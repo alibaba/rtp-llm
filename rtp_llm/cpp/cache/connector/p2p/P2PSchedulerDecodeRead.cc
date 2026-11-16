@@ -61,7 +61,7 @@ P2PSchedulerDecodeRead::~P2PSchedulerDecodeRead() {
 }
 
 bool P2PSchedulerDecodeRead::init(const std::string& process_id) {
-    server_caller_ = std::make_shared<DecodeLoadHelper>(config_.worker_addrs);
+    server_caller_ = std::make_shared<DecodeLoadHelper>(config_.worker_addrs, config_.parallelism_config.tp_size);
 
     auto async_read_pool = std::make_shared<autil::LockFreeThreadPool>(
         kAsyncReadThreadCount, kAsyncReadQueueSize, nullptr, "P2PAsyncReadKickoff");
@@ -130,8 +130,7 @@ P2PSchedulerDecodeRead::planFor(int prefill_tp_size, int prefill_cp_size, const 
         }
     }
 
-    // 本端布局从真实 CacheTopology + ParallelismConfig 取；对端布局由本端推导
-    // （ShardLayoutFactory::peerOf），因此 GetPeerInfo / StartLoad 无需新增字段。
+    // Decode uses its local topology and derives the Prefill layout from the peer TP and CP widths.
     auto dst_layout = ShardLayoutFactory::fromTopology(
         *config_.topology, config_.parallelism_config, RoleType::DECODE, config_.cache_key_tokens_per_block);
     dst_layout.use_group_cache_transfer_policy = config_.use_group_cache_transfer_policy;

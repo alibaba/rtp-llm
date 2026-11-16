@@ -32,11 +32,11 @@ public:
                           bool                                                 no_transfer = false,
                           int64_t                                              request_deadline_ms = 0,
                           const std::set<int>&                                 active_route_ids = {},
-                          int64_t                                              communication_timeout_ms = 0);
+                          int64_t                                              communication_timeout_ms = 0,
+                          int                                                  decode_tp_size = 0);
 
     /// @brief 与 decode 侧用**同一个 planner 函数**算镜像 plan。
-    /// decode 的 (tp_size, cp_size) 由本端推导：tp_size = decode_transfer_servers.size()，
-    /// cp_size = kv_cache_sharded ? decode_tp_size : 1（部署级同配开关）。
+    /// Decode TP width comes from StartLoad. Decode CP is inferred from the local sharding configuration.
     std::shared_ptr<const PlanResult> planFor(int decode_tp_size, const std::string& unique_key);
 
     /// @brief StartLoad 建立前核对 Decode 传来的计划摘要，避免 plan 分歧退化为传输超时。

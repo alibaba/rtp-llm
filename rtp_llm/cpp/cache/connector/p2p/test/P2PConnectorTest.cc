@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerPrefillRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PWorkerDecodeRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillRead.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeRead.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/cache/connector/p2p/test/MockGenerateStream.h"
@@ -483,6 +484,78 @@ TEST_F(P2PConnectorTest, HandleReadAcceptsMatchingPlanDigestBeforeResourceWait) 
     EXPECT_TRUE(resource_wait_reached);
     EXPECT_EQ(response.error_code(), transErrorCodeToRPC(ErrorCode::CANCELLED));
     EXPECT_NE(response.error_message().find("registration wait cancelled"), std::string::npos);
+}
+
+TEST_F(P2PConnectorTest, StartLoadUsesDecodeTpPlanWithMultiplePipelineStages) {
+    TestRpcServer prefill_rpc(std::make_unique<TestRpcService>());
+    ASSERT_TRUE(prefill_rpc.start());
+
+    auto decode_config = createDecodeConfig().scheduler_config;
+    decode_config.parallelism_config.pp_size = 2;
+    decode_config.worker_addrs.clear();
+    std::vector<std::unique_ptr<TestRpcServer>> second_stage;
+    for (int rank = 0; rank < decode_config.parallelism_config.tp_size; ++rank) {
+        auto worker = std::make_unique<TestRpcServer>(std::make_unique<TestRpcService>());
+        ASSERT_TRUE(worker->start());
+        decode_config.worker_grpc_addrs.push_back("127.0.0.1:" + std::to_string(worker->listenPort()));
+        second_stage.push_back(std::move(worker));
+    }
+    for (size_t i = 0; i < decode_config.worker_grpc_addrs.size(); ++i) {
+        const auto& grpc_addr = decode_config.worker_grpc_addrs[i];
+        decode_config.worker_addrs.push_back("127.0.0.1:" + std::to_string(12345 + i)
+                                             + grpc_addr.substr(grpc_addr.rfind(':')));
+    }
+
+    auto broadcast = std::make_shared<P2PBroadcastClient>(decode_config.worker_grpc_addrs,
+                                                           decode_config.p2p_cancel_broadcast_timeout_ms);
+    ASSERT_TRUE(broadcast->init());
+    P2PSchedulerDecodeRead decode(decode_config, nullptr, broadcast);
+    ASSERT_TRUE(decode.init("pp_plan_test"));
+
+    const std::string key = "pp2-tp2-plan";
+    auto stream = createGenerateStream(key, 5021, 10000);
+    auto meta = createMockMeta(stream.get(), /*prefill_tp_size=*/2);
+    meta->setPrefillAddr("127.0.0.1", prefill_rpc.listenPort());
+    auto resource = createValidKVCacheResource();
+    auto read = decode.asyncRead(resource, meta, {0, -1});
+    ASSERT_TRUE(read.ok()) << read.error_info.ToString();
+    ASSERT_NE(read.context, nullptr);
+    read.context->waitDone();
+    ASSERT_TRUE(read.context->success());
+
+    ASSERT_EQ(prefill_rpc.service()->getStartLoadCallCount(), 1);
+    const auto request = prefill_rpc.service()->getLastStartLoadRequest();
+    ASSERT_EQ(request.workers_size(), 4);
+
+    const auto decode_plan = decode.planFor(/*prefill_tp_size=*/2, /*prefill_cp_size=*/1, key);
+    ASSERT_TRUE(decode_plan->ok());
+    EXPECT_EQ(decode_plan->plan.routes.size(), 4u);
+    for (int rank = 0; rank < 2; ++rank) {
+        EXPECT_EQ(decode_plan->plan.forDecodeRank(rank).size(), 2u);
+    }
+    ASSERT_EQ(request.plan_digest(), decode_plan->plan.digest());
+    ASSERT_EQ(request.active_route_ids_size(), 4);
+
+    ASSERT_NE(connector_->asyncRead(resource, meta, 0, 0), nullptr);
+    PrefillResultStore::SideChannelData payload;
+    payload.has_first_token = true;
+    payload.first_token_id = 42;
+    connector_->streamStore()->publishPrefillPayload(key, stream->deadlineMs(), std::move(payload));
+    P2PConnectorStartLoadResponsePB response;
+    connector_->handleRead(request, response);
+    ASSERT_EQ(response.error_code(), ErrorCodePB::NONE_ERROR) << response.error_message();
+
+    std::set<int> prefill_route_ids;
+    for (const auto& worker : tp_broadcast_servers_) {
+        const auto dispatched = worker->service()->getLastBroadcastTpRequest();
+        EXPECT_EQ(dispatched.plan_digest(), request.plan_digest());
+        for (const auto& route : dispatched.routes()) {
+            EXPECT_GE(route.peer_index(), 0);
+            EXPECT_LT(route.peer_index(), 2);
+            prefill_route_ids.insert(route.route_id());
+        }
+    }
+    EXPECT_EQ(prefill_route_ids, std::set<int>(request.active_route_ids().begin(), request.active_route_ids().end()));
 }
 
 TEST_F(P2PConnectorTest, HandleReadRejectsTailKeyPlanMismatchBeforeResourceWait) {

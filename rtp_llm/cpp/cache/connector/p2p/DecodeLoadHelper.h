@@ -47,7 +47,7 @@ class DecodeLoadHelper {
 public:
     /// @param worker_addrs Decode worker 地址列表，每项格式为 host:cache_store_port:grpc_port
     /// 或 [IPv6]:cache_store_port:grpc_port
-    DecodeLoadHelper(const std::vector<std::string>& worker_addrs);
+    DecodeLoadHelper(const std::vector<std::string>& worker_addrs, int decode_tp_size = 0);
     ~DecodeLoadHelper() = default;
 
 public:
@@ -132,6 +132,7 @@ private:
                                const std::vector<int>&        active_route_ids);
 
     std::vector<std::string>    worker_addrs_;
+    const int                   decode_tp_size_;
     std::shared_ptr<RPCPool>    rpc_pool_;
     std::vector<TPWorkerInfoPB> tp_worker_infos_;
 };

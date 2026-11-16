@@ -198,10 +198,14 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
     for (const auto& worker : request.workers()) {
         decode_transfer_servers.emplace_back(worker.ip(), worker.cache_store_port());
     }
+    // Older Decode peers did not send their TP width.
+    const int decode_tp_size = request.decode_tp_size() == 0 ? request.workers_size() : request.decode_tp_size();
     if (!request.no_transfer()) {
         const auto check_plan_start_us = currentTimeUs();
-        const auto plan_error = scheduler_->checkPlanDigest(
-            static_cast<int>(decode_transfer_servers.size()), request.plan_digest(), unique_key);
+        const auto plan_error = decode_tp_size < 0 || decode_tp_size > request.workers_size()
+                                    ? ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                                                "invalid StartLoad Decode TP width for the worker list")
+                                    : scheduler_->checkPlanDigest(decode_tp_size, request.plan_digest(), unique_key);
         collector.prefill_scheduler_check_plan_time_us = currentTimeUs() - check_plan_start_us;
         if (plan_error.hasError()) {
             RTP_LLM_LOG_WARNING("handleRead rejected StartLoad, unique_key=%s, error=%s",
@@ -297,7 +301,8 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
                                                    request.no_transfer(),
                                                    request_deadline_ms,
                                                    active_route_ids,
-                                                   communication_timeout_ms);
+                                                   communication_timeout_ms,
+                                                   decode_tp_size);
     auto send_cost_us = currentTimeUs() - send_start_us;
     if (error_info.hasError()) {
         RTP_LLM_LOG_ERROR("[PD-DIAG] handleRead sendKVCache failed, unique_key=%s, send_cost_us=%ld, error=%s",

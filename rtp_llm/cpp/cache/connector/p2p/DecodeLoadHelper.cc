@@ -111,7 +111,8 @@ bool parseWorkerAddr(const std::string& worker_addr, WorkerAddrParts* parts) {
 
 }  // namespace
 
-DecodeLoadHelper::DecodeLoadHelper(const std::vector<std::string>& worker_addrs): worker_addrs_(worker_addrs) {
+DecodeLoadHelper::DecodeLoadHelper(const std::vector<std::string>& worker_addrs, int decode_tp_size):
+    worker_addrs_(worker_addrs), decode_tp_size_(decode_tp_size) {
     rpc_pool_ = std::make_shared<RPCPool>();
 
     // worker_addrs entries are host:cache_store_port:grpc_port or [IPv6]:cache_store_port:grpc_port.
@@ -267,6 +268,7 @@ bool DecodeLoadHelper::buildAndStartAsyncRpc(const std::shared_ptr<Result>& resu
         transfer_deadline_ms - now_ms, std::numeric_limits<int>::max()));
     result->request.set_timeout_ms(load_timeout_ms);
     result->request.set_handoff_timeout_ms(transfer_deadline_ms - now_ms);
+    result->request.set_decode_tp_size(decode_tp_size_);
     result->client_context->set_deadline(
         std::chrono::system_clock::time_point(std::chrono::milliseconds(transfer_deadline_ms)));
 

@@ -109,7 +109,8 @@ P2PSchedulerPrefillRead::sendKVCache(const std::string&                         
                                           bool                                                 no_transfer,
                                           int64_t                                              request_deadline_ms,
                                           const std::set<int>&                                 active_route_ids,
-                                          int64_t                                              communication_timeout_ms) {
+                                          int64_t                                              communication_timeout_ms,
+                                          int                                                  decode_tp_size) {
     RTP_LLM_LOG_DEBUG("sendKVCache start, request_id: %ld, unique_key: %s, decode_transfer_servers_size: %zu",
                       request_id,
                       unique_key.c_str(),
@@ -143,7 +144,8 @@ P2PSchedulerPrefillRead::sendKVCache(const std::string&                         
             return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "worker list is empty");
         }
         const auto plan_start_us     = currentTimeUs();
-        auto plan = planFor(static_cast<int>(decode_transfer_servers.size()), unique_key);
+        const auto peer_tp_size = decode_tp_size == 0 ? static_cast<int>(decode_transfer_servers.size()) : decode_tp_size;
+        auto plan = planFor(peer_tp_size, unique_key);
         collector->prefill_scheduler_plan_cost_time_us = currentTimeUs() - plan_start_us;
         if (!plan->ok()) {
             RTP_LLM_LOG_WARNING("sendKVCache: transfer plan failed, unique_key=%s, error=%s",

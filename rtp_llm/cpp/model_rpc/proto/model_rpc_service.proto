@@ -976,6 +976,8 @@ message P2PConnectorStartLoadRequestPB {
     repeated int32 active_route_ids = 7;
     // Remaining Decode request lifetime at submission, relative to the receiver clock.
     int64 handoff_timeout_ms = 8;
+    // Decode TP width. The worker list can also include other pipeline stages.
+    int32 decode_tp_size = 9;
 }
 
 // Side-channel tensor blob: carries named tensor data between prefill and decode
