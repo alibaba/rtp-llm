@@ -75,12 +75,16 @@ class FrameworkSmokeTest(unittest.TestCase):
         row = runner.validate(case, response, 0.1, 128)
         self.assertEqual(row["mtp_accepted_tokens"], 6)
 
-    def test_both_models_use_bounded_dp2_deployment_without_runtime_hooks(self):
+    def test_bounded_deployments_keep_graph_and_mtp_without_runtime_hooks(self):
         with tempfile.TemporaryDirectory() as directory:
             checkpoint = Path(directory)
             (checkpoint / "config.json").write_text('{"num_hidden_layers":93}')
             for model in ("kimi_k3", "kimi_k31"):
-                for role, tp, dp in (("PREFILL", 8, 1), ("DECODE", 4, 2)):
+                for role, tp, dp in (
+                    ("PREFILL", 8, 1),
+                    ("DECODE", 8, 1),
+                    ("DECODE", 4, 2),
+                ):
                     args = SimpleNamespace(
                         checkpoint=checkpoint,
                         draft_checkpoint=checkpoint,
@@ -226,6 +230,31 @@ class FrameworkSmokeTest(unittest.TestCase):
             result = copy.deepcopy(baseline)
             mutation(result)
             self.assertFalse(self.check_fixture(result)["passed"])
+
+    def test_dp1_keeps_cache_and_protocol_requirements_without_cross_owner_case(self):
+        result = self.fixture()
+        result["decode_role_addrs"] = result["decode_role_addrs"][:1]
+        result["cases"] = [
+            row for row in result["cases"] if row["name"] != "cross_owner_reuse"
+        ]
+        result["stages"] = [
+            stage for stage in result["stages"] if stage["name"] != "cross_owner_reuse"
+        ]
+        for row in result["cases"]:
+            row.update(
+                decode_owner_rank=0,
+                selected_decode_role_addr=result["decode_role_addrs"][0],
+                observed_decode_role_addrs=result["decode_role_addrs"],
+            )
+        self.assertTrue(self.check_fixture(result)["passed"])
+        invalid_owner = copy.deepcopy(result)
+        invalid_owner["cases"][0]["decode_owner_rank"] = 1
+        self.assertFalse(self.check_fixture(invalid_owner)["passed"])
+        no_host_hit = copy.deepcopy(result)
+        next(row for row in no_host_hit["cases"] if row["name"] == "cache_host")[
+            "prefill_cache_tiers"
+        ].update(memory=0, device=8192)
+        self.assertFalse(self.check_fixture(no_host_hit)["passed"])
 
 
 if __name__ == "__main__":

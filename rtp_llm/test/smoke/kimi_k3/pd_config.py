@@ -12,8 +12,6 @@ def validate_config(config, *, local_role):
         raise ValueError("PD smoke requires kimi_k3 or kimi_k31")
     if type(config.get("compact_smoke", False)) is not bool:
         raise ValueError("compact_smoke must be boolean")
-    if config.get("compact_smoke") and config.get("decode_dp", 1) != 2:
-        raise ValueError("Compact smoke requires Decode DP2/TP4")
     strategies = {"mega_moe", "mega_moe_se"}
     if local_role not in ("prefill", "decode"):
         raise ValueError("local_role must be Prefill or Decode")

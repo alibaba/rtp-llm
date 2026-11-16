@@ -668,26 +668,27 @@ def _group_artifact_errors(
 
 
 def _check_compact(result, path, verdict):
-    from framework_smoke import CASES, CHUNK_INPUT_TOKENS, MAX_INFLIGHT, STAGES
+    from framework_smoke import CHUNK_INPUT_TOKENS, MAX_INFLIGHT, required_matrix
 
     errors = verdict["errors"]
     records = result["cases"]
     rows = {row["name"]: row for row in records}
     stages = result["stages"]
     members = [name for stage in stages for name in stage["case_names"]]
+    required_stages, required_cases = required_matrix(len(result["decode_role_addrs"]))
     if (
         len(rows) != len(records)
-        or set(rows) != CASES
-        or {stage["name"] for stage in stages} != STAGES
-        or len(stages) != len(STAGES)
-        or set(members) != CASES
-        or len(members) != len(CASES)
+        or set(rows) != required_cases
+        or {stage["name"] for stage in stages} != required_stages
+        or len(stages) != len(required_stages)
+        or set(members) != required_cases
+        or len(members) != len(required_cases)
     ):
         errors.append("compact framework request/stage matrix is incomplete")
     if (
         result.get("model_type") not in ("kimi_k3", "kimi_k31")
         or result.get("max_inflight") != MAX_INFLIGHT
-        or len(result["decode_role_addrs"]) != 2
+        or len(result["decode_role_addrs"]) not in (1, 2)
         or result.get("skipped_cases")
         or result.get("formal_request_retries") != 0
     ):
@@ -718,7 +719,8 @@ def _check_compact(result, path, verdict):
     if rows["chunked_cold"]["input_len"] != CHUNK_INPUT_TOKENS:
         errors.append("multi-chunk input length differs from the token fixture")
     if (
-        rows["chunked_cold"]["decode_owner_rank"]
+        len(roles) > 1
+        and rows["chunked_cold"]["decode_owner_rank"]
         == rows["cross_owner_reuse"]["decode_owner_rank"]
     ):
         errors.append("cached handoff did not cross Decode owners")

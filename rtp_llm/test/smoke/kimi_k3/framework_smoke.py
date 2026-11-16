@@ -39,6 +39,11 @@ CASES = (STAGES - {"cache_pressure", "mixed_cache", "decode_refill"}) | {
 }
 
 
+def required_matrix(decode_dp_size):
+    omitted = {"cross_owner_reuse"} if decode_dp_size == 1 else set()
+    return STAGES - omitted, CASES - omitted
+
+
 class FrameworkRunner(Runner):
     def validate(self, case, response, *args, **kwargs):
         row = super().validate(case, response, *args, **kwargs)
@@ -98,7 +103,7 @@ class FrameworkRunner(Runner):
         self._required_stage(name, cases, concurrent=concurrent)
 
     @staticmethod
-    def partial_prefix(cached):
+    def partial_prefix(cached, *, owner=1):
         original = VALUE_QUERY.format(key="cedar")
         if not cached.prompt.endswith(original):
             raise ValueError(
@@ -111,10 +116,12 @@ class FrameworkRunner(Runner):
             expected_input_len=None,
             prompt=cached.prompt[: -len(original)] + VALUE_QUERY.format(key="birch"),
             expected_json={"value": "MAPLE"},
-            decode_owner_rank=1,
+            decode_owner_rank=owner,
         )
 
     def run_framework(self):
+        owners = len(self.decode_role_addrs)
+        other_owner = owners - 1
         # Cross both the physical page and CP checkpoint boundaries. The first
         # answer also appends Decode KV across a physical-page edge.
         edge = self.fixture("page_before", self.args.block_size - 1)
@@ -127,7 +134,7 @@ class FrameworkRunner(Runner):
                 self.fixture(
                     "checkpoint_after",
                     self.reuse_unit_tokens + 1,
-                    owner=1,
+                    owner=other_owner,
                 )
             ],
         )
@@ -146,17 +153,18 @@ class FrameworkRunner(Runner):
         self.stage("cache_device", [cached])
         if self.records[-1]["prefill_cache_tiers"]["device"] <= 0:
             raise SmokeFailure("immediate Device cache reuse was not observed")
-        self.stage(
-            "cross_owner_reuse",
-            [
-                replace(
-                    cached,
-                    name="cross_owner_reuse",
-                    decode_owner_rank=1,
-                )
-            ],
-        )
-        partial = self.partial_prefix(cached)
+        if owners > 1:
+            self.stage(
+                "cross_owner_reuse",
+                [
+                    replace(
+                        cached,
+                        name="cross_owner_reuse",
+                        decode_owner_rank=other_owner,
+                    )
+                ],
+            )
+        partial = self.partial_prefix(cached, owner=other_owner)
         self.stage("partial_prefix", [partial])
 
         # Admit four CP blocks at a time, leaving room for the unaligned
@@ -164,7 +172,9 @@ class FrameworkRunner(Runner):
         # synchronous DROP before the watermark can demote cached KV to Host.
         # These are sequential requests, not a prescribed scheduler batch.
         pressure = [
-            self.fixture(f"pressure_{i}", 4 * self.reuse_unit_tokens + 7, owner=i % 2)
+            self.fixture(
+                f"pressure_{i}", 4 * self.reuse_unit_tokens + 7, owner=i % owners
+            )
             for i in range(PRESSURE_REQUESTS)
         ]
         self.stage("cache_pressure", pressure)
@@ -185,7 +195,9 @@ class FrameworkRunner(Runner):
                     require_chunk=False,
                     allow_long_history=True,
                 ),
-                self.fixture("mixed_miss", self.reuse_unit_tokens + 7, owner=1),
+                self.fixture(
+                    "mixed_miss", self.reuse_unit_tokens + 7, owner=other_owner
+                ),
             ],
             concurrent=True,
         )
@@ -210,7 +222,7 @@ class FrameworkRunner(Runner):
                     copies[0],
                     name="cancel_recovery",
                     reuse="any",
-                    decode_owner_rank=1,
+                    decode_owner_rank=other_owner,
                 )
             ],
         )

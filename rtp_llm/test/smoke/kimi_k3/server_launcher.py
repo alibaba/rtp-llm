@@ -254,13 +254,14 @@ def launch_config(args):
         options["decode_capture_config"] = ",".join(map(str, decode_capture_batches))
     if compact:
         if (
-            (tp_size, dp_size) != ((8, 1) if args.role == "PREFILL" else (4, 2))
+            (tp_size, dp_size)
+            not in (((8, 1),) if args.role == "PREFILL" else ((8, 1), (4, 2)))
             or not orthogonal_smoke
             or not fp8_gemm
             or not fp8_kv_cache
         ):
             raise ValueError(
-                "Compact smoke requires FP8 P=TP8 and D=DP2/TP4 with PageRR"
+                "Compact smoke requires FP8 P=TP8 and D=TP8 or DP2/TP4 with PageRR"
             )
         overrides = {"prefill_kv_workspace_budget_bytes": 1024**3}
         if model_type == "kimi_k31":
