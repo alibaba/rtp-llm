@@ -114,6 +114,7 @@ class Nvfp4HybridExecutorTest(unittest.TestCase):
 
     def test_dispatch_uses_actual_rows_and_configured_boundary(self):
         executor = Nvfp4HybridExecutor.__new__(Nvfp4HybridExecutor)
+        self.assertEqual(executor.topk_ids_dtype, torch.int32)
         executor.hidden_size = 2560
         executor.top_k = 10
         executor.max_b12x_rows = 16
@@ -135,13 +136,21 @@ class Nvfp4HybridExecutorTest(unittest.TestCase):
                 x = torch.zeros(rows, 2560, dtype=torch.bfloat16)
                 payload = ExpertForwardPayload(
                     expert_x=x,
-                    expert_topk_ids=torch.zeros(rows, 10, dtype=torch.int64),
+                    expert_topk_ids=torch.zeros(
+                        rows, 10, dtype=executor.topk_ids_dtype
+                    ),
                     expert_topk_weights=torch.ones(rows, 10),
                 )
                 output = executor.execute(
                     payload, "SiGLU", None, None, False, None
                 ).fused_expert_output
                 self.assertTrue(torch.equal(output, x + (1 if rows <= 16 else -1)))
+                if rows <= 16:
+                    ids = executor.b12x.call_args.args[1]
+                else:
+                    ids = cutlass.call_args.kwargs["token_selected_experts"]
+                self.assertEqual(ids.dtype, torch.int32)
+                self.assertEqual(ids.data_ptr(), payload.expert_topk_ids.data_ptr())
             self.assertEqual(executor.b12x.call_count, 4)
             self.assertEqual(cutlass.call_count, 3)
             self.assertEqual(cutlass.call_args.kwargs["profile_ids"], [13, 37])
