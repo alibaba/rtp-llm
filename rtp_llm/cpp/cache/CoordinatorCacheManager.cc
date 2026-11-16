@@ -29,6 +29,16 @@
 namespace rtp_llm {
 namespace {
 
+BlockIndicesType validReferenceBlocks(const BlockIndicesType& blocks) {
+    BlockIndicesType valid_blocks;
+    for (auto block : blocks) {
+        if (!isNullBlockIdx(block) && block > 0) {
+            valid_blocks.push_back(block);
+        }
+    }
+    return valid_blocks;
+}
+
 // CP shard helpers: when mapper is null/passthrough, all helpers no-op.
 inline CacheKeysType cpCanonicalCacheKeys(const std::shared_ptr<CPSlotMapper>& mapper, const CacheKeysType& full) {
     return (mapper && mapper->isSharded()) ? mapper->canonicalCacheKeys(full) : full;
@@ -1070,11 +1080,7 @@ std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const K
     for (const auto& group : groups) {
         source_blocks_by_group.push_back(&kvcache_resource.blocks(group.tag));
     }
-    std::unordered_map<CacheKeyType, size_t> key_to_pos;
-    const auto&                              resource_keys = kvcache_resource.cacheKeys();
-    for (size_t i = 0; i < resource_keys.size(); ++i) {
-        key_to_pos.emplace(resource_keys[i], i);
-    }
+    const auto& resource_keys = kvcache_resource.cacheKeys();
 
     auto selected_resource_ptr = new KVCacheResource(kvcache_resource);
     auto deleter               = [self = shared_from_this()](KVCacheResource* resource) {
@@ -1089,16 +1095,15 @@ std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const K
         // Keep each group's local layout intact, including sparse and reserved slots.
         for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
             const auto& blocks = *source_blocks_by_group[group_id];
-            BlockIndicesType valid_blocks;
-            for (auto block : blocks) {
-                if (!isNullBlockIdx(block) && block > 0) {
-                    valid_blocks.push_back(block);
-                }
-            }
-            kv_cache_groups_[group_id]->reference(valid_blocks);
+            kv_cache_groups_[group_id]->reference(validReferenceBlocks(blocks));
             selected_resource->mutableBlockIds(groups[group_id].tag).assign(blocks);
         }
         return selected_resource;
+    }
+
+    std::unordered_map<CacheKeyType, size_t> key_to_pos;
+    for (size_t i = 0; i < resource_keys.size(); ++i) {
+        key_to_pos.emplace(resource_keys[i], i);
     }
 
     CacheKeysType                 selected_keys;
@@ -1144,13 +1149,8 @@ std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const K
     selected_resource->cacheKeys() = std::move(selected_keys);
     selected_resource->setBlockDependencies(std::move(selected_dependencies));
     for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
-        BlockIndicesType valid;
-        for (auto b : selected_blocks[static_cast<size_t>(group_id)]) {
-            if (!isNullBlockIdx(b) && b > 0) {
-                valid.push_back(b);
-            }
-        }
-        kv_cache_groups_[static_cast<size_t>(group_id)]->reference(valid);
+        kv_cache_groups_[static_cast<size_t>(group_id)]->reference(
+            validReferenceBlocks(selected_blocks[static_cast<size_t>(group_id)]));
         selected_resource->mutableBlockIds(groups[static_cast<size_t>(group_id)].tag)
             .assign(std::move(selected_blocks[static_cast<size_t>(group_id)]));
     }
@@ -1167,13 +1167,7 @@ void CoordinatorCacheManager::decrKVCacheRef(const KVCacheResource& kvcache_reso
         blocks_by_group.push_back(&kvcache_resource.blocks(group.tag));
     }
     for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
-        BlockIndicesType valid_blocks;
-        for (auto block : *blocks_by_group[group_id]) {
-            if (!isNullBlockIdx(block) && block > 0) {
-                valid_blocks.push_back(block);
-            }
-        }
-        kv_cache_groups_[group_id]->unreference(valid_blocks);
+        kv_cache_groups_[group_id]->unreference(validReferenceBlocks(*blocks_by_group[group_id]));
     }
 }
 
