@@ -1,0 +1,330 @@
+"""Native NVFP4 byte preservation and real MegaMoE/graph regression tests."""
+
+import os
+import tempfile
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import torch
+
+# Bazel remote actions may omit HOME; give DeepJIT an explicit cache root.
+os.environ.setdefault(
+    "DG_JIT_CACHE_DIR",
+    os.path.join(os.environ.get("TEST_TMPDIR", tempfile.gettempdir()), "deep_gemm"),
+)
+
+from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig  # noqa: E402
+from rtp_llm.model_loader.native_mega_moe_nvfp4_weight import (  # noqa: E402
+    NativeMegaMoeNvfp4Weight,
+)
+from rtp_llm.utils.model_weight import (  # noqa: E402
+    CkptWeightInfo,
+    W,
+    identity,
+    stack_,
+    stack_moe_w1,
+)
+
+
+class NativeNvfp4LoaderTest(unittest.TestCase):
+    def test_preserves_codes_scales_and_selected_expert_order(self):
+        for key in (W.moe_w1, W.moe_w2):
+            projections = (
+                ("up_proj", "gate_proj") if key == W.moe_w1 else ("down_proj",)
+            )
+            kernel = MoeAtomicWeight(
+                key,
+                [
+                    CkptWeightInfo(
+                        "model.layers.{i}.mlp.experts.{expert_id}." + p + ".weight",
+                        identity,
+                    )
+                    for p in projections
+                ],
+                stack_moe_w1 if key == W.moe_w1 else stack_,
+                config=MoeConfig(expert_num=4),
+            )
+            loader = NativeMegaMoeNvfp4Weight(kernel)
+            tensors = {}
+            for expert in (3, 1):
+                for j, p in enumerate(projections):
+                    base = f"model.layers.3.mlp.experts.{expert}.{p}"
+                    tensors[base + ".weight"] = (
+                        torch.arange(256).reshape(16, 16) + expert + j
+                    ).to(torch.uint8)
+                    tensors[base + ".weight_scale"] = torch.full(
+                        (16, 2), 0.5 + j, dtype=torch.float8_e4m3fn
+                    )
+                    tensors[base + ".weight_scale_2"] = torch.tensor(
+                        0.123 * (expert + 1) * (j + 1)
+                    )
+            source = SimpleNamespace(
+                load_tensor=lambda name, dtype: [tensors[name].to(dtype)]
+            )
+            cfg = SimpleNamespace(get_selected_experts=lambda *args: [3, 1])
+            with patch(
+                "rtp_llm.model_loader.online_modelopt_fp4_quant_weight.dequantize_nvfp4_expert",
+                side_effect=AssertionError("must not dequantize"),
+            ):
+                raw = loader._load_raw_tensor(source, 3, "cpu", cfg)
+            for local, expert in enumerate((3, 1)):
+                expected = torch.cat(
+                    [
+                        tensors[f"model.layers.3.mlp.experts.{expert}.{p}.weight"]
+                        for p in projections
+                    ]
+                )
+                self.assertTrue(
+                    torch.equal(raw[key][local].view(torch.uint8), expected)
+                )
+                expected_sf = torch.cat(
+                    [
+                        tensors[
+                            f"model.layers.3.mlp.experts.{expert}.{p}.weight_scale"
+                        ].view(torch.uint8)
+                        for p in projections
+                    ]
+                )
+                self.assertTrue(
+                    torch.equal(
+                        raw[loader.scale.name][local].view(torch.uint8), expected_sf
+                    )
+                )
+                expected_gsf = torch.stack(
+                    [
+                        tensors[
+                            f"model.layers.3.mlp.experts.{expert}.{p}.weight_scale_2"
+                        ]
+                        for p in projections
+                    ]
+                )
+                torch.testing.assert_close(
+                    raw[loader.global_scale_name][local].reshape(-1),
+                    expected_gsf,
+                    rtol=0,
+                    atol=0,
+                )
+
+    def test_full_loader_preserves_native_dtypes_with_ep4(self):
+        from rtp_llm.model_loader.ffn_weight import MoeWeight
+
+        for rank in range(4):
+            kernels, tensors, expected = [], {}, {}
+            for name, projections in (
+                (W.moe_w1, ("up_proj", "gate_proj")),
+                (W.moe_w2, ("down_proj",)),
+            ):
+                src = MoeAtomicWeight(
+                    name,
+                    [
+                        CkptWeightInfo(
+                            "model.layers.{i}.mlp.experts.{expert_id}." + p + ".weight",
+                            identity,
+                        )
+                        for p in projections
+                    ],
+                    stack_moe_w1 if name == W.moe_w1 else stack_,
+                    config=MoeConfig(expert_num=4),
+                )
+                native = NativeMegaMoeNvfp4Weight(src)
+                kernels.append(native)
+                for j, p in enumerate(projections):
+                    base = f"model.layers.3.mlp.experts.{rank}.{p}"
+                    tensors[base + ".weight"] = torch.full(
+                        (4, 32), 0xBA, dtype=torch.uint8
+                    )
+                    tensors[base + ".weight_scale"] = torch.full(
+                        (4, 4), 1.5 + j, dtype=torch.float8_e4m3fn
+                    )
+                    tensors[base + ".weight_scale_2"] = torch.tensor(
+                        0.1234567 * (rank + 1) * (j + 1)
+                    )
+                expected[native.global_scale_name] = torch.tensor(
+                    [
+                        [
+                            0.1234567 * (rank + 1) * (j + 1)
+                            for j in range(len(projections))
+                        ]
+                    ]
+                )
+            cfg = SimpleNamespace(
+                get_selected_experts=lambda *_: [rank],
+                merge_lora=False,
+                tp_size=4,
+                tp_rank=rank,
+                ep_size=4,
+                ep_rank=rank,
+                dp_size=1,
+                dp_rank=0,
+                ffn_tp_size=1,
+                ffn_tp_rank=0,
+                hidden_size=64,
+                head_num=1,
+                head_num_kv=1,
+                size_per_head=64,
+                moe_pure_tp_mode=False,
+                bit=4,
+                compute_dtype=torch.bfloat16,
+                exported_device=SimpleNamespace(shuffle_moe_weight=lambda t, *_: t),
+            )
+            source = SimpleNamespace(
+                load_tensor=lambda name, dtype: [tensors[name].to(dtype)]
+            )
+            actual = MoeWeight(kernels, MoeConfig(expert_num=4)).load(
+                source, 3, "cpu", cfg
+            )
+            for name in (W.moe_w1, W.moe_w2):
+                self.assertEqual(actual[name].dtype, torch.int8)
+                self.assertTrue((actual[name].view(torch.uint8) == 0xBA).all())
+            for name in (W.moe_s1, W.moe_s2):
+                self.assertEqual(actual[name].dtype, torch.float8_e4m3fn)
+            for name in (W.moe_w1_s2, W.moe_w2_s2):
+                self.assertEqual(actual[name].dtype, torch.float32)
+                torch.testing.assert_close(
+                    actual[name].reshape(-1), expected[name].reshape(-1), rtol=0, atol=0
+                )
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class NativeNvfp4KernelTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import torch.distributed as dist
+
+        if torch.cuda.get_device_capability()[0] != 10:
+            raise unittest.SkipTest("SM100/SM103 required")
+        cls.directory = tempfile.TemporaryDirectory()
+        dist.init_process_group(
+            "nccl",
+            init_method="file://" + cls.directory.name + "/init",
+            rank=0,
+            world_size=1,
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        import torch.distributed as dist
+
+        dist.destroy_process_group()
+        cls.directory.cleanup()
+
+    def test_kernel_reference_and_changed_input_graph_replay(self):
+        import torch.distributed as dist
+        from deep_gemm.utils import per_block_cast_to_nvfp4, per_token_cast_to_nvfp4
+
+        from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_nvfp4 import (
+            GLM5MegaMoENVFP4,
+            quantize_native_nvfp4_input,
+        )
+
+        torch.manual_seed(282)
+        world, rank = dist.get_world_size(), dist.get_rank()
+        e, d, n, topk = 4 * world, 256, 256, 2
+        local = slice(4 * rank, 4 * (rank + 1))
+
+        def quant(shape):
+            p, s, g = [], [], []
+            for i in range(e):
+                x = torch.randn(shape, device="cuda", dtype=torch.bfloat16) * 0.04
+                gsf = torch.tensor(0.0011 * (i + 1), device="cuda", dtype=torch.float32)
+                packed, sf = per_block_cast_to_nvfp4(x, weight_gsf=gsf)
+                p.append(packed)
+                s.append(sf.to(torch.float8_e4m3fn))
+                g.append(gsf)
+            return torch.stack(p).view(torch.int8), torch.stack(s), torch.stack(g)
+
+        up, su, gu = quant((n, d))
+        gate, sg, gg = quant((n, d))
+        down, sd, gd = quant((d, n))
+        # Independent non-power-of-two gate/up GSFs must survive intact.
+        gg = gg * 1.7
+        with patch.dict(os.environ, {"GLM5_MEGA_MOE_JIT_WARMUP_TOKENS": "1,16"}):
+            moe = GLM5MegaMoENVFP4.from_params(
+                0,
+                dim=d,
+                moe_inter_dim=n,
+                n_routed_experts=e,
+                n_activated_experts=topk,
+                ep_size=world,
+                ep_rank=rank,
+                max_tokens_per_rank=128,
+            )
+            moe.setup_weights_from_nvfp4(
+                torch.cat((up, gate), 1)[local],
+                torch.cat((su.view(torch.uint8), sg.view(torch.uint8)), 1).view(
+                    torch.float8_e4m3fn
+                )[local],
+                torch.stack((gu, gg), 1)[local],
+                down[local],
+                sd[local],
+                gd[local],
+            )
+        tokens = 7 + rank
+        x = torch.randn(tokens, d, device="cuda", dtype=torch.bfloat16)
+        ids = (
+            torch.arange(tokens * topk, device="cuda").reshape(tokens, topk) + rank
+        ) % e
+        weights = torch.softmax(torch.randn(tokens, topk, device="cuda"), dim=-1)
+        for value in (x, torch.zeros_like(x), -torch.zeros_like(x)):
+            expected_quant = per_token_cast_to_nvfp4(value, use_packed_ue4m3=True)
+            actual_quant = quantize_native_nvfp4_input(value)
+            for expected_part, actual_part in zip(expected_quant, actual_quant):
+                torch.testing.assert_close(actual_part, expected_part, rtol=0, atol=0)
+        y = moe(x, weights, ids).clone()
+
+        magnitudes = torch.tensor(
+            [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device="cuda"
+        )
+
+        def dequantize(packed, sf, gsf):
+            # Keep FP32 here: checkpoint GSFs are not narrowed to BF16.
+            bits = packed.view(torch.uint8)
+            codes = torch.stack((bits & 15, bits >> 4), dim=-1).flatten(-2)
+            values = magnitudes[(codes & 7).long()]
+            values = torch.where((codes & 8) != 0, -values, values)
+            return values * sf.float().repeat_interleave(16, dim=-1) * gsf
+
+        p, s, g = per_token_cast_to_nvfp4(x)
+        xd = dequantize(p, s, g[:, None])
+        ref = torch.zeros_like(x, dtype=torch.float32)
+        for expert in range(e):
+            wg = dequantize(gate[expert], sg[expert], gg[expert])
+            wu = dequantize(up[expert], su[expert], gu[expert])
+            wd = dequantize(down[expert], sd[expert], gd[expert])
+            gate_out = (xd @ wg.T).to(torch.bfloat16).float()
+            up_out = (xd @ wu.T).to(torch.bfloat16).float()
+            routing = ((ids == expert) * weights).sum(-1)
+            hidden = torch.nn.functional.silu(gate_out) * up_out
+            # The fused epilogue folds routing into the intermediate, scales
+            # it by 16, then uses block-only NVFP4. L2 undoes that factor.
+            hidden = hidden * routing[:, None] * 16.0
+            hp, hs = per_block_cast_to_nvfp4(hidden)
+            out = (dequantize(hp, hs, 1.0) @ wd.T) / 16.0
+            ref += out.to(torch.bfloat16).float()
+        ref = ref.to(torch.bfloat16).float()
+        relative = (y.float() - ref).square().mean().sqrt() / ref.square().mean().sqrt()
+        print(
+            f"Native NVFP4 EP={world} rank={rank}: relative RMSE={relative.item():.6f}",
+            flush=True,
+        )
+        self.assertLess(relative.item(), 0.03)
+        clone = moe.clone_for_cuda_graph(share_mega_buf=True)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            clone(x, weights, ids)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            captured = clone(x, weights, ids)
+        for _ in range(3):
+            x.normal_()
+            ids.add_(1).remainder_(e)
+            expected = moe(x, weights, ids).clone()
+            graph.replay()
+            torch.testing.assert_close(captured, expected, rtol=0, atol=0)
+
+
+if __name__ == "__main__":
+    unittest.main()

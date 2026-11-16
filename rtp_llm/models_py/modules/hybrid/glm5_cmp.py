@@ -185,6 +185,8 @@ class Glm5Cmp:
         # RTP-kernel writes router outputs directly into MegaMoE's stable input
         # buffers. Keep this optional optimization limited to the deployed ABI.
         config = self.config
+        if getattr(getattr(self.mlp, "fused_moe", None), "_native_nvfp4", False):
+            return "NVFP4 uses block-16 activation scales, not FP8 CMP prepacking"
         if (
             not self.is_moe_layer
             or self._router_weight is None

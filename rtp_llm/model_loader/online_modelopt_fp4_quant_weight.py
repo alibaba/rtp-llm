@@ -12,13 +12,15 @@ deployments:
    ``OnlineMegaMoeFp4Weight`` — BF16 → packed int8 + fp32 scale.
    ``OnlineMegaMoeFp4FromFp8Weight`` — FP8 per-block or MXFP8 1x32
    → BF16 → FP4.
-   ``OnlineMegaMoeFp4FromNvfp4Weight`` — NVFP4 block-16 → BF16 → MXFP4,
+   ``OnlineMegaMoeFp4FromNvfp4Weight`` — NVFP4 block-16 → BF16 → MXFP4
+   for the fused-shared strategies,
    streaming one selected expert at a time and preserving separate gate/up scales.
    These run at load time so source tensors are released before
    ``MegaMoeWrapper.__init__``. Triggered by ``MOE_STRATEGY=mega_moe`` or
    ``MOE_STRATEGY=mega_moe_se`` / ``mega_moe_fused`` env var via
    ``apply_mega_moe_fp4_wrappers`` in
-   ``model_weight_info.py``.
+   ``model_weight_info.py``. Plain ``mega_moe`` instead preserves checkpoint
+   NVFP4 through ``NativeMegaMoeNvfp4Weight`` and DeepGEMM 2.8.2.
 
 3. Hybrid FP8_PER_BLOCK for non-MoE weights when MODELOPT_FP4 hybrid mode is
    active. ``OnlineModelOptFp4HybridFp8AttnWeight`` — group=128, reuses
@@ -989,8 +991,8 @@ def mxfp4_quantize_linear_weight(weight: torch.Tensor):
 
 def wrap_moe_for_mega_moe(weight: WeightModule) -> WeightModule:
     """If ``weight`` is a MoE atomic / FP8 / NVFP4 wrapper for moe_w1/moe_w2,
-    return a load-time MXFP4 quantizer consuming BF16, FP8 or NVFP4. Otherwise
-    return the weight unchanged.
+    preserve native NVFP4 for plain mega_moe; otherwise return a load-time
+    MXFP4 quantizer. Unrelated weights are returned unchanged.
 
     This is the single entry point used by ``apply_mega_moe_fp4_wrappers`` in
     ``model_weight_info.py``.
@@ -1000,6 +1002,14 @@ def wrap_moe_for_mega_moe(weight: WeightModule) -> WeightModule:
     from rtp_llm.model_loader.per_group_fp4_quant_weight import PerGroupFp4Weight
 
     if isinstance(weight, PerGroupFp4Weight) and weight.name in _MEGA_MOE_KERNEL_NAMES:
+        import os
+
+        if os.environ.get("MOE_STRATEGY") == "mega_moe":
+            from rtp_llm.model_loader.native_mega_moe_nvfp4_weight import (
+                NativeMegaMoeNvfp4Weight,
+            )
+
+            return NativeMegaMoeNvfp4Weight(weight.kernel)
         return OnlineMegaMoeFp4FromNvfp4Weight(weight.kernel)
     if isinstance(weight, Mxfp8Weight) and weight.name in _MEGA_MOE_KERNEL_NAMES:
         kernel = weight.kernel

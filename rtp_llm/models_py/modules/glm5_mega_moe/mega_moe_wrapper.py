@@ -55,6 +55,10 @@ class MegaMoeWrapper(nn.Module):
     """
 
     def _get_mega_moe_cls(self):
+        if self._native_nvfp4:
+            from .mega_moe_nvfp4 import GLM5MegaMoENVFP4
+
+            return GLM5MegaMoENVFP4
         return GLM5MegaMoE
 
     def __init__(
@@ -149,6 +153,7 @@ class MegaMoeWrapper(nn.Module):
             )
             max_tokens_per_rank = resolved
 
+        self._native_nvfp4 = type(self) is MegaMoeWrapper and W.moe_w1_s2 in weights
         self.mega_moe = self._get_mega_moe_cls().from_params(
             layer_id=layer_idx,
             dim=dim,
@@ -173,7 +178,17 @@ class MegaMoeWrapper(nn.Module):
                 "quantization without checkpoint scales is not supported."
             )
 
-        if w1.dtype == torch.int8 and w2.dtype == torch.int8:
+        if self._native_nvfp4:
+            self.mega_moe.setup_weights_from_nvfp4(
+                w1,
+                s1,
+                weights.pop(W.moe_w1_s2),
+                w2,
+                s2,
+                weights.pop(W.moe_w2_s2),
+            )
+            del w1, s1, w2, s2
+        elif w1.dtype == torch.int8 and w2.dtype == torch.int8:
             self.mega_moe.setup_weights_from_fp4(
                 w1_w=w1,
                 w1_s=s1,
@@ -257,6 +272,7 @@ class MegaMoeWrapper(nn.Module):
         )
         clone.expert_num = self.expert_num
         clone._activation_clamp = self._activation_clamp
+        clone._native_nvfp4 = self._native_nvfp4
         return clone
 
     @property
