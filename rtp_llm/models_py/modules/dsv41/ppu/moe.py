@@ -59,6 +59,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.linear import (
     _ue8m0_scales_to_float,
 )
 from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import (
+    megamoe_module_name,
     moe_backend,
     moe_kernel_name,
     moe_precision,
@@ -2026,7 +2027,6 @@ class PPUMoE:
             (w13_u, w13_sp), (w2_u, w2_sp) = mega.transform_weights_for_mega_moe(
                 (w13_u, _ue8m0_scale_bytes(w13_s).contiguous().view(torch.uint8)),
                 (w2_u, _ue8m0_scale_bytes(w2_s).contiguous().view(torch.uint8)),
-                activation="swiglu",
             )
             inv13 = inv2 = 1.0
         elif self.precision == "w4a8":
@@ -2183,7 +2183,7 @@ class PPUMoE:
     def _get_mega_module(self):
         if self._mega_module is None:
             try:
-                module = importlib.import_module("deep_gemm")
+                module = importlib.import_module(megamoe_module_name())
             except Exception as error:
                 raise RuntimeError(
                     "PPU890 MegaMoE requires a compatible DeepGEMM-for-sail build"
@@ -2500,18 +2500,19 @@ class PPUMoE:
             else None
         )
         previous_counts = self._mega_recv_stats.clone() if counts is not None else None
-        if getattr(mega, "_C", None) is not None:
+        route_inputs = x.contiguous(), ids.contiguous(), weights.contiguous()
+        if getattr(mega, "__name__", None) == "deep_gemm_mega":
+            mega.mega_moe_pre_dispatch(*route_inputs, sym_buffer=buffer)
+        elif getattr(mega, "_C", None) is not None:
             # Current native ABI validates ownership of these exact views.
             # Do not copy or re-view the symmetric staging tensors.
             mega.mega_moe_pre_dispatch(
-                x.contiguous(), ids.contiguous(), weights.contiguous(),
+                *route_inputs,
                 buffer.x, buffer.x_sf, buffer.topk_idx, buffer.topk_weights,
                 x.shape[0], group_size=32, mma_type="fp4xfp4",
             )
         else:
-            mega.mega_moe_pre_dispatch(
-                x.contiguous(), ids.contiguous(), weights.contiguous(), buffer
-            )
+            mega.mega_moe_pre_dispatch(*route_inputs, buffer)
         y = torch.empty_like(x, dtype=torch.bfloat16)
         # Complete native pipeline includes dispatch, both GEMMs and weighted
         # combine. Do not run DeepEP or apply split-W4A8's pre-quant weighting.

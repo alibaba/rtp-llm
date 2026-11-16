@@ -11,6 +11,14 @@ MOE_PRECISION_ENV = "RTP_V41_PPU_MOE_PRECISION"
 MOE_BACKEND_ENV = "RTP_V41_PPU_MOE_BACKEND"
 
 
+def megamoe_module_name(env: Optional[Mapping[str, str]] = None) -> str:
+    env = os.environ if env is None else env
+    value = env.get("RTP_V41_PPU_MEGAMOE_MODULE", "deep_gemm")
+    if value not in ("deep_gemm", "deep_gemm_mega"):
+        raise ValueError("RTP_V41_PPU_MEGAMOE_MODULE must be deep_gemm or deep_gemm_mega")
+    return value
+
+
 def moe_backend(env: Optional[Mapping[str, str]] = None) -> str:
     env = os.environ if env is None else env
     value = env.get(MOE_BACKEND_ENV, "grouped").strip().lower()

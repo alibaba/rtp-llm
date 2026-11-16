@@ -26,6 +26,7 @@ import importlib
 import os
 
 from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import (
+    megamoe_module_name,
     moe_backend,
     moe_kernel_name,
     moe_precision,
@@ -55,7 +56,8 @@ def kernel_symbols(env=None):
         )
     elif precision == "w4a8":
         functions += ("preprocess_weights_and_scales",)
-    return (("deep_gemm", functions),) + COMMON_KERNEL_SYMBOLS
+    provider = megamoe_module_name(env) if backend == "megamoe" else "deep_gemm"
+    return ((provider, functions),) + COMMON_KERNEL_SYMBOLS
 
 
 # Compatibility for callers inspecting the default kernel surface. Runtime
