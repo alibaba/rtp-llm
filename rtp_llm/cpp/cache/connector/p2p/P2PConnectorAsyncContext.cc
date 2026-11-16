@@ -64,14 +64,31 @@ void P2PConnectorAsyncReadContext::onDone(DoneCallback callback) {
 
 void P2PConnectorAsyncReadContext::dispatchDoneCallbacks() {
     std::vector<DoneCallback> callbacks;
+    std::vector<std::function<void()>> release_callbacks;
     ErrorInfo error;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!done_) return;
         callbacks.swap(done_callbacks_);
+        if (!resourceHoldPending()) {
+            release_callbacks.swap(target_release_callbacks_);
+        }
         error = ErrorInfo(error_code_, error_message_);
     }
     for (auto& callback : callbacks) callback(error);
+    for (auto& callback : release_callbacks)
+        callback();
+}
+
+void P2PConnectorAsyncReadContext::onTargetSafeToRelease(std::function<void()> callback) {
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!done_ || resourceHoldPending()) {
+            target_release_callbacks_.push_back(std::move(callback));
+            return;
+        }
+    }
+    callback();
 }
 
 bool P2PConnectorAsyncReadContext::setCallResults(
@@ -503,6 +520,7 @@ void P2PConnectorAsyncReadContext::pollLeaseIfNeeded(const std::shared_ptr<P2PBr
     }
 
     if (result.allStopped()) {
+        DoneNotifier done_notifier{*this};
         const auto hold_start_us = lease_hold_start_us_.exchange(0);
         if (collector_ && hold_start_us > 0) {
             collector_->decode_schedule_lease_hold_time_us = P2PNotification::nowUs() - hold_start_us;
