@@ -10,6 +10,7 @@
 #include <thread>
 #include <vector>
 
+#include "kvcm_client/TransferClientCompat.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientWrapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/MockKVCMClient.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
@@ -62,7 +63,8 @@ std::shared_ptr<ClientWrapper> initializeClient(bool                            
                                                 kv_cache_manager::MockTransferClient** transfer_client     = nullptr,
                                                 std::chrono::milliseconds              reinit_interval     = std::chrono::seconds(10),
                                                 MockClientFactory**                    observed_factory    = nullptr,
-                                                const std::vector<std::string>&         endpoints           = {}) {
+                                                const std::vector<std::string>&         endpoints           = {},
+                                                std::unique_ptr<kv_cache_manager::MockTransferClient> injected_transfer = nullptr) {
     auto  factory        = std::make_unique<MockClientFactory>();
     auto* factory_ptr    = factory.get();
     if (observed_factory) *observed_factory = factory_ptr;
@@ -120,7 +122,9 @@ std::shared_ptr<ClientWrapper> initializeClient(bool                            
                 observation.registration_base       = params.regist_span->base;
                 observation.registration_size       = params.regist_span->size;
             }
-            auto client = std::make_unique<kv_cache_manager::MockTransferClient>(transfer_destruction_count);
+            auto client = injected_transfer ? std::move(injected_transfer) :
+                                               std::make_unique<kv_cache_manager::MockTransferClient>(
+                                                   transfer_destruction_count);
             if (transfer_client != nullptr) {
                 *transfer_client = client.get();
             }
@@ -435,6 +439,175 @@ TEST(ClientWrapperTest, SubmissionTrackingDistinguishesSdkCallsFromLocalRejectio
         EXPECT_EQ(completion, Completion::NOT_SUBMITTED);
     }
 }
+
+class LegacySdkTransfer {
+public:
+    kv_cache_manager::ClientErrorCode LoadKvCaches(
+        const kv_cache_manager::UriStrVec&,
+        const kv_cache_manager::BlockBuffers&,
+        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace) {
+        ++legacy_reads;
+        last_trace = trace;
+        return kv_cache_manager::ER_OK;
+    }
+
+    std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec> SaveKvCaches(
+        const kv_cache_manager::UriStrVec& uris,
+        const kv_cache_manager::BlockBuffers&,
+        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace) {
+        ++legacy_writes;
+        last_trace = trace;
+        return {kv_cache_manager::ER_OK, uris};
+    }
+
+    size_t legacy_reads{0};
+    size_t legacy_writes{0};
+    std::shared_ptr<kv_cache_manager::TransferTraceInfo> last_trace;
+};
+
+class DeadlineSdkTransfer: public LegacySdkTransfer {
+public:
+    kv_cache_manager::ClientErrorCode LoadKvCachesWithDeadline(
+        const kv_cache_manager::UriStrVec&,
+        const kv_cache_manager::BlockBuffers&,
+        int64_t deadline_ms,
+        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace) {
+        ++deadline_reads;
+        last_deadline_ms = deadline_ms;
+        last_trace = trace;
+        return kv_cache_manager::ER_SDK_TIMEOUT;
+    }
+
+    std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec> SaveKvCachesWithDeadline(
+        const kv_cache_manager::UriStrVec& uris,
+        const kv_cache_manager::BlockBuffers&,
+        int64_t deadline_ms,
+        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace) {
+        ++deadline_writes;
+        last_deadline_ms = deadline_ms;
+        last_trace = trace;
+        return {kv_cache_manager::ER_SDK_TIMEOUT, uris};
+    }
+
+    size_t deadline_reads{0};
+    size_t deadline_writes{0};
+    int64_t last_deadline_ms{0};
+};
+
+TEST(TransferClientCompatTest, LegacySdkUsesOriginalCallsWithAParentDeadline) {
+    LegacySdkTransfer client;
+    const kv_cache_manager::UriStrVec uris{"uri"};
+    const kv_cache_manager::BlockBuffers buffers;
+    auto trace = std::make_shared<kv_cache_manager::TransferTraceInfo>();
+    EXPECT_EQ(loadSdkKvCaches(client, uris, buffers, 1234, trace), kv_cache_manager::ER_OK);
+    EXPECT_EQ(client.last_trace, trace);
+    EXPECT_EQ(saveSdkKvCaches(client, uris, buffers, 1234, trace), std::make_pair(kv_cache_manager::ER_OK, uris));
+    EXPECT_EQ(client.last_trace, trace);
+    EXPECT_EQ(client.legacy_reads, 1u);
+    EXPECT_EQ(client.legacy_writes, 1u);
+}
+
+TEST(TransferClientCompatTest, ZeroDeadlineUsesOriginalCallsOnDeadlineCapableSdk) {
+    DeadlineSdkTransfer client;
+    const kv_cache_manager::UriStrVec uris{"uri"};
+    const kv_cache_manager::BlockBuffers buffers;
+    auto trace = std::make_shared<kv_cache_manager::TransferTraceInfo>();
+    EXPECT_EQ(loadSdkKvCaches(client, uris, buffers, 0, trace), kv_cache_manager::ER_OK);
+    EXPECT_EQ(saveSdkKvCaches(client, uris, buffers, 0, trace), std::make_pair(kv_cache_manager::ER_OK, uris));
+    EXPECT_EQ(client.last_trace, trace);
+    EXPECT_EQ(client.legacy_reads, 1u);
+    EXPECT_EQ(client.legacy_writes, 1u);
+    EXPECT_EQ(client.deadline_reads, 0u);
+    EXPECT_EQ(client.deadline_writes, 0u);
+}
+
+TEST(TransferClientCompatTest, PositiveDeadlineAndSdkErrorsPassThroughUnchanged) {
+    DeadlineSdkTransfer client;
+    const kv_cache_manager::UriStrVec uris{"uri"};
+    const kv_cache_manager::BlockBuffers buffers;
+    auto trace = std::make_shared<kv_cache_manager::TransferTraceInfo>();
+    EXPECT_EQ(loadSdkKvCaches(client, uris, buffers, 1234, trace), kv_cache_manager::ER_SDK_TIMEOUT);
+    EXPECT_EQ(client.last_deadline_ms, 1234);
+    EXPECT_EQ(client.last_trace, trace);
+    EXPECT_EQ(saveSdkKvCaches(client, uris, buffers, 5678, trace),
+              std::make_pair(kv_cache_manager::ER_SDK_TIMEOUT, uris));
+    EXPECT_EQ(client.last_deadline_ms, 5678);
+    EXPECT_EQ(client.last_trace, trace);
+    EXPECT_EQ(client.legacy_reads, 0u);
+    EXPECT_EQ(client.legacy_writes, 0u);
+    EXPECT_EQ(client.deadline_reads, 1u);
+    EXPECT_EQ(client.deadline_writes, 1u);
+}
+
+#if defined(KVCM_HAS_TRANSFER_DEADLINE)
+class DeadlineTransferClient: public kv_cache_manager::MockTransferClient {
+public:
+    using MockTransferClient::MockTransferClient;
+    using Code = kv_cache_manager::ClientErrorCode;
+    using Uris = kv_cache_manager::UriStrVec;
+    using Buffers = kv_cache_manager::BlockBuffers;
+    using Trace = std::shared_ptr<kv_cache_manager::TransferTraceInfo>;
+
+    MOCK_METHOD(Code, LoadKvCachesWithDeadline, (const Uris&, const Buffers&, int64_t, Trace), (override));
+    MOCK_METHOD((std::pair<Code, Uris>), SaveKvCachesWithDeadline,
+                (const Uris&, const Buffers&, int64_t, Trace), (override));
+};
+
+TEST(ClientWrapperTest, ReadAndWriteForwardParentDeadlineAndPreserveSubmissionState) {
+    using namespace kv_cache_manager;
+    using Completion = ClientWrapper::TransferCompletion;
+    unsigned char byte = 7;
+    RegistSpan span{&byte, 1};
+    InitObservation observation;
+    auto destruction_count = std::make_shared<int>(0);
+    auto transfer = std::make_unique<DeadlineTransferClient>(destruction_count);
+    auto* mock = transfer.get();
+    auto client = initializeClient(false, "sdk_deadline", span, observation, destruction_count,
+                                   nullptr, nullptr, nullptr, std::chrono::seconds(10), nullptr, {}, std::move(transfer));
+    ASSERT_NE(client, nullptr);
+    UriStrVec uris{"uri"};
+    BlockBuffers buffers(1);
+    buffers.front().iovs.push_back({kv_cache_manager::MemoryType::CPU, &byte, 1, false});
+    auto trace = std::make_shared<TransferTraceInfo>();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    const int64_t deadline_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline.time_since_epoch()).count();
+    EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).Times(0);
+    EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).Times(0);
+    for (const auto code : {ER_OK, ER_INVALID_PARAMS, ER_SDK_TIMEOUT}) {
+        SCOPED_TRACE(static_cast<int>(code));
+        EXPECT_CALL(*mock, LoadKvCachesWithDeadline(uris, _, deadline_ms, trace)).WillOnce(Return(code));
+        EXPECT_CALL(*mock, SaveKvCachesWithDeadline(uris, _, deadline_ms, trace))
+            .WillOnce(Return(std::make_pair(code, uris)));
+        const auto expected = code == ER_OK ? Completion::PAYLOAD_COMPLETE : Completion::UNKNOWN;
+        auto completion = Completion::NOT_SUBMITTED;
+        EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", uris, buffers, trace, &completion, deadline), code);
+        EXPECT_EQ(completion, expected);
+        completion = Completion::NOT_SUBMITTED;
+        const auto saved =
+            client->saveKvCachesForTagWithStatus("default", uris, buffers, trace, &completion, deadline);
+        EXPECT_EQ(saved.first, code);
+        EXPECT_EQ(saved.second, uris);
+        EXPECT_EQ(completion, expected);
+    }
+    EXPECT_CALL(*mock, LoadKvCachesWithDeadline(_, _, _, _)).Times(0);
+    EXPECT_CALL(*mock, SaveKvCachesWithDeadline(_, _, _, _)).Times(0);
+    EXPECT_CALL(*mock, LoadKvCaches(uris, _, trace)).WillOnce(Return(ER_OK));
+    EXPECT_CALL(*mock, SaveKvCaches(uris, _, trace)).WillOnce(Return(std::make_pair(ER_OK, uris)));
+    EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", uris, buffers, trace), ER_OK);
+    EXPECT_EQ(client->saveKvCachesForTagWithStatus("default", uris, buffers, trace).first, ER_OK);
+    auto completion = Completion::UNKNOWN;
+    const auto expired = std::chrono::steady_clock::now();
+    EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", uris, buffers, trace, &completion, expired), ER_SDK_TIMEOUT);
+    EXPECT_EQ(completion, Completion::NOT_SUBMITTED);
+    completion = Completion::UNKNOWN;
+    EXPECT_EQ(client->saveKvCachesForTagWithStatus("default", uris, buffers, trace, &completion, expired).first,
+              ER_SDK_TIMEOUT);
+    EXPECT_EQ(completion, Completion::NOT_SUBMITTED);
+    client->shutdown();
+    EXPECT_EQ(*destruction_count, 1);
+}
+#endif
 
 TEST(ClientWrapperTest, RejectsInvalidConfigBeforeCreatingSubscriberOrClients) {
     auto                         valid      = makeConfig(false, "endpoint");
