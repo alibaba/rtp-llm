@@ -10,6 +10,9 @@ class PrefillTokenBalanceConfigTest {
     }
     @Test void optInDefaultsAndValidation() {
         assertNull(ConfigTestFixtures.parse("{}").getRouter().getRoles().getPrefill().getTokenBalance());
+        assertEquals(5.0, parse("{}").getRouter().getRoles().getPrefill().getTokenBalance().getMinPrefixHitPercent());
+        assertEquals(50.0, parse("{\"minPrefixHitPercent\":50}")
+                .getRouter().getRoles().getPrefill().getTokenBalance().getMinPrefixHitPercent());
         for (String value : new String[]{"{\"minPrefixHitPercent\":101}", "{\"minPrefixHitPercent\":-1}"}) {
             assertThrows(RuntimeException.class, () -> parse(value));
         }

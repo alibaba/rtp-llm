@@ -442,7 +442,8 @@ class CostBasedPrefillSelectionMetricTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"9,0,BLOCKED", "9,8,BLOCKED", "9,9,SUCCESS", "4,0,SUCCESS", "4,2,SUCCESS", "0,0,SUCCESS"})
+    @CsvSource({"9,0,BLOCKED", "9,8,BLOCKED", "9,9,SUCCESS", "6,0,BLOCKED", "5,0,SUCCESS",
+            "4,0,SUCCESS", "4,2,SUCCESS", "0,0,SUCCESS"})
     void congestedWorkerStillDefinesCacheEligibility(int leaderHit, int availableHit, PlacementResult.Status expected) {
         configureEngineQueueAdmission();
         publish("10.0.0.2", 8080);
@@ -462,7 +463,7 @@ class CostBasedPrefillSelectionMetricTest {
             }
             updateEngineQueue(a, 1, 0);
             context.data().setRequest(context.data().getRequest().toBuilder()
-                    .blockCacheKeys(List.of(1L,2L,3L,4L,5L,6L,7L,8L,9L)).cacheKeyBlockSize(100L).build());
+                    .blockCacheKeys(List.of(1L,2L,3L,4L,5L,6L,7L,8L,9L)).cacheKeyBlockSize(10L).build());
             when(cache.findMatchingEngines(any(), any(), any())).thenAnswer(call -> {
                 List<String> addresses = call.getArgument(2);
                 return java.util.stream.Stream.of(Map.entry(a.ipPort(), leaderHit), Map.entry(b.ipPort(), availableHit))

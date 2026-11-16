@@ -37,7 +37,7 @@ public final class RoutingConfig {
     @Setter
     public static final class TokenBalanceConfig {
         /** Above this percentage, the largest reusable prefix wins without a TTFT cap. */
-        private double minPrefixHitPercent = 50.0;
+        private double minPrefixHitPercent = 5.0;
         /** Actual Engine waiting-stream watermark; not an inflight or unobserved-dispatch quota.
          * Excludes Master queues and running requests. Null disables Engine queue admission.
          * Unknown telemetry imposes no queue gate; explicit concurrency limits still apply.
