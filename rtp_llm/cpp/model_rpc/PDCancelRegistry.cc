@@ -252,7 +252,7 @@ void PDCancelRegistry::finishLocal(const Handle& handle) {
         std::lock_guard<std::mutex> lock(mutex_);
         stream = handle->stream;
     }
-    const bool cleanup_complete = stream && stream->tryCompleteLocalCleanup();
+    const bool cleanup_complete = stream && !stream->hasPendingLocalCleanup();
     std::lock_guard<std::mutex> lock(mutex_);
     handle->local_done      = true;
     if (!handle->canceled.load()) {
@@ -363,7 +363,7 @@ void PDCancelRegistry::releaseFinishedStream(const Handle& handle) {
         }
         stream = handle->stream;
     }
-    if (!stream || !stream->tryCompleteLocalCleanup()) {
+    if (!stream || stream->hasPendingLocalCleanup()) {
         return;
     }
     std::lock_guard<std::mutex> lock(mutex_);
@@ -425,10 +425,9 @@ bool PDCancelRegistry::complete(const Handle& handle) {
         return false;
     }
     auto stream = handle->stream;
-    // Resource cleanup may wait for transport callbacks; do not block unrelated
-    // admission/Cancel operations under the registry lock.
+    // Check Engine and Connector progress without holding the registry lock.
     lock.unlock();
-    if (stream && !stream->tryCompleteLocalCleanup())
+    if (stream && stream->hasPendingLocalCleanup())
         return false;
     lock.lock();
     if (handle->terminal || handle->stream != stream)

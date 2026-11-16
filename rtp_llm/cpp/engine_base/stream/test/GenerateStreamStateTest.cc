@@ -171,18 +171,15 @@ TEST_F(GenerateStreamStateTest, testMallocRetryMetricsIndependentOfTerminalOutco
     }
 }
 
-TEST_F(GenerateStreamStateTest, testDecodeInitialCapacityPressureWaitsUntilRequestTimeout) {
-    auto stream = createStream({1, 2, 3}, false, RoleType::DECODE);
+TEST_F(GenerateStreamStateTest, testDecodeInitialCapacityPressureFailsImmediately) {
+    auto stream    = createStream({1, 2, 3}, false, RoleType::DECODE);
     auto allocator = installRetryableInitMalloc();
+    EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_)).Times(1);
     stream->reportEvent(StreamEvents::CanRun);
-    for (int retry = 0; retry < 3; ++retry) {
-        EXPECT_EQ(stream->moveToNext(), StreamState::WAITING);
-        EXPECT_FALSE(stream->hasError());
-    }
-    // Request cancellation/deadline remains authoritative while capacity is unavailable.
-    stream->reportError(ErrorCode::GENERATE_TIMEOUT, "request deadline while waiting for KV capacity");
+
     EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
-    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    EXPECT_TRUE(stream->streamCacheResource().isResourceReleased());
 }
 
 TEST_F(GenerateStreamStateTest, testDirectStateManipulation) {

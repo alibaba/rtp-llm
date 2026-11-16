@@ -479,6 +479,8 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         }
 
         if (param.p2p_layer_write && request_blocks->getBlocksCount() > 0) {
+            // The block planner above combines the relative input window and its prefix.
+            // Publish the resulting request-global keys and rank-local block IDs.
             const int64_t deadline_ms = param.request_deadline_ms.defined() ?
                                             param.request_deadline_ms.data_ptr<int64_t>()[batch_id] :
                                             std::numeric_limits<int64_t>::max();

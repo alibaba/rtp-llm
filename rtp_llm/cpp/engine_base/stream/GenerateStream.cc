@@ -283,22 +283,14 @@ void GenerateStream::notifyLocalCleanupProgress() {
     }
 }
 
-bool GenerateStream::canReleaseFinishedResources() const {
-    return isFinished() && !isDeferredReleasePending() && !hasPendingAsyncBookkeeping();
-}
-
-bool GenerateStream::tryCompleteLocalCleanup() {
-    if (!canReleaseFinishedResources()) {
-        return false;
-    }
-    // FINISHED can precede resource release. Reuse the idempotent release path
-    // before checking for a surviving Connector lease.
-    releaseResource();
-    return !hasPendingLocalCleanup();
-}
-
 bool GenerateStream::hasPendingLocalCleanup() const {
-    return !canReleaseFinishedResources() || hasPendingP2PResourceHold();
+    if (!isFinished() || isDeferredReleasePending() || hasPendingAsyncBookkeeping()) {
+        return true;
+    }
+    std::lock_guard<std::mutex> lock(*mutex_);
+    const auto& resource = *stream_cache_resource_;
+    return (resource.resourceContext().cache_manager && !resource.isResourceReleased())
+           || resource.p2pReleasePending();
 }
 
 void GenerateStream::incPendingAsyncBookkeeping() {
@@ -345,11 +337,6 @@ bool GenerateStream::deferResourceReleaseIfBusy() {
     }
     markDeferredRelease();
     return true;
-}
-
-bool GenerateStream::hasPendingP2PResourceHold() const {
-    std::lock_guard<std::mutex> lock(*mutex_);
-    return stream_cache_resource_->p2pReleasePending();
 }
 
 bool GenerateStream::isDeferredReleasePending() const {
@@ -1825,6 +1812,7 @@ GenerateStream::TimeInfo GenerateStream::getTimeInfo() {
     time_info.first_token_rt_us       = complete_token_ids_->firstTokenLatencyUs();
     time_info.generation_done         = generation_done_;
     time_info.generation_done_time_us = generation_done_time_us_;
+    time_info.initial_kv_allocation_rt_us = generate_status_->initial_kv_allocation_rt_us;
     time_info.loading_cache_start_time_us = loading_cache_start_time_us_;
     time_info.loading_cache_done_time_us = loading_cache_done_time_us_;
     time_info.loading_cache_succeeded = loading_cache_succeeded_;

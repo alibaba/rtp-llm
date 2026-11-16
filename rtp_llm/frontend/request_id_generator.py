@@ -13,6 +13,8 @@ def generate_request_id(
     port: int,
     server_id: str,
     sequence: int,
+    *,
+    timestamp_ms: int | None = None,
 ) -> int:
     """Generate a unique request ID.
 
@@ -32,7 +34,7 @@ def generate_request_id(
     """
     # This allows us to use fewer bits while maintaining millisecond precision
     EPOCH_2020_MS = 1577836800000  # 2020-01-01 00:00:00 UTC in milliseconds
-    current_timestamp_ms = int(time.time() * 1000)
+    current_timestamp_ms = int(time.time() * 1000) if timestamp_ms is None else timestamp_ms
     relative_timestamp = (
         current_timestamp_ms - EPOCH_2020_MS
     ) & 0xFFFFFFFFFF  # 40 bits mask

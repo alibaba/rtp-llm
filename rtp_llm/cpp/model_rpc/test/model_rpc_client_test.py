@@ -859,7 +859,7 @@ class ModelRpcClientTest(TestCase):
             client, "batch_generate", new=AsyncMock(return_value=[])
         ) as batch:
             self.assertEqual(asyncio.run(client.batch_enqueue([])), [])
-            batch.assert_awaited_once_with([])
+            batch.assert_awaited_once_with([], allow_partial=True)
 
     def test_batch_enqueue_maps_error_codes_and_handles_missing_messages(self):
         cases = (
@@ -913,7 +913,7 @@ class ModelRpcClientTest(TestCase):
                     self.assertRaises(FtRuntimeException) as context,
                 ):
                     asyncio.run(
-                        client.batch_enqueue(
+                        client.batch_generate(
                             [self._make_generate_input(GenerateConfig())]
                         )
                     )
@@ -958,7 +958,7 @@ class ModelRpcClientTest(TestCase):
                 )
                 convert.assert_not_called()
 
-    def test_batch_enqueue_stops_before_later_items_after_first_error(self):
+    def test_batch_enqueue_returns_later_success_after_first_error(self):
         response = BatchGenerateOutputsPB()
         failed = response.results.add()
         failed.error_info.error_code = ErrorCodePB.INVALID_PARAMS
@@ -976,9 +976,8 @@ class ModelRpcClientTest(TestCase):
             patch(
                 "rtp_llm.cpp.model_rpc.model_rpc_client.trans_output"
             ) as trans_output_mock,
-            self.assertRaises(FtRuntimeException) as context,
         ):
-            asyncio.run(
+            results = asyncio.run(
                 client.batch_enqueue(
                     [
                         self._make_generate_input(GenerateConfig()),
@@ -987,8 +986,9 @@ class ModelRpcClientTest(TestCase):
                 )
             )
 
-        self.assertEqual(context.exception.exception_type, ExceptionType.INVALID_PARAMS)
-        trans_output_mock.assert_not_called()
+        self.assertEqual(results[0].exception_type, ExceptionType.INVALID_PARAMS)
+        self.assertIs(results[1], trans_output_mock.return_value)
+        trans_output_mock.assert_called_once()
 
     def test_batch_prefill_only_rejects_generated_tokens(self):
         response = BatchGenerateOutputsPB()
@@ -1095,7 +1095,7 @@ class ModelRpcClientTest(TestCase):
             self.assertRaises(FtRuntimeException) as context,
         ):
             asyncio.run(
-                client.batch_enqueue([self._make_generate_input(GenerateConfig())])
+                client.batch_generate([self._make_generate_input(GenerateConfig())])
             )
 
         self.assertEqual(context.exception.exception_type, ExceptionType.UNKNOWN_ERROR)
@@ -2504,6 +2504,13 @@ class BatchTraceRpcTest(TestCase):
                         task.cancel()
                         with self.assertRaises(asyncio.CancelledError):
                             await task
+                    elif mode in ("business_error", "business_code_only"):
+                        outputs = await task
+                        self.assertEqual(len(outputs), 3)
+                        self.assertEqual(outputs[0].generate_outputs[0].output_ids.item(), 801)
+                        self.assertIsInstance(outputs[1], FtRuntimeException)
+                        self.assertEqual(outputs[2].generate_outputs[0].output_ids.item(), 803)
+                        self.observed_error = (type(outputs[1]), str(outputs[1]))
                     elif mode != "ok":
                         expected = (
                             ValueError
@@ -2523,12 +2530,12 @@ class BatchTraceRpcTest(TestCase):
                             [801, 802, 803],
                         )
                 if mode in ("business_error", "business_code_only"):
-                    self.assertEqual(conversions, [801])
+                    self.assertEqual(conversions, [801, 803])
                 elif mode == "conversion_error":
                     self.assertEqual(conversions, [801, 802])
                 elif mode == "ok":
                     self.assertEqual(conversions, [801, 802, 803])
-                # Original loop stops immediately; telemetry must never convert C.
+                # A conversion exception still stops the batch before the last item.
 
                 self.assertEqual(
                     [i.generate_config.max_new_tokens for i in servicer.request.inputs],

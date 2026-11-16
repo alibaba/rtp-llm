@@ -359,7 +359,7 @@ void NormalEngine::initScheduler() {
                                          resource_context_.cache_manager,
                                          metrics_reporter_));
         RTP_LLM_LOG_INFO("create pipeline parallel scheduler done");
-    } else if (runtime_config.use_batch_decode_scheduler) {
+    } else if (runtime_config.use_batch_decode_scheduler && pd_sep_config.role_type != RoleType::DECODE) {
         scheduler_.reset(new BatchDecodeScheduler(
             runtime_config, resource_context_.cache_manager, metrics_reporter_, parallelism_config.dp_rank));
         RTP_LLM_LOG_INFO("create batch decode scheduler done");

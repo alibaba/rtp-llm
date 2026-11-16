@@ -3006,7 +3006,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 HostServiceArgs(pdfusion_domain="pdfusion-test"),
                 [RoleType.PDFUSION],
             ),
-            (RoleType.PREFILL, HostServiceArgs(), [RoleType.DECODE, RoleType.PREFILL]),
+            (RoleType.PREFILL, HostServiceArgs(), [RoleType.DECODE]),
         ):
             with self.subTest(role=role, expected=expected):
                 config = PDSepConfig()
@@ -3063,7 +3063,7 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
         self.assertFalse(called)
 
-    async def test_route_ips_fail_fast_when_pd_frontend_lacks_prefill(
+    async def test_route_ips_keeps_partial_frontend_route(
         self,
     ):
         pd_sep_config = PDSepConfig()
@@ -3100,8 +3100,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             generate_config=GenerateConfig(),
         )
 
-        with self.assertRaisesRegex(Exception, "no backend role addresses found"):
-            await visitor.route_ips(input_obj)
+        await visitor.route_ips(input_obj)
+        self.assertEqual([addr.role for addr in input_obj.generate_config.role_addrs], [RoleType.DECODE])
 
     async def test_prefill_http_entry_supplies_local_handoff_without_overriding_route(self):
         config = PDSepConfig()
@@ -3148,8 +3148,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             generate_config=GenerateConfig(role_addrs=[decode]),
             enqueued_by_master=True,
         )
-        with self.assertRaisesRegex(FtRuntimeException, "no backend role addresses found"):
-            await visitor.route_ips(reserved)
+        await visitor.route_ips(reserved)
+        self.assertEqual(reserved.generate_config.role_addrs, [decode])
 
         missing_decode = GenerateInput(
             request_id=2,
@@ -3157,8 +3157,8 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             mm_inputs=[],
             generate_config=GenerateConfig(),
         )
-        with self.assertRaisesRegex(FtRuntimeException, "no backend role addresses found"):
-            await visitor.route_ips(missing_decode)
+        await visitor.route_ips(missing_decode)
+        self.assertEqual([addr.role for addr in missing_decode.generate_config.role_addrs], [RoleType.PREFILL])
 
     async def test_master_only_frontend_rejects_empty_route_and_preserves_error(self):
         from unittest.mock import AsyncMock
@@ -3220,6 +3220,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
 
     async def test_batch_enqueue_pd_uses_one_pair(self):
         visitor, inputs = self._frontend_batch_visitor_and_inputs()
+        visitor.host_service.service_available = True
+        visitor.host_service.get_master_addr = lambda: ""
+        visitor.backend_role_list = [RoleType.PREFILL, RoleType.DECODE]
         pair = [
             RoleAddr(role=RoleType.PREFILL, ip="prefill", http_port=10000, grpc_port=10001),
             RoleAddr(role=RoleType.DECODE, ip="decode", http_port=20000, grpc_port=20001),

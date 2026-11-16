@@ -123,6 +123,41 @@ public:
         RTP_LLM_LOG_INFO("BatchDecodeScheduler update batch size to %d, mode to %d", batch_size_, int(scheduler_type_));
     }
 
+    // 根据状态机转移后的目标状态，将 stream 路由到对应的队列
+    void addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state) {
+        switch (new_state) {
+            case StreamState::WAITING:
+                waiting_streams_.push_back(stream);
+                break;
+            case StreamState::LOADING_CACHE:
+                loading_cache_streams_.push_back(stream);
+                break;
+            case StreamState::RUNNING:
+                running_streams_.push_back(stream);
+                break;
+            case StreamState::FINISHED:
+                break;
+            default:
+                RTP_LLM_LOG_ERROR(
+                    "Unknown state: %d for stream [%ld]", static_cast<int>(new_state), stream->streamId());
+                break;
+        }
+    }
+
+    // 通过 GenerateStateMachine 驱动每个 stream 的状态转移，状态变化的 stream 移入对应队列
+    void evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams) {
+        for (auto it = streams.begin(); it != streams.end();) {
+            auto state     = (*it)->getStatus();
+            auto new_state = (*it)->moveToNext();
+            if (new_state != state) {
+                addStreamToNewState(*it, new_state);
+                it = streams.erase(it);
+            } else {
+                it++;
+            }
+        }
+    }
+
     void evaluateWaitingStreams() {
         // Finalize errored streams before selecting a batch so they cannot count toward its size.
         for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
@@ -142,12 +177,11 @@ public:
 
         // Homogeneous queues run exactly batch_size_ streams; a mixed queue may yield a smaller
         // mode-homogeneous batch and drain its remaining tail in subsequent rounds.
+        std::list<GenerateStreamPtr> selected_streams;
         bool                         has_execution_mode = false;
         bool                         prefill_only       = false;
         bool                         has_other_mode     = false;
-        for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
-            const auto  current             = it++;
-            const auto& stream              = *current;
+        for (const auto& stream : waiting_streams_) {
             const bool stream_prefill_only = isPrefillOnly(stream);
             if (!has_execution_mode) {
                 has_execution_mode = true;
@@ -157,34 +191,25 @@ public:
                 has_other_mode = true;
                 continue;
             }
-            if (admitting_streams_.size() < batch_size_) {
-                stream->reportEvent(StreamEvents::CanRun);
-                admitting_streams_.splice(admitting_streams_.end(), waiting_streams_, current);
+            if (selected_streams.size() < batch_size_) {
+                selected_streams.push_back(stream);
             }
         }
 
         // Refresh the drain state from the current queue. This batch may drain a mixed-mode tail,
         // but later homogeneous arrivals must go through the normal batch-size gate.
         draining_mixed_modes_ = has_other_mode;
-    }
-
-    void advanceAdmission() {
-        for (auto it = admitting_streams_.begin(); it != admitting_streams_.end();) {
-            const auto  current      = it++;
-            const auto& stream       = *current;
-            const auto  before       = stream->getStatus();
-            const bool  load_started = stream->hasEvent(StreamEvents::LoadInitiated);
-            auto        state        = stream->moveToNext();
-            // Synchronous Decode allocation first sets LoadInitiated, then enters RUNNING.
-            if (state == StreamState::WAITING
-                && (before == StreamState::LOADING_CACHE
-                    || (!load_started && stream->hasEvent(StreamEvents::LoadInitiated)))) {
-                state = stream->moveToNext();
+        for (auto& stream : selected_streams) {
+            stream->reportEvent(StreamEvents::CanRun);
+            // 忙等stream load cache done, 和原有SyncLoadCache逻辑等效
+            while (stream->getStatus() != StreamState::FINISHED && stream->moveToNext() != StreamState::RUNNING) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
-            if (state == StreamState::RUNNING) {
-                running_streams_.splice(running_streams_.end(), admitting_streams_, current);
-            } else if (state == StreamState::FINISHED) {
-                admitting_streams_.erase(current);
+        }
+        for (const auto& stream : selected_streams) {
+            waiting_streams_.remove(stream);
+            if (stream->getStatus() == StreamState::RUNNING) {
+                running_streams_.push_back(stream);
             }
         }
     }
@@ -209,27 +234,23 @@ public:
 
     absl::StatusOr<ScheduleOutput> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
-        if (running_streams_.empty() && !admitting_streams_.empty()) {
-            // KV completion and capacity changes may come without an enqueue notification.
-            // Wait with the scheduler lock released and retry admission on the next pass.
-            cond_.wait_for(lock, std::chrono::milliseconds(1));
-        } else {
-            cond_.wait_for(lock, std::chrono::seconds(30), [this] {
-                return waiting_streams_.size() >= batch_size_ || !running_streams_.empty()
-                       || (draining_mixed_modes_ && !waiting_streams_.empty());
-            });
-        }
-        running_streams_.remove_if([](const auto& stream) { return stream->moveToNext() == StreamState::FINISHED; });
+        cond_.wait_for(lock, std::chrono::seconds(30), [this] {
+            return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
+                   || !loading_cache_streams_.empty() || (draining_mixed_modes_ && !waiting_streams_.empty());
+        });
+
+        // 统一通过状态机驱动各队列中 stream 的状态转移
+        // LOADING_CACHE -> DONE/WAITING: error / load cache done
+        evaluateAndUpdateStreams(loading_cache_streams_);
+        evaluateAndUpdateStreams(running_streams_);
 
         if (waiting_streams_.empty()) {
             draining_mixed_modes_ = false;
         }
 
-        if (running_streams_.empty()) {
-            if (admitting_streams_.empty()) {
-                evaluateWaitingStreams();
-            }
-            advanceAdmission();
+        if (running_streams_.empty()
+            && (waiting_streams_.size() >= batch_size_ || (draining_mixed_modes_ && !waiting_streams_.empty()))) {
+            evaluateWaitingStreams();
             if (!running_streams_.empty()) {
                 initRunningStreams();
                 RTP_LLM_LOG_INFO("BatchDecodeScheduler::schedule: running_streams_.size() = %d, start run",
@@ -256,14 +277,14 @@ public:
 
     int64_t onflightStreams() override {
         std::lock_guard<std::mutex> lock(lock_);
-        return waiting_streams_.size() + admitting_streams_.size() + running_streams_.size();
+        return waiting_streams_.size() + loading_cache_streams_.size() + running_streams_.size();
     }
 
 private:
     std::mutex                   lock_;
     std::condition_variable      cond_;
     std::list<GenerateStreamPtr> waiting_streams_;
-    std::list<GenerateStreamPtr> admitting_streams_;
+    std::list<GenerateStreamPtr> loading_cache_streams_;
     std::list<GenerateStreamPtr> running_streams_;
     uint32_t                     batch_size_;
     bool                         reorder_request_;

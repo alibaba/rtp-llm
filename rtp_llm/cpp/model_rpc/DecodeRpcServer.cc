@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include <limits.h>
 #include <condition_variable>
+#include <unordered_map>
 #include <unordered_set>
 #include <c10/core/DeviceGuard.h>
 #include <c10/core/InferenceMode.h>
@@ -37,6 +38,7 @@
 #include <deque>
 #include <unistd.h>
 #include <utility>
+#include <unordered_map>
 #include <unordered_set>
 #include <c10/core/InferenceMode.h>
 
@@ -456,7 +458,7 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
             }
             contexts.clear();
             for (const auto& handle : handles) {
-                if (completed)
+                if (completed && !handle->canceled.load())
                     registry.finishDownstream(handle);
                 registry.finishLocal(handle);
             }
@@ -464,39 +466,37 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
     } guard{*cancel_registry_, *engine_, {}, {}, {}, {}, grpc::Status::OK};
 
     try {
-        if (master_admitted && (!all_pd || !single_dp)) {
-            const ErrorInfo reason(ErrorCode::INVALID_PARAMS,
-                                   !single_dp ? "P2P batch inference requires single-DP mode" :
-                                                "cannot forward a mixed batch after Master Prefill admission");
-            guard.status = serializeErrorMsg(std::to_string(request->inputs(0).request_id()), reason);
-            for (const auto& item : effective.inputs()) {
-                if (!item.enqueued_by_master()) {
-                    continue;
-                }
-                const auto timeout = item.generate_config().timeout_ms();
-                const auto deadline_ms = entry_ms + (timeout > 0 ? timeout : kDefaultRpcTimeoutMs);
-                PDCancelRegistry::Handle handle;
-                const auto admission =
-                    cancel_registry_->admit(item, masterEnqueuedHandoffUniqueKey(item.request_id()), address,
-                                            deadline_ms, handle);
-                if (!admission.ok()) {
-                    RTP_LLM_LOG_WARNING("PD rejected batch cleanup registration failed, request_id=%ld status=%s",
-                                        item.request_id(),
-                                        admission.ToString().c_str());
-                    continue;
-                }
-                guard.handles.push_back(handle);
-                guard.submitted_prefill.insert(item.request_id());
-            }
-            return guard.status;
-        }
         EnqueueBatchRequestPB prefill_request;
         prefill_request.set_batch_id(request->inputs(0).request_id());
         auto* slot = prefill_request.add_dp_slots();
         slot->set_dp_rank(0);
         // The batch validated that all items target this exact Prefill endpoint.
         std::optional<PrefillPeerInfo> peer;
+        std::unordered_map<int64_t, int> response_indices;
+        std::unordered_map<int64_t, PDCancelRegistry::Handle> handles_by_id;
+        std::vector<GenerateStreamPtr> output_streams(request->inputs_size());
+        std::vector<GenerateContext*> output_contexts(request->inputs_size(), nullptr);
+        const auto fail_item = [&](int64_t request_id, const ErrorInfo& error) {
+            const auto index = response_indices.at(request_id);
+            auto* item_error = response->mutable_results(index)->mutable_error_info();
+            item_error->set_error_code(transErrorCodeToRPC(error.code()));
+            item_error->set_error_message(error.ToString());
+            if (auto* context = output_contexts[index])
+                context->recordRpcFailure(error);
+            if (const auto& stream = output_streams[index]; stream && !stream->hasError())
+                stream->reportError(error.code(), error.ToString());
+            const auto handle = handles_by_id.find(request_id);
+            if (handle != handles_by_id.end()) {
+                if (guard.submitted_prefill.count(request_id)) {
+                    (void)cancel_registry_->cancel(request_id, error);
+                } else {
+                    cancel_registry_->finishDownstream(handle->second);
+                }
+            }
+        };
         for (auto& item : *effective.mutable_inputs()) {
+            response_indices.emplace(item.request_id(), response->results_size());
+            response->add_results();
             auto* config = item.mutable_generate_config();
             config->set_unique_key(masterEnqueuedHandoffUniqueKey(item.request_id()));
             const auto configured_timeout = config->timeout_ms();
@@ -510,98 +510,125 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
             PDCancelRegistry::Handle handle;
             const auto               admission =
                 cancel_registry_->admit(item, item.generate_config().unique_key(), address, deadline_ms, handle);
-            if (!admission.ok())
-                return guard.status = serializeErrorMsg(std::to_string(item.request_id()), admission);
+            if (!admission.ok()) {
+                fail_item(item.request_id(), admission);
+                continue;
+            }
             guard.handles.push_back(handle);
+            handles_by_id.emplace(item.request_id(), handle);
             if (item.enqueued_by_master())
                 guard.submitted_prefill.insert(item.request_id());
 
+            const bool multimodal =
+                item.multimodal_inputs_size() != 0 || item.has_v41_inputs() || item.has_multimodal_token_layout();
+            if (!single_dp || multimodal) {
+                fail_item(item.request_id(),
+                          {ErrorCode::INVALID_PARAMS,
+                           !single_dp ? "P2P batch inference requires single-DP mode" :
+                                        "P2P batch inference cannot attach this multimodal item"});
+                continue;
+            }
+
             std::shared_ptr<GenerateInput> input;
             GenerateInputPB                prefill_input;
-            auto status = preparePDRequest(item, deadline_ms, input, prefill_input, peer, context);
-            if (!status.ok())
-                return guard.status = status;
+            try {
+                const auto status = preparePDRequest(item, deadline_ms, input, prefill_input, peer, context);
+                if (!status.ok()) {
+                    fail_item(item.request_id(), errorInfoFromGrpcStatus(status));
+                    continue;
+                }
+            } catch (const std::exception& error) {
+                fail_item(item.request_id(), {ErrorCode::EXECUTION_EXCEPTION, error.what()});
+                continue;
+            }
             input->request_deadline_is_handoff_only = configured_timeout == 0;
             input->generate_config->timeout_ms      = configured_timeout;
             auto stream = engine_->makeStream(input);
             stream->setPrefillTpSize(peer->tp_size);
             stream->setPrefillCpSize(peer->cp_size);
             guard.streams.push_back(stream);
+            output_streams[response_indices.at(item.request_id())] = stream;
             cancel_registry_->attach(handle, stream);
             auto ctx = std::make_unique<GenerateContext>(
                 item.request_id(), configured_timeout, context, metrics_reporter_, meta_);
             ctx->setStream(stream);
+            output_contexts[response_indices.at(item.request_id())] = ctx.get();
             guard.contexts.push_back(std::move(ctx));
             if (!item.enqueued_by_master()) {
                 auto* input_pb = slot->add_requests()->mutable_input();
-                input_pb->CopyFrom(item);
+                input_pb->Swap(&prefill_input);
             }
         }
-        const auto is_cancelled = [&]() {
-            return client_cancelled()
-                   || std::any_of(guard.handles.begin(), guard.handles.end(), [](const auto& handle) {
-                          return handle->canceled.load();
-                      });
-        };
-        const auto cancellation_status = [&]() {
-            for (const auto& handle : guard.handles) {
-                if (handle->canceled.load())
-                    return grpcStatusFromErrorInfo(handle->cancel_reason);
-            }
-            return grpcStatusFromErrorInfo({ErrorCode::CANCELLED, "batch cancelled before Prefill admission"});
-        };
-        if (is_cancelled())
-            return guard.status = cancellation_status();
-        if (!slot->requests().empty()) {
-            for (auto& external : *slot->mutable_requests()) {
-                auto*      item      = external.mutable_input();
-                const auto remaining = entry_ms + item->generate_config().timeout_ms() - currentTimeMs();
-                if (remaining <= 0)
-                    return guard.status = grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED,
-                                                       "batch item expired before Prefill admission");
+        if (client_cancelled())
+            return guard.status = grpcStatusFromErrorInfo({ErrorCode::CANCELLED, "batch cancelled"});
+        auto* prefill_items = slot->mutable_requests();
+        for (int i = prefill_items->size() - 1; i >= 0; --i) {
+            auto* item = prefill_items->Mutable(i)->mutable_input();
+            const auto request_id = item->request_id();
+            const auto remaining = entry_ms + item->generate_config().timeout_ms() - currentTimeMs();
+            const auto& handle = handles_by_id.at(request_id);
+            if (handle->canceled.load() || remaining <= 0) {
+                fail_item(request_id, handle->canceled.load() ? handle->cancel_reason :
+                    ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "batch item expired before Prefill admission"));
+                prefill_items->DeleteSubrange(i, 1);
+            } else {
                 item->mutable_generate_config()->set_timeout_ms(clampRpcTimeoutMsToInt32(remaining));
             }
-            EnqueueBatchResponsePB ack;
-            for (const auto& external : slot->requests())
+        }
+        if (!prefill_items->empty()) {
+            std::unordered_set<int64_t> attempted;
+            for (const auto& external : *prefill_items) {
+                attempted.insert(external.input().request_id());
                 guard.submitted_prefill.insert(external.input().request_id());
-            auto status =
-                prefill_server_caller_->enqueueBatch(prefill_request, &ack, address, batch_deadline_ms, is_cancelled);
-            if (!status.ok())
-                return guard.status = is_cancelled() ? cancellation_status() : status;
-            // Explicit rejections were not admitted by this call. In particular,
-            // a duplicate ID must not cancel a different request already on P.
-            for (const auto& error : ack.errors())
-                guard.submitted_prefill.erase(error.request_id());
-            for (const auto& error : ack.errors()) {
-                const auto code     = static_cast<ErrorCode>(error.error_info().error_code());
-                return guard.status = grpcStatusFromErrorInfo(
-                           {code == ErrorCode::NONE_ERROR ? ErrorCode::EXECUTION_EXCEPTION : code,
-                            "Prefill batch request " + std::to_string(error.request_id()) + ": "
-                                + error.error_info().error_message()});
             }
+            EnqueueBatchResponsePB ack;
+            const auto status = prefill_server_caller_->enqueueBatch(
+                prefill_request, &ack, address, batch_deadline_ms, client_cancelled);
+            if (client_cancelled())
+                return guard.status = grpcStatusFromErrorInfo({ErrorCode::CANCELLED, "batch cancelled"});
             std::unordered_set<int64_t> accepted;
-            for (const auto& success : ack.successes())
-                accepted.insert(success.request_id());
-            if (ack.batch_id() != prefill_request.batch_id() || ack.successes_size() != slot->requests_size()
-                || accepted.size() != static_cast<size_t>(slot->requests_size()))
-                return guard.status = grpc::Status(grpc::StatusCode::INTERNAL, "Prefill batch ACK size/id mismatch");
-            for (const auto& external : slot->requests()) {
-                if (!accepted.count(external.input().request_id()))
-                    return guard.status =
-                               grpc::Status(grpc::StatusCode::INTERNAL, "Prefill batch ACK request mismatch");
+            if (status.ok() && ack.batch_id() == prefill_request.batch_id()) {
+                for (const auto& success : ack.successes())
+                    accepted.insert(success.request_id());
+                for (const auto& error : ack.errors()) {
+                    const auto request_id = error.request_id();
+                    if (!attempted.count(request_id)
+                        || response->results(response_indices.at(request_id)).has_error_info())
+                        continue;
+                    // A contradictory ACK leaves admission uncertain, so cancel it.
+                    if (!accepted.erase(request_id))
+                        guard.submitted_prefill.erase(request_id);
+                    const auto code = static_cast<ErrorCode>(error.error_info().error_code());
+                    fail_item(request_id,
+                              {code == ErrorCode::NONE_ERROR ? ErrorCode::EXECUTION_EXCEPTION : code,
+                               error.error_info().error_message()});
+                }
+            }
+            for (const auto& external : *prefill_items) {
+                const auto request_id = external.input().request_id();
+                if (!accepted.count(request_id)
+                    && !response->results(response_indices.at(request_id)).has_error_info()) {
+                    fail_item(request_id,
+                              status.ok() ? ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "Prefill batch ACK mismatch") :
+                                            errorInfoFromGrpcStatus(status));
+                }
             }
         }
-        // Prefill stays grouped; Decode streams independently join ordinary dynamic batching.
         for (auto& stream : guard.streams) {
-            engine_->enqueue(stream);
+            const auto request_id = stream->generateInput()->request_id;
+            const auto index = response_indices.at(request_id);
+            const auto& handle = handles_by_id.at(request_id);
+            if (handle->canceled.load() && !response->results(index).has_error_info())
+                fail_item(request_id, handle->cancel_reason);
+            if (response->results(index).has_error_info()) {
+                stream->finishWithoutGenerate();
+                output_streams[index].reset();
+            } else {
+                engine_->enqueue(stream);
+            }
             ++guard.enqueued_stream_count;
         }
-        for (const auto& stream : guard.streams) {
-            const auto error = stream->statusInfo();
-            if (error.hasError())
-                return guard.status = grpcStatusFromErrorInfo(error);
-        }
-        guard.status    = pollBatchStreamOutput(context, guard.streams, response);
+        guard.status = pollBatchStreamOutput(context, output_streams, response, fail_item);
         guard.completed = guard.status.ok() && !client_cancelled();
         return guard.status;
     } catch (const std::exception& e) {

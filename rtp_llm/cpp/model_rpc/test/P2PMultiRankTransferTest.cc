@@ -740,12 +740,12 @@ protected:
         }
         check(ranks_[0]->resource->blocks(ranks_[0]->resource->groupTags().at(0)) == ranks_[1]->resource->blocks(ranks_[1]->resource->groupTags().at(0)), "rank block IDs must match");
     }
-    void start(bool registered = true) {
+    void start(bool registered = true, int request_timeout_ms = kRequestMs) {
         if (registered) { command('R'); command('P'); }
         auto meta = std::make_shared<MockMeta>();
         meta->setUniqueKey(key(id_));
         meta->setRequestId(id_);
-        meta->setDeadlineMs(currentTimeMs() + kRequestMs);
+        meta->setDeadlineMs(currentTimeMs() + request_timeout_ms);
         meta->setPrefillAddr(peer_host_, report_.grpc_ports[0]);
         meta->setPrefillTpSize(kRanks);
         meta->setPrefillCpSize(1);
@@ -900,7 +900,7 @@ protected:
             auto meta = std::make_shared<MockMeta>();
             meta->setUniqueKey(key(request.id));
             meta->setRequestId(request.id);
-            meta->setDeadlineMs(currentTimeMs() + kRequestMs);
+            meta->setDeadlineMs(currentTimeMs() + (request.mode == 4 ? 3000 : kRequestMs));
             meta->setPrefillAddr(peer_host_, report_.grpc_ports[0]);
             meta->setPrefillTpSize(kRanks);
             meta->setPrefillCpSize(1);
@@ -1089,10 +1089,10 @@ TEST_F(P2PMultiRankTransferTest, StartLoadWaitsForMatchingRegistration) {
     ASSERT_NO_FATAL_FAILURE(recover());
 }
 
-TEST_F(P2PMultiRankTransferTest, MissingRegistrationExpiresWithinLoadBudget) {
-    prepare(1000);
+TEST_F(P2PMultiRankTransferTest, MissingRegistrationExpiresAtRequestDeadline) {
+    prepare(20);
     const auto begin = std::chrono::steady_clock::now();
-    start(false);
+    start(false, /*request_timeout_ms=*/1000);
     ASSERT_TRUE(until([&] { return context_->done(); }, 5000));
     ASSERT_NO_FATAL_FAILURE(expectLoadTimeout());
     EXPECT_GE(std::chrono::steady_clock::now() - begin, std::chrono::milliseconds(800));

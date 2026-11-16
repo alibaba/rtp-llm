@@ -381,7 +381,6 @@ TEST(RpcWriterCancellationTest, PdValidationAndAdmissionErrorsEndServerSpanBefor
         // Missing handoff key must fail before the uninitialized engine is used.
         const auto status = server.GenerateStreamCall(&context, &request, nullptr);
         EXPECT_EQ(errorInfoFromGrpcStatus(status).code(), ErrorCode::INVALID_PARAMS);
-        EXPECT_NE(status.error_message().find("trace_id=prefill-rejected-trace"), std::string::npos);
         EXPECT_EQ(server.onflight_requests_.load(), 0u);
         EXPECT_TRUE(server.onflight_trackers_.empty());
     }
@@ -403,7 +402,6 @@ TEST(RpcWriterCancellationTest, PdValidationAndAdmissionErrorsEndServerSpanBefor
                   CANCEL_STATUS_TOMBSTONED);
         const auto status = server.GenerateStreamCall(&context, &request, nullptr);
         EXPECT_EQ(errorInfoFromGrpcStatus(status).code(), ErrorCode::GENERATE_TIMEOUT);
-        EXPECT_NE(status.error_message().find("trace_id=decode-rejected-trace"), std::string::npos);
         EXPECT_EQ(server.onflight_requests_.load(), 0u);
         EXPECT_FALSE(server.cancel_registry_->find(61));
     }

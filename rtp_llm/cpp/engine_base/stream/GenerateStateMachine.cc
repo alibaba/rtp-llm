@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <cstdlib>
 #include <string>
 
@@ -62,13 +63,14 @@ void GenerateStateMachine::handleWaiting() {
         if (stream != nullptr) {
             stream->recordWaitLatency();
         }
+        const auto allocation_start_us = currentTimeUs();
         auto result = stream_cache_resource_->initKVBlock();
+        initial_kv_allocation_rt_us = currentTimeUs() - allocation_start_us;
         if (!result.ok()) {
             const auto role_type              = stream_cache_resource_->resourceContext().role_type;
-            const bool retryable_context_init = (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL
-                                                  || role_type == RoleType::DECODE)
-                                                 && stream_cache_resource_->isContextStream();
-            if (absl::IsUnavailable(result) && retryable_context_init) {
+            const bool retryable_prefill_init = (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL)
+                                                && stream_cache_resource_->isContextStream();
+            if (absl::IsUnavailable(result) && retryable_prefill_init) {
                 stream_cache_resource_->reportMallocRetry();
                 return;
             }
