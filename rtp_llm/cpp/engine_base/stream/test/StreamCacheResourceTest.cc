@@ -699,85 +699,59 @@ protected:
     std::shared_ptr<PublicationObservations> observations_;
 };
 
-TEST_F(PublicationCallPointTest, UnusedDecodeTreeDoesNotReplaceExplicitPublication) {
+TEST_F(PublicationCallPointTest, CompletedDecodeKeepsMapsOwnersAndReleasePolicy) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     test::withDecodePublicationStartup([&] {
+        enum class Release { IMMEDIATE, DEFERRED, CANCELLED, LOCAL_TREE };
         for (bool dspark : {false, true}) {
-            SCOPED_TRACE(dspark);
-            prepare(dspark);
-            ASSERT_FALSE(HasFatalFailure());
-            ASSERT_TRUE(cache_manager_->cacheConfig().use_opaque_kv_cache_store);
-            ASSERT_TRUE(cache_manager_->cacheConfig().disable_decode_first_malloc_device_reuse);
-            stream_->streamCacheResource().resource_context_.enable_device_cache = true;
-            finish(dspark);
-            ASSERT_FALSE(HasFatalFailure());
-            observations_->phase = "release";
-            EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
-            ASSERT_FALSE(HasFatalFailure());
-            EXPECT_TRUE(stream_->streamCacheResource().isResourceReleased());
-            compareCalls(dspark); // Explicit publication still sees live owners before release.
-            ASSERT_FALSE(HasFatalFailure());
-            EXPECT_TRUE(cache_manager_->blockTreeCache()->getKeySnapshot().keys.empty());
-            for (const auto& pool : cache_manager_->coordinator_manager_->groupBlockPools()) {
-                EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
-                EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
+            for (auto mode : {Release::IMMEDIATE, Release::DEFERRED, Release::CANCELLED, Release::LOCAL_TREE}) {
+                SCOPED_TRACE(dspark);
+                SCOPED_TRACE(static_cast<int>(mode));
+                prepare(dspark);
+                ASSERT_FALSE(HasFatalFailure());
+                if (mode == Release::LOCAL_TREE) {
+                    ASSERT_TRUE(cache_manager_->cacheConfig().use_opaque_kv_cache_store);
+                    ASSERT_TRUE(cache_manager_->cacheConfig().disable_decode_first_malloc_device_reuse);
+                    stream_->streamCacheResource().resource_context_.enable_device_cache = true;
+                }
+                finish(dspark);
+                ASSERT_FALSE(HasFatalFailure());
+                if (mode == Release::CANCELLED) stream_->reportError(ErrorCode::CANCELLED, "cancel after GenerateDone");
+                observations_->phase = "release";
+                if (mode == Release::DEFERRED) {
+                    stream_->incPendingAsyncBookkeeping();
+                    auto worker = std::shared_ptr<void>(nullptr, [stream = stream_](void*) {
+                        stream->decPendingAsyncBookkeepingAndMaybeRelease();
+                    });
+                    EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+                    EXPECT_TRUE(stream_->isDeferredReleasePending());
+                    EXPECT_EQ(observations_->calls.size(), 1u);
+                    EXPECT_FALSE(stream_->streamCacheResource().isResourceReleased());
+                    worker.reset();
+                } else {
+                    EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+                }
+                ASSERT_FALSE(HasFatalFailure());
+                EXPECT_TRUE(stream_->streamCacheResource().isResourceReleased());
+                if (mode == Release::CANCELLED) {
+                    EXPECT_EQ(observations_->calls.size(), 1u);
+                } else {
+                    compareCalls(dspark); // Physical maps, endpoint pages and weak owner/pin lifetimes.
+                    ASSERT_FALSE(HasFatalFailure());
+                }
+                if (mode == Release::LOCAL_TREE) {
+                    EXPECT_TRUE(cache_manager_->blockTreeCache()->getKeySnapshot().keys.empty());
+                    for (const auto& pool : cache_manager_->coordinator_manager_->groupBlockPools()) {
+                        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
+                        EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
+                    }
+                }
+                stream_->releaseResource(); // Public release stays idempotent in every mode.
+                EXPECT_EQ(observations_->calls.size(), mode == Release::CANCELLED ? 1u : 2u);
+                cleanup();
             }
-            cleanup();
         }
     }, [&] { cleanup(); TearDown(); });
-}
-
-TEST_F(PublicationCallPointTest, GenerateDoneAndReleaseKeepNativeMapsAndWeakOwners) {
-    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
-    test::withDecodePublicationStartup([&] {
-        for (bool dspark : {false, true}) for (bool deferred : {false, true}) {
-            SCOPED_TRACE(dspark);
-            SCOPED_TRACE(deferred);
-            prepare(dspark);
-            ASSERT_FALSE(HasFatalFailure());
-            finish(dspark);
-            ASSERT_FALSE(HasFatalFailure());
-            observations_->phase = "release";
-            if (deferred) {
-                stream_->incPendingAsyncBookkeeping();
-                auto worker = std::shared_ptr<void>(nullptr, [stream = stream_](void*) {
-                    stream->decPendingAsyncBookkeepingAndMaybeRelease();
-                });
-                EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
-                EXPECT_TRUE(stream_->isDeferredReleasePending());
-                EXPECT_EQ(observations_->calls.size(), 1u);
-                EXPECT_FALSE(stream_->streamCacheResource().isResourceReleased());
-                worker.reset();
-            } else EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
-            ASSERT_FALSE(HasFatalFailure());
-            EXPECT_TRUE(stream_->streamCacheResource().isResourceReleased());
-            compareCalls(dspark);
-            stream_->releaseResource(); // Idempotent public release, not the aborting raw double-release API.
-            EXPECT_EQ(observations_->calls.size(), 2u);
-            cleanup();
-        }
-    }, [&] { cleanup(); });
-}
-
-TEST_F(PublicationCallPointTest, CancellationAfterGenerateDoneSkipsReleasePublication) {
-    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
-    test::withDecodePublicationStartup([&] {
-        for (bool dspark : {false, true}) for (bool cancelled : {false, true}) {
-            SCOPED_TRACE(dspark);
-            SCOPED_TRACE(cancelled);
-            prepare(dspark);
-            ASSERT_FALSE(HasFatalFailure());
-            finish(dspark);
-            ASSERT_FALSE(HasFatalFailure());
-            if (cancelled) stream_->reportError(ErrorCode::CANCELLED, "cancel after GenerateDone");
-            observations_->phase = "release";
-            EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
-            ASSERT_FALSE(HasFatalFailure());
-            EXPECT_EQ(observations_->calls.size(), cancelled ? 1u : 2u); // Noncancelled control reaches release.
-            EXPECT_TRUE(stream_->streamCacheResource().isResourceReleased());
-            cleanup();
-        }
-    }, [&] { cleanup(); });
 }
 
 TEST_F(PublicationCallPointTest, PrefillRetainedPrefillAndToggleOffNeverCapture) {
@@ -2287,27 +2261,8 @@ TEST_F(StreamCacheResourceTest, HostSuccessDiskFailureKeepsJointPrefixAndDetache
 }
 
 TEST_F(StreamCacheResourceTest, HostSuccessDiskFailureUsesJointPrefixWithCpReuseUnit) {
-    prepareResourceWithInputTokens(std::vector<int>(16, 1), true, RoleType::PREFILL);
-    cache_manager_->cp_slot_mapper_ = std::make_shared<CPSlotMapper>(0, 2, 2);
-    auto&     resource              = stream_->streamCacheResource();
-    const int unit                  = resource.reuseBlockTokens();
-    stream_->setReuseLength(unit);
-    auto context = makeAllocatorLoadContext(4, {Tier::DEVICE, Tier::HOST, Tier::DISK, Tier::HOST}, false);
-    context->setLocalMatchLengths(1, 2);
-    ASSERT_TRUE(context->commit());
-    ASSERT_TRUE(context->completeTransfers(1, false, Tier::DISK));
-    EXPECT_FALSE(context->done());
-    ASSERT_TRUE(context->completeTransfers(2, true, Tier::HOST));
-    resource.allocator_load_context_ = context;
-    ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
-    EXPECT_EQ(stream_->reuseLength(), 2 * unit);
-    EXPECT_EQ(stream_->deviceReuseLength(), unit);
-    EXPECT_EQ(stream_->hostReuseLength(), unit);
-    EXPECT_EQ(stream_->diskReuseLength(), 0);
-}
-
-TEST_F(StreamCacheResourceTest, PartialLoadFailureKeepsOnlyReadyPrefixAcrossCompletionOrder) {
-    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    for (const char* enabled : {"0", "1"}) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled);
     ::rtp_llm::test::withDecodePublicationStartup([&] {
     for (const bool host_first : {false, true}) {
         for (const bool host_success : {false, true}) {
@@ -2317,8 +2272,10 @@ TEST_F(StreamCacheResourceTest, PartialLoadFailureKeepsOnlyReadyPrefixAcrossComp
             cache_manager_->cp_slot_mapper_ = std::make_shared<CPSlotMapper>(0, 2, 2);
             auto&                 resource  = stream_->streamCacheResource();
             const int             unit      = resource.reuseBlockTokens();
-            kmonitor::MetricsTags tags;
-            stream_->setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
+            if (host_first || !host_success) {
+                kmonitor::MetricsTags tags;
+                stream_->setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
+            } // Disk-first / host-success also retains the original no-reporter control.
             const std::vector<Tier> tiers{Tier::DEVICE, Tier::HOST, Tier::DISK, Tier::HOST};
             stream_->setReuseLength(unit);
             auto context = makeAllocatorLoadContext(4, tiers, false);
@@ -2339,9 +2296,15 @@ TEST_F(StreamCacheResourceTest, PartialLoadFailureKeepsOnlyReadyPrefixAcrossComp
             resource.allocator_load_context_ = context;
             ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
             EXPECT_EQ(stream_->reuseLength(), (host_success ? 2 : 1) * unit);
+            if (host_success) {
+                EXPECT_EQ(stream_->deviceReuseLength(), unit);
+            }
+            EXPECT_EQ(stream_->hostReuseLength(), host_success ? unit : 0);
+            EXPECT_EQ(stream_->diskReuseLength(), 0);
         }
     }
     }, [&] { TearDown(); stream_.reset(); cache_manager_.reset(); });
+    }
 }
 
 TEST_F(StreamCacheResourceTest, testPrefillLoadFailureDetachShortfallRearmsAllocation) {

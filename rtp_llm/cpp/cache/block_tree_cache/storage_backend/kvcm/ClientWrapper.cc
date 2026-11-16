@@ -451,13 +451,23 @@ bool ClientWrapper::finishWrite(const std::string&                 unique_id,
                                 const std::string&                 write_session_id,
                                 const kv_cache_manager::BlockMask& block_mask,
                                 const kv_cache_manager::Locations& locations) {
-    CHECK_INIT1(unique_id);
+    return finishWriteWithResult(unique_id, trace_id, write_session_id, block_mask, locations)
+           == FinishWriteResult::ACKNOWLEDGED;
+}
+
+ClientWrapper::FinishWriteResult
+ClientWrapper::finishWriteWithResult(const std::string& unique_id,
+                                    const std::string& trace_id,
+                                    const std::string& write_session_id,
+                                    const kv_cache_manager::BlockMask& block_mask,
+                                    const kv_cache_manager::Locations& locations) {
+    CHECK_INIT_BASE(unique_id, FinishWriteResult::NOT_SENT);
     auto ec = client->FinishWrite(trace_id, write_session_id, block_mask, locations);
     if (!checkError(ec, client)) {
         RTP_LLM_LOG_WARNING("FinishWrite fail, ec [%d]", ec);
-        return false;
+        return FinishWriteResult::UNKNOWN;
     }
-    return true;
+    return FinishWriteResult::ACKNOWLEDGED;
 }
 
 bool ClientWrapper::checkError(kv_cache_manager::ClientErrorCode ec,

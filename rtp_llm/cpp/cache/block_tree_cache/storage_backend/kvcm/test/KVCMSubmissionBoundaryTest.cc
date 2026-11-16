@@ -352,6 +352,91 @@ protected:
     }
 };
 
+TEST_F(KVCMSubmissionBoundaryTest, CleanupRetriesOnlyLocallyProvenNotSentWithinOriginalDeadline) {
+    for (const bool enabled : {false, true}) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        using Result = kvcm::ClientWrapper::FinishWriteResult;
+        struct Case {
+            const char* name;
+            std::vector<Result> replies;
+            bool cleanup = true;
+            bool expired = false;
+            bool no_task = false;
+            bool throws = false;
+            size_t calls = 1;
+            bool acknowledged = false;
+            bool stopping = false;
+        };
+        const std::vector<Case> cases{
+            {"local refusal then ACK", {Result::NOT_SENT, Result::NOT_SENT, Result::ACKNOWLEDGED},
+             true, false, false, false, 3, true},
+            {"bounded local refusals", {Result::NOT_SENT}, true, false, false, false, 3},
+            {"entered after local refusal", {Result::NOT_SENT, Result::UNKNOWN}, true, false, false, false, 2},
+            {"entered without ACK", {Result::UNKNOWN}},
+            {"throw after entry", {}, true, false, false, true},
+            {"commit never retries", {Result::NOT_SENT}, false},
+            {"expired cleanup", {Result::NOT_SENT}, true, true},
+            {"no deadline proof", {Result::NOT_SENT}, true, false, true},
+            {"shutdown stops retry", {Result::NOT_SENT}, true, false, false, false, 1, false, true},
+        };
+        for (const bool decode : {false, true}) {
+            if (decode && !enabled) continue;
+            for (const auto& test : cases) {
+                SCOPED_TRACE(::testing::Message() << "enabled=" << enabled
+                             << " decode=" << decode << " case=" << test.name);
+                auto broadcast = decode ? nullptr : std::make_shared<BoundaryBroadcastManager>(
+                    std::vector<std::string>{"unused-cleanup-peer0", "unused-cleanup-peer1"});
+                Fixture fixture(decode, std::move(broadcast));
+                ASSERT_TRUE(fixture.backend->initialized_);
+                auto request = fixture.request(decode);
+                if (test.no_task) request.transfer_task.reset();
+                else request.transfer_task.emplace(std::vector<TransferDescriptor>{},
+                    test.expired ? std::chrono::milliseconds(-1) : kOperationTimeout);
+                KVCMStorageBackend::Impl::WritePublication write;
+                write.start_acknowledged = true;
+                write.location.write_session_id = "cleanup-boundary-session";
+                kv_cache_manager::Locations locations;
+                if (!test.cleanup) locations.resize(1);
+                size_t calls = 0;
+                fixture.client->finish_write_result = [&](const auto& mask, const auto& locations) -> Result {
+                    ++calls;
+                    const auto* offset = std::get_if<kv_cache_manager::BlockMaskOffset>(&mask);
+                    EXPECT_NE(offset, nullptr);
+                    if (offset) {
+                        EXPECT_EQ(*offset, test.cleanup ? 0u : 1u);
+                    }
+                    EXPECT_EQ(locations.size(), test.cleanup ? 0u : 1u);
+                    if (test.throws) throw std::runtime_error("FinishWrite ACK may be lost");
+                    if (test.stopping) fixture.client->kvcm::ClientWrapper::shutdown();
+                    return test.replies[std::min(calls - 1, test.replies.size() - 1)];
+                };
+                const auto finish = [&] {
+                    return fixture.backend->impl_->finishSession(request, write,
+                        kv_cache_manager::BlockMaskOffset{test.cleanup ? 0u : 1u}, locations, test.cleanup);
+                };
+                if (test.throws) {
+                    EXPECT_THROW(finish(), std::runtime_error);
+                } else {
+                    EXPECT_EQ(finish(), test.acknowledged);
+                }
+                EXPECT_EQ(calls, test.calls);
+                EXPECT_TRUE(write.finish_attempted);
+                // No second cleanup after ACK, NOT_SENT exhaustion, UNKNOWN or
+                // an exception; normal commit failures cannot become aborts.
+                fixture.backend->impl_->closeUnusedWrite(request, write);
+                EXPECT_EQ(calls, test.calls);
+                EXPECT_TRUE(write.dispatch_proof.neverStarted());
+                EXPECT_EQ(fixture.starts.load(), 0);
+                EXPECT_EQ(fixture.saves.load(), 0);
+                EXPECT_EQ(fixture.env.device_pool->refCount(fixture.env.block_id), fixture.refs);
+                EXPECT_FALSE(fixture.env.device_pool->isFrozen(fixture.env.block_id));
+            }
+        }
+    });
+    }
+}
+
 TEST_F(KVCMSubmissionBoundaryTest, OnlyDecodeCreatesTransportRetentionOwner) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     ::rtp_llm::test::withDecodePublicationStartup([&] {

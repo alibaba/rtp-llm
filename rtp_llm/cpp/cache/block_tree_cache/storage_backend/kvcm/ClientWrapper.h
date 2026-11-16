@@ -93,6 +93,17 @@ public:
                              const kv_cache_manager::BlockMask& block_mask,
                              const kv_cache_manager::Locations& locations);
 
+    // NOT_SENT is proved only by local admission, before entering the SDK.
+    // A false SDK reply or exception never permits replay of FinishWrite.
+    enum class FinishWriteResult { NOT_SENT, ACKNOWLEDGED, UNKNOWN };
+    virtual FinishWriteResult finishWriteWithResult(const std::string& unique_id,
+                                                    const std::string& trace_id,
+                                                    const std::string& write_session_id,
+                                                    const kv_cache_manager::BlockMask& block_mask,
+                                                    const kv_cache_manager::Locations& locations);
+    // Reuse the existing shutdown-aware wait for bounded metadata cleanup.
+    bool waitForRetry(int sleep_time_ms);
+
     // The tag selects a registered transfer client; vector slots stay private.
     // PACE uses the first client, which owns all GPU registrations. Span-bound backends must use their own pool's tag.
     virtual bool loadKvCachesForTag(const std::string&                                          tag,
@@ -130,7 +141,6 @@ private:
     bool checkError(kv_cache_manager::ClientErrorCode ec,
                     const std::shared_ptr<kv_cache_manager::MetaClient>& client);
     void                                          reinitWorkerLoop() noexcept;
-    bool                                          waitForRetry(int sleep_time_ms);
     void observeTransfer(bool is_read, size_t completed_bytes, bool completion_unknown) const noexcept;
 
     kv_cache_manager::InitParams init_params_;

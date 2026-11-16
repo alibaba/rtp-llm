@@ -50,7 +50,9 @@ struct StorageTaskState {
     uint64_t                          trace_id{0};
     std::vector<Pin> pins;
     // Parallel to pins for writes and protected reads; one task sidecar, never a per-pin field.
-    std::unique_ptr<std::vector<RemotePublicationPin>> publication_pins;
+    // Inline optional container: ordinary reads allocate no token storage;
+    // writes avoid a separate heap allocation for the vector object itself.
+    std::optional<std::vector<RemotePublicationPin>> publication_pins;
     std::shared_ptr<void> completion_resources;
     std::shared_ptr<StorageTaskState> quarantine_next;
     bool completion_protected{false};
@@ -497,7 +499,7 @@ StorageBackend::prepare(StorageRequest request, bool for_write, uint64_t trace_i
                 }
             }
         }
-        state->publication_pins = std::make_unique<std::vector<RemotePublicationPin>>();
+        state->publication_pins.emplace();
         state->publication_pins->reserve(sources.size());
         state->pins.reserve(sources.size());
         for (auto& pin : sources) {
@@ -899,7 +901,7 @@ bool StorageBackend::write(StorageWriteTask task) {
                 }
                 // pins and publication_pins are parallel and unique per (pool, block).
                 auto& pins        = state->pins;
-                auto* publication = state->publication_pins.get();
+                auto* publication = state->publication_pins ? &*state->publication_pins : nullptr;
                 RTP_LLM_CHECK(!publication || publication->size() == pins.size());
                 size_t kept = 0;
                 for (size_t i = 0; i < pins.size(); ++i) {
