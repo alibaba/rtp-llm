@@ -370,7 +370,7 @@ class CacheHitFeedbackFlowTest {
         context.setRequest(request);
         context.setSchedulingMetadata(
                 SchedulingMetadata.of(50, null, System.currentTimeMillis() + 60_000, 50));
-        var selected = selector.select(context, "group");
+        var selected = selector.selectAndRegister(context, "group");
         assertEquals(SelectionResult.Status.SUCCESS, selected.status());
         var route = selected;
         if (route.value().prefillEndpoint() != null)

@@ -75,7 +75,7 @@ class SubmissionShutdownDeadlockTest {
                                     "release blocked submission during cleanup", interrupted);
                         }
                     };
-            when(f.router.select(any(), any()))
+            when(f.router.selectAndRegister(any(), any()))
                     .thenAnswer(
                             call -> {
                                 if (!queued) {

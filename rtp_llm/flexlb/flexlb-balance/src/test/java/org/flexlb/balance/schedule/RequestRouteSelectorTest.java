@@ -173,7 +173,9 @@ class RequestRouteSelectorTest {
         RequestRouteSelector router = router();
         org.mockito.Mockito.clearInvocations(configService);
 
-        var result = router.select(new RequestContext(SchedulingTestConfig.newConfig()), null);
+        var result =
+                router.selectAndRegister(
+                        new RequestContext(SchedulingTestConfig.newConfig()), null);
 
         assertEquals(SelectionResult.Status.REJECTED, result.status());
         assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), result.failure().getCode());
@@ -489,7 +491,7 @@ class RequestRouteSelectorTest {
                 assertThrows(
                         IllegalStateException.class,
                         () ->
-                                router().select(
+                                router().selectAndRegister(
                                                 context,
                                                 null,
                                                 org.flexlb.balance.schedule.SelectionTestSupport
@@ -580,7 +582,8 @@ class RequestRouteSelectorTest {
             if (cleanupFails) doThrow(cleanup).when(endpoint).rollbackSelection(eq(foreign));
             var actual =
                     assertThrows(
-                            IllegalArgumentException.class, () -> router().select(context, null));
+                            IllegalArgumentException.class,
+                            () -> router().selectAndRegister(context, null));
             assertEquals("selected Worker belongs to another request", actual.getMessage());
             assertEquals(
                     cleanupFails ? List.of(cleanup) : List.of(), List.of(actual.getSuppressed()));
@@ -623,7 +626,7 @@ class RequestRouteSelectorTest {
                 context, RoleType.PREFILL, "g1", SelectionResult.blocked(RoleType.PREFILL));
 
         var result =
-                router().select(
+                router().selectAndRegister(
                                 context,
                                 null,
                                 org.flexlb.balance.schedule.SelectionTestSupport.decode(
@@ -649,7 +652,7 @@ class RequestRouteSelectorTest {
         RequestContext context = context(11L);
         stubQueueSelection(context, role, null, SelectionResult.blocked(role));
 
-        var blocked = router.select(context, router.resolvePolicyGroup(context));
+        var blocked = router.selectAndRegister(context, router.resolvePolicyGroup(context));
         assertEquals(SelectionResult.Status.BLOCKED, blocked.status());
 
         assertEquals(new CapacityKey(role, null, null), blocked.blocker());
@@ -670,7 +673,8 @@ class RequestRouteSelectorTest {
                                             original.endpoint(), 0, 0, 0, 0, null));
                         });
         var context = context(109L);
-        assertThrows(IllegalArgumentException.class, () -> router().select(context, null));
+        assertThrows(
+                IllegalArgumentException.class, () -> router().selectAndRegister(context, null));
         assertNull(context.snapshot().route());
     }
 
@@ -724,7 +728,9 @@ class RequestRouteSelectorTest {
         RequestProtocolTestSupport.submitForManualPlacement(requests, context);
         var attempt = RequestProtocolTestSupport.beginAdmission(requests, context);
         var router = router();
-        var result = requests.executeRouteSelection(attempt, () -> router.select(context, null));
+        var result =
+                requests.executeRouteSelection(
+                        attempt, () -> router.selectAndRegister(context, null));
         assertEquals(SelectionResult.Status.RETRY, result.status());
         if (!role.supportsPrefill()) assertNull(result.blocker());
         org.flexlb.worker.endpoint.EndpointTestSupport.closeAsync(
@@ -752,7 +758,7 @@ class RequestRouteSelectorTest {
                         })
                 .when(decodeStrategy)
                 .chooseBest(any(), any());
-        var result = router().select(context, null);
+        var result = router().selectAndRegister(context, null);
         assertEquals(SelectionResult.Status.BLOCKED, result.status());
         assertEquals(new CapacityKey(RoleType.DECODE, null, null), result.blocker());
         verify(endpoints, never())
@@ -800,7 +806,7 @@ class RequestRouteSelectorTest {
                         org.mockito.ArgumentMatchers.any());
         when(endpoints.getEndpoint(org.flexlb.config.service.RoleType.DECODE, view.address()))
                 .thenReturn(null);
-        var result = router().select(context, null);
+        var result = router().selectAndRegister(context, null);
         assertEquals(SelectionResult.Status.RETRY, result.status());
         org.junit.jupiter.api.Assertions.assertNull(result.blocker());
         assertEquals(
@@ -829,7 +835,7 @@ class RequestRouteSelectorTest {
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
 
-        var blocked = router.select(context, router.resolvePolicyGroup(context));
+        var blocked = router.selectAndRegister(context, router.resolvePolicyGroup(context));
         assertEquals(SelectionResult.Status.BLOCKED, blocked.status());
 
         assertEquals(new CapacityKey(RoleType.PREFILL, null, null), blocked.blocker());
@@ -875,7 +881,7 @@ class RequestRouteSelectorTest {
                         org.mockito.ArgumentMatchers.eq(org.flexlb.config.service.RoleType.DECODE),
                         org.mockito.ArgumentMatchers.any());
 
-        var rejected = router.select(context, router.resolvePolicyGroup(context));
+        var rejected = router.selectAndRegister(context, router.resolvePolicyGroup(context));
         assertEquals(SelectionResult.Status.REJECTED, rejected.status());
 
         assertEquals(
@@ -917,7 +923,9 @@ class RequestRouteSelectorTest {
 
         assertSame(
                 primary,
-                assertThrows(IllegalStateException.class, () -> router().select(context, null)));
+                assertThrows(
+                        IllegalStateException.class,
+                        () -> router().selectAndRegister(context, null)));
 
         var order = org.mockito.Mockito.inOrder(decode.selectedEndpoint, prefill.selectedEndpoint);
         org.flexlb.worker.endpoint.EndpointTestSupport.closeAsync(
@@ -953,7 +961,7 @@ class RequestRouteSelectorTest {
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
 
-        var admitted = router.select(context, router.resolvePolicyGroup(context));
+        var admitted = router.selectAndRegister(context, router.resolvePolicyGroup(context));
         assertEquals(SelectionResult.Status.SUCCESS, admitted.status());
 
         assertTrue(admitted.value().successResponse().isSuccess());
@@ -985,7 +993,7 @@ class RequestRouteSelectorTest {
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
 
-        var result = router().select(context, null);
+        var result = router().selectAndRegister(context, null);
         assertEquals(SelectionResult.Status.SUCCESS, result.status());
         {
             var route = result;
@@ -1022,7 +1030,7 @@ class RequestRouteSelectorTest {
                                 java.util.Optional.of(
                                         call.getArgument(0, java.util.List.class).get(0)));
 
-        var admitted = router.select(context, router.resolvePolicyGroup(context));
+        var admitted = router.selectAndRegister(context, router.resolvePolicyGroup(context));
         assertEquals(SelectionResult.Status.SUCCESS, admitted.status());
 
         verify(prefillStrategy)
@@ -1066,7 +1074,7 @@ class RequestRouteSelectorTest {
                                 java.util.Optional.of(
                                         call.getArgument(0, java.util.List.class).get(0)));
 
-        var admitted = router.select(context, router.resolvePolicyGroup(context));
+        var admitted = router.selectAndRegister(context, router.resolvePolicyGroup(context));
         assertEquals(SelectionResult.Status.SUCCESS, admitted.status());
 
         verify(prefillStrategy)
@@ -1102,7 +1110,7 @@ class RequestRouteSelectorTest {
                                 java.util.Optional.of(
                                         call.getArgument(0, java.util.List.class).get(0)));
 
-        var blocked = router.select(context, router.resolvePolicyGroup(context));
+        var blocked = router.selectAndRegister(context, router.resolvePolicyGroup(context));
         assertEquals(SelectionResult.Status.BLOCKED, blocked.status());
 
         assertEquals(new CapacityKey(RoleType.VIT, "g1", null), blocked.blocker());
@@ -1135,7 +1143,7 @@ class RequestRouteSelectorTest {
                         org.mockito.ArgumentMatchers.eq("g1"),
                         org.mockito.ArgumentMatchers.anyList());
 
-        var blocked = router.select(context, router.resolvePolicyGroup(context));
+        var blocked = router.selectAndRegister(context, router.resolvePolicyGroup(context));
         assertEquals(SelectionResult.Status.BLOCKED, blocked.status());
 
         assertEquals(new CapacityKey(RoleType.DECODE, "g1", null), blocked.blocker());
@@ -1176,7 +1184,7 @@ class RequestRouteSelectorTest {
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
 
-        var handoff = router.select(context, router.resolvePolicyGroup(context));
+        var handoff = router.selectAndRegister(context, router.resolvePolicyGroup(context));
         assertEquals(SelectionResult.Status.RETRY, handoff.status());
         org.flexlb.worker.endpoint.EndpointTestSupport.closeAsync(
                 verify(foreign.selectedEndpoint, never()));
@@ -1191,7 +1199,7 @@ class RequestRouteSelectorTest {
                 .when(prefillStrategy)
                 .chooseBest(any(), org.mockito.ArgumentMatchers.any(), any(), any());
         var router = router();
-        var result = router.select(context, null);
+        var result = router.selectAndRegister(context, null);
         assertEquals(SelectionResult.Status.BLOCKED, result.status());
         assertEquals(new CapacityKey(RoleType.PREFILL, null, null), result.blocker());
         verify((PrefillEndpoint) prefill.endpoint(), never())
@@ -1222,7 +1230,8 @@ class RequestRouteSelectorTest {
         doThrow(new IllegalStateException("metrics unavailable"))
                 .when(reporter)
                 .reportCacheAffinityDecision(RoleType.PREFILL, "p", "MIN_PREFILL_COST");
-        assertEquals(SelectionResult.Status.SUCCESS, router.select(context, null).status());
+        assertEquals(
+                SelectionResult.Status.SUCCESS, router.selectAndRegister(context, null).status());
     }
 
     @Test
@@ -1243,7 +1252,7 @@ class RequestRouteSelectorTest {
                         org.mockito.ArgumentMatchers.anyList(),
                         org.mockito.ArgumentMatchers.any());
 
-        var admitted = router.select(context, router.resolvePolicyGroup(context));
+        var admitted = router.selectAndRegister(context, router.resolvePolicyGroup(context));
         assertEquals(SelectionResult.Status.SUCCESS, admitted.status());
 
         verify(prefillStrategy)

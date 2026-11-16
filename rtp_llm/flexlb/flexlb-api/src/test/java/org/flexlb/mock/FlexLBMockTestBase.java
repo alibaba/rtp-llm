@@ -291,7 +291,7 @@ public abstract class FlexLBMockTestBase {
 
     protected RequestRouteSelector createRouter() {
         RequestRouteSelector fixedRouter = mock(RequestRouteSelector.class);
-        when(fixedRouter.select(any(RequestContext.class), any()))
+        when(fixedRouter.selectAndRegister(any(RequestContext.class), any()))
                 .thenAnswer(
                         inv -> {
                             RequestContext ctx = inv.getArgument(0);

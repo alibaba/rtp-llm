@@ -70,7 +70,7 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
 
         // 2. Reconfigure RequestRouteSelector to alternate between worker A and B
         reset(router);
-        when(router.select(any(RequestContext.class), any()))
+        when(router.selectAndRegister(any(RequestContext.class), any()))
                 .thenAnswer(
                         inv -> {
                             RequestContext ctx = inv.getArgument(0);

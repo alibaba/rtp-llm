@@ -271,9 +271,9 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         }
 
         @Override
-        public SelectionResult<RequestRoute, CapacityKey> select(
+        public SelectionResult<RequestRoute, CapacityKey> selectAndRegister(
                 RequestContext context, String policyGroup) {
-            return requireBound().select(context, policyGroup);
+            return requireBound().selectAndRegister(context, policyGroup);
         }
 
         @Override
@@ -282,11 +282,11 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         }
 
         @Override
-        public SelectionResult<RequestRoute, CapacityKey> select(
+        public SelectionResult<RequestRoute, CapacityKey> selectAndRegister(
                 RequestContext context,
                 String group,
                 org.flexlb.balance.strategy.RoleSelection acquired) {
-            return requireBound().select(context, group, acquired);
+            return requireBound().selectAndRegister(context, group, acquired);
         }
 
         private synchronized void bind(RequestRouteSelector exactRouter) {

@@ -220,7 +220,7 @@ class CustomRequestSchedulerContractTest {
             assertEquals(
                     StrategyErrorType.RESOURCE_EXHAUSTED.getErrorCode(),
                     result.get(2, TimeUnit.SECONDS).getCode());
-            verify(scheduler.selector).select(context, null);
+            verify(scheduler.selector).selectAndRegister(context, null);
         }
     }
 
@@ -253,7 +253,7 @@ class CustomRequestSchedulerContractTest {
             assertFalse(future.get(2, TimeUnit.SECONDS).isSuccess());
             assertTrue(scheduled.await(2, TimeUnit.SECONDS));
             assertTrue(dispatched.get() >= due.get());
-            verify(scheduler.selector).select(any(), isNull());
+            verify(scheduler.selector).selectAndRegister(any(), isNull());
         }
     }
 
@@ -343,7 +343,7 @@ class CustomRequestSchedulerContractTest {
             this.config = config;
             this.runtime = runtime;
             queue = alternative ? new ListSchedulingQueue() : new OrderedRequestQueue(false);
-            when(selector.select(any(), isNull()))
+            when(selector.selectAndRegister(any(), isNull()))
                     .thenReturn(
                             SelectionResult.rejected(
                                     Response.error(StrategyErrorType.RESOURCE_EXHAUSTED)));
@@ -402,11 +402,11 @@ class CustomRequestSchedulerContractTest {
             if (routing == null) return true;
             SelectionResult<RequestRoute, org.flexlb.worker.endpoint.CapacityKey> result;
             try {
-                result = selector.select(selected, selected.getRoutingGroup());
+                result = selector.selectAndRegister(selected, selected.getRoutingGroup());
             } finally {
                 finishSelectionWithoutCommit(routing, null);
             }
-            publish(selected, result.failure(), false);
+            publishResponse(selected, result.failure(), false);
             return true;
         }
 

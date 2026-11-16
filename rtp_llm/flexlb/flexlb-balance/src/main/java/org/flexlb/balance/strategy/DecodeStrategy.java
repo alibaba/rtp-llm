@@ -108,7 +108,7 @@ public class DecodeStrategy
         }
     }
 
-    public SelectionResult<RoleSelection, CapacityKey> select(
+    public SelectionResult<RoleSelection, CapacityKey> selectAndRegister(
             RequestContext context, String group) {
         DecodeInputs cached = DECODE_INPUTS.get();
         DecodeInputs inputs = cached.inUse ? new DecodeInputs() : cached;

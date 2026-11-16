@@ -22,7 +22,7 @@
 | 请求                | `Request`、`requestId`               | 一次业务请求。仅有 request ID 不足以识别所有阶段、重试及资源记录。              |
 | 请求上下文          | `RequestContext`、`requestContext`   | 保存请求生命周期中的事实，并在请求锁内校验和修改状态；不是选址结果。            |
 | 请求阶段            | `RequestPhase`、`requestPhase`       | 同一业务请求的处理阶段；当前为 `ENCODER`、`GENERATION`，不是运行/完成状态。     |
-| 请求状态            | `RequestResult`                      | 请求的可查询状态；不要把 worker 状态或某个 RPC 结果当成整个请求状态。           |
+| 请求状态            | `RequestState`                       | 请求的可查询状态；不要把 worker 状态或某个 RPC 结果当成整个请求状态。           |
 | Worker              | `Worker`、`worker`                   | 承担模型服务的工作节点或实例。不要与 master 的调度线程混用。                    |
 | 引擎                | `Engine`、`engine`                   | Worker 侧执行推理、上报状态并接受请求的执行系统；本地预留不代表引擎已经执行。   |
 | Worker 端点         | `WorkerEndpoint`、`endpoint`         | master 侧管理某个 worker 的对象，含角色相关的请求和资源操作；不只是 IP 字符串。 |
@@ -49,8 +49,8 @@
 | 选址 / 选择 Worker | `Selection`、`select`             | 从候选 worker 中选择目标。若同时登记资源，应使用 `selectAndRegister` 等名称明确副作用。 |
 | 路由               | `Routing`、`Route`                | 为请求确定角色与 worker 的组合，并处理相关路由流程；不直接等于发送成功。                |
 | 单角色选择结果     | `RoleSelection`                   | 一个角色选中的 endpoint、固定元数据及对应资源登记。                                     |
-| 完整路由结果       | `RequestResult`                   | 一个请求的角色选择组合；与一个 role 的结果分开。                                        |
-| 路由处理结果       | `RoutingResult`                   | 仅表达角色策略的成功、阻塞、重试、拒绝或关闭；请求级决策直接返回 RequestResult。        |
+| 完整路由结果       | `RequestRoute`                    | 一个请求的角色选择组合；与一个 role 的结果分开。                                        |
+| 路由处理结果       | `SelectionResult`                 | 仅表达角色策略的成功、阻塞、重试、拒绝或关闭；请求级选址结果包含 RequestRoute。         |
 | 选址凭据           | `RequestContext.SelectionAttempt` | 只读的请求引用和尝试编号；状态归 RequestContext，凭据不管理执行或资源。                 |
 | 路由阶段           | `RoutingPhase`、`routingPhase`    | 当前正在选址、结束选址、移除旧路由或完成移除；不是引擎执行阶段。                        |
 | 路由发布           | `publishRoute`                    | 将选好的路由提交到后续队列或处理流程；仅选中 worker 不代表发布成功。                    |
@@ -159,16 +159,16 @@ Endpoint 的两阶段关闭统一使用 `stopAcceptingRequests()` 和 `closeAsyn
 
 ## 旧词的处理方式
 
-| 旧词或宽泛名称                       | 新增代码的选择原则                                                                                                                                                                                             |
-| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Placement*`                         | 按职责使用 `RoutingPhase`、`RequestContext.SelectionAttempt`、`RoutingResult`、`CapacityNotifier`、`CapacityKey`、`CapacityWaitQueue`、`SchedulingQueue`、`SchedulerConfiguration`；不是统一替换成同一个前缀。 |
-| 抢占中的 `Victim*` / `victim`        | 使用 `Preemption*`、待抢占请求或待抢占资源预留的具体名称。外部字段先处理兼容。                                                                                                                                 |
-| 抢占中的 `Eviction` / `tryReclaim`   | 抢占流程使用 `Preemption` / `tryPreempt`；真实的缓存淘汰和资源回收保留其具体含义。                                                                                                                             |
-| `tryClaim`                           | 说明登记什么；抢占登记使用 `tryRegisterPreemption`。不把请求状态互斥误称为已经释放资源。                                                                                                                       |
-| `withdrawal`                         | 新业务接口优先使用“移除旧路由”或“抢占路由”的具体动作；旧内部协议枚举需按语义迁移，不自动全局替换。                                                                                                             |
-| `Operation` / `Attempt`              | 不作为不知道对象内容时的默认名称；先判断保存的是上下文、结果、登记还是具体编号。实际表达尝试次数时仍可用 `attemptCount`。                                                                                      |
-| `ownership` / `settlement` / `proof` | 必须具体说明哪个请求、哪份预留、哪个释放确认；不能用这些词同时概括执行状态、容量占用和请求关联。                                                                                                               |
-| `advanceRequest`                     | 说明触发事件和实际动作；若方法混合多套状态决策，先梳理职责，不以更长的泛化名字掩盖复杂度。                                                                                                                     |
+| 旧词或宽泛名称                       | 新增代码的选择原则                                                                                                                                                                                               |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Placement*`                         | 按职责使用 `RoutingPhase`、`RequestContext.SelectionAttempt`、`SelectionResult`、`CapacityNotifier`、`CapacityKey`、`CapacityWaitQueue`、`SchedulingQueue`、`SchedulerConfiguration`；不是统一替换成同一个前缀。 |
+| 抢占中的 `Victim*` / `victim`        | 使用 `Preemption*`、待抢占请求或待抢占资源预留的具体名称。外部字段先处理兼容。                                                                                                                                   |
+| 抢占中的 `Eviction` / `tryReclaim`   | 抢占流程使用 `Preemption` / `tryPreempt`；真实的缓存淘汰和资源回收保留其具体含义。                                                                                                                               |
+| `tryClaim`                           | 说明登记什么；抢占登记使用 `tryRegisterPreemption`。不把请求状态互斥误称为已经释放资源。                                                                                                                         |
+| `withdrawal`                         | 新业务接口优先使用“移除旧路由”或“抢占路由”的具体动作；旧内部协议枚举需按语义迁移，不自动全局替换。                                                                                                               |
+| `Operation` / `Attempt`              | 不作为不知道对象内容时的默认名称；先判断保存的是上下文、结果、登记还是具体编号。实际表达尝试次数时仍可用 `attemptCount`。                                                                                        |
+| `ownership` / `settlement` / `proof` | 必须具体说明哪个请求、哪份预留、哪个释放确认；不能用这些词同时概括执行状态、容量占用和请求关联。                                                                                                                 |
+| `advanceRequest`                     | 说明触发事件和实际动作；若方法混合多套状态决策，先梳理职责，不以更长的泛化名字掩盖复杂度。                                                                                                                       |
 
 ## 审核时的五个问题
 

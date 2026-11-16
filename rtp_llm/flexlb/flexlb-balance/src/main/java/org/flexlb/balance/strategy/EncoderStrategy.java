@@ -24,6 +24,7 @@ public class EncoderStrategy
         extends AbstractWorkerSelectionStrategy<
                 EncoderEndpoint, EncoderEndpoint.SelectionSnapshot> {
     private final EndpointRegistry endpoints;
+
     private final int maxRequests;
 
     public EncoderStrategy(ConfigService config, EndpointRegistry endpoints) {
@@ -32,30 +33,7 @@ public class EncoderStrategy
                 config.loadBalanceConfig().getRouter().getRoles().getEncoder().getMaxRequests();
     }
 
-    public java.util.Optional<EncoderEndpoint.SelectionSnapshot> select(
-            List<EncoderEndpoint.SelectionSnapshot> candidates,
-            String group,
-            boolean weighted,
-            int requestLimit) {
-        EncoderEndpoint.SelectionSnapshot winner = null;
-        long leastTokens = Long.MAX_VALUE;
-        long fewestRequests = Long.MAX_VALUE;
-        for (var candidate : candidates) {
-            if (!candidate.available() || group != null && !group.equals(candidate.group()))
-                continue;
-            long requests = candidate.requestCount();
-            if (requests >= requestLimit) continue;
-            long tokens = weighted ? candidate.uncachedTokens() : 0L;
-            if (tokens < leastTokens || tokens == leastTokens && requests < fewestRequests) {
-                winner = candidate;
-                leastTokens = tokens;
-                fewestRequests = requests;
-            }
-        }
-        return java.util.Optional.ofNullable(winner);
-    }
-
-    public SelectionResult<RoleSelection, CapacityKey> select(
+    public SelectionResult<RoleSelection, CapacityKey> selectAndRegister(
             RequestContext context, String group) {
         var candidates = endpoints.<EncoderEndpoint>endpoints(RoleType.ENCODER, group);
         var scope = new CapacityKey(RoleType.ENCODER, group, null);
@@ -93,6 +71,29 @@ public class EncoderStrategy
                                                                     RoleType.ENCODER)),
                                                     null));
                 });
+    }
+
+    public java.util.Optional<EncoderEndpoint.SelectionSnapshot> select(
+            List<EncoderEndpoint.SelectionSnapshot> candidates,
+            String group,
+            boolean weighted,
+            int requestLimit) {
+        EncoderEndpoint.SelectionSnapshot winner = null;
+        long leastTokens = Long.MAX_VALUE;
+        long fewestRequests = Long.MAX_VALUE;
+        for (var candidate : candidates) {
+            if (!candidate.available() || group != null && !group.equals(candidate.group()))
+                continue;
+            long requests = candidate.requestCount();
+            if (requests >= requestLimit) continue;
+            long tokens = weighted ? candidate.uncachedTokens() : 0L;
+            if (tokens < leastTokens || tokens == leastTokens && requests < fewestRequests) {
+                winner = candidate;
+                leastTokens = tokens;
+                fewestRequests = requests;
+            }
+        }
+        return java.util.Optional.ofNullable(winner);
     }
 
     @Override

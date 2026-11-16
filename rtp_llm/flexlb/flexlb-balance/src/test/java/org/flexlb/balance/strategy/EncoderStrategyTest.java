@@ -91,7 +91,7 @@ class EncoderStrategyTest {
                         .build();
         context.setRequest(request);
         try {
-            var result = selection.select(context, "group");
+            var result = selection.selectAndRegister(context, "group");
             assertEquals(SelectionResult.Status.SUCCESS, result.status());
             assertSame(second, result.value().endpoint());
         } finally {
@@ -140,7 +140,7 @@ class EncoderStrategyTest {
                 .when(selection)
                 .select(anyList(), eq("group"), anyBoolean(), anyInt());
         try {
-            var result = selection.select(context, "group");
+            var result = selection.selectAndRegister(context, "group");
             assertEquals(
                     capacityTaken ? SelectionResult.Status.BLOCKED : SelectionResult.Status.SUCCESS,
                     result.status());
@@ -261,7 +261,7 @@ class EncoderStrategyTest {
                 .select(anyList(), eq("g1"), anyBoolean(), anyInt());
 
         try {
-            var result = selection.select(context, "g1");
+            var result = selection.selectAndRegister(context, "g1");
             if (movesToAnotherGroup) {
                 assertAll(
                         () ->

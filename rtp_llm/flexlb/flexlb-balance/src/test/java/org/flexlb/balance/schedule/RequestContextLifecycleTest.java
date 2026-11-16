@@ -999,7 +999,9 @@ class RequestContextLifecycleTest {
                 });
 
         Response rejection = Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
-        assertTrue(lifecycle.publish(lifecycle.repository.findActive("302"), rejection, false));
+        assertTrue(
+                lifecycle.publishResponse(
+                        lifecycle.repository.findActive("302"), rejection, false));
         assertTrue(published.await(5, TimeUnit.SECONDS));
         assertNotEquals(Thread.currentThread().getName(), callbackThread.get());
         assertEquals(

@@ -187,7 +187,7 @@ public class DirectRequestScheduler extends AbstractRequestScheduler {
             recordRequestFailure(fatal);
             throw fatal;
         } finally {
-            if (failure != null) publish(context, failure, false);
+            if (failure != null) publishResponse(context, failure, false);
         }
     }
 
@@ -198,7 +198,7 @@ public class DirectRequestScheduler extends AbstractRequestScheduler {
         var group = router.resolvePolicyGroup(context);
         // Selection and publication share one retry budget. Never replay a delivered route.
         for (int attempt = 0; ; attempt++) {
-            var result = selectAndPublish(context, () -> router.select(context, group));
+            var result = selectAndPublish(context, () -> router.selectAndRegister(context, group));
             if (result.status() == SelectionResult.Status.RETRY && attempt == 0) continue;
             return result;
         }

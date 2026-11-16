@@ -250,7 +250,7 @@ class GlobalQueueProgressTest {
                                     null,
                                     diagnostics))
                     .when(f.router)
-                    .select(any(), nullable(String.class));
+                    .selectAndRegister(any(), nullable(String.class));
             f.submit(994L, "a");
             awaitCondition(
                     () -> {
@@ -362,7 +362,8 @@ class GlobalQueueProgressTest {
             org.junit.jupiter.api.Assertions.assertNull(SchedulerTestSupport.failure(f.lifecycle));
             RequestProtocolTestSupport.close(f.scheduler);
             assertEquals(0, RequestProtocolTestSupport.queuedCount(f.scheduler));
-            verify(f.router, never()).select(eq(f.contexts.get(996L)), nullable(String.class));
+            verify(f.router, never())
+                    .selectAndRegister(eq(f.contexts.get(996L)), nullable(String.class));
         }
     }
 
@@ -397,16 +398,17 @@ class GlobalQueueProgressTest {
                     ((java.util.Map<?, ?>) ReflectionTestUtils.getField(f.scheduler, "executing"))
                             .size());
             assertEquals(0, RequestProtocolTestSupport.queuedCount(f.scheduler));
-            verify(f.router, never()).select(any(), nullable(String.class));
+            verify(f.router, never()).selectAndRegister(any(), nullable(String.class));
         }
     }
 
     @Test
     void missingPlacementResultDoesNotStrandTheAdmissionOwner() throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
-            doReturn(null).when(f.router).select(any(), nullable(String.class));
+            doReturn(null).when(f.router).selectAndRegister(any(), nullable(String.class));
             f.submit(999L, "a");
-            verify(f.lifecycle, timeout(1_000)).publish(eq(f.contexts.get(999L)), any(), eq(false));
+            verify(f.lifecycle, timeout(1_000))
+                    .publishResponse(eq(f.contexts.get(999L)), any(), eq(false));
             verify(RequestProtocolTestSupport.placementScheduler(f.mutations.get(999L)))
                     .finishSelectionWithoutCommit(
                             org.mockito.ArgumentMatchers.same(f.mutations.get(999L)),
@@ -444,7 +446,7 @@ class GlobalQueueProgressTest {
             f.submit(992L, "a");
             var response = ArgumentCaptor.forClass(Response.class);
             verify(f.lifecycle, timeout(5_000))
-                    .publish(eq(f.contexts.get(992L)), response.capture(), eq(false));
+                    .publishResponse(eq(f.contexts.get(992L)), response.capture(), eq(false));
             assertEquals(
                     "Routing failed: diagnostics failed", response.getValue().getErrorMessage());
             assertEquals(List.of(cleanup), List.of(primary.getSuppressed()));
@@ -893,7 +895,7 @@ class GlobalQueueProgressTest {
                         RequestContext.ResponseKind.ACK,
                         f.contexts.get(id).snapshot().responseForFuture().responseKind());
                 verify(f.router)
-                        .select(
+                        .selectAndRegister(
                                 eq(f.contexts.get(id)),
                                 eq("a"),
                                 any(org.flexlb.balance.strategy.RoleSelection.class));
@@ -936,7 +938,7 @@ class GlobalQueueProgressTest {
                 if (outcome.equals("exception")) {
                     var response = ArgumentCaptor.forClass(Response.class);
                     verify(f.lifecycle, timeout(1000))
-                            .publish(eq(f.contexts.get(id)), response.capture(), eq(false));
+                            .publishResponse(eq(f.contexts.get(id)), response.capture(), eq(false));
                     assertFalse(response.getValue().isSuccess());
                     assertFalse(f.admitted.contains(id));
                 } else {
@@ -1245,7 +1247,7 @@ class GlobalQueueProgressTest {
                             })
                     .when(RequestProtocolTestSupport.publication(lifecycle))
                     .publishSelectedRoute(any());
-            when(router.select(any(), nullable(String.class)))
+            when(router.selectAndRegister(any(), nullable(String.class)))
                     .thenAnswer(
                             i -> {
                                 RequestContext context = i.getArgument(0);
@@ -1277,7 +1279,7 @@ class GlobalQueueProgressTest {
                             });
             when(router.blockedEndpoint(any()))
                     .thenAnswer(call -> blockers.get(call.getArgument(0)));
-            when(router.select(
+            when(router.selectAndRegister(
                             any(),
                             nullable(String.class),
                             any(org.flexlb.balance.strategy.RoleSelection.class)))

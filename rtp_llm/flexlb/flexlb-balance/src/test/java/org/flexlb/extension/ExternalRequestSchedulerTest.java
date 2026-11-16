@@ -142,7 +142,9 @@ class ExternalRequestSchedulerTest {
                     context ->
                             assertEquals(
                                     SelectionResult.Status.SUCCESS,
-                                    planRoute(context, () -> selector.select(context, null))
+                                    planRoute(
+                                                    context,
+                                                    () -> selector.selectAndRegister(context, null))
                                             .status()));
         }
     }
@@ -190,7 +192,8 @@ class ExternalRequestSchedulerTest {
                     context -> {
                         assertEquals(
                                 SelectionResult.Status.SUCCESS,
-                                planRoute(context, () -> selector.select(context, null)).status());
+                                planRoute(context, () -> selector.selectAndRegister(context, null))
+                                        .status());
                         assertNull(
                                 context.currentSelectionAttempt(),
                                 "routing must finish before returning to the extension");
@@ -276,7 +279,7 @@ class ExternalRequestSchedulerTest {
                                             null),
                                     requests)
                             : null;
-            when(selector.select(any(), isNull()))
+            when(selector.selectAndRegister(any(), isNull()))
                     .thenAnswer(
                             call -> {
                                 RequestContext context = call.getArgument(0);

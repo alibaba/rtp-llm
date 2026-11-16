@@ -86,7 +86,7 @@ class RequestSchedulerContractTest {
     @org.junit.jupiter.params.provider.ValueSource(strings = {"cancel", "timeout", "failure"})
     void endingAWaitingRequestRemovesItFromScheduling(String ending) throws Exception {
         try (Fixture f = new Fixture(true)) {
-            when(f.router.select(any(), any()))
+            when(f.router.selectAndRegister(any(), any()))
                     .thenReturn(
                             SelectionResult.blocked(new CapacityKey(RoleType.PREFILL, null, null)));
             var context = f.context(944L);
@@ -292,7 +292,7 @@ class RequestSchedulerContractTest {
         var entered = new CountDownLatch(1);
         var resume = new CountDownLatch(1);
         try (Fixture f = new Fixture(queued)) {
-            when(f.router.select(any(), any()))
+            when(f.router.selectAndRegister(any(), any()))
                     .thenAnswer(
                             call -> {
                                 entered.countDown();
@@ -322,7 +322,7 @@ class RequestSchedulerContractTest {
     void acceptedSelectionCannotWaitForItself(boolean queued) throws Exception {
         try (Fixture f = new Fixture(queued)) {
             var selfWait = new CompletableFuture<Boolean>();
-            when(f.router.select(any(), any()))
+            when(f.router.selectAndRegister(any(), any()))
                     .thenAnswer(
                             call -> {
                                 f.scheduler.stop();
@@ -344,7 +344,7 @@ class RequestSchedulerContractTest {
     void closeFromAcceptedSelectionCannotClaimToHaveDrained(boolean queued) throws Exception {
         try (Fixture f = new Fixture(queued)) {
             var selfClose = new CompletableFuture<Throwable>();
-            when(f.router.select(any(), any()))
+            when(f.router.selectAndRegister(any(), any()))
                     .thenAnswer(
                             call -> {
                                 try {
@@ -407,7 +407,7 @@ class RequestSchedulerContractTest {
         try (Fixture f = new Fixture(queued);
                 var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             var request = f.context(98);
-            when(f.router.select(request, null))
+            when(f.router.selectAndRegister(request, null))
                     .thenAnswer(
                             call -> {
                                 SchedulerTestSupport.runtime(f.scheduler)
@@ -437,7 +437,7 @@ class RequestSchedulerContractTest {
                         entered.countDown();
                         RequestProtocolTestSupport.await(resume);
                     };
-            when(f.router.select(any(), any()))
+            when(f.router.selectAndRegister(any(), any()))
                     .thenAnswer(
                             call -> {
                                 if (!queued) {
@@ -543,7 +543,7 @@ class RequestSchedulerContractTest {
             AbstractRequestScheduler api = f.scheduler;
 
             var request = f.context(1);
-            when(f.router.select(request, null)).thenReturn(rejection());
+            when(f.router.selectAndRegister(request, null)).thenReturn(rejection());
             assertEquals(
                     StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
                     SchedulerTestServices.entry(api)
@@ -557,7 +557,7 @@ class RequestSchedulerContractTest {
             assertEquals(
                     StrategyErrorType.SCHEDULER_UNAVAILABLE.getErrorCode(),
                     SchedulerTestServices.entry(api).submit(f.context(2)).join().getCode());
-            verify(f.router, times(1)).select(any(), any());
+            verify(f.router, times(1)).selectAndRegister(any(), any());
         }
     }
 
@@ -570,7 +570,7 @@ class RequestSchedulerContractTest {
                 var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             AbstractRequestScheduler api = f.scheduler;
             var request = f.context(10);
-            when(f.router.select(request, null))
+            when(f.router.selectAndRegister(request, null))
                     .thenAnswer(
                             invocation -> {
                                 selecting.countDown();
@@ -672,7 +672,7 @@ class RequestSchedulerContractTest {
             CompletableFuture<Void> shutdown = null;
             try {
                 assertTrue(
-                        f.requests.publish(
+                        f.requests.publishResponse(
                                 request,
                                 Response.error(StrategyErrorType.NO_PREFILL_WORKER),
                                 false));

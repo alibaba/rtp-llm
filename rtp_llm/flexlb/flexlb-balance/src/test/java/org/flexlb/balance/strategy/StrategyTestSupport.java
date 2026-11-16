@@ -254,7 +254,7 @@ final class StrategyTestSupport {
             var ctx = route.context();
             ctx.setSchedulingMetadata(metadata);
             ctx.setRequestedRoles(List.of(role));
-            var result = routing.select(ctx, group);
+            var result = routing.selectAndRegister(ctx, group);
             if (result.status() != SelectionResult.Status.SUCCESS)
                 return new SelectionResult<>(
                         result.status(),
@@ -321,7 +321,7 @@ final class StrategyTestSupport {
             SelectionResult<
                             org.flexlb.balance.strategy.RoleSelection,
                             org.flexlb.worker.endpoint.CapacityKey>
-                    result = policy.select(context, group);
+                    result = policy.selectAndRegister(context, group);
             if (result.status() == SelectionResult.Status.SUCCESS) {
                 route.roles().add(result.value());
                 var endpoint = (DecodeEndpoint) result.value().endpoint();

@@ -46,7 +46,7 @@ class QueueRegistrationCancellationTest {
     void factoryWaitsForExplicitStartBeforeSelectingQueuedRequests() throws Exception {
         try (Fixture f = new Fixture(false)) {
             var selected = new CountDownLatch(1);
-            when(f.router.select(any(), nullable(String.class)))
+            when(f.router.selectAndRegister(any(), nullable(String.class)))
                     .thenAnswer(
                             call -> {
                                 selected.countDown();
@@ -70,7 +70,7 @@ class QueueRegistrationCancellationTest {
     @Test
     void alternateQueueUsesTheDefaultSchedulerCancellationAndShutdown() throws Exception {
         try (Fixture f = new Fixture(true, new ListSchedulingQueue())) {
-            when(f.router.select(any(), nullable(String.class)))
+            when(f.router.selectAndRegister(any(), nullable(String.class)))
                     .thenReturn(
                             SelectionResult.blocked(
                                     new CapacityKey(
@@ -114,7 +114,7 @@ class QueueRegistrationCancellationTest {
             assertEquals(
                     RequestState.State.CANCELLED,
                     f.runtime.requests().getRequestState("908").state());
-            verify(f.router, never()).select(any(), nullable(String.class));
+            verify(f.router, never()).selectAndRegister(any(), nullable(String.class));
         }
     }
 
@@ -149,7 +149,7 @@ class QueueRegistrationCancellationTest {
             assertTrue(submit.get(2, TimeUnit.SECONDS).isDone());
             f.queue.close();
             assertEquals(0, RequestProtocolTestSupport.queuedCount(f.queue));
-            verify(f.router, never()).select(any(), nullable(String.class));
+            verify(f.router, never()).selectAndRegister(any(), nullable(String.class));
         }
     }
 
@@ -158,7 +158,7 @@ class QueueRegistrationCancellationTest {
     void externalCompletionRemovesParkedEntryWithoutWaitingForCapacity(boolean cancel)
             throws Exception {
         try (Fixture f = new Fixture()) {
-            when(f.router.select(any(), nullable(String.class)))
+            when(f.router.selectAndRegister(any(), nullable(String.class)))
                     .thenReturn(
                             SelectionResult.blocked(
                                     new CapacityKey(
@@ -179,7 +179,7 @@ class QueueRegistrationCancellationTest {
     void registrationHookRunsBeforeSelectionAndNormalRequestsStillStart() throws Exception {
         try (Fixture f = new Fixture()) {
             AtomicBoolean listening = new AtomicBoolean();
-            when(f.router.select(any(), nullable(String.class)))
+            when(f.router.selectAndRegister(any(), nullable(String.class)))
                     .thenAnswer(
                             call -> {
                                 assertTrue(
@@ -201,11 +201,11 @@ class QueueRegistrationCancellationTest {
                                         assertEquals(
                                                 0, RequestProtocolTestSupport.queuedCount(f.queue));
                                         verify(f.router, never())
-                                                .select(any(), nullable(String.class));
+                                                .selectAndRegister(any(), nullable(String.class));
                                         listening.set(true);
                                     });
             assertFalse(result.get(2L, TimeUnit.SECONDS).isSuccess());
-            verify(f.router).select(any(), nullable(String.class));
+            verify(f.router).selectAndRegister(any(), nullable(String.class));
         }
     }
 
@@ -229,7 +229,7 @@ class QueueRegistrationCancellationTest {
                                     });
             assertFalse(result.get(2L, TimeUnit.SECONDS).isSuccess());
             assertEquals(0, RequestProtocolTestSupport.queuedCount(f.queue));
-            verify(f.router, never()).select(any(), nullable(String.class));
+            verify(f.router, never()).selectAndRegister(any(), nullable(String.class));
         }
     }
 
@@ -268,7 +268,7 @@ class QueueRegistrationCancellationTest {
                 resume.countDown();
             }
             assertFalse(submitted.get(2L, TimeUnit.SECONDS).get(2L, TimeUnit.SECONDS).isSuccess());
-            verify(f.router, never()).select(any(), nullable(String.class));
+            verify(f.router, never()).selectAndRegister(any(), nullable(String.class));
             SchedulerTestSupport.shutdown(SchedulerTestSupport.runtime(f.queue));
         }
     }
@@ -285,7 +285,7 @@ class QueueRegistrationCancellationTest {
                                                 "listener installation failed");
                                     });
             assertFalse(result.get(2L, TimeUnit.SECONDS).isSuccess());
-            verify(f.router, never()).select(any(), nullable(String.class));
+            verify(f.router, never()).selectAndRegister(any(), nullable(String.class));
             SchedulerTestSupport.runtime(f.queue).requests().stopAccepting();
             AtomicBoolean called = new AtomicBoolean();
             assertFalse(

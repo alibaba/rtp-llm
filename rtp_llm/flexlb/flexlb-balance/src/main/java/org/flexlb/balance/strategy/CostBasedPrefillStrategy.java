@@ -61,7 +61,7 @@ public class CostBasedPrefillStrategy
         remoteDiscount = affinity == null ? 0.2 : affinity.getRemoteDiscount();
     }
 
-    public SelectionResult<RoleSelection, CapacityKey> select(
+    public SelectionResult<RoleSelection, CapacityKey> selectAndRegister(
             RequestContext context, RoleType role, String group) {
         var candidates = endpoints.<PrefillEndpoint>endpoints(role, null);
         var request = context.getRequest();

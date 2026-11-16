@@ -84,7 +84,7 @@ class SelectionPerformanceTest {
                 long start = System.nanoTime();
                 long checksum = 0L;
                 for (int index = 0; index < operations; index++) {
-                    var result = selector.select(context, null);
+                    var result = selector.selectAndRegister(context, null);
                     assertEquals(SelectionResult.Status.SUCCESS, result.status());
                     checksum +=
                             ((org.flexlb.balance.strategy.RoleSelection)

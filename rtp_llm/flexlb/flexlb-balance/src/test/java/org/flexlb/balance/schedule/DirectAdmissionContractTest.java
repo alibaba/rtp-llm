@@ -76,7 +76,9 @@ class DirectAdmissionContractTest {
 
             var result =
                     SchedulerTestSupport.selectAndPublish(
-                            fixture.scheduler, context, () -> fixture.router.select(context, null));
+                            fixture.scheduler,
+                            context,
+                            () -> fixture.router.selectAndRegister(context, null));
 
             assertEquals(SelectionResult.Status.SUCCESS, result.status());
             assertTrue(future.get(2, TimeUnit.SECONDS).isSuccess());
@@ -132,7 +134,7 @@ class DirectAdmissionContractTest {
                             fixture.scheduler,
                             context,
                             () -> {
-                                var selected = fixture.router.select(context, null);
+                                var selected = fixture.router.selectAndRegister(context, null);
                                 assertEquals(SelectionResult.Status.SUCCESS, selected.status());
                                 assertNotNull(
                                         EndpointTestSupport.decodeRegistration(
@@ -160,7 +162,7 @@ class DirectAdmissionContractTest {
                     RequestProtocolTestSupport.submitForManualPlacement(fixture.scheduler, context);
             var routing = SchedulerTestSupport.claim(fixture.scheduler, "9100", future);
             assertNotNull(routing);
-            var selected = fixture.router.select(context, null);
+            var selected = fixture.router.selectAndRegister(context, null);
             assertEquals(SelectionResult.Status.SUCCESS, selected.status());
             var route = selected;
             assertNotNull(EndpointTestSupport.decodeRegistration(fixture.decode, 9100L));
@@ -210,7 +212,7 @@ class DirectAdmissionContractTest {
                     RequestProtocolTestSupport.submitForManualPlacement(fixture.scheduler, context);
             var operation = SchedulerTestSupport.claim(fixture.scheduler, "9099", future);
             assertNotNull(operation);
-            var route = fixture.router.select(context, null);
+            var route = fixture.router.selectAndRegister(context, null);
             assertNotNull(route);
             org.mockito.Mockito.doThrow(failure)
                     .doCallRealMethod()

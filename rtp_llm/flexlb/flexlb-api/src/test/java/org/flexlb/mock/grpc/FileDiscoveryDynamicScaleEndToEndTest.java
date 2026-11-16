@@ -117,7 +117,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     @Override
     protected RequestRouteSelector createRouter() {
         RequestRouteSelector roundRobin = mock(RequestRouteSelector.class);
-        when(roundRobin.select(any(RequestContext.class), any()))
+        when(roundRobin.selectAndRegister(any(RequestContext.class), any()))
                 .thenAnswer(
                         inv -> {
                             RequestContext ctx = inv.getArgument(0);

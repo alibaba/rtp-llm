@@ -77,7 +77,7 @@ class VitRequestRoutingTest {
                             .build();
             assertTrue(schedule(api, vision).getSuccess());
             assertEquals(0, runtime.requestRegistry().liveRequestCount());
-            verify(selector, never()).select(any(), any());
+            verify(selector, never()).selectAndRegister(any(), any());
 
             var stale = FlexlbScheduleRequestPB.newBuilder().setRequestId(918L);
             stale.getSelectedVitBuilder().setRole("VIT").setWorkerGeneration(1L);
@@ -85,9 +85,9 @@ class VitRequestRoutingTest {
                     StrategyErrorType.VIT_ROUTE_STALE.getErrorCode(),
                     schedule(api, stale.build()).getCode());
             assertEquals(0, runtime.requestRegistry().liveRequestCount());
-            verify(selector, never()).select(any(), any());
+            verify(selector, never()).selectAndRegister(any(), any());
 
-            when(selector.select(any(), isNull()))
+            when(selector.selectAndRegister(any(), isNull()))
                     .thenReturn(
                             org.flexlb.balance.strategy.SelectionResult.rejected(
                                     Response.error(StrategyErrorType.NO_PREFILL_WORKER)));
@@ -95,7 +95,7 @@ class VitRequestRoutingTest {
             assertEquals(
                     StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
                     schedule(api, pd).getCode());
-            verify(selector).select(any(), isNull());
+            verify(selector).selectAndRegister(any(), isNull());
         }
     }
 

@@ -54,12 +54,12 @@ public class RequestRouteSelector {
                         Objects.requireNonNull(modelMetaConfig, "modelMetaConfig").requiredRoles());
     }
 
-    public SelectionResult<RequestRoute, CapacityKey> select(
+    public SelectionResult<RequestRoute, CapacityKey> selectAndRegister(
             RequestContext context, String policyGroup) {
-        return select(context, policyGroup, null);
+        return selectAndRegister(context, policyGroup, null);
     }
 
-    public SelectionResult<RequestRoute, CapacityKey> select(
+    public SelectionResult<RequestRoute, CapacityKey> selectAndRegister(
             RequestContext context, String policyGroup, RoleSelection reclaimed) {
         Request request = context == null ? null : context.getRequest();
         SchedulingMetadata metadata = context == null ? null : context.getSchedulingMetadata();
@@ -122,9 +122,10 @@ public class RequestRouteSelector {
                 context.beginRoutingAttempt(role);
                 SelectionResult<RoleSelection, CapacityKey> result =
                         switch (role) {
-                            case PREFILL, PDFUSION -> prefillStrategy.select(context, role, group);
-                            case DECODE -> decodeStrategy.select(context, group);
-                            case ENCODER -> encoderStrategy.select(context, group);
+                            case PREFILL, PDFUSION ->
+                                    prefillStrategy.selectAndRegister(context, role, group);
+                            case DECODE -> decodeStrategy.selectAndRegister(context, group);
+                            case ENCODER -> encoderStrategy.selectAndRegister(context, group);
                             case VIT -> vitStrategy.select(context, group);
                             case FRONTEND ->
                                     throw new IllegalArgumentException(

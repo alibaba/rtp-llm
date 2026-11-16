@@ -177,7 +177,7 @@ public abstract class AbstractRequestScheduler
                     Response.buildErrorResponse(
                             StrategyErrorType.DISPATCH_FAILED, failure.getMessage());
             if (request != null && request.getRequestScheduler() == this) {
-                publish(request, response, false);
+                publishResponse(request, response, false);
                 return request.getFuture();
             }
             return CompletableFuture.completedFuture(response);
@@ -245,7 +245,7 @@ public abstract class AbstractRequestScheduler
     /**
      * Local submission failure uses the same arbitration as external Future completion.
      */
-    public boolean publish(RequestContext ctx, Response response, boolean synchronous) {
+    public boolean publishResponse(RequestContext ctx, Response response, boolean synchronous) {
         return tryCompleteFromExternal(
                 ctx, RequestFuture.Completion.RESPONSE, response, null, synchronous);
     }
@@ -485,7 +485,7 @@ public abstract class AbstractRequestScheduler
 
     protected final boolean checkRequestMode(RequestContext context, boolean queued) {
         if (context.getConfig().isQueue() == queued) return true;
-        publish(
+        publishResponse(
                 context,
                 Response.buildErrorResponse(
                         StrategyErrorType.DISPATCH_FAILED,

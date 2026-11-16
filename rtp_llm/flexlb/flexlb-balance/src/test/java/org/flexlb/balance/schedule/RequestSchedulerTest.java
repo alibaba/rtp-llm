@@ -125,7 +125,7 @@ class RequestSchedulerTest {
         CountDownLatch releasePlan = new CountDownLatch(1);
         CountDownLatch closeSettled = new CountDownLatch(1);
         RequestRoute route = RequestProtocolTestSupport.mockSelectedRoute(context);
-        when(router.select(context, null))
+        when(router.selectAndRegister(context, null))
                 .thenAnswer(
                         invocation -> {
                             planning.countDown();
@@ -225,7 +225,7 @@ class RequestSchedulerTest {
         CountDownLatch releasePlan = new CountDownLatch(1);
         CountDownLatch planClosed = new CountDownLatch(1);
         RequestRoute route = RequestProtocolTestSupport.mockSelectedRoute(context);
-        when(router.select(context, null))
+        when(router.selectAndRegister(context, null))
                 .thenAnswer(
                         invocation -> {
                             planning.countDown();
@@ -356,9 +356,9 @@ class RequestSchedulerTest {
                         org.mockito.ArgumentMatchers.argThat(
                                 request -> request != null && request.getFuture() == highFuture)))
                 .thenAnswer(i -> RequestProtocolTestSupport.admissionForInvocation(i));
-        when(router.select(lowPriority, null))
+        when(router.selectAndRegister(lowPriority, null))
                 .thenReturn(SelectionResult.blocked(new CapacityKey(RoleType.PREFILL, null, null)));
-        when(router.select(highPriority, null))
+        when(router.selectAndRegister(highPriority, null))
                 .thenReturn(
                         SelectionResult.rejected(
                                 Response.buildErrorResponse(
@@ -373,9 +373,9 @@ class RequestSchedulerTest {
                         new CapacityNotifier());
         try {
             SchedulerTestServices.entry(scheduler).submit(lowPriority);
-            verify(router, timeout(1_000)).select(lowPriority, null);
+            verify(router, timeout(1_000)).selectAndRegister(lowPriority, null);
             SchedulerTestServices.entry(scheduler).submit(highPriority);
-            verify(router, timeout(1_000)).select(highPriority, null);
+            verify(router, timeout(1_000)).selectAndRegister(highPriority, null);
             assertFalse(lowFuture.isDone());
         } finally {
             RequestProtocolTestSupport.close(scheduler);
@@ -572,7 +572,7 @@ class RequestSchedulerTest {
             assertEquals(
                     StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(),
                     future.get(5, TimeUnit.SECONDS).getCode());
-            verify(fixture.router).select(fixture.context, null);
+            verify(fixture.router).selectAndRegister(fixture.context, null);
         } finally {
             doReturn(fixture.config).when(fixture.configService).loadBalanceConfig();
             RequestProtocolTestSupport.close(fixture.scheduler);
@@ -590,7 +590,7 @@ class RequestSchedulerTest {
                         .join();
 
         assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), response.getCode());
-        verify(fixture.router, timeout(1_000)).select(fixture.context, null);
+        verify(fixture.router, timeout(1_000)).selectAndRegister(fixture.context, null);
         verify(fixture.lifecycle, never()).currentSelectionAttempt(any());
         RequestProtocolTestSupport.close(fixture.scheduler);
     }
@@ -598,12 +598,12 @@ class RequestSchedulerTest {
     @Test
     void prioritySelectorMissWaitsWithoutInventingAnEvictionRoute() {
         Fixture fixture = new Fixture(true);
-        when(fixture.router.select(fixture.context, null))
+        when(fixture.router.selectAndRegister(fixture.context, null))
                 .thenReturn(SelectionResult.blocked(new CapacityKey(RoleType.PREFILL, null, null)));
         CompletableFuture<Response> waiting =
                 SchedulerTestServices.entry(fixture.scheduler).submit(fixture.context);
 
-        verify(fixture.router, timeout(1_000)).select(fixture.context, null);
+        verify(fixture.router, timeout(1_000)).selectAndRegister(fixture.context, null);
         verify(fixture.decodePreemption, never()).start(any(), any(), any());
         assertFalse(waiting.isDone());
         verify(fixture.lifecycle, never()).currentSelectionAttempt(any());
@@ -613,12 +613,12 @@ class RequestSchedulerTest {
     @Test
     void fifoTemporaryDecodeMissRemainsQueued() {
         Fixture fixture = new Fixture(false);
-        when(fixture.router.select(fixture.context, null))
+        when(fixture.router.selectAndRegister(fixture.context, null))
                 .thenReturn(SelectionResult.blocked(new CapacityKey(RoleType.DECODE, null, null)));
         CompletableFuture<Response> waiting =
                 SchedulerTestServices.entry(fixture.scheduler).submit(fixture.context);
 
-        verify(fixture.router, timeout(1_000)).select(fixture.context, null);
+        verify(fixture.router, timeout(1_000)).selectAndRegister(fixture.context, null);
         assertFalse(waiting.isDone());
         verify(fixture.decodePreemption, never()).start(any(), any(), any());
         verify(fixture.lifecycle, never()).currentSelectionAttempt(any());
@@ -628,7 +628,7 @@ class RequestSchedulerTest {
     @Test
     void initialPlacementFailureCompletesTheRegisteredGeneration() {
         Fixture fixture = new Fixture(false);
-        when(fixture.router.select(fixture.context, null))
+        when(fixture.router.selectAndRegister(fixture.context, null))
                 .thenThrow(new IllegalStateException("selector failed"));
 
         CompletableFuture<Response> returned =
@@ -769,7 +769,7 @@ class RequestSchedulerTest {
                     .thenAnswer(
                             invocation ->
                                     RequestProtocolTestSupport.admissionForInvocation(invocation));
-            when(router.select(any(RequestContext.class), isNull()))
+            when(router.selectAndRegister(any(RequestContext.class), isNull()))
                     .thenAnswer(
                             invocation -> {
                                 RequestContext context = invocation.getArgument(0);
@@ -1012,8 +1012,8 @@ class RequestSchedulerTest {
                                 return published.getFuture().complete(invocation.getArgument(1));
                             })
                     .when(lifecycle)
-                    .publish(any(), any(), org.mockito.ArgumentMatchers.anyBoolean());
-            when(router.select(context, null))
+                    .publishResponse(any(), any(), org.mockito.ArgumentMatchers.anyBoolean());
+            when(router.selectAndRegister(context, null))
                     .thenReturn(
                             SelectionResult.rejected(
                                     Response.buildErrorResponse(

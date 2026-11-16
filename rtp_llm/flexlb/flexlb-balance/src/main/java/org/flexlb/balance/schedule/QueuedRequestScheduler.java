@@ -365,7 +365,7 @@ public class QueuedRequestScheduler extends AbstractRequestScheduler {
                             StrategyErrorType.DISPATCH_FAILED,
                             "Routing failed: " + failure.getMessage());
             if (task.selection != null) finishSelectionWithoutCommit(task.selection, response);
-            publish(task.request, response, false);
+            publishResponse(task.request, response, false);
             removeRequest(task.request);
         } finally {
             planningThread.remove();
@@ -397,7 +397,8 @@ public class QueuedRequestScheduler extends AbstractRequestScheduler {
         try {
             var result =
                     executeRouteSelection(
-                            selection, () -> router.select(request, request.getRoutingGroup()));
+                            selection,
+                            () -> router.selectAndRegister(request, request.getRoutingGroup()));
             selectionReturned = true;
             if (result.status() == SelectionResult.Status.BLOCKED) {
                 var endpoint = router.blockedEndpoint(result.blocker());
@@ -441,8 +442,9 @@ public class QueuedRequestScheduler extends AbstractRequestScheduler {
                             selection,
                             () ->
                                     acquired == null
-                                            ? router.select(request, request.getRoutingGroup())
-                                            : router.select(
+                                            ? router.selectAndRegister(
+                                                    request, request.getRoutingGroup())
+                                            : router.selectAndRegister(
                                                     request, request.getRoutingGroup(), acquired));
             selectionReturned = true;
             handleResult(request, result);
@@ -458,7 +460,7 @@ public class QueuedRequestScheduler extends AbstractRequestScheduler {
         switch (result.status()) {
             case SUCCESS -> removeQueuedRequest(request);
             case REJECTED -> {
-                publish(request, result.failure(), false);
+                publishResponse(request, result.failure(), false);
                 removeQueuedRequest(request);
             }
             case CLOSED -> {

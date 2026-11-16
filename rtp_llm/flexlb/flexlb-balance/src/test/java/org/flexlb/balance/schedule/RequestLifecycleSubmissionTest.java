@@ -57,7 +57,7 @@ class RequestLifecycleSubmissionTest {
         Span span = mock(Span.class);
         when(span.storeInContext(any(Context.class))).thenCallRealMethod();
         context.setTraceContext(Context.root().with(span));
-        when(router.select(context, null))
+        when(router.selectAndRegister(context, null))
                 .thenReturn(
                         SelectionResult.rejected(
                                 Response.error(StrategyErrorType.NO_PREFILL_WORKER)));

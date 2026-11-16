@@ -63,7 +63,7 @@ class SelectionRegistrationTest {
                     .chooseBest(any(), any());
             org.springframework.test.util.ReflectionTestUtils.setField(
                     routing, "decodeStrategy", policy);
-            var accepted = routing.select(context("registered"), null);
+            var accepted = routing.selectAndRegister(context("registered"), null);
             assertEquals(SelectionResult.Status.SUCCESS, accepted.status());
             assertEquals(
                     1,
@@ -110,10 +110,11 @@ class SelectionRegistrationTest {
             long initial = endpoint.selectionSnapshot().computeTokens();
             var selector = selector(registry);
             assertEquals(
-                    SelectionResult.Status.BLOCKED, selector.select(context("a"), null).status());
+                    SelectionResult.Status.BLOCKED,
+                    selector.selectAndRegister(context("a"), null).status());
             assertEquals(initial, endpoint.selectionSnapshot().computeTokens());
             add(registry, RoleType.DECODE, "d1");
-            var next = selector.select(context("a"), null);
+            var next = selector.selectAndRegister(context("a"), null);
             assertEquals(SelectionResult.Status.SUCCESS, next.status());
             release(next.value());
         }
@@ -132,11 +133,11 @@ class SelectionRegistrationTest {
             add(registry, RoleType.PREFILL, "p1");
             add(registry, RoleType.DECODE, "d1");
             var selector = selector(registry);
-            var first = selector.select(context("first"), null);
+            var first = selector.selectAndRegister(context("first"), null);
             assertEquals(SelectionResult.Status.SUCCESS, first.status());
             var route = first;
             try {
-                var blocked = selector.select(context("second"), null);
+                var blocked = selector.selectAndRegister(context("second"), null);
                 assertEquals(SelectionResult.Status.BLOCKED, blocked.status());
                 assertEquals(RoleType.DECODE, blocked.blocker().role());
                 assertEquals(
@@ -150,7 +151,7 @@ class SelectionRegistrationTest {
             } finally {
                 release(route.value());
             }
-            var retry = selector.select(context("second"), null);
+            var retry = selector.selectAndRegister(context("second"), null);
             assertEquals(SelectionResult.Status.SUCCESS, retry.status());
             release(retry.value());
         }
@@ -184,7 +185,7 @@ class SelectionRegistrationTest {
                     .when(cache)
                     .trackRoutingPrediction(
                             any(), any(), any(), any(), anyLong(), anyLong(), any());
-            var result = selector.select(context, null);
+            var result = selector.selectAndRegister(context, null);
             assertEquals(SelectionResult.Status.CLOSED, result.status());
             assertEquals(0, prefill.selectionSnapshot().computeTokens());
             var decode =
@@ -264,7 +265,7 @@ class SelectionRegistrationTest {
                     .trackRoutingPrediction(
                             any(), any(), any(), any(), anyLong(), anyLong(), any());
             var context = context("retired");
-            var route = selector.select(context, null);
+            var route = selector.selectAndRegister(context, null);
             assertEquals(SelectionResult.Status.SUCCESS, route.status());
             org.junit.jupiter.api.Assertions.assertNull(context.snapshot().route());
             assertEquals(
