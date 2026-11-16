@@ -39,16 +39,15 @@ import static org.flexlb.util.metrics.MetricConstant.SCHEDULER_INFLIGHT_SIZE;
 @Slf4j
 @Component
 public class DeliveryMetricsReporter implements org.flexlb.worker.endpoint.EndpointMetrics {
-
     /**
      * role tag value for scheduler-ledger series (vs PREFILL/DECODE endpoint ledgers).
      */
-    public static final String SCHEDULER_ROLE = "SCHEDULER";
+    private static final String SCHEDULER_ROLE = "SCHEDULER";
 
     /**
      * engineIp tag value for scheduler-ledger series (no real engine behind them).
      */
-    public static final String SCHEDULER_ENGINE_IP = "scheduler";
+    private static final String SCHEDULER_ENGINE_IP = "scheduler";
 
     @Autowired private ObjectProvider<RequestRepository> requestSources;
     @Autowired private ObjectProvider<EndpointStats> endpointSources;
@@ -113,18 +112,6 @@ public class DeliveryMetricsReporter implements org.flexlb.worker.endpoint.Endpo
         reportPrefillInflight(ip, stats.locallyOwnedRequests(), stats.maxObservedAgeMs());
     }
 
-    // ==================== Queue metrics ====================
-
-    /**
-     * Report one Prefill ownership snapshot using the existing per-worker series.
-     */
-    public void reportPrefillInflight(
-            String engineIp, int locallyOwnedRequests, long maxObservedAgeMs) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, "role", RoleType.PREFILL.name());
-        monitor.report(INFLIGHT_REQUEST_COUNT, tags, locallyOwnedRequests);
-        monitor.report(INFLIGHT_MAX_AGE_MS, tags, maxObservedAgeMs);
-    }
-
     public void reportDecode(EndpointStats.Decode endpoint) {
         var stats = endpoint.stats();
         reportDecodeInflight(
@@ -134,24 +121,6 @@ public class DeliveryMetricsReporter implements org.flexlb.worker.endpoint.Endpo
                 stats.expectedKv(),
                 stats.hardKv(),
                 stats.oldestAgeMs());
-    }
-
-    /**
-     * Report one Decode snapshot, keeping expected KV separate from non-reclaimable hard KV.
-     */
-    public void reportDecodeInflight(
-            String engineIp,
-            int inflight,
-            int totalLoad,
-            long expectedKv,
-            long hardKv,
-            long oldestAgeMs) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, "role", RoleType.DECODE.name());
-        monitor.report(INFLIGHT_REQUEST_COUNT, tags, inflight);
-        monitor.report(DECODE_TOTAL_LOAD, tags, totalLoad);
-        monitor.report(DECODE_INFLIGHT_KV_RESERVED_TOKENS, tags, expectedKv);
-        monitor.report(DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS, tags, hardKv);
-        monitor.report(INFLIGHT_MAX_AGE_MS, tags, oldestAgeMs);
     }
 
     @PostConstruct
@@ -207,6 +176,36 @@ public class DeliveryMetricsReporter implements org.flexlb.worker.endpoint.Endpo
      */
     public void reportLatency(Latency latency, String role, String engineIp, long durationMs) {
         monitor.report(latency.metric, FlexMetricTags.ofEngine(engineIp, "role", role), durationMs);
+    }
+
+    // ==================== Queue metrics ====================
+
+    /**
+     * Report one Prefill ownership snapshot using the existing per-worker series.
+     */
+    private void reportPrefillInflight(
+            String engineIp, int locallyOwnedRequests, long maxObservedAgeMs) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, "role", RoleType.PREFILL.name());
+        monitor.report(INFLIGHT_REQUEST_COUNT, tags, locallyOwnedRequests);
+        monitor.report(INFLIGHT_MAX_AGE_MS, tags, maxObservedAgeMs);
+    }
+
+    /**
+     * Report one Decode snapshot, keeping expected KV separate from non-reclaimable hard KV.
+     */
+    private void reportDecodeInflight(
+            String engineIp,
+            int inflight,
+            int totalLoad,
+            long expectedKv,
+            long hardKv,
+            long oldestAgeMs) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, "role", RoleType.DECODE.name());
+        monitor.report(INFLIGHT_REQUEST_COUNT, tags, inflight);
+        monitor.report(DECODE_TOTAL_LOAD, tags, totalLoad);
+        monitor.report(DECODE_INFLIGHT_KV_RESERVED_TOKENS, tags, expectedKv);
+        monitor.report(DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS, tags, hardKv);
+        monitor.report(INFLIGHT_MAX_AGE_MS, tags, oldestAgeMs);
     }
 
     private static <T extends org.flexlb.worker.endpoint.WorkerEndpoint> void reportEndpoints(

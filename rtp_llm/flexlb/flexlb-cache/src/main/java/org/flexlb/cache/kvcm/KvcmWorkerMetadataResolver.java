@@ -58,7 +58,7 @@ public class KvcmWorkerMetadataResolver {
         return namespace == null ? null : namespace + "_" + blockSize;
     }
 
-    public QueryType resolveQueryType(RoleType roleType, String group) {
+    QueryType resolveQueryType(RoleType roleType, String group) {
         if (StringUtils.isBlank(group)) {
             return queryTypeByRoleForCrossGroupRouting.get(roleType);
         }
@@ -66,11 +66,11 @@ public class KvcmWorkerMetadataResolver {
         return queryTypeByRole == null ? null : queryTypeByRole.get(roleType);
     }
 
-    public boolean usesConfiguredNamespace() {
+    boolean usesConfiguredNamespace() {
         return configuredNamespace != null;
     }
 
-    public void refreshNamespacesAndQueryTypes() {
+    void refreshNamespacesAndQueryTypes() {
         if (serviceRoute == null) {
             return;
         }

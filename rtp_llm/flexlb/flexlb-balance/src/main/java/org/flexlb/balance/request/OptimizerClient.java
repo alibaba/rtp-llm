@@ -33,7 +33,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 @Slf4j
 @Component
-public class OptimizerClient {
+class OptimizerClient {
     private static final String PATH_TRACE_QUERY = "/traceQuery";
 
     private final GeneralHttpNettyService httpService;
@@ -48,7 +48,7 @@ public class OptimizerClient {
     private final Object discoveryLifecycleLock = new Object();
 
     @Autowired
-    public OptimizerClient(
+    OptimizerClient(
             GeneralHttpNettyService httpService,
             ServiceDiscovery serviceDiscovery,
             ModelMetaConfig modelMetaConfig,

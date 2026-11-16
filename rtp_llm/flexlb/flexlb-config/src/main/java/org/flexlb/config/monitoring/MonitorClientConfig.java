@@ -21,7 +21,7 @@ import org.springframework.context.annotation.Configuration;
 public class MonitorClientConfig {
 
     @Bean
-    public static BeanPostProcessor safeFlexMonitorPostProcessor(
+    static BeanPostProcessor safeFlexMonitorPostProcessor(
             ObjectProvider<MeterRegistry> registries) {
         return new BeanPostProcessor() {
             @Override
@@ -50,7 +50,7 @@ public class MonitorClientConfig {
     @ConditionalOnMissingBean(FlexMonitor.class)
     @ConditionalOnClass(name = "io.micrometer.core.instrument.MeterRegistry")
     @ConditionalOnMissingClass("com.taobao.kmonitor.KMonitor")
-    public FlexMonitor micrometerFlexMonitor(MeterRegistry meterRegistry) {
+    FlexMonitor micrometerFlexMonitor(MeterRegistry meterRegistry) {
         log.info("Creating MicrometerFlexMonitor - bridging FlexMonitor to micrometer/Prometheus");
         return SafeFlexMonitor.wrap(new MicrometerFlexMonitor(meterRegistry));
     }

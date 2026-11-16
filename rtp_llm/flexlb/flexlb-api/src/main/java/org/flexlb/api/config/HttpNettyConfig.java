@@ -47,7 +47,7 @@ public class HttpNettyConfig {
     }
 
     @Bean(name = "nettyClient")
-    public HttpNettyClientHandler createNettyClientHandler() {
+    HttpNettyClientHandler createNettyClientHandler() {
         Bootstrap bootstrap = new Bootstrap();
         EventLoopGroup group =
                 new NioEventLoopGroup(config.getInternalRuntime().getHttpNettyEventLoopThreads());
@@ -93,7 +93,7 @@ public class HttpNettyConfig {
      * Connection timeout: 300ms, read timeout: 2s
      */
     @Bean(name = "syncNettyClient")
-    public HttpNettyClientHandler createSyncNettyClientHandler() {
+    HttpNettyClientHandler createSyncNettyClientHandler() {
         Bootstrap bootstrap = new Bootstrap();
         EventLoopGroup group =
                 new NioEventLoopGroup(config.getInternalRuntime().getHttpNettyEventLoopThreads());

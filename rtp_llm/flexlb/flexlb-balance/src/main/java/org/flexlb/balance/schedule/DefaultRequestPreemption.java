@@ -32,7 +32,7 @@ import static com.google.common.base.Preconditions.checkState;
  * Registers one resource wait before cancelling selected Decode requests.
  * Capacity checks and result adoption run as short scheduler tasks; waiting itself holds no thread.
  */
-public final class DefaultRequestPreemption implements RequestPreemption {
+final class DefaultRequestPreemption implements RequestPreemption {
     private final RequestRepository requests;
     private final RequestSchedulerReporter reporter;
     private final DecodePreemptionPlanner selectionPolicy;
@@ -47,7 +47,7 @@ public final class DefaultRequestPreemption implements RequestPreemption {
 
     private boolean stopped;
 
-    public DefaultRequestPreemption(
+    DefaultRequestPreemption(
             RequestRepository requests,
             RequestSchedulerReporter reporter,
             ConfigService config,

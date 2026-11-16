@@ -49,7 +49,7 @@ import static org.springframework.web.reactive.function.server.RouterFunctions.r
  * Exposes HTTP health, configuration and scheduling diagnostics from the live service owners.
  */
 @Component
-public class HttpLoadBalanceServer {
+class HttpLoadBalanceServer {
     private static final Path SCHEDULER_SNAPSHOT_DIR = Paths.get("/tmp/flexlb-scheduler-snapshots");
     private static final String SCHEDULER_SNAPSHOT_PREFIX = "scheduler-snapshot-";
 
@@ -64,7 +64,7 @@ public class HttpLoadBalanceServer {
 
     private org.flexlb.balance.schedule.RequestScheduler scheduler;
 
-    public HttpLoadBalanceServer(
+    HttpLoadBalanceServer(
             MasterStatusService masterStatusService,
             ConfigService configService,
             RequestRepository requests,
@@ -83,41 +83,6 @@ public class HttpLoadBalanceServer {
     @org.springframework.beans.factory.annotation.Autowired
     public void configureScheduling(org.flexlb.balance.schedule.RequestScheduler scheduler) {
         this.scheduler = scheduler;
-    }
-
-    @Bean
-    public RouterFunction<ServerResponse> loadBalancePrefill() {
-        return route().POST(
-                        "/rtp_llm/master/info",
-                        accept(MediaType.APPLICATION_JSON),
-                        this::responseMasterInfo)
-                .POST(
-                        "/rtp_llm/schedule_snapshot",
-                        accept(MediaType.APPLICATION_JSON),
-                        this::dumpLBStatus)
-                .POST(
-                        "/rtp_llm/notify_master",
-                        accept(MediaType.APPLICATION_JSON),
-                        this::notifyParticipant)
-                .POST(
-                        "/rtp_llm/update_log_level",
-                        accept(MediaType.APPLICATION_JSON),
-                        this::debugMode)
-                .POST(
-                        "/rtp_llm/update_traffic_policy",
-                        accept(MediaType.APPLICATION_JSON),
-                        this::updateTrafficPolicy)
-                .GET(
-                        "/rtp_llm/queue_snapshot",
-                        accept(MediaType.APPLICATION_JSON),
-                        this::queueSnapshot)
-                .GET(
-                        "/rtp_llm/inflight_status",
-                        accept(MediaType.APPLICATION_JSON),
-                        this::inflightStatus)
-                .GET("/rtp_llm/server_latency", this::serverLatency)
-                .POST("/rtp_llm/server_latency/reset", this::resetServerLatency)
-                .build();
     }
 
     public Mono<ServerResponse> notifyParticipant(ServerRequest request) {
@@ -158,7 +123,42 @@ public class HttpLoadBalanceServer {
                         });
     }
 
-    public Mono<ServerResponse> queueSnapshot(ServerRequest request) {
+    @Bean
+    RouterFunction<ServerResponse> loadBalancePrefill() {
+        return route().POST(
+                        "/rtp_llm/master/info",
+                        accept(MediaType.APPLICATION_JSON),
+                        this::responseMasterInfo)
+                .POST(
+                        "/rtp_llm/schedule_snapshot",
+                        accept(MediaType.APPLICATION_JSON),
+                        this::dumpLBStatus)
+                .POST(
+                        "/rtp_llm/notify_master",
+                        accept(MediaType.APPLICATION_JSON),
+                        this::notifyParticipant)
+                .POST(
+                        "/rtp_llm/update_log_level",
+                        accept(MediaType.APPLICATION_JSON),
+                        this::debugMode)
+                .POST(
+                        "/rtp_llm/update_traffic_policy",
+                        accept(MediaType.APPLICATION_JSON),
+                        this::updateTrafficPolicy)
+                .GET(
+                        "/rtp_llm/queue_snapshot",
+                        accept(MediaType.APPLICATION_JSON),
+                        this::queueSnapshot)
+                .GET(
+                        "/rtp_llm/inflight_status",
+                        accept(MediaType.APPLICATION_JSON),
+                        this::inflightStatus)
+                .GET("/rtp_llm/server_latency", this::serverLatency)
+                .POST("/rtp_llm/server_latency/reset", this::resetServerLatency)
+                .build();
+    }
+
+    private Mono<ServerResponse> queueSnapshot(ServerRequest request) {
         try {
             List<RequestResult> snapshot = requests.snapshotActiveRequests();
             QueueSnapshotResponse response = persistSchedulerSnapshot(snapshot);
@@ -173,7 +173,36 @@ public class HttpLoadBalanceServer {
         }
     }
 
-    public Mono<ServerResponse> inflightStatus(ServerRequest request) {
+    private QueueSnapshotResponse persistSchedulerSnapshot(List<RequestResult> snapshot)
+            throws IOException {
+        Files.createDirectories(SCHEDULER_SNAPSHOT_DIR);
+        cleanOldSchedulerSnapshots();
+
+        long timestamp = System.currentTimeMillis();
+        Path file = SCHEDULER_SNAPSHOT_DIR.resolve(SCHEDULER_SNAPSHOT_PREFIX + timestamp + ".json");
+        Files.writeString(file, JsonUtils.toFormattedString(snapshot));
+        return new QueueSnapshotResponse(
+                file.toAbsolutePath().toString(), timestamp, snapshot.size());
+    }
+
+    private void cleanOldSchedulerSnapshots() throws IOException {
+        List<Path> files;
+        try (Stream<Path> entries = Files.list(SCHEDULER_SNAPSHOT_DIR)) {
+            files =
+                    entries.filter(
+                                    path ->
+                                            path.getFileName()
+                                                    .toString()
+                                                    .startsWith(SCHEDULER_SNAPSHOT_PREFIX))
+                            .sorted()
+                            .toList();
+        }
+        for (int index = 0; index <= files.size() - MAX_SNAPSHOT_FILES; index++) {
+            Files.deleteIfExists(files.get(index));
+        }
+    }
+
+    private Mono<ServerResponse> inflightStatus(ServerRequest request) {
         try {
             Map<String, Object> result = new LinkedHashMap<>();
             int tracked = requests.liveRequestCount();
@@ -326,35 +355,6 @@ public class HttpLoadBalanceServer {
             summary.put(role.getCode(), rs);
         }
         return summary.isEmpty() ? null : summary;
-    }
-
-    private QueueSnapshotResponse persistSchedulerSnapshot(List<RequestResult> snapshot)
-            throws IOException {
-        Files.createDirectories(SCHEDULER_SNAPSHOT_DIR);
-        cleanOldSchedulerSnapshots();
-
-        long timestamp = System.currentTimeMillis();
-        Path file = SCHEDULER_SNAPSHOT_DIR.resolve(SCHEDULER_SNAPSHOT_PREFIX + timestamp + ".json");
-        Files.writeString(file, JsonUtils.toFormattedString(snapshot));
-        return new QueueSnapshotResponse(
-                file.toAbsolutePath().toString(), timestamp, snapshot.size());
-    }
-
-    private void cleanOldSchedulerSnapshots() throws IOException {
-        List<Path> files;
-        try (Stream<Path> entries = Files.list(SCHEDULER_SNAPSHOT_DIR)) {
-            files =
-                    entries.filter(
-                                    path ->
-                                            path.getFileName()
-                                                    .toString()
-                                                    .startsWith(SCHEDULER_SNAPSHOT_PREFIX))
-                            .sorted()
-                            .toList();
-        }
-        for (int index = 0; index <= files.size() - MAX_SNAPSHOT_FILES; index++) {
-            Files.deleteIfExists(files.get(index));
-        }
     }
 
     private Mono<ServerResponse> serverLatency(ServerRequest request) {

@@ -6,9 +6,10 @@ import java.util.List;
  * Defines immutable mock-engine failure and delay settings built through the fluent builder.
  */
 public final class FaultInjectionConfig {
-
     private final boolean failOnEnqueue;
+
     private final String enqueueErrorMessage;
+
     private final long enqueueDelayMs;
     private final long generateDelayMs;
     private final boolean generateError;
@@ -21,9 +22,13 @@ public final class FaultInjectionConfig {
     // the completion queue / version protocol core stays untouched) ──
     private final boolean statusSuppressFinished;
     private final boolean statusSuppressRunning;
+
     private final List<Long> statusSuppressRids;
+
     private final boolean statusNoRespond;
+
     private final List<StatusFakeTask> statusFakeTasks;
+
     private final boolean statusDuplicateFinished;
     private final int statusCursorRegress;
     private final boolean statusVersionRegress;
@@ -93,127 +98,6 @@ public final class FaultInjectionConfig {
 
     public long getEnqueueDelayMs() {
         return enqueueDelayMs;
-    }
-
-    public long getGenerateDelayMs() {
-        return generateDelayMs;
-    }
-
-    public boolean isGenerateError() {
-        return generateError;
-    }
-
-    public boolean isFetchError() {
-        return fetchError;
-    }
-
-    public boolean isNoRespond() {
-        return noRespond;
-    }
-
-    public long getKvPressureTokens() {
-        return kvPressureTokens;
-    }
-
-    public int getQueueDepthLimit() {
-        return queueDepthLimit;
-    }
-
-    public int getCrashAfterNRequests() {
-        return crashAfterNRequests;
-    }
-
-    public boolean isStatusSuppressFinished() {
-        return statusSuppressFinished;
-    }
-
-    public boolean isStatusSuppressRunning() {
-        return statusSuppressRunning;
-    }
-
-    public List<Long> getStatusSuppressRids() {
-        return statusSuppressRids;
-    }
-
-    public boolean isStatusNoRespond() {
-        return statusNoRespond;
-    }
-
-    public List<StatusFakeTask> getStatusFakeTasks() {
-        return statusFakeTasks;
-    }
-
-    public boolean isStatusDuplicateFinished() {
-        return statusDuplicateFinished;
-    }
-
-    public int getStatusCursorRegress() {
-        return statusCursorRegress;
-    }
-
-    public boolean isStatusVersionRegress() {
-        return statusVersionRegress;
-    }
-
-    public boolean isStatusZombieRunning() {
-        return statusZombieRunning;
-    }
-
-    public int getEnqueueAckPartialFail() {
-        return enqueueAckPartialFail;
-    }
-
-    public long getEnqueueAckErrorCode() {
-        return enqueueAckErrorCode;
-    }
-
-    public boolean isEnqueueAckDrop() {
-        return enqueueAckDrop;
-    }
-
-    /**
-     * prefill_async_partial_fail: k = how many members of every executing
-     * prefill batch fail AT the completion callback (the execution-phase
-     * counterpart of {@link #getEnqueueAckPartialFail()}: the admission
-     * ack was honest, the execution lies). 0 = injection off.
-     */
-    public int getPrefillAsyncPartialFail() {
-        return prefillAsyncPartialFail;
-    }
-
-    /**
-     * The engine-side ErrorCode the injected execution-phase failure
-     * carries in task_info.error_code (LACK_MEM / MALLOC_FAILED / 8431
-     * family semantics; default 8500).
-     */
-    public long getPrefillAsyncFailCode() {
-        return prefillAsyncFailCode;
-    }
-
-    /**
-     * cancel_no_respond: the Cancel RPC hangs — no response ever. The
-     * master's short cancel-ack timeout (50ms) fails the future; the
-     * engine state is never touched.
-     */
-    public boolean isCancelNoRespond() {
-        return cancelNoRespond;
-    }
-
-    /**
-     * cancel_error: the Cancel RPC fails at the transport layer (gRPC
-     * INTERNAL / HTTP 500) — a failed future, no fence installed.
-     */
-    public boolean isCancelError() {
-        return cancelError;
-    }
-
-    /**
-     * cancel_unexpected_status: the RPC succeeds but the ack status sits
-     * outside the cancel contract (UNSPECIFIED) — the master's response
-     * mapping must fail it, never accept it.
-     */
-    public boolean isCancelUnexpectedStatus() {
-        return cancelUnexpectedStatus;
     }
 
     /**
@@ -315,6 +199,127 @@ public final class FaultInjectionConfig {
                 + '}';
     }
 
+    long getGenerateDelayMs() {
+        return generateDelayMs;
+    }
+
+    boolean isGenerateError() {
+        return generateError;
+    }
+
+    boolean isFetchError() {
+        return fetchError;
+    }
+
+    boolean isNoRespond() {
+        return noRespond;
+    }
+
+    long getKvPressureTokens() {
+        return kvPressureTokens;
+    }
+
+    int getQueueDepthLimit() {
+        return queueDepthLimit;
+    }
+
+    int getCrashAfterNRequests() {
+        return crashAfterNRequests;
+    }
+
+    boolean isStatusSuppressFinished() {
+        return statusSuppressFinished;
+    }
+
+    boolean isStatusSuppressRunning() {
+        return statusSuppressRunning;
+    }
+
+    List<Long> getStatusSuppressRids() {
+        return statusSuppressRids;
+    }
+
+    boolean isStatusNoRespond() {
+        return statusNoRespond;
+    }
+
+    List<StatusFakeTask> getStatusFakeTasks() {
+        return statusFakeTasks;
+    }
+
+    boolean isStatusDuplicateFinished() {
+        return statusDuplicateFinished;
+    }
+
+    int getStatusCursorRegress() {
+        return statusCursorRegress;
+    }
+
+    boolean isStatusVersionRegress() {
+        return statusVersionRegress;
+    }
+
+    boolean isStatusZombieRunning() {
+        return statusZombieRunning;
+    }
+
+    int getEnqueueAckPartialFail() {
+        return enqueueAckPartialFail;
+    }
+
+    long getEnqueueAckErrorCode() {
+        return enqueueAckErrorCode;
+    }
+
+    boolean isEnqueueAckDrop() {
+        return enqueueAckDrop;
+    }
+
+    /**
+     * prefill_async_partial_fail: k = how many members of every executing
+     * prefill batch fail AT the completion callback (the execution-phase
+     * counterpart of {@link #getEnqueueAckPartialFail()}: the admission
+     * ack was honest, the execution lies). 0 = injection off.
+     */
+    int getPrefillAsyncPartialFail() {
+        return prefillAsyncPartialFail;
+    }
+
+    /**
+     * The engine-side ErrorCode the injected execution-phase failure
+     * carries in task_info.error_code (LACK_MEM / MALLOC_FAILED / 8431
+     * family semantics; default 8500).
+     */
+    long getPrefillAsyncFailCode() {
+        return prefillAsyncFailCode;
+    }
+
+    /**
+     * cancel_no_respond: the Cancel RPC hangs — no response ever. The
+     * master's short cancel-ack timeout (50ms) fails the future; the
+     * engine state is never touched.
+     */
+    boolean isCancelNoRespond() {
+        return cancelNoRespond;
+    }
+
+    /**
+     * cancel_error: the Cancel RPC fails at the transport layer (gRPC
+     * INTERNAL / HTTP 500) — a failed future, no fence installed.
+     */
+    boolean isCancelError() {
+        return cancelError;
+    }
+
+    /**
+     * cancel_unexpected_status: the RPC succeeds but the ack status sits
+     * outside the cancel contract (UNSPECIFIED) — the master's response
+     * mapping must fail it, never accept it.
+     */
+    boolean isCancelUnexpectedStatus() {
+        return cancelUnexpectedStatus;
+    }
+
     /**
      * One synthetic task for the {@code status_fake_task} injection: a task
      * that never existed, appended to the getWorkerStatus output on every
@@ -331,7 +336,7 @@ public final class FaultInjectionConfig {
         /**
          * True for the finished-form synthetic completion.
          */
-        public boolean isFinishedForm() {
+        boolean isFinishedForm() {
             return "finished".equalsIgnoreCase(phase);
         }
     }
@@ -341,7 +346,9 @@ public final class FaultInjectionConfig {
      */
     public static final class Builder {
         private boolean failOnEnqueue = false;
+
         private String enqueueErrorMessage = "mock enqueue failure";
+
         private long enqueueDelayMs = 0;
         private long generateDelayMs = 0;
         private boolean generateError = false;
@@ -352,9 +359,13 @@ public final class FaultInjectionConfig {
         private int crashAfterNRequests = 0;
         private boolean statusSuppressFinished = false;
         private boolean statusSuppressRunning = false;
+
         private List<Long> statusSuppressRids = List.of();
+
         private boolean statusNoRespond = false;
+
         private List<StatusFakeTask> statusFakeTasks = List.of();
+
         private boolean statusDuplicateFinished = false;
         private int statusCursorRegress = 0;
         private boolean statusVersionRegress = false;
@@ -385,128 +396,128 @@ public final class FaultInjectionConfig {
             return this;
         }
 
-        public Builder generateDelayMs(long ms) {
-            this.generateDelayMs = ms;
-            return this;
-        }
-
-        public Builder generateError(boolean generate) {
-            this.generateError = generate;
-            return this;
-        }
-
-        public Builder fetchError(boolean fetch) {
-            this.fetchError = fetch;
-            return this;
-        }
-
-        public Builder noRespond(boolean noRespond) {
-            this.noRespond = noRespond;
-            return this;
-        }
-
-        public Builder kvPressureTokens(long tokens) {
-            this.kvPressureTokens = tokens;
-            return this;
-        }
-
-        public Builder queueDepthLimit(int limit) {
-            this.queueDepthLimit = limit;
-            return this;
-        }
-
-        public Builder crashAfterNRequests(int n) {
-            this.crashAfterNRequests = n;
-            return this;
-        }
-
-        public Builder statusSuppressFinished(boolean suppress) {
-            this.statusSuppressFinished = suppress;
-            return this;
-        }
-
-        public Builder statusSuppressRunning(boolean suppress) {
-            this.statusSuppressRunning = suppress;
-            return this;
-        }
-
-        public Builder statusSuppressRids(List<Long> rids) {
-            this.statusSuppressRids = rids == null ? List.of() : List.copyOf(rids);
-            return this;
-        }
-
-        public Builder statusNoRespond(boolean noRespond) {
-            this.statusNoRespond = noRespond;
-            return this;
-        }
-
-        public Builder statusFakeTasks(List<StatusFakeTask> fakeTasks) {
-            this.statusFakeTasks = fakeTasks == null ? List.of() : List.copyOf(fakeTasks);
-            return this;
-        }
-
-        public Builder statusDuplicateFinished(boolean duplicate) {
-            this.statusDuplicateFinished = duplicate;
-            return this;
-        }
-
-        public Builder statusCursorRegress(int regress) {
-            this.statusCursorRegress = regress;
-            return this;
-        }
-
-        public Builder statusVersionRegress(boolean regress) {
-            this.statusVersionRegress = regress;
-            return this;
-        }
-
-        public Builder statusZombieRunning(boolean zombie) {
-            this.statusZombieRunning = zombie;
-            return this;
-        }
-
-        public Builder enqueueAckPartialFail(int k) {
-            this.enqueueAckPartialFail = k;
-            return this;
-        }
-
-        public Builder enqueueAckErrorCode(long code) {
-            this.enqueueAckErrorCode = code;
-            return this;
-        }
-
-        public Builder enqueueAckDrop(boolean drop) {
-            this.enqueueAckDrop = drop;
-            return this;
-        }
-
-        public Builder prefillAsyncPartialFail(int k) {
-            this.prefillAsyncPartialFail = k;
-            return this;
-        }
-
-        public Builder prefillAsyncFailCode(long code) {
-            this.prefillAsyncFailCode = code;
-            return this;
-        }
-
-        public Builder cancelNoRespond(boolean noRespond) {
-            this.cancelNoRespond = noRespond;
-            return this;
-        }
-
         public Builder cancelError(boolean error) {
             this.cancelError = error;
             return this;
         }
 
-        public Builder cancelUnexpectedStatus(boolean unexpectedStatus) {
-            this.cancelUnexpectedStatus = unexpectedStatus;
+        public FaultInjectionConfig build() {
+            return new FaultInjectionConfig(this);
+        }
+
+        Builder generateDelayMs(long ms) {
+            this.generateDelayMs = ms;
             return this;
         }
 
-        public FaultInjectionConfig build() {
-            return new FaultInjectionConfig(this);
+        Builder generateError(boolean generate) {
+            this.generateError = generate;
+            return this;
+        }
+
+        Builder fetchError(boolean fetch) {
+            this.fetchError = fetch;
+            return this;
+        }
+
+        Builder noRespond(boolean noRespond) {
+            this.noRespond = noRespond;
+            return this;
+        }
+
+        Builder kvPressureTokens(long tokens) {
+            this.kvPressureTokens = tokens;
+            return this;
+        }
+
+        Builder queueDepthLimit(int limit) {
+            this.queueDepthLimit = limit;
+            return this;
+        }
+
+        Builder crashAfterNRequests(int n) {
+            this.crashAfterNRequests = n;
+            return this;
+        }
+
+        Builder statusSuppressFinished(boolean suppress) {
+            this.statusSuppressFinished = suppress;
+            return this;
+        }
+
+        Builder statusSuppressRunning(boolean suppress) {
+            this.statusSuppressRunning = suppress;
+            return this;
+        }
+
+        Builder statusSuppressRids(List<Long> rids) {
+            this.statusSuppressRids = rids == null ? List.of() : List.copyOf(rids);
+            return this;
+        }
+
+        Builder statusNoRespond(boolean noRespond) {
+            this.statusNoRespond = noRespond;
+            return this;
+        }
+
+        Builder statusFakeTasks(List<StatusFakeTask> fakeTasks) {
+            this.statusFakeTasks = fakeTasks == null ? List.of() : List.copyOf(fakeTasks);
+            return this;
+        }
+
+        Builder statusDuplicateFinished(boolean duplicate) {
+            this.statusDuplicateFinished = duplicate;
+            return this;
+        }
+
+        Builder statusCursorRegress(int regress) {
+            this.statusCursorRegress = regress;
+            return this;
+        }
+
+        Builder statusVersionRegress(boolean regress) {
+            this.statusVersionRegress = regress;
+            return this;
+        }
+
+        Builder statusZombieRunning(boolean zombie) {
+            this.statusZombieRunning = zombie;
+            return this;
+        }
+
+        Builder enqueueAckPartialFail(int k) {
+            this.enqueueAckPartialFail = k;
+            return this;
+        }
+
+        Builder enqueueAckErrorCode(long code) {
+            this.enqueueAckErrorCode = code;
+            return this;
+        }
+
+        Builder enqueueAckDrop(boolean drop) {
+            this.enqueueAckDrop = drop;
+            return this;
+        }
+
+        Builder prefillAsyncPartialFail(int k) {
+            this.prefillAsyncPartialFail = k;
+            return this;
+        }
+
+        Builder prefillAsyncFailCode(long code) {
+            this.prefillAsyncFailCode = code;
+            return this;
+        }
+
+        Builder cancelNoRespond(boolean noRespond) {
+            this.cancelNoRespond = noRespond;
+            return this;
+        }
+
+        Builder cancelUnexpectedStatus(boolean unexpectedStatus) {
+            this.cancelUnexpectedStatus = unexpectedStatus;
+            return this;
         }
     }
 }

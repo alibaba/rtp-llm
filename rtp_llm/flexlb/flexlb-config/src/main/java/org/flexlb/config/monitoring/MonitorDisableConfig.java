@@ -27,7 +27,7 @@ public class MonitorDisableConfig {
     @Bean
     @ConditionalOnProperty(name = "flexlb.monitor.enabled", havingValue = "false")
     @ConditionalOnClass(MeterFilter.class)
-    public MeterFilter denyAllMeterFilter() {
+    MeterFilter denyAllMeterFilter() {
         return MeterFilter.deny();
     }
 

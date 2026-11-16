@@ -87,15 +87,15 @@ class ExternalRequestSchedulerTest {
     private static final class ManualRequests {
         private final SchedulingQueue queue = new OrderedRequestQueue(false);
 
-        synchronized void add(RequestContext context) {
+        private synchronized void add(RequestContext context) {
             queue.add(context);
         }
 
-        synchronized void remove(RequestContext context) {
+        private synchronized void remove(RequestContext context) {
             for (var entry : queue.drain()) if (entry != context) queue.restore(entry);
         }
 
-        synchronized void schedule(java.util.function.Consumer<RequestContext> publish) {
+        private synchronized void schedule(java.util.function.Consumer<RequestContext> publish) {
             for (var entry : queue.scanForPlanningCandidates(1, 1, candidate -> true)) {
                 queue.remove(entry);
                 publish.accept(entry);

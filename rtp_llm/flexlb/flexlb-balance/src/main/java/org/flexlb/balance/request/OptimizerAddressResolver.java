@@ -27,7 +27,7 @@ import java.util.concurrent.TimeUnit;
  * the shared discovery bean.</p>
  */
 @Slf4j
-public class OptimizerAddressResolver {
+class OptimizerAddressResolver {
     private final ServiceDiscovery serviceDiscovery;
     private final String address;
     private final DiscoveryEndpoint endpoint;
@@ -44,12 +44,12 @@ public class OptimizerAddressResolver {
 
     private volatile List<String> resolvedAddresses = Collections.emptyList();
 
-    public OptimizerAddressResolver(
+    OptimizerAddressResolver(
             ServiceDiscovery serviceDiscovery, DiscoveryEndpoint endpoint, int port) {
         this(serviceDiscovery, endpoint, port, 1000L);
     }
 
-    public OptimizerAddressResolver(
+    OptimizerAddressResolver(
             ServiceDiscovery serviceDiscovery,
             DiscoveryEndpoint endpoint,
             int port,
@@ -96,13 +96,13 @@ public class OptimizerAddressResolver {
                 resolvedAddresses.size());
     }
 
-    public List<String> getAddresses() {
-        return resolvedAddresses;
-    }
-
     public synchronized void shutdown() {
         shutdown = true;
         refreshScheduler.shutdownNow();
+    }
+
+    List<String> getAddresses() {
+        return resolvedAddresses;
     }
 
     private void refreshSafely() {

@@ -35,7 +35,7 @@ public final class CapacityNotifier {
     }
 
     /**
-     * Receives endpoint capacity changes after the resource lock is released.
+     * Receives a capacity change outside endpoint resource locks and rechecks current availability.
      */
     @FunctionalInterface
     public interface Listener {

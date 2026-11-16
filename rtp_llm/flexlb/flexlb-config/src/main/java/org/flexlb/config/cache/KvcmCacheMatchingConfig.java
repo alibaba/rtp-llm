@@ -14,11 +14,11 @@ public final class KvcmCacheMatchingConfig implements CacheMatchingConfig {
 
     public static final long DEFAULT_REQUEST_TIMEOUT_MS = 500L;
     public static final long DEFAULT_LEADER_REFRESH_INTERVAL_MS = 10_000L;
-    public static final int DEFAULT_HEARTBEAT_FAILURE_THRESHOLD = 3;
-    public static final int DEFAULT_QUERY_FAILURE_THRESHOLD = 10;
-    public static final int DEFAULT_MAX_QUERY_RETRY_COUNT = 1;
-    public static final int DEFAULT_RECOVERY_SUCCESS_THRESHOLD = 3;
-    public static final int DEFAULT_GLOBAL_KVS_HOST_COUNT = 3;
+    private static final int DEFAULT_HEARTBEAT_FAILURE_THRESHOLD = 3;
+    private static final int DEFAULT_QUERY_FAILURE_THRESHOLD = 10;
+    private static final int DEFAULT_MAX_QUERY_RETRY_COUNT = 1;
+    private static final int DEFAULT_RECOVERY_SUCCESS_THRESHOLD = 3;
+    private static final int DEFAULT_GLOBAL_KVS_HOST_COUNT = 3;
 
     /**
      * Total cache-query budget, including retries; also bounds each cluster-info RPC.

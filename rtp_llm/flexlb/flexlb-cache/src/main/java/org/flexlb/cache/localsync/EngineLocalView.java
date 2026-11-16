@@ -50,13 +50,27 @@ public class EngineLocalView {
     }
 
     /**
+     * Clear all data
+     */
+    public void clear() {
+
+        engineViews.clear();
+        log.info("Cleared engine local view");
+    }
+
+    public int size(String engineIpPort) {
+        Set<Long> engineCache = engineViews.get(engineIpPort);
+        return engineCache == null ? 0 : engineCache.size();
+    }
+
+    /**
      * Calculate diff result
      *
      * @param engineIPort    Engine IP
      * @param newCacheBlocks New cache block set
      * @return Diff calculation result
      */
-    public DiffResult calculateDiff(String engineIPort, Set<Long> newCacheBlocks) {
+    DiffResult calculateDiff(String engineIPort, Set<Long> newCacheBlocks) {
         if (engineIPort == null || newCacheBlocks == null) {
             return DiffResult.empty();
         }
@@ -117,7 +131,7 @@ public class EngineLocalView {
      * @param engineIPort Engine IP
      * @return Cache block ID set
      */
-    public Set<Long> getEngineCacheBlocks(String engineIPort) {
+    Set<Long> getEngineCacheBlocks(String engineIPort) {
         if (engineIPort == null) {
             return Collections.emptySet();
         }
@@ -131,7 +145,7 @@ public class EngineLocalView {
      * @param engineIPort     Engine IP
      * @param blockCacheKey   Cache block hash value
      */
-    public void addOrUpdateCacheBlock(String engineIPort, Long blockCacheKey) {
+    void addOrUpdateCacheBlock(String engineIPort, Long blockCacheKey) {
         if (engineIPort == null || blockCacheKey == null) {
             log.warn(
                     "Invalid parameters: engineIPort={}, blockCacheKey={}",
@@ -151,7 +165,7 @@ public class EngineLocalView {
      * @param engineIPort   Engine IP
      * @param blockCacheKey Cache block hash value
      */
-    public void removeCacheBlock(String engineIPort, Long blockCacheKey) {
+    void removeCacheBlock(String engineIPort, Long blockCacheKey) {
         if (engineIPort == null || blockCacheKey == null) {
             return;
         }
@@ -177,7 +191,7 @@ public class EngineLocalView {
      *
      * @param engineIPort Engine IP
      */
-    public void removeAllCacheBlockOfEngine(String engineIPort) {
+    void removeAllCacheBlockOfEngine(String engineIPort) {
         if (engineIPort == null) {
             return;
         }
@@ -190,25 +204,11 @@ public class EngineLocalView {
     }
 
     /**
-     * Clear all data
-     */
-    public void clear() {
-
-        engineViews.clear();
-        log.info("Cleared engine local view");
-    }
-
-    public int size(String engineIpPort) {
-        Set<Long> engineCache = engineViews.get(engineIpPort);
-        return engineCache == null ? 0 : engineCache.size();
-    }
-
-    /**
      * Get engine view map size (number of current engines)
      *
      * @return engineViews map size
      */
-    public int getEngineViewsMapSize() {
+    int getEngineViewsMapSize() {
         return engineViews.size();
     }
 
@@ -217,7 +217,7 @@ public class EngineLocalView {
      *
      * @return All engine IP:Port set
      */
-    public Set<String> getAllEngineIpPorts() {
+    Set<String> getAllEngineIpPorts() {
         return engineViews.keySet();
     }
 

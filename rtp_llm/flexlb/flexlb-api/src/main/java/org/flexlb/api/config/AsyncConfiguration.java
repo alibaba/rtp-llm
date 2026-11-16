@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit;
 public class AsyncConfiguration {
 
     @Bean(name = "doFinallyExecutor", destroyMethod = "shutdown")
-    public ThreadPoolExecutor doFinallyExecutor() {
+    ThreadPoolExecutor doFinallyExecutor() {
         int processors = Runtime.getRuntime().availableProcessors();
         int poolSize = Math.max(processors, 4);
         int maxPoolSize = Math.max(2 * processors, 8);

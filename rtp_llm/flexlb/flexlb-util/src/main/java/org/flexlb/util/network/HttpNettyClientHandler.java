@@ -18,7 +18,7 @@ import lombok.extern.slf4j.Slf4j;
 @ChannelHandler.Sharable
 @Slf4j
 public class HttpNettyClientHandler extends SimpleChannelInboundHandler<HttpObject> {
-    public static final String CHANNEL_CONTEXT_ATTR_NAME = "nettyCtx";
+    private static final String CHANNEL_CONTEXT_ATTR_NAME = "nettyCtx";
 
     private final Bootstrap bootstrap;
 
@@ -37,10 +37,6 @@ public class HttpNettyClientHandler extends SimpleChannelInboundHandler<HttpObje
         return bootstrap.connect(host, port);
     }
 
-    public void setNettyChannelContext(Channel channel, HttpNettyChannelContext nettyCtx) {
-        channel.attr(AttributeKey.valueOf(CHANNEL_CONTEXT_ATTR_NAME)).set(nettyCtx);
-    }
-
     /**
      * Triggered when channel is closed
      */
@@ -54,11 +50,6 @@ public class HttpNettyClientHandler extends SimpleChannelInboundHandler<HttpObje
         } catch (Throwable t) {
             log.error("channelInactive exceptionCaught", t);
         }
-    }
-
-    public HttpNettyChannelContext getNettyChannelContext(Channel channel) {
-        return (HttpNettyChannelContext)
-                channel.attr(AttributeKey.valueOf(CHANNEL_CONTEXT_ATTR_NAME)).get();
     }
 
     @Override
@@ -85,5 +76,14 @@ public class HttpNettyClientHandler extends SimpleChannelInboundHandler<HttpObje
         } catch (Throwable t) {
             log.error("channelRead0 exceptionCaught", t);
         }
+    }
+
+    void setNettyChannelContext(Channel channel, HttpNettyChannelContext nettyCtx) {
+        channel.attr(AttributeKey.valueOf(CHANNEL_CONTEXT_ATTR_NAME)).set(nettyCtx);
+    }
+
+    private HttpNettyChannelContext getNettyChannelContext(Channel channel) {
+        return (HttpNettyChannelContext)
+                channel.attr(AttributeKey.valueOf(CHANNEL_CONTEXT_ATTR_NAME)).get();
     }
 }

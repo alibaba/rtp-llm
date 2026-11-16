@@ -222,60 +222,11 @@ public class ServiceMetricsReporter implements org.flexlb.master.MasterMetrics {
                 ENGINE_BALANCING_MASTER_ALL_RT, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
     }
 
-    public void reportStepLatencyVariance(String modelName, String role, double variance) {
-        FlexMetricTags metricTags = FlexMetricTags.of("model", modelName, "role", role);
-        monitor.report(ENGINE_WORKER_INFO_STEP_LATENCY_VAR, metricTags, variance);
-        logger.debug(
-                "Step-latency variance - model: {}, role: {}, value: {}",
-                modelName,
-                role,
-                variance);
-    }
-
-    public void reportRunningLoadVariance(String modelName, String role, double variance) {
-        FlexMetricTags metricTags = FlexMetricTags.of("model", modelName, "role", role);
-        monitor.report(ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR, metricTags, variance);
-        logger.debug(
-                "Running-load variance - model: {}, role: {}, value: {}",
-                modelName,
-                role,
-                variance);
-    }
-
     public void reportRawServiceDiscoveryHostCount(String model, RoleType role, int count) {
         monitor.report(
                 ENGINE_SERVICE_DISCOVERY_RAW_HOST_COUNT,
                 FlexMetricTags.of("model", model, "role", role.name()),
                 count);
-    }
-
-    public void reportServiceDiscoveryResult(String modelName, int result, String role) {
-        FlexMetricTags metricTags = FlexMetricTags.of("model", modelName, "role", role);
-        monitor.report(ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT, metricTags, result);
-    }
-
-    public void reportStatusCheckRemoteInfo(String modelName, String role, Long startTime) {
-        FlexMetricTags metricTags =
-                FlexMetricTags.of(
-                        "model", modelName,
-                        "role", role);
-        monitor.report(
-                ENGINE_STATUS_VISITOR_RT,
-                metricTags,
-                (double) System.nanoTime() / 1000 - startTime);
-        monitor.report(ENGINE_STATUS_VISITOR_SUCCESS_QPS, metricTags, 1.0);
-    }
-
-    public void reportCacheStatusCheckRemoteInfo(String modelName, String role, Long startTime) {
-        FlexMetricTags metricTags =
-                FlexMetricTags.of(
-                        "model", modelName,
-                        "role", role);
-        monitor.report(
-                CACHE_STATUS_CHECK_VISITOR_RT,
-                metricTags,
-                (double) System.nanoTime() / 1000 - startTime);
-        monitor.report(CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS, metricTags, 1.0);
     }
 
     public void reportStatusCheckerFail(BalanceStatusEnum errorEnum, RoleType role) {
@@ -287,63 +238,6 @@ public class ServiceMetricsReporter implements org.flexlb.master.MasterMetrics {
         FlexMetricTags metricTags = statusCheckFailureTags(errorEnum, engineIp, role);
         monitor.report(ENGINE_STATUS_CHECK_FAIL, metricTags, 1.0);
         monitor.report(ENGINE_STATUS_CHECK_FAIL_TOTAL, metricTags, 1.0);
-    }
-
-    public void reportCacheStatusCheckerFail(
-            WorkerStatus workerStatus, BalanceStatusEnum errorEnum) {
-        RoleType role = workerStatus.getRole();
-        FlexMetricTags metricTags =
-                FlexMetricTags.of(
-                        "engineIp", workerStatus.getMetricIpPort(),
-                        "code", String.valueOf(errorEnum.getCode()),
-                        "role", role == null ? "" : role.getCode());
-        monitor.report(CACHE_STATUS_CHECK_FAIL, metricTags, 1.0);
-    }
-
-    public void reportStatusCheckerSuccess(
-            WorkerStatus workerStatus,
-            OptionalLong load,
-            int runningTaskInfoSize,
-            int finishedTaskListSize) {
-
-        WorkerStatus.EngineObservation status = workerStatus.committedEngineObservation();
-        WorkerStatus.PollHealth pollHealth = workerStatus.pollHealth();
-
-        long pollIntervalUs = pollHealth.successfulPollIntervalUs();
-        if (pollIntervalUs > 0) {
-            reportWorkerMetric(ENGINE_STATUS_CHECK_SUCCESS_PERIOD, workerStatus, pollIntervalUs);
-        }
-        load.ifPresent(value -> reportWorkerMetric(ENGINE_RUNNING_QUEUE_TIME, workerStatus, value));
-        if (status.availableConcurrency() != null) {
-            reportWorkerMetric(
-                    ENGINE_STATUS_AVAILABLE_CONCURRENCY,
-                    workerStatus,
-                    status.availableConcurrency());
-        }
-        reportWorkerMetric(ENGINE_FINISHED_TASK_LIST_SIZE, workerStatus, finishedTaskListSize);
-        reportWorkerMetric(ENGINE_RUNNING_TASK_INFO_SIZE, workerStatus, runningTaskInfoSize);
-        reportKvCacheCapacity(workerStatus, status);
-    }
-
-    public void reportCacheStatusCheckerSuccess(
-            WorkerStatus workerStatus, long successfulPollIntervalUs) {
-        CacheStatus cacheStatus = workerStatus.getCacheStatus();
-        if (successfulPollIntervalUs > 0L) {
-            reportWorkerMetric(
-                    CACHE_STATUS_CHECK_SUCCESS_PERIOD, workerStatus, successfulPollIntervalUs);
-        }
-        if (cacheStatus != null) {
-            long cacheKeySize = cacheStatus.getCacheKeySize();
-            reportWorkerMetric(CACHE_KEY_SIZE, workerStatus, cacheKeySize);
-        }
-    }
-
-    public void reportEncoderStatus(
-            String engineAddress, long pending, long total, long uncachedTokens) {
-        var tags = FlexMetricTags.of("engineIp", engineAddress, "role", "ENCODER");
-        monitor.report(ENCODER_PENDING_REQUEST_COUNT, tags, pending);
-        monitor.report(ENCODER_SELECTION_LOAD, tags, total);
-        monitor.report(ENCODER_UNCACHED_TOKEN_LOAD, tags, uncachedTokens);
     }
 
     public void reportBalancingService(int code, long elapsedMs) {
@@ -394,22 +288,6 @@ public class ServiceMetricsReporter implements org.flexlb.master.MasterMetrics {
                 System.currentTimeMillis());
     }
 
-    public void reportThreadPoolInfo(
-            String metricName, String name, int active, int queued, int core, int pool) {
-        monitor.report(
-                metricName,
-                FlexMetricTags.of("threadPool", name, "type", "executingTaskThreadSize"),
-                active);
-        monitor.report(
-                metricName, FlexMetricTags.of("threadPool", name, "type", "queueSize"), queued);
-        monitor.report(
-                metricName, FlexMetricTags.of("threadPool", name, "type", "corePoolSize"), core);
-        monitor.report(
-                metricName,
-                FlexMetricTags.of("threadPool", name, "type", "currentThreadSizeInPool"),
-                pool);
-    }
-
     public void reportArriveDelayTime(long requestTimeMs, long grpcEntryTime, long startTimeMs) {
         if (requestTimeMs == 0) {
             return;
@@ -435,7 +313,145 @@ public class ServiceMetricsReporter implements org.flexlb.master.MasterMetrics {
         monitor.report(GRACEFUL_LIFECYCLE_EVENT, FlexMetricTags.of("type", "process_ok"), 1);
     }
 
-    public void reportPrefillWorkerStatusTask(
+    public void reportDuration(Event event, long durationMs) {
+        monitor.report(
+                GRACEFUL_LIFECYCLE_EVENT,
+                FlexMetricTags.of(
+                        "type",
+                        event.name().toLowerCase(Locale.ROOT),
+                        "duration_ms",
+                        String.valueOf(durationMs)),
+                1);
+    }
+
+    public void reportRequestPayload(
+            boolean success, long inputTokens, long blockSize, Long messageBytes) {
+        var tags = FlexMetricTags.of("success", String.valueOf(success));
+        if (inputTokens >= 0) monitor.report(REQUEST_SEQ_LEN, tags, inputTokens);
+        if (blockSize >= 0) monitor.report(REQUEST_BLOCK_SIZE, tags, blockSize);
+        if (messageBytes != null) monitor.report(REQUEST_MESSAGE_BYTES, tags, messageBytes);
+    }
+
+    void reportStepLatencyVariance(String modelName, String role, double variance) {
+        FlexMetricTags metricTags = FlexMetricTags.of("model", modelName, "role", role);
+        monitor.report(ENGINE_WORKER_INFO_STEP_LATENCY_VAR, metricTags, variance);
+        logger.debug(
+                "Step-latency variance - model: {}, role: {}, value: {}",
+                modelName,
+                role,
+                variance);
+    }
+
+    void reportRunningLoadVariance(String modelName, String role, double variance) {
+        FlexMetricTags metricTags = FlexMetricTags.of("model", modelName, "role", role);
+        monitor.report(ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR, metricTags, variance);
+        logger.debug(
+                "Running-load variance - model: {}, role: {}, value: {}",
+                modelName,
+                role,
+                variance);
+    }
+
+    void reportServiceDiscoveryResult(String modelName, int result, String role) {
+        FlexMetricTags metricTags = FlexMetricTags.of("model", modelName, "role", role);
+        monitor.report(ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT, metricTags, result);
+    }
+
+    void reportStatusCheckRemoteInfo(String modelName, String role, Long startTime) {
+        FlexMetricTags metricTags =
+                FlexMetricTags.of(
+                        "model", modelName,
+                        "role", role);
+        monitor.report(
+                ENGINE_STATUS_VISITOR_RT,
+                metricTags,
+                (double) System.nanoTime() / 1000 - startTime);
+        monitor.report(ENGINE_STATUS_VISITOR_SUCCESS_QPS, metricTags, 1.0);
+    }
+
+    void reportCacheStatusCheckRemoteInfo(String modelName, String role, Long startTime) {
+        FlexMetricTags metricTags =
+                FlexMetricTags.of(
+                        "model", modelName,
+                        "role", role);
+        monitor.report(
+                CACHE_STATUS_CHECK_VISITOR_RT,
+                metricTags,
+                (double) System.nanoTime() / 1000 - startTime);
+        monitor.report(CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS, metricTags, 1.0);
+    }
+
+    void reportCacheStatusCheckerFail(WorkerStatus workerStatus, BalanceStatusEnum errorEnum) {
+        RoleType role = workerStatus.getRole();
+        FlexMetricTags metricTags =
+                FlexMetricTags.of(
+                        "engineIp", workerStatus.getMetricIpPort(),
+                        "code", String.valueOf(errorEnum.getCode()),
+                        "role", role == null ? "" : role.getCode());
+        monitor.report(CACHE_STATUS_CHECK_FAIL, metricTags, 1.0);
+    }
+
+    void reportStatusCheckerSuccess(
+            WorkerStatus workerStatus,
+            OptionalLong load,
+            int runningTaskInfoSize,
+            int finishedTaskListSize) {
+
+        WorkerStatus.EngineObservation status = workerStatus.committedEngineObservation();
+        WorkerStatus.PollHealth pollHealth = workerStatus.pollHealth();
+
+        long pollIntervalUs = pollHealth.successfulPollIntervalUs();
+        if (pollIntervalUs > 0) {
+            reportWorkerMetric(ENGINE_STATUS_CHECK_SUCCESS_PERIOD, workerStatus, pollIntervalUs);
+        }
+        load.ifPresent(value -> reportWorkerMetric(ENGINE_RUNNING_QUEUE_TIME, workerStatus, value));
+        if (status.availableConcurrency() != null) {
+            reportWorkerMetric(
+                    ENGINE_STATUS_AVAILABLE_CONCURRENCY,
+                    workerStatus,
+                    status.availableConcurrency());
+        }
+        reportWorkerMetric(ENGINE_FINISHED_TASK_LIST_SIZE, workerStatus, finishedTaskListSize);
+        reportWorkerMetric(ENGINE_RUNNING_TASK_INFO_SIZE, workerStatus, runningTaskInfoSize);
+        reportKvCacheCapacity(workerStatus, status);
+    }
+
+    void reportCacheStatusCheckerSuccess(WorkerStatus workerStatus, long successfulPollIntervalUs) {
+        CacheStatus cacheStatus = workerStatus.getCacheStatus();
+        if (successfulPollIntervalUs > 0L) {
+            reportWorkerMetric(
+                    CACHE_STATUS_CHECK_SUCCESS_PERIOD, workerStatus, successfulPollIntervalUs);
+        }
+        if (cacheStatus != null) {
+            long cacheKeySize = cacheStatus.getCacheKeySize();
+            reportWorkerMetric(CACHE_KEY_SIZE, workerStatus, cacheKeySize);
+        }
+    }
+
+    void reportEncoderStatus(String engineAddress, long pending, long total, long uncachedTokens) {
+        var tags = FlexMetricTags.of("engineIp", engineAddress, "role", "ENCODER");
+        monitor.report(ENCODER_PENDING_REQUEST_COUNT, tags, pending);
+        monitor.report(ENCODER_SELECTION_LOAD, tags, total);
+        monitor.report(ENCODER_UNCACHED_TOKEN_LOAD, tags, uncachedTokens);
+    }
+
+    void reportThreadPoolInfo(
+            String metricName, String name, int active, int queued, int core, int pool) {
+        monitor.report(
+                metricName,
+                FlexMetricTags.of("threadPool", name, "type", "executingTaskThreadSize"),
+                active);
+        monitor.report(
+                metricName, FlexMetricTags.of("threadPool", name, "type", "queueSize"), queued);
+        monitor.report(
+                metricName, FlexMetricTags.of("threadPool", name, "type", "corePoolSize"), core);
+        monitor.report(
+                metricName,
+                FlexMetricTags.of("threadPool", name, "type", "currentThreadSizeInPool"),
+                pool);
+    }
+
+    void reportPrefillWorkerStatusTask(
             String engineIp, String role, String group, WorkerStatus.TaskTelemetry task) {
         FlexMetricTags tags = lifecycleTags(engineIp, role, group);
         monitor.report(
@@ -491,18 +507,7 @@ public class ServiceMetricsReporter implements org.flexlb.master.MasterMetrics {
                 task.waitingEnteredTimeMs());
     }
 
-    public void reportDuration(Event event, long durationMs) {
-        monitor.report(
-                GRACEFUL_LIFECYCLE_EVENT,
-                FlexMetricTags.of(
-                        "type",
-                        event.name().toLowerCase(Locale.ROOT),
-                        "duration_ms",
-                        String.valueOf(durationMs)),
-                1);
-    }
-
-    public void reportWorkerStepMetrics(WorkerStatus worker, WorkerStatus.StepMetrics step) {
+    void reportWorkerStepMetrics(WorkerStatus worker, WorkerStatus.StepMetrics step) {
         FlexMetricTags tags =
                 FlexMetricTags.of(
                         "engineIp", worker.getMetricIpPort(),
@@ -517,8 +522,7 @@ public class ServiceMetricsReporter implements org.flexlb.master.MasterMetrics {
         monitor.report(ENGINE_WORKER_STEP_BUDGET_FILL_RATIO, tags, step.budgetFillRatio());
     }
 
-    public void reportCacheHitComparisonMetrics(
-            WorkerStatus worker, CacheHitComparisonResult comparison) {
+    void reportCacheHitComparisonMetrics(WorkerStatus worker, CacheHitComparisonResult comparison) {
         if (comparison == null) {
             return;
         }
@@ -590,14 +594,6 @@ public class ServiceMetricsReporter implements org.flexlb.master.MasterMetrics {
                                 / (double) inputTokens);
             }
         }
-    }
-
-    public void reportRequestPayload(
-            boolean success, long inputTokens, long blockSize, Long messageBytes) {
-        var tags = FlexMetricTags.of("success", String.valueOf(success));
-        if (inputTokens >= 0) monitor.report(REQUEST_SEQ_LEN, tags, inputTokens);
-        if (blockSize >= 0) monitor.report(REQUEST_BLOCK_SIZE, tags, blockSize);
-        if (messageBytes != null) monitor.report(REQUEST_MESSAGE_BYTES, tags, messageBytes);
     }
 
     @Scheduled(fixedRate = 2000)

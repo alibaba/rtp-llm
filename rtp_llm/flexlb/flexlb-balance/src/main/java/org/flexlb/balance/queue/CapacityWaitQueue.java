@@ -109,7 +109,7 @@ public final class CapacityWaitQueue {
     }
 
     /**
-     * Groups requests blocked on the same capacity and allows one retry at a time.
+     * Keeps ordered waiters and the single capacity retry for one role/group.
      */
     private final class Domain {
         private final CapacityKey key;

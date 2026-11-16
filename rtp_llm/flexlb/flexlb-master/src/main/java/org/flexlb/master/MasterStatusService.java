@@ -14,7 +14,7 @@ import java.util.Map;
 @Slf4j
 @Component
 public class MasterStatusService implements MasterStatusView {
-    public static final String MASTER_CHANGE_NOTIFY_PATH = "/rtp_llm/notify_master";
+    static final String MASTER_CHANGE_NOTIFY_PATH = "/rtp_llm/notify_master";
 
     private final ZookeeperMasterElectService zookeeperMasterElectService;
     private final ZookeeperMasterElectService.LocalNodeIdentity localNode;

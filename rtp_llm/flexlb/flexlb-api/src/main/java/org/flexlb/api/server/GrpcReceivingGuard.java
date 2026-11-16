@@ -28,7 +28,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * measurement. Normal receiving completion is decoded half-close; terminal cleanup waits for the
  * application listener, including message producers already queued when the transport closed.
  */
-public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
+final class GrpcReceivingGuard extends ServerStreamTracer.Factory
         implements ServerCallExecutorSupplier, ServerInterceptor, AutoCloseable {
     private static final Context.Key<Lease> LEASE = Context.key("receive-guard");
 
@@ -55,7 +55,7 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
     private final long scheduleByteLimit;
     private final long controlByteLimit;
 
-    public GrpcReceivingGuard(
+    GrpcReceivingGuard(
             int limit,
             int controlLimit,
             long timeoutMillis,
@@ -98,32 +98,12 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
         this(limit, controlLimit, timeoutMillis, business, control, Long.MAX_VALUE, Long.MAX_VALUE);
     }
 
-    public long receivingBytes() {
-        return receivingBytes.get();
-    }
-
-    public long controlReceivingBytes() {
-        return controlReceivingBytes.get();
-    }
-
     public int receiving() {
         return receiving.get();
     }
 
-    public int controlReceiving() {
-        return controlReceiving.get();
-    }
-
-    public int pendingTimers() {
-        return timer.getQueue().size();
-    }
-
     public long rejected() {
         return rejected.get();
-    }
-
-    public long timedOut() {
-        return timedOut.get();
     }
 
     @Override
@@ -286,6 +266,26 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
         }
     }
 
+    long receivingBytes() {
+        return receivingBytes.get();
+    }
+
+    long controlReceivingBytes() {
+        return controlReceivingBytes.get();
+    }
+
+    int controlReceiving() {
+        return controlReceiving.get();
+    }
+
+    int pendingTimers() {
+        return timer.getQueue().size();
+    }
+
+    long timedOut() {
+        return timedOut.get();
+    }
+
     private boolean acquire(AtomicInteger counter, int maximum) {
         if (stopping) return false;
         for (; ; ) {
@@ -344,7 +344,7 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
             this.byteLimit = byteLimit;
         }
 
-        void charge(long bytes) {
+        private void charge(long bytes) {
             if (bytes <= 0) return;
             synchronized (this) {
                 if (!admitted || closed || finished) return;
@@ -363,14 +363,14 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
                     new Metadata());
         }
 
-        synchronized void terminal() {
+        private synchronized void terminal() {
             closed = true;
             transportClosed = true;
             if (timeout != null) timeout.cancel(false);
             if (!handlerStarted) finish();
         }
 
-        synchronized void finish() {
+        private synchronized void finish() {
             if (finished) return;
             finished = true;
             if (admitted) {
@@ -381,17 +381,17 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
             active.remove(this);
         }
 
-        void close(Status status) {
+        private void close(Status status) {
             if (claimClose()) call.close(status, new Metadata());
         }
 
-        synchronized boolean claimClose() {
+        private synchronized boolean claimClose() {
             if (closed) return false;
             closed = true;
             return true;
         }
 
-        void expire() {
+        private void expire() {
             synchronized (this) {
                 if (finished || closed) return;
                 closed = true;
@@ -406,7 +406,7 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
         // restores STOPPED in finally but an Error skips the normal nonempty-queue reschedule.
         // Enqueueing a no-op on that SAME serial executor restarts pending producer cleanup.
         // This path never returns a reservation; the terminal listener/marker must still run.
-        void kickAfterError(Runnable task) {
+        private void kickAfterError(Runnable task) {
             if (task instanceof Executor) {
                 try {
                     ((Executor) task).execute(() -> {});
@@ -421,7 +421,7 @@ public final class GrpcReceivingGuard extends ServerStreamTracer.Factory
         // finish marker in the same serial queue, behind all producers already enqueued.
         // This is deliberately NOT a marker in the shared business executor queue.
         // For an unsupported runnable shape, fail closed rather than reuse retained bytes.
-        void afterTask(Runnable task) {
+        private void afterTask(Runnable task) {
             synchronized (this) {
                 if (!transportClosed
                         || !startCallFailed

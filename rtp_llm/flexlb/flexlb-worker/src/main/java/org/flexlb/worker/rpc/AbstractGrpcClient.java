@@ -29,7 +29,7 @@ public abstract class AbstractGrpcClient implements EngineAddressResolver.Listen
      *
      * @see ServiceType
      */
-    protected final Map<String /*ip:port:serviceType*/, Invoker> channelPool =
+    private final Map<String /*ip:port:serviceType*/, Invoker> channelPool =
             new ConcurrentHashMap<>();
 
     protected final GrpcReporter grpcReporter;
@@ -374,8 +374,11 @@ public abstract class AbstractGrpcClient implements EngineAddressResolver.Listen
         // the pooled channel of the target engine worker.
         ENGINE_CANCEL("engine_cancel", "Cancel");
 
-        @Getter private final String suffix;
-        @Getter private final String operationName;
+        @Getter(lombok.AccessLevel.PACKAGE)
+        private final String suffix;
+
+        @Getter(lombok.AccessLevel.PACKAGE)
+        private final String operationName;
 
         ServiceType(String suffix, String operationName) {
             this.suffix = suffix;

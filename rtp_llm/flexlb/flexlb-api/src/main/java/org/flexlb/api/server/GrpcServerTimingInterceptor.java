@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * </ul>
  */
 @Component
-public class GrpcServerTimingInterceptor implements ServerInterceptor {
+class GrpcServerTimingInterceptor implements ServerInterceptor {
     private static final Context.Key<RequestMessageSize> REQUEST_MESSAGE_SIZE_KEY =
             Context.key("requestMessageSize");
 
@@ -32,15 +32,11 @@ public class GrpcServerTimingInterceptor implements ServerInterceptor {
      * Context key carrying the gRPC server entry timestamp (epoch millis).
      * Accessed by {@code FlexlbServiceImpl} via {@link #get()}.
      */
-    public static final Context.Key<Long> GRPC_ENTRY_TIME_KEY = Context.key("grpcEntryTime");
+    private static final Context.Key<Long> GRPC_ENTRY_TIME_KEY = Context.key("grpcEntryTime");
 
-    public static final Context.Key<Long> GRPC_ENTRY_NANOS_KEY = Context.key("grpcEntryNanos");
+    private static final Context.Key<Long> GRPC_ENTRY_NANOS_KEY = Context.key("grpcEntryNanos");
 
     private final AtomicLong lastScheduleArrivalNanos = new AtomicLong(System.nanoTime());
-
-    public long getLastScheduleArrivalNanos() {
-        return lastScheduleArrivalNanos.get();
-    }
 
     /**
      * Convenience method to retrieve the current gRPC entry time from the
@@ -49,10 +45,6 @@ public class GrpcServerTimingInterceptor implements ServerInterceptor {
      */
     public static Long get() {
         return GRPC_ENTRY_TIME_KEY.get();
-    }
-
-    public static Long getNanos() {
-        return GRPC_ENTRY_NANOS_KEY.get();
     }
 
     /**
@@ -115,6 +107,14 @@ public class GrpcServerTimingInterceptor implements ServerInterceptor {
                         .withValue(GRPC_ENTRY_TIME_KEY, grpcEntryTime)
                         .withValue(GRPC_ENTRY_NANOS_KEY, grpcEntryNanos);
         return Contexts.interceptCall(ctx, call, headers, next);
+    }
+
+    long getLastScheduleArrivalNanos() {
+        return lastScheduleArrivalNanos.get();
+    }
+
+    static Long getNanos() {
+        return GRPC_ENTRY_NANOS_KEY.get();
     }
 
     /**

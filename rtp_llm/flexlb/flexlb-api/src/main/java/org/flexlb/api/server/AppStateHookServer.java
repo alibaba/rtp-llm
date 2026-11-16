@@ -25,8 +25,7 @@ import static org.springframework.web.reactive.function.server.RouterFunctions.r
  */
 @Slf4j
 @Component
-public class AppStateHookServer {
-
+class AppStateHookServer {
     private final ApplicationLifecycle applicationLifecycle;
     private final ServiceMetricsReporter lifecycleReporter;
 
@@ -34,7 +33,7 @@ public class AppStateHookServer {
 
     private volatile InetAddress localAddress;
 
-    public AppStateHookServer(
+    AppStateHookServer(
             ApplicationLifecycle applicationLifecycle, ServiceMetricsReporter lifecycleReporter) {
         this.applicationLifecycle = applicationLifecycle;
         this.lifecycleReporter = lifecycleReporter;
@@ -51,14 +50,14 @@ public class AppStateHookServer {
     }
 
     @Bean
-    public RouterFunction<ServerResponse> appStateHook() {
+    RouterFunction<ServerResponse> appStateHook() {
         return route().GET("/hook/process_ok", accept(MediaType.ALL), this::handleProcessOk)
                 .GET("/hook/after_start", accept(MediaType.ALL), this::handleAppStartUp)
                 .GET("/hook/pre_stop", accept(MediaType.ALL), this::handleAppStop)
                 .build();
     }
 
-    public Mono<ServerResponse> handleProcessOk(ServerRequest request) {
+    private Mono<ServerResponse> handleProcessOk(ServerRequest request) {
         log.warn("recv /hook/process_ok request.");
         if (isNonLocalRequest(request)) {
             return buildErrorResponse("handleProcessOk");
@@ -72,12 +71,29 @@ public class AppStateHookServer {
         }
     }
 
+    private boolean isNonLocalRequest(ServerRequest request) {
+        if (request.remoteAddress().isEmpty()) {
+            return true;
+        }
+        InetAddress remoteAddress = request.remoteAddress().get().getAddress();
+        if (remoteAddress.isLoopbackAddress()) {
+            return false;
+        }
+        return !remoteAddress.equals(localAddress);
+    }
+
+    private static Mono<ServerResponse> buildErrorResponse(String handler) {
+        log.info("{} failed, remote request is not allowed.", handler);
+        return ServerResponse.status(403)
+                .body(Mono.just("remote request is not allowed."), String.class);
+    }
+
     // NOTE: Intentionally blocking the Reactor event loop here.
     // This hook is invoked only once during startup by the local sidecar,
     // before any traffic is served. Blocking ensures the 200 response is
     // returned only after online() completes, so the sidecar can reliably
     // determine startup success. No need to offload to boundedElastic.
-    public Mono<ServerResponse> handleAppStartUp(ServerRequest request) {
+    private Mono<ServerResponse> handleAppStartUp(ServerRequest request) {
         log.warn("recv /hook/after_start request.");
         if (isNonLocalRequest(request)) {
             return buildErrorResponse("handleAppStartUp");
@@ -96,7 +112,7 @@ public class AppStateHookServer {
         }
     }
 
-    public Mono<ServerResponse> handleAppStop(ServerRequest request) {
+    private Mono<ServerResponse> handleAppStop(ServerRequest request) {
         log.warn("recv /hook/pre_stop request.");
 
         if (isNonLocalRequest(request)) {
@@ -130,22 +146,5 @@ public class AppStateHookServer {
                             return ServerResponse.status(500)
                                     .body(Mono.just("Shutdown error."), String.class);
                         });
-    }
-
-    private boolean isNonLocalRequest(ServerRequest request) {
-        if (request.remoteAddress().isEmpty()) {
-            return true;
-        }
-        InetAddress remoteAddress = request.remoteAddress().get().getAddress();
-        if (remoteAddress.isLoopbackAddress()) {
-            return false;
-        }
-        return !remoteAddress.equals(localAddress);
-    }
-
-    private static Mono<ServerResponse> buildErrorResponse(String handler) {
-        log.info("{} failed, remote request is not allowed.", handler);
-        return ServerResponse.status(403)
-                .body(Mono.just("remote request is not allowed."), String.class);
     }
 }

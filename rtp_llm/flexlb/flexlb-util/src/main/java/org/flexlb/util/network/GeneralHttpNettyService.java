@@ -39,7 +39,6 @@ import java.util.concurrent.atomic.LongAdder;
  */
 @Slf4j
 public class GeneralHttpNettyService {
-
     private final HttpNettyClientHandler nettyClient;
     private final Scheduler httpRequestScheduler;
     private final ThreadPoolExecutor httpRequestExecutor;
@@ -66,7 +65,7 @@ public class GeneralHttpNettyService {
         return this.doRequest(request, uri, path, null, responseClz);
     }
 
-    public <Request, Result> Mono<Result> doRequest(
+    private <Request, Result> Mono<Result> doRequest(
             Request request, URI uri, String path, HttpHeaders headers, Class<Result> responseClz) {
         return Mono.just(request)
                 .map(
@@ -91,6 +90,83 @@ public class GeneralHttpNettyService {
                                                 nettyContext ->
                                                         executeHttpRequest(
                                                                 nettyContext, uri, path, headers)));
+    }
+
+    private <Result> void handleNettyMessage(
+            HttpNettyChannelContext<Result> nettyCtx, HttpObject obj, Class<Result> responseClz) {
+        if (nettyCtx.getSink().isCancelled()) {
+            NettyUtils.finish(nettyCtx);
+            log.error("sink canceled, finish netty");
+            return;
+        }
+        if (nettyCtx.isFinish()) {
+            return;
+        }
+
+        if (obj instanceof HttpResponse response) {
+            nettyCtx.setHttpResp(response);
+        } else if (obj instanceof HttpContent) {
+            handleNettyChunk(nettyCtx, obj, responseClz);
+        } else {
+            log.error("uncatchable message types {}", obj);
+        }
+    }
+
+    private <Result> void handleNettyChunk(
+            HttpNettyChannelContext<Result> nettyCtx, HttpObject obj, Class<Result> responseClz) {
+
+        // Check if current HTTP response status is 200; if not 200, indicates abnormal situation,
+        // parse chunk and return error
+        int httpStatusCode = NettyUtils.getHttpStatusCode(nettyCtx);
+
+        // If status code is not 200, indicates abnormal situation, parse chunk and return error
+        if (httpStatusCode != StatusEnum.SUCCESS.getCode()) {
+            NettyUtils.cacheBuffer(nettyCtx, obj);
+            String body = NettyUtils.readBody(nettyCtx);
+            NettyUtils.finishNettyWithException(
+                    nettyCtx,
+                    new RuntimeException(
+                            "http error, httpStatusCode=" + httpStatusCode + ", body=" + body));
+            return;
+        }
+
+        // Add to buffer
+        NettyUtils.cacheBuffer(nettyCtx, obj);
+
+        // For non-streaming calls, wait until last chunk arrives before parsing
+        if (!(obj instanceof LastHttpContent)) {
+            return;
+        }
+
+        try {
+            byte[] bodyBytes = NettyUtils.getBodyBytes(nettyCtx);
+            nettyCtx.getByteDataList().clear();
+            nettyCtx.getByteDataSize().reset();
+
+            // For non-streaming calls, ignore if data is empty
+            // Normally bodyBytes should not be empty
+            // Currently only occurs when engine disconnects abnormally, due to HttpObjectAggregator
+            // aggregation, returns a FullResponse with empty body
+            if (bodyBytes.length == 0) {
+                return;
+            }
+
+            Result response;
+            try {
+                response = JsonUtils.toObject(bodyBytes, responseClz);
+            } catch (Throwable e) {
+                throw StatusEnum.INTERNAL_ERROR.toException(e);
+            }
+            nettyCtx.getSink().next(response);
+            // Upstream stream complete
+            nettyCtx.getSink().complete();
+            // Downstream netty complete
+            NettyUtils.finish(nettyCtx);
+
+        } catch (FlexLBException e) {
+            nettyCtx.getSink().error(e);
+            NettyUtils.finish(nettyCtx);
+        }
     }
 
     private <Result> Mono<HttpNettyChannelContext<Result>> connectBackend(
@@ -177,82 +253,5 @@ public class GeneralHttpNettyService {
                                     e));
         }
         nettyCtx.getChannel().close();
-    }
-
-    private <Result> void handleNettyMessage(
-            HttpNettyChannelContext<Result> nettyCtx, HttpObject obj, Class<Result> responseClz) {
-        if (nettyCtx.getSink().isCancelled()) {
-            NettyUtils.finish(nettyCtx);
-            log.error("sink canceled, finish netty");
-            return;
-        }
-        if (nettyCtx.isFinish()) {
-            return;
-        }
-
-        if (obj instanceof HttpResponse response) {
-            nettyCtx.setHttpResp(response);
-        } else if (obj instanceof HttpContent) {
-            handleNettyChunk(nettyCtx, obj, responseClz);
-        } else {
-            log.error("uncatchable message types {}", obj);
-        }
-    }
-
-    private <Result> void handleNettyChunk(
-            HttpNettyChannelContext<Result> nettyCtx, HttpObject obj, Class<Result> responseClz) {
-
-        // Check if current HTTP response status is 200; if not 200, indicates abnormal situation,
-        // parse chunk and return error
-        int httpStatusCode = NettyUtils.getHttpStatusCode(nettyCtx);
-
-        // If status code is not 200, indicates abnormal situation, parse chunk and return error
-        if (httpStatusCode != StatusEnum.SUCCESS.getCode()) {
-            NettyUtils.cacheBuffer(nettyCtx, obj);
-            String body = NettyUtils.readBody(nettyCtx);
-            NettyUtils.finishNettyWithException(
-                    nettyCtx,
-                    new RuntimeException(
-                            "http error, httpStatusCode=" + httpStatusCode + ", body=" + body));
-            return;
-        }
-
-        // Add to buffer
-        NettyUtils.cacheBuffer(nettyCtx, obj);
-
-        // For non-streaming calls, wait until last chunk arrives before parsing
-        if (!(obj instanceof LastHttpContent)) {
-            return;
-        }
-
-        try {
-            byte[] bodyBytes = NettyUtils.getBodyBytes(nettyCtx);
-            nettyCtx.getByteDataList().clear();
-            nettyCtx.getByteDataSize().reset();
-
-            // For non-streaming calls, ignore if data is empty
-            // Normally bodyBytes should not be empty
-            // Currently only occurs when engine disconnects abnormally, due to HttpObjectAggregator
-            // aggregation, returns a FullResponse with empty body
-            if (bodyBytes.length == 0) {
-                return;
-            }
-
-            Result response;
-            try {
-                response = JsonUtils.toObject(bodyBytes, responseClz);
-            } catch (Throwable e) {
-                throw StatusEnum.INTERNAL_ERROR.toException(e);
-            }
-            nettyCtx.getSink().next(response);
-            // Upstream stream complete
-            nettyCtx.getSink().complete();
-            // Downstream netty complete
-            NettyUtils.finish(nettyCtx);
-
-        } catch (FlexLBException e) {
-            nettyCtx.getSink().error(e);
-            NettyUtils.finish(nettyCtx);
-        }
     }
 }

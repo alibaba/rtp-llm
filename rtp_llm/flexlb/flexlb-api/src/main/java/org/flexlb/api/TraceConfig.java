@@ -92,36 +92,12 @@ final class TraceConfig {
     private Integer httpTimeoutMs;
     private String source;
 
-    public double samplerRatio() {
-        return samplerRatio == null ? 1.0 : samplerRatio;
-    }
-
     public String endpoint() {
         return endpoint == null ? "" : endpoint;
     }
 
     public Map<String, String> headers() {
         return headers == null ? Map.of() : headers;
-    }
-
-    public String certificate() {
-        return certificate == null ? "" : certificate;
-    }
-
-    public int maxQueueSize() {
-        return maxQueueSize == null ? 2048 : maxQueueSize;
-    }
-
-    public int maxExportBatchSize() {
-        return maxExportBatchSize == null ? 512 : maxExportBatchSize;
-    }
-
-    public int scheduleDelayMs() {
-        return scheduleDelayMs == null ? 5000 : scheduleDelayMs;
-    }
-
-    public int httpTimeoutMs() {
-        return httpTimeoutMs == null ? 3000 : httpTimeoutMs;
     }
 
     public String source() {
@@ -136,6 +112,30 @@ final class TraceConfig {
 
     public boolean enabled() {
         return Boolean.TRUE.equals(enabled);
+    }
+
+    double samplerRatio() {
+        return samplerRatio == null ? 1.0 : samplerRatio;
+    }
+
+    String certificate() {
+        return certificate == null ? "" : certificate;
+    }
+
+    int maxQueueSize() {
+        return maxQueueSize == null ? 2048 : maxQueueSize;
+    }
+
+    int maxExportBatchSize() {
+        return maxExportBatchSize == null ? 512 : maxExportBatchSize;
+    }
+
+    int scheduleDelayMs() {
+        return scheduleDelayMs == null ? 5000 : scheduleDelayMs;
+    }
+
+    int httpTimeoutMs() {
+        return httpTimeoutMs == null ? 3000 : httpTimeoutMs;
     }
 
     static TraceConfig parse(String raw) {

@@ -18,12 +18,12 @@ import java.util.List;
 public class ServiceDiscoveryConfiguration {
 
     @Bean(destroyMethod = "")
-    public ServiceDiscoveryProvider staticEnvironmentServiceDiscoveryProvider() {
+    ServiceDiscoveryProvider staticEnvironmentServiceDiscoveryProvider() {
         return new StaticServiceDiscoveryProvider();
     }
 
     @Bean(destroyMethod = "shutdown")
-    public RoutingServiceDiscovery routingServiceDiscovery(
+    RoutingServiceDiscovery routingServiceDiscovery(
             List<ServiceDiscoveryProvider> providers,
             ObjectProvider<ConfigService> configServiceProvider) {
         DiscoveryClientSettings defaults = new DiscoveryClientSettings();

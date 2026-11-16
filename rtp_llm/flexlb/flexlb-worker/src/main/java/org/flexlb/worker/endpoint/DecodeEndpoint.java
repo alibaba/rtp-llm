@@ -704,11 +704,11 @@ public class DecodeEndpoint extends WorkerEndpoint
             this.priority = priority;
         }
 
-        RequestRegistration reservation() {
+        private RequestRegistration reservation() {
             return registration;
         }
 
-        boolean matches(WorkerEndpoint.RequestRegistration exact) {
+        private boolean matches(WorkerEndpoint.RequestRegistration exact) {
             return exact == registration;
         }
     }

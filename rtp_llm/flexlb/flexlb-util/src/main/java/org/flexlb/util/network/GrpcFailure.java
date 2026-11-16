@@ -179,12 +179,6 @@ public final class GrpcFailure {
      * Classifies a gRPC failure and exposes transport retry eligibility to the caller.
      */
     public record Analysis(Kind kind, Status.Code grpcCode, Throwable rootCause) {
-        public boolean confirmedLocalFailure() {
-            return kind == Kind.LOCAL_MEMORY_EXHAUSTED
-                    || kind == Kind.LOCAL_EXECUTOR_REJECTED
-                    || kind == Kind.LOCAL_BIND_FAILED;
-        }
-
         /**
          * Caller also enforces operation idempotency and the single retry limit.
          */
@@ -211,6 +205,12 @@ public final class GrpcFailure {
                         true;
                 default -> false;
             };
+        }
+
+        boolean confirmedLocalFailure() {
+            return kind == Kind.LOCAL_MEMORY_EXHAUSTED
+                    || kind == Kind.LOCAL_EXECUTOR_REJECTED
+                    || kind == Kind.LOCAL_BIND_FAILED;
         }
     }
 }

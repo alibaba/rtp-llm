@@ -13,7 +13,7 @@ import java.util.function.Consumer;
  * Serializes each owner's effects outside Context's monitor. Cleanup notifications coalesce;
  * a task carrying a reserved frontend response must run even when cleanup is already pending.
  */
-public final class RequestCloseQueue {
+final class RequestCloseQueue {
     private final ThreadLocal<Boolean> executing = new ThreadLocal<>();
     private final ConcurrentMap<Object, Lane> lanes = new ConcurrentHashMap<>();
 

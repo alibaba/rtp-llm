@@ -8,7 +8,6 @@ import org.slf4j.LoggerFactory;
  * Business logger facade. Log filtering is delegated to the configured SLF4J backend.
  */
 public final class Logger {
-
     public static final String LOGGER_NAME = "flexlbLogger";
     private static final org.slf4j.Logger log = LoggerFactory.getLogger(LOGGER_NAME);
 
@@ -16,13 +15,6 @@ public final class Logger {
 
     public static boolean isDebugEnabled() {
         return log.isDebugEnabled();
-    }
-
-    /**
-     * Returns whether fine-grained per-candidate tracing is enabled.
-     */
-    public static boolean isTraceEnabled() {
-        return log.isTraceEnabled();
     }
 
     public static void trace(String format, Object argument) {
@@ -1051,6 +1043,13 @@ public final class Logger {
     public static void setLevel(LogLevel level) {
         Level logbackLevel = level == null ? Level.INFO : Level.toLevel(level.name(), Level.INFO);
         logbackLogger().setLevel(logbackLevel);
+    }
+
+    /**
+     * Returns whether fine-grained per-candidate tracing is enabled.
+     */
+    static boolean isTraceEnabled() {
+        return log.isTraceEnabled();
     }
 
     private static ch.qos.logback.classic.Logger logbackLogger() {

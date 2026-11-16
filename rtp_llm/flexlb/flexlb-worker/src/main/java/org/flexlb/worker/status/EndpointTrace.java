@@ -45,17 +45,6 @@ public final class EndpointTrace {
     private volatile long scannedKeys;
     private volatile long removedMappings;
 
-    public void recordUnavailable(String reason, long lastSuccessUs, long failures) {
-        unavailableReason = bounded(reason, MAX_REASON_CHARS);
-        decidedAtMs = System.currentTimeMillis();
-        lastSuccessAgeUs =
-                lastSuccessUs == 0L
-                        ? -1L
-                        : TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) - lastSuccessUs;
-        consecutiveFailures = failures;
-        record(Stage.UNAVAILABLE_DECISION);
-    }
-
     public void record(Stage stage) {
         if (stage == Stage.ENDPOINT_PUBLISHED && !endpointPublished.compareAndSet(false, true)) {
             return;
@@ -109,19 +98,6 @@ public final class EndpointTrace {
     }
 
     /**
-     * WorkerStatus holds its health monitor so only an admitted poll replaces the latest snapshot.
-     */
-    public Poll beginPoll(String kind, long cycle) {
-        Poll pollTrace = new Poll(kind, ++nextPollId, cycle);
-        switch (kind) {
-            case "STATUS" -> latestStatusPoll = pollTrace;
-            case "CACHE" -> latestCachePoll = pollTrace;
-            default -> throw new IllegalArgumentException("Unknown poll kind: " + kind);
-        }
-        return pollTrace;
-    }
-
-    /**
      * Captures both poll kinds without locks; concurrent fields can describe adjacent instants.
      */
     public Snapshot snapshot() {
@@ -148,7 +124,31 @@ public final class EndpointTrace {
                 cachePoll == null ? null : cachePoll.snapshot(now));
     }
 
-    public static Throwable unwrap(Throwable failure) {
+    void recordUnavailable(String reason, long lastSuccessUs, long failures) {
+        unavailableReason = bounded(reason, MAX_REASON_CHARS);
+        decidedAtMs = System.currentTimeMillis();
+        lastSuccessAgeUs =
+                lastSuccessUs == 0L
+                        ? -1L
+                        : TimeUnit.NANOSECONDS.toMicros(System.nanoTime()) - lastSuccessUs;
+        consecutiveFailures = failures;
+        record(Stage.UNAVAILABLE_DECISION);
+    }
+
+    /**
+     * WorkerStatus holds its health monitor so only an admitted poll replaces the latest snapshot.
+     */
+    Poll beginPoll(String kind, long cycle) {
+        Poll pollTrace = new Poll(kind, ++nextPollId, cycle);
+        switch (kind) {
+            case "STATUS" -> latestStatusPoll = pollTrace;
+            case "CACHE" -> latestCachePoll = pollTrace;
+            default -> throw new IllegalArgumentException("Unknown poll kind: " + kind);
+        }
+        return pollTrace;
+    }
+
+    static Throwable unwrap(Throwable failure) {
         if (!(failure instanceof CompletionException || failure instanceof ExecutionException)) {
             return failure;
         }
@@ -584,11 +584,6 @@ public final class EndpointTrace {
             return firstFailureStage.get();
         }
 
-        public void recordRpcStarted(long timeoutMs) {
-            rpcTimeoutMs = timeoutMs;
-            record(Stage.RPC_STARTED);
-        }
-
         public void record(Stage point) {
             record(point, (Throwable) null);
         }
@@ -649,7 +644,12 @@ public final class EndpointTrace {
             record(point);
         }
 
-        public void skippedBusy() {
+        void recordRpcStarted(long timeoutMs) {
+            rpcTimeoutMs = timeoutMs;
+            record(Stage.RPC_STARTED);
+        }
+
+        void skippedBusy() {
             skippedBusy.incrementAndGet();
         }
 

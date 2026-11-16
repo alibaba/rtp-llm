@@ -21,25 +21,10 @@ import java.util.concurrent.TimeUnit;
  */
 @Component
 public class KvcmMetaServiceClient {
-
     private final GrpcChannelPool<GrpcTarget> channelPool;
 
     public KvcmMetaServiceClient(GrpcChannelFactory channelFactory) {
         this.channelPool = new GrpcChannelPool<>(channelFactory::create);
-    }
-
-    public GetClusterInfoResponse getClusterInfo(
-            GrpcTarget target, GetClusterInfoRequest request, long requestTimeoutMs) {
-        return MetaServiceGrpc.newBlockingStub(channelFor(target))
-                .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS)
-                .getClusterInfo(request);
-    }
-
-    public GetHostCacheStateResponse getHostCacheState(
-            GrpcTarget target, GetHostCacheStateRequest request, Deadline queryDeadline) {
-        return MetaServiceGrpc.newBlockingStub(channelFor(target))
-                .withDeadline(queryDeadline)
-                .getHostCacheState(request);
     }
 
     public void removeStaleChannels(Collection<GrpcTarget> activeTargets) {
@@ -49,6 +34,20 @@ public class KvcmMetaServiceClient {
     @PreDestroy
     public void shutdown() {
         channelPool.shutdown();
+    }
+
+    GetClusterInfoResponse getClusterInfo(
+            GrpcTarget target, GetClusterInfoRequest request, long requestTimeoutMs) {
+        return MetaServiceGrpc.newBlockingStub(channelFor(target))
+                .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS)
+                .getClusterInfo(request);
+    }
+
+    GetHostCacheStateResponse getHostCacheState(
+            GrpcTarget target, GetHostCacheStateRequest request, Deadline queryDeadline) {
+        return MetaServiceGrpc.newBlockingStub(channelFor(target))
+                .withDeadline(queryDeadline)
+                .getHostCacheState(request);
     }
 
     private ManagedChannel channelFor(GrpcTarget target) {

@@ -231,10 +231,6 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
         timing = timing.withTotalElapsedUs((System.nanoTime() - timing.startedNanos()) / 1_000L);
     }
 
-    public void recordPreemptionStatistics(long cost, int requestCount) {
-        preemptionStatistics = new PreemptionStatistics(cost, requestCount);
-    }
-
     public synchronized void recordCacheQuery(String source, long queryTimeUs) {
         cacheSource = source;
         cacheQueryUs += Math.max(0L, queryTimeUs);
@@ -299,6 +295,10 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
     @Override
     public boolean isResponseDone() {
         return future != null && future.isDone();
+    }
+
+    void recordPreemptionStatistics(long cost, int requestCount) {
+        preemptionStatistics = new PreemptionStatistics(cost, requestCount);
     }
 
     /**

@@ -65,11 +65,22 @@ public class WhitelistMetricsFilterConfig {
     }
 
     /**
+     * Sets the early-return allowlist on {@link MicrometerFlexMonitor}. The
+     * set is a prefix-aware view: {@code contains} applies
+     * {@link #matches(List, String)} instead of exact equality, keeping the
+     * early-return layer semantics aligned with the {@link MeterFilter}.
+     */
+    @PostConstruct
+    public void init() {
+        MicrometerFlexMonitor.setAllowedMetrics(allowedMetrics);
+    }
+
+    /**
      * Defensive MeterRegistry filter: allows all non-flexlb metrics, and only
      * allows flexlb metrics whose prometheus-form name matches the whitelist.
      */
     @Bean
-    public MeterFilter whitelistMetricsFilter() {
+    MeterFilter whitelistMetricsFilter() {
         return new MeterFilter() {
             @Override
             public MeterFilterReply accept(Meter.Id id) {
@@ -82,17 +93,6 @@ public class WhitelistMetricsFilterConfig {
                         : MeterFilterReply.DENY;
             }
         };
-    }
-
-    /**
-     * Sets the early-return allowlist on {@link MicrometerFlexMonitor}. The
-     * set is a prefix-aware view: {@code contains} applies
-     * {@link #matches(List, String)} instead of exact equality, keeping the
-     * early-return layer semantics aligned with the {@link MeterFilter}.
-     */
-    @PostConstruct
-    public void init() {
-        MicrometerFlexMonitor.setAllowedMetrics(allowedMetrics);
     }
 
     /**

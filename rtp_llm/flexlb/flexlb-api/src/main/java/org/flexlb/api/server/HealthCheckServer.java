@@ -17,11 +17,11 @@ import static org.springframework.web.reactive.function.server.RouterFunctions.r
  */
 @Component
 @Slf4j
-public class HealthCheckServer {
+class HealthCheckServer {
 
     private final ApplicationLifecycle applicationLifecycle;
 
-    public HealthCheckServer(ApplicationLifecycle applicationLifecycle) {
+    HealthCheckServer(ApplicationLifecycle applicationLifecycle) {
         this.applicationLifecycle = applicationLifecycle;
     }
 
@@ -29,7 +29,7 @@ public class HealthCheckServer {
      * Health check
      */
     @Bean
-    public RouterFunction<ServerResponse> healthCheck() {
+    RouterFunction<ServerResponse> healthCheck() {
         return route().path(
                         "/health",
                         b ->

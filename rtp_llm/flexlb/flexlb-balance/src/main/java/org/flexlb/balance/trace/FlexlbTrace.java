@@ -25,7 +25,7 @@ import java.util.concurrent.TimeUnit;
  * Small fail-open facade for the FlexLB manual tracing points.
  */
 public final class FlexlbTrace {
-    public static final String INSTRUMENTATION_NAME = "org.flexlb";
+    private static final String INSTRUMENTATION_NAME = "org.flexlb";
 
     /**
      * Platform-indexed span search key. Unitrace only indexes this unprefixed
@@ -38,7 +38,7 @@ public final class FlexlbTrace {
             AttributeKey.stringKey("rtp_llm.prefill_address");
     public static final AttributeKey<String> DECODE_ADDRESS =
             AttributeKey.stringKey("rtp_llm.decode_address");
-    public static final AttributeKey<String> DISPATCH_REASON =
+    private static final AttributeKey<String> DISPATCH_REASON =
             AttributeKey.stringKey("rtp_llm.dispatch_reason");
     public static final AttributeKey<String> SCHEDULE_MODE =
             AttributeKey.stringKey("flexlb.schedule.mode");
@@ -50,9 +50,9 @@ public final class FlexlbTrace {
     public static final AttributeKey<Long> ROUTE_SUBMIT_MS =
             AttributeKey.longKey("rtp_llm.route_submit_ms");
 
-    public static final AttributeKey<Long> GRPC_STATUS_CODE =
+    private static final AttributeKey<Long> GRPC_STATUS_CODE =
             AttributeKey.longKey("rpc.grpc.status_code");
-    public static final AttributeKey<Long> RTP_LLM_GRPC_STATUS_CODE =
+    private static final AttributeKey<Long> RTP_LLM_GRPC_STATUS_CODE =
             AttributeKey.longKey("rtp_llm.grpc_status_code");
 
     /**

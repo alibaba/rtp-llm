@@ -27,14 +27,14 @@ import static org.flexlb.util.metrics.MetricConstant.JVM_GC_PAUSE_TOTAL_MS;
  */
 @Slf4j
 @Component
-public class JvmGcMetricsReporter {
+class JvmGcMetricsReporter {
     private final FlexMonitor monitor;
     private final List<GarbageCollectorMXBean> collectors;
     private final Map<String, FlexMetricTags> collectorTags = new LinkedHashMap<>();
     private final List<ListenerRegistration> listeners = new ArrayList<>();
 
     @Autowired
-    public JvmGcMetricsReporter(FlexMonitor monitor) {
+    JvmGcMetricsReporter(FlexMonitor monitor) {
         this(monitor, ManagementFactory.getGarbageCollectorMXBeans());
     }
 

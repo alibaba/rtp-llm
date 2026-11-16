@@ -259,7 +259,7 @@ public class WorkerAddressService {
         // Zero means workers are available; otherwise this is the next empty-list warning deadline.
         private final AtomicLong emptyWarningDeadlineNanos = new AtomicLong();
 
-        boolean shouldWarnForEmptyWorkers() {
+        private boolean shouldWarnForEmptyWorkers() {
             long now = System.nanoTime();
             long warningDeadline = emptyWarningDeadlineNanos.get();
             if (warningDeadline != 0 && now < warningDeadline) {
@@ -269,7 +269,7 @@ public class WorkerAddressService {
                     warningDeadline, now + EMPTY_WORKER_WARNING_INTERVAL_NANOS);
         }
 
-        boolean markAvailable() {
+        private boolean markAvailable() {
             long warningDeadline = emptyWarningDeadlineNanos.get();
             return warningDeadline != 0
                     && emptyWarningDeadlineNanos.compareAndSet(warningDeadline, 0);

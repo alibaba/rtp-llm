@@ -33,7 +33,7 @@ import static org.flexlb.util.metrics.MetricConstant.NETTY_MEMORY_SAMPLE_TIMESTA
  * and traverse chunks, so neither RPC threads nor metric scrapes call them.
  */
 @Component
-public class NettyMemoryReporter {
+class NettyMemoryReporter {
     private static final Logger logger = LoggerFactory.getLogger(NettyMemoryReporter.class);
     private static final FlexMetricTags NO_TAGS = FlexMetricTags.of();
 
@@ -47,7 +47,7 @@ public class NettyMemoryReporter {
     private Long lastCaptureNanos;
 
     @Autowired
-    public NettyMemoryReporter(ConfigService configService, FlexMonitor monitor) {
+    NettyMemoryReporter(ConfigService configService, FlexMonitor monitor) {
         this(configService.loadBalanceConfig().getScheduler().getNettyMemoryReporter(), monitor);
     }
 

@@ -82,7 +82,7 @@ public final class PriorityNormalizer {
     /**
      * Parse caller QoS without assigning a default scheduling priority.
      */
-    public static int parseHeader(String headerValue) {
+    private static int parseHeader(String headerValue) {
         if (headerValue != null) {
             try {
                 int headerPriority = Integer.parseInt(headerValue.trim());

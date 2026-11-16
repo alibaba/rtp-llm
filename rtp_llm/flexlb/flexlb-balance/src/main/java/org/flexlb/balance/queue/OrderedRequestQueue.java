@@ -200,7 +200,7 @@ public final class OrderedRequestQueue implements SchedulingQueue {
         private Node tail;
         private Node nextToScan;
 
-        void insert(Node entry, boolean restoring) {
+        private void insert(Node entry, boolean restoring) {
             Node before = restoring ? head : null;
             while (before != null
                     && before.request.getPlacementSequence()
@@ -222,7 +222,7 @@ public final class OrderedRequestQueue implements SchedulingQueue {
             }
         }
 
-        void remove(Node entry) {
+        private void remove(Node entry) {
             Node previous = entry.previous;
             Node next = entry.next;
             if (nextToScan == entry) {

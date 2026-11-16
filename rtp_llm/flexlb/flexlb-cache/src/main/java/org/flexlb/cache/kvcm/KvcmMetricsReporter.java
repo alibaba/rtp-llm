@@ -29,7 +29,7 @@ public class KvcmMetricsReporter {
         monitor.register(KVCM_QUERY_FAILURE_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
     }
 
-    public void reportQueryRetry(int attempt) {
+    void reportQueryRetry(int attempt) {
         monitor.report(
                 KVCM_QUERY_RETRY_QPS, FlexMetricTags.of("attempt", String.valueOf(attempt)), 1.0);
     }
@@ -37,7 +37,7 @@ public class KvcmMetricsReporter {
     /**
      * Reports a KVCM query that failed after all configured retry attempts.
      */
-    public void reportQueryFailure() {
+    void reportQueryFailure() {
         monitor.report(KVCM_QUERY_FAILURE_QPS, FlexMetricTags.of(), 1.0);
     }
 }

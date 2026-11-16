@@ -23,7 +23,6 @@ import java.util.concurrent.atomic.AtomicReference;
  * span when one is already current, and otherwise creates and owns a manual one.
  */
 public final class GrpcTraceInterceptor implements ServerInterceptor {
-
     private static final TextMapGetter<Metadata> METADATA_GETTER =
             new TextMapGetter<>() {
                 @Override
@@ -43,13 +42,8 @@ public final class GrpcTraceInterceptor implements ServerInterceptor {
                     }
                 }
             };
-
     public static final io.grpc.Context.Key<io.opentelemetry.context.Context> OTEL_CONTEXT_KEY =
             io.grpc.Context.key("flexlbOtelContext");
-
-    public static io.opentelemetry.context.Context getOtelContext() {
-        return OTEL_CONTEXT_KEY.get();
-    }
 
     @Override
     public <ReqT, RespT> ServerCall.Listener<ReqT> interceptCall(
@@ -101,6 +95,10 @@ public final class GrpcTraceInterceptor implements ServerInterceptor {
             }
             throw error;
         }
+    }
+
+    static io.opentelemetry.context.Context getOtelContext() {
+        return OTEL_CONTEXT_KEY.get();
     }
 
     private static String spanName(ServerCall<?, ?> call) {

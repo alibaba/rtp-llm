@@ -87,7 +87,7 @@ public interface FlexMetricTags {
          *
          * @param tags Tag map
          */
-        public ImmutableFlexMetricTags(Map<String, String> tags) {
+        private ImmutableFlexMetricTags(Map<String, String> tags) {
             if (tags == null || tags.isEmpty()) {
                 this.tags = Collections.emptyMap();
             } else {
@@ -100,7 +100,7 @@ public interface FlexMetricTags {
          *
          * @param keyValues Key-value pairs, format: key1, value1, key2, value2, ...
          */
-        public ImmutableFlexMetricTags(String... keyValues) {
+        private ImmutableFlexMetricTags(String... keyValues) {
             if (keyValues == null || keyValues.length == 0) {
                 this.tags = Collections.emptyMap();
             } else {

@@ -251,7 +251,7 @@ final class MasterTargetRouter {
             this.stubs = stubs;
         }
 
-        FlexlbServiceGrpc.FlexlbServiceBlockingStub nextStub() {
+        private FlexlbServiceGrpc.FlexlbServiceBlockingStub nextStub() {
             int idx = Math.floorMod(rr.getAndIncrement(), stubs.length);
             return stubs[idx];
         }

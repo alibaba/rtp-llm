@@ -20,7 +20,7 @@ import reactor.core.publisher.Mono;
 public class CorsConfig {
 
     @Bean
-    public WebFilter corsFilter() {
+    WebFilter corsFilter() {
         return (ServerWebExchange ctx, WebFilterChain chain) -> {
             ServerHttpRequest request = ctx.getRequest();
             if (CorsUtils.isCorsRequest(request)) {

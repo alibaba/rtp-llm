@@ -8,6 +8,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
+import org.springframework.mock.web.server.MockServerWebExchange;
+import org.springframework.web.reactive.function.server.HandlerStrategies;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
@@ -22,7 +25,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * Checks localhost readiness access and shutdown responses using the application lifecycle.
+ * Checks registered lifecycle routes for localhost readiness access and shutdown responses.
  */
 @ExtendWith(MockitoExtension.class)
 @DisplayName("AppStateHookServer Tests")
@@ -49,7 +52,7 @@ class AppStateHookServerTest {
 
         server.onApplicationReady();
 
-        Mono<ServerResponse> result = server.handleProcessOk(serverRequest);
+        Mono<ServerResponse> result = routeRequest("/hook/process_ok");
 
         StepVerifier.create(result)
                 .expectNextMatches(response -> response.statusCode().value() == 200)
@@ -66,7 +69,7 @@ class AppStateHookServerTest {
 
         server.onApplicationReady();
 
-        Mono<ServerResponse> result = server.handleProcessOk(serverRequest);
+        Mono<ServerResponse> result = routeRequest("/hook/process_ok");
 
         StepVerifier.create(result)
                 .expectNextMatches(response -> response.statusCode().value() == 200)
@@ -79,7 +82,7 @@ class AppStateHookServerTest {
         when(serverRequest.remoteAddress())
                 .thenReturn(Optional.of(new InetSocketAddress("127.0.0.1", 12345)));
 
-        Mono<ServerResponse> result = server.handleProcessOk(serverRequest);
+        Mono<ServerResponse> result = routeRequest("/hook/process_ok");
 
         StepVerifier.create(result)
                 .expectNextMatches(response -> response.statusCode().value() == 503)
@@ -94,7 +97,7 @@ class AppStateHookServerTest {
 
         server.onApplicationReady();
 
-        Mono<ServerResponse> result = server.handleProcessOk(serverRequest);
+        Mono<ServerResponse> result = routeRequest("/hook/process_ok");
 
         StepVerifier.create(result)
                 .expectNextMatches(response -> response.statusCode().value() == 403)
@@ -108,7 +111,7 @@ class AppStateHookServerTest {
 
         server.onApplicationReady();
 
-        Mono<ServerResponse> result = server.handleProcessOk(serverRequest);
+        Mono<ServerResponse> result = routeRequest("/hook/process_ok");
 
         StepVerifier.create(result)
                 .expectNextMatches(response -> response.statusCode().value() == 403)
@@ -124,7 +127,7 @@ class AppStateHookServerTest {
 
         server.onApplicationReady();
 
-        Mono<ServerResponse> result = server.handleProcessOk(serverRequest);
+        Mono<ServerResponse> result = routeRequest("/hook/process_ok");
 
         StepVerifier.create(result)
                 .expectNextMatches(response -> response.statusCode().value() == 200)
@@ -138,7 +141,7 @@ class AppStateHookServerTest {
                 .thenReturn(Optional.of(new InetSocketAddress("127.0.0.1", 12345)));
         when(applicationLifecycle.offline()).thenReturn(true);
 
-        Mono<ServerResponse> result = server.handleAppStop(serverRequest);
+        Mono<ServerResponse> result = routeRequest("/hook/pre_stop");
 
         StepVerifier.create(result)
                 .expectNextMatches(response -> response.statusCode().value() == 200)
@@ -154,12 +157,22 @@ class AppStateHookServerTest {
                 .thenReturn(Optional.of(new InetSocketAddress("127.0.0.1", 12345)));
         when(applicationLifecycle.offline()).thenReturn(false);
 
-        Mono<ServerResponse> result = server.handleAppStop(serverRequest);
+        Mono<ServerResponse> result = routeRequest("/hook/pre_stop");
 
         StepVerifier.create(result)
                 .expectNextMatches(response -> response.statusCode().value() == 503)
                 .verifyComplete();
 
         verify(applicationLifecycle).offline();
+    }
+
+    private Mono<ServerResponse> routeRequest(String path) {
+        MockServerHttpRequest.BaseBuilder<?> builder = MockServerHttpRequest.get(path);
+        serverRequest.remoteAddress().ifPresent(builder::remoteAddress);
+        ServerRequest request =
+                ServerRequest.create(
+                        MockServerWebExchange.from(builder.build()),
+                        HandlerStrategies.withDefaults().messageReaders());
+        return server.appStateHook().route(request).flatMap(handler -> handler.handle(request));
     }
 }

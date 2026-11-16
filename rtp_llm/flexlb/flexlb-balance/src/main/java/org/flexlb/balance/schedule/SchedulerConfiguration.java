@@ -27,7 +27,6 @@ import org.springframework.context.annotation.Primary;
 @org.springframework.scheduling.annotation.EnableScheduling
 @Configuration(proxyBeanMethods = false)
 public class SchedulerConfiguration {
-
     @Bean(name = "taskScheduler")
     public java.util.concurrent.ScheduledThreadPoolExecutor taskScheduler() {
         return new java.util.concurrent.ScheduledThreadPoolExecutor(
@@ -113,25 +112,6 @@ public class SchedulerConfiguration {
     }
 
     @Bean
-    @Lazy
-    @ConditionalOnMissingBean(SchedulingQueue.class)
-    public SchedulingQueue schedulingQueue(ConfigService config) {
-        return new OrderedRequestQueue(config.loadBalanceConfig().isPriorityOrdering());
-    }
-
-    @Bean
-    @ConditionalOnMissingBean(RequestPreemption.class)
-    @Lazy
-    public RequestPreemption requestPreemption(
-            RequestRepository requests,
-            RequestSchedulerReporter reporter,
-            ConfigService configService,
-            AdmissionCapacity capacity) {
-        return new DefaultRequestPreemption(
-                requests, reporter, configService, capacity, new DecodePreemptionPlanner());
-    }
-
-    @Bean
     public AdmissionCapacity decodeAdmissionCapacity(ConfigService configService) {
         var availability =
                 configService
@@ -190,6 +170,25 @@ public class SchedulerConfiguration {
                 deliveryReporter,
                 cacheTrace,
                 endpoints);
+    }
+
+    @Bean
+    @Lazy
+    @ConditionalOnMissingBean(SchedulingQueue.class)
+    SchedulingQueue schedulingQueue(ConfigService config) {
+        return new OrderedRequestQueue(config.loadBalanceConfig().isPriorityOrdering());
+    }
+
+    @Bean
+    @ConditionalOnMissingBean(RequestPreemption.class)
+    @Lazy
+    RequestPreemption requestPreemption(
+            RequestRepository requests,
+            RequestSchedulerReporter reporter,
+            ConfigService configService,
+            AdmissionCapacity capacity) {
+        return new DefaultRequestPreemption(
+                requests, reporter, configService, capacity, new DecodePreemptionPlanner());
     }
 
     static java.util.concurrent.ScheduledThreadPoolExecutor newTimerExecutor(

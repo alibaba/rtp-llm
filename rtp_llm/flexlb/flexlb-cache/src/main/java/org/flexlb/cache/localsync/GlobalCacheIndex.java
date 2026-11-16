@@ -44,6 +44,29 @@ public class GlobalCacheIndex {
             ThreadLocal.withInitial(() -> new String[0]);
 
     /**
+     * Clear all data
+     */
+    public void clear() {
+
+        lock.lock();
+        try {
+            blockToEnginesMap.clear();
+            totalMappings.reset();
+        } finally {
+            lock.unlock();
+        }
+        log.info("Cleared global cache index");
+    }
+
+    public long totalBlocks() {
+        return blockToEnginesMap.mappingCount();
+    }
+
+    public long totalMappings() {
+        return totalMappings.sum();
+    }
+
+    /**
      * Add cache block to specified engine
      *
      * @param blockCacheKey Cache block hash value
@@ -51,7 +74,7 @@ public class GlobalCacheIndex {
      *                      index identifies one independently routable engine behind the physical
      *                      frontend
      */
-    public void addCacheBlock(Long blockCacheKey, String engineIpPort) {
+    void addCacheBlock(Long blockCacheKey, String engineIpPort) {
         if (blockCacheKey == null || engineIpPort == null) {
             log.warn(
                     "Invalid parameters: blockCacheKey={}, engineIpPort={}",
@@ -81,7 +104,7 @@ public class GlobalCacheIndex {
      * @param engineIp      logical worker identity in {@code ip:port@engineIndex} format
      * @param blockCacheKey Cache block hash value
      */
-    public void removeCacheBlock(String engineIp, Long blockCacheKey) {
+    void removeCacheBlock(String engineIp, Long blockCacheKey) {
         if (blockCacheKey == null || engineIp == null) {
             return;
         }
@@ -112,7 +135,7 @@ public class GlobalCacheIndex {
      *
      * @param engineIp logical worker identity in {@code ip:port@engineIndex} format
      */
-    public void removeAllCacheBlockOfEngine(String engineIp, Set<Long> ownedKeys) {
+    void removeAllCacheBlockOfEngine(String engineIp, Set<Long> ownedKeys) {
         if (engineIp == null || ownedKeys == null || ownedKeys.isEmpty()) {
             return;
         }
@@ -139,36 +162,13 @@ public class GlobalCacheIndex {
      * @param blockCacheKeys Ordered cache block hash value list
      * @return prefix match lengths keyed by logical worker identity
      */
-    public Map<String, Integer> batchCalculatePrefixMatchLength(
+    Map<String, Integer> batchCalculatePrefixMatchLength(
             List<String> engineIpPorts, List<Long> blockCacheKeys) {
 
         if (isEmpty(engineIpPorts) || isEmpty(blockCacheKeys)) {
             return Collections.emptyMap();
         }
         return calculatePrefixMatchLength(engineIpPorts, blockCacheKeys);
-    }
-
-    /**
-     * Clear all data
-     */
-    public void clear() {
-
-        lock.lock();
-        try {
-            blockToEnginesMap.clear();
-            totalMappings.reset();
-        } finally {
-            lock.unlock();
-        }
-        log.info("Cleared global cache index");
-    }
-
-    public long totalBlocks() {
-        return blockToEnginesMap.mappingCount();
-    }
-
-    public long totalMappings() {
-        return totalMappings.sum();
     }
 
     /**

@@ -948,7 +948,7 @@ class StatusFaultInjectionTest {
         final AtomicReference<Throwable> error = new AtomicReference<>();
         final CountDownLatch terminal = new CountDownLatch(1);
 
-        StreamObserver<EngineRpcService.GenerateOutputsPB> observer() {
+        private StreamObserver<EngineRpcService.GenerateOutputsPB> observer() {
             return new StreamObserver<>() {
                 @Override
                 public void onNext(EngineRpcService.GenerateOutputsPB value) {
@@ -968,7 +968,7 @@ class StatusFaultInjectionTest {
             };
         }
 
-        void await(long ms) throws InterruptedException {
+        private void await(long ms) throws InterruptedException {
             assertTrue(
                     terminal.await(ms, TimeUnit.MILLISECONDS),
                     "stream must terminate (completed or error) within " + ms + "ms");

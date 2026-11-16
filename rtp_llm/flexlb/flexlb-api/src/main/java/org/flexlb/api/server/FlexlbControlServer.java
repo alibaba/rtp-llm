@@ -27,7 +27,7 @@ import static org.springframework.web.reactive.function.server.RouterFunctions.r
  * Exposes FlexLB runtime control-plane endpoints.
  */
 @Component
-public class FlexlbControlServer {
+class FlexlbControlServer {
     private static final String UPDATE_LOG_LEVEL_PATH = "/flexlb/update_log_level";
     private static final String CACHE_MATCH_STATUS_PATH = "/flexlb/cache_match/status";
     private static final String CACHE_MATCH_FAILOVER_PATH = "/flexlb/cache_match/failover";
@@ -37,7 +37,7 @@ public class FlexlbControlServer {
     private final CacheMatchQueryOrchestrator cacheMatchQueryOrchestrator;
     private final FlexlbLogManager flexlbLogManager;
 
-    public FlexlbControlServer(
+    FlexlbControlServer(
             GeneralHttpNettyService generalHttpNettyService,
             MasterStatusService masterStatusService,
             CacheMatchQueryOrchestrator cacheMatchQueryOrchestrator,
@@ -49,7 +49,7 @@ public class FlexlbControlServer {
     }
 
     @Bean
-    public RouterFunction<ServerResponse> flexlbControlRoutes() {
+    RouterFunction<ServerResponse> flexlbControlRoutes() {
         return route().POST(
                         UPDATE_LOG_LEVEL_PATH,
                         accept(MediaType.APPLICATION_JSON),

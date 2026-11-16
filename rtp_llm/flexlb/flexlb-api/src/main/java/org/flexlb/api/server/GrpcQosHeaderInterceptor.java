@@ -20,7 +20,7 @@ import org.springframework.stereotype.Component;
  * proto field.
  */
 @Component
-public class GrpcQosHeaderInterceptor implements ServerInterceptor {
+class GrpcQosHeaderInterceptor implements ServerInterceptor {
 
     private static final Metadata.Key<String> QOS_HEADER_KEY =
             Metadata.Key.of(PriorityNormalizer.QOS_HEADER_NAME, Metadata.ASCII_STRING_MARSHALLER);
@@ -29,7 +29,7 @@ public class GrpcQosHeaderInterceptor implements ServerInterceptor {
      * Context key carrying the raw QoS header value (may be null when the
      * header is absent or the call bypassed the interceptor).
      */
-    public static final Context.Key<String> QOS_LEVEL_KEY = Context.key("qosLevel");
+    private static final Context.Key<String> QOS_LEVEL_KEY = Context.key("qosLevel");
 
     /**
      * Convenience method to retrieve the raw QoS header value from the active

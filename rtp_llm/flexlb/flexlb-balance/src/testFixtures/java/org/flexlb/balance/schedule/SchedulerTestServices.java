@@ -224,9 +224,8 @@ public final class SchedulerTestServices {
                     case "dispatcher" -> "engineCancellation";
                     default -> name;
                 };
-        if (!java.util.Set.of(
-                        "tasks", "dispatcher", "responseCompletions", "timer")
-                .contains(name)) return;
+        if (!java.util.Set.of("tasks", "dispatcher", "responseCompletions", "timer").contains(name))
+            return;
         synchronized (owners) {
             for (var entry : owners.entrySet()) {
                 if (entry.getValue() == fixture)
@@ -256,8 +255,7 @@ public final class SchedulerTestServices {
             org.mockito.Mockito.doCallRealMethod().when(owner).throwIfRequestFailed();
         }
         owners.put(owner, runtime);
-        for (String name :
-                new String[] {"tasks", "dispatcher", "responseCompletions"}) {
+        for (String name : new String[] {"tasks", "dispatcher", "responseCompletions"}) {
             try {
                 var source = SchedulerTestServices.class.getDeclaredField(name);
                 source.setAccessible(true);

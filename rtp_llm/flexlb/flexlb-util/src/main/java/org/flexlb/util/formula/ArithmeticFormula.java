@@ -12,7 +12,7 @@ import static org.flexlb.util.formula.ArithmeticFormulaAst.Node;
  * Supports {@code + - * / ^}, {@code sqrt}, {@code log}, {@code exp}, {@code abs},
  * {@code max}, {@code min}, {@code pow}, and named constants via {@code param(name, value)}.
  */
-public final class ArithmeticFormula {
+final class ArithmeticFormula {
     // Bounded reuse also avoids one generated class per equal-model endpoint.
     private static final int MAX_COMPILED_FORMULAS = 128;
 
@@ -51,14 +51,14 @@ public final class ArithmeticFormula {
     /**
      * Includes variables parsed inside a {@code param()} initial value.
      */
-    public boolean referencesVariable(String variable) {
+    boolean referencesVariable(String variable) {
         return referencedVariables.contains(variable);
     }
 
     /**
      * Retain fractional and non-finite results for the caller's validation boundary.
      */
-    public double evaluateAsDouble(double[] vars) {
+    double evaluateAsDouble(double[] vars) {
         return compiled.evaluate(vars);
     }
 

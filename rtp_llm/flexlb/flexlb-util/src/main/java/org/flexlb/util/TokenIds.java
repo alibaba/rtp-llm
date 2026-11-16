@@ -29,7 +29,7 @@ public interface TokenIds {
     final class ArrayTokenIds implements TokenIds {
         private final int[] values;
 
-        public ArrayTokenIds(int[] values) {
+        private ArrayTokenIds(int[] values) {
             this.values = Objects.requireNonNull(values, "token IDs must not be null");
         }
 

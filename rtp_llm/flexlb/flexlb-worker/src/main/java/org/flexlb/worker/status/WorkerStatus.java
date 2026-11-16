@@ -270,10 +270,6 @@ public class WorkerStatus {
                 !updatesStopped, "WorkerStatus generation updates are stopped: %s", generationId);
     }
 
-    public void requireGenerationLock() {
-        checkState(lock.isHeldByCurrentThread(), "status transaction requires generation lock");
-    }
-
     /**
      * Publish fields and both cursors at one linearization point after every
      * response reducer has succeeded.
@@ -317,45 +313,6 @@ public class WorkerStatus {
         synchronized (healthGate) {
             return updatePollHealth(reportedAlive);
         }
-    }
-
-    /**
-     * The RPC owner records health before any local conversion or application.
-     */
-    public void recordStatusRpcResult(PollLease lease, boolean valid, boolean alive) {
-        synchronized (healthGate) {
-            if (lease == null
-                    || statusPollLease.get() != lease
-                    || lease.resultRecorded
-                    || updatesStopped
-                    || closeReason != null) {
-                return;
-            }
-            lease.resultRecorded = true;
-            if (valid) {
-                updatePollHealth(alive);
-                lease.trace.record(EndpointTrace.Stage.STATUS_HEALTH_UPDATED);
-            }
-        }
-    }
-
-    /**
-     * One local application may outlive its RPC; later RPCs still update health.
-     */
-    public PollLease tryBeginStatusApplication(PollLease rpcLease) {
-        synchronized (healthGate) {
-            requireStatusPollLease(rpcLease);
-            if (updatesStopped) {
-                return null;
-            }
-            PollLease lease =
-                    new PollLease(this, PollKind.APPLICATION, statusApplication, rpcLease.trace);
-            return statusApplication.compareAndSet(null, lease) ? lease : null;
-        }
-    }
-
-    public void requireStatusPollLease(PollLease lease) {
-        requirePollLease(lease, PollKind.STATUS, statusPollLease);
     }
 
     /**
@@ -459,31 +416,6 @@ public class WorkerStatus {
                                 next, current.indexInitialized(), current.indexedVersion()));
     }
 
-    public void requireCacheMutationLock() {
-        checkState(cacheMutationLock.isHeldByCurrentThread(), "cache mutation requires cache lock");
-    }
-
-    public void publishCacheIndexedVersion(long version) {
-        requireCacheMutationLock();
-        CacheIndexSnapshot current = cacheIndexSnapshot.get();
-        checkState(
-                current.cacheStatus() != null && current.cacheStatus().getVersion() == version,
-                "indexed cache version must match current cache status");
-        cacheIndexSnapshot.set(new CacheIndexSnapshot(current.cacheStatus(), true, version));
-    }
-
-    /**
-     * Preserve cache cadence when a coalesced discovery cycle crosses a due tick.
-     */
-    public boolean shouldPollCache(long cycleId, long intervalCycles) {
-        checkArgument(intervalCycles > 0L, "cache poll interval must be positive");
-        long previous = lastCachePollCycle.getAndAccumulate(cycleId, Math::max);
-        return cycleId >= previous
-                && (cycleId % intervalCycles == 0L
-                        || previous != Long.MIN_VALUE
-                                && cycleId / intervalCycles > previous / intervalCycles);
-    }
-
     public long recordSuccessfulCachePoll() {
         long nowUs = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
         long previousUs = cacheLastUpdateTime.getAndSet(nowUs);
@@ -581,10 +513,6 @@ public class WorkerStatus {
         }
     }
 
-    public void requireCachePollLease(PollLease lease) {
-        requirePollLease(lease, PollKind.CACHE, cachePollLease);
-    }
-
     /**
      * Get the HTTP IP:PORT address.
      */
@@ -651,6 +579,78 @@ public class WorkerStatus {
                 + ", pollHealth="
                 + pollHealth.get()
                 + '}';
+    }
+
+    /**
+     * The RPC owner records health before any local conversion or application.
+     */
+    void recordStatusRpcResult(PollLease lease, boolean valid, boolean alive) {
+        synchronized (healthGate) {
+            if (lease == null
+                    || statusPollLease.get() != lease
+                    || lease.resultRecorded
+                    || updatesStopped
+                    || closeReason != null) {
+                return;
+            }
+            lease.resultRecorded = true;
+            if (valid) {
+                updatePollHealth(alive);
+                lease.trace.record(EndpointTrace.Stage.STATUS_HEALTH_UPDATED);
+            }
+        }
+    }
+
+    /**
+     * One local application may outlive its RPC; later RPCs still update health.
+     */
+    PollLease tryBeginStatusApplication(PollLease rpcLease) {
+        synchronized (healthGate) {
+            requireStatusPollLease(rpcLease);
+            if (updatesStopped) {
+                return null;
+            }
+            PollLease lease =
+                    new PollLease(this, PollKind.APPLICATION, statusApplication, rpcLease.trace);
+            return statusApplication.compareAndSet(null, lease) ? lease : null;
+        }
+    }
+
+    void requireStatusPollLease(PollLease lease) {
+        requirePollLease(lease, PollKind.STATUS, statusPollLease);
+    }
+
+    void publishCacheIndexedVersion(long version) {
+        requireCacheMutationLock();
+        CacheIndexSnapshot current = cacheIndexSnapshot.get();
+        checkState(
+                current.cacheStatus() != null && current.cacheStatus().getVersion() == version,
+                "indexed cache version must match current cache status");
+        cacheIndexSnapshot.set(new CacheIndexSnapshot(current.cacheStatus(), true, version));
+    }
+
+    /**
+     * Preserve cache cadence when a coalesced discovery cycle crosses a due tick.
+     */
+    boolean shouldPollCache(long cycleId, long intervalCycles) {
+        checkArgument(intervalCycles > 0L, "cache poll interval must be positive");
+        long previous = lastCachePollCycle.getAndAccumulate(cycleId, Math::max);
+        return cycleId >= previous
+                && (cycleId % intervalCycles == 0L
+                        || previous != Long.MIN_VALUE
+                                && cycleId / intervalCycles > previous / intervalCycles);
+    }
+
+    void requireCachePollLease(PollLease lease) {
+        requirePollLease(lease, PollKind.CACHE, cachePollLease);
+    }
+
+    private void requireGenerationLock() {
+        checkState(lock.isHeldByCurrentThread(), "status transaction requires generation lock");
+    }
+
+    private void requireCacheMutationLock() {
+        checkState(cacheMutationLock.isHeldByCurrentThread(), "cache mutation requires cache lock");
     }
 
     private PollHealth updatePollHealth(boolean alive) {

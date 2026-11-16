@@ -121,8 +121,33 @@ public class KvCacheManager implements EngineCacheInvalidator {
         return globalCacheIndex.batchCalculatePrefixMatchLength(engineIpPorts, blockCacheKeys);
     }
 
-    public void updateEngineCache(
-            WorkerStatus workerStatus, String role, Set<Long> newCacheBlocks) {
+    /**
+     * Remove cache metadata for engines that are no longer present in service discovery.
+     */
+    @Override
+    public void removeStaleEngineCaches(Collection<String> activeEngineIpPorts) {
+        if (activeEngineIpPorts == null) {
+            return;
+        }
+        Set<String> activePhysicalIpPorts = new HashSet<>(activeEngineIpPorts);
+        Set<String> staleEngineIpPorts = new HashSet<>(engineLocalView.getAllEngineIpPorts());
+        staleEngineIpPorts.removeIf(
+                engineIpPort -> {
+                    var worker = workersByLogicalAddress.get(engineIpPort);
+                    return activePhysicalIpPorts.contains(
+                            worker == null ? engineIpPort : worker.getPhysicalIpPort());
+                });
+        for (String staleEngineIpPort : staleEngineIpPorts) {
+            long startTime = System.nanoTime() / 1000;
+            removeEngineCache(staleEngineIpPort);
+            log.info(
+                    "Removed stale engine cache: {}, cost={}us",
+                    staleEngineIpPort,
+                    System.nanoTime() / 1000 - startTime);
+        }
+    }
+
+    void updateEngineCache(WorkerStatus workerStatus, String role, Set<Long> newCacheBlocks) {
         if (workerStatus == null) {
             return;
         }
@@ -169,35 +194,9 @@ public class KvCacheManager implements EngineCacheInvalidator {
     }
 
     /**
-     * Remove cache metadata for engines that are no longer present in service discovery.
-     */
-    @Override
-    public void removeStaleEngineCaches(Collection<String> activeEngineIpPorts) {
-        if (activeEngineIpPorts == null) {
-            return;
-        }
-        Set<String> activePhysicalIpPorts = new HashSet<>(activeEngineIpPorts);
-        Set<String> staleEngineIpPorts = new HashSet<>(engineLocalView.getAllEngineIpPorts());
-        staleEngineIpPorts.removeIf(
-                engineIpPort -> {
-                    var worker = workersByLogicalAddress.get(engineIpPort);
-                    return activePhysicalIpPorts.contains(
-                            worker == null ? engineIpPort : worker.getPhysicalIpPort());
-                });
-        for (String staleEngineIpPort : staleEngineIpPorts) {
-            long startTime = System.nanoTime() / 1000;
-            removeEngineCache(staleEngineIpPort);
-            log.info(
-                    "Removed stale engine cache: {}, cost={}us",
-                    staleEngineIpPort,
-                    System.nanoTime() / 1000 - startTime);
-        }
-    }
-
-    /**
      * Remove both local and global cache-index state for one engine.
      */
-    public void removeEngineCache(String engineIpPort) {
+    void removeEngineCache(String engineIpPort) {
         if (engineIpPort == null) {
             return;
         }

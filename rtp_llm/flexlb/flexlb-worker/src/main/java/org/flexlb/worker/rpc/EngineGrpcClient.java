@@ -45,12 +45,11 @@ public class EngineGrpcClient extends AbstractGrpcClient {
     private static final int DEFAULT_CONNECT_TIMEOUT_MILLIS = 20;
 
     public static final String CONNECT_TIMEOUT_PROPERTY = "flexlb.engine-grpc.connect-timeout-ms";
-    public static final String VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES_PROPERTY =
+    private static final String VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES_PROPERTY =
             "flexlb.engine-grpc.vit-cache-max-inbound-message-bytes";
 
     private static final int DEFAULT_MAX_INBOUND_MESSAGE_BYTES = 8 * 1024 * 1024;
     private static final int DEFAULT_VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES = 16 * 1024 * 1024;
-
     private static final int MAX_METRICS_ERROR_MESSAGE_CHARS = 256;
     private static final long METRICS_WARNING_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(30);
 
@@ -63,10 +62,9 @@ public class EngineGrpcClient extends AbstractGrpcClient {
     private int vitCacheMaxInboundMessageBytes = DEFAULT_VIT_CACHE_MAX_INBOUND_MESSAGE_BYTES;
 
     @Getter private final Executor executor;
-    @Getter private final EventLoopGroup eventLoopGroup;
+    private final EventLoopGroup eventLoopGroup;
 
     private final int connectTimeoutMillis;
-
     private final boolean cacheStatusEnabled;
 
     private final GrpcTransportObserver transportObserver = new GrpcTransportObserver();
@@ -117,19 +115,6 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                 stub -> stub.getRpcServiceFutureStub().getCacheStatus(request),
                 requestTimeoutMs,
                 ServiceType.CACHE_STATUS);
-    }
-
-    /**
-     * Get multimodal worker status via gRPC (async)
-     */
-    public CompletableFuture<EngineRpcService.WorkerStatusPB> getMultimodalWorkerStatusAsync(
-            String ip, int port, EngineRpcService.StatusVersionPB request, long requestTimeoutMs) {
-        return executeGrpcCallAsync(
-                ip,
-                port,
-                stub -> stub.getMultimodalFutureStub().getWorkerStatus(request),
-                requestTimeoutMs,
-                ServiceType.MULTIMODAL_WORKER_STATUS);
     }
 
     /**
@@ -234,6 +219,19 @@ public class EngineGrpcClient extends AbstractGrpcClient {
                 .intercept(GrpcCallTrace.INTERCEPTOR)
                 .disableRetry()
                 .build();
+    }
+
+    /**
+     * Get multimodal worker status via gRPC (async)
+     */
+    CompletableFuture<EngineRpcService.WorkerStatusPB> getMultimodalWorkerStatusAsync(
+            String ip, int port, EngineRpcService.StatusVersionPB request, long requestTimeoutMs) {
+        return executeGrpcCallAsync(
+                ip,
+                port,
+                stub -> stub.getMultimodalFutureStub().getWorkerStatus(request),
+                requestTimeoutMs,
+                ServiceType.MULTIMODAL_WORKER_STATUS);
     }
 
     static boolean shouldRetry(ServiceType serviceType, Throwable failure, GrpcCallTrace trace) {

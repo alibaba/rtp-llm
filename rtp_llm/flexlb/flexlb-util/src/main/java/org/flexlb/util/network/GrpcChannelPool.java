@@ -123,7 +123,6 @@ public class GrpcChannelPool<K> {
      * Closes a cached channel once and bounds its termination wait before forcing shutdown.
      */
     public static final class PooledChannel {
-
         private final String description;
         @Getter private final ManagedChannel channel;
         private final AtomicBoolean shutdown = new AtomicBoolean();
@@ -131,15 +130,6 @@ public class GrpcChannelPool<K> {
         private PooledChannel(String description, ManagedChannel channel) {
             this.description = description;
             this.channel = channel;
-        }
-
-        public boolean isUsable() {
-            if (shutdown.get() || channel.isShutdown() || channel.isTerminated()) {
-                return false;
-            }
-            ConnectivityState state = channel.getState(true);
-            return state != ConnectivityState.SHUTDOWN
-                    && state != ConnectivityState.TRANSIENT_FAILURE;
         }
 
         public void shutdown() {
@@ -169,6 +159,15 @@ public class GrpcChannelPool<K> {
                 log.warn("Failed to shut down gRPC channel: {}", description, e);
                 channel.shutdownNow();
             }
+        }
+
+        private boolean isUsable() {
+            if (shutdown.get() || channel.isShutdown() || channel.isTerminated()) {
+                return false;
+            }
+            ConnectivityState state = channel.getState(true);
+            return state != ConnectivityState.SHUTDOWN
+                    && state != ConnectivityState.TRANSIENT_FAILURE;
         }
     }
 }

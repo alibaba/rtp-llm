@@ -1329,6 +1329,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
      */
     private static final class ScheduleCompletion {
         private final boolean transportCancellation;
+
         private final AtomicBoolean responseClaimed = new AtomicBoolean();
         private final AtomicBoolean cancelled = new AtomicBoolean();
         private final AtomicBoolean cancellationSettled = new AtomicBoolean();
@@ -1346,20 +1347,14 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             }
         }
 
-        boolean tryRespond() {
+        private boolean tryRespond() {
             return responseClaimed.compareAndSet(false, true);
         }
 
-        void bindCancellation(Runnable action) {
+        private void bindCancellation(Runnable action) {
             if (!cancellation.compareAndSet(null, action)) {
                 throw new IllegalStateException("schedule cancellation owner already bound");
             }
-            settleCancellation();
-        }
-
-        void cancel() {
-            cancelled.set(true);
-            responseClaimed.set(true);
             settleCancellation();
         }
 
@@ -1370,6 +1365,12 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     && cancellationSettled.compareAndSet(false, true)) {
                 action.run();
             }
+        }
+
+        private void cancel() {
+            cancelled.set(true);
+            responseClaimed.set(true);
+            settleCancellation();
         }
     }
 

@@ -24,12 +24,12 @@ public class MetricConstant {
     /**
      * One increment per GC notification, tagged by gc, collector and pid.
      */
-    public static final String JVM_GC_COLLECTION_COUNT = "app.jvm.gc.collection.count";
+    static final String JVM_GC_COLLECTION_COUNT = "app.jvm.gc.collection.count";
 
     /**
      * Sum of GC notification pause durations in milliseconds, with the same tags as the count.
      */
-    public static final String JVM_GC_PAUSE_TOTAL_MS = "app.jvm.gc.pause.total.ms";
+    static final String JVM_GC_PAUSE_TOTAL_MS = "app.jvm.gc.pause.total.ms";
 
     public static final String NETTY_DIRECT_RESERVED_BYTES = "app.netty.direct.reserved.bytes";
     public static final String NETTY_DIRECT_PINNED_BYTES = "app.netty.direct.pinned.bytes";
@@ -42,7 +42,7 @@ public class MetricConstant {
             "grpc.server.executor.completed.tasks";
     public static final String GRPC_SERVER_EXECUTOR_CALLER_RUNS =
             "grpc.server.executor.caller.runs";
-    public static final String GRPC_RESPONSE_SIZE = "app.grpc.response.size";
+    static final String GRPC_RESPONSE_SIZE = "app.grpc.response.size";
 
     /* ------------------------ Engine Status Metrics -------------------------- */
 
@@ -200,7 +200,7 @@ public class MetricConstant {
     /**
      * Load balancing service NioEventLoopGroup status
      */
-    public static final String ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO =
+    static final String ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO =
             "app.engine.balancing.event.loop.group.info";
 
     /**
@@ -497,7 +497,7 @@ public class MetricConstant {
     /**
      * Connection count in gRPC connection pool
      */
-    public static final String GRPC_CHANNEL_POOL_SIZE = "app.grpc.channel.pool.size";
+    static final String GRPC_CHANNEL_POOL_SIZE = "app.grpc.channel.pool.size";
 
     /**
      * gRPC call duration in milliseconds
@@ -509,8 +509,8 @@ public class MetricConstant {
      */
     public static final String GRPC_CALL_COUNT = "app.grpc.call.count";
 
-    public static final String GRPC_CALL_FAILURE = "app.grpc.call.failure";
-    public static final String GRPC_DELIVERY_DELAY = "app.grpc.delivery.delay_ms";
+    static final String GRPC_CALL_FAILURE = "app.grpc.call.failure";
+    static final String GRPC_DELIVERY_DELAY = "app.grpc.delivery.delay_ms";
 
     /**
      * gRPC connection duration in microseconds
