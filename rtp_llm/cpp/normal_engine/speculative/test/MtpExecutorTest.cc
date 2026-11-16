@@ -133,6 +133,22 @@ TEST(MtpExecutorPolicyTest, HybridCacheWaitsBeforeReadingNextRoundHostState) {
                                                               /*cache_snapshot_ready=*/true));
 }
 
+TEST(MtpExecutorPolicyTest, DSparkAsyncFakeStreamSkipsOnlyBroadTailSync) {
+    EXPECT_TRUE(MtpExecutor::canSkipFakeStreamDeviceSync(
+        /*is_dspark=*/true,
+        /*stream_async=*/true,
+        /*drop_broad_sync=*/true,
+        /*warm_up=*/false,
+        /*has_streams=*/true,
+        /*is_fake_stream=*/true));
+    EXPECT_FALSE(MtpExecutor::canSkipFakeStreamDeviceSync(true, false, true, false, true, true));
+    EXPECT_FALSE(MtpExecutor::canSkipFakeStreamDeviceSync(true, true, false, false, true, true));
+    EXPECT_FALSE(MtpExecutor::canSkipFakeStreamDeviceSync(true, true, true, true, true, true));
+    EXPECT_FALSE(MtpExecutor::canSkipFakeStreamDeviceSync(true, true, true, false, false, true));
+    EXPECT_FALSE(MtpExecutor::canSkipFakeStreamDeviceSync(true, true, true, false, true, false));
+    EXPECT_FALSE(MtpExecutor::canSkipFakeStreamDeviceSync(false, true, true, false, true, true));
+}
+
 TEST(MtpExecutorPolicyTest, MtpSequenceUpperBoundChainsUntilBookkeepingCatchesUp) {
     constexpr int width      = 8;
     const int     first_next = MtpExecutor::selectMtpPreviousSeqLenUpperBound(

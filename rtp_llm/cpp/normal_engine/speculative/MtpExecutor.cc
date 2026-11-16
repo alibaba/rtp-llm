@@ -1918,7 +1918,18 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
-        cudaSyncAndCheck();
+        const bool skip_fake_stream_sync =
+            canSkipFakeStreamDeviceSync(is_dspark_,
+                                        useStreamAsync(),
+                                        useDropBroadSync(),
+                                        warm_up_,
+                                        !streams.empty(),
+                                        model_input.is_fake_stream);
+        if (!skip_fake_stream_sync) {
+            cudaSyncAndCheck();
+        }
+        // TensorHolder retains two released rounds, so async H2D sources stay
+        // alive while the same CUDA stream serializes the fake keepalive work.
         releaseAllModelBuffers();
         return absl::OkStatus();
     }
@@ -3279,6 +3290,15 @@ bool MtpExecutor::useAsyncDeviceState() const {
 bool MtpExecutor::useDropBroadSync() const {
     static const bool enabled = []() { return readEnvFlag("RTP_LLM_DROP_BROAD_SYNC", "drop-broad-sync", "enabled"); }();
     return enabled;
+}
+
+bool MtpExecutor::canSkipFakeStreamDeviceSync(bool is_dspark,
+                                              bool stream_async,
+                                              bool drop_broad_sync,
+                                              bool warm_up,
+                                              bool has_streams,
+                                              bool is_fake_stream) {
+    return is_dspark && stream_async && drop_broad_sync && !warm_up && has_streams && is_fake_stream;
 }
 
 bool MtpExecutor::useAsyncPrepare() const {
