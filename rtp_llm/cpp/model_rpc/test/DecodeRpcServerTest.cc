@@ -850,6 +850,8 @@ public:
     }
     void enqueue(std::shared_ptr<GenerateStream>& stream) override {
         ++enqueue_count;
+        EXPECT_FALSE(stream->isContextStream());
+        EXPECT_GT(stream->curBlocksNum(), 0);
         /** Drive the scheduler transition, then complete the request without a model step. */
         stream->moveToNext();
         stream->reportEvent(StreamEvents::GenerateDone);

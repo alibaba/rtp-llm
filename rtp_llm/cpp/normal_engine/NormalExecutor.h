@@ -20,19 +20,21 @@ namespace rtp_llm {
 class KVCacheManager;
 class ModelInputsLogger;
 struct GptModelInitParams;
+class AgreedDecodeExecution;
 
 class NormalExecutor: public Executor {
 public:
     explicit NormalExecutor(const EngineInitParams&                params,
                             const std::shared_ptr<KVCacheManager>& cache_manager,
-                            bool                                   warm_up                = false,
-                            bool                                   is_propose             = false,
-                            int                                    propose_model_index    = 0,
-                            std::function<void()>                  profile_step_start     = nullptr,
-                            std::function<void()>                  profile_step_finish    = nullptr,
-                            bool                                   allow_cuda_graph       = true,
-                            bool                                   accuracy_check_mode    = false,
-                            bool                                   dynamic_decode_enabled = false);
+                            bool                                   warm_up                 = false,
+                            bool                                   is_propose              = false,
+                            int                                    propose_model_index     = 0,
+                            std::function<void()>                  profile_step_start      = nullptr,
+                            std::function<void()>                  profile_step_finish     = nullptr,
+                            bool                                   allow_cuda_graph        = true,
+                            bool                                   accuracy_check_mode     = false,
+                            bool                                   dynamic_decode_enabled  = false,
+                            AgreedDecodeExecution*                 agreed_decode_execution = nullptr);
     ~NormalExecutor();
     ModelBase* getModel() {
         return model_.get();
@@ -55,6 +57,8 @@ public:
     // Test hook: if set, used to create model when py_model is None
     using ModelFactory = std::function<std::unique_ptr<ModelBase>(const GptModelInitParams&)>;
     static ModelFactory test_model_factory;
+
+    void syncMutableStreamState() override;
 
     bool updateEplbConfig(const EPLBConfig& config) override;
 

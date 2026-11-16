@@ -148,7 +148,10 @@ cc_test(
         }),
         exec_properties = {"gpu": "L20_CU13"},
         tags = ["L20_CU13"],
-        deps = [":mock_engine"] + cuda13_torch_link_deps,
+        deps = [
+            ":mock_engine",
+            "//rtp_llm/cpp/engine_base/schedulers:schedulers",
+        ] + cuda13_torch_link_deps,
     )
     for mode, stream_async in [
         ("sync", "0"),

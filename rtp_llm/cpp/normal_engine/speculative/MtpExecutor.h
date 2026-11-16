@@ -48,6 +48,7 @@ public:
                          bool                                           warm_up            = false);
 
     absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) override;
+    void         syncMutableStreamState() override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
 
     void setModelForwardCallbacks(std::function<void()> before, std::function<void()> after) {

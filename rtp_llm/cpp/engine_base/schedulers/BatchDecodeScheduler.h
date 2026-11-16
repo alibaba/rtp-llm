@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <condition_variable>
 #include <list>
@@ -58,6 +59,10 @@ public:
         }
         {
             std::lock_guard<std::mutex> lock(lock_);
+            if (stopped_) {
+                stream->reportError(ErrorCode::CANCELLED, "scheduler stopped");
+                return absl::CancelledError("scheduler stopped");
+            }
             stream->recordSchedulerEnqueueTime(autil::TimeUtility::currentTimeInMicroSeconds());
             waiting_streams_.emplace_back(stream);
             if (waiting_streams_.size() % 16 == 0) {
@@ -105,6 +110,12 @@ public:
         }
         {
             std::lock_guard<std::mutex> lock(lock_);
+            if (stopped_) {
+                for (const auto& stream : stream_enqueued) {
+                    stream->reportError(ErrorCode::CANCELLED, "scheduler stopped");
+                }
+                return {std::vector<bool>(streams.size(), false), streams};
+            }
             waiting_streams_.insert(waiting_streams_.end(), stream_enqueued.begin(), stream_enqueued.end());
         }
         cond_.notify_all();
@@ -233,11 +244,70 @@ public:
     }
 
     absl::StatusOr<ScheduleOutput> schedule() override {
+        return scheduleImpl(true);
+    }
+
+    absl::StatusOr<ScheduleOutput> scheduleWithoutWaiting() override {
+        return scheduleImpl(false);
+    }
+
+    absl::Status stop() override {
+        {
+            std::lock_guard<std::mutex> lock(lock_);
+            if (stopped_) {
+                return absl::OkStatus();
+            }
+            stopped_ = true;
+            for (auto* streams : {&waiting_streams_, &loading_cache_streams_, &running_streams_}) {
+                for (const auto& stream : *streams) {
+                    stream->reportError(ErrorCode::CANCELLED, "scheduler stopped");
+                }
+            }
+        }
+        cond_.notify_all();
+        return absl::OkStatus();
+    }
+
+    void finalizeCancelledStreams() override {
+        std::lock_guard<std::mutex> lock(lock_);
+        if (stopped_) {
+            // The executor can hold references to these streams until its
+            // in-flight batch drains. Only now release their KV resources.
+            for (auto* streams : {&waiting_streams_, &loading_cache_streams_, &running_streams_}) {
+                for (const auto& stream : *streams) {
+                    stream->moveToNext();
+                }
+                streams->clear();
+            }
+        }
+    }
+
+    bool empty() override {
+        // Not implemented
+        return true;  // 默认返回值
+    }
+
+    int64_t lastScheduleTime() override {
+        return 0;  // 默认返回值
+    }
+
+    int64_t onflightStreams() override {
+        std::lock_guard<std::mutex> lock(lock_);
+        return waiting_streams_.size() + loading_cache_streams_.size() + running_streams_.size();
+    }
+
+private:
+    absl::StatusOr<ScheduleOutput> scheduleImpl(bool wait) {
         std::unique_lock<std::mutex> lock(lock_);
-        cond_.wait_for(lock, std::chrono::seconds(30), [this] {
-            return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
-                   || !loading_cache_streams_.empty() || (draining_mixed_modes_ && !waiting_streams_.empty());
-        });
+        if (wait) {
+            cond_.wait_for(lock, std::chrono::seconds(30), [this] {
+                return stopped_ || waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
+                       || !loading_cache_streams_.empty() || (draining_mixed_modes_ && !waiting_streams_.empty());
+            });
+        }
+        if (stopped_) {
+            return ScheduleOutput{};
+        }
 
         // 统一通过状态机驱动各队列中 stream 的状态转移
         // LOADING_CACHE -> DONE/WAITING: error / load cache done
@@ -261,28 +331,9 @@ public:
         return ScheduleOutput{running_streams_};
     }
 
-    absl::Status stop() override {
-        // Not implemented
-        return absl::UnimplementedError("BatchDecodeScheduler::stop not implemented");
-    }
-
-    bool empty() override {
-        // Not implemented
-        return true;  // 默认返回值
-    }
-
-    int64_t lastScheduleTime() override {
-        return 0;  // 默认返回值
-    }
-
-    int64_t onflightStreams() override {
-        std::lock_guard<std::mutex> lock(lock_);
-        return waiting_streams_.size() + loading_cache_streams_.size() + running_streams_.size();
-    }
-
-private:
     std::mutex                   lock_;
     std::condition_variable      cond_;
+    bool                         stopped_ = false;
     std::list<GenerateStreamPtr> waiting_streams_;
     std::list<GenerateStreamPtr> loading_cache_streams_;
     std::list<GenerateStreamPtr> running_streams_;

@@ -31,6 +31,7 @@ public:
     enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override;
 
     absl::StatusOr<ScheduleOutput> schedule() override;
+    absl::StatusOr<ScheduleOutput> scheduleWithoutWaiting() override;
 
 public:
     // for test. Group-aware shadow of the FIFOSchedulerBase helper so that
@@ -84,11 +85,12 @@ private:
     size_t prefillTokenCostWithCache(const GenerateStreamPtr& stream) const;
     // Group-aware shadow of FIFOSchedulerBase::countInitedKVCacheStreams(): streams parked
     // in the group queues also hold inited KV blocks and must count against the limit.
-    size_t countInitedKVCacheStreams() const;
-    size_t groupQueueStreamsSize(const StreamGroupQueue& group_queue) const;
-    void   accountBatchMetrics(const GenerateStreamPtr& new_stream);
-    bool   waitPredicate() override;
-    void   onRunningStream(const GenerateStreamPtr& stream) override;
+    size_t                         countInitedKVCacheStreams() const;
+    size_t                         groupQueueStreamsSize(const StreamGroupQueue& group_queue) const;
+    void                           accountBatchMetrics(const GenerateStreamPtr& new_stream);
+    bool                           waitPredicate() override;
+    absl::StatusOr<ScheduleOutput> scheduleImpl(bool wait);
+    void                           onRunningStream(const GenerateStreamPtr& stream) override;
     // FIFO-specific replacement for FIFOSchedulerBase::evaluateWaitingStreams(): admission and
     // state transition happen in a single pass so that per-round token budgets only account for
     // streams that really advanced, and errored streams behind a saturated budget are still

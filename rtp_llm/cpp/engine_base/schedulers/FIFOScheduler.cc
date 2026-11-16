@@ -641,16 +641,26 @@ bool FIFOScheduler::partitionChunkContinuations() {
 }
 
 absl::StatusOr<ScheduleOutput> FIFOScheduler::schedule() {
+    return scheduleImpl(true);
+}
+
+absl::StatusOr<ScheduleOutput> FIFOScheduler::scheduleWithoutWaiting() {
+    return scheduleImpl(false);
+}
+
+absl::StatusOr<ScheduleOutput> FIFOScheduler::scheduleImpl(bool wait) {
     unique_lock<mutex> lock(lock_);
-    if (need_fill_fake_stream_ || !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
-        || !waiting_group_queue_.empty()) {
-        cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
-    } else if (!waiting_streams_.empty()) {
-        // No running work can release capacity. Poll PD-held block releases without turning a
-        // large retryable queue into a tight malloc/eviction loop.
-        cond_.wait_for(lock, std::chrono::milliseconds(100), [this] { return waitPredicate(); });
-    } else {
-        cond_.wait(lock, [this] { return waitPredicate(); });
+    if (wait) {
+        if (need_fill_fake_stream_ || !loading_cache_streams_.empty() || !loading_cache_group_queue_.empty()
+            || !waiting_group_queue_.empty()) {
+            cond_.wait_for(lock, std::chrono::milliseconds(10), [this] { return waitPredicate(); });
+        } else if (!waiting_streams_.empty()) {
+            // No running work can release capacity. Poll PD-held block releases without turning a
+            // large retryable queue into a tight malloc/eviction loop.
+            cond_.wait_for(lock, std::chrono::milliseconds(100), [this] { return waitPredicate(); });
+        } else {
+            cond_.wait(lock, [this] { return waitPredicate(); });
+        }
     }
 
     schedule_trigger_                 = false;

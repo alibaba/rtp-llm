@@ -33,6 +33,18 @@ inline bool validDsv4DecodeCaptureBuckets(const std::vector<int>& buckets, int w
            && buckets.back() <= std::numeric_limits<int>::max() / world / width;
 }
 
+inline size_t dsv4DecodeWorkspaceBudget(size_t before, size_t after, std::optional<size_t> warm_up_cap) {
+    // Torch can fill the workspace from its allocator cache without reducing
+    // driver free memory. Only charge a measured driver allocation against
+    // the earlier conservative warmup cap.
+    if (!warm_up_cap) {
+        return after;
+    }
+    const auto consumed = before - std::min(before, after);
+    const auto capped   = std::min(before, *warm_up_cap);
+    return std::min(after, capped - std::min(capped, consumed));
+}
+
 enum class Dsv4DecodeControlVote : int64_t {
     RUN,
     PAUSE,

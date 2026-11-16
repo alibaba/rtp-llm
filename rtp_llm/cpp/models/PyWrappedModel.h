@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/models/HiddenStateCapturePublisher.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/GenerationPrefillCudaGraphEligibility.h"
+#include "rtp_llm/cpp/models/AgreedDecodeExecution.h"
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -216,8 +217,12 @@ private:
     std::atomic<bool>               prepared_attention_inputs_{false};
     torch_ext::PyAttentionInputs    attention_inputs_;
     torch_ext::AttentionInputsByTag attention_inputs_by_tag_;
-    CudaGraphState                  graph_state_;
-    CudaGraphState                  generation_prefill_cuda_graph_state_;
+    AgreedDecodeExecution*          agreed_decode_execution_   = nullptr;
+    DecodeExecutionPhase            agreed_decode_phase_       = DecodeExecutionPhase::TARGET;
+    int                             agreed_decode_token_width_ = 1;
+
+    CudaGraphState graph_state_;
+    CudaGraphState generation_prefill_cuda_graph_state_;
 };
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
@@ -253,13 +258,15 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                                                                is_prefill_cuda_graph_mode,
                                                                                params.parallelism_config.role_type,
                                                                                params.sp_config.type)),
-    enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && allow_cuda_graph && pp_size_ == 1),
+    enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && allow_cuda_graph && pp_size_ == 1
+                       && (!params.agreed_decode_execution || params.owns_py_model)),
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
     generation_prefill_cuda_graph_init_status_(owns_generation_prefill_cuda_graph_ ?
                                                    GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE :
                                                    GenerationPrefillCudaGraphStatus::NOT_REQUESTED),
     use_spec_decoding_(use_spec_decoding),
-    check_nan_(params.profile_debug_logging_config.check_nan) {
+    check_nan_(params.profile_debug_logging_config.check_nan),
+    agreed_decode_execution_(params.agreed_decode_execution) {
 
     c10::InferenceMode inference_guard(true);
 
@@ -424,12 +431,25 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         RTP_LLM_CHECK(py::hasattr(py_model_, "set_mtp_indexer_role"));
         py_model_.attr("set_mtp_indexer_role")(static_cast<int>(mtp_indexer_role_));
     }
-    auto py_initialize_method = py_model_.attr("initialize");
-    try {
-        py_init_result = py_initialize_method(init_resources);
-    } catch (const py::error_already_set& e) {
-        RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
-        throw;
+    if (agreed_decode_execution_) {
+        bool initialized = false;
+        try {
+            py_init_result = py_model_.attr("initialize")(init_resources);
+            initialized    = py_init_result.cast<bool>()
+                          && (!owns_py_model_ || (enable_cuda_graph_ && params.kv_cache_layer_layout.has_value()));
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("DSv4 decode model initialization failed: %s", e.what());
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("DSv4 decode model initialization failed with an unknown exception");
+        }
+        agreed_decode_execution_->verifyModelInitialization(initialized);
+    } else {
+        try {
+            py_init_result = py_model_.attr("initialize")(init_resources);
+        } catch (const py::error_already_set& e) {
+            RTP_LLM_LOG_ERROR("Python model initialize failed:\n%s", e.what());
+            throw;
+        }
     }
     // Registration enables the handler; only batches with selected prefill rows invoke it.
     if (py::hasattr(py_model_, "custom_output_handler")) {
@@ -544,29 +564,55 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             is_prefill_cuda_graph_mode    ? (params.sp_config.type == SP_TYPE_NONE ? CudaGraphRole::EMBEDDING_PREFILL :
                                                                                      CudaGraphRole::MTP_DRAFT_PREFILL) :
                                             CudaGraphRole::DECODE;
+        if (agreed_decode_execution_) {
+            agreed_decode_token_width_       = graph_params.num_tokens_per_bs;
+            graph_params.agreed_decode_phase = agreed_decode_phase_;
+        }
         graph_params.kernel_block_table_width = params.kernel_block_table_width;
         RTP_LLM_CHECK_WITH_INFO(graph_params.kernel_block_table_width > 0,
                                 "CUDA graph requires Executor to provide a positive kernel block table width");
 
-        auto graph_runner =
-            std::make_unique<CudaGraphRunner>(graph_params, py_instance, forward_method, params.metrics_reporter);
-        {
+        std::unique_ptr<CudaGraphRunner> graph_runner;
+        try {
+            graph_runner =
+                std::make_unique<CudaGraphRunner>(graph_params, py_instance, forward_method, params.metrics_reporter);
             void* nccl_comm = cuda_graph::getGraphCaptureTpNcclComm();
             cuda_graph::register_graph_capture_nccl_comm(nccl_comm,
                                                          static_cast<int>(params.parallelism_config.tp_size),
                                                          static_cast<int>(params.parallelism_config.tp_rank));
+        } catch (...) {
+            if (agreed_decode_execution_) {
+                agreed_decode_execution_->verifyCapture(agreed_decode_phase_, graph_params.num_tokens_per_bs, {});
+            }
+            throw;
         }
-        auto py_initialize_method = py_instance.attr("initialize");
         try {
-            py_init_result = py_initialize_method(init_resources);
+            if (agreed_decode_execution_) {
+                agreed_decode_execution_->verifyCapture(
+                    agreed_decode_phase_, graph_runner->decodeTokenWidth(), graph_runner->decodeCaptureBuckets());
+            } else {
+                py_init_result = py_instance.attr("initialize")(init_resources);
+            }
             // Python initialization/JIT can take a different amount of time on
             // each EP/TP rank. Synchronize immediately before capture so every
             // rank enters graph-held collectives in the same order.
-            syncCudaGraphCaptureRanks(params.parallelism_config, "after_initialize_before_initCapture");
+            if (!agreed_decode_execution_) {
+                syncCudaGraphCaptureRanks(params.parallelism_config, "after_initialize_before_initCapture");
+            }
             if (mtp_indexer_role_ != MtpIndexerRole::NORMAL) {
                 py_model_.attr("set_mtp_indexer_role")(static_cast<int>(mtp_indexer_role_));
             }
-            graph_runner_.reset(CudaGraphRunner::initializeCapture(std::move(graph_runner)));
+            CudaGraphRunner::CaptureReadiness readiness;
+            if (agreed_decode_execution_) {
+                readiness = [this](int key, bool before_capture, bool local_ok) {
+                    agreed_decode_execution_->verifyCaptureReadiness(
+                        agreed_decode_phase_, key, before_capture, local_ok);
+                };
+            }
+            graph_runner_.reset(CudaGraphRunner::initializeCapture(std::move(graph_runner), std::move(readiness)));
+            if (agreed_decode_execution_) {
+                agreed_decode_execution_->finishCapture(agreed_decode_phase_);
+            }
         } catch (const py::error_already_set& e) {
             RTP_LLM_LOG_ERROR("Python model initialize failed (cuda_graph branch):\n%s", e.what());
             throw;

@@ -28,6 +28,11 @@ public:
                                            enqueueGroup(const std::vector<GenerateStreamPtr>& streams) = 0;
     virtual absl::StatusOr<ScheduleOutput> schedule()                                                  = 0;
 
+    // Collective decode rounds must not wait on rank-local request arrivals.
+    virtual absl::StatusOr<ScheduleOutput> scheduleWithoutWaiting() {
+        return absl::UnimplementedError("scheduler does not support collective decode");
+    }
+
     // Conservative-KV scheduling variant for async execution. The async path
     // schedules step N+1 before step N's specUpdate has run, so seq_len is not
     // yet authoritative. Conservative variants reserve the maximum possible

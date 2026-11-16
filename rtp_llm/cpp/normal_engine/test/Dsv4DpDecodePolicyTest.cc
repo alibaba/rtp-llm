@@ -6,6 +6,17 @@
 namespace rtp_llm {
 namespace {
 
+TEST(Dsv4DpDecodePolicyTest, ChargesOnlyMeasuredDriverAllocationAgainstWarmupBudget) {
+    // An allocation served by the Torch cache leaves driver free bytes unchanged.
+    EXPECT_EQ(dsv4DecodeWorkspaceBudget(40, 40, std::nullopt), 40u);
+    EXPECT_EQ(dsv4DecodeWorkspaceBudget(40, 40, 30), 30u);
+    EXPECT_EQ(dsv4DecodeWorkspaceBudget(40, 37, std::nullopt), 37u);
+    EXPECT_EQ(dsv4DecodeWorkspaceBudget(40, 37, 30), 27u);
+    EXPECT_EQ(dsv4DecodeWorkspaceBudget(40, 45, std::nullopt), 45u);
+    EXPECT_EQ(dsv4DecodeWorkspaceBudget(40, 45, 50), 40u);
+    EXPECT_EQ(dsv4DecodeWorkspaceBudget(40, 37, 2), 0u);
+}
+
 TEST(Dsv4DpDecodePolicy, DedicatedTopologyRequiresSingleHostDpAndEp) {
     for (const int world : {4, 8}) {
         EXPECT_TRUE(isDsv4DedicatedDecodeTopology(RoleType::DECODE, 1, 1, world, world, world, world, false));

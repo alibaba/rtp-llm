@@ -20,6 +20,9 @@ public:
     Executor() {};
     virtual absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) = 0;
 
+    // Publish outstanding stream updates before scheduling or releasing their KV cache.
+    virtual void syncMutableStreamState() {}
+
     /** Complete pending work on the engine loop thread before executor teardown. */
     virtual absl::Status finish() {
         return absl::OkStatus();

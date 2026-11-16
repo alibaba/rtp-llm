@@ -2993,6 +2993,12 @@ absl::Status MtpExecutor::process(const ScheduleOutput& schedule_output, int64_t
     return absl::OkStatus();
 }
 
+void MtpExecutor::syncMutableStreamState() {
+    if (useStreamAsync()) {
+        spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+    }
+}
+
 bool MtpExecutor::updateEplbConfig(const EPLBConfig& config) {
     if (expert_balancer_) {
         return expert_balancer_->updateEplbConfig(config);

@@ -43,12 +43,16 @@
 #include <random>
 #include <stdexcept>
 
+#if USING_CUDA || USING_ROCM
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#endif
+
 #if USING_CUDA
 #include "c10/cuda/CUDACachingAllocator.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
-#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 
 #include "c10/cuda/CUDAGuard.h"
+#include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #endif
 
 #ifdef __linux__
@@ -186,7 +190,8 @@ int NormalEngine::calculateReserveStep(const EngineInitParams& params) {
 }
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
-                           std::unique_ptr<ProposeModelEngineInitParams> propose_params):
+                           std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                           DecodeReplicaCoordinatorFactory               coordinator_factory):
     EngineBase(params),
     model_config_(params.model_config_),
     parallelism_config(params.parallelism_config),
@@ -309,6 +314,8 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     RTP_LLM_LOG_INFO("ROCm NormalEngine ctor: set device to %d", parallelism_config.local_rank);
 #endif
 
+    decode_replica_coordinator_ = coordinator_factory(params, resolved_moe_strategy, propose_params_ != nullptr);
+
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
 #if USING_CUDA
     if (runtime_config.warm_up && (!model_config_.mm_model_config.is_multimodal)) {
@@ -338,7 +345,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
         }
         dynamic_decode_gate_enabled_ = gate_result.value();
     }
-    initCacheManager(warm_up_result);
+    initCacheManager(params, warm_up_result);
     RTP_LLM_LOG_INFO("create cache manager done");
 
     initExecutor(params);
@@ -349,7 +356,6 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     // 此时checkpoint已加载完成，可以将glibc缓存的内存归还给操作系统
     releaseHostMemoryCache();
 
-    initScheduler();
     (void)startLoop();
     (void)construction_guard.release();
 }
@@ -380,7 +386,8 @@ void NormalEngine::initExecutor(const EngineInitParams& params) {
             [this]() { step_profiler_.finishStep(); },
             true,
             false,
-            dynamic_decode_gate_enabled_));
+            dynamic_decode_gate_enabled_,
+            decode_replica_coordinator_.get()));
     }
 }
 
@@ -798,15 +805,30 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     RTP_LLM_FAIL("decodeWarmUp is not supported on non-CUDA platforms");
     return {};
 #else
-    auto fake_input                                   = makeFakeInput(getWarmUpInputLength());
-    fake_input->generate_config->num_return_sequences = runtime_config.max_generate_batch_size;
-    fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
-
-    auto cache_manager = createWarmupCacheManager();
+    std::shared_ptr<GenerateInput>  fake_input;
+    std::shared_ptr<KVCacheManager> cache_manager;
+    prepareDecodeReplicaStartup(decode_replica_coordinator_.get(), DecodeReplicaStartupStage::WARMUP_INPUTS, [&] {
+        fake_input                                        = makeFakeInput(getWarmUpInputLength());
+        fake_input->generate_config->num_return_sequences = runtime_config.max_generate_batch_size;
+        fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
+        cache_manager                                     = createWarmupCacheManager();
+    });
     if (parallelism_config.pp_size > 1) {
         executor_.reset(new PPExecutor(params, cache_manager, true));
     } else {
-        executor_.reset(new NormalExecutor(params, cache_manager, true, false, 0));
+        // The temporary wrapper warms the eager target path collectively.
+        // Serving runners warm their fixed providers immediately before capture.
+        executor_.reset(new NormalExecutor(params,
+                                           cache_manager,
+                                           true,
+                                           false,
+                                           0,
+                                           nullptr,
+                                           nullptr,
+                                           true,
+                                           false,
+                                           false,
+                                           decode_replica_coordinator_.get()));
     }
     // preRun creates its stream through resource_context_; expose the same
     // finalized warmup topology that the temporary executor owns.
@@ -1065,44 +1087,58 @@ absl::StatusOr<bool> NormalEngine::runAttentionAccuracyCheck(const EngineInitPar
 #endif
 }
 
-void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
-    normalizeSystemPromptCacheConfig();
-    const bool use_device_malloc_block_pool = shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config);
-    const ModelConfig* draft_model_config   = propose_params_ && propose_params_->draftModel() ?
-                                                  &propose_params_->getEngineInitParams().model_config_ :
-                                                  nullptr;
-    auto               config               = CacheConfigCreator::createConfig(
-        model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
-    auto block_tree_layout = planBlockTreeCacheLayout(config, kv_cache_config);
-    RTP_LLM_CHECK_WITH_INFO(block_tree_layout != nullptr, "failed to plan BlockTreeCache layout");
-    const auto local_block_num = CacheConfigCreator::computeLocalBlockNum(
-        config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
-    const auto confirmed_block_num = CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config);
-    if (parallelism_config.pp_size > 1) {
-        PPCacheCapacityNegotiator negotiator(parallelism_config.pp_size);
-        const auto                capacity =
-            negotiator.negotiate(config, confirmed_block_num, block_tree_layout->sizing, runtime_config);
-        config.finalizeBlockNums(capacity.paged_block_num, runtime_config, &capacity.block_num_overrides);
-        block_tree_layout->block_nums = capacity.block_tree;
-    } else {
-        config.finalizeBlockNums(confirmed_block_num, runtime_config);
-    }
-    auto cache_manager = make_shared<KVCacheManager>(config,
-                                                     false,
-                                                     metrics_reporter_,
-                                                     kv_cache_config,
-                                                     parallelism_config,
-                                                     runtime_config,
-                                                     draft_model_config ? sp_config : SpeculativeExecutionConfig{},
-                                                     pd_sep_config,
-                                                     cache_store_config,
-                                                     use_device_malloc_block_pool,
-                                                     std::move(block_tree_layout));
-    initializeAndPublishCacheManager(resource_context_,
-                                     kv_cache_group_num_,
-                                     pd_sep_config.role_type,
-                                     std::move(cache_manager),
-                                     [](KVCacheManager& manager) { return manager.init(); });
+void NormalEngine::initCacheManager(const EngineInitParams& params, std::optional<WarmUpResult> warm_up_result) {
+    const ModelConfig*      draft_model_config = propose_params_ && propose_params_->draftModel() ?
+                                                     &propose_params_->getEngineInitParams().model_config_ :
+                                                     nullptr;
+    CacheConfig             config;
+    BlockTreeCacheLayoutPtr block_tree_layout;
+    const auto              compute_local_capacity = [&] {
+        if (decode_replica_coordinator_) {
+            decode_replica_coordinator_->reserveWorkspace(params, warm_up_result);
+        }
+        normalizeSystemPromptCacheConfig();
+        config = CacheConfigCreator::createConfig(
+            model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
+        block_tree_layout = planBlockTreeCacheLayout(config, kv_cache_config);
+        RTP_LLM_CHECK_WITH_INFO(block_tree_layout != nullptr, "failed to plan BlockTreeCache layout");
+        return CacheConfigCreator::computeLocalBlockNum(
+            config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
+    };
+    const auto agreed_or_local =
+        prepareDecodeReplicaCacheCapacity(decode_replica_coordinator_.get(), compute_local_capacity);
+    const auto confirmed_block_num = decode_replica_coordinator_ ?
+                                         agreed_or_local :
+                                         CacheConfigCreator::synchronizeBlockNum(agreed_or_local, parallelism_config);
+
+    prepareDecodeReplicaStartup(decode_replica_coordinator_.get(), DecodeReplicaStartupStage::CACHE_MANAGER, [&] {
+        if (parallelism_config.pp_size > 1) {
+            PPCacheCapacityNegotiator negotiator(parallelism_config.pp_size);
+            const auto                capacity =
+                negotiator.negotiate(config, confirmed_block_num, block_tree_layout->sizing, runtime_config);
+            config.finalizeBlockNums(capacity.paged_block_num, runtime_config, &capacity.block_num_overrides);
+            block_tree_layout->block_nums = capacity.block_tree;
+        } else {
+            config.finalizeBlockNums(confirmed_block_num, runtime_config);
+        }
+        auto cache_manager =
+            make_shared<KVCacheManager>(config,
+                                        false,
+                                        metrics_reporter_,
+                                        kv_cache_config,
+                                        parallelism_config,
+                                        runtime_config,
+                                        draft_model_config ? sp_config : SpeculativeExecutionConfig{},
+                                        pd_sep_config,
+                                        cache_store_config,
+                                        shouldUseDeviceMallocKVCacheBacking(pd_sep_config, cache_store_config),
+                                        std::move(block_tree_layout));
+        initializeAndPublishCacheManager(resource_context_,
+                                         kv_cache_group_num_,
+                                         pd_sep_config.role_type,
+                                         std::move(cache_manager),
+                                         [](KVCacheManager& manager) { return manager.init(); });
+    });
 }
 
 absl::Status NormalEngine::initSystemPrompt() {
@@ -1126,11 +1162,16 @@ KVCacheInfo NormalEngine::getCacheStatusInfo(int64_t latest_version, bool need_c
 }
 
 absl::Status NormalEngine::startLoop() {
-    if (parallelism_config.tp_rank == 0) {
-        THROW_IF_STATUS_ERROR(initSystemPrompt());
-    }
-    // System prompts run on the constructor thread; keep Kineto on the engine loop.
-    step_profiler_.configureFromConfig(profiling_debug_logging_config);
+    prepareDecodeReplicaStartup(decode_replica_coordinator_.get(), DecodeReplicaStartupStage::ENGINE_READY, [&] {
+        if (!scheduler_) {
+            initScheduler();
+        }
+        if (parallelism_config.tp_rank == 0) {
+            THROW_IF_STATUS_ERROR(initSystemPrompt());
+        }
+        // System prompts run on the constructor thread; keep Kineto on the engine loop.
+        step_profiler_.configureFromConfig(profiling_debug_logging_config);
+    });
     RTP_LLM_LOG_INFO("start normal engine loop");
     running_     = true;
     loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
@@ -1143,17 +1184,30 @@ absl::Status NormalEngine::stop() {
         return absl::OkStatus();
     }
     RTP_LLM_LOG_INFO("stop normal engine");
-    running_                    = false;
-    const auto scheduler_status = scheduler_->stop();
-    // Ask rank 0 to stop at a step boundary. Receivers must finish all model
-    // collectives for inputs that rank 0 has already published before exiting.
-    CpuTpBroadcaster::instance().requestStop();
+    absl::Status scheduler_status;
+    if (decode_replica_coordinator_) {
+        closeDecodeAdmission();
+    } else {
+        running_         = false;
+        scheduler_status = scheduler_->stop();
+        // Receivers finish model collectives for inputs rank 0 already published.
+        CpuTpBroadcaster::instance().requestStop();
+    }
     loop_thread_->join();
-    scheduler_->finalizeCancelledStreams();
+    if (decode_replica_coordinator_) {
+        scheduler_status = decode_scheduler_stop_status_;
+    } else {
+        scheduler_->finalizeCancelledStreams();
+    }
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
     resource_context_.cache_manager->stopMetricsReporter();
     return scheduler_status;
+}
+
+void NormalEngine::closeDecodeAdmission() {
+    const std::lock_guard<std::mutex> lock(decode_admission_mutex_);
+    running_ = false;
 }
 
 void NormalEngine::loop() {
@@ -1162,12 +1216,17 @@ void NormalEngine::loop() {
     c10::InferenceMode inference_guard(true);
     setCurrentThreadDevice(getDeviceId());
     auto& tp_broadcaster = CpuTpBroadcaster::instance();
-    while (parallelism_config.pp_size > 1 ? running_.load() : !tp_broadcaster.shouldStop(!running_)) {
+    while (decode_replica_coordinator_
+           || (parallelism_config.pp_size > 1 ? running_.load() : !tp_broadcaster.shouldStop(!running_))) {
         try {
-            auto status = parallelism_config.pp_size > 1 ? pp_step() : step();
+            bool replica_stopped = false;
+            auto status          = parallelism_config.pp_size > 1 ? pp_step() : step(replica_stopped);
             if (!status.ok()) {
                 RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
                 THROW_IF_STATUS_ERROR(trySaveStepError());
+            }
+            if (replica_stopped) {
+                break;
             }
         } catch (const CpuTpBroadcastStopped& e) {
             running_ = false;
@@ -1175,10 +1234,25 @@ void NormalEngine::loop() {
             break;
         }
     }
-    running_ = false;
+    if (decode_replica_coordinator_) {
+        closeDecodeAdmission();
+    } else {
+        running_ = false;
+    }
+    if (decode_replica_coordinator_ || runtime_config.use_batch_decode_scheduler) {
+        executor_->syncMutableStreamState();
+#if USING_CUDA || USING_ROCM
+        cuda_graph::graphGetCurrentStream().synchronize();
+#endif
+    }
     // Publish only after the last complete step, while sockets remain alive
     // for the receivers and subsequent model teardown collectives.
-    THROW_IF_STATUS_ERROR(executor_->finish());
+    const auto finish_status = executor_->finish();
+    if (decode_replica_coordinator_) {
+        decode_scheduler_stop_status_ = scheduler_->stop();
+        scheduler_->finalizeCancelledStreams();
+    }
+    THROW_IF_STATUS_ERROR(finish_status);
     tp_broadcaster.finish();
 }
 
@@ -1194,6 +1268,29 @@ bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) 
         return true;
     }
     stream->reportError(ErrorCode::INVALID_PARAMS, kDecodeRolePrefillOnlyError);
+    return false;
+}
+
+bool NormalEngine::validateDecodeEnqueue(const GenerateStreamPtr& stream) const {
+    if (!validateStreamForScheduling(stream)) {
+        return false;
+    }
+    if (!decode_replica_coordinator_) {
+        return true;
+    }
+    const auto& config = *stream->generateConfig();
+    const auto* error  = decode_replica_coordinator_->admissionError({
+        stream->isFakeStream(),
+        stream->isContextStream(),
+        stream->curBlocksNum() > 0,
+        config.variable_num_beams.empty() ? config.num_beams : 0,
+        config.num_return_sequences,
+        config.force_disable_sp_run,
+    });
+    if (!error) {
+        return true;
+    }
+    stream->reportError(ErrorCode::INVALID_PARAMS, error);
     return false;
 }
 
@@ -1253,8 +1350,16 @@ std::shared_ptr<GenerateStream> NormalEngine::makeStream(const std::shared_ptr<G
 
 void NormalEngine::enqueue(std::shared_ptr<GenerateStream>& stream) {
     stream->setReserveStep(reserveStepForStream(stream->generateConfig()->isPrefillOnly()));
-    if (!validateStreamForScheduling(stream)) {
+    if (!validateDecodeEnqueue(stream)) {
         return;
+    }
+    std::unique_lock<std::mutex> admission(decode_admission_mutex_, std::defer_lock);
+    if (decode_replica_coordinator_) {
+        admission.lock();
+        if (!running_) {
+            stream->reportError(ErrorCode::CANCELLED, "decode replica stopped");
+            return;
+        }
     }
     (void)scheduler_->enqueue(stream);
 }
@@ -1297,12 +1402,22 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
     }
 
     for (size_t i = 0; i < streams.size(); ++i) {
-        if (validateStreamForScheduling(streams[i])) {
+        if (validateDecodeEnqueue(streams[i])) {
             schedulable_indexes.push_back(i);
             schedulable_streams.push_back(streams[i]);
         }
     }
 
+    std::unique_lock<std::mutex> admission(decode_admission_mutex_, std::defer_lock);
+    if (decode_replica_coordinator_) {
+        admission.lock();
+        if (!running_) {
+            for (const auto& stream : schedulable_streams) {
+                stream->reportError(ErrorCode::CANCELLED, "decode replica stopped");
+            }
+            return {std::vector<bool>(streams.size(), false), std::move(streams)};
+        }
+    }
     auto              schedulable_result = scheduler_->enqueueGroup(schedulable_streams);
     std::vector<bool> enqueue_successes(streams.size(), false);
     for (size_t i = 0; i < schedulable_indexes.size(); ++i) {
@@ -1311,9 +1426,14 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
     return {std::move(enqueue_successes), std::move(streams)};
 }
 
-absl::Status NormalEngine::step() try {
+absl::Status NormalEngine::step() {
+    bool replica_stopped = false;
+    return step(replica_stopped);
+}
+
+absl::Status NormalEngine::step(bool& replica_stopped) try {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
-    while (pause_) {
+    while (!decode_replica_coordinator_ && pause_) {
         // wait 50ms if system paused.
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
@@ -1321,7 +1441,50 @@ absl::Status NormalEngine::step() try {
     int64_t        tps_schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     ScheduleOutput schedule_output;
     auto&          streams = schedule_output.streams;
-    if (parallelism_config.tp_rank == 0) {
+    if (decode_replica_coordinator_) {
+        // Pause and stop apply at a round boundary, before any scheduler can
+        // advance streams or reserve KV for the next model step.
+        const auto control = decode_replica_coordinator_->beginRound(pause_, !running_);
+        const auto round   = scheduleDecodeReplicaRound(
+            control,
+            [&]() -> int64_t {
+                try {
+                    // Scheduling and phase proposals read the same committed stream state.
+                    executor_->syncMutableStreamState();
+                    auto scheduled = scheduler_->scheduleWithoutWaiting();
+                    if (scheduled.ok()) {
+                        schedule_output = std::move(scheduled).value();
+                        return countScheduledDecodeRequests(streams);
+                    } else {
+                        RTP_LLM_LOG_ERROR("decode replica scheduler failed: %s", scheduled.status().ToString().c_str());
+                    }
+                } catch (const std::exception& e) {
+                    RTP_LLM_LOG_ERROR("decode replica could not freeze scheduled streams: %s", e.what());
+                } catch (...) {
+                    RTP_LLM_LOG_ERROR("decode replica could not freeze scheduled streams");
+                }
+                return -1;
+            },
+            [&](int64_t local_requests) {
+                return decode_replica_coordinator_->agreeScheduledRequests(local_requests);
+            });
+        switch (round) {
+            case DecodeReplicaRound::INVALID:
+                return absl::InternalError("decode replica received invalid scheduled requests or a scheduler failure");
+            case DecodeReplicaRound::STOP:
+                replica_stopped = true;
+                return absl::OkStatus();
+            case DecodeReplicaRound::PAUSED:
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                return absl::OkStatus();
+            case DecodeReplicaRound::IDLE:
+                // Back off only when the entire replica has no scheduled work.
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                return absl::OkStatus();
+            case DecodeReplicaRound::EXECUTE:
+                break;
+        }
+    } else if (parallelism_config.tp_rank == 0) {
         {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
             CHECK_AND_ASSIGN(schedule_output, scheduler_->schedule());
@@ -1341,24 +1504,40 @@ absl::Status NormalEngine::step() try {
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = absl::OkStatus();
 
-    // Per-request timeline: if any stream requested gen_timeline and no session is
-    // active yet, configure the profiler so the executor-driven step window
-    // captures THIS step.
-    if (!step_profiler_.enabled()) {
-        for (const auto& stream : streams) {
-            if (stream && stream->genTimeline()) {
-                const auto& cfg = stream->generateConfig();
-                step_profiler_.configure(true, cfg->profile_trace_name, 0, cfg->profile_step);
-                break;
+    bool executor_started = false;
+    try {
+        if (decode_replica_coordinator_) {
+            mayAddFakeStream(streams);
+        }
+        // Configure per-request timeline before the executor starts model work.
+        if (!step_profiler_.enabled()) {
+            for (const auto& stream : streams) {
+                if (stream && stream->genTimeline()) {
+                    const auto& cfg = stream->generateConfig();
+                    step_profiler_.configure(true, cfg->profile_trace_name, 0, cfg->profile_step);
+                    break;
+                }
             }
         }
-    }
 
-    {
-        // Both executors drive profiling from actual model-work callbacks,
-        // after TP input synchronization has rejected idle steps.
+        // Both executors profile actual model work after input synchronization.
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
-        status = executor_->process(schedule_output, tps_schedule_time_us);
+        executor_started = true;
+        status           = executor_->process(schedule_output, tps_schedule_time_us);
+    } catch (...) {
+        if (decode_replica_coordinator_) {
+            notifyDecodeReplicaFailure([&] {
+                if (executor_started) {
+                    decode_replica_coordinator_->rejectUnpreparedTarget();
+                } else {
+                    decode_replica_coordinator_->rejectUnpreparedRound();
+                }
+            });
+        }
+        throw;
+    }
+    if (!status.ok() && decode_replica_coordinator_) {
+        notifyDecodeReplicaFailure([&] { decode_replica_coordinator_->rejectUnpreparedTarget(); });
     }
 
     // report step metrics
