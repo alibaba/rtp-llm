@@ -594,16 +594,18 @@ TEST(CacheConfigCreatorTest, ReplaySelectsTargetLinearGroupsAndReservesLogMemory
                       (std::vector<int>{static_cast<int>(config.topology().groupIdForTag("target_linear"))}));
             EXPECT_EQ(plan.slotCount(), 5);
             EXPECT_EQ(plan.maxSteps(), 4);
-            EXPECT_EQ(plan.k_shape, (std::array<int64_t, 4>{5, 4, key_heads, 128}));
+            const int64_t kg_slots = vector_gate ? 10 : 5;
+            EXPECT_EQ(plan.k_shape, (std::array<int64_t, 4>{kg_slots, 4, key_heads, 128}));
             EXPECT_EQ(plan.u_shape, (std::array<int64_t, 4>{5, 4, value_heads, 128}));
-            EXPECT_EQ(plan.g_shape, (std::array<int64_t, 4>{5, 4, value_heads, gate_dim}));
+            EXPECT_EQ(plan.g_shape, (std::array<int64_t, 4>{kg_slots, 4, value_heads, gate_dim}));
             EXPECT_EQ(plan.conv_input_shape, (std::array<int64_t, 3>{5, 4, channels}));
             EXPECT_EQ(plan.conv_dtype, DataType::TYPE_BF16);
             // One target layer of 4-step logs per slot; draft layers must not contribute.
-            const size_t values_per_step = key_heads * 128 + value_heads * 128 + value_heads * gate_dim;
+            const size_t kg_banks = vector_gate ? 2 : 1;
+            const size_t values_per_step = kg_banks * (key_heads * 128 + value_heads * gate_dim) + value_heads * 128;
             EXPECT_EQ(plan.reserve_bytes,
                       5u
-                          * (2u * sizeof(int64_t) + 2u * sizeof(int32_t)
+                          * (2u * sizeof(int64_t) + (vector_gate ? 3u : 2u) * sizeof(int32_t)
                              + 4u * (values_per_step * sizeof(float) + channels * sizeof(uint16_t))));
         }
     }

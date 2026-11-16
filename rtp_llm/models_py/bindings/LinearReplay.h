@@ -98,6 +98,7 @@ struct LinearReplayLayerCache {
     torch::Tensor conv_inputs;
     torch::Tensor slot_generations;
     torch::Tensor log_epochs;
+    torch::Tensor log_banks;
     torch::Tensor valid_counts;
     torch::Tensor error_flags;
 };

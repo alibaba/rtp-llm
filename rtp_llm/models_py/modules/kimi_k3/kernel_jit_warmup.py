@@ -120,7 +120,7 @@ def _warmup_replay(model, init_resource) -> None:
             logging.info(
                 "K3 LINEAR replay JIT prepared: layer=%d group=%d steps=1..%d "
                 "slots=%d blocks=%d capacity=%d state_stride=%d cost=%.3fs",
-                layer.index, cache.group_id, max_steps, replay_cache.k.shape[0],
+                layer.index, cache.group_id, max_steps, replay_cache.u.shape[0],
                 state.shape[0], replay_cache.k.shape[1], state.stride(0),
                 time.perf_counter() - start,
             )

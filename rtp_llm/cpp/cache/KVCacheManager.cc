@@ -717,11 +717,13 @@ void KVCacheManager::initLinearReplayPool() {
     const auto epochs = torch::zeros({slots}, i64);
     const auto counts = torch::zeros({slots}, i64.dtype(torch::kInt32));
     const auto errors = torch::zeros({slots}, i64.dtype(torch::kInt32));
+    const auto banks  = plan.hasBankedKeyGateLogs() ? torch::zeros({slots}, i64.dtype(torch::kInt32)) : torch::Tensor{};
     for (auto& [tag, layers] : linear_replay_by_tag_) {
         for (auto& layer : layers) {
             if (layer) {
                 layer->slot_generations = generations;
                 layer->log_epochs = epochs;
+                layer->log_banks = banks;
                 layer->valid_counts = counts;
                 layer->error_flags = errors;
             }

@@ -87,6 +87,64 @@ def _replay_row(
 
 
 @triton.jit
+def _rebuild_state_tile(
+    State,
+    KLog,
+    ULog,
+    GLog,
+    slot,
+    kg_slot,
+    source,
+    destination,
+    accepted,
+    init,
+    hv,
+    hk,
+    ik,
+    iv,
+    state_offset,
+    state_mask,
+    STATE_STRIDE: tl.constexpr,
+    CAPACITY: tl.constexpr,
+    H: tl.constexpr,
+    HV: tl.constexpr,
+    K: tl.constexpr,
+    V: tl.constexpr,
+    GD: tl.constexpr,
+):
+    state = tl.load(
+        State + source * STATE_STRIDE + state_offset,
+        mask=state_mask & (init != 2),
+        other=0,
+    ).to(tl.float32)
+    for t in range(accepted):
+        key = tl.load(
+            KLog + ((kg_slot * CAPACITY + t) * H + hk) * K + ik,
+            mask=ik < K,
+            other=0,
+        )
+        residual = tl.load(
+            ULog + ((slot * CAPACITY + t) * HV + hv) * V + iv,
+            mask=iv < V,
+            other=0,
+        )
+        if GD == 1:
+            gate = tl.load(GLog + (kg_slot * CAPACITY + t) * HV + hv)
+            state *= exp(gate)
+        else:
+            gate = tl.load(
+                GLog + ((kg_slot * CAPACITY + t) * HV + hv) * GD + ik,
+                mask=ik < K,
+                other=0,
+            )
+            state *= exp(gate[None, :])
+        state += residual[:, None] * key[None, :]
+    tl.store(State + destination * STATE_STRIDE + state_offset, state, state_mask)
+    # Keep the same rounding as a separate load of the committed page.
+    return state.to(State.dtype.element_ty).to(tl.float32)
+
+
+@triton.jit
 def _rebuild_state_kernel(
     State,
     KLog,
@@ -149,34 +207,31 @@ def _rebuild_state_kernel(
     else:
         state_offset = hv * V * K + ik[None, :] * V + iv[:, None]
     state_mask = (ik[None, :] < K) & (iv[:, None] < V)
-    state = tl.load(
-        State + source * STATE_STRIDE + state_offset,
-        mask=state_mask & (init != 2),
-        other=0,
-    ).to(tl.float32)
-    for t in range(accepted):
-        key = tl.load(
-            KLog + ((slot * CAPACITY + t) * H + hk) * K + ik,
-            mask=ik < K,
-            other=0,
-        )
-        residual = tl.load(
-            ULog + ((slot * CAPACITY + t) * HV + hv) * V + iv,
-            mask=iv < V,
-            other=0,
-        )
-        if GD == 1:
-            gate = tl.load(GLog + (slot * CAPACITY + t) * HV + hv)
-            state *= exp(gate)
-        else:
-            gate = tl.load(
-                GLog + ((slot * CAPACITY + t) * HV + hv) * GD + ik,
-                mask=ik < K,
-                other=0,
-            )
-            state *= exp(gate[None, :])
-        state += residual[:, None] * key[None, :]
-    tl.store(State + destination * STATE_STRIDE + state_offset, state, state_mask)
+    _rebuild_state_tile(
+        State,
+        KLog,
+        ULog,
+        GLog,
+        slot,
+        slot,
+        source,
+        destination,
+        accepted,
+        init,
+        hv,
+        hk,
+        ik,
+        iv,
+        state_offset,
+        state_mask,
+        STATE_STRIDE,
+        CAPACITY,
+        H,
+        HV,
+        K,
+        V,
+        GD,
+    )
 
 
 @triton.jit
@@ -322,6 +377,7 @@ def _serial_verify_kernel(
     PoolEpoch,
     PoolCount,
     Error,
+    LogBanks,
     GATE_STRIDE: tl.constexpr,
     BETA_STRIDE: tl.constexpr,
     STATE_STRIDE: tl.constexpr,
@@ -338,6 +394,7 @@ def _serial_verify_kernel(
     BV: tl.constexpr,
     LOWER_BOUND: tl.constexpr,
     STATE_V_FIRST: tl.constexpr,
+    FUSE_REBUILD: tl.constexpr,
 ):
     row, hv = tl.program_id(0) // HV, tl.program_id(0) % HV
     tile_v = tl.program_id(1)
@@ -371,11 +428,43 @@ def _serial_verify_kernel(
         state_offset = hv * V * K + iv[:, None] * K + ik[None, :]
     else:
         state_offset = hv * V * K + ik[None, :] * V + iv[:, None]
-    state = tl.load(
-        State + destination * STATE_STRIDE + state_offset,
-        mask=(ik[None, :] < K) & (iv[:, None] < V),
-        other=0,
-    ).to(tl.float32)
+    state_mask = (ik[None, :] < K) & (iv[:, None] < V)
+    if FUSE_REBUILD:
+        bank = tl.load(LogBanks + slot).to(tl.int64)
+        history_kg_slot = slot + bank * NSLOT
+        output_kg_slot = slot + (1 - bank) * NSLOT
+        # ULog is private to this value tile. Shared K/G writes use the other
+        # bank because sibling CTAs can still be replaying the old window.
+        state = _rebuild_state_tile(
+            State,
+            KLog,
+            ULog,
+            GLog,
+            slot,
+            history_kg_slot,
+            source,
+            destination,
+            accepted,
+            init,
+            hv,
+            hk,
+            ik,
+            iv,
+            state_offset,
+            state_mask,
+            STATE_STRIDE,
+            CAPACITY,
+            H,
+            HV,
+            K,
+            V,
+            GD,
+        )
+    else:
+        output_kg_slot = slot
+        state = tl.load(
+            State + destination * STATE_STRIDE + state_offset, state_mask, other=0
+        ).to(tl.float32)
     alog = tl.load(ALog + hv).to(tl.float32)
     if GD == 1:
         bias = tl.load(DtBias + hv).to(tl.float32)
@@ -418,13 +507,13 @@ def _serial_verify_kernel(
         tl.store(ULog + ((slot * CAPACITY + t) * HV + hv) * V + iv, residual, iv < V)
         # Grouped value heads share one key log; each address has one writer.
         if (tile_v == 0) & (hv % (HV // H) == 0):
-            tl.store(KLog + ((slot * CAPACITY + t) * H + hk) * K + ik, k, ik < K)
+            tl.store(KLog + ((output_kg_slot * CAPACITY + t) * H + hk) * K + ik, k, ik < K)
         if tile_v == 0:
             if GD == 1:
-                tl.store(GLog + (slot * CAPACITY + t) * HV + hv, gate)
+                tl.store(GLog + (output_kg_slot * CAPACITY + t) * HV + hv, gate)
             else:
                 tl.store(
-                    GLog + ((slot * CAPACITY + t) * HV + hv) * K + ik, gate, ik < K
+                    GLog + ((output_kg_slot * CAPACITY + t) * HV + hv) * K + ik, gate, ik < K
                 )
 
 
@@ -437,8 +526,10 @@ def _finalize_kernel(
     PoolEpoch,
     PoolCount,
     Error,
+    LogBanks,
     B,
     NSLOT: tl.constexpr,
+    BANKED_KG: tl.constexpr,
     T: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
@@ -456,6 +547,9 @@ def _finalize_kernel(
     tl.store(PoolGeneration + slot, generation, valid)
     tl.store(PoolEpoch + slot, epoch, valid)
     tl.store(PoolCount + slot, T, valid)
+    if BANKED_KG:
+        bank = tl.load(LogBanks + slot, valid, other=0)
+        tl.store(LogBanks + slot, 1 - bank, valid)
 
 
 def finalize_linear_replay(layer_cache: Any, replay_inputs: Any, steps: int) -> None:
@@ -463,6 +557,8 @@ def finalize_linear_replay(layer_cache: Any, replay_inputs: Any, steps: int) -> 
     if steps <= 0 or steps > layer_cache.k.shape[1]:
         raise ValueError("LINEAR replay finalize length exceeds the log capacity")
     batch = replay_inputs.slot_ids.numel()
+    slots = layer_cache.u.shape[0]
+    banked_kg = layer_cache.k.shape[0] == 2 * slots
     _finalize_kernel[(triton.cdiv(batch, 128),)](
         replay_inputs.slot_ids,
         replay_inputs.slot_generations,
@@ -471,8 +567,10 @@ def finalize_linear_replay(layer_cache: Any, replay_inputs: Any, steps: int) -> 
         layer_cache.log_epochs,
         layer_cache.valid_counts,
         layer_cache.error_flags,
+        layer_cache.log_banks if banked_kg else layer_cache.valid_counts,
         batch,
-        layer_cache.k.shape[0],
+        slots,
+        banked_kg,
         steps,
         128,
         num_warps=4,
@@ -522,8 +620,15 @@ class LinearReplay:
                 "target LINEAR verification requires replay cache and inputs"
             )
         device = ssm_pool.device
-        slots, capacity, h, k = layer_cache.k.shape
-        _, _, hv, v = layer_cache.u.shape
+        kg_slots, capacity, h, k = layer_cache.k.shape
+        slots, _, hv, v = layer_cache.u.shape
+        banked_kg = vector_gate and kg_slots == 2 * slots
+        if not banked_kg and kg_slots != slots:
+            raise ValueError("invalid LINEAR replay K/G bank geometry")
+        if banked_kg:
+            _require_tensor(
+                "log_banks", layer_cache.log_banks, (slots,), device, torch.int32
+            )
         gate_dim = k if vector_gate else 1
         channels = 2 * h * k + hv * v
         if min(slots, capacity, h, k, hv, v) <= 0 or hv % h:
@@ -531,9 +636,9 @@ class LinearReplay:
                 "invalid LINEAR replay window capacity or grouped head counts"
             )
         for name, shape, dtype in (
-            ("k", (slots, capacity, h, k), torch.float32),
+            ("k", (kg_slots, capacity, h, k), torch.float32),
             ("u", (slots, capacity, hv, v), torch.float32),
-            ("g", (slots, capacity, hv, gate_dim), torch.float32),
+            ("g", (kg_slots, capacity, hv, gate_dim), torch.float32),
             ("conv_inputs", (slots, capacity, channels), conv_pool.dtype),
             ("slot_generations", (slots,), torch.int64),
             ("log_epochs", (slots,), torch.int64),
@@ -662,8 +767,9 @@ def _linear_serial_replay(
     if batch <= 0 or tokens % batch:
         raise ValueError("LINEAR replay requires an integral verify length per request")
     steps = tokens // batch
-    slots, capacity, h, k = layer_cache.k.shape
-    _, _, hv, v = layer_cache.u.shape
+    kg_slots, capacity, h, k = layer_cache.k.shape
+    slots, _, hv, v = layer_cache.u.shape
+    banked_kg = kg_slots == 2 * slots
     gate_dim = k if vector_gate else 1
     channels = 2 * h * k + hv * v
     if steps <= 0 or steps > capacity or hv % h:
@@ -733,26 +839,27 @@ def _linear_serial_replay(
     tile_v = 32 if vector_gate else 8
     grid = (batch * hv, triton.cdiv(v, tile_v))
     warps = 4 if vector_gate else 1
-    _rebuild_state_kernel[grid](
-        ssm_pool,
-        layer_cache.k,
-        layer_cache.u,
-        layer_cache.g,
-        *row_args,
-        ssm_pool.stride(0),
-        slots,
-        blocks,
-        capacity,
-        h,
-        hv,
-        k,
-        v,
-        gate_dim,
-        tile_k,
-        tile_v,
-        state_v_first,
-        num_warps=warps,
-    )
+    if not banked_kg:
+        _rebuild_state_kernel[grid](
+            ssm_pool,
+            layer_cache.k,
+            layer_cache.u,
+            layer_cache.g,
+            *row_args,
+            ssm_pool.stride(0),
+            slots,
+            blocks,
+            capacity,
+            h,
+            hv,
+            k,
+            v,
+            gate_dim,
+            tile_k,
+            tile_v,
+            state_v_first,
+            num_warps=warps,
+        )
     convolved = torch.empty((tokens, channels), device=device, dtype=q_projected.dtype)
     _replay_conv_kernel[(batch, triton.cdiv(channels, 128))](
         q_projected,
@@ -794,6 +901,7 @@ def _linear_serial_replay(
         layer_cache.u,
         layer_cache.g,
         *row_args,
+        layer_cache.log_banks if banked_kg else layer_cache.valid_counts,
         raw_gate.stride(0),
         raw_beta.stride(0),
         ssm_pool.stride(0),
@@ -810,7 +918,8 @@ def _linear_serial_replay(
         tile_v,
         lower_bound,
         state_v_first,
-        num_warps=warps,
+        banked_kg,
+        num_warps=2 if banked_kg else warps,
     )
     return output
 
