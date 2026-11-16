@@ -142,3 +142,12 @@ py_test(
     tags = ["open_skip", "H20_CU13"],
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
 )
+
+py_test(
+    name = "deepgemm_282_indexer_sm100_arm_test",
+    srcs = ["deepgemm_282_indexer_test.py"],
+    main = "deepgemm_282_indexer_test.py",
+    deps = py_test_deps,
+    tags = ["SM100_ARM_CU13"],
+    exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)

@@ -5,6 +5,7 @@
 namespace torch_ext {
 
 // Stable per-row radix-select TopK for GLM5 indexer prefill.
+// Accepts FP32 or BF16 scores; BF16 values are converted to FP32 in registers.
 //
 // Each row reads scores[row, row_starts[row]:row_ends[row]]. Returned indices
 // are relative to row_starts[row]. Equal threshold scores are resolved by the

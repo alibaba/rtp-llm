@@ -401,7 +401,9 @@ class IndexerOp(nn.Module):
         )
         # 2.8.2 stores column j at K[ks[row] + j]; the unfilled tail is unreadable.
         # TopK returns request-local indices for both layouts, so no ks shift is needed.
-        return logits.float(), torch.zeros_like(ks), ke - ks, None
+        if self._prefill_topk_backend != "topk_v3_tie_break":
+            logits = logits.float()
+        return logits, torch.zeros_like(ks), ke - ks, None
 
     def _mqa_weights(self, weights: torch.Tensor) -> torch.Tensor:
         if not self.use_mxfp8:
@@ -1285,7 +1287,11 @@ class IndexerOp(nn.Module):
                 weights_sq0 = weights_sq[:n_local]
             else:
                 q0 = q_fp8[total_local_ids].contiguous()
-                q_scale0 = q_scale[total_local_ids].contiguous() if q_scale is not None else None
+                q_scale0 = (
+                    q_scale[total_local_ids].contiguous()
+                    if q_scale is not None
+                    else None
+                )
                 weights_sq0 = weights_sq[total_local_ids].contiguous()
         else:
             q0 = q_fp8[:0]
@@ -1417,7 +1423,9 @@ class IndexerOp(nn.Module):
                 Tuple of (q_fp8, q_scale) for local context only, shapes [local_tokens, ...].
             """
             if self._new_mqa_api:
-                return self._dg282_quant_q_k_cp(query, key, kv_cache, slot_mapping, kv_restore_unpad_indices)
+                return self._dg282_quant_q_k_cp(
+                    query, key, kv_cache, slot_mapping, kv_restore_unpad_indices
+                )
             assert kv_cache is not None, "kv_cache is required"
             gathered_key = all_gather(
                 key.contiguous(), group=Group.TP, role="indexer_k_bf16"
@@ -1475,7 +1483,14 @@ class IndexerOp(nn.Module):
                 TopK indices tensor
             """
             if self._new_mqa_api:
-                return self._dg282__get_topk_ragged(q_fp8, weights, kv_cache, fmha_params, attention_inputs, q_scale=q_scale)
+                return self._dg282__get_topk_ragged(
+                    q_fp8,
+                    weights,
+                    kv_cache,
+                    fmha_params,
+                    attention_inputs,
+                    q_scale=q_scale,
+                )
             assert not (
                 bool(getattr(attention_inputs, "is_target_verify", False))
                 or bool(getattr(attention_inputs, "is_draft_extend", False))
@@ -1624,7 +1639,30 @@ class IndexerOp(nn.Module):
                 layer's top-k object.
             """
             if self._new_mqa_api:
-                return self._dg282__get_topk_ragged_cp(q_fp8, weights, kv_cache, fmha_params, attention_inputs, total_local_ids, cu_kv_seqlens_global, num_kv_tokens, precomputed_ks, precomputed_ke, precomputed_lengths, precomputed_topk_off, kv_cache_sharded, cp_size, cp_rank, kv_owner_tokens_per_block, indexer_cp_plan, indexer_cp_local_cu, indexer_copy_dst_idx, indexer_src_for_padded, total_local_ids_is_identity, q_scale=q_scale)
+                return self._dg282__get_topk_ragged_cp(
+                    q_fp8,
+                    weights,
+                    kv_cache,
+                    fmha_params,
+                    attention_inputs,
+                    total_local_ids,
+                    cu_kv_seqlens_global,
+                    num_kv_tokens,
+                    precomputed_ks,
+                    precomputed_ke,
+                    precomputed_lengths,
+                    precomputed_topk_off,
+                    kv_cache_sharded,
+                    cp_size,
+                    cp_rank,
+                    kv_owner_tokens_per_block,
+                    indexer_cp_plan,
+                    indexer_cp_local_cu,
+                    indexer_copy_dst_idx,
+                    indexer_src_for_padded,
+                    total_local_ids_is_identity,
+                    q_scale=q_scale,
+                )
             device = q_fp8.device
             has_local_ids = (
                 total_local_ids is not None and int(total_local_ids.numel()) > 0

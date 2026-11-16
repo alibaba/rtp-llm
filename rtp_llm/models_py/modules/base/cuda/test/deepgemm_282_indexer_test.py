@@ -1,15 +1,23 @@
 """GLM5 MXFP8 integration checks for the default CUDA13 DeepGEMM dependency."""
 
+import os
+import tempfile
 from types import SimpleNamespace
 from unittest import SkipTest, TestCase, main
 
 import torch
 
-from rtp_llm.models_py.modules.base.cuda.indexer_op import IndexerOp
-from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (
+# Bazel remote actions may omit HOME; give DeepJIT an explicit cache root.
+os.environ.setdefault(
+    "DG_JIT_CACHE_DIR",
+    os.path.join(os.environ.get("TEST_TMPDIR", tempfile.gettempdir()), "deep_gemm"),
+)
+
+from rtp_llm.models_py.modules.base.cuda.indexer_op import IndexerOp  # noqa: E402
+from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_impl import (  # noqa: E402
     SparseMlaImpl,
 )
-from rtp_llm.ops.compute_ops import LayerKVCache
+from rtp_llm.ops.compute_ops import LayerKVCache  # noqa: E402
 
 
 class DeepGemm282IndexerTest(TestCase):
@@ -148,6 +156,29 @@ class DeepGemm282IndexerTest(TestCase):
         for row, (ks, ke) in enumerate(zip(fmha.ks.tolist(), fmha.ke.tolist())):
             torch.testing.assert_close(
                 logits[row, : ke - ks], 4096 * k_values[ks:ke], rtol=0, atol=0
+            )
+
+    def test_prefill_tie_break_preserves_deepgemm_bf16_logits(self) -> None:
+        from deep_gemm.utils import per_token_cast_to_fp8
+
+        q, sf, weights, _, fmha, _, k_values = self._inputs()
+        k = k_values[:, None].expand(256, 128).to(torch.bfloat16).contiguous()
+        k_fp8, k_sf = per_token_cast_to_fp8(
+            k, use_ue8m0=True, gran_k=32, use_packed_ue8m0=True
+        )
+        self.op._prefill_topk_backend = "dsv4_per_row"
+        baseline, _, _, _ = self.op._prefill_logits(
+            q, sf, (k_fp8, k_sf.flatten()), weights.squeeze(-1), fmha.ks, fmha.ke, 128
+        )
+        self.op._prefill_topk_backend = "topk_v3_tie_break"
+        actual, _, _, _ = self.op._prefill_logits(
+            q, sf, (k_fp8, k_sf.flatten()), weights.squeeze(-1), fmha.ks, fmha.ke, 128
+        )
+        self.assertEqual(actual.dtype, torch.bfloat16)
+        self.assertEqual(baseline.dtype, torch.float32)
+        for row, length in enumerate((fmha.ke - fmha.ks).tolist()):
+            torch.testing.assert_close(
+                actual[row, :length].float(), baseline[row, :length], rtol=0, atol=0
             )
 
     def test_selected_ranking_depends_on_reordered_q_scales(self) -> None:

@@ -535,6 +535,111 @@ def test_cuda_graph_replay_updates_scores_and_ragged_bounds() -> None:
             )
 
 
+def test_bf16_matches_fp32_cast_and_stable_reference() -> None:
+    generator = torch.Generator(device="cuda").manual_seed(20261030)
+    cases = 0
+    for length in (511, 2049, 4095, 8192, 16384, 32771, 65537):
+        rows, width = 8, length + 19
+        starts = torch.tensor(
+            [0, 1, 2, 3, 5, 7, 8, 9], device="cuda", dtype=torch.int32
+        )
+        ends = starts + length
+        ends[0] = starts[0]
+        ends[1] = starts[1] + min(length, 513)
+        for discrete in (False, True):
+            storage = torch.full(
+                (rows, width + 1), torch.nan, device="cuda", dtype=torch.bfloat16
+            )
+            scores = storage[:, 1:]
+            for row in range(rows):
+                start, end = int(starts[row]), int(ends[row])
+                values = torch.randn(end - start, device="cuda", generator=generator)
+                if discrete:
+                    values = torch.randint(
+                        -2, 3, (end - start,), device="cuda", generator=generator
+                    ).float()
+                scores[row, start:end] = values
+            for k in (512, 1024, 2048):
+                actual = _run(scores, starts, ends, k, length)
+                baseline = _run(scores.float(), starts, ends, k, length)
+                torch.testing.assert_close(
+                    actual.sort(dim=1).values,
+                    baseline.sort(dim=1).values,
+                    atol=0,
+                    rtol=0,
+                )
+                _assert_stable_equiv(
+                    actual, scores, starts, ends, k, length,
+                    f"BF16 length={length} K={k} discrete={discrete}",
+                )
+                cases += 1
+    print(
+        f"BF16 random/discrete ragged comparison: {cases} cases, "
+        f"{cases * rows} rows, zero selected-index mismatches"
+    )
+
+
+def test_bf16_special_values_match_fp32_cast() -> None:
+    # Preserve signed zero, infinities, subnormals, and signed quiet NaN payloads.
+    bits = torch.tensor(
+        [0, -32768, 1, -32767, 16256, -16512, 32639, -129, 32640, -128, 32704, -64],
+        dtype=torch.int16,
+        device="cuda",
+    )
+    for length in (8192, 65537):
+        scores = (
+            bits.view(torch.bfloat16)
+            .repeat((length + 23) // bits.numel() + 1)[: length + 23]
+            .reshape(1, -1)
+        )
+        starts = torch.tensor([3], dtype=torch.int32, device="cuda")
+        ends = starts + length
+        for k in (512, 1024, 2048):
+            actual = _run(scores, starts, ends, k, length)
+            baseline = _run(scores.float(), starts, ends, k, length)
+            torch.testing.assert_close(
+                actual.sort(dim=1).values,
+                baseline.sort(dim=1).values,
+                atol=0,
+                rtol=0,
+            )
+    print("BF16 special-value comparison: 6 cases, zero selected-index mismatches")
+
+
+def test_bf16_cuda_graph_replay_matches_fp32_cast() -> None:
+    rows, width, k = 4, 32771, 2048
+    scores = torch.zeros((rows, width), dtype=torch.bfloat16, device="cuda")
+    starts = torch.arange(rows, dtype=torch.int32, device="cuda")
+    ends = torch.full_like(starts, width)
+    output = torch.empty((rows, k), dtype=torch.int32, device="cuda")
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        rtp_llm_ops.topk_v3_tie_break(scores, starts, ends, output, k, width)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        rtp_llm_ops.topk_v3_tie_break(scores, starts, ends, output, k, width)
+    for repeat in range(3):
+        scores.fill_(-1)
+        scores[:, 3000 + repeat : 6000 + repeat] = 1
+        starts.copy_(torch.arange(rows, dtype=torch.int32, device="cuda") + repeat)
+        ends[0] = starts[0]
+        ends[1] = starts[1] + k - 1
+        graph.replay()
+        baseline = _run(scores.float(), starts, ends, k, width)
+        torch.testing.assert_close(
+            output.sort(dim=1).values,
+            baseline.sort(dim=1).values,
+            atol=0,
+            rtol=0,
+        )
+        _assert_stable_equiv(
+            output, scores, starts, ends, k, width, f"BF16 graph replay={repeat}"
+        )
+    print("BF16 CUDA Graph comparison: 3 changed-input replays, zero selected-index mismatches")
+
+
 if __name__ == "__main__":
     if not hasattr(rtp_llm_ops, "topk_v3_tie_break"):
         print("SKIP: topk_v3_tie_break binding is not built")
@@ -554,4 +659,7 @@ if __name__ == "__main__":
     test_overflow_boundary_counter_is_snapshotted_by_all_warps()
     test_negative_midpoint_preserves_higher_scores_and_stable_ties()
     test_cuda_graph_replay_updates_scores_and_ragged_bounds()
+    test_bf16_matches_fp32_cast_and_stable_reference()
+    test_bf16_special_values_match_fp32_cast()
+    test_bf16_cuda_graph_replay_matches_fp32_cast()
     print("topk_v3_tie_break correctness: PASS")

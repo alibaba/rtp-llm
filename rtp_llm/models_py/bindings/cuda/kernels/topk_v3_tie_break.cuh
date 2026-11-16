@@ -10,7 +10,7 @@ namespace device::topk_tie_break {
 
 namespace base = device::topk;
 
-using base::TopKProblem;
+using base::TypedTopKProblem;
 using base::TieValue;
 
 inline constexpr uint32_t kBlockSize = base::TopKConfig::kBlockSize;
@@ -27,8 +27,8 @@ SGL_DEVICE uint32_t stable_score_key(float value) {
     return (bits & 0x80000000u) ? ~bits : (bits ^ 0x80000000u);
 }
 
-template <typename Predicate, typename KeyFn>
-SGL_DEVICE uint32_t radix_select_problem(const TopKProblem&                       problem,
+template <typename DType, typename Predicate, typename KeyFn>
+SGL_DEVICE uint32_t radix_select_problem(const TypedTopKProblem<DType>&           problem,
                                          uint32_t                                 rank,
                                          typename base::TopKConfig::TieHandleSmem* smem,
                                          Predicate                                predicate,
@@ -93,9 +93,9 @@ SGL_DEVICE uint32_t radix_select_problem(const TopKProblem&                     
     return prefix;
 }
 
-template <uint32_t kItems>
+template <uint32_t kItems, typename DType>
 SGL_DEVICE void stable_handle_tie_impl(const TieValue*                           tie_buffer,
-                                       const TopKProblem&                        problem,
+                                       const TypedTopKProblem<DType>&            problem,
                                        uint32_t                                  base_out,
                                        uint32_t                                  num_ties,
                                        uint32_t                                  remaining_topk,
@@ -294,8 +294,9 @@ SGL_DEVICE void stable_handle_tie_impl(const TieValue*                          
 // threshold are all selected. If only part of the exact-threshold group fits,
 // select its smallest relative indices using a second four-round radix pass on
 // index_key = UINT32_MAX - idx.
+template <typename DType>
 SGL_DEVICE void stable_handle_tie(const TieValue*                           tie_buffer,
-                                  const TopKProblem&                        problem,
+                                  const TypedTopKProblem<DType>&            problem,
                                   uint32_t                                  base_out,
                                   uint32_t                                  num_ties,
                                   uint32_t                                  remaining_topk,
@@ -363,9 +364,9 @@ SGL_DEVICE bool needs_exact_coarse_classification(uint32_t threshold_bin) {
 // Candidate-buffer overflow fallback. It performs the same stable score then
 // index radix selection while rescanning the coarse threshold interval, or the
 // whole row for the non-monotonic canonical NaN bin.
-template <uint32_t kHistBits>
+template <uint32_t kHistBits, typename DType>
 SGL_DEVICE void stable_exact_boundary_scan_topk(
-    const TopKProblem&                        problem,
+    const TypedTopKProblem<DType>&            problem,
     typename base::TopKConfig::TieHandleSmem* smem,
     uint32_t                                  threshold_bin,
     uint32_t                                  output_base) {
@@ -477,8 +478,8 @@ struct TopKRegister : base::TopKRadixBase<12> {
     using Smem = Base::Smem;
     using vec_t = typename Base::vec_t;
 
-    template <bool kAlignedInput>
-    SGL_DEVICE static void forward(const TopKProblem problem, void* raw_smem) {
+    template <bool kAlignedInput, typename DType>
+    SGL_DEVICE static void forward(const TypedTopKProblem<DType> problem, void* raw_smem) {
         const uint32_t tx = threadIdx.x;
         auto* smem = static_cast<Smem*>(raw_smem);
         typename Smem::kHistVec hist_vec;
@@ -504,11 +505,7 @@ struct TopKRegister : base::TopKRadixBase<12> {
             if (vi >= num_full) {
                 break;
             }
-            if constexpr (kAlignedInput) {
-                local_vecs[i].load(problem.in, vi);
-            } else {
-                local_vecs[i].load_unaligned(problem.in, vi);
-            }
+            Base::template load_input<kAlignedInput>(local_vecs[i], problem.in, vi);
         }
 #pragma unroll
         for (uint32_t i = 0; i < kLocalVecs; ++i) {
@@ -614,8 +611,8 @@ struct TopKRegister : base::TopKRadixBase<12> {
 struct TopKStreaming : TopKRegister<2> {
     static constexpr uint32_t kMaxSeqLen = std::numeric_limits<uint32_t>::max();
 
-    template <bool kAlignedInput>
-    SGL_DEVICE static void forward(const TopKProblem problem, void* raw_smem) {
+    template <bool kAlignedInput, typename DType>
+    SGL_DEVICE static void forward(const TypedTopKProblem<DType> problem, void* raw_smem) {
         const uint32_t tx = threadIdx.x;
         auto* smem = static_cast<Smem*>(raw_smem);
         typename Smem::kHistVec hist_vec;
