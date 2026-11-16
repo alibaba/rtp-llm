@@ -11,6 +11,27 @@ repos:
     # Formatters
   - repo: local
     hooks:
+      - id: flexlb-java-checker-tests
+        name: Test FlexLB Java checkers
+        entry: python -m unittest discover -s rtp_llm/flexlb/tools -p test_*.py
+        language: python
+        additional_dependencies:
+          - tree-sitter==0.23.2
+          - tree-sitter-java==0.23.5
+        files: ^(rtp_llm/flexlb/tools/.*\.py|\.pre-commit-config\.yaml)$
+        pass_filenames: false
+        require_serial: true
+      - id: flexlb-java-unused
+        name: Check FlexLB unused imports, members and test-only production methods
+        entry: python rtp_llm/flexlb/tools/flexlb-clean-obvious.py --check
+        language: python
+        additional_dependencies:
+          - tree-sitter==0.23.2
+          - tree-sitter-java==0.23.5
+        files: ^(rtp_llm/flexlb/.*\.(java|py)|\.pre-commit-config\.yaml)$
+        pass_filenames: false
+        require_serial: true
+        always_run: true
       - id: flexlb-java-conventions
         name: Check FlexLB Java member order and changed-class Javadoc
         entry: python rtp_llm/flexlb/tools/check_flexlb_java.py
