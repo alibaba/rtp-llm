@@ -38,6 +38,16 @@ load("@rules_cc//cc:defs.bzl", cuda13_cc_test = "cc_test")
 ]
 
 cc_test(
+    name = "decode_execution_test",
+    srcs = ["decode_execution_test.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:decode_execution",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "combo_position_ids_validation_test",
     srcs = ["combo_position_ids_validation_test.cc"],
     copts = copts(),

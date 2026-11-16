@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
+#include "rtp_llm/cpp/cuda_graph/decode_execution.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include "rtp_llm/models_py/bindings/CacheStoreWriter.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
@@ -369,6 +370,11 @@ struct PyModelInputs {
 
     /** PP boundary tensors received from the upstream stage; empty under pp_size=1. */
     PPIntermediates pp_intermediates;
+
+    std::optional<rtp_llm::DecodeExecution> decode_execution{};
+    // Flat CUDA bool tensor. True marks a token row with real request data.
+    // Graph replay refreshes this tensor in the captured input storage.
+    torch::Tensor decode_row_validity{};
 
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();

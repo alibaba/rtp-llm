@@ -223,6 +223,33 @@ void registerPyOpDefs(pybind11::module& m) {
             "mm_extra_input", &PyMultimodalInputs::mm_extra_input, "Multimodal model-specific extra input tensor")
         .def("__repr__", [](const PyMultimodalInputs& self) { return "PyMultimodalInputs"; });
 
+    using rtp_llm::DecodeExecution;
+    using rtp_llm::DecodeExecutionMode;
+    using rtp_llm::DecodeExecutionPhase;
+    pybind11::enum_<DecodeExecutionMode>(m, "DecodeExecutionMode")
+        .value("EAGER", DecodeExecutionMode::EAGER)
+        .value("FIXED", DecodeExecutionMode::FIXED)
+        .value("GRAPH", DecodeExecutionMode::GRAPH);
+    pybind11::enum_<DecodeExecutionPhase>(m, "DecodeExecutionPhase")
+        .value("TARGET", DecodeExecutionPhase::TARGET)
+        .value("TARGET_VERIFY", DecodeExecutionPhase::TARGET_VERIFY)
+        .value("MTP_DRAFT", DecodeExecutionPhase::MTP_DRAFT)
+        .value("MTP_COMMIT", DecodeExecutionPhase::MTP_COMMIT)
+        .value("DSPARK_PROPOSAL", DecodeExecutionPhase::DSPARK_PROPOSAL)
+        .value("DSPARK_COMMIT", DecodeExecutionPhase::DSPARK_COMMIT);
+    pybind11::class_<DecodeExecution>(m, "DecodeExecution")
+        .def(pybind11::init([](DecodeExecutionMode mode, DecodeExecutionPhase phase, int bucket, int token_width) {
+                 return DecodeExecution{mode, phase, bucket, token_width};
+             }),
+             pybind11::arg("mode"),
+             pybind11::arg("phase"),
+             pybind11::arg("bucket"),
+             pybind11::arg("token_width"))
+        .def_readonly("mode", &DecodeExecution::mode)
+        .def_readonly("phase", &DecodeExecution::phase)
+        .def_readonly("bucket", &DecodeExecution::bucket)
+        .def_readonly("token_width", &DecodeExecution::token_width);
+
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
         .def(pybind11::init<>())
         .def(pybind11::init([](torch::Tensor       input_ids,
@@ -259,6 +286,8 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("need_all_logits", &PyModelInputs::need_all_logits)
         .def_readwrite("need_all_hidden_states", &PyModelInputs::need_all_hidden_states)
         .def_readwrite("engram_token_windows", &PyModelInputs::engram_token_windows)
+        .def_readwrite("decode_execution", &PyModelInputs::decode_execution)
+        .def_readwrite("decode_row_validity", &PyModelInputs::decode_row_validity)
         .def_readwrite("input_ids", &PyModelInputs::input_ids, "Input token IDs tensor")
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
         .def_readwrite("combo_position_ids", &PyModelInputs::combo_position_ids, "Combo position IDs tensor")

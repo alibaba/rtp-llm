@@ -15,6 +15,9 @@ from rtp_llm.models_py.utils.kvcache import SingleGroupKVCacheAdapter
 from rtp_llm.ops import HybridAttentionConfig, HybridAttentionType, KVCacheConfig
 from rtp_llm.ops.compute_ops import (
     CacheStoreWriter,
+    DecodeExecution,
+    DecodeExecutionMode,
+    DecodeExecutionPhase,
     KVCache,
     LayerKVCache,
     PyAttentionInputs,
@@ -169,6 +172,33 @@ class PyModelInputsCompatTest(unittest.TestCase):
 
         self.assertTrue(inputs.attention_inputs.is_prefill)
         self.assertEqual(3, inputs.attention_inputs.input_lengths.item())
+
+    def test_agreed_decode_execution_binding_defaults_and_fields(self) -> None:
+        inputs = PyModelInputs()
+        self.assertIsNone(inputs.decode_execution)
+        self.assertIsNone(inputs.decode_row_validity)
+        self.assertIsNone(PyModelInputs(input_ids=torch.empty(0)).decode_execution)
+
+        execution = DecodeExecution(
+            DecodeExecutionMode.GRAPH,
+            DecodeExecutionPhase.MTP_COMMIT,
+            bucket=4,
+            token_width=3,
+        )
+        inputs.decode_execution = execution
+        validity = torch.tensor([True, False, True, False], dtype=torch.bool)
+        inputs.decode_row_validity = validity
+        self.assertEqual(inputs.decode_execution.mode, DecodeExecutionMode.GRAPH)
+        self.assertEqual(inputs.decode_execution.phase, DecodeExecutionPhase.MTP_COMMIT)
+        self.assertEqual(inputs.decode_execution.bucket, 4)
+        self.assertEqual(inputs.decode_execution.token_width, 3)
+        self.assertEqual(inputs.decode_row_validity.data_ptr(), validity.data_ptr())
+        with self.assertRaises(AttributeError):
+            execution.bucket = 8
+
+        inputs.decode_execution = None
+        self.assertIsNone(inputs.decode_execution)
+        self.assertIsNone(PyModelInputs().decode_row_validity)
 
     def test_model_outputs_exposes_explicit_speculative_features(self) -> None:
         hidden_states = torch.empty(0)

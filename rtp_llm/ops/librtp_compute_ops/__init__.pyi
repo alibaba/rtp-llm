@@ -11,6 +11,9 @@ __all__: list[str] = [
     "BertEmbeddingInputs",
     "CacheGroupType",
     "CacheStoreWriter",
+    "DecodeExecution",
+    "DecodeExecutionMode",
+    "DecodeExecutionPhase",
     "LayerKVCache",
     "KVCache",
     "ParamsBase",
@@ -307,10 +310,42 @@ class PyModelInitResources:
     @property
     def max_context_batch_size(self) -> int: ...
 
+class DecodeExecutionMode:
+    EAGER: typing.ClassVar[DecodeExecutionMode]
+    FIXED: typing.ClassVar[DecodeExecutionMode]
+    GRAPH: typing.ClassVar[DecodeExecutionMode]
+
+class DecodeExecutionPhase:
+    TARGET: typing.ClassVar[DecodeExecutionPhase]
+    TARGET_VERIFY: typing.ClassVar[DecodeExecutionPhase]
+    MTP_DRAFT: typing.ClassVar[DecodeExecutionPhase]
+    MTP_COMMIT: typing.ClassVar[DecodeExecutionPhase]
+    DSPARK_PROPOSAL: typing.ClassVar[DecodeExecutionPhase]
+    DSPARK_COMMIT: typing.ClassVar[DecodeExecutionPhase]
+
+class DecodeExecution:
+    def __init__(
+        self,
+        mode: DecodeExecutionMode,
+        phase: DecodeExecutionPhase,
+        bucket: int,
+        token_width: int,
+    ) -> None: ...
+    @property
+    def mode(self) -> DecodeExecutionMode: ...
+    @property
+    def phase(self) -> DecodeExecutionPhase: ...
+    @property
+    def bucket(self) -> int: ...
+    @property
+    def token_width(self) -> int: ...
+
 class PyModelInputs:
     need_all_hidden_states: bool
     need_all_logits: bool
     engram_token_windows: torch.Tensor
+    decode_execution: DecodeExecution | None
+    decode_row_validity: torch.Tensor | None
     @typing.overload
     def __init__(self) -> None: ...
     @typing.overload
