@@ -37,6 +37,14 @@ class PpuDeepSeekV4DSparkModel(DeepSeekV4DSparkModel, PpuDeepSeekV4Model):
     projection through the PPU provider.
     """
 
+    def prepare_fmha_impl(self, *args, **kwargs):
+        owner = super().prepare_fmha_impl(*args, **kwargs)
+        if owner is not None:
+            # The DSpARK owner only retains device scheduler tensors; its
+            # prepare callback never reads framework host mirrors.
+            owner.uses_device_only_cuda_graph_metadata = True
+        return owner
+
     def _load_extra_weights(self, weights: ModelWeights) -> None:
         gw = weights.global_weights
         self.main_norm = RMSNorm(

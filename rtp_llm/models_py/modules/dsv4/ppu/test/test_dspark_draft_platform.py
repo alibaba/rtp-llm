@@ -73,6 +73,11 @@ class PpuDsparkDraftContractTest(unittest.TestCase):
         )
         self.assertIn("platform_provider=self._platform_provider", ast.unparse(load))
 
+    def test_ppu_draft_declares_device_only_graph_metadata(self):
+        cls = _class(_parse(PPU_DSPARK), "PpuDeepSeekV4DSparkModel")
+        prepare = ast.unparse(_method(cls, "prepare_fmha_impl"))
+        self.assertIn("uses_device_only_cuda_graph_metadata = True", prepare)
+
     def test_shared_attention_body_only_talks_to_hooks(self):
         cls = _class(_parse(SHARED_DSPARK), "DeepSeekV4DSparkModel")
         body = ast.unparse(_method(cls, "_forward_dspark_attention"))
