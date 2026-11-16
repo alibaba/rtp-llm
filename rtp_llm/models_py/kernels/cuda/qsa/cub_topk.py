@@ -25,16 +25,13 @@ _CUDA_SOURCE = Path(__file__).with_name("topk.cuh").read_text()
 
 
 def is_supported(scores, lengths):
-    # Opt in only the two MTP3 target buckets captured with an 8K KV capacity.
-    # Other row counts/column widths retain their existing dispatch domain.
     mode = os.getenv("RTP_QWEN4_TARGET_TOPK_IMPL", "native")
     if mode not in ("native", "cub"):
         raise ValueError("RTP_QWEN4_TARGET_TOPK_IMPL must be native or cub")
-    mtp3_target = (
-        mode == "cub"
-        and scores.ndim == 2
-        and scores.shape[0] in (64, 256)
-        and scores.shape[1] == 2048
+    decode = (
+        scores.ndim == 2
+        and 1 <= scores.shape[0] <= (32768 if mode == "cub" else 32)
+        and (2047 <= scores.shape[1] <= 2176 or 4095 <= scores.shape[1] <= 4352)
     )
     large_prefill = (
         scores.ndim == 2
@@ -47,10 +44,7 @@ def is_supported(scores, lengths):
         and torch.version.git_version == _TORCH_GIT
         and scores.dtype == torch.float32
         and scores.ndim == 2
-        and (large_prefill or mtp3_target or 1 <= scores.shape[0] <= 32)
-        # The 8K MTP draft graph reserves three additional 128-token pages:
-        # (64 + 3) * 32 compressed columns. Preserve the full-width Torch order.
-        and (large_prefill or scores.shape[1] in (2047, 2048, 2144))
+        and (large_prefill or decode)
         and scores.is_contiguous()
         and lengths.dtype == torch.int32
         and lengths.shape == (scores.shape[0],)

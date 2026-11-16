@@ -183,8 +183,8 @@ void qsa_cub_topk(
     TORCH_CHECK(scores.is_contiguous() && lengths.is_contiguous() && output.is_contiguous());
     TORCH_CHECK(scores.device() == lengths.device() && scores.device() == output.device());
     TORCH_CHECK(scores.size(0) == lengths.numel() && output.size(0) == scores.size(0) && output.size(1) == 2051);
-    TORCH_CHECK(scores.size(1) == 1023 || scores.size(1) == 1024 || scores.size(1) == 2047 || scores.size(1) == 2048
-                || (scores.size(1) >= 2144 && scores.size(1) <= 16384));
+    TORCH_CHECK(scores.size(1) == 1023 || scores.size(1) == 1024
+                || (scores.size(1) >= 2047 && scores.size(1) <= 16384));
     TORCH_CHECK(threads == 128 || threads == 256 || threads == 512);
     c10::cuda::CUDAGuard guard(scores.device());
     auto                 stream = at::cuda::getCurrentCUDAStream().stream();
@@ -218,8 +218,8 @@ void qsa_cub_topk(
     }
     // Measured 8K domains only. StableSort preserves equal-key column order;
     // the special-value second pass below remains the pinned Torch radix order.
-    if (merge && (columns == 2047 || columns == 2048 || columns == 2144)) {
-        if (columns == 2144) {
+    if (merge && columns >= 2047 && columns <= 2144) {
+        if (columns > 2048) {
             rtp_llm::qsaCubStableTopK<2304, 256, true><<<rows, 256, 0, stream>>>(scores.data_ptr<float>(),
                                                                                  lengths.data_ptr<int32_t>(),
                                                                                  output.data_ptr<int32_t>(),
@@ -246,7 +246,7 @@ void qsa_cub_topk(
         } else {
             LAUNCH(1024, 512);
         }
-    } else if (columns == 2144) {
+    } else if (columns > 2048) {
         if (threads == 128) {
             LAUNCH(2176, 128);
         } else if (threads == 256) {
