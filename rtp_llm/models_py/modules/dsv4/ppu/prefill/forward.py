@@ -626,7 +626,7 @@ def forward_prefill(
     # instead of growing `q_rows` to the full warmup token count.
     groups = (
         None
-        if is_capturing or _rt.ENABLED
+        if is_capturing
         else reserved_page_warmup_groups(
             v4,
             parallelism_config,
