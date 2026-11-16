@@ -55,6 +55,11 @@ public final class FlexlbConfig {
     }
 
     @JsonIgnore
+    public boolean isPrefillCostOrder() {
+        return isQueue() && scheduler.getOrdering().isPrefillCostOrder();
+    }
+
+    @JsonIgnore
     public boolean allowsPreemption(VictimStage stage) {
         return isPriorityOrdering() && scheduler.getOrdering().getPreemption() != null
                 && scheduler.getOrdering().getPreemption().allows(stage);

@@ -10,6 +10,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry.PrefillRoutingEntry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.eviction.EvictionManager;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
+import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.VictimStage;
@@ -21,6 +22,8 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.telemetry.FlexlbTrace;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
@@ -184,9 +187,10 @@ class GlobalQueueProgressTest {
         }
     }
 
-    @Test
-    void cancelledPlannerKeepsItsSlotUntilItsResourcesAreClosed() throws Exception {
-        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void cancelledPlannerKeepsItsSlotUntilItsResourcesAreClosed(boolean costOrder) throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL, false, costOrder)) {
             CountDownLatch started = new CountDownLatch(2);
             CountDownLatch finish = new CountDownLatch(1);
             CountDownLatch thirdStarted = new CountDownLatch(1);
@@ -217,9 +221,10 @@ class GlobalQueueProgressTest {
         }
     }
 
-    @Test
-    void shutdownClosesLatePlanWithoutAdmittingIt() throws Exception {
-        try (Fixture f = new Fixture(RoleType.PREFILL)) {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void shutdownClosesLatePlanWithoutAdmittingIt(boolean costOrder) throws Exception {
+        try (Fixture f = new Fixture(RoleType.PREFILL, false, costOrder)) {
             CountDownLatch started = new CountDownLatch(1);
             CountDownLatch finish = new CountDownLatch(1);
             f.onSelection = id -> {
@@ -309,6 +314,267 @@ class GlobalQueueProgressTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void cachedInputBenefitPrecedesShortColdWithEqualCompute(boolean enabled) throws Exception {
+        var release = new CountDownLatch(1);
+        var cheapStarted = new CountDownLatch(1);
+        var expensiveStarted = new CountDownLatch(1);
+        try (Fixture f = new Fixture(RoleType.PREFILL, false, enabled)) {
+            configureWorkCosts(f, enabled);
+            f.aSlots.set(1);
+            f.onSelection = id -> {
+                if (id == 1801L) {
+                    cheapStarted.countDown();
+                    await(release);
+                } else {
+                    expensiveStarted.countDown();
+                }
+            };
+            Object queue = ReflectionTestUtils.getField(f.scheduler, "globalQueue");
+            var lock = (ReentrantLock) ReflectionTestUtils.getField(queue, "lock");
+            lock.lock();
+            try {
+                f.submit(1801L, "a");
+                f.submit(1802L, "a");
+            } finally {
+                lock.unlock();
+            }
+            try {
+                assertTrue(cheapStarted.await(2, TimeUnit.SECONDS));
+                if (enabled) {
+                    assertFalse(expensiveStarted.await(100, TimeUnit.MILLISECONDS),
+                            "short cold work must not race higher-benefit cached admission");
+                } else {
+                    assertTrue(expensiveStarted.await(2, TimeUnit.SECONDS),
+                            "disabled ordering must preserve existing parallel planning");
+                }
+            } finally {
+                release.countDown();
+            }
+            awaitCondition(() -> f.admitted.size() == 2);
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void cancelledCostOrderedWaiterDoesNotBlockLaterWorkOrStartAfterCancellation() throws Exception {
+        var release = new CountDownLatch(1);
+        var cheapStarted = new CountDownLatch(1);
+        var cancelledSelections = new AtomicInteger();
+        try (Fixture f = new Fixture(RoleType.PREFILL, false, true)) {
+            configureWorkCosts(f, true);
+            f.aSlots.set(1);
+            f.onSelection = id -> {
+                if (id == 1801L) {
+                    cheapStarted.countDown();
+                    await(release);
+                }
+                if (id == 1802L) {
+                    cancelledSelections.incrementAndGet();
+                }
+            };
+            f.submit(1801L, "a");
+            assertTrue(cheapStarted.await(2, TimeUnit.SECONDS));
+            f.submit(1802L, "a");
+            f.requests.get(1802L).cancel(false);
+            f.submit(1803L, "a");
+            release.countDown();
+            awaitCondition(() -> f.admitted.contains(1803L));
+            assertEquals(0, cancelledSelections.get());
+            assertFalse(f.admitted.contains(1802L));
+            awaitCondition(() -> f.scheduler.getQueuedRequestCount() == 0);
+        } finally {
+            release.countDown();
+        }
+    }
+
+    @Test
+    void costRefreshSlowerThanTtlDoesNotExpireBeforeFirstUse() throws Exception {
+        int backlog = 32;
+        var lookedUp = new AtomicInteger();
+        var refreshingLast = new CountDownLatch(1);
+        var finishRefresh = new CountDownLatch(1);
+        try (Fixture f = new Fixture(RoleType.PREFILL, false, true)) {
+            when(f.router.estimateQueuedTokens(any(), nullable(String.class))).thenAnswer(call -> {
+                if (lookedUp.incrementAndGet() == backlog) {
+                    refreshingLast.countDown();
+                    await(finishRefresh);
+                }
+                return new CostBasedPrefillStrategy.TokenEstimate(1000L, 0L);
+            });
+            Object queue = ReflectionTestUtils.getField(f.scheduler, "globalQueue");
+            var lock = (ReentrantLock) ReflectionTestUtils.getField(queue, "lock");
+            lock.lock();
+            try {
+                for (int i = 0; i < backlog; i++) {
+                    f.submit(1850L + i, "b");
+                }
+            } finally {
+                lock.unlock();
+            }
+            try {
+                assertTrue(refreshingLast.await(2, TimeUnit.SECONDS));
+                Thread.sleep(1100L);
+            } finally {
+                finishRefresh.countDown();
+            }
+            awaitCondition(() -> f.admitted.size() == backlog);
+            assertEquals(backlog, lookedUp.get(),
+                    "a completed cost snapshot must be usable before another full-backlog refresh");
+        } finally {
+            finishRefresh.countDown();
+        }
+    }
+
+    @Test
+    void largeCostOrderedBacklogMakesProgressWhenRefreshExceedsTtl() throws Exception {
+        int backlog = 48;
+        var lookedUp = new AtomicInteger();
+        try (Fixture f = new Fixture(RoleType.PREFILL, false, true)) {
+            when(f.router.estimateQueuedTokens(any(), nullable(String.class))).thenAnswer(call -> {
+                lookedUp.incrementAndGet();
+                Thread.sleep(25L);
+                return new CostBasedPrefillStrategy.TokenEstimate(1000L, 0L);
+            });
+            Object queue = ReflectionTestUtils.getField(f.scheduler, "globalQueue");
+            var lock = (ReentrantLock) ReflectionTestUtils.getField(queue, "lock");
+            lock.lock();
+            try {
+                for (int i = 0; i < backlog; i++) {
+                    f.submit(1950L + i, "b");
+                }
+            } finally {
+                lock.unlock();
+            }
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(4L);
+            while (f.admitted.size() < backlog && System.nanoTime() < deadline) {
+                Thread.sleep(10L);
+            }
+            assertEquals(backlog, f.admitted.size(),
+                    "ready capacity must drain the backlog instead of repeating expired cost scans: lookups="
+                            + lookedUp.get());
+        }
+    }
+
+    @Test
+    void reusedCostSnapshotStillRefreshesChangedCacheBenefitsAfterTtl() throws Exception {
+        var firstStarted = new CountDownLatch(1);
+        var finishFirst = new CountDownLatch(1);
+        var cacheWarmed = new java.util.concurrent.atomic.AtomicBoolean();
+        try (Fixture f = new Fixture(RoleType.PREFILL, false, true)) {
+            when(f.router.estimateQueuedTokens(any(), nullable(String.class))).thenAnswer(call -> {
+                BalanceContext context = call.getArgument(0);
+                long hit = context.getRequestId() == 1810L ? 900L : cacheWarmed.get() ? 999L : 0L;
+                return new CostBasedPrefillStrategy.TokenEstimate(1000L, hit);
+            });
+            f.onSelection = id -> {
+                if (id == 1810L) {
+                    firstStarted.countDown();
+                    await(finishFirst);
+                }
+            };
+            Object queue = ReflectionTestUtils.getField(f.scheduler, "globalQueue");
+            var lock = (ReentrantLock) ReflectionTestUtils.getField(queue, "lock");
+            lock.lock();
+            try {
+                f.submit(1810L, "b");
+                f.submit(1811L, "b");
+            } finally {
+                lock.unlock();
+            }
+            try {
+                assertTrue(firstStarted.await(2, TimeUnit.SECONDS));
+                assertFalse(f.selected.contains(1811L));
+                cacheWarmed.set(true);
+                Thread.sleep(1100L);
+                f.release("b");
+                awaitCondition(() -> f.admitted.contains(1811L));
+            } finally {
+                finishFirst.countDown();
+            }
+        } finally {
+            finishFirst.countDown();
+        }
+    }
+
+    @Test
+    void sustainedArrivalsDrainAfterAnInitiallySlowCostRefresh() throws Exception {
+        int backlog = 48;
+        int arrivals = 30;
+        try (Fixture f = new Fixture(RoleType.PREFILL, false, true)) {
+            when(f.router.estimateQueuedTokens(any(), nullable(String.class))).thenAnswer(call -> {
+                Thread.sleep(25L);
+                return new CostBasedPrefillStrategy.TokenEstimate(1000L, 0L);
+            });
+            Object queue = ReflectionTestUtils.getField(f.scheduler, "globalQueue");
+            var lock = (ReentrantLock) ReflectionTestUtils.getField(queue, "lock");
+            lock.lock();
+            try {
+                for (int i = 0; i < backlog; i++) {
+                    f.submit(2000L + i, "b");
+                }
+            } finally {
+                lock.unlock();
+            }
+            for (int i = 0; i < arrivals; i++) {
+                Thread.sleep(100L);
+                f.submit(2000L + backlog + i, "b");
+            }
+            awaitCondition(() -> f.admitted.size() == backlog + arrivals);
+            assertEquals(backlog + arrivals, f.selected.size());
+        }
+    }
+
+    @Test
+    void slowCostRefreshDoesNotHoldAlreadyCompletedPlans() throws Exception {
+        var planning = new CountDownLatch(1);
+        var finishPlan = new CountDownLatch(1);
+        var refreshing = new CountDownLatch(1);
+        var finishRefresh = new CountDownLatch(1);
+        try (Fixture f = new Fixture(RoleType.PREFILL, false, true)) {
+            when(f.router.estimateQueuedTokens(any(), nullable(String.class))).thenAnswer(call -> {
+                BalanceContext context = call.getArgument(0);
+                if (context.getRequestId() == 2102L) {
+                    refreshing.countDown();
+                    await(finishRefresh);
+                }
+                return new CostBasedPrefillStrategy.TokenEstimate(1000L, 0L);
+            });
+            f.onSelection = id -> {
+                if (id == 2101L) {
+                    planning.countDown();
+                    await(finishPlan);
+                }
+            };
+            try {
+                f.submit(2101L, "b");
+                assertTrue(planning.await(2, TimeUnit.SECONDS));
+                f.submit(2102L, "b");
+                assertTrue(refreshing.await(2, TimeUnit.SECONDS));
+                finishPlan.countDown();
+                awaitCondition(() -> f.admitted.contains(2101L));
+                assertFalse(f.selected.contains(2102L), "the unfinished estimate must not bypass cost ordering");
+            } finally {
+                finishPlan.countDown();
+                finishRefresh.countDown();
+            }
+            awaitCondition(() -> f.admitted.size() == 2);
+        } finally {
+            finishPlan.countDown();
+            finishRefresh.countDown();
+        }
+    }
+
+    private static void configureWorkCosts(Fixture f, boolean enabled) {
+        when(f.router.estimateQueuedTokens(any(), nullable(String.class))).thenAnswer(call -> {
+            BalanceContext context = call.getArgument(0);
+            boolean cheap = context.getRequestId() == 1801L;
+            return new CostBasedPrefillStrategy.TokenEstimate(cheap ? 9216 : 1024, cheap ? 8192 : 0);
+        });
+    }
+
     private static final class Fixture implements AutoCloseable {
         private final FlexlbConfig config = twoPlannerConfig();
         private final PlacementAvailability availability = new PlacementAvailability();
@@ -325,6 +591,7 @@ class GlobalQueueProgressTest {
         private volatile LongConsumer onAdmission = ignored -> { };
         private volatile LongConsumer onSelection = ignored -> { };
         private final RequestScheduler scheduler;
+        private final DefaultRouter router;
         private final RoleType role;
 
         private static FlexlbConfig twoPlannerConfig() {
@@ -340,11 +607,18 @@ class GlobalQueueProgressTest {
         }
 
         private Fixture(RoleType role, boolean preempt) {
+            this(role, preempt, false);
+        }
+
+        private Fixture(RoleType role, boolean preempt, boolean prefillCostOrder) {
             this.role = role;
             SchedulingTestConfig.useFifoQueue(config);
             if (preempt) {
                 SchedulingTestConfig.usePriorityQueue(config);
                 SchedulingTestConfig.allowVictim(config, VictimStage.PREFILL_QUEUED);
+            }
+            if (prefillCostOrder) {
+                SchedulingTestConfig.usePrefillCostOrder(config);
             }
             SchedulingTestConfig.useNonBatchDispatcher(config).setMaxInflightPerPrefillWorker(1);
             ConfigService service = mock(ConfigService.class);
@@ -396,6 +670,7 @@ class GlobalQueueProgressTest {
             });
             scheduler = new RequestScheduler(service, router, endpoints, mock(BatchSchedulerReporter.class),
                     mock(EvictionManager.class), lifecycle, availability);
+            this.router = router;
         }
 
         private void submit(long id, String group) {

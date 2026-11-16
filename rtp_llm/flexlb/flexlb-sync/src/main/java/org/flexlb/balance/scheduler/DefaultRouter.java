@@ -84,6 +84,14 @@ public class DefaultRouter {
                 : prefillSelector.estimateQueuedWork(context, role, policyGroup);
     }
 
+    /** Cached-input token estimate for one queued request; null without a Prefill pool. */
+    public CostBasedPrefillStrategy.TokenEstimate estimateQueuedTokens(
+            BalanceContext context, String policyGroup) {
+        RoleType role = prefillRole();
+        return role == null ? null
+                : prefillSelector.estimateQueuedTokens(context, role, policyGroup);
+    }
+
     /** Sustained pool-wide Engine queue pressure evidence for global shedding. */
     public boolean isPrefillClusterOverloaded(String policyGroup, long nowMs) {
         RoleType role = prefillRole();
