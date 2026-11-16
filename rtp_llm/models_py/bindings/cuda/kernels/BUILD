@@ -342,9 +342,11 @@ cc_library(
     srcs = ["mtp_target_verify_prepare.cu"],
     hdrs = ["mtp_target_verify_prepare.h"],
     deps = [
+        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/models_py/bindings/core:op_data",
     ] + torch_deps(),
     copts = cuda_copts(),
     visibility = ["//visibility:public"],

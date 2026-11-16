@@ -73,6 +73,7 @@ cc_library(
     name = "cuda_impl",
     srcs = ["//rtp_llm/models_py/bindings/core:exec_ctx_impl_srcs"],
     deps = [
+        "//rtp_llm/models_py/bindings/core:sampling_params_hdr",
         ":gpu_base",
         "//rtp_llm/cpp/utils:debug_utils",
         "//rtp_llm/models_py/bindings/common/kernels:vocab_prune_kernels",

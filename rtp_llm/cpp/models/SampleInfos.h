@@ -21,6 +21,20 @@ struct SamplerInitParams {
     bool   fixed_max_batch_size = true;
 };
 
+enum class SamplerProbabilityOutput {
+    NONE,
+    DENSE,         // Materialize [batch, vocab] probabilities.
+    DISTRIBUTION,  // Consumers also accept point-mass tokens or probabilities with candidate IDs.
+};
+
+struct SamplingRowMapping {
+    // Stable selected logical rows (int64) and their inverse (int32, -1 for omitted rows).
+    // Logits already use the selected rows; request metadata still uses all logical rows.
+    // Single-beam only. Every request must retain a row so its dispatch mode is represented.
+    torch::Tensor packed_to_dense;
+    torch::Tensor dense_to_packed;
+};
+
 struct SamplerInputs {
 public:
     std::string debugString() const {
@@ -37,7 +51,7 @@ public:
 
 public:
     torch::Tensor         logits;         // shape: [batch_size, vocab_size]
-    mutable torch::Tensor token_ids;      // shape: [batch_size, max_length]
+    mutable torch::Tensor token_ids;      // [batch_size, step + 1] history; undefined when no history is consumed.
     torch::Tensor         input_lengths;  // shape: [batch_size]
     // shape: [decoder_batch_size]
     torch::Tensor            sequence_lengths;
@@ -67,23 +81,14 @@ public:
     bool skip_logits_probs_restore = false;
     int  force_topk                = 0;  // DSpARK fixed-width sampling; 0 keeps full vocabulary.
 
-    // When true every consumer of all_probs treats the renormalized
-    // distribution as a point mass at the sampled token, so the sampler may
-    // skip materializing the one-hot [batch_size, vocab_size] matrix (and the
-    // gather may leave all_probs uninitialized). Set only by the speculative
-    // (MTP) verify gather when it is locally provable that the fused greedy
-    // top-1 token-only path handles the whole batch; every other path keeps
-    // the legacy fully-materialized all_probs contract.
-    bool all_probs_point_mass = false;
-
-    mutable torch::Tensor cum_log_probs;  // shape: [batch_size]
-    mutable torch::Tensor all_probs;      // shape: [batch_size, vocab_size], or compact [batch_size, K]
-    torch::Tensor all_probs_indices;      // optional CUDA int32 [batch_size, K] original vocabulary IDs
+    SamplerProbabilityOutput probability_output = SamplerProbabilityOutput::NONE;
+    mutable torch::Tensor    cum_log_probs;  // shape: [batch_size]
 
     // Retain the processed sampling distribution for generation logprobs.
     bool return_logprobs = false;
 
-    std::vector<at::Generator> generator;
+    std::vector<at::Generator>        generator;
+    std::optional<SamplingRowMapping> row_mapping;
 };
 
 struct SamplerOutput {

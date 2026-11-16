@@ -56,37 +56,21 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
     auto               total_batch_size_out = stream_groups.totalSamplerBatchSizeOut();
     ReturnAllProbsMode return_all_probs     = stream_groups.needReturnAllProbs();
 
-    bool need_token_history = true;
-#if USING_CUDA
-    if (model_output.logits.is_cuda()) {
-        // Readers of the transposed history: the repetition/presence/frequency
-        // penalty kernel and beam search. An all-default-penalty single-beam
-        // batch needs no host history at all (the sampler writes the last
-        // column on device).
-        need_token_history = anyStreamPenaltyEnabled(all_streams)
-                             || std::any_of(all_streams.begin(), all_streams.end(), [](const auto& stream) {
-                                    return stream->currentNumBeams() != 1 || stream->nextNumBeams() != 1;
-                                });
-    }
-#endif
+    const bool need_token_history = anyStreamPenaltyEnabled(all_streams)
+                                    || std::any_of(all_streams.begin(), all_streams.end(), [](const auto& stream) {
+                                           return stream->currentNumBeams() != 1 || stream->nextNumBeams() != 1;
+                                       });
     SamplerInputs sampler_inputs =
         allocateSamplerInputs(stream_groups, total_batch_size_in, total_batch_size_out, 0, need_token_history);
-    if (!need_token_history) {
-        // Normal dispatch only consumes the last column without beams. The
-        // sampler writes it on device; no host history needs to be uploaded.
-        sampler_inputs.token_ids =
-            torch::empty({static_cast<int64_t>(total_batch_size_in), static_cast<int64_t>(sampler_inputs.step + 1)},
-                         model_output.logits.options().dtype(torch::kInt32));
-    }
     fillSamplerCommonInputs(sampler_inputs, all_streams);
 
     setLogitsProcessorInputs(sampler_inputs, all_streams);
 
-    size_t               total_decode_batch_size_in = 0;
-    int                  batch_idx                  = 0;
-    bool                 return_logits              = false;
-    bool                 calculate_softmax_probs    = false;
-    bool                 need_tiling                = false;
+    size_t total_decode_batch_size_in = 0;
+    int    batch_idx                  = 0;
+    bool   return_logits              = false;
+    bool   calculate_softmax_probs    = false;
+    bool   need_tiling                = false;
     for (auto& stream : all_streams) {
         auto complete_token_ids = stream->completeTokenIds();
         auto complete_seq_len   = complete_token_ids.size(1);
@@ -135,8 +119,7 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
     }
 
     if (return_all_probs != ReturnAllProbsMode::NONE) {
-        sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size_in, (int64_t)vocab_size},
-                                                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        sampler_inputs.probability_output = SamplerProbabilityOutput::DENSE;
         if (return_all_probs == ReturnAllProbsMode::ORIGINAL) {
             sampler_inputs.return_original_all_probs = true;
         }
@@ -202,9 +185,9 @@ SamplerInputs NormalSamplerInputGatherer::allocateSamplerInputs(const StreamGrou
     static const auto pinned_f32  = torch::TensorOptions(torch::kFloat32).pinned_memory(true);
     static const auto pinned_bool = torch::TensorOptions(torch::kBool).pinned_memory(true);
 
-    sampler_inputs.top_k                = torch::empty({bs}, pinned_int);
-    sampler_inputs.top_p                = torch::empty({bs}, pinned_f32);
-    sampler_inputs.temperature          = torch::empty({bs}, pinned_f32);
+    sampler_inputs.top_k       = torch::empty({bs}, pinned_int);
+    sampler_inputs.top_p       = torch::empty({bs}, pinned_f32);
+    sampler_inputs.temperature = torch::empty({bs}, pinned_f32);
     // Penalty inputs are materialized only when some stream can actually run the
     // repetition/presence/frequency or no-repeat-ngram kernel. An all-default
     // batch leaves all four undefined: Sampler::forward turns an undefined
@@ -219,8 +202,8 @@ SamplerInputs NormalSamplerInputGatherer::allocateSamplerInputs(const StreamGrou
         sampler_inputs.frequency_penalty    = torch::empty({bs}, pinned_f32);
         sampler_inputs.no_repeat_ngram_size = torch::empty({bs}, pinned_i32);
     }
-    sampler_inputs.do_sample            = torch::empty({bs}, pinned_bool);
-    sampler_inputs.finished_mask        = torch::empty({bs}, torch::kBool);
+    sampler_inputs.do_sample     = torch::empty({bs}, pinned_bool);
+    sampler_inputs.finished_mask = torch::empty({bs}, torch::kBool);
     if (stream_groups.needReturnCumLogProbs()) {
         sampler_inputs.cum_log_probs = torch::empty({(int64_t)total_batch_size_in}, torch::kFloat32);
     }
@@ -240,13 +223,13 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
                                                          std::list<GenerateStreamPtr>& all_streams,
                                                          bool                          score_batch,
                                                          size_t                        propose_step) const {
-    int*      input_lengths        = sampler_inputs.input_lengths.data_ptr<int32_t>();
-    int*      sequence_lengths     = sampler_inputs.sequence_lengths.data_ptr<int32_t>();
-    uint64_t* num_beams_in         = reinterpret_cast<uint64_t*>(sampler_inputs.num_beams_in.data_ptr<int64_t>());
-    uint64_t* num_beams_out        = reinterpret_cast<uint64_t*>(sampler_inputs.num_beams_out.data_ptr<int64_t>());
-    uint32_t* top_k                = reinterpret_cast<uint32_t*>(sampler_inputs.top_k.data_ptr<int32_t>());
-    float*    top_p                = sampler_inputs.top_p.data_ptr<float>();
-    float*    temperature          = sampler_inputs.temperature.data_ptr<float>();
+    int*      input_lengths    = sampler_inputs.input_lengths.data_ptr<int32_t>();
+    int*      sequence_lengths = sampler_inputs.sequence_lengths.data_ptr<int32_t>();
+    uint64_t* num_beams_in     = reinterpret_cast<uint64_t*>(sampler_inputs.num_beams_in.data_ptr<int64_t>());
+    uint64_t* num_beams_out    = reinterpret_cast<uint64_t*>(sampler_inputs.num_beams_out.data_ptr<int64_t>());
+    uint32_t* top_k            = reinterpret_cast<uint32_t*>(sampler_inputs.top_k.data_ptr<int32_t>());
+    float*    top_p            = sampler_inputs.top_p.data_ptr<float>();
+    float*    temperature      = sampler_inputs.temperature.data_ptr<float>();
     // Undefined penalty arrays mean "no stream can run a penalty kernel"
     // (see allocateSamplerInputs); they are skipped instead of written through a
     // null pointer. Each is guarded on its own so a caller that materialized only
@@ -257,10 +240,10 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
         sampler_inputs.presence_penalty.defined() ? sampler_inputs.presence_penalty.data_ptr<float>() : nullptr;
     float* frequency_penalty =
         sampler_inputs.frequency_penalty.defined() ? sampler_inputs.frequency_penalty.data_ptr<float>() : nullptr;
-    int32_t*  no_repeat_ngram_size = sampler_inputs.no_repeat_ngram_size.defined() ?
-                                         sampler_inputs.no_repeat_ngram_size.data_ptr<int32_t>() :
-                                         nullptr;
-    bool*     do_sample            = reinterpret_cast<bool*>(sampler_inputs.do_sample.data_ptr());
+    int32_t* no_repeat_ngram_size = sampler_inputs.no_repeat_ngram_size.defined() ?
+                                        sampler_inputs.no_repeat_ngram_size.data_ptr<int32_t>() :
+                                        nullptr;
+    bool*    do_sample            = reinterpret_cast<bool*>(sampler_inputs.do_sample.data_ptr());
 
     int batch_idx = 0;
     for (auto& stream : all_streams) {
@@ -279,13 +262,13 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
                    cum_log_probs.numel() * sizeof(float));
         }
         for (int i = 0; i < sampler_batch_size; ++i) {
-            input_lengths[batch_idx]      = stream->inputLength();
-            sequence_lengths[batch_idx]   = stream->seqLength() + (score_batch ? i : propose_step);
-            num_beams_in[batch_idx]       = stream->currentNumBeams();
-            num_beams_out[batch_idx]      = stream->nextNumBeams();
-            top_k[batch_idx]              = stream->generateConfig()->top_k;
-            top_p[batch_idx]              = stream->generateConfig()->top_p;
-            temperature[batch_idx]        = stream->generateConfig()->temperature;
+            input_lengths[batch_idx]    = stream->inputLength();
+            sequence_lengths[batch_idx] = stream->seqLength() + (score_batch ? i : propose_step);
+            num_beams_in[batch_idx]     = stream->currentNumBeams();
+            num_beams_out[batch_idx]    = stream->nextNumBeams();
+            top_k[batch_idx]            = stream->generateConfig()->top_k;
+            top_p[batch_idx]            = stream->generateConfig()->top_p;
+            temperature[batch_idx]      = stream->generateConfig()->temperature;
             if (repetition_penalty != nullptr) {
                 repetition_penalty[batch_idx] = stream->generateConfig()->repetition_penalty;
             }
@@ -295,7 +278,7 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
             if (frequency_penalty != nullptr) {
                 frequency_penalty[batch_idx] = stream->generateConfig()->frequency_penalty;
             }
-            do_sample[batch_idx]          = stream->generateConfig()->do_sample;
+            do_sample[batch_idx] = stream->generateConfig()->do_sample;
             if (!do_sample[batch_idx]) {
                 top_k[batch_idx]       = 1;
                 top_p[batch_idx]       = 1;

@@ -1783,10 +1783,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     // TODO(yinzhi): consider beam search & lora
 
-    MtpBatchStreamProcessor::DSparkRoundState         dspark_round_state;
-    MtpBatchStreamProcessor::DSparkPackedTargetLayout packed_target_layout;
-    DSparkVerifyPlan                                  dspark_verify_plan;
-    size_t                                            batch_size = 0;
+    DSparkRoundState         dspark_round_state;
+    DSparkPackedTargetLayout packed_target_layout;
+    DSparkVerifyPlan         dspark_verify_plan;
+    size_t                   batch_size = 0;
 
     if (is_dspark_) {
         // Proposal and target verification are two model phases with different
@@ -1830,33 +1830,36 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             if (isTpRank0()) {
                 if (dspark_packed_verify_ && dspark_verify_plan.draft_budget >= 0
                     && !draft_sampler_output.valid_draft_lengths.defined()) {
-                    packed_target_layout = batch_stream_processor_->prepareDSparkBoundedTargetVerifyModelInput(
-                        dspark_round_state,
-                        model_input,
-                        draft_sampler_output.token_ids,
-                        draft_sampler_output.confidence_rates,
-                        dspark_verify_plan.stable_order,
-                        dspark_verify_plan.draft_budget,
-                        buffer_holder_,
-                        draft_sampler_output.valid_draft_lengths,
-                        &draft_sampler_output.token_ids,
-                        dspark_verify_plan.capacity.has_value());
+                    packed_target_layout =
+                        prepareDSparkBoundedTargetVerifyModelInput(propose_step_,
+                                                                   dspark_round_state,
+                                                                   model_input,
+                                                                   draft_sampler_output.token_ids,
+                                                                   draft_sampler_output.confidence_rates,
+                                                                   dspark_verify_plan.stable_order,
+                                                                   dspark_verify_plan.draft_budget,
+                                                                   buffer_holder_,
+                                                                   draft_sampler_output.valid_draft_lengths,
+                                                                   &draft_sampler_output.token_ids,
+                                                                   dspark_verify_plan.capacity.has_value());
                 } else if (dspark_packed_verify_ && draft_sampler_output.valid_draft_lengths.defined()) {
-                    packed_target_layout = batch_stream_processor_->prepareDSparkPackedTargetVerifyModelInput(
-                        dspark_round_state,
-                        model_input,
-                        draft_sampler_output.token_ids,
-                        draft_sampler_output.valid_draft_lengths,
-                        dspark_verify_plan.draft_budget,
-                        buffer_holder_,
-                        &draft_sampler_output.token_ids,
-                        dspark_verify_plan.capacity.has_value());
+                    packed_target_layout =
+                        prepareDSparkPackedTargetVerifyModelInput(propose_step_,
+                                                                  dspark_round_state,
+                                                                  model_input,
+                                                                  draft_sampler_output.token_ids,
+                                                                  draft_sampler_output.valid_draft_lengths,
+                                                                  dspark_verify_plan.draft_budget,
+                                                                  buffer_holder_,
+                                                                  &draft_sampler_output.token_ids,
+                                                                  dspark_verify_plan.capacity.has_value());
                 } else {
-                    batch_stream_processor_->prepareDSparkTargetVerifyModelInput(dspark_round_state,
-                                                                                 model_input,
-                                                                                 draft_sampler_output.token_ids,
-                                                                                 buffer_holder_,
-                                                                                 &draft_sampler_output.token_ids);
+                    prepareDSparkTargetVerifyModelInput(propose_step_,
+                                                        dspark_round_state,
+                                                        model_input,
+                                                        draft_sampler_output.token_ids,
+                                                        buffer_holder_,
+                                                        &draft_sampler_output.token_ids);
                 }
                 model_input.is_packed_target_verify = packed_target_layout.packed_to_dense.defined();
                 if (dspark_verify_plan.capacity) {
@@ -2096,35 +2099,20 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 stream_groups = StreamGroups(streams);
             }
 
-            // Keep the existing sampler shape and RNG reservation. Unverified
-            // dense tail rows are never read by rejection sampling; finite
-            // zeros keep its dense sampling pass well-defined.
-            auto sampler_model_output = model_output;
-            if (packed_target_layout.packed_to_dense.defined()) {
-                RTP_LLM_CHECK_WITH_INFO(model_output.logits.dim() == 2
-                                            && model_output.logits.size(0)
-                                                   == packed_target_layout.packed_to_dense.numel(),
-                                        "Packed DSpARK target logits do not match packed query rows");
-                sampler_model_output.logits =
-                    torch::zeros({static_cast<int64_t>(batch_size * (propose_step_ + 1)), model_output.logits.size(1)},
-                                 model_output.logits.options());
-                sampler_model_output.logits.index_copy_(0, packed_target_layout.packed_to_dense, model_output.logits);
-            }
             // target model sample
-            CHECK_AND_RETURN_REF(
-                sampler_input,
-                // DSpARK produces draft_sampler_output before this event, so the
-                // copy-stream expansion can be ordered against it and overlap the
-                // target-verify forward. The non-DSpARK MTP path assigns its draft
-                // tokens after the forward and passes no event.
-                batch_stream_processor_->gatherSpecSamplerInput(stream_groups,
-                                                                sampler_model_output,
-                                                                *spec_logits_result,
-                                                                draft_sampler_output.token_ids,
-                                                                is_dspark_ ? draft_tokens_ready_event : nullptr,
-                                                                d2t_map_.defined()));
+            CHECK_AND_RETURN_REF(sampler_input,
+                                 batch_stream_processor_->gatherSpecSamplerInput(
+                                     stream_groups, model_output, draft_sampler_output.token_ids, d2t_map_.defined()));
+            if (packed_target_layout.packed_to_dense.defined()) {
+                sampler_input.row_mapping =
+                    SamplingRowMapping{packed_target_layout.packed_to_dense, packed_target_layout.dense_to_packed};
+            }
+            SpecLogitsVerifyRunner::applyMaskToLogits(sampler_input.logits,
+                                                      *spec_logits_result,
+                                                      sampler_input.vocab_size,
+                                                      packed_target_layout.dense_to_packed);
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
-            sampler_output           = std::move(sampler_->forward(sampler_input));
+            sampler_output           = sampler_->forward(sampler_input);
             sampler_output.all_probs = reshapeMtpTargetAllProbs(sampler_output.all_probs,
                                                                 static_cast<int64_t>(batch_size),
                                                                 static_cast<int64_t>(propose_step_ + 1),
@@ -2878,12 +2866,11 @@ MtpExecutor::DSparkVerifyPlan MtpExecutor::prepareDSparkVerifyPlan(const StreamG
     return plan;
 }
 
-MtpExecutor::DSparkVerifyPlan
-MtpExecutor::runDSparkProposal(GptModelInputs&                                  proposal_input,
-                               const StreamGroups&                              stream_groups,
-                               const MtpBatchStreamProcessor::DSparkRoundState& round_state,
-                               SamplerOutput&                                   draft_sampler_output,
-                               int64_t&                                         model_forward_us) {
+MtpExecutor::DSparkVerifyPlan MtpExecutor::runDSparkProposal(GptModelInputs&         proposal_input,
+                                                             const StreamGroups&     stream_groups,
+                                                             const DSparkRoundState& round_state,
+                                                             SamplerOutput&          draft_sampler_output,
+                                                             int64_t&                model_forward_us) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.dspark_model_decode(batch_size=%zu)",
                                   proposal_input.input_lengths.size(0));
 

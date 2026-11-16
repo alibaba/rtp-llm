@@ -105,6 +105,14 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "sampling_params_hdr",
+    hdrs = ["SamplingParams.h"],
+    deps = [":op_data"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
 # ExecOps — unified public header for runtime operations.
 # Replaces the former ExecutionContext.h (now deleted).
 cc_library(
@@ -193,6 +201,7 @@ filegroup(
     srcs = [
         "CudaOps.cc",
         "CudaSampleOp.cc",
+        "SamplingParams.cc",
         "CudaBeamSearchOp.cc",
     ],
     visibility = ["//visibility:public"],
@@ -266,9 +275,11 @@ cc_library(
     srcs = [
         "CudaOps.cc",
         "CudaSampleOp.cc",
+        "SamplingParams.cc",
         "CudaBeamSearchOp.cc",
     ],
     deps = [
+        ":sampling_params_hdr",
         ":exec_ops_hdr",
         ":device_data",
         ":op_data",
@@ -318,8 +329,10 @@ cc_library(
     name = "rejection_sampling_ops_test_lib",
     srcs = [
         "CudaSampleOp.cc",
+        "SamplingParams.cc",
     ],
     deps = [
+        ":sampling_params_hdr",
         ":common_defines",
         ":op_data",
         "//rtp_llm/cpp/utils:debug_utils",
@@ -337,6 +350,7 @@ cc_library(
             "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
             "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
             "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
+            "//rtp_llm/models_py/bindings/cuda/kernels:deepselect_fp32",
         ],
         "//conditions:default": [],
     }),
@@ -349,8 +363,9 @@ cc_library(
 # fallback remains compile- and testable under --config=cpu.
 cc_library(
     name = "generic_sampler_fallback_test_lib",
-    srcs = ["CudaSampleOp.cc"],
+    srcs = ["CudaSampleOp.cc", "SamplingParams.cc"],
     deps = [
+        ":sampling_params_hdr",
         ":common_defines",
         ":op_data",
     ] + torch_deps(),

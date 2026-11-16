@@ -1,5 +1,7 @@
 #pragma once
 
+#include "rtp_llm/cpp/normal_engine/speculative/MtpTargetVerifyLayout.h"
+
 #include <memory>
 #include <optional>
 
@@ -116,18 +118,12 @@ public:
                                                       const std::vector<CacheGroupType>& group_types,
                                                       int64_t                            seq_size_per_block);
 
-    // `draft_tokens_ready` is recorded on the main stream after the proposal
-    // that produced `draft_token_ids`. When it is supplied the token-matrix
-    // expansion runs on the copy stream, ordered by that event, and overlaps the
-    // target-verify forward. The non-DSpARK MTP path assigns its draft tokens
-    // after the forward, so it passes nullptr and expands on the main stream.
-    absl::StatusOr<SamplerInputs>
-    gatherSpecSamplerInput(const StreamGroups&                         stream_groups,
-                           const GptModelOutputs&                      model_output,
-                           const SpecLogitsVerifyRunner::LaunchResult& spec_logits_result,
-                           const torch::Tensor&                        draft_token_ids,
-                           const std::shared_ptr<torch::Event>&        draft_tokens_ready          = nullptr,
-                           bool                                        has_draft_to_target_mapping = false) const;
+    // Build full logical-row history on the current stream when penalties need it.
+    // The executor applies precomputed masks before passing these inputs to Sampler.
+    absl::StatusOr<SamplerInputs> gatherSpecSamplerInput(const StreamGroups&    stream_groups,
+                                                         const GptModelOutputs& model_output,
+                                                         const torch::Tensor&   draft_token_ids,
+                                                         bool has_draft_to_target_mapping = false) const;
 
     void prepareDecodeDraftModelInput(const StreamGroups& stream_groups,
                                       GptModelInputs&     model_input,
@@ -173,15 +169,6 @@ public:
     // one DSpARK round. Position bases contain one MRoPE/default tuple per
     // request; each phase expands them to its own token width, so batching
     // cannot shift one request onto another request's positions.
-    struct DSparkRoundState {
-        torch::Tensor anchors;
-        torch::Tensor committed_ends;
-        torch::Tensor position_bases;
-        torch::Tensor engram_windows;
-        // Filled together with anchors/lengths by the CUDA round-head kernel.
-        // Each round owns its buffer, including when the batch shrinks/reorders.
-        torch::Tensor proposal_tokens;
-    };
     DSparkRoundState buildDSparkRoundState(const StreamGroups&   stream_groups,
                                            const GptModelInputs& model_input,
                                            TensorHolder&         host_holder) const;
@@ -189,48 +176,6 @@ public:
     void prepareDSparkProposeModelInput(const DSparkRoundState& round_state,
                                         GptModelInputs&         model_input,
                                         TensorHolder&           host_holder);
-
-    void prepareDSparkTargetVerifyModelInput(const DSparkRoundState& round_state,
-                                             GptModelInputs&         model_input,
-                                             const torch::Tensor&    proposals,
-                                             TensorHolder&           host_holder,
-                                             torch::Tensor*          owned_proposals = nullptr);
-
-    struct DSparkPackedTargetLayout {
-        // CUDA int64 [batch + total_draft_budget], in stable request order.
-        // Undefined when the full-width dense path is retained.
-        torch::Tensor packed_to_dense;
-        // Preserve the sampler/spec-logits and next-round position contracts.
-        torch::Tensor dense_tokens;  // [batch, propose_step + 1]
-        torch::Tensor dense_position_ids;
-    };
-
-    // The round-head planner guarantees 0 <= lengths <= propose_step and
-    // sum(lengths) == total_draft_budget. The host budget fixes the output shape
-    // without reading a CUDA scalar or computing a dynamic-size nonzero.
-    DSparkPackedTargetLayout prepareDSparkPackedTargetVerifyModelInput(const DSparkRoundState& round_state,
-                                                                       GptModelInputs&         model_input,
-                                                                       const torch::Tensor&    proposals,
-                                                                       const torch::Tensor&    valid_draft_lengths,
-                                                                       int64_t                 total_draft_budget,
-                                                                       TensorHolder&           host_holder,
-                                                                       torch::Tensor* owned_proposals     = nullptr,
-                                                                       bool           force_packed_layout = false);
-
-    // Plan confidence prefixes and materialize packed verification inputs
-    // together. The host-known budget fixes every output shape; the identity
-    // permutation must have been frozen before sampling this round's drafts.
-    // Unsupported CUDA geometries retain the existing planner/packing path.
-    DSparkPackedTargetLayout prepareDSparkBoundedTargetVerifyModelInput(const DSparkRoundState&     round_state,
-                                                                        GptModelInputs&             model_input,
-                                                                        const torch::Tensor&        proposals,
-                                                                        const torch::Tensor&        confidence_rates,
-                                                                        const std::vector<int64_t>& stable_order,
-                                                                        int64_t                     total_draft_budget,
-                                                                        TensorHolder&               host_holder,
-                                                                        torch::Tensor&              valid_draft_lengths,
-                                                                        torch::Tensor* owned_proposals     = nullptr,
-                                                                        bool           force_packed_layout = false);
 
     // Async target preparation runs before proposal sampling completes. Build
     // its verify-width positions locally from the TP-synchronized proposal
@@ -266,7 +211,6 @@ protected:
                                   TensorHolder&       host_holder) const;
 
     torch::Tensor collectDSparkPositionBases(const StreamGroups& stream_groups, TensorHolder& host_holder) const;
-    torch::Tensor expandDSparkPositionIds(const torch::Tensor& position_bases, int64_t width) const;
 
     void updateProposeTokens(const StreamGroups&                stream_groups,
                              const MergedOutput&                draft_prefill_output,
@@ -308,7 +252,6 @@ protected:
 
     // gatherSpecSamplerInput runs serially on the executor thread. Keep its
     // history uploads on one stream so allocator reuse stays stream-ordered.
-    mutable std::optional<torch::Stream> sampler_input_copy_stream_;
 
     // Decode-round constants are grow-only device buffers.  Keeping them on
     // device is required by RTP_LLM_STREAM_ASYNC: no accept-length D2H is

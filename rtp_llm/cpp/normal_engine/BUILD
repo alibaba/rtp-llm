@@ -58,8 +58,11 @@ cc_library(
         ],
         "@//:using_rocm": [
             "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+            "//rtp_llm/models_py/bindings/rocm/kernels:mtp_target_verify_prepare",
         ],
-        "//conditions:default": [],
+        "//conditions:default": [
+            "//rtp_llm/models_py/bindings/rocm/kernels:mtp_target_verify_prepare",
+        ],
     }),
     visibility = ["//visibility:public"],
 )

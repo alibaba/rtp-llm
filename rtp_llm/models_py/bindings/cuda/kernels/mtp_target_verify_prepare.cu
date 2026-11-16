@@ -1,6 +1,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -34,6 +35,7 @@ struct DSparkBudgetedVerifyPrepare {
     int32_t *      valid_lengths, *tokens, *query_lengths, *lm_indexes, *output_history, *positions;
     int32_t *      owned_proposals, *dense_tokens, *dense_positions, *sequence_lengths_plus_1;
     int64_t*       packed_to_dense;
+    int32_t*       dense_to_packed;
     int32_t        batch, gamma, factor, budget;
     int64_t        anchor_stride, proposal_row_stride, proposal_col_stride;
     int64_t        history_row_stride, history_col_stride, base_row_stride, base_col_stride, prefix_stride;
@@ -152,6 +154,7 @@ __global__ void mtpDSparkBudgetedVerifyPrepareKernel(DSparkBudgetedVerifyPrepare
             const auto base = static_cast<uint32_t>(p.bases[row * p.base_row_stride + factor * p.base_col_stride]);
             p.dense_positions[(row * width + pos) * p.factor + factor] = static_cast<int32_t>(base + pos);
         }
+        p.dense_to_packed[row * width + pos] = pos < query_length ? query_start + pos : -1;
         if (pos >= query_length) {
             continue;
         }
@@ -610,6 +613,7 @@ MtpDSparkBudgetedVerifyInputs tryMtpDSparkBudgetedVerifyPrepare(const torch::Ten
     MtpDSparkBudgetedVerifyInputs out;
     out.valid_draft_lengths     = torch::empty({batch}, options);
     out.packed_to_dense         = torch::empty({packed_rows}, options.dtype(torch::kInt64));
+    out.dense_to_packed         = torch::empty({batch * width}, options);
     out.dense_tokens            = torch::empty({batch, width}, options);
     out.sequence_lengths_plus_1 = torch::empty({batch}, options);
     out.packed.tokens           = torch::empty({packed_rows}, options);
@@ -646,6 +650,7 @@ MtpDSparkBudgetedVerifyInputs tryMtpDSparkBudgetedVerifyPrepare(const torch::Ten
     params.dense_positions = out.dense_positions.defined() ? out.dense_positions.data_ptr<int32_t>() : nullptr;
     params.sequence_lengths_plus_1 = out.sequence_lengths_plus_1.data_ptr<int32_t>();
     params.packed_to_dense         = out.packed_to_dense.data_ptr<int64_t>();
+    params.dense_to_packed         = out.dense_to_packed.data_ptr<int32_t>();
     params.batch                   = static_cast<int32_t>(batch);
     params.gamma                   = static_cast<int32_t>(gamma);
     params.factor                  = static_cast<int32_t>(factor);
@@ -931,8 +936,7 @@ void invokeMtpSpecSamplerTokenMatrix(const torch::Tensor& history,
                                      const torch::Tensor& draft,
                                      const torch::Tensor& base_lengths,
                                      torch::Tensor&       output,
-                                     int64_t              gamma,
-                                     cudaStream_t         stream) {
+                                     int64_t              gamma) {
     RTP_LLM_CHECK_WITH_INFO(history.defined() && history.is_cuda() && history.scalar_type() == torch::kInt32
                                 && history.dim() == 2 && history.is_contiguous(),
                             "sampler history must be contiguous CUDA int32 [B, width]");
@@ -953,6 +957,7 @@ void invokeMtpSpecSamplerTokenMatrix(const torch::Tensor& history,
     if (output.numel() == 0) {
         return;
     }
+    const auto                 stream = c10::cuda::getCurrentCUDAStream().stream();
     const c10::cuda::CUDAGuard guard(output.device());
     mtpSpecSamplerTokenMatrixKernel<<<prepareGridSize(output.numel()), kPrepareBlockSize, 0, stream>>>(
         history.data_ptr<int32_t>(),

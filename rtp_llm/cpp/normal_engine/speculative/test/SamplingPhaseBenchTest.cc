@@ -5,7 +5,7 @@
 //   2. target    execSampleGreedy on three paths (production compact
 //                force_topk, full vocabulary, fused greedy top-1) with the
 //                per-step full-block logits clone attribution (copy_ /
-//                production .clone() / copy alone), kernel probes aimed at the
+//                allocation + copy baseline / copy alone), kernel probes aimed at the
 //                full-vocab suspicion, and a KINETO trace of the compact path
 //   3. rejection execRejectionSampling, once with the CUDA folded finalize and
 //                once with the legacy eager finalize
@@ -30,6 +30,7 @@
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/SamplingParams.h"
 
 #include <algorithm>
 #include <chrono>
@@ -384,17 +385,8 @@ std::vector<at::Generator> makeGenerators(int64_t rows) {
 // the round in production (recomputed by the next model forward), so the
 // benchmark restores them with ``prepare`` before every timed repetition.
 //
-// sampling_buffers mirrors Sampler::allocateGreedySamplingBuffers
-// (cpp/models/Sampler.cc): production pre-allocates one persistent set of
-// pinned-host + device seed/offset staging tensors and passes it through
-// GreedyParams. When the pointer is null, makeSamplingSeedOffsetTensors
-// (models_py/bindings/core/CudaSampleOp.cc) allocates two pinned host tensors
-// on EVERY call, i.e. cudaHostAlloc inside the timed region, which is a
-// benchmark-only artifact the served decode step never pays.
-//
-// params.sampling_buffers must be wired AFTER the fixture has been
-// materialized in its final storage (it points into this struct), so
-// makeTargetFixture leaves it null and the caller sets it.
+// Each timed target call includes prepareSamplingParams, which allocates and
+// uploads RNG inputs for stochastic groups before the device-only sampling operation.
 // ---------------------------------------------------------------------------
 struct TargetFixture {
     int64_t                    rows = 0;
@@ -409,7 +401,6 @@ struct TargetFixture {
     torch::Tensor              all_probs;
     torch::Tensor              all_probs_indices;
     std::vector<at::Generator> generators;
-    GreedySamplingBuffers      sampling_buffers;
     GreedyParams               params;
 
     void resetLogits() {
@@ -423,17 +414,6 @@ struct TargetFixture {
         params.generator = generators;
     }
 };
-
-void allocateGreedySamplingBuffers(GreedySamplingBuffers& buffers, int64_t max_batch_size) {
-    const auto pinned_i64        = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
-    const auto device_i64        = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
-    buffers.seed_host            = torch::empty({max_batch_size}, pinned_i64);
-    buffers.offset_host          = torch::empty({max_batch_size}, pinned_i64);
-    buffers.output_ids_ptrs_host = torch::empty({max_batch_size}, pinned_i64);
-    buffers.max_batch_size       = static_cast<size_t>(max_batch_size);
-    buffers.seed_device          = torch::empty({max_batch_size}, device_i64);
-    buffers.offset_device        = torch::empty({max_batch_size}, device_i64);
-}
 
 TargetFixture makeTargetFixture(int64_t rows) {
     const auto fp32     = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
@@ -457,7 +437,6 @@ TargetFixture makeTargetFixture(int64_t rows) {
     fixture.all_probs         = torch::empty({rows, width}, fp32);
     fixture.all_probs_indices = torch::empty({rows, width}, i32);
     fixture.generators        = makeGenerators(rows);
-    allocateGreedySamplingBuffers(fixture.sampling_buffers, rows);
 
     GreedyParams& params             = fixture.params;
     params.logits                    = fixture.logits;
@@ -473,8 +452,6 @@ TargetFixture makeTargetFixture(int64_t rows) {
     params.skip_logits_probs_restore = true;
     params.force_topk                = width;
     params.generator                 = fixture.generators;
-    // Set by the caller once the fixture sits in its final storage.
-    params.sampling_buffers = nullptr;
     return fixture;
 }
 
@@ -503,15 +480,15 @@ struct TargetVariantResult {
 };
 
 TargetVariantResult measureTargetVariant(TargetFixture& fixture, int warmup, int reps) {
-    auto                run     = [&]() { execSampleGreedy(fixture.params); };
-    auto                prepare = [&]() { fixture.resetLogits(); };
+    auto run     = [&]() { execSampleGreedy(prepareSamplingParams(fixture.params, fixture.params.logits.size(0))); };
+    auto prepare = [&]() { fixture.resetLogits(); };
     TargetVariantResult result;
     result.timing = measurePhase(run, prepare, warmup, reps);
 
     // Fingerprint on restored logits with freshly seeded generators.
     fixture.resetLogits();
     fixture.reseedGenerators();
-    auto greedy_output = execSampleGreedy(fixture.params);
+    auto greedy_output = execSampleGreedy(prepareSamplingParams(fixture.params, fixture.params.logits.size(0)));
 
     result.token_ids  = firstInts(fixture.token_ids.select(1, 1), kFingerprintCount);
     result.sampled_ok = fixture.token_ids.select(1, 1).ge(0).all().item<bool>();
@@ -925,15 +902,6 @@ TEST(SamplingPhaseBench, DsparkDecodePhaseTimingAndFingerprints) {
         const int64_t rows = labelled_rows.second;
         reseedFixtureRng();
         auto fixture = makeTargetFixture(rows);
-        // Wire the persistent staging buffers once the fixture owns its final
-        // storage: the sampler only skips its per-call pinned allocation when
-        // this pointer is set (production allocates the same shape through
-        // Sampler::allocateGreedySamplingBuffers).
-        fixture.params.sampling_buffers = &fixture.sampling_buffers;
-        TORCH_CHECK(fixture.params.sampling_buffers->seed_host.numel() >= rows
-                        && fixture.params.sampling_buffers->seed_device.defined(),
-                    "target fixture must provide persistent greedy sampling buffers");
-
         // Full-width buffers shared by the two full-width variants (and by the
         // full-vocab renormalization probe).
         auto full_width_probs = torch::empty({rows, kVocab}, fp32);
@@ -942,29 +910,20 @@ TEST(SamplingPhaseBench, DsparkDecodePhaseTimingAndFingerprints) {
         // --- path 1: production compact force_topk (fixture default) ---
         const auto compact_result = measureTargetVariant(fixture, warmup, reps);
 
-        // Clone variants on the compact path. MtpBatchStreamProcessor currently
-        // clones the whole [rows, vocab] logits block before sampling; removing
-        // that clone is a separate optimization, so time the copy alone,
-        // copy+sample, and the production alloc+copy+sample sequence. The
-        // derived overheads are (variant - sample_only) and sit next to the
-        // directly measured copy so the two independent numbers must agree.
+        // Compare optional logits copies with the production compact path,
+        // which consumes the model logits directly.
         auto       clone_only_run   = [&]() { fixture.logits.copy_(fixture.pristine); };
         const auto clone_only_stats = measurePhase(clone_only_run, nullptr, warmup, reps);
         auto       with_clone_run   = [&]() {
             fixture.logits.copy_(fixture.pristine);
-            execSampleGreedy(fixture.params);
+            execSampleGreedy(prepareSamplingParams(fixture.params, fixture.params.logits.size(0)));
         };
         const auto with_clone_stats = measurePhase(with_clone_run, nullptr, warmup, reps);
-        // Production-exact form: MtpBatchStreamProcessor rebuilds the sampler
-        // input with `sampler_inputs.logits = sampler_inputs.logits.clone()`, so
-        // the fresh allocation belongs to the step that optimization removes.
-        // The copy_ variant above is the lower bound; this one matches what the
-        // served timeline pays. params.logits is re-pointed at the new tensor;
-        // the sampling_buffers pointer is unrelated to logits and stays valid.
+        // Include allocation as well as copying in this comparison variant.
         auto with_clone_alloc_run = [&]() {
             fixture.logits        = fixture.pristine.clone();
             fixture.params.logits = fixture.logits;
-            execSampleGreedy(fixture.params);
+            execSampleGreedy(prepareSamplingParams(fixture.params, fixture.params.logits.size(0)));
         };
         const auto with_clone_alloc_stats = measurePhase(with_clone_alloc_run, nullptr, warmup, reps);
 
@@ -1020,7 +979,7 @@ TEST(SamplingPhaseBench, DsparkDecodePhaseTimingAndFingerprints) {
               << jsonTiming(with_clone_alloc_stats, "target_clone_alloc_")
               << ",\"target_clone_alloc_overhead_event_us_median\":" << jsonUs(clone_alloc_overhead_us)
               << ",\"target_clone_alloc_method\":"
-                 "\"target_clone_alloc_event_us_median - event_us_median (production .clone() form)\""
+                 "\"target_clone_alloc_event_us_median - event_us_median (allocation + copy baseline form)\""
               << ",\"target_compact\":" << targetVariantJson(compact_result)
               << ",\"target_full_vocab\":" << targetVariantJson(full_vocab_result)
               << ",\"target_greedy_top1\":" << targetVariantJson(greedy_top1_result) << ",\"kernels\":" << kernel_json
@@ -1078,8 +1037,7 @@ TEST(SamplingPhaseBench, DsparkDecodePhaseTimingAndFingerprints) {
             namespace tap = torch::autograd::profiler;
             namespace tpi = torch::profiler::impl;
             reseedFixtureRng();
-            auto trace_fixture                    = makeTargetFixture(kBatch * (kGamma + 1));
-            trace_fixture.params.sampling_buffers = &trace_fixture.sampling_buffers;
+            auto trace_fixture = makeTargetFixture(kBatch * (kGamma + 1));
 
             tpi::ProfilerConfig               config(tpi::ProfilerState::KINETO, /*report_input_shapes=*/true);
             const std::set<tpi::ActivityType> activities{tpi::ActivityType::CPU, tpi::ActivityType::CUDA};
@@ -1095,7 +1053,7 @@ TEST(SamplingPhaseBench, DsparkDecodePhaseTimingAndFingerprints) {
                         1,
                         static_cast<int>(kVocab));
                     trace_fixture.resetLogits();
-                    execSampleGreedy(trace_fixture.params);
+                    execSampleGreedy(prepareSamplingParams(trace_fixture.params, trace_fixture.params.logits.size(0)));
                 }
                 at::cuda::getCurrentCUDAStream().synchronize();
             } catch (...) {
@@ -1170,17 +1128,10 @@ TEST(SamplingPhaseBench, DsparkDecodePhaseTimingAndFingerprints) {
              << kTemperature << ",\"top_p\":" << kTopP << ",\"top_k\":\"disabled\",\"markov_dtype\":\"bf16\""
              << ",\"markov_rank\":" << kMarkovRank << ",\"candidate_width\":" << candidateWidth()
              << ",\"warmup\":" << warmup << ",\"reps\":" << reps << ",\"seed\":" << kFingerprintSeed
-             << ",\"device\":" << jsonString(device_label.str()) << ",\"deepselect_fp32_available\":"
-             << (torch_ext::deepselect_fp32_available() ? "true" : "false")
-             // Target params carry production's persistent seed/offset staging
-             // buffers. If this were false the sampler would allocate two
-             // pinned host tensors per call (cudaHostAlloc, ms scale) inside
-             // the timed region — benchmark-only noise the served step pays
-             // from Sampler::allocateGreedySamplingBuffers instead.
-             << ",\"sampling_buffers\":true"
-             << ",\"sampling_buffers_kind\":"
-                "\"GreedySamplingBuffers(pinned int64 seed_host/offset_host/output_ids_ptrs_host + "
-                "CUDA int64 seed_device/offset_device, max_batch_size=rows)\""
+             << ",\"device\":" << jsonString(device_label.str())
+             << ",\"deepselect_fp32_available\":" << (torch_ext::deepselect_fp32_available() ? "true" : "false")
+             << ",\"sampling_buffers\":false"
+             << ",\"sampling_buffers_kind\":\"per-call pinned RNG preparation for stochastic groups\""
              << ",\"target_variants\":[\"compact\",\"full_vocab\",\"greedy_top1\"]"
              << ",\"rejection_candidate_sets\":\"partial\""
              << ",\"target_trace\":"

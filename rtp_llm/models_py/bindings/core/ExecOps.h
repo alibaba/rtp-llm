@@ -81,10 +81,20 @@ void          setTraceMemory(bool trace_memory);
 void runtimeCopy(const CopyParams& params);
 void runtimeBatchCopy(const BatchCopyParams& params);
 void runtimeMaskLogits(torch::Tensor& logits, const torch::Tensor& mask);
+// Internal processor contract: logits are [columns] or [rows, columns], with
+// unit vocabulary stride and non-overlapping rows; 0 < vocab_size <= columns.
+// packed_allow_mask is int32 [mask_rows, words], with mask_rows > 0,
+// words >= ceil(vocab_size / 32), and non-overlapping, word-contiguous rows.
+// Optional row_indices is contiguous int32 [mask_rows]; absent means identity.
+// CUDA metadata shares logits' device, and dimensions/strides fit int32.
+// Optional CUDA-only dense_to_packed is contiguous int32 [dense_rows]: row_indices
+// addresses dense rows, then this map selects logits rows; -1 means omitted.
+// Without dense_to_packed, row_indices directly addresses logits rows.
 void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
                                   const torch::Tensor& packed_allow_mask,
                                   const torch::Tensor& row_indices,
-                                  size_t               vocab_size);
+                                  size_t               vocab_size,
+                                  const torch::Tensor& dense_to_packed = {});
 void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
                                   const torch::Tensor& packed_allow_mask,
                                   size_t               vocab_size);
@@ -107,6 +117,17 @@ void             execRejectionSampling(const RejectionSamplingParams& params);
 // CUDA finalizes every output element, including forced rows and zero padding.
 // Other backends retain the caller's eager finalization.
 bool execRejectionSamplingSupportsFinalize();
+// Expand each request's history and draft tokens to all of its verify rows.
+// history: int32 [B, width]; draft: int32 [B, gamma]; base_lengths: int64 [B].
+// output: int32 [B, rows, width]. All tensors are contiguous on the same device,
+// and each base length plus gamma fits in width. Uses the current device stream.
+// CUDA zeroes columns after the draft; the Torch fallback retains history padding.
+void invokeMtpSpecSamplerTokenMatrix(const torch::Tensor& history,
+                                     const torch::Tensor& draft,
+                                     const torch::Tensor& base_lengths,
+                                     torch::Tensor&       output,
+                                     int64_t              gamma);
+
 void execMarkovSoftmaxStep(const MarkovSoftmaxStepParams& params);
 // Softmax-free DSpARK draft step for all-greedy batches: returns int32 [B]
 // first-argmax tokens of (logits + markov_bias) / temperature. The caller

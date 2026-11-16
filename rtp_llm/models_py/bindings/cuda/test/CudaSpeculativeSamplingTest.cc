@@ -806,8 +806,11 @@ std::pair<torch::Tensor, torch::Tensor> boundedSamplingReference(const FinalizeF
                     mass += residual[v];
                 }
                 EXPECT_GT(mass, 0.0);
-                const double cutoff = uniforms.data_ptr<float>()[b * (G + 1) + accepted + 1] * mass;
-                double       cdf    = 0.0;
+                // Bounded draws reserve the final slot for residual sampling,
+                // separate from every absolute-position acceptance draw.
+                const int    residual_slot = lengths.defined() ? G : accepted + 1;
+                const double cutoff        = uniforms.data_ptr<float>()[b * (G + 1) + residual_slot] * mass;
+                double       cdf           = 0.0;
                 for (int v = 0; v < V; ++v) {
                     cdf += residual[v];
                     if (cdf > cutoff) {
@@ -887,7 +890,7 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_BoundedMixedLengthsMatch
     }
 }
 
-TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_BoundedResidualUsesNextUniformAndDenseStride) {
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_BoundedResidualUsesDedicatedUniformAndDenseStride) {
     auto f = FinalizeFixture::make();
     // Row 3 rejects its last valid draft at position 1. q(13)=1/2,
     // p(13)=1/8, and the residual has equal mass on tokens 3 and 4.
@@ -902,10 +905,10 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_BoundedResidualUsesNextU
         f.target_probs.index_put_({3, 1, token}, 0.25f);
     }
     f.uniform_samples.index_put_({3, 1}, 0.75f);
-    f.uniform_samples.index_put_({3, 3}, 0.6f);  // unused physical final slot
+    f.uniform_samples.index_put_({3, 2}, 0.6f);  // next acceptance slot must not affect the bounded residual
     auto lengths = torch::tensor({0, 1, 3, 2, 3}, torch::kInt32);
     for (float residual_uniform : {0.1f, 0.9f}) {
-        f.uniform_samples.index_put_({3, 2}, residual_uniform);
+        f.uniform_samples.index_put_({3, 3}, residual_uniform);
         for (bool finalize : {false, true}) {
             auto expected = boundedSamplingReference(f, lengths, finalize, false, false);
             auto actual   = runBoundedSampling(f, stream_, lengths, finalize);

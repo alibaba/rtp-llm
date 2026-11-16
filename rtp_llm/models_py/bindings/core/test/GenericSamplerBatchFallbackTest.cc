@@ -5,7 +5,7 @@
 #include <cmath>
 #include <limits>
 
-#include "rtp_llm/models_py/bindings/core/OpData.h"
+#include "rtp_llm/models_py/bindings/core/SamplingParams.h"
 
 namespace rtp_llm {
 GreedyOutput sampleGreedy(const GreedyParams& params);
@@ -39,24 +39,49 @@ GreedyOutput runSample(torch::Tensor                logits,
                        std::optional<torch::Tensor> do_sample                 = std::nullopt,
                        std::vector<at::Generator>   generators                = {},
                        bool                         return_original_all_probs = false) {
-    return sampleGreedy({logits,
-                         input_lengths,
-                         sequence_lengths,
-                         token_ids,
-                         static_cast<size_t>(token_ids.size(1) - 1),
-                         top_k,
-                         top_p,
-                         temperature,
-                         std::nullopt,
-                         no_repeat_ngram_size,
-                         cum_log_probs,
-                         std::nullopt,
-                         return_original_all_probs,
-                         output_all_probs,
-                         std::nullopt,
-                         std::nullopt,
-                         do_sample,
-                         std::move(generators)});
+    GreedyParams params{logits,
+                        input_lengths,
+                        sequence_lengths,
+                        token_ids,
+                        static_cast<size_t>(token_ids.size(1) - 1),
+                        top_k,
+                        top_p,
+                        temperature,
+                        std::nullopt,
+                        no_repeat_ngram_size,
+                        cum_log_probs,
+                        std::nullopt,
+                        return_original_all_probs,
+                        output_all_probs,
+                        std::nullopt,
+                        std::nullopt,
+                        do_sample,
+                        std::move(generators)};
+    return sampleGreedy(prepareSamplingParams(params, logits.size(0)));
+}
+
+TEST(GenericSamplerBatchFallbackTest, CommonPreparationCompilesAndNormalizesCpuMetadata) {
+    EXPECT_FALSE(enableCudaSampling());
+    GreedyParams params;
+    params.logits           = torch::empty({2, 8}, torch::kFloat32);
+    params.top_k            = torch::tensor({1, 1}, torch::kInt32);
+    params.top_p            = torch::tensor({0.0f, 0.8f});
+    params.temperature      = torch::tensor({0.5f, 1.0f});
+    params.input_lengths    = torch::tensor({2, 3}, torch::kInt32);
+    params.sequence_lengths = torch::tensor({4}, torch::kInt32);
+    auto sampling           = prepareSamplingParams(params, 2);
+    EXPECT_TRUE(sampling.mode.all_top_k_one);
+    EXPECT_TRUE(sampling.mode.temperature_active);
+    EXPECT_TRUE(sampling.top_p.is_cpu());
+    EXPECT_TRUE(torch::equal(sampling.top_p, torch::tensor({1.0f, 0.8f})));
+    // Preserve the temperature kernel's epsilon, including for unit temperature.
+    auto expected_scales = torch::tensor({1.0f / (0.5f + 1e-6f), 1.0f / (1.0f + 1e-6f)});
+    EXPECT_TRUE(torch::equal(sampling.inverse_temperature, expected_scales));
+    EXPECT_TRUE(torch::equal(sampling.sequence_lengths, torch::tensor({4, 3}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(sampling.sequence_last_indexes, torch::tensor({3, 2}, torch::kInt32)));
+    EXPECT_TRUE(torch::equal(params.top_p, torch::tensor({0.0f, 0.8f})));
+    EXPECT_FALSE(sampling.seed.defined());
+    EXPECT_FALSE(sampling.offset.defined());
 }
 
 TEST(GenericSamplerBatchFallbackTest, MixedTopKAndTopPReturnsSampledDistribution) {

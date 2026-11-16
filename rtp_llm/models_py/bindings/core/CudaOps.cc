@@ -41,70 +41,14 @@ torch::Tensor contiguousCpuTensor(const torch::Tensor& tensor) {
     return tensor.cpu().contiguous();
 }
 
-void validatePackedMaskLogitsInputs(const torch::Tensor& logits,
-                                    const torch::Tensor& packed_allow_mask,
-                                    const torch::Tensor& row_indices,
-                                    size_t               vocab_size) {
-    RTP_LLM_CHECK_WITH_INFO(logits.defined() && (logits.dim() == 1 || logits.dim() == 2),
-                            "packed mask logits must be a defined 1D or 2D tensor");
-    const int64_t logits_columns = logits.dim() == 1 ? logits.size(0) : logits.size(1);
-    const int64_t logits_rows    = logits.dim() == 1 ? 1 : logits.size(0);
-    const int64_t logits_stride  = logits.dim() == 1 ? logits_columns : logits.stride(0);
-    RTP_LLM_CHECK_WITH_INFO(logits.stride(logits.dim() - 1) == 1 && logits_stride >= logits_columns,
-                            "packed mask logits rows must be non-overlapping and contiguous in the vocab dimension");
-    RTP_LLM_CHECK_WITH_INFO(packed_allow_mask.defined() && packed_allow_mask.dim() == 2
-                                && packed_allow_mask.scalar_type() == torch::kInt32 && packed_allow_mask.stride(1) == 1
-                                && packed_allow_mask.stride(0) >= packed_allow_mask.size(1),
-                            "packed allow mask rows must be non-overlapping 2D int32 data contiguous in the "
-                            "bitmask dimension");
-    if (row_indices.defined()) {
-        RTP_LLM_CHECK_WITH_INFO(row_indices.dim() == 1 && row_indices.scalar_type() == torch::kInt32
-                                    && row_indices.is_contiguous(),
-                                "packed mask row indices must be a contiguous 1D int32 tensor");
-        RTP_LLM_CHECK_WITH_INFO(packed_allow_mask.size(0) == row_indices.numel(),
-                                "packed mask rows (%lld) must equal row index count (%lld)",
-                                static_cast<long long>(packed_allow_mask.size(0)),
-                                static_cast<long long>(row_indices.numel()));
-    } else {
-        RTP_LLM_CHECK_WITH_INFO(packed_allow_mask.size(0) <= logits_rows,
-                                "identity-mapped packed mask rows (%lld) exceed logits rows (%lld)",
-                                static_cast<long long>(packed_allow_mask.size(0)),
-                                static_cast<long long>(logits_rows));
-    }
-    RTP_LLM_CHECK_WITH_INFO(vocab_size > 0 && vocab_size <= static_cast<size_t>(logits_columns),
-                            "packed mask vocab_size=%zu must be in (0, logits columns=%lld]",
-                            vocab_size,
-                            static_cast<long long>(logits_columns));
-    RTP_LLM_CHECK_WITH_INFO(logits_rows <= std::numeric_limits<int>::max()
-                                && logits_stride <= std::numeric_limits<int>::max()
-                                && packed_allow_mask.size(0) <= std::numeric_limits<int>::max()
-                                && packed_allow_mask.size(1) <= std::numeric_limits<int>::max()
-                                && packed_allow_mask.stride(0) <= std::numeric_limits<int>::max()
-                                && vocab_size <= static_cast<size_t>(std::numeric_limits<int>::max()),
-                            "packed mask tensor dimensions exceed kernel int32 limits");
-    const size_t required_words = (vocab_size + 31) / 32;
-    RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(packed_allow_mask.size(1)) >= required_words,
-                            "packed mask width=%lld is smaller than required words=%zu for vocab_size=%zu",
-                            static_cast<long long>(packed_allow_mask.size(1)),
-                            required_words,
-                            vocab_size);
-}
-
 #if USING_CUDA
 template<typename Stream>
 void launchPackedMaskLogits(const torch::Tensor& logits,
                             const torch::Tensor& packed_allow_mask,
                             const torch::Tensor& row_indices,
                             size_t               vocab_size,
-                            Stream               stream) {
-    validatePackedMaskLogitsInputs(logits, packed_allow_mask, row_indices, vocab_size);
-    RTP_LLM_CHECK_WITH_INFO(logits.is_cuda(), "packed mask CUDA logits must be on a CUDA device");
-    RTP_LLM_CHECK_WITH_INFO(logits.device() == packed_allow_mask.device(),
-                            "packed mask CUDA logits and mask must be on the same device");
-    if (row_indices.defined()) {
-        RTP_LLM_CHECK_WITH_INFO(logits.device() == row_indices.device(),
-                                "packed mask CUDA logits and row indices must be on the same device");
-    }
+                            Stream               stream,
+                            const torch::Tensor& dense_to_packed) {
     const int mask_rows   = static_cast<int>(packed_allow_mask.size(0));
     const int logits_rows = logits.dim() == 1 ? 1 : static_cast<int>(logits.size(0));
     const int logits_row_stride =
@@ -113,46 +57,30 @@ void launchPackedMaskLogits(const torch::Tensor& logits,
     const int      bitmask_words  = static_cast<int>(packed_allow_mask.size(1));
     const int32_t* row_index_data = row_indices.defined() ? row_indices.data_ptr<int32_t>() : nullptr;
 
-    if (mask_rows == 0) {
-        return;
-    }
+#define INVOKE_PACKED_MASK_LOGITS(T, TORCH_T)                                                                          \
+    invokePackedMaskLogits<T>(reinterpret_cast<T*>(logits.data_ptr<TORCH_T>()),                                        \
+                              packed_allow_mask.data_ptr<int32_t>(),                                                   \
+                              row_index_data,                                                                          \
+                              mask_rows,                                                                               \
+                              logits_rows,                                                                             \
+                              logits_row_stride,                                                                       \
+                              static_cast<int>(vocab_size),                                                            \
+                              bitmask_stride,                                                                          \
+                              bitmask_words,                                                                           \
+                              stream,                                                                                  \
+                              dense_to_packed.defined() ? dense_to_packed.data_ptr<int32_t>() : nullptr,               \
+                              dense_to_packed.defined() ? dense_to_packed.numel() : 0)
 
     if (logits.scalar_type() == torch::kFloat32) {
-        invokePackedMaskLogits<float>(logits.data_ptr<float>(),
-                                      packed_allow_mask.data_ptr<int32_t>(),
-                                      row_index_data,
-                                      mask_rows,
-                                      logits_rows,
-                                      logits_row_stride,
-                                      static_cast<int>(vocab_size),
-                                      bitmask_stride,
-                                      bitmask_words,
-                                      stream);
+        INVOKE_PACKED_MASK_LOGITS(float, float);
     } else if (logits.scalar_type() == torch::kFloat16) {
-        invokePackedMaskLogits<half>(reinterpret_cast<half*>(logits.data_ptr<at::Half>()),
-                                     packed_allow_mask.data_ptr<int32_t>(),
-                                     row_index_data,
-                                     mask_rows,
-                                     logits_rows,
-                                     logits_row_stride,
-                                     static_cast<int>(vocab_size),
-                                     bitmask_stride,
-                                     bitmask_words,
-                                     stream);
+        INVOKE_PACKED_MASK_LOGITS(half, at::Half);
     } else if (logits.scalar_type() == torch::kBFloat16) {
-        invokePackedMaskLogits<__nv_bfloat16>(reinterpret_cast<__nv_bfloat16*>(logits.data_ptr<at::BFloat16>()),
-                                              packed_allow_mask.data_ptr<int32_t>(),
-                                              row_index_data,
-                                              mask_rows,
-                                              logits_rows,
-                                              logits_row_stride,
-                                              static_cast<int>(vocab_size),
-                                              bitmask_stride,
-                                              bitmask_words,
-                                              stream);
+        INVOKE_PACKED_MASK_LOGITS(__nv_bfloat16, at::BFloat16);
     } else {
         throw OpException(OpErrorType::ERROR_UNIMPLEMENTED);
     }
+#undef INVOKE_PACKED_MASK_LOGITS
 }
 #endif
 
@@ -160,8 +88,6 @@ void applyPackedMaskLogitsCpuFallback(const torch::Tensor& logits,
                                       const torch::Tensor& packed_allow_mask,
                                       const torch::Tensor& row_indices,
                                       size_t               vocab_size) {
-    validatePackedMaskLogitsInputs(logits, packed_allow_mask, row_indices, vocab_size);
-
     // ROCm and other backends without a native packed-mask kernel deliberately
     // fall back to CPU. The work is O(mask_rows * vocab_size) over only the
     // current logits and mask; it never replays the generated prefix. Blocking
@@ -333,8 +259,10 @@ void runtimeMaskLogits(torch::Tensor& logits, const torch::Tensor& mask) {
 void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
                                   const torch::Tensor& packed_allow_mask,
                                   const torch::Tensor& row_indices,
-                                  size_t               vocab_size) {
+                                  size_t               vocab_size,
+                                  const torch::Tensor& dense_to_packed) {
     if (logits.device().is_cpu()) {
+        RTP_LLM_CHECK(!dense_to_packed.defined());
         applyPackedMaskLogitsCpuFallback(logits, packed_allow_mask, row_indices, vocab_size);
         return;
     }
@@ -342,7 +270,8 @@ void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
                            packed_allow_mask,
                            row_indices,
                            vocab_size,
-                           at::cuda::getCurrentCUDAStream(logits.device().index()).stream());
+                           at::cuda::getCurrentCUDAStream(logits.device().index()).stream(),
+                           dense_to_packed);
 }
 
 void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
@@ -431,7 +360,9 @@ void runtimeMaskLogits(torch::Tensor& logits, const torch::Tensor& mask) {
 void runtimeApplyPackedMaskLogits(const torch::Tensor& logits,
                                   const torch::Tensor& packed_allow_mask,
                                   const torch::Tensor& row_indices,
-                                  size_t               vocab_size) {
+                                  size_t               vocab_size,
+                                  const torch::Tensor& dense_to_packed) {
+    RTP_LLM_CHECK(!dense_to_packed.defined());
     applyPackedMaskLogitsCpuFallback(logits, packed_allow_mask, row_indices, vocab_size);
 }
 

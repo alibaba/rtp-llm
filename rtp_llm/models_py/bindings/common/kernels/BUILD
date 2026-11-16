@@ -305,3 +305,12 @@ cc_library(
     include_prefix = "src",
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "dspark_packed_sampling",
+    srcs = ["dspark_packed_sampling.cu"],
+    hdrs = ["dspark_packed_sampling.h"],
+    deps = any_cuda_deps + ["//rtp_llm/models_py/bindings/core:op_data"] + torch_deps(),
+    copts = any_cuda_copts(),
+    visibility = ["//visibility:public"],
+)

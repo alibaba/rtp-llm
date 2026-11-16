@@ -11,8 +11,10 @@
 #include <vector>
 
 #include "rtp_llm/cpp/models/Sampler.h"
+#include "rtp_llm/cpp/models/SamplingRows.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/SamplingParams.h"
 #include "rtp_llm/models_py/bindings/rocm/kernels/sampling/sampling.h"
 
 using namespace rtp_llm;
@@ -48,7 +50,6 @@ std::vector<at::Generator> makeGenerators(int64_t batch_size, uint64_t first_see
 
 SamplerInputs makeSamplerInputs(int64_t batch_size, int32_t top_k_value, float top_p_value, uint64_t seed) {
     constexpr int64_t vocab_size = 8;
-    auto              gpu        = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
     auto              logits     = torch::tensor({0.0f, 0.2f, 0.4f, 0.6f, 0.8f, 1.0f, 1.2f, 1.4f}, torch::kFloat32)
                       .repeat({batch_size, 1})
                       .to(torch::kCUDA);
@@ -74,9 +75,10 @@ SamplerInputs makeSamplerInputs(int64_t batch_size, int32_t top_k_value, float t
             torch::Tensor(),
             /*return_original_all_probs=*/false,
             /*skip_logits_probs_restore=*/false,
-            /*all_probs_point_mass=*/false,
+            /*force_topk=*/0,
+            SamplerProbabilityOutput::DENSE,
             torch::zeros({batch_size}, torch::kFloat32),
-            torch::zeros({batch_size, vocab_size}, gpu),
+            /*return_logprobs=*/false,
             makeGenerators(batch_size, seed)};
 }
 
@@ -103,13 +105,13 @@ torch::Tensor jointTopKTopPReference(int64_t top_k, float top_p) {
     return filtered / filtered.sum();
 }
 
-TEST(RocmSamplerOpTest, ProductionSamplerCoversAllDispatchesAndReusesSlots) {
+TEST(RocmSamplerOpTest, ProductionSamplerCoversAllDispatchesAcrossRounds) {
     Sampler sampler(SamplerInitParams{/*max_batch_size=*/16, /*fixed_max_batch_size=*/true});
     const std::vector<std::pair<int32_t, float>> dispatches = {
         {0, 0.75f},  // pure top-p
         {4, 1.0f},   // pure top-k
         {4, 0.75f},  // combined top-k/top-p
-        {4, 0.75f},  // fourth call reuses the first persistent buffer slot
+        {4, 0.75f},  // repeat the dispatch with fresh prepared parameters
     };
 
     for (size_t iteration = 0; iteration < dispatches.size(); ++iteration) {
@@ -139,8 +141,8 @@ TEST_P(RocmSamplerInvalidProbTest, ReportsInvalidRowsWithoutAffectingHealthyRows
         inputs.logits[2].fill_(-inf);
         inputs.logits[3][0].fill_(inf);
         if (output_mode == 0) {
-            inputs.all_probs     = torch::Tensor();
-            inputs.cum_log_probs = torch::Tensor();
+            inputs.probability_output = SamplerProbabilityOutput::NONE;
+            inputs.cum_log_probs      = torch::Tensor();
         }
         inputs.return_original_all_probs = output_mode == 2;
         auto output                      = sampler.forward(inputs);
@@ -185,8 +187,8 @@ TEST_P(RocmSamplerInvalidProbTest, RejectsSingleInvalidRow) {
         auto inputs = makeSamplerInputs(1, top_k, top_p, /*seed=*/13000);
         inputs.logits.fill_(invalid);
         // Also exercise the internal probability buffer allocated for cum_log_probs.
-        inputs.all_probs = torch::Tensor();
-        auto output      = sampler.forward(inputs);
+        inputs.probability_output = SamplerProbabilityOutput::NONE;
+        auto output               = sampler.forward(inputs);
         runtimeSyncAndCheck();
         EXPECT_FALSE(output.success.cpu()[0].item<bool>());
         EXPECT_EQ(output.token_ids[0][0].item<int32_t>(), -1);
@@ -290,9 +292,9 @@ TEST(RocmSamplerOpTest, CombinedSamplingMatchesReturnedDistribution) {
 
 TEST(RocmSamplerOpTest, CumulativeLogProbWorksWithoutAllProbabilityOutput) {
     Sampler sampler(SamplerInitParams{/*max_batch_size=*/8, /*fixed_max_batch_size=*/true});
-    auto    inputs   = makeSamplerInputs(/*batch_size=*/8, /*top_k=*/4, /*top_p=*/0.75f, /*seed=*/6000);
-    inputs.all_probs = torch::Tensor();
-    auto output      = sampler.forward(inputs);
+    auto    inputs            = makeSamplerInputs(/*batch_size=*/8, /*top_k=*/4, /*top_p=*/0.75f, /*seed=*/6000);
+    inputs.probability_output = SamplerProbabilityOutput::NONE;
+    auto output               = sampler.forward(inputs);
     runtimeSyncAndCheck();
 
     EXPECT_FALSE(output.all_probs.defined());
@@ -314,26 +316,28 @@ std::vector<int32_t> sampleRequestAcrossRounds(int64_t request_row, int64_t batc
         auto token_ids        = torch::zeros({batch_size, 1}, torch::kInt32);
         auto input_lengths    = torch::zeros({batch_size}, torch::kInt32);
         auto sequence_lengths = torch::empty({0}, torch::kInt32);
-        execSampleGreedy({logits,
-                          input_lengths,
-                          sequence_lengths,
-                          token_ids,
-                          /*step=*/0,
-                          torch::full({batch_size}, 4, torch::kInt32).pin_memory(),
-                          torch::full({batch_size}, 0.8f, torch::kFloat32).pin_memory(),
-                          torch::ones({batch_size}, torch::kFloat32).pin_memory(),
-                          std::nullopt,
-                          std::nullopt,
-                          std::nullopt,
-                          std::nullopt,
-                          /*return_original_all_probs=*/false,
-                          std::nullopt,
-                          std::nullopt,
-                          std::nullopt,
-                          std::nullopt,
-                          generators});
+        GreedyParams raw{logits,
+                         input_lengths,
+                         sequence_lengths,
+                         token_ids,
+                         /*step=*/0,
+                         torch::full({batch_size}, 4, torch::kInt32).pin_memory(),
+                         torch::full({batch_size}, 0.8f, torch::kFloat32).pin_memory(),
+                         torch::ones({batch_size}, torch::kFloat32).pin_memory(),
+                         std::nullopt,
+                         std::nullopt,
+                         std::nullopt,
+                         std::nullopt,
+                         /*return_original_all_probs=*/false,
+                         std::nullopt,
+                         std::nullopt,
+                         std::nullopt,
+                         std::nullopt,
+                         generators};
+        auto         params = prepareSamplingParams(raw, batch_size);
+        execSampleGreedy(params);
         runtimeSyncAndCheck();
-        samples.push_back(token_ids[request_row].item<int32_t>());
+        samples.push_back(params.token_ids[request_row].item<int32_t>());
     }
     return samples;
 }
@@ -357,3 +361,78 @@ TEST(RocmSamplerOpTest, RunsProductionSamplerOnNonzeroDevice) {
 }
 
 }  // namespace
+
+TEST(RocmSamplerOpTest, SelectedRowsPreserveDenseRngAndOptionalOutputs) {
+    constexpr int64_t rows    = 8;
+    auto              map     = torch::tensor({0, 2, 3, 4, 6}, torch::kInt64).to(torch::kCUDA);
+    auto              inverse = torch::tensor({0, -1, 1, 2, 3, -1, 4, -1}, torch::kInt32).to(torch::kCUDA);
+    for (int mode = 0; mode < 3; ++mode) {
+        auto    dense_gen    = makeGenerators(1, 789).front();
+        auto    selected_gen = makeGenerators(1, 789).front();
+        Sampler sampler({rows});
+        for (int round = 0; round < 3; ++round) {
+            SCOPED_TRACE(::testing::Message() << "mode=" << mode << ", round=" << round);
+            auto dense = makeSamplerInputs(rows, mode == 0 ? 1 : 4, .75f, 123);
+            dense.logits_processor_states_ptr.reset();
+            dense.generator.assign(rows, dense_gen);
+            dense.probability_output = mode == 1 ? SamplerProbabilityOutput::NONE : SamplerProbabilityOutput::DENSE;
+            dense.return_logprobs    = mode == 2;
+            dense.cum_log_probs      = mode == 2 ? dense.cum_log_probs : torch::Tensor();
+            auto selected            = dense;
+            selected.generator.assign(rows, selected_gen);
+            selected.logits      = dense.logits.index_select(0, map);
+            selected.row_mapping = SamplingRowMapping{map, inverse};
+            if (dense.cum_log_probs.defined())
+                selected.cum_log_probs = dense.cum_log_probs.clone();
+            auto expected = sampler.forward(dense);
+            auto actual   = sampler.forward(selected);
+            EXPECT_TRUE(torch::equal(actual.token_ids.index_select(0, map), expected.token_ids.index_select(0, map)));
+            EXPECT_EQ(actual.all_probs.defined(), expected.all_probs.defined());
+            if (actual.all_probs.defined()) {
+                EXPECT_TRUE(
+                    torch::allclose(actual.all_probs.index_select(0, map), expected.all_probs.index_select(0, map)));
+                EXPECT_TRUE(actual.all_probs[1].eq(0).all().item<bool>());
+            }
+            if (actual.sampling_probs.defined())
+                EXPECT_TRUE(torch::allclose(actual.sampling_probs.index_select(0, map),
+                                            expected.sampling_probs.index_select(0, map)));
+            if (actual.cum_log_probs.defined())
+                EXPECT_TRUE(torch::allclose(actual.cum_log_probs.index_select(0, map),
+                                            expected.cum_log_probs.index_select(0, map)));
+            EXPECT_EQ(dense_gen.get_offset(), selected_gen.get_offset());
+            EXPECT_FALSE(actual.success[1].item<bool>());
+            EXPECT_TRUE(selected.top_k.is_cpu());
+        }
+    }
+}
+
+TEST(RocmSamplerOpTest, GatherBindsNgramPointersToSelectedHistory) {
+    const auto   gpu = torch::TensorOptions().device(torch::kCUDA);
+    GreedyParams raw;
+    raw.logits               = torch::zeros({3, 16}, gpu);
+    raw.step                 = 7;
+    raw.top_k                = torch::ones({6}, torch::kInt32);
+    raw.top_p                = torch::ones({6});
+    raw.temperature          = torch::ones({6});
+    raw.input_lengths        = torch::full({6}, 2, torch::kInt32);
+    raw.sequence_lengths     = torch::tensor({4, 5, 6, 3, 4, 5}, torch::kInt32);
+    raw.no_repeat_ngram_size = torch::full({6}, 2, torch::kInt32);
+    auto dense               = prepareSamplingParams(raw, 6);
+    auto history             = torch::tensor({{1, 2, 3, 4, 8, 9, 0, 0},
+                                              {1, 2, 3, 4, 8, 9, 0, 0},
+                                              {1, 2, 3, 4, 8, 9, 0, 0},
+                                              {5, 6, 7, 10, 11, 0, 0, 0},
+                                              {5, 6, 7, 10, 11, 0, 0, 0},
+                                              {5, 6, 7, 10, 11, 0, 0, 0}},
+                                 torch::kInt32)
+                       .pin_memory();
+    auto map      = torch::tensor({0, 1, 3}, torch::kInt64).to(torch::kCUDA);
+    auto selected = gatherSamplingRows(dense, map, history);
+    auto expected =
+        torch::tensor({{1, 2, 3, 4, 8, 9, 0, 0}, {1, 2, 3, 4, 8, 9, 0, 0}, {5, 6, 7, 10, 11, 0, 0, 0}}, torch::kInt32);
+    EXPECT_TRUE(torch::equal(selected.token_ids.cpu(), expected));
+    auto pointers = selected.output_ids_ptrs.cpu();
+    for (int row = 0; row < 3; ++row)
+        EXPECT_EQ(pointers[row].item<int64_t>(),
+                  reinterpret_cast<int64_t>(selected.token_ids.data_ptr<int32_t>() + row * 8));
+}

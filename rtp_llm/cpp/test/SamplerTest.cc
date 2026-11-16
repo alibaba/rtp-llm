@@ -1,12 +1,10 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/Sampler.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/cpp/test/ModelTestUtil.h"
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
-#include <cuda_runtime.h>
-#include <chrono>
-#include <future>
-#include <thread>
+#include <ATen/cuda/CUDAGeneratorImpl.h>
 #endif
 
 using namespace std;
@@ -25,96 +23,216 @@ protected:
     std::unique_ptr<Sampler> sampler_;
 };
 
-TEST_F(SamplerTest, testDynamicGreedySamplingBuffersGrow) {
+namespace {
+SamplerInputs makeGreedySamplerInput(int64_t rows) {
+    SamplerInputs inputs;
+    inputs.batch_size = inputs.batch_size_out = rows;
+    inputs.vocab_size                         = 8;
+    inputs.step                               = 1;
+    inputs.logits                             = torch::zeros({rows, 8}, torch::TensorOptions().device(torch::kCUDA));
+    inputs.logits.select(1, 3).fill_(10);
+    inputs.token_ids     = torch::zeros({rows, 2}, torch::kInt32);
+    inputs.input_lengths = inputs.sequence_lengths = torch::ones({rows}, torch::kInt32);
+    inputs.num_beams_in = inputs.num_beams_out = torch::ones({rows}, torch::kInt64);
+    inputs.top_k                               = torch::ones({rows}, torch::kInt32);
+    inputs.top_p                               = torch::zeros({rows}, torch::kFloat32);
+    inputs.temperature                         = torch::ones({rows}, torch::kFloat32);
+    inputs.generator.resize(rows);
+    return inputs;
+}
+}  // namespace
+
+TEST_F(SamplerTest, testDynamicBatchCapacityThroughForward) {
     Sampler sampler(SamplerInitParams{1, false});
-
-    sampler.ensureGreedySamplingBuffers(2);
-
-    ASSERT_EQ(sampler.max_batch_size_, 2);
-    for (const auto& slot : sampler.greedy_sampling_buffer_slots_) {
-        ASSERT_EQ(slot.buffers.max_batch_size, 2);
-        ASSERT_GE(slot.buffers.seed_host.numel(), 2);
-        ASSERT_GE(slot.buffers.offset_host.numel(), 2);
-        ASSERT_GE(slot.buffers.output_ids_ptrs_host.numel(), 2);
-#if USING_CUDA
-        ASSERT_TRUE(slot.buffers.seed_device.is_cuda());
-        ASSERT_TRUE(slot.buffers.offset_device.is_cuda());
-        ASSERT_GE(slot.buffers.seed_device.numel(), 2);
-        ASSERT_GE(slot.buffers.offset_device.numel(), 2);
-#endif
+    for (const int64_t rows : {2, 5, 1, 5}) {
+        auto inputs = makeGreedySamplerInput(rows);
+        auto output = sampler.forward(inputs);
+        EXPECT_TRUE(torch::equal(output.token_ids.select(1, 1).cpu(), torch::full({rows}, 3, torch::kInt32)));
+        EXPECT_TRUE(output.success.all().item<bool>());
     }
-
-    GreedySamplingBuffers* used_slots[Sampler::kGreedySamplingBufferSlots] = {};
-    for (size_t i = 0; i < Sampler::kGreedySamplingBufferSlots; ++i) {
-        auto& buffers = sampler.nextGreedySamplingBuffers(2);
-        used_slots[i] = &buffers;
-        ASSERT_EQ(&sampler.greedy_sampling_buffer_slots_[i].buffers, &buffers);
-        sampler.markGreedySamplingBufferReady();
-        ASSERT_TRUE(sampler.greedy_sampling_buffer_slots_[i].ready_event);
-    }
-
-    auto& reused_buffers = sampler.nextGreedySamplingBuffers(2);
-    ASSERT_EQ(used_slots[0], &reused_buffers);
-    ASSERT_FALSE(sampler.greedy_sampling_buffer_slots_[0].ready_event);
-    sampler.markGreedySamplingBufferReady();
 }
 
-TEST_F(SamplerTest, testFixedGreedySamplingBuffersRejectGrow) {
+TEST_F(SamplerTest, testFixedBatchCapacityThroughForward) {
     Sampler sampler(SamplerInitParams{1, true});
+    auto    oversized = makeGreedySamplerInput(2);
+    EXPECT_THROW(sampler.forward(oversized), rtp_llm::RTPException);
+    // Rejecting an oversized batch must not prevent a subsequent valid call.
+    auto valid = makeGreedySamplerInput(1);
+    EXPECT_EQ(sampler.forward(valid).token_ids[0][1].item<int32_t>(), 3);
+}
 
-    EXPECT_THROW(sampler.ensureGreedySamplingBuffers(2), rtp_llm::RTPException);
+TEST_F(SamplerTest, testTokenBufferBindingWithOptionalHistory) {
+    for (int scenario = 0; scenario < 5; ++scenario) {
+        SCOPED_TRACE(scenario);
+        auto inputs             = makeGreedySamplerInput(2);
+        inputs.step             = 3;
+        inputs.sequence_lengths = torch::full({2}, 3, torch::kInt32);
+        inputs.logits.select(1, 2).fill_(5);
+        inputs.token_ids = scenario == 0 ? torch::Tensor() : torch::full({2, 4}, 3, torch::kInt32);
+        if (scenario == 2 || scenario == 4) {
+            inputs.token_ids = inputs.token_ids.to(inputs.logits.device());
+        }
+        if (scenario >= 3) {
+            // The repeated bigram bans token 3, so sampling must choose token 2.
+            inputs.no_repeat_ngram_size = torch::full({2}, 2, torch::kInt32);
+        }
+        auto output = sampler_->forward(inputs);
+        EXPECT_EQ(output.token_ids.size(0), 2);
+        EXPECT_EQ(output.token_ids.size(1), 4);
+        EXPECT_EQ(output.token_ids.device(), inputs.logits.device());
+        EXPECT_TRUE(
+            torch::equal(output.token_ids.select(1, 3).cpu(), torch::full({2}, scenario >= 3 ? 2 : 3, torch::kInt32)));
+        EXPECT_TRUE(output.success.all().item<bool>());
+        if (scenario != 0) {
+            EXPECT_TRUE(torch::equal(output.token_ids.narrow(1, 0, 3).cpu(), torch::full({2, 3}, 3, torch::kInt32)));
+        }
+    }
 }
 
 #if USING_CUDA
-TEST_F(SamplerTest, testPendingGreedySamplingSourcesSurviveReuseAndGrowth) {
-    // Delay the stream without consuming a GPU SM. A bounded release thread
-    // also lets a regression that blocks the host fail instead of hanging.
-    for (const bool grow : {false, true}) {
-        Sampler sampler(SamplerInitParams{2, false});
-        auto&   source = sampler.nextGreedySamplingBuffers(2);
-        // First use of this int64 fill can lazily load its CUDA module and
-        // synchronize the context. Warm it before blocking the stream so the
-        // timed region measures buffer reuse rather than kernel loading.
-        source.seed_device.fill_(0);
-        at::cuda::getCurrentCUDAStream().synchronize();
-        source.seed_host.fill_(37);
-        auto               old_source = source.seed_host;
-        auto               old_device = source.seed_device;
-        std::promise<void> release;
-        auto               ready = release.get_future().share();
-        ASSERT_EQ(cudaLaunchHostFunc(
-                      at::cuda::getCurrentCUDAStream().stream(),
-                      [](void* data) { static_cast<std::shared_future<void>*>(data)->wait(); },
-                      &ready),
-                  cudaSuccess);
-        auto copied = source.seed_device;
-        copied.copy_(source.seed_host, /*non_blocking=*/true);
-        sampler.markGreedySamplingBufferReady();
-        std::thread releaser([&release] {
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            release.set_value();
-        });
-        const auto  start = std::chrono::steady_clock::now();
-        if (grow) {
-            sampler.ensureGreedySamplingBuffers(3);
+TEST_F(SamplerTest, testMappedSamplingRejectsBeamAndContextRows) {
+    for (int scenario = 0; scenario < 3; ++scenario) {
+        SCOPED_TRACE(scenario);
+        auto inputs        = makeGreedySamplerInput(2);
+        inputs.row_mapping = SamplingRowMapping{torch::tensor({0}, torch::kInt64).to(torch::kCUDA),
+                                                torch::tensor({0, -1}, torch::kInt32).to(torch::kCUDA)};
+        inputs.logits      = inputs.logits.narrow(0, 0, 1);
+        if (scenario == 0) {
+            inputs.num_beams_in = torch::full({2}, 2, torch::kInt64);
+        } else if (scenario == 1) {
+            inputs.num_beams_out = torch::full({2}, 2, torch::kInt64);
         } else {
-            sampler.greedy_sampling_buffer_index_ = 0;
+            inputs.sequence_lengths = inputs.sequence_lengths.narrow(0, 0, 1);
         }
-        auto& next = sampler.nextGreedySamplingBuffers(grow ? 3 : 2);
-        next.seed_host.fill_(91);
-        next.seed_device.fill_(91);
-        const auto elapsed =
-            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
-        const bool distinct_storage        = next.seed_host.data_ptr() != old_source.data_ptr();
-        const bool distinct_device_storage = next.seed_device.data_ptr() != old_device.data_ptr();
-        releaser.join();
-        EXPECT_LT(elapsed, 250) << "reusing sampler staging must not wait for the GPU";
-        EXPECT_TRUE(distinct_storage);
-        EXPECT_TRUE(distinct_device_storage);
-        EXPECT_TRUE(torch::equal(copied.cpu(), torch::full({2}, 37, torch::kInt64)));
-        EXPECT_TRUE(torch::equal(old_source, torch::full({2}, 37, torch::kInt64)));
+        try {
+            sampler_->forward(inputs);
+            FAIL() << "row mapping must reject beam and context rows";
+        } catch (const c10::Error& error) {
+            EXPECT_NE(std::string(error.what()).find("row selection requires single-beam decoder rows"),
+                      std::string::npos);
+        }
+        inputs.num_beams_in = inputs.num_beams_out = torch::ones({2}, torch::kInt64);
+        inputs.sequence_lengths                    = torch::ones({2}, torch::kInt32);
+        auto output                                = sampler_->forward(inputs);
+        EXPECT_TRUE(torch::equal(output.token_ids.cpu(), torch::tensor({{3}, {0}}, torch::kInt32)));
     }
 }
+
+TEST_F(SamplerTest, testMappedSamplingRejectsLogitsProcessorState) {
+    auto inputs                        = makeGreedySamplerInput(2);
+    inputs.row_mapping                 = SamplingRowMapping{torch::tensor({0}, torch::kInt64).to(torch::kCUDA),
+                                            torch::tensor({0, -1}, torch::kInt32).to(torch::kCUDA)};
+    inputs.logits                      = inputs.logits.narrow(0, 0, 1);
+    inputs.logits_processor_states_ptr = std::make_shared<LogitsProcessorStates>();
+    try {
+        sampler_->forward(inputs);
+        FAIL() << "mapped logits must be processed before sampling";
+    } catch (const c10::Error& error) {
+        EXPECT_NE(std::string(error.what()).find("mapped sampling requires logits processors to run before"),
+                  std::string::npos);
+    }
+    inputs.logits_processor_states_ptr.reset();
+    auto output = sampler_->forward(inputs);
+    EXPECT_TRUE(torch::equal(output.token_ids.cpu(), torch::tensor({{3}, {0}}, torch::kInt32)));
+}
+
+TEST_F(SamplerTest, testProbabilityOutputsAreOwnedByForward) {
+    for (int scenario = 0; scenario < 9; ++scenario) {
+        SCOPED_TRACE(scenario);
+        auto inputs                      = makeGreedySamplerInput(2);
+        inputs.probability_output        = scenario == 0                  ? SamplerProbabilityOutput::NONE :
+                                           scenario == 1 || scenario == 6 ? SamplerProbabilityOutput::DENSE :
+                                                                            SamplerProbabilityOutput::DISTRIBUTION;
+        inputs.skip_logits_probs_restore = true;
+        inputs.return_original_all_probs = scenario == 3;
+        inputs.return_logprobs           = scenario == 4;
+        if (scenario >= 5) {
+            inputs.vocab_size = 1024;
+            inputs.logits     = torch::full({2, 1024}, -100.f, inputs.logits.options());
+            inputs.logits.select(1, 3).fill_(10.f);
+            inputs.logits.select(1, 5).fill_(9.f);
+            inputs.top_k.fill_(scenario == 7 ? 2 : 0);
+            inputs.top_p.fill_(.95f);
+            inputs.force_topk = 128;
+        }
+        if (scenario == 8) {
+            inputs.cum_log_probs = torch::zeros({2}, inputs.logits.options());
+        }
+        const auto original = torch::softmax(inputs.logits, -1);
+        auto       output   = sampler_->forward(inputs);
+        EXPECT_EQ(output.all_probs.defined(), scenario != 0);
+        EXPECT_EQ(output.token_ids_are_point_mass, scenario == 2);
+        EXPECT_EQ(output.all_probs_indices.defined(), scenario == 5);
+        if (scenario != 0 && scenario != 2) {
+            EXPECT_EQ(output.all_probs.size(1), scenario == 5 ? 128 : inputs.vocab_size);
+            EXPECT_TRUE(torch::allclose(output.all_probs.sum(-1), torch::ones({2}, original.options()), 1e-5, 1e-6));
+            if (scenario == 3) {
+                EXPECT_TRUE(torch::allclose(output.all_probs, original, 1e-5, 1e-6));
+            } else {
+                auto dense = output.all_probs_indices.defined() ?
+                                 torch::zeros_like(original).scatter_(
+                                     1, output.all_probs_indices.to(torch::kLong), output.all_probs) :
+                                 output.all_probs;
+                auto expected =
+                    scenario >= 5 ? original : torch::zeros_like(original).scatter_(1, original.argmax(-1, true), 1.f);
+                EXPECT_TRUE(torch::allclose(dense, expected, 1e-5, 1e-6));
+            }
+        }
+        EXPECT_TRUE(inputs.top_k.is_cpu());
+        EXPECT_TRUE(inputs.top_p.is_cpu());
+    }
+}
+
+TEST_F(SamplerTest, testUnchangedBeamGroupsReuseHistoryStorage) {
+    for (const auto& beams : std::vector<std::vector<int64_t>>{{1, 1, 1, 1}, {2, 2, 2, 2}, {1, 2, 2, 1}}) {
+        SCOPED_TRACE(::testing::PrintToString(beams));
+        auto inputs         = makeGreedySamplerInput(4);
+        inputs.token_ids    = torch::tensor({{1, -1}, {2, -1}, {3, -1}, {4, -1}}, torch::kInt32).to(torch::kCUDA);
+        inputs.num_beams_in = inputs.num_beams_out = torch::tensor(beams, torch::kInt64);
+        inputs.cum_log_probs                       = torch::zeros({4}, inputs.logits.options());
+        inputs.return_logprobs                     = true;
+        auto output                                = sampler_->forward(inputs);
+        EXPECT_EQ(output.token_ids.data_ptr(), inputs.token_ids.data_ptr());
+        EXPECT_TRUE(output.token_ids.select(1, 1).eq(3).all().item<bool>());
+        // Each beam has one distinct winning candidate, so all four prefixes survive.
+        auto prefixes = std::get<0>(output.token_ids.select(1, 0).sort()).cpu();
+        EXPECT_TRUE(torch::equal(prefixes, torch::tensor({1, 2, 3, 4}, torch::kInt32)));
+        EXPECT_TRUE(output.success.all().item<bool>());
+        EXPECT_EQ(output.sampling_probs.sizes().vec(), (std::vector<int64_t>{4, 8}));
+        EXPECT_TRUE(
+            torch::allclose(output.sampling_probs.sum(-1), torch::ones({4}, inputs.logits.options()), 1e-5, 1e-6));
+        EXPECT_TRUE(output.cum_log_probs.isfinite().all().item<bool>());
+    }
+}
+
+TEST_F(SamplerTest, testForwardPreservesCpuMetadataAndRngOrderAcrossGroups) {
+    auto inputs         = makeGreedySamplerInput(6);
+    inputs.vocab_size   = 16;
+    inputs.step         = 9;
+    inputs.logits       = torch::arange(16, inputs.logits.options()).repeat({6, 1});
+    inputs.token_ids    = torch::zeros({6, 10}, torch::kInt32);
+    inputs.num_beams_in = inputs.num_beams_out = torch::tensor({1L, 1L, 2L, 2L, 1L, 1L}, torch::kInt64);
+    inputs.top_k                               = torch::tensor({1, 1, 1, 1, 0, 4}, torch::kInt32);
+    inputs.top_p                               = torch::tensor({0.f, 1.f, 1.f, 1.f, 0.f, .7f});
+    inputs.temperature                         = torch::tensor({1.f, 1.f, 1.f, 1.f, .5f, 1.f});
+    inputs.input_lengths                       = torch::full({6}, 3, torch::kInt32);
+    inputs.sequence_lengths                    = torch::tensor({5, 6, 7, 8, 9}, torch::kInt32);
+    auto generator                             = at::cuda::detail::createCUDAGenerator();
+    generator.set_current_seed(123);
+    inputs.generator = std::vector<at::Generator>(6, generator);
+    auto original_k = inputs.top_k.clone(), original_p = inputs.top_p.clone();
+    for (int round = 0; round < 2; ++round) {
+        inputs.logits = torch::arange(16, inputs.logits.options()).repeat({6, 1});
+        auto output   = sampler_->forward(inputs);
+        EXPECT_EQ(output.token_ids.size(0), 6);
+        EXPECT_TRUE(output.token_ids.narrow(0, 0, 2).select(1, 9).eq(15).all().item<bool>());
+        EXPECT_EQ(generator.get_offset(), 64 * (round + 1));
+        EXPECT_TRUE(torch::equal(inputs.top_k, original_k));
+        EXPECT_TRUE(torch::equal(inputs.top_p, original_p));
+        EXPECT_EQ(inputs.sequence_lengths.numel(), 5);
+    }
+}
+
 #endif
 
 TEST_F(SamplerTest, testMixedDynamicBeamTransitionsUseIndependentOutput) {
@@ -168,11 +286,9 @@ TEST_F(SamplerTest, testMixedDynamicBeamTransitionsUseIndependentOutput) {
                          false,
                          false,  // skip_logits_probs_restore
                          0,      // force_topk
-                         false,  // all_probs_point_mass
+                         SamplerProbabilityOutput::NONE,
                          cum_log_probs,
-                         torch::Tensor(),
-                         torch::Tensor(),  // all_probs_indices
-                         false,            // return_logprobs
+                         false,  // return_logprobs
                          generators};
 
     auto device_history_inputs          = inputs;
@@ -192,8 +308,9 @@ TEST_F(SamplerTest, testMixedDynamicBeamTransitionsUseIndependentOutput) {
 
     // MTP supplies history already on the consumer stream. Skipping its
     // redundant upload must preserve mixed-beam independent-output semantics.
-    auto device_history_output = sampler_->forward(device_history_inputs).token_ids.cpu().contiguous();
-    EXPECT_TRUE(torch::equal(output, device_history_output));
+    auto device_result = sampler_->forward(device_history_inputs);
+    EXPECT_NE(device_result.token_ids.data_ptr(), device_history_inputs.token_ids.data_ptr());
+    EXPECT_TRUE(torch::equal(output, device_result.token_ids.cpu().contiguous()));
 }
 
 TEST_F(SamplerTest, testGeneralSampling) {
@@ -266,11 +383,9 @@ TEST_F(SamplerTest, testGeneralSampling) {
         false,            // return_original_all_probs
         false,            // skip_logits_probs_restore
         0,                // force_topk
-        false,            // all_probs_point_mass
+        SamplerProbabilityOutput::NONE,
         cum_log_probs.clone(),
-        torch::Tensor(),  // all_probs
-        torch::Tensor(),  // all_probs_indices
-        false,            // return_logprobs
+        false,  // return_logprobs
         generator,
     };
 
@@ -359,11 +474,11 @@ TEST_F(SamplerTest, testGeneralSampling) {
     inputs.temperature = torch::ones({(int64_t)batch_size}, torch::kFloat32).pin_memory();
     inputs.top_k.fill_(1);
     inputs.top_p.fill_(1.0f);
-    inputs.logits        = oracle_logits.clone();
-    inputs.all_probs     = torch::empty_like(oracle_logits);
-    inputs.cum_log_probs = torch::Tensor();
-    outputs              = sampler_->forward(inputs);
-    auto point_mass      = torch::zeros_like(oracle_logits).scatter_(1, oracle_logits.argmax(-1, true), 1.0);
+    inputs.logits             = oracle_logits.clone();
+    inputs.probability_output = SamplerProbabilityOutput::DENSE;
+    inputs.cum_log_probs      = torch::Tensor();
+    outputs                   = sampler_->forward(inputs);
+    auto point_mass           = torch::zeros_like(oracle_logits).scatter_(1, oracle_logits.argmax(-1, true), 1.0);
     EXPECT_TRUE(torch::allclose(outputs.all_probs, point_mass));
 
     // The original top token probability exceeds 0.5, so top-p keeps only token 7.
@@ -371,7 +486,7 @@ TEST_F(SamplerTest, testGeneralSampling) {
     inputs.top_p.fill_(0.5f);
     inputs.token_ids     = output_token_ids.clone();
     inputs.logits        = oracle_logits.clone();
-    inputs.all_probs     = torch::empty({(int64_t)batch_size, 4}, logits.options());
+    inputs.vocab_size    = 4;
     inputs.cum_log_probs = cum_log_probs.clone();
     outputs              = sampler_->forward(inputs);
     EXPECT_TRUE(

@@ -1,4 +1,5 @@
 #pragma once
+#include <climits>
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
@@ -285,13 +286,14 @@ struct FfnConfigs {
     std::optional<MoeConfigs> moe_configs = std::nullopt;
 };
 
-struct GreedySamplingBuffers {
-    torch::Tensor seed_host;
-    torch::Tensor offset_host;
-    torch::Tensor output_ids_ptrs_host;
-    size_t        max_batch_size = 0;
-    torch::Tensor seed_device;
-    torch::Tensor offset_device;
+// Host dispatch decisions for a batch whose row parameters already live on GPU.
+// The caller must compute these over exactly the represented request set.
+struct SamplingMode {
+    bool all_top_k_one = true, all_top_k_unlimited = true;
+    bool all_top_p_one = true, all_top_p_exact_one = true, any_top_p_one = false;
+    bool temperature_active = false, repetition_active = false, ngram_active = false;
+    bool need_do_sample = false, has_not_do_sample = false;
+    int  min_top_k = INT_MAX, max_top_k = INT_MIN;
 };
 
 struct GreedyParams {
@@ -319,7 +321,6 @@ struct GreedyParams {
     std::optional<torch::Tensor> do_sample;
 
     std::vector<at::Generator> generator;
-    GreedySamplingBuffers*     sampling_buffers = nullptr;
 
     // Caller declares params.logits private to this sampling round (discarded
     // afterwards): sampleGreedy may skip restoring softmax probabilities into
@@ -339,7 +340,19 @@ struct GreedyParams {
     // Also return the normalized distribution when output_all_probs requests
     // pre-filter probabilities. Otherwise reuse output_all_probs storage.
     bool return_sampling_probs = false;
+
+    // Sampling execution consumes named tensors on the logits device.
+    // sequence_lengths contains effective lengths for all rows; only the first
+    // decoder_batch_size rows participate in the no-repeat-ngram kernel.
+    SamplingMode  mode;
+    torch::Tensor seed, offset, inverse_temperature, sequence_last_indexes, output_ids_ptrs;
+    int64_t       decoder_batch_size = 0;
 };
+
+// Select the CUDA sampling implementation; ROCm and generic use their own backend.
+bool enableCudaSampling();
+
+int64_t samplingCandidateWidth(const GreedyParams& params, const SamplingMode& mode);
 
 struct GreedyOutput {
     torch::Tensor success;
@@ -347,7 +360,7 @@ struct GreedyOutput {
     // and output_all_probs was left unmaterialized; consumers must then treat
     // the distribution as a one-hot at the sampled token. Callers must never
     // read all_probs values when this is set.
-    bool all_probs_point_mass = false;
+    bool          all_probs_point_mass = false;
     torch::Tensor sampling_probs;
 };
 

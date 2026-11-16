@@ -168,11 +168,11 @@ protected:
         int                           budget_per_request = -1;
         std::shared_ptr<torch::Event> start_event;
     };
-    DSparkVerifyPlan runDSparkProposal(GptModelInputs&                                  proposal_input,
-                                       const StreamGroups&                              stream_groups,
-                                       const MtpBatchStreamProcessor::DSparkRoundState& round_state,
-                                       SamplerOutput&                                   draft_sampler_output,
-                                       int64_t&                                         model_forward_us);
+    DSparkVerifyPlan runDSparkProposal(GptModelInputs&         proposal_input,
+                                       const StreamGroups&     stream_groups,
+                                       const DSparkRoundState& round_state,
+                                       SamplerOutput&          draft_sampler_output,
+                                       int64_t&                model_forward_us);
     GptModelOutputs  runDraftPrefillForward(GptModelInputs& model_input);
     SpecLogitsVerifyRunner::LaunchResult
                  buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,

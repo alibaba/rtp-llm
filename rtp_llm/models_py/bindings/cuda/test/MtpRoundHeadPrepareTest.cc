@@ -728,7 +728,9 @@ MtpDSparkBudgetedVerifyInputs oldBudgetedVerify(const torch::Tensor&        rate
     auto owners              = at::searchsorted(ends, rows, false, true).clamp(0, batch - 1);
     auto positions           = (rows - starts.index_select(0, owners)).clamp(0, gamma);
     out.packed_to_dense      = owners * width + positions;
-    out.packed.tokens        = dense.tokens.index_select(0, out.packed_to_dense);
+    out.dense_to_packed      = torch::full({batch * width}, -1, i32);
+    out.dense_to_packed.index_copy_(0, out.packed_to_dense, rows.to(torch::kInt32));
+    out.packed.tokens = dense.tokens.index_select(0, out.packed_to_dense);
     if (dense.positions.defined()) {
         out.packed.positions =
             dense.positions.reshape({batch * width, -1}).index_select(0, out.packed_to_dense).reshape({-1});
@@ -747,6 +749,7 @@ void expectBudgetedVerifyEqual(const MtpDSparkBudgetedVerifyInputs& actual,
     const std::vector<std::pair<torch::Tensor, torch::Tensor>> fields{
         {actual.valid_draft_lengths, expected.valid_draft_lengths},
         {actual.packed_to_dense, expected.packed_to_dense},
+        {actual.dense_to_packed, expected.dense_to_packed},
         {actual.dense_tokens, expected.dense_tokens},
         {actual.dense_positions, expected.dense_positions},
         {actual.sequence_lengths_plus_1, expected.sequence_lengths_plus_1},

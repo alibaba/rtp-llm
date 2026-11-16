@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
 #if USING_CUDA
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
 #include <cuda_runtime.h>
@@ -651,6 +652,32 @@ private:
 };
 
 }  // namespace
+
+TEST(SpecLogitsVerifyRunnerTest, ApplyMaskWaitsForProducerStream) {
+    const auto                           producer = c10::cuda::getStreamFromPool();
+    const auto                           consumer = c10::cuda::getStreamFromPool();
+    c10::cuda::CUDAStreamGuard           producer_guard(producer);
+    auto                                 logits = torch::ones({1, 32}, torch::TensorOptions().device(torch::kCUDA));
+    SpecLogitsVerifyRunner::LaunchResult result;
+    result.packed_allow_mask_gpu = torch::full({1, 1}, -1, logits.options().dtype(torch::kInt32));
+    result.ready_event           = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+    result.ready_event->record(producer.unwrap());
+    SpecLogitsVerifyRunner::applyMaskToLogits(logits, result, 32);
+    producer.synchronize();
+    {
+        BlockedCudaStream blocked(producer);
+        result.packed_allow_mask_gpu.fill_(1 << 3);
+        result.ready_event->record(producer.unwrap());
+        c10::cuda::CUDAStreamGuard consumer_guard(consumer);
+        SpecLogitsVerifyRunner::applyMaskToLogits(logits, result, 32);
+        // The helper must enqueue a device wait without blocking the host.
+        EXPECT_FALSE(blocked.timed_out.load());
+        EXPECT_FALSE(result.ready_event->query());
+    }
+    consumer.synchronize();
+    EXPECT_EQ(logits[0][3].item<float>(), 1.0f);
+    EXPECT_EQ(logits.gt(0).sum().item<int64_t>(), 1);
+}
 
 TEST(SpecLogitsVerifyRunnerTest, PendingGrammarMaskSurvivesThirdCommitTimeoutAndNextRoundAllowsAllTokens) {
     constexpr int              kStep  = 2;

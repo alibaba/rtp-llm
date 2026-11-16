@@ -200,56 +200,6 @@ public:
 #if USING_CUDA
 namespace {
 
-// A bounded host callback holds one stream without launching an SM-consuming
-// spin kernel. The timeout only prevents a broken dependency from hanging the
-// test; correctness is checked with tensor values, never elapsed-time limits.
-class ScopedSamplerStreamGate {
-public:
-    explicit ScopedSamplerStreamGate(cuda_graph::GraphStream stream): state_(std::make_shared<State>()) {
-        auto*      callback_state = new std::shared_ptr<State>(state_);
-        const auto status         = cudaLaunchHostFunc(
-            stream.stream(),
-            [](void* opaque) {
-                std::unique_ptr<std::shared_ptr<State>> owner(static_cast<std::shared_ptr<State>*>(opaque));
-                auto&                                   state = **owner;
-                std::unique_lock<std::mutex>            lock(state.mutex);
-                if (!state.cv.wait_for(lock, std::chrono::seconds(30), [&] { return state.released; })) {
-                    state.timed_out.store(true);
-                }
-            },
-            callback_state);
-        if (status != cudaSuccess) {
-            delete callback_state;
-            throw std::runtime_error(cudaGetErrorString(status));
-        }
-    }
-
-    ~ScopedSamplerStreamGate() {
-        release();
-    }
-
-    void release() {
-        {
-            std::lock_guard<std::mutex> lock(state_->mutex);
-            state_->released = true;
-        }
-        state_->cv.notify_all();
-    }
-
-    bool timedOut() const {
-        return state_->timed_out.load();
-    }
-
-private:
-    struct State {
-        std::mutex              mutex;
-        std::condition_variable cv;
-        bool                    released = false;
-        std::atomic<bool>       timed_out{false};
-    };
-    std::shared_ptr<State> state_;
-};
-
 struct AsyncSamplerInputCase {
     std::unique_ptr<MtpBatchStreamProcessor> processor;
     std::list<GenerateStreamPtr>             streams;
@@ -257,8 +207,7 @@ struct AsyncSamplerInputCase {
     torch::Tensor                            draft_tokens;
 };
 
-AsyncSamplerInputCase makeAsyncSamplerInputCase(MtpBatchStreamProcessorTest& fixture,
-                                                cuda_graph::GraphStream      copy_stream) {
+AsyncSamplerInputCase makeAsyncSamplerInputCase(MtpBatchStreamProcessorTest& fixture) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -274,13 +223,12 @@ AsyncSamplerInputCase makeAsyncSamplerInputCase(MtpBatchStreamProcessorTest& fix
     AsyncSamplerInputCase data;
     data.processor = std::make_unique<MtpBatchStreamProcessor>(
         model_config, pd_sep_config, profiling_config, fixture.makeProcessorCacheConfig(), sp_config, false);
-    data.processor->sampler_input_copy_stream_ = copy_stream;
     data.streams.push_back(fixture.createContextStream(model_config, runtime_config, resource_context, {5, 6, 7}, 1));
     data.streams.push_back(
         fixture.createContextStream(model_config, runtime_config, resource_context, {8, 9, 10, 11, 12}, 2));
     for (auto& stream : data.streams) {
         stream->setScoreLen(4);
-        // Keep a history reader active to exercise the full-upload DMA lifetime.
+        // Keep a history reader active to exercise the pinned snapshot and device history lifetime.
         stream->generateConfig()->repetition_penalty = 1.05f;
     }
     data.model_output.logits = torch::zeros({8, 64}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
@@ -290,39 +238,9 @@ AsyncSamplerInputCase makeAsyncSamplerInputCase(MtpBatchStreamProcessorTest& fix
 
 SamplerInputs gatherAsyncSamplerInput(AsyncSamplerInputCase& data) {
     auto result =
-        data.processor->gatherSpecSamplerInput(StreamGroups(data.streams), data.model_output, {}, data.draft_tokens);
+        data.processor->gatherSpecSamplerInput(StreamGroups(data.streams), data.model_output, data.draft_tokens);
     RTP_LLM_CHECK_WITH_INFO(result.ok(), "sampler input gather failed: %s", result.status().ToString().c_str());
     return std::move(result.value());
-}
-
-// Reserve the exact shapes on both participating streams before introducing a
-// gate. This prevents cudaMalloc/cudaHostAlloc growth from serializing the test.
-void warmAsyncSamplerInput(AsyncSamplerInputCase& data, cuda_graph::GraphStream copy_stream) {
-    std::vector<SamplerInputs> inputs;
-    std::vector<torch::Tensor> clones;
-    for (int i = 0; i < 8; ++i) {
-        inputs.push_back(gatherAsyncSamplerInput(data));
-        clones.push_back(inputs.back().token_ids.clone());
-    }
-    const auto sizes = inputs.front().token_ids.sizes().vec();
-    // The pinned history snapshot is one row per request, not one per verify
-    // row; PyTorch's host allocator bins by exact size, so it needs its own
-    // pressure shape or the matrix shape never reuses the snapshot block.
-    const std::vector<int64_t> history_sizes = {static_cast<int64_t>(data.streams.size()), sizes[1]};
-    std::vector<torch::Tensor> device_reserve;
-    std::vector<torch::Tensor> host_reserve;
-    {
-        cuda_graph::GraphStreamGuard guard(copy_stream);
-        for (int i = 0; i < 32; ++i) {
-            device_reserve.push_back(torch::empty(sizes, inputs.front().token_ids.options()));
-            host_reserve.push_back(
-                torch::empty(sizes, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true)));
-            host_reserve.push_back(torch::empty(
-                history_sizes, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).pinned_memory(true)));
-        }
-    }
-    copy_stream.synchronize();
-    cuda_graph::graphGetCurrentStream().synchronize();
 }
 
 void expectAsyncSamplerHistory(const torch::Tensor&                 history,
@@ -350,93 +268,45 @@ void expectAsyncSamplerHistory(const torch::Tensor&                 history,
 
 }  // namespace
 
-TEST_F(MtpBatchStreamProcessorTest, AsyncSamplerUploadOwnsPinnedHistorySnapshot) {
-    auto consumer_stream = cuda_graph::graphGetStreamFromPool(false);
-    auto copy_stream     = cuda_graph::graphGetStreamFromPool(false);
-    ASSERT_NE(consumer_stream, copy_stream);
-    cuda_graph::GraphStreamGuard consumer_guard(consumer_stream);
-    auto                         data = makeAsyncSamplerInputCase(*this, copy_stream);
-    warmAsyncSamplerInput(data, copy_stream);
-
-    ScopedSamplerStreamGate copy_gate(copy_stream);
-    auto                    inputs = gatherAsyncSamplerInput(data);
-    EXPECT_EQ(cuda_graph::graphGetCurrentStream(), consumer_stream);
-    EXPECT_EQ(cuda_graph::toGraphStream(*data.processor->sampler_input_copy_stream_), copy_stream);
+TEST_F(MtpBatchStreamProcessorTest, SamplerInputOwnsExpandedHistorySnapshot) {
+    auto                         stream = cuda_graph::graphGetStreamFromPool(false);
+    cuda_graph::GraphStreamGuard guard(stream);
+    auto                         data   = makeAsyncSamplerInputCase(*this);
+    auto                         inputs = gatherAsyncSamplerInput(data);
     ASSERT_TRUE(inputs.token_ids.is_cuda());
-
-    // Mutating the stream history must not change the upload's own snapshot.
-    // Refill cached pinned allocations while the original H2D is still queued
-    // to exercise the source allocation's DMA-aware lifetime, too.
-    for (auto& stream : data.streams) {
-        stream->completeTokenIds().fill_(-99);
-    }
-    std::vector<torch::Tensor> host_pressure;
-    const auto                 matrix_sizes  = inputs.token_ids.sizes().vec();
-    const std::vector<int64_t> history_sizes = {static_cast<int64_t>(data.streams.size()), matrix_sizes[1]};
-    for (int i = 0; i < 32; ++i) {
-        auto tensor = torch::empty(inputs.token_ids.sizes(),
-                                   torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
-        tensor.fill_(-777);
-        host_pressure.push_back(std::move(tensor));
-        auto history = torch::empty(
-            history_sizes, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).pinned_memory(true));
-        history.fill_(-777);
-        host_pressure.push_back(std::move(history));
-    }
-    copy_gate.release();
+    ASSERT_EQ(inputs.token_ids.size(0), 8);
+    for (auto& request : data.streams)
+        request->completeTokenIds().fill_(-99);
     expectAsyncSamplerHistory(inputs.token_ids, {{5, 6, 7}, {8, 9, 10, 11, 12}}, 21);
-    EXPECT_FALSE(copy_gate.timedOut());
 }
 
-TEST_F(MtpBatchStreamProcessorTest, AsyncSamplerUploadRetainsConsumerStorageAcrossRounds) {
-    auto consumer_stream = cuda_graph::graphGetStreamFromPool(false);
-    auto copy_stream     = cuda_graph::graphGetStreamFromPool(false);
-    ASSERT_NE(consumer_stream, copy_stream);
-    cuda_graph::GraphStreamGuard consumer_guard(consumer_stream);
-    auto                         data = makeAsyncSamplerInputCase(*this, copy_stream);
-    warmAsyncSamplerInput(data, copy_stream);
-
-    std::vector<SamplerInputs> inputs;
+TEST_F(MtpBatchStreamProcessorTest, SamplerInputsOwnHistoryStorageAcrossRounds) {
+    auto                         stream = cuda_graph::graphGetStreamFromPool(false);
+    cuda_graph::GraphStreamGuard guard(stream);
+    auto                         data = makeAsyncSamplerInputCase(*this);
+    std::vector<torch::Tensor>   histories;
     for (int round = 0; round < 4; ++round) {
-        for (auto& stream : data.streams) {
-            stream->completeTokenIds().fill_(5 + round);
-        }
-        // Proposal production and scatter must preserve their order on this
-        // non-default consumer stream; the CPU-history upload is independent.
+        for (auto& request : data.streams)
+            request->completeTokenIds().fill_(5 + round);
         data.draft_tokens.fill_(21 + round);
-        inputs.push_back(gatherAsyncSamplerInput(data));
-        EXPECT_EQ(cuda_graph::graphGetCurrentStream(), consumer_stream);
+        auto inputs = gatherAsyncSamplerInput(data);
+        histories.push_back(inputs.token_ids);
     }
-
-    // Gate only after gather has enqueued its existing small pageable metadata
-    // copies. Their driver staging is not part of the async-history regression.
-    ScopedSamplerStreamGate    consumer_gate(consumer_stream);
-    std::vector<torch::Tensor> observed_histories;
-    for (const auto& input : inputs) {
-        observed_histories.push_back(input.token_ids.clone());
-    }
-    inputs.clear();
-    // SamplerInputs is gone while its main-stream clones are still pending.
-    // Without record_stream, the copy-stream allocator can recycle and poison
-    // the source storage before those consumers read it.
-    std::vector<torch::Tensor> device_pressure;
-    {
-        cuda_graph::GraphStreamGuard copy_guard(copy_stream);
-        for (int i = 0; i < 32; ++i) {
-            auto tensor = torch::empty({8, 9}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
-            tensor.fill_(-777);
-            device_pressure.push_back(std::move(tensor));
-        }
-    }
-    copy_stream.synchronize();
-    consumer_gate.release();
     for (int round = 0; round < 4; ++round) {
         expectAsyncSamplerHistory(
-            observed_histories[round], {std::vector<int>(3, 5 + round), std::vector<int>(5, 5 + round)}, 21 + round);
+            histories[round], {std::vector<int>(3, 5 + round), std::vector<int>(5, 5 + round)}, 21 + round);
     }
-    EXPECT_FALSE(consumer_gate.timedOut());
 }
+
 #endif
+
+static void applySamplerMask(SamplerInputs& inputs, const SpecLogitsVerifyRunner::LaunchResult& mask) {
+    SpecLogitsVerifyRunner::applyMaskToLogits(inputs.logits,
+                                              mask,
+                                              inputs.vocab_size,
+                                              inputs.row_mapping ? inputs.row_mapping->dense_to_packed :
+                                                                   torch::Tensor());
+}
 
 TEST_F(MtpBatchStreamProcessorTest, DISABLED_benchmarkScoreTokenIdsTorchCopyVsMemcpy) {
     constexpr int64_t stream_count = 64;
@@ -523,12 +393,12 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputBuildsPositionSpec
     model_output.logits.narrow(1, 0, model_config.vocab_size).zero_();
 
     auto draft_token_ids       = torch::tensor({1, 2, 3, 3, 2, 1}, torch::kInt32).reshape({2, 3});
-    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_output, {}, draft_token_ids);
+    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_output, draft_token_ids);
     ASSERT_TRUE(sampler_inputs_status.ok());
 
     const auto& sampler_inputs = sampler_inputs_status.value();
     EXPECT_EQ((std::vector<int64_t>{8, 4}), sampler_inputs.logits.sizes().vec());
-    EXPECT_EQ((std::vector<int64_t>{8, 4}), sampler_inputs.all_probs.sizes().vec());
+    EXPECT_EQ(sampler_inputs.probability_output, SamplerProbabilityOutput::DISTRIBUTION);
     EXPECT_TRUE(sampler_inputs.logits.eq(0).all().item<bool>());
 
     auto  token_ids = sampler_inputs.token_ids.cpu();
@@ -580,58 +450,67 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkTargetWithoutExplicitTopKUsesFixed
     MtpBatchStreamProcessor processor(model_config, pd_sep_config, debug_config, cache_config, sp_config, false);
     GptModelOutputs         output;
     output.logits = torch::randn({4, 8192}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
-    auto draft    = torch::zeros({2, 1}, torch::kInt32);
-    auto mixed    = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
+    Sampler sampler({});
+    auto    draft = torch::zeros({2, 1}, torch::kInt32);
+    auto    mixed = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, draft);
     ASSERT_TRUE(mixed.ok());
-    EXPECT_EQ(mixed->all_probs.size(1), 8192);
-    EXPECT_FALSE(mixed->all_probs_indices.defined());
+    auto mixed_sampled = sampler.forward(*mixed);
+    EXPECT_EQ(mixed_sampled.all_probs.size(1), 8192);
+    EXPECT_FALSE(mixed_sampled.all_probs_indices.defined());
 
     second->generateConfig()->top_k = 8192;
-    auto pure = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
+    auto pure                       = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, draft);
     ASSERT_TRUE(pure.ok());
-    EXPECT_EQ(pure->all_probs.size(1), 8192);
-    EXPECT_FALSE(pure->all_probs_indices.defined());
+    auto pure_sampled = sampler.forward(*pure);
+    EXPECT_EQ(pure_sampled.all_probs.size(1), 8192);
+    EXPECT_FALSE(pure_sampled.all_probs_indices.defined());
 
     first->generateConfig()->top_k  = 0;
     second->generateConfig()->top_k = 0;
-    auto pure_no_k_p1 = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
+    auto pure_no_k_p1               = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, draft);
     ASSERT_TRUE(pure_no_k_p1.ok());
-    EXPECT_EQ(pure_no_k_p1->all_probs.size(1), speculative::dsparkForceTopK());
-    EXPECT_TRUE(pure_no_k_p1->all_probs_indices.defined());
+    auto pure_no_k_p1_sampled = sampler.forward(*pure_no_k_p1);
+    EXPECT_EQ(pure_no_k_p1_sampled.all_probs.size(1), speculative::dsparkForceTopK());
+    EXPECT_TRUE(pure_no_k_p1_sampled.all_probs_indices.defined());
 
-    auto mapped = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft, nullptr, true);
+    auto mapped = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, draft, true);
     ASSERT_TRUE(mapped.ok());
-    EXPECT_EQ(mapped->all_probs.size(1), 8192);
-    EXPECT_FALSE(mapped->all_probs_indices.defined());
+    auto mapped_sampled = sampler.forward(*mapped);
+    EXPECT_EQ(mapped_sampled.all_probs.size(1), 8192);
+    EXPECT_FALSE(mapped_sampled.all_probs_indices.defined());
 
     first->generateConfig()->top_p  = 0.95f;
     second->generateConfig()->top_p = 0.95f;
-    auto pure_no_k_p95 = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
+    auto pure_no_k_p95              = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, draft);
     ASSERT_TRUE(pure_no_k_p95.ok());
-    EXPECT_EQ(pure_no_k_p95->all_probs.size(1), speculative::dsparkForceTopK());
-    EXPECT_TRUE(pure_no_k_p95->all_probs_indices.defined());
+    auto pure_no_k_p95_sampled = sampler.forward(*pure_no_k_p95);
+    EXPECT_EQ(pure_no_k_p95_sampled.all_probs.size(1), speculative::dsparkForceTopK());
+    EXPECT_TRUE(pure_no_k_p95_sampled.all_probs_indices.defined());
 
     first->generateConfig()->top_p  = 1.0f;
     second->generateConfig()->top_p = 1.0f;
     first->generateConfig()->top_k  = 40;
     second->generateConfig()->top_k = 40;
-    auto small_vocab_pure = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
+    auto small_vocab_pure           = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, draft);
     ASSERT_TRUE(small_vocab_pure.ok());
-    EXPECT_EQ(small_vocab_pure->all_probs.size(1), 8192);
-    EXPECT_FALSE(small_vocab_pure->all_probs_indices.defined());
+    auto small_vocab_pure_sampled = sampler.forward(*small_vocab_pure);
+    EXPECT_EQ(small_vocab_pure_sampled.all_probs.size(1), 8192);
+    EXPECT_FALSE(small_vocab_pure_sampled.all_probs_indices.defined());
 
     second->generateConfig()->top_p = 1.0f - 5e-8f;
-    auto equivalent_p = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
+    auto equivalent_p               = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, draft);
     ASSERT_TRUE(equivalent_p.ok());
-    EXPECT_EQ(equivalent_p->all_probs.size(1), 8192);
-    EXPECT_FALSE(equivalent_p->all_probs_indices.defined());
+    auto equivalent_p_sampled = sampler.forward(*equivalent_p);
+    EXPECT_EQ(equivalent_p_sampled.all_probs.size(1), 8192);
+    EXPECT_FALSE(equivalent_p_sampled.all_probs_indices.defined());
 
     second->generateConfig()->top_p     = 1.0f;
     second->generateConfig()->do_sample = false;
-    auto mixed_greedy = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, {}, draft);
+    auto mixed_greedy = processor.gatherSpecSamplerInput(StreamGroups({first, second}), output, draft);
     ASSERT_TRUE(mixed_greedy.ok());
-    EXPECT_EQ(mixed_greedy->all_probs.size(1), 8192);
-    EXPECT_FALSE(mixed_greedy->all_probs_indices.defined());
+    auto mixed_greedy_sampled = sampler.forward(*mixed_greedy);
+    EXPECT_EQ(mixed_greedy_sampled.all_probs.size(1), 8192);
+    EXPECT_FALSE(mixed_greedy_sampled.all_probs_indices.defined());
 
     model_config.vocab_size = 129280;
     auto large_first        = createContextStream(model_config, runtime_config, resource_context, {1}, 3);
@@ -650,44 +529,49 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkTargetWithoutExplicitTopKUsesFixed
     GptModelOutputs large_output;
     large_output.logits = torch::randn({4, 129280}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     auto large_mixed =
-        large_processor.gatherSpecSamplerInput(StreamGroups({large_first, large_second}), large_output, {}, draft);
+        large_processor.gatherSpecSamplerInput(StreamGroups({large_first, large_second}), large_output, draft);
     ASSERT_TRUE(large_mixed.ok());
-    EXPECT_EQ(large_mixed->all_probs.size(1), 129280);
-    EXPECT_FALSE(large_mixed->all_probs_indices.defined());
+    auto large_mixed_sampled = sampler.forward(*large_mixed);
+    EXPECT_EQ(large_mixed_sampled.all_probs.size(1), 129280);
+    EXPECT_FALSE(large_mixed_sampled.all_probs_indices.defined());
 
     large_second->generateConfig()->top_p = 0.95f;
     auto large_mixed_topp =
-        large_processor.gatherSpecSamplerInput(StreamGroups({large_first, large_second}), large_output, {}, draft);
+        large_processor.gatherSpecSamplerInput(StreamGroups({large_first, large_second}), large_output, draft);
     ASSERT_TRUE(large_mixed_topp.ok());
-    EXPECT_EQ(large_mixed_topp->all_probs.size(1), 129280);
-    EXPECT_FALSE(large_mixed_topp->all_probs_indices.defined());
+    auto large_mixed_topp_sampled = sampler.forward(*large_mixed_topp);
+    EXPECT_EQ(large_mixed_topp_sampled.all_probs.size(1), 129280);
+    EXPECT_FALSE(large_mixed_topp_sampled.all_probs_indices.defined());
 
     large_first->generateConfig()->top_k = 41;
     auto bounded_mixed_topp =
-        large_processor.gatherSpecSamplerInput(StreamGroups({large_first, large_second}), large_output, {}, draft);
+        large_processor.gatherSpecSamplerInput(StreamGroups({large_first, large_second}), large_output, draft);
     ASSERT_TRUE(bounded_mixed_topp.ok());
-    EXPECT_EQ(bounded_mixed_topp->all_probs.size(1), 129280);
-    EXPECT_FALSE(bounded_mixed_topp->all_probs_indices.defined());
+    auto bounded_mixed_topp_sampled = sampler.forward(*bounded_mixed_topp);
+    EXPECT_EQ(bounded_mixed_topp_sampled.all_probs.size(1), 129280);
+    EXPECT_FALSE(bounded_mixed_topp_sampled.all_probs_indices.defined());
 
     for (const auto& stream : {large_first, large_second}) {
         stream->generateConfig()->top_k = 0;
         stream->generateConfig()->top_p = 0.95f;
     }
     auto large_pure =
-        large_processor.gatherSpecSamplerInput(StreamGroups({large_first, large_second}), large_output, {}, draft);
+        large_processor.gatherSpecSamplerInput(StreamGroups({large_first, large_second}), large_output, draft);
     ASSERT_TRUE(large_pure.ok());
-    EXPECT_EQ(large_pure->all_probs.size(1), speculative::dsparkForceTopK());
-    EXPECT_TRUE(large_pure->all_probs_indices.defined());
+    auto large_pure_sampled = sampler.forward(*large_pure);
+    EXPECT_EQ(large_pure_sampled.all_probs.size(1), speculative::dsparkForceTopK());
+    EXPECT_TRUE(large_pure_sampled.all_probs_indices.defined());
 
     large_first->generateConfig()->top_k = 40;
     large_first->generateConfig()->top_p = 1.0f;
     GptModelOutputs one_output;
     one_output.logits = torch::randn({2, 129280}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     auto one_draft    = torch::zeros({1, 1}, torch::kInt32);
-    auto large_single = large_processor.gatherSpecSamplerInput(StreamGroups({large_first}), one_output, {}, one_draft);
+    auto large_single = large_processor.gatherSpecSamplerInput(StreamGroups({large_first}), one_output, one_draft);
     ASSERT_TRUE(large_single.ok());
-    EXPECT_EQ(large_single->all_probs.size(1), 129280);
-    EXPECT_FALSE(large_single->all_probs_indices.defined());
+    auto large_single_sampled = sampler.forward(*large_single);
+    EXPECT_EQ(large_single_sampled.all_probs.size(1), 129280);
+    EXPECT_FALSE(large_single_sampled.all_probs_indices.defined());
 
     std::list<GenerateStreamPtr> pure_k_streams{large_first};
     for (int i = 0; i < 7; ++i) {
@@ -702,19 +586,20 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkTargetWithoutExplicitTopKUsesFixed
     eight_output.logits =
         torch::randn({16, 129280}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     auto eight_draft = torch::zeros({8, 1}, torch::kInt32);
-    auto large_eight =
-        large_processor.gatherSpecSamplerInput(StreamGroups(pure_k_streams), eight_output, {}, eight_draft);
+    auto large_eight = large_processor.gatherSpecSamplerInput(StreamGroups(pure_k_streams), eight_output, eight_draft);
     ASSERT_TRUE(large_eight.ok());
-    EXPECT_EQ(large_eight->all_probs.size(1), 129280);
-    EXPECT_FALSE(large_eight->all_probs_indices.defined());
+    auto large_eight_sampled = sampler.forward(*large_eight);
+    EXPECT_EQ(large_eight_sampled.all_probs.size(1), 129280);
+    EXPECT_FALSE(large_eight_sampled.all_probs_indices.defined());
     for (const auto& stream : pure_k_streams) {
         stream->generateConfig()->top_p = 0.95f;
     }
     auto large_eight_joint =
-        large_processor.gatherSpecSamplerInput(StreamGroups(pure_k_streams), eight_output, {}, eight_draft);
+        large_processor.gatherSpecSamplerInput(StreamGroups(pure_k_streams), eight_output, eight_draft);
     ASSERT_TRUE(large_eight_joint.ok());
-    EXPECT_EQ(large_eight_joint->all_probs.size(1), 129280);
-    EXPECT_FALSE(large_eight_joint->all_probs_indices.defined());
+    auto large_eight_joint_sampled = sampler.forward(*large_eight_joint);
+    EXPECT_EQ(large_eight_joint_sampled.all_probs.size(1), 129280);
+    EXPECT_FALSE(large_eight_joint_sampled.all_probs_indices.defined());
 }
 
 // Per-round logits are consumable; gathering does not clone them.
@@ -752,7 +637,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputAliasesLogitsWhenN
         torch::arange(32, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).reshape({8, 4});
     auto draft_token_ids = torch::tensor({1, 2, 3, 3, 2, 1}, torch::kInt32).reshape({2, 3});
 
-    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_output, {}, draft_token_ids);
+    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_output, draft_token_ids);
     ASSERT_TRUE(sampler_inputs_status.ok());
     const auto& sampler_inputs = sampler_inputs_status.value();
 
@@ -761,10 +646,9 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputAliasesLogitsWhenN
     // The elided clone: the sampler consumes the model-output storage itself.
     EXPECT_EQ(model_output.logits.data_ptr(), sampler_inputs.logits.data_ptr());
     EXPECT_TRUE(torch::equal(model_output.logits, sampler_inputs.logits));
-    // The greedy contracts the elision relies on are declared.
-    EXPECT_TRUE(sampler_inputs.all_probs_point_mass);
+    // The caller requests a distribution; forward chooses its representation.
     EXPECT_TRUE(sampler_inputs.skip_logits_probs_restore);
-    EXPECT_EQ((std::vector<int64_t>{8, 4}), sampler_inputs.all_probs.sizes().vec());
+    EXPECT_EQ(sampler_inputs.probability_output, SamplerProbabilityOutput::DISTRIBUTION);
 #if USING_CUDA
     // Follow the real gather -> sampler path: unread history can remain
     // uninitialized, but every final-column token must be defined.
@@ -812,12 +696,16 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputConsumesLogitsWith
         model_output.logits =
             torch::arange(32, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).reshape({8, 4});
 
-        auto status = processor.gatherSpecSamplerInput(stream_groups, model_output, {}, draft_token_ids);
+        auto status = processor.gatherSpecSamplerInput(stream_groups, model_output, draft_token_ids);
         ASSERT_TRUE(status.ok());
         const auto& sampler_inputs = status.value();
-        EXPECT_TRUE(sampler_inputs.all_probs_point_mass);
+        EXPECT_EQ(sampler_inputs.probability_output, SamplerProbabilityOutput::DISTRIBUTION);
         EXPECT_EQ(model_output.logits.data_ptr(), sampler_inputs.logits.data_ptr());
         EXPECT_TRUE(torch::equal(model_output.logits, sampler_inputs.logits));
+        Sampler sampler({8});
+        auto    output = sampler.forward(sampler_inputs);
+        EXPECT_EQ(output.token_ids_are_point_mass, enableCudaSampling());
+        EXPECT_TRUE(output.token_ids.select(1, sampler_inputs.step).eq(3).all().item<bool>());
     }
 
     // Padding is cropped with a view; the sampler chooses a compatible kernel.
@@ -838,7 +726,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputConsumesLogitsWith
         model_output.logits =
             torch::arange(56, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).reshape({8, 7});
 
-        auto status = processor.gatherSpecSamplerInput(stream_groups, model_output, {}, draft_token_ids);
+        auto status = processor.gatherSpecSamplerInput(stream_groups, model_output, draft_token_ids);
         ASSERT_TRUE(status.ok());
         const auto& sampler_inputs = status.value();
         EXPECT_EQ((std::vector<int64_t>{8, 4}), sampler_inputs.logits.sizes().vec());
@@ -895,15 +783,18 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputSkipsMaskedHistory
         auto spec_result = runner.run(task);
         ASSERT_TRUE(spec_result.has_active_processor);
 
-        auto status = processor.gatherSpecSamplerInput(stream_groups, model_output, spec_result, task.draft_tokens);
+        auto status = processor.gatherSpecSamplerInput(stream_groups, model_output, task.draft_tokens);
         ASSERT_TRUE(status.ok());
-        const auto& sampler_inputs = status.value();
+        auto& sampler_inputs = status.value();
+        applySamplerMask(sampler_inputs, spec_result);
+        Sampler sampler({3});
+        auto    output = sampler.forward(sampler_inputs);
 
 #if USING_CUDA
-        EXPECT_EQ(processor.sampler_input_copy_stream_.has_value(), with_penalty);
+        EXPECT_EQ(sampler_inputs.token_ids.defined(), with_penalty);
 #endif
         if (with_penalty) {
-            auto history = sampler_inputs.token_ids.narrow(1, 0, 4).cpu();
+            auto history = output.token_ids.narrow(1, 0, 4).cpu();
             EXPECT_TRUE(
                 torch::equal(history, torch::tensor({{1, 2, 1, 2}, {1, 2, 1, 2}, {1, 2, 1, 2}}, torch::kInt32)));
         }
@@ -916,8 +807,6 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputSkipsMaskedHistory
             EXPECT_EQ(neg_inf, sampler_inputs.logits[i][7].item<float>());
         }
 #if USING_CUDA
-        Sampler sampler({3});
-        auto    output = sampler.forward(sampler_inputs);
         EXPECT_TRUE(output.token_ids.select(1, output.token_ids.size(1) - 1).eq(3).all().item<bool>());
 #endif
     }
@@ -961,19 +850,14 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputSkipsHistoryMateri
 
     auto gather_and_check_dead =
         [&](const std::list<GenerateStreamPtr>& streams, const torch::Tensor& draft, int64_t expected_width) {
-            auto status = processor.gatherSpecSamplerInput(StreamGroups(streams), model_output, {}, draft);
+            auto status = processor.gatherSpecSamplerInput(StreamGroups(streams), model_output, draft);
             ASSERT_TRUE(status.ok());
             const auto& sampler_inputs = status.value();
-            EXPECT_TRUE(sampler_inputs.token_ids.is_cuda());
-            EXPECT_TRUE(sampler_inputs.token_ids.is_contiguous());
-            EXPECT_EQ(sampler_inputs.token_ids.scalar_type(), torch::kInt32);
-            ASSERT_EQ(sampler_inputs.token_ids.sizes().vec(),
+            EXPECT_FALSE(sampler_inputs.token_ids.defined());
+            Sampler sampler({});
+            auto    output = sampler.forward(sampler_inputs);
+            EXPECT_EQ(output.token_ids.sizes().vec(),
                       (std::vector<int64_t>{static_cast<int64_t>(streams.size()) * 4, expected_width}));
-#if USING_CUDA
-            EXPECT_FALSE(processor.sampler_input_copy_stream_.has_value());
-#endif
-            // Column contents are don't-care on gate-on rounds (no reader);
-            // only the geometry contract above is asserted.
         };
 
     // Round 1: gate-on from a cold processor.
@@ -1008,6 +892,82 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputSkipsHistoryMateri
     gather_and_check_dead({stream1, stream2}, draft2, /*expected_width=*/7);
 }
 
+#if USING_CUDA
+TEST_F(MtpBatchStreamProcessorTest, testSamplingLayoutDrivesMaskAndOutputRestore) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 32;
+    model_config.vocab_size  = 16;
+    model_config.num_layers  = 1;
+    SpeculativeExecutionConfig spec;
+    spec.gen_num_per_cycle = 2;
+    MtpBatchStreamProcessor processor(
+        model_config, PDSepConfig{}, ProfilingDebugLoggingConfig{}, makeProcessorCacheConfig(), spec, false);
+    Sampler    sampler(SamplerInitParams{});
+    const auto device = torch::TensorOptions().device(torch::kCUDA);
+    auto       draft  = torch::tensor({6, 7, 8, 9}, torch::kInt32).reshape({2, 2}).to(torch::kCUDA);
+    // Test a sparse layout and a packed layout whose row count equals dense.
+    // The latter must still return its map; shape alone does not identify layout.
+    for (bool history : {false, true}) {
+        for (int layout : {0, 1, 2}) {
+            SCOPED_TRACE(::testing::Message() << "history=" << history << " layout=" << layout);
+            ResourceContext resources;
+            RuntimeConfig   runtime;
+            auto            first  = createContextStream(model_config, runtime, resources, {1, 2}, 1);
+            auto            second = createContextStream(model_config, runtime, resources, {3, 4}, 1);
+            for (auto& stream : {first, second}) {
+                stream->setScoreLen(3);
+                stream->generateConfig()->top_k              = 1;
+                stream->generateConfig()->repetition_penalty = history ? 1.05f : 1.f;
+            }
+            torch::Tensor forward_map, inverse_map;
+            if (layout == 1) {
+                forward_map = torch::tensor({0L, 1L, 3L, 4L, 5L}, torch::kInt64).to(torch::kCUDA);
+                inverse_map = torch::tensor({0, 1, -1, 2, 3, 4}, torch::kInt32).to(torch::kCUDA);
+            } else if (layout == 2) {
+                forward_map = torch::arange(6, device.dtype(torch::kInt64));
+                inverse_map = torch::arange(6, device.dtype(torch::kInt32));
+            }
+            auto logits = torch::zeros({6, 16}, device.dtype(torch::kFloat32));
+            for (int row = 0; row < 6; ++row) {
+                logits[row][row + 1].fill_(10);
+                logits[row][row + 2].fill_(5);
+            }
+            SpecLogitsVerifyRunner::LaunchResult mask;
+            mask.has_active_processor = true;
+            // Mask one retained row and the row absent from the sparse layout.
+            mask.logits_row_indices_gpu = torch::tensor({2, 4}, torch::kInt32).to(torch::kCUDA);
+            mask.packed_allow_mask_gpu =
+                torch::tensor({~(1 << 3), ~(1 << 5)}, torch::kInt32).reshape({2, 1}).to(torch::kCUDA);
+            GptModelOutputs model_output;
+            model_output.logits = forward_map.defined() ? logits.index_select(0, forward_map) : logits;
+            // Exercise both host and device proposals at the upload boundary.
+            auto proposals = layout == 1 ? draft.cpu() : draft;
+            auto result    = processor.gatherSpecSamplerInput(StreamGroups({first, second}), model_output, proposals);
+            ASSERT_TRUE(result.ok());
+            auto& input = *result;
+            EXPECT_EQ(input.batch_size, 6);
+            EXPECT_TRUE(input.top_k.is_cpu());
+            EXPECT_EQ(input.token_ids.defined(), history);
+            if (history) {
+                EXPECT_TRUE(input.token_ids.is_cuda());
+                EXPECT_EQ(input.token_ids.size(0), 6);
+            }
+            if (forward_map.defined())
+                input.row_mapping = SamplingRowMapping{forward_map, inverse_map};
+            applySamplerMask(input, mask);
+            auto output = sampler.forward(input);
+            auto tokens = output.token_ids.select(1, output.token_ids.size(1) - 1).cpu();
+            ASSERT_EQ(tokens.numel(), 6);
+            for (int row = 0; row < 6; ++row) {
+                if (layout == 1 && row == 2)
+                    continue;
+                EXPECT_EQ(tokens[row].item<int32_t>(), (row == 2 || row == 4) ? row + 2 : row + 1);
+            }
+        }
+    }
+}
+#endif
+
 TEST_F(MtpBatchStreamProcessorTest, testInternalTargetProbsIgnorePublicReturnAllProbs) {
     ModelConfig model_config;
     model_config.max_seq_len = 32;
@@ -1035,9 +995,9 @@ TEST_F(MtpBatchStreamProcessorTest, testInternalTargetProbsIgnorePublicReturnAll
                           options)
                 .repeat({2, 1});
         auto input = processor.gatherSpecSamplerInput(
-            StreamGroups({stream}), model_output, {}, torch::tensor({1}, torch::kInt32).reshape({1, 1}));
+            StreamGroups({stream}), model_output, torch::tensor({1}, torch::kInt32).reshape({1, 1}));
         ASSERT_TRUE(input.ok());
-        EXPECT_TRUE(input->all_probs.defined());
+        EXPECT_EQ(input->probability_output, SamplerProbabilityOutput::DISTRIBUTION);
         EXPECT_FALSE(input->return_original_all_probs);
         EXPECT_EQ(input->logits.data_ptr(), model_output.logits.data_ptr());
         auto output   = sampler.forward(*input);
@@ -1080,11 +1040,12 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputDeadHistoryGateFli
         model_output.logits = torch::zeros({8, 7}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
         auto draft          = torch::tensor({1, 2, 3, 3, 2, 1}, torch::kInt32).reshape({2, 3});
 
-        auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream2}), model_output, {}, draft);
+        auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream2}), model_output, draft);
         ASSERT_TRUE(status.ok()) << name;
         const auto& sampler_inputs = status.value();
-        EXPECT_EQ(sampler_inputs.all_probs.defined(), expect_all_probs) << name;
-        auto        cpu    = sampler_inputs.token_ids.cpu();
+        EXPECT_EQ(sampler_inputs.probability_output != SamplerProbabilityOutput::NONE, expect_all_probs) << name;
+        Sampler     sampler({});
+        auto        cpu    = sampler.forward(sampler_inputs).token_ids.cpu();
         const auto* values = cpu.data_ptr<int32_t>();
         const auto  width  = cpu.size(1);
         ASSERT_EQ(width, 6) << name;
@@ -1162,7 +1123,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputLeavesDefaultPenal
     model_output.logits = torch::zeros({8, 7}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     auto draft          = torch::tensor({1, 2, 3, 3, 2, 1}, torch::kInt32).reshape({2, 3});
 
-    auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream2}), model_output, {}, draft);
+    auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream2}), model_output, draft);
     ASSERT_TRUE(status.ok());
     const auto& sampler_inputs = status.value();
 
@@ -1177,7 +1138,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputLeavesDefaultPenal
     // The dead-history elision still fires: no pinned history snapshot and no
     // copy stream are created for this round.
 #if USING_CUDA
-    EXPECT_FALSE(processor.sampler_input_copy_stream_.has_value());
+    EXPECT_FALSE(sampler_inputs.token_ids.defined());
 #endif
 }
 
@@ -1216,7 +1177,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputMaterializesPenalt
     model_output.logits = torch::zeros({8, 7}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     auto draft          = torch::tensor({1, 2, 3, 3, 2, 1}, torch::kInt32).reshape({2, 3});
 
-    auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream2}), model_output, {}, draft);
+    auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream2}), model_output, draft);
     ASSERT_TRUE(status.ok());
     const auto& sampler_inputs = status.value();
 
@@ -1242,11 +1203,9 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputMaterializesPenalt
     EXPECT_TRUE(sampler_inputs.no_repeat_ngram_size.eq(0).all().item<bool>());
     EXPECT_TRUE(NormalSamplerInputGatherer::anyPenaltyRowActive(sampler_inputs));
 
-    // The penalty kernel reads the token history, so the elision flips off and
-    // the copy stream that uploads the history is created.
-#if USING_CUDA
-    EXPECT_TRUE(processor.sampler_input_copy_stream_.has_value());
-#endif
+    // An active penalty requires full logical-row history before sampling.
+    EXPECT_TRUE(sampler_inputs.token_ids.is_cuda());
+    EXPECT_EQ(sampler_inputs.token_ids.size(0), expected_rows);
 }
 
 // Re-enabling a history reader must upload the current host history in full,
@@ -1304,9 +1263,10 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputHistoryResumesAfte
     // Round 1: materialized history with sequence lengths {1, 2}.
     auto draft1 = torch::tensor({1, 2, 3, 3, 2, 1}, torch::kInt32).reshape({2, 3});
     {
-        auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream2}), model_output, {}, draft1);
+        auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream2}), model_output, draft1);
         ASSERT_TRUE(status.ok());
-        auto cpu = status.value().token_ids.cpu();
+        Sampler sampler({});
+        auto    cpu = sampler.forward(status.value()).token_ids.cpu();
         ASSERT_EQ(cpu.size(1), 6);
         EXPECT_EQ(cpu[0][0].item<int32_t>(), 5);
         EXPECT_EQ(cpu[4][0].item<int32_t>(), 6);
@@ -1323,12 +1283,11 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputHistoryResumesAfte
     }
     auto draft2 = torch::tensor({2, 3, 1, 1, 3, 2}, torch::kInt32).reshape({2, 3});
     {
-        auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream2}), model_output, {}, draft2);
+        auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream2}), model_output, draft2);
         ASSERT_TRUE(status.ok());
-        const auto& token_ids = status.value().token_ids;
-        EXPECT_TRUE(token_ids.is_cuda());
-        EXPECT_TRUE(token_ids.is_contiguous());
-        auto cpu = token_ids.cpu();
+        EXPECT_FALSE(status.value().token_ids.defined());
+        Sampler sampler({});
+        auto    cpu = sampler.forward(status.value()).token_ids.cpu();
         ASSERT_EQ(cpu.sizes().vec(), (std::vector<int64_t>{8, 7}));
     }
     commit(stream1, {3});     // seq 4
@@ -1340,9 +1299,10 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputHistoryResumesAfte
     }
     auto draft3 = torch::tensor({0, 1, 2, 3, 0, 1}, torch::kInt32).reshape({2, 3});
     {
-        auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream2}), model_output, {}, draft3);
+        auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream2}), model_output, draft3);
         ASSERT_TRUE(status.ok());
-        auto cpu = status.value().token_ids.cpu();
+        Sampler sampler({});
+        auto    cpu = sampler.forward(status.value()).token_ids.cpu();
         ASSERT_EQ(cpu.size(1), 9);
         const std::vector<int> prefix1 = {5, 1, 2, 3, 0, 1, 2};
         const std::vector<int> prefix2 = {6, 7, 3, 1, 2, 3, 0, 1};
@@ -1365,9 +1325,10 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputHistoryResumesAfte
     stream1->generateConfig()->repetition_penalty = 1.0f;
     auto draft4                                   = torch::tensor({1, 1, 2, 2, 3, 3}, torch::kInt32).reshape({2, 3});
     {
-        auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream3}), model_output, {}, draft4);
+        auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream3}), model_output, draft4);
         ASSERT_TRUE(status.ok());
-        auto cpu = status.value().token_ids.cpu();
+        Sampler sampler({});
+        auto    cpu = sampler.forward(status.value()).token_ids.cpu();
         ASSERT_EQ(cpu.sizes().vec(), (std::vector<int64_t>{8, 8}));
     }
 
@@ -1376,9 +1337,10 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputHistoryResumesAfte
     stream3->generateConfig()->repetition_penalty = 1.05f;
     auto draft5                                   = torch::tensor({3, 2, 1, 1, 2, 3}, torch::kInt32).reshape({2, 3});
     {
-        auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream3}), model_output, {}, draft5);
+        auto status = processor.gatherSpecSamplerInput(StreamGroups({stream1, stream3}), model_output, draft5);
         ASSERT_TRUE(status.ok());
-        auto cpu = status.value().token_ids.cpu();
+        Sampler sampler({});
+        auto    cpu = sampler.forward(status.value()).token_ids.cpu();
         ASSERT_EQ(cpu.size(1), 8);
         const std::vector<int> prefix1 = {5, 1, 2, 3, 3, 2, 1};
         const std::vector<int> prefix3 = {2, 1, 1, 2, 3};
@@ -1417,7 +1379,7 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
 
     GptModelInputs  model_input;
     GptModelOutputs model_output;
-    model_output.logits = torch::zeros({3, 16}, torch::kFloat32);
+    model_output.logits = torch::zeros({3, 16}, torch::TensorOptions().device(torch::kCUDA));
 
     // Since the spec-logits overlap (#1262), stateful processors (think,
     // grammar) are excluded from the inline score-batch states and applied
@@ -1438,13 +1400,16 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
     auto spec_result = runner.run(task);
     ASSERT_TRUE(spec_result.has_active_processor);
 
-    auto sampler_inputs_status =
-        processor.gatherSpecSamplerInput(stream_groups, model_output, spec_result, task.draft_tokens);
+    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_output, task.draft_tokens);
     ASSERT_TRUE(sampler_inputs_status.ok());
     auto sampler_inputs = sampler_inputs_status.value();
+    applySamplerMask(sampler_inputs, spec_result);
+    sampler_inputs.top_k.fill_(1);
+    Sampler sampler({});
+    sampler.forward(sampler_inputs);
 
     // Constrained/think processors ride the SpecLogitsVerifyRunner packed
-    // allow-mask, which the gather applies to the verify logits inline; the
+    // allow-mask, which the sampler applies to the verify logits inline; the
     // MTP verify sampler still carries no logits-processor states (main #1006
     // design). In think mode with remaining budget, only the begin-think
     // token is blocked while the end-think sequence stays open.
@@ -2320,7 +2285,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDevice
               toVec<int32_t>(target_prepare_input.combo_position_ids));
 
     auto proposals = torch::tensor({{31, 32, 33}, {41, 42, 43}}, torch::kInt32).to(torch::kCUDA);
-    processor.prepareDSparkTargetVerifyModelInput(round_state, model_input, proposals, host_holder);
+    prepareDSparkTargetVerifyModelInput(sp_config.gen_num_per_cycle, round_state, model_input, proposals, host_holder);
     EXPECT_EQ((std::vector<int32_t>{102, 31, 32, 33, 22, 41, 42, 43}), toVec<int32_t>(model_input.combo_tokens));
     EXPECT_EQ((std::vector<int32_t>{gamma + 1, gamma + 1}), toVec<int32_t>(model_input.input_lengths));
     EXPECT_EQ((std::vector<int32_t>{9, 2}), toVec<int32_t>(model_input.prefix_lengths));
@@ -2329,13 +2294,20 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDevice
                                     122, 122, 122, 123, 123, 123, 124, 124, 124, 125, 125, 125}),
               toVec<int32_t>(model_input.combo_position_ids));
 
-    auto       packed_input  = model_input;
-    const auto packed_layout = processor.prepareDSparkPackedTargetVerifyModelInput(
-        round_state, packed_input, proposals, torch::tensor({0, 2}, torch::kInt32).to(torch::kCUDA), 2, host_holder);
+    auto       packed_input = model_input;
+    const auto packed_layout =
+        prepareDSparkPackedTargetVerifyModelInput(sp_config.gen_num_per_cycle,
+                                                  round_state,
+                                                  packed_input,
+                                                  proposals,
+                                                  torch::tensor({0, 2}, torch::kInt32).to(torch::kCUDA),
+                                                  2,
+                                                  host_holder);
     EXPECT_EQ((std::vector<int32_t>{102, 22, 41, 42}), toVec<int32_t>(packed_input.combo_tokens));
     EXPECT_EQ((std::vector<int32_t>{1, 3}), toVec<int32_t>(packed_input.input_lengths));
     EXPECT_EQ((std::vector<int32_t>{9, 2}), toVec<int32_t>(packed_input.prefix_lengths));
     EXPECT_EQ((std::vector<int64_t>{0, 4, 5, 6}), toVec<int64_t>(packed_layout.packed_to_dense));
+    EXPECT_EQ((std::vector<int32_t>{0, -1, -1, -1, 1, 2, 3, -1}), toVec<int32_t>(packed_layout.dense_to_packed));
     EXPECT_EQ((std::vector<int32_t>{30, 40, 50, 122, 122, 122, 123, 123, 123, 124, 124, 124}),
               toVec<int32_t>(packed_input.combo_position_ids));
 
@@ -2351,12 +2323,13 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDevice
     EXPECT_EQ((std::vector<int32_t>{22, 255, 255, 102, 255, 255}), toVec<int32_t>(reordered_input.combo_tokens));
     auto       reordered_packed_input = reordered_input;
     const auto reordered_proposals    = torch::tensor({{41, 42, 43}, {31, 32, 33}}, torch::kInt32).to(torch::kCUDA);
-    processor.prepareDSparkPackedTargetVerifyModelInput(reordered_state,
-                                                        reordered_packed_input,
-                                                        reordered_proposals,
-                                                        torch::tensor({2, 0}, torch::kInt32).to(torch::kCUDA),
-                                                        2,
-                                                        host_holder);
+    prepareDSparkPackedTargetVerifyModelInput(sp_config.gen_num_per_cycle,
+                                              reordered_state,
+                                              reordered_packed_input,
+                                              reordered_proposals,
+                                              torch::tensor({2, 0}, torch::kInt32).to(torch::kCUDA),
+                                              2,
+                                              host_holder);
     EXPECT_EQ((std::vector<int32_t>{22, 41, 42, 102}), toVec<int32_t>(reordered_packed_input.combo_tokens));
     EXPECT_EQ((std::vector<int32_t>{3, 1}), toVec<int32_t>(reordered_packed_input.input_lengths));
     EXPECT_EQ((std::vector<int32_t>{77, 9}), toVec<int32_t>(reordered_packed_input.prefix_lengths));
@@ -2388,12 +2361,13 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPrepareAndVerifyUsePerStreamDevice
     EXPECT_EQ((std::vector<int32_t>{202, 255, 255}), toVec<int32_t>(smaller_input.combo_tokens));
     EXPECT_EQ((std::vector<int32_t>{19}), toVec<int32_t>(smaller_state.committed_ends));
     auto smaller_packed_input = smaller_input;
-    processor.prepareDSparkPackedTargetVerifyModelInput(smaller_state,
-                                                        smaller_packed_input,
-                                                        proposals.narrow(0, 0, 1),
-                                                        torch::tensor({1}, torch::kInt32).to(torch::kCUDA),
-                                                        1,
-                                                        host_holder);
+    prepareDSparkPackedTargetVerifyModelInput(sp_config.gen_num_per_cycle,
+                                              smaller_state,
+                                              smaller_packed_input,
+                                              proposals.narrow(0, 0, 1),
+                                              torch::tensor({1}, torch::kInt32).to(torch::kCUDA),
+                                              1,
+                                              host_holder);
     EXPECT_EQ((std::vector<int32_t>{202, 31}), toVec<int32_t>(smaller_packed_input.combo_tokens));
     EXPECT_EQ((std::vector<int32_t>{2}), toVec<int32_t>(smaller_packed_input.input_lengths));
     EXPECT_EQ((std::vector<int32_t>{19}), toVec<int32_t>(smaller_packed_input.prefix_lengths));
@@ -2455,7 +2429,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPackedVerifyPreservesPerRequestRow
     const std::vector<int32_t> anchors      = {100, 200, 300};
     const std::vector<int32_t> dense_tokens = {100, 11, 12, 13, 200, 21, 22, 23, 300, 31, 32, 33};
     const std::vector<int32_t> bases        = {30, 40, 50, 60, 70, 80, 90, 100, 110};
-    MtpBatchStreamProcessor::DSparkRoundState state;
+    DSparkRoundState           state;
     state.anchors        = torch::tensor(anchors, cuda_i32);
     state.committed_ends = torch::tensor({7, 15, 23}, cuda_i32);
     state.position_bases = torch::tensor(bases, cuda_i32).reshape({3, 3});
@@ -2507,8 +2481,14 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPackedVerifyPreservesPerRequestRow
         // preparation must snapshot proposals before the next replay.
         auto       graph_proposals = proposals.clone();
         auto       owned_proposals = graph_proposals;
-        const auto layout          = processor.prepareDSparkPackedTargetVerifyModelInput(
-            state, input, graph_proposals, torch::tensor(lengths, cuda_i32), total_budget, holder, &owned_proposals);
+        const auto layout          = prepareDSparkPackedTargetVerifyModelInput(sp_config.gen_num_per_cycle,
+                                                                      state,
+                                                                      input,
+                                                                      graph_proposals,
+                                                                      torch::tensor(lengths, cuda_i32),
+                                                                      total_budget,
+                                                                      holder,
+                                                                      &owned_proposals);
         graph_proposals.fill_(-1);
         EXPECT_TRUE(torch::equal(owned_proposals, proposals));
         EXPECT_NE(owned_proposals.data_ptr(), graph_proposals.data_ptr());
@@ -2529,8 +2509,9 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPackedVerifyPreservesPerRequestRow
             EXPECT_EQ((std::vector<int32_t>{8, 16, 24}), toVec<int32_t>(input.sequence_lengths_plus_1));
         } else {
             EXPECT_FALSE(layout.packed_to_dense.defined());
+            EXPECT_FALSE(layout.dense_to_packed.defined());
             GptModelInputs dense_input;
-            processor.prepareDSparkTargetVerifyModelInput(state, dense_input, proposals, holder);
+            prepareDSparkTargetVerifyModelInput(sp_config.gen_num_per_cycle, state, dense_input, proposals, holder);
             EXPECT_TRUE(torch::equal(input.combo_tokens, dense_input.combo_tokens));
             EXPECT_TRUE(torch::equal(input.combo_position_ids, dense_input.combo_position_ids));
             EXPECT_TRUE(torch::equal(input.engram_token_windows, dense_input.engram_token_windows));
@@ -2584,7 +2565,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPackedAuxFeaturesKeepRequestTokenL
     const std::vector<int32_t> next_anchors     = {191, 291, 391};
     const auto                 proposals =
         torch::tensor({{111, 112, 113, 114, 115}, {211, 212, 213, 214, 215}, {311, 312, 313, 314, 315}}, cuda_i32);
-    MtpBatchStreamProcessor::DSparkRoundState state;
+    DSparkRoundState state;
     state.anchors        = torch::tensor(anchors, cuda_i32);
     state.committed_ends = torch::tensor(prefixes, cuda_i32);
     state.position_bases = torch::tensor(prefixes, cuda_i32).reshape({3, 1});
@@ -2619,8 +2600,8 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPackedAuxFeaturesKeepRequestTokenL
     const auto dense_features =
         torch::tensor(dense_values, torch::kFloat32).reshape({3 * (gamma + 1), feature_width}).to(torch::kCUDA);
     GptModelInputs input;
-    const auto     layout = processor.prepareDSparkPackedTargetVerifyModelInput(
-        state, input, proposals, torch::tensor(valid_lengths, cuda_i32), 7, holder);
+    const auto     layout = prepareDSparkPackedTargetVerifyModelInput(
+        sp_config.gen_num_per_cycle, state, input, proposals, torch::tensor(valid_lengths, cuda_i32), 7, holder);
     ASSERT_TRUE(layout.packed_to_dense.defined());
     const auto packed_target_features = dense_features.index_select(0, layout.packed_to_dense);
     processor.updateDecodePostDSparkCommitInput(input, packed_target_features, 3);
@@ -2683,10 +2664,10 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPackedAuxFeaturesKeepRequestTokenL
 }
 
 #if USING_CUDA
-void expectDSparkBoundedVerifyInputsEqual(const GptModelInputs&                                    actual,
-                                          const MtpBatchStreamProcessor::DSparkPackedTargetLayout& actual_layout,
-                                          const GptModelInputs&                                    expected,
-                                          const MtpBatchStreamProcessor::DSparkPackedTargetLayout& expected_layout) {
+void expectDSparkBoundedVerifyInputsEqual(const GptModelInputs&           actual,
+                                          const DSparkPackedTargetLayout& actual_layout,
+                                          const GptModelInputs&           expected,
+                                          const DSparkPackedTargetLayout& expected_layout) {
     auto same = [](const torch::Tensor& a, const torch::Tensor& b, const char* field) {
         SCOPED_TRACE(field);
         ASSERT_EQ(a.defined(), b.defined());
@@ -2708,6 +2689,7 @@ void expectDSparkBoundedVerifyInputsEqual(const GptModelInputs&                 
     same(actual_layout.dense_tokens, expected_layout.dense_tokens, "dense_tokens");
     same(actual_layout.dense_position_ids, expected_layout.dense_position_ids, "dense_position_ids");
     same(actual_layout.packed_to_dense, expected_layout.packed_to_dense, "packed_to_dense");
+    same(actual_layout.dense_to_packed, expected_layout.dense_to_packed, "dense_to_packed");
     EXPECT_EQ(actual.is_target_verify, expected.is_target_verify);
 }
 
@@ -2729,7 +2711,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkBoundedVerifyMatchesPlannerAndPack
                 for (bool has_engram : {false, true}) {
                     SCOPED_TRACE(::testing::Message() << "gamma=" << gamma << " batch=" << batch << " factor=" << factor
                                                       << " engram=" << has_engram);
-                    MtpBatchStreamProcessor::DSparkRoundState state;
+                    DSparkRoundState state;
                     state.anchors        = torch::arange(batch, ints) * 100 + 10;
                     state.committed_ends = torch::arange(batch, ints) * 7 + 15;
                     state.position_bases = torch::arange(batch * factor, ints).reshape({batch, factor}) * 11;
@@ -2756,19 +2738,26 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkBoundedVerifyMatchesPlannerAndPack
                         expected.kv_cache_block_id = torch::arange(batch * 2, ints).reshape({1, batch, 2});
                         actual.kv_cache_block_id   = expected.kv_cache_block_id;
                         auto expected_owned        = proposals;
-                        auto expected_layout       = processor.prepareDSparkPackedTargetVerifyModelInput(
-                            state, expected, proposals, expected_lengths, budget, holder, &expected_owned);
-                        auto          graph_proposals = proposals.clone();
+                        auto expected_layout = prepareDSparkPackedTargetVerifyModelInput(sp_config.gen_num_per_cycle,
+                                                                                         state,
+                                                                                         expected,
+                                                                                         proposals,
+                                                                                         expected_lengths,
+                                                                                         budget,
+                                                                                         holder,
+                                                                                         &expected_owned);
+                        auto graph_proposals = proposals.clone();
                         torch::Tensor actual_lengths, actual_owned;
-                        auto          actual_layout = processor.prepareDSparkBoundedTargetVerifyModelInput(state,
-                                                                                                  actual,
-                                                                                                  graph_proposals,
-                                                                                                  rates,
-                                                                                                  order,
-                                                                                                  budget,
-                                                                                                  holder,
-                                                                                                  actual_lengths,
-                                                                                                  &actual_owned);
+                        auto actual_layout = prepareDSparkBoundedTargetVerifyModelInput(sp_config.gen_num_per_cycle,
+                                                                                        state,
+                                                                                        actual,
+                                                                                        graph_proposals,
+                                                                                        rates,
+                                                                                        order,
+                                                                                        budget,
+                                                                                        holder,
+                                                                                        actual_lengths,
+                                                                                        &actual_owned);
                         EXPECT_TRUE(torch::equal(actual_lengths, expected_lengths));
                         EXPECT_EQ(actual_lengths.sum().item<int64_t>(), budget);
                         expectDSparkBoundedVerifyInputsEqual(actual, actual_layout, expected, expected_layout);
@@ -2786,23 +2775,26 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkBoundedVerifyMatchesPlannerAndPack
                             GptModelInputs expected_strided, actual_strided;
                             auto           expected_strided_owned = proposals;
                             auto           expected_strided_layout =
-                                processor.prepareDSparkPackedTargetVerifyModelInput(strided_state,
-                                                                                    expected_strided,
-                                                                                    proposals,
-                                                                                    expected_lengths,
-                                                                                    budget,
-                                                                                    holder,
-                                                                                    &expected_strided_owned);
+                                prepareDSparkPackedTargetVerifyModelInput(sp_config.gen_num_per_cycle,
+                                                                          strided_state,
+                                                                          expected_strided,
+                                                                          proposals,
+                                                                          expected_lengths,
+                                                                          budget,
+                                                                          holder,
+                                                                          &expected_strided_owned);
                             torch::Tensor strided_lengths, strided_owned;
-                            auto strided_layout = processor.prepareDSparkBoundedTargetVerifyModelInput(strided_state,
-                                                                                                       actual_strided,
-                                                                                                       proposals,
-                                                                                                       rates,
-                                                                                                       order,
-                                                                                                       budget,
-                                                                                                       holder,
-                                                                                                       strided_lengths,
-                                                                                                       &strided_owned);
+                            auto          strided_layout =
+                                prepareDSparkBoundedTargetVerifyModelInput(sp_config.gen_num_per_cycle,
+                                                                           strided_state,
+                                                                           actual_strided,
+                                                                           proposals,
+                                                                           rates,
+                                                                           order,
+                                                                           budget,
+                                                                           holder,
+                                                                           strided_lengths,
+                                                                           &strided_owned);
                             EXPECT_TRUE(actual_strided.prefix_lengths.is_contiguous());
                             EXPECT_TRUE(torch::equal(strided_lengths, expected_lengths));
                             EXPECT_EQ(strided_lengths.sum().item<int64_t>(), budget);
@@ -2830,9 +2822,9 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkCapacityBudgetKeepsFullGammaPacked
     MtpBatchStreamProcessor processor(model_config, pd_sep_config, profiling_config, cache_config, sp_config, false);
     const auto              ints = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
     for (int64_t batch : {3, 5, 9}) {
-        const int64_t                             rows   = batch == 3 ? 16 : batch == 5 ? 30 : 54;
-        const int64_t                             budget = rows - batch;
-        MtpBatchStreamProcessor::DSparkRoundState round;
+        const int64_t    rows   = batch == 3 ? 16 : batch == 5 ? 30 : 54;
+        const int64_t    budget = rows - batch;
+        DSparkRoundState round;
         round.anchors                  = torch::arange(batch, ints) + 10;
         round.committed_ends           = torch::arange(batch, ints) * 512 + 127;
         round.position_bases           = torch::arange(batch * 3, ints).reshape({batch, 3}) * 7;
@@ -2847,11 +2839,11 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkCapacityBudgetKeepsFullGammaPacked
             rates, torch::tensor(order, ints.dtype(torch::kInt64)), budget);
         TensorHolder   holder;
         GptModelInputs expected, actual;
-        auto           expected_layout = processor.prepareDSparkPackedTargetVerifyModelInput(
-            round, expected, proposals, expected_lengths, budget, holder, nullptr, true);
+        auto           expected_layout = prepareDSparkPackedTargetVerifyModelInput(
+            sp_config.gen_num_per_cycle, round, expected, proposals, expected_lengths, budget, holder, nullptr, true);
         torch::Tensor lengths, owned;
-        auto          layout = processor.prepareDSparkBoundedTargetVerifyModelInput(
-            round, actual, proposals, rates, order, budget, holder, lengths, &owned, true);
+        auto          layout = prepareDSparkBoundedTargetVerifyModelInput(
+            sp_config.gen_num_per_cycle, round, actual, proposals, rates, order, budget, holder, lengths, &owned, true);
         ASSERT_TRUE(layout.packed_to_dense.defined());
         EXPECT_EQ(actual.combo_tokens.numel(), rows);
         EXPECT_EQ(lengths.sum().item<int64_t>(), budget);
@@ -2860,8 +2852,8 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkCapacityBudgetKeepsFullGammaPacked
         if (batch == 5) {
             EXPECT_TRUE(torch::equal(layout.packed_to_dense, torch::arange(rows, ints.dtype(torch::kInt64))));
             GptModelInputs legacy;
-            auto           legacy_layout =
-                processor.prepareDSparkPackedTargetVerifyModelInput(round, legacy, proposals, lengths, budget, holder);
+            auto           legacy_layout = prepareDSparkPackedTargetVerifyModelInput(
+                sp_config.gen_num_per_cycle, round, legacy, proposals, lengths, budget, holder);
             EXPECT_FALSE(legacy_layout.packed_to_dense.defined());
         }
         actual.is_packed_target_verify = true;
@@ -2891,7 +2883,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkBoundedVerifyRetainsRoundsAcrossRe
     MtpBatchStreamProcessor processor(model_config, pd_sep_config, profiling_config, cache_config, sp_config, false);
     const auto              ints  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
     constexpr int64_t       batch = 48, gamma = 5;
-    MtpBatchStreamProcessor::DSparkRoundState initial;
+    DSparkRoundState        initial;
     initial.anchors                = torch::arange(batch, ints) * 100 + 10;
     initial.committed_ends         = torch::arange(batch, ints) * 7 + 15;
     initial.position_bases         = torch::arange(batch * 3, ints).reshape({batch, 3}) * 11;
@@ -2905,15 +2897,23 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkBoundedVerifyRetainsRoundsAcrossRe
     TensorHolder   holder;
     GptModelInputs retained;
     torch::Tensor  retained_lengths, retained_owned;
-    const int64_t  budget          = 3 * batch + 1;
-    auto           retained_layout = processor.prepareDSparkBoundedTargetVerifyModelInput(
-        initial, retained, proposals, rates, order, budget, holder, retained_lengths, &retained_owned);
-    auto token_snapshot    = retained.combo_tokens.clone();
-    auto position_snapshot = retained.combo_position_ids.clone();
-    auto history_snapshot  = retained.engram_token_windows.clone();
-    auto dense_snapshot    = retained_layout.dense_tokens.clone();
-    auto owned_snapshot    = retained_owned.clone();
-    auto length_snapshot   = retained_lengths.clone();
+    const int64_t  budget            = 3 * batch + 1;
+    auto           retained_layout   = prepareDSparkBoundedTargetVerifyModelInput(sp_config.gen_num_per_cycle,
+                                                                      initial,
+                                                                      retained,
+                                                                      proposals,
+                                                                      rates,
+                                                                      order,
+                                                                      budget,
+                                                                      holder,
+                                                                      retained_lengths,
+                                                                      &retained_owned);
+    auto           token_snapshot    = retained.combo_tokens.clone();
+    auto           position_snapshot = retained.combo_position_ids.clone();
+    auto           history_snapshot  = retained.engram_token_windows.clone();
+    auto           dense_snapshot    = retained_layout.dense_tokens.clone();
+    auto           owned_snapshot    = retained_owned.clone();
+    auto           length_snapshot   = retained_lengths.clone();
 
     // Reversing the batch changes physical rows, but equal-score decisions
     // remain attached to the same stable identities.
@@ -2926,14 +2926,15 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkBoundedVerifyRetainsRoundsAcrossRe
     std::reverse(order.begin(), order.end());
     GptModelInputs reordered;
     torch::Tensor  reordered_lengths;
-    processor.prepareDSparkBoundedTargetVerifyModelInput(reverse_state,
-                                                         reordered,
-                                                         proposals.index_select(0, permutation),
-                                                         rates,
-                                                         order,
-                                                         budget,
-                                                         holder,
-                                                         reordered_lengths);
+    prepareDSparkBoundedTargetVerifyModelInput(sp_config.gen_num_per_cycle,
+                                               reverse_state,
+                                               reordered,
+                                               proposals.index_select(0, permutation),
+                                               rates,
+                                               order,
+                                               budget,
+                                               holder,
+                                               reordered_lengths);
     EXPECT_TRUE(torch::equal(reordered_lengths, retained_lengths.index_select(0, permutation)));
 
     // Shrink/reorder and mutate the original borrowed proposal source, as a
@@ -2951,14 +2952,15 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkBoundedVerifyRetainsRoundsAcrossRe
         }
         GptModelInputs smaller;
         torch::Tensor  lengths;
-        processor.prepareDSparkBoundedTargetVerifyModelInput(state,
-                                                             smaller,
-                                                             proposals.narrow(0, 0, smaller_batch),
-                                                             rates.narrow(0, 0, smaller_batch),
-                                                             smaller_order,
-                                                             3 * smaller_batch,
-                                                             holder,
-                                                             lengths);
+        prepareDSparkBoundedTargetVerifyModelInput(sp_config.gen_num_per_cycle,
+                                                   state,
+                                                   smaller,
+                                                   proposals.narrow(0, 0, smaller_batch),
+                                                   rates.narrow(0, 0, smaller_batch),
+                                                   smaller_order,
+                                                   3 * smaller_batch,
+                                                   holder,
+                                                   lengths);
         EXPECT_EQ(lengths.sum().item<int64_t>(), 3 * smaller_batch);
     }
     EXPECT_TRUE(torch::equal(retained.combo_tokens, token_snapshot));
@@ -2983,7 +2985,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkBoundedVerifyCaptureReplaysCurrent
     MtpBatchStreamProcessor processor(model_config, pd_sep_config, profiling_config, cache_config, sp_config, false);
     const auto              ints  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
     constexpr int64_t       batch = 48, gamma = 5, budget = 144;
-    MtpBatchStreamProcessor::DSparkRoundState state;
+    DSparkRoundState        state;
     state.anchors                  = torch::arange(batch, ints) * 100 + 10;
     state.committed_ends           = torch::arange(batch, ints) * 7 + 15;
     state.position_bases           = torch::arange(batch * 3, ints).reshape({batch, 3}) * 11;
@@ -2999,8 +3001,16 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkBoundedVerifyCaptureReplaysCurrent
     GptModelInputs captured;
     torch::Tensor  captured_lengths, captured_owned;
     auto           run = [&]() {
-        return processor.prepareDSparkBoundedTargetVerifyModelInput(
-            state, captured, proposals, rates, order, budget, holder, captured_lengths, &captured_owned);
+        return prepareDSparkBoundedTargetVerifyModelInput(sp_config.gen_num_per_cycle,
+                                                          state,
+                                                          captured,
+                                                          proposals,
+                                                          rates,
+                                                          order,
+                                                          budget,
+                                                          holder,
+                                                          captured_lengths,
+                                                          &captured_owned);
     };
     run();
     stream.synchronize();
@@ -3020,8 +3030,8 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkBoundedVerifyCaptureReplaysCurrent
         auto expected_lengths = speculative::SpeculativeSampler::buildValidDraftLengths(rates, order_d, budget);
         GptModelInputs expected;
         auto           expected_owned  = proposals;
-        auto           expected_layout = processor.prepareDSparkPackedTargetVerifyModelInput(
-            state, expected, proposals, expected_lengths, budget, holder, &expected_owned);
+        auto           expected_layout = prepareDSparkPackedTargetVerifyModelInput(
+            sp_config.gen_num_per_cycle, state, expected, proposals, expected_lengths, budget, holder, &expected_owned);
         EXPECT_TRUE(torch::equal(captured_lengths, expected_lengths));
         EXPECT_TRUE(torch::equal(captured_owned, expected_owned));
         expectDSparkBoundedVerifyInputsEqual(captured, captured_layout, expected, expected_layout);
@@ -3039,7 +3049,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPackedVerifyRejectsInvalidMetadata
     sp_config.gen_num_per_cycle = 3;
     MtpBatchStreamProcessor processor(model_config, pd_sep_config, profiling_config, cache_config, sp_config, false);
     const auto              cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-    MtpBatchStreamProcessor::DSparkRoundState state;
+    DSparkRoundState        state;
     state.anchors                                    = torch::tensor({100, 200}, cuda_i32);
     state.committed_ends                             = torch::tensor({7, 15}, cuda_i32);
     state.position_bases                             = torch::tensor({7, 15}, cuda_i32).reshape({2, 1});
@@ -3054,22 +3064,24 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPackedVerifyRejectsInvalidMetadata
     TensorHolder                     holder;
     for (const auto& invalid : invalid_lengths) {
         GptModelInputs input;
-        EXPECT_ANY_THROW(
-            processor.prepareDSparkPackedTargetVerifyModelInput(state, input, proposals, invalid, 4, holder));
+        EXPECT_ANY_THROW(prepareDSparkPackedTargetVerifyModelInput(
+            sp_config.gen_num_per_cycle, state, input, proposals, invalid, 4, holder));
     }
     GptModelInputs input;
-    EXPECT_ANY_THROW(processor.prepareDSparkPackedTargetVerifyModelInput(state, input, proposals, lengths, -1, holder));
-    EXPECT_ANY_THROW(processor.prepareDSparkPackedTargetVerifyModelInput(state, input, proposals, lengths, 7, holder));
-    EXPECT_ANY_THROW(
-        processor.prepareDSparkPackedTargetVerifyModelInput(state, input, proposals.cpu(), lengths, 4, holder));
+    EXPECT_ANY_THROW(prepareDSparkPackedTargetVerifyModelInput(
+        sp_config.gen_num_per_cycle, state, input, proposals, lengths, -1, holder));
+    EXPECT_ANY_THROW(prepareDSparkPackedTargetVerifyModelInput(
+        sp_config.gen_num_per_cycle, state, input, proposals, lengths, 7, holder));
+    EXPECT_ANY_THROW(prepareDSparkPackedTargetVerifyModelInput(
+        sp_config.gen_num_per_cycle, state, input, proposals.cpu(), lengths, 4, holder));
     auto host_anchor_state    = state;
     host_anchor_state.anchors = state.anchors.cpu();
-    EXPECT_ANY_THROW(
-        processor.prepareDSparkPackedTargetVerifyModelInput(host_anchor_state, input, proposals, lengths, 4, holder));
+    EXPECT_ANY_THROW(prepareDSparkPackedTargetVerifyModelInput(
+        sp_config.gen_num_per_cycle, host_anchor_state, input, proposals, lengths, 4, holder));
     auto empty_state    = state;
     empty_state.anchors = torch::empty({0}, cuda_i32);
-    EXPECT_ANY_THROW(
-        processor.prepareDSparkPackedTargetVerifyModelInput(empty_state, input, proposals, lengths, 0, holder));
+    EXPECT_ANY_THROW(prepareDSparkPackedTargetVerifyModelInput(
+        sp_config.gen_num_per_cycle, empty_state, input, proposals, lengths, 0, holder));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
@@ -4588,7 +4600,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputRejectsUndersizedL
         torch::arange(0, 8, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).reshape({2, 4});
     auto original_logits = model_output.logits.clone();
     auto draft           = torch::zeros({1, 1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-    EXPECT_ANY_THROW(processor.gatherSpecSamplerInput(stream_groups, model_output, {}, draft));
+    EXPECT_ANY_THROW(processor.gatherSpecSamplerInput(stream_groups, model_output, draft));
     EXPECT_TRUE(torch::equal(model_output.logits, original_logits));
 }
 
@@ -4625,11 +4637,11 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputCropsPaddedLogitsW
     auto original_logits = model_output.logits.clone();
 
     auto draft                 = torch::zeros({2, 1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_output, {}, draft);
+    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_output, draft);
     ASSERT_TRUE(sampler_inputs_status.ok());
     const auto& sampler_inputs = sampler_inputs_status.value();
     ASSERT_EQ(sampler_inputs.logits.sizes(), (torch::IntArrayRef{4, 5}));
-    ASSERT_EQ(sampler_inputs.all_probs.sizes(), (torch::IntArrayRef{4, 5}));
+    EXPECT_EQ(sampler_inputs.probability_output, SamplerProbabilityOutput::DISTRIBUTION);
     EXPECT_TRUE(torch::equal(model_output.logits, original_logits));
     EXPECT_TRUE(torch::equal(sampler_inputs.logits, original_logits.narrow(1, 0, 5)));
 }
@@ -4669,18 +4681,20 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecMaskExcludesPaddedSamplerLogitsWitho
     spec_mask_result.packed_allow_mask_gpu  = torch::tensor({{15}, {30}}, cuda_i32);
     spec_mask_result.logits_row_indices_gpu = torch::tensor({0, 1}, cuda_i32);
     auto draft                              = torch::zeros({1, 1}, cuda_i32);
-    auto sampler_inputs_status = processor.gatherSpecSamplerInput(stream_groups, model_output, spec_mask_result, draft);
+    auto sampler_inputs_status              = processor.gatherSpecSamplerInput(stream_groups, model_output, draft);
     ASSERT_TRUE(sampler_inputs_status.ok());
     auto sampler_inputs = std::move(sampler_inputs_status.value());
+    applySamplerMask(sampler_inputs, spec_mask_result);
 
-    LogitsProcessorStates states;
-    states.batchProcess(sampler_inputs);
-    auto masked_logits = sampler_inputs.logits.cpu();
+    sampler_inputs.top_k.fill_(1);
+    Sampler sampler({});
+    auto    output        = sampler.forward(sampler_inputs);
+    auto    masked_logits = sampler_inputs.logits.cpu();
 
     EXPECT_EQ(masked_logits.index({0, 4}).item<float>(), BaseLogitsProcessor::neg_inf);
     EXPECT_EQ(masked_logits.index({1, 0}).item<float>(), BaseLogitsProcessor::neg_inf);
     EXPECT_EQ(masked_logits.size(1), model_config.vocab_size);
-    auto sampled_token_ids = masked_logits.argmax(/*dim=*/1);
+    auto sampled_token_ids = output.token_ids.select(1, output.token_ids.size(1) - 1).cpu().to(torch::kLong);
     EXPECT_EQ(toVec<int64_t>(sampled_token_ids), (std::vector<int64_t>{3, 1}));
     EXPECT_TRUE(torch::all(sampled_token_ids < model_config.vocab_size).item<bool>());
     EXPECT_TRUE(torch::equal(model_output.logits.narrow(1, 5, 3), original_logits.narrow(1, 5, 3)));

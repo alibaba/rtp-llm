@@ -7,11 +7,6 @@ cc_test = cc_test_wrapper
 
 test_copts = copts()
 
-sampler_test_copts = [
-    # SamplerTest validates private buffer state; keep access override scoped to this target.
-    "-fno-access-control",
-] + test_copts
-
 cc_library(
     name = "test_headers",
     hdrs = glob([
@@ -59,7 +54,7 @@ cc_test(
     data = [
         "//rtp_llm/test/model_test/fake_test/testdata",
     ],
-    copts = sampler_test_copts,
+    copts = test_copts,
     deps = test_deps + [
         ":test_utils",
     ],

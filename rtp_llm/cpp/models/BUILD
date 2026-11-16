@@ -180,6 +180,7 @@ cc_library(
         "*.cc",
     ], exclude = ["ModelInputsLogger.cc"]),
     deps = [
+        "//rtp_llm/models_py/bindings/core:sampling_params_hdr",
         ":model_inputs_logger",
         ":model_types",
         ":eplb",
@@ -208,10 +209,12 @@ cc_library(
         "//rtp_llm/cpp/multimodal_processor:multimodal_types",
     ] + select({
         "//:using_cuda": [
+            "//rtp_llm/models_py/bindings/common/kernels:dspark_packed_sampling",
             "//rtp_llm/models_py/bindings/cuda/kernels:attention_input_metadata",
             "//rtp_llm/models_py/bindings/cuda:bf16_gemm_op",
             "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         ],
+        "//:using_rocm": ["//rtp_llm/models_py/bindings/common/kernels:dspark_packed_sampling"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],

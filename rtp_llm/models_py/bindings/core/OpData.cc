@@ -118,4 +118,12 @@ BatchCopyParams& BatchCopyParams::add(void* dst, const void* src, size_t size, C
     return *this;
 }
 
+bool enableCudaSampling() {
+#if USING_CUDA
+    return true;
+#else
+    return false;
+#endif
+}
+
 }  // namespace rtp_llm

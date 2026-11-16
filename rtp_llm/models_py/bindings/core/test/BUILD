@@ -27,6 +27,7 @@ cc_test(
     name = "generic_sampler_batch_fallback_test",
     srcs = ["GenericSamplerBatchFallbackTest.cc"],
     deps = [
+        "//rtp_llm/models_py/bindings/core:sampling_params_hdr",
         "//rtp_llm/models_py/bindings/core:generic_sampler_fallback_test_lib",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),

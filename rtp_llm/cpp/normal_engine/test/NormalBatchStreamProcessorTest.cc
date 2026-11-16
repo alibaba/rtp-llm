@@ -2060,8 +2060,10 @@ TEST_F(NormalBatchStreamProcessorTest, testDisabledOutputVocabMasksPaddedLogits)
     auto sampler_inputs = processor.gatherSamplerInput(stream_groups, GptModelInputs(), model_output);
     ASSERT_TRUE(sampler_inputs.ok());
     EXPECT_EQ(sampler_inputs->top_k.data_ptr<int32_t>()[0], 8);
-    EXPECT_EQ(sampler_inputs->all_probs.size(1), 16);
+    EXPECT_EQ(sampler_inputs->probability_output, SamplerProbabilityOutput::DENSE);
     EXPECT_TRUE(torch::isneginf(sampler_inputs->logits.narrow(1, 10, 6)).all().item<bool>());
+    Sampler sampler({});
+    EXPECT_EQ(sampler.forward(*sampler_inputs).all_probs.size(1), 16);
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testPaddedSizeLargerThanKKeepsDispatchAndSamplingOnK) {
@@ -3004,9 +3006,8 @@ TEST_F(NormalBatchStreamProcessorTest, testSamplerInputSkipsHistoryWithoutPenalt
             model_output.logits[1][2].fill_(0.0f);
             auto inputs = processor->gatherSamplerInput(groups, GptModelInputs(), model_output);
             ASSERT_TRUE(inputs.ok());
-            EXPECT_TRUE(inputs->token_ids.is_cuda());
+            EXPECT_FALSE(inputs->token_ids.defined());
             EXPECT_EQ(inputs->step, groups.maxSeqLen());
-            EXPECT_EQ(inputs->token_ids.sizes(), (torch::IntArrayRef{2, static_cast<int64_t>(inputs->step + 1)}));
 
             MergedOutput outputs;
             outputs.model_output   = model_output;
@@ -3052,8 +3053,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSamplerInputPreservesHistoryForMixedB
 
         auto inputs = processor->gatherSamplerInput(groups, GptModelInputs(), model_output);
         ASSERT_TRUE(inputs.ok());
-        ASSERT_TRUE(inputs->token_ids.device().is_cpu());
-        EXPECT_TRUE(inputs->token_ids.is_pinned());
+        ASSERT_TRUE(inputs->token_ids.is_cpu());
         EXPECT_EQ(inputs->step, 2);
         EXPECT_EQ(inputs->token_ids.sizes(), (torch::IntArrayRef{2, 3}));
         EXPECT_EQ(inputs->token_ids[0][0].item<int32_t>(), 0);

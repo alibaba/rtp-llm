@@ -70,6 +70,7 @@ cc_test(
     data = [],
     copts = copts(),
     deps = test_deps + [
+        "//rtp_llm/models_py/bindings/core:sampling_params_hdr",
         "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
         "//rtp_llm/models_py/bindings/cuda/kernels:attention_input_metadata",
         "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",

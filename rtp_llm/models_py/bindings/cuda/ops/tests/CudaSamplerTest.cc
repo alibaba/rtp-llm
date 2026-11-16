@@ -1,4 +1,5 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/SamplingParams.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_fp32.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
 #include "rtp_llm/models_py/bindings/cuda/ops/tests/CudaTestUtils.h"
@@ -219,56 +220,6 @@ TEST_F(CudaSamplerTest, testBatchedSeedOffsetsRejectCapture) {
     EXPECT_TRUE(torch::equal(generator.get_state(), state));
     EXPECT_EQ(seed, -1);
     EXPECT_EQ(offset, -1);
-}
-
-TEST_F(CudaSamplerTest, testPersistentSeedDeviceSlicesPreserveSamplingAndRefreshOffsets) {
-    const auto            device_i64    = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt64);
-    const auto            pinned_i64    = torch::TensorOptions().pinned_memory(true).dtype(torch::kInt64);
-    auto                  seed_host     = torch::full({4}, -91, pinned_i64);
-    auto                  offset_host   = torch::full({4}, -91, pinned_i64);
-    auto                  seed_device   = torch::full({4}, -91, device_i64);
-    auto                  offset_device = torch::full({4}, -91, device_i64);
-    GreedySamplingBuffers buffers{seed_host.narrow(0, 1, 2),
-                                  offset_host.narrow(0, 1, 2),
-                                  torch::empty({2}, pinned_i64),
-                                  2,
-                                  seed_device.narrow(0, 1, 2),
-                                  offset_device.narrow(0, 1, 2)};
-    auto                  generator = torch::make_generator<at::CUDAGeneratorImpl>();
-    generator.set_current_seed(20261102);
-    auto logits = torch::linspace(-1.0, 1.0, 16, device_i64.dtype(torch::kFloat32)).repeat({2, 1});
-    auto sample = [&](bool persistent) {
-        auto         tokens = torch::zeros({2, 2}, device_i64.dtype(torch::kInt32));
-        auto         q      = torch::empty_like(logits);
-        GreedyParams params({logits.clone(),
-                             pinnedIntTensor({-1, -1}),
-                             pinnedIntTensor({1, 1}),
-                             tokens,
-                             1,
-                             pinnedIntTensor({0, 0}),
-                             pinnedFloatTensor({0.95f, 0.7f}),
-                             pinnedFloatTensor({1.0f, 1.0f})});
-        params.generator        = {generator, generator};
-        params.output_all_probs = q;
-        params.sampling_buffers = persistent ? &buffers : nullptr;
-        execSampleGreedy(params);
-        return std::make_pair(tokens, q);
-    };
-    for (int round = 0; round < 3; ++round) {
-        const auto state          = generator.get_state();
-        const auto expected       = sample(false);
-        const auto expected_state = generator.get_state();
-        generator.set_state(state);
-        const auto actual = sample(true);
-        EXPECT_TRUE(torch::equal(actual.first, expected.first));
-        EXPECT_TRUE(torch::equal(actual.second, expected.second));
-        EXPECT_TRUE(torch::equal(generator.get_state(), expected_state));
-        EXPECT_EQ(buffers.seed_device.data_ptr(), seed_device.narrow(0, 1, 2).data_ptr());
-        EXPECT_EQ(buffers.offset_device.data_ptr(), offset_device.narrow(0, 1, 2).data_ptr());
-        EXPECT_TRUE(torch::equal(seed_device.cpu(), torch::tensor({-91L, 20261102L, 20261102L, -91L}, torch::kInt64)));
-        EXPECT_TRUE(torch::equal(offset_device.cpu(),
-                                 torch::tensor({-91L, round * 64L, round * 64L + 32, -91L}, torch::kInt64)));
-    }
 }
 
 TEST_F(CudaSamplerTest, testBatchedSeedOffsetsCpuBenchmark) {
@@ -613,7 +564,7 @@ TEST_F(CudaSamplerTest, testCudaSamplingKernelTopK1) {
         nullopt,
         generator,
     });
-    auto         greedy_output = execSampleGreedy(params);
+    auto         greedy_output = execSampleGreedy(prepareSamplingParams(params, params.logits.size(0)));
     check_cuda_error();
     auto output_token_ids_host = toHostInt(output_token_ids_t);
     ASSERT_EQ(output_token_ids_host[5], 5);
@@ -708,10 +659,9 @@ TEST_F(CudaSamplerTest, testCudaSamplingGreedyBatchSkipsSeedOffsetMaterializatio
                                 nullopt,
                                 nullopt,
                                 generators,
-                                nullptr,
                                 /*skip_logits_probs_restore=*/true,
                                 /*all_probs_point_mass=*/true});
-    auto         greedy_output = execSampleGreedy(greedy_params);
+    auto         greedy_output = execSampleGreedy(prepareSamplingParams(greedy_params, greedy_params.logits.size(0)));
     check_cuda_error();
     ASSERT_TRUE(greedy_output.all_probs_point_mass);
     auto greedy_host = toHostInt(output_token_ids_t);
@@ -745,7 +695,7 @@ TEST_F(CudaSamplerTest, testCudaSamplingGreedyBatchSkipsSeedOffsetMaterializatio
                                nullopt,
                                nullopt,
                                generators});
-    execSampleGreedy(mixed_params);
+    execSampleGreedy(prepareSamplingParams(mixed_params, mixed_params.logits.size(0)));
     check_cuda_error();
     for (size_t i = 0; i < batch_size; ++i) {
         EXPECT_FALSE(torch::equal(torch::Tensor(generators[i].get_state()), states_before[i]))
@@ -796,7 +746,7 @@ TEST_F(CudaSamplerTest, testCudaSamplingKernelTopK) {
         nullopt,
         generator,
     });
-    auto         greedy_output = execSampleGreedy(params);
+    auto         greedy_output = execSampleGreedy(prepareSamplingParams(params, params.logits.size(0)));
     check_cuda_error();
     ASSERT_TRUE(greedy_output.success.defined());
     ASSERT_EQ(greedy_output.success.numel(), 4);
@@ -856,7 +806,7 @@ TEST_F(CudaSamplerTest, testCudaSamplingKernelTopP) {
         nullopt,
         generator,
     });
-    auto         greedy_output = execSampleGreedy(params);
+    auto         greedy_output = execSampleGreedy(prepareSamplingParams(params, params.logits.size(0)));
     check_cuda_error();
     ASSERT_TRUE(greedy_output.success.defined());
     ASSERT_EQ(greedy_output.success.numel(), 4);
@@ -918,7 +868,7 @@ TEST_F(CudaSamplerTest, testCudaSamplingKernelTopKTopP) {
         nullopt,
         generator,
     });
-    auto         greedy_output = execSampleGreedy(params);
+    auto         greedy_output = execSampleGreedy(prepareSamplingParams(params, params.logits.size(0)));
     check_cuda_error();
     ASSERT_TRUE(greedy_output.success.defined());
     ASSERT_EQ(greedy_output.success.numel(), 4);
@@ -967,7 +917,7 @@ TEST_F(CudaSamplerTest, testTopKTopPAllProbsMatchesJointSamplingSupport) {
                          nullopt,
                          nullopt,
                          generators});
-    execSampleGreedy(params);
+    execSampleGreedy(prepareSamplingParams(params, params.logits.size(0)));
     check_cuda_error();
 
     ASSERT_VECTOR_NEAR(toHostFloat(output_all_probs_t), std::vector<float>({0.625f, 0.375f, 0, 0}), 1e-5);
@@ -1019,7 +969,7 @@ TEST_F(CudaSamplerTest, testLogprobDistributionIncludesTemperaturePenaltyAndJoin
             for (auto& generator : params.generator) {
                 generator.set_current_seed(20261105);
             }
-            auto output = execSampleGreedy(params);
+            auto output = execSampleGreedy(prepareSamplingParams(params, params.logits.size(0)));
             assertAllValid(output.success);
             auto tokens = params.token_ids.select(1, 1).to(torch::kLong);
             if (!return_scores) {
@@ -1078,7 +1028,7 @@ TEST_F(CudaSamplerTest, testCompactAndDenseLogprobDistributionsFromFusedTargetSa
             params.return_sampling_probs     = true;
             params.generator                 = {torch::make_generator<at::CUDAGeneratorImpl>(),
                                                 torch::make_generator<at::CUDAGeneratorImpl>()};
-            auto output                      = execSampleGreedy(params);
+            auto output                      = execSampleGreedy(prepareSamplingParams(params, params.logits.size(0)));
             assertAllValid(output.success);
             EXPECT_EQ(output.sampling_probs.data_ptr(), params.output_all_probs->data_ptr());
             auto actual = output.sampling_probs;
@@ -1128,7 +1078,7 @@ TEST_F(CudaSamplerTest, testTemperatureFoldAtZeroAndOneMatchesFullLogits) {
                 for (int i = 0; i < 3; ++i) {
                     params.generator.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
                 }
-                auto output = execSampleGreedy(params);
+                auto output = execSampleGreedy(prepareSamplingParams(params, params.logits.size(0)));
                 assertAllValid(output.success);
                 if (!compact) {
                     reference = output.sampling_probs.clone();
@@ -1179,7 +1129,7 @@ TEST_F(CudaSamplerTest, testUnrestrictedTopPReturnsOriginalDistributionForReject
                          nullopt,
                          nullopt,
                          generators});
-    auto         output = execSampleGreedy(params);
+    auto         output = execSampleGreedy(prepareSamplingParams(params, params.logits.size(0)));
     check_cuda_error();
 
     ASSERT_TRUE(output.success.cpu().all().item<bool>());
@@ -1217,7 +1167,7 @@ TEST_F(CudaSamplerTest, testPureTopPSamplesFromReturnedDistribution) {
         generator.set_current_seed(20261030);
         params.generator = {generator, generator};
 
-        execSampleGreedy(params);
+        execSampleGreedy(prepareSamplingParams(params, params.logits.size(0)));
         check_cuda_error();
         EXPECT_TRUE(q.sum(-1).sub(1.0f).abs().lt(1e-4).all().item<bool>());
         if (candidate_ids.defined()) {
@@ -1387,7 +1337,7 @@ TEST_F(CudaSamplerTest, testCudaSamplingKernelFailed) {
         nullopt,
         generator,
     });
-    auto         greedy_output = execSampleGreedy(params);
+    auto         greedy_output = execSampleGreedy(prepareSamplingParams(params, params.logits.size(0)));
     check_cuda_error();
 
     ASSERT_TRUE(greedy_output.success.defined());
@@ -1516,7 +1466,7 @@ TEST_F(CudaSamplerTest, testPenalty) {
                          frequency_penalty_t,
                          nullopt,
                          generator});
-    execSampleGreedy(params);
+    execSampleGreedy(prepareSamplingParams(params, params.logits.size(0)));
     check_cuda_error();
 
     auto output_token_ids_host = toHostInt(output_token_ids_t);
@@ -1600,7 +1550,7 @@ TEST_F(CudaSamplerTest, testDoSample) {
                          nullopt,
                          do_sample_t,
                          generator});
-    execSampleGreedy(params);
+    execSampleGreedy(prepareSamplingParams(params, params.logits.size(0)));
     check_cuda_error();
 
     auto output_token_ids_host = toHostInt(output_token_ids_t);
@@ -1679,7 +1629,7 @@ TEST_F(CudaSamplerTest, testGreedyTopKFusedSkipRestoreMatchesLegacy) {
                              nullopt,
                              generator});
         params.skip_logits_probs_restore = skip_restore;
-        auto greedy_output               = execSampleGreedy(params);
+        auto greedy_output               = execSampleGreedy(prepareSamplingParams(params, params.logits.size(0)));
         check_cuda_error();
         EXPECT_FALSE(greedy_output.success.defined());  // all_top_k_one marks all succeeded
 
@@ -1753,7 +1703,7 @@ TEST_F(CudaSamplerTest, testGreedyTopKFusedGateFallsBackForMixedTopK) {
                          nullopt,
                          generator});
     params.skip_logits_probs_restore = true;  // flag set, but gate must reject (top_k != 1 row)
-    execSampleGreedy(params);
+    execSampleGreedy(prepareSamplingParams(params, params.logits.size(0)));
     check_cuda_error();
 
     // Legacy chain ran: logits now holds softmax probs (writeback happened).
@@ -1764,12 +1714,10 @@ TEST_F(CudaSamplerTest, testGreedyTopKFusedGateFallsBackForMixedTopK) {
     ASSERT_FALSE(torch::equal(logits_t.cpu(), raw_logits.cpu()));
 }
 
-// Direct token scatter path (CUDA-resident history, no active penalties): the
-// last-column scatter must leave the whole [batch, step+1] matrix bit-identical
-// to the legacy transpose-out/copy-back round trip (executed by the CPU-history
-// run), with the fused greedy top-1 kernel as the sampler — the exact shape of
-// the MTP target-verify production path.
-TEST_F(CudaSamplerTest, testTokenHistoryDirectScatterMatchesLegacyRoundTrip) {
+// Host and device history use the same explicit preparation contract. Sampling
+// writes only the last column of the prepared device tensor; every history
+// element must survive both upload and the fused greedy top-1 scatter.
+TEST_F(CudaSamplerTest, testPreparedHostAndDeviceHistoryPreservePrefix) {
     const int64_t batch_size = 4, vocab_size = 64, step = 5;
     torch::manual_seed(20261018);
     auto base_logits =
@@ -1813,16 +1761,18 @@ TEST_F(CudaSamplerTest, testTokenHistoryDirectScatterMatchesLegacyRoundTrip) {
                              nullopt,
                              generator});
         params.skip_logits_probs_restore = true;  // fused deterministic top-1
-        execSampleGreedy(params);
+        auto device_params               = prepareSamplingParams(params, params.logits.size(0));
+        EXPECT_TRUE(device_params.token_ids.is_cuda());
+        execSampleGreedy(device_params);
         check_cuda_error();
         cudaDeviceSynchronize();
-        return std::make_pair(toHostInt(token_ids_t), toHostFloat(all_probs_t));
+        return std::make_pair(toHostInt(device_params.token_ids), toHostFloat(all_probs_t));
     };
 
-    auto [tokens_direct, probs_direct] = run_case(true);   // direct scatter
-    auto [tokens_legacy, probs_legacy] = run_case(false);  // legacy round trip
-    ASSERT_EQ(tokens_direct, tokens_legacy);
-    ASSERT_EQ(probs_direct, probs_legacy);
+    auto [tokens_direct, probs_direct]     = run_case(true);   // direct scatter
+    auto [tokens_uploaded, probs_uploaded] = run_case(false);  // uploaded history
+    ASSERT_EQ(tokens_direct, tokens_uploaded);
+    ASSERT_EQ(probs_direct, probs_uploaded);
 
     auto expected_tokens = base_logits.argmax(-1).cpu();
     for (int64_t b = 0; b < batch_size; ++b) {
@@ -1833,11 +1783,9 @@ TEST_F(CudaSamplerTest, testTokenHistoryDirectScatterMatchesLegacyRoundTrip) {
     }
 }
 
-// Inactive penalty tensors (repetition==1.0, presence/frequency==0.0) must not
-// disable the direct scatter path, and the stochastic top-k branch must still
-// produce bit-identical tokens and renormalized all_probs versus the legacy
-// round trip (same per-row generator seeds on both runs).
-TEST_F(CudaSamplerTest, testTokenHistoryDirectScatterInactivePenaltiesParity) {
+// Inactive penalties must preserve seeded top-k results and the history prefix
+// whether preparation uploads host history or receives existing device storage.
+TEST_F(CudaSamplerTest, testPreparedHostAndDeviceHistoryInactivePenaltiesParity) {
     const int64_t batch_size = 4, vocab_size = 32, step = 5;
     torch::manual_seed(20261019);
     auto base_logits =
@@ -1885,16 +1833,18 @@ TEST_F(CudaSamplerTest, testTokenHistoryDirectScatterInactivePenaltiesParity) {
                              frequency_penalty_t,
                              nullopt,
                              generator});
-        execSampleGreedy(params);
+        auto         device_params = prepareSamplingParams(params, params.logits.size(0));
+        EXPECT_TRUE(device_params.token_ids.is_cuda());
+        execSampleGreedy(device_params);
         check_cuda_error();
         cudaDeviceSynchronize();
-        return std::make_pair(toHostInt(token_ids_t), toHostFloat(all_probs_t));
+        return std::make_pair(toHostInt(device_params.token_ids), toHostFloat(all_probs_t));
     };
 
-    auto [tokens_direct, probs_direct] = run_case(true);
-    auto [tokens_legacy, probs_legacy] = run_case(false);
-    ASSERT_EQ(tokens_direct, tokens_legacy);
-    ASSERT_EQ(probs_direct, probs_legacy);
+    auto [tokens_direct, probs_direct]     = run_case(true);
+    auto [tokens_uploaded, probs_uploaded] = run_case(false);
+    ASSERT_EQ(tokens_direct, tokens_uploaded);
+    ASSERT_EQ(probs_direct, probs_uploaded);
     for (int64_t b = 0; b < batch_size; ++b) {
         for (int64_t s = 0; s < step; ++s) {
             ASSERT_EQ(tokens_direct[b * (step + 1) + s], history[b * (step + 1) + s]);
@@ -1904,11 +1854,9 @@ TEST_F(CudaSamplerTest, testTokenHistoryDirectScatterInactivePenaltiesParity) {
     }
 }
 
-// Ban-repeat-ngram reads the row-major device history, so it must keep working
-// on the direct scatter path (no transposed clone is built): the repeated
-// bigram (3, 4) bans token 4 and the argmax falls back to token 9, identical
-// to the legacy round-trip run.
-TEST_F(CudaSamplerTest, testTokenHistoryDirectScatterNgramStillBans) {
+// Ngram pointer preparation must bind the final device history in both cases:
+// repeated bigram (3, 4) bans token 4 and argmax falls back to token 9.
+TEST_F(CudaSamplerTest, testPreparedHostAndDeviceHistoryNgramStillBans) {
     const int64_t batch_size = 4, vocab_size = 16, step = 5;
     // Per-row history [1, 3, 4, 2, 3, x]: the trailing 3 repeats the 3 at
     // index 1, so with n=2 the successor token 4 is banned.
@@ -1959,16 +1907,18 @@ TEST_F(CudaSamplerTest, testTokenHistoryDirectScatterNgramStillBans) {
                              nullopt,
                              nullopt,
                              generator});
-        execSampleGreedy(params);
+        auto         device_params = prepareSamplingParams(params, params.logits.size(0));
+        EXPECT_TRUE(device_params.token_ids.is_cuda());
+        execSampleGreedy(device_params);
         check_cuda_error();
         cudaDeviceSynchronize();
-        return std::make_pair(toHostInt(token_ids_t), toHostFloat(all_probs_t));
+        return std::make_pair(toHostInt(device_params.token_ids), toHostFloat(all_probs_t));
     };
 
-    auto [tokens_direct, probs_direct] = run_case(true);   // direct scatter + ngram
-    auto [tokens_legacy, probs_legacy] = run_case(false);  // legacy round trip + ngram
-    ASSERT_EQ(tokens_direct, tokens_legacy);
-    ASSERT_EQ(probs_direct, probs_legacy);
+    auto [tokens_direct, probs_direct]     = run_case(true);   // direct scatter + ngram
+    auto [tokens_uploaded, probs_uploaded] = run_case(false);  // uploaded history + ngram
+    ASSERT_EQ(tokens_direct, tokens_uploaded);
+    ASSERT_EQ(probs_direct, probs_uploaded);
     for (int64_t b = 0; b < batch_size; ++b) {
         ASSERT_EQ(tokens_direct[b * (step + 1) + step], 9);  // 4 banned, fell back
         for (int64_t s = 0; s < step; ++s) {
@@ -2002,7 +1952,7 @@ TEST_F(CudaSamplerTest, testForceTopKReturnsVocabularyProbabilities) {
         auto generator              = torch::make_generator<at::CUDAGeneratorImpl>();
         generator.set_current_seed(20261023);
         p.generator = {generator};
-        execSampleGreedy(p);
+        execSampleGreedy(prepareSamplingParams(p, p.logits.size(0)));
         check_cuda_error();
         return std::make_pair(toHostInt(tokens)[1], toHostFloat(probs));
     };
@@ -2072,7 +2022,7 @@ TEST_F(CudaSamplerTest, testForceTopK4096SparseMaskPreservesProbabilityMass) {
             params.generator.push_back(generator);
         }
 
-        auto output = execSampleGreedy(params);
+        auto output = execSampleGreedy(prepareSamplingParams(params, params.logits.size(0)));
         check_cuda_error();
         assertAllValid(output.success);
         EXPECT_TRUE(tokens.select(1, 0).eq(0).all().item<bool>());
@@ -2113,7 +2063,7 @@ TEST_F(CudaSamplerTest, testExactJointSmallTopKUsesFullVocabularyTopPAndRetainsT
     auto generator                   = torch::make_generator<at::CUDAGeneratorImpl>();
     generator.set_current_seed(1729);
     params.generator.assign(batch, generator);
-    execSampleGreedy(params);
+    execSampleGreedy(prepareSamplingParams(params, params.logits.size(0)));
     check_cuda_error();
     auto q = toHostFloat(probs);
     EXPECT_NEAR(q[0], 0.625f, 1e-5f);

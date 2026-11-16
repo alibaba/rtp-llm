@@ -21,6 +21,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
+#include "rtp_llm/cpp/models/SamplingRows.h"
 #include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
 
 #define private public
@@ -649,8 +650,10 @@ public:
         if (inputs.logits_processor_states_ptr) {
             inputs.logits_processor_states_ptr->batchProcess(inputs);
         }
+        // Keep output row restoration when substituting the sampling result.
         checkInputs(inputs);
-        return output_holder.get();
+        auto output = output_holder.get();
+        return inputs.row_mapping ? scatterSamplingRows(output, inputs.row_mapping->dense_to_packed) : output;
     }
 
     size_t forwardCount() const {
@@ -1328,10 +1331,10 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
     input.kv_scale_stride_bytes = 777;
     // A non-root proposal forwards inputs without entering root-only sampling.
     executor->tp_rank_ = 1;
-    StreamGroups                              streams(std::list<GenerateStreamPtr>{});
-    MtpBatchStreamProcessor::DSparkRoundState round;
-    SamplerOutput                             output;
-    int64_t                                   forward_us = 0;
+    StreamGroups     streams(std::list<GenerateStreamPtr>{});
+    DSparkRoundState round;
+    SamplerOutput    output;
+    int64_t          forward_us = 0;
     executor->runDSparkProposal(input, streams, round, output, forward_us);
     EXPECT_TRUE(saw_proposal);
 }
@@ -3060,14 +3063,12 @@ void MtpExecutorTest::runDSparkPackedCommitScenario(bool adaptive) {
         commit_output.hidden_states = torch::zeros({packed_rows, 2}, f32);
         components.fake_draft_prefill_model->setOutputs({commit_output});
 
-        // Sampler keeps the physical dense stride, while commit above must
-        // retain exactly four packed feature rows in this round's row order.
-        auto dense_logits = torch::zeros({batch * (gamma + 1), vocab}, f32);
-        dense_logits.index_copy_(0, torch::tensor(dense_rows[round], i32.dtype(torch::kInt64)), target_output.logits);
-        components.fake_sampler->setInputs({SamplerInputs{dense_logits}});
+        // Sampling uses packed logits; Sampler::forward returns dense outputs
+        // before rejection and logprobs consume them.
+        components.fake_sampler->setInputs({SamplerInputs{target_output.logits}});
         SamplerOutput sampled;
-        sampled.token_ids = torch::full({batch * (gamma + 1), 1}, 3, i32);
-        sampled.all_probs = torch::softmax(dense_logits * 0.5f, -1);
+        sampled.token_ids = torch::full({packed_rows, 1}, 3, i32);
+        sampled.all_probs = torch::softmax(target_output.logits * 0.5f, -1);
         components.fake_sampler->setOutputs({sampled});
         spec::SpeculativeSamplerOutput accepted;
         accepted.accept_len_cpu    = torch::tensor(target_lengths[round], torch::kInt32);
@@ -4119,7 +4120,7 @@ TEST_F(MtpExecutorTest, testDSparkAdaptiveProposalReturnsFrozenChosenBudget) {
     input.combo_tokens   = torch::zeros({batch * gamma}, i32);
     input.input_lengths  = torch::full({batch}, gamma, i32);
     input.prefix_lengths = torch::full({batch}, 2, i32);
-    MtpBatchStreamProcessor::DSparkRoundState round;
+    DSparkRoundState round;
     round.anchors        = torch::tensor({1, 1}, i32);
     round.committed_ends = input.prefix_lengths;
     SamplerOutput draft;
@@ -4141,16 +4142,16 @@ TEST_F(MtpExecutorTest, testDSparkAdaptiveProposalReturnsFrozenChosenBudget) {
     // the controller has selected zero for the next round, this round consumes
     // its frozen budget and identity order, rather than consulting it again.
     GptModelInputs target_input;
-    const auto     layout =
-        executor.batch_stream_processor_->prepareDSparkBoundedTargetVerifyModelInput(round,
-                                                                                     target_input,
-                                                                                     draft.token_ids,
-                                                                                     draft.confidence_rates,
-                                                                                     chosen.stable_order,
-                                                                                     chosen.draft_budget,
-                                                                                     executor.buffer_holder_,
-                                                                                     draft.valid_draft_lengths,
-                                                                                     &draft.token_ids);
+    const auto     layout = prepareDSparkBoundedTargetVerifyModelInput(executor.propose_step_,
+                                                                   round,
+                                                                   target_input,
+                                                                   draft.token_ids,
+                                                                   draft.confidence_rates,
+                                                                   chosen.stable_order,
+                                                                   chosen.draft_budget,
+                                                                   executor.buffer_holder_,
+                                                                   draft.valid_draft_lengths,
+                                                                   &draft.token_ids);
     EXPECT_TRUE(torch::equal(draft.valid_draft_lengths.cpu(), torch::tensor({3, 1}, torch::kInt32)));
     EXPECT_EQ(draft.valid_draft_lengths.sum().item<int64_t>(), chosen.draft_budget);
     EXPECT_EQ(target_input.combo_tokens.numel(), batch + chosen.draft_budget);
@@ -4265,7 +4266,7 @@ TEST_F(MtpExecutorTest, testDSparkBoundedProposalFreezesBudgetAndAdvancesTwoRoun
     input.combo_tokens   = torch::zeros({batch * gamma}, i32);
     input.input_lengths  = torch::full({batch}, gamma, i32);
     input.prefix_lengths = torch::full({batch}, 2, i32);
-    MtpBatchStreamProcessor::DSparkRoundState round;
+    DSparkRoundState round;
     round.anchors = torch::tensor({1, 1}, i32);
     SamplerOutput draft;
     int64_t       forward_us = 0;
@@ -5290,20 +5291,12 @@ TEST_F(MtpExecutorTest, testDSparkPackedFakeTargetAndCommitKeepRowsAndSeededReal
         components.fake_target_model->setInputObserver(check_geometry);
         components.fake_draft_prefill_model->setInputObserver(check_geometry);
         if (!fake) {
-            // Rejection sampling keeps the physical dense stride, so the target
-            // logits are re-materialized to gamma+1 rows with the packed rows
-            // scattered back into their dense positions. A single request maps
-            // its packed rows to the leading dense rows.
-            auto sampler_logits = target_output.logits;
-            if (packed) {
-                const auto i64 = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
-                sampler_logits = torch::zeros({gamma + 1, vocab}, f32);
-                sampler_logits.index_copy_(0, torch::arange(rows, i64), target_output.logits);
-            }
-            components.fake_sampler->setInputs({SamplerInputs{sampler_logits}});
+            // Sampling uses the target's packed rows; Sampler::forward restores
+            // gamma+1 output rows before rejection sampling.
+            components.fake_sampler->setInputs({SamplerInputs{target_output.logits}});
             SamplerOutput sampled;
-            sampled.token_ids = torch::full({gamma + 1, 1}, 3, i32);
-            sampled.all_probs = torch::zeros({gamma + 1, vocab}, f32);
+            sampled.token_ids = torch::full({rows, 1}, 3, i32);
+            sampled.all_probs = torch::zeros({rows, vocab}, f32);
             sampled.all_probs.select(1, 3).fill_(1);
             components.fake_sampler->setOutputs({sampled});
             spec::SpeculativeSamplerOutput accepted;
@@ -5411,7 +5404,7 @@ TEST_F(MtpExecutorTest, testDSparkPackedFakeBudgetRequiresPureFakeDecodeAndIgnor
         input.input_lengths  = torch::full({batch}, gamma, i32);
         input.prefix_lengths = torch::full({batch}, 1, i32);
         input.is_fake_stream = scenario.first_fake || scenario.second_fake;
-        MtpBatchStreamProcessor::DSparkRoundState round;
+        DSparkRoundState round;
         round.anchors = torch::zeros({batch}, i32);
         SamplerOutput draft;
         int64_t       forward_us = 0;

@@ -7,49 +7,22 @@
 #include "rtp_llm/cpp/models/SampleInfos.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
-#include <array>
-#include <atomic>
 #include <memory>
 
 namespace rtp_llm {
-// Sampler would split logits into appropriate groups (mostly, based on beam size)
-// and calls device sampling apis (greedy, beam search, etc) for each group.
-// Sampler owns rotating host/device buffers, so forward() is intentionally single-threaded
-// and non-reentrant per Sampler instance.
+// Groups requests by beam count and owns parameter preparation, row selection and
+// output restoration. forward() is single-threaded and non-reentrant per instance.
 class Sampler {
 public:
     Sampler(const SamplerInitParams& params);
-    ~Sampler();
+    virtual ~Sampler() = default;
 
     virtual SamplerOutput forward(const SamplerInputs& inputs);
 
 private:
     std::vector<std::optional<ErrorInfo>> preprocessLogits(const SamplerInputs& inputs);
-    void                                  ensureGreedySamplingBuffers(size_t batch_size);
-    void                                  allocateGreedySamplingBuffers(size_t max_batch_size);
-    void                                  waitGreedySamplingBufferEvents();
-    void                                  retirePendingGreedySamplingBuffers();
-    GreedySamplingBuffers&                nextGreedySamplingBuffers(size_t batch_size);
-    void                                  markGreedySamplingBufferReady();
-
-    struct GreedySamplingBufferSlot {
-        GreedySamplingBuffers         buffers;
-        std::shared_ptr<torch::Event> ready_event;
-    };
-
-    // Rotate across forward calls. Pending slots retain their immutable host
-    // sources and device RNG arrays until sampling completes; reuse never
-    // blocks serving.
-    static constexpr size_t kGreedySamplingBufferSlots = 3;
-
-    bool                                                             fixed_max_batch_size_         = false;
-    size_t                                                           max_batch_size_               = 0;
-    size_t                                                           greedy_sampling_buffer_index_ = 0;
-    GreedySamplingBufferSlot*                                        current_greedy_sampling_slot_ = nullptr;
-    std::array<GreedySamplingBufferSlot, kGreedySamplingBufferSlots> greedy_sampling_buffer_slots_;
-    std::vector<GreedySamplingBufferSlot>                            pending_greedy_sampling_slots_;
-    std::atomic<bool>                                                forward_in_progress_{false};
-    cuda_graph::GraphStream                                          copy_stream_;
+    bool                                  fixed_max_batch_size_ = false;
+    size_t                                max_batch_size_       = 0;
 };
 
 }  // namespace rtp_llm

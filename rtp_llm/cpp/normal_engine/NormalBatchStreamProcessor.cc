@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 
 namespace rtp_llm {

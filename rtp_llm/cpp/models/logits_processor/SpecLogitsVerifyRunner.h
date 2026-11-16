@@ -63,7 +63,10 @@ public:
     SpecLogitsVerifyRunner& operator=(const SpecLogitsVerifyRunner&) = delete;
 
     LaunchResult run(const LaunchTask& task);
-    static void  applyMaskToLogits(torch::Tensor& logits, const LaunchResult& result, size_t vocab_size);
+    static void  applyMaskToLogits(torch::Tensor&       logits,
+                                   const LaunchResult&  result,
+                                   size_t               vocab_size,
+                                   const torch::Tensor& dense_to_packed = {});
 
 private:
     struct VerifyShape {

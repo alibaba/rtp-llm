@@ -336,8 +336,7 @@ TEST(DSparkSamplerTest, CompactTargetSamplerKeepsValidSparseCandidateIds) {
     inputs.top_k                               = torch::zeros({2}, torch::kInt32);
     inputs.top_p                               = torch::full({2}, 0.95f, torch::kFloat32);
     inputs.temperature                         = torch::ones({2}, torch::kFloat32);
-    inputs.all_probs                           = torch::empty({2, width}, floats);
-    inputs.all_probs_indices                   = torch::empty({2, width}, ints);
+    inputs.probability_output                  = SamplerProbabilityOutput::DISTRIBUTION;
     inputs.skip_logits_probs_restore           = true;
     inputs.force_topk                          = width;
     inputs.generator.resize(2);
