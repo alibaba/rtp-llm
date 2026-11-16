@@ -59,6 +59,11 @@ class Nvfp4HybridExecutor(FusedMoeExpertExecutor):
     def executor_type(cls):
         return ExecutorType.NVFP4_HYBRID
 
+    @property
+    def topk_ids_dtype(self):
+        # Both backends consume int32; preserve the fused router's admission.
+        return torch.int32
+
     @classmethod
     def check_conditions(cls, checker, config):
         CutlassNvfp4Executor.check_conditions(checker, config)
