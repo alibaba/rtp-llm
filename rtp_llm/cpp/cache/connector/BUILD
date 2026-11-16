@@ -13,16 +13,3 @@ cc_library(
         "//rtp_llm/cpp/utils:error_code",
     ],
 )
-
-cc_library(
-    name = "connector_context",
-    hdrs = [
-        "KVCacheConnectorReadWriteContext.h",
-    ],
-    copts = copts(),
-    visibility = ["//visibility:public"],
-    deps = [
-        ":connector_base",
-        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
-    ],
-)
