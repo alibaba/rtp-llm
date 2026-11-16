@@ -61,6 +61,177 @@ def _parse_kv_list(raw: str) -> Dict[str, str]:
     return result
 
 
+def _btc_pending_decode_drains(text):
+    import re
+
+    pending = {}
+    for line in text.splitlines():
+        if "BlockTreeCache::~BlockTreeCache()" not in line:
+            continue
+        identity = re.search(r"\[(\d+):(\d+)\]\s+\[RANK\s", line)
+        if identity is None:
+            continue
+        key = tuple(map(int, identity.groups()))
+        if "load tickets closed, draining cache tasks..." in line:
+            pending[key] = line
+        elif line.endswith("] destroyed"):
+            pending.pop(key, None)
+    return pending
+
+
+def _btc_verified_decode_process(pid, tid, test_pid, process_api):
+    """Reject log PIDs unless they are live, same-UID descendants of this test."""
+    test = process_api.Process(test_pid)
+    if test.uids().real != os.getuid() or test.uids().effective != os.getuid():
+        raise RuntimeError("test UID changed")
+    children = {child.pid: child for child in test.children(recursive=True)}
+    if pid not in children or pid == test_pid:
+        raise RuntimeError("logged PID is not a current test descendant")
+    process = children[pid]
+    if process.uids().real != os.getuid() or process.uids().effective != os.getuid():
+        raise RuntimeError("backend UID differs from test UID")
+    if not process.is_running() or tid not in {
+        thread.id for thread in process.threads()
+    }:
+        raise RuntimeError("backend or logged native thread no longer exists")
+    return process
+
+
+def _btc_capture_decode_drain_stack(
+    output_dir, pid, tid, log_path, observed_stall_seconds=0, expected_marker=None
+):
+    import subprocess
+    from pathlib import Path
+
+    import psutil
+
+    output = Path(output_dir)
+    stem = output / f"startup_native_stack_decode_{pid}"
+    result = {
+        "pid": pid,
+        "drain_tid": tid,
+        "test_pid": os.getpid(),
+        "role_log": str(log_path.relative_to(output)),
+        "observed_stall_seconds": observed_stall_seconds,
+        "gdb_path": shutil.which("gdb"),
+        "returncode": None,
+        "exception": None,
+        "attach_attempted": False,
+    }
+
+    def read_proc(path):
+        try:
+            return Path(path).read_text().strip()
+        except OSError as error:
+            return type(error).__name__
+
+    try:
+        process = _btc_verified_decode_process(pid, tid, os.getpid(), psutil)
+        created = process.create_time()
+        result["backend_create_time"] = created
+        result["uid_verified"] = os.getuid()
+        result["pid_wchan"] = read_proc(f"/proc/{pid}/wchan")
+        result["drain_tid_wchan"] = read_proc(f"/proc/{pid}/task/{tid}/wchan")
+        result["ptrace_scope"] = read_proc("/proc/sys/kernel/yama/ptrace_scope")
+        if result["gdb_path"] is None:
+            raise RuntimeError("gdb is not installed")
+        with stem.with_suffix(".log").open("x") as stream:
+            # Refresh ancestry, UID, lifetime and thread ownership immediately before attach.
+            current = _btc_verified_decode_process(pid, tid, os.getpid(), psutil)
+            if current.create_time() != created:
+                raise RuntimeError("backend PID was reused")
+            active = _btc_pending_decode_drains(log_path.read_text(errors="replace"))
+            if (pid, tid) not in active or (
+                expected_marker is not None and active[(pid, tid)] != expected_marker
+            ):
+                raise RuntimeError("logged drain completed or changed before attach")
+            result["attach_attempted"] = True
+            completed = subprocess.run(
+                [
+                    result["gdb_path"],
+                    "-nx",
+                    "-batch",
+                    "-ex",
+                    "set pagination off",
+                    "-ex",
+                    "set debuginfod enabled off",
+                    "-ex",
+                    "set auto-load off",
+                    "-ex",
+                    "set print frame-arguments none",
+                    "-ex",
+                    f"attach {pid}",
+                    "-ex",
+                    "thread apply all bt 35",
+                    "-ex",
+                    "detach",
+                ],
+                stdout=stream,
+                stderr=subprocess.STDOUT,
+                timeout=45,
+                check=False,
+            )
+            result["returncode"] = completed.returncode
+    except Exception as error:
+        result["exception"] = f"{type(error).__name__}: {error}"
+    finally:
+        with stem.with_suffix(".json").open("x") as stream:
+            json.dump(result, stream, indent=2)
+            stream.write("\n")
+
+
+def _start_btc_ppu_drain_stack_observer():
+    """Opt-in startup diagnostics only; leave the normal smoke path untouched."""
+    if os.environ.get("RTP_BTC_PPU_DRAIN_STACKS") != "1":
+        return None
+    output_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
+    if not output_dir:
+        logging.warning("BTC drain stacks requested without an artifact directory")
+        return None
+
+    import threading
+    import time
+    from pathlib import Path
+
+    output = Path(output_dir).resolve()
+    stop = threading.Event()
+
+    def observe():
+        waiting = {}
+        attempted = set()
+        while not stop.wait(1):
+            pending = {}
+            try:
+                for path in output.glob("**/decode_logs/process.log"):
+                    path = path.resolve()
+                    if output not in path.parents:
+                        continue
+                    for key, marker in _btc_pending_decode_drains(
+                        path.read_text(errors="replace")
+                    ).items():
+                        pending[key] = (path, marker)
+                now = time.monotonic()
+                for key in list(waiting):
+                    if key not in pending or pending[key] != waiting[key][1]:
+                        waiting.pop(key)
+                for (pid, tid), marker in pending.items():
+                    if pid in attempted:
+                        continue
+                    started, _ = waiting.setdefault((pid, tid), (now, marker))
+                    if now - started < 5:
+                        continue
+                    attempted.add(pid)
+                    _btc_capture_decode_drain_stack(
+                        output, pid, tid, marker[0], now - started, marker[1]
+                    )
+            except Exception as error:
+                logging.warning("BTC drain observer failed: %s", type(error).__name__)
+
+    observer = threading.Thread(target=observe, name="btc-drain-stacks", daemon=True)
+    observer.start()
+    return stop, observer
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="smoke runner")
     parser.add_argument("--suite_name", type=str, required=True, help="suite_name")
@@ -134,6 +305,7 @@ if __name__ == "__main__":
     runner = runner_class(**runner_params)
 
     dmesg_baseline = snapshot_dmesg()
+    btc_drain_observer = _start_btc_ppu_drain_stack_observer()
 
     try:
         task_states = runner.run()
@@ -149,6 +321,9 @@ if __name__ == "__main__":
             )
         raise
     finally:
+        if btc_drain_observer is not None:
+            btc_drain_observer[0].set()
+            btc_drain_observer[1].join(timeout=50)
         output_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
         rocm_debug_dir = os.path.join(output_dir, "rocm_debug")
         for pattern in [
