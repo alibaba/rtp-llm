@@ -1096,7 +1096,14 @@ std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const K
         for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
             const auto& blocks = *source_blocks_by_group[group_id];
             kv_cache_groups_[group_id]->reference(validReferenceBlocks(blocks));
-            selected_resource->mutableBlockIds(groups[group_id].tag).assign(blocks);
+            const auto& tag                = groups[group_id].tag;
+            auto& selected_block_ids = selected_resource->mutableBlockIds(tag);
+            selected_block_ids.assign(blocks);
+            // Keep the logical dummy tail when the local table has no CP block sharding.
+            if (!kvcache_resource.lastBlockAligned() && blocks.size() + 1 == resource_keys.size()
+                && !cpBlockRoundRobinGroup(cp_slot_mapper_, config_, tag)) {
+                selected_block_ids.resize(resource_keys.size());
+            }
         }
         return selected_resource;
     }
