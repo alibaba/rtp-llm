@@ -663,7 +663,7 @@ class Qwen4ExpPLELayer(nn.Module):
     def _bf16_prefill_enabled(self, hyper_states, embeddings, page_size):
         """Select the qualified single-request SM90 BF16 projection path."""
         return (
-            page_size == 64
+            page_size in (64, 128)
             and hyper_states.is_cuda
             and torch.version.hip is None
             and hyper_states.shape[0] == 1
