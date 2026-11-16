@@ -25,6 +25,10 @@ message IntMatrix {
     repeated IntVector rows = 1;
 }
 
+// PD release contract: Frontend, FlexLB master, Prefill and Decode must be
+// deployed as one matching release bundle. Mixed old/new PD control protocols
+// are unsupported; there is no automatic version negotiation or legacy shim.
+// See docs/backend/pd_entrance_transpose.md for group switch and rollback steps.
 // KV-cache protocol compatibility contract:
 // Grouped topology and independent block pools change block addressing and
 // payload structures. Prefill, decode, P2P, remote-cache, and host-cache
@@ -36,11 +40,6 @@ message GroupBlockPB {
     int32 deprecated_group_id = 1;
     int32 block_id = 2;
     string tag = 3;
-}
-
-message TaggedBlockIdsPB {
-    string tag = 1;
-    repeated int32 block_ids = 2;
 }
 
 enum RoleTypePB {
@@ -167,6 +166,7 @@ message GenerateConfigPB {
     // Explicit target-prefill assertion. true requires max_new_tokens == 0 and cannot be combined with
     // return_prompt_logits. false/omitted does not change the legacy bare-zero behavior above.
     bool prefill_only = 76;
+    google.protobuf.Int32Value logits_index = 77;
 }
 
 message MMPreprocessConfigPB {
@@ -316,6 +316,8 @@ message GenerateInputPB {
     // token_ids are already expanded when this field is present.
     MultimodalTokenLayoutPB multimodal_token_layout = 11;
     V41RequestInputsPB v41_inputs = 12;
+    // Master has already admitted this request to the selected Prefill.
+    bool enqueued_by_master = 13;
 }
 
 message AuxInfoPB {
@@ -422,11 +424,42 @@ enum ErrorCodePB {
     P2P_CONNECTOR_WORKER_READ_CANCELED = 23;
     P2P_CONNECTOR_WORKER_READ_TIMEOUT = 24;
     P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE = 25;
+    LONG_PROMPT_ERROR = 511;
+    MALLOC_FAILED = 602;
+    GENERATE_TIMEOUT = 603;
+    ERROR_GENERATE_CONFIG_FORMAT = 604;
+    // Stable protobuf wire IDs; internal ErrorCode uses explicit conversion.
     INVALID_PARAMS = 26;
     EXECUTION_EXCEPTION = 27;
-    GENERATE_TIMEOUT = 603;
+    EXCEEDS_KV_CACHE_MAX_LEN = 607;
+    MM_LONG_PROMPT_ERROR = 901;
+    MM_WRONG_FORMAT_ERROR = 902;
+    MM_PROCESS_ERROR = 903;
+    MM_EMPTY_ENGINE_ERROR = 904;
+    MM_NOT_SUPPORTED_ERROR = 905;
+    MM_DOWNLOAD_FAILED = 906;
+    OUT_OF_VOCAB_RANGE = 8101;
+    OUTPUT_QUEUE_FULL = 8102;
+    OUTPUT_QUEUE_IS_EMPTY = 8103;
+    FINISHED = 8104;
+    GET_HOST_FAILED = 8200;
     GET_CONNECTION_FAILED = 8201;
+    CONNECT_FAILED = 8202;
+    CONNECT_TIMEOUT = 8203;
+    DEADLINE_EXCEEDED = 8204;
+    CONNECTION_RESET_BY_PEER = 8205;
+    REMOTE_ALLOCATE_RESOURCE_WRITE_FAILED = 8206;
+    REMOTE_ALLOCATE_RESOURCE_READ_FAILED = 8207;
+    REMOTE_LOAD_KV_CACHE_FAILED = 8208;
+    REMOTE_GENERATE_FAILED = 8209;
     RPC_FINISH_FAILED = 8210;
+    DECODE_MALLOC_FAILED = 8211;
+    LOAD_KV_CACHE_FAILED = 8212;
+    WAIT_TO_RUN_TIMEOUT = 8213;
+    KEEP_ALIVE_TIMEOUT = 8214;
+    CACHE_STORE_PUSH_ITEM_FAILED = 8301;
+    CACHE_STORE_LOAD_UNKNOWN_ERROR = 8308;
+    CACHE_STORE_STORE_FAILED = 8309;
     P2P_CONNECTOR_TRANSFER_BUILD_REQUEST_FAILED = 8326;
     P2P_CONNECTOR_TRANSFER_CONNECTION_FAILED = 8327;
     P2P_CONNECTOR_TRANSFER_RPC_FAILED = 8328;
@@ -434,6 +467,8 @@ enum ErrorCodePB {
     P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED = 8330;
     P2P_CONNECTOR_TRANSFER_COPY_FAILED = 8331;
     P2P_CONNECTOR_TRANSFER_CONTEXT_DESTROYED = 8332;
+    GET_PART_NODE_STATUS_FAILED = 8400;
+    GET_ALL_NODE_STATUS_FAILED = 8401;
 }
 
 // transfer between prefill and decode
@@ -443,119 +478,6 @@ message RpcErrorPB {
 }
 
 message EmptyPB {}
-
-enum RemoteStage {
-    ALLOCATE = 0;
-    LOAD = 1;
-    GENERATE = 2;
-    // Prefill completed locally after LOAD; no Decode execution is required.
-    PREFILL_COMPLETE = 3;
-}
-
-// One PP stage's main-model layer range and the peer subset serving it.
-// Populated by prefill only when pp_size > 1; empty means pp_P=1 (flat peer_addrs).
-message StagePeerGroupPB {
-    uint32 layer_begin = 1;
-    uint32 layer_count = 2;
-    repeated string peer_addrs = 3;
-    bool is_last_stage = 4;
-}
-
-message GenerateRequestPB {
-    RemoteStage stage = 1;
-    int64 request_id = 2;
-    string client_id = 3;
-    int64 start_time = 4;
-    int32 first_generate_token_id = 5;
-    GenerateInputPB input = 6;
-    repeated string peer_addrs = 7;
-    repeated int32 propose_token_ids = 8;
-    repeated int32 position_ids = 9;
-    TensorPB propose_probs = 10;
-    TensorPB propose_hidden = 11;
-    repeated StagePeerGroupPB stage_peer_groups = 12;
-}
-
-// In the TP case, the decode master broadcasts to decode workers.
-// This request uses the tagged grouped-cache layout. Legacy group-addressing
-// field numbers stay reserved even though mixed-version KV-cache deployment is
-// outside the supported protocol contract documented above.
-message BroadcastLoadRequestPB {
-    int64 request_id = 1;
-    string request_key = 2;
-    repeated string peer_addrs = 3;
-    repeated int64 cache_keys = 4;
-    reserved 5;
-    reserved "block_ids";
-    int64 block_num = 6;
-    int64 reuse_block_size = 7;
-    int64 timeout_ms = 8;
-    int64 dp_rank = 9;
-    int32 partition_count = 10;
-    int32 partition_id = 11;
-    reserved 12;
-    reserved "group_block_ids";
-    int32 prefill_cp_size = 13;
-    repeated TaggedBlockIdsPB tagged_group_block_ids = 14;
-    repeated StagePeerGroupPB stage_peer_groups = 15;
-
-}
-
-message BroadcastLoadResponsePB {
-    RpcErrorPB error_info = 1;
-    int64 done_time_us = 2;
-    int64 loaded_cache_block_count = 3;
-}
-
-message RemoteFinishRequestPB {
-    int64 request_id = 1;
-}
-
-message RemoteGenerateRequestPBNew {
-    GenerateInputPB input = 1;
-    string client_id = 2;
-    int64 start_time_us = 3;
-    repeated string addrs = 4;
-    repeated int32 block_ids = 5;
-    int64 reuse_block_size = 6;
-    string mtp_hidden_states_key = 7;
-    bool use_mla = 8;
-    int32 layer_num = 9;
-    int64 deadline_us = 10;
-}
-
-message RemoteGenerateResponsePBNew {
-    ErrorDetailsPB error_info = 1;
-    GenerateOutputsPB output = 2;
-    int32 first_generate_token_id = 3;
-    int64 first_token_rt_us = 4;
-    bool finished = 5;
-}
-
-message RemoteStorePartition {
-    string remote_addr = 1;
-    int32 remote_partition_id = 2;
-    int32 remote_partition_count = 3;
-    int32 local_partition_id = 4;
-    int32 local_partition_count = 5;
-}
-
-message RemoteStoreRequestPB {
-    int64 dp_rank = 1;
-    int64 request_id = 2;
-    string request_key = 3;
-    repeated int32 decode_block_ids = 4;
-    repeated int32 prefill_block_ids = 5;
-    int64 reuse_block_size = 6;
-    repeated RemoteStorePartition partition_infos = 7;
-    int64 deadline_us = 8;
-    string client_id = 9;
-}
-
-message RemoteStoreResponsePB {
-    RpcErrorPB error_info = 1;
-    int64 done_time_us = 2;
-}
 
 message StatusVersionPB {
     int64 latest_cache_version = 1;
@@ -899,7 +821,10 @@ message P2PConnectorBroadcastTpRequestPB {
     int64 request_id = 4;
     int64 deadline_ms = 5;
     P2PConnectorBroadcastType type = 6;
-    // The transfer plan supplies explicit routes. Empty routes mean no work.
+    // Removed: remote_tp_size (8) - its only consumer was
+    // P2PWorkerDecodeRead::calculateRecvPartitionCount, which the transfer plan replaced.
+    // Removed: allow_empty_projection (10) - an empty `routes` list is now the authoritative
+    // "this worker has nothing to do" signal.
     reserved 8, 10;
     reserved "remote_tp_size", "allow_empty_projection";
     // Original user-request deadline. deadline_ms remains the physical
@@ -1142,16 +1067,24 @@ message FetchRequestPB {
 
 message CancelRequestPB {
     int64 request_id = 1;
+    // Selected Prefill endpoint, needed when Cancel precedes Decode admission.
+    string prefill_address = 2;
+    // Zero means an explicit FlexLB priority preemption; cleanup forwards its exact ErrorCode.
+    int64 cancel_error_code = 3;
+    string cancel_error_message = 4;
 }
 
 enum CancelStatusPB {
     CANCEL_STATUS_UNSPECIFIED = 0;
-    // The original Prefill atomically installed the priority-preemption
-    // latch/intent and triggered current-or-future P-to-D cancellation. This
+    // The receiving endpoint atomically installed the priority-preemption
+    // latch/intent. Decode forwards cancellation to Prefill. This
     // is not a resource-release acknowledgement.
     CANCEL_STATUS_ACCEPTED = 1;
+    // No priority intent was installed: the request completed or an earlier
+    // ordinary cancellation/execution outcome won. Reconcile WorkerStatus;
+    // this reply alone does not prove resource release.
     CANCEL_STATUS_NOT_FOUND = 2;
-    // No active request was visible, so Prefill installed (or found) a
+    // No active request was visible, so the endpoint installed (or found) a
     // short-lived request-id tombstone. A later Enqueue for the same id is
     // rejected with 8429 before it can reach the Engine scheduler.
     CANCEL_STATUS_TOMBSTONED = 3;
@@ -1166,10 +1099,6 @@ service RpcService {
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
     rpc GenerateStreamCall(GenerateInputPB) returns (stream GenerateOutputsPB);
     rpc BatchGenerateCall(BatchGenerateInputPB) returns (BatchGenerateOutputsPB);
-    rpc RemoteLoad(BroadcastLoadRequestPB) returns (BroadcastLoadResponsePB);
-    rpc RemoteGenerate(stream GenerateRequestPB) returns (stream GenerateOutputsPB);
-    rpc RemoteFinish(RemoteFinishRequestPB) returns (EmptyPB);
-    rpc RemoteFinishNew(RemoteFinishRequestPB) returns (EmptyPB);
 
     rpc CheckHealth(EmptyPB) returns (CheckHealthResponsePB);
     rpc UpdateEplbConfig(UpdateEplbConfigRequestPB) returns (EmptyPB);
@@ -1183,8 +1112,6 @@ service RpcService {
     rpc UpdateSchedulerInfo(UpdateSchedulerInfoRequestPB) returns (EmptyPB);
 
     rpc UpdateWeights(UpdateWeightsRequestPB) returns (EmptyPB);
-    rpc RemoteGenerateNew(RemoteGenerateRequestPBNew) returns (RemoteGenerateResponsePBNew);
-    rpc RemoteStore(RemoteStoreRequestPB) returns (RemoteStoreResponsePB);
 
     rpc ExecuteFunction(FunctionRequestPB) returns (FunctionResponsePB);
     rpc StartLoad(P2PConnectorStartLoadRequestPB) returns (P2PConnectorStartLoadResponsePB);
@@ -1192,10 +1119,10 @@ service RpcService {
     rpc EnqueueBatch(EnqueueBatchRequestPB) returns (EnqueueBatchResponsePB);
     rpc EnqueueGroup(EnqueueGroupRequestPB) returns (EnqueueBatchResponsePB);
     rpc FetchResponse(FetchRequestPB) returns (stream GenerateOutputsPB);
-    // AutoTPM priority-preemption Cancel targets the original Prefill role.
-    // Prefill triggers the existing Prefill->Decode stream cancellation;
-    // Decode does not implement this RPC. Completion is reported separately
-    // by Prefill WorkerStatus as priority_preemption_progress=CANCELED with
+    // AutoTPM priority-preemption Cancel targets the selected Decode role.
+    // Decode forwards Cancel to Prefill, including cancel-before-attach fences.
+    // Prefill cancels only local work. Completion is reported separately
+    // by Decode WorkerStatus after both endpoints release resources, as priority_preemption_progress=CANCELED with
     // error code 8429. The original Enqueue/Fetch path also returns 8429.
     rpc Cancel(CancelRequestPB) returns (CancelResponsePB);
 }

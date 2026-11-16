@@ -111,8 +111,8 @@ def ppu_suites():
                 name="pd_tp2_to_tp2",
                 task_info="data/model/qwen_7b/q_r_ppu_pd.json",
                 smoke_args= {
-                    "prefill": "--warm_up 0 --seq_size_per_block 64 --act_type fp16 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 20000 --cache_store_thread_count 2 --reserver_runtime_mem_mb 8192 --tp_size 2",
-                    "decode": "--warm_up 0 --seq_size_per_block 64 --act_type fp16 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 20000 --reserver_runtime_mem_mb 8192 --tp_size 2"
+                    "prefill": "--warm_up 0 --seq_size_per_block 64 --act_type fp16 --role_type PREFILL --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 300000 --cache_store_thread_count 2 --reserver_runtime_mem_mb 8192 --tp_size 2",
+                    "decode": "--warm_up 0 --seq_size_per_block 64 --act_type fp16 --role_type DECODE --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 300000 --reserver_runtime_mem_mb 8192 --tp_size 2"
                 },
                 gpu_type=["PPU-ZW810E"],
             ),

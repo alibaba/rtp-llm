@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <functional>
 #include <mutex>
@@ -35,7 +36,15 @@ public:
             for (size_t i = 0; i < block_indices.size(); ++i) {
                 result_.block_errors[block_indices[i]] = batch_result.blockError(i);
             }
-            result_.merge(std::move(batch_result));
+            const auto copy_error = batch_result.copy_error;
+            try {
+                result_.merge(std::move(batch_result));
+            } catch (...) {
+                // Preserve the conservative completion policy if diagnostics
+                // cannot be assembled, and still settle the outstanding batch.
+                result_.status     = ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "");
+                result_.copy_error = std::max(result_.copy_error, copy_error);
+            }
             --remaining_;
             finishIfReadyLocked(callback, result);
         }
@@ -67,7 +76,7 @@ private:
             return;
         }
         completed_ = true;
-        result     = result_;
+        result     = std::move(result_);
         callback   = std::move(callback_);
     }
 

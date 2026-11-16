@@ -93,6 +93,7 @@ public final class JavaLoadClient {
     private final AtomicInteger scheduleStubRR = new AtomicInteger();
     private final Map<String, ManagedChannel[]> engineChannelPools = new ConcurrentHashMap<>();
     private final Map<String, AtomicInteger> engineChannelRR = new ConcurrentHashMap<>();
+    private final Map<String, Boolean> mockPrefillByAddress = new ConcurrentHashMap<>();
     private final HttpClient httpClient =
             HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
     private final List<RequestResult> results = new ArrayList<>();
@@ -1355,22 +1356,24 @@ public final class JavaLoadClient {
                 Double terminalNanos = null;
 
                 String prefillAddr = roleAddr(scheduleResponse, "PREFILL");
-                if (prefillAddr.isEmpty()) {
-                    prefillAddr = roleAddr(scheduleResponse, "PDFUSION");
+                boolean mock = isMockPrefill(prefillAddr);
+                String target = mock ? prefillAddr : roleAddr(scheduleResponse, "DECODE");
+                if (target.isEmpty()) {
+                    target = roleAddr(scheduleResponse, "PDFUSION");
                 }
-                if (prefillAddr.isEmpty()) {
-                    throw new RuntimeException("schedule response has no PREFILL/PDFUSION address");
+                if (target.isEmpty()) {
+                    throw new RuntimeException("schedule response has no DECODE/PDFUSION address");
                 }
 
                 EngineRpcService.GenerateInputPB modifiedInput =
                         copyRoleAddrs(inputPb, scheduleResponse);
-                ManagedChannel engineChannel = getEngineChannel(prefillAddr);
+                ManagedChannel engineChannel = getEngineChannel(target);
                 RpcServiceGrpc.RpcServiceBlockingStub engineStub =
                         RpcServiceGrpc.newBlockingStub(engineChannel)
                                 .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
 
                 Iterator<EngineRpcService.GenerateOutputsPB> stream;
-                if (scheduleResponse.getEnqueuedByMaster()) {
+                if (mock && scheduleResponse.getEnqueuedByMaster()) {
                     stream =
                             engineStub.fetchResponse(
                                     EngineRpcService.FetchRequestPB.newBuilder()
@@ -1447,7 +1450,9 @@ public final class JavaLoadClient {
         EngineRpcService.GenerateConfigPB.Builder genConfig =
                 EngineRpcService.GenerateConfigPB.newBuilder()
                         .setMaxNewTokens(Math.max(1, record.outputLen))
+                        .setCanUsePdSeparation(record.outputLen > 1)
                         .setNumReturnSequences(1)
+                        .setNumBeams(1)
                         .setTopP(1.0f)
                         .setTopK(0)
                         .setTemperature(1.0f)
@@ -1500,7 +1505,7 @@ public final class JavaLoadClient {
     /**
      * Fallback direct-to-engine send (parity with Python _try_fallback): round-robin
      * picks prefill/decode addresses from endpoints.json, attaches role_addrs and
-     * streams GenerateStreamCall directly against the prefill engine.
+     * streams GenerateStreamCall against the selected engine.
      */
     private void attemptFallback(
             TraceRecord record, RequestResult result, long startedNanos, String masterErrorPrefix) {
@@ -1535,10 +1540,15 @@ public final class JavaLoadClient {
             fbConfig.addRoleAddrs(
                     toRoleAddrPb(EngineRpcService.RoleTypePB.ROLE_TYPE_DECODE, decodeAddr));
         }
+        if (decodeAddr.isEmpty()) {
+            fbConfig.setCanUsePdSeparation(false);
+        }
         EngineRpcService.GenerateInputPB fbInput =
                 buildGenerateInput(record).toBuilder().setGenerateConfig(fbConfig).build();
 
-        ManagedChannel channel = getEngineChannel(prefillAddr);
+        String target =
+                decodeAddr.isEmpty() || isMockPrefill(prefillAddr) ? prefillAddr : decodeAddr;
+        ManagedChannel channel = getEngineChannel(target);
         RpcServiceGrpc.RpcServiceBlockingStub stub =
                 RpcServiceGrpc.newBlockingStub(channel)
                         .withDeadlineAfter(config.timeoutMs, TimeUnit.MILLISECONDS);
@@ -1614,6 +1624,24 @@ public final class JavaLoadClient {
                 .build();
     }
 
+    private boolean isMockPrefill(String address) {
+        if (address.isEmpty()) {
+            return false;
+        }
+        // Both evaluation mocks report an empty topology. Real Prefill returns
+        // a positive TP size or a gRPC error.
+        return mockPrefillByAddress.computeIfAbsent(
+                address,
+                endpoint ->
+                        RpcServiceGrpc.newBlockingStub(getEngineChannel(endpoint))
+                                        .withDeadlineAfter(1, TimeUnit.SECONDS)
+                                        .getPeerInfo(
+                                                EngineRpcService.GetPeerInfoRequestPB
+                                                        .getDefaultInstance())
+                                        .getTpSize()
+                                == 0);
+    }
+
     private ManagedChannel getEngineChannel(String target) {
         ManagedChannel[] pool =
                 engineChannelPools.computeIfAbsent(
@@ -1644,7 +1672,8 @@ public final class JavaLoadClient {
     private EngineRpcService.GenerateInputPB copyRoleAddrs(
             EngineRpcService.GenerateInputPB inputPb,
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB response) {
-        EngineRpcService.GenerateInputPB.Builder modified = inputPb.toBuilder();
+        EngineRpcService.GenerateInputPB.Builder modified =
+                inputPb.toBuilder().setEnqueuedByMaster(response.getEnqueuedByMaster());
         modified.getGenerateConfigBuilder().clearRoleAddrs();
         for (FlexlbScheduleProtocol.FlexlbServerStatusPB status : response.getServerStatusList()) {
             EngineRpcService.RoleTypePB roleType =

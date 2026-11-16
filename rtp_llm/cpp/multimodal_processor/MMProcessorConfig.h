@@ -37,8 +37,10 @@ inline const char* vitSeparationName(VitSeparation separation) {
 
 /** Later PP stages receive activations and do not create a local multimodal engine.
  *  Keep ingress ownership aligned with LanguageCppEngine in rpc_engine.py so those stages can initialize. */
-inline bool ownsMultimodalIngress(RoleType role_type, int64_t tp_rank, int64_t pp_rank) {
-    return pp_rank == 0 && tp_rank == 0 && (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL);
+inline bool ownsMultimodalIngress(RoleType role_type, int64_t tp_rank, int64_t pp_rank, VitSeparation vit_separation) {
+    return pp_rank == 0 && tp_rank == 0
+           && (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL
+               || (role_type == RoleType::DECODE && vit_separation == VIT_SEPARATION_LOCAL));
 }
 
 inline MMProcessorKind resolveMMProcessorKind(bool          is_multimodal,
@@ -47,7 +49,7 @@ inline MMProcessorKind resolveMMProcessorKind(bool          is_multimodal,
                                               RoleType      role_type,
                                               int64_t       tp_rank,
                                               int64_t       pp_rank) {
-    const bool owns_ingress = is_multimodal && ownsMultimodalIngress(role_type, tp_rank, pp_rank);
+    const bool owns_ingress = is_multimodal && ownsMultimodalIngress(role_type, tp_rank, pp_rank, vit_separation);
     if (has_local_engine && !owns_ingress) {
         return MMProcessorKind::INVALID;
     }

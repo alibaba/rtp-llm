@@ -54,6 +54,10 @@ QUEUE 模式下，`ordering.type` 和 `dispatcher.type` 是两个正交维度：
 与 endpoint 容量触发发送；NON_BATCH dispatcher 使用
 `ImmediateNonBatchAlgorithm`，一个决策组只包含一个请求。
 
+BATCH 模式下，`EnqueueBatch` 无法接纳的请求走直接路由交付，由调用方发起模型 RPC。
+这包括多模态、只做 Prefill、最多生成一个 token、请求 prompt logits、beam search、
+多候选输出和显式禁用 PD 的请求。
+
 在任何模式下，调度器都在对外可见前提交 endpoint 账本和
 `RequestLifecycle`。BATCH 路径记录引擎 ACK/执行状态；NON_BATCH 路径记录
 路由决策的交付与调用方确认。

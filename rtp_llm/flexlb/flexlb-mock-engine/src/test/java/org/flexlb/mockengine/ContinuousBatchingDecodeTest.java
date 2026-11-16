@@ -34,15 +34,15 @@ import static org.junit.jupiter.api.Assertions.fail;
  * Checks shared Decode ticks, per-step progress and queue admission across changing running batches.
  */
 class ContinuousBatchingDecodeTest {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private static final int BASE_PORT = 63400;
 
     @TempDir Path tempDir;
-
     private ScheduledExecutorService scheduler;
     private ExecutorService workerPool;
     private Map<Integer, JavaMockEngineCluster.FastRpcService> services;
+
     private int nextPortOffset;
 
     @BeforeEach
@@ -97,10 +97,8 @@ class ContinuousBatchingDecodeTest {
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 132);
 
         long t0 = System.nanoTime();
-        LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queueA =
-                new LinkedBlockingQueue<>();
-        LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queueB =
-                new LinkedBlockingQueue<>();
+        TerminalFrameQueue queueA = new TerminalFrameQueue();
+        TerminalFrameQueue queueB = new TerminalFrameQueue();
         assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, 1L, 10, 2), -1, queueA));
         assertTrue(invokeScheduleDecodeCompletion(decode, shapeOf(model, 2L, 10, 2), -1, queueB));
         assertEquals(
@@ -263,10 +261,8 @@ class ContinuousBatchingDecodeTest {
         JavaMockEngineCluster.FastRpcService decode = newDecodeService(model, 132);
 
         long t0 = System.nanoTime();
-        LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queueLong =
-                new LinkedBlockingQueue<>();
-        LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queueShort =
-                new LinkedBlockingQueue<>();
+        TerminalFrameQueue queueLong = new TerminalFrameQueue();
+        TerminalFrameQueue queueShort = new TerminalFrameQueue();
         assertTrue(
                 invokeScheduleDecodeCompletion(decode, shapeOf(model, 1L, 10, 20), -1, queueLong));
         assertTrue(
@@ -435,21 +431,20 @@ class ContinuousBatchingDecodeTest {
         return model.shape(input.build(), new MockLruBlockCache(100));
     }
 
-    // ──────────── Completion observation helpers ────────────
-
     /**
      * Blocks for the terminal frame on the request's own response queue and
-     * returns its arrival timestamp (System.nanoTime). The direct
+     * returns the timestamp captured by the publishing thread. A delayed
+     * test consumer must not collapse the gap between queued completions. The direct
      * generate_stream path publishes exactly one finished=true frame at decode
      * completion, so this timestamp IS the completion timestamp.
      */
-    private static long awaitTerminalFrame(
-            LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> queue, long timeoutMs)
+    private static long awaitTerminalFrame(TerminalFrameQueue queue, long timeoutMs)
             throws InterruptedException {
         EngineRpcService.GenerateOutputsPB frame = queue.poll(timeoutMs, TimeUnit.MILLISECONDS);
         assertNotNull(frame, "terminal frame must arrive within " + timeoutMs + "ms");
         assertTrue(frame.getFlattenOutput().getFinished(0), "frame must be the terminal frame");
-        return System.nanoTime();
+        assertTrue(queue.terminalArrivalNanos != 0, "publisher must timestamp the terminal frame");
+        return queue.terminalArrivalNanos;
     }
 
     private void awaitQuiescence(JavaMockEngineCluster.FastRpcService service, long timeoutMs)
@@ -506,5 +501,24 @@ class ContinuousBatchingDecodeTest {
                         LinkedBlockingQueue.class);
         method.setAccessible(true);
         return (Boolean) method.invoke(service, shape, batchId, responseQueue);
+    }
+
+    // ──────────── Completion observation helpers ────────────
+
+    /**
+     * Records when Decode publishes a finished frame.
+     */
+    private static final class TerminalFrameQueue
+            extends LinkedBlockingQueue<EngineRpcService.GenerateOutputsPB> {
+        private volatile long terminalArrivalNanos;
+
+        @Override
+        public boolean offer(EngineRpcService.GenerateOutputsPB frame) {
+            if (frame.getFlattenOutput().getFinishedCount() > 0
+                    && frame.getFlattenOutput().getFinished(0)) {
+                terminalArrivalNanos = System.nanoTime();
+            }
+            return super.offer(frame);
+        }
     }
 }

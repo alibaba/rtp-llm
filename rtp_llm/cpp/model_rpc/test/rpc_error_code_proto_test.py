@@ -5,11 +5,22 @@ from google.protobuf.descriptor import FieldDescriptor
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (  # type: ignore
     ErrorCodePB,
     GenerateConfigPB,
+    GenerateInputPB,
     RpcErrorPB,
 )
 
 
 class RpcErrorCodeProtoTest(unittest.TestCase):
+    def test_master_enqueue_flag_uses_independent_wire_field_13(self):
+        fields = GenerateInputPB.DESCRIPTOR.fields_by_name
+        self.assertEqual(fields["multimodal_token_layout"].number, 11)
+        self.assertEqual(fields["v41_inputs"].number, 12)
+        self.assertEqual(fields["enqueued_by_master"].number, 13)
+        # Field 13, wire type 0, boolean true; independent of generated constants.
+        parsed = GenerateInputPB.FromString(bytes((0x68, 0x01)))
+        self.assertTrue(parsed.enqueued_by_master)
+        self.assertEqual(parsed.SerializeToString(), bytes((0x68, 0x01)))
+
     def test_invalid_params_is_declared_and_round_trips(self):
         self.assertEqual(ErrorCodePB.Value("INVALID_PARAMS"), 26)
 
@@ -35,6 +46,18 @@ class RpcErrorCodeProtoTest(unittest.TestCase):
         self.assertEqual(parsed.error_code, ErrorCodePB.EXECUTION_EXCEPTION)
         self.assertEqual(ErrorCodePB.Name(parsed.error_code), "EXECUTION_EXCEPTION")
         self.assertEqual(parsed.error_message, "handler threw")
+
+    def test_existing_wire_error_ids_keep_their_meaning(self):
+        for wire_id, expected in (
+            (26, ErrorCodePB.INVALID_PARAMS),
+            (27, ErrorCodePB.EXECUTION_EXCEPTION),
+        ):
+            with self.subTest(wire_id=wire_id):
+                # These bytes are independent of the generated enum values.
+                encoded = bytes((0x08, wire_id))
+                parsed = RpcErrorPB.FromString(encoded)
+                self.assertEqual(parsed.error_code, expected)
+                self.assertEqual(parsed.SerializeToString(), encoded)
 
     def test_disk_cache_and_prefill_only_keep_independent_wire_fields(self):
         fields = GenerateConfigPB.DESCRIPTOR.fields_by_name

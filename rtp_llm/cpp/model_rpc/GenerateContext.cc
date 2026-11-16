@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/model_rpc/GenerateContext.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 
 #include <limits>
 
@@ -16,6 +17,75 @@ GenerateContext::~GenerateContext() {
     }
     stopStream();
     reportTime();
+}
+
+void GenerateContext::synthesizeTracePhases(telemetry::PhaseRole role, bool exception_unwinding) {
+    if (!trace_span_guard || !trace_span_guard->valid()) {
+        return;
+    }
+    auto& stream = getStream();
+    if (!stream) {
+        return;
+    }
+    const auto             time_info = stream->getTimeInfo();
+    telemetry::PhaseTiming phase_timing;
+    phase_timing.begin_time_us           = time_info.begin_time_us;
+    phase_timing.running_started         = time_info.running_started;
+    phase_timing.running_started_time_us = time_info.running_started_time_us;
+    phase_timing.first_token_committed   = time_info.first_token_committed;
+    phase_timing.first_token_time_us     = time_info.first_token_time_us;
+    phase_timing.generation_done         = time_info.generation_done;
+    phase_timing.generation_done_time_us = time_info.generation_done_time_us;
+    phase_timing.synthesis_end_time_us   = currentTimeUs();
+    phase_timing.request_id              = request_id;
+    const bool request_ok                = error_status.ok() && !exception_unwinding;
+    if (request_ok && time_info.generation_done) {
+        // Beam rows are an internal search width; Fusion exposes one primary
+        // sequence (the remaining candidates live in beam_responses). Only
+        // ordinary multi-return Fusion requests aggregate all active rows. PD
+        // retains its existing per-sequence, per-hop usage contract.
+        const auto returned_sequence_count =
+            role != telemetry::PhaseRole::Fusion ? 1 :
+            stream->hasNumBeams() ? std::max(stream->numReturnSequences(), 1) : stream->currentBatchSize();
+        telemetry::setUsageTokenAttributes(*trace_span_guard,
+                                           (int64_t)stream->inputLength(),
+                                           (int64_t)(stream->outputTokenLen() * returned_sequence_count));
+    }
+    const auto local_error = stream->firstError();
+    const auto first_error = FirstError::earlier(local_error, dependency_failure);
+    const bool dependency_selected = dependency_failure.error.hasError()
+                                     && first_error.order == dependency_failure.order;
+    const bool priority_preempted = first_error.error.code() == ErrorCode::PRIORITY_PREEMPTED
+                                    || error_info.code() == ErrorCode::PRIORITY_PREEMPTED;
+    phase_timing.error_type = request_ok ? nullptr :
+                               priority_preempted ? "PRIORITY_PREEMPTED" :
+                               dependency_selected ? "DependencyFailure" :
+                               !error_status.ok() ? telemetry::grpcStatusCodeName(error_status.error_code()) :
+                                                    "Exception";
+    if (role == telemetry::PhaseRole::Decode && time_info.loading_cache_start_time_us > 0) {
+        const bool load_finished = time_info.loading_cache_done_time_us > 0;
+        if (load_finished || !request_ok) {
+            const bool load_ok = load_finished && time_info.loading_cache_succeeded;
+            const auto error = first_error.error.hasError() ? first_error.error :
+                               error_info.hasError() ? error_info : errorInfoFromGrpcStatus(error_status);
+            const auto reason = error.hasError() ? ErrorCodeToString(error.code()) : std::string{};
+            telemetry::synthesizeKvLoadSpan(
+                trace_span_guard->sharedSpan(), time_info.loading_cache_start_time_us,
+                load_finished ? time_info.loading_cache_done_time_us : phase_timing.synthesis_end_time_us,
+                request_id, load_ok, load_ok ? nullptr : phase_timing.error_type,
+                !load_ok && error.hasError() ? static_cast<int64_t>(error.code()) : -1,
+                !load_ok && !reason.empty() ? reason.c_str() : nullptr);
+        }
+    }
+    telemetry::synthesizePhaseSpans(trace_span_guard->sharedSpan(), phase_timing, role, request_ok);
+}
+
+void GenerateContext::recordRpcFailure(const ErrorInfo& error) {
+    if (!error_info.hasError()) {
+        const auto first = stream_ ? stream_->firstError() : FirstError::Snapshot{};
+        error_info = first.error.hasError() ? first.error : error;
+    }
+    error_status = grpcStatusFromErrorInfo(error_info);
 }
 
 void GenerateContext::reset() {
@@ -132,15 +202,20 @@ void GenerateContext::collectBasicMetrics(RpcMetricsCollector& collector) {
     } else if (cancelled()) {
         collector.error_code = ErrorCode::CANCELLED;
     } else if (hasError()) {
-        collector.error_code = ErrorCode::UNKNOWN_ERROR;
+        collector.error_code = errorInfoFromGrpcStatus(error_status).code();
     }
     collector.onflight_request   = onflight_requests ? static_cast<int64_t>(onflight_requests->load()) : 0;
+    collector.loading_cache_request = meta ? meta->loadingCacheRequestCount() : 0;
     collector.total_rt_us        = executeTimeMs() * 1000;
     collector.retry_times        = retry_times;
     collector.retry_cost_time_ms = retry_cost_time_ms;
 }
 
 void GenerateContext::reportMetrics(RpcMetricsCollector& collector) {
+    // Stage collectors also carry gauges; refresh them instead of publishing
+    // their default zero over other active requests.
+    collector.onflight_request = onflight_requests ? static_cast<int64_t>(onflight_requests->load()) : 0;
+    collector.loading_cache_request = meta ? meta->loadingCacheRequestCount() : 0;
     if (metrics_reporter) {
         metrics_reporter->report<RpcMetrics, RpcMetricsCollector>(nullptr, &collector);
     }

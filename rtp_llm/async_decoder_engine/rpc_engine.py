@@ -53,10 +53,8 @@ class LanguageCppEngine(BaseEngine):
             == VitSeparation.VIT_SEPARATION_LOCAL
             and engine_config.parallelism_config.tp_rank == 0
             and is_pp_stage_root
-            and (
-                engine_config.pd_sep_config.role_type == RoleType.PREFILL
-                or engine_config.pd_sep_config.role_type == RoleType.PDFUSION
-            )
+            and engine_config.pd_sep_config.role_type
+            in (RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION)
         ):
             self.mm_process_engine = (
                 MultimodalMixinFactory.create_multimodal_process_engine(

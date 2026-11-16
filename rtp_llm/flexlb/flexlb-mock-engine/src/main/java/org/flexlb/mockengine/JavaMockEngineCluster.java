@@ -2000,6 +2000,14 @@ public final class JavaMockEngineCluster {
         }
 
         @Override
+        public void getPeerInfo(
+                EngineRpcService.GetPeerInfoRequestPB request,
+                StreamObserver<EngineRpcService.GetPeerInfoResponsePB> observer) {
+            observer.onNext(EngineRpcService.GetPeerInfoResponsePB.getDefaultInstance());
+            observer.onCompleted();
+        }
+
+        @Override
         public void checkHealth(
                 EngineRpcService.EmptyPB request,
                 StreamObserver<EngineRpcService.CheckHealthResponsePB> observer) {
