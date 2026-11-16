@@ -15,6 +15,7 @@ from rtp_llm.model_loader.linear_attn_weight import (
     LinearAttnConfig,
 )
 from rtp_llm.model_loader.load_config import LoadConfig
+from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
@@ -591,6 +592,15 @@ class Glm53FlashWeight(DeepSeekV2Weight):
 
 
 class Glm53Flash(BaseModel):
+    def create_model_loader(self) -> ModelLoader:
+        loader = super().create_model_loader()
+        load_config = loader.get_load_config()
+        load_config.fp8_defer_moe_requant = (
+            load_config.fp8_requant_preserve_fp32
+            and self.moe_config.moe_strategy in ("mega_moe_fp8", "mega_moe_fp8_se")
+        )
+        return loader
+
     @classmethod
     def _post_build_model_config(cls, model_config: ModelConfig) -> None:
         if model_config.kv_cache_spec_descs:
