@@ -378,6 +378,16 @@ class PdGenerationTest {
         }
     }
 
+    @Test void deadlineWithoutDescriptionPreservesNativeErrorCode() throws Exception {
+        var failure = RpcErrors.scheduling(Status.DEADLINE_EXCEEDED.asRuntimeException());
+        var error = RpcErrors.failure(failure);
+        assertEquals(Status.Code.DEADLINE_EXCEEDED, error.getStatus().getCode());
+        var key = Metadata.Key.of("grpc-status-details-bin", Metadata.BINARY_BYTE_MARSHALLER);
+        var details = ErrorDetailsPB.parseFrom(error.getTrailers().get(key));
+        assertEquals(603, details.getErrorCode());
+        assertEquals("", details.getErrorMessage());
+    }
+
     @Test void requestTimeoutCompletesSchedulersAndRetainsErrorForFetch() throws Exception {
         try (var p = node("prefill", 8, 1); var d = node("decode", 8, 500)) {
             var request = input(d, 104, 5, 4, 100, true);

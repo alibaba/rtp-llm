@@ -62,7 +62,12 @@ public final class RpcErrors {
     static StatusRuntimeException failure(Status status, long code) {
         if (code == 0) return status.asRuntimeException();
         var trailers = new Metadata();
-        trailers.put(DETAILS, ErrorDetailsPB.newBuilder().setErrorCode(code).setErrorMessage(status.getDescription()).build().toByteArray());
+        String description = status.getDescription();
+        var details = ErrorDetailsPB.newBuilder()
+            .setErrorCode(code)
+            .setErrorMessage(description == null ? "" : description)
+            .build();
+        trailers.put(DETAILS, details.toByteArray());
         return status.asRuntimeException(trailers);
     }
 
