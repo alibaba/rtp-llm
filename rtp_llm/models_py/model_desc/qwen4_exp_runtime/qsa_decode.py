@@ -19,6 +19,10 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection import (
     select_qsa_paged_tokens,
 )
+from rtp_llm.models_py.modules.qwen4_exp.qsa.flashinfer_indexer import (
+    try_flashinfer_decode_selection,
+    use_flashinfer_indexer,
+)
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     apply_partial_rope,
     build_base_rope,
@@ -315,6 +319,18 @@ def select_decode_tokens(
     rotated_q = apply_partial_rope(
         q, current_cos.unsqueeze(1), current_sin.unsqueeze(1)
     )
+    if (
+        not self.is_mtp_draft
+        and ratio == 4
+        and token_budget == 2048
+        and use_flashinfer_indexer()
+    ):
+        selected = try_flashinfer_decode_selection(
+            rotated_q, kv_pool, kv_table, visible_token_lengths
+        )
+        if selected is not None:
+            return selected
+
     get_weights = getattr(indexer, "score_weights", None)
     score_weights = get_weights(batch_size, q.device) if callable(get_weights) else None
     if score_weights is None:

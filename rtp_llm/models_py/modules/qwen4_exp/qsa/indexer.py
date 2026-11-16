@@ -34,7 +34,7 @@ from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
     exact_head_rms_norm,
 )
 
-from .flashinfer_indexer import try_flashinfer_prefill_selection, use_flashinfer_qsa
+from .flashinfer_indexer import try_flashinfer_prefill_selection, use_flashinfer_indexer
 from .validation import DeviceChecks
 
 # Bound fallback logits and their head reduction independently of context length.
@@ -628,10 +628,13 @@ class Qwen4ExpQSAIndexer(nn.Module):
                 torch.empty((batch, seq_len, 0), device=device), positions
             )
 
-        if use_flashinfer_qsa():
-            selected = try_flashinfer_prefill_selection(
-                self, q, block_keys, positions, _MAX_SCORE_WORKSPACE_BYTES
-            )
+        if (
+            past_len == 0
+            and ratio == 4
+            and self.block_topk == 512
+            and use_flashinfer_indexer()
+        ):
+            selected = try_flashinfer_prefill_selection(q, block_keys)
             if selected is not None:
                 return selected
 

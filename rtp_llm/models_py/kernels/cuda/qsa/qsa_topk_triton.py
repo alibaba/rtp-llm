@@ -39,23 +39,80 @@ def _expand_tokens(
     K: tl.constexpr,
     LENGTH_STRIDE: tl.constexpr,
     FINITE_ONLY: tl.constexpr,
+    PRESELECTED: tl.constexpr = False,
+    LOGITS_WIDTH: tl.constexpr = 0,
 ):
     row = tl.program_id(0)
     slot = tl.arange(0, 4096)
     index = slot // 4
-    value = tl.load(values + row * K + index, index < K, other=float("-inf"))
-    block = tl.load(blocks + row * K + index, index < K, other=0)
-    if FINITE_ONLY:
-        finite = (value == value) & (tl.abs(value) != float("inf"))
-    else:
-        finite = value > float("-inf")
-    token = tl.where((index < K) & finite, block * 4 + slot % 4, -1)
-    length = tl.load(lengths + row * LENGTH_STRIDE).to(tl.int64)
+    length = (
+        row.to(tl.int64) + 1
+        if lengths is None
+        else tl.load(lengths + row * LENGTH_STRIDE).to(tl.int64)
+    )
     complete = (length - tl.where(length < 0, 3, 0)) // 4
+    block = tl.load(blocks + row * K + index, index < K, other=-1)
+    if PRESELECTED:
+        valid = (block >= 0) & (block < complete)
+        if LOGITS_WIDTH:
+            valid &= block < LOGITS_WIDTH
+            value = tl.load(values + row * LOGITS_WIDTH + block, valid, other=0)
+            valid &= (value == value) & (tl.abs(value) != float("inf"))
+    else:
+        value = tl.load(values + row * K + index, index < K, other=float("-inf"))
+        if FINITE_ONLY:
+            valid = (value == value) & (tl.abs(value) != float("inf"))
+        else:
+            valid = value > float("-inf")
+    token = tl.where((index < K) & valid, block * 4 + slot % 4, -1)
     tail_offset = slot - 2048
     tail = tl.where(tail_offset < length - complete * 4, complete * 4 + tail_offset, -1)
     token = tl.where(slot >= 2048, tail, token)
     tl.store(output + row * 2051 + slot, token.to(tl.int32), slot < 2051)
+
+
+def expand_qsa_block_ids(block_ids, lengths=None, logits=None):
+    """Expand preselected blocks and append the implicit 0–3 token tail."""
+    rows, width = block_ids.shape
+    output = torch.empty((rows, 2051), device=block_ids.device, dtype=torch.int32)
+    _expand_tokens[(rows,)](
+        logits,
+        block_ids,
+        lengths,
+        output,
+        K=width,
+        LENGTH_STRIDE=0 if lengths is None else lengths.stride(0),
+        FINITE_ONLY=True,
+        PRESELECTED=True,
+        LOGITS_WIDTH=0 if logits is None else logits.shape[1],
+        num_warps=4,
+    )
+    return output
+
+
+@triton.jit
+def _mask_decode_pages(
+    scores,
+    table,
+    counts,
+    COLS: tl.constexpr,
+    TABLE_STRIDE: tl.constexpr,
+    PAGES: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    cols = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    visible = (cols < COLS) & (cols < tl.load(counts + row))
+    page = tl.load(table + row * TABLE_STRIDE + cols // 32, visible, other=0)
+    missing = (page <= 0) | (page >= PAGES)
+    tl.store(scores + row * COLS + cols, float("-inf"), visible & missing)
+
+
+def mask_qsa_decode_pages(scores, table, counts, pages):
+    rows, cols = scores.shape
+    _mask_decode_pages[(rows, triton.cdiv(cols, 256))](
+        scores, table, counts, cols, table.stride(0), pages, 256
+    )
 
 
 @triton.jit
