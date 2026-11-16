@@ -48,8 +48,8 @@ Decode 和不开启该开关的部署不执行这些自动配置。
 
 同组必须可达 Owner 端口并使用相同的模型版本。旧消费者在线期间禁止就地修改权重。
 设置空 `RTP_LLM_RESIDENT_OWNER_ARGS` 可以保留纯消费者模式。
-C2 分批填入 ganginfo IP 时，Supervisor 只有在所有分片 IP 齐全且拓扑有效后才启动 Owner。
-校验失败时记录原因和缺 IP 的分片，清理后以退出码 1 退出，由平台重新拉起。
+C2 分批填入 ganginfo IP 时，Supervisor 在挂载模型前检查所有分片 IP 是否齐全、拓扑是否有效。
+如果 C2 拓扑无效，Supervisor 记录原因和缺 IP 的分片，以退出码 1 退出，由平台重新拉起。
 
 ## 故障与责任边界
 
