@@ -18,7 +18,7 @@ public:
                           const std::shared_ptr<TokenProcessor>&          token_processor);
     virtual ~GenerateStreamWrapper() = default;
 
-    bool init(const std::shared_ptr<GenerateInput>& input, const std::shared_ptr<EngineBase>& engine);
+    void init(const std::shared_ptr<GenerateInput>& input, const std::shared_ptr<EngineBase>& engine);
 
     void init(GenerateStreamPtr input, const std::shared_ptr<EngineBase>& engine);
 

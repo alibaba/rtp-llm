@@ -239,6 +239,7 @@ GenerateInputPB lifecycleRequest() {
     request.add_token_ids(2);
     auto* config = request.mutable_generate_config();
     config->set_max_new_tokens(8);
+    config->set_can_use_pd_separation(true);
     config->set_num_beams(1);
     config->set_num_return_sequences(1);
     config->set_timeout_ms(10000);

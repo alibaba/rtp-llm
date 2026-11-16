@@ -381,33 +381,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(request.mm_token_expansion)
         visitor.master_client.get_vit_cache_metadata.assert_not_awaited()
 
-    async def test_mixed_frontend_accepts_either_complete_route(self):
-        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
-        visitor._local_prefill_addresses = []
-        visitor._mm_cache_routing = False
-        visitor.master_config = None
-        visitor.host_service = MagicMock()
-        visitor.backend_role_list = [
-            RoleType.PREFILL,
-            RoleType.DECODE,
-            RoleType.PDFUSION,
-        ]
-        for roles in ((RoleType.PDFUSION,), (RoleType.PREFILL, RoleType.DECODE)):
-            with self.subTest(roles=roles):
-                request = _FakeInput()
-                request.generate_config.role_addrs = [
-                    RoleAddr(role=role, ip="requested", http_port=9000, grpc_port=9001)
-                    for role in roles
-                ]
-                with patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor"):
-                    await visitor.route_ips(request)
-                self.assertEqual(
-                    [address.role for address in request.generate_config.role_addrs],
-                    list(roles),
-                )
-        visitor.host_service.get_backend_role_addrs.assert_not_called()
-
-    async def test_mixed_frontend_fills_only_prefill_for_selected_decode(self):
+    async def test_mixed_frontend_requests_all_missing_configured_roles(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor._local_prefill_addresses = []
         visitor._mm_cache_routing = False
@@ -430,11 +404,11 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
             await visitor.route_ips(request)
 
         visitor.host_service.get_backend_role_addrs.assert_called_once_with(
-            [RoleType.PREFILL]
+            [RoleType.PREFILL, RoleType.PDFUSION]
         )
         self.assertEqual(request.generate_config.role_addrs, [decode, prefill])
 
-    async def test_mixed_frontend_chooses_fusion_when_prefill_domain_is_unavailable(
+    async def test_mixed_frontend_keeps_discovered_role_order(
         self,
     ):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
@@ -456,7 +430,7 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         with patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor"):
             await visitor.route_ips(request)
 
-        self.assertEqual(request.generate_config.role_addrs, [fusion])
+        self.assertEqual(request.generate_config.role_addrs, [decode, fusion])
 
     async def test_route_ips_preserves_request_source_when_domain_completes_roles(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
@@ -1342,69 +1316,16 @@ class MixedFrontendBatchTest(unittest.IsolatedAsyncioTestCase):
         visitor.model_rpc_client = SimpleNamespace(batch_enqueue=AsyncMock(return_value=["result"]))
         return visitor
 
-    async def test_pdfusion_batch_keeps_local_execution_without_per_item_master_routes(self):
+    async def test_frontend_batch_uses_normal_per_item_routing(self):
         visitor = self.make_visitor()
-        visitor.pd_sep_config.role_type = RoleType.PDFUSION
         visitor.host_service.service_available = True
         inputs = [_FakeRouteInput(), _FakeRouteInput()]
+
         result = await visitor.batch_enqueue(inputs)
+
         self.assertEqual(result, ["result"])
-        visitor.route_ips.assert_not_awaited()
+        self.assertEqual(visitor.route_ips.await_count, 2)
         visitor.host_service.get_backend_role_addrs.assert_not_called()
-        visitor.model_rpc_client.batch_enqueue.assert_awaited_once_with(inputs)
-
-    async def test_mixed_frontend_resolves_pdfusion_without_master_enqueue(self):
-        visitor = self.make_visitor()
-        fusion = RoleAddr(role=RoleType.PDFUSION, ip="fusion", http_port=9000, grpc_port=9001)
-        visitor.host_service.get_backend_role_addrs.return_value = [fusion]
-        inputs = [_FakeRouteInput(), _FakeRouteInput()]
-        result = await visitor.batch_enqueue(inputs)
-        self.assertEqual(result, ["result"])
-        visitor.host_service.get_backend_role_addrs.assert_called_once_with([RoleType.PDFUSION])
-        visitor.route_ips.assert_not_awaited()
-        for item in inputs:
-            self.assertEqual(item.generate_config.role_addrs, [fusion])
-
-    async def test_fusion_batch_resolves_vit_for_multimodal_items(self):
-        fusion = RoleAddr(
-            role=RoleType.PDFUSION, ip="fusion", http_port=9000, grpc_port=9001
-        )
-        vit = RoleAddr(role=RoleType.VIT, ip="vit", http_port=8000, grpc_port=8001)
-        for role in (RoleType.PDFUSION, RoleType.FRONTEND):
-            with self.subTest(role=role):
-                visitor = self.make_visitor()
-                visitor.pd_sep_config.role_type = role
-                visitor.backend_role_list.append(RoleType.VIT)
-                visitor.host_service.get_backend_role_addrs.side_effect = (
-                    lambda roles: [vit] if roles == [RoleType.VIT] else [fusion]
-                )
-                text, vision = _FakeRouteInput(), _FakeRouteInput()
-                vision.mm_inputs = [object()]
-                await visitor.batch_enqueue([text, vision])
-                self.assertNotIn(vit, text.generate_config.role_addrs)
-                self.assertIn(vit, vision.generate_config.role_addrs)
-                visitor.route_ips.assert_not_awaited()
-
-    async def test_missing_batch_targets_fail_before_rpc(self):
-        visitor = self.make_visitor()
-        visitor.host_service.get_backend_role_addrs.return_value = []
-        item = _FakeRouteInput()
-        with self.assertRaises(FtRuntimeException):
-            await visitor.batch_enqueue([item])
-        visitor.model_rpc_client.batch_enqueue.assert_not_awaited()
-        visitor.route_ips.assert_not_awaited()
-
-    async def test_pd_only_frontend_resolves_one_pair_without_master_admission(self):
-        visitor = self.make_visitor()
-        prefill = RoleAddr(role=RoleType.PREFILL, ip="prefill", http_port=1, grpc_port=2)
-        decode = RoleAddr(role=RoleType.DECODE, ip="decode", http_port=3, grpc_port=4)
-        visitor.host_service.get_backend_role_addrs.side_effect = [[], [prefill, decode]]
-        inputs = [_FakeRouteInput(), _FakeRouteInput()]
-        await visitor.batch_enqueue(inputs)
-        for item in inputs:
-            self.assertEqual(item.generate_config.role_addrs, [prefill, decode])
-            self.assertFalse(item.enqueued_by_master)
-        visitor.route_ips.assert_not_awaited()
         visitor.model_rpc_client.batch_enqueue.assert_awaited_once_with(inputs)
 
     async def test_master_admitted_batch_keeps_its_existing_pair(self):
@@ -1418,23 +1339,6 @@ class MixedFrontendBatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(item.generate_config.role_addrs, pair)
         self.assertTrue(item.enqueued_by_master)
         visitor.host_service.get_backend_role_addrs.assert_not_called()
-
-    async def test_pd_frontend_batch_resolves_vit_for_prefill_fallback(self):
-        visitor = self.make_visitor()
-        visitor.backend_role_list.append(RoleType.VIT)
-        prefill = RoleAddr(role=RoleType.PREFILL, ip="prefill", http_port=1, grpc_port=2)
-        decode = RoleAddr(role=RoleType.DECODE, ip="decode", http_port=3, grpc_port=4)
-        vit = RoleAddr(role=RoleType.VIT, ip="vit", http_port=5, grpc_port=6)
-        visitor.host_service.get_backend_role_addrs.side_effect = [
-            [],
-            [prefill, decode],
-            [vit],
-        ]
-        item = _FakeRouteInput()
-        item.mm_inputs = [object()]
-        await visitor.batch_enqueue([item])
-        self.assertEqual(item.generate_config.role_addrs, [prefill, decode, vit])
-        visitor.model_rpc_client.batch_enqueue.assert_awaited_once_with([item])
 
     async def test_prefill_entry_batches_each_pd_pair_and_preserves_response_order(self):
         visitor = self.make_visitor()

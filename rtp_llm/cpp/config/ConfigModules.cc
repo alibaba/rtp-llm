@@ -352,6 +352,11 @@ std::string CacheStoreConfig::to_string() const {
         << "messager_worker_thread_count: " << messager_worker_thread_count << "\n"
         << "rdma_max_block_pairs_per_connection: " << rdma_max_block_pairs_per_connection << "\n"
         << "p2p_transfer_not_done_resource_hold_ms: " << p2p_transfer_not_done_resource_hold_ms << "\n"
+        << "rdma_transfer_wait_timeout_ms: " << rdma_transfer_wait_timeout_ms << "\n"
+        << "p2p_read_steal_before_deadline_ms: " << p2p_read_steal_before_deadline_ms << "\n"
+        << "p2p_read_return_before_deadline_ms: " << p2p_read_return_before_deadline_ms << "\n"
+        << "p2p_resource_store_timeout_check_interval_ms: " << p2p_resource_store_timeout_check_interval_ms << "\n"
+        << "p2p_layer_cache_buffer_store_timeout_ms: " << p2p_layer_cache_buffer_store_timeout_ms << "\n"
         << "p2p_lease_query_timeout_ms: " << p2p_lease_query_timeout_ms << "\n"
         << "p2p_kv_leak_exit_threshold_percent: " << p2p_kv_leak_exit_threshold_percent << "\n"
         << "p2p_cancel_broadcast_timeout_ms: " << p2p_cancel_broadcast_timeout_ms << "\n"
@@ -584,7 +589,10 @@ std::string PDSepConfig::to_string() const {
         << "rdma_connect_retry_times: " << rdma_connect_retry_times << "\n"
         << "load_cache_timeout_ms: " << load_cache_timeout_ms << "\n"
         << "max_rpc_timeout_ms: " << max_rpc_timeout_ms << "\n"
-        << "worker_port_offset: " << worker_port_offset << "\n";
+        << "worker_port_offset: " << worker_port_offset << "\n"
+        << "decode_entrance: " << decode_entrance << "\n"
+        << "prefill_prepare_resource_pool_size: " << prefill_prepare_resource_pool_size << "\n"
+        << "prefill_stop_stream_wait_timeout_ms: " << prefill_stop_stream_wait_timeout_ms << "\n";
     return oss.str();
 }
 

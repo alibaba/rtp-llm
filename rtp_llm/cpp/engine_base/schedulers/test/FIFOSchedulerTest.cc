@@ -1385,7 +1385,7 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerSchedulesNonzeroBatch) {
     }
 }
 
-TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerRunsReadyStreamWhilePeerWaitsForKv) {
+TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerRunsReadyStreamWhenPeerFailsKvAllocation) {
     auto [cache_manager, resource_context, model_config, runtime_config] =
         makeBatchDecodeResources(test::makeSimpleMhaCacheConfig(1, 6, 1, rtp_llm::DataType::TYPE_FP16, 1, 4));
     resource_context.role_type = RoleType::DECODE;
@@ -1393,17 +1393,14 @@ TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerRunsReadyStreamWhilePeerWaitsF
     BatchDecodeScheduler scheduler(runtime_config, cache_manager, nullptr);
 
     auto ready   = makeStream({1, 2, 3}, model_config, runtime_config, resource_context, /*max_new_tokens=*/2);
-    auto waiting = makeStream({4, 5, 6}, model_config, runtime_config, resource_context, /*max_new_tokens=*/2);
-    ASSERT_TRUE(enqueueIndividually(scheduler, {ready, waiting}));
+    auto rejected = makeStream({4, 5, 6}, model_config, runtime_config, resource_context, /*max_new_tokens=*/2);
+    ASSERT_TRUE(enqueueIndividually(scheduler, {ready, rejected}));
 
     ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, ready));
-    EXPECT_EQ(waiting->getStatus(), StreamState::WAITING);
-    EXPECT_TRUE(waiting->hasEvent(StreamEvents::CanRun));
-    EXPECT_FALSE(waiting->hasEvent(StreamEvents::LoadInitiated));
-    EXPECT_EQ(scheduler.onflightStreams(), 2);
-
-    ready->reportEvent(StreamEvents::GenerateDone);
-    ASSERT_NO_FATAL_FAILURE(verifyOnlyScheduledStream(scheduler, waiting));
+    EXPECT_EQ(rejected->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(rejected->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    EXPECT_FALSE(rejected->hasEvent(StreamEvents::LoadInitiated));
+    EXPECT_EQ(scheduler.onflightStreams(), 1);
 }
 
 TEST_F(FIFOSchedulerTest, testFIFOAdmissionModeStillIncludesRunningStream) {

@@ -130,7 +130,7 @@ def init_cache_store_group_args(parser, cache_store_config):
         bind_to=(cache_store_config, "p2p_resource_store_timeout_check_interval_ms"),
         type=int,
         default=100,
-        help="P2P decode 侧资源 store 周期扫描超时资源的间隔（毫秒）。",
+        help="兼容旧启动配置。当前资源过期由请求截止时间驱动。",
     )
     cache_store_group.add_argument(
         "--p2p_layer_cache_buffer_store_timeout_ms",
@@ -227,4 +227,31 @@ def init_cache_store_group_args(parser, cache_store_config):
         type=int,
         default=10000,
         help="P2P Prefill 异步发送线程池的队列容量，必须大于 0。",
+    )
+
+    cache_store_group.add_argument(
+        "--cache_store_rdma_transfer_wait_timeout_ms",
+        env_name="CACHE_STORE_RDMA_TRANSFER_WAIT_TIMEOUT_MS",
+        bind_to=(cache_store_config, "rdma_transfer_wait_timeout_ms"),
+        type=int,
+        default=180000,
+        help="兼容旧启动配置，P2P 传输路径不使用此参数。",
+    )
+
+    cache_store_group.add_argument(
+        "--p2p_read_steal_before_deadline_ms",
+        env_name="P2P_READ_STEAL_BEFORE_DEADLINE_MS",
+        bind_to=(cache_store_config, "p2p_read_steal_before_deadline_ms"),
+        type=int,
+        default=250,
+        help="兼容旧启动配置，P2P 传输路径不使用此参数。",
+    )
+
+    cache_store_group.add_argument(
+        "--p2p_read_return_before_deadline_ms",
+        env_name="P2P_READ_RETURN_BEFORE_DEADLINE_MS",
+        bind_to=(cache_store_config, "p2p_read_return_before_deadline_ms"),
+        type=int,
+        default=100,
+        help="兼容旧启动配置，P2P 传输路径不使用此参数。",
     )

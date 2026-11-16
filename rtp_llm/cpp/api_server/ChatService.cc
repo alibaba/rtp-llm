@@ -10,38 +10,6 @@ using namespace autil::legacy::json;
 
 namespace rtp_llm {
 
-namespace {
-
-class StreamErrorPayload: public autil::legacy::Jsonizable {
-public:
-    class StreamErrorBody: public autil::legacy::Jsonizable {
-    public:
-        void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
-            json.Jsonize("message", message, message);
-            json.Jsonize("type", type, type);
-        }
-
-    public:
-        std::string message;
-        std::string type = "stream_error";
-    };
-
-    void Jsonize(autil::legacy::Jsonizable::JsonWrapper& json) override {
-        json.Jsonize("error", error, error);
-    }
-
-public:
-    StreamErrorBody error;
-};
-
-std::string createStreamErrorJson(const std::string& message) {
-    StreamErrorPayload payload;
-    payload.error.message = message;
-    return ToJsonString(payload, true);
-}
-
-}  // namespace
-
 // ChatService::ChatService() {}
 
 std::shared_ptr<GenerateInput> ChatService::fillGenerateInput(int64_t                      request_id,
@@ -157,7 +125,7 @@ void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig
     ctx->init(num_return_sequences, body, chat_render);
 
     auto write_sse_response = [&](std::string json_response) {
-        std::string sse_response = chatSseFrame(json_response);
+        std::string sse_response = sseResponse(json_response);
         writer->AddHeader("Content-Type", "text/event-stream");
         writer->Write(sse_response);
         index += 1;
@@ -177,7 +145,7 @@ void ChatService::generateStreamingResponse(const std::shared_ptr<GenerateConfig
             const auto exception = streamErrorToHttpException(status);
             metric_reporter_->reportErrorQpsMetric(chat_request.source.value_or("unknown"), exception.getType());
             AccessLogWrapper::logExceptionAccess(body, request_id, exception.what());
-            write_sse_response(index > 0 ? createStreamErrorJson(status.ToString()) : formatException(exception));
+            write_sse_response(formatException(exception));
             writer->WriteDone();
             return;
         }
@@ -233,16 +201,6 @@ void ChatService::chatCompletions(const std::unique_ptr<http_server::HttpRespons
 
     auto input  = fillGenerateInput(request_id, chat_request, rendered_input);
     auto stream = engine_->enqueue(input);
-    if (stream->hasError()) {
-        auto error_info = stream->statusInfo();
-        HttpApiServerException e(transErrorCodeToHttpExceptionType(error_info.code()), error_info.ToString());
-        if (metric_reporter_) {
-            metric_reporter_->reportErrorQpsMetric(chat_request.source.value_or("unknown"), e.getType());
-        }
-        AccessLogWrapper::logExceptionAccess(body, request_id, e.what());
-        WriteExceptionResponse(writer, e);
-        return;
-    }
 
     if (chat_request.stream.value_or(false) == false) {
         generateResponse(input->generate_config,
