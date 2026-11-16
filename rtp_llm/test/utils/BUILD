@@ -34,14 +34,14 @@ py_library(
 
 py_binary(
     name = "gpu_lock",
-    deps = [":jit_sys_path_setup", ":filelock", ":torch"],
+    deps = [":jit_sys_path_setup", ":filelock", ":torch", ":shared_memory_table"],
     main = "device_resource.py",
     srcs = ["device_resource.py", "jit_sys_path_setup.py"],
 )
 
 py_library(
     name = "device_resource",
-    deps = [":filelock", ":jit_sys_path_setup"],
+    deps = [":filelock", ":jit_sys_path_setup", ":shared_memory_table"],
     srcs = ["device_resource.py"],
 )
 
@@ -99,4 +99,17 @@ py_test(
     tags = ["SM100_ARM_CU13"],
     env = {"GPU_COUNT": "1"},
     exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
+)
+
+py_library(
+    name = "shared_memory_table",
+    srcs = ["shared_memory_table.py"],
+)
+
+py_test(
+    name = "shared_memory_table_test",
+    size = "small",
+    srcs = ["shared_memory_table_test.py"],
+    env = {"GPU_COUNT": "0"},
+    deps = [":shared_memory_table"],
 )
