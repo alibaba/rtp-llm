@@ -145,15 +145,25 @@ def _require_n_shared_experts(config_json: dict) -> int:
     return raw_value
 
 
+_PPU_FLASH_LAYERS = {
+    "deepseek_v4": 43,
+    # V4-Flash MTP is a single SWA block; the 0731 DSpARK checkpoint stores
+    # three of them (mtp.0/1/2) behind a trailing zeroed compress ratio.
+    "deepseek_v4_mtp": 1,
+    "deepseek_v4_dspark": 3,
+}
+
+
 def _is_ppu_flash(config):
-    if config.model_type not in ("deepseek_v4", "deepseek_v4_mtp"):
+    expected_layers = _PPU_FLASH_LAYERS.get(config.model_type)
+    if expected_layers is None:
         return False
     from rtp_llm.device.device_type import is_ppu
 
     return (
         is_ppu()
         and config.hidden_size == 4096
-        and config.num_layers == (1 if config.model_type == "deepseek_v4_mtp" else 43)
+        and config.num_layers == expected_layers
     )
 
 
@@ -1266,9 +1276,14 @@ class DeepSeekV4DSpark(DeepSeekV4):
         return config
 
     def _create_python_model(self):
-        from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import (
-            DeepSeekV4DSparkModel,
-        )
+        if _is_ppu_flash(self.model_config):
+            from rtp_llm.models_py.model_desc.deepseek_v4_ppu.dspark_model import (
+                PpuDeepSeekV4DSparkModel as DeepSeekV4DSparkModel,
+            )
+        else:
+            from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import (
+                DeepSeekV4DSparkModel,
+            )
 
         self.py_model = DeepSeekV4DSparkModel(
             self.model_config,

@@ -52,18 +52,28 @@ def validate_cache_config(kv_cache_config):
         raise ValueError("PPU DSV4 prefix reuse requires experimental DSV4_PPU_PREFIX_REUSE=1")
 
 
+DRAFT_LAYERS = {"deepseek_v4_mtp": 1, "deepseek_v4_dspark": 3}
+
+
 def build_provider(model_config, parallelism, moe_config, max_generate_batch_size):
     from rtp_llm.ops import KvCacheDataType
 
     role = parallelism.role_type.name
-    draft = model_config.model_type == "deepseek_v4_mtp"
+    draft_depth = DRAFT_LAYERS.get(model_config.model_type)
+    draft = draft_depth is not None
     if (
         model_config.hidden_size != 4096
-        or model_config.num_layers != (1 if draft else 43)
-        or model_config.model_type not in ("deepseek_v4", "deepseek_v4_mtp")
-        or (draft and list(model_config.attn_config.layer_compress_ratios) != [0])
+        or model_config.model_type not in ("deepseek_v4",) + tuple(DRAFT_LAYERS)
+        or model_config.num_layers != (draft_depth if draft else 43)
+        or (
+            draft
+            and list(model_config.attn_config.layer_compress_ratios) != [0] * draft_depth
+        )
     ):
-        raise ValueError("PPU supports DeepSeek V4 Flash and its single SWA MTP layer")
+        raise ValueError(
+            "PPU supports DeepSeek V4 Flash, its single SWA MTP layer and the "
+            "three SWA DSpARK draft layers"
+        )
     if role not in ("PREFILL", "DECODE"):
         raise ValueError(f"PPU DSV4 requires separate Prefill and Decode roles, got {role}")
     if parallelism.pp_size != 1 or parallelism.prefill_cp_config.is_enabled():
@@ -81,8 +91,18 @@ def build_provider(model_config, parallelism, moe_config, max_generate_batch_siz
     if (model_config.attn_config.kernel_tokens_per_block != 256
             or model_config.attn_config.tokens_per_block != 256):
         raise ValueError("PPU DSV4 requires matching 256-token physical and kernel blocks")
-    if model_config.gen_num_per_cycle not in (0, 1, 2, 3):
-        raise ValueError("PPU DSV4 supports MTP depths 1 through 3")
+    # GEN_NUM_PER_CYCLE is the runtime proposal width and the target carries it
+    # too (for its gamma+1 verify span), so the gate keys off the checkpoint:
+    # a DSpARK checkpoint declares its own width, plain MTP stays at 1..3.
+    dspark = model_config.model_type == "deepseek_v4_dspark" or bool(
+        getattr(model_config, "dspark_target_layer_ids", None)
+    )
+    max_depth = 8 if dspark else 3
+    if not 0 <= model_config.gen_num_per_cycle <= max_depth:
+        raise ValueError(
+            f"PPU DSV4 supports {model_config.model_type} speculative depth "
+            f"0 through {max_depth}, got {model_config.gen_num_per_cycle}"
+        )
     if getattr(model_config, "lora_infos", None) or model_config.eplb_config.enable_eplb():
         raise ValueError("PPU DSV4 LoRA and EPLB are not qualified")
     if parallelism.ep_size > 1 or role == "DECODE":

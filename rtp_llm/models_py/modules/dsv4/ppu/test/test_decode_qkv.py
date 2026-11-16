@@ -89,7 +89,8 @@ class DecodeQKVGpuTest(unittest.TestCase):
 
     @torch.inference_mode()
     def test_dynamic_normalization_graph_and_empty_batch(self):
-        for width in (1, 2, 3, 4):
+        # 5/6 are the DSpARK proposal block and its gamma+1 verify span.
+        for width in (1, 2, 3, 4, 5, 6):
             with self.subTest(query_len=width):
                 self._check_dynamic_normalization(width)
 

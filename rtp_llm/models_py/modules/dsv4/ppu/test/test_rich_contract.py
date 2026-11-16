@@ -13,6 +13,71 @@ _CONTRACT = Path(__file__).parents[6] / "rtp_llm/models_py/modules/dsv4/ppu/atte
 
 
 class RichContractTest(unittest.TestCase):
+    def test_dspark_block_index_width_is_admitted(self):
+        """The SWA pool accepts the doubled DSpARK block width, nothing else."""
+
+        class Fake:
+            def __init__(self, shape, dtype, strides=None, contiguous=True):
+                self.shape = tuple(shape)
+                self.dtype = dtype
+                self.device = "ppu"
+                self.ndim = len(self.shape)
+                self._strides = tuple(strides or [1] * self.ndim)
+                self._contiguous = contiguous
+
+            def stride(self, dim):
+                return self._strides[dim]
+
+            def is_contiguous(self):
+                return self._contiguous
+
+        fake_torch = types.ModuleType("torch")
+        fake_torch.Tensor = Fake
+        fake_torch.uint8 = "uint8"
+        fake_torch.bfloat16 = "bf16"
+        fake_torch.int32 = "int32"
+        fake_torch.float32 = "fp32"
+        namespace = {
+            "torch": fake_torch,
+            "RICH_SWA_INDEX_WIDTH": 128,
+            "RICH_SWA_PAGE": 128,
+            "RICH_CSA_INDEX_WIDTH": 512,
+            "RICH_HCA_INDEX_WIDTH": 64,
+        }
+        tree = ast.parse(_CONTRACT.read_text())
+        wanted = (
+            "_validate_rich_pool_page",
+            "_validate_model1_cache_tensor",
+            "_validate_rich_pool",
+            "_validate_lengths",
+            "validate_swa_pool",
+        )
+        nodes = [
+            n for n in tree.body
+            if (isinstance(n, ast.FunctionDef) and n.name in wanted)
+            or (isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name)
+                and n.targets[0].id == "RICH_SWA_MAX_INDEX_WIDTH")
+        ]
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), str(_CONTRACT), "exec"),
+             namespace)
+        validate = namespace["validate_swa_pool"]
+        # 128 physical SWA entries per block, padded row stride as in the pool.
+        pool = Fake((16, 128, 584), "uint8", strides=(74880, 584, 1))
+
+        def call(width):
+            validate(
+                q=Fake((2, 5, 64, 512), "bf16"),
+                swa_pool_3d=pool,
+                swa_topk_3d=Fake((2, 5, width), "int32"),
+                attn_sink=Fake((64,), "fp32"),
+                topk_length=Fake((2,), "int32"),
+            )
+
+        call(128)
+        call(256)
+        with self.assertRaisesRegex(ValueError, "unsupported width 320"):
+            call(320)
+
     def test_scheduler_key_and_buckets(self):
         fake_torch = types.ModuleType("torch")
         fake_torch.Tensor = object
