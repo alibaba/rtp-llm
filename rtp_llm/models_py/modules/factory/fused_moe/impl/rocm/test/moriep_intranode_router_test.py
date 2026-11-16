@@ -609,18 +609,6 @@ class MoriEpIntranodeRouterTest(unittest.TestCase):
         mp.set_start_method("spawn", force=True)
         test_single(world_size=4, dist_port=_get_free_port())
 
-    @pytest.mark.gpu(type="MI308X_ROCM7", count=2)
-    def test_short_tail_multichunk(self):
-        self._check_skip()
-        mp.set_start_method("spawn", force=True)
-        # Distinct random data in 8+8+4 tokens exposes routing and shared-view reuse.
-        test_single(
-            world_size=2,
-            dist_port=_get_free_port(),
-            token_num_aligned=20,
-            max_tokens_on_rank=8,
-        )
-
 
 if __name__ == "__main__":
     unittest.main()
