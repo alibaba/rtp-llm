@@ -1269,7 +1269,7 @@ TEST_F(FIFOSchedulerTest, WeightedPoolsWaitForExhaustedPoolAndReadmitAfterCancel
         waiting->reportError(ErrorCode::CANCELLED, "finish weighted pool test");
         auto drained = scheduler.schedule();
         ASSERT_TRUE(drained.ok());
-        EXPECT_TRUE(drained->empty());
+        EXPECT_TRUE(drained->streams.empty());
         for (const auto& pool : pools) {
             EXPECT_EQ(pool->referencedBlocksNum(), 0u);
         }
@@ -1519,8 +1519,8 @@ TEST_F(FIFOSchedulerTest, LinearHistoryAdmissionJoinsPendingWorkerWithoutHolding
     running->decPendingAsyncBookkeepingAndMaybeRelease();
     auto result = next_round.get();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result->size(), 1u);
-    EXPECT_EQ(result->front(), candidate);
+    ASSERT_EQ(result->streams.size(), 1u);
+    EXPECT_EQ(result->streams.front(), candidate);
     EXPECT_EQ(scheduler.waiting_streams_.size(), 0u);
     scheduler.stop();
 }
