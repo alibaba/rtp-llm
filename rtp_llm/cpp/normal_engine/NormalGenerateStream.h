@@ -46,7 +46,6 @@ private:
     GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status_{
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     std::deque<GenerateOutputs> generate_outputs_;
-    torch::Tensor               selected_logits_;
 };
 
 std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_new_tokens,

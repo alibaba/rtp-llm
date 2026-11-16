@@ -224,9 +224,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
     generate_results.request_id    = request_id_;
 
     torch::Tensor logits_result;
-    if (finished_ && selected_logits_.defined()) {
-        logits_result = std::move(selected_logits_);
-    } else if (returnLogits() && update_info.logits.defined()) {
+    if (returnLogits() && update_info.logits.defined()) {
         logits_result = selectLogits(update_info.logits);
     }
 
@@ -508,12 +506,6 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
             || (role == RoleType::DECODE && !update_info.update_remote_generate && iter_count_ == 1));
     const bool need_update = pd_sep_first_token || isStreaming() || finished_;
     if (!need_update) {
-        // Keep the requested step's logits when the stream buffers its token output.
-        const auto logits_index = generateConfig()->logits_index;
-        if (returnLogits() && update_info.logits.defined() && logits_index
-            && seqLength() - inputLength() == *logits_index) {
-            selected_logits_ = selectLogits(update_info.logits).to(torch::kCPU, false, true);
-        }
         return;
     }
 

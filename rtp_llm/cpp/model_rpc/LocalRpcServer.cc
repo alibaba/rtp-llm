@@ -355,7 +355,8 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
     // optional first-token tensors; streaming and other roles keep block semantics.
     const bool collect_pd_output =
         stream->queryPdSep() && stream->resourceContext().role_type == RoleType::DECODE && !stream->isStreaming();
-    BatchStreamOutputCollector complete_output(stream->generateConfig()->logits_index);
+    const auto& config = *stream->generateConfig();
+    BatchStreamOutputCollector complete_output(config.aux_info ? config.logits_index : std::nullopt);
     while (true) {
         auto remote_error = check_remote ? check_remote() : FirstError::Snapshot{};
         auto first        = FirstError::earlier(stream->firstError(), remote_error);
@@ -462,7 +463,9 @@ grpc::Status LocalRpcServer::pollBatchStreamOutput(
     std::vector<BatchStreamOutputCollector> collectors;
     collectors.reserve(streams.size());
     for (const auto& stream : streams) {
-        collectors.emplace_back(stream ? stream->generateConfig()->logits_index : std::nullopt);
+        collectors.emplace_back(stream && stream->generateConfig()->aux_info
+                                    ? stream->generateConfig()->logits_index
+                                    : std::nullopt);
     }
     std::vector<bool> settled(streams.size(), false);
     while (true) {
