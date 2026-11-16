@@ -3,6 +3,7 @@
 import tempfile
 import types
 import unittest
+from itertools import product
 
 import torch
 import torch.nn.functional as F
@@ -21,7 +22,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_t
 from rtp_llm.models_py.new_models.llama import LlamaForCausalLM
 from rtp_llm.models_py.quant_methods import QuantizationConfig
 from rtp_llm.ops import RopeStyle
-from rtp_llm.ops.compute_ops import PyModelInputs
+from rtp_llm.ops.compute_ops import FlashInferMlaAttnParams, PyModelInputs
 
 
 class ScaledRopePrefillTest(BaseAttentionTest):
@@ -100,13 +101,19 @@ class ScaledRopePrefillTest(BaseAttentionTest):
 
     def test_ragged_and_prefix_paged_outputs_and_kv_match_reference(self):
         for llama3 in (True, False):
-            for prefixes in ([0, 0], [7, 35]):
-                with self.subTest(llama3=llama3, prefixes=prefixes):
+            for prefixes, device_input in product(([0, 0], [7, 35]), (False, True)):
+                with self.subTest(
+                    llama3=llama3, prefixes=prefixes, device_input=device_input
+                ):
                     counts = [17, 41]
                     config = self.config(llama3)
                     inputs = self._create_chunked_prefill_attention_inputs(
                         2, prefixes, counts, 16
                     )
+                    if device_input:
+                        inputs.input_lengths = inputs.input_lengths.to(self.device)
+                        inputs.prefix_lengths = inputs.prefix_lengths.to(self.device)
+                        inputs.prefix_lengths_device = inputs.prefix_lengths
                     lengths = [p + n for p, n in zip(prefixes, counts)]
                     raw = [
                         torch.randn(n, 8, 128, device=self.device, dtype=torch.float16)
@@ -134,6 +141,15 @@ class ScaledRopePrefillTest(BaseAttentionTest):
                         else PyFlashinferPrefillImpl
                     )
                     impl = impl_type(config, inputs)
+                    if device_input and any(prefixes):
+                        # Poison and refill: the old device planner left this
+                        # buffer untouched, even though DynamicNTK consumes it.
+                        impl.fmha_params.kvlen_d.fill_(-777)
+                        impl.fmha_impl.prepare(inputs)
+                        torch.testing.assert_close(
+                            impl.fmha_params.kvlen_d.cpu(),
+                            torch.tensor(lengths, dtype=torch.int32),
+                        )
                     packed = torch.cat([x[p:] for x, p in zip(raw, prefixes)]).reshape(
                         sum(counts), -1
                     )
@@ -166,6 +182,87 @@ class ScaledRopePrefillTest(BaseAttentionTest):
                         rtol=3e-3,
                         atol=3e-3,
                     )
+
+    def test_device_planner_kv_lengths_decode_prefill_and_reuse(self):
+        params = FlashInferMlaAttnParams()
+        empty = torch.empty(0, device=self.device, dtype=torch.int32)
+        blocks = torch.arange(16, device=self.device, dtype=torch.int32).reshape(2, 8)
+        for decode in (False, True):
+            for batch in (2, 1, 2):
+                lengths = torch.tensor(
+                    [5, 9][:batch], device=self.device, dtype=torch.int32
+                )
+                prefixes = torch.tensor(
+                    [17, 35][:batch], device=self.device, dtype=torch.int32
+                )
+                args = (
+                    empty if decode else prefixes,
+                    prefixes if decode else empty,
+                    lengths,
+                    blocks[:batch],
+                    16,
+                    False,
+                )
+                params.fill_params_mha_device(*args)
+                params.kvlen_d.fill_(-777)
+                params.fill_params_mha_device(*args)
+                expected = prefixes + 1 if decode else prefixes + lengths
+                torch.testing.assert_close(params.kvlen_d, expected)
+                self.assertEqual(params.kvlen_d.numel(), batch)
+
+    def test_device_planner_and_dynamic_ntk_graph_replay(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
+            MhaRotaryEmbeddingOp,
+        )
+
+        params = FlashInferMlaAttnParams()
+        empty = torch.empty(0, device=self.device, dtype=torch.int32)
+        lengths = torch.tensor([3, 5], device=self.device, dtype=torch.int32)
+        prefixes = torch.tensor([0, 29], device=self.device, dtype=torch.int32)
+        blocks = torch.arange(16, device=self.device, dtype=torch.int32).reshape(2, 8)
+        raw = torch.randn(8, 8, 128, device=self.device, dtype=torch.float16)
+        qkv = raw.clone()
+        rope = MhaRotaryEmbeddingOp(self.config(False))
+        rope.set_params(params)
+
+        def run():
+            params.fill_params_mha_device(prefixes, empty, lengths, blocks, 16, True)
+            rope.forward(qkv.reshape(8, -1))
+
+        params.fill_params_mha_device(prefixes, empty, lengths, blocks, 16, False)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                qkv.copy_(raw)
+                run()
+        torch.cuda.current_stream().wait_stream(stream)
+        ptr = params.kvlen_d.data_ptr()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run()
+        for offsets in ([0, 29], [39, 67]):
+            prefixes.copy_(torch.tensor(offsets, device=self.device, dtype=torch.int32))
+            params.kvlen_d.fill_(-777)
+            qkv.copy_(raw)
+            graph.replay()
+            self.assertEqual(params.kvlen_d.data_ptr(), ptr)
+            torch.testing.assert_close(params.kvlen_d, prefixes + lengths)
+            for start, count, prefix in ((0, 3, offsets[0]), (3, 5, offsets[1])):
+                for left, right in ((0, 4), (4, 6)):
+                    expected = self.rope(
+                        raw[start : start + count, left:right],
+                        prefix,
+                        prefix + count,
+                        False,
+                    )
+                    torch.testing.assert_close(
+                        qkv[start : start + count, left:right],
+                        expected,
+                        rtol=4e-3,
+                        atol=2e-2,
+                    )
+            torch.testing.assert_close(qkv[:, 6:], raw[:, 6:], rtol=0, atol=0)
 
     def test_full_newloader_llama_forward_uses_real_scaled_attention(self):
         for llama3 in (True, False):

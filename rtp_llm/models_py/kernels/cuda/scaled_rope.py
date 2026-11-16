@@ -38,13 +38,13 @@ def _scaled_rope(
     mask = lane < DIM // 2
     pos = tl.load(Positions + token).to(tl.float32)
     base = tl.full((), BASE, tl.float32)
-    if not LLAMA3:
+    if not LLAMA3 and ORIGINAL > 0:
         batch = tl.load(BatchIndices + token)
         length = tl.load(KvLengths + batch).to(tl.float32)
         factor = tl.maximum(SCALE * length / ORIGINAL - (SCALE - 1.0), 1.0)
         base = base * tl.exp(tl.log(factor) * (DIM / (DIM - 2.0)))
     inv_freq = tl.exp(-2.0 * lane / DIM * tl.log(base))
-    if LLAMA3:
+    if LLAMA3 and SCALE != 1.0:
         wavelength = 6.283185307179586 / inv_freq
         smooth = (ORIGINAL / wavelength - LOW) / (HIGH - LOW)
         interpolated = (1.0 - smooth) * inv_freq / SCALE + smooth * inv_freq
@@ -90,13 +90,16 @@ def scaled_rope_qk_inplace(
         raise ValueError(
             "scaled RoPE requires a positive even rotary_dim within the head"
         )
-    if not llama3 and rotary_dim <= 2:
+    if not llama3 and original_max_position > 0 and rotary_dim <= 2:
         raise ValueError("dynamic NTK requires rotary_dim > 2")
-    if base <= 0 or scale <= 0 or original_max_position <= 0:
+    # A style-only override has scale=1 and no original length. It is ordinary
+    # RoPE. With a valid original length, DynamicNTK still extrapolates past
+    # that threshold even when scale=1 (the native kernel has the same rule).
+    if base <= 0 or scale <= 0 or (scale != 1.0 and original_max_position <= 0):
         raise ValueError(
             "scaled RoPE requires positive base, scale and original length"
         )
-    if llama3 and not 0 < low_freq_factor < high_freq_factor:
+    if llama3 and scale != 1.0 and not 0 < low_freq_factor < high_freq_factor:
         raise ValueError("Llama3 RoPE requires 0 < low_freq_factor < high_freq_factor")
     if query.stride(-1) != 1 or key.stride(-1) != 1:
         raise ValueError("scaled RoPE requires contiguous head dimensions")
@@ -105,6 +108,8 @@ def scaled_rope_qk_inplace(
         raise ValueError("scaled RoPE token metadata is too short")
     if tokens == 0:
         return
+    if not llama3 and original_max_position > 0 and kv_lengths.numel() == 0:
+        raise ValueError("dynamic NTK requires per-request KV lengths")
     # Select the input device, not whichever GPU the caller left current.
     # The CPU branch is only useful for Triton's numerical interpreter tests.
     with torch.cuda.device(query.device) if query.is_cuda else nullcontext():

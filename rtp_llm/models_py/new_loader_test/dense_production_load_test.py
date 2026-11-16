@@ -117,6 +117,81 @@ def checkpoint(model_type):
 
 
 class DenseProductionLoadTest(unittest.TestCase):
+    def test_gqa_partition_is_checked_before_automatic_route(self):
+        for tp, kv, supported in (
+            (6, 4, False),
+            (4, 6, False),
+            (4, 2, True),
+            (2, 4, True),
+            (4, -1, True),
+        ):
+            for explicit in (None, True, False):
+                with self.subTest(tp=tp, kv=kv, explicit=explicit):
+                    model = service(
+                        use_new_loader=explicit, require_weight_update=False
+                    )
+                    model.model_config.attn_config.head_num = 24
+                    model.model_config.attn_config.kv_head_num = kv
+                    model.model_config.vocab_size = 96
+                    parallel = model.parallelism_config
+                    parallel.tp_size = tp
+                    parallel.get_attn_tp_size = lambda: tp
+                    parallel.get_ffn_tp_size = lambda: tp
+                    if explicit is True and not supported:
+                        with self.assertRaisesRegex(ValueError, "QKV head partition"):
+                            model._use_new_loader()
+                    else:
+                        self.assertEqual(
+                            model._use_new_loader(), supported and explicit is not False
+                        )
+
+    def test_scaled_rope_override_preserves_defaults_and_parses_fields(self):
+        from rtp_llm.config.model_config import ModelConfig
+
+        for style in ("dynamicntk", "llama3"):
+
+            def config():
+                return NS(
+                    attn_config=NS(
+                        rope_config=NS(
+                            style=1, scale=1.0, max_pos=0, factor1=1.0, factor2=1.0
+                        )
+                    )
+                )
+
+            model = config()
+            ModelConfig.apply_rope_scaling_override(
+                model, {"rope_scaling": {"type": style}}
+            )
+            self.assertEqual(model.attn_config.rope_config.scale, 1.0)
+            self.assertEqual(model.attn_config.rope_config.max_pos, 0)
+            values = dict(
+                type=style,
+                factor=8.0,
+                original_max_position_embeddings=4096,
+                low_freq_factor=1.0,
+                high_freq_factor=4.0,
+            )
+            ModelConfig.apply_rope_scaling_override(model, {"rope_scaling": values})
+            rope = model.attn_config.rope_config
+            self.assertEqual(
+                (rope.scale, rope.max_pos, rope.factor1, rope.factor2),
+                (8.0, 4096, 1.0, 4.0),
+            )
+            with self.assertRaisesRegex(ValueError, "original_max_position_embeddings"):
+                ModelConfig.apply_rope_scaling_override(
+                    config(), {"rope_scaling": {"type": style, "factor": 8.0}}
+                )
+        with self.assertRaisesRegex(ValueError, "low_freq_factor"):
+            ModelConfig.apply_rope_scaling_override(
+                config(),
+                {
+                    "rope_scaling": dict(
+                        type="llama3", factor=8.0, original_max_position_embeddings=4096
+                    )
+                },
+            )
+
     def test_real_production_load_for_each_registered_dense_model(self):
         for model_type in ("qwen_2", "qwen_3", "llama"):
             with self.subTest(

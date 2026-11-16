@@ -61,6 +61,26 @@ def new_loader_unsupported_reason(
         return "Context Parallelism / independent attention TP is not supported by this NewLoader batch"
     if ffn_tp != attn_tp:
         return "independent FFN TP / sequence parallelism is not supported by this NewLoader batch"
+    heads = config.attn_config.head_num
+    kv_heads = config.attn_config.kv_head_num
+    if kv_heads == -1:
+        kv_heads = heads
+    tp_size = attn_tp[0]
+    # Keep automatic routing consistent with QKVParallelLinear's local GQA
+    # grouping. KV replication (e.g. 2 KV heads / TP4) remains supported.
+    if (
+        heads <= 0
+        or kv_heads <= 0
+        or tp_size <= 0
+        or heads % kv_heads
+        or heads % tp_size
+        or (kv_heads % tp_size and tp_size % kv_heads)
+    ):
+        return (
+            "NewLoader QKV head partition is unsupported: "
+            f"num_heads={heads}, num_kv_heads={kv_heads}, tp_size={tp_size}; "
+            "Q heads must divide evenly and KV heads/TP must be mutually divisible"
+        )
     if config.vocab_size % parallel.tp_size:
         return "vocabulary padding for non-divisible TP vocabularies is not supported by this NewLoader batch"
     # build_model_config applies --hack_layer_num before this route is chosen.

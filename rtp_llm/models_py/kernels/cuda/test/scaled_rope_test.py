@@ -80,6 +80,66 @@ class ScaledRopeTest(unittest.TestCase):
                             0.1,
                         )
 
+    def test_style_only_override_matches_unscaled_rope(self):
+        self._check_style_only_override_matches_unscaled_rope()
+
+    def test_dynamic_ntk_factor_one_with_original_length_still_extrapolates(self):
+        qkv, positions, batches, lengths = self.fixture(torch.float32)
+        original = qkv.clone()
+        kwargs = dict(
+            rotary_dim=128,
+            base=10000.0,
+            scale=1.0,
+            original_max_position=32,
+            llama3=False,
+        )
+        scaled_rope_qk_inplace(
+            qkv[:, :4], qkv[:, 4:6], positions, batches, lengths, **kwargs
+        )
+        self.assert_result(qkv, original, positions, batches, lengths, **kwargs)
+        unscaled = reference_rope(
+            original[:, :4],
+            positions,
+            lengths[batches.long()],
+            **dict(kwargs, original_max_position=1024)
+        )
+        self.assertGreater((qkv[:, :4] - unscaled).abs().max().item(), 0.1)
+
+    def _check_style_only_override_matches_unscaled_rope(self):
+        for llama3 in (True, False):
+            for dtype in (torch.float16, torch.bfloat16, torch.float32):
+                with self.subTest(llama3=llama3, dtype=dtype):
+                    qkv, positions, batches, lengths = self.fixture(dtype)
+                    original = qkv.clone()
+                    # Defaults produced by a style-only JSON override. No KV
+                    # lengths are needed when the scaling factor is one.
+                    scaled_rope_qk_inplace(
+                        qkv[:, :4],
+                        qkv[:, 4:6],
+                        positions,
+                        batches,
+                        lengths[:0],
+                        rotary_dim=128,
+                        base=10000.0,
+                        scale=1.0,
+                        original_max_position=0,
+                        llama3=llama3,
+                        low_freq_factor=1.0,
+                        high_freq_factor=1.0,
+                    )
+                    self.assert_result(
+                        qkv,
+                        original,
+                        positions,
+                        batches,
+                        lengths,
+                        rotary_dim=128,
+                        base=10000.0,
+                        scale=1.0,
+                        original_max_position=1024,
+                        llama3=False,
+                    )
+
     def test_llama3_long_context_positions(self):
         for dtype in (torch.float32, torch.float16, torch.bfloat16):
             with self.subTest(dtype=dtype):

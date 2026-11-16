@@ -684,6 +684,28 @@ class ModelConfig(CppModelConfig):
 
         self.attn_config.rope_config.style = rope_type[rope_override_args["type"]]
 
+        if rope_override_args["type"] in ("dynamicntk", "llama3"):
+            rope = self.attn_config.rope_config
+            scale = float(rope_override_args.get("factor", rope.scale))
+            original = int(
+                rope_override_args.get("original_max_position_embeddings", rope.max_pos)
+            )
+            low = float(rope_override_args.get("low_freq_factor", rope.factor1))
+            high = float(rope_override_args.get("high_freq_factor", rope.factor2))
+            if not math.isfinite(scale) or scale <= 0 or (scale != 1.0 and original <= 0):
+                raise ValueError(
+                    "scaled RoPE override requires a positive factor and "
+                    "original_max_position_embeddings"
+                )
+            if rope_override_args["type"] == "llama3" and scale != 1.0:
+                if not math.isfinite(low) or not math.isfinite(high) or not 0 < low < high:
+                    raise ValueError(
+                        "Llama3 RoPE override requires 0 < low_freq_factor < high_freq_factor"
+                    )
+            # scale=1 needs no scaling fields; preserve style-only overrides.
+            rope.scale, rope.max_pos = scale, original
+            rope.factor1, rope.factor2 = low, high
+
         if rope_override_args["type"] == "yarn":
             assert (
                 "factor" in rope_override_args

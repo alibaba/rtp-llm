@@ -3,7 +3,7 @@ load("//rtp_llm/models_py:new_models/tests.bzl", "dense_loader_test")
 dense_loader_test(
     name = "dense_production_load_test",
     src = "dense_production_load_test.py",
-    deps = ["//rtp_llm:models", "//rtp_llm:new_loader_routing"],
+    deps = ["//rtp_llm:models", "//rtp_llm:new_loader_routing", "//rtp_llm:async_model"],
 )
 
 # Infrastructure-only tests do not instantiate any accelerator backend.

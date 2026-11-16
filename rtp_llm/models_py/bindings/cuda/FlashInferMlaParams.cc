@@ -667,6 +667,7 @@ void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths
     paged_kv_last_page_len_d.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size});
     decode_page_indptr_d.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size + 1});
     page_indice_d.unsafeGetTensorImpl()->set_sizes_contiguous({page_num_upper});
+    kvlen_d.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size});
 
     cudaStream_t stream = GET_CURRENT_STREAM();
     invokeMhaPagedAttnPlan(t_input_lengths_dev,
@@ -679,6 +680,7 @@ void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths
                            page_indice_d,
                            batch_indice_d,
                            positions_d,
+                           kvlen_d,
                            stream);
 
     decode_page_indptr     = decode_page_indptr_d;
@@ -686,6 +688,7 @@ void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths
     paged_kv_last_page_len = paged_kv_last_page_len_d;
     batch_indice           = batch_indice_d;
     positions              = positions_d;
+    kvlen                  = kvlen_d;
 }
 
 void registerPyFlashInferMlaParams(pybind11::module& m) {

@@ -110,6 +110,10 @@ flashinfer_attention_tests = [
         "extra_deps": [
             "//rtp_llm/models_py:new_loader_models",
             "//rtp_llm/models_py/kernels/cuda/test:scaled_rope_reference",
+            # The HF parser regression imports legacy Llama/BaseModel, whose
+            # CustomModule annotations import the embedding engine interface.
+            "//rtp_llm:models",
+            "//rtp_llm:async_model",
             "//rtp_llm:safetensors",
         ],
     },
