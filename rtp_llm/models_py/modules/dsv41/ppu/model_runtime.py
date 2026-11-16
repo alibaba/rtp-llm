@@ -106,6 +106,7 @@ class SharedNativeRuntime:
         self._requested, self._observed = lambda: False, lambda: None
         self._stopped = False
         self._pending_verify_host_vote = None
+        self._use_gc_decode = False
         self.observer = None
         self.qkv_streams = None
         self.last_n5_routes = []
@@ -176,7 +177,7 @@ class SharedNativeRuntime:
         work = dist.all_reduce(packet, group=_native_shutdown_group(), async_op=True)
         self._pending_verify_host_vote = (count > 0, packet, work)
 
-    def vote(self, count, *, host=False):
+    def vote(self, count, *, host=False, gc_blocked=None):
         if self._stopped:
             return False
         if host and self._pending_verify_host_vote is not None:
@@ -186,9 +187,11 @@ class SharedNativeRuntime:
             if had_work != (count > 0):
                 raise RuntimeError("target Verify work changed after the Proposal vote")
             return self._finish_vote(packet, host=True)
+        packet = [count, int(self._requested())]
+        if gc_blocked is not None:
+            packet.append(int(gc_blocked))
         value = torch.tensor(
-            [count, int(self._requested())], dtype=torch.int64,
-            device="cpu" if host else self.device,
+            packet, dtype=torch.int64, device="cpu" if host else self.device,
         )
         if dist.is_initialized():
             if host:
@@ -198,7 +201,9 @@ class SharedNativeRuntime:
         return self._finish_vote(value, host=host)
 
     def _finish_vote(self, value, *, host):
-        count, stopping = value.tolist()
+        count, stopping, *blocked = value.tolist()
+        if blocked:
+            self._use_gc_decode = not blocked[0]
         # Work continues on the engine stream. Preserve the old device fence
         # when this vote instead returns early or observes shutdown.
         if host and (stopping or count == 0) and self.device.type == "cuda":
@@ -355,7 +360,18 @@ class SharedNativeRuntime:
         if idle and verify:
             idle_token = _NoBusinessVerifyToken.capture(inputs, attn, self._idle_verify_calls + 1, self.policy.max_rollback_tokens)
             self._idle_verify_calls += 1
-        if not self.vote(0 if idle else rows):
+        ops = getattr(model, "_shared_ops", None)
+        gc_decode = getattr(getattr(ops, "moe_engine", None), "gc_decode", None)
+        count = 0 if idle else rows
+        gc_blocked = None
+        if gc_decode is not None and not model._is_decode_role:
+            # EP ranks must enter the same collective even when some have no tokens.
+            gc_blocked = not idle and (bool(attn.is_prefill) or rows > gc_decode.token_bound)
+        if gc_blocked is None:
+            has_work = self.vote(count)
+        else:
+            has_work = self.vote(count, gc_blocked=gc_blocked)
+        if not has_work:
             if idle_token is not None:
                 self.pending_idle_verify = replace(idle_token, reason="all_empty_vote")
             return PyModelOutputs(torch.zeros((rows, self.geometry.hidden_size), dtype=torch.bfloat16, device=self.device))
@@ -413,6 +429,9 @@ class SharedNativeRuntime:
         state = SharedForwardState(self, inputs, attn, cache, prefill=prefill, idle=idle, prefixes=prefixes, lengths=lengths)
         if restore_replay is not None:
             state.append_starts = dict(enumerate(original_prefixes))
+        state.use_gc_decode = gc_decode is not None and (
+            gc_blocked is None or self._use_gc_decode
+        )
         self.current = state
         self._cross_mhc_evidence = state._cross_mhc_evidence
         state.verify = verify

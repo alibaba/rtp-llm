@@ -636,6 +636,10 @@ class PPUSharedMoE(nn.Module):
         self.shared_expert = (
             PPUSharedExpert(views, layer_id) if views.geometry.n_shared_experts else None
         )
+        self.gc_shared_weights = ()
+        gc_decode = getattr(ops.moe_engine, "gc_decode", None)
+        if routed_enabled and gc_decode is not None and gc_decode.fuses_shared:
+            self.gc_shared_weights = gc_decode.prepare_shared_weights(self.shared_expert)
         self.gate = PPUSharedGate(views, layer_id) if routed_enabled else None
         self.calls = 0
         self.eplb_layer = None
@@ -643,6 +647,8 @@ class PPUSharedMoE(nn.Module):
             ops.bind_expert_weights(layer_id, *views.routed(layer_id))
             mapping, counts = views.eplb_maps(layer_id)
             if mapping is not None:
+                if gc_decode is not None:
+                    raise ValueError("PPU GC MoE decode requires fixed expert placement")
                 from rtp_llm.models_py.modules.dsv41.ppu.eplb import bind_layer
 
                 self.eplb_layer = bind_layer(
@@ -705,7 +711,16 @@ class PPUSharedMoE(nn.Module):
             if not getattr(state, "bulk_counters", False):
                 state.moe_calls[self.layer_id].add_(1)
             engine = self.ops.moe_engine
-            if state.grouped_moe is None:
+            gc_decode = getattr(state, "gc_decode", None)
+            if gc_decode is not None:
+                routed = engine.forward_gc_decode(
+                    flat, ids[:, :self.gate.top_k], weights[:, :self.gate.top_k],
+                    layer_id=self.layer_id, expert_load=expert_load, valid=None,
+                    shared_weights=self.gc_shared_weights,
+                )
+                if gc_decode.fuses_shared:
+                    return routed.reshape(shape)
+            elif state.grouped_moe is None:
                 routed = engine.forward_shared_graph(
                     flat,
                     ids,
@@ -727,6 +742,26 @@ class PPUSharedMoE(nn.Module):
                     return routed.reshape(shape), shared.reshape(shape)
                 routed = combine_routed_and_shared(routed, shared)
             return routed.reshape(shape)
+        engine = self.ops.moe_engine
+        gc_decode = getattr(engine, "gc_decode", None)
+        if gc_decode is not None and getattr(state, "use_gc_decode", True):
+            if _return_shared:
+                raise ValueError("PPU GC MoE decode expects the combined FFN result")
+            rows = 0 if getattr(state, "idle", False) else flat.shape[0]
+            active = flat[:rows]
+            ids, weights = self.gate(active)
+            valid = getattr(state, "active_token_mask", None) if rows else None
+            routed = engine.forward_gc_decode(
+                active, ids, weights, layer_id=self.layer_id,
+                expert_load=expert_load, valid=valid,
+                shared_weights=self.gc_shared_weights,
+            )
+            if rows != flat.shape[0]:
+                return torch.zeros_like(hidden)
+            if self.shared_expert is not None and not gc_decode.fuses_shared:
+                routed = combine_routed_and_shared(routed, self.shared_expert(active))
+            return routed.reshape(shape)
+
         cp = _full_cp8_prefill_context(state)
         routing_cp = cp
         if (

@@ -296,8 +296,10 @@ class SharedPPUBlock(Block):
 
     def _try_decode_ffn_post(self, hidden, input_ids, expert_load, residual, post, comb):
         runtime = self.attn.runtime
+        gc_decode = getattr(getattr(runtime, "current", None), "gc_decode", None)
         if (
             not _ordinary_decode_graph(runtime)
+            or (gc_decode is not None and gc_decode.fuses_shared)
             or runtime.current.grouped_moe is not None
             or self.ffn.shared_expert is None
             or torch.is_grad_enabled()

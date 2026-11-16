@@ -17,6 +17,10 @@ from rtp_llm.models_py.modules.dsv41.ppu.ops import PPUOps
 from rtp_llm.models_py.modules.dsv41.ppu.block import SharedPPUBlock
 from rtp_llm.models_py.modules.dsv41.ppu.transformer import SharedPPUTransformer
 from rtp_llm.models_py.modules.dsv41.ppu.model_weights import SharedWeightViews
+from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import (
+    GC_MOE_TOKEN_BOUND_ENV,
+    gc_moe_mode,
+)
 
 
 class SharedPPUTargetBlock(SharedPPUBlock):
@@ -100,6 +104,18 @@ class DeepSeekV41PPUModel(DeepSeekV41Model):
             top_k=g.n_activated_experts,
             dp_rank=self._v4_args.dp_rank, dp_size=self._v4_args.dp_size,
         )
+        pdfusion = os.environ.get("ROLE_TYPE", "").upper() == "PDFUSION"
+        mode = gc_moe_mode() if self._is_decode_role or pdfusion else "off"
+        if mode != "off":
+            gc_bound = int(os.environ.get(GC_MOE_TOKEN_BOUND_ENV, self._max_generate_batch_size))
+            if self._is_speculative:
+                raise ValueError("PPU GC MoE decode requires ordinary execution")
+            graph_safe = bool(getattr(self.py_hw_kernel_config, "enable_cuda_graph", False))
+            if graph_safe and self._v4_args.fake_balance_expert:
+                raise ValueError("PPU GC MoE Graph does not support fake expert balance")
+            ops.moe_engine.configure_gc_decode(
+                g.n_activated_experts, gc_bound, mode=mode, graph_safe=graph_safe,
+            )
         self._shared_ops = ops
         block_factory = SharedPPUTargetBlock if getattr(self, "_is_speculative", False) else self.build_weight_consumer
         self.v4 = SharedPPUTransformer(

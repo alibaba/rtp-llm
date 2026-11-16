@@ -66,6 +66,8 @@ py_library(
         "modules/dsv41/ppu/local_prefill_sg_ops.py",
         "modules/dsv41/ppu/ptpc_quant.py",
         "modules/dsv41/ppu/quant_conversion.py",
+        "modules/dsv41/ppu/gc_decode_moe.py",
+        "modules/dsv41/ppu/input_packer.py",
         "modules/dsv41/ppu/moe.py",
     ],
     deps = [
