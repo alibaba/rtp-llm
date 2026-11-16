@@ -29,6 +29,12 @@ public:
         }
     }
 
+    void initGroups(const CacheConfig& config, bool materialize_layer_views = true) {
+        for (auto& batch : batch_resource) {
+            batch.initGroups(config, materialize_layer_views);
+        }
+    }
+
     int groupNums() const {
         RTP_LLM_CHECK(!batch_resource.empty());
         return batch_resource[0].groupNums();
@@ -56,28 +62,46 @@ public:
         return cacheResource(batch_id).blocks(tag);
     }
 
-    const BlockIndicesType& blocksForLayer(int batch_id, int layer_id, std::string_view tag) const {
-        return cacheResource(batch_id).blocksForLayer(layer_id, tag);
+    const BlockIndicesType&
+    blocksForLayer(int batch_id, int layer_id, std::string_view tag, size_t module_id = 0) const {
+        return cacheResource(batch_id).blocksForLayer(layer_id, tag, module_id);
+    }
+
+    const BlockIndicesType& blocksForLayer(int batch_id, int layer_id, size_t module_id) const {
+        return cacheResource(batch_id).blocksForLayer(layer_id, module_id);
     }
 
     const BlockIndicesType& kernelBlocks(int batch_id, std::string_view tag) const {
         return cacheResource(batch_id).kernelBlocks(tag);
     }
 
-    const BlockIndicesType& kernelBlocksForLayer(int batch_id, int layer_id, std::string_view tag) const {
-        return cacheResource(batch_id).kernelBlocksForLayer(layer_id, tag);
+    const BlockIndicesType&
+    kernelBlocksForLayer(int batch_id, int layer_id, std::string_view tag, size_t module_id = 0) const {
+        return cacheResource(batch_id).kernelBlocksForLayer(layer_id, tag, module_id);
     }
 
     BlockIds& mutableBlockIds(int batch_id, std::string_view tag) {
         return cacheResource(batch_id).mutableBlockIds(tag);
     }
 
-    BlockIds& mutableBlockIdsForLayer(int batch_id, int layer_id, std::string_view tag) {
-        return cacheResource(batch_id).mutableBlockIdsForLayer(layer_id, tag);
+    BlockIds& mutableBlockIdsForLayer(int batch_id, int layer_id, std::string_view tag, size_t module_id = 0) {
+        return cacheResource(batch_id).mutableBlockIdsForLayer(layer_id, tag, module_id);
     }
 
     std::shared_ptr<BlockIds> groupBlockIds(int batch_id, std::string_view tag) const {
         return cacheResource(batch_id).groupBlockIds(tag);
+    }
+
+    const std::vector<std::string>& groupTagsForLayer(int batch_id, int layer_id, size_t module_id = 0) const {
+        return cacheResource(batch_id).groupTagsForLayer(layer_id, module_id);
+    }
+
+    const std::string& soleGroupTagForLayer(int batch_id, int layer_id, size_t module_id = 0) const {
+        return cacheResource(batch_id).soleGroupTagForLayer(layer_id, module_id);
+    }
+
+    size_t moduleNum(int batch_id = 0) const {
+        return cacheResource(batch_id).moduleNum();
     }
 
     const KVCacheResource& cacheResource(int batch_id = 0) const {

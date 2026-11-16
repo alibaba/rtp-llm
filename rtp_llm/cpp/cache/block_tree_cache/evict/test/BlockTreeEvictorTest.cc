@@ -42,6 +42,7 @@ using block_tree_cache_test::MultiNodeBlocks;
 using block_tree_cache_test::releaseLowerTierSeedRefs;
 using ScriptedTransferEngine = block_tree_cache_test::ScriptedPerRankBlockTransferEngine;
 using block_tree_cache_test::unreferenceDeviceBlocksForTest;
+using block_transfer_engine_test::makeTestCacheConfig;
 
 double snapshotQps(kmonitor::MutableMetric* metric, const kmonitor::MetricsTags& tags) {
     if (metric == nullptr) {
@@ -192,7 +193,7 @@ void initializeGroups(const std::vector<GroupSetPtr>&                          g
     auto   topology     = block_transfer_engine_test::makeTestTopology(std::move(group_bases));
     size_t group_set_id = 0;
     for (const auto& tag : topology->groupTags()) {
-        groups[group_set_id]->initialize(group_set_id, topology, {tag});
+        groups[group_set_id]->initialize(group_set_id, makeTestCacheConfig(*topology), {tag});
         ++group_set_id;
     }
 }
@@ -1251,7 +1252,7 @@ TEST_F(BlockTreeEvictorTest, PendingReleasesCountEveryDeviceMemberBlock) {
                                                       block_transfer_engine_test::makeTestGroupBase(policy, {1}, 16)});
     group_ =
         std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{device_pool_, device_pool_}, nullptr, nullptr);
-    group_->initialize(0, topology, topology->groupTags());
+    group_->initialize(0, makeTestCacheConfig(*topology), topology->groupTags());
     groups_  = {group_};
     tree_    = std::make_unique<BlockTree>(groups_);
     evictor_ = evictor_runtime_.make(tree_.get());
@@ -1311,7 +1312,7 @@ TEST_F(BlockTreeEvictorTest, PendingReleaseSettlementIsTransactionalAcrossDevice
                                                       block_transfer_engine_test::makeTestGroupBase(policy, {1}, 16)});
     group_ = std::make_shared<FullGroupSet>(
         std::vector<DeviceBlockPoolPtr>{device_pool_, second_device_pool}, nullptr, nullptr);
-    group_->initialize(0, topology, topology->groupTags());
+    group_->initialize(0, makeTestCacheConfig(*topology), topology->groupTags());
     groups_  = {group_};
     tree_    = std::make_unique<BlockTree>(groups_);
     evictor_ = evictor_runtime_.make(tree_.get());
@@ -2082,7 +2083,7 @@ TEST_F(BlockTreeEvictorTest, DeviceWatermarkUsesMaximumDeficitAcrossMemberPools)
         block_transfer_engine_test::makeTestTopology({block_transfer_engine_test::makeTestGroupBase(policy, {0}, 16),
                                                       block_transfer_engine_test::makeTestGroupBase(policy, {1}, 16)});
     group_ = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{narrow_pool, wide_pool}, nullptr, nullptr);
-    group_->initialize(0, topology, topology->groupTags());
+    group_->initialize(0, makeTestCacheConfig(*topology), topology->groupTags());
     groups_  = {group_};
     tree_    = std::make_unique<BlockTree>(groups_);
     evictor_ = evictor_runtime_.make(tree_.get());
@@ -3778,7 +3779,7 @@ TEST(BlockTreeEvictorAsyncTest, HostExecutionFailurePreservesSourceForRetry) {
     ASSERT_TRUE(environment.init());
     const auto& group = environment.groups_[0];
     group->initialize(group->groupSetId(),
-                      group->topologyPtr(),
+                      group->cacheConfig(),
                       group->groupTags(),
                       block_transfer_engine_test::makeTestBackingLayout(group->payloadBytes(), true));
     const auto path = environment.insertParentDeviceChildHost();
@@ -3799,7 +3800,7 @@ TEST(BlockTreeEvictorAsyncTest, DeviceStoreFailurePreservesDeviceSource) {
     ASSERT_TRUE(environment.init());
     const auto& group = environment.groups_[0];
     group->initialize(group->groupSetId(),
-                      group->topologyPtr(),
+                      group->cacheConfig(),
                       group->groupTags(),
                       block_transfer_engine_test::makeTestBackingLayout(group->payloadBytes(), true));
     TreeNode* node = environment.insertDeviceNode();

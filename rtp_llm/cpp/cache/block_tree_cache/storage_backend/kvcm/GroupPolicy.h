@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <string_view>
@@ -56,12 +57,17 @@ public:
     using SpecNames          = std::vector<std::string>;
     using LocationSpecGroups = std::map<std::string, std::vector<std::string>>;
 
-    GroupPolicy(const CacheTopology&                    topology,
-                StorageBackend::BufferResolver          buffer_resolver,
+    // Config-aware construction: protocol group ids follow
+    // CacheConfig::allGroupIdentities() order (main module first, then each
+    // sub-module), and mask bits follow main-then-sub, local-layer-first tag
+    // encounter order. The buffer resolver receives the tag's pool-local layer
+    // ordinal inside its owning module, never a cross-module layer id.
+    GroupPolicy(std::shared_ptr<const CacheConfig>      cache_config,
+                StorageBackend::StorageBufferResolver   buffer_resolver,
                 const std::vector<std::string>&         full_group_tags,
                 const std::vector<std::string>&         other_group_tags,
                 std::unordered_map<std::string, size_t> group_block_size_bytes = {}):
-        topology_(topology),
+        cache_config_(std::move(cache_config)),
         buffer_resolver_(std::move(buffer_resolver)),
         full_group_tags_(full_group_tags.begin(), full_group_tags.end()),
         other_group_tags_(other_group_tags.begin(), other_group_tags.end()),
@@ -111,9 +117,16 @@ protected:
                                  const SpecNames&                  selected_specs,
                                  const char*                       kind,
                                  LocationView&                     location_view) const;
+    // Protocol group identity order: main module groups first, then each
+    // sub-module's groups, as published by CacheConfig::allGroupIdentities().
+    std::vector<std::string> protocolIdentityTags() const;
+    // (pool-local layer ordinal, tag) in main-then-sub, local-layer-first
+    // encounter order. Mask bits are assigned in this order.
+    std::vector<std::pair<int, std::string>> layerEncounterOrder() const;
+    size_t                                   blockSizeBytesForTag(const std::string& tag) const;
 
-    const CacheTopology&                    topology_;
-    StorageBackend::BufferResolver          buffer_resolver_;
+    std::shared_ptr<const CacheConfig>      cache_config_;
+    StorageBackend::StorageBufferResolver   buffer_resolver_;
     std::set<std::string>                   full_group_tags_;
     std::set<std::string>                   other_group_tags_;
     std::unordered_map<std::string, size_t> group_block_size_bytes_;
@@ -132,12 +145,12 @@ protected:
 
 class DefaultLayerGroupPolicy: public GroupPolicy {
 public:
-    DefaultLayerGroupPolicy(const CacheTopology&                    topology,
-                            StorageBackend::BufferResolver          buffer_resolver,
+    DefaultLayerGroupPolicy(std::shared_ptr<const CacheConfig>      cache_config,
+                            StorageBackend::StorageBufferResolver   buffer_resolver,
                             const std::vector<std::string>&         full_group_tags,
                             const std::vector<std::string>&         other_group_tags,
                             std::unordered_map<std::string, size_t> group_block_size_bytes = {}):
-        GroupPolicy(topology,
+        GroupPolicy(std::move(cache_config),
                     std::move(buffer_resolver),
                     full_group_tags,
                     other_group_tags,
@@ -164,17 +177,18 @@ protected:
         return "G";
     }
 
-    std::map<int32_t, std::vector<int>> group_to_layer_ids_;
+    // Pool-local layer ordinals for each group, in the owning module's layer order.
+    std::map<int32_t, std::vector<int>> group_layer_ordinals_;
 };
 
 class FullLayerGroupPolicy: public DefaultLayerGroupPolicy {
 public:
-    FullLayerGroupPolicy(const CacheTopology&                    topology,
-                         StorageBackend::BufferResolver          buffer_resolver,
+    FullLayerGroupPolicy(std::shared_ptr<const CacheConfig>      cache_config,
+                         StorageBackend::StorageBufferResolver   buffer_resolver,
                          const std::vector<std::string>&         full_group_tags,
                          const std::vector<std::string>&         other_group_tags,
                          std::unordered_map<std::string, size_t> group_block_size_bytes = {}):
-        DefaultLayerGroupPolicy(topology,
+        DefaultLayerGroupPolicy(std::move(cache_config),
                                 std::move(buffer_resolver),
                                 full_group_tags,
                                 other_group_tags,
@@ -203,16 +217,17 @@ public:
 protected:
     void rebuildDerivedSpecInfo() override;
 
-    FullOtherGroupPolicy(const CacheTopology&                    topology,
-                         StorageBackend::BufferResolver          buffer_resolver,
+    FullOtherGroupPolicy(std::shared_ptr<const CacheConfig>      cache_config,
+                         StorageBackend::StorageBufferResolver   buffer_resolver,
                          const std::vector<std::string>&         full_group_tags,
                          const std::vector<std::string>&         other_group_tags,
                          std::unordered_map<std::string, size_t> group_block_size_bytes = {}):
-        DefaultLayerGroupPolicy(topology,
+        DefaultLayerGroupPolicy(std::move(cache_config),
                                 std::move(buffer_resolver),
                                 full_group_tags,
                                 other_group_tags,
                                 std::move(group_block_size_bytes)) {}
+
     uint64_t  valid_full_bithash_       = 0;
     uint64_t  valid_full_other_bithash_ = 0;
     SpecNames full_spec_names_;
@@ -221,12 +236,12 @@ protected:
 
 class FullLinearLayerGroupPolicy: public FullOtherGroupPolicy {
 public:
-    FullLinearLayerGroupPolicy(const CacheTopology&                    topology,
-                               StorageBackend::BufferResolver          buffer_resolver,
+    FullLinearLayerGroupPolicy(std::shared_ptr<const CacheConfig>      cache_config,
+                               StorageBackend::StorageBufferResolver   buffer_resolver,
                                const std::vector<std::string>&         full_group_tags,
                                const std::vector<std::string>&         other_group_tags,
                                std::unordered_map<std::string, size_t> group_block_size_bytes = {}):
-        FullOtherGroupPolicy(topology,
+        FullOtherGroupPolicy(std::move(cache_config),
                              std::move(buffer_resolver),
                              full_group_tags,
                              other_group_tags,

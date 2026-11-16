@@ -7,6 +7,7 @@ import torch
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import INDEXER_KV_TAG
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
     _same_tensor_metadata,
+    _typed_2d_pool,
     _validate_required_blocks,
 )
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection import (
@@ -22,6 +23,20 @@ from rtp_llm.ops.compute_ops import PyCacheStoreInputs
 
 
 class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
+    def test_prefixed_draft_side_pool_uses_local_tag(self):
+        base = torch.zeros((2, 8), dtype=torch.uint8)
+        cache = SimpleNamespace(tag="mtp_indexer_kv", kv_cache_base=base)
+        view = _typed_2d_pool(
+            cache,
+            tag=INDEXER_KV_TAG,
+            storage_dtype=torch.uint8,
+            payload_dtype=torch.uint8,
+            entries=2,
+            width=4,
+        )
+        self.assertEqual(view.shape, (2, 2, 4))
+        self.assertEqual(view.data_ptr(), base.data_ptr())
+
     @skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_eager_decode_combines_main_geometry_rope_and_side_verdict(self):
         from rtp_llm.models_py.modules.qwen4_exp.qsa import fmha_validation

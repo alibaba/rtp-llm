@@ -9,9 +9,57 @@
 
 namespace rtp_llm {
 namespace {
+
 ErrorInfo conversionError(const std::string& message) {
     return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
                      "LayerCacheBuffer conversion failed: " + message);
+}
+
+struct TransferWindow {
+    const BlockIndicesType* block_ids;
+    const CacheKeysType*    cache_keys;
+    size_t                  begin;
+    size_t                  count;
+    size_t                  cp_rank;
+    size_t                  cp_size;
+};
+
+std::optional<TransferWindow> getTransferWindow(const KVCacheResource& resource,
+                                                int                    layer_id,
+                                                const std::string&     cache_tag,
+                                                int                    start_block_idx,
+                                                int                    block_count,
+                                                int                    cp_rank,
+                                                int                    cp_size,
+                                                size_t                 module_id = 0) {
+    if (start_block_idx < 0 || block_count == 0 || block_count < -1 || cp_size < 1 || cp_rank < 0
+        || cp_rank >= cp_size) {
+        RTP_LLM_LOG_WARNING(
+            "invalid tagged cache conversion arguments for layer=%d tag=%s", layer_id, cache_tag.c_str());
+        return std::nullopt;
+    }
+
+    const auto& cache_keys                = resource.cacheKeys();
+    const auto& block_ids                 = resource.blocksForLayer(layer_id, cache_tag, module_id);
+    const auto  rank                      = static_cast<size_t>(cp_rank);
+    const auto  world_size                = static_cast<size_t>(cp_size);
+    size_t      max_local_blocks_for_keys = cache_keys.size();
+    if (world_size > 1) {
+        max_local_blocks_for_keys =
+            cache_keys.size() > rank ? (cache_keys.size() - rank + world_size - 1) / world_size : 0;
+    }
+    const size_t actual_block_count = std::min(block_ids.size(), max_local_blocks_for_keys);
+    const auto   begin              = static_cast<size_t>(start_block_idx);
+    if (begin >= actual_block_count) {
+        return std::nullopt;
+    }
+
+    const size_t remaining = actual_block_count - begin;
+    const size_t count     = block_count > 0 ? std::min(static_cast<size_t>(block_count), remaining) : remaining;
+    if (count == 0) {
+        return std::nullopt;
+    }
+    return TransferWindow{&block_ids, &cache_keys, begin, count, rank, world_size};
 }
 
 std::string bufferContext(const LayerCacheBuffer& buffer, int64_t key, int32_t block_id) {
@@ -42,7 +90,8 @@ LayerCacheBufferUtil::convert(KVCacheResource&     resource,
                               int                  block_count,
                               int                  cp_rank,
                               int                  cp_size,
-                              size_t               cache_key_tokens_per_block) {
+                              size_t               cache_key_tokens_per_block,
+                              size_t               module_id) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> result;
     for (const auto& layer : topology.layers()) {
         auto buffers = convertLayer(resource,
@@ -52,7 +101,8 @@ LayerCacheBufferUtil::convert(KVCacheResource&     resource,
                                     block_count,
                                     cp_rank,
                                     cp_size,
-                                    cache_key_tokens_per_block);
+                                    cache_key_tokens_per_block,
+                                    module_id);
         if (!buffers.ok()) {
             return buffers.status();
         }
@@ -71,7 +121,8 @@ LayerCacheBufferUtil::convertLayer(KVCacheResource&     resource,
                                    int                  block_count,
                                    int                  cp_rank,
                                    int                  cp_size,
-                                   size_t               cache_key_tokens_per_block) {
+                                   size_t               cache_key_tokens_per_block,
+                                   size_t               module_id) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> result;
     if (layer_id < 0 || static_cast<size_t>(layer_id) >= topology.layers().size()) {
         return conversionError("layer=" + std::to_string(layer_id) + ": invalid layer");
@@ -84,7 +135,8 @@ LayerCacheBufferUtil::convertLayer(KVCacheResource&     resource,
                                       block_count,
                                       cp_rank,
                                       cp_size,
-                                      cache_key_tokens_per_block);
+                                      cache_key_tokens_per_block,
+                                      module_id);
         if (!buffer.ok()) {
             return buffer.status();
         }
@@ -103,7 +155,8 @@ LayerCacheBufferUtil::convertLayerTag(KVCacheResource& resource,
                                       int              block_count,
                                       int              cp_rank,
                                       int              cp_size,
-                                      size_t           cache_key_tokens_per_block) {
+                                      size_t           cache_key_tokens_per_block,
+                                      size_t           module_id) {
     const size_t      count   = resource.cacheKeys().size();
     const std::string context = "layer=" + std::to_string(layer_id) + " tag=" + group.tag;
     if (cp_size <= 0 || cp_rank < 0 || cp_rank >= cp_size || start_block_idx < 0 || block_count < -1
@@ -139,7 +192,7 @@ LayerCacheBufferUtil::convertLayerTag(KVCacheResource& resource,
         }
     }
     try {
-        const auto& blocks = resource.blocksForLayer(layer_id, group.tag);
+        const auto& blocks = resource.blocksForLayer(layer_id, group.tag, module_id);
         const bool state_group = group.policy.group_type != CacheGroupType::FULL;
         const auto state_slots = state_group ? stateProjection(group, count, cache_key_tokens_per_block) :
                                                std::map<size_t, size_t>{};
@@ -163,7 +216,7 @@ LayerCacheBufferUtil::convertLayerTag(KVCacheResource& resource,
             }
         }
         return convertLayerTagForRoute(
-            resource, group, layer_id, available, cp_rank, cp_size, cache_key_tokens_per_block);
+            resource, group, layer_id, available, cp_rank, cp_size, cache_key_tokens_per_block, module_id);
     } catch (const std::exception& error) {
         return conversionError(context + ": " + error.what());
     }
@@ -176,7 +229,8 @@ LayerCacheBufferUtil::convertLayerTagForRoute(KVCacheResource&           resourc
                                               const std::vector<size_t>& logical_positions,
                                               int                        cp_rank,
                                               int                        cp_size,
-                                              size_t                     cache_key_tokens_per_block) {
+                                              size_t                     cache_key_tokens_per_block,
+                                              size_t                     module_id) {
     const std::string context = "layer=" + std::to_string(layer_id) + " tag=" + group.tag;
     if (cp_size <= 0 || cp_rank < 0 || cp_rank >= cp_size) {
         return conversionError(context + ": invalid CP rank/size");
@@ -186,8 +240,8 @@ LayerCacheBufferUtil::convertLayerTagForRoute(KVCacheResource&           resourc
     }
     try {
         const auto& keys   = resource.cacheKeys();
-        const auto& blocks = resource.blocksForLayer(layer_id, group.tag);
-        auto        buffer = std::make_shared<LayerCacheBuffer>(layer_id, group.tag);
+        const auto& blocks = resource.blocksForLayer(layer_id, group.tag, module_id);
+        auto        buffer = std::make_shared<LayerCacheBuffer>(layer_id, group.tag, 0, module_id);
         const bool  state_group = group.policy.group_type != CacheGroupType::FULL;
         const auto  state_slots =
             state_group ? stateProjection(group, keys.size(), cache_key_tokens_per_block) : std::map<size_t, size_t>{};
@@ -242,7 +296,8 @@ LayerCacheBufferUtil::convertTagForRoute(KVCacheResource&           resource,
                                          const std::vector<size_t>& positions,
                                          int                        cp_rank,
                                          int                        cp_size,
-                                         size_t                     cache_key_tokens_per_block) {
+                                         size_t                     cache_key_tokens_per_block,
+                                         size_t                     module_id) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> result;
     if (positions.empty()) {
         return std::move(result);
@@ -254,13 +309,39 @@ LayerCacheBufferUtil::convertTagForRoute(KVCacheResource&           resource,
     }
     for (int layer_id : topology.layerIdsForGroup(cache_tag)) {
         auto buffer = convertLayerTagForRoute(
-            resource, *group, layer_id, positions, cp_rank, cp_size, cache_key_tokens_per_block);
+            resource, *group, layer_id, positions, cp_rank, cp_size, cache_key_tokens_per_block, module_id);
         if (!buffer.ok()) {
             return buffer.status();
         }
         result.push_back(std::move(buffer.value()));
     }
     return std::move(result);
+}
+
+bool LayerCacheBufferUtil::hasTransferableBlocks(const KVCacheResource& resource,
+                                                 int                    layer_id,
+                                                 const std::string&     cache_tag,
+                                                 int                    start_block_idx,
+                                                 int                    block_count,
+                                                 int                    cp_rank,
+                                                 int                    cp_size,
+                                                 size_t                 module_id) {
+    const auto window =
+        getTransferWindow(resource, layer_id, cache_tag, start_block_idx, block_count, cp_rank, cp_size, module_id);
+    if (!window.has_value()) {
+        return false;
+    }
+    for (size_t i = 0; i < window->count; ++i) {
+        const size_t local_idx   = window->begin + i;
+        const size_t logical_idx = window->cp_rank + local_idx * window->cp_size;
+        if (logical_idx >= window->cache_keys->size()) {
+            break;
+        }
+        if (!isNullBlockIdx(window->block_ids->at(local_idx))) {
+            return true;
+        }
+    }
+    return false;
 }
 
 ErrorResult<transfer::KeyBlockInfoMap>
@@ -288,7 +369,7 @@ LayerCacheBufferUtil::buildKeyBlockInfos(const std::shared_ptr<LayerBlockConvert
         std::vector<BlockInfo> parts;
         try {
             parts = converter->convertIndexToBuffer(
-                buffer->getLayerId(), buffer->cacheTag(), block_id, partition_count, partition_id);
+                buffer->getLayerId(), buffer->cacheTag(), block_id, partition_count, partition_id, buffer->moduleId());
         } catch (const std::exception& error) {
             return conversionError(key_context + ": " + error.what());
         }

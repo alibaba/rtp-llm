@@ -5,6 +5,7 @@ from collections.abc import Mapping
 import torch
 
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import INDEXER_STATE_TAG
+from rtp_llm.models_py.model_desc.block_map import canonical_attention_inputs
 
 from .state_cache_inputs import prepare_state_cache_inputs
 
@@ -73,6 +74,7 @@ class DraftPrefillGraphReplay(Mapping):
         return len(self.impls)
 
     def prepare_cuda_graph(self, groups):
+        groups = canonical_attention_inputs(groups)
         groups = prepare_state_cache_inputs(groups, self.state_cache)
         anchor = groups[next(iter(self.impls))]
         lengths = anchor.input_lengths

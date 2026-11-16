@@ -79,9 +79,10 @@ public:
         client_wrapper_(std::move(client_wrapper)),
         sdk_check_enabled_(autil::EnvUtil::getEnv("KVCM_SDK_CHECK", autil::EnvUtil::getEnv("RECO_SDK_CHECK", false))) {}
 
-    bool init(const CacheTopology&                                                topology,
-              StorageBackend::BufferResolver                                      buffer_resolver,
+    bool init(std::shared_ptr<const CacheConfig>                                  cache_config,
+              StorageBackend::StorageBufferResolver                               buffer_resolver,
               const std::function<const DeviceBlockPoolPtr&(const std::string&)>& pool_resolver) {
+        RTP_LLM_CHECK_WITH_INFO(cache_config != nullptr, "KVCM storage backend requires a cache config");
         RTP_LLM_LOG_INFO("start init BlockTree KVCM storage backend");
         const auto quarantine_abort_ratio = remoteCacheQuarantineAbortRatio();
         if (!quarantine_abort_ratio.has_value()) {
@@ -96,25 +97,27 @@ public:
         }
         std::vector<std::string> full_group_tags;
         std::vector<std::string> other_group_tags;
-        // CacheConfig::blockSizeBytesForGroup resolves MTP child-owned physical
-        // strides; do not replace this with topology-derived geometry.
+        // CacheConfig::blockSizeBytesForGroup resolves the owning module's
+        // physical strides; do not replace this with topology-derived geometry.
         std::unordered_map<std::string, size_t> group_block_size_bytes;
-        const std::vector<GroupBase>&           groups = topology.groups();
-        group_block_size_bytes.reserve(groups.size());
-        for (const auto& group : groups) {
+        const auto                              identities = cache_config->allGroupIdentities();
+        group_block_size_bytes.reserve(identities.size());
+        for (const auto& identity : identities) {
+            const auto& group = cache_config->moduleConfig(identity.module_id).group(identity.tag);
             if (group.policy.group_type == CacheGroupType::FULL) {
                 full_group_tags.push_back(group.tag);
             } else {
                 other_group_tags.push_back(group.tag);
             }
-            group_block_size_bytes.emplace(group.tag, cache_config_.blockSizeBytesForGroup(group.tag));
+            group_block_size_bytes.emplace(group.tag,
+                                           cache_config->blockSizeBytesForGroup(group.tag, identity.module_id));
         }
         if (other_group_tags.empty()) {
             group_policy_ = std::make_unique<kvcm::FullLayerGroupPolicy>(
-                topology, buffer_resolver, full_group_tags, other_group_tags, std::move(group_block_size_bytes));
+                cache_config, buffer_resolver, full_group_tags, other_group_tags, std::move(group_block_size_bytes));
         } else {
             group_policy_ = std::make_unique<kvcm::FullLinearLayerGroupPolicy>(
-                topology, buffer_resolver, full_group_tags, other_group_tags, std::move(group_block_size_bytes));
+                cache_config, buffer_resolver, full_group_tags, other_group_tags, std::move(group_block_size_bytes));
         }
         if (!group_policy_->init()) {
             RTP_LLM_LOG_ERROR("BlockTree KVCM group policy init failed");
@@ -447,7 +450,8 @@ private:
         for (const auto& [group_id, group] : group_policy_->groups()) {
             for (int rank = 0; rank < parallelism_config_.tp_size; ++rank) {
                 const std::string spec_name = kvcm::genLocationSpecName(rank, group.group_name);
-                infos->emplace(spec_name, cache_config_.blockSizeBytesForGroup(group.tag));
+                infos->emplace(spec_name,
+                               cache_config_.blockSizeBytesForGroup(group.tag, cache_config_.moduleOfTag(group.tag)));
             }
         }
         return {std::move(infos), std::move(groups)};
@@ -469,7 +473,7 @@ private:
         auto [location_infos, location_groups] = genLocationSpecs();
 
         const std::string model_name = runtime_config_.model_name;
-        const std::string dtype      = getDataTypeStr(cache_config_.dtype);
+        const std::string dtype      = getDataTypeStr(cache_config_.dtype());
         std::string       extra      = kv_cache_config_.kvcm_model_extra_info;
         extra += '/' + autil::EnvUtil::getEnv("BIZ_NAME", std::string("")) + '/'
                  + std::to_string(hashString(autil::EnvUtil::getEnv("CHECKPOINT_PATH", std::string(""))));
@@ -480,7 +484,7 @@ private:
         std::stringstream identity;
         identity << "instance_group: " << kv_cache_config_.kvcm_instance_group
                  << ";block_size:" << cache_config_.seq_size_per_block << ";model_name:" << model_name
-                 << ";dtype_str:" << dtype << ";use_mla:" << cache_config_.use_mla
+                 << ";dtype_str:" << dtype << ";use_mla:" << cache_config_.use_mla()
                  << ";fp8_kv_cache:" << kv_cache_config_.fp8_kv_cache << ";tp_size:" << parallelism_config_.tp_size
                  << ";dp_size:" << parallelism_config_.dp_size << ";extra_info:" << extra
                  << ";location_spec_info:" << autil::legacy::ToJsonString(location_infos, true)
@@ -504,7 +508,7 @@ private:
                                                location_groups,
                                                kvcm::ModelDeployment(model_name,
                                                                      dtype,
-                                                                     cache_config_.use_mla,
+                                                                     cache_config_.use_mla(),
                                                                      static_cast<int32_t>(parallelism_config_.tp_size),
                                                                      static_cast<int32_t>(parallelism_config_.dp_size),
                                                                      1,
@@ -796,16 +800,16 @@ private:
     }
 
 private:
-    CacheConfig                          cache_config_;
-    KVCacheConfig                        kv_cache_config_;
-    RuntimeConfig                        runtime_config_;
-    ParallelismConfig                    parallelism_config_;
-    SpeculativeExecutionConfig           sp_config_;
-    std::shared_ptr<BroadcastManager>    broadcast_manager_;
+    CacheConfig                                         cache_config_;
+    KVCacheConfig                                       kv_cache_config_;
+    RuntimeConfig                                       runtime_config_;
+    ParallelismConfig                                   parallelism_config_;
+    SpeculativeExecutionConfig                          sp_config_;
+    std::shared_ptr<BroadcastManager>                   broadcast_manager_;
     std::shared_ptr<kmonitor::MetricsReporter>          metrics_reporter_;
-    std::unique_ptr<kvcm::GroupPolicy>   group_policy_;
-    std::shared_ptr<kvcm::ClientWrapper> client_wrapper_;
-    std::vector<std::string>             registration_tags_;
+    std::unique_ptr<kvcm::GroupPolicy>                  group_policy_;
+    std::shared_ptr<kvcm::ClientWrapper>                client_wrapper_;
+    std::vector<std::string>                            registration_tags_;
     std::unordered_map<std::string, DeviceBlockPoolPtr> pools_by_tag_;
     size_t                                              total_device_block_count_{0};
     double                                              quarantine_abort_ratio_{0.0};
@@ -843,10 +847,12 @@ KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                       
 KVCMStorageBackend::~KVCMStorageBackend() = default;
 
 bool KVCMStorageBackend::initImpl() {
+    // KVCM's protocol metadata is owned by the CP-adjusted CacheConfig the
+    // factory passed to StorageBackend, not by the transitional legacy topology.
     return impl_->init(
-        topology(),
-        [this](int layer_id, const std::string& tag, int block_id) {
-            return convertIndexToBuffer(layer_id, tag, block_id);
+        std::make_shared<CacheConfig>(cacheConfig()),
+        [this](int layer_ordinal, const std::string& tag, int block_id) {
+            return convertIndexToBuffer(layer_ordinal, tag, block_id);
         },
         [this](const std::string& tag) -> const DeviceBlockPoolPtr& { return devicePool(tag); });
 }

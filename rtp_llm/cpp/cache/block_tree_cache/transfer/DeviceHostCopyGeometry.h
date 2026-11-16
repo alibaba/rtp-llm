@@ -38,7 +38,7 @@ inline std::vector<DeviceHostCopyTileGeometry> getDeviceHostCopyTiles(const Grou
             throw std::invalid_argument("device-host backing has a null pool");
         }
         const auto& base      = group.group(tags[member]);
-        const auto  layer_ids = group.topologyPtr()->layerIdsForGroup(tags[member]);
+        const auto  layer_ids = group.localLayerIdsForMember(tags[member]);
         if (layer_ids.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
             throw std::overflow_error("device-host backing layer count overflow");
         }

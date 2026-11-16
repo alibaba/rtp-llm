@@ -213,14 +213,24 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&        plan,
             }
             const int cp_size = layout.physicalCpSize(route->cache_tag);
             // COMPACT keeps the same state slots on every Decode rank; FULL uses identity mapping.
-            const int worker_cp_rank = 0;
-            auto      layer_buffers  = LayerCacheBufferUtil::convertTagForRoute(resource,
-                                                                          *config_.topology,
-                                                                          route->cache_tag,
-                                                                          positions,
-                                                                          worker_cp_rank,
-                                                                          cp_size,
-                                                                          config_.cache_key_tokens_per_block);
+            const int    worker_cp_rank = 0;
+            const auto   module_it      = config_.module_by_tag.find(route->cache_tag);
+            if (module_it == config_.module_by_tag.end() && !config_.module_by_tag.empty()) {
+                return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                                 "decode route=" + std::to_string(route->route_id)
+                                     + " worker_rank=" + std::to_string(worker_rank) + ": cache_tag="
+                                     + route->cache_tag + " has no owning cache module");
+            }
+            const size_t module_id = module_it == config_.module_by_tag.end() ? 0 : module_it->second;
+            auto         layer_buffers =
+                LayerCacheBufferUtil::convertTagForRoute(resource,
+                                                         *config_.topology,
+                                                         route->cache_tag,
+                                                         positions,
+                                                         worker_cp_rank,
+                                                         cp_size,
+                                                         config_.cache_key_tokens_per_block,
+                                                         module_id);
             if (!layer_buffers.ok()) {
                 return ErrorInfo(layer_buffers.status().code(),
                                  "decode route=" + std::to_string(route->route_id) + " worker_rank="

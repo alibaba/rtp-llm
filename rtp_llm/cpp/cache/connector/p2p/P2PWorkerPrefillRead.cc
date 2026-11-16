@@ -224,7 +224,29 @@ bool P2PWorkerPrefillRead::writeByLayerTag(int                                  
                                                 const std::shared_ptr<torch::Event>& event,
                                                 int64_t                              request_deadline_ms,
                                                 int                                  chunk_id) {
-    if (!resource || resource->cacheKeys().size() != resource->blocksForLayer(layer_id, tag).size()) {
+    // Resolve the owning module from the publication tag before touching the
+    // resource: KVCacheResource accessors are module-scoped, and a wrong module
+    // would silently read another module's block table.
+    size_t module_id = 0;
+    if (layer_block_converter_) {
+        try {
+            module_id = layer_block_converter_->moduleOfTag(tag);
+            if (!layer_block_converter_->tagOwnsLayer(tag, layer_id)) {
+                return rejectLayer(
+                    request_id,
+                    request_deadline_ms,
+                    ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                              "layer=" + std::to_string(layer_id) + " tag=" + tag + ": tag does not own layer"));
+            }
+        } catch (const std::exception& e) {
+            return rejectLayer(request_id,
+                               request_deadline_ms,
+                               ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                                         "layer=" + std::to_string(layer_id) + " tag=" + tag
+                                             + ": unknown cache tag for module mapping"));
+        }
+    }
+    if (!resource || resource->cacheKeys().size() != resource->blocksForLayer(layer_id, tag, module_id).size()) {
         return rejectLayer(request_id,
                            request_deadline_ms,
                            ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
@@ -232,12 +254,12 @@ bool P2PWorkerPrefillRead::writeByLayerTag(int                                  
                                          + ": missing resource or mismatched key/block counts"));
     }
 
-    auto        layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, tag, chunk_id);
+    auto        layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, tag, chunk_id, module_id);
     if (config_.tp_rank == 0) {
         layer_cache_buffer->setKVCacheResource(resource);
     }
     const auto& cache_keys         = resource->cacheKeys();
-    const auto& block_ids          = resource->blocksForLayer(layer_id, tag);
+    const auto& block_ids          = resource->blocksForLayer(layer_id, tag, module_id);
     for (size_t i = 0; i < cache_keys.size(); ++i) {
         if (isNullBlockIdx(block_ids[i]) || block_ids[i] < 0 || layer_cache_buffer->blockIdMap().count(cache_keys[i])) {
             return rejectLayer(request_id,
@@ -462,8 +484,20 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
         }
     };
 
-    const size_t payload_bytes =
-        config_.topology ? config_.topology->group(layer_cache_buffer->cacheTag()).spec->k_block_payload_bytes() : 0;
+    // Unknown tags (e.g. a plan referencing a tag this topology never declared)
+    // must not abort dispatch with an unhandled CHECK; fail this dispatch
+    // explicitly so the request surfaces a diagnostic instead of UB.
+    size_t payload_bytes = 0;
+    try {
+        payload_bytes = config_.topology ?
+                            config_.topology->group(layer_cache_buffer->cacheTag()).spec->k_block_payload_bytes() :
+                            0;
+    } catch (const std::exception& e) {
+        mark_dispatch_failure(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+                              "sendKVCache: unknown cache tag=" + layer_cache_buffer->cacheTag()
+                                  + " unique_key=" + unique_key + ": " + e.what());
+        return 0;
+    }
 
     for (const auto& route : worker_plan.routes) {
         // route 与 layer 无关：只发本 buffer 所属 tag 的那些 route。

@@ -203,6 +203,13 @@ class Glm5MtpWeight(Glm5Weight):
 class Glm5Mtp(Glm5):
 
     @classmethod
+    def _post_build_model_config(cls, model_config: ModelConfig) -> None:
+        super()._post_build_model_config(model_config)
+        from rtp_llm.models_py.utils.kvcache import declare_draft_cache_tags
+
+        declare_draft_cache_tags(model_config)
+
+    @classmethod
     def _create_config(cls, ckpt_path: str):
         config = super()._create_config(ckpt_path)
         num_main_layers = config.num_layers

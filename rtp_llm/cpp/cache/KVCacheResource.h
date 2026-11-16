@@ -13,6 +13,7 @@
 namespace rtp_llm {
 
 class CacheTopology;
+struct CacheConfig;
 
 using CacheKeyType = int64_t;
 using BlockIdxType = int32_t;
@@ -82,9 +83,9 @@ private:
     // Size is always block_indices.size() * kernel_blocks_per_kv_block_.
     mutable BlockIndicesType kernel_block_indices_;
     size_t                   kernel_blocks_per_kv_block_ = 1;
-    mutable size_t           cyclic_prompt_tail_ = 0;
+    mutable size_t           cyclic_prompt_tail_         = 0;
     // Zero means the kernel row contains the ordinary mapping.
-    mutable size_t           cyclic_bank_count_  = 0;
+    mutable size_t cyclic_bank_count_ = 0;
 };
 
 // Build the complete identity/row pair before publishing it through a const owner view.
@@ -109,35 +110,42 @@ using LayerAttnBlockIds = std::vector<std::vector<std::shared_ptr<BlockIds>>>;
 class KVCacheResource {
 public:
     void initGroups(std::shared_ptr<const CacheTopology> topology, bool materialize_layer_views = true);
+    void initGroups(const CacheConfig& config, bool materialize_layer_views = true);
     void resizeBlocks(int reserver_blocks, int value = 0);
 
     int                     blocksNum(std::string_view tag) const;
     const BlockIndicesType& blocks(std::string_view tag) const;
-    const BlockIndicesType& blocksForLayer(int layer_id, std::string_view tag) const;
+    const BlockIndicesType& blocksForLayer(int layer_id, std::string_view tag, size_t module_id = 0) const;
+    // Convenience: blocks for the sole group of a module-local layer.
+    const BlockIndicesType& blocksForLayer(int layer_id, size_t module_id) const;
     const BlockIndicesType& kernelBlocks(std::string_view tag) const;
-    const BlockIndicesType& kernelBlocksForLayer(int layer_id, std::string_view tag) const;
+    const BlockIndicesType& kernelBlocksForLayer(int layer_id, std::string_view tag, size_t module_id = 0) const;
     BlockIds&               mutableBlockIds(std::string_view tag) const;
-    BlockIds&               mutableBlockIdsForLayer(int layer_id, std::string_view tag) const;
+    BlockIds&               mutableBlockIdsForLayer(int layer_id, std::string_view tag, size_t module_id = 0) const;
 
     const BlockIds& blockIds(std::string_view tag) const;
-    const BlockIds& blockIdsForLayer(int layer_id, std::string_view tag) const;
+    const BlockIds& blockIdsForLayer(int layer_id, std::string_view tag, size_t module_id = 0) const;
 
     // Shared-row view resolved through this resource's own tag map; keeps async
     // holders aliasing the resource rows without re-deriving a group index.
     std::shared_ptr<BlockIds> groupBlockIds(std::string_view tag) const;
     const GroupBlockIds&      groupBlockIds() const;
 
-    const std::vector<std::string>& groupTagsForLayer(int layer_id) const;
-    const std::string&              soleGroupTagForLayer(int layer_id) const;
+    // Module-local layer accessors. module_id=0 is the main model; 1..N are MTP
+    // sub-modules. The legacy overloads (no module_id) default to module 0.
+    const std::vector<std::string>& groupTagsForLayer(int layer_id, size_t module_id = 0) const;
+    const std::string&              soleGroupTagForLayer(int layer_id, size_t module_id = 0) const;
 
-    int layerNum() const;
-    int groupNums() const;
+    int    layerNum() const;
+    int    layerNum(size_t module_id) const;
+    int    groupNums() const;
+    size_t moduleNum() const;
 
     std::vector<std::string> groupTags() const;
     int                      maxBlocksNum() const;
     size_t                   firstNonEmptyBlocksNum() const;
 
-    LayerBlockIds            layerBlocks() const;
+    LayerBlockIds layerBlocks() const;
 
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
@@ -190,16 +198,18 @@ public:
     std::string debugString() const;
 
 private:
-    void checkLayerTag(int layer_id, std::string_view tag) const;
+    void checkLayerTag(int layer_id, std::string_view tag, size_t module_id = 0) const;
     bool hasOneGroupPerLayer() const;
 
     // Beam forks share immutable layer membership; default resources keep owning views.
-    std::shared_ptr<const CacheTopology>  topology_;
-    std::vector<std::vector<std::string>> layer_group_tags_;
-    GroupBlockIds         group_block_ids;
-    CacheKeysType         cache_keys;
-    BlockDependenciesType block_dependencies;
-    bool                  cache_keys_are_cp_canonical_{false};
+    std::vector<std::shared_ptr<const CacheTopology>> module_topologies_;
+    // [module_id][local_layer_id] -> group tags for that module's local layer.
+    // module 0 is the main model; 1..N are MTP sub-modules.
+    std::vector<std::vector<std::vector<std::string>>> module_layer_group_tags_;
+    GroupBlockIds                                      group_block_ids;
+    CacheKeysType                                      cache_keys;
+    BlockDependenciesType                              block_dependencies;
+    bool                                               cache_keys_are_cp_canonical_{false};
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};

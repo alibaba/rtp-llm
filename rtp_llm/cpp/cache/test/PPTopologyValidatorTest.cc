@@ -202,9 +202,9 @@ TEST(PPTopologyValidatorTest, PrefixReuseMismatchFails) {
 
 TEST(PPTopologyValidatorTest, CaptureLocalStageBuildsSnapshot) {
     CacheConfig cache_config;
-    auto        spec                = std::make_shared<MHAKVCacheSpec>("default", 4, 2, 1);
-    cache_config.layer_num          = 2;
-    cache_config.seq_size_per_block = 4;
+    auto        spec                   = std::make_shared<MHAKVCacheSpec>("default", 4, 2, 1);
+    cache_config.main_config.layer_num = 2;
+    cache_config.seq_size_per_block    = 4;
     cache_config.fromGroupedSpecs({spec}, {{0, 1}}, {CacheGroupType::FULL}, {"default"});
     cache_config.finalizeBlockNums(42, RuntimeConfig{});
 

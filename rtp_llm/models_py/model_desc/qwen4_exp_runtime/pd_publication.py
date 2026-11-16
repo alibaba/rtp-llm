@@ -10,6 +10,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
     PLE_NGRAM_CTX_TAG,
     PLE_STATE_TAG,
 )
+from rtp_llm.models_py.utils.kvcache import canonical_cache_tag
 
 SIDE_TAGS = frozenset(
     (
@@ -67,10 +68,10 @@ def prepare_side_cache_store_writers(attention_inputs, kv_cache, *, layer_count)
             "qwen4_exp PD side-cache publication needs tagged cache inputs"
         )
     required = {
-        str(cache.tag)
+        canonical_cache_tag(cache.tag)
         for layer in range(layer_count)
         for cache in kv_cache.get_layer_cache_groups(layer)
-        if str(cache.tag) in SIDE_TAGS
+        if canonical_cache_tag(cache.tag) in SIDE_TAGS
     }
     missing = required - attention_inputs.keys()
     if missing:
@@ -98,7 +99,7 @@ def publish_layer_side_caches(kv_cache, layer_idx, writers) -> None:
     if not writers:
         return
     for cache in kv_cache.get_layer_cache_groups(layer_idx):
-        tag = str(cache.tag)
+        tag = canonical_cache_tag(cache.tag)
         if tag in SIDE_TAGS:
             if tag not in writers:
                 raise RuntimeError(

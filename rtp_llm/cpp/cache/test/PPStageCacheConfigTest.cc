@@ -7,6 +7,7 @@
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 
@@ -126,9 +127,8 @@ TEST(PPStageCacheConfigTest, IndependentPoolsUseStageLocalGeometry) {
     const auto model = makeHybridModelConfig(8);
     for (int64_t rank = 0; rank < 2; ++rank) {
         const auto config = CacheConfigCreator::createConfig(model, makePpConfig(8, 2, rank), KVCacheConfig{});
-        EXPECT_EQ(config.layer_num, 4u);
-        EXPECT_EQ(config.layer_all_num(), 4u);
-        EXPECT_EQ(config.global_layer_begin, static_cast<uint32_t>(rank) * 4u);
+        EXPECT_EQ(config.layer_num(), 4u);
+        EXPECT_EQ(config.topology().layers().size(), 4u);
         EXPECT_EQ(config.topology().layers().size(), 4u);
         EXPECT_EQ(countLayersOfType(config, CacheGroupType::LINEAR), 3u);
         EXPECT_EQ(countLayersOfType(config, CacheGroupType::FULL), 1u);
@@ -139,8 +139,7 @@ TEST(PPStageCacheConfigTest, CreateConfigScopesBeforeBuildingTopology) {
     const auto    model = makeSingleModelConfig(8);
     KVCacheConfig options;
     const auto    config = CacheConfigCreator::createConfig(model, makePpConfig(8, 2, 1), options);
-    EXPECT_EQ(config.layer_num, 4u);
-    EXPECT_EQ(config.global_layer_begin, 4u);
+    EXPECT_EQ(config.layer_num(), 4u);
     ASSERT_EQ(config.groupNums(), 1);
     EXPECT_EQ(config.layerIdsForGroup("full"), (std::vector<int>{0, 1, 2, 3}));
 }
@@ -154,8 +153,7 @@ TEST(PPStageCacheConfigTest, StagePartitionPreservesCacheReplayAndHashPolicy) {
         const auto layout = makePpConfig(8, 2, rank);
         for (const auto& config : {CacheConfigCreator::createConfig(model, layout, KVCacheConfig{}),
                                    CacheConfigCreator::createWarmupConfig(model, layout, KVCacheConfig{}, 0)}) {
-            EXPECT_EQ(config.layer_num, 4u);
-            EXPECT_EQ(config.global_layer_begin, static_cast<uint32_t>(rank) * 4u);
+            EXPECT_EQ(config.layer_num(), 4u);
             EXPECT_EQ(config.cache_min_replay_tokens, 4);
             EXPECT_EQ(config.cache_key_hash_seed, 123);
             EXPECT_EQ(config.maxPrefixReuseTokens(16), 12);
@@ -167,11 +165,10 @@ TEST(PPStageCacheConfigTest, WarmupUsesStageLocalTopologyAndSmallFinalizedPools)
     const auto    model = makeHybridModelConfig(8);
     KVCacheConfig kv_cache_config;
     kv_cache_config.reuse_cache_tail_blocks = 4;
-    kv_cache_config.linear_pool_blocks     = 16;
+    kv_cache_config.linear_pool_blocks      = 16;
     const auto config = CacheConfigCreator::createWarmupConfig(model, makePpConfig(8, 2, 1), kv_cache_config, 0);
-    EXPECT_EQ(config.layer_num, 4u);
-    EXPECT_EQ(config.global_layer_begin, 4u);
-    EXPECT_EQ(config.reuse_cache_tail_blocks, 4);
+    EXPECT_EQ(config.layer_num(), 4u);
+    EXPECT_EQ(config.reuse_cache_tail_blocks(), 4);
     for (const auto& group : config.groups()) {
         EXPECT_EQ(group.block_num, 2u);
     }
@@ -184,7 +181,7 @@ TEST(PPStageCacheConfigTest, PpAllowsOpaqueStateAndSwaGroups) {
 
     const auto config = CacheConfigCreator::createConfig(model, makePpConfig(8, 2, 0), KVCacheConfig{});
     ASSERT_EQ(config.groupNums(), 2);
-    EXPECT_TRUE(config.use_opaque_kv_cache_store);
+    EXPECT_TRUE(config.use_opaque_kv_cache_store());
     EXPECT_EQ(config.group("state").policy.group_type, CacheGroupType::SWA);
     EXPECT_EQ(config.group("state").policy.sliding_window_size, 32);
 }
@@ -205,10 +202,11 @@ TEST(PPStageCacheConfigTest, TransferPolicySurvivesSingletonStagesAndWarmup) {
     }
 }
 
-TEST(PPStageCacheConfigTest, DraftInheritsWholeModelTransferPolicyOnLastStage) {
-    auto layout                      = makePpConfig(8, 2, 1);
-    layout.pp_stage_layer_counts     = {7, 1};
-    const auto                 draft = makeSingleModelConfig(1);
+TEST(PPStageCacheConfigTest, DraftKeepsItsOwnTransferPolicyOnLastStage) {
+    auto layout                         = makePpConfig(8, 2, 1);
+    layout.pp_stage_layer_counts        = {7, 1};
+    auto draft                          = makeSingleModelConfig(1);
+    draft.kv_cache_spec_descs[0][0].tag = "mtp_full";
     SpeculativeExecutionConfig speculative;
     speculative.type              = SP_TYPE_MTP;
     speculative.gen_num_per_cycle = 2;
@@ -217,19 +215,12 @@ TEST(PPStageCacheConfigTest, DraftInheritsWholeModelTransferPolicyOnLastStage) {
         const auto config =
             CacheConfigCreator::createConfig(target, layout, KVCacheConfig{}, speculative, &draft, true, false);
         ASSERT_EQ(config.groupNums(), 1);
-        ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+        ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
         for (const auto& sub : config.mtp_sub_configs) {
-            ASSERT_EQ(sub->groupNums(), 1);
-            EXPECT_EQ(sub->usesGroupCacheTransferPolicy(), hybrid);
+            ASSERT_EQ(sub.groupNums(), 1);
+            EXPECT_FALSE(config.usesGroupCacheTransferPolicy(1));
         }
     }
-
-    auto target = CacheConfigCreator::createConfig(makeHybridModelConfig(8), ParallelismConfig{}, KVCacheConfig{});
-    target.model_has_multiple_cache_groups = false;
-    ASSERT_EQ(target.groupNums(), 2);
-    const auto draft_config = CacheConfigCreator::createConfig(draft, ParallelismConfig{}, KVCacheConfig{});
-    const auto sub          = target.mergeMTPModule(draft_config, 0, target.layer_num);
-    EXPECT_TRUE(sub->model_has_multiple_cache_groups);
 }
 
 TEST(PPStageCacheConfigTest, PerTagOverridesReplaceDerivedCounts) {
@@ -243,8 +234,11 @@ TEST(PPStageCacheConfigTest, PerTagOverridesReplaceDerivedCounts) {
 }
 
 TEST(PPStageCacheConfigTest, DraftCacheExistsOnlyOnLastStageAndIsNotSliced) {
-    const auto                 target = makeSingleModelConfig(7);
-    const auto                 draft  = makeSingleModelConfig(2);
+    const auto target = makeSingleModelConfig(7);
+    auto       draft  = makeSingleModelConfig(2);
+    for (auto& layer : draft.kv_cache_spec_descs) {
+        layer[0].tag = "mtp_full";
+    }
     SpeculativeExecutionConfig speculative;
     speculative.type              = SP_TYPE_MTP;
     speculative.gen_num_per_cycle = 2;
@@ -257,18 +251,25 @@ TEST(PPStageCacheConfigTest, DraftCacheExistsOnlyOnLastStageAndIsNotSliced) {
     last_layout.pp_stage_layer_counts = {2, 3, 2};
     auto config =
         CacheConfigCreator::createConfig(target, last_layout, KVCacheConfig{}, speculative, &draft, true, false);
-    EXPECT_EQ(config.layer_num, 2u);
-    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    EXPECT_EQ(config.layer_num(), 2u);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     for (const auto& sub_config : config.mtp_sub_configs) {
-        ASSERT_TRUE(sub_config);
-        EXPECT_EQ(sub_config->layer_num, 2u);
-        EXPECT_EQ(sub_config->global_layer_begin, 0u);
+        EXPECT_EQ(sub_config.layer_num, 2u);
     }
+    config.finalizeBlockNums(24, RuntimeConfig{});
+    const KVCacheManager manager(config, false, nullptr, KVCacheConfig{}, last_layout);
+    EXPECT_EQ(manager.cacheStoreKeyLayerId(0, 0), 5u);
+    EXPECT_EQ(manager.cacheStoreKeyLayerId(0, 1), 6u);
+    EXPECT_EQ(manager.cacheStoreKeyLayerId(1, 0), 0u);
+    EXPECT_EQ(manager.cacheStoreKeyLayerId(1, 1), 1u);
 }
 
-TEST(PPStageCacheConfigTest, PerTagOverridesReachEveryDraftModule) {
-    const auto                 target = makeSingleModelConfig(4);
-    const auto                 draft  = makeSingleModelConfig(2);
+TEST(PPStageCacheConfigTest, PerTagOverridesApplyOnlyToMainModule) {
+    const auto target = makeSingleModelConfig(4);
+    auto       draft  = makeSingleModelConfig(2);
+    for (auto& layer : draft.kv_cache_spec_descs) {
+        layer[0].tag = "mtp_full";
+    }
     SpeculativeExecutionConfig speculative;
     speculative.type              = SP_TYPE_MTP;
     speculative.gen_num_per_cycle = 2;
@@ -279,10 +280,9 @@ TEST(PPStageCacheConfigTest, PerTagOverridesReachEveryDraftModule) {
     config.finalizeBlockNums(/*global_block_num=*/24, RuntimeConfig{}, &overrides);
 
     EXPECT_EQ(config.group("full").block_num, 32u);
-    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     for (const auto& sub_config : config.mtp_sub_configs) {
-        ASSERT_NE(sub_config, nullptr);
-        EXPECT_EQ(sub_config->group("full").block_num, 32u);
+        EXPECT_EQ(sub_config.group("mtp_full").block_num, 24u);
     }
 }
 

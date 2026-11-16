@@ -5689,17 +5689,19 @@ TEST_F(PPExecutorTest, LastVerifyIgnoresSamplerFailuresAfterTheRejectedPrefix) {
 TEST_F(PPExecutorTest, LastDraftForwardUsesDraftCacheStrides) {
     for (bool multiple_groups : {false, true}) {
         SCOPED_TRACE(multiple_groups);
-        auto       params       = makeStageParams(2, SP_TYPE_MTP, 1);
-        auto       cache_config = test::makeSimpleMhaCacheConfig(1, 16, 4, DataType::TYPE_FP16);
-        const auto draft_config = cache_config;
+        auto params       = makeStageParams(2, SP_TYPE_MTP, 1);
+        auto cache_config = test::makeSimpleMhaCacheConfig(1, 16, 4, DataType::TYPE_FP16);
+        auto draft_config = test::makeSimpleMhaCacheConfig(1, 16, 4, DataType::TYPE_FP16);
+        draft_config.fromGroupedSpecs(
+            {test::makeMhaSpec("mtp_default", 4, TYPE_FP16, 1, 1)}, {{0}}, {CacheGroupType::FULL});
         if (multiple_groups) {
-            cache_config.layer_num = 2;
+            cache_config.main_config.layer_num = 2;
             cache_config.fromGroupedSpecs(
                 {test::makeMhaSpec("default", 4, TYPE_FP16, 1, 1), test::makeMhaSpec("extra", 4, TYPE_FP16, 1, 1)},
                 {{0}, {1}},
                 {CacheGroupType::FULL, CacheGroupType::FULL});
         }
-        cache_config.mtp_sub_configs.push_back(cache_config.mergeMTPModule(draft_config, 0, cache_config.layer_num));
+        cache_config.mtp_sub_configs.push_back(draft_config.main_config);
         cache_config.finalizeBlockNums(16, RuntimeConfig{});
         auto cache = std::make_shared<KVCacheManager>(cache_config);
         ASSERT_TRUE(cache->init());
@@ -5719,16 +5721,9 @@ TEST_F(PPExecutorTest, LastDraftForwardUsesDraftCacheStrides) {
         executor.runDraftStep(plan, target_output, sampling);
         ASSERT_EQ(recorded->inputs.size(), 1u);
         const auto& expected = cache->getMTPModuleCacheConfig(0);
-        ASSERT_EQ(expected.groupNums(), multiple_groups ? 2 : 1);
-        if (multiple_groups) {
-            /** Multiple cache groups require group-specific strides, including groups without local draft layers. */
-            EXPECT_TRUE(expected.layerIdsForGroup("extra").empty());
-            EXPECT_EQ(recorded->inputs[0].kv_block_stride_bytes, 0u);
-            EXPECT_EQ(recorded->inputs[0].kv_scale_stride_bytes, 0u);
-        } else {
-            EXPECT_EQ(recorded->inputs[0].kv_block_stride_bytes, expected.group("default").kvBlockStrideBytes());
-            EXPECT_EQ(recorded->inputs[0].kv_scale_stride_bytes, expected.group("default").kvScaleStrideBytes());
-        }
+        ASSERT_EQ(expected.groupNums(), 1);
+        EXPECT_EQ(recorded->inputs[0].kv_block_stride_bytes, expected.group("mtp_default").kvBlockStrideBytes());
+        EXPECT_EQ(recorded->inputs[0].kv_scale_stride_bytes, expected.group("mtp_default").kvScaleStrideBytes());
         EXPECT_EQ(plan.model_input.kv_block_stride_bytes, 17);
         EXPECT_EQ(plan.model_input.kv_scale_stride_bytes, 19);
     }

@@ -113,7 +113,10 @@ def detect_fp4_expert_storage(weight_keys) -> "str | None":
     does not declare ``expert_dtype``.
     """
     for key in weight_keys:
-        if key.endswith((".w1.scale", ".w2.scale", ".w3.scale")) and ".ffn.experts." in key:
+        if (
+            key.endswith((".w1.scale", ".w2.scale", ".w3.scale"))
+            and ".ffn.experts." in key
+        ):
             return "fp4"
     return None
 
@@ -735,10 +738,12 @@ class DeepSeekV4(DeepSeekV2):
 
     def create_model_loader(self):
         if _is_ppu_flash(self.model_config):
+            from rtp_llm.models_py.modules.dsv4.ppu.manifest import (
+                validate_cache_config,
+            )
             from rtp_llm.models_py.modules.dsv4.ppu.metadata.cache import (
                 configure_indexer_cache,
             )
-            from rtp_llm.models_py.modules.dsv4.ppu.manifest import validate_cache_config
 
             validate_cache_config(self.kv_cache_config)
             configure_indexer_cache(self.model_config)
@@ -1068,13 +1073,21 @@ class DeepSeekV4MtpWeight(DeepSeekV4Weight, DeepSeekV3MtpWeight):
         if _is_ppu_flash(self.model_config):
             # Quantized projections already own these scale bytes.
             weights = [
-                w for w in weights
+                w
+                for w in weights
                 if w.name not in (W.v4_mtp_e_proj_s, W.v4_mtp_h_proj_s)
             ]
         return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
 
 
 class DeepSeekV4Mtp(DeepSeekV4, DeepSeekV3Mtp):
+    @classmethod
+    def _post_build_model_config(cls, model_config) -> None:
+        super()._post_build_model_config(model_config)
+        from rtp_llm.models_py.utils.kvcache import declare_draft_cache_tags
+
+        declare_draft_cache_tags(model_config)
+
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = super()._create_config(ckpt_path)
@@ -1091,7 +1104,9 @@ class DeepSeekV4Mtp(DeepSeekV4, DeepSeekV3Mtp):
                 PpuDeepSeekV4MtpModel as DeepSeekV4MtpModel,
             )
         else:
-            from rtp_llm.models_py.model_desc.deepseek_v4_mtp_model import DeepSeekV4MtpModel
+            from rtp_llm.models_py.model_desc.deepseek_v4_mtp_model import (
+                DeepSeekV4MtpModel,
+            )
 
         self.py_model = DeepSeekV4MtpModel(
             self.model_config,
@@ -1205,6 +1220,13 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
 
 class DeepSeekV4DSpark(DeepSeekV4):
     """Runtime-fixed-width DeepSeek-V4 DSpARK proposal model."""
+
+    @classmethod
+    def _post_build_model_config(cls, model_config) -> None:
+        super()._post_build_model_config(model_config)
+        from rtp_llm.models_py.utils.kvcache import declare_draft_cache_tags
+
+        declare_draft_cache_tags(model_config)
 
     @classmethod
     def speculative_weight_alias_names(cls, target_model, draft_model_config):

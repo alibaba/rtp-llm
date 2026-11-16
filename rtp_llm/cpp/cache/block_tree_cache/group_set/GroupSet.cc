@@ -27,6 +27,22 @@ BlockIdList collectBlocks(const MultiNodeResource& resource) {
     return result;
 }
 
+bool groupSetSemanticsCompatible(const GroupBase& lhs, const GroupBase& rhs) {
+    if (lhs.policy.group_type != rhs.policy.group_type || lhs.seqSizePerBlock() != rhs.seqSizePerBlock()
+        || lhs.policy.cp_mapping != rhs.policy.cp_mapping) {
+        return false;
+    }
+    if (lhs.policy.group_type == CacheGroupType::SWA
+        && lhs.policy.sliding_window_size != rhs.policy.sliding_window_size) {
+        return false;
+    }
+    if ((lhs.policy.group_type == CacheGroupType::SWA || lhs.policy.group_type == CacheGroupType::LINEAR)
+        && lhs.policy.active_tail_blocks != rhs.policy.active_tail_blocks) {
+        return false;
+    }
+    return true;
+}
+
 template<typename Operation>
 void applyToResourcePools(const MultiNodeResource&               resource,
                           const std::vector<DeviceBlockPoolPtr>& device_pools,
@@ -52,31 +68,47 @@ GroupSet::GroupSet(std::vector<DeviceBlockPoolPtr> device_pools,
                    BlockTreeDiskBlockPoolPtr       disk_pool):
     device_pools_(std::move(device_pools)), host_pool_(std::move(host_pool)), disk_pool_(std::move(disk_pool)) {}
 
-void GroupSet::initialize(size_t                               group_set_id,
-                          std::shared_ptr<const CacheTopology> topology,
-                          std::vector<std::string>             group_tags,
-                          BackingLayout                        backing_layout) {
-    RTP_LLM_CHECK_WITH_INFO(topology != nullptr, "GroupSet requires a topology");
+void GroupSet::initialize(size_t                             group_set_id,
+                          std::shared_ptr<const CacheConfig> cache_config,
+                          std::vector<std::string>           group_tags,
+                          BackingLayout                      backing_layout) {
+    RTP_LLM_CHECK_WITH_INFO(cache_config != nullptr, "GroupSet requires a cache config");
     RTP_LLM_CHECK_WITH_INFO(!group_tags.empty(), "GroupSet requires at least one member tag");
     RTP_LLM_CHECK_WITH_INFO(device_pools_.empty() || device_pools_.size() == group_tags.size(),
                             "GroupSet tag/pool count mismatch: tags=%zu pools=%zu",
                             group_tags.size(),
                             device_pools_.size());
+
     std::unordered_set<std::string> seen_tags;
+    const GroupBase*                first_group = nullptr;
     for (size_t member_index = 0; member_index < group_tags.size(); ++member_index) {
         const auto& tag = group_tags[member_index];
         RTP_LLM_CHECK_WITH_INFO(seen_tags.emplace(tag).second, "GroupSet has duplicate member tag=%s", tag.c_str());
-        (void)topology->group(tag);
+        const auto& group = cache_config->groupByTagGlobal(tag);
+        RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "GroupSet member tag=%s has null cache spec", tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(
+            !cache_config->moduleConfig(cache_config->moduleOfTag(tag)).layerIdsForGroup(tag).empty(),
+            "GroupSet member tag=%s has no local layers",
+            tag.c_str());
+        if (first_group == nullptr) {
+            first_group = &group;
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(groupSetSemanticsCompatible(*first_group, group),
+                                    "GroupSet has incompatible reuse geometry for tags=%s and %s",
+                                    group_tags.front().c_str(),
+                                    tag.c_str());
+        }
         if (!device_pools_.empty()) {
             RTP_LLM_CHECK_WITH_INFO(
                 device_pools_[member_index] != nullptr, "GroupSet has null device pool for tag=%s", tag.c_str());
         }
     }
-    size_t physical_payload_bytes   = backing_layout.payload_bytes;
-    uses_physical_payload_geometry_ = physical_payload_bytes > 0;
+
+    size_t physical_payload_bytes = backing_layout.payload_bytes;
     if (physical_payload_bytes == 0) {
         for (const auto& tag : group_tags) {
-            const size_t group_bytes = topology->blockSizeBytesForGroup(tag);
+            const size_t group_bytes =
+                cache_config->moduleConfig(cache_config->moduleOfTag(tag)).blockSizeBytesForGroup(tag);
             RTP_LLM_CHECK_WITH_INFO(group_bytes <= std::numeric_limits<size_t>::max() - physical_payload_bytes,
                                     "GroupSet payload size overflow at tag=%s",
                                     tag.c_str());
@@ -86,11 +118,25 @@ void GroupSet::initialize(size_t                               group_set_id,
     RTP_LLM_CHECK_WITH_INFO(physical_payload_bytes > 0, "GroupSet physical payload must be positive");
 
     group_set_id_  = group_set_id;
-    topology_      = std::move(topology);
+    cache_config_  = std::move(cache_config);
     group_tags_    = std::move(group_tags);
     payload_bytes_ = physical_payload_bytes;
     enable_crc_    = backing_layout.crc_enabled;
     storage_bytes_ = backing_layout.storage_bytes == 0 ? physical_payload_bytes : backing_layout.storage_bytes;
+    uses_physical_payload_geometry_ = backing_layout.payload_bytes > 0;
+}
+
+const KVCacheSpec& GroupSet::groupSpec(std::string_view tag) const {
+    const auto& member = group(tag);
+    RTP_LLM_CHECK_WITH_INFO(member.spec != nullptr,
+                            "GroupSet member tag=%.*s has null cache spec",
+                            static_cast<int>(tag.size()),
+                            tag.data());
+    return *member.spec;
+}
+
+std::vector<int> GroupSet::localLayerIdsForMember(std::string_view tag) const {
+    return cache_config_->moduleConfig(cache_config_->moduleOfTag(tag)).layerIdsForGroup(tag);
 }
 
 void GroupSet::referenceBlocks(const MultiNodeResource& resource) const {

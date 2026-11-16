@@ -5,6 +5,14 @@ _DSV4_CUDA13_ONLY = select({
 })
 
 py_test(
+    name = "draft_cache_tag_prefix_test",
+    srcs = ["draft_cache_tag_prefix_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
+)
+
+py_test(
     name = "dsv4_kv_cache_test",
     srcs = ["dsv4_kv_cache_test.py"],
     deps = ["//rtp_llm:testlib"],

@@ -196,9 +196,7 @@ protected:
             for (const auto& handle : key_handles) {
                 group_tags_.push_back(handle.tag);
                 blocks_.push_back(handle.block);
-                const auto& layer_ids = topology().layerIdsForGroup(handle.tag);
-                RTP_LLM_CHECK(!layer_ids.empty());
-                const auto buffers = convertIndexToBuffer(layer_ids.front(), handle.tag, handle.block);
+                const auto buffers = convertIndexToBuffer(0, handle.tag, handle.block);
                 addresses_.push_back(buffers.front().addr);
             }
         }
@@ -610,7 +608,7 @@ TEST(BlockTreeStorerTest, UnsupportedInsertTargetsRejectWithoutPublishingOrPinni
     resources[0][0].device_blocks = holder[0];
     resources[1][0].device_blocks = holder[1];
 
-    const auto    version = env.cache->getKeySnapshot().version;
+    const auto version = env.cache->getKeySnapshot().version;
     for (const Tier target : {Tier::REMOTE, Tier::NONE}) {
         SCOPED_TRACE(tierName(target));
         EXPECT_ANY_THROW(env.cache->insert({100, 101}, resources, target));
@@ -837,11 +835,16 @@ TEST(BlockTreeStorerTest, StorageHandlesUseTopologyGroupsAndResolveGpuBuffers) {
         return group;
     };
     auto topology  = CacheTopology::create({make_group("z_group", 0), make_group("a_group", 1)},
-                                          {{0, {"z_group"}}, {1, {"a_group"}}});
+                                           {{0, {"z_group"}}, {1, {"a_group"}}});
     auto pool_z    = makeDevicePool({{16, 0}}, kStoreDeviceBlocks, "storage_tag_z");
     auto pool_a    = makeDevicePool({{16, 0}}, kStoreDeviceBlocks, "storage_tag_a");
     auto group_set = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_z, pool_a}, nullptr, nullptr);
-    group_set->initialize(0, topology, {"z_group", "a_group"});
+    auto cache_config                            = std::make_shared<CacheConfig>();
+    cache_config->seq_size_per_block             = topology->groups().front().seqSizePerBlock();
+    cache_config->main_config.seq_size_per_block = cache_config->seq_size_per_block;
+    cache_config->main_config.layer_num          = static_cast<uint32_t>(topology->layers().size());
+    cache_config->setTopology(topology->groups(), topology->layers());
+    group_set->initialize(0, cache_config, {"z_group", "a_group"});
 
     auto                 backend = std::make_shared<PendingWriteBackend>();
     BlockTreeCacheConfig config;

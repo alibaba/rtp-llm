@@ -27,6 +27,7 @@ _CP_HELPER_TESTS = [
     "test_cp_attention_shard",
     "test_cp_async",
     "test_prefill_workspace",
+    "test_dsv4_tag_resolution",
 ]
 
 _MODEL_CONTRACT_TESTS = [

@@ -11,6 +11,7 @@ namespace {
 
 using block_transfer_engine_test::makeTestGroupBase;
 using block_transfer_engine_test::makeTestTopology;
+using block_transfer_engine_test::makeTestCacheConfig;
 
 class LinearGroupSetTest: public ::testing::Test {
 protected:
@@ -20,7 +21,7 @@ protected:
         group_        = std::make_shared<LinearGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_}, nullptr, nullptr);
         auto group    = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::LINEAR), {0}, 1);
         auto topology = makeTestTopology({std::move(group)});
-        group_->initialize(0, topology, topology->groupTags());
+        group_->initialize(0, makeTestCacheConfig(*topology), topology->groupTags());
     }
 
     void TearDown() override {

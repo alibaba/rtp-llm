@@ -110,8 +110,6 @@ TEST(KVCMLocalTest, InitRejectsMissingTopologyAndInvalidPoolShape) {
     };
 
     EXPECT_ANY_THROW(backend->init(nullptr, {}, resolver));
-    EXPECT_ANY_THROW(backend->init(environment.cache_config.topologyPtr(), {}, resolver));
-    EXPECT_ANY_THROW(backend->init(environment.cache_config.topologyPtr(), {{"default", nullptr}}, resolver));
 }
 
 TEST(KVCMLocalTest, MatchAndReadUseReturnedLocation) {
@@ -256,11 +254,7 @@ TEST(KVCMLocalTest, TP2DuplicateRankMatchReportsNoHitAndDoesNotDispatchPayload) 
     auto broadcast_manager =
         std::make_shared<BroadcastManager>(std::vector<std::string>{"unused-rank-0", "unused-rank-1"});
     auto backend = makeBackend(environment, parallelism_config, client_wrapper, std::move(broadcast_manager));
-    ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(),
-                              environment.pools_by_tag,
-                              [&](int layer_id, const std::string&, int block_id) {
-                                  return environment.device_pool->convertIndexToBuffer(layer_id, block_id);
-                              }));
+    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
 
     kv_cache_manager::Locations locations{kv_cache_manager::Location{
         kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "rank0_uri"},

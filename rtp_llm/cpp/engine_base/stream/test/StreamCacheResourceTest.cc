@@ -414,7 +414,7 @@ TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReorde
         }
         auto& batch = resource.kvCacheMutable();
         // Only the resource order changes; the manager keeps its original topology.
-        batch.initGroups(config.topologyPtr());
+        batch.initGroups(config);
         for (const auto& group : config.topology().groups()) {
             batch.mutableBlockIds(0, group.tag).assign({2, 5});
         }
@@ -430,8 +430,8 @@ TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReorde
 TEST_F(StreamCacheResourceTest, PrefillIncrementAfterHostLoadPreservesLinearReuseState) {
     for (const int tail_blocks : {2, 8}) {
         SCOPED_TRACE(tail_blocks);
-        auto config                    = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
-        config.reuse_cache_tail_blocks = tail_blocks;
+        auto config = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
+        config.main_config.reuse_cache_tail_blocks = tail_blocks;
         KVCacheConfig tiered_config;
         tiered_config.enable_device_cache  = false;
         tiered_config.enable_memory_cache  = true;
@@ -906,12 +906,12 @@ TEST_F(StreamCacheResourceTest, testStoreTargetPreservesReuseCacheOverride) {
 }
 
 TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyForFirstMalloc) {
-    auto cache_config                                     = test::makeSimpleHybridMhaCacheConfig(/*layer_num=*/4,
+    auto cache_config = test::makeSimpleHybridMhaCacheConfig(/*layer_num=*/4,
                                                              /*block_num=*/9,
                                                              /*tokens_per_block=*/2,
                                                              rtp_llm::DataType::TYPE_FP16,
                                                              /*group_layer_num=*/2);
-    cache_config.disable_decode_first_malloc_device_reuse = true;
+    cache_config.main_config.disable_decode_first_malloc_device_reuse = true;
     prepareResourceWithCacheConfig(cache_config, {1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, RoleType::DECODE);
     auto& resource = stream_->streamCacheResource();
     ASSERT_GT(cache_manager_->cacheConfig().groupNums(), 1);

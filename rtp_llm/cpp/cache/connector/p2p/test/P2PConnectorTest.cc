@@ -1,8 +1,12 @@
 #include <atomic>
 #include <future>
 #include <limits>
+#include <map>
+#include <mutex>
+#include <set>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <gtest/gtest.h>
 #include "grpc++/grpc++.h"
 
@@ -28,6 +32,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
 #include "rtp_llm/cpp/cache/BlockInfo.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
 
@@ -38,7 +43,8 @@ public:
                                                 const std::string& /*cache_tag*/,
                                                 int /*block_id*/,
                                                 int /*partition_count*/,
-                                                int /*partition_id*/) const override {
+                                                int /*partition_id*/,
+                                                size_t /*module_id*/) const override {
         static char mock_block[1024];
         BlockInfo info;
         info.is_cuda    = true;
@@ -47,9 +53,82 @@ public:
         return {info};
     }
 
+    size_t moduleOfTag(const std::string& tag) const override {
+        const auto it = module_by_tag.find(tag);
+        if (it == module_by_tag.end()) {
+            RTP_LLM_FAIL("unknown cache tag %s", tag.c_str());
+        }
+        return it->second;
+    }
+
+    bool tagOwnsLayer(const std::string& tag, int layer_id) const override {
+        const auto it = owned_layers_by_tag.find(tag);
+        if (it == owned_layers_by_tag.end()) {
+            return false;
+        }
+        return it->second.count(layer_id) != 0;
+    }
+
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
         return {};
     }
+
+    std::map<std::string, size_t>        module_by_tag{{"group0", 0}, {"group1", 0}, {"full", 0}};
+    std::map<std::string, std::set<int>> owned_layers_by_tag{{"group0", {0}}, {"group1", {1}}, {"full", {0}}};
+};
+
+// Records the (tag, module) identity actually handed to the block converter so
+// entry-level decode tests can prove draft buffers resolve to module 1.
+class RecordingModuleLayerBlockConverter: public LayerBlockConverter {
+public:
+    struct ConversionCall {
+        int         layer_id;
+        std::string cache_tag;
+        size_t      module_id;
+    };
+
+    explicit RecordingModuleLayerBlockConverter(CacheConfig config): config_(std::move(config)) {}
+
+    std::vector<BlockInfo> convertIndexToBuffer(int                layer_id,
+                                                const std::string& cache_tag,
+                                                int /*block_id*/,
+                                                int /*partition_count*/,
+                                                int /*partition_id*/,
+                                                size_t module_id) const override {
+        {
+            std::lock_guard<std::mutex> lock(calls_mutex_);
+            conversion_calls_.push_back({layer_id, cache_tag, module_id});
+        }
+        static char mock_block[1024];
+        BlockInfo   info;
+        info.is_cuda    = true;
+        info.addr       = mock_block;
+        info.size_bytes = 1024;
+        return {info};
+    }
+
+    size_t moduleOfTag(const std::string& tag) const override {
+        return config_.moduleOfTag(tag);
+    }
+
+    bool tagOwnsLayer(const std::string& tag, int layer_id) const override {
+        const auto layer_ids = config_.layerIdsForGroup(tag, config_.moduleOfTag(tag));
+        return std::find(layer_ids.begin(), layer_ids.end(), layer_id) != layer_ids.end();
+    }
+
+    std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
+        return {};
+    }
+
+    std::vector<ConversionCall> conversionCalls() const {
+        std::lock_guard<std::mutex> lock(calls_mutex_);
+        return conversion_calls_;
+    }
+
+private:
+    CacheConfig                         config_;
+    mutable std::mutex                  calls_mutex_;
+    mutable std::vector<ConversionCall> conversion_calls_;
 };
 
 class P2PConnectorTest: public ::testing::Test {
@@ -75,9 +154,9 @@ protected:
         parallelism_config.tp_rank = 0;
 
         PDSepConfig pd_sep_config;
-        pd_sep_config.role_type                      = RoleType::PREFILL;
-        pd_sep_config.cache_store_listen_port        = 0;
-        pd_sep_config.cache_store_rdma_mode          = false;
+        pd_sep_config.role_type               = RoleType::PREFILL;
+        pd_sep_config.cache_store_listen_port = 0;
+        pd_sep_config.cache_store_rdma_mode   = false;
 
         config_ = P2PConnectorConfig::create(runtime_config,
                                              cache_store_config,
@@ -186,6 +265,33 @@ protected:
         decode_config.tp_rank                     = 1;
         decode_config.worker_config.tp_rank       = 1;
         return decode_config;
+    }
+
+    P2PConnectorConfig createDecodeConfig(const CacheConfig& cache_config) const {
+        RuntimeConfig runtime_config;
+        runtime_config.worker_grpc_addrs = tp_broadcast_addrs_;
+
+        CacheStoreConfig cache_store_config;
+        cache_store_config.cache_store_rdma_mode        = false;
+        cache_store_config.messager_io_thread_count     = 1;
+        cache_store_config.messager_worker_thread_count = 1;
+
+        ParallelismConfig parallelism_config;
+        parallelism_config.tp_size = 2;
+        parallelism_config.tp_rank = 1;
+
+        PDSepConfig pd_sep_config;
+        pd_sep_config.role_type               = RoleType::DECODE;
+        pd_sep_config.cache_store_listen_port = 0;
+        pd_sep_config.cache_store_rdma_mode   = false;
+
+        return P2PConnectorConfig::create(runtime_config,
+                                          cache_store_config,
+                                          parallelism_config,
+                                          pd_sep_config,
+                                          cache_config.layer_num(0),
+                                          /*llm_kv_block_size_bytes=*/0,
+                                          cache_config);
     }
 
 protected:
@@ -856,6 +962,62 @@ TEST_F(P2PConnectorTest, ExecuteFunction_ReturnsError_WhenReadRequestRepeatsLaye
     EXPECT_FALSE(connector->executeFunction(request, response));
     EXPECT_NE(response.p2p_response().error_code(), ErrorCodePB::NONE_ERROR);
     EXPECT_NE(response.p2p_response().error_message().find("duplicate layer/tag"), std::string::npos);
+}
+
+TEST_F(P2PConnectorTest, DecodeReadUsesDraftModuleTopologyFromCacheConfig) {
+    auto cache_config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1, /*block_num=*/16, /*tokens_per_block=*/1,
+                                                       DataType::TYPE_FP16);
+    auto draft = test::declareModuleScopedTags(
+        test::makeSimpleMhaCacheConfig(/*layer_num=*/1, /*block_num=*/16, /*tokens_per_block=*/1, DataType::TYPE_FP16)
+            .main_config);
+    cache_config.mtp_sub_configs.push_back(std::move(draft));
+
+    const auto main_tag  = cache_config.groupTags(0).front();
+    const auto draft_tag = cache_config.groupTags(1).front();
+    ASSERT_NE(main_tag, draft_tag);
+
+    auto converter = std::make_shared<RecordingModuleLayerBlockConverter>(cache_config);
+    auto connector = std::make_unique<P2PConnector>(createDecodeConfig(cache_config), converter, nullptr);
+    ASSERT_TRUE(connector->init());
+
+    FunctionRequestPB request;
+    auto*             p2p_request = request.mutable_p2p_request();
+    p2p_request->set_type(P2PConnectorBroadcastType::READ);
+    p2p_request->set_request_id(6101);
+    p2p_request->set_unique_key("draft-module-topology-read");
+    p2p_request->set_deadline_ms(currentTimeMs() + 5000);
+    p2p_request->set_transfer_timeout_ms(50);
+    p2p_request->set_request_deadline_ms(currentTimeMs() + 5000);
+    for (const auto& tag : {main_tag, draft_tag}) {
+        auto* route = p2p_request->add_routes();
+        route->set_route_id(static_cast<int32_t>(p2p_request->routes_size() - 1));
+        route->set_cache_tag(tag);
+        route->set_partition_count(1);
+        route->set_partition_id(0);
+        route->set_slice_mode(static_cast<int32_t>(CpBlockSliceMode::NONE));
+        route->set_slice_count(1);
+        route->set_slice_index(0);
+        auto* layer_block = route->add_layer_blocks();
+        layer_block->set_layer_id(0);
+        layer_block->set_cache_tag(tag);
+        layer_block->add_cache_keys(tag == main_tag ? 101 : 102);
+        layer_block->add_block_ids(0);
+    }
+
+    FunctionResponsePB response;
+    // The peer never connects here; the assertion targets the converter identity
+    // reached before any transfer wait.
+    connector->executeFunction(request, response);
+
+    const auto calls = converter->conversionCalls();
+    ASSERT_EQ(calls.size(), 2u);
+    std::set<std::tuple<std::string, size_t>> identities;
+    for (const auto& call : calls) {
+        EXPECT_EQ(call.layer_id, 0);
+        identities.emplace(call.cache_tag, call.module_id);
+    }
+    EXPECT_EQ(identities.count({main_tag, 0}), 1u);
+    EXPECT_EQ(identities.count({draft_tag, 1}), 1u);
 }
 
 TEST_F(P2PConnectorTest, Rank1DoesNotInitializeRequestResourceStore) {

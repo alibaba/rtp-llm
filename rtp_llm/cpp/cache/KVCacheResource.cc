@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 
 namespace rtp_llm {
@@ -60,7 +61,7 @@ std::vector<std::string> GroupBlockIds::orderedTags() const {
 void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology, bool materialize_layer_views) {
     RTP_LLM_CHECK_WITH_INFO(topology != nullptr, "KVCacheResource::initGroups requires a topology");
     GroupBlockIds candidate;
-    const auto& groups = topology->groups();
+    const auto&   groups = topology->groups();
     candidate.rows_.reserve(groups.size());
     candidate.tag_to_index_.reserve(groups.size());
     for (const auto& group : groups) {
@@ -88,11 +89,66 @@ void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology, 
         }
     }
 
+    // Wrap the single-module layer tags as module 0 of the per-module vector.
+    std::vector<std::vector<std::vector<std::string>>> module_layer_tags;
+    if (materialize_layer_views) {
+        module_layer_tags.push_back(std::move(layer_tags));
+    }
+    std::vector<std::shared_ptr<const CacheTopology>> module_topologies;
+    if (!materialize_layer_views) {
+        module_topologies.push_back(std::move(topology));
+    }
+
     // All throwing construction/validation finished; publish both views together.
     group_block_ids.tag_to_index_.swap(candidate.tag_to_index_);
     group_block_ids.rows_.swap(candidate.rows_);
-    layer_group_tags_.swap(layer_tags);
-    topology_ = materialize_layer_views ? nullptr : std::move(topology);
+    module_layer_group_tags_.swap(module_layer_tags);
+    module_topologies_.swap(module_topologies);
+}
+
+void KVCacheResource::initGroups(const CacheConfig& config, bool materialize_layer_views) {
+    GroupBlockIds candidate;
+    const auto    identities = config.allGroupIdentities();
+    candidate.rows_.reserve(identities.size());
+    candidate.tag_to_index_.reserve(identities.size());
+    for (const auto& identity : identities) {
+        RTP_LLM_CHECK_WITH_INFO(candidate.tag_to_index_.emplace(identity.tag, candidate.rows_.size()).second,
+                                "KVCacheResource duplicate tag=%s",
+                                identity.tag.c_str());
+        const auto&  group               = config.moduleConfig(identity.module_id).group(identity.tag);
+        const size_t blocks_per_kv_block = group.kernelBlocksPerKvBlock();
+        const size_t stored_blocks_per_kv_block =
+            group.policy.group_type == CacheGroupType::FULL ? std::max<size_t>(1, blocks_per_kv_block) : 1;
+        candidate.rows_.push_back(std::make_shared<BlockIds>(stored_blocks_per_kv_block));
+    }
+    candidate.validate();
+
+    std::vector<std::vector<std::vector<std::string>>> module_layer_tags;
+    std::vector<std::shared_ptr<const CacheTopology>>  module_topologies;
+    for (size_t module_id = 0; module_id < config.moduleCount(); ++module_id) {
+        auto topology = config.moduleConfig(module_id).topologyPtr();
+        if (!materialize_layer_views) {
+            module_topologies.push_back(std::move(topology));
+            continue;
+        }
+        auto& layer_tags = module_layer_tags.emplace_back();
+        layer_tags.reserve(topology->layers().size());
+        for (const auto& layer : topology->layers()) {
+            RTP_LLM_CHECK_WITH_INFO(layer.layer_id >= 0 && static_cast<size_t>(layer.layer_id) == layer_tags.size(),
+                                    "KVCacheResource invalid layer_id=%d",
+                                    layer.layer_id);
+            for (const auto& tag : layer.group_tags) {
+                (void)candidate.blockIds(tag);
+            }
+            layer_tags.push_back(layer.group_tags);
+        }
+    }
+
+    // All throwing construction/validation finished; publish both views together.
+    group_block_ids.tag_to_index_.swap(candidate.tag_to_index_);
+    group_block_ids.rows_.swap(candidate.rows_);
+    module_layer_group_tags_.swap(module_layer_tags);
+    module_topologies_.swap(module_topologies);
 }
 
 size_t BlockIds::blocksNum() const {
@@ -243,8 +299,8 @@ void BlockIds::updateKernelSlotAt(size_t pos, BlockIdxType val) const {
 
 void BlockIds::syncKernelBlocks() const {
     cyclic_bank_count_ = 0;
-    const size_t n   = block_indices.size();
-    const size_t bpk = kernel_blocks_per_kv_block_;
+    const size_t n     = block_indices.size();
+    const size_t bpk   = kernel_blocks_per_kv_block_;
     kernel_block_indices_.resize(n * bpk);
     for (size_t i = 0; i < n; ++i) {
         updateKernelSlotAt(i, block_indices[i]);
@@ -265,17 +321,22 @@ const BlockIndicesType& KVCacheResource::blocks(std::string_view tag) const {
     return group_block_ids.blocks(tag);
 }
 
-const BlockIndicesType& KVCacheResource::blocksForLayer(int layer_id, std::string_view tag) const {
-    checkLayerTag(layer_id, tag);
+const BlockIndicesType& KVCacheResource::blocksForLayer(int layer_id, std::string_view tag, size_t module_id) const {
+    checkLayerTag(layer_id, tag, module_id);
     return group_block_ids.blocks(tag);
+}
+
+const BlockIndicesType& KVCacheResource::blocksForLayer(int layer_id, size_t module_id) const {
+    return blocks(soleGroupTagForLayer(layer_id, module_id));
 }
 
 const BlockIndicesType& KVCacheResource::kernelBlocks(std::string_view tag) const {
     return group_block_ids.kernelBlocks(tag);
 }
 
-const BlockIndicesType& KVCacheResource::kernelBlocksForLayer(int layer_id, std::string_view tag) const {
-    checkLayerTag(layer_id, tag);
+const BlockIndicesType&
+KVCacheResource::kernelBlocksForLayer(int layer_id, std::string_view tag, size_t module_id) const {
+    checkLayerTag(layer_id, tag, module_id);
     return group_block_ids.kernelBlocks(tag);
 }
 
@@ -284,8 +345,8 @@ BlockIds& KVCacheResource::mutableBlockIds(std::string_view tag) const {
     return const_cast<BlockIds&>(group_block_ids.blockIds(tag));
 }
 
-BlockIds& KVCacheResource::mutableBlockIdsForLayer(int layer_id, std::string_view tag) const {
-    checkLayerTag(layer_id, tag);
+BlockIds& KVCacheResource::mutableBlockIdsForLayer(int layer_id, std::string_view tag, size_t module_id) const {
+    checkLayerTag(layer_id, tag, module_id);
     return mutableBlockIds(tag);
 }
 
@@ -293,8 +354,8 @@ const BlockIds& KVCacheResource::blockIds(std::string_view tag) const {
     return group_block_ids.blockIds(tag);
 }
 
-const BlockIds& KVCacheResource::blockIdsForLayer(int layer_id, std::string_view tag) const {
-    checkLayerTag(layer_id, tag);
+const BlockIds& KVCacheResource::blockIdsForLayer(int layer_id, std::string_view tag, size_t module_id) const {
+    checkLayerTag(layer_id, tag, module_id);
     return group_block_ids.blockIds(tag);
 }
 
@@ -307,47 +368,97 @@ const GroupBlockIds& KVCacheResource::groupBlockIds() const {
     return group_block_ids;
 }
 
-void KVCacheResource::checkLayerTag(int layer_id, std::string_view tag) const {
-    const auto& tags  = groupTagsForLayer(layer_id);
+void KVCacheResource::checkLayerTag(int layer_id, std::string_view tag, size_t module_id) const {
+    const auto& tags  = groupTagsForLayer(layer_id, module_id);
     const auto  value = std::string(tag);
     RTP_LLM_CHECK_WITH_INFO(std::find(tags.begin(), tags.end(), value) != tags.end(),
-                            "KVCacheResource layer=%d does not own tag=%s",
+                            "KVCacheResource module=%zu layer=%d does not own tag=%s",
+                            module_id,
                             layer_id,
                             value.c_str());
 }
 
-const std::vector<std::string>& KVCacheResource::groupTagsForLayer(int layer_id) const {
-    if (topology_) {
-        return topology_->layer(layer_id).group_tags;
+const std::vector<std::string>& KVCacheResource::groupTagsForLayer(int layer_id, size_t module_id) const {
+    if (!module_topologies_.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(module_id < module_topologies_.size(),
+                                "KVCacheResource module_id=%zu out of range [0, %zu)",
+                                module_id,
+                                module_topologies_.size());
+        return module_topologies_[module_id]->layer(layer_id).group_tags;
     }
-    RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layer_group_tags_.size(),
-                            "KVCacheResource invalid layer_id=%d size=%zu",
+    RTP_LLM_CHECK_WITH_INFO(module_id < module_layer_group_tags_.size(),
+                            "KVCacheResource module_id=%zu out of range [0, %zu)",
+                            module_id,
+                            module_layer_group_tags_.size());
+    const auto& module_tags = module_layer_group_tags_[module_id];
+    RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < module_tags.size(),
+                            "KVCacheResource invalid layer_id=%d for module=%zu size=%zu",
                             layer_id,
-                            layer_group_tags_.size());
-    return layer_group_tags_[static_cast<size_t>(layer_id)];
+                            module_id,
+                            module_tags.size());
+    return module_tags[static_cast<size_t>(layer_id)];
 }
 
-const std::string& KVCacheResource::soleGroupTagForLayer(int layer_id) const {
-    const auto& tags = groupTagsForLayer(layer_id);
-    RTP_LLM_CHECK_WITH_INFO(
-        tags.size() == 1, "KVCacheResource layer=%d requires exactly one group, got %zu", layer_id, tags.size());
+const std::string& KVCacheResource::soleGroupTagForLayer(int layer_id, size_t module_id) const {
+    const auto& tags = groupTagsForLayer(layer_id, module_id);
+    RTP_LLM_CHECK_WITH_INFO(tags.size() == 1,
+                            "KVCacheResource module=%zu layer=%d requires exactly one group, got %zu",
+                            module_id,
+                            layer_id,
+                            tags.size());
     return tags.front();
 }
 
 bool KVCacheResource::hasOneGroupPerLayer() const {
-    if (topology_) {
-        return topology_->hasOneGroupPerLayer();
+    if (!module_topologies_.empty()) {
+        return std::all_of(module_topologies_.begin(), module_topologies_.end(), [](const auto& topology) {
+            return topology->hasOneGroupPerLayer();
+        });
     }
-    return std::all_of(
-        layer_group_tags_.begin(), layer_group_tags_.end(), [](const auto& tags) { return tags.size() == 1; });
+    for (const auto& module_tags : module_layer_group_tags_) {
+        for (const auto& tags : module_tags) {
+            if (tags.size() != 1) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 int KVCacheResource::layerNum() const {
-    return topology_ ? static_cast<int>(topology_->layers().size()) : static_cast<int>(layer_group_tags_.size());
+    if (!module_topologies_.empty()) {
+        return static_cast<int>(module_topologies_[0]->layers().size());
+    }
+    if (module_layer_group_tags_.empty()) {
+        return 0;
+    }
+    return static_cast<int>(module_layer_group_tags_[0].size());
+}
+
+int KVCacheResource::layerNum(size_t module_id) const {
+    if (!module_topologies_.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(module_id < module_topologies_.size(),
+                                "KVCacheResource module_id=%zu out of range [0, %zu)",
+                                module_id,
+                                module_topologies_.size());
+        return static_cast<int>(module_topologies_[module_id]->layers().size());
+    }
+    RTP_LLM_CHECK_WITH_INFO(module_id < module_layer_group_tags_.size(),
+                            "KVCacheResource module_id=%zu out of range [0, %zu)",
+                            module_id,
+                            module_layer_group_tags_.size());
+    return static_cast<int>(module_layer_group_tags_[module_id].size());
 }
 
 int KVCacheResource::groupNums() const {
     return static_cast<int>(group_block_ids.size());
+}
+
+size_t KVCacheResource::moduleNum() const {
+    if (!module_topologies_.empty()) {
+        return module_topologies_.size();
+    }
+    return module_layer_group_tags_.size();
 }
 
 std::vector<std::string> KVCacheResource::groupTags() const {

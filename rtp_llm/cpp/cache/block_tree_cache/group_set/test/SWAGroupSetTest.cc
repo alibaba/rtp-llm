@@ -11,6 +11,7 @@ namespace {
 
 using block_transfer_engine_test::makeTestGroupBase;
 using block_transfer_engine_test::makeTestTopology;
+using block_transfer_engine_test::makeTestCacheConfig;
 
 class SWAGroupSetTest: public ::testing::Test {
 protected:
@@ -28,7 +29,7 @@ protected:
         policy.sliding_window_size = 128;
         auto group                 = makeTestGroupBase(std::move(policy), {0}, 1, 0, 128, 64);
         auto topology              = makeTestTopology({std::move(group)});
-        group_->initialize(0, topology, topology->groupTags());
+        group_->initialize(0, makeTestCacheConfig(*topology), topology->groupTags());
     }
 
     void TearDown() override {

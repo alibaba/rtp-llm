@@ -272,5 +272,39 @@ TEST_F(CrcDumpWriterTest, WorkersShareWriterPerRank) {
     EXPECT_EQ(CrcDumpWriter::forRank(9181), CrcDumpWriter::forRank(9181));
     EXPECT_NE(CrcDumpWriter::forRank(9181), CrcDumpWriter::forRank(9182));
 }
+TEST_F(CrcDumpWriterTest, ModuleIdDistinguishesOverlappingLayerZero) {
+    CrcDumpWriter writer(3, root_.string());
+    const auto    path = dump(writer,
+                           failure(),
+                              {
+                               {"kind", "FULL"},
+                               {"layout_tile_count", "2"},
+                               {"layout_tile_0_member", "0"},
+                               {"layout_tile_0_module_id", "0"},
+                               {"layout_tile_0_layer_id", "0"},
+                               {"layout_tile_0_module_layer_id", "0:0"},
+                               {"layout_tile_0_offset", "0"},
+                               {"layout_tile_0_bytes", "4"},
+                               {"layout_tile_1_member", "0"},
+                               {"layout_tile_1_module_id", "1"},
+                               {"layout_tile_1_layer_id", "0"},
+                               {"layout_tile_1_module_layer_id", "1:0"},
+                               {"layout_tile_1_offset", "4"},
+                               {"layout_tile_1_bytes", "8"},
+                           });
+    ASSERT_FALSE(path.empty());
+    const auto manifest = readText(fs::path(path) / "manifest.json");
+    EXPECT_NE(manifest.find("\"layout_tile_0_module_id\": \"0\""), std::string::npos);
+    EXPECT_NE(manifest.find("\"layout_tile_0_layer_id\": \"0\""), std::string::npos);
+    EXPECT_NE(manifest.find("\"layout_tile_0_module_layer_id\": \"0:0\""), std::string::npos);
+    EXPECT_NE(manifest.find("\"layout_tile_1_module_id\": \"1\""), std::string::npos);
+    EXPECT_NE(manifest.find("\"layout_tile_1_layer_id\": \"0\""), std::string::npos);
+    EXPECT_NE(manifest.find("\"layout_tile_1_module_layer_id\": \"1:0\""), std::string::npos);
+    EXPECT_NE(manifest.find("\"layout_tile_0_offset\": \"0\""), std::string::npos);
+    EXPECT_NE(manifest.find("\"layout_tile_0_bytes\": \"4\""), std::string::npos);
+    EXPECT_NE(manifest.find("\"layout_tile_1_offset\": \"4\""), std::string::npos);
+    EXPECT_NE(manifest.find("\"layout_tile_1_bytes\": \"8\""), std::string::npos);
+}
+
 }  // namespace
 }  // namespace rtp_llm

@@ -258,12 +258,19 @@ private:
 // =============================================================================
 class LeaseTestMockLayerBlockConverter: public LayerBlockConverter {
 public:
-    std::vector<BlockInfo> convertIndexToBuffer(int, const std::string&, int, int, int) const override {
+    std::vector<BlockInfo>
+    convertIndexToBuffer(int, const std::string&, int, int, int, size_t = 0) const override {
         static char mock_block[1024];
         BlockInfo   info;
         info.addr       = mock_block;
         info.size_bytes = sizeof(mock_block);
         return {info};
+    }
+    size_t moduleOfTag(const std::string&) const override {
+        return 0;
+    }
+    bool tagOwnsLayer(const std::string&, int) const override {
+        return true;
     }
     std::vector<std::pair<BlockInfo, size_t>> getAllBuffers() const override {
         return {};
