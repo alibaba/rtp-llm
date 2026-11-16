@@ -31,8 +31,6 @@ ErrorInfo BatchStreamOutputCollector::add(GenerateOutputs output) {
             const auto& previous = output_.generate_outputs[i];
             if (!next.loss.has_value())
                 next.loss = previous.loss;
-            if (!next.logits.has_value())
-                next.logits = previous.logits;
             if (!next.hidden_states.has_value())
                 next.hidden_states = previous.hidden_states;
             if (!next.all_hidden_states.has_value())
