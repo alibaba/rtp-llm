@@ -45,7 +45,9 @@ class RequestRouteStateTest {
             var debug = new DebugInfo();
             debug.setHitCacheLen(7);
             metadata.setDebugInfo(debug);
-            roles.add(RoleSelection.prefill(endpoint, metadata, 13, null));
+            roles.add(
+                    org.flexlb.balance.schedule.SelectionTestSupport.prefill(
+                            endpoint, metadata, 13, null));
             var result = new RequestRoute(context, roles);
             assertThrows(
                     IllegalStateException.class,
@@ -65,7 +67,13 @@ class RequestRouteStateTest {
             var prefill = result.role(RoleType.PREFILL);
             assertSame(endpoint, prefill.endpoint());
             assertEquals(13, prefill.computeTokens());
-            assertEquals(7, prefill.hitCacheTokens());
+            assertEquals(
+                    7,
+                    result.successResponse()
+                            .getServerStatus()
+                            .getFirst()
+                            .getDebugInfo()
+                            .getHitCacheLen());
             assertEquals(
                     "original", result.successResponse().getServerStatus().getFirst().getGroup());
             assertThrows(UnsupportedOperationException.class, () -> result.roles().clear());

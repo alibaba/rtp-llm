@@ -157,7 +157,7 @@ final class RequestProtocolTestSupport {
             if (role.role().supportsPrefill() && role.registration() == null) {
                 var record = org.mockito.Mockito.mock(PrefillEndpoint.RequestRegistration.class);
                 registered.add(
-                        RoleSelection.prefill(
+                        org.flexlb.balance.schedule.SelectionTestSupport.prefill(
                                 (PrefillEndpoint) role.endpoint(),
                                 role.toServerStatus(context.getRequestId()),
                                 role.computeTokens(),

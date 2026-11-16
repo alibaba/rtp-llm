@@ -203,7 +203,7 @@ public class RequestRouteSelector {
             return true;
         }
         return requiredRoles.contains(RoleType.VIT)
-                && vitStrategy.validate(context, resolvePolicyGroup(context)).isSuccess();
+                && vitStrategy.validateSelection(context, resolvePolicyGroup(context)) != null;
     }
 
     public WorkerEndpoint blockedEndpoint(CapacityKey key) {

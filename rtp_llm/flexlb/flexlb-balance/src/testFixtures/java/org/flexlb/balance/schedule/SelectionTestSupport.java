@@ -21,7 +21,14 @@ public final class SelectionTestSupport {
             DecodeEndpoint endpoint,
             ServerStatus status,
             DecodeEndpoint.RequestRegistration registration) {
-        return RoleSelection.decode(endpoint, status, registration);
+        return decode(endpoint, status, registration);
+    }
+
+    public static RoleSelection decode(
+            DecodeEndpoint endpoint,
+            ServerStatus status,
+            DecodeEndpoint.RequestRegistration registration) {
+        return RoleSelection.decode(endpoint, topology(status), registration);
     }
 
     /**
@@ -30,19 +37,43 @@ public final class SelectionTestSupport {
     public static RoleSelection metadata(
             WorkerEndpoint endpoint, ServerStatus status, long workMs) {
         return switch (status.getRole()) {
-            case PREFILL, PDFUSION ->
-                    RoleSelection.prefill((PrefillEndpoint) endpoint, status, workMs, null);
-            case DECODE -> RoleSelection.decode((DecodeEndpoint) endpoint, status, null);
-            case ENCODER -> RoleSelection.encoder((EncoderEndpoint) endpoint, status, null);
-            default -> RoleSelection.auxiliary(endpoint, status);
+            case PREFILL, PDFUSION -> prefill((PrefillEndpoint) endpoint, status, workMs, null);
+            case DECODE -> decode((DecodeEndpoint) endpoint, status, null);
+            case ENCODER -> encoder((EncoderEndpoint) endpoint, status, null);
+            default -> auxiliary(endpoint, status);
         };
+    }
+
+    public static RoleSelection prefill(
+            PrefillEndpoint endpoint,
+            ServerStatus status,
+            long computeTokens,
+            PrefillEndpoint.RequestRegistration registration) {
+        return RoleSelection.prefill(
+                endpoint,
+                topology(status),
+                status.getDebugInfo() == null ? 0L : status.getDebugInfo().getHitCacheLen(),
+                computeTokens,
+                registration);
+    }
+
+    public static RoleSelection encoder(
+            EncoderEndpoint endpoint,
+            ServerStatus status,
+            EncoderEndpoint.RequestRegistration registration) {
+        return RoleSelection.encoder(endpoint, topology(status), registration);
+    }
+
+    public static RoleSelection auxiliary(WorkerEndpoint endpoint, ServerStatus status) {
+        return RoleSelection.auxiliary(endpoint, topology(status));
     }
 
     /**
      * Supplies a deterministic pure choice; production selection performs admission and registration.
      */
     public static <T> java.util.Optional<T> selectionResult(
-            org.mockito.invocation.InvocationOnMock call, SelectionResult<T, CapacityKey> selected) {
+            org.mockito.invocation.InvocationOnMock call,
+            SelectionResult<T, CapacityKey> selected) {
         if (selected.status() != SelectionResult.Status.SUCCESS) return java.util.Optional.empty();
         if (selected.value() instanceof CostBasedPrefillStrategy.Selection value) {
             java.util.List<PrefillEndpoint> inputs = call.getArgument(2);
@@ -100,5 +131,18 @@ public final class SelectionTestSupport {
             org.mockito.Mockito.doReturn(registered.value()).when(route).prefillRegistration();
         }
         return registered;
+    }
+
+    private static org.flexlb.worker.status.WorkerStatus.TopologySnapshot topology(
+            ServerStatus status) {
+        return new org.flexlb.worker.status.WorkerStatus.TopologySnapshot(
+                status.getGroup(),
+                status.getServerIp(),
+                status.getHttpPort(),
+                status.getGrpcPort(),
+                null,
+                null,
+                status.getRoutingEngineIndex(),
+                status.getRoutingMultiEngineNum());
     }
 }

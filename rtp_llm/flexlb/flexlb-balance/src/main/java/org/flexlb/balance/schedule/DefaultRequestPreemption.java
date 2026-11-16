@@ -15,7 +15,6 @@ import org.flexlb.worker.endpoint.DecodeResources;
 import org.flexlb.worker.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.worker.endpoint.DecodeResources.DecodeRequestView;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
-import org.flexlb.worker.status.ServerStatus;
 
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -233,15 +232,7 @@ final class DefaultRequestPreemption implements RequestPreemption {
             if (resource != null) {
                 try {
                     var view = item.endpoint.selectionSnapshot();
-                    acquired =
-                            RoleSelection.decode(
-                                    item.endpoint,
-                                    ServerStatus.forWorker(
-                                            org.flexlb.config.service.RoleType.DECODE,
-                                            request.getRequestId(),
-                                            view.topology(),
-                                            view.workerStatus().fields()),
-                                    resource);
+                    acquired = RoleSelection.decode(item.endpoint, view.topology(), resource);
                 } catch (RuntimeException | Error failure) {
                     item.endpoint.rollbackSelection(resource);
                     throw failure;

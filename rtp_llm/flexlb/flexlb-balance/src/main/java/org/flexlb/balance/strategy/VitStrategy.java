@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.cache.VitWorkerCacheManager;
 import org.flexlb.config.service.RoleType;
@@ -34,31 +35,131 @@ public class VitStrategy
     }
 
     public synchronized RoleSelection selectForRoute(RequestContext ctx, String group) {
-        ServerStatus result =
+        RoleSelection result =
                 ctx.getRequest().getSelectedVit() == null
-                        ? selectCache(ctx, group)
-                        : validate(ctx, group);
-        if (!result.isSuccess()) {
+                        ? selectCachedWorker(ctx, group).value()
+                        : validateSelection(ctx, group);
+        if (result == null
+                || !result.endpoint().acceptsNewRequests()
+                || workers.getEndpoint(RoleType.VIT, result.capacityKey().endpoint())
+                        != result.endpoint()) {
             return null;
         }
-        WorkerEndpoint selectedEndpoint =
-                workers.getEndpoint(RoleType.VIT, result.getLogicalIpPort());
-        if (selectedEndpoint == null || !selectedEndpoint.acceptsNewRequests()) {
-            return null;
-        }
-        if (selectedEndpoint.getStatus().getGenerationId() != result.getWorkerGeneration()) {
-            return null;
-        }
-        return RoleSelection.auxiliary(selectedEndpoint, result);
+        return result;
     }
 
     public synchronized ServerStatus selectCache(RequestContext ctx, String group) {
+        var result = selectCachedWorker(ctx, group);
+        if (result.status() == SelectionResult.Status.SUCCESS)
+            return result.value().toServerStatus(ctx.getRequestId());
+        var response = new ServerStatus();
+        response.setCode(result.failure().getCode());
+        response.setMessage(result.failure().getErrorMessage());
+        return response;
+    }
+
+    public Optional<Candidate> select(List<Candidate> candidates) {
+        Candidate best = null;
+        int ties = 0;
+        for (var candidate : candidates) {
+            int comparison = best == null ? 1 : compare(candidate, best);
+            if (comparison > 0) {
+                best = candidate;
+                ties = 1;
+            } else if (comparison == 0 && ThreadLocalRandom.current().nextInt(++ties) == 0)
+                best = candidate;
+        }
+        return Optional.ofNullable(best);
+    }
+
+    public SelectionResult<RoleSelection, CapacityKey> select(
+            RequestContext context, String group) {
+        var candidates = new ArrayList<VitStrategy.Candidate>();
+        for (var endpoint : workers.endpoints(RoleType.VIT, group)) {
+            if (endpoint != null
+                    && endpoint.acceptsNewRequests()
+                    && (group == null || group.equals(endpoint.getStatus().getGroup())))
+                candidates.add(new VitStrategy.Candidate(endpoint, 0, 0, 0, 0, null));
+        }
+        var scope = new CapacityKey(RoleType.VIT, group, null);
+        return selectCandidates(
+                context,
+                scope,
+                candidates,
+                current ->
+                        this.select(current)
+                                .map(
+                                        candidate ->
+                                                SelectionResult
+                                                        .<VitStrategy.Candidate, CapacityKey>
+                                                                success(candidate))
+                                .orElseGet(() -> SelectionResult.blocked(scope)));
+    }
+
+    public synchronized ServerStatus validate(RequestContext ctx, String group) {
+        var selection = validateSelection(ctx, group);
+        return selection == null
+                ? errorStatus(StrategyErrorType.NO_VIT_WORKER)
+                : selection.toServerStatus(ctx.getRequestId());
+    }
+
+    @Override
+    protected Candidate candidate(Candidate selected) {
+        return selected;
+    }
+
+    @Override
+    protected Candidate refresh(Candidate candidate) {
+        return candidate;
+    }
+
+    @Override
+    protected WorkerEndpoint.Registration<RoleSelection> register(
+            RequestContext context, RoleType role, String group, Candidate selected) {
+        var endpoint = selected.endpoint();
+        if (!endpoint.acceptsNewRequests()
+                || workers.getEndpoint(RoleType.VIT, endpoint.ipPort()) != endpoint
+                || group != null && !group.equals(endpoint.getStatus().getGroup()))
+            return WorkerEndpoint.Registration.rejected(
+                    WorkerEndpoint.RegistrationStatus.UNAVAILABLE);
+        if (selected.cache() != null) {
+            var keys =
+                    new ArrayList<>(
+                            new LinkedHashSet<>(context.getRequest().getCacheAffinityKeys()));
+            cacheManager.reserve(
+                    keys,
+                    selected.cache(),
+                    context.getRequest().getGenerateTimeout(),
+                    System.currentTimeMillis());
+        }
+        return new WorkerEndpoint.Registration<>(
+                WorkerEndpoint.RegistrationStatus.REGISTERED,
+                RoleSelection.auxiliary(endpoint, endpoint.getStatus().topologySnapshot()));
+    }
+
+    synchronized RoleSelection validateSelection(RequestContext ctx, String group) {
+        ServerStatus selected = ctx.getRequest().getSelectedVit();
+        if (selected == null) return null;
+        var endpoint = workers.getEndpoint(RoleType.VIT, selected.getLogicalIpPort());
+        WorkerStatus worker = endpoint == null ? null : endpoint.getStatus();
+        if (worker == null || !endpoint.acceptsNewRequests()) return null;
+        var topology = worker.topologySnapshot();
+        if (selected.getRole() != RoleType.VIT
+                || group != null && !Objects.equals(group, topology.group())
+                || selected.getGrpcPort() != topology.grpcPort()
+                || !Objects.equals(selected.getGroup(), topology.group())
+                || selected.getWorkerGeneration() != worker.getGenerationId()) return null;
+        return RoleSelection.auxiliary(endpoint, topology);
+    }
+
+    private SelectionResult<RoleSelection, CapacityKey> selectCachedWorker(
+            RequestContext ctx, String group) {
         var keys = ctx.getRequest().getCacheAffinityKeys();
         if (keys == null
                 || keys.isEmpty()
                 || keys.size() > 256
                 || keys.stream().anyMatch(k -> k == null || k.isEmpty() || k.length() > 4096)) {
-            return errorStatus(StrategyErrorType.INVALID_REQUEST);
+            return SelectionResult.rejected(Response.error(StrategyErrorType.INVALID_REQUEST));
         }
         keys = new ArrayList<>(new LinkedHashSet<>(keys));
         Map<String, VitWorkerCacheManager.Candidate> candidates =
@@ -101,101 +202,8 @@ public class VitStrategy
                                                                         group,
                                                                         null))));
         return result.status() == SelectionResult.Status.SUCCESS
-                ? result.value().toServerStatus(ctx.getRequestId())
-                : errorStatus(StrategyErrorType.NO_VIT_WORKER);
-    }
-
-    public Optional<Candidate> select(List<Candidate> candidates) {
-        Candidate best = null;
-        int ties = 0;
-        for (var candidate : candidates) {
-            int comparison = best == null ? 1 : compare(candidate, best);
-            if (comparison > 0) {
-                best = candidate;
-                ties = 1;
-            } else if (comparison == 0 && ThreadLocalRandom.current().nextInt(++ties) == 0)
-                best = candidate;
-        }
-        return Optional.ofNullable(best);
-    }
-
-    public SelectionResult<RoleSelection, CapacityKey> select(
-            RequestContext context, String group) {
-        var candidates = new ArrayList<VitStrategy.Candidate>();
-        for (var endpoint : workers.endpoints(RoleType.VIT, group)) {
-            if (endpoint != null
-                    && endpoint.acceptsNewRequests()
-                    && (group == null || group.equals(endpoint.getStatus().getGroup())))
-                candidates.add(new VitStrategy.Candidate(endpoint, 0, 0, 0, 0, null));
-        }
-        var scope = new CapacityKey(RoleType.VIT, group, null);
-        return selectCandidates(
-                context,
-                scope,
-                candidates,
-                current ->
-                        this.select(current)
-                                .map(
-                                        candidate ->
-                                                SelectionResult
-                                                        .<VitStrategy.Candidate, CapacityKey>
-                                                                success(candidate))
-                                .orElseGet(() -> SelectionResult.blocked(scope)));
-    }
-
-    public synchronized ServerStatus validate(RequestContext ctx, String group) {
-        ServerStatus selected = ctx.getRequest().getSelectedVit();
-        if (selected == null) {
-            return errorStatus(StrategyErrorType.NO_VIT_WORKER);
-        }
-        var selectedEndpoint = workers.getEndpoint(RoleType.VIT, selected.getLogicalIpPort());
-        WorkerStatus worker = selectedEndpoint == null ? null : selectedEndpoint.getStatus();
-        if (selected.getRole() != RoleType.VIT
-                || worker == null
-                || !selectedEndpoint.acceptsNewRequests()
-                || (group != null && !Objects.equals(group, worker.getGroup()))
-                || selected.getGrpcPort() != worker.getGrpcPort()
-                || !Objects.equals(selected.getGroup(), worker.getGroup())
-                || selected.getWorkerGeneration()
-                        != selectedEndpoint.getStatus().getGenerationId()) {
-            return errorStatus(StrategyErrorType.NO_VIT_WORKER);
-        }
-        return status(worker, ctx.getRequestId());
-    }
-
-    @Override
-    protected Candidate candidate(Candidate selected) {
-        return selected;
-    }
-
-    @Override
-    protected Candidate refresh(Candidate candidate) {
-        return candidate;
-    }
-
-    @Override
-    protected WorkerEndpoint.Registration<RoleSelection> register(
-            RequestContext context, RoleType role, String group, Candidate selected) {
-        var endpoint = selected.endpoint();
-        if (!endpoint.acceptsNewRequests()
-                || workers.getEndpoint(RoleType.VIT, endpoint.ipPort()) != endpoint
-                || group != null && !group.equals(endpoint.getStatus().getGroup()))
-            return WorkerEndpoint.Registration.rejected(
-                    WorkerEndpoint.RegistrationStatus.UNAVAILABLE);
-        if (selected.cache() != null) {
-            var keys =
-                    new ArrayList<>(
-                            new LinkedHashSet<>(context.getRequest().getCacheAffinityKeys()));
-            cacheManager.reserve(
-                    keys,
-                    selected.cache(),
-                    context.getRequest().getGenerateTimeout(),
-                    System.currentTimeMillis());
-        }
-        return new WorkerEndpoint.Registration<>(
-                WorkerEndpoint.RegistrationStatus.REGISTERED,
-                RoleSelection.auxiliary(
-                        endpoint, status(endpoint.getStatus(), context.getRequestId())));
+                ? result
+                : SelectionResult.rejected(Response.error(StrategyErrorType.NO_VIT_WORKER));
     }
 
     private static int compare(Candidate left, Candidate right) {
@@ -211,22 +219,6 @@ public class VitStrategy
         ServerStatus status = new ServerStatus();
         status.setCode(error.getErrorCode());
         status.setMessage(error.getErrorMsg());
-        return status;
-    }
-
-    private static ServerStatus status(WorkerStatus worker, String requestId) {
-        ServerStatus status = new ServerStatus();
-        status.setRole(RoleType.VIT);
-        status.setWorkerGeneration(worker.getGenerationId());
-        status.setServerIp(worker.getIp());
-        status.setHttpPort(worker.getPort());
-        status.setSelectedEngineIndex(
-                worker.topologySnapshot().engineIndex(),
-                worker.topologySnapshot().multiEngineNum());
-        status.setGrpcPort(worker.getGrpcPort());
-        status.setGroup(worker.getGroup());
-        status.setRequestId(requestId);
-        status.setSuccess(true);
         return status;
     }
 

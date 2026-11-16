@@ -1,11 +1,11 @@
 package org.flexlb.balance.schedule;
 
-import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
 import org.flexlb.balance.queue.SchedulingQueue;
 import org.flexlb.balance.strategy.RequestRouteSelector;
 import org.flexlb.balance.strategy.RoleSelection;
+import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.util.Failures;
@@ -113,8 +113,8 @@ public final class SchedulerTestServices {
     /**
      * Publish deterministic fixture choices through the production endpoint registration boundary.
      */
-    public static SelectionResult<RequestRoute, org.flexlb.worker.endpoint.CapacityKey> registerSelection(
-            RequestContext context, List<RoleSelection> selections) {
+    public static SelectionResult<RequestRoute, org.flexlb.worker.endpoint.CapacityKey>
+            registerSelection(RequestContext context, List<RoleSelection> selections) {
         var data = context;
         var config = data.getConfig();
         var limits = config.getRouter().getRoles().getDecode().getAvailability();
@@ -141,7 +141,7 @@ public final class SchedulerTestServices {
                     if (registration.status() != WorkerEndpoint.RegistrationStatus.REGISTERED)
                         return SelectionResult.blocked(role.capacityKey());
                     registered.add(
-                            RoleSelection.prefill(
+                            org.flexlb.balance.schedule.SelectionTestSupport.prefill(
                                     endpoint,
                                     metadata,
                                     role.computeTokens(),
@@ -162,7 +162,9 @@ public final class SchedulerTestServices {
                         return SelectionResult.retry();
                     if (acquired.status() != WorkerEndpoint.RegistrationStatus.REGISTERED)
                         return SelectionResult.blocked(role.capacityKey());
-                    registered.add(RoleSelection.decode(endpoint, metadata, acquired.value()));
+                    registered.add(
+                            org.flexlb.balance.schedule.SelectionTestSupport.decode(
+                                    endpoint, metadata, acquired.value()));
                 } else registered.add(role);
             }
             var route = new RequestRoute(context, registered);
@@ -317,7 +319,7 @@ public final class SchedulerTestServices {
     }
 
     /**
-     * Uses the production shutdown sequence, with a caller-selected response grace period.
+     * Closes this test environment with a caller-selected response grace period.
      */
     public ShutdownResult shutdown(ShutdownMode requestedMode, Duration timeout) {
         Objects.requireNonNull(requestedMode, "requestedMode");
@@ -343,7 +345,14 @@ public final class SchedulerTestServices {
             Throwable shutdownFailure = null;
             try {
                 drained =
-                        shutdownScheduling(scheduling, requests, tasks, timer, dispatcher, responseCompletions, endpoints,
+                        shutdownScheduling(
+                                scheduling,
+                                requests,
+                                tasks,
+                                timer,
+                                dispatcher,
+                                responseCompletions,
+                                endpoints,
                                 requestedMode == ShutdownMode.DRAIN
                                         ? com.google.common.math.LongMath.saturatedAdd(
                                                 System.nanoTime(), timeout.toNanos())
@@ -366,15 +375,23 @@ public final class SchedulerTestServices {
     }
 
     public static boolean shutdownScheduling(
-            AbstractRequestScheduler scheduling, RequestRepository requests, RequestTaskPool tasks,
-            ExpirationTimer timer, EngineCancellation dispatcher,
-            ResponseCompletionExecutor responses, EndpointRegistry endpoints, long deadlineNanos) {
+            AbstractRequestScheduler scheduling,
+            RequestRepository requests,
+            RequestTaskPool tasks,
+            ExpirationTimer timer,
+            EngineCancellation dispatcher,
+            ResponseCompletionExecutor responses,
+            EndpointRegistry endpoints,
+            long deadlineNanos) {
         scheduling.checkShutdownThread();
         requests.stopAccepting();
         boolean drained = false;
         Throwable failure = null;
-        try { drained = requests.awaitResponses(deadlineNanos); }
-        catch (Throwable cause) { failure = cause; }
+        try {
+            drained = requests.awaitResponses(deadlineNanos);
+        } catch (Throwable cause) {
+            failure = cause;
+        }
         requests.closeRegistration();
         var schedulers = new java.util.LinkedHashSet<AbstractRequestScheduler>();
         schedulers.add(scheduling);
@@ -394,8 +411,13 @@ public final class SchedulerTestServices {
         failure = Failures.run(failure, tasks::close);
         failure = Failures.run(failure, responses::close);
         for (var owner : schedulers) failure = Failures.run(failure, owner::throwIfRequestFailed);
-        if (requests.liveRequestCount() != 0) failure = Failures.append(failure,
-                new IllegalStateException("unsettled requests at shutdown: " + requests.liveRequestCount()));
+        if (requests.liveRequestCount() != 0)
+            failure =
+                    Failures.append(
+                            failure,
+                            new IllegalStateException(
+                                    "unsettled requests at shutdown: "
+                                            + requests.liveRequestCount()));
         Failures.rethrow(failure, "fixture shutdown failed");
         return drained;
     }

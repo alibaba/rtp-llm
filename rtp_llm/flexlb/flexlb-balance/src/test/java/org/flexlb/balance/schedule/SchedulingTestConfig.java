@@ -82,11 +82,11 @@ public final class SchedulingTestConfig {
             if (decode.getRole() == null) decode.setRole(org.flexlb.config.service.RoleType.DECODE);
         }
         roles.add(
-                RoleSelection.prefill(
+                org.flexlb.balance.schedule.SelectionTestSupport.prefill(
                         (PrefillEndpoint) fixtureWorker(prefillEndpoint), prefill, 0L, null));
         if (decode != null)
             roles.add(
-                    RoleSelection.decode(
+                    org.flexlb.balance.schedule.SelectionTestSupport.decode(
                             (DecodeEndpoint) fixtureWorker(decodeEndpoint), decode, reservation));
         RequestRoute selected = new RequestRoute(context, roles);
 

@@ -492,10 +492,11 @@ class RequestRouteSelectorTest {
                                 router().select(
                                                 context,
                                                 null,
-                                                RoleSelection.decode(
-                                                        decode,
-                                                        selectedDecode.status(),
-                                                        reservation)));
+                                                org.flexlb.balance.schedule.SelectionTestSupport
+                                                        .decode(
+                                                                decode,
+                                                                selectedDecode.status(),
+                                                                reservation)));
         assertSame(adoptionThrows ? adoptionFailure : cleanupFailure, actual);
         assertEquals(
                 adoptionThrows ? List.of(cleanupFailure) : List.of(),
@@ -580,7 +581,7 @@ class RequestRouteSelectorTest {
             var actual =
                     assertThrows(
                             IllegalArgumentException.class, () -> router().select(context, null));
-            assertEquals("Decode reservation belongs to another request", actual.getMessage());
+            assertEquals("selected Worker belongs to another request", actual.getMessage());
             assertEquals(
                     cleanupFails ? List.of(cleanup) : List.of(), List.of(actual.getSuppressed()));
             verify(requests, never()).currentSelectionAttempt(any());
@@ -599,8 +600,10 @@ class RequestRouteSelectorTest {
         var context = context(706L);
         var prefill = selection(RoleType.PREFILL, 706L, "p", 8001, "g1");
         var decode = selection(RoleType.DECODE, 706L, "d", 8002, "g1");
-        decode.status().setRequestId(String.valueOf(999L));
-        assertThrows(IllegalStateException.class, () -> selectedRoute(context, prefill, decode));
+        var registration = new DecodeEndpoint.RequestRegistration(1L, "999");
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> selectedRoute(context, registration, prefill, decode));
         org.flexlb.worker.endpoint.EndpointTestSupport.closeAsync(
                 verify(prefill.selectedEndpoint(), never()));
         org.flexlb.worker.endpoint.EndpointTestSupport.closeAsync(
@@ -623,7 +626,8 @@ class RequestRouteSelectorTest {
                 router().select(
                                 context,
                                 null,
-                                RoleSelection.decode(endpoint, decode.status(), reservation));
+                                org.flexlb.balance.schedule.SelectionTestSupport.decode(
+                                        endpoint, decode.status(), reservation));
 
         assertEquals(SelectionResult.Status.BLOCKED, result.status());
         verify(endpoint).rollbackSelection(reservation);
@@ -1400,17 +1404,15 @@ class RequestRouteSelectorTest {
             org.flexlb.worker.endpoint.EndpointTestSupport.stubResources(prefill, ledger);
             when(prefill.tryRegisterSelection(any(), any(), org.mockito.ArgumentMatchers.anyLong()))
                     .thenAnswer(
-                            call ->
-                                    new WorkerEndpoint.Registration<
-                                            PrefillEndpoint.RequestRegistration>(
-                                            prefill.acceptsNewRequests()
-                                                    ? WorkerEndpoint.RegistrationStatus.REGISTERED
-                                                    : WorkerEndpoint.RegistrationStatus.UNAVAILABLE,
-                                            prefill.acceptsNewRequests()
-                                                    ? mock(
-                                                            PrefillEndpoint.RequestRegistration
-                                                                    .class)
-                                                    : null));
+                            call -> {
+                                if (!prefill.acceptsNewRequests())
+                                    return WorkerEndpoint.Registration.rejected(
+                                            WorkerEndpoint.RegistrationStatus.UNAVAILABLE);
+                                var registration = mock(PrefillEndpoint.RequestRegistration.class);
+                                when(registration.requestId()).thenReturn(call.getArgument(0));
+                                return new WorkerEndpoint.Registration<>(
+                                        WorkerEndpoint.RegistrationStatus.REGISTERED, registration);
+                            });
         }
         ServerStatus status = new ServerStatus();
         status.setSuccess(true);
@@ -1526,16 +1528,22 @@ class RequestRouteSelectorTest {
         var roles = new java.util.ArrayList<RoleSelection>();
         for (var selected : selections) {
             if (selected.endpoint() instanceof PrefillEndpoint prefill) {
+                var registration = mock(PrefillEndpoint.RequestRegistration.class);
+                when(registration.requestId()).thenReturn(selected.status().getRequestId());
                 roles.add(
-                        RoleSelection.prefill(
+                        org.flexlb.balance.schedule.SelectionTestSupport.prefill(
                                 prefill,
                                 selected.status(),
                                 selected.status().getPrefillTime(),
-                                mock(PrefillEndpoint.RequestRegistration.class)));
+                                registration));
             } else if (selected.endpoint() instanceof DecodeEndpoint decode) {
-                roles.add(RoleSelection.decode(decode, selected.status(), decodeRegistration));
+                roles.add(
+                        org.flexlb.balance.schedule.SelectionTestSupport.decode(
+                                decode, selected.status(), decodeRegistration));
             } else {
-                roles.add(RoleSelection.auxiliary(selected.endpoint(), selected.status()));
+                roles.add(
+                        org.flexlb.balance.schedule.SelectionTestSupport.auxiliary(
+                                selected.endpoint(), selected.status()));
             }
         }
         var route = new RequestRoute(context, roles);

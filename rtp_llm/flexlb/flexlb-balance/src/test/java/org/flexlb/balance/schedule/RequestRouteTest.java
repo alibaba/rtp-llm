@@ -67,9 +67,15 @@ class RequestRouteTest {
                         route.role(org.flexlb.config.service.RoleType.PREFILL)
                                 .toServerStatus(route.requestId())
                                 .getGroup());
-                assertEquals(17L, route.role(RoleType.PREFILL).hitCacheTokens());
                 assertEquals(
-                        7L,
+                        17L,
+                        route.successResponse()
+                                .getServerStatus()
+                                .getFirst()
+                                .getDebugInfo()
+                                .getHitCacheLen());
+                assertEquals(
+                        worker.getStatus().getDpRank(),
                         route.role(RoleType.PREFILL).toServerStatus(route.requestId()).getDpRank());
                 assertEquals(10L, route.computeTokens());
                 assertSame(selectedEndpoint, route.prefillEndpoint());
@@ -90,14 +96,11 @@ class RequestRouteTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"failed", "request", "work", "role"})
+    @ValueSource(strings = {"request", "work", "role"})
     void validationFailureLeavesEndpointAvailable(String invalid) {
         var worker = prefill();
         var selectedEndpoint = worker;
         var metadata = metadata(worker);
-        if (invalid.equals("failed")) {
-            metadata.setSuccess(false);
-        }
         if (invalid.equals("request")) {
             metadata.setRequestId(String.valueOf(99L));
         }
@@ -109,6 +112,15 @@ class RequestRouteTest {
             assertThrows(
                     RuntimeException.class,
                     () -> {
+                        if (invalid.equals("request")) {
+                            var registration = mock(PrefillEndpoint.RequestRegistration.class);
+                            org.mockito.Mockito.when(registration.requestId()).thenReturn("99");
+                            route.add(
+                                    SelectionTestSupport.prefill(
+                                            selectedEndpoint, metadata, 10L, registration));
+                            new RequestRoute(context(), route);
+                            return;
+                        }
                         route.add(
                                 SelectionTestSupport.metadata(
                                         selectedEndpoint,
@@ -257,7 +269,6 @@ class RequestRouteTest {
         var worker = prefill();
         var selectedEndpoint = spy(worker);
         var metadata = metadata(worker);
-        metadata.setSuccess(false);
         try {
             var route = new java.util.ArrayList<RoleSelection>();
             var failure =
@@ -266,7 +277,7 @@ class RequestRouteTest {
                             () ->
                                     route.add(
                                             SelectionTestSupport.metadata(
-                                                    selectedEndpoint, metadata, 1L)));
+                                                    selectedEndpoint, metadata, -1L)));
             assertEquals(List.of(), List.of(failure.getSuppressed()));
             assertFalse(selectedEndpoint.hasStoppedAcceptingRequests());
         } finally {

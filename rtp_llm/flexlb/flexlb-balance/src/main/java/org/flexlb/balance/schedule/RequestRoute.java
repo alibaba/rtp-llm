@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 
 /**
@@ -38,8 +39,9 @@ public final class RequestRoute implements WorkerRoute {
         this.roles = List.copyOf(roles);
         var seen = java.util.EnumSet.noneOf(RoleType.class);
         for (var selection : this.roles) {
-            checkState(
-                    Objects.equals(requestId, selection.requestId()),
+            checkArgument(
+                    selection.registration() == null
+                            || Objects.equals(requestId, selection.registration().requestId()),
                     "selected Worker belongs to another request");
             checkState(
                     seen.add(

@@ -44,15 +44,16 @@ P/D/V/E 策略继承 `AbstractWorkerSelectionStrategy`，共用有界登记重�
 角色之间不同时持有 Endpoint 锁，不存在先占 P 锁再等 D 锁的过程。
 预测、cache 查询和资源通知均在 Endpoint 状态锁外；没有全局选点串行队列。
 
-选点元数据由 RoleSelection 冻结。返回路由、抢占构造取消目标时直接读取冻结的地址字段，
-内部直接读取冻结的角色字段；对外响应才由 RequestRoute 生成独立协议对象。
-这些字段不从 Endpoint 的后续动态观测重新读取，保持已选路由的地址一致性。
+RoleSelection 复用选中时的 TopologySnapshot，保存本次命中量、预计工作量及精确登记。
+地址、分组和 Engine 索引读取保存的拓扑；角色与 DP rank 从 Endpoint 获取，不重复保存。
+对外响应由 RequestRoute 提供 requestId，通过 RoleSelection.toServerStatus 生成独立协议对象；
+ViT 代际读取 Endpoint 绑定的 WorkerStatus，内部选址不再构造成功协议对象。
 
 ## 数据归属
 
 | 粒度           | 类型                              | 保存的信息                                                                                     |
 | -------------- | --------------------------------- | ---------------------------------------------------------------------------------------------- |
-| 单角色事实     | `RoleSelection`                   | Endpoint、冻结拓扑、DP rank、对外协议需要的观测                                                |
+| 单角色事实     | `RoleSelection`                   | Endpoint、选中时的拓扑、本请求命中量                                                           |
 | Prefill 事实   | `RoleSelection`                   | 本请求预计工作量、精确 Prefill 登记                                                            |
 | Decode 事实    | `RoleSelection`                   | 精确 Decode 登记                                                                               |
 | 单次多角色结果 | `RequestRoute`                    | Context、冻结 requestId、有序 RoleSelection 引用；同时作为队列和回调的精确身份，不复制角色字段 |
@@ -140,4 +141,4 @@ RequestRouteSelector 接收已取得的 RoleSelection，继续选择其余角色
 取消、超时及发送结果未知的资源规则见 [队列调度](02-queue-scheduling.md) 和 [资源管理](03-resource-management.md)。
 
 RequestRoute 只保存已选角色和精确登记。RequestContext 直接保存结束状态、原因和说明；响应选择引用 ResponseCompletionExecutor.Registration，执行登记同时作为精确响应身份。查询按 Context 快照生成 RequestState，清理完成后保留同一种摘要；摘要不实现 WorkerRoute。
-RoleSelection 用角色字段区分 Prefill、Decode 和辅助角色，资源登记与 compute tokens 直接保存在同一个对象中。
+RoleSelection 从 Endpoint 获取角色，资源登记与 compute tokens 直接保存在同一个对象中。

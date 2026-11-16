@@ -53,7 +53,7 @@ public final class RequestExecutionTestSupport {
         var roles = new java.util.ArrayList<RoleSelection>();
         try {
             roles.add(
-                    RoleSelection.prefill(
+                    org.flexlb.balance.schedule.SelectionTestSupport.prefill(
                             prefill,
                             metadata(
                                     prefill,
@@ -63,7 +63,7 @@ public final class RequestExecutionTestSupport {
                             registered.value()));
             if (decode != null)
                 roles.add(
-                        RoleSelection.decode(
+                        org.flexlb.balance.schedule.SelectionTestSupport.decode(
                                 decode,
                                 metadata(
                                         decode,

@@ -9,7 +9,6 @@ import org.flexlb.worker.endpoint.CapacityKey;
 import org.flexlb.worker.endpoint.EncoderEndpoint;
 import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
-import org.flexlb.worker.status.ServerStatus;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -123,17 +122,10 @@ public class EncoderStrategy
         if (accepted.status() != WorkerEndpoint.RegistrationStatus.REGISTERED)
             return WorkerEndpoint.Registration.rejected(accepted.status());
         try {
-            var status = endpoint.getStatus();
             return new WorkerEndpoint.Registration<>(
                     WorkerEndpoint.RegistrationStatus.REGISTERED,
                     RoleSelection.encoder(
-                            endpoint,
-                            ServerStatus.forWorker(
-                                    RoleType.ENCODER,
-                                    request.getRequestId(),
-                                    status.topologySnapshot(),
-                                    status.committedEngineObservation()),
-                            accepted.value()));
+                            endpoint, endpoint.getStatus().topologySnapshot(), accepted.value()));
         } catch (RuntimeException | Error failure) {
             Failures.append(
                     failure,

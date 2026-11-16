@@ -16,8 +16,6 @@ import org.flexlb.worker.endpoint.CapacityKey;
 import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.PrefillEndpoint;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
-import org.flexlb.worker.status.DebugInfo;
-import org.flexlb.worker.status.ServerStatus;
 
 import java.util.List;
 import java.util.Objects;
@@ -212,18 +210,13 @@ public class CostBasedPrefillStrategy
             return WorkerEndpoint.Registration.rejected(accepted.status());
         try {
             var status = endpoint.getStatus();
-            var assignment =
-                    ServerStatus.forWorker(
-                            role,
-                            request.getRequestId(),
-                            status.topologySnapshot(),
-                            status.committedEngineObservation());
-            var debug = new DebugInfo();
-            debug.setHitCacheLen(selected.cacheHitTokens());
-            assignment.setDebugInfo(debug);
             var result =
                     RoleSelection.prefill(
-                            endpoint, assignment, selected.computeTokens(), accepted.value());
+                            endpoint,
+                            status.topologySnapshot(),
+                            selected.cacheHitTokens(),
+                            selected.computeTokens(),
+                            accepted.value());
             reportCacheAffinity(role, endpoint.getIp(), selected.affinityReason());
             context.recordCacheSelection(role, endpoint.getIp(), selected.cacheHitTokens());
             reportSelection(role, request.getSeqLen(), selected);

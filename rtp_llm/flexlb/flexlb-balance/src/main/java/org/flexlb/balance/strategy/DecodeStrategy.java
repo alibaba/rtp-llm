@@ -16,7 +16,6 @@ import org.flexlb.worker.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
-import org.flexlb.worker.status.ServerStatus;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -357,14 +356,7 @@ public class DecodeStrategy
         try {
             return new WorkerEndpoint.Registration<>(
                     WorkerEndpoint.RegistrationStatus.REGISTERED,
-                    RoleSelection.decode(
-                            endpoint,
-                            ServerStatus.forWorker(
-                                    RoleType.DECODE,
-                                    request.getRequestId(),
-                                    selected.topology(),
-                                    selected.workerStatus().fields()),
-                            accepted.value()));
+                    RoleSelection.decode(endpoint, selected.topology(), accepted.value()));
         } catch (RuntimeException | Error failure) {
             Failures.append(
                     failure,

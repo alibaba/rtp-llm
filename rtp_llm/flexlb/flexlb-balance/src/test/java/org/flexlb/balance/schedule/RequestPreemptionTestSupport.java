@@ -95,10 +95,11 @@ public final class RequestPreemptionTestSupport {
                                                     exact.requestContext().getRequestId());
                                             status.setSuccess(true);
                                             acquired =
-                                                    RoleSelection.decode(
-                                                            item.endpoint,
-                                                            status,
-                                                            result.reservation());
+                                                    org.flexlb.balance.schedule.SelectionTestSupport
+                                                            .decode(
+                                                                    item.endpoint,
+                                                                    status,
+                                                                    result.reservation());
                                         }
                                         item.handler.accept(acquired);
                                     } finally {
