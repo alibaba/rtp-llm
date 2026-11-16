@@ -30,7 +30,7 @@ using BlockTreeCacheLayoutConstPtr = std::shared_ptr<const BlockTreeCacheLayout>
 class PrefillCacheHitMetricsReporter;
 class KVCacheAllocationWaitState;
 class P2PConnector;
-class KVCacheConnectorReadWriteContext;
+class Meta;
 
 class KVCacheManager {
 public:
@@ -140,7 +140,9 @@ public:
     // 异步连接器操作
     // async load cache from connector to gpu, for all rank
     std::shared_ptr<AsyncContext>
-    asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context);
+    asyncLoadCache(const KVCacheResource& kv_cache_resource,
+                   const std::shared_ptr<Meta>& meta,
+                   size_t tree_covered_block_num);
 
     // for every single rank
     // Returns whether a trustworthy mem_response was formed, not whether the transfer

@@ -11,7 +11,6 @@
 
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
-#include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorDecode.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeRead.h"
@@ -26,27 +25,6 @@ namespace {
 // Supply the allocator's logical match separately from device-ready reuse.
 // The existing StreamCacheResource tests cover how this value is produced;
 // these tests cover its propagation through the manager into the wire routes.
-class PrefixReadContext: public KVCacheConnectorReadWriteContext {
-public:
-    PrefixReadContext(std::shared_ptr<Meta> meta, KVCacheResourcePtr resource, size_t covered):
-        meta_(std::move(meta)), resource_(std::move(resource)), covered_(covered) {}
-
-    const std::shared_ptr<Meta>& meta() const override {
-        return meta_;
-    }
-    const KVCacheResource& kvCacheResource() const override {
-        return *resource_;
-    }
-    size_t treeCoveredBlockNum() const override {
-        return covered_;
-    }
-
-private:
-    std::shared_ptr<Meta> meta_;
-    KVCacheResourcePtr resource_;
-    size_t covered_;
-};
-
 struct PrefixReadCase {
     const char* name;
     size_t covered;
@@ -161,9 +139,8 @@ protected:
 
 TEST_P(KVCacheManagerP2PReadTest, TreePrefixDeterminesWireRoutes) {
     const auto& scenario = GetParam();
-    auto read_context = std::make_shared<PrefixReadContext>(meta_, resource_, scenario.covered);
     // Do not construct a block_range here: it must be selected by the manager.
-    context_ = std::dynamic_pointer_cast<P2PConnectorAsyncReadContext>(manager_->asyncLoadCache(read_context));
+    context_ = std::dynamic_pointer_cast<P2PConnectorAsyncReadContext>(manager_->asyncLoadCache(*resource_, meta_, scenario.covered));
     ASSERT_NE(context_, nullptr);
     const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (!context_->done() && std::chrono::steady_clock::now() < limit) {
@@ -218,8 +195,7 @@ TEST_P(KVCacheManagerP2PReadTest, SingleTokenSkipsTransferEvenWithoutAnyDecodeBl
     stream_->generateConfig()->max_new_tokens = 1;
     meta_->setDecodeNeedsCompute(stream_->needsDecodeAfterPrefill());
     auto empty_resource = std::make_shared<KVCacheResource>();
-    auto read_context = std::make_shared<PrefixReadContext>(meta_, empty_resource, 0);
-    context_ = std::dynamic_pointer_cast<P2PConnectorAsyncReadContext>(manager_->asyncLoadCache(read_context));
+    context_ = std::dynamic_pointer_cast<P2PConnectorAsyncReadContext>(manager_->asyncLoadCache(*empty_resource, meta_, 0));
     ASSERT_NE(context_, nullptr);
     const auto limit = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (!context_->done() && std::chrono::steady_clock::now() < limit) {

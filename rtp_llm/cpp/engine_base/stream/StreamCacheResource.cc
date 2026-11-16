@@ -7,7 +7,7 @@
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
-#include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
+#include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
@@ -23,31 +23,6 @@
 using namespace std;
 
 namespace rtp_llm {
-
-class StreamConnectorContext: public KVCacheConnectorReadWriteContext {
-public:
-    StreamConnectorContext(std::shared_ptr<BatchKVCacheResource> resource,
-                           std::shared_ptr<Meta>                  meta,
-                           size_t                                 tree_covered_block_num):
-        resource_(std::move(resource)),
-        meta_(std::move(meta)),
-        tree_covered_block_num_(tree_covered_block_num) {}
-
-    const KVCacheResource& kvCacheResource() const override {
-        return resource_->cacheResource(0);
-    }
-    const std::shared_ptr<Meta>& meta() const override {
-        return meta_;
-    }
-    size_t treeCoveredBlockNum() const override {
-        return tree_covered_block_num_;
-    }
-
-private:
-    std::shared_ptr<BatchKVCacheResource> resource_;
-    std::shared_ptr<Meta>                 meta_;
-    size_t                                tree_covered_block_num_{0};
-};
 
 class MetaImpl: public Meta {
 public:
@@ -735,10 +710,8 @@ bool StreamCacheResource::asyncLoadCache() {
             reuseCache() && enableMemoryCache(), reuseCache() && resource_context_.enable_remote_cache, stream_->traceId());
         meta->generate_stream_ = stream_;
         meta->fillRoutingContext(stream_);
-        const size_t tree_covered_block_num = treeCoveredBlockNum();
-        auto context = std::make_shared<StreamConnectorContext>(
-            batch_kv_cache_resource_, std::move(meta), tree_covered_block_num);
-        p2p_load_context_ = resource_context_.cache_manager->asyncLoadCache(context);
+        p2p_load_context_ = resource_context_.cache_manager->asyncLoadCache(
+            batch_kv_cache_resource_->cacheResource(0), meta, treeCoveredBlockNum());
     }
     return allocator_load_context_ != nullptr || p2p_load_context_ != nullptr;
 }
