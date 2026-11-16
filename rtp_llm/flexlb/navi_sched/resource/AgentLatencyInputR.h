@@ -43,6 +43,7 @@ struct AgentLatencyInput {
     bool latencySampleValid = true;
     bool latencyValidationValid = true;
     NaviSchedLatencyFeatures precedingFeatures;
+    int32_t readyBatchRunningRequestCount = -1;
     double backendQueueLatencyMs = 0.0;
     double predictedQueueLatencyMs = 0.0;
     double predictedExecutionLatencyMs = 0.0;
@@ -88,7 +89,9 @@ public:
 public:
     bool submitBatchReady(const NaviSchedBatchPtr &batch, int32_t batchWaitingRequests,
                           int32_t queuedBatchRequests, int32_t runningRequests,
-                          int64_t eventTimeUs);
+                          int64_t eventTimeUs,
+                          const NaviSchedWorkloadSnapshot *readyWorkload = nullptr,
+                          int32_t readyBatchRunningRequestCount = -1);
     bool submitBatchCacheResolved(const NaviSchedBatchPtr &batch,
                                   const AgentLatencyInput &executionState);
     bool submitBatchStarted(int64_t batchId, int32_t batchWaitingRequests,

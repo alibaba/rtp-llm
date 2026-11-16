@@ -33,6 +33,7 @@ class NaviSchedAgent(_navi_sched.NaviSchedAgent):
         mamba_retention_interval: int = -1,
         mamba_align: bool = False,
         latency_prediction_mode: str = "split",
+        pd_unified_capacity_split: bool = False,
         latency_model_fingerprint: str = "",
         latency_history_fingerprint: str = "",
         latency_history_binary_fingerprint: str = "",
@@ -63,6 +64,10 @@ class NaviSchedAgent(_navi_sched.NaviSchedAgent):
             raise ValueError(
                 "pd_separated=False requires latency_prediction_mode='unified'"
             )
+        if pd_unified_capacity_split and (
+            not pd_separated or latency_prediction_mode != "unified"
+        ):
+            raise ValueError("PD capacity split requires PD unified prediction")
         if projected_execution_geometry_enabled and not execution_geometry_enabled:
             raise ValueError("projected execution geometry requires execution geometry")
         if execution_cache_source_enabled and not execution_geometry_enabled:
@@ -103,6 +108,8 @@ class NaviSchedAgent(_navi_sched.NaviSchedAgent):
         agent_config.mamba_retention_interval = int(mamba_retention_interval)
         agent_config.mamba_align = bool(mamba_align)
         agent_config.unified_latency_prediction = latency_prediction_mode == "unified"
+        if pd_unified_capacity_split:
+            agent_config.pd_unified_capacity_split = True
         agent_config.time_compression = float(time_compression)
         agent_config.latency_model_fingerprint = str(latency_model_fingerprint)
         agent_config.latency_history_fingerprint = str(latency_history_fingerprint)

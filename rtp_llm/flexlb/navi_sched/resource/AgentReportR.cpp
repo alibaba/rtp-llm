@@ -93,6 +93,8 @@ bool AgentReportR::config(navi::ResourceConfigContext &ctx)
     NAVI_JSONIZE(ctx, "pd_separated", _pdSeparated, _pdSeparated);
     NAVI_JSONIZE(ctx, "unified_latency_prediction", _unifiedLatencyPrediction,
                  _unifiedLatencyPrediction);
+    NAVI_JSONIZE(ctx, "pd_unified_capacity_split", _pdUnifiedCapacitySplit,
+                 _pdUnifiedCapacitySplit);
     NAVI_JSONIZE(ctx, "full_attention_query_drop_tokens", _fullAttentionQueryDropTokens,
                  _fullAttentionQueryDropTokens);
     NAVI_JSONIZE(ctx, "mamba_replay_stop_shift", _mambaReplayStopShift,
@@ -104,7 +106,8 @@ bool AgentReportR::config(navi::ResourceConfigContext &ctx)
                  _workloadPublishTimingEnabled);
     NAVI_JSONIZE(ctx, "latency_model_fingerprint", _latencyModelFingerprint,
                  _latencyModelFingerprint);
-    return _serverInfo.port >= 0 && _latencyModelFingerprint.size() <= 4096 &&
+    return (!_pdUnifiedCapacitySplit || (_pdSeparated && _unifiedLatencyPrediction)) &&
+           _serverInfo.port >= 0 && _latencyModelFingerprint.size() <= 4096 &&
            _fullAttentionQueryDropTokens >= 0;
 }
 
@@ -117,7 +120,7 @@ navi::ErrorCode AgentReportR::init(navi::ResourceInitContext &)
         NaviSchedWorkloadSnapshot workload;
         workload.revision = 1;
         workload.eventTimeUs = autil::TimeUtility::currentTime();
-        workload.prefillCapacitySplit = !_pdSeparated;
+        workload.prefillCapacitySplit = !_pdSeparated || _pdUnifiedCapacitySplit;
         std::atomic_store_explicit(
             &_workloadSnapshot,
             std::make_shared<const NaviSchedWorkloadSnapshot>(std::move(workload)),
@@ -364,7 +367,7 @@ uint64_t AgentReportR::reportWorkloadUpdated(
     {
         autil::ScopedLock lock(_mutex);
         if (_stopping) return 0;
-        if (!_pdSeparated && _unifiedLatencyPrediction) {
+        if (usesObservedUnifiedWorkload()) {
             // Preview the complete replacement before changing either owner's state.
             if (!_nativeWorkload.combine(observed, published, covered) ||
                 !_nativeWorkload.handoff(covered, retired))
@@ -379,9 +382,11 @@ uint64_t AgentReportR::reportWorkloadUpdated(
     return published.revision;
 }
 
-bool AgentReportR::reportNativeBatchReady(const NaviSchedBatchPtr &batch)
+bool AgentReportR::reportNativeBatchReady(
+    const NaviSchedBatchPtr &batch, NaviSchedWorkloadSnapshot *readyWorkload,
+    int32_t *readyBatchRunningRequestCount)
 {
-    if (_pdSeparated || !_unifiedLatencyPrediction) return true;
+    if (!usesObservedUnifiedWorkload()) return true;
     if (!batch) return false;
     const auto prepared =
         AgentWorkloadOwnership::prepareBatch(AgentBatchR::getRequestStats(*batch));
@@ -393,11 +398,13 @@ bool AgentReportR::reportNativeBatchReady(const NaviSchedBatchPtr &batch)
         autil::ScopedLock lock(_mutex);
         if (_stopping || !_nativeWorkload.addBatch(batch->batchId, prepared))
             return false;
-        if (!_nativeWorkload.combine(observedWorkloadLocked(), combined)) {
+        if (!_nativeWorkload.combine(observedWorkloadLocked(), combined, {},
+                                     batch->batchId, readyBatchRunningRequestCount)) {
             _nativeWorkload.handoff({batch->batchId}, retired);
             return false;
         }
         combined.admittedBatch = batch->makeLocalBatchInfo();
+        if (readyWorkload) *readyWorkload = combined;
         task = enqueueWorkloadLocked(combined);
     }
     finishWorkloadPublish(task);
@@ -442,7 +449,7 @@ bool AgentReportR::reportNativeRequestReceived(const NaviSchedRequestStats &requ
 bool AgentReportR::reportNativeUnbatchedRequestsRemoved(
     const std::vector<uint64_t> &requestIds)
 {
-    if (_pdSeparated || !_unifiedLatencyPrediction) return true;
+    if (!usesObservedUnifiedWorkload()) return true;
     NaviSchedWorkloadSnapshot combined;
     QueuedPublishPtr task;
     {
@@ -460,7 +467,7 @@ bool AgentReportR::reportNativeUnbatchedRequestsRemoved(
 bool AgentReportR::reportNativeRequestsRemoved(int64_t localBatchId,
                                                const std::vector<uint64_t> &requestIds)
 {
-    if (_pdSeparated || !_unifiedLatencyPrediction) return true;
+    if (!usesObservedUnifiedWorkload()) return true;
     NaviSchedWorkloadSnapshot combined;
     QueuedPublishPtr task;
     {
@@ -477,7 +484,7 @@ bool AgentReportR::reportNativeRequestsRemoved(int64_t localBatchId,
 
 bool AgentReportR::reportNativeBatchRemoved(int64_t localBatchId)
 {
-    if (_pdSeparated || !_unifiedLatencyPrediction) return true;
+    if (!usesObservedUnifiedWorkload()) return true;
     NaviSchedWorkloadSnapshot combined;
     QueuedPublishPtr task;
     AgentWorkloadOwnership::RetiredBatches retired;
@@ -530,7 +537,7 @@ bool AgentReportR::reportNativeBatchCompleted(int64_t localBatchId,
             }
         }
         autil::ScopedLock lock(_mutex);
-        if (!_pdSeparated && _unifiedLatencyPrediction &&
+        if (usesObservedUnifiedWorkload() &&
             _nativeWorkload.hasBatch(localBatchId)) {
             NaviSchedWorkloadSnapshot combined;
             workloadCompleted =

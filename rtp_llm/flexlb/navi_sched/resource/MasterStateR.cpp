@@ -395,18 +395,20 @@ void applyLatencyModelInfo(
 }
 
 bool latencyModelMatchesPdMode(const AgentLatencyToMasterDataPtr &latency,
-                               bool pdSeparated)
+                               bool pdSeparated, bool pdUnifiedCapacitySplit)
 {
     if (!latency || latency->modelRevision <= 0) {
         return true;
     }
     return NonLinearPrefillModelR::usesCapacitySplitParameters(latency->parameters) ==
-           !pdSeparated;
+           (!pdSeparated || pdUnifiedCapacitySplit);
 }
 
-bool workloadMatchesPdMode(const NaviSchedWorkloadSnapshotPtr &workload, bool pdSeparated)
+bool workloadMatchesPdMode(const NaviSchedWorkloadSnapshotPtr &workload, bool pdSeparated,
+                           bool pdUnifiedCapacitySplit)
 {
-    return !workload || workload->prefillCapacitySplit == !pdSeparated;
+    return !workload ||
+           workload->prefillCapacitySplit == (!pdSeparated || pdUnifiedCapacitySplit);
 }
 
 } // namespace
@@ -2225,14 +2227,20 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
     const auto pdSeparated = NaviSchedAgentEvent::AGENT_HANDSHAKE == event
                                  ? update->control->pdSeparated
                                  : infoSnapshot->pdSeparated;
-    if (!latencyModelMatchesPdMode(update->latency, pdSeparated)) {
+    const auto pdUnifiedCapacitySplit = NaviSchedAgentEvent::AGENT_HANDSHAKE == event
+                                            ? pdSeparated &&
+                                                  update->control->unifiedLatencyPrediction &&
+                                                  update->workload &&
+                                                  update->workload->prefillCapacitySplit
+                                            : infoSnapshot->pdUnifiedCapacitySplit;
+    if (!latencyModelMatchesPdMode(update->latency, pdSeparated, pdUnifiedCapacitySplit)) {
         NAVI_KERNEL_LOG(ERROR,
                         "reject latency model incompatible with PD mode, "
                         "agentId [%s], pdSeparated [%d], parameterCount [%lu]",
                         agentId.c_str(), pdSeparated, update->latency->parameters.size());
         return false;
     }
-    if (!workloadMatchesPdMode(update->workload, pdSeparated)) {
+    if (!workloadMatchesPdMode(update->workload, pdSeparated, pdUnifiedCapacitySplit)) {
         NAVI_KERNEL_LOG(ERROR,
                         "reject workload incompatible with PD mode, agentId [%s], "
                         "pdSeparated [%d], prefillCapacitySplit [%d]",
@@ -3042,6 +3050,7 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
         if (NaviSchedAgentEvent::AGENT_HANDSHAKE == event) {
             node.serverInfo = update->control->serverInfo;
             node.pdSeparated = update->control->pdSeparated;
+            node.pdUnifiedCapacitySplit = pdUnifiedCapacitySplit;
             node.unifiedLatencyPrediction = update->control->unifiedLatencyPrediction;
             node.latencyModelFingerprint = update->latencyModelFingerprint;
             node.executionGeometryEnabled = update->control->executionGeometryEnabled;

@@ -239,8 +239,10 @@ bool AgentWorkloadOwnership::handoff(
 
 bool AgentWorkloadOwnership::combine(
     const NaviSchedWorkloadSnapshot &observed, NaviSchedWorkloadSnapshot &combined,
-    const std::vector<int64_t> &coveredBatchIds) const
+    const std::vector<int64_t> &coveredBatchIds, int64_t trackedLocalBatchId,
+    int32_t *runningRequestCountForBatch) const
 {
+    int32_t trackedRunningRequests = 0;
     const std::unordered_set<int64_t> covered(coveredBatchIds.begin(), coveredBatchIds.end());
     auto prefillFeatures = _prefillFeatures;
     auto requestCount = _requestCount;
@@ -285,6 +287,9 @@ bool AgentWorkloadOwnership::combine(
                 break;
             }
             ++combined.runningCapacitySlotCount;
+            if (runningRequestCountForBatch && batch->localBatchId == trackedLocalBatchId) {
+                ++trackedRunningRequests;
+            }
             if (request.cacheMissTokens > 0) {
                 running.appendRequest(request.cacheHitTokens, request.cacheMissTokens);
             }
@@ -322,7 +327,11 @@ bool AgentWorkloadOwnership::combine(
     combined.remainingTotalTokenCount += prefillFeatures.getCacheMissTokenCount();
     combined.remainingTotalTokenSquareSum += prefillFeatures.getCacheMissTokenSquareSum();
     combined.contextRemainingTotalTokenProductSum += prefillFeatures.getCacheHitMissTokenProductSum();
-    return combined.valid();
+    if (!combined.valid()) return false;
+    if (runningRequestCountForBatch) {
+        *runningRequestCountForBatch = trackedRunningRequests;
+    }
+    return true;
 }
 
 }
