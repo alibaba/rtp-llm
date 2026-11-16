@@ -30,6 +30,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -59,6 +60,7 @@ class VitCacheDirectoryTest {
 
     private WorkerStatus a;
     private WorkerStatus b;
+    private WorkerDirectory workers;
     private EngineGrpcClient grpc;
     private LBStatusConsistencyService consistency;
 
@@ -68,7 +70,7 @@ class VitCacheDirectoryTest {
         b = worker("10.0.0.2", "two");
         live.put(a.getLogicalIpPort(), a);
         live.put(b.getLogicalIpPort(), b);
-        var workers = mock(WorkerDirectory.class);
+        workers = mock(WorkerDirectory.class);
         when(workers.statusSnapshot(RoleType.VIT)).thenAnswer(call -> Map.copyOf(live));
         when(workers.endpointAddressSnapshot(RoleType.VIT))
                 .thenAnswer(call -> new java.util.ArrayList<>(live.keySet()));
@@ -343,6 +345,37 @@ class VitCacheDirectoryTest {
             assertEquals(other.getIp(), selector.select(context("cold"), null).getServerIp());
         } finally {
             executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void validatesSelectedWorkerWhileAnotherRequestWaitsForCandidates() throws Exception {
+        snapshot(a, "epoch-a", "image");
+        var context = context("image");
+        context.getRequest().setSelectedVit(selector.select(context, "one"));
+
+        var slowDirectory = mock(VitCacheDirectory.class);
+        var lookupStarted = new CountDownLatch(1);
+        var releaseLookup = new CountDownLatch(1);
+        when(slowDirectory.candidates(eq("one"), eq(List.of("image"))))
+                .thenAnswer(
+                        call -> {
+                            lookupStarted.countDown();
+                            releaseLookup.await();
+                            return directory.candidates("one", List.of("image"));
+                        });
+        var concurrentSelector = new VitCacheSelector(slowDirectory, workers);
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            var selection =
+                    executor.submit(() -> concurrentSelector.select(context("image"), "one"));
+            try {
+                assertTrue(lookupStarted.await(5, TimeUnit.SECONDS));
+                var validation = executor.submit(() -> concurrentSelector.validate(context, "one"));
+                assertTrue(validation.get(5, TimeUnit.SECONDS).isSuccess());
+            } finally {
+                releaseLookup.countDown();
+            }
+            assertTrue(selection.get(5, TimeUnit.SECONDS).isSuccess());
         }
     }
 
