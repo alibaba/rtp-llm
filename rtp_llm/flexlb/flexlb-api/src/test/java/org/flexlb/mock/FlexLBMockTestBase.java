@@ -574,6 +574,7 @@ public abstract class FlexLBMockTestBase {
                         .setGenerateConfig(
                                 EngineRpcService.GenerateConfigPB.newBuilder()
                                         .setMaxNewTokens(8)
+                                        .setCanUsePdSeparation(true)
                                         .setGroupTimeout(com.google.protobuf.Int32Value.of(77))
                                         .build())
                         .build();

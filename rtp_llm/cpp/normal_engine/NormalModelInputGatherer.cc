@@ -200,7 +200,8 @@ void copyKvCacheBlocksToModelInput(GptModelInputs&             model_input,
             + (row * batch + static_cast<size_t>(model_batch_idx)) * model_input.kv_cache_block_id.size(2);
         if (borrowed && stream->isMiddleChunk()) {
             // Cyclic banks will be overwritten; publish them only after the final chunk.
-            std::fill_n(store_dst, physical_blocks.size(), NULL_BLOCK_IDX);
+            // Mask padding too: the publisher tests the entire batch-width row.
+            std::fill_n(store_dst, model_input.kv_cache_block_id.size(2), NULL_BLOCK_IDX);
         } else {
             std::memcpy(store_dst, physical_blocks.data(), physical_blocks.size() * sizeof(int32_t));
         }
@@ -421,15 +422,24 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     if (config_.has_engram) {
         model_input.engram_token_windows = torch::full({(int64_t)current_tokens_size, 4}, -1, pinned_i32);
     }
-    model_input.input_lengths                    = torch::empty({(int64_t)total_batch_size}, pinned_i32);
-    model_input.sequence_lengths                 = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
-    model_input.prefix_lengths                   = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
-    model_input.cache_store_publish_start_tokens = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
+    model_input.input_lengths    = torch::empty({(int64_t)total_batch_size}, pinned_i32);
+    model_input.sequence_lengths = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
+    model_input.prefix_lengths   = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
+    model_input.cache_store_publish_start_tokens =
+        torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
+    if (config_.role_type == RoleType::PREFILL) {
+        model_input.p2p_final_prefill = torch::empty({(int64_t)total_context_batch_size}, pinned_bool);
+    }
     if (needs_custom_output_indexes) {
         model_input.custom_output_indexes = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
     }
     model_input.request_id            = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
     model_input.request_pd_separation = torch::empty({(int64_t)total_context_batch_size}, pinned_bool);
+    // Per-context-request absolute business deadline (ms since epoch). Used by
+    // P2P prefill to set ComputedLayerCacheBuffer lifetime aligned with the
+    // request's own deadline. INT64_MAX denotes an absent business deadline;
+    // P2P workers reject that value because layer publication requires a finite deadline.
+    model_input.request_deadline_ms = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
 
     if (max_blocks_num || kernel_width) {
         model_input.kv_cache_kernel_block_id = torch::zeros(
@@ -468,7 +478,6 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     model_input.kernel_seq_size_per_block = config_.kernel_seq_size_per_block;
     model_input.pd_separation             = config_.role_type == RoleType::PREFILL;
     model_input.warmup                    = config_.warm_up;
-    model_input.decode_entrance           = config_.decode_entrance;
     model_input.use_opaque_kv_cache_store = config_.use_opaque_kv_cache_store;
     model_input.is_fake_stream            = stream_groups.isFakeStream();
 
@@ -725,6 +734,9 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             ctx.prefix_lengths_host[prefill_batch_idx] = stream->prefixLength();
             model_input.cache_store_publish_start_tokens.data_ptr<int32_t>()[prefill_batch_idx] =
                 stream->cacheStorePublishStartToken();
+            if (model_input.p2p_final_prefill.defined()) {
+                model_input.p2p_final_prefill.data_ptr<bool>()[prefill_batch_idx] = !stream->isMiddleChunk();
+            }
             gatherMultimodalInputsForContextBatch(
                 stream, ctx, gathered_mm_features, gathered_mm_extra_input, host_holder);
             if (model_input.record_lengths) {
@@ -759,6 +771,8 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             *(model_input.request_id.data_ptr<int64_t>() + prefill_batch_idx) = stream->streamId();
             *(reinterpret_cast<bool*>(model_input.request_pd_separation.data_ptr()) + prefill_batch_idx) =
                 stream->queryPdSep();
+            // deadlineMs() returns INT64_MAX when timeout_ms <= 0 (no deadline set).
+            *(model_input.request_deadline_ms.data_ptr<int64_t>() + prefill_batch_idx) = stream->deadlineMs();
 
             ctx.batch_idx += 1;
             ctx.token_idx += input_tokens.size();

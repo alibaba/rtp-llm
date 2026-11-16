@@ -49,9 +49,6 @@ public:
 
     // pd-sep decode stage metrics
     int64_t prepare_generate_context_rt_us = 0;
-    int64_t allocate_resource_rt_us        = 0;
-    int64_t load_cache_from_prefill_rt_us  = 0;
-    int64_t local_generate_rt_us           = 0;
 
     // pd-sep prefill metrics(decode entrance)
     int64_t notify_store_cache_rt_us   = 0;
@@ -59,11 +56,6 @@ public:
     int64_t wait_store_cache_rt_us     = 0;
     int64_t min_response_done_time_us  = 1lu << 60;
     int64_t max_response_done_time_us  = 0;
-
-    // for decode tp
-    int64_t load_cache_min_rt_us       = 0;
-    int64_t load_cache_max_rt_us       = 0;
-    int64_t load_cache_polling_cost_us = 0;
 };
 
 class RpcMetrics: public kmonitor::MetricsGroup {
@@ -95,13 +87,6 @@ public:
     kmonitor::MutableMetric* poll_remote_output_rt_us_metric              = nullptr;
 
     kmonitor::MutableMetric* prepare_generate_context_rt_us_metric = nullptr;
-    kmonitor::MutableMetric* allocate_resource_rt_us_metric        = nullptr;
-    kmonitor::MutableMetric* load_cache_from_prefill_rt_us_metric  = nullptr;
-    kmonitor::MutableMetric* local_generate_rt_us_metric           = nullptr;
-
-    kmonitor::MutableMetric* load_cache_min_rt_us_metric       = nullptr;
-    kmonitor::MutableMetric* load_cache_max_rt_us_metric       = nullptr;
-    kmonitor::MutableMetric* load_cache_polling_cost_us_metric = nullptr;
 
     kmonitor::MutableMetric* notify_store_cache_rt_us_metric   = nullptr;
     kmonitor::MutableMetric* generate_first_token_rt_us_metric = nullptr;

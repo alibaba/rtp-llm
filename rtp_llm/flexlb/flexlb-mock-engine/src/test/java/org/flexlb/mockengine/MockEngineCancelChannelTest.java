@@ -485,7 +485,7 @@ class MockEngineCancelChannelTest {
     // ---- helpers ----
 
     private static CancelTarget target(int grpcPort) {
-        return new CancelTarget("127.0.0.1", grpcPort);
+        return new CancelTarget("127.0.0.1", 1, "127.0.0.1:" + grpcPort);
     }
 
     private static DecodeEndpoint endpoint(int grpcPort) {

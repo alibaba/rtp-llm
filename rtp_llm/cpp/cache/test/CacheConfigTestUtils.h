@@ -120,9 +120,9 @@ inline std::shared_ptr<const CacheTopology> makeTestCacheTopology(int           
         spec->kernel_seq_size_per_block = 1;
 
         GroupBase group;
-        group.tag       = tag;
-        group.spec      = std::move(spec);
-        group.policy    = defaultCacheGroupPolicy(group_types.empty() ? CacheGroupType::FULL :
+        group.tag                       = tag;
+        group.spec                      = std::move(spec);
+        group.policy                    = defaultCacheGroupPolicy(group_types.empty() ? CacheGroupType::FULL :
                                                                      group_types[static_cast<size_t>(group_id)]);
         group.block_num = 16;
         groups.push_back(std::move(group));

@@ -90,10 +90,7 @@ private:
         broadcast_result_->onDone([self = std::move(self)] { self->evaluate(); });
     }
 
-    void evaluate() {
-        if (!broadcast_result_->done()) {
-            return;
-        }
+    TransferResult collectResult() const {
         TransferResult result;
         if (!broadcast_result_->success()) {
             result = {ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "multi-rank transfer RPC failed"),
@@ -127,19 +124,42 @@ private:
                 result.merge(std::move(rank_result));
             }
         }
+        return result;
+    }
+
+    void evaluate() {
+        if (!broadcast_result_->done()) {
+            return;
+        }
+        TransferResult result;
+        try {
+            result = collectResult();
+        } catch (const std::exception& error) {
+            RTP_LLM_LOG_ERROR("multi-rank transfer result collection failed: %s", error.what());
+            result = {ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, ""), CacheCopyError::RPC_FAILED};
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("multi-rank transfer result collection failed with an unknown exception");
+            result = {ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, ""), CacheCopyError::RPC_FAILED};
+        }
         std::vector<DoneCallback> callbacks;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (evaluated_) {
                 return;
             }
-            result_    = result;
+            result_    = std::move(result);
             evaluated_ = true;
             callbacks.swap(callbacks_);
         }
         cv_.notify_all();
         for (auto& callback : callbacks) {
-            callback(result);
+            try {
+                callback(result_);
+            } catch (const std::exception& error) {
+                RTP_LLM_LOG_ERROR("multi-rank transfer completion callback failed: %s", error.what());
+            } catch (...) {
+                RTP_LLM_LOG_ERROR("multi-rank transfer completion callback failed with an unknown exception");
+            }
         }
     }
 

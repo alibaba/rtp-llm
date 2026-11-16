@@ -511,6 +511,7 @@ final class AutoTpmE2EHarness implements AutoCloseable {
                         .setGenerateConfig(
                                 EngineRpcService.GenerateConfigPB.newBuilder()
                                         .setMaxNewTokens(maxNewTokens)
+                                        .setCanUsePdSeparation(maxNewTokens > 1)
                                         .build());
         for (int token = 0; token < inputTokens; token++) {
             input.addTokenIds(token);

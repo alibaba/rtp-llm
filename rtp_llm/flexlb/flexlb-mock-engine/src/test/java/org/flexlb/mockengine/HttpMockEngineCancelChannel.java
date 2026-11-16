@@ -50,12 +50,13 @@ public class HttpMockEngineCancelChannel implements EngineCancelChannel {
         try {
             // TEST-ONLY routing: the mock control plane resolves the target
             // engine by the original Prefill endpoint's gRPC port.
-            if (target == null || !target.isRoutable()) {
+            int prefillPort = MockEngineCancelChannel.prefillPort(target);
+            if (prefillPort <= 0) {
                 return CompletableFuture.completedFuture(CancelAck.UNSUPPORTED);
             }
             String body =
                     MAPPER.createObjectNode()
-                            .put("port", target.prefillGrpcPort())
+                            .put("port", prefillPort)
                             .put("request_id", requestId)
                             .toString();
             HttpRequest request =

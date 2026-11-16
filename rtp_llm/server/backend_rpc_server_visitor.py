@@ -4,7 +4,7 @@ import logging
 import os
 import time
 from dataclasses import replace
-from typing import TYPE_CHECKING, AsyncGenerator, Callable, List, Optional, Set
+from typing import TYPE_CHECKING, AsyncGenerator, Callable, List, Optional, Sequence, Set
 
 import torch
 
@@ -13,6 +13,7 @@ from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
+    _split_host_port,
     multimodal_cache_keys,
     trans_input,
 )
@@ -31,6 +32,7 @@ from rtp_llm.server.master_client import (
     MasterClient,
 )
 from rtp_llm.server.misc import format_exception
+from rtp_llm.server.mm_cache_metadata import MAX_METADATA_KEY_LENGTH, MAX_METADATA_KEYS
 from rtp_llm.server.mm_cache_routing import multimodal_routing_tokens
 from rtp_llm.server.recent_cache_key_window import RecentCacheKeyWindow
 from rtp_llm.server.request_headers import (
@@ -56,6 +58,14 @@ route_logger = logging.getLogger("route_logger")
 def get_role_names(role_addrs: List[RoleAddr]) -> Set[str]:
     """Return the set of human-readable role names from a list of RoleAddr."""
     return {role_addr.role.name for role_addr in role_addrs}
+
+
+def _valid_vit_cache_keys(keys: Sequence[str]) -> bool:
+    return (
+        bool(keys)
+        and len(keys) <= MAX_METADATA_KEYS
+        and all(0 < len(key) <= MAX_METADATA_KEY_LENGTH for key in keys)
+    )
 
 
 PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
@@ -123,20 +133,22 @@ class BackendRPCServerVisitor:
         self.max_seq_len = max_seq_len
         self.seq_size_per_block = seq_size_per_block
         self.pd_sep_config = pd_sep_config
+        self._local_prefill_addresses = (
+            list(addresses) if pd_sep_config.role_type == RoleType.PREFILL else []
+        )
         self.sp_config = sp_config
         self.source_role = source_role
         self.mm_model_config = mm_model_config
         self._mm_cache_routing = (
             vit_separation == VitSeparation.VIT_SEPARATION_REMOTE
-            and getattr(pd_sep_config, "role_type", None) == RoleType.FRONTEND
+            and getattr(pd_sep_config, "role_type", None)
+            in (RoleType.FRONTEND, RoleType.PREFILL)
             and mm_model_config is not None
         )
         self.source_ip = str(getattr(server_config, "ip", "") or "")
         assert self.max_seq_len > 0
 
-        # Get max_rpc_timeout_ms and decode_entrance from pd_sep_config
         max_rpc_timeout_ms = pd_sep_config.max_rpc_timeout_ms
-        decode_entrance = pd_sep_config.decode_entrance
 
         # Get client_config from grpc_config if provided, otherwise use empty dict
         if grpc_config is not None:
@@ -148,7 +160,7 @@ class BackendRPCServerVisitor:
             addresses=addresses,
             client_config=client_config,
             max_rpc_timeout_ms=max_rpc_timeout_ms,
-            decode_entrance=decode_entrance,
+            role_type=pd_sep_config.role_type,
         )
 
         host_args = HostServiceArgs.create_from_env()
@@ -248,13 +260,19 @@ class BackendRPCServerVisitor:
 
         config_role_type = pd_sep_config.role_type
 
-        if config_role_type == RoleType.PREFILL and not pd_sep_config.decode_entrance:
-            role_list.append(RoleType.DECODE)
-            logging.info("Added DECODE role for PREFILL type")
-        elif config_role_type == RoleType.DECODE and pd_sep_config.decode_entrance:
+        if config_role_type == RoleType.PREFILL:
+            role_list.extend([RoleType.DECODE, RoleType.PREFILL])
+        elif config_role_type == RoleType.DECODE:
             role_list.append(RoleType.PREFILL)
-            logging.info("Added PREFILL role for DECODE type")
         elif config_role_type == RoleType.FRONTEND:
+            if host_args.prefill_domain and not (
+                host_args.master_domain
+                or host_args.decode_domain
+                or host_args.pdfusion_domain
+            ):
+                raise ValueError(
+                    "FRONTEND with a Prefill domain requires a Master, Decode, or PDFUSION domain"
+                )
             logging.info(
                 f"Checking FRONTEND roles: decode_domain={host_args.decode_domain}, prefill_domain={host_args.prefill_domain}, pdfusion_domain={host_args.pdfusion_domain}"
             )
@@ -321,7 +339,7 @@ class BackendRPCServerVisitor:
         ):
             keys = multimodal_cache_keys(input)
             metadata = None
-            if keys and len(keys) <= 256 and all(len(key) <= 4096 for key in keys):
+            if _valid_vit_cache_keys(keys):
                 vit_result = await self.master_client.get_backend_role_addrs(
                     block_cache_keys=[],
                     cache_key_block_size=self._cache_key_block_size(),
@@ -608,15 +626,63 @@ class BackendRPCServerVisitor:
             return self.seq_size_per_block * self._page_rr_cp_size
         return self.seq_size_per_block
 
+    @staticmethod
+    def _selected_backend_role(role_addrs: Sequence[RoleAddr]) -> RoleType | None:
+        return next(
+            (
+                addr.role
+                for addr in role_addrs
+                if addr.ip and addr.role in (RoleType.DECODE, RoleType.PDFUSION)
+            ),
+            None,
+        )
+
+    def _missing_backend_roles(
+        self, role_addrs: Sequence[RoleAddr], needs_vit: bool
+    ) -> list[RoleType]:
+        available = {addr.role for addr in role_addrs if addr.ip}
+        required = set(self.backend_role_list)
+        pd_roles = {RoleType.PREFILL, RoleType.DECODE}
+        if self.pd_sep_config.role_type == RoleType.FRONTEND:
+            # Use the same first target as ModelRpcClient when a route exists.
+            target = self._selected_backend_role(role_addrs)
+            if target == RoleType.PDFUSION:
+                required -= pd_roles
+            elif target == RoleType.DECODE:
+                required.discard(RoleType.PDFUSION)
+                required |= pd_roles
+        if not needs_vit:
+            required.discard(RoleType.VIT)
+        return [role for role in self.backend_role_list if role in required - available]
+
     async def get_domain_route_addrs(self, input: GenerateInput):
-        specified_roles = {addr.role for addr in input.generate_config.role_addrs}
-        missing_roles = [
-            role for role in self.backend_role_list if role not in specified_roles
-        ]
+        missing_roles = self._missing_backend_roles(
+            input.generate_config.role_addrs,
+            bool(input.mm_inputs)
+            or bool(getattr(getattr(input, "v41_inputs", None), "images", None)),
+        )
+        if not missing_roles:
+            route_logger.debug(
+                "skip domain routing, request_id=%s, no missing backend roles",
+                input.request_id,
+            )
+            return
         role_addrs: List[RoleAddr] = self.host_service.get_backend_role_addrs(
             missing_roles
         )
         if role_addrs:
+            specified = input.generate_config.role_addrs
+            available = {addr.role for addr in [*specified, *role_addrs] if addr.ip}
+            if (
+                not input.enqueued_by_master
+                and self._selected_backend_role(specified) is None
+                and RoleType.PDFUSION in available
+                and RoleType.PREFILL not in available
+            ):
+                # A domain-discovered Decode cannot serve without a Prefill peer.
+                role_addrs = [
+                    addr for addr in role_addrs if addr.role != RoleType.DECODE
+                ]
             input.generate_config.role_addrs.extend(role_addrs)
             route_logger.warning(
                 "fallback to host service, request_id=%s, addrs=%s",
@@ -633,6 +699,66 @@ class BackendRPCServerVisitor:
                 input.request_id,
                 missing_roles,
             )
+
+    async def _expand_pd_multimodal_tokens(self, input: GenerateInput):
+        # Domain and explicitly supplied routes bypass Master preselection, but
+        # Decode still consumes exactly the frontend-expanded token layout.
+        if (
+            not self._mm_cache_routing
+            or not input.mm_inputs
+            or input.mm_token_expansion is not None
+            or (
+                not input.generate_config.can_use_pd_separation
+                and not input.enqueued_by_master
+            )
+            or self._selected_backend_role(input.generate_config.role_addrs)
+            != RoleType.DECODE
+        ):
+            return
+        vit_addrs = [
+            a for a in input.generate_config.role_addrs if a.role == RoleType.VIT
+        ]
+        if len(vit_addrs) != 1:
+            raise FtRuntimeException(
+                ExceptionType.ROUTE_ERROR,
+                "PD multimodal expansion requires one selected ViT",
+            )
+        keys = multimodal_cache_keys(input)
+        metadata = None
+        if _valid_vit_cache_keys(keys):
+            metadata = await self.master_client.get_vit_cache_metadata(
+                vit_addrs[0], keys, input=input
+            )
+        if metadata is None:
+            if input.enqueued_by_master:
+                raise FtRuntimeException(
+                    ExceptionType.MM_PROCESS_ERROR,
+                    "ViT routing hashes are unavailable for the admitted request",
+                )
+            # Decode forwards non-PD requests to Prefill, which can compute the
+            # embeddings and expand the original tokens using the regular RPC.
+            input.generate_config.can_use_pd_separation = False
+            return
+        spans = []
+        try:
+            token_ids, full_length = multimodal_routing_tokens(
+                input.token_ids.reshape(-1).tolist(),
+                self.mm_model_config.mm_sep_tokens,
+                self.mm_model_config.include_sep_tokens,
+                keys,
+                metadata,
+                self.max_seq_len,
+                compact=True,
+                expanded_spans=spans,
+            )
+            if full_length is None:
+                raise ValueError("Selected ViT did not return complete routing hashes")
+        except (ValueError, KeyError, TypeError, ImportError, OverflowError) as error:
+            raise FtRuntimeException(
+                ExceptionType.MM_PROCESS_ERROR,
+                f"Cannot expand PD multimodal tokens: {error}",
+            ) from error
+        input.mm_token_expansion = MultimodalTokenExpansion(token_ids, spans)
 
     async def route_ips(self, input: GenerateInput):
         # PD node selection span: master routing is a real RPC round-trip that
@@ -705,11 +831,13 @@ class BackendRPCServerVisitor:
                         master_addr,
                         input_token_batched,
                     )
-                specified_roles = {
-                    addr.role for addr in input.generate_config.role_addrs
-                }
-                need_domain_routing = not set(self.backend_role_list).issubset(
-                    specified_roles
+                needs_vit = bool(input.mm_inputs) or bool(
+                    getattr(getattr(input, "v41_inputs", None), "images", None)
+                )
+                need_domain_routing = bool(
+                    self._missing_backend_roles(
+                        input.generate_config.role_addrs, needs_vit
+                    )
                 )
                 allow_domain_fallback = master_route_result is None or (
                     master_route_result.connection_failed
@@ -735,7 +863,44 @@ class BackendRPCServerVisitor:
                 route_logger.debug("routing to master done")
 
             kmonitor.report(GaugeMetrics.ROUTE_RT_METRIC, route_timer.cost_ms())
-            if not input.generate_config.role_addrs:
+            final_roles = {
+                addr.role for addr in input.generate_config.role_addrs if addr.ip
+            }
+            if (
+                RoleType.PREFILL not in final_roles
+                and self._local_prefill_addresses
+                and not getattr(input, "enqueued_by_master", False)
+            ):
+                # This HTTP entry belongs to a real Prefill backend. Preserve an
+                # externally selected Prefill, otherwise advertise the local DP
+                # serving rank for Decode's handoff rather than requiring self
+                # registration in the external routing source. A pre-enqueued
+                # Master route cannot change Prefill: that node may already own
+                # the request, so incomplete reserved routes still fail below.
+                local_address = self._local_prefill_addresses[
+                    input.request_id % len(self._local_prefill_addresses)
+                ]
+                try:
+                    local_ip, local_port = _split_host_port(local_address)
+                except ValueError:
+                    route_logger.warning(
+                        "Invalid local Prefill RPC address: %s", local_address
+                    )
+                    local_ip, local_port = "", 0
+                if local_ip and local_port > 0:
+                    input.generate_config.role_addrs.append(
+                        RoleAddr(
+                            role=RoleType.PREFILL,
+                            ip=local_ip,
+                            http_port=local_port - 1,
+                            grpc_port=local_port,
+                        )
+                    )
+                    final_roles.add(RoleType.PREFILL)
+            missing_roles = self._missing_backend_roles(
+                input.generate_config.role_addrs, needs_vit
+            )
+            if not final_roles or missing_roles:
                 route_error = FtRuntimeException(
                     ExceptionType.ROUTE_ERROR,
                     "request_id=%s no backend role addresses found after routing"
@@ -748,6 +913,7 @@ class BackendRPCServerVisitor:
                 ):
                     route_error.rtp_error_code = master_route_result.error_code
                 raise route_error
+            await self._expand_pd_multimodal_tokens(input)
         except BaseException as e:
             if route_span is not None:
                 route_span.set_attribute(trace_attrs.RTP_LLM_ROUTE_SOURCE, route_source)
@@ -1009,6 +1175,8 @@ class BackendRPCServerVisitor:
 
     @torch.inference_mode()
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
+        if not inputs:
+            return []
         for input in inputs:
             self.fill_request_info(input)
             input.generate_config.validate()
@@ -1016,11 +1184,141 @@ class BackendRPCServerVisitor:
             self.check_sp_supported(input)
             self.check_prefill_cp_supported(input)
 
-        if self.host_service.service_available:
+        # Select one batch destination without per-item Master admissions, which
+        # can split a batch across workers before Decode receives it.
+        if self.pd_sep_config.role_type == RoleType.FRONTEND:
+            selected_addrs = next(
+                (
+                    input.generate_config.role_addrs
+                    for input in inputs
+                    if any(
+                        addr.ip and addr.role in (RoleType.PDFUSION, RoleType.DECODE)
+                        for addr in input.generate_config.role_addrs
+                    )
+                ),
+                None,
+            )
+            if selected_addrs is None:
+                candidates = self.host_service.get_backend_role_addrs(
+                    [RoleType.PDFUSION]
+                )
+                selected_addrs = [
+                    addr for addr in (candidates or [])
+                    if addr.ip and addr.role == RoleType.PDFUSION
+                ][:1]
+                if not selected_addrs:
+                    selected_addrs = self.host_service.get_backend_role_addrs(
+                        [RoleType.PREFILL, RoleType.DECODE]
+                    ) or []
+            selected_addrs = list(selected_addrs)
+            selected_roles = {addr.role for addr in selected_addrs if addr.ip}
+            if RoleType.PDFUSION not in selected_roles:
+                missing_roles = [
+                    role for role in (RoleType.PREFILL, RoleType.DECODE)
+                    if role not in selected_roles
+                ]
+                if missing_roles:
+                    selected_addrs.extend(
+                        self.host_service.get_backend_role_addrs(missing_roles) or []
+                    )
+            for input in inputs:
+                roles = {addr.role for addr in input.generate_config.role_addrs if addr.ip}
+                input.generate_config.role_addrs = list(input.generate_config.role_addrs) + [
+                    addr for addr in selected_addrs if addr.ip and addr.role not in roles
+                ]
+                roles = {addr.role for addr in input.generate_config.role_addrs if addr.ip}
+                if RoleType.PDFUSION not in roles and not {
+                    RoleType.PREFILL, RoleType.DECODE
+                }.issubset(roles):
+                    raise FtRuntimeException(
+                        ExceptionType.ROUTE_ERROR,
+                        "/batch_infer requires a PDFUSION target or a Prefill/Decode pair",
+                    )
+        elif (
+            self.pd_sep_config.role_type != RoleType.PDFUSION
+            and self.host_service.service_available
+        ):
             for input in inputs:
                 await self.route_ips(input)
+            return await self._enqueue_routed_batches(inputs)
+
+        if RoleType.VIT in self.backend_role_list:
+            inputs_needing_vit = [
+                input
+                for input in inputs
+                if (
+                    input.mm_inputs
+                    or getattr(getattr(input, "v41_inputs", None), "images", None)
+                )
+                and not any(
+                    addr.ip and addr.role == RoleType.VIT
+                    for addr in input.generate_config.role_addrs
+                )
+            ]
+            if inputs_needing_vit:
+                vit_addrs = self.host_service.get_backend_role_addrs([RoleType.VIT])
+                if not vit_addrs:
+                    raise FtRuntimeException(
+                        ExceptionType.ROUTE_ERROR, "Could not resolve batch ViT address"
+                    )
+                for input in inputs_needing_vit:
+                    input.generate_config.role_addrs = [
+                        addr
+                        for addr in input.generate_config.role_addrs
+                        if addr.role != RoleType.VIT
+                    ] + vit_addrs
 
         return await self.model_rpc_client.batch_enqueue(inputs)
+
+    async def _enqueue_routed_batches(
+        self, inputs: list[GenerateInput]
+    ) -> list[GenerateOutputs]:
+        # Keep each item's route, including any Prefill already selected by Master.
+        # A Decode batch RPC can only attach to one Prefill endpoint.
+        groups = {}
+        for index, input in enumerate(inputs):
+            addresses = input.generate_config.role_addrs
+            target = next(
+                (
+                    (addr.role, addr.ip, addr.grpc_port)
+                    for addr in addresses
+                    if addr.ip and addr.role in (RoleType.DECODE, RoleType.PDFUSION)
+                ),
+                None,
+            )
+            prefill = next(
+                (
+                    (addr.ip, addr.grpc_port)
+                    for addr in addresses
+                    if addr.role == RoleType.PREFILL
+                ),
+                None,
+            )
+            key = (target, prefill, input.enqueued_by_master)
+            groups.setdefault(key, []).append((index, input))
+        if len(groups) == 1:
+            return await self.model_rpc_client.batch_enqueue(inputs)
+
+        tasks = [
+            asyncio.create_task(
+                self.model_rpc_client.batch_enqueue([input for _, input in group])
+            )
+            for group in groups.values()
+        ]
+        try:
+            results = await asyncio.gather(*tasks)
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        indexed_outputs = [
+            (index, output)
+            for group, outputs in zip(groups.values(), results)
+            for (index, _), output in zip(group, outputs)
+        ]
+        indexed_outputs.sort(key=lambda item: item[0])
+        return [output for _, output in indexed_outputs]
 
     def is_backend_service_ready(self, refresh: bool = False) -> bool:
         roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(
