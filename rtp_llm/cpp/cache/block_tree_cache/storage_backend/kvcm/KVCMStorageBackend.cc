@@ -218,10 +218,23 @@ public:
         const auto meta = std::dynamic_pointer_cast<KVCMMatchMeta>(match_meta);
         RTP_LLM_CHECK_WITH_INFO(meta != nullptr, "KVCM read received invalid match metadata");
         kvcm::LocationsView locations_view;
+        const bool          only_full_groups = requestsOnlyFullGroups(request);
         RTP_LLM_CHECK_WITH_INFO(group_policy_->filterNeedLoadLocations(
-                                    meta->locations, locations_view, /*block_mask=*/0, requestsOnlyFullGroups(request)),
+                                    meta->locations, locations_view, /*block_mask=*/0, only_full_groups),
                                 "KVCM read location filtering failed");
         const size_t remote_blocks = request.handles.size() - request.local_matched_blocks_num;
+        if (only_full_groups && locations_view.size() > remote_blocks) {
+            // Full-group-only filtering counts one view row per FULL-group
+            // location, so the re-derived view can legitimately report more
+            // rows than this request reserved handles for (match() counts the
+            // same view the same way, while the allocator caps the handle
+            // range at the final reusable full block). The view is
+            // order-preserving and each row depends only on the rows before
+            // it, so reading the first remote_blocks rows covers exactly the
+            // keys with reserved destination handles; the excess tail rows
+            // belong to keys this request never asked to transfer.
+            locations_view.resize(remote_blocks);
+        }
         RTP_LLM_CHECK_WITH_INFO(locations_view.size() == remote_blocks,
                                 "KVCM read shape mismatch: locations=%zu remote_blocks=%zu",
                                 locations_view.size(),
