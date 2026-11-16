@@ -1,0 +1,8 @@
+{
+  "atom_version": "0.1.8+g9af739efc",
+  "wheel_sha256": "41bebd65c177fed38fdc24a444f0af10107619a292c625c9c85ff9eec4ecda5a",
+  "file": "atom/models/qwen4_exp_mtp.py",
+  "source_sha256": "38ee36417db7bcce2ef0892a0d418f175722982dc081a1b9fe57aac298e263f9",
+  "patched_sha256": "a89ee9d96c06ee2697e6b7ef4a830ee7dde2197784893277f481be2564a1fc8d",
+  "patch_sha256": "7698b67ac084adfeb5a26d80294bbba8255b9beb432890d67ae2dc082a7c5a07"
+}
