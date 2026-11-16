@@ -1,4 +1,4 @@
-"""Model-specific DSA parameters, independent of the attention implementation."""
+"""Kimi K3.1 DSA checkpoint configuration and supported model constraints."""
 
 from dataclasses import dataclass
 from typing import Any, Mapping

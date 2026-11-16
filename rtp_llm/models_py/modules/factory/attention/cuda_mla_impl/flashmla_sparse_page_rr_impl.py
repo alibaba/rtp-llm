@@ -448,16 +448,14 @@ class SparseMlaPageRRImpl(SparseMlaImpl):
         fmha_config,
         is_cuda_graph,
         *,
-        workspace_owner=None,
+        workspace_owner,
         execution_phase=None,
     ):
         if execution_phase not in (None, "indexer", "sfa"):
             raise ValueError(f"Unknown DSA execution phase: {execution_phase}")
         self.execution_phase = execution_phase
         if workspace_owner is None:
-            from .dsa_kv_workspace import DsaWorkspaceOwner
-
-            workspace_owner = DsaWorkspaceOwner.from_model(config, parallelism)
+            raise ValueError("Sparse PageRR attention requires a model-owned workspace")
         self.workspace_owner = workspace_owner
         # Query-CP weights retain every head in all phases, including local
         # Decode and target verification where no Prefill layout is prepared.

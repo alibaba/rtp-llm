@@ -5,9 +5,9 @@ import json
 import logging
 from dataclasses import dataclass, replace
 
-from rtp_llm.config.dsa_config import DsaConfig
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_factory_register import register_model
+from rtp_llm.models.kimi_k3.dsa_config import DsaConfig
 from rtp_llm.models.kimi_k3.kimi_k3 import (
     KimiK3,
     KimiK3ModelConfig,

@@ -10,7 +10,7 @@ from rtp_llm.models_py.model_desc.block_map import (
     get_attention_inputs_value,
     get_primary_attention_inputs,
 )
-from rtp_llm.ops import HybridAttentionType
+from rtp_llm.ops import HybridAttentionType, KvCacheDataType, RoleType
 
 
 class KimiK31ModelAdapter:
@@ -40,9 +40,37 @@ class KimiK31ModelAdapter:
             DsaWorkspaceOwner,
         )
 
-        self.dsa_workspace = DsaWorkspaceOwner.from_model(
-            self.config, self.parallelism_config
+        config, parallelism = self.config, self.parallelism_config
+        dsa, a = config.k3_runtime_config.dsa, config.attn_config
+        block_size = config.k3_runtime_config.attn_res_block_size
+        blocks = (config.num_layers + block_size - 1) // block_size if block_size else 0
+        owner = DsaWorkspaceOwner(
+            prefill_kv_workspace_budget_bytes=config.prefill_kv_workspace_budget_bytes,
+            index_heads=dsa.index_num_heads,
+            index_dim=dsa.index_head_dim,
+            indexer_use_fp8=dsa.indexer_use_fp8,
+            sfa_use_fp8=a.kv_cache_dtype == KvCacheDataType.FP8,
+            topk=dsa.index_topk,
+            heads=a.head_num,
+            latent_dim=a.kv_lora_rank,
+            suffix_dim=a.rope_head_dim,
+            value_dim=a.v_head_dim,
+            hidden_dim=config.hidden_size,
+            q_rank=a.q_lora_rank,
+            nope_dim=a.nope_head_dim,
+            attn_res_blocks=blocks,
+            tp_size=parallelism.tp_size,
+            device=torch.device("cuda", torch.cuda.current_device()),
         )
+        cp = parallelism.prefill_cp_config
+        owner.prefill_query_cp = (
+            parallelism.role_type == RoleType.PREFILL
+            and cp.is_enabled()
+            and getattr(cp, "preserve_tp_layout", False)
+        )
+        if owner.prefill_query_cp or parallelism.role_type == RoleType.DECODE:
+            owner.query_heads = owner.heads
+        self.dsa_workspace = owner
         self.dsa_workspace.graph_max_requests = self._max_generate_batch_size
         self.dsa_workspace.graph_max_queries = max(
             1, int(self.config.gen_num_per_cycle) + 1
