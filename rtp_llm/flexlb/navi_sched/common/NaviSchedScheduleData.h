@@ -149,6 +149,7 @@ struct NaviSchedNodeInfo {
     int32_t queuedBatchRequests = 0;
     int32_t runningRequests = 0;
     bool pdSeparated = true;
+    bool pdUnifiedCapacitySplit = false;
     bool unifiedLatencyPrediction = false;
     NaviSchedWorkloadSnapshot workload;
     NaviSchedLatencyFeatures reservedWorkloadFeatures;

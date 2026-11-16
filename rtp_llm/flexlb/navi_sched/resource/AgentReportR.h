@@ -103,7 +103,10 @@ public:
     uint64_t reportWorkloadUpdated(
         const NaviSchedWorkloadSnapshot &snapshot,
         const std::vector<int64_t> &coveredNativeBatchIds = {});
-    bool reportNativeBatchReady(const NaviSchedBatchPtr &batch);
+    bool reportNativeBatchReady(
+        const NaviSchedBatchPtr &batch,
+        NaviSchedWorkloadSnapshot *readyWorkload = nullptr,
+        int32_t *readyBatchRunningRequestCount = nullptr);
     bool reportNativeRequestReceived(const NaviSchedRequestStats &request,
                                      int32_t batchWaitingRequests,
                                      int32_t queuedBatchRequests, int32_t runningRequests,
@@ -148,6 +151,11 @@ public:
     void setLatencyValidationEnabled(bool enabled);
     bool pdSeparated() const { return _pdSeparated; }
     bool usesUnifiedLatencyPrediction() const { return _unifiedLatencyPrediction; }
+    bool usesPdUnifiedCapacitySplit() const { return _pdUnifiedCapacitySplit; }
+    bool usesObservedUnifiedWorkload() const
+    {
+        return _unifiedLatencyPrediction && (!_pdSeparated || _pdUnifiedCapacitySplit);
+    }
     bool reportPeerCacheReadAvailable(bool available);
     size_t reportCacheUpdated(const NaviSchedCacheUpdate &update) const;
     bool reportPendingCacheReady(
@@ -304,6 +312,7 @@ private:
     NaviSchedServerInfo _serverInfo;
     int64_t _agentStartTimeUs = 0;
     bool _pdSeparated = true;
+    bool _pdUnifiedCapacitySplit = false;
     bool _unifiedLatencyPrediction = false;
     int64_t _fullAttentionQueryDropTokens = 0;
     bool _mambaReplayStopShift = false;

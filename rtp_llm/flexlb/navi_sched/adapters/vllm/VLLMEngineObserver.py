@@ -588,9 +588,11 @@ def _native_pp_unified_latency_enabled(vllm_config, native_ingress: bool) -> boo
     if not native_ingress or int(getattr(parallel, "pipeline_parallel_size", 1)) <= 1:
         return False
     mode = os.environ.get("VLLM_NAVI_SCHED_PP_LATENCY_MODE", "split")
-    if mode not in ("split", "unified"):
-        raise ValueError("VLLM_NAVI_SCHED_PP_LATENCY_MODE must be split or unified")
-    return mode == "unified"
+    if mode not in ("split", "unified", "unified19"):
+        raise ValueError(
+            "VLLM_NAVI_SCHED_PP_LATENCY_MODE must be split, unified, or unified19"
+        )
+    return mode in ("unified", "unified19")
 
 
 def _native_pd_latency_model_fingerprint(
@@ -601,6 +603,7 @@ def _native_pd_latency_model_fingerprint(
     projected_execution_geometry_enabled: bool = False,
     execution_cache_source_enabled: bool = False,
     unified_latency_prediction: bool = False,
+    capacity_split_prediction: bool = False,
 ) -> str:
     """Separate TPU PD training state when vLLM's effective cache geometry changes."""
     values = json.loads(formula_fingerprint)
@@ -633,7 +636,11 @@ def _native_pd_latency_model_fingerprint(
     if unified_latency_prediction:
         if execution_geometry_enabled or execution_cache_source_enabled:
             raise ValueError("unified prefill does not use execution geometry")
-        values["navi_latency_mode"] = "unified_native_prefill_admission_v1"
+        values["navi_latency_mode"] = (
+            "unified_native_prefill_capacity19_v2"
+            if capacity_split_prediction
+            else "unified_native_prefill_admission_v1"
+        )
     values["cache_prediction_version"] = 1
     values["execution_completion_boundary"] = "scheduler_update_complete_v1"
     values["execution_start_boundary"] = (
@@ -1699,6 +1706,10 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
         self._pp_unified_latency = _native_pp_unified_latency_enabled(
             vllm_config, self._native_ingress
         )
+        self._pp_capacity_unified = (
+            self._pp_unified_latency
+            and os.environ.get("VLLM_NAVI_SCHED_PP_LATENCY_MODE") == "unified19"
+        )
         self._execution_geometry_enabled = (
             self._native_ingress
             and config.execution_geometry_enabled
@@ -1722,6 +1733,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 self._cache_policy,
                 execution_geometry_enabled=self._execution_geometry_enabled,
                 unified_latency_prediction=self._pp_unified_latency,
+                capacity_split_prediction=self._pp_capacity_unified,
             )
         latency_history_fingerprint = _latency_history_fingerprint(
             vllm_config, latency_model_fingerprint
@@ -1810,6 +1822,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 self._cache_policy.full_attention_query_drop_tokens
             ),
             pd_separated=self._native_ingress,
+            pd_unified_capacity_split=self._pp_capacity_unified,
             mamba_replay_stop_shift=(
                 self._native_ingress
                 and self._cache_policy.hybrid_tail_required
@@ -1973,9 +1986,10 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
         )
         self._agent = NaviSchedAgent(**options)
         self._agent.init()
-        self._bridge = naviSchedModule()._VLLMAgentBridge(
-            self._agent, pd_separated=self._native_ingress
-        )
+        bridge_options = {"pd_separated": self._native_ingress}
+        if options.get("pd_unified_capacity_split", False):
+            bridge_options["prefill_capacity_split"] = True
+        self._bridge = naviSchedModule()._VLLMAgentBridge(self._agent, **bridge_options)
         if self._observed_execution_window_training and (
             getattr(naviSchedModule(), "VLLM_SHARED_EXECUTION_SAMPLES_VERSION", 0) != 1
             or not hasattr(self._bridge, "record_observed_execution_sample")

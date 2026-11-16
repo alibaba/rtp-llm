@@ -30,7 +30,9 @@ public:
     bool handoff(const std::vector<int64_t> &localBatchIds, RetiredBatches &retired);
     bool combine(const NaviSchedWorkloadSnapshot &observed,
                  NaviSchedWorkloadSnapshot &combined,
-                 const std::vector<int64_t> &coveredBatchIds = {}) const;
+                 const std::vector<int64_t> &coveredBatchIds = {},
+                 int64_t trackedLocalBatchId = 0,
+                 int32_t *runningRequestCountForBatch = nullptr) const;
     size_t requestCount() const { return _requestCount; }
     size_t batchCount() const { return _batches.size(); }
     size_t unbatchedRequestCount() const { return _unbatched ? _unbatched->requests.size() : 0; }

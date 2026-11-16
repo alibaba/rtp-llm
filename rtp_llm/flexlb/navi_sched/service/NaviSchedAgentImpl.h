@@ -130,6 +130,7 @@ private:
     int32_t _serverPort = 0;
     int64_t _cacheTotalBlocks = 0;
     bool _pdSeparated = true;
+    bool _pdUnifiedCapacitySplit = false;
     bool _unifiedLatencyPrediction = false;
     bool _executionGeometryEnabled = false;
     bool _executionCacheSourceEnabled = false;

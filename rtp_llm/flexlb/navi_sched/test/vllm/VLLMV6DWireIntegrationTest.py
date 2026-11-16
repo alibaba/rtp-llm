@@ -81,7 +81,144 @@ class SnapshotChanges:
         os.close(self.fd)
 
 
+def empty_workload_report():
+    return dict(
+        event_time_us=time.time_ns() // 1000,
+        batch_count=0, request_count=0, remaining_prefill_request_count=0,
+        running_request_count=0, waiting_request_count=0,
+        remaining_prefill_context_token_count=0, remaining_prefill_token_count=0,
+        remaining_prefill_token_square_sum=0.0,
+        context_remaining_prefill_token_product_sum=0.0,
+        max_running_request_count=64, running_capacity_slot_count=0,
+        running_capacity_prefill_request_count=0,
+        running_capacity_prefill_context_token_count=0,
+        running_capacity_prefill_token_count=0,
+        running_capacity_prefill_token_square_sum=0.0,
+        running_capacity_context_remaining_prefill_token_product_sum=0.0,
+        waiting_capacity_prefill_request_count=0,
+        waiting_capacity_prefill_context_token_count=0,
+        waiting_capacity_prefill_token_count=0,
+        waiting_capacity_prefill_token_square_sum=0.0,
+        waiting_capacity_context_remaining_prefill_token_product_sum=0.0,
+        remaining_total_context_token_count=0, remaining_total_token_count=0,
+        remaining_total_token_square_sum=0.0,
+        context_remaining_total_token_product_sum=0.0,
+        total_prompt_token_count=0, in_flight_scheduled_token_count=0,
+        admitted_schedule_batch_id=0, admitted_local_batch_id=0,
+        admitted_request_count=0, admitted_pending_cache_tracked=False,
+        admitted_request_ids=[], running_elapsed_time_ms=0.0,
+        running_decode_request_count=0, running_decode_generated_token_count=0,
+        running_decode_remaining_token_budget=0,
+    )
+
+
 class VLLMV6DWireIntegrationTest(unittest.TestCase):
+    def test_pp_unified_capacity_model_reaches_master(self):
+        original_dir = os.getcwd()
+        with tempfile.TemporaryDirectory(prefix="navi-pp-capacity-") as directory:
+            os.chdir(directory)
+            notifications = SnapshotChanges(Path(directory))
+            agent = master = None
+            try:
+                agent = NaviSchedAgent(
+                    "pp_capacity_prefill",
+                    server_ip="127.0.0.1",
+                    server_port=17200,
+                    total_blocks=100,
+                    block_size=16,
+                    linear_step=1,
+                    hybrid_tail_required=False,
+                    pd_separated=True,
+                    latency_prediction_mode="unified",
+                    pd_unified_capacity_split=True,
+                    runtime_config={"thread_num": 2},
+                    name="pp_capacity_agent",
+                    enable_kmon=False,
+                    enable_snapshot=False,
+                    wait_no_query=False,
+                ).init()
+                master = NaviSchedMaster(
+                    "pp_capacity_master",
+                    runtime_config={
+                        "thread_num": 2,
+                        "local_nodes": [
+                            dict(
+                                biz_name="pp_capacity_prefill",
+                                grpc_port=agent.grpc_port,
+                                support_heartbeat=True,
+                            )
+                        ],
+                    },
+                    max_wait_schedule_count=1,
+                    scheduler_name="max_cache_hit",
+                    name="pp_capacity_master",
+                    snapshot_dir=directory,
+                    enable_kmon=False,
+                    enable_snapshot=True,
+                    wait_no_query=False,
+                ).init()
+                legacy_bridge = core._VLLMAgentBridge(agent, pd_separated=True)
+                self.assertFalse(legacy_bridge.report_workload(**empty_workload_report()))
+                bridge = core._VLLMAgentBridge(
+                    agent, pd_separated=True, prefill_capacity_split=True
+                )
+                self.assertTrue(bridge.report_workload(**empty_workload_report()))
+                snapshot = notifications.wait(
+                    lambda text: "parameter_count=19" in text
+                    and "capacity_split=true" in text
+                    and "    online: true\n" in text
+                    and "running_capacity_slots=0/64" in text
+                )
+                self.assertIn("    pd_separated: true\n", snapshot)
+                self.assertIn("binary_version=24", snapshot)
+                self.assertIn("running_capacity_slots=0/64", snapshot)
+                active = empty_workload_report()
+                active.update(
+                    batch_count=1, request_count=1, remaining_prefill_request_count=1,
+                    running_request_count=1, remaining_prefill_token_count=128,
+                    remaining_prefill_token_square_sum=16384.0,
+                    running_capacity_slot_count=1,
+                    running_capacity_prefill_request_count=1,
+                    running_capacity_prefill_token_count=128,
+                    running_capacity_prefill_token_square_sum=16384.0,
+                    remaining_total_token_count=128,
+                    remaining_total_token_square_sum=16384.0, total_prompt_token_count=128,
+                )
+                self.assertTrue(bridge.report_workload(**active))
+                notifications.wait(
+                    lambda text: "request_count=1, running_requests=1" in text
+                    and "running_capacity_prefill_requests=1" in text
+                )
+            finally:
+                if master is not None:
+                    master.stop()
+                if agent is not None:
+                    agent.stop()
+                notifications.close()
+                os.chdir(original_dir)
+
+    def test_bridge_default_workload_modes_preserve_pd_and_non_pd(self):
+        original_dir = os.getcwd()
+        with tempfile.TemporaryDirectory(prefix="navi-workload-defaults-") as directory:
+            os.chdir(directory)
+            try:
+                for pd_separated in (True, False):
+                    agent = NaviSchedAgent(
+                        "workload_defaults", server_ip="127.0.0.1", server_port=17300,
+                        total_blocks=100, block_size=16, linear_step=1,
+                        hybrid_tail_required=False, pd_separated=pd_separated,
+                        latency_prediction_mode="unified",
+                        runtime_config={"thread_num": 2}, name="workload_default_agent",
+                        enable_kmon=False, enable_snapshot=False, wait_no_query=False,
+                    ).init()
+                    try:
+                        bridge = core._VLLMAgentBridge(agent, pd_separated=pd_separated)
+                        self.assertTrue(bridge.report_workload(**empty_workload_report()))
+                    finally:
+                        agent.stop()
+            finally:
+                os.chdir(original_dir)
+
     def test_full_prefix_chains_ready_segments_across_peers(self):
         original_dir = os.getcwd()
         with tempfile.TemporaryDirectory(prefix="navi-v6d-prefix-") as directory:

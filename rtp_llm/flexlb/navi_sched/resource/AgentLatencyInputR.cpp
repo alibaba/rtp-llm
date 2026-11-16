@@ -94,7 +94,9 @@ AgentLatencyInputR::AgentLatencyInputR()
 bool AgentLatencyInputR::submitBatchReady(const NaviSchedBatchPtr &batch,
                                           int32_t batchWaitingRequests,
                                           int32_t queuedBatchRequests,
-                                          int32_t runningRequests, int64_t eventTimeUs)
+                                          int32_t runningRequests, int64_t eventTimeUs,
+                                          const NaviSchedWorkloadSnapshot *readyWorkload,
+                                          int32_t readyBatchRunningRequestCount)
 {
     if (!batch || batchWaitingRequests < 0 || queuedBatchRequests < 0 ||
         runningRequests < 0) {
@@ -102,6 +104,18 @@ bool AgentLatencyInputR::submitBatchReady(const NaviSchedBatchPtr &batch,
     }
     AgentLatencyInput input;
     input.type = AgentLatencyInputType::BATCH_READY;
+    input.readyBatchRunningRequestCount = readyBatchRunningRequestCount;
+    if (readyWorkload) {
+        NaviSchedLatencyFeatures admittedRequests;
+        if (!readyWorkload->prefillCapacitySplit ||
+            !input.precedingFeatures.appendPrefillWorkload(*readyWorkload) ||
+            !admittedRequests.appendCapacitySplitAggregate(
+                0, 0, 0, 0, 0.0, 0.0, 0, 0, 0, 0.0, 0.0) ||
+            !admittedRequests.appendPrecedingRequestCount(batch->requestIds.size()) ||
+            !input.precedingFeatures.subtract(admittedRequests)) {
+            return false;
+        }
+    }
     input.batch = batch;
     input.batchId = batch->batchId;
     input.batchWaitingRequests = batchWaitingRequests;
