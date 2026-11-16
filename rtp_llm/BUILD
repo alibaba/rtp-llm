@@ -170,12 +170,14 @@ py_library(
         "utils/**/*.py",
     ], exclude = _JIT_CACHE_SRCS + _JIT_CACHE_ENV_SRCS + [
         "utils/warmup.py",
+        "utils/shared_memory_table.py",
         "utils/test/*.py",
         "utils/test/**/*.py",
     ]),
     data = glob(["utils/moe_luts/*"]),
     deps = [
         ":jit_cache_env",
+        ":shared_memory_table",
         ":torch",
         ":safetensors",
         #":decord",
@@ -190,6 +192,12 @@ py_library(
 py_library(
     name = "warmup",
     srcs = ["utils/warmup.py"],
+)
+
+py_library(
+    name = "shared_memory_table",
+    srcs = ["utils/shared_memory_table.py"],
+    visibility = ["//visibility:public"],
 )
 
 py_library(

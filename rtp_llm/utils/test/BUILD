@@ -299,3 +299,11 @@ py_test(
     # Exercise the same lightweight entrypoint used by the PPU model target.
     data = ["//rtp_llm/models_py:ppu_entrypoint"],
 )
+
+py_test(
+    name = "shared_memory_table_test",
+    size = "small",
+    srcs = ["shared_memory_table_test.py"],
+    env = {"GPU_COUNT": "0"},
+    deps = ["//rtp_llm:shared_memory_table"],
+)

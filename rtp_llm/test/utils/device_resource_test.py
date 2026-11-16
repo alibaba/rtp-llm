@@ -209,10 +209,13 @@ class GpuLockEntryTest(unittest.TestCase):
                         ) as resource, patch(
                             "rtp_llm.test.utils.device_resource.subprocess.Popen",
                             return_value=self._fake_popen(0),
-                        ) as popen:
+                        ) as popen, patch(
+                            "rtp_llm.utils.shared_memory_table.reclaim_abandoned_tables"
+                        ) as reclaim:
                             self.assertEqual(main(), 0)
                             probe.assert_not_called()
                             resource.assert_not_called()
+                            reclaim.assert_not_called()
                             popen.assert_called_once_with(
                                 ["cpu-test", "arg"], start_new_session=True
                             )
@@ -243,14 +246,40 @@ class GpuLockEntryTest(unittest.TestCase):
                 ), patch(
                     "rtp_llm.test.utils.device_resource.subprocess.Popen",
                     return_value=self._fake_popen(17),
-                ):
+                ), patch(
+                    "rtp_llm.utils.shared_memory_table.reclaim_abandoned_tables"
+                ) as reclaim:
                     resource.return_value.__enter__.return_value.gpu_ids = ["1", "3"]
                     self.assertEqual(main(), 17)
                     probe.assert_called_once_with()
                     resource.assert_called_once_with(2, cuda_info=("NVIDIA A10", 4))
                     jit_setup.setup_jit_cache.assert_called_once_with()
                     resource.return_value.__exit__.assert_called_once()
+                    reclaim.assert_called_once_with()
                     self.assertEqual(os.environ["CUDA_VISIBLE_DEVICES"], "1,3")
+
+    def test_shared_host_cleanup_runs_inside_gpu_lease_before_test(self):
+        events = []
+        resource = MagicMock()
+        resource.__enter__.side_effect = lambda: (events.append("lock") or resource)
+        resource.__exit__.side_effect = lambda *_: events.append("unlock")
+        resource.gpu_ids = ["0"]
+        with patch.dict(os.environ, {"GPU_COUNT": "1", "WORLD_SIZE": "1"}), patch.dict(
+            sys.modules, {"jit_sys_path_setup": MagicMock()}
+        ), patch(
+            "rtp_llm.test.utils.device_resource.get_cuda_info",
+            return_value=("GPU", 1),
+        ), patch(
+            "rtp_llm.test.utils.device_resource.DeviceResource", return_value=resource
+        ), patch(
+            "rtp_llm.utils.shared_memory_table.reclaim_abandoned_tables",
+            side_effect=lambda: events.append("reclaim"),
+        ), patch(
+            "rtp_llm.test.utils.device_resource._run_test_command",
+            side_effect=lambda _: events.append("test") or 0,
+        ):
+            self.assertEqual(main(), 0)
+        self.assertEqual(events, ["lock", "reclaim", "test", "unlock"])
 
 
 class CudaProbeReuseTest(unittest.TestCase):

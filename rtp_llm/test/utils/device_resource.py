@@ -1025,6 +1025,12 @@ def main():
     device_name, _ = cuda_info
     require_count = int(os.environ.get("WORLD_SIZE", os.environ.get("GPU_COUNT", "1")))
     with DeviceResource(require_count, cuda_info=cuda_info) as gpu_resource:
+        if _IS_POSIX:
+            from rtp_llm.utils.shared_memory_table import reclaim_abandoned_tables
+
+            # A killed host-table reader must not starve the next model's load.
+            # The shared lease protocol preserves active readers and writers.
+            reclaim_abandoned_tables()
         if "308" in device_name:
             env_name = "HIP_VISIBLE_DEVICES"
         else:

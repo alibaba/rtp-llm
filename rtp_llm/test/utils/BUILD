@@ -34,14 +34,14 @@ py_library(
 
 py_binary(
     name = "gpu_lock",
-    deps = [":jit_sys_path_setup", ":filelock", ":torch"],
+    deps = [":jit_sys_path_setup", ":filelock", ":torch", "//rtp_llm:shared_memory_table"],
     main = "device_resource.py",
     srcs = ["device_resource.py", "jit_sys_path_setup.py"],
 )
 
 py_library(
     name = "device_resource",
-    deps = [":filelock", ":jit_sys_path_setup"],
+    deps = [":filelock", ":jit_sys_path_setup", "//rtp_llm:shared_memory_table"],
     srcs = ["device_resource.py"],
 )
 
