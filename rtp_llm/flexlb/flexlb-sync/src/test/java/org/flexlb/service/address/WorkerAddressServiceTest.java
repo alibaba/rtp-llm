@@ -3,10 +3,15 @@ package org.flexlb.service.address;
 import org.apache.commons.lang3.tuple.Pair;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.config.ServiceDiscoveryRuntimeConfig;
 import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.dao.route.DiscoveryConfig;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.discovery.RoutingServiceDiscovery;
 import org.flexlb.discovery.ServiceDiscovery;
+import org.flexlb.discovery.ServiceDiscoveryType;
+import org.flexlb.discovery.StaticServiceDiscoveryProvider;
 import org.flexlb.enums.BackendServiceProtocolEnum;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -29,6 +34,9 @@ import java.util.concurrent.TimeoutException;
 import static org.mockito.Mockito.anyString;
 import static org.mockito.Mockito.when;
 
+/**
+ * Verifies discovery polling, normalized addresses, and failure handling.
+ */
 @ExtendWith(MockitoExtension.class)
 class WorkerAddressServiceTest {
 
@@ -44,18 +52,41 @@ class WorkerAddressServiceTest {
     @Mock
     private ConfigService configService;
 
+    private RoutingServiceDiscovery router;
     private WorkerAddressService workerAddressService;
 
     @BeforeEach
     void setUp() {
         Mockito.lenient().when(configService.loadBalanceConfig()).thenReturn(org.flexlb.balance.scheduler.SchedulingTestConfig.newConfig());
+        router = new RoutingServiceDiscovery(List.of(new StaticServiceDiscoveryProvider()),
+                serviceDiscovery, ServiceDiscoveryRuntimeConfig::new);
         workerAddressService = new WorkerAddressService(engineHealthReporter, modelMetaConfig,
-                serviceDiscovery, configService);
+                router, configService);
     }
 
     @AfterEach
     void tearDown() {
         workerAddressService.destroy();
+    }
+
+    @Test
+    void pollsConfiguredProviderUsingTheEngineEndpoint() {
+        var endpoint = new Endpoint();
+        endpoint.setAddress("prefill");
+        endpoint.setProtocol("grpc");
+        var discovery = new DiscoveryConfig();
+        discovery.setType(ServiceDiscoveryType.STATIC_ENV);
+        discovery.setHosts(List.of("127.0.0.1:8081"));
+        endpoint.setDiscovery(discovery);
+        when(modelMetaConfig.endpointsWithGroup("model", RoleType.PREFILL))
+                .thenReturn(List.of(Pair.of("group", endpoint)));
+
+        router.validate(endpoint);
+        WorkerHost host = workerAddressService.getEngineWorkerList("model", RoleType.PREFILL).getFirst();
+        Assertions.assertEquals(8080, host.getHttpPort());
+        Assertions.assertEquals(8081, host.getGrpcPort());
+        Assertions.assertEquals("group", host.getGroup());
+        Mockito.verifyNoInteractions(serviceDiscovery);
     }
 
     @Test

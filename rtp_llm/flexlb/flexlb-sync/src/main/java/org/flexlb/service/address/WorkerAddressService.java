@@ -8,8 +8,7 @@ import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.discovery.ServiceDiscovery;
-import org.flexlb.enums.BackendServiceProtocolEnum;
+import org.flexlb.discovery.RoutingServiceDiscovery;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.slf4j.Logger;
@@ -28,13 +27,16 @@ import java.util.concurrent.TimeoutException;
 
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
 
+/**
+ * Polls discovered Engine addresses with a bounded executor and timeout.
+ */
 @Service("workerAddressService")
 public class WorkerAddressService {
-
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
+
     private final EngineHealthReporter engineHealthReporter;
     private final ModelMetaConfig modelMetaConfig;
-    private final ServiceDiscovery serviceDiscovery;
+    private final RoutingServiceDiscovery serviceDiscovery;
     /**
      * Service discovery request thread pool
      */
@@ -42,7 +44,7 @@ public class WorkerAddressService {
 
     public WorkerAddressService(EngineHealthReporter engineHealthReporter,
                                 ModelMetaConfig modelMetaConfig,
-                                ServiceDiscovery serviceDiscovery,
+                                RoutingServiceDiscovery serviceDiscovery,
                                 ConfigService configService) {
 
         this.engineHealthReporter = engineHealthReporter;
@@ -65,17 +67,6 @@ public class WorkerAddressService {
         serviceDiscoveryExecutor.shutdown();
     }
 
-    @Scheduled(fixedRate = 2000)
-    private void reportExecutorMetrics() {
-        try {
-            engineHealthReporter.reportThreadPoolInfo(
-                    ENGINE_BALANCING_THREAD_POOL_INFO,
-                    "serviceDiscoveryExecutor", serviceDiscoveryExecutor);
-        } catch (Throwable failure) {
-            logger.warn("Failed to report service discovery executor metrics", failure);
-        }
-    }
-
     public List<WorkerHost> getEngineWorkerList(String modelName, RoleType modelEndpointType) {
         List<WorkerHost> workerHosts = new ArrayList<>();
         List<Pair<String, Endpoint>> endpoints =
@@ -93,16 +84,27 @@ public class WorkerAddressService {
                 logger.info("modelName={} endpoint is null, endpointType={}", modelName, modelEndpointType);
                 continue;
             }
-            String address = endpoint.getAddress();
-            workerHosts.addAll(convertServiceDiscoveryHosts(getServiceHosts(modelName, address), endpoint.getProtocol(), groupName));
+            workerHosts.addAll(getServiceHosts(modelName, endpoint, groupName));
         }
         return workerHosts;
     }
 
-    private List<WorkerHost> getServiceHosts(String modelName, String address) {
+    @Scheduled(fixedRate = 2000)
+    private void reportExecutorMetrics() {
+        try {
+            engineHealthReporter.reportThreadPoolInfo(
+                    ENGINE_BALANCING_THREAD_POOL_INFO,
+                    "serviceDiscoveryExecutor", serviceDiscoveryExecutor);
+        } catch (Throwable failure) {
+            logger.warn("Failed to report service discovery executor metrics", failure);
+        }
+    }
+
+    private List<WorkerHost> getServiceHosts(String modelName, Endpoint endpoint, String groupName) {
+        String address = endpoint.getAddress();
         Future<List<WorkerHost>> future = null;
         try {
-            future = serviceDiscoveryExecutor.submit(() -> serviceDiscovery.getHosts(address));
+            future = serviceDiscoveryExecutor.submit(() -> serviceDiscovery.getHosts(endpoint, groupName));
             // Set timeout to prevent blocking threads when service discovery has no machines and takes long to return
             return future.get(500, TimeUnit.MILLISECONDS);
         } catch (Exception e) {
@@ -122,18 +124,4 @@ public class WorkerAddressService {
             throw new IllegalStateException("Service discovery failed for " + address, e);
         }
     }
-
-    private static List<WorkerHost> convertServiceDiscoveryHosts(
-            List<WorkerHost> hosts, String protocol, String groupName) {
-        List<WorkerHost> workerHosts = new ArrayList<>();
-        for (WorkerHost host : hosts) {
-            if (BackendServiceProtocolEnum.GRPC.getName().equals(protocol)) {
-                workerHosts.add(new WorkerHost(host.getIp(), host.getPort() - 1, host.getPort(), host.getPort() + 4, host.getSite(), groupName));
-            } else {
-                workerHosts.add(new WorkerHost(host.getIp(), host.getPort(), host.getPort() + 1, host.getPort() + 5, host.getSite(), groupName));
-            }
-        }
-        return workerHosts;
-    }
-
 }

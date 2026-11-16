@@ -325,9 +325,13 @@ Static IP lists use `MODEL_SERVICE_CONFIG.hosts`:
 The key matches the endpoint's `address`; ports follow its `protocol`.
 Use `hosts` or `discovery_file`, not both.
 
-Local file discovery uses `MODEL_SERVICE_CONFIG.discovery_file`, pointing to a
-JSON mapping of service domains to HTTP host:port lists. Production discovery
-providers continue to resolve their service domains.
+Master selects a provider from each Engine endpoint's `discovery.type`.
+For `static-env`, put the host list under that endpoint's `discovery.hosts`.
+Endpoints that omit the `discovery` object use address-based discovery.
+
+The Mock Runner sets `discovery.type` to `file` on P/D/V endpoints and writes
+`MODEL_SERVICE_CONFIG.discovery_file`. The file maps service domains to
+`host:port` lists whose ports follow the endpoint protocol.
 
 Master configuration uses `FLEXLB_CONFIG`, `MODEL_SERVICE_CONFIG`, and `LOG_LEVEL`. Spring does not bind environment
 variables. Configure ports, RPC transport and logging with their standard

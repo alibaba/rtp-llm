@@ -4,6 +4,9 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 
+/**
+ * A service address and its optional endpoint-specific discovery settings.
+ */
 @JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class Endpoint {
@@ -16,4 +19,7 @@ public class Endpoint {
 
     @JsonProperty("path")
     private String path;
+
+    @JsonProperty("discovery")
+    private DiscoveryConfig discovery;
 }

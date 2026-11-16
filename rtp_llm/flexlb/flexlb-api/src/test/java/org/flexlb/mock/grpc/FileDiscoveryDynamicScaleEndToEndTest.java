@@ -13,6 +13,7 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.discovery.LocalServiceDiscovery;
+import org.flexlb.discovery.RoutingServiceDiscovery;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.mock.MockPrefillWorker;
 import org.flexlb.mock.MockWorkerBehavior;
@@ -79,17 +80,17 @@ import static org.mockito.Mockito.when;
  * participates in the discovery/registration decision path.
  */
 class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
-
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String PREFILL_DOMAIN = "mock.prefill.hosts.address";
     private static final String DECODE_DOMAIN = "mock.decode.hosts.address";
     private static final String MODEL_NAME = "mock-model";
+
     /** Master SYNC_STATUS_INTERVAL default — the production re-pull cadence. */
     private static final long SYNC_INTERVAL_MS = 20L;
     private static final long CONVERGENCE_CAP_MS = 10_000L;
+
     @TempDir
     Path tempDir;
-
     private MockPrefillWorker workerB;
     private MockPrefillWorker workerC;
     private Path discoveryFile;
@@ -99,8 +100,46 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
     private EngineHealthReporter healthReporter;
     private ScheduledExecutorService syncScheduler;
     private ExecutorService statusCheckExecutor;
+
     private final AtomicInteger routerCounter = new AtomicInteger();
     private final AtomicLong requestIdCounter = new AtomicLong(810_000L);
+
+    // ════════════════════════════════════════════════════════════════
+    //  Round-robin router over the LIVE endpoint set
+    // ════════════════════════════════════════════════════════════════
+
+    /**
+     * Route each request to the next live prefill endpoint from the
+     * {@code EndpointRegistry} — the set the discovery pipeline maintains —
+     * so additions and evictions are reflected in routing immediately.
+     */
+    @Override
+    protected DefaultRouter createRouter() {
+        DefaultRouter roundRobin = mock(DefaultRouter.class);
+        when(roundRobin.select(any(BalanceContext.class), any())).thenAnswer(inv -> {
+            BalanceContext ctx = inv.getArgument(0);
+            List<String> candidates = new ArrayList<>(
+                    endpointRegistry.endpointAddressSnapshot(RoleType.PREFILL));
+            if (candidates.isEmpty()) {
+                Response empty = new Response();
+                empty.setSuccess(false);
+                return PlacementResult.rejected(empty);
+            }
+            Collections.sort(candidates);
+            String chosen = candidates.get(routerCounter.getAndIncrement() % candidates.size());
+            String[] parts = chosen.split(":");
+            String ip = parts[0];
+            int httpPort = Integer.parseInt(parts[1]);
+            // admittedRoute() converts this response into the exact pinned
+            // queue admission the scheduler consumes — including the Decode KV
+            // reservation (RouteAdmission.reserveQueuedPinned) the batcher
+            // later marks queued; without it admission would hit NOT_QUEUED ->
+            // OwnershipLost and the request would never complete.
+            return admittedRoute(ctx,
+                    routeResponse(ctx.getRequestId(), ip, httpPort, httpPort + 1));
+        });
+        return roundRobin;
+    }
 
     @BeforeEach
     void setUpFileDiscoveryPipeline() throws Exception {
@@ -133,8 +172,10 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
 
         // Real master discovery wiring (metrics reporter mocked — not on the decision path).
         healthReporter = mock(EngineHealthReporter.class);
+        var router = new RoutingServiceDiscovery(List.of(), fileServiceDiscovery,
+                () -> configService.loadBalanceConfig().getServiceDiscovery());
         workerAddressService = new WorkerAddressService(
-                healthReporter, modelMetaConfig, fileServiceDiscovery, configService);
+                healthReporter, modelMetaConfig, router, configService);
         engineGrpcService = new EngineGrpcService(grpcClient);
         // Upstream's schedule refactor removed the cache-generation
         // activate/retire gate from the discovery publish path; the cache
@@ -307,43 +348,6 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         } catch (java.nio.file.AtomicMoveNotSupportedException e) {
             Files.move(tmp, discoveryFile, StandardCopyOption.REPLACE_EXISTING);
         }
-    }
-
-    // ════════════════════════════════════════════════════════════════
-    //  Round-robin router over the LIVE endpoint set
-    // ════════════════════════════════════════════════════════════════
-
-    /**
-     * Route each request to the next live prefill endpoint from the
-     * {@code EndpointRegistry} — the set the discovery pipeline maintains —
-     * so additions and evictions are reflected in routing immediately.
-     */
-    @Override
-    protected DefaultRouter createRouter() {
-        DefaultRouter roundRobin = mock(DefaultRouter.class);
-        when(roundRobin.select(any(BalanceContext.class), any())).thenAnswer(inv -> {
-            BalanceContext ctx = inv.getArgument(0);
-            List<String> candidates = new ArrayList<>(
-                    endpointRegistry.endpointAddressSnapshot(RoleType.PREFILL));
-            if (candidates.isEmpty()) {
-                Response empty = new Response();
-                empty.setSuccess(false);
-                return PlacementResult.rejected(empty);
-            }
-            Collections.sort(candidates);
-            String chosen = candidates.get(routerCounter.getAndIncrement() % candidates.size());
-            String[] parts = chosen.split(":");
-            String ip = parts[0];
-            int httpPort = Integer.parseInt(parts[1]);
-            // admittedRoute() converts this response into the exact pinned
-            // queue admission the scheduler consumes — including the Decode KV
-            // reservation (RouteAdmission.reserveQueuedPinned) the batcher
-            // later marks queued; without it admission would hit NOT_QUEUED ->
-            // OwnershipLost and the request would never complete.
-            return admittedRoute(ctx,
-                    routeResponse(ctx.getRequestId(), ip, httpPort, httpPort + 1));
-        });
-        return roundRobin;
     }
 
     private Response routeResponse(long requestId, String prefillIpAddr, int prefillHttpPort,

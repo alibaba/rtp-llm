@@ -51,6 +51,9 @@ def test_binds_only_run_owned_discovery_and_preserves_business_document(tmp_path
     assert "old-host" in config["MODEL_SERVICE_CONFIG"]
     route = json.loads(env["MODEL_SERVICE_CONFIG"])
     assert "hosts" not in route
+    assert route["role_endpoints"][0]["prefill_endpoint"]["discovery"] == {
+        "type": "file"
+    }
     assert json.loads(Path(route["discovery_file"]).read_text()) == {
         "p-domain": ["127.0.0.1:30001"],
         "d-domain": ["127.0.0.1:40001"],
@@ -269,7 +272,7 @@ def test_real_master_routes_to_isolated_rtp_processes(
         )
     dynamic = replicas == 1 and not batched and not history_overflow and not vision
     if dynamic:
-        document["phases"][0]["timeout"] = "45s"
+        document["phases"][0]["timeout"] = "60s"
         document["phases"][0]["steps"].extend(
             [
                 {
@@ -294,6 +297,18 @@ def test_real_master_routes_to_isolated_rtp_processes(
                 {
                     "id": "after_remove",
                     "describe": "Master清除旧P",
+                    "interface": "master/list/engines",
+                },
+                {
+                    "id": "remove_last_prefill",
+                    "describe": "关闭最后一个P",
+                    "interface": "engine/scale",
+                    "args": {"direction": "in", "count": 1},
+                    "wait_after": "12s",
+                },
+                {
+                    "id": "after_scale_to_zero",
+                    "describe": "Master看到P实例清空",
                     "interface": "master/list/engines",
                 },
             ]
@@ -494,6 +509,7 @@ def test_real_master_routes_to_isolated_rtp_processes(
         }
         assert observations["after_remove"] == {master: [addresses["prefill-0"]]}
         assert observations["removed"] == observations["added"]
+        assert observations["after_scale_to_zero"] == {master: []}
     assert len(gates) == 1 and gates[0]["status"] == "PASS"
     if replicas == 2:
         other = json.loads(

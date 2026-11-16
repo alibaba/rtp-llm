@@ -51,6 +51,8 @@ public final class FlexlbConfigValidator {
     }
 
     public static void validate(FlexlbConfig config) {
+        require(config.getServiceDiscovery() != null, "serviceDiscovery", "is required");
+        validateServiceDiscovery(config.getServiceDiscovery());
         require(config.getEngineGrpc() != null, "engineGrpc", "is required");
         require(config.getEngineGrpc().getKvCacheMaxInboundMessageBytes() > 0,
                 "engineGrpc.kvCacheMaxInboundMessageBytes", "must be positive");
@@ -388,4 +390,12 @@ public final class FlexlbConfigValidator {
                     "observability.cacheHit.theoryLog.path", "must not be blank");
         }
     }
+    private static void validateServiceDiscovery(ServiceDiscoveryRuntimeConfig serviceDiscovery) {
+        positive(serviceDiscovery.getConnectTimeoutMs(), "serviceDiscovery.connectTimeoutMs");
+        positive(serviceDiscovery.getReadTimeoutMs(), "serviceDiscovery.readTimeoutMs");
+        positive(serviceDiscovery.getPollIntervalMs(), "serviceDiscovery.pollIntervalMs");
+        positive(serviceDiscovery.getMaxIdleConnections(), "serviceDiscovery.maxIdleConnections");
+        positive(serviceDiscovery.getKeepAliveDurationMs(), "serviceDiscovery.keepAliveDurationMs");
+    }
+
 }

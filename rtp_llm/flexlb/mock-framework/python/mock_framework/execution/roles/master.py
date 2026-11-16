@@ -52,13 +52,14 @@ def _resolve_discovery(route_json, topology, *, require_engines):
             for node in topology:
                 if node["role"] == role:
                     host, port = node["rpc"].rsplit(":", 1)
-                    # Native WorkerAddressService translates grpc discovery ports to its HTTP identity.
+                    # Master discovery normalizes the gRPC port to the worker HTTP identity.
                     port = int(port)
                     if port <= 0:
                         raise ValueError("Invalid Engine RPC port")
                     addresses.append(f"{host}:{port}")
             if require_engines and not addresses:
                 raise ValueError(f"No running Engines for native {role}_endpoint")
+            endpoint["discovery"] = {"type": "file"}
             hosts[domain] = addresses
         if not hosts or groups[0].get("pd_fusion_endpoint") is not None:
             raise ValueError("local Master supports separate P/D/V endpoints only")

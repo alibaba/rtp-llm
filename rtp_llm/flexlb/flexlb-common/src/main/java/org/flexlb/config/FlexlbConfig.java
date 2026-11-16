@@ -25,6 +25,7 @@ public final class FlexlbConfig {
     private ConsistencyConfig consistency = new NoConsistencyConfig();
     private ObservabilityConfig observability = new ObservabilityConfig();
     private GrpcServerConfig grpcServer = new GrpcServerConfig();
+    private ServiceDiscoveryRuntimeConfig serviceDiscovery = new ServiceDiscoveryRuntimeConfig();
     private EngineGrpcConfig engineGrpc = new EngineGrpcConfig();
 
     @JsonIgnore
