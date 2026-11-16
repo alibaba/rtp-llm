@@ -659,7 +659,7 @@ bool CostSchedulerGraphState::runRow(size_t workerIndex, size_t iteration)
         _inverseRequestTokenCounts.get(), _tokenNormalizationDenominator, _config.lambda,
         _config.latencyWeightConcavity, range.first, range.second,
         worker.nodeGradients.get(), nullptr, nullptr);
-    auto forwardEndUs = bool(_replayInfo) ? autil::TimeUtility::monotonicTimeUs() : 0;
+    auto forwardEndUs = autil::TimeUtility::monotonicTimeUs();
     if (!std::isfinite(worker.forwardValue)) {
         fail();
         return false;
@@ -672,7 +672,7 @@ bool CostSchedulerGraphState::runRow(size_t workerIndex, size_t iteration)
     worker.gradientUs = backwardEndUs - beginUs;
     auto gradients = worker.gradients.get();
     _gradientSpans[workerIndex].values = gradients;
-    auto updateEndUs = bool(_replayInfo) ? autil::TimeUtility::monotonicTimeUs() : 0;
+    auto updateEndUs = autil::TimeUtility::monotonicTimeUs();
     worker.forwardUs = forwardEndUs - beginUs;
     worker.backwardUs = backwardEndUs - forwardEndUs;
     worker.updateUs = updateEndUs - backwardEndUs;
