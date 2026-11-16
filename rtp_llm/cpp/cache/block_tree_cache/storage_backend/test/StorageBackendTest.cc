@@ -34,31 +34,34 @@ TEST(StorageBackendExecutorTest, RejectsZeroWorkersAndAllowsUnboundedQueue) {
     EXPECT_NO_THROW((void)makeStorageBackendExecutor(/*thread_count=*/1, /*queue_size=*/0));
 }
 
-TEST(StorageBackendExecutorTest, CompletionCapabilityDoesNotBypassReservationAdmission) {
-    auto unbounded = makeStorageBackendExecutor(1, 0);
-    EXPECT_FALSE(unbounded->hasCompletionReservations());
-    ASSERT_TRUE(unbounded->start());
-    EXPECT_FALSE(unbounded->hasCompletionReservations());
-    unbounded->shutdown();
-
-    auto bounded = makeStorageBackendExecutor(1, 2);
-    EXPECT_TRUE(bounded->hasCompletionReservations());
-    EXPECT_FALSE(bounded->reserveCompletion([] {}, BlockTreeTaskClass::LOAD));
-    ASSERT_TRUE(bounded->start());
-    std::atomic<int> calls{0};
-    auto ticket = bounded->reserveCompletion([&] { ++calls; }, BlockTreeTaskClass::LOAD);
-    ASSERT_TRUE(ticket);
-    bounded->stopAdmission();
-    EXPECT_FALSE(bounded->submit([] {}));
-    EXPECT_TRUE(ticket->post());
-    ticket.reset(); // Also releases the reservation if the post unexpectedly failed.
-    bounded->shutdown();
-    EXPECT_EQ(calls.load(), 1);
-    EXPECT_TRUE(bounded->hasCompletionReservations());
-    EXPECT_FALSE(bounded->reserveCompletion([] {}, BlockTreeTaskClass::LOAD));
+TEST(StorageBackendExecutorTest, CompletionQueueIgnoresNormalCapacityAndStopAdmission) {
+    auto executor = makeStorageBackendExecutor(1, 2);
+    std::promise<void> entered, release;
+    auto started = entered.get_future();
+    auto released = release.get_future().share();
+    std::atomic<size_t> completed{0};
+    block_tree_cache_detail::ScopeRollback unblock([&] { release.set_value(); });
+    block_tree_cache_detail::ScopeRollback cleanup([&] { unblock.run(); executor->shutdown(); });
+    ASSERT_TRUE(executor->start());
+    ASSERT_TRUE(executor->submit([&] { entered.set_value(); released.wait(); }));
+    ASSERT_EQ(started.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    for (size_t i = 0; i < 2; ++i)
+        ASSERT_TRUE(executor->submit([] {}, BlockTreeTaskClass::BACKGROUND));
+    EXPECT_FALSE(executor->submit([] {}, BlockTreeTaskClass::BACKGROUND));
+    executor->stopAdmission();
+    EXPECT_FALSE(executor->submit([] {}));
+    // Queue invariant only: publication submission boundaries are covered by
+    // KVCMSubmissionBoundaryTest, not by this capacity loop.
+    for (size_t i = 0; i < 256; ++i)
+        ASSERT_TRUE(executor->submitCompletion([&] { ++completed; }));
+    EXPECT_EQ(executor->queueSizes().completion, 256u);
+    unblock.run();
+    executor->shutdown();
+    EXPECT_EQ(completed.load(), 256u);
+    EXPECT_FALSE(executor->submitCompletion([] {}));
 }
 
-TEST(StorageBackendExecutorTest, ReservedCompletionSharesWorkerAndDrainsBeforeNormalWork) {
+TEST(StorageBackendExecutorTest, CompletionSharesWorkerAndDrainsBeforeNormalWork) {
     // Captured state outlives executor shutdown even after an ASSERT return.
     std::mutex mutex;
     std::vector<int> order;
@@ -83,16 +86,12 @@ TEST(StorageBackendExecutorTest, ReservedCompletionSharesWorkerAndDrainsBeforeNo
     const auto worker = entered_result.get();
     ASSERT_TRUE(executor->submit([&] { record(1); }, BlockTreeTaskClass::LOAD));
     ASSERT_TRUE(executor->submit([&] { record(2); }, BlockTreeTaskClass::BACKGROUND));
-    auto completion = executor->reserveCompletion([&, retained = owner] {
+    ASSERT_TRUE(executor->submitCompletion([&, retained = owner] {
         EXPECT_EQ(*retained, 7);
         completion_worker = std::this_thread::get_id();
         record(0);
         settled.set_value();
-    }, BlockTreeTaskClass::LOAD);
-    ASSERT_TRUE(completion);
-    ASSERT_TRUE(completion->post());
-    EXPECT_FALSE(completion->post());
-    completion.reset();
+    }));
     owner.reset();
     EXPECT_FALSE(lifetime.expired());
     EXPECT_EQ(settled_result.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
@@ -108,20 +107,18 @@ TEST(StorageBackendExecutorTest, ReservedCompletionSharesWorkerAndDrainsBeforeNo
     EXPECT_EQ(executor->queueSizes().completion, 0u);
 }
 
-TEST(StorageBackendExecutorTest, PostedRecordDoesNotOwnPoolAndShutdownWaitsForItsCallback) {
+TEST(StorageBackendExecutorTest, ShutdownWaitsForRunningCompletionWithoutAnOwnershipCycle) {
     std::promise<void> entered;
     auto entered_result = entered.get_future();
     std::promise<void> unblock;
     auto released = unblock.get_future().share();
-    auto pool = std::make_shared<BlockTreeTaskPool>(1, 0, "completion_owner", 1);
+    auto pool = std::make_shared<BlockTreeTaskPool>(1, 0, "completion_owner");
     block_tree_cache_detail::ScopeRollback release([&] { unblock.set_value(); });
     ASSERT_TRUE(pool->start());
-    auto record = pool->reserveCompletion([&] {
+    ASSERT_TRUE(pool->submitCompletion([&] {
         entered.set_value();
         released.wait();
-    }, BlockTreeTaskClass::LOAD);
-    ASSERT_TRUE(record);
-    ASSERT_TRUE(record->post());
+    }));
     ASSERT_EQ(entered_result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
     std::weak_ptr<BlockTreeTaskPool> lifetime = pool;
     BoundedThread<void> stopped([owner = std::move(pool)]() mutable { owner.reset(); });
@@ -131,34 +128,30 @@ TEST(StorageBackendExecutorTest, PostedRecordDoesNotOwnPoolAndShutdownWaitsForIt
     release.run();
     ASSERT_EQ(stopped.waitFor(std::chrono::seconds(5)), std::future_status::ready);
     stopped.get();
-    EXPECT_TRUE(lifetime.expired()); // Still retaining record must not retain a stopped pool.
-    EXPECT_FALSE(record->post());
-    record.reset();
+    EXPECT_TRUE(lifetime.expired());
 }
 
-TEST(StorageBackendExecutorTest, UpstreamLoadHeadroomAndDecodeCompletionReservationStaySeparate) {
-    for (const bool async_payload : {false, true}) {
-        auto executor = makeStorageBackendExecutor(1, 66, async_payload);
-        std::promise<void> entered, release;
-        auto started = entered.get_future();
-        auto released = release.get_future().share();
-        std::atomic<size_t> completed{0};
-        block_tree_cache_detail::ScopeRollback unblock([&] { release.set_value(); });
-        block_tree_cache_detail::ScopeRollback cleanup([&] { unblock.run(); executor->shutdown(); });
-        ASSERT_TRUE(executor->start());
-        ASSERT_TRUE(executor->submit([&] { entered.set_value(); released.wait(); }));
-        ASSERT_EQ(started.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-        // Both roles retain upstream Q background entries plus 64 LOAD slots.
-        const size_t expected = 66;
-        for (size_t i = 0; i < expected; ++i)
-            ASSERT_TRUE(executor->submit([&] { ++completed; }, BlockTreeTaskClass::BACKGROUND));
-        EXPECT_FALSE(executor->submit([] {}, BlockTreeTaskClass::BACKGROUND));
-        EXPECT_EQ(executor->queueSizes().background, expected);
-        EXPECT_EQ(executor->hasCompletionReservations(), async_payload);
-        unblock.run();
-        executor->shutdown();
-        EXPECT_EQ(completed.load(), expected);
-    }
+TEST(StorageBackendExecutorTest, UpstreamLoadHeadroomIsIndependentOfCompletionQueue) {
+    auto executor = makeStorageBackendExecutor(1, 66);
+    std::promise<void> entered, release;
+    auto started = entered.get_future();
+    auto released = release.get_future().share();
+    std::atomic<size_t> completed{0};
+    block_tree_cache_detail::ScopeRollback unblock([&] { release.set_value(); });
+    block_tree_cache_detail::ScopeRollback cleanup([&] { unblock.run(); executor->shutdown(); });
+    ASSERT_TRUE(executor->start());
+    ASSERT_TRUE(executor->submit([&] { entered.set_value(); released.wait(); }));
+    ASSERT_EQ(started.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    // Both roles retain upstream Q background entries plus 64 LOAD slots.
+    const size_t expected = 66;
+    for (size_t i = 0; i < expected; ++i)
+        ASSERT_TRUE(executor->submit([&] { ++completed; }, BlockTreeTaskClass::BACKGROUND));
+    EXPECT_FALSE(executor->submit([] {}, BlockTreeTaskClass::BACKGROUND));
+    EXPECT_EQ(executor->queueSizes().background, expected);
+    ASSERT_TRUE(executor->submitCompletion([&] { ++completed; }));
+    unblock.run();
+    executor->shutdown();
+    EXPECT_EQ(completed.load(), expected + 1);
 }
 
 TEST(StorageBackendExecutorTest, HonorsConfiguredWorkerAndQueueCapacity) {
@@ -433,20 +426,6 @@ private:
     bool                    reject_{false};
     bool                    duplicate_{false};
     bool                    throw_on_submit_{false};
-};
-
-// The failure occurs at completion preparation, before any backend I/O entry.
-class FailingReservationExecutor: public HoldingExecutor {
-public:
-    bool fail_with_bad_alloc{true};
-    size_t reserve_calls{0};
-    bool hasCompletionReservations() const noexcept override { return true; }
-    std::shared_ptr<BlockTreeTaskPool::Completion> reserveCompletion(Task, BlockTreeTaskClass) override {
-        ++reserve_calls;
-        if (fail_with_bad_alloc) throw std::bad_alloc();
-        throw StorageOperationCompletionUnknown("reservation failed before I/O",
-                                                StorageQuarantineReason::INVALID_RESPONSE);
-    }
 };
 
 class TestBackend: public StorageBackend {
@@ -903,12 +882,12 @@ TEST(StorageBackendTest, SingleWorkerStartsNextReadWhileFirstRetainsPinsThroughS
 }
 
 TEST(StorageBackendTest, DeferredResultKeepsItsOwnerThroughExactlyOnceBusinessSettlement) {
-    for (const bool reserved : {false, true}) {
-        SCOPED_TRACE(reserved);
+    for (const bool bounded : {false, true}) {
+        SCOPED_TRACE(bounded);
         auto pool = std::make_shared<TestBlockPool>();
         const auto block = pool->malloc().value();
         pool->incRef(block);
-        auto executor = reserved ? makeStorageBackendExecutor(1, 8) : makeStorageBackendExecutor(1, 0);
+        auto executor = bounded ? makeStorageBackendExecutor(1, 8) : makeStorageBackendExecutor(1, 0);
         DeferredReadBackend backend(true, executor);
         ASSERT_TRUE(initBackend(backend, pool));
         auto owner = std::make_shared<int>(17);
@@ -1273,64 +1252,6 @@ TEST(StorageBackendTest, PeerProjectionRejectedForReadsAndOrdinaryWritesBeforePi
     EXPECT_EQ(pool->refCount(block), 1u);
     pool->decRef(block);
     backend.shutdown();
-}
-
-TEST(StorageBackendTest, PrefillBypassesReservationWhileDecodePreIoFailureReleasesResources) {
-    for (const bool decode : {false, true}) {
-    for (const bool read : {false, true}) {
-        if (decode && read)
-            continue; // Decode publication is write-only; read cases exercise P.
-        for (const bool bad_alloc : {false, true}) {
-            auto pool = std::make_shared<TestBlockPool>();
-            const auto block = pool->malloc().value();
-            pool->incRef(block);
-            block_tree_cache_detail::ScopeRollback free_request_ref([&] { pool->decRef(block); });
-            auto executor = std::make_shared<FailingReservationExecutor>();
-            executor->fail_with_bad_alloc = bad_alloc;
-            size_t io_calls = 0, read_callbacks = 0;
-            ProtectedBackend backend(true, executor);
-            ASSERT_TRUE(initBackend(backend, pool));
-            // Let a regressed candidate drain safely AFTER observing quarantine;
-            // it must not make this negative proof hang in backend destruction.
-            block_tree_cache_detail::ScopeRollback cleanup([&] {
-                backend.proveQuiescence();
-                backend.shutdown();
-            });
-            backend.read_action = [&] { ++io_calls; };
-            backend.write_action = [&] { ++io_calls; };
-            auto budget = std::make_shared<kvcm::DecodePublicationAccounting>(16, 1);
-            auto request = makeRequest(block);
-            request.decode_completion = decode;
-            if (!read && decode) {
-                request.completion_admission = budget->tryAcquire(16, std::nullopt);
-                ASSERT_TRUE(request.completion_admission);
-            }
-            std::weak_ptr<void> owner = backend.resources;
-            std::weak_ptr<const CacheKeysType> keys = request.keys;
-            if (read) {
-                backend.read(std::move(request), nullptr, [&](ErrorInfo error) {
-                    ++read_callbacks;
-                    EXPECT_EQ(error.ok(), !decode);
-                });
-            } else {
-                ASSERT_TRUE(backend.write(backend.prepareWrite(std::move(request))));
-            }
-            backend.resources.reset();
-            ASSERT_EQ(executor->runAll(), 1u);
-            EXPECT_EQ(executor->reserve_calls, decode ? 1u : 0u);
-            EXPECT_EQ(io_calls, decode ? 0u : 1u);
-            EXPECT_EQ(read_callbacks, read ? 1u : 0u);
-            EXPECT_EQ(backend.quarantine_events, 0u);
-            EXPECT_EQ(backend.quarantined_tasks, 0u);
-            EXPECT_FALSE(pool->isFrozen(block));
-            EXPECT_EQ(pool->refCount(block), 1u);
-            EXPECT_TRUE(owner.expired());
-            EXPECT_TRUE(keys.expired());
-            EXPECT_EQ(budget->snapshot().jobs, 0u);
-            EXPECT_EQ(executor->runAll(), 0u); // No second completion was queued.
-        }
-    }
-    }
 }
 
 TEST(StorageBackendTest, TypedUnknownIsQuarantinedOnceBeforeErrorReporting) {

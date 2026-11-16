@@ -129,6 +129,7 @@ protected:
         std::atomic<int> starts{0}, saves{0}, closes{0};
         std::atomic<bool> bad_close{false};
         size_t refs = env.device_pool->refCount(env.block_id);
+        bool submitted_decode{false};
 
         Fixture(bool decode, std::shared_ptr<BoundaryBroadcastManager> broadcast = {},
                 size_t workers = 1, size_t queue_size = 8) {
@@ -192,6 +193,7 @@ protected:
             return backend->impl_->planCompletedDecode(resource, env.cache_config.seq_size_per_block);
         }
         bool submit(StorageRequest request) {
+            submitted_decode = request.decode_completion;
             return backend->write(backend->prepareWrite(std::move(request)));
         }
         void expectSettled(bool retained, bool source_unknown) {
@@ -203,9 +205,9 @@ protected:
             EXPECT_EQ(starts.load(), 1);
             EXPECT_EQ(closes.load(), retained ? 0 : 1);
             EXPECT_FALSE(bad_close.load());
-            const bool protected_owner = source_unknown && backend->protectUnknownCompletion();
-            // Ordinary P writes only read local sources and keep no FROZEN target. On
-            // retains the live source owner/pins until quiescence; freezing happens during shutdown.
+            const bool protected_owner = source_unknown && (submitted_decode || backend->protectUnknownCompletion());
+            // P writes have no local targets. D publications retain actual
+            // source pins until quiescence, independently of the read policy.
             EXPECT_FALSE(env.device_pool->isFrozen(env.block_id));
             if (!protected_owner) {
                 EXPECT_EQ(env.device_pool->refCount(env.block_id), refs);
@@ -437,7 +439,7 @@ TEST_F(KVCMSubmissionBoundaryTest, CleanupRetriesOnlyLocallyProvenNotSentWithinO
     }
 }
 
-TEST_F(KVCMSubmissionBoundaryTest, OnlyDecodeCreatesTransportRetentionOwner) {
+TEST_F(KVCMSubmissionBoundaryTest, OnlyDecodeCreatesUnresolvedIoToken) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     ::rtp_llm::test::withDecodePublicationStartup([&] {
         for (const bool decode : {false, true}) {
@@ -713,7 +715,7 @@ TEST_F(KVCMSubmissionBoundaryTest, LocalPeerSafeFailureCancelsTailButCannotAbort
     });
 }
 
-TEST_F(KVCMSubmissionBoundaryTest, LocalPeerUnknownRetainsOperationAndSourceWithoutFinishOrAbort) {
+TEST_F(KVCMSubmissionBoundaryTest, LocalPeerUnknownRetainsOriginalTransportAndSourceWithoutFinishOrAbort) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     ::rtp_llm::test::withDecodePublicationStartup([&] {
         Fixture s(true);
@@ -726,10 +728,10 @@ TEST_F(KVCMSubmissionBoundaryTest, LocalPeerUnknownRetainsOperationAndSourceWith
         ASSERT_NO_FATAL_FAILURE(s.expectSettled(true, true));
         EXPECT_EQ(s.saves.load(), 1);
         EXPECT_EQ(s.backend->impl_->completion_resources_->unresolved.load(), 1u);
-        std::lock_guard<std::mutex> lock(s.backend->impl_->completion_resources_->mutex);
-        ASSERT_TRUE(s.backend->impl_->completion_resources_->operations);
-        EXPECT_EQ(s.backend->impl_->completion_resources_->operations->client, s.client);
-        EXPECT_FALSE(s.backend->impl_->completion_resources_->operations->buffers.empty());
+        EXPECT_EQ(s.backend->impl_->client_wrapper_, s.client);
+        EXPECT_TRUE(s.backend->impl_->completion_stopped_.load());
+        // Source/metadata lifetime is checked by expectSettled above. Actual
+        // borrowed-descriptor lifetime is exercised through ClientWrapperTest.
     });
 }
 
@@ -863,12 +865,15 @@ TEST_F(KVCMSubmissionBoundaryTest, OrdinaryFullPrefixIntersectsGroupsAndEndpoint
                 resource.decode_endpoint = std::move(endpoint);
             }
             {
+                const auto expired = StorageBackendExecutor::Clock::now() - std::chrono::milliseconds(1);
+                EXPECT_TRUE(backend.backend->impl_->planCompletedDecode(resource, 32, expired).empty());
+                EXPECT_EQ(backend.backend->impl_->completion_accounting_->snapshot().jobs, 0u);
                 auto request = backend.backend->impl_->planCompletedDecode(resource, 32);
                 if (expected_end) {
                     ASSERT_FALSE(request.empty());
-                    EXPECT_EQ(request.published_tokens, expected_end);
                     EXPECT_EQ(request.keys->size(), expected_end / 8);
-                    EXPECT_EQ(request.computed_tokens, 32u);
+                    EXPECT_EQ(*request.keys, CacheKeysType(resource.cacheKeys(0).begin(),
+                                                          resource.cacheKeys(0).begin() + expected_end / 8));
                     for (const auto& handles : request.handles) EXPECT_EQ(handles.size(), 2u);
                 } else EXPECT_TRUE(request.empty());
             } // Return any plan-only budget before the next case; no task is submitted.

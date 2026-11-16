@@ -18,4 +18,4 @@ cc_test_wrapper(
     tags = ["L20_CU13"],
 )
 
-exports_files(["ReservedCompletionLaneHostTest.cc"])
+exports_files(["CompletionQueueHostTest.cc"])

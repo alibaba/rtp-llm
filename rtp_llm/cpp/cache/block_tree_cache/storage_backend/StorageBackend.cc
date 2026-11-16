@@ -53,6 +53,8 @@ struct StorageTaskState {
     // Inline optional container: ordinary reads allocate no token storage;
     // writes avoid a separate heap allocation for the vector object itself.
     std::optional<std::vector<RemotePublicationPin>> publication_pins;
+    // Backend-owned unresolved-I/O token. Backend shutdown keeps its original
+    // transport owner alive until the token and protected tasks are discharged.
     std::shared_ptr<void> completion_resources;
     std::shared_ptr<StorageTaskState> quarantine_next;
     bool completion_protected{false};
@@ -81,49 +83,22 @@ struct StorageTaskState {
 // Keep one copy of the settlement state across the worker and RPC callback.
 template<typename Result, typename Settle>
 auto makeIoCompletion(std::shared_ptr<StorageBackendExecutor> executor,
-                      std::shared_ptr<StorageTaskState> state, Settle settle,
-                      BlockTreeTaskClass task_class) {
-    struct Continuation {
-        Settle settle;
-        Result result{};
-        // Carry failures directly: building a throwing std::function in a
-        // bad_alloc catch can itself allocate and lose lifecycle retirement.
-        std::exception_ptr error;
-        explicit Continuation(Settle&& value): settle(std::move(value)) {}
-    };
-    // One pre-I/O allocation holds both the settlement and its terminal result.
-    auto continuation = std::make_shared<Continuation>(std::move(settle));
-    std::shared_ptr<BlockTreeTaskPool::Completion> reservation;
-    if (state->request.decode_completion && executor->hasCompletionReservations()) {
-        reservation = executor->reserveCompletion([continuation]() mutable {
-            continuation->settle(std::move(continuation->result), true, false, std::move(continuation->error));
-        }, task_class);
-        if (!reservation) throw StorageOperationBufferSafeFailure("storage business completion capacity rejected before I/O");
-    }
-    return [executor = std::move(executor), state = std::move(state), continuation,
-            reservation = std::move(reservation)](Result result, bool asynchronous, std::exception_ptr error) mutable {
+                      std::shared_ptr<StorageTaskState> state, Settle settle) {
+    // Prepare the shared settlement owner before I/O, without reserving a
+    // completion slot. A queue allocation failure still uses the inline fallback.
+    auto continuation = std::make_shared<Settle>(std::move(settle));
+    return [executor = std::move(executor), state = std::move(state), continuation](Result result, bool asynchronous, std::exception_ptr error) mutable {
         if (state->completion_started.exchange(true))
             return;
-        if (asynchronous && reservation) {
-            continuation->result = std::move(result);
-            continuation->error = std::move(error);
-            // This accepted obligation cannot be rejected by stopAdmission or
-            // a deque allocation at terminal CQ time. Never settle SDK/metadata
-            // business on a notifying CQ/driver lane.
-            RTP_LLM_CHECK(reservation->post());
-            reservation.reset();
-            return;
-        }
-        reservation.reset(); // Synchronous/no-I/O result abandons the unused reservation.
         if (asynchronous) {
             try {
                 if (executor->submitCompletion([continuation, result, error]() mutable {
-                        continuation->settle(std::move(result), true, false, std::move(error));
+                        (*continuation)(std::move(result), true, false, std::move(error));
                     }))
                     return;
             } catch (...) {}
         }
-        continuation->settle(std::move(result), !asynchronous, false, std::move(error));
+        (*continuation)(std::move(result), !asynchronous, false, std::move(error));
     };
 }
 
@@ -475,7 +450,7 @@ StorageBackend::prepare(StorageRequest request, bool for_write, uint64_t trace_i
     if (state->completion_protected) {
         state->completion_resources = completionResourceOwner();
         RTP_LLM_CHECK_WITH_INFO(state->completion_resources != nullptr,
-                                "protected storage I/O requires an actual transport resource owner");
+                                "protected storage I/O requires a backend unresolved-I/O token");
     }
     if (for_write || state->completion_protected) {
         // All metadata allocation and deduplication precedes pin acquisition.
@@ -734,7 +709,7 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
             std::function<void(Task, bool, std::exception_ptr)> complete_read;
             try {
                 complete_read = storage_backend_detail::makeIoCompletion<Task>(
-                    executor_, state, settle_read, BlockTreeTaskClass::LOAD);
+                    executor_, state, settle_read);
             } catch (...) {
                 // Completion preparation failed before readAsyncImpl/readImpl.
                 // No external I/O can own the destination, even on bad_alloc.
@@ -866,7 +841,7 @@ bool StorageBackend::write(StorageWriteTask task) {
         std::function<void(WriteResult, bool, std::exception_ptr)> complete;
         try {
             complete = storage_backend_detail::makeIoCompletion<WriteResult>(
-                executor_, state, settle_write, BlockTreeTaskClass::BACKGROUND);
+                executor_, state, settle_write);
         } catch (...) {
             // No startWriteImpl/writeImpl call has occurred. Preserve the
             // original error without manufacturing an UNKNOWN buffer owner.

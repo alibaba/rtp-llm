@@ -29,7 +29,7 @@ struct BlockTreeQueueSizes {
     size_t completion{0};
 };
 
-class BlockTreeTaskPool: public std::enable_shared_from_this<BlockTreeTaskPool> {
+class BlockTreeTaskPool {
 public:
     using Clock = std::chrono::steady_clock;
 
@@ -41,17 +41,7 @@ public:
     // small pools never starve BACKGROUND.
     static constexpr size_t kLoadReservedSlots = 64;
 
-    BlockTreeTaskPool(size_t thread_count, size_t queue_size, std::string thread_name,
-                      size_t completion_capacity = 0);
-    class Completion;
-    struct CompletionSnapshot {
-        size_t capacity, outstanding, queued_load, queued_background, running, rejected;
-        bool accepting;
-    };
-    std::shared_ptr<Completion> reserveCompletion(std::function<void()> task, BlockTreeTaskClass task_class);
-    void stopCompletionAdmission();
-    void waitForCompletionIdle();
-    CompletionSnapshot completionSnapshot() const;
+    BlockTreeTaskPool(size_t thread_count, size_t queue_size, std::string thread_name);
     ~BlockTreeTaskPool();
 
     BlockTreeTaskPool(const BlockTreeTaskPool&)            = delete;
@@ -80,44 +70,6 @@ private:
         std::optional<Clock::time_point> deadline;
     };
 
-public:
-    // One pre-I/O callback record, charged by the existing outstanding counter.
-    // It is itself the queue node; no ticket or separate phase machine.
-    class Completion: public std::enable_shared_from_this<Completion> {
-        friend class BlockTreeTaskPool;
-        std::shared_ptr<BlockTreeTaskPool> pool_;
-        std::function<void()> task_;
-        std::shared_ptr<Completion> next_;
-        const bool load_;
-        bool admitted_{false};
-        std::atomic<bool> posted_{false};
-    public:
-        // Only reserveCompletion arms admission. A directly constructed record
-        // cannot post or return capacity that it never acquired.
-        Completion(std::shared_ptr<BlockTreeTaskPool> pool, std::function<void()> task, bool load):
-            pool_(std::move(pool)), task_(std::move(task)), load_(load) {}
-        Completion(const Completion&) = delete;
-        Completion& operator=(const Completion&) = delete;
-        ~Completion() { if (admitted_ && !posted_.load()) pool_->abandonCompletion(*this); }
-        // The caller must also hold an independent pool/executor owner through
-        // post(). Production makeIoCompletion captures that executor strongly;
-        // otherwise dropping the last pool owner here could join this worker.
-        bool post() noexcept {
-            if (!admitted_) return false;
-            auto pool = std::atomic_load(&pool_);
-            if (!pool) return false;
-            auto self = shared_from_this();
-            const bool accepted = pool->postCompletion(self);
-            // A queued record must not create pool -> record -> pool ownership.
-            // The posting caller keeps pool/self alive through this handoff;
-            // executor ownership and shutdown draining cover the queued work.
-            if (accepted) std::atomic_store(&pool_, std::shared_ptr<BlockTreeTaskPool>{});
-            return accepted;
-        }
-    };
-private:
-    bool postCompletion(const std::shared_ptr<Completion>& node) noexcept;
-    void abandonCompletion(Completion& node) noexcept;
     void       workerLoop();
     size_t     backgroundLimit() const;
     size_t     normalQueueSizeLocked() const;
@@ -127,17 +79,11 @@ private:
 
     const size_t      thread_count_;
     const size_t      queue_size_;
-    const size_t      completion_capacity_;
     const std::string thread_name_;
 
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
     mutable std::mutex                         lifecycle_mutex_;
-    std::condition_variable                    queue_cv_, completion_idle_;
-    std::shared_ptr<Completion> completed_load_, completed_background_;
-    Completion *completed_load_tail_{nullptr}, *completed_background_tail_{nullptr};
-    size_t completion_outstanding_{0}, completion_load_{0}, completion_background_{0}, completion_running_{0};
-    size_t completion_rejected_{0}, completion_burst_{0};
-    bool completion_admission_stopped_{false};
+    std::condition_variable                    queue_cv_;
     std::mutex shutdown_mutex_;
     std::deque<QueuedTask>                     load_queue_;
     std::deque<QueuedTask>                     background_queue_;

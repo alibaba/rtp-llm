@@ -159,22 +159,22 @@ struct EndpointHoldFixture {
         return result;
     }
     std::shared_ptr<const DecodeEndpoint> capture(size_t end, const std::shared_ptr<const DecodeEndpoint>& previous = {},
-                                                 bool writer_already_fenced = false) {
-        return manager->retainDecodeEndpoint(ids, tags, 0, end, previous, writer_already_fenced);
+                                                 bool defer_writer_wait = false) {
+        return manager->retainDecodeEndpoint(ids, tags, 0, end, previous, defer_writer_wait);
     }
 };
 } // namespace
 
 TEST_F(KVCacheManagerTest, EndpointFullHoldsShareAcrossBoundariesAndBothReleaseOrders) {
-    for (const bool writer_already_fenced : {false, true})
+    for (const bool defer_writer_wait : {false, true})
     for (const bool reversed : {false, true}) {
         EndpointHoldFixture f;
         const auto baseline = f.refs();
         auto first = f.capture(4);
         ASSERT_TRUE(first);
-        auto second = f.capture(8, first, writer_already_fenced);
+        auto second = f.capture(8, first, defer_writer_wait);
         ASSERT_TRUE(second);
-        auto third = f.capture(12, second, writer_already_fenced);
+        auto third = f.capture(12, second, defer_writer_wait);
         ASSERT_TRUE(third);
         EXPECT_EQ(first->pages.at("full").at(0), second->pages.at("full").at(0));
         EXPECT_EQ(second->pages.at("full").at(1), third->pages.at("full").at(1));

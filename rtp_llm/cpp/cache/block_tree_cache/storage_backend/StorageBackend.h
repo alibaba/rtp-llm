@@ -131,9 +131,6 @@ struct StorageRequest {
     std::optional<TransferTask> transfer_task;
     bool decode_completion{false};
     std::shared_ptr<const DecodePeerBlocks> decode_peer_blocks;
-    size_t computed_tokens{0};
-    size_t published_tokens{0};
-    std::optional<int64_t> prefill_computed_tokens;
     std::shared_ptr<const void> source_owner;
     std::shared_ptr<StorageCompletionAdmission> completion_admission;
 

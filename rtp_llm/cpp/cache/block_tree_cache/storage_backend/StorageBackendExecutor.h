@@ -27,11 +27,6 @@ public:
     virtual bool submitCompletion(Task task) {
         return submit(std::move(task), BlockTreeTaskClass::LOAD);
     }
-    // Default KVCM executors reserve a bounded, allocation-free post before
-    // external I/O. Custom legacy executors keep their existing contract.
-    virtual bool hasCompletionReservations() const noexcept { return false; }
-    virtual std::shared_ptr<BlockTreeTaskPool::Completion>
-    reserveCompletion(Task, BlockTreeTaskClass) { return {}; }
     virtual BlockTreeQueueSizes queueSizes() const { return {}; }
     // Async executors leave the completion queue open while the backend drains
     // external I/O. Synchronous executors can finish their queued work here.
@@ -43,8 +38,7 @@ private:
     // Executors cannot be restarted or shared by multiple backend lifecycles.
     std::atomic<bool> bound_to_backend_{false};
 };
-std::shared_ptr<StorageBackendExecutor> makeStorageBackendExecutor(size_t thread_count, size_t queue_size,
-                                                                  bool reserve_completion = true);
+std::shared_ptr<StorageBackendExecutor> makeStorageBackendExecutor(size_t thread_count, size_t queue_size);
 std::shared_ptr<StorageBackendExecutor> makeDefaultStorageBackendExecutor();
 
 }  // namespace rtp_llm

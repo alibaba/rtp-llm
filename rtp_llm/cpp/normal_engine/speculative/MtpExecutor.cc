@@ -78,6 +78,7 @@ void MtpExecutor::retainDecodePublicationPages(const StreamGroups& streams, cons
         }
     }
     if (!crossing) return; // No payload copy or metadata join on ordinary rounds.
+    RTP_LLM_PROFILE_SCOPE("executor.mtp.retain_decode_endpoint");
     if (!sampled.transfer_done_event || !target.prefix_lengths.defined() || !target.input_lengths.defined()
         || !draft.prefix_lengths.defined() || !draft.input_lengths.defined() || !target.kv_cache_block_id.defined()) return;
     try {
@@ -92,10 +93,9 @@ void MtpExecutor::retainDecodePublicationPages(const StreamGroups& streams, cons
     auto ids = target.kv_cache_block_id.to(torch::kCPU).to(torch::kInt32).contiguous();
     if (is_dspark_ && (!draft.last_hidden_states.defined() || draft.last_hidden_states.numel() == 0)) return;
     size_t row = 0;
-    // All target/draft writers precede this loop on the caller's stream.
-    // Between captures we only read CPU metadata and hold native request pages;
-    // the next round and its bookkeeping dispatch cannot start in this loop.
-    bool writer_ready = false;
+    // Keep exact-page pinning on the engine thread. These candidates remain
+    // pending until specUpdate, whose existing final draft_event host wait
+    // covers target/draft/Graph writers. CPU accept metadata was joined above.
     for (const auto& stream : streams.allStreams()) {
         std::vector<std::shared_ptr<const DecodeEndpoint>> endpoints;
         try {
@@ -116,9 +116,8 @@ void MtpExecutor::retainDecodePublicationPages(const StreamGroups& streams, cons
             auto previous = stream->latestDecodePublicationEndpoint();
             for (size_t h = (static_cast<size_t>(prefix) / unit + 1) * unit; h <= end; h += unit) {
                 auto endpoint = cache_manager_->retainDecodeEndpoint(
-                    ids, target.kv_cache_group_tags, row, h, previous, writer_ready);
+                    ids, target.kv_cache_group_tags, row, h, previous, /*defer_writer_wait=*/true);
                 if (endpoint) {
-                    writer_ready = true; // Only a successful capture proves the first fence completed.
                     previous = endpoint;
                     endpoints.push_back(std::move(endpoint));
                 }

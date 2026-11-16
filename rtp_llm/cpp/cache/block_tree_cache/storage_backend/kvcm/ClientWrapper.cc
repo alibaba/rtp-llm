@@ -1,6 +1,5 @@
 #include "ClientWrapper.h"
 #include <limits>
-#include <type_traits>
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 #include "kvcm_client/HostCacheStateCompat.h"
 #include "kvcm_client/TransferClientCompat.h"
@@ -14,7 +13,6 @@
 #include <thread>
 #include <chrono>
 #include <unistd.h>
-#include <tuple>
 #include "autil/EnvUtil.h"
 
 namespace rtp_llm {
@@ -22,70 +20,28 @@ namespace kvcm {
 
 namespace {
 
-// Projected Decode retains local bounds and owned descriptors. Prefill
-// forwards the original whole call directly to the SDK.
-struct SdkRange {
-    size_t begin, end, bytes, iovs;
-};
-bool sdkRanges(const kv_cache_manager::UriStrVec&    uris,
-                      const kv_cache_manager::BlockBuffers& buffers,
-                      bool bounded, std::vector<SdkRange>& ranges) {
-    const size_t max_bytes = bounded ? 64 * 1024 * 1024 : std::numeric_limits<size_t>::max();
-    const size_t max_blocks = bounded ? 256 : std::numeric_limits<size_t>::max();
-    const size_t max_iovs = bounded ? 1024 : std::numeric_limits<size_t>::max();
-    if (uris.size() != buffers.size()) {
-        return false;
-    }
-    for (size_t begin = 0; begin < buffers.size();) {
-        size_t end = begin, bytes = 0, iovs = 0;
-        while (end < buffers.size()) {
-            size_t     next_bytes = 0;
-            const auto next_iovs  = buffers[end].iovs.size();
-            if (next_iovs > max_iovs) {
-                return false;
-            }
-            for (const auto& iov : buffers[end].iovs) {
-                if (iov.size > max_bytes - next_bytes) {
-                    return false;
-                }
-                next_bytes += iov.size;
-            }
-            if (end > begin
-                && (end - begin >= max_blocks || next_bytes > max_bytes - bytes || next_iovs > max_iovs - iovs)) {
-                if (!bounded) return false; // A legacy whole call must still fit numeric accounting.
-                break;
-            }
-            bytes += next_bytes;
-            iovs += next_iovs;
-            ++end;
+// Validate numeric accounting for one native SDK call. URI/IOV limits are
+// governed by the SDK; Decode keeps only the actual borrowed descriptors.
+struct SdkPayloadSize { size_t bytes{0}, iovs{0}; };
+bool sdkPayloadSize(const kv_cache_manager::UriStrVec& uris,
+                    const kv_cache_manager::BlockBuffers& buffers, SdkPayloadSize& size) {
+    if (uris.size() != buffers.size()) return false;
+    for (const auto& block : buffers) {
+        if (block.iovs.size() > std::numeric_limits<size_t>::max() - size.iovs) return false;
+        size.iovs += block.iovs.size();
+        for (const auto& iov : block.iovs) {
+            if (iov.size > std::numeric_limits<size_t>::max() - size.bytes) return false;
+            size.bytes += iov.size;
         }
-        ranges.push_back({begin, end, bytes, iovs});
-        begin = end;
     }
     return true;
-}
-
-std::shared_ptr<kv_cache_manager::TransferTraceInfo>
-traceForRange(const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace, const SdkRange& range) {
-    if (!trace || trace->block_ids.empty())
-        return trace;
-    // Decomposition guards the complete SDK field set: additions must be
-    // handled explicitly instead of silently losing metadata in this clone.
-    const auto& [print, ids] = *trace;
-    static_assert(std::is_same_v<std::decay_t<decltype(print)>, bool>
-                  && std::is_same_v<std::decay_t<decltype(ids)>, std::vector<std::string>>);
-    auto result = std::make_shared<kv_cache_manager::TransferTraceInfo>();
-    auto& [result_print, result_ids] = *result;
-    result_print = print;
-    result_ids.assign(ids.begin() + range.begin, ids.begin() + range.end);
-    return result;
 }
 
 }  // namespace
 
 ClientWrapper::ClientWrapper(std::unique_ptr<ClientFactory> client_factory,
-                             std::chrono::milliseconds reinit_interval, bool bound_sdk_calls):
-    bound_sdk_calls_(bound_sdk_calls),
+                             std::chrono::milliseconds reinit_interval, bool retain_transfer_descriptors):
+    retain_transfer_descriptors_(retain_transfer_descriptors),
     client_factory_(std::move(client_factory)),
     reinit_interval_(std::max(reinit_interval, std::chrono::milliseconds(1))) {
     RTP_LLM_CHECK_WITH_INFO(client_factory_ != nullptr, "ClientWrapper requires a client factory");
@@ -683,8 +639,8 @@ ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                  
     const int64_t deadline_ms = deadline ?
         std::chrono::duration_cast<std::chrono::milliseconds>(deadline->time_since_epoch()).count() : 0;
     // Prefill forwards the caller's original descriptors and trace unchanged.
-    // Only projected Decode retains the bounded transfer/UNKNOWN records.
-    if (!remoteCacheDecodePublicationEnabled() || !bound_sdk_calls_) {
+    // Projected Decode also owns descriptors across an unproven completion.
+    if (!remoteCacheDecodePublicationEnabled() || !retain_transfer_descriptors_) {
         if (completion)
             *completion = TransferCompletion::UNKNOWN;
         const auto ec = loadSdkKvCaches(*transfer_clients_[slot->second], uri_str_vec, block_buffers, deadline_ms,
@@ -696,85 +652,55 @@ ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                  
         }
         return ec;
     }
-    const auto io_started = std::chrono::steady_clock::now();
-    auto                  ec = kv_cache_manager::ClientErrorCode::ER_OK;
-    std::vector<SdkRange> ranges;
+    SdkPayloadSize size;
     if ((trace_info && !trace_info->block_ids.empty() && trace_info->block_ids.size() != uri_str_vec.size())
-        || !sdkRanges(uri_str_vec, block_buffers, bound_sdk_calls_, ranges)) {
-        RTP_LLM_LOG_ERROR("KVCM SDK rejects malformed, overflowing or profile-oversized block geometry");
+        || !sdkPayloadSize(uri_str_vec, block_buffers, size)) {
+        RTP_LLM_LOG_ERROR("KVCM SDK rejects malformed or overflowing block geometry");
         return kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS;
     }
-    for (const auto& range : ranges) {
-        auto retained = std::make_shared<PendingTransfer>();
-        retained->uris.assign(uri_str_vec.begin() + range.begin, uri_str_vec.begin() + range.end);
-        auto& uris = retained->uris;
-        // Shallow pointer descriptors; caller pins own all payloads for the whole operation.
-        retained->buffers.assign(block_buffers.begin() + range.begin, block_buffers.begin() + range.end);
-        auto& buffers = retained->buffers;
-        const auto                     began      = std::chrono::steady_clock::now();
-        const auto                     part_trace = traceForRange(trace_info, range);
-        retained->trace = part_trace;
-        auto local_completion = TransferCompletion::UNKNOWN;
-        retainTransfer(retained);
-        struct RetainedScope {
-            ClientWrapper* owner;
-            const std::shared_ptr<PendingTransfer>& transfer;
-            TransferCompletion& completion;
-            ~RetainedScope() {
-                if (completion != TransferCompletion::UNKNOWN) owner->releaseTransfer(transfer);
-            }
-        } preserve_unknown{this, retained, local_completion};
-        if (deadline && std::chrono::steady_clock::now() >= *deadline) {
-            local_completion = TransferCompletion::NOT_STARTED;
-            return kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT;
+    if (uri_str_vec.empty()) return kv_cache_manager::ClientErrorCode::ER_OK;
+    auto retained = std::make_shared<PendingTransfer>();
+    retained->uris = uri_str_vec;
+    retained->buffers = block_buffers; // Pointer descriptors only, never a CPU payload copy.
+    retained->trace = trace_info ? std::make_shared<kv_cache_manager::TransferTraceInfo>(*trace_info) : nullptr;
+    auto local_completion = TransferCompletion::UNKNOWN;
+    retainTransfer(retained);
+    struct RetainedScope {
+        ClientWrapper* owner;
+        const std::shared_ptr<PendingTransfer>& transfer;
+        TransferCompletion& completion;
+        ~RetainedScope() {
+            if (completion != TransferCompletion::UNKNOWN) owner->releaseTransfer(transfer);
         }
-        try {
-            if (completion)
-                *completion = TransferCompletion::UNKNOWN;
-            ec = loadSdkKvCaches(*transfer_clients_[slot->second], uris, buffers, deadline_ms, part_trace);
-        } catch (...) {
-            observeTransfer(/*is_read=*/true, 0, /*completion_unknown=*/true);
-            throw;
-        }
-        local_completion = sdkResultCompletion(ec);
-        if (completion)
-            *completion = local_completion;
-        observeTransfer(/*is_read=*/true,
-                        ec == kv_cache_manager::ClientErrorCode::ER_OK ? range.bytes : 0,
-                        ec != kv_cache_manager::ClientErrorCode::ER_OK);
-        const auto us =
-            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count();
-        RTP_LLM_LOG_DEBUG("KV_SDK_CHUNK op=read pid=%d tag=%s blocks=%zu iovs=%zu bytes=%zu duration_us=%ld ec=%d",
-                         static_cast<int>(getpid()),
-                         tag.c_str(),
-                         uris.size(),
-                         range.iovs,
-                         range.bytes,
-                         static_cast<long>(us),
-                         static_cast<int>(ec));
-        if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
-            break;
-        }
-        std::copy(buffers.begin(), buffers.end(), block_buffers.begin() + range.begin);
+    } preserve_unknown{this, retained, local_completion};
+    if (deadline && std::chrono::steady_clock::now() >= *deadline) {
+        local_completion = TransferCompletion::NOT_STARTED;
+        return kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT;
     }
-    const auto io_us =
-        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - io_started).count();
-    size_t io_bytes = 0;
-    for (const auto& block : block_buffers) {
-        for (const auto& iov : block.iovs) {
-            io_bytes += iov.size;
-        }
+    const auto began = std::chrono::steady_clock::now();
+    kv_cache_manager::ClientErrorCode ec;
+    try {
+        if (completion) *completion = TransferCompletion::UNKNOWN;
+        ec = loadSdkKvCaches(*transfer_clients_[slot->second], retained->uris, retained->buffers,
+                             deadline_ms, retained->trace);
+    } catch (...) {
+        observeTransfer(/*is_read=*/true, 0, /*completion_unknown=*/true);
+        throw;
     }
+    local_completion = sdkResultCompletion(ec);
+    if (completion) *completion = local_completion;
+    observeTransfer(/*is_read=*/true, ec == kv_cache_manager::ClientErrorCode::ER_OK ? size.bytes : 0,
+                    ec != kv_cache_manager::ClientErrorCode::ER_OK);
+    const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - began).count();
+    RTP_LLM_LOG_DEBUG("KV_SDK_CHUNK op=read pid=%d tag=%s blocks=%zu iovs=%zu bytes=%zu duration_us=%ld ec=%d",
+                     static_cast<int>(getpid()), tag.c_str(), retained->uris.size(), size.iovs, size.bytes,
+                     static_cast<long>(us), static_cast<int>(ec));
     RTP_LLM_LOG_DEBUG("KV_IO op=read pid=%d tag=%s blocks=%zu bytes=%zu duration_us=%ld ec=%d",
-                     static_cast<int>(getpid()),
-                     tag.c_str(),
-                     uri_str_vec.size(),
-                     io_bytes,
-                     static_cast<long>(io_us),
-                     static_cast<int>(ec));
-    if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
-        RTP_LLM_LOG_ERROR("kvcm client loadKvCaches fail, ec [%d]", ec);
-    }
+                     static_cast<int>(getpid()), tag.c_str(), retained->uris.size(), size.bytes,
+                     static_cast<long>(us), static_cast<int>(ec));
+    if (ec == kv_cache_manager::ClientErrorCode::ER_OK) block_buffers = retained->buffers;
+    else RTP_LLM_LOG_ERROR("kvcm client loadKvCaches fail, ec [%d]", ec);
     return ec;
 }
 
@@ -811,8 +737,8 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
     const int64_t deadline_ms = deadline ?
         std::chrono::duration_cast<std::chrono::milliseconds>(deadline->time_since_epoch()).count() : 0;
     // Prefill forwards the caller's original descriptors and trace unchanged.
-    // Only projected Decode retains the bounded transfer/UNKNOWN records.
-    if (!remoteCacheDecodePublicationEnabled() || !bound_sdk_calls_) {
+    // Projected Decode also owns descriptors across an unproven completion.
+    if (!remoteCacheDecodePublicationEnabled() || !retain_transfer_descriptors_) {
         if (completion)
             *completion = TransferCompletion::UNKNOWN;
         auto result = saveSdkKvCaches(*transfer_clients_[slot->second], uri_str_vec, block_buffers, deadline_ms,
@@ -824,98 +750,62 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
         }
         return result;
     }
-    const auto io_started = std::chrono::steady_clock::now();
-    auto                        ec = kv_cache_manager::ClientErrorCode::ER_OK;
-    kv_cache_manager::UriStrVec result;
-    std::vector<SdkRange>       ranges;
+    SdkPayloadSize size;
     if ((trace_info && !trace_info->block_ids.empty() && trace_info->block_ids.size() != uri_str_vec.size())
-        || !sdkRanges(uri_str_vec, block_buffers, bound_sdk_calls_, ranges)) {
-        RTP_LLM_LOG_ERROR("KVCM SDK rejects malformed, overflowing or profile-oversized block geometry");
+        || !sdkPayloadSize(uri_str_vec, block_buffers, size)) {
+        RTP_LLM_LOG_ERROR("KVCM SDK rejects malformed or overflowing block geometry");
         return {kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS, {}};
     }
-    for (const auto& range : ranges) {
-        auto retained = std::make_shared<PendingTransfer>();
-        retained->uris.assign(uri_str_vec.begin() + range.begin, uri_str_vec.begin() + range.end);
-        auto& uris = retained->uris;
-        // Shallow pointer descriptors; caller pins own all payloads for the whole operation.
-        retained->buffers.assign(block_buffers.begin() + range.begin, block_buffers.begin() + range.end);
-        auto& buffers = retained->buffers;
-        const auto                     began      = std::chrono::steady_clock::now();
-        const auto                     part_trace = traceForRange(trace_info, range);
-        retained->trace = part_trace;
-        auto local_completion = TransferCompletion::UNKNOWN;
-        retainTransfer(retained);
-        struct RetainedScope {
-            ClientWrapper* owner;
-            const std::shared_ptr<PendingTransfer>& transfer;
-            TransferCompletion& completion;
-            ~RetainedScope() {
-                if (completion != TransferCompletion::UNKNOWN) owner->releaseTransfer(transfer);
-            }
-        } preserve_unknown{this, retained, local_completion};
-        if (deadline && std::chrono::steady_clock::now() >= *deadline) {
-            local_completion = TransferCompletion::NOT_STARTED;
-            return {kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT, {}};
+    if (uri_str_vec.empty()) return {kv_cache_manager::ClientErrorCode::ER_OK, {}};
+    auto retained = std::make_shared<PendingTransfer>();
+    retained->uris = uri_str_vec;
+    retained->buffers = block_buffers; // Pointer descriptors only; source pages have their original pins.
+    retained->trace = trace_info ? std::make_shared<kv_cache_manager::TransferTraceInfo>(*trace_info) : nullptr;
+    auto local_completion = TransferCompletion::UNKNOWN;
+    retainTransfer(retained);
+    struct RetainedScope {
+        ClientWrapper* owner;
+        const std::shared_ptr<PendingTransfer>& transfer;
+        TransferCompletion& completion;
+        ~RetainedScope() {
+            if (completion != TransferCompletion::UNKNOWN) owner->releaseTransfer(transfer);
         }
-        auto                           saved      = [&] {
-            try {
-                if (completion)
-                    *completion = TransferCompletion::UNKNOWN;
-                return saveSdkKvCaches(*transfer_clients_[slot->second], uris, buffers, deadline_ms, part_trace);
-            } catch (...) {
-                observeTransfer(/*is_read=*/false, 0, /*completion_unknown=*/true);
-                throw;
-            }
-        }();
-        ec = saved.first;
-        local_completion = sdkResultCompletion(ec);
-        if (completion)
-            *completion = local_completion;
-        observeTransfer(/*is_read=*/false,
-                        ec == kv_cache_manager::ClientErrorCode::ER_OK ? range.bytes : 0,
-                        ec != kv_cache_manager::ClientErrorCode::ER_OK);
-        const auto us =
-            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count();
-        RTP_LLM_LOG_DEBUG("KV_SDK_CHUNK op=write pid=%d tag=%s blocks=%zu iovs=%zu bytes=%zu duration_us=%ld ec=%d",
-                         static_cast<int>(getpid()),
-                         tag.c_str(),
-                         uris.size(),
-                         range.iovs,
-                         range.bytes,
-                         static_cast<long>(us),
-                         static_cast<int>(ec));
-        if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
-            break;
-        }
-        if (!saved.second.empty() && saved.second.size() != uris.size()) {
-            ec = kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS;
-            break;
-        }
-        const auto& actual = saved.second.empty() ? uris : saved.second;
-        result.insert(result.end(), actual.begin(), actual.end());
+    } preserve_unknown{this, retained, local_completion};
+    if (deadline && std::chrono::steady_clock::now() >= *deadline) {
+        local_completion = TransferCompletion::NOT_STARTED;
+        return {kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT, {}};
     }
-    if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
-        result.clear();
-    }
-    const auto io_us =
-        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - io_started).count();
-    size_t io_bytes = 0;
-    for (const auto& block : block_buffers) {
-        for (const auto& iov : block.iovs) {
-            io_bytes += iov.size;
+    const auto began = std::chrono::steady_clock::now();
+    auto saved = [&] {
+        try {
+            if (completion) *completion = TransferCompletion::UNKNOWN;
+            return saveSdkKvCaches(*transfer_clients_[slot->second], retained->uris, retained->buffers,
+                                   deadline_ms, retained->trace);
+        } catch (...) {
+            observeTransfer(/*is_read=*/false, 0, /*completion_unknown=*/true);
+            throw;
         }
-    }
+    }();
+    auto ec = saved.first;
+    local_completion = sdkResultCompletion(ec);
+    if (completion) *completion = local_completion;
+    observeTransfer(/*is_read=*/false, ec == kv_cache_manager::ClientErrorCode::ER_OK ? size.bytes : 0,
+                    ec != kv_cache_manager::ClientErrorCode::ER_OK);
+    const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now() - began).count();
+    RTP_LLM_LOG_DEBUG("KV_SDK_CHUNK op=write pid=%d tag=%s blocks=%zu iovs=%zu bytes=%zu duration_us=%ld ec=%d",
+                     static_cast<int>(getpid()), tag.c_str(), retained->uris.size(), size.iovs, size.bytes,
+                     static_cast<long>(us), static_cast<int>(ec));
     RTP_LLM_LOG_DEBUG("KV_IO op=write pid=%d tag=%s blocks=%zu bytes=%zu duration_us=%ld ec=%d",
-                     static_cast<int>(getpid()),
-                     tag.c_str(),
-                     uri_str_vec.size(),
-                     io_bytes,
-                     static_cast<long>(io_us),
-                     static_cast<int>(ec));
+                     static_cast<int>(getpid()), tag.c_str(), retained->uris.size(), size.bytes,
+                     static_cast<long>(us), static_cast<int>(ec));
     if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
         RTP_LLM_LOG_ERROR("kvcm client saveKvCaches fail, ec [%d]", ec);
+        return {ec, {}};
     }
-    return {ec, std::move(result)};
+    if (!saved.second.empty() && saved.second.size() != retained->uris.size())
+        return {kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS, {}};
+    return {ec, saved.second.empty() ? std::move(retained->uris) : std::move(saved.second)};
 }
 
 }  // namespace kvcm

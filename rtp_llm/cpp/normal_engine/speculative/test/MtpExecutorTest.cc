@@ -3855,6 +3855,64 @@ TEST_F(MtpExecutorTest, DecodeEndpointSkipsFakeAndUnsampledRoundsBeforeWaitingOn
     });
 }
 
+TEST_F(MtpExecutorTest, DecodeEndpointCapturePinsPendingPagesWithoutWaitingForFinalWriter) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    test::withDecodePublicationStartup([&] {
+        MtpExecutorTestConfig config;
+        config.role_type = RoleType::DECODE;
+        config.sp_type = SP_TYPE_DSPARK;
+        config.gen_num_per_cycle = 3;
+        auto components = createMtpExecutorComponents(config);
+        auto& executor = *components.executor;
+        auto context = components.resource_context;
+        context.cache_manager = executor.cache_manager_;
+        auto stream = createContextStream(components.model_config, components.runtime_config, context, {0, 1, 2}, 16);
+        ASSERT_TRUE(stream->initKVBlock().ok());
+        const auto& tags = executor.cache_manager_->cacheConfig().groupTags();
+        ASSERT_EQ(executor.cache_manager_->decodePublicationUnit(), 2u);
+        ASSERT_TRUE(stream->mayCrossDecodePublicationBoundary(2, executor.propose_step_ + 1));
+        size_t slots = 0;
+        for (const auto& tag : tags) slots = std::max(slots, stream->kvCache().blocks(0, tag).size());
+        ASSERT_GE(slots, 2u);
+        GptModelInputs target, draft;
+        target.kv_cache_group_tags = tags;
+        target.prefix_lengths = draft.prefix_lengths = torch::tensor({2}, torch::kInt32);
+        target.input_lengths = draft.input_lengths = torch::tensor({2}, torch::kInt32);
+        target.kv_cache_block_id = torch::full(
+            {static_cast<int64_t>(tags.size()), 1, static_cast<int64_t>(slots)}, NULL_BLOCK_IDX, torch::kInt32);
+        for (size_t group = 0; group < tags.size(); ++group) {
+            const auto& blocks = stream->kvCache().blocks(0, tags[group]);
+            for (size_t slot = 0; slot < blocks.size(); ++slot)
+                target.kv_cache_block_id.data_ptr<int32_t>()[group * slots + slot] = blocks[slot];
+        }
+        draft.last_hidden_states = torch::zeros({1, 1}, torch::kFloat32);
+        spec::SpeculativeSamplerOutput sampled;
+        sampled.accept_len_cpu = torch::tensor({2}, torch::kInt32);
+        sampled.transfer_done_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+        sampled.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
+        sampled.transfer_done_event->synchronize(); // Accept metadata is ready before the final-writer marker.
+        ScopedMetricsStreamGate gate(cuda_graph::graphGetCurrentStream());
+        auto final_writer = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+        final_writer->record(cuda_graph::graphGetCurrentStream());
+        // This invokes the real production capture entry. The pre-optimization
+        // first-capture sync drains the gated stream and trips its watchdog.
+        executor.retainDecodePublicationPages(StreamGroups({stream}), target, draft, sampled);
+        EXPECT_FALSE(gate.timedOut()) << "capture waited for the final writer instead of pinning pending pages";
+        EXPECT_FALSE(final_writer->query());
+        EXPECT_FALSE(stream->kvCache().decode_endpoint);
+        auto pending = stream->latestDecodePublicationEndpoint();
+        ASSERT_TRUE(pending);
+        EXPECT_EQ(pending->end, 4u);
+        ASSERT_FALSE(pending->pages.empty());
+        for (const auto& [tag, holds] : pending->pages) for (const auto& hold : holds) {
+            ASSERT_TRUE(hold); EXPECT_TRUE(hold->pin); EXPECT_EQ(hold->pin.get(), hold->pool.get());
+        }
+        gate.release(); final_writer->synchronize();
+        // A stream marker verifies host-wait placement and exact pins, not model
+        // kernel write ranges, STATE contents, or an end-to-end speedup.
+    });
+}
+
 TEST_F(MtpExecutorTest, testAcceptLenMetricsConsumeReadyPrefixWithoutWaitingOrSkippingPendingGpuRound) {
     MtpExecutorTestConfig config;
     config.gen_num_per_cycle = 5;

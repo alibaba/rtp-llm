@@ -27,7 +27,7 @@ public:
     using ConfigMap = std::map<std::string, KVCMConfigPtr>;
     explicit ClientWrapper(std::unique_ptr<ClientFactory> client_factory = std::make_unique<ClientFactory>(),
                            std::chrono::milliseconds reinit_interval = std::chrono::seconds(10),
-                           bool bound_sdk_calls = true);
+                           bool retain_transfer_descriptors = true);
     virtual ~ClientWrapper();
     virtual bool
     init(const ConfigMap& config_str_map, const kv_cache_manager::InitParams& init_params, const std::string& tag);
@@ -158,7 +158,7 @@ private:
     // Shutdown takes this lock exclusively before destroying the pool transfer clients.
     std::shared_mutex transfer_mutex_;
     TransferObserver  transfer_observer_;
-    const bool bound_sdk_calls_;
+    const bool retain_transfer_descriptors_;
     // Borrowed URI/IOV/trace descriptors must survive an SDK error or throw
     // whose payload completion is unknown, together with the registered client.
     struct PendingTransfer {

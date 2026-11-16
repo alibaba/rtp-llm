@@ -1395,12 +1395,12 @@ TEST(ClientWrapperTest, PrefillWholeCallPreservesIdentityDeadlineAndCallerLifeti
     }
 }
 
-TEST(ClientWrapperTest, PrefillForwardsOriginalDescriptorsWhileDecodeKeepsBoundedOwnership) {
+TEST(ClientWrapperTest, PrefillAndDecodeUseWholeCallsWhileDecodeOwnsBorrowedDescriptors) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     ::rtp_llm::test::withDecodePublicationStartup([&] {
     using namespace kv_cache_manager;
-    for (bool bounded : {false, true}) {
-    SCOPED_TRACE(bounded);
+    for (bool retained : {false, true}) {
+    SCOPED_TRACE(retained);
     std::vector<unsigned char> data(300 * 19), destination(data.size(), 0);
     for (size_t i = 0; i < data.size(); ++i)
         data[i] = static_cast<unsigned char>(i * 31 + 7);
@@ -1408,8 +1408,8 @@ TEST(ClientWrapperTest, PrefillForwardsOriginalDescriptorsWhileDecodeKeepsBounde
     InitObservation     observation;
     MockTransferClient* mock = nullptr;
     auto                client =
-        initializeClient(false, "bounded", span, observation, std::make_shared<int>(0), nullptr, nullptr, &mock,
-                         nullptr, std::chrono::seconds(10), nullptr, {}, bounded);
+        initializeClient(false, "retained", span, observation, std::make_shared<int>(0), nullptr, nullptr, &mock,
+                         nullptr, std::chrono::seconds(10), nullptr, {}, retained);
     ASSERT_NE(client, nullptr);
     ASSERT_NE(mock, nullptr);
     size_t read_bytes = 0, written_bytes = 0, unknown_calls = 0;
@@ -1433,18 +1433,19 @@ TEST(ClientWrapperTest, PrefillForwardsOriginalDescriptorsWhileDecodeKeepsBounde
     trace->block_ids  = uris;
     size_t saved = 0, loaded = 0;
     EXPECT_CALL(*mock, SaveKvCaches(_, _, _))
-        .Times(bounded ? 6 : 1)
+        .Times(1)
         .WillRepeatedly(Invoke([&](const auto& u, const auto& b, const auto& part_trace) {
             EXPECT_NE(part_trace, nullptr);
-            if (bounded) {
+            if (retained) {
                 EXPECT_NE(part_trace.get(), trace.get());
             } else {
                 EXPECT_EQ(part_trace.get(), trace.get());
             }
             EXPECT_TRUE(part_trace->need_print);
             EXPECT_EQ(part_trace->block_ids, u);
-            if (bounded) {
-                EXPECT_LE(u.size() * 19, 1024u);
+            if (retained) {
+                EXPECT_EQ(u.size(), 300u);
+                EXPECT_GT(u.size() * 19, 1024u);
             } else {
                 EXPECT_EQ(u.size(), uris.size());
                 EXPECT_EQ(&u, &uris);
@@ -1459,7 +1460,7 @@ TEST(ClientWrapperTest, PrefillForwardsOriginalDescriptorsWhileDecodeKeepsBounde
                 actual.push_back("actual_" + u[i]);
             }
             saved += u.size();
-            if (bounded) {
+            if (retained) {
                 part_trace->need_print = false;
                 part_trace->block_ids.front() = "sdk-private-save-trace";
             }
@@ -1472,10 +1473,10 @@ TEST(ClientWrapperTest, PrefillForwardsOriginalDescriptorsWhileDecodeKeepsBounde
     EXPECT_TRUE(trace->need_print);
     EXPECT_EQ(trace->block_ids, uris);
     EXPECT_CALL(*mock, LoadKvCaches(_, _, _))
-        .Times(bounded ? 6 : 1)
+        .Times(1)
         .WillRepeatedly(Invoke([&](const auto& u, auto& b, const auto& part_trace) {
             EXPECT_NE(part_trace, nullptr);
-            if (bounded) {
+            if (retained) {
                 EXPECT_NE(part_trace.get(), trace.get());
             } else {
                 EXPECT_EQ(part_trace.get(), trace.get());
@@ -1484,8 +1485,9 @@ TEST(ClientWrapperTest, PrefillForwardsOriginalDescriptorsWhileDecodeKeepsBounde
             EXPECT_EQ(part_trace->block_ids.size(), u.size());
             for (size_t i = 0; i < u.size(); ++i)
                 EXPECT_EQ(part_trace->block_ids[i], uris[loaded + i]);
-            if (bounded) {
-                EXPECT_LE(u.size() * 19, 1024u);
+            if (retained) {
+                EXPECT_EQ(u.size(), 300u);
+                EXPECT_GT(u.size() * 19, 1024u);
             } else {
                 EXPECT_EQ(u.size(), uris.size());
                 EXPECT_EQ(&u, &written.second);
@@ -1497,7 +1499,7 @@ TEST(ClientWrapperTest, PrefillForwardsOriginalDescriptorsWhileDecodeKeepsBounde
                     *static_cast<unsigned char*>(b[i].iovs[j].base) = data[(loaded + i) * 19 + j];
             }
             loaded += u.size();
-            if (bounded) {
+            if (retained) {
                 part_trace->need_print = false;
                 part_trace->block_ids.front() = "sdk-private-load-trace";
             }
@@ -1508,13 +1510,72 @@ TEST(ClientWrapperTest, PrefillForwardsOriginalDescriptorsWhileDecodeKeepsBounde
     EXPECT_TRUE(trace->need_print);
     EXPECT_EQ(trace->block_ids, uris);
     EXPECT_EQ(data, destination);
-    EXPECT_EQ(read_bytes, bounded ? data.size() : 0u);
-    EXPECT_EQ(written_bytes, bounded ? data.size() : 0u);
+    EXPECT_EQ(read_bytes, retained ? data.size() : 0u);
+    EXPECT_EQ(written_bytes, retained ? data.size() : 0u);
     EXPECT_EQ(unknown_calls, 0u);
     client->shutdown();
     }
     });
 }
+TEST(ClientWrapperTest, WholeCallUnknownOwnsBorrowedDescriptorsAboveAllFormerLimits) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        using namespace kv_cache_manager;
+        for (const bool throws : {false, true}) {
+            SCOPED_TRACE(throws);
+            constexpr size_t objects = 300, segments = 4, segment_bytes = 64 * 1024;
+            std::vector<unsigned char> data(objects * segments * segment_bytes, 7);
+            RegistSpan span{data.data(), data.size()};
+            InitObservation observation;
+            MockTransferClient* mock = nullptr;
+            auto client = initializeClient(false, "whole_unknown_owner", span, observation,
+                                            std::make_shared<int>(0), nullptr, nullptr, &mock);
+            ASSERT_NE(client, nullptr);
+            UriStrVec uris;
+            BlockBuffers buffers(objects);
+            for (size_t i = 0; i < objects; ++i) {
+                uris.push_back("uri" + std::to_string(i));
+                for (size_t j = 0; j < segments; ++j)
+                    buffers[i].iovs.push_back({MemoryType::CPU,
+                        data.data() + (i * segments + j) * segment_bytes, segment_bytes, false});
+            }
+            auto trace = std::make_shared<TransferTraceInfo>();
+            trace->block_ids = uris;
+            const UriStrVec* borrowed_uris = nullptr;
+            const BlockBuffers* borrowed_buffers = nullptr;
+            std::weak_ptr<TransferTraceInfo> borrowed_trace;
+            EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).Times(1).WillOnce(Invoke(
+                [&](const auto& u, const auto& b, const auto& t) -> std::pair<ClientErrorCode, UriStrVec> {
+                    EXPECT_NE(&u, &uris); EXPECT_NE(&b, &buffers); EXPECT_NE(t, trace);
+                    EXPECT_EQ(u.size(), objects); EXPECT_EQ(b.size(), objects);
+                    size_t bytes = 0, iovs = 0;
+                    for (const auto& block : b) for (const auto& iov : block.iovs) { bytes += iov.size; ++iovs; }
+                    EXPECT_GT(bytes, 64u * 1024 * 1024); EXPECT_GT(iovs, 1024u);
+                    borrowed_uris = &u; borrowed_buffers = &b; borrowed_trace = t;
+                    if (throws) throw std::runtime_error("synthetic SDK exception after handoff");
+                    return {ClientErrorCode::ER_SDK_TIMEOUT, {}};
+                }));
+            auto completion = ClientWrapper::TransferCompletion::NOT_STARTED;
+            if (throws) EXPECT_THROW((void)client->saveKvCachesForTagWithStatus(
+                "default", uris, buffers, trace, &completion), std::runtime_error);
+            else EXPECT_EQ(client->saveKvCachesForTagWithStatus(
+                "default", uris, buffers, trace, &completion).first, ClientErrorCode::ER_SDK_TIMEOUT);
+            EXPECT_EQ(completion, ClientWrapper::TransferCompletion::UNKNOWN);
+            uris.clear(); buffers.clear(); trace.reset();
+            // The actual SDK arguments belong to the same retained record as
+            // this trace. This tests descriptor custody, not detached GPU DMA.
+            ASSERT_FALSE(borrowed_trace.expired());
+            ASSERT_NE(borrowed_uris, nullptr); ASSERT_NE(borrowed_buffers, nullptr);
+            EXPECT_EQ(borrowed_uris->size(), objects);
+            EXPECT_EQ(borrowed_uris->back(), "uri299");
+            EXPECT_EQ(borrowed_buffers->back().iovs.back().base,
+                      data.data() + (objects * segments - 1) * segment_bytes);
+            client->shutdown(); client.reset(); // Mock SDK has no detached work.
+            EXPECT_TRUE(borrowed_trace.expired());
+        }
+    });
+}
+
 #if defined(KVCM_HAS_TRANSFER_DEADLINE)
 class DeadlineTransferClient: public kv_cache_manager::MockTransferClient {
 public:
@@ -1531,7 +1592,7 @@ public:
                 (override));
 };
 
-TEST(ClientWrapperTest, ReadAndWriteChunksForwardTheParentDeadline) {
+TEST(ClientWrapperTest, WholeCallsForwardTheParentDeadline) {
     using namespace kv_cache_manager;
     for (const bool publication : {false, true}) {
         autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", publication ? "1" : "0");
@@ -1555,10 +1616,10 @@ TEST(ClientWrapperTest, ReadAndWriteChunksForwardTheParentDeadline) {
         EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).Times(0);
         EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).Times(0);
         EXPECT_CALL(*mock, LoadKvCachesWithDeadline(_, _, deadline_ms, _))
-            .Times(publication ? 2 : 1)
+            .Times(1)
             .WillRepeatedly(Return(ClientErrorCode::ER_OK));
         EXPECT_CALL(*mock, SaveKvCachesWithDeadline(_, _, deadline_ms, _))
-            .Times(publication ? 2 : 1)
+            .Times(1)
             .WillRepeatedly(Invoke([](const auto& batch, const auto&, int64_t, const auto&) {
                 return std::make_pair(ClientErrorCode::ER_OK, batch);
             }));
@@ -1577,7 +1638,7 @@ TEST(ClientWrapperTest, ReadAndWriteChunksForwardTheParentDeadline) {
 }
 #endif
 
-TEST(ClientWrapperTest, BoundedSdkDoesNotStartAnotherChunkAfterDeadline) {
+TEST(ClientWrapperTest, WholeCallPayloadSuccessAfterParentDeadlineRemainsBufferSafe) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     ::rtp_llm::test::withDecodePublicationStartup([&] {
     using namespace kv_cache_manager;
@@ -1597,7 +1658,7 @@ TEST(ClientWrapperTest, BoundedSdkDoesNotStartAnotherChunkAfterDeadline) {
                 block.iovs.push_back({MemoryType::CPU, &byte, 1, false});
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
         auto finish_after_deadline = [&](const BlockBuffers& batch) {
-            EXPECT_LT(batch.size(), buffers.size());
+            EXPECT_EQ(batch.size(), buffers.size());
             std::this_thread::sleep_until(deadline + std::chrono::milliseconds(10));
         };
         auto completion = ClientWrapper::TransferCompletion::NOT_STARTED;
@@ -1609,7 +1670,7 @@ TEST(ClientWrapperTest, BoundedSdkDoesNotStartAnotherChunkAfterDeadline) {
                     return ClientErrorCode::ER_OK;
                 }));
             EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion, deadline),
-                      ClientErrorCode::ER_SDK_TIMEOUT);
+                      ClientErrorCode::ER_OK);
         } else {
             EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).Times(0);
             EXPECT_CALL(*mock, SaveKvCaches(_, _, _))
@@ -1619,70 +1680,64 @@ TEST(ClientWrapperTest, BoundedSdkDoesNotStartAnotherChunkAfterDeadline) {
                 }));
             const auto result =
                 client->saveKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion, deadline);
-            EXPECT_EQ(result.first, ClientErrorCode::ER_SDK_TIMEOUT);
-            EXPECT_TRUE(result.second.empty());
+            EXPECT_EQ(result.first, ClientErrorCode::ER_OK);
+            EXPECT_EQ(result.second, uris);
         }
+        // The whole payload completed; the outer TransferTask still enforces
+        // the transaction deadline. Payload success must not become UNKNOWN.
         EXPECT_EQ(completion, ClientWrapper::TransferCompletion::BUFFER_SAFE);
         client->shutdown();
     }
     });
 }
 
-TEST(ClientWrapperTest, BoundedSdkStopsOnFailureAndRejectsUnsafeGeometry) {
+TEST(ClientWrapperTest, WholeCallFailureAndMalformedGeometryHaveDistinctProofs) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     ::rtp_llm::test::withDecodePublicationStartup([&] {
-    using namespace kv_cache_manager;
-    unsigned char       byte = 7;
-    RegistSpan          span{&byte, 1};
-    InitObservation     observation;
-    MockTransferClient* mock   = nullptr;
-    auto                client = initializeClient(
-        false, "bounded_failure", span, observation, std::make_shared<int>(0), nullptr, nullptr, &mock);
-    ASSERT_NE(client, nullptr);
-    size_t confirmed = 0, expected_confirmed = 0, unknown_calls = 0;
-    client->setTransferObserver([&](bool read, size_t bytes, bool unknown) {
-        EXPECT_FALSE(read);
-        confirmed += bytes;
-        unknown_calls += unknown;
-    });
-    UriStrVec    uris(120, "uri");
-    BlockBuffers buffers(120);
-    for (auto& b : buffers)
-        for (int j = 0; j < 19; ++j)
-            b.iovs.push_back({MemoryType::CPU, &byte, 1, false});
-    {
-        ::testing::InSequence ordered;
-        EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).WillOnce(Invoke([&](const auto&, const auto& batch, const auto&) {
-            for (const auto& block : batch)
-                for (const auto& iov : block.iovs)
-                    expected_confirmed += iov.size;
-            return std::make_pair(ClientErrorCode::ER_OK, UriStrVec{});
-        }));
-        EXPECT_CALL(*mock, SaveKvCaches(_, _, _))
-            .WillOnce(Return(std::make_pair(ClientErrorCode::ER_INVALID_PARAMS, UriStrVec{})));
-    }
-    auto completion = ClientWrapper::TransferCompletion::NOT_STARTED;
-    auto result     = client->saveKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion);
-    EXPECT_EQ(result.first, ClientErrorCode::ER_INVALID_PARAMS);
-    EXPECT_TRUE(result.second.empty());
-    EXPECT_GT(confirmed, 0u);
-    EXPECT_EQ(confirmed, expected_confirmed);
-    EXPECT_EQ(unknown_calls, 1u);
-    EXPECT_EQ(completion, ClientWrapper::TransferCompletion::UNKNOWN);
-    ::testing::Mock::VerifyAndClearExpectations(mock);
-    EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).Times(0);
-    EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).Times(0);
-    EXPECT_EQ(client->saveKvCachesForTagWithStatus("default", UriStrVec{"one"}, buffers, nullptr, &completion).first,
-              ClientErrorCode::ER_INVALID_PARAMS);
-    EXPECT_EQ(completion, ClientWrapper::TransferCompletion::NOT_STARTED);
-    BlockBuffers unsafe(1);
-    for (int j = 0; j < 1025; ++j)
-        unsafe[0].iovs.push_back({MemoryType::CPU, &byte, 1, false});
-    EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", UriStrVec{"one"}, unsafe, nullptr, &completion),
-              ClientErrorCode::ER_INVALID_PARAMS);
-    EXPECT_EQ(completion, ClientWrapper::TransferCompletion::NOT_STARTED);
-    EXPECT_EQ(unknown_calls, 1u);  // Rejected geometry never attempted SDK I/O.
-    client->shutdown();
+        using namespace kv_cache_manager;
+        unsigned char byte = 7;
+        RegistSpan span{&byte, 1};
+        InitObservation observation;
+        MockTransferClient* mock = nullptr;
+        auto client = initializeClient(false, "whole_failure", span, observation, std::make_shared<int>(0),
+                                       nullptr, nullptr, &mock);
+        ASSERT_NE(client, nullptr);
+        size_t confirmed = 0, unknown_calls = 0;
+        client->setTransferObserver([&](bool /*read*/, size_t bytes, bool unknown) {
+            confirmed += bytes; unknown_calls += unknown;
+        });
+        UriStrVec uris(120, "uri");
+        BlockBuffers buffers(120);
+        for (auto& block : buffers)
+            for (int j = 0; j < 19; ++j) block.iovs.push_back({MemoryType::CPU, &byte, 1, false});
+        EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).Times(1).WillOnce(Invoke(
+            [&](const auto& u, const auto& b, const auto&) {
+                EXPECT_EQ(u.size(), 120u); EXPECT_EQ(b.size(), 120u);
+                return std::make_pair(ClientErrorCode::ER_INVALID_PARAMS, UriStrVec{});
+            }));
+        auto completion = ClientWrapper::TransferCompletion::NOT_STARTED;
+        EXPECT_EQ(client->saveKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion).first,
+                  ClientErrorCode::ER_INVALID_PARAMS);
+        EXPECT_EQ(completion, ClientWrapper::TransferCompletion::UNKNOWN);
+        EXPECT_EQ(confirmed, 0u); EXPECT_EQ(unknown_calls, 1u);
+        ::testing::Mock::VerifyAndClearExpectations(mock);
+        EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).Times(0);
+        EXPECT_EQ(client->saveKvCachesForTagWithStatus("default", UriStrVec{"one"}, buffers, nullptr,
+                                                       &completion).first, ClientErrorCode::ER_INVALID_PARAMS);
+        EXPECT_EQ(completion, ClientWrapper::TransferCompletion::NOT_STARTED);
+        // A >1024-IOV object is now handed to the SDK, rather than rejected by RTP.
+        BlockBuffers many(1);
+        for (int j = 0; j < 1025; ++j) many[0].iovs.push_back({MemoryType::CPU, &byte, 1, false});
+        EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).Times(1).WillOnce(Invoke(
+            [&](const auto& u, const auto& b, const auto&) {
+                EXPECT_EQ(u.size(), 1u); EXPECT_EQ(b.front().iovs.size(), 1025u);
+                return ClientErrorCode::ER_OK;
+            }));
+        EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", UriStrVec{"one"}, many, nullptr,
+                                                       &completion), ClientErrorCode::ER_OK);
+        EXPECT_EQ(completion, ClientWrapper::TransferCompletion::BUFFER_SAFE);
+        EXPECT_EQ(unknown_calls, 1u);
+        client->shutdown();
     });
 }
 

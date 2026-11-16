@@ -628,7 +628,7 @@ size_t KVCacheManager::decodePublicationUnit() const {
 
 std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpoint(
     const torch::Tensor& physical_ids, const std::vector<std::string>& tags, size_t row, size_t end,
-    const std::shared_ptr<const DecodeEndpoint>& previous, bool writer_already_fenced) const {
+    const std::shared_ptr<const DecodeEndpoint>& previous, bool defer_writer_wait) const {
     // Decode owns the native pages locally; the existing D->P projection
     // performs the actual target-CP slicing at publication time.
     if (decode_capture_stopped_.load() || !isAllocatorOwner() || !coordinator_manager_ || !end) return {};
@@ -686,9 +686,10 @@ std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpoint(
     }
     try {
 #if USING_CUDA
-        // Pin prevents recycling, not an unfinished writer. Fence the actual
-        // writer stream before exposing this native endpoint; no payload copy.
-        if (!writer_already_fenced)
+        // Production speculative captures remain pending until specUpdate,
+        // after the original final draft_event host wait. Other callers keep
+        // the synchronous capture contract; pin alone is not readiness.
+        if (!defer_writer_wait)
             check_cuda_value(cudaStreamSynchronize(at::cuda::getCurrentCUDAStream().stream()));
 #endif
     } catch (...) {
@@ -702,7 +703,8 @@ std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpoint(
 #endif
         throw;
     }
-    RTP_LLM_LOG_DEBUG("DSV41_NATIVE_ENDPOINT H=%zu state_copies=0 source=original_pages", end);
+    RTP_LLM_LOG_DEBUG("DSV41_NATIVE_ENDPOINT H=%zu state_copies=0 source=original_pages writer_wait_deferred=%d",
+                      end, static_cast<int>(defer_writer_wait));
     return endpoint;
 }
 

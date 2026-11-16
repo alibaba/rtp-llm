@@ -207,11 +207,13 @@ std::string publicationPeerTag(const std::string& tag, int peer) const {
 // Select completed native checkpoints, not the final mutable slot. In
 // particular, floor(E/unit) is only a candidate: all FULL pages and every
 // required terminal STATE/SWA page must still be present at that exact key.
-StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end) {
+StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end,
+                                   Clock::time_point deadline = Clock::time_point::max()) {
     StorageRequest request;
     if (!decode_publication_enabled_ || !is_decode_role_ || parallelism_config_.tp_rank != 0
         || completion_stopped_.load() || resource.decodeCompletionSubmitted())
         return request;
+    if (Clock::now() >= deadline) return request;
     if (resource.batchSize() != 1 || computed_end == 0)
         return request;
     const auto&  lifecycle      = resource.decodeCompletionLifecycle();
@@ -307,12 +309,6 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
     request.keys = std::make_shared<const CacheKeysType>(mapper.canonicalCacheKeys(complete_keys));
     request.handles.resize(request.keys->size());
     request.decode_completion = true;
-    request.computed_tokens   = actual_computed_end;
-    request.published_tokens  = end;
-    if (const auto& handoff = lifecycle.prefillComputedEnd();
-        handoff && *handoff >= 0 && static_cast<uint64_t>(*handoff) <= actual_computed_end) {
-        request.prefill_computed_tokens = *handoff;
-    }
     auto peer_blocks = std::make_shared<DecodePeerBlocks>();
     request.decode_peer_blocks = peer_blocks;
     size_t                                                                       bytes = 0;
@@ -357,6 +353,18 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
             request.handles[key].push_back(std::move(handle));
         }
     }
+    // Production callers have already host-waited the writer: normal dispatch
+    // waits sampler/worker dependencies; specUpdate waits the final draft event.
+    // Release waits bookkeeping before freeing pages. Loads finish before Decode
+    // is enqueued, and warmup returns before dispatch. Probe faults without
+    // draining unrelated later GPU work; NotReady is not a quiescence proof.
+    setCudaDevice();
+#if USING_CUDA
+    const auto writer_status = cudaStreamQuery(at::cuda::getCurrentCUDAStream().stream());
+    if (writer_status != cudaSuccess && writer_status != cudaErrorNotReady)
+        check_cuda_value(writer_status);
+#endif
+    if (Clock::now() >= deadline) return {};
     request.completion_admission = completion_accounting_->tryAcquire(bytes, lifecycle.eosAt());
     if (!request.completion_admission) {
         if (lifecycle.recordFirstBudgetSkip())
@@ -367,21 +375,6 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
                             pending.bytes,
                             pending.jobs);
         return {};
-    }
-    // Endpoint writers were fenced at capture and their pages remain pinned.
-    // Probe already-reported faults without draining unrelated later work; this
-    // is not a quiescence proof or a wait for faults in still-running kernels.
-    // Ordinary live-table sources still need their EOS writer fence below.
-    setCudaDevice();
-#if USING_CUDA
-    if (!cache_config_.mtp_sub_configs.empty()) {
-        const auto status = cudaStreamQuery(at::cuda::getCurrentCUDAStream().stream());
-        if (status != cudaSuccess && status != cudaErrorNotReady)
-            check_cuda_value(status);
-    } else
-#endif
-    {
-        check_cuda_value(cudaDeviceSynchronize());
     }
     RTP_LLM_LOG_DEBUG(
         "DTOP_GPU retained_plan computed=%zu published=%zu tail=%zu pages=%zu bytes=%zu CPU_snapshot_bytes=0",

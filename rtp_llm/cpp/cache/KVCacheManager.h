@@ -72,11 +72,12 @@ public:
     // No writer last-use proof: keep ownership and charge the existing frozen
     // pool guard rather than silently accumulating invisible request holds.
     void freezeUnknownDecodeWriter(const BatchKVCacheResource& resource) const noexcept;
-    // writer_already_fenced is only for later captures in the same caller-thread
-    // round, with no intervening writer submission and request pages still held.
+    // Speculative capture may defer this wait only while the original stream
+    // owns the pages and its final draft-event host wait precedes promotion in
+    // specUpdate. Standalone captures retain their synchronous default.
     std::shared_ptr<const DecodeEndpoint> retainDecodeEndpoint(const torch::Tensor& physical_ids,
         const std::vector<std::string>& tags, size_t row, size_t end,
-        const std::shared_ptr<const DecodeEndpoint>& previous = {}, bool writer_already_fenced = false) const;
+        const std::shared_ptr<const DecodeEndpoint>& previous = {}, bool defer_writer_wait = false) const;
 
     // Decode-side P/D admission allocates destination blocks before cache handoff.  When pools are
     // temporarily full, waiters use this generation instead of polling malloc in a tight loop.

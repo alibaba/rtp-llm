@@ -383,6 +383,34 @@ TEST_F(GenerateStreamTest, SpeculativeEndpointBookkeepingIsDecodeOnly) {
     }
 }
 
+TEST_F(GenerateStreamTest, SpecUpdateCannotPromoteALaterRoundEndpointBeforeItsComputedBoundary) {
+    autil::EnvGuard publish("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        ResourceContext context; context.role_type = RoleType::DECODE;
+        auto stream = GenerateStreamBuilder().createContextStream({1, 2, 3}, nullptr, context);
+        stream->generateConfig()->max_new_tokens = 16;
+        stream->generate_status_->status.store(StreamState::RUNNING);
+        auto output = std::make_shared<SpeculativeExecutorStreamOutput>();
+        output->tokens = torch::zeros({1, 1}, torch::kInt32); stream->setSPOutputBuffer(output);
+        auto current = std::make_shared<DecodeEndpoint>(); current->end = 3;
+        auto later = std::make_shared<DecodeEndpoint>(); later->end = 4;
+        stream->setDecodePublicationPages({current, later});
+        auto& resource = stream->kvCacheMutable();
+        EXPECT_FALSE(resource.decode_endpoint); // Capture alone is never readable promotion.
+        stream->specUpdate({torch::tensor({{17}}, torch::kInt32), 1, -1, {}, {}});
+        ASSERT_FALSE(stream->hasError());
+        EXPECT_EQ(resource.decode_endpoint, current);
+        ASSERT_EQ(resource.decode_round_endpoints.size(), 1u);
+        EXPECT_EQ(resource.decode_round_endpoints.front(), later);
+        stream->specUpdate({torch::tensor({{18}}, torch::kInt32), 1, -1, {}, {}});
+        ASSERT_FALSE(stream->hasError());
+        EXPECT_EQ(resource.decode_endpoint, later);
+        EXPECT_TRUE(resource.decode_round_endpoints.empty());
+        // This checks the promotion boundary; real draft-event ordering is
+        // checked by the native executor path and the model trace separately.
+    });
+}
+
 TEST_F(GenerateStreamTest, LatestDecodeEndpointIncludesPendingCandidatesAndRetainsSnapshot) {
     auto stream = GenerateStreamBuilder().createContextStream({1, 2, 3});
     auto selected = std::make_shared<DecodeEndpoint>(); selected->end = 4;

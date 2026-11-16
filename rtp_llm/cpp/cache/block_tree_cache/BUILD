@@ -317,8 +317,8 @@ cc_library(
 )
 
 cc_test(
-    name = "decode_completion_reservation_test",
-    srcs = ["//rtp_llm/cpp/cache/block_tree_cache/storage_backend/test:ReservedCompletionLaneHostTest.cc"],
+    name = "decode_completion_queue_test",
+    srcs = ["//rtp_llm/cpp/cache/block_tree_cache/storage_backend/test:CompletionQueueHostTest.cc"],
     copts = ["-std=c++17", "-UNDEBUG", "-pthread"],
     linkopts = ["-pthread"],
     deps = [":block_tree_task_pool"],
