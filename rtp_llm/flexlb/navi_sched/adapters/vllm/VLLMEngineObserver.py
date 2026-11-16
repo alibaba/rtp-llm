@@ -1546,6 +1546,58 @@ class _RoutingOutputQueue:
         self._output_queue.put_nowait(item)
 
 
+class _SerialPrefillTestBridge:
+    """Keep one forwarded prefill batch in Native for the PP isolation experiment.
+
+    The existing forwarding thread is the only batch consumer. Its bounded wait
+    returns to the ordinary cancellation and V6D maintenance loop. Native still
+    pipelines all physical steps inside the admitted batch.
+    """
+
+    def __init__(self, bridge):
+        self._bridge = bridge
+        self._condition = threading.Condition()
+        self._active_batch_id = None
+        self._closed = False
+
+    def __getattr__(self, name):
+        return getattr(self._bridge, name)
+
+    def take_next_forward_batch(self, timeout_ms=0):
+        timeout_ms = max(0, timeout_ms)
+        deadline = time.monotonic() + timeout_ms / 1000.0
+        with self._condition:
+            if self._active_batch_id is not None and timeout_ms > 0:
+                self._condition.wait_for(
+                    lambda: self._closed or self._active_batch_id is None,
+                    timeout_ms / 1000.0,
+                )
+            if self._closed or self._active_batch_id is not None:
+                return None
+        remaining_ms = max(0, math.ceil((deadline - time.monotonic()) * 1000))
+        batch = self._bridge.take_next_forward_batch(remaining_ms)
+        if batch is not None:
+            with self._condition:
+                self._active_batch_id = int(batch.batch_id)
+        return batch
+
+    def release_forward_batch(self, batch):
+        try:
+            return self._bridge.release_forward_batch(batch)
+        finally:
+            if batch is not None:
+                with self._condition:
+                    if self._active_batch_id == int(batch.batch_id):
+                        self._active_batch_id = None
+                        self._condition.notify_all()
+
+    def disable_forwarding(self):
+        with self._condition:
+            self._closed = True
+            self._condition.notify_all()
+        return self._bridge.disable_forwarding()
+
+
 class VLLMEngineObserver:
     def __init__(
         self,
@@ -1554,6 +1606,14 @@ class VLLMEngineObserver:
         max_concurrent_batches: int = 1,
     ):
         self._native_ingress = is_vllm_native_pd_prefill()
+        self._serial_prefill_test = _read_bool_env(
+            "VLLM_NAVI_SCHED_PP_SERIAL_PREFILL_TEST", False
+        )
+        if self._serial_prefill_test and (
+            not self._native_ingress
+            or int(getattr(vllm_config.parallel_config, "pipeline_parallel_size", 1)) <= 1
+        ):
+            raise ValueError("serial prefill experiment requires Native PD with PP")
         self._pp_submit_audit_enabled = (
             self._native_ingress
             and _read_bool_env("VLLM_NAVI_SCHED_PP_SUBMIT_AUDIT_ENABLED", False)
@@ -1886,6 +1946,9 @@ class VLLMEngineObserver:
         if not self._bridge.enable_forwarding():
             self.shutdown()
             raise RuntimeError("failed to enable NaviSched Agent forwarding")
+        if getattr(self, "_serial_prefill_test", False):
+            self._bridge = _SerialPrefillTestBridge(self._bridge)
+            logger.warning("PP experiment: admit the next batch after prefill completes")
 
     def bind_engine_core(self, engine_core) -> None:
         from vllm.v1.serial_utils import MsgpackEncoder
