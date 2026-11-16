@@ -1,6 +1,7 @@
-"""CPU contract tests for registry admission and physical-M dispatch."""
+"""NVFP4 dispatch contracts and opt-in SM120 GPU regression tests."""
 
 import json
+import os
 import sys
 import unittest
 from types import SimpleNamespace
@@ -176,9 +177,14 @@ class Nvfp4HybridExecutorTest(unittest.TestCase):
         def weight_views(*, branches, **kwargs):
             return dict(branches=branches, **kwargs)
 
+        def allocate(*, backend):
+            raise AssertionError("Constructing weights must not allocate a row bucket")
+
         convert = Mock(side_effect=lambda value, **kwargs: value)
         dispatch = SimpleNamespace(
-            launch_sm120_static_moe=launch, _get_weight_views=weight_views
+            launch_sm120_static_moe=launch,
+            _get_weight_views=weight_views,
+            allocate_sm120_moe_workspace=allocate,
         )
         modules = {
             "flashinfer.cute_dsl.utils": SimpleNamespace(
@@ -253,9 +259,163 @@ class Nvfp4HybridExecutorTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 decode_tuning(config)
         config.decode_cutlass_profile_ids = None
-        config.decode_b12x_max_rows = -1
-        with self.assertRaises(ValueError):
-            decode_tuning(config)
+        for rows in (0, 16):
+            config.decode_b12x_max_rows = rows
+            self.assertEqual(decode_tuning(config), (rows, None))
+        for bad in (-1, 17, True):
+            config.decode_b12x_max_rows = bad
+            with self.assertRaisesRegex(ValueError, "decode_b12x_max_rows"):
+                decode_tuning(config)
+
+
+@unittest.skipUnless(
+    os.environ.get("RTP_TEST_B12X_NVFP4_GPU") == "1",
+    "requires SM120 and the pinned FlashInfer b12x runtime",
+)
+class B12xNvfp4GpuTest(unittest.TestCase):
+    @staticmethod
+    def packed_weights(experts, hidden, intermediate, device):
+        packed = 0x2222222222222222
+        w1 = torch.full(
+            (experts, 2 * intermediate, hidden // 16),
+            packed,
+            dtype=torch.int64,
+            device=device,
+        )
+        w2 = torch.full(
+            (experts, hidden, intermediate // 16),
+            packed,
+            dtype=torch.int64,
+            device=device,
+        )
+        scale1 = torch.ones(
+            (experts, 2 * intermediate, hidden // 16), device=device
+        ).to(torch.float8_e4m3fn)
+        scale2 = torch.ones((experts, hidden, intermediate // 16), device=device).to(
+            torch.float8_e4m3fn
+        )
+        alpha = torch.ones(experts, device=device)
+        inverse_act_scale = torch.ones((), device=device)
+        return (
+            w1,
+            w2,
+            [
+                inverse_act_scale,
+                scale1.view(torch.int32),
+                alpha,
+                inverse_act_scale,
+                scale2.view(torch.int32),
+                alpha,
+            ],
+        )
+
+    def test_remote_routes_overwrite_output_in_eager_and_graph(self):
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.b12x_nvfp4 import (
+            B12xNvfp4MoE,
+        )
+
+        self.assertEqual(torch.cuda.get_device_capability(), (12, 0))
+        device = torch.device("cuda", torch.cuda.current_device())
+        experts, hidden, intermediate, top_k = 4, 256, 256, 2
+        rows = 4
+        w1, w2, scales = self.packed_weights(experts, hidden, intermediate, device)
+        adapter = B12xNvfp4MoE(
+            w1,
+            w2,
+            scales,
+            1,
+            object(),
+            top_k,
+        )
+        launch = adapter.launch
+
+        def poison_then_launch(**kwargs):
+            output = kwargs["scatter_output"]
+            output.fill_(float("nan"))
+            result = launch(**kwargs)
+            self.assertIs(result, output)
+            return result
+
+        adapter.launch = poison_then_launch
+        x = torch.full((rows, hidden), 0.125, dtype=torch.bfloat16, device=device)
+        local_ids = torch.tensor([4, 5], dtype=torch.int32, device=device).repeat(
+            rows, 1
+        )
+        remote_ids = local_ids - experts
+        mixed_ids = local_ids.clone()
+        mixed_ids[::2].copy_(remote_ids[::2])
+        routes = local_ids.clone()
+        routing_weights = torch.full((rows, top_k), 0.5, device=device)
+        expected_local = adapter(x, routes, routing_weights)
+        self.assertTrue(torch.isfinite(expected_local).all().item())
+        self.assertGreater(expected_local.abs().min().item(), 0)
+        expected_remote = torch.zeros_like(expected_local)
+        expected_mixed = expected_local.clone()
+        expected_mixed[::2].zero_()
+
+        for ids, expected in (
+            (remote_ids, expected_remote),
+            (mixed_ids, expected_mixed),
+        ):
+            routes.copy_(ids)
+            torch.testing.assert_close(
+                adapter(x, routes, routing_weights), expected, atol=0, rtol=0
+            )
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = adapter(x, routes, routing_weights)
+        for ids, expected in (
+            (local_ids, expected_local),
+            (remote_ids, expected_remote),
+            (mixed_ids, expected_mixed),
+            (remote_ids, expected_remote),
+        ):
+            routes.copy_(ids)
+            graph.replay()
+            torch.testing.assert_close(output, expected, atol=0, rtol=0)
+
+    def test_explicit_cutlass_tactics_above_b12x_limit(self):
+        self.assertEqual(torch.cuda.get_device_capability(), (12, 0))
+        device = torch.device("cuda", torch.cuda.current_device())
+        executor = Nvfp4HybridExecutor.__new__(Nvfp4HybridExecutor)
+        executor.hidden_size, executor.top_k = 2560, 10
+        executor.max_b12x_rows, executor.cutlass_profiles = 16, [13, 37]
+        executor.tp_size, executor.tp_rank = 1, 0
+        executor.ep_size, executor.ep_rank = 2, 1
+        executor.b12x = Mock(side_effect=AssertionError("large M must use CUTLASS"))
+        executor.w1, executor.w2, executor.quant_scales = self.packed_weights(
+            256, executor.hidden_size, 640, device
+        )
+        rows = 32
+        x = torch.full(
+            (rows, executor.hidden_size), 0.125, device=device, dtype=torch.bfloat16
+        )
+        ids = torch.arange(256, 266, device=device, dtype=torch.int32).repeat(rows, 1)
+        payload = ExpertForwardPayload(
+            expert_x=x,
+            expert_topk_ids=ids,
+            expert_topk_weights=torch.full((rows, executor.top_k), 0.1, device=device),
+        )
+
+        def run():
+            return executor.execute(
+                payload, "silu", None, None, False, None
+            ).fused_expert_output
+
+        expected = run()
+        torch.cuda.synchronize()
+        self.assertTrue(torch.isfinite(expected).all().item())
+        self.assertGreater(expected.abs().min().item(), 0)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = run()
+        graph.replay()
+        torch.testing.assert_close(output, expected, atol=0, rtol=0)
+        x.zero_()
+        graph.replay()
+        torch.testing.assert_close(output, torch.zeros_like(output), atol=0, rtol=0)
+        executor.b12x.assert_not_called()
 
 
 if __name__ == "__main__":

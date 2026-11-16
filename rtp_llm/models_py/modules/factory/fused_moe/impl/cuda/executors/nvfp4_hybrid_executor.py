@@ -24,6 +24,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.nvfp4_weights import (
 )
 
 logger = logging.getLogger(__name__)
+_MAX_B12X_ROWS = 16  # Largest physical M validated in Decode serving.
 
 
 def hybrid_enabled():
@@ -37,10 +38,12 @@ def hybrid_enabled():
 
 
 def decode_tuning(quant_config):
-    max_rows = getattr(quant_config, "decode_b12x_max_rows", 16)
+    max_rows = getattr(quant_config, "decode_b12x_max_rows", _MAX_B12X_ROWS)
     profiles = getattr(quant_config, "decode_cutlass_profile_ids", None)
-    if type(max_rows) is not int or max_rows < 0:
-        raise ValueError("decode_b12x_max_rows must be a nonnegative integer")
+    if type(max_rows) is not int or not 0 <= max_rows <= _MAX_B12X_ROWS:
+        raise ValueError(
+            f"decode_b12x_max_rows must be an integer in [0, {_MAX_B12X_ROWS}]"
+        )
     if profiles is not None:
         if (
             not isinstance(profiles, (tuple, list))
@@ -84,11 +87,6 @@ class Nvfp4HybridExecutor(FusedMoeExpertExecutor):
 
     def __init__(self, config, quant_config, weights):
         super().__init__(config, quant_config, weights)
-        prepared = Nvfp4WeightViews(config, quant_config, weights)
-        self.w1, self.w2 = prepared.w1, prepared.w2
-        self.quant_scales = prepared.cutlass_quant_scales()
-        self.ep_size, self.ep_rank = prepared.ep_size, prepared.ep_rank
-        self.tp_size, self.tp_rank = prepared.tp_size, prepared.tp_rank
         self.max_b12x_rows, self.cutlass_profiles = decode_tuning(
             config.model_config.quant_config
         )
@@ -97,8 +95,14 @@ class Nvfp4HybridExecutor(FusedMoeExpertExecutor):
             and "profile_ids" not in inspect.signature(cutlass_fused_moe).parameters
         ):
             raise RuntimeError(
-                "Configured NVFP4 tactics require FlashInfer profile_ids support"
+                "Configured NVFP4 tactics require FlashInfer profile_ids support. "
+                "Use a compatible build or omit decode_cutlass_profile_ids."
             )
+        prepared = Nvfp4WeightViews(config, quant_config, weights)
+        self.w1, self.w2 = prepared.w1, prepared.w2
+        self.quant_scales = prepared.cutlass_quant_scales()
+        self.ep_size, self.ep_rank = prepared.ep_size, prepared.ep_rank
+        self.tp_size, self.tp_rank = prepared.tp_size, prepared.tp_rank
         self.hidden_size = self.w2.shape[1]
         self.top_k = config.moe_k
         self.b12x = (

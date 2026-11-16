@@ -1,5 +1,6 @@
 """Dimension-derived adapter for FlashInfer static b12x NVFP4 MoE."""
 
+import dis
 import inspect
 from types import FunctionType
 from weakref import WeakValueDictionary
@@ -16,23 +17,33 @@ class _WorkspacePool:
 
 
 class B12xNvfp4MoE:
-    """Adapter for the FlashInfer b12x static NVFP4 ABI at 7fa5c3b909a7."""
+    """Adapter for the static NVFP4 ABI in FlashInfer 0.7.3 (7fa5c3b909a7)."""
 
     def __init__(self, w1, w2, scales, ep_rank, model_config, top_k):
         from flashinfer.cute_dsl.utils import convert_sf_to_mma_layout
         from flashinfer.fused_moe.cute_dsl.blackwell_sm12x import moe_dispatch
 
-        launch = moe_dispatch.launch_sm120_static_moe
+        launch = getattr(moe_dispatch, "launch_sm120_static_moe", None)
+        weight_views = getattr(moe_dispatch, "_get_weight_views", None)
+        workspace = getattr(moe_dispatch, "allocate_sm120_moe_workspace", None)
         # The pinned launcher selects static via a module flag. Bind it in a
         # private namespace so unrelated FlashInfer users keep their dispatch.
         if (
-            "_FORCED_BACKEND" not in launch.__code__.co_names
+            not hasattr(launch, "__code__")
+            or not callable(weight_views)
+            or not callable(workspace)
+            or not any(
+                inst.opname == "LOAD_GLOBAL" and inst.argval == "_FORCED_BACKEND"
+                for inst in dis.get_instructions(launch)
+            )
             or "quant_mode" not in inspect.signature(launch).parameters
-            or "branches"
-            not in inspect.signature(moe_dispatch._get_weight_views).parameters
+            or "branches" not in inspect.signature(weight_views).parameters
+            or "backend" not in inspect.signature(workspace).parameters
         ):
             raise RuntimeError(
-                "b12x NVFP4 requires FlashInfer's pinned static NVFP4 ABI"
+                "b12x NVFP4 requires the FlashInfer static ABI in 0.7.3 "
+                "(7fa5c3b909a7). Use a compatible build or set "
+                "decode_b12x_max_rows=0."
             )
         self.launch = FunctionType(
             launch.__code__,
@@ -73,6 +84,8 @@ class B12xNvfp4MoE:
         self.states = pool.states
 
         def mma_scale(scale, rows, cols):
+            # FlashInfer expects the existing CUTLASS swizzled storage and
+            # exposes it as a strided MMA view.
             return convert_sf_to_mma_layout(
                 scale.contiguous().view(torch.float8_e4m3fn),
                 m=rows,
