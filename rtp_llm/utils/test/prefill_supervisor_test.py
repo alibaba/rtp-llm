@@ -3,7 +3,9 @@ import json
 import logging
 import os
 import resource
+import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -86,9 +88,32 @@ def _fixture(mode, directory):
         rank.terminate()
         rank.wait(timeout=2)
         return
+    elif mode == "pace":
+
+        def stop_pace(*_):
+            worker = json.loads((directory / "worker").read_text())
+            _write(
+                directory / "pace-stop",
+                [pid for pid in worker if Path(f"/proc/{pid}").exists()],
+            )
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, stop_pace)
+        while not (directory / "pace-listen").exists():
+            time.sleep(0.02)
+        path = directory / "pace.sock"
+        path.unlink(missing_ok=True)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(str(path))
+            listener.listen()
+            _write(directory / "pace-ready", os.getpid())
+            while True:
+                listener.accept()[0].close()
     elif mode == "supervisor":
         logging.basicConfig(level=logging.INFO)
         prefill_supervisor._enable_subreaper()
+        if os.environ.get(prefill_supervisor.PACE_SOCKET_ENV):
+            prefill_supervisor._PACE_SERVER = str(directory / "tair_mempool_server")
         owner = subprocess.Popen(
             [sys.executable, __file__, "owner", str(directory)],
             start_new_session=True,
@@ -108,6 +133,36 @@ def _fixture(mode, directory):
 
 
 class SupervisorBootstrapTest(unittest.TestCase):
+    def test_pace_replacement_without_listener_exits_without_next_worker(self):
+        env = {
+            "PACE_META_SERVER_ADDR": "fixture",
+            prefill_supervisor.PACE_SOCKET_ENV: "/tmp/pace.sock",
+        }
+        supervisor = prefill_supervisor.PrefillSupervisor([], env, None, 3)
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(supervisor, "_run_worker", return_value=True) as worker,
+            patch.object(supervisor, "_wait", return_value=True),
+            patch.object(
+                prefill_supervisor, "_pace_process", side_effect=[(10, 20), (11, 21)]
+            ),
+            patch.object(prefill_supervisor, "_terminate_pidfd") as terminate,
+            patch.object(prefill_supervisor, "_pidfd_exited", return_value=True),
+            patch.object(prefill_supervisor, "_pace_listening", return_value=False),
+            patch.object(prefill_supervisor.os, "close") as close,
+            patch.object(
+                prefill_supervisor.time, "monotonic", side_effect=[0, 0, 0, 0, 1, 60]
+            ),
+            self.assertLogs(prefill_supervisor._LOGGER) as logs,
+            self.assertRaises(SystemExit) as failure,
+        ):
+            supervisor.run(Path(directory))
+        self.assertEqual(failure.exception.code, 1)
+        worker.assert_called_once()
+        terminate.assert_called_once_with(20)
+        self.assertEqual([entry.args for entry in close.call_args_list], [(20,), (21,)])
+        self.assertIn("timed out waiting for replacement_socket", "\n".join(logs.output))
+
     def test_cli_model_paths_override_env_and_are_removed_from_worker_args(self):
         env, remaining = prefill_supervisor._resolve_worker_args(
             {"CHECKPOINT_PATH": "/old"},
@@ -683,6 +738,56 @@ class PrefillSupervisorTest(unittest.TestCase):
             with self.assertRaises(ProcessLookupError):
                 os.kill(pid, 0)
 
+    def test_external_worker_exit_restarts_pace_before_spawning_replacement(self):
+        server = self.directory / "tair_mempool_server"
+        shutil.copyfile(Path(sys.executable).resolve(), server)
+        server.chmod(0o700)
+        allow_listen = self.directory / "pace-listen"
+        allow_listen.touch()
+
+        def start_pace():
+            process = subprocess.Popen(
+                [str(server), __file__, "pace", str(self.directory)],
+                env={**os.environ, "PYTHONHOME": sys.base_prefix},
+            )
+
+            def stop():
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=5)
+
+            self.addCleanup(stop)
+            return process
+
+        pace = start_pace()
+        self._wait_for(lambda: self._read("pace-ready") == pace.pid)
+        worker = self._start(
+            {
+                **os.environ,
+                "PACE_META_SERVER_ADDR": "fixture",
+                prefill_supervisor.PACE_SOCKET_ENV: str(self.directory / "pace.sock"),
+            }
+        )
+        self.assertIsNone(pace.poll())
+        for sig in (signal.SIGTERM, signal.SIGABRT):
+            allow_listen.unlink()
+            os.kill(worker[0], sig)
+            self.assertEqual(pace.wait(timeout=8), 0)
+            self.assertEqual(self._read("pace-stop"), [])
+            pace = start_pace()
+            # Leave the old socket file and start the replacement daemon, but
+            # delay listen long enough for the restart loop to inspect it.
+            time.sleep(0.7)
+            self.assertEqual(self._read("worker"), worker)
+            self.assertFalse((self.directory / "ready").exists())
+            allow_listen.touch()
+            worker = self._assert_restarted(worker)
+            self.assertEqual(self._read("pace-ready"), pace.pid)
+
+        self.supervisor.terminate()
+        self.assertEqual(self.supervisor.wait(timeout=10), 0)
+        self.assertIsNone(pace.poll())
+
     def test_owner_exit_withdraws_worker_and_holds_container(self):
         worker = self._start()
         os.kill(self.owner, signal.SIGKILL)
@@ -784,6 +889,7 @@ if __name__ == "__main__":
         "supervisor",
         "detacher",
         "live_detached",
+        "pace",
     ):
         _fixture(sys.argv[1], Path(sys.argv[2]))
     else:
