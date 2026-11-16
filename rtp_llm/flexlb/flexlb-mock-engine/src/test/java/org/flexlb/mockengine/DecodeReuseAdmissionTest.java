@@ -210,8 +210,8 @@ class DecodeReuseAdmissionTest {
      * conservation, not by the lease's net-allocation arithmetic: trace
      * metadata may carry more hash keys than the token demand covers (10
      * tokens → 1 block, 2 keys), and those keys park fine while the pool
-     * has room. Genuine over-subscription evicts the pure-LRU tail (eldest
-     * first — including just-parked keys when they are the eldest).
+     * has room. Genuine over-subscription evicts unreferenced chain TAILS
+     * (leaves first), preserving the parked prefix ancestors for reuse.
      */
     @Test
     void admitParksAllKeysWhenHashKeysExceedTokenDemand() {
@@ -228,9 +228,10 @@ class DecodeReuseAdmissionTest {
                 "hash keys beyond the token demand still park when the pool has room");
 
         // Genuine over-subscription: a 3-block pool with 2 parked keys and 1
-        // held block cannot index 4 new keys at once — the ELDEST pure-LRU
-        // entries are the victims (1, 2, then the just-parked 7), keeping
-        // the pool at capacity, never above.
+        // held block cannot index 4 new keys at once — the legacy-seeded keys
+        // (1, 2) and the newest chain TAIL are the victims, keeping the pool
+        // at capacity, never above, while the parked prefix (7, 8, 9) stays
+        // matchable for reuse.
         MockLruBlockCache tiny = new MockLruBlockCache(3, 0.0);
         assertTrue(tiny.admit(List.of(1L, 2L)));
         MockLruBlockCache.BlockLease over = tiny.acquireWithReuse(1, List.of(7L));
@@ -239,11 +240,11 @@ class DecodeReuseAdmissionTest {
         assertTrue(tiny.admit(over, List.of(7L, 8L, 9L, 10L)));
         assertEquals(3, tiny.snapshotKeys().size(),
                 "the pool must stay at capacity, never above");
-        assertTrue(tiny.snapshotKeys().containsAll(List.of(8L, 9L, 10L)),
-                "the eldest entries (1, 2, then 7) are the eviction victims");
+        assertTrue(tiny.snapshotKeys().containsAll(List.of(7L, 8L, 9L)),
+                "the parked prefix chain stays reusable after tail truncation");
         assertFalse(tiny.snapshotKeys().contains(1L));
         assertFalse(tiny.snapshotKeys().contains(2L));
-        assertFalse(tiny.snapshotKeys().contains(7L));
+        assertFalse(tiny.snapshotKeys().contains(10L));
     }
 
     // ─────────────── engine level: hand-off re-match against the OWN LRU ───────────────
