@@ -92,11 +92,6 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     private record CostRefresh(List<GlobalQueueEntry> ready,
             CompletableFuture<Map<GlobalQueueEntry, TokenEstimate>> result) { }
 
-    private long nextRescueRetryNanos;
-    private Set<PlacementKey> idleRescueDomains = Set.of();
-    private long lastLocalMigrationNanos = Long.MIN_VALUE;
-    private long nextRescueDomainScanNanos;
-    private final org.flexlb.config.RoutingConfig.HotspotRescueConfig hotspotRescue;
     private final ReentrantLock lock = new ReentrantLock();
     private final Condition changed = lock.newCondition();
     private final OrderedRequestQueue orderedQueue;
@@ -138,8 +133,6 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         this.availability = Objects.requireNonNull(availability, "availability");
         this.orderedQueue = new OrderedRequestQueue(queueSettings.priorityOrdering());
         this.waitingRequests = new PlacementCapacityWaitQueue(queueSettings.priorityOrdering(), availability);
-        var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
-        this.hotspotRescue = balance == null ? null : balance.getHotspotRescue();
         this.scanBudgetMultiplier = config.queueScheduler().getScanBudgetMultiplier();
 
         this.plannerCount = Math.max(MIN_PLANNER_THREADS,
@@ -155,6 +148,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
             close();
         });
         availability.addListener(availabilityListener);
+        var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
         removeDeliveryCapacityListener = config.getDispatcher().requiresGenerateInput() && balance != null
                 ? runtime.deliveries().watchDeliveryCapacity(() -> {
                     availability.changed(PlacementKey.anyGroup(RoleType.PREFILL));
@@ -459,7 +453,6 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                 } finally { lock.unlock(); }
                 runControlActions(controls);
                 if (completed != null) { processCompletedPlan(completed); }
-                migrateHotspotQueues();
                 lock.lock();
                 try {
                     // Control effects can restore an older entry, and a completed route
@@ -492,7 +485,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                                 || (!orderedQueue.hasUnscannedRequests() && !waitingRequests.hasReadyRequests()
                                     && (!prefillCostOrder || costOrderPending.isEmpty())))) {
                         try {
-                            if (hotspotRescue == null) { changed.await(); } else { changed.await(100L, TimeUnit.MILLISECONDS); break; }
+                            changed.await();
                         }
                         catch (InterruptedException interruption) {
                             if (closed.get()) { Thread.currentThread().interrupt(); }
@@ -646,11 +639,6 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
 
     /** Caller holds lock; every examined entry counts against the scan budget. */
     private List<GlobalQueueEntry> planningCandidates(int slots) {
-        if (hotspotRescue != null && System.nanoTime() >= nextRescueRetryNanos) {
-            nextRescueRetryNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(100L);
-            waitingRequests.resumeRescue(slots, System.currentTimeMillis(), idleRescueDomains,
-                    orderedQueue::markRequestReadyForRetry);
-        }
         int budget = (int) Math.min(Integer.MAX_VALUE, Math.ceil(slots * scanBudgetMultiplier));
         int lookahead = prefillCostOrder ? budget : slots;
         waitingRequests.resumeReady(lookahead, orderedQueue::markRequestReadyForRetry);
@@ -996,12 +984,6 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         try {
             if (!(!plan.entry.removed && !plan.entry.context.data().getFuture().isDone())) { return true; }
             parked = waitingRequests.park(plan.entry, plan.waitKey, plan.availabilitySequence);
-            if (parked && hotspotRescue != null && plan.waitKey.role().supportsPrefill()
-                    && plan.entry.context.data().getRequest().getSeqLen() <= hotspotRescue.getMaxInputTokens()) {
-                long due = Math.max(com.google.common.math.LongMath.saturatedAdd(System.currentTimeMillis(), 100L),
-                        com.google.common.math.LongMath.saturatedAdd(plan.entry.context.snapshot().createdAtMs(), hotspotRescue.getMinWaitMs()));
-                waitingRequests.scheduleRescue(plan.entry, plan.waitKey, due);
-            }
             depth = orderedQueue.size();
             counts = orderedQueue.priorityCounts();
         } finally {
@@ -1025,62 +1007,6 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         latestQueueWaitSnapshot = Collections.unmodifiableMap(details);
         return parked;
     }
-
-    private void migrateHotspotQueues() {
-        migrateHotspotQueues(System.nanoTime());
-    }
-
-    /** Decision-owner only. One bounded round, with no catch-up burst after idle periods. */
-    void migrateHotspotQueues(long nowNanos) {
-        if (hotspotRescue == null || closed.get()) { return; }
-        if (nowNanos >= nextRescueDomainScanNanos) {
-            nextRescueDomainScanNanos = nowNanos + TimeUnit.MILLISECONDS.toNanos(100L);
-            idleRescueDomains = router.hotspotRescueDomains();
-        }
-        if (lastLocalMigrationNanos != Long.MIN_VALUE && nowNanos - lastLocalMigrationNanos
-                < TimeUnit.MILLISECONDS.toNanos(hotspotRescue.getMigrationIntervalMs())) { return; }
-        lastLocalMigrationNanos = nowNanos;
-        int limit = Math.min(plannerCount, hotspotRescue.getMaxMigrationsPerRound());
-        List<RequestRoute> candidates = router.hotspotMigrationCandidates(limit);
-        int migrated = 0;
-        for (var route : candidates) {
-            if (migrated >= limit) { break; }
-            if (migrateQueuedRoute(route)) { migrated++; }
-        }
-    }
-
-    /** Withdraw only local, unsubmitted work. The placement claim excludes concurrent delivery. */
-    boolean migrateQueuedRoute(RequestRoute item) {
-        if (item.ctx().prefillMigrationSource() != null || item.decodeEp() == null) { return false; }
-        var claim = claimQueuedRoute(item.decodeEp(), item.decodeReservation(), Integer.MAX_VALUE);
-        if (claim == null) { return false; }
-        boolean detached = false;
-        try {
-            if (!item.prefillEp().control(item, WorkerBatcher.Control.REMOVE)) { return false; }
-            var released = item.decodeEp().release(item.decodeReservation(), DecodeResources.ReleaseReason.NOT_SENT).status();
-            checkState(released == DecodeResources.ReservationReleaseResult.RELEASED
-                    || released == DecodeResources.ReservationReleaseResult.STALE, "migration retained Decode resources");
-            synchronized (item.ctx()) {
-                item.ctx().markPrefillMigrationSource(item.prefillEp());
-                item.ctx().bindPlacement(claim.token, item, PublicationResult.WITHDRAWN);
-            }
-            detached = true;
-        } catch (RuntimeException failure) {
-            claim.terminate(buildErrorResponse(StrategyErrorType.DISPATCH_FAILED, "queued migration failed: " + failure.getMessage()));
-            Logger.error("Queued Prefill migration failed: request_id={}", item.requestId(), failure);
-        } finally {
-            claim.finish();
-            if (detached) {
-                var state = item.ctx().snapshot();
-                if (state.phase() == Phase.OPEN && state.cancellation() == null && !item.future().isDone() && !requeue(item)) {
-                    item.future().complete(buildErrorResponse(StrategyErrorType.DISPATCH_FAILED, "scheduler closed during migration"));
-                }
-            }
-        }
-        return detached;
-    }
-
-
 
     private void removeRequest(GlobalQueueEntry entry) {
         boolean acquire = !lock.isHeldByCurrentThread();

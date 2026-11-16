@@ -48,16 +48,6 @@ public class RequestWorkerSelector {
                         modelMetaConfig, "modelMetaConfig").requiredRoles());
     }
 
-
-
-    public List<RequestRoute> hotspotMigrationCandidates(int limit) {
-        return prefillSelector.hotspotMigrationCandidates(limit);
-    }
-
-    public java.util.Set<PlacementKey> hotspotRescueDomains() {
-        return prefillSelector.hotspotRescueDomains();
-    }
-
     public PlacementResult<RequestRoute, PlacementKey> select(RequestContext context, String policyGroup) {
         Request request = context == null ? null : context.data().getRequest();
         SchedulingMetadata metadata = context == null ? null : context.data().getSchedulingMetadata();
@@ -114,10 +104,6 @@ public class RequestWorkerSelector {
         }
     }
 
-
-
-
-
     CostBasedPrefillStrategy.TokenEstimate estimateQueuedTokens(RequestContext context, String policyGroup) {
         var selectedVit = context.data().getRequest().getSelectedVit();
         String group = selectedVit == null ? policyGroup : selectedVit.getGroup();
@@ -128,7 +114,6 @@ public class RequestWorkerSelector {
         }
         return null;
     }
-
 
     public Response routeVit(RequestContext context) {
         if (context == null || context.data().getRequest() == null) {

@@ -106,7 +106,6 @@ public class CostBasedPrefillStrategy {
         return new TokenEstimate(request.getSeqLen(), hit);
     }
 
-
     public PlacementResult<ServerStatus, RoleType> select(
             Request request,
             SchedulingMetadata metadata,
@@ -177,38 +176,10 @@ public class CostBasedPrefillStrategy {
                     roleType, discovery.registeredCount(), rejections);
         }
 
-        boolean rescue = false;
-        if (tokenBalance != null) {
-            var escape = tokenBalance.getHotspotRescue();
-            long createdAt = route.ctx().snapshot().createdAtMs();
-            boolean agedShort = escape != null && createdAt > 0L
-                    && System.currentTimeMillis() - createdAt >= escape.getMinWaitMs()
-                    && seqLen <= escape.getMaxInputTokens();
-            if (agedShort && fleetMaxHit > 0L) {
-                rescue = true;
-                for (var entry : discovery.cacheCandidates()) {
-                    long hit = calculateCacheMatch(entry.endpoint(), entry.address(), cacheMatchResults, request).effectiveHitTokens();
-                    if (hit == fleetMaxHit && !entry.endpoint().engineQueueAdmissionBlocked()
-                            && (entry.endpoint().engineQueueAllowsAdmission() || entry.endpoint().ownership.tokenWorkload()
-                            .pendingTokens() < tokenBalance.getMaxPendingComputeTokens())) {
-                        rescue = false;
-                        break;
-                    }
-                }
-            }
-            rescue |= escape != null && route.ctx().prefillMigrationSource() != null;
-            if (PrefillTokenBalance.cacheFirst(fleetMaxHit, seqLen, tokenBalance.getMinPrefixHitPercent())
-                    && survivors.maximumCacheHit < fleetMaxHit) {
-                return PlacementResult.blocked(roleType);
-            }
+        if (hot && survivors.maximumCacheHit < fleetMaxHit) {
+            return PlacementResult.blocked(roleType);
         }
-
         route.setColdTokenBalance(tokenBalance != null && !hot);
-        boolean migrating = tokenBalance != null && tokenBalance.getHotspotRescue() != null
-                && route.ctx().prefillMigrationSource() != null;
-        // A migrated hot request must recheck target load and exclude its old worker,
-        // while retaining the same maximum-cache-hit eligibility as normal routing.
-        rescue = migrating || (rescue && !hot);
         int selectedIndex;
         if (tokenBalance == null) {
             selectedIndex = selectBestCandidate(survivors, survivors.minimumTtftRank, roleType, group, seqLen);
@@ -216,11 +187,7 @@ public class CostBasedPrefillStrategy {
             // Parallel planners must see earlier choices before asynchronous admission commits.
             // Only scoring + soft reservation are serialized; cache lookup/projection stay parallel.
             synchronized (tokenSelectionLock) {
-                selectedIndex = rescue ? selectRescueCandidate(survivors, roleType, group, seqLen, fleetMaxHit, route.ctx().prefillMigrationSource())
-                        : selectTokenBalancedCandidate(survivors, roleType, group, seqLen, fleetMaxHit);
-                if (selectedIndex < 0 && rescue && !migrating && hasEngineQueueAdmission(survivors)) {
-                    selectedIndex = selectTokenBalancedCandidate(survivors, roleType, group, seqLen, fleetMaxHit);
-                }
+                selectedIndex = selectTokenBalancedCandidate(survivors, roleType, group, seqLen, fleetMaxHit);
                 if (selectedIndex >= 0) {
                     route.reserveTokenPlan(survivors.endpoint(selectedIndex).ownership.planTokenWork(
                             Math.max(0L, seqLen - survivors.cacheHit(selectedIndex))));
@@ -421,116 +388,6 @@ public class CostBasedPrefillStrategy {
         return selectedIndex;
     }
 
-
-    private int migrationSourceCursor;
-
-    public java.util.Set<org.flexlb.balance.scheduler.PlacementKey> hotspotRescueDomains() {
-        if (tokenBalance == null || tokenBalance.getHotspotRescue() == null) { return java.util.Set.of(); }
-        var domains = new java.util.HashSet<org.flexlb.balance.scheduler.PlacementKey>();
-        for (var role : List.of(RoleType.PREFILL, RoleType.PDFUSION)) {
-            for (var entry : endpointRegistry.prefillRoutingSnapshot(role)) {
-                var endpoint = entry.endpoint();
-                var work = endpoint.ownership.tokenWorkload();
-                if (!endpoint.engineQueueAdmissionBlocked()
-                        && work.pendingTokens() + work.plannedTokens() <= tokenBalance.getHotspotRescue().getMaxIdlePendingTokens()) {
-                    domains.add(new org.flexlb.balance.scheduler.PlacementKey(role, endpoint.getStatus().topologySnapshot().group(), null));
-                    domains.add(org.flexlb.balance.scheduler.PlacementKey.anyGroup(role));
-                }
-            }
-        }
-        return domains;
-    }
-
-    /** Advisory capture only. Context/delivery ownership is rechecked atomically before removal. */
-    public java.util.List<RequestRoute> hotspotMigrationCandidates(int limit) {
-        if (limit <= 0 || tokenBalance == null || tokenBalance.getHotspotRescue() == null) { return List.of(); }
-        var rescue = tokenBalance.getHotspotRescue();
-        var fleet = endpointRegistry.prefillRoutingSnapshot(RoleType.PREFILL);
-        if (fleet.isEmpty()) { return List.of(); }
-        long wallMs = System.currentTimeMillis();
-        var idleGroups = new java.util.HashSet<String>();
-        for (var entry : fleet) {
-            var work = entry.endpoint().ownership.tokenWorkload();
-            if (!entry.endpoint().engineQueueAdmissionBlocked()
-                    && work.pendingTokens() + work.plannedTokens() <= rescue.getMaxIdlePendingTokens()) {
-                idleGroups.add(entry.endpoint().getStatus().topologySnapshot().group());
-            }
-        }
-        if (idleGroups.isEmpty()) { return List.of(); }
-        var order = java.util.Comparator.comparingLong(RequestRoute::seqLen).thenComparingLong(RequestRoute::enqueueSeq);
-        var candidates = new java.util.PriorityQueue<RequestRoute>(Math.min(limit, 64), order.reversed());
-        int budget = (int) Math.min(Integer.MAX_VALUE, Math.max(64L, 64L * limit));
-        int sourceLimit = (int) Math.min(fleet.size(), Math.max(1L, 2L * limit));
-        for (int examined = 0; examined < sourceLimit && budget > 0; examined++) {
-            migrationSourceCursor %= fleet.size();
-            var endpoint = fleet.get(migrationSourceCursor++).endpoint();
-            var engineStatus = endpoint.getStatus().committedWorkerStatus();
-            if (!idleGroups.contains(endpoint.getStatus().topologySnapshot().group())
-                    || engineStatus.cursor().statusVersion() < 0L
-                    || engineStatus.fields().waitingQueryLen() <= rescue.getEngineQueueMigrationThreshold()) { continue; }
-            for (var route : endpoint.ownership.captureQueue(Math.min(64, budget)).items()) {
-                if (budget-- <= 0) { break; }
-                if (route.seqLen() > rescue.getMaxInputTokens() || route.decodeEp() == null
-                        || route.ctx().prefillMigrationSource() != null
-                        || wallMs - route.ctx().snapshot().createdAtMs() < rescue.getMinWaitMs()) { continue; }
-                if (candidates.size() < limit) { candidates.add(route); }
-                else if (order.compare(route, candidates.peek()) < 0) { candidates.poll(); candidates.add(route); }
-            }
-        }
-        var result = new ArrayList<>(candidates);
-        result.sort(order);
-        // Validate at most the bounded shortlist. Final placement rechecks the current cache fleet.
-        result.removeIf(route -> !hasCacheEligibleMigrationTarget(route, fleet));
-        return result;
-    }
-
-    private boolean hasCacheEligibleMigrationTarget(RequestRoute route, List<EndpointRegistry.PrefillRoutingEntry> fleet) {
-        var request = route.ctx().data().getRequest();
-        var source = route.prefillEp();
-        if (request == null || source == null) { return false; }
-        String group = source.getStatus().topologySnapshot().group();
-        var pool = fleet.stream().filter(entry -> java.util.Objects.equals(group,
-                entry.endpoint().getStatus().topologySnapshot().group())).toList();
-        var matches = cacheAwareService.findMatchingEngines(request.getBlockCacheKeys(), RoleType.PREFILL,
-                pool.stream().map(EndpointRegistry.PrefillRoutingEntry::address).toList());
-        long[] hits = new long[pool.size()];
-        long maxHit = 0L;
-        for (int i = 0; i < pool.size(); i++) {
-            var entry = pool.get(i);
-            hits[i] = calculateCacheMatch(entry.endpoint(), entry.address(), matches, request).effectiveHitTokens();
-            maxHit = Math.max(maxHit, hits[i]);
-        }
-        boolean cacheFirst = PrefillTokenBalance.cacheFirst(maxHit, request.getSeqLen(), tokenBalance.getMinPrefixHitPercent());
-        for (int i = 0; i < pool.size(); i++) {
-            var endpoint = pool.get(i).endpoint();
-            if (endpoint == source || endpoint.isGenerationRetiringOrRetired() || endpoint.engineQueueAdmissionBlocked()
-                    || !PrefillTokenBalance.eligible(hits[i], maxHit, cacheFirst)) { continue; }
-            var work = endpoint.ownership.tokenWorkload();
-            if (work.pendingTokens() + work.plannedTokens() <= tokenBalance.getHotspotRescue().getMaxIdlePendingTokens()) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /** Rescue remains within the same cache-eligible set as ordinary routing. */
-    private int selectRescueCandidate(PrefillCandidateSet candidates, RoleType role, String group, long seqLen, long maxHit, PrefillEndpoint excluded) {
-        boolean cacheFirst = PrefillTokenBalance.cacheFirst(maxHit, seqLen, tokenBalance.getMinPrefixHitPercent());
-        double[] scores = new double[candidates.size()];
-        java.util.Arrays.fill(scores, Double.POSITIVE_INFINITY);
-        double minimum = Double.POSITIVE_INFINITY;
-        for (int i = 0; i < candidates.size(); i++) {
-            if (!PrefillTokenBalance.eligible(candidates.cacheHit(i), maxHit, cacheFirst)) { continue; }
-            var work = candidates.endpoint(i).ownership.tokenWorkload();
-            if (candidates.endpoint(i) == excluded || work.pendingTokens() + work.plannedTokens() > tokenBalance.getHotspotRescue().getMaxIdlePendingTokens()) { continue; }
-            scores[i] = cacheFirst ? 0.0 : work.score() + Math.max(0L, seqLen);
-            minimum = Math.min(minimum, scores[i]);
-        }
-        if (!Double.isFinite(minimum)) { return -1; }
-        double chosen = minimum;
-        return tieRotation.next(role, group, candidates.size(), i -> scores[i] == chosen, candidates::endpointAddress);
-    }
-
     private int selectTokenBalancedCandidate(PrefillCandidateSet candidates, RoleType role, String group, long seqLen) {
         return selectTokenBalancedCandidate(candidates, role, group, seqLen, candidates.maximumCacheHit);
     }
@@ -543,10 +400,8 @@ public class CostBasedPrefillStrategy {
         for (int i = 0; i < candidates.size(); i++) {
             if (!PrefillTokenBalance.eligible(candidates.cacheHit(i), maxHit, cacheFirst)) { continue; }
             var work = candidates.endpoint(i).ownership.tokenWorkload();
-            // Preserve a busy cache leader by parking globally, where existing HIT_RATE shedding applies.
-            if (candidates.endpoint(i).engineQueueAdmissionBlocked()
-                    || !PrefillTokenBalance.hasCapacity(work.pendingTokens(), tokenBalance.getMaxPendingComputeTokens())
-                    && !candidates.endpoint(i).engineQueueAllowsAdmission()) { continue; }
+            // Preserve cache eligibility while waiting for Engine queue capacity.
+            if (candidates.endpoint(i).engineQueueAdmissionBlocked()) { continue; }
             scores[i] = cacheFirst ? 0.0 : work.score() + Math.max(0L, seqLen);
             minimum = Math.min(minimum, scores[i]);
         }
@@ -554,13 +409,6 @@ public class CostBasedPrefillStrategy {
         double selectedScore = minimum;
         return tieRotation.next(role, group, candidates.size(), i -> scores[i] == selectedScore,
                 candidates::endpointAddress);
-    }
-
-    private static boolean hasEngineQueueAdmission(PrefillCandidateSet candidates) {
-        for (int i = 0; i < candidates.size(); i++) {
-            if (candidates.endpoint(i).engineQueueAllowsAdmission()) { return true; }
-        }
-        return false;
     }
 
     private static double normalizedHitRate(double configuredRate) {

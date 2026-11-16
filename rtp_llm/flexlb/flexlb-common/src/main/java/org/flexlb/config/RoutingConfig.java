@@ -38,35 +38,13 @@ public final class RoutingConfig {
     public static final class TokenBalanceConfig {
         /** Above this percentage, the largest reusable prefix wins without a TTFT cap. */
         private double minPrefixHitPercent = 50.0;
-        /** Token backpressure when Engine queue admission is disabled or telemetry is unknown. */
-        private long maxPendingComputeTokens = 2_000_000L;
-        /** Include recently completed uncached tokens in routing scores. */
-        private boolean enableWindow = false;
-        private long windowMs = 10_000L;
         /** Actual Engine waiting-stream watermark; not an inflight or unobserved-dispatch quota.
-         * Excludes Master queues and running requests. Null retains legacy admission limits.
+         * Excludes Master queues and running requests. Null disables Engine queue admission.
+         * Unknown telemetry imposes no queue gate; explicit concurrency limits still apply.
          */
         private Long engineQueueAdmissionThreshold = 10L;
         /** Consecutive observed time above the watermark before sustained overload; actual waiting gates dispatch immediately. */
         private long engineQueueOverloadDurationMs = 5_000L;
-        /** Optional rescue of small, aged requests to lightly loaded cache-eligible workers. */
-        private HotspotRescueConfig hotspotRescue;
-    }
-
-    @Getter
-    @Setter
-    public static final class HotspotRescueConfig {
-        /** Migrate only when the source Engine reports more waiting streams than this count. */
-        private long engineQueueMigrationThreshold = 30L;
-        private long minWaitMs = 5_000L;
-        /** Total input, not just uncached tokens: a cache miss on the target must stay cheap. */
-        private long maxInputTokens = 32_768L;
-        /** Target's outstanding uncached tokens (pending + planned), excluding completed history. */
-        private long maxIdlePendingTokens = 0L;
-        /** Minimum interval between local queue migration rounds; unused rounds never accumulate. */
-        private long migrationIntervalMs = 1_000L;
-        /** Maximum withdrawals per round, shared by all workers in this model scheduler. */
-        private int maxMigrationsPerRound = 1;
     }
 
     @Getter

@@ -218,30 +218,13 @@ final class FlexlbConfigValidator {
         }
         var balance = prefill.getTokenBalance();
         if (balance != null) {
-            positive(balance.getWindowMs(), "router.roles.prefill.tokenBalance.windowMs");
             range(balance.getMinPrefixHitPercent(), 0, RoutingConfig.PERCENTAGE_SCALE,
                     "router.roles.prefill.tokenBalance.minPrefixHitPercent");
-            positive(balance.getMaxPendingComputeTokens(),
-                    "router.roles.prefill.tokenBalance.maxPendingComputeTokens");
             nonNegative(balance.getEngineQueueOverloadDurationMs(),
                     "router.roles.prefill.tokenBalance.engineQueueOverloadDurationMs");
             if (balance.getEngineQueueAdmissionThreshold() != null) {
                 nonNegative(balance.getEngineQueueAdmissionThreshold(),
                         "router.roles.prefill.tokenBalance.engineQueueAdmissionThreshold");
-            }
-            var rescue = balance.getHotspotRescue();
-            if (rescue != null) {
-                nonNegative(rescue.getEngineQueueMigrationThreshold(),
-                        "router.roles.prefill.tokenBalance.hotspotRescue.engineQueueMigrationThreshold");
-                positive(rescue.getMinWaitMs(), "router.roles.prefill.tokenBalance.hotspotRescue.minWaitMs");
-                positive(rescue.getMaxInputTokens(), "router.roles.prefill.tokenBalance.hotspotRescue.maxInputTokens");
-                positive(rescue.getMigrationIntervalMs(), "router.roles.prefill.tokenBalance.hotspotRescue.migrationIntervalMs");
-                require(rescue.getMigrationIntervalMs() <= Long.MAX_VALUE / 1_000_000L,
-                        "router.roles.prefill.tokenBalance.hotspotRescue.migrationIntervalMs", "is too large");
-                positive(rescue.getMaxMigrationsPerRound(), "router.roles.prefill.tokenBalance.hotspotRescue.maxMigrationsPerRound");
-                nonNegative(rescue.getMaxIdlePendingTokens(), "router.roles.prefill.tokenBalance.hotspotRescue.maxIdlePendingTokens");
-                require(rescue.getMaxIdlePendingTokens() < balance.getMaxPendingComputeTokens(),
-                        "router.roles.prefill.tokenBalance.hotspotRescue.maxIdlePendingTokens", "must be below pending waterline");
             }
             require(prefill.getCacheAffinity() == null, "router.roles.prefill",
                     "tokenBalance and cacheAffinity are mutually exclusive");

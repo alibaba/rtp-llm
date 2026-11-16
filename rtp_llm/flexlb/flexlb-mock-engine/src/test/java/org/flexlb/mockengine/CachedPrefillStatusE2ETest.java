@@ -28,7 +28,6 @@ class CachedPrefillStatusE2ETest {
         config.queueScheduler().getDecision().setType(DecisionPolicyConfig.Type.SINGLE);
         var balance = new RoutingConfig.TokenBalanceConfig();
         balance.setMinPrefixHitPercent(5);
-        balance.setMaxPendingComputeTokens(200_000);
         balance.setEngineQueueAdmissionThreshold(30L);
         config.getRouter().getRoles().getPrefill().setTokenBalance(balance);
         config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator().setExpression("sum(computeTokens) / 70");

@@ -43,8 +43,6 @@ class ColdTokenDispatchTest {
             config.getDispatcher().setMaxInflightPerPrefillWorker(256);
             config.getRouter().getRoles().getPrefill().getTokenBalance().setEngineQueueAdmissionThreshold(256L);
             var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
-            balance.setEnableWindow(false);
-            balance.setMaxPendingComputeTokens(2_000_000L);
         })) {
             var workers = List.of(f.a, f.b, (PrefillEndpoint) f.publish(RoleType.PREFILL, "127.0.0.3"),
                     (PrefillEndpoint) f.publish(RoleType.PREFILL, "127.0.0.4"));
@@ -104,7 +102,6 @@ class ColdTokenDispatchTest {
     void lowActualWaitingCanFeedRepeatedSixtyFourRequestPrefillBatches(int waiting) throws Exception {
         try (var f = new Fixture(false, false, false, true, config -> {
             config.getDispatcher().setMaxInflightPerPrefillWorker(256);
-            config.getRouter().getRoles().getPrefill().getTokenBalance().setMaxPendingComputeTokens(2_000_000L);
         })) {
             when(f.cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(f.a.ipPort(), 9));
             var background = new java.util.ArrayList<org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB>();
@@ -203,8 +200,6 @@ class ColdTokenDispatchTest {
             config.getDispatcher().setMaxInflightPerPrefillWorker(256);
             var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
             balance.setMinPrefixHitPercent(5);
-            balance.setEnableWindow(false);
-            balance.setMaxPendingComputeTokens(2_000_000L);
             balance.setEngineQueueOverloadDurationMs(duration);
             balance.setEngineQueueAdmissionThreshold(threshold);
         })) {
@@ -489,7 +484,7 @@ class ColdTokenDispatchTest {
 
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.CsvSource({"false,false", "false,true", "true,false", "true,true"})
-    void lowEngineQueueDeliversColdAndCacheFirstHotRequestsDespiteTokenWaterline(boolean batch, boolean hot) throws Exception {
+    void lowEngineQueueDeliversColdAndCacheFirstHotRequests(boolean batch, boolean hot) throws Exception {
         try (var f = new Fixture(batch, false, false, true)) {
             var a = f.occupy(f.a, 90);
             var b = f.occupy(f.b, 91);
@@ -551,8 +546,6 @@ class ColdTokenDispatchTest {
             config.getRouter().getRoles().getPrefill().getTokenBalance().setEngineQueueAdmissionThreshold(1000L);
             var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
             balance.setMinPrefixHitPercent(5);
-            balance.setEnableWindow(false);
-            balance.setMaxPendingComputeTokens(2_000_000L);
             config.getDispatcher().setMaxInflightPerPrefillWorker(512);
         })) {
             var c = (PrefillEndpoint) f.publish(RoleType.PREFILL, "127.0.0.3");
@@ -659,17 +652,12 @@ class ColdTokenDispatchTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.CsvSource({"false,false,false", "true,false,false", "false,true,false", "true,true,false",
-            "false,false,true", "true,false,true"})
-    void engineBacklogWithoutLocalOwnersMustNotAttractTheColdBurst(boolean batch, boolean fullyOwned, boolean migrating) throws Exception {
+    @org.junit.jupiter.params.provider.CsvSource({"false,false", "true,false", "false,true", "true,true"})
+    void engineBacklogWithoutLocalOwnersMustNotAttractTheColdBurst(boolean batch, boolean fullyOwned) throws Exception {
         try (var f = new Fixture(batch, false, false, true, config -> {
             var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
             balance.setMinPrefixHitPercent(5);
             balance.setEngineQueueAdmissionThreshold(32L); // Equal token scores with room for another burst.
-            balance.setMaxPendingComputeTokens(2_000_000L);
-            var rescue = new RoutingConfig.HotspotRescueConfig();
-            rescue.setMaxIdlePendingTokens(64768);
-            balance.setHotspotRescue(rescue);
             config.getDispatcher().setMaxInflightPerPrefillWorker(256);
         })) {
             var workers = List.of(f.a, f.b, (PrefillEndpoint) f.publish(RoleType.PREFILL, "127.0.0.3"),
@@ -698,17 +686,6 @@ class ColdTokenDispatchTest {
                 }
                 assertEquals(List.of(500_000.0, 500_000.0, 500_000.0, 500_000.0),
                         workers.stream().map(w -> w.ownership.tokenWorkload().score()).toList());
-                if (migrating) {
-                    var request = f.context(300_000L);
-                    request.markPrefillMigrationSource(workers.getLast());
-                    var result = f.router.select(request, null);
-                    try (var selected = result.value()) {
-
-                        assertEquals(org.flexlb.balance.PlacementResult.Status.BLOCKED, result.status(),
-                                "no worker is below the 64768-token migration target limit");
-                    }
-                    return;
-                }
                 var counts = new int[4];
                 for (int i = 0; i < 10; i++) {
                     var request = f.context(200_000L + i);
@@ -847,7 +824,6 @@ class ColdTokenDispatchTest {
             config.getInternalRuntime().setRequestInactivityTimeoutMs(100_000L);
             var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
             balance.setMinPrefixHitPercent(5);
-            balance.setMaxPendingComputeTokens(200_000L);
             balance.setEngineQueueAdmissionThreshold(30L);
         })) {
             when(f.cache.findMatchingEngines(any(), any(), any())).thenAnswer(call -> {
@@ -904,13 +880,6 @@ class ColdTokenDispatchTest {
             config.getInternalRuntime().setRequestInactivityTimeoutMs(100_000L);
             var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
             balance.setMinPrefixHitPercent(5);
-            balance.setMaxPendingComputeTokens(1_000_000L);
-            balance.setEnableWindow(true);
-            var rescue = new RoutingConfig.HotspotRescueConfig();
-            rescue.setMaxInputTokens(64_768L);
-            rescue.setMaxIdlePendingTokens(128_768L);
-            rescue.setMigrationIntervalMs(500L);
-            balance.setHotspotRescue(rescue);
             balance.setEngineQueueAdmissionThreshold(30L);
         })) {
             var workers = new java.util.ArrayList<PrefillEndpoint>(List.of(f.a, f.b));
@@ -975,9 +944,7 @@ class ColdTokenDispatchTest {
 
     @Test
     void newlyVisibleCacheWakesAHotRequestWhoseOldCacheWorkerIsStillFull() throws Exception {
-        try (var f = new Fixture(false, false, false, true, config -> {
-            config.getRouter().getRoles().getPrefill().getTokenBalance().setMaxPendingComputeTokens(200_000L);
-        })) {
+        try (var f = new Fixture(false, false, false, true)) {
             var warmed = new AtomicBoolean();
             when(f.cache.findMatchingEngines(any(), any(), any())).thenAnswer(call -> warmed.get()
                     ? Map.of(f.a.ipPort(), 19, f.b.ipPort(), 19) : Map.of(f.a.ipPort(), 19));
@@ -1002,7 +969,6 @@ class ColdTokenDispatchTest {
             config.getRouter().getRoles().getPrefill().getTokenBalance().setEngineQueueAdmissionThreshold(30L);
             config.setDispatchTimeoutMs(120_000L);
             config.getInternalRuntime().setRequestInactivityTimeoutMs(100_000L);
-            config.getRouter().getRoles().getPrefill().getTokenBalance().setMaxPendingComputeTokens(200_000L);
         })) {
             when(f.cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(f.a.ipPort(), 19));
             f.updateWaitingTasks(f.a, 0, false);
@@ -1049,7 +1015,6 @@ class ColdTokenDispatchTest {
         try (var f = new Fixture(false, false, false, true, config -> {
             config.getDispatcher().setMaxInflightPerPrefillWorker(256);
             var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
-            balance.setMaxPendingComputeTokens(200_000L);
             balance.setEngineQueueAdmissionThreshold(30L);
         })) {
             var reservations = new java.util.ArrayList<PrefillState.RouteReservation>();
@@ -1131,9 +1096,8 @@ class ColdTokenDispatchTest {
             if (engineAdmissionTest) {
                 config.getDispatcher().setMaxInflightPerPrefillWorker(128);
                 config.queueScheduler().getDecision().setType(org.flexlb.config.DecisionPolicyConfig.Type.SINGLE);
-                config.getRouter().getRoles().getPrefill().getTokenBalance().setMaxPendingComputeTokens(1L);
             } else {
-                // These cases exercise the explicitly retained legacy capacity policy.
+                // These cases exercise concurrency limits without Engine queue admission.
                 config.getRouter().getRoles().getPrefill().getTokenBalance().setEngineQueueAdmissionThreshold(null);
             }
             customize.accept(config);

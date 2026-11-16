@@ -104,67 +104,6 @@ class QueuedDeliveryWithdrawalRaceTest {
         }
     }
 
-    @Test
-    @Timeout(15)
-    void migrationReturnsLocalReservationsAndRetainsIdentityAndDeadline() throws Exception {
-        try (var fixture = new Fixture()) {
-            long deadline = fixture.context.data().getRequestExpiresAtMs();
-            assertEquals(16L, fixture.prefill.ownership.tokenWorkload().pendingTokens());
-            assertTrue(fixture.owner.migrateQueuedRoute(fixture.route));
-            assertEquals(0L, fixture.prefill.ownership.tokenWorkload().pendingTokens());
-            assertEquals(0L, fixture.prefill.ownership.tokenWorkload().plannedTokens());
-            assertSame(fixture.prefill, fixture.context.prefillMigrationSource());
-            assertNull(fixture.context.snapshot().route());
-            assertNull(fixture.context.snapshot().placement());
-            assertEquals(0, fixture.prefill.ownership.progress().queueDepth());
-            assertEquals(DecodeResources.Ownership.NONE, fixture.decode.ownership(fixture.reservation));
-            assertFalse(fixture.future.isDone(), "migration must not return a failure to the client");
-            assertEquals(deadline, fixture.context.data().getRequestExpiresAtMs());
-            assertFalse(fixture.owner.migrateQueuedRoute(fixture.route), "one migration per request prevents ping-pong");
-            verify(fixture.client, never()).batchEnqueueAsync(anyString(), anyInt(), any());
-            fixture.future.cancel(false);
-        }
-    }
-
-    @Test
-    @Timeout(15)
-    void migrationCannotWithdrawAnEngineDelivery() throws Exception {
-        try (var fixture = new Fixture()) {
-            fixture.select(evaluator(() -> {}));
-            fixture.runtime.deliveries().awaitDeliveries();
-            fixture.assertDelivered();
-            assertFalse(fixture.owner.migrateQueuedRoute(fixture.route));
-            assertNull(fixture.context.prefillMigrationSource());
-        }
-    }
-
-    @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.CsvSource({"1000,1", "2000,2"})
-    void migrationPacingIsIndependentOfPlannerCountAndDoesNotBankIdleRounds(long intervalMs, int perRound) throws Exception {
-        var rescue = new org.flexlb.config.RoutingConfig.HotspotRescueConfig();
-        rescue.setMigrationIntervalMs(intervalMs);
-        rescue.setMaxMigrationsPerRound(perRound);
-        try (var fixture = new Fixture(rescue)) {
-            var owner = spy(fixture.owner);
-            var candidates = List.of(mock(RequestRoute.class), mock(RequestRoute.class), mock(RequestRoute.class));
-            when(fixture.router.hotspotMigrationCandidates(perRound)).thenReturn(candidates);
-            doReturn(true).when(owner).migrateQueuedRoute(any());
-            long start = TimeUnit.SECONDS.toNanos(1);
-            long interval = TimeUnit.MILLISECONDS.toNanos(intervalMs);
-            owner.migrateHotspotQueues(start);
-            verify(owner, times(perRound)).migrateQueuedRoute(any());
-            for (int i = 1; i < 100; i++) { owner.migrateHotspotQueues(start + interval * i / 100); }
-            verify(owner, times(perRound)).migrateQueuedRoute(any());
-            verify(fixture.router, times(1)).hotspotMigrationCandidates(perRound);
-            owner.migrateHotspotQueues(start + interval);
-            verify(owner, times(2 * perRound)).migrateQueuedRoute(any());
-            owner.migrateHotspotQueues(start + interval * 100);
-            owner.migrateHotspotQueues(start + interval * 100 + 1);
-            verify(owner, times(3 * perRound)).migrateQueuedRoute(any());
-            verify(fixture.router, times(3)).hotspotMigrationCandidates(perRound);
-        }
-    }
-
     private static PrefillTimePredictor.Evaluator evaluator(Runnable predictionBarrier) {
         return new PrefillTimePredictor.Evaluator() {
             @Override public long estimateMs(long total, long hit) { return 1L; }
@@ -194,17 +133,7 @@ class QueuedDeliveryWithdrawalRaceTest {
         final RequestRoute route;
 
         Fixture() throws Exception {
-            this(null);
-        }
-
-        Fixture(org.flexlb.config.RoutingConfig.HotspotRescueConfig rescue) throws Exception {
             var config = SchedulingTestConfig.batchConfig();
-            if (rescue != null) {
-                var balance = new org.flexlb.config.RoutingConfig.TokenBalanceConfig();
-                balance.setHotspotRescue(rescue);
-                config.getRouter().getRoles().getPrefill().setTokenBalance(balance);
-                ReflectionTestUtils.setField(config.getInternalRuntime(), "queuePlannerThreads", 8);
-            }
             SchedulingTestConfig.usePriorityQueue(config);
             SchedulingTestConfig.useSingleDecision(config);
             var service = mock(ConfigService.class);
@@ -240,7 +169,7 @@ class QueuedDeliveryWithdrawalRaceTest {
             applyStatus(prefill, status(RoleType.PREFILL));
             applyStatus(decode, status(RoleType.DECODE));
             var state = new PrefillState(new ReentrantLock(), PrefillActiveIndex.ordered(16, WorkerBatcher.PRIORITY_QUEUE_ORDER), System::currentTimeMillis);
-            ReflectionTestUtils.invokeMethod(state, "enableTokenWorkload", 1_000_000L);
+            ReflectionTestUtils.invokeMethod(state, "enableTokenWorkload");
             ReflectionTestUtils.setField(prefill, "ownership", state);
             batcher = new WorkerBatcher("withdrawal-race", prefill, QueueExecutionSettings.capture(config), dispatcher, state);
             ReflectionTestUtils.setField(prefill, "batcher", batcher);

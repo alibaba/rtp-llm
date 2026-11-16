@@ -1,42 +1,10 @@
 package org.flexlb.balance.strategy;
 
-/** Outstanding uncached work and optional completed history for routing scores. */
+/** Outstanding uncached work and planning reservations for routing scores. */
 public final class PrefillTokenWorkload {
-    public record Snapshot(long completedTokens, long pendingTokens, long plannedTokens) {
-        public Snapshot(long pendingTokens, long plannedTokens) { this(0L, pendingTokens, plannedTokens); }
-        public Snapshot(long pendingTokens) { this(0L, pendingTokens, 0L); }
-        public double score() { return (double) completedTokens + pendingTokens + plannedTokens; }
-    }
-    private record Completion(long atMs, long tokens) { }
-    private final long windowMs;
-    private final java.util.function.LongSupplier clock;
-    private final java.util.ArrayDeque<Completion> completions;
-    private long completedTokens;
-
-    public PrefillTokenWorkload() { this(0L); }
-    public PrefillTokenWorkload(long windowMs) { this(windowMs, () -> System.nanoTime() / 1_000_000L); }
-    PrefillTokenWorkload(long windowMs, java.util.function.LongSupplier clock) {
-        if (windowMs < 0L) { throw new IllegalArgumentException("negative window"); }
-        this.windowMs = windowMs;
-        this.clock = clock;
-        completions = windowMs == 0L ? null : new java.util.ArrayDeque<>();
-    }
-
-    /** Record successful work separately from releasing its original reservation. */
-    public synchronized void complete(long tokens) {
-        if (tokens < 0L) { throw new IllegalArgumentException("negative completion"); }
-        if (completions == null) { return; }
-        long nowMs = clock.getAsLong();
-        if (tokens == 0L) { return; }
-        expire(nowMs);
-        completedTokens = Math.addExact(completedTokens, tokens);
-        completions.addLast(new Completion(nowMs, tokens));
-    }
-
-    private void expire(long nowMs) {
-        while (!completions.isEmpty() && nowMs - completions.getFirst().atMs() >= windowMs) {
-            completedTokens -= completions.removeFirst().tokens();
-        }
+    public record Snapshot(long pendingTokens, long plannedTokens) {
+        public Snapshot(long pendingTokens) { this(pendingTokens, 0L); }
+        public double score() { return (double) pendingTokens + plannedTokens; }
     }
     private long pendingTokens;
     private long plannedTokens;
@@ -73,7 +41,6 @@ public final class PrefillTokenWorkload {
     }
 
     public synchronized Snapshot snapshot() {
-        if (completions != null) { expire(clock.getAsLong()); }
-        return new Snapshot(completedTokens, pendingTokens, plannedTokens);
+        return new Snapshot(pendingTokens, plannedTokens);
     }
 }

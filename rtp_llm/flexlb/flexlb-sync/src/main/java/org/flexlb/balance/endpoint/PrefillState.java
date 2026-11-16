@@ -280,7 +280,7 @@ public final class PrefillState {
         }
     }
 
-    record TerminalObservation(RequestEntry owner, long executionTimeMs, long errorCode, long computeTokens,
+    record TerminalObservation(RequestEntry owner, long executionTimeMs, long errorCode,
             PriorityPreemptionProgress preemptionProgress) { }
 
     public final ReentrantLock lock;
@@ -290,7 +290,6 @@ public final class PrefillState {
     final Map<Long, RequestEntry> requests = new HashMap<>();
     final LongSupplier clock;
     private org.flexlb.balance.strategy.PrefillTokenWorkload tokenWorkload;
-    private long pendingTokenLimit;
     record EngineWorkKey(long requestId, long batchId) {
         EngineWorkKey {
             // Ordinary C++ streams use -1; legacy protobuf reports may omit the field (0).
@@ -381,8 +380,7 @@ public final class PrefillState {
 
     private org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot tokenWorkloadLocked() {
         var local = tokenWorkload.snapshot();
-        return new org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot(local.completedTokens(),
-                saturatedAdd(saturatedAdd(local.pendingTokens(), engineTokens - engineCoveredTokens), unconfirmedTokens), local.plannedTokens());
+        return new org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot(saturatedAdd(saturatedAdd(local.pendingTokens(), engineTokens - engineCoveredTokens), unconfirmedTokens), local.plannedTokens());
     }
     private java.util.function.Supplier<EngineQueueAdmission.State> engineQueueState = () -> EngineQueueAdmission.State.UNKNOWN;
 
@@ -390,28 +388,17 @@ public final class PrefillState {
         engineQueueState = java.util.Objects.requireNonNull(state);
     }
 
-    /** Engine feedback may relax token backpressure, never explicit request/batch concurrency limits. */
-    private boolean admissionCapacityAvailable(boolean legacyCapacity) {
+    /** Queue telemetry gates admission independently of explicit request/batch concurrency limits. */
+    private boolean admissionCapacityAvailable() {
         return switch (engineQueueState.get()) {
             case AVAILABLE -> !engineQueueAdmissionBlocked();
             case CONGESTED -> false;
-            case UNKNOWN -> legacyCapacity;
+            case UNKNOWN -> true;
         };
     }
-    private java.util.function.BooleanSupplier engineQueueAdmission = () -> false;
     /** Installed before this endpoint generation is published. */
-    void enableTokenWorkload(long pendingTokenLimit) {
-        enableTokenWorkload(pendingTokenLimit, () -> false);
-    }
-
-    void enableTokenWorkload(long pendingTokenLimit, java.util.function.BooleanSupplier engineQueueAdmission) {
-        enableTokenWorkload(pendingTokenLimit, engineQueueAdmission, 0L);
-    }
-
-    void enableTokenWorkload(long pendingTokenLimit, java.util.function.BooleanSupplier engineQueueAdmission, long windowMs) {
-        this.engineQueueAdmission = java.util.Objects.requireNonNull(engineQueueAdmission);
-        this.pendingTokenLimit = pendingTokenLimit;
-        tokenWorkload = new org.flexlb.balance.strategy.PrefillTokenWorkload(windowMs);
+    void enableTokenWorkload() {
+        tokenWorkload = new org.flexlb.balance.strategy.PrefillTokenWorkload();
     }
 
     public org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot tokenWorkload() {
@@ -425,11 +412,6 @@ public final class PrefillState {
 
     private static long computeTokens(RequestRoute route) {
         return Math.max(0L, route.seqLen() - Math.clamp(route.hitCache(), 0L, Math.max(0L, route.seqLen())));
-    }
-
-    private boolean tokenCapacityAvailable() {
-        return tokenWorkload == null || tokenWorkloadLocked().pendingTokens() < pendingTokenLimit
-                || engineQueueAdmission.getAsBoolean();
     }
 
     public org.flexlb.balance.strategy.PrefillTokenWorkload.Reservation planTokenWork(long tokens) {
@@ -565,7 +547,7 @@ public final class PrefillState {
             if (route == null) { return null; }
             var entry = requests.get(route.requestId());
             if (change == QueueChange.ENQUEUE) {
-                if (entry != null || unconfirmedDispatches.containsKey(new EngineWorkKey(route.requestId(), 0L)) || (requestLimit > 0L && outstandingRequestCount >= requestLimit) || !admissionCapacityAvailable(tokenCapacityAvailable())) { return null; }
+                if (entry != null || unconfirmedDispatches.containsKey(new EngineWorkKey(route.requestId(), 0L)) || (requestLimit > 0L && outstandingRequestCount >= requestLimit) || !admissionCapacityAvailable()) { return null; }
                 entry = new RequestEntry(route, OwnershipStage.QUEUED);
                 requests.put(route.requestId(), entry);
                 try { activeIndex.add(route); }
@@ -713,7 +695,7 @@ public final class PrefillState {
                 return new ReservationResult<>(
                         CapacityStatus.BATCH_ID_ALREADY_RESERVED, null);
             }
-            if (batches.size() >= maximum || !admissionCapacityAvailable(true)) {
+            if (batches.size() >= maximum || !admissionCapacityAvailable()) {
                 return new ReservationResult<>(
                         CapacityStatus.CAPACITY_FULL, null);
             }
@@ -738,7 +720,7 @@ public final class PrefillState {
             if (requests.containsKey(route.requestId()) || unconfirmedDispatches.containsKey(new EngineWorkKey(route.requestId(), 0L))) { return new ReservationResult<>(CapacityStatus.REQUEST_ALREADY_RESERVED, null); }
             if (batches.containsKey(batchId)) { return new ReservationResult<>(CapacityStatus.BATCH_ID_ALREADY_RESERVED, null); }
             if (batches.size() >= maximum
-                    || !admissionCapacityAvailable(tokenCapacityAvailable())) { return new ReservationResult<>(CapacityStatus.CAPACITY_FULL, null); }
+                    || !admissionCapacityAvailable()) { return new ReservationResult<>(CapacityStatus.CAPACITY_FULL, null); }
             var entry = new RequestEntry(route, OwnershipStage.DIRECT_RESERVED);
             var lease = new BatchReservation(this, entry, batchId, handoff);
             entry.reservation = lease;
@@ -755,7 +737,7 @@ public final class PrefillState {
         checkArgument(maximum > 0, "maximumInflightBatches must be positive");
         lock.lock();
         try {
-            return batches.size() < maximum && admissionCapacityAvailable(true);
+            return batches.size() < maximum && admissionCapacityAvailable();
         } finally {
             lock.unlock();
         }
@@ -871,7 +853,7 @@ public final class PrefillState {
                 return new ReservationResult<>(CapacityStatus.REQUEST_ALREADY_RESERVED, null);
             }
             if ((maxOutstandingRequests > 0L && outstandingRequestCount >= maxOutstandingRequests)
-                    || !admissionCapacityAvailable(tokenCapacityAvailable())) {
+                    || !admissionCapacityAvailable()) {
                 return new ReservationResult<>(CapacityStatus.CAPACITY_FULL, null);
             }
             RequestEntry entry = new RequestEntry(item, OwnershipStage.DIRECT_RESERVED);
@@ -1056,11 +1038,7 @@ public final class PrefillState {
             batch.lastObservedAtMs = Math.max(batch.lastObservedAtMs, reduction.nowMs);
         }
         for (TerminalObservation terminal : reduction.terminals.values()) {
-            if (removeEntry(terminal.owner) && tokenWorkload != null && terminal.errorCode() == 0L
-                    && terminal.preemptionProgress() != PriorityPreemptionProgress.CANCELED) {
-                tokenWorkload.complete(terminal.owner.route.coldTokenBalance()
-                        ? computeTokens(terminal.owner.route) : terminal.computeTokens());
-            }
+            removeEntry(terminal.owner);
         }
         for (var phase : reduction.individualPhases.entrySet()) {
             var entry = phase.getKey();

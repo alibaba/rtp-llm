@@ -12,8 +12,4 @@ public final class PrefillTokenBalance {
     public static boolean eligible(long hit, long maxHit, boolean cacheFirst) {
         return !cacheFirst || hit == maxHit;
     }
-
-    public static boolean hasCapacity(long pendingTokens, long limit) {
-        return pendingTokens < limit;
-    }
 }

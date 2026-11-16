@@ -35,9 +35,7 @@ class HotOverloadAdmissionE2ETest {
         config.getInternalRuntime().setRequestInactivityTimeoutMs(100_000L);
         var balance = new RoutingConfig.TokenBalanceConfig();
         balance.setMinPrefixHitPercent(5);
-        balance.setEnableWindow(false);
         balance.setEngineQueueAdmissionThreshold(30L);
-        balance.setMaxPendingComputeTokens(200_000L);
         config.getRouter().getRoles().getPrefill().setTokenBalance(balance);
         config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator().setExpression("sum(computeTokens) / 70");
         var performance = Map.<String, Object>of("test_pool_blocks", 65_536, "jitter_pct", 0.1,

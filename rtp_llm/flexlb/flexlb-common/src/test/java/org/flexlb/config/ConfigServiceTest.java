@@ -30,9 +30,8 @@ class ConfigServiceTest {
                   "dispatcher": {"maxInflightPerPrefillWorker": 256},
                   "dispatchTimeoutMs": 120000,
                   "router": {"roles": {"prefill": {"tokenBalance": {
-                    "hotspotRescue": {"maxInputTokens": 64768, "maxIdlePendingTokens": 128768, "migrationIntervalMs": 500},
-                    "minPrefixHitPercent": 5, "enableWindow": true,
-                    "engineQueueAdmissionThreshold": 30, "maxPendingComputeTokens": 1000000
+                    "minPrefixHitPercent": 5,
+                    "engineQueueAdmissionThreshold": 30
                   }}}}
                 }
                 """);
@@ -43,24 +42,15 @@ class ConfigServiceTest {
         assertEquals(256, config.getDispatcher().getMaxInflightPerPrefillWorker());
         assertEquals(120000L, config.getDispatchTimeoutMs());
         var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
-        assertTrue(balance.isEnableWindow());
-        assertEquals(10000L, balance.getWindowMs());
         assertEquals(5.0, balance.getMinPrefixHitPercent());
         assertEquals(30L, balance.getEngineQueueAdmissionThreshold());
-        assertEquals(1000000L, balance.getMaxPendingComputeTokens());
         assertEquals(5000L, balance.getEngineQueueOverloadDurationMs());
-        var rescue = balance.getHotspotRescue();
-        assertEquals(64768L, rescue.getMaxInputTokens());
-        assertEquals(128768L, rescue.getMaxIdlePendingTokens());
-        assertEquals(500L, rescue.getMigrationIntervalMs());
-        assertEquals(30L, rescue.getEngineQueueMigrationThreshold());
-        assertEquals(1, rescue.getMaxMigrationsPerRound());
     }
 
     @Test
     void removedAdmissionOptionsAreRejectedInsteadOfSilentlyIgnored() {
         for (String field : java.util.List.of("enforcePendingComputeLimit", "maxColdWindowComputeTokens",
-                "coldEngineQueueAdmissionThreshold")) {
+                "coldEngineQueueAdmissionThreshold", "maxPendingComputeTokens")) {
             String value = field.equals("enforcePendingComputeLimit") ? "true" : "100";
             var error = assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse(
                     "{\"router\":{\"roles\":{\"prefill\":{\"tokenBalance\":{\"" + field + "\":" + value + "}}}}}"));

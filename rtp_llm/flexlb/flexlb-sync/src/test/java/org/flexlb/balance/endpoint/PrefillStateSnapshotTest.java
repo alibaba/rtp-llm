@@ -57,7 +57,7 @@ class PrefillStateSnapshotTest {
         pressure.observe(waitingCount, 0L);
         state.configureEngineQueueAdmission(pressure::state);
         state.configureEngineQueueDispatchBlocked(pressure::dispatchBlocked);
-        state.enableTokenWorkload(1L);
+        state.enableTokenWorkload();
         var accepted = new java.util.concurrent.ConcurrentLinkedQueue<PrefillState.RouteReservation>();
         var start = new CountDownLatch(1);
         try (var threads = Executors.newFixedThreadPool(8)) {
@@ -97,7 +97,7 @@ class PrefillStateSnapshotTest {
         pressure.observe(0L, 0L);
         state.configureEngineQueueAdmission(pressure::state);
         state.configureEngineQueueDispatchBlocked(pressure::dispatchBlocked);
-        state.enableTokenWorkload(1L);
+        state.enableTokenWorkload();
         var route = item(88);
         var lease = state.reserveUnqueuedRoute(route, 1, 1).reservation();
         try (var handoff = EndpointTestSupport.commitRoutes(state, List.of(route), List.of(lease), generation.tryAcquireHandoff())) {
@@ -145,7 +145,7 @@ class PrefillStateSnapshotTest {
         pressure.observe(0L, 0L);
         state.configureEngineQueueAdmission(pressure::state);
         state.configureEngineQueueDispatchBlocked(pressure::dispatchBlocked);
-        state.enableTokenWorkload(1L);
+        state.enableTokenWorkload();
         var lease = state.reserveUnqueuedRoute(item(87), 1, 2).reservation();
         assertNotNull(lease);
         var active = task(87, TaskPhase.RUNNING, 0L, 0L);
@@ -174,7 +174,7 @@ class PrefillStateSnapshotTest {
         pressure.observe(0, 0);
         state.configureEngineQueueAdmission(pressure::state);
         state.configureEngineQueueDispatchBlocked(pressure::dispatchBlocked);
-        state.enableTokenWorkload(1);
+        state.enableTokenWorkload();
         var first = item(91);
         var second = item(92);
         enqueue(first); enqueue(second);
@@ -198,7 +198,7 @@ class PrefillStateSnapshotTest {
     @Test
     void unconfirmedCleanupRetryIsBoundedAndRotatesAcrossRequests() {
         state.configureEngineQueueAdmission(() -> EngineQueueAdmission.State.AVAILABLE);
-        state.enableTokenWorkload(1L);
+        state.enableTokenWorkload();
         for (long id = 200; id < 203; id++) {
             var route = item(id);
             var lease = state.reserveUnqueuedRoute(route, 1, 3).reservation();
@@ -221,7 +221,7 @@ class PrefillStateSnapshotTest {
     @Test
     void orphanTtlCannotEraseADispatchedRequestBeforeItsFirstEngineReport() {
         state.configureEngineQueueAdmission(() -> EngineQueueAdmission.State.AVAILABLE);
-        state.enableTokenWorkload(1L);
+        state.enableTokenWorkload();
         var route = item(301);
         var lease = state.reserveUnqueuedRoute(route, 1, 1).reservation();
         try (var committed = EndpointTestSupport.commitRoutes(state, List.of(route), List.of(lease), generation.tryAcquireHandoff())) {
@@ -238,8 +238,8 @@ class PrefillStateSnapshotTest {
     }
 
     @Test
-    void tokenReservationsAreCanonicalAndBackpressureAllowsOneOversizedRequest() {
-        state.enableTokenWorkload(90);
+    void tokenReservationsRemainCanonicalWithoutTokenBackpressure() {
+        state.enableTokenWorkload();
         var first = item(1001);
         when(first.hitCache()).thenReturn(20L);
         enqueue(first);
@@ -247,31 +247,39 @@ class PrefillStateSnapshotTest {
         assertNull(state.updateQueue(PrefillState.QueueChange.ENQUEUE, first, 0, 0));
         assertEquals(80, state.tokenWorkload().pendingTokens());
         var second = item(1002);
-        enqueue(second); // admitted below the cap, then crosses it
+        enqueue(second);
         assertEquals(180, state.tokenWorkload().pendingTokens());
-        assertNull(state.updateQueue(PrefillState.QueueChange.ENQUEUE, item(1003), 0, 0));
+        var third = item(1003);
+        enqueue(third);
+        assertEquals(280, state.tokenWorkload().pendingTokens());
+        state.release(null, third);
         state.release(null, first); state.release(null, first);
         assertEquals(100, state.tokenWorkload().pendingTokens());
         state.release(null, second);
         assertEquals(0, state.tokenWorkload().score());
         var big = item(1004);
-        when(big.seqLen()).thenReturn(1_000_000L);
+        when(big.seqLen()).thenReturn(3_000_000L);
         var reservation = state.reserveUnqueuedRoute(big, 1, 0).reservation();
         assertNotNull(reservation);
-        assertEquals(1_000_000, state.tokenWorkload().pendingTokens());
-        assertNull(state.reserveUnqueuedRoute(item(1005), 1, 0).reservation());
+        assertEquals(3_000_000, state.tokenWorkload().pendingTokens());
+        var next = state.reserveUnqueuedRoute(item(1005), 1, 0).reservation();
+        assertNotNull(next);
+        state.release(next, null);
         state.release(reservation, null);
         assertEquals(0, state.tokenWorkload().score());
     }
 
-    @Test
-    void engineQueueOverrideBypassesTokenWaterlineButRetainsRequestLimit() {
-        var allowed = new java.util.concurrent.atomic.AtomicBoolean(false);
-        state.enableTokenWorkload(90, allowed::get);
-        var first = state.reserveUnqueuedRoute(item(4001), 1, 2).reservation();
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(value = EngineQueueAdmission.State.class,
+            names = {"UNKNOWN", "AVAILABLE"})
+    void tokenVolumeDoesNotGateAdmissionButRequestLimitStillApplies(EngineQueueAdmission.State queueState) {
+        state.configureEngineQueueAdmission(() -> queueState);
+        state.enableTokenWorkload();
+        var large = item(4001);
+        when(large.seqLen()).thenReturn(3_000_000L);
+        var first = state.reserveUnqueuedRoute(large, 1, 2).reservation();
         assertNotNull(first);
-        assertNull(state.reserveUnqueuedRoute(item(4002), 1, 2).reservation());
-        allowed.set(true);
+        assertEquals(3_000_000L, state.tokenWorkload().pendingTokens());
         var second = state.reserveUnqueuedRoute(item(4002), 1, 2).reservation();
         assertNotNull(second);
         assertNull(state.reserveUnqueuedRoute(item(4003), 1, 2).reservation());
@@ -280,10 +288,10 @@ class PrefillStateSnapshotTest {
     }
 
     @Test
-    void engineQueuePolicyBypassesTokensButNeverTheRequestLimit() {
+    void engineQueuePolicyPreservesTheRequestLimitAndBlocksCongestion() {
         var pressure = new java.util.concurrent.atomic.AtomicReference<>(EngineQueueAdmission.State.AVAILABLE);
         state.configureEngineQueueAdmission(pressure::get);
-        state.enableTokenWorkload(90);
+        state.enableTokenWorkload();
         var leases = new java.util.ArrayList<PrefillState.RouteReservation>();
         for (int i = 0; i < 2; i++) {
             var lease = state.reserveUnqueuedRoute(item(5000 + i), 1, 2).reservation();
@@ -316,7 +324,7 @@ class PrefillStateSnapshotTest {
         pressure.observe(waiting, 0L);
         assertEquals(EngineQueueAdmission.State.AVAILABLE, pressure.state());
         state.configureEngineQueueAdmission(pressure::state);
-        state.enableTokenWorkload(1L);
+        state.enableTokenWorkload();
         var accepted = new java.util.concurrent.ConcurrentLinkedQueue<PrefillState.RouteReservation>();
         var start = new CountDownLatch(1);
         try (var threads = Executors.newFixedThreadPool(8)) {
@@ -345,7 +353,7 @@ class PrefillStateSnapshotTest {
     @Test
     void lowEngineWaitingNeverBypassesBatchSlots() {
         state.configureEngineQueueAdmission(() -> EngineQueueAdmission.State.AVAILABLE);
-        state.enableTokenWorkload(1L);
+        state.enableTokenWorkload();
         var first = state.reserveUnqueuedBatch(item(7001), 7001L, 1, generation.tryAcquireHandoff()).reservation();
         assertNotNull(first);
         try {
@@ -1569,10 +1577,9 @@ class PrefillStateSnapshotTest {
     }
 
     @ParameterizedTest
-    @org.junit.jupiter.params.provider.CsvSource({"BATCH,false,false", "NON_BATCH,false,false", "BATCH,true,false", "NON_BATCH,true,false",
-            "BATCH,false,true", "NON_BATCH,false,true", "BATCH,true,true", "NON_BATCH,true,true"})
-    void terminalReleasesOriginalReservationAndRetainsConsistentHistory(DispatcherConfig.Type mode, boolean history, boolean cold) {
-        state.enableTokenWorkload(1_000_000, () -> false, history ? 10_000 : 0);
+    @org.junit.jupiter.params.provider.CsvSource({"BATCH,false", "NON_BATCH,false", "BATCH,true", "NON_BATCH,true"})
+    void terminalReleasesOriginalReservationWithoutRetainingHistory(DispatcherConfig.Type mode, boolean cold) {
+        state.enableTokenWorkload();
         var request = item(71);
         when(request.coldTokenBalance()).thenReturn(cold);
         if (mode == DispatcherConfig.Type.BATCH) {
@@ -1591,17 +1598,16 @@ class PrefillStateSnapshotTest {
         terminal.setPrefixLength(90L);
         reconcile(Map.of("71", terminal), Map.of(), unused -> 0L);
         assertEquals(0, state.tokenWorkload().pendingTokens());
-        int completed = history ? cold ? 100 : 10 : 0;
-        assertEquals(completed, state.tokenWorkload().score());
+        assertEquals(0, state.tokenWorkload().score());
         enqueue(item(72));
-        assertEquals(completed + 100, state.tokenWorkload().score());
+        assertEquals(100, state.tokenWorkload().score());
         reconcile(Map.of("71", terminal), Map.of(), unused -> 0L);
-        assertEquals(completed + 100, state.tokenWorkload().score(), "duplicate terminal neither releases nor records twice");
+        assertEquals(100, state.tokenWorkload().score(), "duplicate terminal must not release another reservation");
     }
 
     @Test
     void duplicateTerminalReportsMergeBeforeBatchAggregationAndReleaseOnce() {
-        state.enableTokenWorkload(1_000_000);
+        state.enableTokenWorkload();
         commitBatch(List.of(item(1), item(2)), 300L);
         var finished = Map.of("first-success", task(1, null, 0L, 100L),
                 "first-failure", task(1, null, 500L, 700L),
@@ -1763,7 +1769,7 @@ class PrefillStateSnapshotTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void engineAndLocalTokensDeduplicateInEitherArrivalOrderAndSurviveCancellation(boolean localFirst) {
-        state.enableTokenWorkload(1_000_000);
+        state.enableTokenWorkload();
         var local = item(81);
         var active = task(81, TaskPhase.RECEIVED, 0L, 0L);
         active.setBatchId(0L);
@@ -1797,7 +1803,7 @@ class PrefillStateSnapshotTest {
 
     @Test
     void engineTokenChangesWakeCapacityWaitersEvenWhenRequestCountsStayEqual() {
-        state.enableTokenWorkload(1000);
+        state.enableTokenWorkload();
         var active = task(82, TaskPhase.RECEIVED, 0L, 0L);
         active.setInputLength(200L);
         reconcile(Map.of(), Map.of("82", active), unused -> 0L);
@@ -1813,7 +1819,7 @@ class PrefillStateSnapshotTest {
 
     @Test
     void engineBatchIdentityFencesCoverageAndPriorityOverlaysDoNotAddWork() {
-        state.enableTokenWorkload(1000);
+        state.enableTokenWorkload();
         var local = item(83);
         enqueue(local);
         var active = task(83, TaskPhase.RECEIVED, 0L, 0L);
@@ -1844,7 +1850,7 @@ class PrefillStateSnapshotTest {
     @ParameterizedTest
     @ValueSource(longs = {-1L, 0L})
     void concurrentEngineObservationAndLocalReleaseRetainExactlyOneCopy(long wireBatchId) throws Exception {
-        state.enableTokenWorkload(1_000_000);
+        state.enableTokenWorkload();
         try (var threads = Executors.newFixedThreadPool(2)) {
             for (int i = 0; i < 32; i++) {
                 var local = item(9000 + i);
@@ -1873,8 +1879,8 @@ class PrefillStateSnapshotTest {
     }
 
     @Test
-    void observedWorkAndOptionalCompletionWindowDoNotDoubleCount() {
-        state.enableTokenWorkload(1000, () -> false, 10_000L);
+    void completedObservedWorkLeavesNoRoutingLoad() {
+        state.enableTokenWorkload();
         var local = item(85);
         commitBatch(List.of(local), 100L);
         var task = task(85, TaskPhase.RUNNING, 0L, 10L);
@@ -1883,9 +1889,9 @@ class PrefillStateSnapshotTest {
         assertEquals(100, state.tokenWorkload().score());
         reconcile(Map.of("85", task), Map.of("85", task), unused -> 0L);
         assertEquals(0, state.tokenWorkload().pendingTokens());
-        assertEquals(100, state.tokenWorkload().completedTokens());
+        assertEquals(0, state.tokenWorkload().score());
         reconcile(Map.of("85", task), Map.of(), unused -> 0L);
-        assertEquals(100, state.tokenWorkload().score());
+        assertEquals(0, state.tokenWorkload().score());
     }
 
     private PrefillState.StatusReconciliation reconcile(Map<String, TaskInfo> finished, Map<String, TaskInfo> active,
@@ -1958,7 +1964,7 @@ class PrefillStateSnapshotTest {
         pressure.observe(2L, 0L);
         state.configureEngineQueueAdmission(pressure::state);
         state.configureEngineQueueDispatchBlocked(pressure::dispatchBlocked);
-        state.enableTokenWorkload(200_000L, () -> true);
+        state.enableTokenWorkload();
         var running = new java.util.HashMap<String, TaskInfo>();
         for (long id = 91; id <= 93; id++) {
             var hot = item(id);
