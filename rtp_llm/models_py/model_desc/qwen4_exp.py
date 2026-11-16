@@ -911,7 +911,9 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             )
             if use_segments:
                 hidden_states, hyper_states, inject_weights = segments[0].run(
-                    self._prefill_attn_hc, *hc_inputs
+                    self._prefill_attn_hc,
+                    *hc_inputs,
+                    capture_eager=self._prefill_attn_hc_private,
                 )
             else:
                 hidden_states, hyper_states, inject_weights = self._prefill_attn_hc(
@@ -930,7 +932,11 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             hidden_states = self.self_attn(**attn_kwargs)
         if use_segments:
             return segments[1].run(
-                self._prefill_hc_moe, hyper_states, hidden_states, inject_weights
+                self._prefill_hc_moe,
+                hyper_states,
+                hidden_states,
+                inject_weights,
+                capture_eager=self._prefill_hc_moe_private,
             )
         if use_compact_moe:
             return compact_moe.run(
@@ -948,6 +954,16 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
         if pending_injection:
             return self.attn_hyper_connection.forward_with_injection(
                 hyper_states, *pending_injection
+            )
+        return self.attn_hyper_connection(hyper_states)
+
+    def _prefill_attn_hc_private(self, hyper_states, *pending_injection):
+        # Deferred injection otherwise allocates a wide residual retained by
+        # every layer graph. Only graph-owned copies may be updated in place;
+        # hc_moe consumes this stage's residual before the next hc_attn replay.
+        if pending_injection:
+            return self.attn_hyper_connection.forward_with_injection(
+                hyper_states, *pending_injection, inplace_residual=True
             )
         return self.attn_hyper_connection(hyper_states)
 

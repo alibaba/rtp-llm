@@ -263,7 +263,7 @@ def reuse_moe_input_slot(slot, result):
 def reuse_hc_moe_slots(slots, outputs):
     """Publish HC outputs into private slots after their inputs are consumed."""
     if not isinstance(outputs, tuple) or len(slots) != 3 or len(outputs) != 3:
-        raise RuntimeError("Compact HC/MoE output must match its private input slots")
+        raise RuntimeError("HC/MoE output must match its private input slots")
     for slot, output in zip(slots, outputs):
         if output is not slot:
             reuse_moe_input_slot(slot, output)
@@ -362,11 +362,13 @@ class StaticPrefillSegment:
                 self.mega._prefill_graph_recording = True
             try:
                 with torch.cuda.graph(graph, pool=pool, stream=stream):
-                    # Compact HC writes its residual directly into a private
-                    # slot, then publishes the smaller outputs. Standalone
-                    # 3072-row MoE retains its original distinct output;
+                    # Both HC/MoE paths write the residual into a private slot,
+                    # then publish the smaller outputs. Attention/cache consumes
+                    # the previous stage before these slots are reused, so full
+                    # static shapes need not retain outputs for every layer.
+                    # Standalone 3072-row MoE retains its original distinct output;
                     # other MoE shapes reclaim outputs through their input.
-                    if compact:
+                    if self.name in ("hc_moe", "hc_moe_compact"):
                         output = reuse_hc_moe_slots(static, captured(*static))
                     elif self.name == "moe" and x.shape[0] != 3072:
                         output = reuse_moe_input_slot(static[0], captured(*static))

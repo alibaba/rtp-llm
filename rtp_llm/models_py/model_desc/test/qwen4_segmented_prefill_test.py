@@ -214,18 +214,26 @@ class SegmentPolicyTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "private input slots"):
                 module.reuse_hc_moe_slots(slots, outputs)
 
-    def test_compact_fallback_never_calls_private_mutating_function(self):
-        admission = module.SegmentAdmission()
-        segment = module.StaticPrefillSegment(0, "hc_moe_compact", admission)
-        private = SimpleNamespace()
-        with patch.object(module, "require_rank_agreement") as collective:
-            for rows in (768, 3072, 5376):
-                x = torch.ones(rows, 4)
-                output = segment.run(lambda t: t + 1, x, capture_eager=private)
-                self.assertTrue(torch.equal(output, x + 1))
-                self.assertTrue(torch.equal(x, torch.ones_like(x)))
-            collective.assert_not_called()
-        self.assertEqual(segment.graphs, {})
+    def test_hc_fallback_never_calls_private_mutating_function(self):
+        for name, shapes in (
+            ("hc_attn", (512, 2048, 6144, 8192)),
+            ("hc_moe", (512, 2048, 6144, 8192)),
+            ("hc_moe_compact", (768, 3072, 5376)),
+        ):
+            with self.subTest(segment=name):
+                segment = module.StaticPrefillSegment(
+                    0, name, module.SegmentAdmission()
+                )
+                with patch.object(module, "require_rank_agreement") as collective:
+                    for rows in shapes:
+                        x = torch.ones(rows, 4)
+                        output = segment.run(
+                            lambda t: t + 1, x, capture_eager=SimpleNamespace()
+                        )
+                        self.assertTrue(torch.equal(output, x + 1))
+                        self.assertTrue(torch.equal(x, torch.ones_like(x)))
+                    collective.assert_not_called()
+                self.assertEqual(segment.graphs, {})
 
     def test_all_hot_shapes_fit_shared_budget_without_non_hot_promotion(self):
         with patch.dict(os.environ, {}, clear=True):
