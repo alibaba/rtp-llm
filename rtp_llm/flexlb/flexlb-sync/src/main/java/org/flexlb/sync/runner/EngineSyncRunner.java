@@ -28,9 +28,17 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.stream.Collectors;
 
+/**
+ * One synchronization cycle for a model role: discovers workers, retires missing
+ * generations, and submits per-worker status and cache polls to their executors.
+ * Cache cadence is checked before a poll lease is allocated or a task is submitted.
+ */
 public class EngineSyncRunner implements Runnable {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
+
+    /** Decode engines only need cache metadata once per second. */
+    private static final long DECODE_CACHE_METADATA_INTERVAL_MS = 1_000L;
 
     private final String modelName;
 
@@ -151,9 +159,19 @@ public class EngineSyncRunner implements Runnable {
 
             logger.debug("Submitting status check tasks for {} workers", latestEngineWorkerList.size());
             // Check cadence before allocating a cache poll or submitting a task.
-            boolean pollCacheThisCycle = !roleType.requiresCacheKeys()
-                    || syncCycleId % Math.max(cacheIntervalService.getCurrentIntervalMs()
-                            / syncEngineStatusInterval, 1L) == 0L;
+            // Decode engines only need cache metadata once per second; status
+            // polls keep capacity updates and monitoring at the status cadence.
+            boolean pollCacheThisCycle;
+            if (roleType == RoleType.DECODE) {
+                long intervalCycles = Math.max(
+                        1L + (DECODE_CACHE_METADATA_INTERVAL_MS - 1L)
+                                / syncEngineStatusInterval, 1L);
+                pollCacheThisCycle = syncCycleId % intervalCycles == 0L;
+            } else {
+                pollCacheThisCycle = !roleType.requiresCacheKeys()
+                        || syncCycleId % Math.max(cacheIntervalService.getCurrentIntervalMs()
+                                / syncEngineStatusInterval, 1L) == 0L;
+            }
             for (WorkerHost host : latestEngineWorkerList) {
                 String workerIpPort = host.getIpPort();
                 String site = host.getSite();
@@ -198,7 +216,11 @@ public class EngineSyncRunner implements Runnable {
                     logger.debug("Skip status check for worker: {}, previous request in progress", workerIpPort);
                 }
 
-                if (!pollCacheThisCycle) { continue; }
+                // A decode worker without cache metadata yet must not wait for
+                // the next one-second tick.
+                boolean cacheMetadataMissing = roleType == RoleType.DECODE
+                        && workerStatus.getCacheStatus() == null;
+                if (!pollCacheThisCycle && !cacheMetadataMissing) { continue; }
                 WorkerStatus.PollLease cachePollLease =
                         workerStatus.tryBeginCachePoll(syncCycleId);
                 if (cachePollLease != null) {

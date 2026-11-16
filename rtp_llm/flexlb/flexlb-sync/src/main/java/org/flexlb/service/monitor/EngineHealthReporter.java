@@ -72,7 +72,9 @@ import static org.flexlb.constant.MetricConstant.ZK_MASTER_EVENT;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_NODE;
 
 /**
- * Engine health reporter for monitoring engine status and metrics
+ * Reports engine status, cache poll, and selection metrics to the monitor.
+ * Gauge registration happens once at startup; the report methods run on
+ * poll callbacks and must stay side-effect free beyond reporting.
  */
 @Component
 public class EngineHealthReporter {
@@ -287,6 +289,12 @@ public class EngineHealthReporter {
                             ENGINE_RUNNING_QUEUE_TIME, metricTags, value));
         }
 
+        if (status.role() == RoleType.DECODE) {
+            // Decode cache polls run at the one-second metadata cadence; keep
+            // decode KV capacity reporting at the status cadence.
+            reportKvCapacity(modelName, topology, status);
+        }
+
         monitor.report(ENGINE_FINISHED_TASK_LIST_SIZE, metricTags, finishedTaskListSize);
         monitor.report(ENGINE_RUNNING_TASK_INFO_SIZE, metricTags, runningTaskInfoSize);
     }
@@ -323,6 +331,13 @@ public class EngineHealthReporter {
             monitor.report(CACHE_KEY_SIZE, engineMetricTags, cacheKeySize);
         }
 
+        reportKvCapacity(modelName, topology, status);
+    }
+
+    /** Report KV capacity gauges from the committed engine status observation. */
+    private void reportKvCapacity(String modelName,
+                                  WorkerStatus.TopologySnapshot topology,
+                                  WorkerStatus.EngineObservation status) {
         long totalKvCacheTokens = status.totalKvCacheTokens();
         long availableKvCacheTokens = status.availableKvCacheTokens();
         long usedKvCacheTokens = totalKvCacheTokens - availableKvCacheTokens;

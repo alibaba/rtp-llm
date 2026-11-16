@@ -5,6 +5,7 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.cache.service.DynamicCacheIntervalService;
 import org.flexlb.config.ConfigService;
+import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -468,6 +469,85 @@ class EngineSyncRunnerTest {
 
         verify(engineHealthReporter).reportRunningLoadVariance(
                 modelName, RoleType.PREFILL.toString(), 200.0);
+    }
+
+    @Test
+    void decodeCacheMetadataFollowsOneSecondCadence() {
+        ExecutorService statusExecutor = Mockito.mock(ExecutorService.class);
+        ExecutorService cacheExecutor = Mockito.mock(ExecutorService.class);
+        WorkerHost host = WorkerHost.of("127.0.0.1", 8080);
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.DECODE))
+                .thenReturn(List.of(host));
+        List<Runnable> submitted = new ArrayList<>();
+        when(statusExecutor.submit(any(Runnable.class))).thenAnswer(invocation -> {
+            submitted.add(invocation.getArgument(0));
+            return CompletableFuture.completedFuture(null);
+        });
+        when(cacheExecutor.submit(any(Runnable.class))).thenAnswer(invocation -> {
+            submitted.add(invocation.getArgument(0));
+            return CompletableFuture.completedFuture(null);
+        });
+        WorkerStatus status = RunnerTestSupport.discovered(
+                RoleType.DECODE, host.getGroup(), "127.0.0.1",
+                8080, host.getGrpcPort(), host.getSite());
+        discover(workerDirectory, status);
+        publishCacheMetadata(status, CacheStatus.builder()
+                .version(1L).blockSize(128L).build());
+
+        // 200ms status ticks give a 5-cycle one-second decode cadence.
+        runDecodeCycle(statusExecutor, cacheExecutor, 4L);
+        assertEquals(1, submitted.size());
+        assertTrue(submitted.getFirst() instanceof GrpcWorkerStatusRunner,
+                "status polls keep the status cadence");
+
+        runDecodeCycle(statusExecutor, cacheExecutor, 5L);
+        assertEquals(2, submitted.size());
+        assertTrue(submitted.get(1) instanceof GrpcCacheStatusCheckRunner,
+                "decode cache metadata is polled on the one-second tick");
+    }
+
+    @Test
+    void decodeCacheMetadataInitializesBeforeFirstSuccessfulPoll() {
+        ExecutorService statusExecutor = Mockito.mock(ExecutorService.class);
+        ExecutorService cacheExecutor = Mockito.mock(ExecutorService.class);
+        when(workerAddressService.getEngineWorkerList(modelName, RoleType.DECODE))
+                .thenReturn(List.of(WorkerHost.of("127.0.0.1", 8080)));
+        List<Runnable> submitted = new ArrayList<>();
+        when(statusExecutor.submit(any(Runnable.class))).thenAnswer(invocation -> {
+            submitted.add(invocation.getArgument(0));
+            return CompletableFuture.completedFuture(null);
+        });
+        when(cacheExecutor.submit(any(Runnable.class))).thenAnswer(invocation -> {
+            submitted.add(invocation.getArgument(0));
+            return CompletableFuture.completedFuture(null);
+        });
+
+        // A fresh decode worker has no cache metadata; a non-due cycle must
+        // still fetch it immediately instead of waiting for the next tick.
+        runDecodeCycle(statusExecutor, cacheExecutor, 4L);
+
+        assertEquals(2, submitted.size());
+        assertTrue(submitted.getFirst() instanceof GrpcWorkerStatusRunner);
+        assertTrue(submitted.get(1) instanceof GrpcCacheStatusCheckRunner);
+    }
+
+    private void runDecodeCycle(
+            ExecutorService statusExecutor, ExecutorService cacheExecutor, long cycleId) {
+        new EngineSyncRunner(
+                modelName, workerDirectory, workerAddressService,
+                statusExecutor, cacheExecutor, statusExecutor,
+                engineHealthReporter, engineGrpcService, RoleType.DECODE,
+                localKvCacheAwareManager, cacheIntervalService,
+                syncRequestTimeoutMs, cycleId, 200L, false).run();
+    }
+
+    private static void publishCacheMetadata(WorkerStatus status, CacheStatus cacheStatus) {
+        status.cacheMutationLock.lock();
+        try {
+            status.publishCacheStatus(cacheStatus);
+        } finally {
+            status.cacheMutationLock.unlock();
+        }
     }
 
     private EngineSyncRunner varianceRunner(WorkerDirectory directory) {
