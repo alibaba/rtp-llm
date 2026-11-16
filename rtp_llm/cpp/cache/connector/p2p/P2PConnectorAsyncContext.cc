@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <functional>
 #include <limits>
+#include <random>
 #include <set>
 
 namespace rtp_llm {
@@ -18,6 +19,10 @@ constexpr int64_t kLeasePollInitialIntervalMs = 10;
 constexpr int64_t kLeasePollMaxIntervalMs     = 100;
 constexpr int64_t kLeasePollRpcTimeoutMs      = 500;
 constexpr int64_t kRetainedKvExitGraceMs      = 30 * 1000;
+constexpr int     kBasisPointsPerPercent     = 100;
+constexpr int     kBasisPointsPerWhole       = 100 * kBasisPointsPerPercent;
+constexpr int     kDefaultRetainedKvMinPercent = 30;
+constexpr int     kDefaultRetainedKvMaxPercent = 70;
 
 const char* readOutcomeHoldReason(ErrorCode error_code) {
     switch (error_code) {
@@ -667,7 +672,18 @@ bool P2PConnectorAsyncReadContextChecker::init(const kmonitor::MetricsReporterPt
         RTP_LLM_LOG_ERROR("P2P lease checker requires nonzero total KV capacity");
         return false;
     }
-    kv_leak_exit_threshold_percent_ = config.p2p_kv_leak_exit_threshold_percent;
+    const int configured_percent = config.p2p_kv_leak_exit_threshold_percent;
+    kv_leak_exit_threshold_bps_ = configured_percent * kBasisPointsPerPercent;
+    if (configured_percent == kDefaultRetainedKvMinPercent) {
+        // Sample once per checker to spread restarts across Decode instances.
+        std::mt19937 generator{std::random_device{}()};
+        std::uniform_int_distribution<int> threshold(kDefaultRetainedKvMinPercent * kBasisPointsPerPercent,
+                                                     kDefaultRetainedKvMaxPercent * kBasisPointsPerPercent);
+        kv_leak_exit_threshold_bps_ = threshold(generator);
+    }
+    RTP_LLM_LOG_INFO("P2P retained KV exit protection: configured_percent=%d effective_percent=%.2f",
+                     config.p2p_kv_leak_exit_threshold_percent,
+                     static_cast<double>(kv_leak_exit_threshold_bps_) / kBasisPointsPerPercent);
     metrics_reporter_    = metrics_reporter;
     tp_broadcast_client_ = tp_broadcast_client;
     control_pool_        = control_pool;
@@ -830,13 +846,13 @@ void P2PConnectorAsyncReadContextChecker::checkRetainedResources(
     const int64_t now_ms = now_us / 1000;
     if (held_contexts > 0 && (last_leak_log_ms_ == 0 || now_ms - last_leak_log_ms_ >= 30 * 1000)) {
         RTP_LLM_LOG_WARNING("P2P retained KV: contexts=%zu held_bytes=%zu total_bytes=%zu held_percent=%.2f "
-                            "exit_threshold_percent=%d oldest_hold_ms=%ld awaiting_cancel=%zu pending_query=%zu "
+                            "exit_threshold_percent=%.2f oldest_hold_ms=%ld awaiting_cancel=%zu pending_query=%zu "
                             "failed_query=%zu awaiting_stop=%zu",
                             held_contexts,
                             held_bytes,
                             total_kv_bytes_,
                             held_percent,
-                            kv_leak_exit_threshold_percent_,
+                            static_cast<double>(kv_leak_exit_threshold_bps_) / kBasisPointsPerPercent,
                             oldest_hold_ms,
                             awaiting_cancel,
                             pending_query,
@@ -847,12 +863,13 @@ void P2PConnectorAsyncReadContextChecker::checkRetainedResources(
         RTP_LLM_LOG_INFO("P2P retained KV: all held resources released after physical stop confirmation");
         last_leak_log_ms_ = 0;
     }
-    if (kv_leak_exit_threshold_percent_ == 0) {
+    if (kv_leak_exit_threshold_bps_ == 0) {
         return;
     }
     // Exact strict comparison without overflowing size_t or rounding percentages.
-    const size_t threshold_bytes = (total_kv_bytes_ / 100) * kv_leak_exit_threshold_percent_
-                                   + (total_kv_bytes_ % 100) * kv_leak_exit_threshold_percent_ / 100;
+    const size_t threshold_bytes =
+        (total_kv_bytes_ / kBasisPointsPerWhole) * kv_leak_exit_threshold_bps_
+        + (total_kv_bytes_ % kBasisPointsPerWhole) * kv_leak_exit_threshold_bps_ / kBasisPointsPerWhole;
     if (held_bytes <= threshold_bytes) {
         retained_kv_over_threshold_since_ms_ = 0;
         return;
@@ -860,19 +877,19 @@ void P2PConnectorAsyncReadContextChecker::checkRetainedResources(
     if (retained_kv_over_threshold_since_ms_ == 0) {
         retained_kv_over_threshold_since_ms_ = now_ms;
         RTP_LLM_LOG_WARNING("P2P retained KV exceeded exit threshold; allowing lease cleanup: "
-                            "held_bytes=%zu total_bytes=%zu exit_threshold_percent=%d grace_ms=%ld",
+                            "held_bytes=%zu total_bytes=%zu exit_threshold_percent=%.2f grace_ms=%ld",
                             held_bytes,
                             total_kv_bytes_,
-                            kv_leak_exit_threshold_percent_,
+                            static_cast<double>(kv_leak_exit_threshold_bps_) / kBasisPointsPerPercent,
                             kRetainedKvExitGraceMs);
     }
     if (now_ms - retained_kv_over_threshold_since_ms_ >= kRetainedKvExitGraceMs) {
         RTP_LLM_LOG_ERROR("P2P retained KV exceeded exit threshold; aborting rank 0 with KV still held: "
-                          "held_bytes=%zu total_bytes=%zu held_percent=%.2f exit_threshold_percent=%d",
+                          "held_bytes=%zu total_bytes=%zu held_percent=%.2f exit_threshold_percent=%.2f",
                           held_bytes,
                           total_kv_bytes_,
                           held_percent,
-                          kv_leak_exit_threshold_percent_);
+                          static_cast<double>(kv_leak_exit_threshold_bps_) / kBasisPointsPerPercent);
         std::abort();
     }
 }
