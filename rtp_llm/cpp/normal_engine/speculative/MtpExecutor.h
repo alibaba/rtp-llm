@@ -237,13 +237,6 @@ protected:
     // correctness while bookkeeping overlaps the next step.
     bool useDropBroadSync() const;
 
-    static bool canSkipFakeStreamDeviceSync(bool is_dspark,
-                                            bool stream_async,
-                                            bool drop_broad_sync,
-                                            bool warm_up,
-                                            bool has_streams,
-                                            bool is_fake_stream);
-
     // Attach next-step device state, then fork a worker that waits on caller-
     // recorded rejection/draft events and runs D2H/specUpdate/KV release off
     // the main thread.
