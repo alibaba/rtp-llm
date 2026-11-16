@@ -73,6 +73,15 @@ void invokeMtpSelectedTokens(const torch::Tensor& tokens,
                              torch::Tensor&       output,
                              cudaStream_t         stream);
 
+// Expand one history row per request and its draft proposal to every Target
+// verification row. output is contiguous [B, rows, width].
+void invokeMtpSpecSamplerTokenMatrix(const torch::Tensor& history,
+                                     const torch::Tensor& draft,
+                                     const torch::Tensor& base_lengths,
+                                     torch::Tensor&       output,
+                                     int64_t              gamma,
+                                     cudaStream_t         stream);
+
 void invokeMtpTargetVerifyPrepare(const torch::Tensor& sequence_lengths,
                                   torch::Tensor&       input_lengths,
                                   torch::Tensor&       prefix_lengths,

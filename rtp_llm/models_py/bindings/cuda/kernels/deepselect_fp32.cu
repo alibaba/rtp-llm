@@ -132,7 +132,7 @@ __device__ __forceinline__ float compactApplyTemperature(float value, float scal
 template<int items>
 __device__ void compactTopKTopPBody(float* dense, const float* selected, const int32_t* selected_ids,
                                   float* compact, int32_t* ids, int32_t* fallback, float* log_normalizer,
-                                  int vocab, float top_p,
+                                  int vocab, int request_top_k, float top_p,
                                   float temperature_scale, bool scale_temperature) {
     constexpr int threads = 256;
     using Sort = cub::BlockRadixSort<float, threads, items, int32_t>;
@@ -158,10 +158,10 @@ __device__ void compactTopKTopPBody(float* dense, const float* selected, const i
     Sort(temporary.sort).SortDescending(values, keys);
     __syncthreads();
     if (threadIdx.x == 0) maximum = values[0];
-    if (threadIdx.x == 255) boundary = values[3];
+    if (threadIdx.x == (request_top_k - 1) / items) boundary = values[(request_top_k - 1) % items];
     __syncthreads();
     if (threadIdx.x == 0) {
-        // Strict TopK: ties outside these 1024 candidates stay excluded.
+        // Strict TopK: candidate slots beyond the request limit stay excluded, even on ties.
         overflow = !isfinite(maximum);
         fallback[row] = overflow;
     }
@@ -171,7 +171,7 @@ __device__ void compactTopKTopPBody(float* dense, const float* selected, const i
 #pragma unroll
     for (int i = 0; i < items; ++i) {
         const int slot = threadIdx.x * items + i;
-        probabilities[i] = slot < 1024 ? expf(values[i] - maximum) : 0.0f;
+        probabilities[i] = slot < request_top_k ? expf(values[i] - maximum) : 0.0f;
         subtotal += probabilities[i];
     }
     const float sum = Reduce(temporary.reduce).Sum(subtotal);
@@ -182,7 +182,7 @@ __device__ void compactTopKTopPBody(float* dense, const float* selected, const i
     float first = 1024;
 #pragma unroll
     for (int i = 0; i < items; ++i)
-        if (threadIdx.x * items + i < 1024 && prefix[i] >= top_p * total)
+        if (threadIdx.x * items + i < request_top_k && prefix[i] >= top_p * total)
             first = fminf(first, static_cast<float>(threadIdx.x * items + i));
     const float first_global = Reduce(temporary.reduce).Reduce(first, cuda::minimum<float>());
     if (threadIdx.x == 0) {
@@ -198,7 +198,7 @@ __device__ void compactTopKTopPBody(float* dense, const float* selected, const i
     for (int i = 0; i < items; ++i) {
         const int slot = threadIdx.x * items + i;
         if (slot < 1024) {
-            compact[row * 1024 + slot] = values[i] >= cutoff ? values[i] : -INFINITY;
+            compact[row * 1024 + slot] = slot < request_top_k && values[i] >= cutoff ? values[i] : -INFINITY;
             ids[row * 1024 + slot] = keys[i];
         }
     }
@@ -206,7 +206,7 @@ __device__ void compactTopKTopPBody(float* dense, const float* selected, const i
         float retained = 0.0f;
 #pragma unroll
         for (int i = 0; i < items; ++i)
-            retained += values[i] >= cutoff ? probabilities[i] : 0.0f;
+            retained += threadIdx.x * items + i < request_top_k && values[i] >= cutoff ? probabilities[i] : 0.0f;
         const float mass = Reduce(temporary.reduce).Sum(retained);
         if (threadIdx.x == 0)
             log_normalizer[row] = overflow ? nanf("") : maximum + logf(mass);
@@ -223,12 +223,13 @@ __device__ void compactTopKTopPBody(float* dense, const float* selected, const i
 }
 
 __global__ void compactTopKTopP(float* dense, const float* selected, const int32_t* selected_ids,
-                               float* compact, int32_t* ids, int32_t* fallback, float* log_normalizer, int vocab, float top_p,
+                               float* compact, int32_t* ids, int32_t* fallback, float* log_normalizer, int vocab,
+                               int request_top_k, float top_p,
                                float temperature) {
     const bool scale_temperature = temperature != 1.0f;
     const float temperature_scale = scale_temperature ? compactTemperatureScale(temperature) : 1.0f;
     compactTopKTopPBody<4>(dense, selected, selected_ids, compact, ids, fallback, log_normalizer,
-                          vocab, top_p, temperature_scale, scale_temperature);
+                          vocab, request_top_k, top_p, temperature_scale, scale_temperature);
 }
 
 __global__ void deferredMaskLogits(float* logits, const float* thresholds, int vocab) {
@@ -245,9 +246,11 @@ __global__ void deferredMaskLogits(float* logits, const float* thresholds, int v
 #endif
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
-deferred_compact_topk_topp(const torch::Tensor& logits, int64_t k, float top_p, float temperature, torch::Tensor* log_normalizer) {
+deferred_compact_topk_topp(const torch::Tensor& logits, int64_t k, float top_p, float temperature,
+                           torch::Tensor* log_normalizer, int64_t request_top_k) {
 #if defined(RTP_DEEPSELECT_FP32_ENABLED) && !defined(USE_ROCM)
-    if (k != 1024 || !logits.is_cuda() || logits.scalar_type() != torch::kFloat32 || logits.dim() != 2
+    if (k != 1024 || request_top_k < 2 || request_top_k > k || !logits.is_cuda()
+        || logits.scalar_type() != torch::kFloat32 || logits.dim() != 2
         || !logits.is_contiguous() || logits.size(1) <= k || logits.size(1) >= MAX_VOCAB_SIZE
         || logits.size(0) > 65535 || logits.stride(0) % 256 != 0
         || reinterpret_cast<uintptr_t>(logits.data_ptr()) % 16 != 0 || !(top_p > 0 && top_p <= 1)
@@ -257,8 +260,8 @@ deferred_compact_topk_topp(const torch::Tensor& logits, int64_t k, float top_p, 
     if (properties->major != 10 || (properties->minor != 0 && properties->minor != 3)) return {};
     const c10::cuda::CUDAGuard guard(logits.device());
     const auto stream = at::cuda::getCurrentCUDAStream(logits.get_device());
-    if (temperature != 1.0f) {
-        // A captured scalar would freeze temperature instead of replaying its tensor upload.
+    if (temperature != 1.0f || request_top_k != 1024) {
+        // Captured scalars would freeze temperature or the request's Top-K on replay.
         cudaStreamCaptureStatus capture_status;
         C10_CUDA_CHECK(cudaStreamIsCapturing(stream.stream(), &capture_status));
         if (capture_status != cudaStreamCaptureStatusNone)
@@ -274,7 +277,7 @@ deferred_compact_topk_topp(const torch::Tensor& logits, int64_t k, float top_p, 
             logits.data_ptr<float>(), std::get<0>(selected).data_ptr<float>(),
             std::get<1>(selected).data_ptr<int32_t>(), compact.data_ptr<float>(), ids.data_ptr<int32_t>(),
             fallback.data_ptr<int32_t>(), log_normalizer ? log_normalizer->data_ptr<float>() : nullptr,
-            logits.size(1), top_p, temperature);
+            logits.size(1), static_cast<int>(request_top_k), top_p, temperature);
         C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
     return {compact, ids, fallback};

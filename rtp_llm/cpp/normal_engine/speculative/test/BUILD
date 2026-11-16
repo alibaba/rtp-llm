@@ -33,7 +33,7 @@ cc_test(
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ] + torch_deps() + cuda13_torch_link_deps,
-    args = ["--gtest_filter=*DeferredTargetSamplingEligibility"],
+    args = ["--gtest_filter=*DeferredTargetSamplingEligibility:*Glm5AutoCompactTargetAndInplaceLogits:*Glm5TargetVerifySingleGpuABProfile"],
     env = {"TEST_USING_DEVICE": "CUDA", "RTP_LLM_TEST_PYTHON_SAMPLING": "1"},
     exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
 )

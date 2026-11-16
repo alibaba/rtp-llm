@@ -708,13 +708,15 @@ TEST_F(MtpExecutorTest, testCompactPointMassProposalAndRejection) {
             }
         }
     }
-    // Mapped vocabularies retain the established dense representation.
+    // Mapping the selected token preserves its point-mass distribution.
     spec::FastTopKSampler mapped(torch::arange(7, i32.dtype(torch::kInt64)), true);
-    EXPECT_FALSE(mapped.compactPointMassEnabled());
+    EXPECT_TRUE(mapped.compactPointMassEnabled());
     auto                  mapping = torch::arange(7, i32.dtype(torch::kInt64)).flip({0});
     spec::FastTopKSampler remapped(mapping, true);
     auto                  logits = torch::arange(7, f32).unsqueeze(0);
-    EXPECT_EQ(remapped.forward(logits).token_ids.item<int64_t>(), 0);
+    auto remapped_output = remapped.forward(logits);
+    EXPECT_EQ(remapped_output.token_ids.item<int64_t>(), 0);
+    EXPECT_FALSE(remapped_output.all_probs.defined());
     auto multiple = dense.forward(logits, 3);
     EXPECT_TRUE(torch::equal(multiple.all_probs, torch::softmax(logits, -1)));
     EXPECT_TRUE(torch::equal(multiple.token_ids, std::get<1>(torch::topk(multiple.all_probs, 3, -1))));
