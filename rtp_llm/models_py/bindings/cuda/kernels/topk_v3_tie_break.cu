@@ -16,7 +16,7 @@ namespace {
 namespace impl = device::topk_tie_break;
 namespace base = device::topk;
 
-using base::TopKProblem;
+using base::TypedTopKProblem;
 using Register1 = impl::TopKRegister<1>;
 using Register2 = impl::TopKRegister<2>;
 using Register4 = impl::TopKRegister<4>;
@@ -25,8 +25,9 @@ using Streaming = impl::TopKStreaming;
 constexpr uint32_t kBlockSize = base::TopKConfig::kBlockSize;
 constexpr uint32_t kOccupancy = base::TopKConfig::kOccupancy;
 
+template <typename DType>
 struct Params {
-    const float* __restrict__ scores;
+    const DType* __restrict__ scores;
     const int32_t* __restrict__ row_starts;
     const int32_t* __restrict__ row_ends;
     int32_t* __restrict__ output;
@@ -36,7 +37,7 @@ struct Params {
     uint32_t topk;
     uint32_t max_seq_len;
 
-    __device__ __forceinline__ TopKProblem problem(uint32_t row) const {
+    __device__ __forceinline__ TypedTopKProblem<DType> problem(uint32_t row) const {
         const int32_t requested_start = row_starts[row];
         const int32_t requested_end = row_ends[row];
         const uint32_t start = requested_start <= 0
@@ -45,7 +46,7 @@ struct Params {
         uint32_t end = requested_end <= 0 ? 0u : min(static_cast<uint32_t>(requested_end), score_width);
         end = max(end, start);
         const uint32_t seq_len = min(end - start, max_seq_len);
-        return TopKProblem{
+        return TypedTopKProblem<DType>{
             .in = scores + static_cast<int64_t>(row) * stride + start,
             .out = output + static_cast<int64_t>(row) * topk,
             .raw_out = nullptr,
@@ -57,14 +58,15 @@ struct Params {
     }
 };
 
-__device__ __forceinline__ void trivial(const TopKProblem& problem) {
+template <typename DType>
+__device__ __forceinline__ void trivial(const TypedTopKProblem<DType>& problem) {
     for (uint32_t i = threadIdx.x; i < problem.topk; i += blockDim.x) {
         problem.out[i] = i < problem.seq_len ? static_cast<int32_t>(i) : -1;
     }
 }
 
-template <typename Implementation>
-__device__ __forceinline__ void run_implementation(const TopKProblem& problem, void* smem) {
+template <typename Implementation, typename DType>
+__device__ __forceinline__ void run_implementation(const TypedTopKProblem<DType>& problem, void* smem) {
     const bool aligned = (reinterpret_cast<uintptr_t>(problem.in) & 0xfu) == 0u;
     if (aligned) {
         Implementation::template forward<true>(problem, smem);
@@ -73,11 +75,11 @@ __device__ __forceinline__ void run_implementation(const TopKProblem& problem, v
     }
 }
 
-template <int Level>
+template <int Level, typename DType>
 __global__ __launch_bounds__(kBlockSize, kOccupancy)
-void main_kernel(const __grid_constant__ Params params) {
+void main_kernel(const __grid_constant__ Params<DType> params) {
     device::enable_smem_spilling();
-    const TopKProblem problem = params.problem(blockIdx.x);
+    const TypedTopKProblem<DType> problem = params.problem(blockIdx.x);
     if (problem.seq_len <= problem.topk) {
         trivial(problem);
         return;
@@ -94,7 +96,8 @@ void main_kernel(const __grid_constant__ Params params) {
     }
 }
 
-cudaError_t launch_topk(const Params& params, int64_t k, int64_t max_seq_len, cudaStream_t stream) {
+template <typename DType>
+cudaError_t launch_topk(const Params<DType>& params, int64_t k, int64_t max_seq_len, cudaStream_t stream) {
     if (max_seq_len <= Register1::kMaxSeqLen && (params.rows <= 32 || k <= 1024)) {
         main_kernel<-1><<<params.rows, kBlockSize, 0, stream>>>(params);
     } else if (max_seq_len <= Register2::kMaxSeqLen) {
@@ -105,6 +108,28 @@ cudaError_t launch_topk(const Params& params, int64_t k, int64_t max_seq_len, cu
         main_kernel<2><<<params.rows, kBlockSize, 0, stream>>>(params);
     }
     return cudaGetLastError();
+}
+
+template <typename DType>
+cudaError_t dispatch_topk(const torch::Tensor& scores,
+                          const torch::Tensor& row_starts,
+                          const torch::Tensor& row_ends,
+                          torch::Tensor& output,
+                          int64_t k,
+                          int64_t max_seq_len) {
+    const Params<DType> params{
+        .scores = scores.data_ptr<DType>(),
+        .row_starts = row_starts.data_ptr<int32_t>(),
+        .row_ends = row_ends.data_ptr<int32_t>(),
+        .output = output.data_ptr<int32_t>(),
+        .stride = scores.stride(0),
+        .score_width = static_cast<uint32_t>(scores.size(1)),
+        .rows = static_cast<uint32_t>(scores.size(0)),
+        .topk = static_cast<uint32_t>(k),
+        .max_seq_len = static_cast<uint32_t>(max_seq_len),
+    };
+    const auto stream = at::cuda::getCurrentCUDAStream(scores.get_device());
+    return launch_topk(params, k, max_seq_len, stream);
 }
 
 }  // namespace
@@ -120,9 +145,10 @@ void topk_v3_tie_break(const torch::Tensor& scores,
     TORCH_CHECK(row_starts.device() == scores.device() && row_ends.device() == scores.device() &&
                     output.device() == scores.device(),
                 "scores, row_starts, row_ends, and output must be on the same CUDA device");
-    TORCH_CHECK(scores.dtype() == torch::kFloat32 && row_starts.dtype() == torch::kInt32 &&
+    TORCH_CHECK((scores.dtype() == torch::kFloat32 || scores.dtype() == torch::kBFloat16) &&
+                    row_starts.dtype() == torch::kInt32 &&
                     row_ends.dtype() == torch::kInt32 && output.dtype() == torch::kInt32,
-                "expected float32 scores and int32 row_starts/row_ends/output");
+                "expected float32 or bfloat16 scores and int32 row_starts/row_ends/output");
     TORCH_CHECK(scores.dim() == 2 && scores.stride(1) == 1,
                 "scores must be a dense-last-dimension 2D tensor");
     TORCH_CHECK(row_starts.is_contiguous() && row_ends.is_contiguous() &&
@@ -144,19 +170,9 @@ void topk_v3_tie_break(const torch::Tensor& scores,
     }
 
     const c10::cuda::CUDAGuard device_guard(scores.device());
-    const Params params{
-        .scores = scores.data_ptr<float>(),
-        .row_starts = row_starts.data_ptr<int32_t>(),
-        .row_ends = row_ends.data_ptr<int32_t>(),
-        .output = output.data_ptr<int32_t>(),
-        .stride = scores.stride(0),
-        .score_width = static_cast<uint32_t>(scores.size(1)),
-        .rows = static_cast<uint32_t>(scores.size(0)),
-        .topk = static_cast<uint32_t>(k),
-        .max_seq_len = static_cast<uint32_t>(max_seq_len),
-    };
-    const auto stream = at::cuda::getCurrentCUDAStream(scores.get_device());
-    const cudaError_t error = launch_topk(params, k, max_seq_len, stream);
+    const cudaError_t error = scores.scalar_type() == at::ScalarType::Float ?
+                                 dispatch_topk<float>(scores, row_starts, row_ends, output, k, max_seq_len) :
+                                 dispatch_topk<c10::BFloat16>(scores, row_starts, row_ends, output, k, max_seq_len);
     TORCH_CHECK(error == cudaSuccess,
                 "topk_v3_tie_break launch failed: ", cudaGetErrorString(error));
 }

@@ -334,7 +334,9 @@ class IndexerOp(nn.Module):
         )
         # 2.8.2 stores column j at K[ks[row] + j]; the unfilled tail is unreadable.
         # TopK returns request-local indices for both layouts, so no ks shift is needed.
-        return logits.float(), torch.zeros_like(ks), ke - ks, None
+        if self._prefill_topk_backend != "topk_v3_tie_break":
+            logits = logits.float()
+        return logits, torch.zeros_like(ks), ke - ks, None
 
     def _mqa_weights(self, weights: torch.Tensor) -> torch.Tensor:
         if not self.use_mxfp8:
