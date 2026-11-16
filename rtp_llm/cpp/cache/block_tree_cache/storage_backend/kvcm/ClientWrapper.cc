@@ -1,5 +1,6 @@
 #include "ClientWrapper.h"
 #include "kvcm_client/HostCacheStateCompat.h"
+#include "kvcm_client/TransferClientCompat.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/Subscriber.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -619,7 +620,9 @@ ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                  
     }
     auto* completion = transfer_deadline_owner == this ? transfer_completion : nullptr;
     if (completion) *completion = TransferCompletion::UNKNOWN;
-    auto ec = transfer_clients_[slot->second]->LoadKvCaches(uri_str_vec, block_buffers, trace_info);
+    const int64_t deadline_ms = deadline ?
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline->time_since_epoch()).count() : 0;
+    auto ec = loadSdkKvCaches(*transfer_clients_[slot->second], uri_str_vec, block_buffers, deadline_ms, trace_info);
     if (completion && ec == kv_cache_manager::ClientErrorCode::ER_OK)
         *completion = TransferCompletion::PAYLOAD_COMPLETE;
     if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
@@ -657,7 +660,10 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
     }
     auto* completion = transfer_deadline_owner == this ? transfer_completion : nullptr;
     if (completion) *completion = TransferCompletion::UNKNOWN;
-    auto [ec, result] = transfer_clients_[slot->second]->SaveKvCaches(uri_str_vec, block_buffers, trace_info);
+    const int64_t deadline_ms = deadline ?
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline->time_since_epoch()).count() : 0;
+    auto [ec, result] =
+        saveSdkKvCaches(*transfer_clients_[slot->second], uri_str_vec, block_buffers, deadline_ms, trace_info);
     if (completion && ec == kv_cache_manager::ClientErrorCode::ER_OK)
         *completion = TransferCompletion::PAYLOAD_COMPLETE;
     if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
