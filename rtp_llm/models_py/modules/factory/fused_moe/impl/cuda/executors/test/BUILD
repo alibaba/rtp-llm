@@ -1,6 +1,19 @@
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
 load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm100_py_test")
 
+py_test(
+    name = "deepgemm_sm90_scale_layout_test",
+    srcs = ["deepgemm_sm90_scale_layout_test.py"],
+    deps = [
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
 py_library(
     name = "fused_moe_executor_test_util",
     srcs = ["fused_moe_executor_test_util.py"],
