@@ -440,6 +440,37 @@ TEST(BlockTransferRequestConverterTest, DecodeKeepsMatchedItemsWhenSkippingAbsen
     EXPECT_EQ(descriptors.front().group_set_id, 0u);
 }
 
+TEST(BlockTransferRequestConverterTest, DecodePreservesOriginalItemIndicesWhenSkippingAbsentGroupSets) {
+    MemoryOperationRequestPB request;
+    appendDeviceToHostItem(request, "missing");
+    appendDeviceToHostItem(request, "group0");
+    appendDeviceToHostItem(request, "missing");
+    appendDeviceToHostItem(request, "group5");
+
+    std::vector<TransferDescriptor> descriptors;
+    std::vector<size_t>             item_indices;
+    ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(
+        request, descriptors, groupSets(), /*allow_absent_group_sets=*/true, &item_indices));
+    ASSERT_EQ(descriptors.size(), 2u);
+    EXPECT_EQ(item_indices, (std::vector<size_t>{1, 3}));
+    EXPECT_EQ(descriptors[0].group_set_id, 0u);
+    EXPECT_EQ(descriptors[1].group_set_id, 3u);
+}
+
+TEST(BlockTransferRequestConverterTest, DecodeFailureDoesNotAppendDescriptorsOrItemIndices) {
+    MemoryOperationRequestPB request;
+    appendDeviceToHostItem(request, "group0");
+    appendDeviceToHostItem(request, "group1");  // Partial overlap with {group1, group2}.
+    std::vector<TransferDescriptor> descriptors{TransferDescriptor::deviceToHost(0, {1}, 2)};
+    std::vector<size_t>             item_indices{9};
+
+    EXPECT_FALSE(BlockTransferRequestConverter::decodeTransfer(
+        request, descriptors, groupSets(), /*allow_absent_group_sets=*/true, &item_indices));
+    ASSERT_EQ(descriptors.size(), 1u);
+    EXPECT_EQ(descriptors.front().source_blocks, (BlockIndicesType{1}));
+    EXPECT_EQ(item_indices, (std::vector<size_t>{9}));
+}
+
 TEST(BlockTransferRequestConverterTest, DecodeRejectsBlocksInvalidForBlockPools) {
     const std::vector<TransferDescriptor> invalid_descriptors{
         TransferDescriptor::deviceToHost(0, {128}, 1),

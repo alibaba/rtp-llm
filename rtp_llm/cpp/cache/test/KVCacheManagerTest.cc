@@ -2179,6 +2179,30 @@ TEST_F(KVCachePayloadTest, ConcurrentEvictionAndTwoLoadBacksPreserveEveryKVAndSc
     roundTrip(/*concurrent=*/true);
 }
 
+TEST_F(KVCacheManagerTest, InitRejectsPipelineParallelRemoteCacheBeforeAllocatingPools) {
+    for (const int pp_rank : {0, 1}) {
+        for (const int tp_rank : {0, 1}) {
+            SCOPED_TRACE(::testing::Message() << "pp_rank=" << pp_rank << " tp_rank=" << tp_rank);
+            auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+            KVCacheConfig     kv_cache_config;
+            ParallelismConfig parallelism_config;
+            kv_cache_config.enable_remote_cache = true;
+            parallelism_config.pp_size          = 2;
+            parallelism_config.pp_rank          = pp_rank;
+            parallelism_config.tp_size          = 2;
+            parallelism_config.tp_rank          = tp_rank;
+            parallelism_config.world_size       = 4;
+            parallelism_config.world_rank       = pp_rank * 2 + tp_rank;
+            auto manager =
+                std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config, parallelism_config);
+
+            EXPECT_FALSE(manager->init());
+            EXPECT_EQ(manager->coordinator_manager_, nullptr);
+            EXPECT_EQ(manager->blockTreeCache(), nullptr);
+        }
+    }
+}
+
 TEST_F(KVCacheManagerTest, ExecuteFunctionReportsInvalidRequestForEmptyMemoryRequest) {
     auto cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     auto manager      = std::make_shared<KVCacheManager>(cache_config);
@@ -2281,6 +2305,68 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionSkipsAbsentGroupSetOnlyWithPP) {
         }
         EXPECT_EQ(engine->submitted_batch_count, 0u);
         EXPECT_EQ(engine->submitted_descriptor_count, 0u);
+    }
+}
+
+TEST_F(KVCacheManagerTest, ExecuteFunctionPreservesWireErrorsAcrossAbsentPPGroupSets) {
+    auto              cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    KVCacheConfig     kv_cache_config;
+    ParallelismConfig parallelism_config;
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.memory_cache_size_mb = 1;
+    parallelism_config.pp_size           = 2;
+    parallelism_config.pp_rank           = 1;
+    parallelism_config.world_size        = 2;
+    parallelism_config.world_rank        = 1;
+    auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config, parallelism_config);
+    ASSERT_TRUE(manager->init());
+    auto engine                                      = std::make_shared<RecordingBatchTransferEngine>();
+    manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
+
+    FunctionRequestPB request;
+    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
+        *request.mutable_mem_request(),
+        TransferTask({TransferDescriptor::deviceToHost(0, {1}, 1), TransferDescriptor::deviceToHost(0, {2}, 2)},
+                     std::chrono::seconds(30)),
+        manager->blockTreeCache()->groupSets()));
+    const auto first  = request.mem_request().copy_items(0);
+    const auto second = request.mem_request().copy_items(1);
+    auto*      memory = request.mutable_mem_request();
+    memory->clear_copy_items();
+    const auto append_absent = [&] {
+        auto* item = memory->add_copy_items();
+        item->CopyFrom(first);
+        item->set_group_tags(0, "absent_group");
+        item->mutable_group_blocks(0)->set_tag("absent_group");
+    };
+    append_absent();
+    memory->add_copy_items()->CopyFrom(first);
+    append_absent();
+    memory->add_copy_items()->CopyFrom(second);
+    append_absent();
+
+    for (const bool failed : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "failed=" << failed);
+        engine->completion_error =
+            failed ? ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected batch failure") : ErrorInfo::OkStatus();
+        engine->copy_errors = failed ?
+                                  std::vector<CacheCopyError>{CacheCopyError::COPY_FAILED, CacheCopyError::IO_FAILED} :
+                                  std::vector<CacheCopyError>{CacheCopyError::NONE, CacheCopyError::NONE};
+        FunctionResponsePB response;
+        ASSERT_TRUE(manager->executeFunction(request, response));
+        ASSERT_EQ(response.mem_response().block_errors_size(), memory->copy_items_size());
+        const auto result =
+            BlockTransferRequestConverter::decodeTransferResult(response.mem_response(), memory->copy_items_size());
+        const auto first_error  = failed ? CacheCopyError::COPY_FAILED : CacheCopyError::NONE;
+        const auto second_error = failed ? CacheCopyError::IO_FAILED : CacheCopyError::NONE;
+        EXPECT_EQ(result.block_errors,
+                  (std::vector<CacheCopyError>{
+                      CacheCopyError::NONE, first_error, CacheCopyError::NONE, second_error, CacheCopyError::NONE}));
+        EXPECT_EQ(result.ok(), !failed);
+        EXPECT_EQ(result.status.code(), failed ? ErrorCode::EXECUTION_EXCEPTION : ErrorCode::NONE_ERROR);
+        EXPECT_EQ(result.copy_error, second_error);
+        EXPECT_EQ(engine->submitted_batch_count, failed ? 2u : 1u);
+        EXPECT_EQ(engine->submitted_descriptor_count, failed ? 4u : 2u);
     }
 }
 
