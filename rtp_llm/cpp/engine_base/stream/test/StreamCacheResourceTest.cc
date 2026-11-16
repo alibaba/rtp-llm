@@ -814,8 +814,9 @@ TEST_F(StreamCacheResourceTest, LinearHistoryAsyncReservationJoinsOnlyAtPhysical
         ASSERT_EQ(resource.kvCache().blocks(0, "linear").size(), 7u);
         stream_->incPendingAsyncBookkeeping();
         // Missing publication must not silently allocate against an unknown
-        // committed watermark when the new forecast policy is active.
-        EXPECT_EQ(stream_->needsAsyncBookkeepingJoinForKvReservation(), enabled);
+        // committed watermark. The stale-block-table guard applies with or
+        // without the reclaim forecast policy.
+        EXPECT_TRUE(stream_->needsAsyncBookkeepingJoinForKvReservation());
         GenerateStream::NormalAsyncDeviceState state;
         state.next_real_seq_len = 14;
         stream_->setNormalAsyncDeviceState(state);
