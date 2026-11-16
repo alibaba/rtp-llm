@@ -12,10 +12,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import gc
+import io
 import json
 import logging
 import math
+import multiprocessing
 import struct
+import threading
 import time
 import unittest
 import weakref
@@ -33,6 +36,7 @@ from rtp_llm.config.exceptions import (
     FtRuntimeException,
 )
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr, ThinkingMode
+from rtp_llm.config.py_config_modules import GrammarAdmissionConfig
 from rtp_llm.config.response_format_compiler import ReasoningFormat
 from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
     FlexlbScheduleResponsePB,
@@ -90,7 +94,7 @@ from rtp_llm.dash_sc.inference.servicer import (
 from rtp_llm.dash_sc.inference.tpm_recheck import TpmRecheckResult, recheck_tpm
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.metrics import AccMetrics
-from rtp_llm.ops import RoleType
+from rtp_llm.ops import GrammarConfig, RoleType
 from rtp_llm.server.master_client import FLEXLB_GRPC_PORT_OFFSET, MasterClient
 from rtp_llm.server.mm_cache_metadata import MMRoutingSnapshot
 from rtp_llm.telemetry import tracing
@@ -4272,6 +4276,79 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual("Too many requests.", message)
                 else:
                     self.assertIn(str(error), message)
+
+    async def test_compiler_runtime_error_returns_400_and_reuses_worker(self) -> None:
+        backend = MagicMock()
+        diagnostic = "unsupported constraint"
+        backend.compile_json_schema.side_effect = [RuntimeError(diagnostic), None]
+        admission_config = GrammarAdmissionConfig()
+        admission_config.sandbox_pool_size = 1
+        admission_config.sandbox_process_memory_limit_mb = 0
+        admission_config.result_cache_max_entries = 8
+        with (
+            patch.object(GrammarValidator, "_build_backend", return_value=backend),
+            patch.object(GrammarValidator, "_ensure_pool"),
+            patch.object(GrammarValidator, "_xgrammar", return_value=None),
+        ):
+            validator = GrammarValidator("{}", GrammarConfig(), admission_config)
+            parent_conn, worker_conn = multiprocessing.Pipe()
+            validator._worker_fault_file = io.BytesIO()
+            worker = threading.Thread(
+                target=validator._worker_loop, args=(worker_conn,), daemon=True
+            )
+            process = MagicMock()
+            process.is_alive.side_effect = worker.is_alive
+            validator._retire = MagicMock()
+            worker.start()
+            try:
+                self.assertTrue(parent_conn.poll(5))
+                self.assertEqual(parent_conn.recv(), ("__ready__", True))
+                validator._idle.put(
+                    (process, parent_conn, validator._worker_fault_file)
+                )
+                visitor = self._terminal_visitor()
+                servicer = DashScInferenceServicer(
+                    backend_visitor=visitor, grammar_validator=validator
+                )
+                request = self._valid_infer_request()
+                request.parameters["response_format"].string_param = json.dumps(
+                    {"type": "json_object"}
+                )
+                for _ in range(2):
+                    responses = await _drain(
+                        servicer.ModelStreamInfer(
+                            _areq_iter([request]), _FakeGrpcContext()
+                        )
+                    )
+                    self.assertEqual(len(responses), 1)
+                    _assert_parameter_error_response(self, responses[0], diagnostic)
+                    self.assertEqual(_gen_ids(responses[0]), [])
+                    self.assertEqual(visitor.enqueue_called, 0)
+                backend.compile_json_schema.assert_called_once()
+
+                # A different grammar must still compile on the same worker and enqueue.
+                request.parameters["response_format"].string_param = json.dumps(
+                    {
+                        "type": "json_schema",
+                        "json_schema": {"schema": {"type": "object"}},
+                    }
+                )
+                responses = await _drain(
+                    servicer.ModelStreamInfer(_areq_iter([request]), _FakeGrpcContext())
+                )
+                self.assertEqual(len(responses), 1)
+                self.assertEqual(_gen_ids(responses[0]), [9])
+                self.assertEqual(visitor.enqueue_called, 1)
+                self.assertEqual(backend.compile_json_schema.call_count, 2)
+                validator._retire.assert_not_called()
+                self.assertTrue(worker.is_alive())
+                self.assertEqual(validator._idle.qsize(), 1)
+            finally:
+                parent_conn.close()
+                worker.join(timeout=5)
+                worker_conn.close()
+                validator._worker_fault_file.close()
+            self.assertFalse(worker.is_alive())
 
     async def test_normalized_grammar_preserves_other_sampling_fields(self) -> None:
         for field in ("response_format", "structural_tag"):

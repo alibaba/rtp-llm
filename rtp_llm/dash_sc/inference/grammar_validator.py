@@ -10,7 +10,7 @@ Every request runs cheap shape checks first, then trial-compiles in a spawned wo
 pool. An uncatchable SIGSEGV/OOM therefore only kills the worker, never DashLLM.
 
 The trial compile only needs a classified answer, so the compiled grammar is never
-shipped. Repeat specs with deterministic answers are served from an LRU; transient
+shipped. Successful compiles and compiler rejections are served from an LRU; transient
 pool failures are raised and never cached.
 """
 
@@ -101,74 +101,16 @@ def _with_request_id(message: str) -> str:
     return f"{message}, request_id={request_id}" if request_id else message
 
 
-def _is_resource_exhaustion(error: BaseException) -> bool:
-    message = str(error).lower()
-    return isinstance(error, MemoryError) or any(
-        marker in message
-        for marker in (
-            "bad_alloc",
-            "out of memory",
-            "resource exhausted",
-            "cannot allocate memory",
-            "memoryallocation",
-        )
-    )
-
-
-# Keep this list synchronized with isExplicitGrammarParseError() in
-# rtp_llm/cpp/engine_base/grammar/XGrammarBackend.cc.
-_DETERMINISTIC_GRAMMAR_ERROR_MARKERS = (
-    "invalid json",
-    "json parse",
-    "json parsing error",
-    "failed to parse json",
-    "json syntax error",
-    "json lexer error",
-    "invalid regex",
-    "regex parse",
-    "regex parsing error",
-    "failed to parse regex",
-    "regex syntax error",
-    "regex lexer error",
-    "invalid ebnf",
-    "ebnf parse",
-    "ebnf parsing error",
-    "ebnf lexer error",
-    "failed to parse ebnf",
-    "ebnf syntax error",
-    "invalid grammar",
-    "grammar parse",
-    "grammar parsing error",
-    "grammar lexer error",
-    "grammar syntax error",
-    "invalid structural tag",
-    "structural tag parse",
-    "structural tag parsing error",
-    "structural tag syntax error",
-    "structural tag lexer error",
-)
-
-
-def _is_deterministic_grammar_error(error: BaseException) -> bool:
-    if isinstance(error, (json.JSONDecodeError, ValueError, TypeError)):
-        return True
-    error_name = type(error).__name__.lower()
-    message = str(error).lower()
-    if "invalid" in error_name and any(
-        subject in error_name for subject in ("json", "regex", "grammar", "structural")
-    ):
-        return True
-    return any(marker in message for marker in _DETERMINISTIC_GRAMMAR_ERROR_MARKERS)
-
-
 def _compile_exception_reply(error: Exception) -> tuple[_WorkerStatus, bool, str]:
-    """Classify a caught worker compile failure without poisoning invalid caches."""
+    """Classify exceptions from the request's trial compile, not worker startup or IPC."""
     message = (str(error) or type(error).__name__)[:_MAX_COMPILE_ERROR_MESSAGE_LENGTH]
-    if _is_resource_exhaustion(error):
+    if isinstance(error, MemoryError):
         return _WorkerStatus.OVERLOADED, True, message
-    if _is_deterministic_grammar_error(error):
+    # xgrammar uses RuntimeError for validation failures and unsupported grammars.
+    # Treat all such compile errors as request rejections, regardless of their text.
+    # This policy includes native failures exposed as RuntimeError.
+    if isinstance(error, (RuntimeError, ValueError, TypeError)):
         return _WorkerStatus.INVALID, False, message
-    # Ordinary runtime/transport failures are not evidence that the grammar is bad.
     return _WorkerStatus.UNAVAILABLE, True, message
 
 
@@ -350,7 +292,7 @@ class GrammarCheckTimeout(GrammarCheckUnavailable):
 
 
 class GrammarCompilationError(ValueError):
-    """Any deterministic xgrammar compiler error returned by a sandbox worker."""
+    """An xgrammar compiler rejection returned by a sandbox worker."""
 
 
 class GrammarValidator:
@@ -756,7 +698,7 @@ class GrammarValidator:
                 )
             except GrammarCompilationError as e:
                 # GrammarCompilationError is raised only for an explicit INVALID reply
-                # from a healthy worker, so this deterministic verdict is cacheable.
+                # from a worker; compiler rejections follow the invalid-result cache policy.
                 result = _GrammarCheckResult(
                     ok=False,
                     compile_error=str(e),
@@ -865,7 +807,7 @@ class GrammarValidator:
         """Compile with independent checkout and execution budgets.
 
         A checked-out worker is always either returned healthy or retired. Queue/compile
-        timeouts, transport failures, and catchable resource-exhaustion exceptions are
+        timeouts, transport failures, and Python MemoryError exceptions are
         transient unavailable outcomes and are never cached as invalid input. A worker that
         reports resource exhaustion is retired after replying.
         """

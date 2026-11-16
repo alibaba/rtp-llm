@@ -30,7 +30,6 @@ from rtp_llm.dash_sc.inference.grammar_validator import (
     _enable_worker_faulthandler,
     _format_worker_exitcode,
     _GrammarCheckResult,
-    _is_resource_exhaustion,
     _WorkerStatus,
 )
 
@@ -45,72 +44,46 @@ def _crash_with_faulthandler(fault_trace_fd) -> None:
 
 
 class CompileExceptionReplyTest(unittest.TestCase):
-    def test_resource_exhaustion_is_overloaded_and_retires_worker(self) -> None:
-        for error in (MemoryError("out of memory"), RuntimeError("std::bad_alloc")):
-            self.assertTrue(_is_resource_exhaustion(error))
-            status, retire_after_reply, message = _compile_exception_reply(error)
-            self.assertIs(status, _WorkerStatus.OVERLOADED)
-            self.assertTrue(retire_after_reply)
-            self.assertTrue(message)
+    def test_memory_error_is_overloaded_and_retires_worker(self) -> None:
+        status, retire_after_reply, message = _compile_exception_reply(MemoryError())
+        self.assertIs(status, _WorkerStatus.OVERLOADED)
+        self.assertTrue(retire_after_reply)
+        self.assertEqual(message, "MemoryError")
 
-    def test_typed_deterministic_error_is_invalid_and_keeps_worker(self) -> None:
-        error = ValueError("invalid json schema")
-        self.assertFalse(_is_resource_exhaustion(error))
-        status, retire_after_reply, message = _compile_exception_reply(error)
-        self.assertIs(status, _WorkerStatus.INVALID)
-        self.assertFalse(retire_after_reply)
-        self.assertTrue(message)
+    def test_compile_errors_are_invalid_regardless_of_message(self) -> None:
+        class CompilerError(RuntimeError):
+            pass
 
-    def test_cpp_runtime_error_markers_are_invalid_and_keep_worker(self) -> None:
-        messages = (
-            "invalid json document",
-            "json parse failed",
-            "json parsing error at byte 4",
-            "failed to parse json schema",
-            "invalid regex pattern",
-            "regex parse failed",
-            "regex parsing error at byte 4",
-            "failed to parse regex",
-            "invalid ebnf grammar",
-            "ebnf parse failed",
-            "ebnf parsing error at byte 4",
-            "ebnf lexer error at byte 4",
-            "failed to parse ebnf",
-            "invalid grammar",
-            "grammar parse failed",
-            "grammar parsing error at byte 4",
-            "grammar lexer error at byte 4",
-            "invalid structural tag",
-            "structural tag parse failed",
-            "structural tag parsing error at byte 4",
-            "structural tag syntax error at byte 4",
-            "grammar parser error at byte 4",
-            "regex lexer error at byte 4",
+        errors = (
+            RuntimeError("unsupported constraint"),
+            RuntimeError("std::bad_alloc"),
+            RuntimeError("thread creation failed"),
+            RuntimeError(),
+            CompilerError("internal compiler assertion"),
+            ValueError("invalid json schema"),
+            TypeError("unsupported type"),
         )
-        for message in messages:
-            with self.subTest(message=message):
-                status, retire_after_reply, reply = _compile_exception_reply(
-                    RuntimeError(message)
-                )
+        for error in errors:
+            with self.subTest(error=error):
+                status, retire_after_reply, message = _compile_exception_reply(error)
                 self.assertIs(status, _WorkerStatus.INVALID)
                 self.assertFalse(retire_after_reply)
-                self.assertEqual(reply, message)
+                self.assertEqual(message, str(error) or type(error).__name__)
 
-    def test_generic_runtime_error_is_unavailable_and_retires_worker(self) -> None:
-        messages = (
-            "thread creation failed",
-            "unexpected token: syntax error",
-            "parser error",
-            "token lexer error at byte 4",
-        )
-        for message in messages:
-            with self.subTest(message=message):
-                status, retire_after_reply, reply = _compile_exception_reply(
-                    RuntimeError(message)
-                )
+    def test_other_errors_are_unavailable_regardless_of_message(self) -> None:
+        class InvalidGrammarError(Exception):
+            pass
+
+        for error in (
+            OSError("invalid grammar"),
+            Exception("out of memory"),
+            InvalidGrammarError("unsupported constraint"),
+        ):
+            with self.subTest(error=error):
+                status, retire_after_reply, message = _compile_exception_reply(error)
                 self.assertIs(status, _WorkerStatus.UNAVAILABLE)
                 self.assertTrue(retire_after_reply)
-                self.assertEqual(reply, message)
+                self.assertEqual(message, str(error))
 
     def test_exit_code_format_includes_signal_name(self) -> None:
         self.assertEqual(
