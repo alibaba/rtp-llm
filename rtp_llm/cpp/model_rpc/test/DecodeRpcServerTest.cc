@@ -466,8 +466,9 @@ TEST(DecodeRpcServerTest, SlowPrefillCancelDoesNotBlockOtherLocalTerminals) {
     input.set_request_id(211);
     PDCancelRegistry::Handle local;
     ASSERT_TRUE(decode.cancel_registry_->admit(input, "local", "", currentTimeMs() + 10000, local).ok());
-    decode.cancel_registry_->finishLocal(local);
+    // Cancel while the local request is active, then publish its cleanup.
     EXPECT_TRUE(cancel(211, "").ok());
+    decode.cancel_registry_->finishLocal(local);
     EXPECT_TRUE(waitForCancel([&] { return local->terminal.load(); }));
     EXPECT_EQ(prefill.calls.load(), 0);
     release.set_value();
