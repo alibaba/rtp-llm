@@ -193,10 +193,11 @@ class ChatCompletionRequest(BaseModel):
     prompt_logprobs: Optional[int] = None
     response_format: Optional[ResponseFormat] = None
     json_format: Optional[bool] = None
+    presence_penalty: Optional[float] = Field(default=None, ge=-2.0, le=2.0)
+    frequency_penalty: Optional[float] = Field(default=None, ge=-2.0, le=2.0)
+    repetition_penalty: Optional[float] = None
 
     # ---- These functions are not implemented yet.
-    # presence_penalty: Optional[float] = 0.0
-    # frequency_penalty: Optional[float] = 0.0
     # logit_bias: Optional[Dict[str, float]] = None
 
     # ---- These params are hacked for our framework, not standard.

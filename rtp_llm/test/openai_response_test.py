@@ -8,6 +8,7 @@ from typing import Any, AsyncGenerator, Callable, List
 from unittest import IsolatedAsyncioTestCase, main
 
 import torch
+from pydantic import ValidationError
 from typing_extensions import override
 
 from rtp_llm.config.generate_config import GenerateConfig, ThinkingMode
@@ -28,6 +29,7 @@ from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
 )
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.openai.api_datatype import (
+    BatchChatCompletionRequest,
     ChatCompletionExtraOutputs,
     ChatCompletionRequest,
     ChatCompletionStreamResponse,
@@ -524,6 +526,100 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         endpoint.stop_words_id_list = []
         endpoint.stop_words_str_list = []
         return tokenizer, renderer, endpoint
+
+    def test_penalty_fields_reach_generate_config(self):
+        _, renderer, endpoint = self._create_base_thinking_endpoint("disabled")
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+            presence_penalty=1.5,
+            frequency_penalty=0.3,
+            repetition_penalty=1.1,
+        )
+        config = endpoint._extract_generation_config(
+            request, input_ids=[], renderer=renderer
+        )
+        self.assertEqual(config.presence_penalty, 1.5)
+        self.assertEqual(config.frequency_penalty, 0.3)
+        self.assertEqual(config.repetition_penalty, 1.1)
+        batch = BatchChatCompletionRequest(requests=[request])
+        self.assertEqual(batch.requests[0].presence_penalty, 1.5)
+        self.assertEqual(batch.requests[0].frequency_penalty, 0.3)
+        self.assertEqual(batch.requests[0].repetition_penalty, 1.1)
+
+    def test_absent_penalty_fields_keep_extra_configs_values(self):
+        _, renderer, endpoint = self._create_base_thinking_endpoint("disabled")
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+            extra_configs=GenerateConfig(
+                presence_penalty=1.5,
+                frequency_penalty=0.3,
+                repetition_penalty=1.1,
+            ),
+        )
+        config = endpoint._extract_generation_config(
+            request, input_ids=[], renderer=renderer
+        )
+        self.assertEqual(config.presence_penalty, 1.5)
+        self.assertEqual(config.frequency_penalty, 0.3)
+        self.assertEqual(config.repetition_penalty, 1.1)
+
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+        )
+        config = endpoint._extract_generation_config(
+            request, input_ids=[], renderer=renderer
+        )
+        self.assertEqual(config.presence_penalty, 0.0)
+        self.assertEqual(config.frequency_penalty, 0.0)
+        self.assertEqual(config.repetition_penalty, 1.0)
+
+    def test_explicit_neutral_penalty_overrides_extra_configs(self):
+        _, renderer, endpoint = self._create_base_thinking_endpoint("disabled")
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+            presence_penalty=0.0,
+            frequency_penalty=0.3,
+            repetition_penalty=1.0,
+            extra_configs=GenerateConfig(
+                presence_penalty=1.5,
+                frequency_penalty=0.3,
+                repetition_penalty=1.2,
+            ),
+        )
+        config = endpoint._extract_generation_config(
+            request, input_ids=[], renderer=renderer
+        )
+        self.assertEqual(config.presence_penalty, 0.0)
+        self.assertEqual(config.frequency_penalty, 0.3)
+        self.assertEqual(config.repetition_penalty, 1.0)
+
+        request = ChatCompletionRequest(
+            messages=[ChatMessage(role=RoleEnum.user, content="hello")],
+            frequency_penalty=0.4,
+            extra_configs=GenerateConfig(
+                presence_penalty=1.5,
+                frequency_penalty=0.3,
+                repetition_penalty=1.2,
+            ),
+        )
+        config = endpoint._extract_generation_config(
+            request, input_ids=[], renderer=renderer
+        )
+        self.assertEqual(config.presence_penalty, 1.5)
+        self.assertEqual(config.frequency_penalty, 0.4)
+        self.assertEqual(config.repetition_penalty, 1.2)
+
+    def test_openai_penalty_range(self):
+        messages = [ChatMessage(role=RoleEnum.user, content="hello")]
+        for field in ("presence_penalty", "frequency_penalty"):
+            for value in (2.0001, -2.0001):
+                with self.assertRaises(ValidationError):
+                    ChatCompletionRequest(messages=messages, **{field: value})
+            for value in (2.0, -2.0):
+                request = ChatCompletionRequest(messages=messages, **{field: value})
+                self.assertEqual(getattr(request, field), value)
+        request = ChatCompletionRequest(messages=messages, repetition_penalty=3.0)
+        self.assertEqual(request.repetition_penalty, 3.0)
 
     async def _run_without_aux_info(
         self, stream: bool, num_choices: int, termination: str = "eos"

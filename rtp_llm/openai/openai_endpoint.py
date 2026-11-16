@@ -276,6 +276,12 @@ class OpenaiEndpoint(object):
             config.top_p = request.top_p
         if request.top_k != None:
             config.top_k = request.top_k
+        if request.presence_penalty != None:
+            config.presence_penalty = request.presence_penalty
+        if request.frequency_penalty != None:
+            config.frequency_penalty = request.frequency_penalty
+        if request.repetition_penalty != None:
+            config.repetition_penalty = request.repetition_penalty
         if request.n != None:
             config.num_return_sequences = request.n
         request_stop_words_list = request.stop if request.stop != None else []
