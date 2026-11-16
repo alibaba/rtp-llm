@@ -36,7 +36,7 @@ class VitStrategyTest {
         endpoints = StrategyTestSupport.endpointRegistry(configService);
         strategy =
                 new VitStrategy(
-                        org.mockito.Mockito.mock(org.flexlb.cache.VitCacheDirectory.class),
+                        org.mockito.Mockito.mock(org.flexlb.cache.VitWorkerCacheManager.class),
                         endpoints);
     }
 
@@ -111,27 +111,27 @@ class VitStrategyTest {
         registerVit("127.0.0.2", 8080, "target");
         registerVit("127.0.0.3", 8080, "target");
         registerVit("127.0.0.4", 8080, "other");
-        EndpointRegistry directory = Mockito.spy(endpoints);
+        EndpointRegistry cacheManager = Mockito.spy(endpoints);
         Mockito.doReturn(
                         List.of(
                                 endpoints.getEndpoint(RoleType.VIT, "127.0.0.1:8080@0"),
                                 endpoints.getEndpoint(RoleType.VIT, "127.0.0.2:8080@0"),
                                 endpoints.getEndpoint(RoleType.VIT, "127.0.0.3:8080@0"),
                                 endpoints.getEndpoint(RoleType.VIT, "127.0.0.4:8080@0")))
-                .when(directory)
+                .when(cacheManager)
                 .endpoints(
                         org.mockito.ArgumentMatchers.eq(RoleType.VIT),
                         org.mockito.ArgumentMatchers.any());
         VitStrategy grouped =
                 new VitStrategy(
-                        org.mockito.Mockito.mock(org.flexlb.cache.VitCacheDirectory.class),
+                        org.mockito.Mockito.mock(org.flexlb.cache.VitWorkerCacheManager.class),
                         endpoints);
         Map<String, Integer> counts = new HashMap<>();
         for (int request = 0; request < 4_000; request++) {
             {
                 Selection selected =
                         StrategyTestSupport.select(
-                                directory, grouped, request, RoleType.VIT, "target");
+                                cacheManager, grouped, request, RoleType.VIT, "target");
                 assertNotNull(selected);
                 assertEquals("target", StrategyTestSupport.vit(selected).getGroup());
                 counts.merge(StrategyTestSupport.vit(selected).getServerIp(), 1, Integer::sum);

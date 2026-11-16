@@ -6,7 +6,6 @@ import org.flexlb.cache.match.CacheMetadataUpdateOrchestrator;
 import org.flexlb.config.cache.CacheMatchConfiguration;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.worker.cache.WorkerCacheUpdateResult;
-import org.flexlb.worker.endpoint.Request;
 import org.flexlb.worker.status.ServerStatus;
 import org.flexlb.worker.status.WorkerStatus;
 import org.junit.jupiter.api.Test;
@@ -61,12 +60,12 @@ class CacheMetadataUpdateOrchestratorTest {
     @Test
     void routesSuccessfulRequestMetadataToLocalStandby() {
         when(configuration.isLocalStandbyEnabled()).thenReturn(true);
-        Request request = Request.builder().build();
         List<ServerStatus> selectedWorkers = List.of(new ServerStatus());
 
-        orchestrator().updateFromRoutedRequest(request, selectedWorkers);
+        orchestrator().updateFromRoutedRequest("1", 4096, List.of(11L), selectedWorkers);
 
-        verify(localStandbyProvider).updateFromRoutedRequest(request, selectedWorkers);
+        verify(localStandbyProvider)
+                .updateFromRoutedRequest("1", 4096, List.of(11L), selectedWorkers);
     }
 
     @Test
@@ -74,7 +73,7 @@ class CacheMetadataUpdateOrchestratorTest {
         when(configuration.isLocalStandbyEnabled()).thenReturn(false);
 
         orchestrator()
-                .updateFromRoutedRequest(Request.builder().build(), List.of(new ServerStatus()));
+                .updateFromRoutedRequest("1", 4096, List.of(11L), List.of(new ServerStatus()));
 
         verifyNoInteractions(localStandbyProvider);
     }

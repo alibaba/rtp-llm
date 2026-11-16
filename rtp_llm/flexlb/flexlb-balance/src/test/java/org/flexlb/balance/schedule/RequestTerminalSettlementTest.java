@@ -1,5 +1,6 @@
 package org.flexlb.balance.schedule;
 
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.schedule.RequestContext.SelectionAttempt;
 import org.flexlb.balance.schedule.SchedulerTestSupport.Stage;
 import org.flexlb.config.service.RoleType;
@@ -7,7 +8,6 @@ import org.flexlb.worker.endpoint.DecodeEndpoint;
 import org.flexlb.worker.endpoint.DecodeResources;
 import org.flexlb.worker.endpoint.PrefillEndpoint;
 import org.flexlb.worker.endpoint.RequestEventType;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.rpc.EngineGrpcClient;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -190,8 +190,8 @@ class RequestTerminalSettlementTest {
                 .getRequestScheduler()
                 .finishSelectionWithoutCommit(f.admission(), null);
         assertEquals(
-                RequestResult.State.CANCELLED,
-                RequestResult.from(f.requestContext().snapshot()).state());
+                RequestState.State.CANCELLED,
+                RequestState.from(f.requestContext().snapshot()).state());
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.schedule.SchedulerTestSupport.runtime(f.scheduler()));
         assertTrue((stage(f.requestContext()) == Stage.FINISHED));
@@ -259,8 +259,8 @@ class RequestTerminalSettlementTest {
                                                         "original terminal failure"))));
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.schedule.SchedulerTestSupport.runtime(f.scheduler()));
-        var original = context.snapshot().requestEndResult();
-        assertEquals("original terminal failure", original.detail());
+        var original = context.snapshot().endState();
+        assertEquals("original terminal failure", context.snapshot().endDetail());
         assertTrue(RequestProtocolTestSupport.awaitResult(context.getFuture()).isSuccess());
         if (failures >= 3) {
             assertEquals(3, attempts.get(), "one finish wake-up performs at most three attempts");
@@ -292,7 +292,7 @@ class RequestTerminalSettlementTest {
                 "recovering notifications finish their existing owner");
         assertSame(
                 original,
-                context.snapshot().requestEndResult(),
+                context.snapshot().endState(),
                 "retries preserve the frozen outcome and first cause");
         assertTrue(context.snapshot().notificationsDone());
         assertNull(context.snapshot().deadlines().inactivity());
@@ -351,7 +351,7 @@ class RequestTerminalSettlementTest {
         var prefillServer = new org.flexlb.worker.status.ServerStatus();
         prefillServer.setServerIp("127.0.0.1");
         prefillServer.setGrpcPort(8090);
-        RequestResult item =
+        RequestRoute item =
                 org.flexlb.balance.schedule.SchedulingTestConfig.createRoute(
                         context,
                         new Response(),
@@ -366,7 +366,7 @@ class RequestTerminalSettlementTest {
         assertNotNull(admission);
         if (finishAdmission) {
             assertEquals(
-                    org.flexlb.balance.strategy.RoutingResult.Status.SUCCESS,
+                    org.flexlb.balance.strategy.SelectionResult.Status.SUCCESS,
                     RequestProtocolTestSupport.commitRoute(
                             requestOwner,
                             item,
@@ -380,6 +380,6 @@ class RequestTerminalSettlementTest {
     private record Fixture(
             AbstractRequestScheduler scheduler,
             RequestContext requestContext,
-            RequestResult item,
+            RequestRoute item,
             SelectionAttempt admission) {}
 }

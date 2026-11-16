@@ -52,7 +52,7 @@ class AbstractWorkerSelectionStrategyTest {
                                 null,
                                 scope,
                                 List.of(stale),
-                                list -> RoutingResult.success(list.getFirst()));
+                                list -> SelectionResult.success(list.getFirst()));
         assertSame(registered, result.value());
         assertEquals(2, calls.get());
     }
@@ -89,7 +89,7 @@ class AbstractWorkerSelectionStrategyTest {
                                 null,
                                 scope,
                                 source,
-                                list -> RoutingResult.success(list.getFirst()));
+                                list -> SelectionResult.success(list.getFirst()));
         assertSame(registered, result.value());
         assertEquals(20, calls.get());
         assertEquals(20, source.size());
@@ -123,8 +123,8 @@ class AbstractWorkerSelectionStrategyTest {
                                 null,
                                 scope,
                                 List.of(candidate),
-                                list -> RoutingResult.success(list.getFirst()));
-        assertEquals(RoutingResult.Status.RETRY, result.status());
+                                list -> SelectionResult.success(list.getFirst()));
+        assertEquals(SelectionResult.Status.RETRY, result.status());
         assertEquals(8, calls.get());
     }
 
@@ -151,8 +151,8 @@ class AbstractWorkerSelectionStrategyTest {
                             }
                         })
                         .selectCandidates(
-                                null, scope, List.of(), list -> RoutingResult.blocked(scope));
-        assertEquals(RoutingResult.Status.BLOCKED, result.status());
+                                null, scope, List.of(), list -> SelectionResult.blocked(scope));
+        assertEquals(SelectionResult.Status.BLOCKED, result.status());
         assertEquals(0, calls.get());
     }
 }

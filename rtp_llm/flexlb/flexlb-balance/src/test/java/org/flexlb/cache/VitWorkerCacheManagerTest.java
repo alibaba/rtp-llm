@@ -5,14 +5,14 @@ import io.grpc.Status;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.balance.request.Request;
 import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.balance.strategy.VitStrategy;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.service.RoleType;
-import org.flexlb.master.MasterStatusService;
+import org.flexlb.master.MasterStatusView;
 import org.flexlb.util.metrics.GrpcReporter;
 import org.flexlb.worker.endpoint.EndpointRegistry;
-import org.flexlb.worker.endpoint.Request;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
 import org.flexlb.worker.rpc.EngineAddressResolver;
 import org.flexlb.worker.rpc.EngineGrpcClient;
@@ -54,9 +54,10 @@ import static org.mockito.Mockito.when;
  * Checks VIT cache affinity across residency tiers, polling failures and worker replacement.
  * Cached placement must still respect group, health and generation constraints.
  */
-class VitCacheDirectoryTest {
-    private VitCacheDirectory directory;
+class VitWorkerCacheManagerTest {
+    private VitWorkerCacheManager cacheManager;
     private VitStrategy selector;
+    private VitWorkerCacheSynchronizer synchronizer;
 
     private final Map<String, WorkerStatus> live = new HashMap<>();
 
@@ -64,7 +65,7 @@ class VitCacheDirectoryTest {
     private WorkerStatus b;
     private EndpointRegistry workers;
     private EngineGrpcClient grpc;
-    private MasterStatusService consistency;
+    private MasterStatusView consistency;
 
     @BeforeEach
     void setUp() {
@@ -96,14 +97,15 @@ class VitCacheDirectoryTest {
                                             status, WorkerEndpoint::new);
                         });
         grpc = mock(EngineGrpcClient.class);
-        consistency = mock(MasterStatusService.class);
-        directory = new VitCacheDirectory(workers, grpc, consistency);
-        selector = new VitStrategy(directory, workers);
+        consistency = mock(MasterStatusView.class);
+        cacheManager = new VitWorkerCacheManager(workers);
+        synchronizer = new VitWorkerCacheSynchronizer(workers, grpc, consistency, cacheManager);
+        selector = new VitStrategy(cacheManager, workers);
     }
 
     @AfterEach
     void tearDown() {
-        directory.stop();
+        synchronizer.stop();
     }
 
     @Test
@@ -111,7 +113,7 @@ class VitCacheDirectoryTest {
         snapshot(a, "a1", "image");
         snapshot(b, "b1", "image");
         var calls = new java.util.concurrent.atomic.AtomicInteger();
-        var replacementStrategy = org.mockito.Mockito.spy(new VitStrategy(directory, workers));
+        var replacementStrategy = org.mockito.Mockito.spy(new VitStrategy(cacheManager, workers));
         org.mockito.Mockito.doAnswer(
                         call -> {
                             java.util.List<VitStrategy.Candidate> addresses = call.getArgument(0);
@@ -227,8 +229,8 @@ class VitCacheDirectoryTest {
                                 CacheStatusPB.newBuilder().setMultimodalCache(snapshot).build()));
         when(grpc.getMultimodalCacheStatusAsync(b.getIp(), 8001, request, 2000))
                 .thenReturn(CompletableFuture.completedFuture(CacheStatusPB.getDefaultInstance()));
-        directory.refresh();
-        directory.refresh();
+        synchronizer.refresh();
+        synchronizer.refresh();
         verify(grpc, times(1)).getMultimodalCacheStatusAsync(a.getIp(), 8001, request, 2000);
         verify(grpc, times(1)).getMultimodalCacheStatusAsync(b.getIp(), 8001, request, 2000);
         for (String key : List.of("hash", "gpu", "cpu")) {
@@ -243,14 +245,14 @@ class VitCacheDirectoryTest {
                 .thenReturn(CompletableFuture.failedFuture(new RuntimeException("unavailable")));
         when(grpc.getMultimodalCacheStatusAsync(eq(b.getIp()), eq(8001), any(), eq(2000L)))
                 .thenReturn(CompletableFuture.completedFuture(CacheStatusPB.getDefaultInstance()));
-        directory.refresh();
-        directory.refresh();
+        synchronizer.refresh();
+        synchronizer.refresh();
         verify(grpc, times(2)).getMultimodalCacheStatusAsync(any(), eq(8001), any(), eq(2000L));
-        var field = VitCacheDirectory.class.getDeclaredField("attempts");
+        var field = VitWorkerCacheSynchronizer.class.getDeclaredField("attempts");
         field.setAccessible(true);
-        var attempts = (Map<String, Long>) field.get(directory);
-        attempts.replaceAll((key, value) -> value - VitCacheDirectory.SYNC_INTERVAL_MS);
-        directory.refresh();
+        var attempts = (Map<WorkerStatus, Long>) field.get(synchronizer);
+        attempts.replaceAll((key, value) -> value - VitWorkerCacheSynchronizer.SYNC_INTERVAL_MS);
+        synchronizer.refresh();
         verify(grpc, times(4)).getMultimodalCacheStatusAsync(any(), eq(8001), any(), eq(2000L));
     }
 
@@ -259,14 +261,14 @@ class VitCacheDirectoryTest {
         snapshot(a, "a1", "image");
         when(grpc.getMultimodalCacheStatusAsync(any(), eq(8001), any(), eq(2000L)))
                 .thenReturn(CompletableFuture.failedFuture(new RuntimeException("unavailable")));
-        directory.refresh();
-        var prune = VitCacheDirectory.class.getDeclaredMethod("prune", Map.class, long.class);
+        synchronizer.refresh();
+        var prune = VitWorkerCacheManager.class.getDeclaredMethod("prune", Map.class, long.class);
         prune.setAccessible(true);
         prune.invoke(
-                directory,
+                cacheManager,
                 live,
-                System.currentTimeMillis() + 2 * VitCacheDirectory.SYNC_INTERVAL_MS + 1);
-        directory.refresh();
+                System.currentTimeMillis() + 2 * VitWorkerCacheSynchronizer.SYNC_INTERVAL_MS + 1);
+        synchronizer.refresh();
         verify(grpc, times(2)).getMultimodalCacheStatusAsync(any(), eq(8001), any(), eq(2000L));
     }
 
@@ -276,7 +278,7 @@ class VitCacheDirectoryTest {
         snapshot(b, "b1", "image");
         when(grpc.getMultimodalCacheStatusAsync(any(), eq(8001), any(), eq(2000L)))
                 .thenReturn(CompletableFuture.completedFuture(CacheStatusPB.getDefaultInstance()));
-        directory.refresh();
+        synchronizer.refresh();
         assertEquals(a.getIp(), selector.selectCache(context("image"), null).getServerIp());
         snapshot(a, "a1");
         assertEquals(b.getIp(), selector.selectCache(context("image"), null).getServerIp());
@@ -350,7 +352,7 @@ class VitCacheDirectoryTest {
                                                     "127.0.0.1", server.getPort(), request, 5000)
                                             .join());
             assertEquals(Status.Code.RESOURCE_EXHAUSTED, Status.fromThrowable(error).getCode());
-            directory.replace(a, response.getMultimodalCache());
+            cacheManager.replace(a, response.getMultimodalCache());
             assertEquals(
                     a.getIp(),
                     selector.selectCache(context(keys.get(keys.size() - 1)), null).getServerIp());
@@ -430,20 +432,78 @@ class VitCacheDirectoryTest {
         snapshot(a, "a1", "image");
         when(consistency.isNeedConsistency()).thenReturn(true);
         when(consistency.isMaster()).thenReturn(false);
-        directory.refresh();
+        synchronizer.refresh();
         verifyNoInteractions(grpc);
         when(grpc.getMultimodalCacheStatusAsync(any(), eq(8001), any(), eq(2000L)))
                 .thenReturn(CompletableFuture.failedFuture(new RuntimeException("unavailable")));
         when(consistency.isMaster()).thenReturn(true);
-        directory.refresh();
+        synchronizer.refresh();
         assertEquals(a.getIp(), selector.selectCache(context("image"), null).getServerIp());
-        directory.refresh();
+        synchronizer.refresh();
         verify(grpc, times(2)).getMultimodalCacheStatusAsync(any(), eq(8001), any(), eq(2000L));
         when(consistency.isMaster()).thenReturn(false);
-        directory.refresh();
+        synchronizer.refresh();
         when(consistency.isMaster()).thenReturn(true);
-        directory.refresh();
+        synchronizer.refresh();
         verify(grpc, times(4)).getMultimodalCacheStatusAsync(any(), eq(8001), any(), eq(2000L));
+    }
+
+    @Test
+    void shutdownCancelsInFlightPollingAndPreventsFurtherRefresh() throws Exception {
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var completed = new java.util.concurrent.CountDownLatch(1);
+        var response = new CompletableFuture<CacheStatusPB>();
+        response.whenComplete((value, error) -> completed.countDown());
+        when(grpc.getMultimodalCacheStatusAsync(any(), eq(8001), any(), eq(2000L)))
+                .thenAnswer(
+                        call -> {
+                            entered.countDown();
+                            return response;
+                        });
+        synchronizer.start();
+        assertTrue(entered.await(5, TimeUnit.SECONDS));
+        synchronizer.stop();
+        assertTrue(completed.await(5, TimeUnit.SECONDS));
+        assertTrue(response.isCancelled());
+        org.mockito.Mockito.clearInvocations(grpc);
+        synchronizer.refresh();
+        verifyNoInteractions(grpc);
+    }
+
+    @Test
+    void lateRpcResponseCannotPopulateReplacementWorkerCache() throws Exception {
+        var entered = new java.util.concurrent.CountDownLatch(1);
+        var response = new CompletableFuture<CacheStatusPB>();
+        when(grpc.getMultimodalCacheStatusAsync(eq(a.getIp()), eq(8001), any(), eq(2000L)))
+                .thenAnswer(
+                        call -> {
+                            entered.countDown();
+                            return response;
+                        });
+        when(grpc.getMultimodalCacheStatusAsync(eq(b.getIp()), eq(8001), any(), eq(2000L)))
+                .thenReturn(CompletableFuture.completedFuture(CacheStatusPB.getDefaultInstance()));
+        var executor = Executors.newSingleThreadExecutor();
+        try {
+            var refresh = executor.submit(synchronizer::refresh);
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            WorkerStatus replacement = worker(a.getIp(), "one");
+            live.put(a.getLogicalIpPort(), replacement);
+            response.complete(
+                    CacheStatusPB.newBuilder()
+                            .setMultimodalCache(
+                                    MultimodalCacheStatusPB.newBuilder()
+                                            .setWorkerInstance("old")
+                                            .addKeys("image"))
+                            .build());
+            refresh.get(5, TimeUnit.SECONDS);
+            var candidate =
+                    cacheManager.candidates("one", List.of("image")).get(a.getLogicalIpPort());
+            assertEquals(replacement, candidate.worker());
+            assertEquals(0, candidate.hashHits());
+        } finally {
+            response.cancel(true);
+            executor.shutdownNow();
+        }
     }
 
     @Test
@@ -497,7 +557,7 @@ class VitCacheDirectoryTest {
     }
 
     private void snapshot(WorkerStatus worker, String epoch, String... keys) {
-        directory.replace(
+        cacheManager.replace(
                 worker,
                 MultimodalCacheStatusPB.newBuilder()
                         .setWorkerInstance(epoch)
@@ -507,7 +567,7 @@ class VitCacheDirectoryTest {
 
     private void tierSnapshot(
             WorkerStatus worker, List<String> hashes, List<String> gpu, List<String> cpu) {
-        directory.replace(
+        cacheManager.replace(
                 worker,
                 MultimodalCacheStatusPB.newBuilder()
                         .setWorkerInstance("instance")

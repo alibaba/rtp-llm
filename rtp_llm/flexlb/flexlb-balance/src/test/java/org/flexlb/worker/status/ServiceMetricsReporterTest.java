@@ -1,5 +1,7 @@
 package org.flexlb.worker.status;
 
+import org.flexlb.balance.request.Request;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.cache.metrics.CacheMetricsReporter;
 import org.flexlb.config.FlexlbConfig;
@@ -16,8 +18,6 @@ import org.flexlb.worker.cache.CacheHitComparisonResult;
 import org.flexlb.worker.cache.CacheStatus;
 import org.flexlb.worker.endpoint.EncoderEndpoint;
 import org.flexlb.worker.endpoint.EndpointStats;
-import org.flexlb.worker.endpoint.Request;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
 import org.flexlb.worker.rpc.EngineGrpcClient;
 import org.junit.jupiter.api.BeforeEach;

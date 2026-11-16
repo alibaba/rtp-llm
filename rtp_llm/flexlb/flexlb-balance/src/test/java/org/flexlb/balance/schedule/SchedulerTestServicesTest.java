@@ -207,7 +207,7 @@ class SchedulerTestServicesTest {
                     SchedulerTestSupport.initializedScheduler(f.runtime));
             var wrongMode = new RequestContext(SchedulingTestConfig.newConfig());
             wrongMode.setRequest(
-                    org.flexlb.worker.endpoint.Request.builder()
+                    org.flexlb.balance.request.Request.builder()
                             .requestId("991")
                             .seqLen(1L)
                             .build());
@@ -453,7 +453,7 @@ class SchedulerTestServicesTest {
                                         f.runtime.responseCompletions(),
                                         context,
                                         response,
-                                        () -> true)
+                                        RequestContext.ResponseKind.ACK)
                                 .submit(() -> response.completeOwned(null));
                     } else {
                         f.runtime.tasks().execute(reenterShutdown);

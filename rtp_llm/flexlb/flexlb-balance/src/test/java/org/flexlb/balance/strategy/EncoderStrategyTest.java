@@ -1,11 +1,11 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.request.Request;
 import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.worker.endpoint.CapacityNotifier;
 import org.flexlb.worker.endpoint.EncoderEndpoint;
 import org.flexlb.worker.endpoint.EndpointRegistry;
-import org.flexlb.worker.endpoint.Request;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
 import org.flexlb.worker.status.WorkerStatus;
 import org.junit.jupiter.api.Test;
@@ -92,7 +92,7 @@ class EncoderStrategyTest {
         context.setRequest(request);
         try {
             var result = selection.select(context, "group");
-            assertEquals(RoutingResult.Status.SUCCESS, result.status());
+            assertEquals(SelectionResult.Status.SUCCESS, result.status());
             assertSame(second, result.value().endpoint());
         } finally {
             first.evictExpiredRequests(-1L, ignored -> false);
@@ -142,7 +142,7 @@ class EncoderStrategyTest {
         try {
             var result = selection.select(context, "group");
             assertEquals(
-                    capacityTaken ? RoutingResult.Status.BLOCKED : RoutingResult.Status.SUCCESS,
+                    capacityTaken ? SelectionResult.Status.BLOCKED : SelectionResult.Status.SUCCESS,
                     result.status());
             assertEquals(1L, endpoint.selectionSnapshot().requestCount());
             assertEquals(capacityTaken ? 50L : 100L, endpoint.selectionSnapshot().uncachedTokens());
@@ -266,7 +266,7 @@ class EncoderStrategyTest {
                 assertAll(
                         () ->
                                 assertNotEquals(
-                                        RoutingResult.Status.SUCCESS,
+                                        SelectionResult.Status.SUCCESS,
                                         result.status(),
                                         "a worker that moved to g2 cannot satisfy a g1 request"),
                         () ->
@@ -275,7 +275,7 @@ class EncoderStrategyTest {
                                         endpoint.selectionSnapshot().requestCount(),
                                         "a group mismatch must leave no Encoder registration"));
             } else {
-                assertEquals(RoutingResult.Status.SUCCESS, result.status());
+                assertEquals(SelectionResult.Status.SUCCESS, result.status());
                 assertEquals("g1", result.value().group());
                 assertEquals(1L, endpoint.selectionSnapshot().requestCount());
             }

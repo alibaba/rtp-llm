@@ -62,7 +62,7 @@ class RequestNotificationOwnershipRaceTest {
         var notificationStarted = new CountDownLatch(1);
         var finishNotification = new CountDownLatch(1);
         var blockFirstNotification = new AtomicBoolean(true);
-        var notificationOwner = new AtomicReference<RequestResult>();
+        var notificationOwner = new AtomicReference<RequestState.State>();
         var originalCaller = Thread.currentThread();
         doAnswer(
                         call -> {
@@ -73,7 +73,7 @@ class RequestNotificationOwnershipRaceTest {
                                         "the existing request work lane owns this notification");
                                 var state = context.snapshot();
                                 assertEquals(Phase.ENDING, state.phase());
-                                notificationOwner.set(state.requestEndResult());
+                                notificationOwner.set(state.endState());
                                 assertNotNull(notificationOwner.get());
                                 assertFalse(state.notificationsDone());
                                 notificationStarted.countDown();
@@ -116,7 +116,7 @@ class RequestNotificationOwnershipRaceTest {
                     Phase.ENDING,
                     context.snapshot().phase(),
                     "an external publisher cannot complete a running close owner");
-            assertSame(notificationOwner.get(), context.snapshot().requestEndResult());
+            assertSame(notificationOwner.get(), context.snapshot().endState());
             assertFalse(context.snapshot().notificationsDone());
             assertFalse(context.snapshot().notificationsDone());
             assertEquals(1, runtime.requests().liveRequestCount());
@@ -131,7 +131,7 @@ class RequestNotificationOwnershipRaceTest {
                             context.snapshot().phase() == Phase.CLOSED
                                     && runtime.requests().liveRequestCount() == 0);
             SchedulerTestSupport.awaitRequestWork(runtime);
-            assertSame(notificationOwner.get(), context.snapshot().requestEndResult());
+            assertSame(notificationOwner.get(), context.snapshot().endState());
             assertTrue(context.snapshot().notificationsDone());
             assertTrue(future.isCancelled());
             assertEquals(CancelReason.CLIENT_CANCELLED, context.snapshot().cancellationReason());

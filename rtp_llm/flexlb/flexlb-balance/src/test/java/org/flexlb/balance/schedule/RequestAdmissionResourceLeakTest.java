@@ -2,14 +2,14 @@ package org.flexlb.balance.schedule;
 
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.requestlog.TheoryCacheHitReporter;
 import org.flexlb.balance.schedule.RequestContext.SelectionAttempt;
 import org.flexlb.balance.schedule.RequestProtocolTestSupport.Registered;
-import org.flexlb.balance.strategy.RoutingResult;
+import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.worker.endpoint.DecodeEndpoint;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -73,7 +73,7 @@ class RequestAdmissionResourceLeakTest {
         try (var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             assertEquals(
-                    RoutingResult.Status.BLOCKED,
+                    SelectionResult.Status.BLOCKED,
                     RequestProtocolTestSupport.commitRoute(
                             lifecycle,
                             registered.item(),
@@ -126,7 +126,7 @@ class RequestAdmissionResourceLeakTest {
                                 null,
                                 System.currentTimeMillis()));
         assertEquals(
-                RoutingResult.Status.CLOSED,
+                SelectionResult.Status.CLOSED,
                 RequestProtocolTestSupport.commitRoute(
                         lifecycle,
                         registered.item(),
@@ -150,9 +150,9 @@ class RequestAdmissionResourceLeakTest {
         try {
             registered.item().ctx().registerSelectedRoute(admission, registered.item());
             assertEquals(
-                    RequestResult.State.CANCEL_REQUESTED,
+                    RequestState.State.CANCEL_REQUESTED,
                     lifecycle.cancel("4", CancelReason.CLIENT_CANCELLED).state());
-            verify(registered.item().decodeEndpoint(), never()).releaseRequest(any());
+            verify(registered.item().decodeEndpoint(), never()).releaseUnconfirmedRequest(any());
         } finally {
             admission
                     .requestContext()
@@ -163,7 +163,7 @@ class RequestAdmissionResourceLeakTest {
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.schedule.SchedulerTestSupport.runtime(lifecycle));
         verify(registered.item().decodeEndpoint(), times(1))
-                .releaseRequest(registered.item().decodeRegistration());
+                .releaseUnconfirmedRequest(registered.item().decodeRegistration());
     }
 
     @Test
@@ -288,7 +288,7 @@ class RequestAdmissionResourceLeakTest {
                                         lifecycle, registered.item(), publication));
             } else {
                 assertEquals(
-                        RoutingResult.Status.CLOSED,
+                        SelectionResult.Status.CLOSED,
                         RequestProtocolTestSupport.commitRoute(
                                 lifecycle, registered.item(), publication));
             }
@@ -338,7 +338,7 @@ class RequestAdmissionResourceLeakTest {
                                                         true))));
     }
 
-    private RequestResult activeRoute(long requestId) {
+    private RequestRoute activeRoute(long requestId) {
         RequestContext requestContext = lifecycle.repository.findActive(String.valueOf(requestId));
         synchronized (requestContext) {
             return requestContext.snapshot().route();

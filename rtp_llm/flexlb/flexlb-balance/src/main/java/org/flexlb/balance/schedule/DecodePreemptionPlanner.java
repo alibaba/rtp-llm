@@ -1,6 +1,7 @@
 package org.flexlb.balance.schedule;
 
 import com.google.common.math.LongMath;
+import org.flexlb.balance.request.Request;
 import org.flexlb.config.scheduler.PreemptionConfig;
 import org.flexlb.config.scheduler.PreemptionStage;
 import org.flexlb.util.PriorityNormalizer;
@@ -8,7 +9,6 @@ import org.flexlb.worker.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.worker.endpoint.DecodeResources.Capacity;
 import org.flexlb.worker.endpoint.DecodeResources.DecodeRequestView;
 import org.flexlb.worker.endpoint.DecodeResources.ResourceSnapshot;
-import org.flexlb.worker.endpoint.Request;
 import org.flexlb.worker.status.DecodeTaskPhase;
 
 import java.math.BigInteger;

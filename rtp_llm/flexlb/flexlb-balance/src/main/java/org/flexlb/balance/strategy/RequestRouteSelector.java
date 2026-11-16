@@ -1,9 +1,11 @@
 package org.flexlb.balance.strategy;
 
 import org.apache.commons.lang3.StringUtils;
+import org.flexlb.balance.request.Request;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.balance.schedule.RequestPhase;
-import org.flexlb.balance.schedule.RequestResult;
+import org.flexlb.balance.schedule.RequestRoute;
 import org.flexlb.balance.schedule.SchedulingMetadata;
 import org.flexlb.config.service.ModelMetaConfig;
 import org.flexlb.config.service.RoleType;
@@ -11,8 +13,6 @@ import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
 import org.flexlb.worker.endpoint.CapacityKey;
 import org.flexlb.worker.endpoint.EndpointRegistry;
-import org.flexlb.worker.endpoint.Request;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
 import org.flexlb.worker.status.ServerStatus;
@@ -54,17 +54,18 @@ public class RequestRouteSelector {
                         Objects.requireNonNull(modelMetaConfig, "modelMetaConfig").requiredRoles());
     }
 
-    public RequestResult select(RequestContext context, String policyGroup) {
+    public SelectionResult<RequestRoute, CapacityKey> select(
+            RequestContext context, String policyGroup) {
         return select(context, policyGroup, null);
     }
 
-    public RequestResult select(
+    public SelectionResult<RequestRoute, CapacityKey> select(
             RequestContext context, String policyGroup, RoleSelection reclaimed) {
         Request request = context == null ? null : context.getRequest();
         SchedulingMetadata metadata = context == null ? null : context.getSchedulingMetadata();
         if (request == null || metadata == null) {
-            if (reclaimed != null) reclaimed.rollbackSelection();
-            return RequestResult.rejected(Response.error(StrategyErrorType.INVALID_REQUEST));
+            if (reclaimed != null) rollbackSelection(reclaimed);
+            return SelectionResult.rejected(Response.error(StrategyErrorType.INVALID_REQUEST));
         }
         if (StringUtils.isNotBlank(policyGroup)) {
             Logger.info(
@@ -83,7 +84,7 @@ public class RequestRouteSelector {
                 if (!reclaimed.endpoint().acceptsNewRequests()
                         || StringUtils.isNotBlank(policyGroup)
                                 && !policyGroup.equals(reclaimed.group()))
-                    return RequestResult.retry();
+                    return SelectionResult.retry();
                 group = reclaimed.group();
             }
             if (request.getSelectedVit() != null) {
@@ -92,7 +93,7 @@ public class RequestRouteSelector {
                                 ? null
                                 : vitStrategy.selectForRoute(context, group);
                 if (vit == null) {
-                    return RequestResult.rejected(
+                    return SelectionResult.rejected(
                             Response.error(StrategyErrorType.VIT_ROUTE_STALE));
                 }
                 selections.add(vit);
@@ -102,7 +103,7 @@ public class RequestRouteSelector {
             if ((!requested.isEmpty() && !requiredRoles.containsAll(requested))
                     || context.getPhase() == RequestPhase.ENCODER
                             && !requiredRoles.contains(RoleType.ENCODER)) {
-                return RequestResult.rejected(Response.error(StrategyErrorType.INVALID_REQUEST));
+                return SelectionResult.rejected(Response.error(StrategyErrorType.INVALID_REQUEST));
             }
             var roles =
                     requested.isEmpty()
@@ -113,13 +114,13 @@ public class RequestRouteSelector {
             for (RoleType role : roles) {
                 if (context.getFuture() != null && context.getFuture().isDone()
                         || context.snapshot().cancellationReason() != null)
-                    return RequestResult.closed();
+                    return SelectionResult.closed();
                 if (reclaimed != null && role == reclaimed.role()) continue;
                 if (role == RoleType.VIT && request.getSelectedVit() != null) {
                     continue;
                 }
                 context.beginRoutingAttempt(role);
-                RoutingResult<RoleSelection, CapacityKey> result =
+                SelectionResult<RoleSelection, CapacityKey> result =
                         switch (role) {
                             case PREFILL, PDFUSION -> prefillStrategy.select(context, role, group);
                             case DECODE -> decodeStrategy.select(context, group);
@@ -129,19 +130,19 @@ public class RequestRouteSelector {
                                     throw new IllegalArgumentException(
                                             "Endpoint selection is not supported for FRONTEND");
                         };
-                if (result.status() != RoutingResult.Status.SUCCESS) {
+                if (result.status() != SelectionResult.Status.SUCCESS) {
                     Logger.debug(
                             "Failed to select {} worker for request {}",
                             role.getCode(),
                             context.getRequestId());
-                    return RequestResult.validateEndpoints(
-                            selections, RequestResult.fromDecision(result));
+                    return RequestRoute.validateEndpoints(selections, result.asFailure());
                 }
                 RoleSelection selection = result.value();
                 try {
                     selections.add(selection);
                 } catch (RuntimeException | Error failure) {
-                    Failures.append(failure, Failures.run(null, selection::rollbackSelection));
+                    Failures.append(
+                            failure, Failures.run(null, () -> rollbackSelection(selection)));
                     throw failure;
                 }
                 if (StringUtils.isBlank(policyGroup)) {
@@ -150,10 +151,10 @@ public class RequestRouteSelector {
             }
             if (context.getFuture() != null && context.getFuture().isDone()
                     || context.snapshot().cancellationReason() != null)
-                return RequestResult.closed();
-            var execution = new RequestResult(context, selections);
+                return SelectionResult.closed();
+            var execution = new RequestRoute(context, selections);
             transferred = true;
-            return execution;
+            return SelectionResult.success(execution);
         } catch (RuntimeException | Error failure) {
             selectionFailure = failure;
             throw failure;
@@ -213,7 +214,14 @@ public class RequestRouteSelector {
 
     private static void rollback(List<RoleSelection> selections) {
         Throwable failure = null;
-        for (var role : selections) failure = Failures.run(failure, role::rollbackSelection);
+        for (var role : selections) failure = Failures.run(failure, () -> rollbackSelection(role));
         Failures.rethrow(failure, "selection registration rollback failed");
+    }
+
+    private static void rollbackSelection(RoleSelection selection) {
+        if (selection.registration() != null) {
+            ((org.flexlb.worker.endpoint.SelectionRollback) selection.endpoint())
+                    .rollbackSelection(selection.registration());
+        }
     }
 }

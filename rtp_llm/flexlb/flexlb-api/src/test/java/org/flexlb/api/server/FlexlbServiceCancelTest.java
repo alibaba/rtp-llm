@@ -8,7 +8,7 @@ import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
 import org.flexlb.balance.schedule.AbstractRequestScheduler;
 import org.flexlb.balance.schedule.CancelReason;
-import org.flexlb.balance.schedule.RequestResult;
+import org.flexlb.balance.schedule.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.master.MasterStatusService;
 import org.flexlb.worker.status.ServiceMetricsReporter;
@@ -63,7 +63,7 @@ class FlexlbServiceCancelTest {
 
     @Test
     void localCancelReturnsAuthoritativePendingLifecycle() {
-        RequestResult pending = snapshot(101L, RequestResult.State.CANCEL_REQUESTED);
+        RequestState pending = snapshot(101L, RequestState.State.CANCEL_REQUESTED);
         when(requestScheduler.cancel(
                         "101",
                         CancelReason.DEADLINE_EXCEEDED,
@@ -92,7 +92,7 @@ class FlexlbServiceCancelTest {
 
     @Test
     void localCancelPreservesExistingTerminalLifecycle() {
-        RequestResult completed = snapshot(102L, RequestResult.State.COMPLETED);
+        RequestState completed = snapshot(102L, RequestState.State.COMPLETED);
         when(requestScheduler.cancel(
                         "102",
                         CancelReason.CLIENT_CANCELLED,
@@ -281,8 +281,8 @@ class FlexlbServiceCancelTest {
                 .build();
     }
 
-    private static RequestResult snapshot(long requestId, RequestResult.State phase) {
-        return new RequestResult(
+    private static RequestState snapshot(long requestId, RequestState.State phase) {
+        return new RequestState(
                 String.valueOf(requestId),
                 requestId,
                 org.flexlb.balance.schedule.RequestPhase.GENERATION,

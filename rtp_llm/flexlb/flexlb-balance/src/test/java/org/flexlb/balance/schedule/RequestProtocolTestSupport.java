@@ -1,19 +1,19 @@
 package org.flexlb.balance.schedule;
 
 import org.flexlb.balance.queue.OrderedRequestQueue;
+import org.flexlb.balance.request.Request;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.schedule.RequestContext.SelectionAttempt;
 import org.flexlb.balance.strategy.RequestRouteSelector;
 import org.flexlb.balance.strategy.RoleSelection;
-import org.flexlb.balance.strategy.RoutingResult;
+import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.worker.endpoint.CapacityNotifier;
 import org.flexlb.worker.endpoint.DecodeEndpoint;
 import org.flexlb.worker.endpoint.DecodeResources;
 import org.flexlb.worker.endpoint.PrefillEndpoint;
-import org.flexlb.worker.endpoint.Request;
 import org.flexlb.worker.endpoint.RequestEventType;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -47,7 +47,7 @@ final class RequestProtocolTestSupport {
         if (context.snapshot().requestId() != null) return;
         if (context.getRequest() == null) {
             context.setRequest(
-                    org.flexlb.worker.endpoint.Request.builder().requestId(requestId).build());
+                    org.flexlb.balance.request.Request.builder().requestId(requestId).build());
         }
         context.setSchedulingMetadata(
                 org.flexlb.balance.schedule.SchedulingMetadata.explicit(
@@ -65,7 +65,7 @@ final class RequestProtocolTestSupport {
             context.setFuture(future);
     }
 
-    static SelectedRoute plan(RequestContext context, RequestResult routing) {
+    static SelectedRoute plan(RequestContext context, RequestRoute routing) {
         return new SelectedRoute(context, routing, admissionHandle(context));
     }
 
@@ -129,15 +129,15 @@ final class RequestProtocolTestSupport {
                 ReflectionTestUtils.getField(operation.requestContext(), "requestScheduler");
     }
 
-    static RequestResult planRouting(SelectedRoute plan) {
+    static RequestRoute planRouting(SelectedRoute plan) {
         return plan.route;
     }
 
-    static RequestResult selectionOf(RequestResult route) {
+    static RequestRoute selectionOf(RequestRoute route) {
         return route;
     }
 
-    static RequestResult mockSelectedRoute(RequestContext context) {
+    static RequestRoute mockSelectedRoute(RequestContext context) {
         var prefill = org.mockito.Mockito.mock(PrefillEndpoint.class);
         var status = new org.flexlb.worker.status.ServerStatus();
         status.setRequestId(context.getRequestId());
@@ -150,7 +150,7 @@ final class RequestProtocolTestSupport {
     /**
      * Scheduler control-flow fixture with an explicit mock resource owner, constructed before routing.
      */
-    static RequestResult mockSelectedRoute(
+    static RequestRoute mockSelectedRoute(
             RequestContext context, java.util.List<RoleSelection> roles) {
         var registered = new java.util.ArrayList<RoleSelection>();
         for (var role : roles) {
@@ -166,17 +166,18 @@ final class RequestProtocolTestSupport {
         }
         var route =
                 org.mockito.Mockito.mock(
-                        RequestResult.class,
+                        RequestRoute.class,
                         org.mockito.Mockito.withSettings()
                                 .useConstructor(context, registered)
                                 .defaultAnswer(org.mockito.Mockito.CALLS_REAL_METHODS));
         org.mockito.Mockito.doAnswer(call -> call.getArgument(0))
                 .when(route)
-                .validateEndpoints(org.mockito.ArgumentMatchers.any(RequestResult.class));
+                .validateEndpoints(org.mockito.ArgumentMatchers.any(SelectionResult.class));
         return route;
     }
 
-    static RequestResult published(RequestResult selected, RequestResult route) {
+    static SelectionResult<RequestRoute, org.flexlb.worker.endpoint.CapacityKey> published(
+            RequestRoute selected, RequestRoute route) {
         recordPrefillReservation(selected);
         var context = selected.ctx();
         var operation = context.currentSelectionAttempt();
@@ -187,13 +188,14 @@ final class RequestProtocolTestSupport {
             context.tryCommitRoute(
                     operation,
                     publication,
-                    new RequestResult(context, RequestContext.ResponseKind.ACK, now),
+                    SchedulerTestSupport.responseCandidate(
+                            context, RequestContext.ResponseKind.ACK),
                     now);
         }
-        return publication;
+        return SelectionResult.success(publication);
     }
 
-    static boolean recordPrefillReservation(RequestResult route) {
+    static boolean recordPrefillReservation(RequestRoute route) {
         org.junit.jupiter.api.Assertions.assertNotNull(route.prefillRegistration());
         return true;
     }
@@ -213,6 +215,9 @@ final class RequestProtocolTestSupport {
         org.mockito.Mockito.lenient()
                 .when(endpoint.releaseRequest(org.mockito.ArgumentMatchers.any()))
                 .thenReturn(true);
+        org.mockito.Mockito.lenient()
+                .when(endpoint.releaseUnconfirmedRequest(org.mockito.ArgumentMatchers.any()))
+                .thenAnswer(call -> !endpoint.registrationState(call.getArgument(0)).confirmed());
         org.mockito.Mockito.lenient()
                 .when(
                         endpoint.tryRegisterSelection(
@@ -491,7 +496,7 @@ final class RequestProtocolTestSupport {
         scheduler.onRequestEvent(
                 context,
                 new RequestEvent(
-                        (RequestResult) status.route(),
+                        (RequestRoute) status.route(),
                         status.route().decodeRegistration(),
                         role,
                         null,
@@ -557,7 +562,7 @@ final class RequestProtocolTestSupport {
                 org.flexlb.balance.schedule.SchedulerTestSupport.runtime(scheduler));
     }
 
-    static RequestResult endFixture(RequestContext context, EndKind kind, String detail) {
+    static RequestState.State endFixture(RequestContext context, EndKind kind, String detail) {
         return context.endRequest(
                         RequestEndEvent.failure(
                                 context.snapshot().route(),
@@ -566,10 +571,10 @@ final class RequestProtocolTestSupport {
                                 detail),
                         System.currentTimeMillis(),
                         null)
-                .requestEndResult();
+                .endState();
     }
 
-    static void closing(RequestResult route) {
+    static void closing(RequestRoute route) {
         var ctx = route.ctx();
         long now = System.currentTimeMillis();
         RequestProtocolTestSupport.register(
@@ -586,7 +591,7 @@ final class RequestProtocolTestSupport {
             ctx.tryCommitRoute(
                     admission,
                     route,
-                    new RequestResult(ctx, RequestContext.ResponseKind.ACK, now),
+                    SchedulerTestSupport.responseCandidate(ctx, RequestContext.ResponseKind.ACK),
                     now);
         }
         ctx.finishSelectionWithoutCommit(admission, null, now);
@@ -624,34 +629,33 @@ final class RequestProtocolTestSupport {
                                     lifecycle,
                                     registered.item(),
                                     RequestProtocolTestSupport.publication(() -> true))
-                            == org.flexlb.balance.strategy.RoutingResult.Status.SUCCESS));
+                            == org.flexlb.balance.strategy.SelectionResult.Status.SUCCESS));
         }
     }
 
     static void beginRouteResult(AbstractRequestScheduler lifecycle, Registered registered) {
-        assertEquals(RoutingResult.Status.SUCCESS, commitRoute(lifecycle, registered));
+        assertEquals(SelectionResult.Status.SUCCESS, commitRoute(lifecycle, registered));
     }
 
-    static RoutingResult.Status commitRoute(
-            AbstractRequestScheduler lifecycle, RequestResult route, Publication action) {
+    static SelectionResult.Status commitRoute(
+            AbstractRequestScheduler lifecycle, RequestRoute route, Publication action) {
         var admission = lifecycle.currentSelectionAttempt(route);
-        if (admission == null) return RoutingResult.Status.CLOSED;
+        if (admission == null) return SelectionResult.Status.CLOSED;
         Throwable failure = org.flexlb.util.Failures.run(null, action::publish);
         boolean published = action.published();
         boolean recorded = published && route.ctx().canPublishRoute(admission);
         if (recorded) {
             var context = route.ctx();
             long nowMs = System.currentTimeMillis();
-            var candidate = new RequestResult(context, RequestContext.ResponseKind.ACK, nowMs);
             try (var completion =
                     new ResponseCompletionExecutor.Registration(
                             SchedulerTestSupport.runtime(lifecycle).responseCompletions(),
                             context,
                             (ResponseCompletionExecutor.RequestFuture) context.getFuture(),
-                            () -> context.snapshot().responseForFuture() == candidate)) {
+                            RequestContext.ResponseKind.ACK)) {
                 synchronized (context) {
                     context.registerSelectedRoute(admission, route);
-                    recorded = context.tryCommitRoute(admission, route, candidate, nowMs);
+                    recorded = context.tryCommitRoute(admission, route, completion, nowMs);
                     if (recorded)
                         completion.prepare(
                                 ResponseCompletionExecutor.RequestFuture.Completion.RESPONSE,
@@ -667,13 +671,13 @@ final class RequestProtocolTestSupport {
                             failure, AbstractRequestScheduler.finishUnpublishedRoute(route, null));
         org.flexlb.util.Failures.rethrow(failure, "test publication failed");
         return recorded
-                ? RoutingResult.Status.SUCCESS
+                ? SelectionResult.Status.SUCCESS
                 : route.ctx().canPublishRoute(admission)
-                        ? RoutingResult.Status.BLOCKED
-                        : RoutingResult.Status.CLOSED;
+                        ? SelectionResult.Status.BLOCKED
+                        : SelectionResult.Status.CLOSED;
     }
 
-    static RoutingResult.Status commitRoute(
+    static SelectionResult.Status commitRoute(
             AbstractRequestScheduler lifecycle, Registered registered) {
         SelectionAttempt admission =
                 SchedulerTestSupport.claim(
@@ -687,13 +691,13 @@ final class RequestProtocolTestSupport {
         }
     }
 
-    static RequestResult claimRouteWithoutPrediction(
-            AbstractRequestScheduler scheduler, RequestResult route, BooleanSupplier handoff) {
+    static RequestRoute claimRouteWithoutPrediction(
+            AbstractRequestScheduler scheduler, RequestRoute route, BooleanSupplier handoff) {
         return claimRoute(scheduler, route, handoff);
     }
 
-    static RequestResult claimRoute(
-            AbstractRequestScheduler scheduler, RequestResult route, BooleanSupplier handoff) {
+    static RequestRoute claimRoute(
+            AbstractRequestScheduler scheduler, RequestRoute route, BooleanSupplier handoff) {
         if (route.ctx().snapshot().committedRoute() != null)
             return handoff.getAsBoolean() ? route : null;
         if (!handoff.getAsBoolean()) return null;
@@ -711,7 +715,7 @@ final class RequestProtocolTestSupport {
         return () -> scheduler.processPendingRequestActions(claim.ctx());
     }
 
-    static void routeDelivered(AbstractRequestScheduler scheduler, RequestResult claim) {
+    static void routeDelivered(AbstractRequestScheduler scheduler, RequestRoute claim) {
         scheduler.processPendingRequestActions(claim.ctx());
     }
 
@@ -778,7 +782,7 @@ final class RequestProtocolTestSupport {
     }
 
     static boolean commitSelectedRoute(
-            RequestContext context, SelectionAttempt selecting, RequestResult route) {
+            RequestContext context, SelectionAttempt selecting, RequestRoute route) {
         synchronized (context) {
             if (!context.canPublishRoute(selecting)) return false;
             context.registerSelectedRoute(selecting, route);
@@ -786,7 +790,8 @@ final class RequestProtocolTestSupport {
             return context.tryCommitRoute(
                     selecting,
                     route,
-                    new RequestResult(context, RequestContext.ResponseKind.ACK, nowMs),
+                    SchedulerTestSupport.responseCandidate(
+                            context, RequestContext.ResponseKind.ACK),
                     nowMs);
         }
     }
@@ -810,10 +815,10 @@ final class RequestProtocolTestSupport {
      */
     static final class SelectedRoute implements AutoCloseable {
         final RequestContext context;
-        final RequestResult route;
+        final RequestRoute route;
         private SelectionAttempt operation;
 
-        SelectedRoute(RequestContext context, RequestResult route, SelectionAttempt operation) {
+        SelectedRoute(RequestContext context, RequestRoute route, SelectionAttempt operation) {
             this.context = context;
             this.route = route;
             this.operation = operation;
@@ -848,5 +853,5 @@ final class RequestProtocolTestSupport {
         void publish();
     }
 
-    record Registered(RequestResult item, CompletableFuture<Response> future) {}
+    record Registered(RequestRoute item, CompletableFuture<Response> future) {}
 }

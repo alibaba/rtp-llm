@@ -25,7 +25,7 @@ class RequestCleanupPassTest {
     void responseSelectedAfterCleanupImmediatelyArchivesTheRequest() {
         var context = new RequestContext(new FlexlbConfig());
         context.setRequest(
-                org.flexlb.worker.endpoint.Request.builder().requestId("late-response").build());
+                org.flexlb.balance.request.Request.builder().requestId("late-response").build());
         context.setSchedulingMetadata(
                 org.flexlb.balance.schedule.SchedulingMetadata.explicit(0, 100_000L));
         context.register(
@@ -45,11 +45,13 @@ class RequestCleanupPassTest {
         assertEquals(Phase.ENDING, context.snapshot().phase());
         assertNotNull(context.snapshot().deadlines().inactivity());
 
-        var response = new RequestResult(context, RequestContext.ResponseKind.TERMINAL, 1003L);
+        var response =
+                SchedulerTestSupport.responseCandidate(
+                        context, RequestContext.ResponseKind.TERMINAL);
         var closed = context.endRequest(null, 1003L, response);
         assertEquals(Phase.CLOSED, closed.phase());
         assertSame(response, closed.responseForFuture());
-        assertEquals(RequestResult.State.CANCELLED, closed.requestRecordForArchive().state());
+        assertEquals(RequestState.State.CANCELLED, closed.requestRecordForArchive().state());
         assertNull(closed.deadlines().inactivity());
         assertNull(closed.deadlines().request());
         assertNull(closed.deadlines().visibility());
@@ -71,7 +73,7 @@ class RequestCleanupPassTest {
         assertTrue(partial.notificationsDone());
         assertFalse(partial.decodeCleanupCompleted());
         assertEquals(Phase.ENDING, partial.phase());
-        context.recordCleanupProgress(mock(RequestResult.class), false, true, true, 1003L);
+        context.recordCleanupProgress(mock(RequestRoute.class), false, true, true, 1003L);
         assertEquals(partial, context.snapshot());
         context.recordCleanupProgress(route, false, true, false, 1004L);
         assertEquals(Phase.CLOSED, context.snapshot().phase());
@@ -87,7 +89,7 @@ class RequestCleanupPassTest {
                 100_000L,
                 10_000L,
                 org.flexlb.worker.endpoint.StrategyErrorType.SCHEDULING_DEADLINE_EXCEEDED);
-        var route = mock(RequestResult.class);
+        var route = mock(RequestRoute.class);
         when(route.ctx()).thenReturn(context);
         when(route.requestId()).thenReturn(String.valueOf(id));
         var decode = SchedulerTestSupport.mockDecodeEndpoint();
@@ -109,18 +111,18 @@ class RequestCleanupPassTest {
         return value;
     }
 
-    static RequestResult ended(RequestContext.Snapshot snapshot) {
-        assertNotNull(snapshot.requestEndResult());
-        return snapshot.requestEndResult();
+    static RequestState.State ended(RequestContext.Snapshot snapshot) {
+        assertNotNull(snapshot.endState());
+        return snapshot.endState();
     }
 
     @Test
     void partialCompletionRetainsProofAndCannotRewriteAnArchivedRequest() {
         RequestContext context = endingContext(7301L);
         var route = context.snapshot().route();
-        assertNotNull(context.releaseReason());
+        assertEquals(Phase.ENDING, context.snapshot().phase());
         var beforeForeignRelease = context.snapshot();
-        context.recordCleanupProgress(mock(RequestResult.class), true, true, false, 1002L);
+        context.recordCleanupProgress(mock(RequestRoute.class), true, true, false, 1002L);
         assertEquals(
                 beforeForeignRelease,
                 context.snapshot(),
@@ -181,27 +183,28 @@ class RequestCleanupPassTest {
                 null);
         assertFalse(RequestProtocolTestSupport.commitSelectedRoute(context, operation, candidate));
         assertNull(context.snapshot().route());
-        assertNull(context.snapshot().requestEndResult());
+        assertNull(context.snapshot().endState());
         assertEquals("original cancellation", context.snapshot().cancellationDetail());
         context.finishSelectionWithoutCommit(
                 operation,
-                org.flexlb.worker.endpoint.Response.buildErrorResponse(
+                org.flexlb.balance.request.Response.buildErrorResponse(
                         org.flexlb.worker.endpoint.StrategyErrorType.DISPATCH_FAILED,
                         "selection failed"),
                 1003L);
-        assertEquals("original cancellation", context.snapshot().requestEndResult().detail());
+        assertEquals("original cancellation", context.snapshot().endDetail());
         ended(context.snapshot());
-        assertEquals(RequestResult.State.CANCELLED, context.snapshot().requestEndResult().state());
+        assertEquals(RequestState.State.CANCELLED, context.snapshot().endState());
         context.endRequest(
                 null,
                 1005L,
-                new RequestResult(context, RequestContext.ResponseKind.TERMINAL, 1005L));
+                SchedulerTestSupport.responseCandidate(
+                        context, RequestContext.ResponseKind.TERMINAL));
         context.recordCleanupProgress(context.snapshot().route(), false, false, true, 1005L);
         assertEquals(Phase.CLOSED, context.snapshot().phase());
     }
 
-    static RequestResult route(RequestContext context, long id) {
-        var route = mock(RequestResult.class);
+    static RequestRoute route(RequestContext context, long id) {
+        var route = mock(RequestRoute.class);
         when(route.ctx()).thenReturn(context);
         when(route.requestId()).thenReturn(String.valueOf(id));
         var decode = SchedulerTestSupport.mockDecodeEndpoint();
@@ -235,25 +238,23 @@ class RequestCleanupPassTest {
                                         "shutdown"),
                                 1001L,
                                 null)
-                        .requestEndResult());
-        assertNull(context.snapshot().requestEndResult());
+                        .endState());
+        assertNull(context.snapshot().endState());
         org.flexlb.balance.schedule.RequestChangeAssertions.record(
                 context,
                 observedRequest ->
                         observedRequest.finishSelectionWithoutCommit(
                                 placement,
-                                org.flexlb.worker.endpoint.Response.buildErrorResponse(
+                                org.flexlb.balance.request.Response.buildErrorResponse(
                                         StrategyErrorType.RESOURCE_EXHAUSTED,
                                         "KV capacity unavailable"),
                                 1002L));
         ended(context.snapshot());
+        assertEquals(StrategyErrorType.RESOURCE_EXHAUSTED, context.snapshot().endError());
         assertEquals(
-                StrategyErrorType.RESOURCE_EXHAUSTED,
-                context.snapshot().requestEndResult().errorType());
-        assertEquals(
-                org.flexlb.worker.endpoint.Response.buildErrorResponse(
+                org.flexlb.balance.request.Response.buildErrorResponse(
                                 StrategyErrorType.RESOURCE_EXHAUSTED, "KV capacity unavailable")
                         .getErrorMessage(),
-                context.snapshot().requestEndResult().detail());
+                context.snapshot().endDetail());
     }
 }

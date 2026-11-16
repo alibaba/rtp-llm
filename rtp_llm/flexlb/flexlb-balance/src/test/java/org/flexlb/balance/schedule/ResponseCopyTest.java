@@ -1,8 +1,8 @@
 package org.flexlb.balance.schedule;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.flexlb.balance.request.Response;
 import org.flexlb.worker.endpoint.AdmissionRejectReason;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.status.DebugInfo;
 import org.flexlb.worker.status.ServerStatus;

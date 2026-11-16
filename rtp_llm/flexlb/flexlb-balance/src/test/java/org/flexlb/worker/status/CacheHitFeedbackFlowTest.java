@@ -4,13 +4,14 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.flexlb.balance.request.Request;
 import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.balance.schedule.SchedulingMetadata;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeStrategy;
 import org.flexlb.balance.strategy.EncoderStrategy;
 import org.flexlb.balance.strategy.RequestRouteSelector;
-import org.flexlb.balance.strategy.RoutingResult;
+import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.balance.strategy.VitStrategy;
 import org.flexlb.cache.CacheMatchResult;
 import org.flexlb.cache.CacheMatchSource;
@@ -33,7 +34,6 @@ import org.flexlb.config.routing.RoutingConfig;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.util.metrics.FlexMonitor;
 import org.flexlb.worker.endpoint.EndpointRegistry;
-import org.flexlb.worker.endpoint.Request;
 import org.flexlb.worker.rpc.WorkerStatusRpcClient;
 import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
@@ -371,12 +371,12 @@ class CacheHitFeedbackFlowTest {
         context.setSchedulingMetadata(
                 SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60_000));
         var selected = selector.select(context, "group");
-        assertEquals(RoutingResult.Status.SUCCESS, selected.status());
+        assertEquals(SelectionResult.Status.SUCCESS, selected.status());
         var route = selected;
-        if (route.prefillEndpoint() != null)
-            route.prefillEndpoint().releaseRequest(route.prefillRegistration());
-        if (route.decodeEndpoint() != null)
-            route.decodeEndpoint().releaseRequest(route.decodeRegistration());
+        if (route.value().prefillEndpoint() != null)
+            route.value().prefillEndpoint().releaseRequest(route.value().prefillRegistration());
+        if (route.value().decodeEndpoint() != null)
+            route.value().decodeEndpoint().releaseRequest(route.value().decodeRegistration());
     }
 
     private void publish(WorkerStatus status) {

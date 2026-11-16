@@ -1,5 +1,6 @@
 package org.flexlb.balance.schedule;
 
+import org.flexlb.balance.request.Request;
 import org.flexlb.balance.schedule.DecodePreemptionPlanner.DecodePreemptionPlan;
 import org.flexlb.balance.schedule.DecodePreemptionPlanner.PriorityHarmProfile;
 import org.flexlb.config.scheduler.PreemptionConfig;
@@ -7,7 +8,6 @@ import org.flexlb.config.scheduler.PreemptionStage;
 import org.flexlb.worker.endpoint.DecodeEndpoint;
 import org.flexlb.worker.endpoint.DecodeResources;
 import org.flexlb.worker.endpoint.DecodeResources.DecodeRequestView;
-import org.flexlb.worker.endpoint.Request;
 import org.flexlb.worker.status.DecodeTaskPhase;
 import org.flexlb.worker.status.WorkerStatus;
 import org.junit.jupiter.api.DisplayName;

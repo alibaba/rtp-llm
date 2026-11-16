@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.request.Request;
 import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.balance.schedule.SchedulingTestConfig;
 import org.flexlb.balance.strategy.StrategyTestSupport.Selection;
@@ -15,7 +16,6 @@ import org.flexlb.worker.endpoint.DecodeResources;
 import org.flexlb.worker.endpoint.DecodeResources.Capacity;
 import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.EndpointTestSupport;
-import org.flexlb.worker.endpoint.Request;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -54,14 +54,14 @@ class DecodeSelectionAdmissionContractTest {
 
             for (long requestId = 100L; requestId < 106L; requestId++) {
                 Request request = fixture.request(requestId);
-                RoutingResult<Selection, RoleType> result =
+                SelectionResult<Selection, RoleType> result =
                         StrategyTestSupport.select(
                                 fixture.strategy,
                                 request,
                                 org.flexlb.balance.schedule.SchedulingMetadata.explicit(
                                         70, Long.MAX_VALUE),
                                 null);
-                assertEquals(RoutingResult.Status.SUCCESS, result.status());
+                assertEquals(SelectionResult.Status.SUCCESS, result.status());
                 try (Selection selected = result.value()) {
                     assertEquals(
                             FREE_IP,
@@ -108,14 +108,14 @@ class DecodeSelectionAdmissionContractTest {
             Map<String, Integer> selectedCounts = new HashMap<>();
 
             for (long requestId = 200L; requestId < 206L; requestId++) {
-                RoutingResult<Selection, RoleType> result =
+                SelectionResult<Selection, RoleType> result =
                         StrategyTestSupport.select(
                                 fixture.strategy,
                                 fixture.request(requestId),
                                 org.flexlb.balance.schedule.SchedulingMetadata.explicit(
                                         70, Long.MAX_VALUE),
                                 null);
-                assertEquals(RoutingResult.Status.SUCCESS, result.status());
+                assertEquals(SelectionResult.Status.SUCCESS, result.status());
                 try (Selection selected = result.value()) {
                     selectedCounts.merge(selected.decode().getServerIp(), 1, Integer::sum);
                     assertEquals(

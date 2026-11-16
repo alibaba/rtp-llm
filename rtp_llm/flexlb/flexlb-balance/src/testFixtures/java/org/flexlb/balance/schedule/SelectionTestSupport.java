@@ -2,7 +2,7 @@ package org.flexlb.balance.schedule;
 
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.RoleSelection;
-import org.flexlb.balance.strategy.RoutingResult;
+import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.worker.endpoint.CapacityKey;
 import org.flexlb.worker.endpoint.DecodeEndpoint;
 import org.flexlb.worker.endpoint.DecodeResources;
@@ -42,8 +42,8 @@ public final class SelectionTestSupport {
      * Supplies a deterministic pure choice; production selection performs admission and registration.
      */
     public static <T> java.util.Optional<T> selectionResult(
-            org.mockito.invocation.InvocationOnMock call, RoutingResult<T, CapacityKey> selected) {
-        if (selected.status() != RoutingResult.Status.SUCCESS) return java.util.Optional.empty();
+            org.mockito.invocation.InvocationOnMock call, SelectionResult<T, CapacityKey> selected) {
+        if (selected.status() != SelectionResult.Status.SUCCESS) return java.util.Optional.empty();
         if (selected.value() instanceof CostBasedPrefillStrategy.Selection value) {
             java.util.List<PrefillEndpoint> inputs = call.getArgument(2);
             var input =
@@ -92,7 +92,7 @@ public final class SelectionTestSupport {
     }
 
     public static WorkerEndpoint.Registration<PrefillEndpoint.RequestRegistration> registerPrefill(
-            PrefillEndpoint endpoint, RequestResult route, long computeTokens) {
+            PrefillEndpoint endpoint, RequestRoute route, long computeTokens) {
         var registered =
                 endpoint.tryRegisterSelection(
                         route.requestId(), endpoint.selectionSnapshot(), computeTokens);

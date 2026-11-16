@@ -2,10 +2,10 @@ package org.flexlb.balance.schedule;
 
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.requestlog.TheoryCacheHitReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.worker.endpoint.PrefillEndpoint;
-import org.flexlb.worker.endpoint.Response;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -72,7 +72,7 @@ class RequestAdmissionExpirationRaceTest {
                 try (var completion = RequestProtocolTestSupport.finishOnExit(admission)) {
                     assertNotNull(admission);
                     assertEquals(
-                            org.flexlb.balance.strategy.RoutingResult.Status.SUCCESS,
+                            org.flexlb.balance.strategy.SelectionResult.Status.SUCCESS,
                             RequestProtocolTestSupport.commitRoute(
                                     registry,
                                     item,

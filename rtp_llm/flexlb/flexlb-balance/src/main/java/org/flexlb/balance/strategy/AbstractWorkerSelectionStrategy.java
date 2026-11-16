@@ -1,7 +1,7 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.request.Response;
 import org.flexlb.worker.endpoint.CapacityKey;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
 
@@ -19,29 +19,29 @@ import static com.google.common.base.Preconditions.checkArgument;
 public abstract class AbstractWorkerSelectionStrategy<I, C> {
     private static final int MAX_VERSION_CONFLICTS = 8;
 
-    protected final RoutingResult<RoleSelection, CapacityKey> selectCandidates(
+    protected final SelectionResult<RoleSelection, CapacityKey> selectCandidates(
             org.flexlb.balance.schedule.RequestContext context,
             CapacityKey scope,
             List<I> initial,
-            Function<List<I>, RoutingResult<C, CapacityKey>> choose) {
+            Function<List<I>, SelectionResult<C, CapacityKey>> choose) {
         if (initial.isEmpty())
-            return RoutingResult.blocked(
+            return SelectionResult.blocked(
                     scope,
                     Response.error(
                             org.flexlb.worker.endpoint.StrategyErrorType.forRole(scope.role())),
                     null);
         List<I> candidates = initial;
         int conflicts = 0;
-        RoutingResult<RoleSelection, CapacityKey> lastFull = null;
+        SelectionResult<RoleSelection, CapacityKey> lastFull = null;
         while (true) {
             if (candidates.isEmpty() && candidates != initial)
-                return lastFull == null ? RoutingResult.retry() : lastFull;
+                return lastFull == null ? SelectionResult.retry() : lastFull;
             var choice = choose.apply(Collections.unmodifiableList(candidates));
             // A full candidate can fit after capacity is released, even if the remaining ones
             // cannot.
-            if (choice.status() == RoutingResult.Status.REJECTED && lastFull != null)
+            if (choice.status() == SelectionResult.Status.REJECTED && lastFull != null)
                 return lastFull;
-            if (choice.status() != RoutingResult.Status.SUCCESS) return choice.asFailure();
+            if (choice.status() != SelectionResult.Status.SUCCESS) return choice.asFailure();
             C selected = choice.value();
             I original = candidate(selected);
             int index = -1;
@@ -54,7 +54,7 @@ public abstract class AbstractWorkerSelectionStrategy<I, C> {
             checkArgument(index >= 0, "strategy must select an original candidate");
             var accepted = register(context, scope.role(), scope.group(), selected);
             if (accepted.status() == WorkerEndpoint.RegistrationStatus.REGISTERED)
-                return RoutingResult.success(accepted.value());
+                return SelectionResult.success(accepted.value());
             if (accepted.status() == WorkerEndpoint.RegistrationStatus.CAPACITY_FULL) {
                 lastFull = capacityFull(selected, scope);
             }
@@ -62,7 +62,7 @@ public abstract class AbstractWorkerSelectionStrategy<I, C> {
             switch (accepted.status()) {
                 case VERSION_CONFLICT, ALREADY_REGISTERED -> {
                     if (++conflicts >= MAX_VERSION_CONFLICTS)
-                        return RoutingResult.retry(
+                        return SelectionResult.retry(
                                 Response.error(StrategyErrorType.SCHEDULER_PLAN_CONFLICT));
                     I refreshed = refresh(original);
                     if (refreshed == null) candidates.remove(index);
@@ -83,9 +83,9 @@ public abstract class AbstractWorkerSelectionStrategy<I, C> {
             String group,
             C selected);
 
-    protected RoutingResult<RoleSelection, CapacityKey> capacityFull(
+    protected SelectionResult<RoleSelection, CapacityKey> capacityFull(
             C selected, CapacityKey scope) {
-        return RoutingResult.blocked(
+        return SelectionResult.blocked(
                 scope, Response.error(StrategyErrorType.RESOURCE_EXHAUSTED), null);
     }
 

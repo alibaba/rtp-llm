@@ -237,7 +237,7 @@ class JavaLoadClientParityTest {
         client.errorCount.set(1);
         client.inflightCount.set(2);
 
-        JavaLoadClient.RequestResult ok = new JavaLoadClient.RequestResult();
+        JavaLoadClient.RequestRoute ok = new JavaLoadClient.RequestRoute();
         ok.status = "ok";
         ok.routePath = "master";
         ok.scheduleMs = 1.5;
@@ -245,7 +245,7 @@ class JavaLoadClientParityTest {
         ok.ttftMs = 10.0;
         client.completedResults.add(ok);
 
-        JavaLoadClient.RequestResult fb = new JavaLoadClient.RequestResult();
+        JavaLoadClient.RequestRoute fb = new JavaLoadClient.RequestRoute();
         fb.status = "ok";
         fb.routePath = "fallback";
         fb.totalMs = 30.0;

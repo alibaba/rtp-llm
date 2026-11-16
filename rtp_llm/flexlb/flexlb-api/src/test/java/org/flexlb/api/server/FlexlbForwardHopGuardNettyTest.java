@@ -15,12 +15,12 @@ import org.flexlb.api.protocol.FlexlbScheduleProtocol;
 import org.flexlb.api.protocol.FlexlbServiceGrpc;
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.schedule.AbstractRequestScheduler;
 import org.flexlb.balance.schedule.CancelReason;
-import org.flexlb.balance.schedule.RequestResult;
+import org.flexlb.balance.schedule.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.master.MasterStatusService;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.junit.jupiter.api.Test;
@@ -267,12 +267,12 @@ class FlexlbForwardHopGuardNettyTest {
                             .getRequestState(
                                     String.valueOf(requestId),
                                     org.flexlb.balance.schedule.RequestPhase.GENERATION))
-                    .thenReturn(requestState(requestId, RequestResult.State.ACKNOWLEDGED));
+                    .thenReturn(requestState(requestId, RequestState.State.ACKNOWLEDGED));
             when(originalMaster.requestScheduler.cancel(
                             String.valueOf(requestId),
                             CancelReason.CLIENT_CANCELLED,
                             org.flexlb.balance.schedule.RequestPhase.GENERATION))
-                    .thenReturn(requestState(requestId, RequestResult.State.CANCELLED));
+                    .thenReturn(requestState(requestId, RequestState.State.CANCELLED));
 
             originalMaster.isMaster.set(true);
             FlexlbScheduleProtocol.GetRequestStateResponsePB state =
@@ -324,12 +324,12 @@ class FlexlbForwardHopGuardNettyTest {
                             String.valueOf(unrelatedLocalId),
                             CancelReason.CLIENT_CANCELLED,
                             org.flexlb.balance.schedule.RequestPhase.GENERATION))
-                    .thenReturn(requestState(unrelatedLocalId, RequestResult.State.CANCELLED));
+                    .thenReturn(requestState(unrelatedLocalId, RequestState.State.CANCELLED));
             when(currentMaster.requestScheduler.cancel(
                             String.valueOf(requestedId),
                             CancelReason.CLIENT_CANCELLED,
                             org.flexlb.balance.schedule.RequestPhase.GENERATION))
-                    .thenReturn(requestState(requestedId, RequestResult.State.CANCELLED));
+                    .thenReturn(requestState(requestedId, RequestState.State.CANCELLED));
 
             FlexlbScheduleProtocol.FlexlbCancelResponsePB response =
                     client.stub.cancel(
@@ -372,8 +372,8 @@ class FlexlbForwardHopGuardNettyTest {
                 .build();
     }
 
-    private static RequestResult requestState(long requestId, RequestResult.State phase) {
-        return new RequestResult(
+    private static RequestState requestState(long requestId, RequestState.State phase) {
+        return new RequestState(
                 String.valueOf(requestId),
                 requestId,
                 org.flexlb.balance.schedule.RequestPhase.GENERATION,

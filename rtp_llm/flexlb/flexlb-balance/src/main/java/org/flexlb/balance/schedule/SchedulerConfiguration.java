@@ -107,8 +107,8 @@ public class SchedulerConfiguration {
     @Lazy
     @ConditionalOnMissingBean(VitStrategy.class)
     public VitStrategy vitStrategy(
-            org.flexlb.cache.VitCacheDirectory directory, EndpointRegistry endpoints) {
-        return new VitStrategy(directory, endpoints);
+            org.flexlb.cache.VitWorkerCacheManager cacheManager, EndpointRegistry endpoints) {
+        return new VitStrategy(cacheManager, endpoints);
     }
 
     @Bean

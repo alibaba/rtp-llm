@@ -1,5 +1,7 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.request.Request;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.cache.CacheMatchResult;
 import org.flexlb.cache.match.CacheAwareService;
@@ -13,8 +15,6 @@ import org.flexlb.util.formula.PrefillTimePredictor;
 import org.flexlb.worker.endpoint.CapacityKey;
 import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.PrefillEndpoint;
-import org.flexlb.worker.endpoint.Request;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
 import org.flexlb.worker.status.DebugInfo;
 import org.flexlb.worker.status.ServerStatus;
@@ -63,7 +63,7 @@ public class CostBasedPrefillStrategy
         remoteDiscount = affinity == null ? 0.2 : affinity.getRemoteDiscount();
     }
 
-    public RoutingResult<RoleSelection, CapacityKey> select(
+    public SelectionResult<RoleSelection, CapacityKey> select(
             RequestContext context, RoleType role, String group) {
         var candidates = endpoints.<PrefillEndpoint>endpoints(role, null);
         var request = context.getRequest();
@@ -86,13 +86,13 @@ public class CostBasedPrefillStrategy
                         this.chooseBest(request, group, current, matches)
                                 .map(
                                         selected ->
-                                                RoutingResult
+                                                SelectionResult
                                                         .<CostBasedPrefillStrategy.Selection,
                                                                 CapacityKey>
                                                                 success(selected))
                                 .orElseGet(
                                         () ->
-                                                RoutingResult.blocked(
+                                                SelectionResult.blocked(
                                                         scope,
                                                         Response.error(
                                                                 org.flexlb.worker.endpoint

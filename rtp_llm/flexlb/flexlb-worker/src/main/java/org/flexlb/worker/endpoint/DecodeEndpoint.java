@@ -243,15 +243,31 @@ public class DecodeEndpoint extends WorkerEndpoint
      */
     @Override
     public boolean rollbackSelection(WorkerEndpoint.RequestRegistration exact) {
-        return releaseRequest(exact, true);
+        var result = removeRegistration(exact, true);
+        checkState(
+                result != ReleaseResult.RETAINED,
+                "route rollback retained Decode resources: worker already confirmed the request");
+        return result == ReleaseResult.REMOVED;
     }
 
     /**
-     * Releases an exact registration after confirming it was not sent or remote cleanup completed.
-     * Sending a cancellation alone is not sufficient.
+     * Removes exact local bookkeeping after remote cleanup, a known unsent request, or inactivity expiry.
+     * Sending a cancellation alone is not sufficient; reported Worker occupancy is retained.
      */
     public boolean releaseRequest(RequestRegistration exact) {
-        return releaseRequest(exact, false);
+        var result = removeRegistration(exact, false);
+        if (result == ReleaseResult.REMOVED) capacityNotifier.notifyChanged(this);
+        return result == ReleaseResult.REMOVED;
+    }
+
+    /**
+     * Removes only an unconfirmed exact registration. Absence completes cleanup; a confirmed
+     * registration returns false and remains owned by the remote execution lifecycle.
+     */
+    public boolean releaseUnconfirmedRequest(RequestRegistration exact) {
+        var result = removeRegistration(exact, true);
+        if (result == ReleaseResult.REMOVED) capacityNotifier.notifyChanged(this);
+        return result != ReleaseResult.RETAINED;
     }
 
     /**
@@ -287,22 +303,20 @@ public class DecodeEndpoint extends WorkerEndpoint
     }
 
     public AdmissionEvaluation evaluateSelection(
-            org.flexlb.worker.endpoint.Request request, int priority, AdmissionCapacity capacity) {
+            long hardKvTokens, long expectedKvTokens, int priority, AdmissionCapacity capacity) {
         stateLock().lock();
         try {
             var snapshot = selectionSnapshot();
             var deficit =
                     capacity.evaluate(
-                            snapshot.usage(),
-                            request.getHardKvTokens(),
-                            request.getExpectedKvTokens(),
-                            Capacity.NONE);
+                            snapshot.usage(), hardKvTokens, expectedKvTokens, Capacity.NONE);
             return new AdmissionEvaluation(
                     snapshot,
                     deficit,
                     deficit.isZero()
-                            ? null
-                            : classifyCapacityFailure(request, priority, snapshot, capacity));
+                            ? CapacityFailure.NONE
+                            : classifyCapacityFailure(
+                                    hardKvTokens, expectedKvTokens, priority, snapshot, capacity));
         } finally {
             stateLock().unlock();
         }
@@ -459,25 +473,21 @@ public class DecodeEndpoint extends WorkerEndpoint
         for (var wait : waits) wait.complete(null);
     }
 
-    private boolean releaseRequest(
+    private ReleaseResult removeRegistration(
             WorkerEndpoint.RequestRegistration exact, boolean requireUnconfirmed) {
         if (exact == null || exact.endpointGenerationId() != getStatus().getGenerationId())
-            return false;
-        boolean released;
+            return ReleaseResult.ABSENT;
         stateLock().lock();
         try {
             var request = registeredRequests.get(exact.requestId());
-            released = request != null && request.matches(exact);
-            checkState(
-                    !released || !requireUnconfirmed || !request.confirmed,
-                    "route rollback retained Decode resources: worker already confirmed the request");
-            if (released) removeRequestLocked(request);
-            if (released) admissionVersion++;
+            if (request == null || !request.matches(exact)) return ReleaseResult.ABSENT;
+            if (requireUnconfirmed && request.confirmed) return ReleaseResult.RETAINED;
+            removeRequestLocked(request);
+            admissionVersion++;
+            return ReleaseResult.REMOVED;
         } finally {
             stateLock().unlock();
         }
-        if (released && !requireUnconfirmed) capacityNotifier.notifyChanged(this);
-        return released;
     }
 
     /**
@@ -576,12 +586,16 @@ public class DecodeEndpoint extends WorkerEndpoint
     /**
      * Classify only the dimensions that prevent this request from fitting.
      */
-    private Response classifyCapacityFailure(
-            Request request, int priority, SelectionSnapshot snapshot, AdmissionCapacity capacity) {
+    private CapacityFailure classifyCapacityFailure(
+            long hardKvTokens,
+            long expectedKvTokens,
+            int priority,
+            SelectionSnapshot snapshot,
+            AdmissionCapacity capacity) {
         var usage = snapshot.usage();
         if (usage.totalKvTokens() > 0
-                && request.getExpectedKvTokens() > capacity.kvBudget(usage.totalKvTokens())) {
-            return Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
+                && expectedKvTokens > capacity.kvBudget(usage.totalKvTokens())) {
+            return CapacityFailure.INSUFFICIENT_CAPACITY;
         }
         Capacity lower = Capacity.NONE;
         Capacity higher = Capacity.NONE;
@@ -602,38 +616,42 @@ public class DecodeEndpoint extends WorkerEndpoint
         }
         // Removing lower-priority occupancy is a counterfactual for attribution,
         // not an authorization to preempt its owners.
-        var residual =
-                capacity.evaluate(
-                        usage, request.getHardKvTokens(), request.getExpectedKvTokens(), lower);
+        var residual = capacity.evaluate(usage, hardKvTokens, expectedKvTokens, lower);
         if (residual.isZero()) {
-            return Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
+            return CapacityFailure.INSUFFICIENT_CAPACITY;
         }
         return classifyProtectedCapacity(residual, higher, same);
     }
 
-    private static Response classifyProtectedCapacity(
+    private static CapacityFailure classifyProtectedCapacity(
             DecodeResources.Capacity residual, Capacity higher, Capacity same) {
         Capacity attributed = higher.plus(same);
         if (residual.requests() > attributed.requests()
                 || residual.hardKvTokens() > attributed.hardKvTokens()
                 || residual.expectedKvTokens() > attributed.expectedKvTokens()) {
-            return Response.error(StrategyErrorType.ADMISSION_UNAVAILABLE);
+            return CapacityFailure.UNKNOWN_BLOCKER;
         }
         boolean higherBlocks =
                 residual.requests() > 0 && higher.requests() > 0
                         || residual.hardKvTokens() > 0 && higher.hardKvTokens() > 0
                         || residual.expectedKvTokens() > 0 && higher.expectedKvTokens() > 0;
-        return Response.error(
-                StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
-                higherBlocks
-                        ? AdmissionRejectReason.HIGHER_PRIORITY_AHEAD
-                        : AdmissionRejectReason.SAME_PRIORITY_AHEAD);
+        return higherBlocks
+                ? CapacityFailure.BLOCKED_BY_HIGHER_PRIORITY
+                : CapacityFailure.BLOCKED_BY_SAME_PRIORITY;
     }
 
     public record AdmissionEvaluation(
             DecodeEndpoint.SelectionSnapshot snapshot,
             org.flexlb.worker.endpoint.DecodeResources.Capacity deficit,
-            org.flexlb.worker.endpoint.Response failure) {}
+            CapacityFailure failure) {}
+
+    public enum CapacityFailure {
+        NONE,
+        INSUFFICIENT_CAPACITY,
+        BLOCKED_BY_HIGHER_PRIORITY,
+        BLOCKED_BY_SAME_PRIORITY,
+        UNKNOWN_BLOCKER
+    }
 
     /**
      * Identifies one Decode registration by object identity within a worker generation.
@@ -781,5 +799,11 @@ public class DecodeEndpoint extends WorkerEndpoint
             if (!result.complete(registration) && registration != null)
                 endpoint.rollbackSelection(registration);
         }
+    }
+
+    private enum ReleaseResult {
+        ABSENT,
+        RETAINED,
+        REMOVED
     }
 }

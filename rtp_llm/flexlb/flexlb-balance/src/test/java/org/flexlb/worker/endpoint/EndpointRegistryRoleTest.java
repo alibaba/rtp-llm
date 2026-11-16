@@ -131,7 +131,7 @@ class EndpointRegistryRoleTest {
                                 RoleType.ENCODER,
                                 "127.0.0.1:8001@0",
                                 status(RoleType.ENCODER, 8001));
-        var route = mock(org.flexlb.balance.schedule.RequestResult.class);
+        var route = mock(org.flexlb.balance.schedule.RequestRoute.class);
         var context = mock(org.flexlb.balance.schedule.RequestContext.class);
         Mockito.when(route.requestId()).thenReturn("encoder-orphan");
         Mockito.when(route.ctx()).thenReturn(context);

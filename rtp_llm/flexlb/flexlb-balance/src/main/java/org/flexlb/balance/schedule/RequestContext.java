@@ -3,14 +3,14 @@ package org.flexlb.balance.schedule;
 import io.opentelemetry.context.Context;
 import lombok.Getter;
 import lombok.Setter;
+import org.flexlb.balance.request.Request;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.requestlog.RoutingDecision;
 import org.flexlb.balance.schedule.ResponseCompletionExecutor.RequestFuture;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.worker.endpoint.DecodeEndpoint;
-import org.flexlb.worker.endpoint.Request;
 import org.flexlb.worker.endpoint.RequestEventType;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
 
@@ -80,7 +80,7 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
     private long updatedAtMs;
 
     private String registeredRequestId;
-    private RequestResult route;
+    private RequestRoute route;
 
     private long activeSelectionId;
 
@@ -98,9 +98,12 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
     private CancelReason cancellationReason;
     private StrategyErrorType cancellationError;
     private String cancellationDetail;
-    private RequestResult requestEndResult;
+    private RequestState.State endState;
+    private EndKind endKind;
+    private StrategyErrorType endError;
+    private String endDetail;
     private RequestEndEvent pendingEndEvent;
-    private RequestResult responseForFuture;
+    private ResponseCompletionExecutor.Registration responseForFuture;
 
     private boolean prefillCleanupCompleted = true;
     private boolean decodeCleanupCompleted = true;
@@ -108,7 +111,7 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
     private boolean expired;
 
     private ExpirationTimer.Plan deadlines = new ExpirationTimer.Plan(0L, null, null, null);
-    private RequestResult requestRecordForArchive;
+    private RequestState requestRecordForArchive;
 
     private long lastWorkerAtMs;
     private boolean requestDeadlineConsumed;
@@ -140,9 +143,13 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
                 decodeWorkerReleaseConfirmed,
                 decodeAccepted,
                 visibilityOverdue,
+                expired,
                 cancellationReason,
                 cancellationDetail,
-                requestEndResult,
+                endState,
+                endKind,
+                endError,
+                endDetail,
                 responseForFuture,
                 prefillCleanupCompleted,
                 decodeCleanupCompleted,
@@ -306,7 +313,7 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
      */
     synchronized SelectionAttempt beginRouteSelection() {
         if (registeredRequestId == null
-                || requestEndResult != null
+                || endState != null
                 || cancellationReason != null
                 || pendingEndEvent != null
                 || activeSelectionId != 0
@@ -331,7 +338,7 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
 
     synchronized boolean canPublishRoute(SelectionAttempt exact) {
         return registeredRequestId != null
-                && requestEndResult == null
+                && endState == null
                 && cancellationReason == null
                 && pendingEndEvent == null
                 && routeCommittedAtMs < 0
@@ -361,7 +368,7 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
                             && routeCommittedAtMs < 0
                             && !decodeAccepted;
             boolean failedAdmission =
-                    failure != null && requestEndResult == null && cancellationReason == null;
+                    failure != null && endState == null && cancellationReason == null;
             if (rolledBackBeforePublication && pendingEndEvent.kind() == EndKind.ENDPOINT_CLOSED
                     || failedAdmission && pendingEndEvent.kind() == EndKind.SHUTDOWN)
                 pendingEndEvent = null;
@@ -394,7 +401,7 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
                                 || event.role() == RoleType.PDFUSION
                                 || event.role() == RoleType.ENCODER
                                 || routeCommittedAtMs < 0 && !decodeAccepted;
-                if (ending && requestEndResult == null) {
+                if (ending && endState == null) {
                     if (activeSelectionId != 0
                             && (!decode || routeCommittedAtMs < 0 && !decodeAccepted)) {
                         if (pendingEndEvent == null) {
@@ -416,13 +423,13 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
                                     || event.role() == RoleType.ENCODER
                                     || event.type() == RequestEventType.FAILED
                                     || event.type() == RequestEventType.PRIORITY_CANCELLED;
-                    if (ending && requestEndResult == null) changed |= retainEnd(event.end());
+                    if (ending && endState == null) changed |= retainEnd(event.end());
                 }
             }
         }
         if (changed) refreshState(event.nowMs());
         return previousDeadlines != deadlines
-                || changed && (pendingEndEvent != null || requestEndResult != null);
+                || changed && (pendingEndEvent != null || endState != null);
     }
 
     synchronized boolean requestCancel(
@@ -431,9 +438,9 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
             long nowMs,
             StrategyErrorType errorType,
             String detail,
-            RequestResult responseCandidate) {
+            ResponseCompletionExecutor.Registration responseCandidate) {
         Objects.requireNonNull(reason);
-        if (registeredRequestId == null || requestEndResult != null || cancellationReason != null)
+        if (registeredRequestId == null || endState != null || cancellationReason != null)
             return false;
         if (reason == CancelReason.DEADLINE_EXCEEDED && routeCommittedAtMs >= 0) return false;
         if (frontend && (responseForFuture != null || routeCommittedAtMs >= 0)) return false;
@@ -472,12 +479,12 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
             else requestDeadlineConsumed = true;
             boolean requestAlreadyCommitted =
                     !inactive
-                            && (requestEndResult != null
+                            && (endState != null
                                     || routeCommittedAtMs >= 0 && activeSelectionId == 0);
             if (!requestAlreadyCommitted) {
                 String detail =
                         inactive ? "request inactive" : "request scheduling deadline exceeded";
-                if (cancellationReason == null && requestEndResult == null)
+                if (cancellationReason == null && endState == null)
                     recordCancellation(
                             CancelReason.DEADLINE_EXCEEDED,
                             timeoutError,
@@ -493,7 +500,9 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
     }
 
     synchronized Snapshot endRequest(
-            RequestEndEvent evidence, long nowMs, RequestResult responseCandidate) {
+            RequestEndEvent evidence,
+            long nowMs,
+            ResponseCompletionExecutor.Registration responseCandidate) {
         if (registeredRequestId == null
                 || requestRecordForArchive != null
                 || evidence != null && evidence.route() != null && evidence.route() != route)
@@ -504,22 +513,11 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
         return snapshot();
     }
 
-    synchronized WorkerEndpoint.ReleaseReason releaseReason() {
-        if (requestEndResult == null || requestRecordForArchive != null || activeSelectionId != 0)
-            return null;
-        if (routeCommittedAtMs >= 0
-                && prefillWorkerReleaseConfirmed
-                && decodeWorkerReleaseConfirmed) return WorkerEndpoint.ReleaseReason.REMOTE_CLEANUP;
-        return expired
-                ? WorkerEndpoint.ReleaseReason.EXPIRED
-                : WorkerEndpoint.ReleaseReason.COUNTERPART_FINISHED;
-    }
-
     synchronized void recordRouteCommitStart(long startedNanos) {
         timing = timing.withRouteCommitStartedNanos(startedNanos);
     }
 
-    synchronized void registerSelectedRoute(SelectionAttempt exact, RequestResult acquired) {
+    synchronized void registerSelectedRoute(SelectionAttempt exact, RequestRoute acquired) {
         checkState(matchesSelection(exact), "route requires its current selection");
         checkState(
                 acquired.ctx() == this
@@ -537,7 +535,10 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
      * Commits the route and its reserved response together; expiration still wins before commit.
      */
     synchronized boolean tryCommitRoute(
-            SelectionAttempt exact, RequestResult acquired, RequestResult response, long nowMs) {
+            SelectionAttempt exact,
+            RequestRoute acquired,
+            ResponseCompletionExecutor.Registration response,
+            long nowMs) {
         if (!canPublishRoute(exact) || route != acquired || responseForFuture != null) return false;
         if (getRequestExpiresAtMs() > 0 && nowMs >= getRequestExpiresAtMs()
                 || nowMs >= inactivityExpiresAtMs()) {
@@ -561,7 +562,7 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
     }
 
     synchronized void recordCleanupProgress(
-            RequestResult exact,
+            RequestRoute exact,
             boolean prefillReleased,
             boolean decodeReleased,
             boolean notificationsSubmitted,
@@ -569,7 +570,7 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
         if (route != exact || requestRecordForArchive != null) return;
         prefillCleanupCompleted |= prefillReleased;
         decodeCleanupCompleted |= decodeReleased;
-        if (requestEndResult != null) notificationsDone |= notificationsSubmitted;
+        if (endState != null) notificationsDone |= notificationsSubmitted;
         else if (routeCommittedAtMs < 0 && prefillCleanupCompleted && decodeCleanupCompleted)
             route = null;
         refreshState(nowMs);
@@ -686,10 +687,11 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
         return changed;
     }
 
-    private void selectResponse(RequestResult candidate) {
-        if (candidate == null || candidate.ctx() != this || responseForFuture != null) return;
+    private void selectResponse(ResponseCompletionExecutor.Registration candidate) {
+        if (candidate == null || candidate.requestContext() != this || responseForFuture != null)
+            return;
         if (candidate.responseKind() == ResponseKind.ACK
-                || candidate.responseKind() == ResponseKind.TERMINAL && requestEndResult == null
+                || candidate.responseKind() == ResponseKind.TERMINAL && endState == null
                 || candidate.responseKind() == ResponseKind.CANCELLATION
                         && cancellationReason == null) return;
         responseForFuture = candidate;
@@ -708,7 +710,7 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
      */
     private boolean retainEnd(RequestEndEvent evidence) {
         currentResourceWait = null;
-        if (requestEndResult != null) {
+        if (endState != null) {
             boolean newlyExpired = !expired && evidence.kind() == EndKind.INACTIVITY;
             expired |= newlyExpired;
             return newlyExpired;
@@ -728,32 +730,35 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
         if (pendingEndEvent == null
                 || evidence.kind() == EndKind.WORKER && pendingEndEvent.kind() != EndKind.WORKER)
             pendingEndEvent = evidence;
-        requestEndResult = buildResult(pendingEndEvent);
+        recordEnd(pendingEndEvent);
         expired |= pendingEndEvent.kind() == EndKind.INACTIVITY;
         pendingEndEvent = null;
         return true;
     }
 
-    private RequestResult buildResult(RequestEndEvent evidence) {
+    private void recordEnd(RequestEndEvent evidence) {
+        endKind = evidence.kind();
         // Preserve the first cancellation cause, except when a committed route reports FAILURE.
         // That failure keeps its own result instead of being replaced by the cancellation.
         boolean failureAfterRouteCommitted =
                 evidence.kind() == EndKind.FAILURE && routeCommittedAtMs >= 0L;
         if (cancellationReason != null && !failureAfterRouteCommitted) {
-            var state = RequestResult.State.CANCELLED;
+            var state = RequestState.State.CANCELLED;
             if (cancellationReason == CancelReason.DEADLINE_EXCEEDED) {
-                state = RequestResult.State.TIMED_OUT;
+                state = RequestState.State.TIMED_OUT;
             }
-            return new RequestResult(evidence.kind(), state, cancellationError, cancellationDetail);
+            endState = state;
+            endError = cancellationError;
+            endDetail = cancellationDetail;
+            return;
         }
 
         // Inactivity without an earlier cancellation ends the request as TIMED_OUT.
         if (evidence.kind() == EndKind.INACTIVITY) {
-            return new RequestResult(
-                    evidence.kind(),
-                    RequestResult.State.TIMED_OUT,
-                    timeoutError,
-                    evidence.detail());
+            endState = RequestState.State.TIMED_OUT;
+            endError = timeoutError;
+            endDetail = evidence.detail();
+            return;
         }
 
         // Worker/frontend success produces COMPLETED when no overriding cancellation applies.
@@ -764,12 +769,15 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
                     evidence.detail() == null || evidence.detail().isBlank()
                             ? "request completed"
                             : evidence.detail();
-            return new RequestResult(evidence.kind(), RequestResult.State.COMPLETED, null, detail);
+            endState = RequestState.State.COMPLETED;
+            endError = null;
+            endDetail = detail;
+            return;
         }
         // Worker-reported preemption produces CANCELLED; other unsuccessful endings produce FAILED.
-        var state = RequestResult.State.FAILED;
+        var state = RequestState.State.FAILED;
         if (evidence.kind() == EndKind.PRIORITY) {
-            state = RequestResult.State.CANCELLED;
+            state = RequestState.State.CANCELLED;
         }
         var error = evidence.errorType();
         if (error == null) {
@@ -789,7 +797,9 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
                         default -> "request ended";
                     };
         }
-        return new RequestResult(evidence.kind(), state, error, detail);
+        endState = state;
+        endError = error;
+        endDetail = detail;
     }
 
     /**
@@ -797,7 +807,7 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
      * Deadline tokens are replaced only when their scheduled time changes.
      */
     private void refreshState(long nowMs) {
-        if (requestEndResult != null
+        if (endState != null
                 && requestRecordForArchive == null
                 && prefillCleanupCompleted
                 && decodeCleanupCompleted
@@ -805,23 +815,22 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
                 && (responseForFuture != null || future.isDone())
                 && activeSelectionId == 0) {
             requestRecordForArchive =
-                    new RequestResult(
+                    new RequestState(
                             registeredRequestId,
                             originalNumericRequestId,
                             phase,
-                            requestEndResult.state(),
+                            endState,
                             timing.registeredAtMs(),
                             nowMs,
-                            requestEndResult.detail(),
-                            requestScheduler);
+                            endDetail);
             route = null;
         }
         if (registeredRequestId != null) {
             long requestAt =
-                    requestEndResult == null && !requestDeadlineConsumed && routeCommittedAtMs < 0
+                    endState == null && !requestDeadlineConsumed && routeCommittedAtMs < 0
                             ? getRequestExpiresAtMs()
                             : 0;
-            long visibilityAt = requestEndResult == null ? visibilityAtMs : 0;
+            long visibilityAt = endState == null ? visibilityAtMs : 0;
             long inactivityAt =
                     requestRecordForArchive != null || expired ? 0 : inactivityExpiresAtMs();
             deadlines = deadlines.schedule(this, requestAt, visibilityAt, inactivityAt);
@@ -907,13 +916,13 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
      * Carries an ending cause for one exact route; resource cleanup is recorded separately on the context.
      */
     public record RequestEndEvent(
-            RequestResult route,
+            RequestRoute route,
             EndKind kind,
             boolean success,
             long errorCode,
             StrategyErrorType errorType,
             String detail) {
-        public static RequestEndEvent publicationFailure(RequestResult route, Response response) {
+        public static RequestEndEvent publicationFailure(RequestRoute route, Response response) {
             var error = StrategyErrorType.DISPATCH_FAILED;
             if (response != null) {
                 for (var candidate : StrategyErrorType.values()) {
@@ -933,12 +942,12 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
         }
 
         public static RequestEndEvent failure(
-                RequestResult route, EndKind kind, StrategyErrorType errorType, String detail) {
+                RequestRoute route, EndKind kind, StrategyErrorType errorType, String detail) {
             return new RequestEndEvent(route, kind, false, 0L, errorType, detail);
         }
 
         public static RequestEndEvent externalFailure(
-                RequestResult route, Response response, Throwable error) {
+                RequestRoute route, Response response, Throwable error) {
             String detail =
                     error != null
                             ? "external future failure: " + error.getMessage()
@@ -955,7 +964,7 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
      * reservation.
      */
     public record RequestEvent(
-            RequestResult route,
+            RequestRoute route,
             DecodeEndpoint.RequestRegistration reservation,
             RoleType role,
             WorkerEndpoint endpoint,
@@ -996,22 +1005,26 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
             long originalNumericRequestId,
             org.flexlb.balance.schedule.RequestPhase requestPhase,
             long createdAtMs,
-            RequestResult route,
+            RequestRoute route,
             long selectionId,
             long routeCommittedAtMs,
             boolean prefillWorkerReleaseConfirmed,
             boolean decodeWorkerReleaseConfirmed,
             boolean decodeAccepted,
             boolean visibilityOverdue,
+            boolean inactivityExpired,
             CancelReason cancellationReason,
             String cancellationDetail,
-            RequestResult requestEndResult,
-            RequestResult responseForFuture,
+            RequestState.State endState,
+            EndKind endKind,
+            StrategyErrorType endError,
+            String endDetail,
+            ResponseCompletionExecutor.Registration responseForFuture,
             boolean prefillCleanupCompleted,
             boolean decodeCleanupCompleted,
             boolean notificationsDone,
             ExpirationTimer.Plan deadlines,
-            RequestResult requestRecordForArchive,
+            RequestState requestRecordForArchive,
             long updatedAtMs,
             long inactivityExpiresAtMs)
             implements org.flexlb.worker.endpoint.WorkerRequestSnapshot {
@@ -1019,14 +1032,14 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
             return selectionId == 0L ? RoutingPhase.NONE : RoutingPhase.SELECTING;
         }
 
-        public RequestResult committedRoute() {
+        public RequestRoute committedRoute() {
             return routeCommittedAtMs >= 0L ? route : null;
         }
 
         public Phase phase() {
             return requestRecordForArchive != null
                     ? Phase.CLOSED
-                    : requestEndResult != null ? Phase.ENDING : Phase.OPEN;
+                    : endState != null ? Phase.ENDING : Phase.OPEN;
         }
     }
 

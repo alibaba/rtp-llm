@@ -190,7 +190,7 @@ class EndpointCleanupOwnershipTest {
                         org.flexlb.balance.schedule.SchedulerTestSupport.repository(registry)
                                 ::retainsIdentity));
         assertDecodeLedger(endpoint, 1, 0, 200L, 350L);
-        RequestResult retiredRecord1 =
+        RequestState retiredRecord1 =
                 org.flexlb.balance.schedule.SchedulerTestSupport.repository(registry)
                         .getRequestState(requestContext.getRequestId());
         assertTrue(
@@ -244,7 +244,7 @@ class EndpointCleanupOwnershipTest {
                         org.flexlb.balance.schedule.SchedulerTestSupport.repository(registry)
                                 ::retainsIdentity));
         assertDecodeLedger(endpoint, 0, 1, 0L, 0L);
-        RequestResult retiredRecord3 =
+        RequestState retiredRecord3 =
                 org.flexlb.balance.schedule.SchedulerTestSupport.repository(registry)
                         .getRequestState(original.getRequestId());
         assertTrue(

@@ -6,12 +6,12 @@ import org.flexlb.api.protocol.FlexlbScheduleProtocol.FlexlbScheduleRequestPB;
 import org.flexlb.api.protocol.FlexlbScheduleProtocol.FlexlbScheduleResponsePB;
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.schedule.RequestSchedulerTestRuntime;
 import org.flexlb.balance.strategy.RequestRouteSelector;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.master.MasterStatusService;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.rpc.EngineGrpcClient;
 import org.flexlb.worker.status.ServiceMetricsReporter;
@@ -89,7 +89,7 @@ class VitRequestRoutingTest {
 
             when(selector.select(any(), isNull()))
                     .thenReturn(
-                            org.flexlb.balance.schedule.RequestResult.rejected(
+                            org.flexlb.balance.strategy.SelectionResult.rejected(
                                     Response.error(StrategyErrorType.NO_PREFILL_WORKER)));
             var pd = FlexlbScheduleRequestPB.newBuilder().setRequestId(918L).build();
             assertEquals(

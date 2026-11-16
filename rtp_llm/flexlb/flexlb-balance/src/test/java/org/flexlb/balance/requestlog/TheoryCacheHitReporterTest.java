@@ -1,12 +1,12 @@
 package org.flexlb.balance.requestlog;
 
+import org.flexlb.balance.request.Request;
 import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.cache.match.TheoryCacheKeyHistory;
 import org.flexlb.cache.metrics.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.service.RoleType;
-import org.flexlb.worker.endpoint.Request;
 import org.flexlb.worker.status.WorkerStatus;
 import org.flexlb.worker.status.WorkerStatusProvider;
 import org.junit.jupiter.api.AfterEach;

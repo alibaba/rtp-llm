@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.request.Request;
 import org.flexlb.balance.schedule.SchedulingMetadata;
 import org.flexlb.cache.CacheMatchResult;
 import org.flexlb.cache.CacheMatchSource;
@@ -10,7 +11,6 @@ import org.flexlb.config.routing.RoutingConfig;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.util.formula.PrefillTimePredictor;
 import org.flexlb.worker.endpoint.PrefillEndpoint;
-import org.flexlb.worker.endpoint.Request;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;

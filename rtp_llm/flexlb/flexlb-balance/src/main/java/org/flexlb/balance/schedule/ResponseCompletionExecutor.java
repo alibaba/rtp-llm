@@ -1,7 +1,7 @@
 package org.flexlb.balance.schedule;
 
+import org.flexlb.balance.request.Response;
 import org.flexlb.util.Failures;
-import org.flexlb.worker.endpoint.Response;
 
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
@@ -156,21 +156,21 @@ public final class ResponseCompletionExecutor implements AutoCloseable {
     static final class Registration implements AutoCloseable {
         private final AtomicReference<Phase> phase = new AtomicReference<>(Phase.RESERVED);
         private final ResponseCompletionExecutor executor;
-        private final Object requestLock;
+        private final RequestContext requestContext;
         private final RequestFuture response;
-        private final BooleanSupplier ownsResponse;
+        private final RequestContext.ResponseKind responseKind;
 
         private BooleanSupplier preparedResponse;
 
         Registration(
                 ResponseCompletionExecutor executor,
-                Object requestLock,
+                RequestContext context,
                 RequestFuture response,
-                BooleanSupplier ownsResponse) {
-            this.requestLock = Objects.requireNonNull(requestLock);
-            this.response = Objects.requireNonNull(response);
-            this.ownsResponse = Objects.requireNonNull(ownsResponse);
+                RequestContext.ResponseKind kind) {
+            this.requestContext = context;
+            this.response = response;
             this.executor = executor;
+            this.responseKind = kind;
             checkState(executor.register(), "frontend publication is closed");
         }
 
@@ -179,6 +179,14 @@ public final class ResponseCompletionExecutor implements AutoCloseable {
             if (phase.compareAndSet(Phase.RESERVED, Phase.CLOSED)) {
                 executor.release();
             }
+        }
+
+        RequestContext requestContext() {
+            return requestContext;
+        }
+
+        RequestContext.ResponseKind responseKind() {
+            return responseKind;
         }
 
         void reject(Throwable failure) {
@@ -202,9 +210,9 @@ public final class ResponseCompletionExecutor implements AutoCloseable {
 
         boolean complete(RequestFuture.Completion kind, Response response, Throwable failure) {
             checkState(
-                    !Thread.holdsLock(requestLock),
+                    !Thread.holdsLock(requestContext),
                     "response callbacks require the Context lock to be released");
-            if (!ownsResponse.getAsBoolean()) return false;
+            if (requestContext.snapshot().responseForFuture() != this) return false;
             return switch (kind) {
                 case RESPONSE -> this.response.completeOwned(response);
                 case FAILURE -> this.response.completeExceptionallyOwned(failure);
@@ -224,7 +232,7 @@ public final class ResponseCompletionExecutor implements AutoCloseable {
         }
 
         boolean completeNow(BooleanSupplier completion) {
-            if (Thread.holdsLock(requestLock)) {
+            if (Thread.holdsLock(requestContext)) {
                 close();
                 throw new IllegalStateException("response completion under Context lock");
             }
@@ -232,7 +240,7 @@ public final class ResponseCompletionExecutor implements AutoCloseable {
         }
 
         void submit(BooleanSupplier completion) {
-            if (Thread.holdsLock(requestLock)) {
+            if (Thread.holdsLock(requestContext)) {
                 close();
                 throw new IllegalStateException("response submission under Context lock");
             }

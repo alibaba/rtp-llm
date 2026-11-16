@@ -28,21 +28,21 @@ final class StrategyTestSupport {
 
     private StrategyTestSupport() {}
 
-    static <B> org.flexlb.balance.strategy.RoutingResult<Selection, B> select(
-            org.flexlb.worker.endpoint.Request request,
+    static <B> org.flexlb.balance.strategy.SelectionResult<Selection, B> select(
+            org.flexlb.balance.request.Request request,
             java.util.function.Function<
                             Selection,
-                            org.flexlb.balance.strategy.RoutingResult<
+                            org.flexlb.balance.strategy.SelectionResult<
                                     org.flexlb.balance.strategy.RoleSelection, B>>
                     action) {
         var route = scope(request);
         var result = action.apply(route);
-        return result.status() == RoutingResult.Status.SUCCESS
-                ? RoutingResult.success(route)
+        return result.status() == SelectionResult.Status.SUCCESS
+                ? SelectionResult.success(route)
                 : result.asFailure();
     }
 
-    static Selection scope(org.flexlb.worker.endpoint.Request request) {
+    static Selection scope(org.flexlb.balance.request.Request request) {
         var context = new org.flexlb.balance.schedule.RequestContext(config());
         context.setRequest(request);
         context.setSchedulingMetadata(
@@ -56,19 +56,19 @@ final class StrategyTestSupport {
         return config;
     }
 
-    static org.flexlb.balance.strategy.RoutingResult<Selection, RoleType> select(
+    static org.flexlb.balance.strategy.SelectionResult<Selection, RoleType> select(
             DecodeRoutingFixture selector,
-            org.flexlb.worker.endpoint.Request request,
+            org.flexlb.balance.request.Request request,
             org.flexlb.balance.schedule.SchedulingMetadata metadata,
             String group) {
         return select(request, route -> selector.select(request, metadata, group, route));
     }
 
-    static org.flexlb.balance.strategy.RoutingResult<
+    static org.flexlb.balance.strategy.SelectionResult<
                     Selection, org.flexlb.worker.endpoint.CapacityKey>
             select(
                     PrefillRoutingFixture selector,
-                    org.flexlb.worker.endpoint.Request request,
+                    org.flexlb.balance.request.Request request,
                     org.flexlb.balance.schedule.SchedulingMetadata metadata,
                     RoleType role,
                     String group) {
@@ -83,7 +83,7 @@ final class StrategyTestSupport {
             String group) {
         Selection route =
                 scope(
-                        org.flexlb.worker.endpoint.Request.builder()
+                        org.flexlb.balance.request.Request.builder()
                                 .requestId(String.valueOf(id))
                                 .build());
         com.google.common.base.Preconditions.checkArgument(role == RoleType.VIT);
@@ -97,10 +97,10 @@ final class StrategyTestSupport {
                         selector,
                         org.mockito.Mockito.mock(EncoderStrategy.class),
                         Mockito.mock(org.flexlb.config.service.ModelMetaConfig.class));
-        RoutingResult<?, ?> result = selector.select(route.context(), group);
-        if (result.status() == RoutingResult.Status.SUCCESS)
+        SelectionResult<?, ?> result = selector.select(route.context(), group);
+        if (result.status() == SelectionResult.Status.SUCCESS)
             route.roles().add((org.flexlb.balance.strategy.RoleSelection) result.value());
-        return result.status() == RoutingResult.Status.SUCCESS ? route : null;
+        return result.status() == SelectionResult.Status.SUCCESS ? route : null;
     }
 
     static org.flexlb.worker.status.ServerStatus vit(Selection route) {
@@ -241,11 +241,11 @@ final class StrategyTestSupport {
                             model);
         }
 
-        org.flexlb.balance.strategy.RoutingResult<
+        org.flexlb.balance.strategy.SelectionResult<
                         org.flexlb.balance.strategy.RoleSelection,
                         org.flexlb.worker.endpoint.CapacityKey>
                 select(
-                        org.flexlb.worker.endpoint.Request request,
+                        org.flexlb.balance.request.Request request,
                         org.flexlb.balance.schedule.SchedulingMetadata metadata,
                         RoleType role,
                         String group,
@@ -254,21 +254,21 @@ final class StrategyTestSupport {
             ctx.setSchedulingMetadata(metadata);
             ctx.setRequestedRoles(List.of(role));
             var result = routing.select(ctx, group);
-            if (result.status() != RoutingResult.Status.SUCCESS)
-                return new RoutingResult<>(
+            if (result.status() != SelectionResult.Status.SUCCESS)
+                return new SelectionResult<>(
                         result.status(),
                         null,
                         result.failure(),
                         result.blocker(),
                         result.diagnostics());
-            var execution = result;
+            var execution = result.value();
             route.roles().addAll(execution.roles());
             route.cleanup.add(
                     () ->
                             execution
                                     .prefillEndpoint()
                                     .rollbackSelection(execution.prefillRegistration()));
-            return RoutingResult.success(execution.role(role));
+            return SelectionResult.success(execution.role(role));
         }
     }
 
@@ -291,10 +291,10 @@ final class StrategyTestSupport {
             configuration = config.loadBalanceConfig();
         }
 
-        org.flexlb.balance.strategy.RoutingResult<
+        org.flexlb.balance.strategy.SelectionResult<
                         org.flexlb.balance.strategy.RoleSelection, RoleType>
                 select(
-                        org.flexlb.worker.endpoint.Request request,
+                        org.flexlb.balance.request.Request request,
                         org.flexlb.balance.schedule.SchedulingMetadata metadata,
                         String group,
                         Selection route) {
@@ -310,18 +310,18 @@ final class StrategyTestSupport {
                             policy,
                             new VitStrategy(
                                     org.mockito.Mockito.mock(
-                                            org.flexlb.cache.VitCacheDirectory.class),
+                                            org.flexlb.cache.VitWorkerCacheManager.class),
                                     registry),
                             Mockito.mock(EncoderStrategy.class),
                             model);
             var context = route.context();
             context.setSchedulingMetadata(metadata);
             context.setRequestedRoles(List.of(RoleType.DECODE));
-            RoutingResult<
+            SelectionResult<
                             org.flexlb.balance.strategy.RoleSelection,
                             org.flexlb.worker.endpoint.CapacityKey>
                     result = policy.select(context, group);
-            if (result.status() == RoutingResult.Status.SUCCESS) {
+            if (result.status() == SelectionResult.Status.SUCCESS) {
                 route.roles().add(result.value());
                 var endpoint = (DecodeEndpoint) result.value().endpoint();
                 var registration =
@@ -331,9 +331,9 @@ final class StrategyTestSupport {
                                 .reservation();
                 route.cleanup.add(() -> endpoint.releaseRequest(registration));
             }
-            return new RoutingResult<>(
+            return new SelectionResult<>(
                     result.status(),
-                    result.status() == RoutingResult.Status.SUCCESS
+                    result.status() == SelectionResult.Status.SUCCESS
                             ? route.role(RoleType.DECODE)
                             : null,
                     result.failure(),

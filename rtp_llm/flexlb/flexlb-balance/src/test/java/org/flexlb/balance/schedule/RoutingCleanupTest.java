@@ -32,7 +32,7 @@ class RoutingCleanupTest {
     @Test
     void cleanupFailureFinishesAdmissionAsFailed() {
         var context = RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), 2L);
-        var route = mock(RequestResult.class);
+        var route = mock(RequestRoute.class);
         var endpoint = mock(DecodeEndpoint.class);
         var reservation = new DecodeEndpoint.RequestRegistration(1L, String.valueOf(2L));
         var failure = new IllegalStateException("cleanup failed");

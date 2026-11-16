@@ -5,14 +5,15 @@ import org.flexlb.balance.metrics.RequestSchedulerReporter;
 import org.flexlb.balance.queue.ListSchedulingQueue;
 import org.flexlb.balance.queue.OrderedRequestQueue;
 import org.flexlb.balance.queue.SchedulingQueue;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.requestlog.TheoryCacheHitReporter;
 import org.flexlb.balance.strategy.RequestRouteSelector;
+import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.worker.endpoint.CapacityNotifier;
 import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.PrefillEndpoint;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.rpc.EngineGrpcClient;
 import org.junit.jupiter.api.Test;
@@ -343,7 +344,7 @@ class CustomRequestSchedulerContractTest {
             queue = alternative ? new ListSchedulingQueue() : new OrderedRequestQueue(false);
             when(selector.select(any(), isNull()))
                     .thenReturn(
-                            RequestResult.rejected(
+                            SelectionResult.rejected(
                                     Response.error(StrategyErrorType.RESOURCE_EXHAUSTED)));
             SchedulerTestServices.bind(this, runtime);
             runtime.registerScheduler(this);
@@ -398,7 +399,7 @@ class CustomRequestSchedulerContractTest {
             }
             var routing = tryBeginRouteSelection(selected);
             if (routing == null) return true;
-            org.flexlb.balance.schedule.RequestResult result;
+            SelectionResult<RequestRoute, org.flexlb.worker.endpoint.CapacityKey> result;
             try {
                 result = selector.select(selected, selected.getRoutingGroup());
             } finally {

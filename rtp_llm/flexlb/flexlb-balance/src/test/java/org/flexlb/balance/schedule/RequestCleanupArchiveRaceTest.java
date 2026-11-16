@@ -36,7 +36,7 @@ class RequestCleanupArchiveRaceTest {
                                 "cleanup required"),
                         1001L,
                         null));
-        assertNotNull(context.releaseReason());
+        assertEquals(Phase.ENDING, context.snapshot().phase());
         var ready = new CountDownLatch(2);
         var start = new CountDownLatch(1);
         var workers = Executors.newFixedThreadPool(2);
@@ -74,7 +74,7 @@ class RequestCleanupArchiveRaceTest {
                     "the last real obligation must close atomically");
             assertEquals(Phase.CLOSED, current.phase());
             assertNull(current.route());
-            assertNull(context.releaseReason());
+            assertEquals(Phase.CLOSED, context.snapshot().phase());
             context.recordCleanupProgress(route, true, true, false, 1003L);
             assertEquals(current, context.snapshot());
         } finally {

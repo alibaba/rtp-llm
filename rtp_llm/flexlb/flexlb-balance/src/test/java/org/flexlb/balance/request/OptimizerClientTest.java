@@ -12,7 +12,6 @@ import org.flexlb.util.discovery.ServiceDiscoveryType;
 import org.flexlb.util.metrics.FlexMetricTags;
 import org.flexlb.util.metrics.FlexMonitor;
 import org.flexlb.util.network.GeneralHttpNettyService;
-import org.flexlb.worker.endpoint.Request;
 import org.flexlb.worker.status.ServerStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;

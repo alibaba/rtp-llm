@@ -195,7 +195,7 @@ class ExpirationTimerInstallationRecoveryTest {
             assertSame(newer.request(), ReflectionTestUtils.getField(installed, "token"));
             assertEquals(4, attempts.get());
             assertEquals(0, ReflectionTestUtils.getField(f.timer, "registrations"));
-            assertNull(f.context.snapshot().requestEndResult());
+            assertNull(f.context.snapshot().endState());
             assertNull(f.context.snapshot().cancellationReason());
         }
     }
@@ -237,7 +237,7 @@ class ExpirationTimerInstallationRecoveryTest {
 
         Fixture() {
             context = new RequestContext(SchedulingTestConfig.newConfig());
-            var request = mock(org.flexlb.worker.endpoint.Request.class);
+            var request = mock(org.flexlb.balance.request.Request.class);
             when(request.getRequestId()).thenReturn(String.valueOf(7502L));
             context.setRequest(request);
             context.setSchedulingMetadata(

@@ -3,7 +3,7 @@ package org.flexlb.worker.endpoint;
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.schedule.AbstractRequestScheduler;
 import org.flexlb.balance.schedule.EngineCancellation;
-import org.flexlb.balance.schedule.RequestResult;
+import org.flexlb.balance.schedule.RequestRoute;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.worker.status.WorkerStatus;
 import org.flexlb.worker.status.WorkerStatusResponse;
@@ -304,7 +304,7 @@ public final class EndpointTestSupport {
                                         org.mockito.Mockito.mock(
                                                 org.flexlb.balance.schedule.RequestContext.Snapshot
                                                         .class);
-                                var route = org.mockito.Mockito.mock(RequestResult.class);
+                                var route = org.mockito.Mockito.mock(RequestRoute.class);
 
                                 org.mockito.Mockito.when(context.getRequestScheduler())
                                         .thenReturn(owner);
@@ -343,7 +343,7 @@ public final class EndpointTestSupport {
         return endpoint;
     }
 
-    public static boolean releaseRequest(PrefillEndpoint state, RequestResult exact) {
+    public static boolean releaseRequest(PrefillEndpoint state, RequestRoute exact) {
         return state.releaseRequest(exact.prefillRegistration());
     }
 
@@ -468,7 +468,7 @@ public final class EndpointTestSupport {
     }
 
     static boolean commitEncoder(
-            EncoderEndpoint endpoint, RequestResult route, int limit, long tokens) {
+            EncoderEndpoint endpoint, RequestRoute route, int limit, long tokens) {
         var registered =
                 endpoint.tryRegisterSelection(
                         route.requestId(),
@@ -483,7 +483,7 @@ public final class EndpointTestSupport {
     }
 
     static void commitUnqueued(PrefillEndpoint endpoint, long requestId, long predictedMs) {
-        RequestResult item = org.mockito.Mockito.mock(RequestResult.class);
+        RequestRoute item = org.mockito.Mockito.mock(RequestRoute.class);
         org.mockito.Mockito.when(item.requestId()).thenReturn(String.valueOf(requestId));
         org.flexlb.balance.schedule.SchedulerTestSupport.bindEndpointOwner(endpoint, item);
         {
@@ -498,7 +498,7 @@ public final class EndpointTestSupport {
     }
 
     static PrefillEndpoint.RequestRegistration reserveUnqueued(
-            PrefillEndpoint endpoint, RequestResult item, long predictedMs) {
+            PrefillEndpoint endpoint, RequestRoute item, long predictedMs) {
         org.flexlb.balance.schedule.SchedulerTestSupport.bindEndpointOwner(endpoint, item);
         {
             WorkerEndpoint selectedEndpoint = endpoint;

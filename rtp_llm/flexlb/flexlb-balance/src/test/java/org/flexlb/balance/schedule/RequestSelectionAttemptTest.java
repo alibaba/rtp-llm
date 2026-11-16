@@ -64,7 +64,7 @@ class RequestSelectionAttemptTest {
         assertNull(
                 context.finishSelectionWithoutCommit(
                         first,
-                        org.flexlb.worker.endpoint.Response.buildErrorResponse(
+                        org.flexlb.balance.request.Response.buildErrorResponse(
                                 org.flexlb.worker.endpoint.StrategyErrorType.DISPATCH_FAILED,
                                 "selection failed"),
                         2L));
@@ -74,7 +74,7 @@ class RequestSelectionAttemptTest {
 
     private static RequestContext context() {
         var context = new RequestContext(new org.flexlb.config.FlexlbConfig());
-        context.setRequest(org.flexlb.worker.endpoint.Request.builder().requestId("4401").build());
+        context.setRequest(org.flexlb.balance.request.Request.builder().requestId("4401").build());
         RequestProtocolTestSupport.register(
                 context,
                 "4401",

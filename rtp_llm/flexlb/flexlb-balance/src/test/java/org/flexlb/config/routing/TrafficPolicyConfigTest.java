@@ -1,8 +1,8 @@
 package org.flexlb.config.routing;
 
+import org.flexlb.balance.request.Request;
 import org.flexlb.config.ConfigTestFixtures;
 import org.flexlb.config.loading.ConfigValidationException;
-import org.flexlb.worker.endpoint.Request;
 import org.junit.jupiter.api.Test;
 
 import java.util.Set;

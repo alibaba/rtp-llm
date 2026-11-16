@@ -1,12 +1,13 @@
 package org.flexlb.balance.schedule;
 
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.requestlog.TheoryCacheHitReporter;
 import org.flexlb.balance.strategy.RequestRouteSelector;
-import org.flexlb.balance.strategy.RoutingResult;
+import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.util.Logger;
+import org.flexlb.worker.endpoint.CapacityKey;
 import org.flexlb.worker.endpoint.EndpointRegistry;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 
 import java.util.Objects;
@@ -91,8 +92,9 @@ public class DirectRequestScheduler extends AbstractRequestScheduler {
         else if (started) drainPendingRequests();
     }
 
-    public RequestResult selectAndPublish(
-            RequestContext context, java.util.function.Supplier<RequestResult> selection) {
+    public SelectionResult<RequestRoute, CapacityKey> selectAndPublish(
+            RequestContext context,
+            java.util.function.Supplier<SelectionResult<RequestRoute, CapacityKey>> selection) {
         return planRoute(context, selection);
     }
 
@@ -107,9 +109,10 @@ public class DirectRequestScheduler extends AbstractRequestScheduler {
     }
 
     @Override
-    protected RequestResult selectedRouteResult(RequestResult result) {
-        if (result.status() != RoutingResult.Status.BLOCKED) return result;
-        return RequestResult.rejected(
+    protected SelectionResult<RequestRoute, CapacityKey> selectedRouteResult(
+            SelectionResult<RequestRoute, CapacityKey> result) {
+        if (result.status() != SelectionResult.Status.BLOCKED) return result;
+        return SelectionResult.rejected(
                 result.failure() == null
                         ? Response.buildErrorResponse(
                                 org.flexlb.worker.endpoint.StrategyErrorType.forRole(
@@ -194,12 +197,12 @@ public class DirectRequestScheduler extends AbstractRequestScheduler {
     /**
      * Finish admission before publishing the route response.
      */
-    private RequestResult selectAndCommit(RequestContext context) {
+    private SelectionResult<RequestRoute, CapacityKey> selectAndCommit(RequestContext context) {
         var group = router.resolvePolicyGroup(context);
         // Selection and publication share one retry budget. Never replay a delivered route.
         for (int attempt = 0; ; attempt++) {
             var result = selectAndPublish(context, () -> router.select(context, group));
-            if (result.status() == RoutingResult.Status.RETRY && attempt == 0) continue;
+            if (result.status() == SelectionResult.Status.RETRY && attempt == 0) continue;
             return result;
         }
     }

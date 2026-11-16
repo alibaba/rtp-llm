@@ -3,11 +3,13 @@ package org.flexlb.balance.schedule;
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
 import org.flexlb.balance.queue.OrderedRequestQueue;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeStrategy;
 import org.flexlb.balance.strategy.EncoderStrategy;
 import org.flexlb.balance.strategy.RequestRouteSelector;
 import org.flexlb.balance.strategy.RoleSelection;
+import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.balance.strategy.VitStrategy;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.service.ModelMetaConfig;
@@ -15,7 +17,6 @@ import org.flexlb.config.service.RoleType;
 import org.flexlb.worker.endpoint.CapacityKey;
 import org.flexlb.worker.endpoint.CapacityNotifier;
 import org.flexlb.worker.endpoint.EndpointRegistry;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
 import org.flexlb.worker.rpc.EngineGrpcClient;
 import org.flexlb.worker.status.ServerStatus;
@@ -125,7 +126,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
     /**
      * Return the exact item currently owned by a fixture request context.
      */
-    public RequestResult activeRoute(long requestId) {
+    public RequestRoute activeRoute(long requestId) {
         RequestContext requestContext = requests.findActive(String.valueOf(requestId));
         if (requestContext == null) {
             return null;
@@ -198,7 +199,8 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
      * Convert a fixture's successful route metadata into the exact pinned
      * queue-admission capability consumed by {@link AbstractRequestScheduler}.
      */
-    public RequestResult routeResult(RequestContext context, Response response) {
+    public SelectionResult<RequestRoute, CapacityKey> routeResult(
+            RequestContext context, Response response) {
         Objects.requireNonNull(context, "context");
         Objects.requireNonNull(response, "response");
         if (!response.isSuccess() || response.getServerStatus() == null) {
@@ -262,14 +264,15 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
                                     org.flexlb.cache.metrics.CacheMetricsReporter.class)),
                     new DecodeStrategy(configService, capacity, workers),
                     new VitStrategy(
-                            org.mockito.Mockito.mock(org.flexlb.cache.VitCacheDirectory.class),
+                            org.mockito.Mockito.mock(org.flexlb.cache.VitWorkerCacheManager.class),
                             workers),
                     new EncoderStrategy(configService, workers),
                     emptyModelMeta());
         }
 
         @Override
-        public RequestResult select(RequestContext context, String policyGroup) {
+        public SelectionResult<RequestRoute, CapacityKey> select(
+                RequestContext context, String policyGroup) {
             return requireBound().select(context, policyGroup);
         }
 
@@ -279,7 +282,7 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         }
 
         @Override
-        public RequestResult select(
+        public SelectionResult<RequestRoute, CapacityKey> select(
                 RequestContext context,
                 String group,
                 org.flexlb.balance.strategy.RoleSelection acquired) {

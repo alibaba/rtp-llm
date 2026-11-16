@@ -3,6 +3,7 @@ package org.flexlb.extension;
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.queue.OrderedRequestQueue;
 import org.flexlb.balance.queue.SchedulingQueue;
+import org.flexlb.balance.request.Request;
 import org.flexlb.balance.requestlog.TheoryCacheHitReporter;
 import org.flexlb.balance.schedule.AbstractRequestScheduler;
 import org.flexlb.balance.schedule.CancelReason;
@@ -19,14 +20,13 @@ import org.flexlb.balance.schedule.SelectionTestSupport;
 import org.flexlb.balance.schedule.TaskTimer;
 import org.flexlb.balance.strategy.RequestRouteSelector;
 import org.flexlb.balance.strategy.RoleSelection;
-import org.flexlb.balance.strategy.RoutingResult;
+import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.worker.endpoint.DecodeEndpoint;
 import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.EndpointTestSupport;
 import org.flexlb.worker.endpoint.PrefillEndpoint;
-import org.flexlb.worker.endpoint.Request;
 import org.flexlb.worker.rpc.EngineGrpcClient;
 import org.flexlb.worker.status.ServerStatus;
 import org.flexlb.worker.status.WorkerStatus;
@@ -142,7 +142,7 @@ class ExternalRequestSchedulerTest {
             pending.schedule(
                     context ->
                             assertEquals(
-                                    RoutingResult.Status.SUCCESS,
+                                    SelectionResult.Status.SUCCESS,
                                     planRoute(context, () -> selector.select(context, null))
                                             .status()));
         }
@@ -191,7 +191,7 @@ class ExternalRequestSchedulerTest {
             pending.schedule(
                     context -> {
                         assertEquals(
-                                RoutingResult.Status.SUCCESS,
+                                SelectionResult.Status.SUCCESS,
                                 planRoute(context, () -> selector.select(context, null)).status());
                         assertNull(
                                 context.currentSelectionAttempt(),

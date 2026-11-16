@@ -1,7 +1,7 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.schedule.RequestContext;
-import org.flexlb.cache.VitCacheDirectory;
+import org.flexlb.cache.VitWorkerCacheManager;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.worker.endpoint.CapacityKey;
 import org.flexlb.worker.endpoint.EndpointRegistry;
@@ -20,16 +20,16 @@ import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Prefers VIT cache matches in hash, embedding, GPU and pending order, choosing uniformly among ties.
- * Registers the chosen endpoint through the shared retry loop and records cold cache keys in the directory.
+ * Registers the chosen endpoint through the shared retry loop and records pending image keys in the cache manager.
  * Candidates without cache preferences are selected uniformly.
  */
 public class VitStrategy
         extends AbstractWorkerSelectionStrategy<VitStrategy.Candidate, VitStrategy.Candidate> {
-    private final VitCacheDirectory directory;
+    private final VitWorkerCacheManager cacheManager;
     private final EndpointRegistry workers;
 
-    public VitStrategy(VitCacheDirectory directory, EndpointRegistry workers) {
-        this.directory = Objects.requireNonNull(directory);
+    public VitStrategy(VitWorkerCacheManager cacheManager, EndpointRegistry workers) {
+        this.cacheManager = Objects.requireNonNull(cacheManager);
         this.workers = Objects.requireNonNull(workers);
     }
 
@@ -61,10 +61,11 @@ public class VitStrategy
             return errorStatus(StrategyErrorType.INVALID_REQUEST);
         }
         keys = new ArrayList<>(new LinkedHashSet<>(keys));
-        Map<String, VitCacheDirectory.Candidate> candidates = directory.candidates(group, keys);
+        Map<String, VitWorkerCacheManager.Candidate> candidates =
+                cacheManager.candidates(group, keys);
         long now = System.currentTimeMillis();
         var evaluated = new ArrayList<VitStrategy.Candidate>();
-        for (VitCacheDirectory.Candidate candidate : candidates.values()) {
+        for (VitWorkerCacheManager.Candidate candidate : candidates.values()) {
             if (group != null && !Objects.equals(group, candidate.worker().getGroup())) continue;
             var endpoint = workers.getEndpoint(RoleType.VIT, candidate.worker().getLogicalIpPort());
             if (endpoint == null
@@ -77,7 +78,7 @@ public class VitStrategy
                             candidate.hashHits(),
                             candidate.embeddingHits(),
                             candidate.gpuHits(),
-                            directory.pendingHits(candidate, keys, now),
+                            cacheManager.pendingHits(candidate, keys, now),
                             candidate));
         }
         var result =
@@ -89,17 +90,17 @@ public class VitStrategy
                                 select(current)
                                         .map(
                                                 value ->
-                                                        RoutingResult
+                                                        SelectionResult
                                                                 .<Candidate, CapacityKey>success(
                                                                         value))
                                         .orElseGet(
                                                 () ->
-                                                        RoutingResult.blocked(
+                                                        SelectionResult.blocked(
                                                                 new CapacityKey(
                                                                         RoleType.VIT,
                                                                         group,
                                                                         null))));
-        return result.status() == RoutingResult.Status.SUCCESS
+        return result.status() == SelectionResult.Status.SUCCESS
                 ? result.value().toServerStatus(ctx.getRequestId())
                 : errorStatus(StrategyErrorType.NO_VIT_WORKER);
     }
@@ -118,7 +119,8 @@ public class VitStrategy
         return Optional.ofNullable(best);
     }
 
-    public RoutingResult<RoleSelection, CapacityKey> select(RequestContext context, String group) {
+    public SelectionResult<RoleSelection, CapacityKey> select(
+            RequestContext context, String group) {
         var candidates = new ArrayList<VitStrategy.Candidate>();
         for (var endpoint : workers.endpoints(RoleType.VIT, group)) {
             if (endpoint != null
@@ -135,10 +137,10 @@ public class VitStrategy
                         this.select(current)
                                 .map(
                                         candidate ->
-                                                RoutingResult
+                                                SelectionResult
                                                         .<VitStrategy.Candidate, CapacityKey>
                                                                 success(candidate))
-                                .orElseGet(() -> RoutingResult.blocked(scope)));
+                                .orElseGet(() -> SelectionResult.blocked(scope)));
     }
 
     public synchronized ServerStatus validate(RequestContext ctx, String group) {
@@ -184,7 +186,7 @@ public class VitStrategy
             var keys =
                     new ArrayList<>(
                             new LinkedHashSet<>(context.getRequest().getCacheAffinityKeys()));
-            directory.reserve(
+            cacheManager.reserve(
                     keys,
                     selected.cache(),
                     context.getRequest().getGenerateTimeout(),
@@ -229,7 +231,7 @@ public class VitStrategy
     }
 
     /**
-     * Ordinary routing has zero cache scores; cache routing retains its exact directory observation.
+     * Ordinary routing has zero cache scores; cache routing retains the observed worker cache candidate.
      */
     public record Candidate(
             WorkerEndpoint endpoint,
@@ -237,5 +239,5 @@ public class VitStrategy
             int embeddingHits,
             int gpuHits,
             int pendingHits,
-            VitCacheDirectory.Candidate cache) {}
+            VitWorkerCacheManager.Candidate cache) {}
 }

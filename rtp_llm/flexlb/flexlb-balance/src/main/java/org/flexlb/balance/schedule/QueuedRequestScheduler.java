@@ -4,16 +4,17 @@ import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
 import org.flexlb.balance.queue.CapacityWaitQueue;
 import org.flexlb.balance.queue.SchedulingQueue;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.requestlog.TheoryCacheHitReporter;
 import org.flexlb.balance.schedule.RequestContext.SelectionAttempt;
 import org.flexlb.balance.strategy.RequestRouteSelector;
 import org.flexlb.balance.strategy.RoleSelection;
-import org.flexlb.balance.strategy.RoutingResult;
+import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.util.Failures;
+import org.flexlb.worker.endpoint.CapacityKey;
 import org.flexlb.worker.endpoint.CapacityNotifier;
 import org.flexlb.worker.endpoint.EndpointRegistry;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 
 import java.util.ArrayList;
@@ -401,7 +402,7 @@ public class QueuedRequestScheduler extends AbstractRequestScheduler {
                     executeRouteSelection(
                             selection, () -> router.select(request, request.getRoutingGroup()));
             selectionReturned = true;
-            if (result.status() == RoutingResult.Status.BLOCKED) {
+            if (result.status() == SelectionResult.Status.BLOCKED) {
                 var endpoint = router.blockedEndpoint(result.blocker());
                 waiting =
                         endpoint != null
@@ -432,7 +433,9 @@ public class QueuedRequestScheduler extends AbstractRequestScheduler {
         boolean selectionReturned = true;
         try {
             if (stopped || request.isResponseDone() || !request.canPublishRoute(selection)) {
-                if (acquired != null) acquired.rollbackSelection();
+                if (acquired != null && acquired.registration() != null)
+                    ((org.flexlb.worker.endpoint.SelectionRollback) acquired.endpoint())
+                            .rollbackSelection(acquired.registration());
                 return;
             }
             selectionReturned = false;
@@ -453,7 +456,8 @@ public class QueuedRequestScheduler extends AbstractRequestScheduler {
         }
     }
 
-    private void handleResult(RequestContext request, RequestResult result) {
+    private void handleResult(
+            RequestContext request, SelectionResult<RequestRoute, CapacityKey> result) {
         switch (result.status()) {
             case SUCCESS -> removeQueuedRequest(request);
             case REJECTED -> {
@@ -489,7 +493,8 @@ public class QueuedRequestScheduler extends AbstractRequestScheduler {
         }
     }
 
-    private void recordCapacityWait(RequestContext request, RequestResult result) {
+    private void recordCapacityWait(
+            RequestContext request, SelectionResult<RequestRoute, CapacityKey> result) {
         int depth;
         int[] counts;
         lock.lock();

@@ -38,14 +38,14 @@ class JavaLoadClientResultCollectionTest {
                 () -> {
                     ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
                     try {
-                        List<Future<JavaLoadClient.RequestResult>> futures = new ArrayList<>();
+                        List<Future<JavaLoadClient.RequestRoute>> futures = new ArrayList<>();
                         futures.add(new CompletableFuture<>()); // never completes
                         futures.add(executor.submit(() -> delayedRow("fast-1", 50)));
                         futures.add(executor.submit(() -> delayedRow("fast-2", 250)));
                         futures.add(executor.submit(() -> delayedRow("fast-3", 400)));
 
                         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
-                        List<JavaLoadClient.RequestResult> rows =
+                        List<JavaLoadClient.RequestRoute> rows =
                                 JavaLoadClient.collectOutstandingResults(futures, deadline);
 
                         assertEquals(4, rows.size());
@@ -73,14 +73,14 @@ class JavaLoadClientResultCollectionTest {
                 () -> {
                     ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
                     try {
-                        List<Future<JavaLoadClient.RequestResult>> futures = new ArrayList<>();
+                        List<Future<JavaLoadClient.RequestRoute>> futures = new ArrayList<>();
                         futures.add(CompletableFuture.completedFuture(realRow("done-0", 100.0)));
                         futures.add(executor.submit(() -> delayedRow("done-1", 80)));
                         futures.add(executor.submit(() -> failingRow(40)));
                         futures.add(new CompletableFuture<>()); // never completes
 
                         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(600);
-                        List<JavaLoadClient.RequestResult> rows =
+                        List<JavaLoadClient.RequestRoute> rows =
                                 JavaLoadClient.collectOutstandingResults(futures, deadline);
 
                         // one row per future, in submission order
@@ -106,11 +106,11 @@ class JavaLoadClientResultCollectionTest {
         assertTimeout(
                 Duration.ofSeconds(5),
                 () -> {
-                    List<Future<JavaLoadClient.RequestResult>> futures =
+                    List<Future<JavaLoadClient.RequestRoute>> futures =
                             List.of(new CompletableFuture<>());
                     long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(300);
                     long startNanos = System.nanoTime();
-                    List<JavaLoadClient.RequestResult> rows =
+                    List<JavaLoadClient.RequestRoute> rows =
                             JavaLoadClient.collectOutstandingResults(futures, deadline);
                     long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
                     assertEquals(1, rows.size());
@@ -126,14 +126,14 @@ class JavaLoadClientResultCollectionTest {
         assertTimeout(
                 Duration.ofSeconds(5),
                 () -> {
-                    List<Future<JavaLoadClient.RequestResult>> futures = new ArrayList<>();
+                    List<Future<JavaLoadClient.RequestRoute>> futures = new ArrayList<>();
                     for (int i = 0; i < 100; i++) {
                         futures.add(
                                 CompletableFuture.completedFuture(realRow("rid-" + i, i * 10.0)));
                     }
                     long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
                     long startNanos = System.nanoTime();
-                    List<JavaLoadClient.RequestResult> rows =
+                    List<JavaLoadClient.RequestRoute> rows =
                             JavaLoadClient.collectOutstandingResults(futures, deadline);
                     long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
                     assertEquals(100, rows.size());
@@ -153,10 +153,10 @@ class JavaLoadClientResultCollectionTest {
                 () -> {
                     ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
                     try {
-                        List<Future<JavaLoadClient.RequestResult>> futures = new ArrayList<>();
+                        List<Future<JavaLoadClient.RequestRoute>> futures = new ArrayList<>();
                         futures.add(executor.submit(() -> delayedRow("late", 800)));
                         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(300);
-                        List<JavaLoadClient.RequestResult> rows =
+                        List<JavaLoadClient.RequestRoute> rows =
                                 JavaLoadClient.collectOutstandingResults(futures, deadline);
                         assertEquals(1, rows.size());
                         assertEquals("timeout", rows.get(0).status);
@@ -167,14 +167,14 @@ class JavaLoadClientResultCollectionTest {
                 });
     }
 
-    private static JavaLoadClient.RequestResult delayedRow(String rid, long sleepMs)
+    private static JavaLoadClient.RequestRoute delayedRow(String rid, long sleepMs)
             throws InterruptedException {
         Thread.sleep(sleepMs);
         return realRow(rid, 1_000.0);
     }
 
-    private static JavaLoadClient.RequestResult realRow(String rid, double sendStartEpochMs) {
-        JavaLoadClient.RequestResult result = new JavaLoadClient.RequestResult();
+    private static JavaLoadClient.RequestRoute realRow(String rid, double sendStartEpochMs) {
+        JavaLoadClient.RequestRoute result = new JavaLoadClient.RequestRoute();
         result.rid = rid;
         result.status = "ok";
         result.sendStartEpochMs = sendStartEpochMs;
@@ -182,7 +182,7 @@ class JavaLoadClientResultCollectionTest {
         return result;
     }
 
-    private static JavaLoadClient.RequestResult failingRow(long sleepMs)
+    private static JavaLoadClient.RequestRoute failingRow(long sleepMs)
             throws InterruptedException {
         Thread.sleep(sleepMs);
         throw new RuntimeException("boom");

@@ -48,7 +48,7 @@ class ResponseCompletionExecutorTest {
             var future =
                     new ResponseCompletionExecutor.RequestFuture((kind, value, failure) -> false);
             var registration =
-                    new ResponseCompletionExecutor.Registration(
+                    SchedulerTestSupport.responseRegistration(
                             f.executor,
                             new Object(),
                             future,
@@ -56,7 +56,7 @@ class ResponseCompletionExecutorTest {
                                 selected.incrementAndGet();
                                 return true;
                             });
-            var value = mock(org.flexlb.worker.endpoint.Response.class);
+            var value = mock(org.flexlb.balance.request.Response.class);
             registration.prepare(
                     ResponseCompletionExecutor.RequestFuture.Completion.RESPONSE, value, null);
             assertThrows(
@@ -84,11 +84,11 @@ class ResponseCompletionExecutorTest {
             var future =
                     new ResponseCompletionExecutor.RequestFuture((kind, value, failure) -> false);
             var registration =
-                    new ResponseCompletionExecutor.Registration(
+                    SchedulerTestSupport.responseRegistration(
                             f.executor, new Object(), future, () -> false);
             registration.prepare(
                     ResponseCompletionExecutor.RequestFuture.Completion.RESPONSE,
-                    mock(org.flexlb.worker.endpoint.Response.class),
+                    mock(org.flexlb.balance.request.Response.class),
                     null);
             assertFalse(registration.publish(true));
             assertFalse(future.isDone());
@@ -106,11 +106,11 @@ class ResponseCompletionExecutorTest {
             var future =
                     new ResponseCompletionExecutor.RequestFuture((kind, value, error) -> false);
             var registration =
-                    new ResponseCompletionExecutor.Registration(
+                    SchedulerTestSupport.responseRegistration(
                             f.executor, new Object(), future, () -> true);
             registration.prepare(
                     ResponseCompletionExecutor.RequestFuture.Completion.RESPONSE,
-                    mock(org.flexlb.worker.endpoint.Response.class),
+                    mock(org.flexlb.balance.request.Response.class),
                     null);
             assertSame(
                     failure,
@@ -134,7 +134,7 @@ class ResponseCompletionExecutorTest {
             var future =
                     new ResponseCompletionExecutor.RequestFuture((kind, value, failure) -> false);
             var registration =
-                    new ResponseCompletionExecutor.Registration(
+                    SchedulerTestSupport.responseRegistration(
                             f.executor, new Object(), future, () -> true);
             var original = new IllegalStateException("response preparation failed");
             registration.failIfUnsubmitted(original);
@@ -153,12 +153,12 @@ class ResponseCompletionExecutorTest {
     @Test
     void unsubmittedFailureUsesBoundArbitrationOutsideTheRequestLock() throws Exception {
         try (var f = new Fixture()) {
-            var lock = new Object();
+            var lock = mock(RequestContext.class);
             var future =
                     new ResponseCompletionExecutor.RequestFuture((kind, value, failure) -> false);
             var selections = new AtomicInteger();
             var registration =
-                    new ResponseCompletionExecutor.Registration(
+                    SchedulerTestSupport.responseRegistration(
                             f.executor,
                             lock,
                             future,
@@ -195,9 +195,9 @@ class ResponseCompletionExecutorTest {
             var future =
                     new ResponseCompletionExecutor.RequestFuture((kind, value, failure) -> false);
             var registration =
-                    new ResponseCompletionExecutor.Registration(
+                    SchedulerTestSupport.responseRegistration(
                             f.executor, new Object(), future, () -> true);
-            var response = mock(org.flexlb.worker.endpoint.Response.class);
+            var response = mock(org.flexlb.balance.request.Response.class);
             registration.submit(
                     () ->
                             registration.complete(
@@ -219,7 +219,7 @@ class ResponseCompletionExecutorTest {
             var future =
                     new ResponseCompletionExecutor.RequestFuture((kind, value, failure) -> false);
             var registration =
-                    new ResponseCompletionExecutor.Registration(
+                    SchedulerTestSupport.responseRegistration(
                             f.executor, new Object(), future, () -> false);
             registration.failIfUnsubmitted(new IllegalStateException("obsolete response"));
             RequestProtocolTestSupport.awaitCondition(() -> registrations(f.executor) == 0);

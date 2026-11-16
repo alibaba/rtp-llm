@@ -1,12 +1,13 @@
 package org.flexlb.balance.schedule;
 
+import org.flexlb.balance.request.Request;
+import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.worker.endpoint.DecodeEndpoint;
 import org.flexlb.worker.endpoint.EncoderEndpoint;
 import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.PrefillEndpoint;
-import org.flexlb.worker.endpoint.Request;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -28,7 +29,9 @@ class RequestContextConcurrencyTest {
     @Test
     void cancellationSelectsItsReservedResponseInTheSameCall() {
         var context = request();
-        var candidate = new RequestResult(context, RequestContext.ResponseKind.TERMINAL, 1100L);
+        var candidate =
+                SchedulerTestSupport.responseCandidate(
+                        context, RequestContext.ResponseKind.TERMINAL);
         assertTrue(
                 context.requestCancel(
                         CancelReason.CLIENT_CANCELLED,
@@ -37,7 +40,7 @@ class RequestContextConcurrencyTest {
                         StrategyErrorType.REQUEST_CANCELLED,
                         "client cancelled",
                         candidate));
-        assertEquals(RequestResult.State.CANCELLED, context.snapshot().requestEndResult().state());
+        assertEquals(RequestState.State.CANCELLED, context.snapshot().endState());
         assertSame(candidate, context.snapshot().responseForFuture());
     }
 
@@ -53,7 +56,7 @@ class RequestContextConcurrencyTest {
                         "client cancelled",
                         null));
         assertEquals(RequestContext.Phase.ENDING, context.snapshot().phase());
-        assertEquals(RequestResult.State.CANCELLED, context.snapshot().requestEndResult().state());
+        assertEquals(RequestState.State.CANCELLED, context.snapshot().endState());
         assertNull(context.snapshot().responseForFuture());
         assertNull(
                 org.springframework.test.util.ReflectionTestUtils.getField(
@@ -71,9 +74,9 @@ class RequestContextConcurrencyTest {
                 StrategyErrorType.REQUEST_CANCELLED,
                 "client cancelled",
                 null);
-        assertNull(context.snapshot().requestEndResult());
+        assertNull(context.snapshot().endState());
         var ended = context.finishSelectionWithoutCommit(attempt, null, 1200L);
-        assertEquals(RequestResult.State.CANCELLED, ended.requestEndResult().state());
+        assertEquals(RequestState.State.CANCELLED, ended.endState());
         assertNull(
                 org.springframework.test.util.ReflectionTestUtils.getField(
                         context, "pendingEndEvent"));
@@ -107,7 +110,7 @@ class RequestContextConcurrencyTest {
         assertNull(
                 context.finishSelectionWithoutCommit(
                         first,
-                        org.flexlb.worker.endpoint.Response.buildErrorResponse(
+                        org.flexlb.balance.request.Response.buildErrorResponse(
                                 org.flexlb.worker.endpoint.StrategyErrorType.DISPATCH_FAILED,
                                 "selection failed"),
                         1200L));
@@ -164,7 +167,8 @@ class RequestContextConcurrencyTest {
                 context.tryCommitRoute(
                         attempt,
                         route,
-                        new RequestResult(context, RequestContext.ResponseKind.ACK, 1200L),
+                        SchedulerTestSupport.responseCandidate(
+                                context, RequestContext.ResponseKind.ACK),
                         1200L));
         assertNull(context.snapshot().responseForFuture());
         assertSame(route, context.snapshot().route());
@@ -175,8 +179,9 @@ class RequestContextConcurrencyTest {
                 context.endRequest(
                         null,
                         1203L,
-                        new RequestResult(context, RequestContext.ResponseKind.TERMINAL, 1203L));
-        assertEquals(RequestResult.State.CANCELLED, ended.requestEndResult().state());
+                        SchedulerTestSupport.responseCandidate(
+                                context, RequestContext.ResponseKind.TERMINAL));
+        assertEquals(RequestState.State.CANCELLED, ended.endState());
         context.recordCleanupProgress(context.snapshot().route(), false, false, true, 1204L);
         assertEquals(RequestContext.Phase.CLOSED, context.snapshot().phase());
     }
@@ -186,20 +191,16 @@ class RequestContextConcurrencyTest {
         var context = request();
         var attempt = context.beginRouteSelection();
         var route = acquiredRoute(context, attempt);
-        var candidate = new RequestResult(context, RequestContext.ResponseKind.ACK, 1100L);
         var future = new ResponseCompletionExecutor.RequestFuture((kind, value, error) -> false);
         try (var executor = new ResponseCompletionExecutor(1)) {
             var completion =
                     new ResponseCompletionExecutor.Registration(
-                            executor,
-                            context,
-                            future,
-                            () -> context.snapshot().responseForFuture() == candidate);
+                            executor, context, future, RequestContext.ResponseKind.ACK);
             synchronized (context) {
-                assertTrue(context.tryCommitRoute(attempt, route, candidate, 1100L));
+                assertTrue(context.tryCommitRoute(attempt, route, completion, 1100L));
                 completion.prepare(
                         ResponseCompletionExecutor.RequestFuture.Completion.RESPONSE,
-                        new org.flexlb.worker.endpoint.Response(),
+                        new org.flexlb.balance.request.Response(),
                         null);
             }
             assertFalse(future.isDone());
@@ -214,19 +215,17 @@ class RequestContextConcurrencyTest {
                             "cancel execution",
                             null));
             assertSame(
-                    candidate,
+                    completion,
                     context.endRequest(
                                     null,
                                     1200L,
-                                    new RequestResult(
-                                            context,
-                                            RequestContext.ResponseKind.CANCELLATION,
-                                            1200L))
+                                    SchedulerTestSupport.responseCandidate(
+                                            context, RequestContext.ResponseKind.CANCELLATION))
                             .responseForFuture());
             future.thenRun(() -> assertFalse(Thread.holdsLock(context)));
             completion.publish(false);
             future.get(5, java.util.concurrent.TimeUnit.SECONDS);
-            assertSame(candidate, context.snapshot().responseForFuture());
+            assertSame(completion, context.snapshot().responseForFuture());
             assertSame(route, context.snapshot().committedRoute());
         }
     }
@@ -240,7 +239,7 @@ class RequestContextConcurrencyTest {
         assertSame(route, context.snapshot().route());
         context.finishSelectionWithoutCommit(
                 attempt,
-                org.flexlb.worker.endpoint.Response.buildErrorResponse(
+                org.flexlb.balance.request.Response.buildErrorResponse(
                         org.flexlb.worker.endpoint.StrategyErrorType.DISPATCH_FAILED,
                         "selection failed"),
                 1200L);
@@ -251,7 +250,8 @@ class RequestContextConcurrencyTest {
                         StrategyErrorType.DISPATCH_FAILED,
                         "rollback failed"),
                 1201L,
-                new RequestResult(context, RequestContext.ResponseKind.TERMINAL, 1201L));
+                SchedulerTestSupport.responseCandidate(
+                        context, RequestContext.ResponseKind.TERMINAL));
         context.recordCleanupProgress(context.snapshot().route(), false, false, true, 1202L);
         assertEquals(RequestContext.Phase.ENDING, context.snapshot().phase());
         context.recordCleanupProgress(route, true, true, false, 1300L);
@@ -270,7 +270,8 @@ class RequestContextConcurrencyTest {
                 context.tryCommitRoute(
                         attempt,
                         route,
-                        new RequestResult(context, RequestContext.ResponseKind.ACK, 61000L),
+                        SchedulerTestSupport.responseCandidate(
+                                context, RequestContext.ResponseKind.ACK),
                         61000L));
         assertNull(context.snapshot().responseForFuture());
         assertEquals(CancelReason.DEADLINE_EXCEEDED, context.snapshot().cancellationReason());
@@ -317,17 +318,15 @@ class RequestContextConcurrencyTest {
                             60000L,
                             StrategyErrorType.SCHEDULING_DEADLINE_EXCEEDED));
             var attempt = context.beginRouteSelection();
-            var route = mock(RequestResult.class);
+            var route = mock(RequestRoute.class);
             var prefill = mock(PrefillEndpoint.class);
-            var response = new org.flexlb.worker.endpoint.Response();
+            var response = new org.flexlb.balance.request.Response();
             response.setSuccess(true);
             org.mockito.Mockito.when(route.ctx()).thenReturn(context);
             org.mockito.Mockito.when(route.requestId()).thenReturn("commit-test");
             org.mockito.Mockito.when(route.prefillEndpoint()).thenReturn(prefill);
             org.mockito.Mockito.when(route.selectedEndpointsAvailable()).thenReturn(true);
             org.mockito.Mockito.when(route.successResponse()).thenReturn(response);
-            org.mockito.Mockito.when(route.status())
-                    .thenReturn(org.flexlb.balance.strategy.RoutingResult.Status.SUCCESS);
             org.mockito.Mockito.when(route.validateEndpoints(org.mockito.ArgumentMatchers.any()))
                     .thenAnswer(call -> call.getArgument(0));
             org.mockito.Mockito.when(prefill.commitSelection(route))
@@ -343,12 +342,13 @@ class RequestContextConcurrencyTest {
                                             null);
                                 return true;
                             });
-            var submitted = scheduler.executeRouteSelection(attempt, () -> route);
+            var submitted =
+                    scheduler.executeRouteSelection(attempt, () -> SelectionResult.success(route));
             org.mockito.Mockito.verify(context).registerSelectedRoute(attempt, route);
             assertEquals(
                     cancelBeforeCommit
-                            ? org.flexlb.balance.strategy.RoutingResult.Status.CLOSED
-                            : org.flexlb.balance.strategy.RoutingResult.Status.SUCCESS,
+                            ? org.flexlb.balance.strategy.SelectionResult.Status.CLOSED
+                            : org.flexlb.balance.strategy.SelectionResult.Status.SUCCESS,
                     submitted.status());
             var received = future.get(5, java.util.concurrent.TimeUnit.SECONDS);
             assertEquals(!cancelBeforeCommit, received.isSuccess());
@@ -375,7 +375,8 @@ class RequestContextConcurrencyTest {
                 context.tryCommitRoute(
                         attempt,
                         route,
-                        new RequestResult(context, RequestContext.ResponseKind.ACK, 1000L),
+                        SchedulerTestSupport.responseCandidate(
+                                context, RequestContext.ResponseKind.ACK),
                         1000L));
         var before = context.snapshot();
         var activePrefill =
@@ -462,7 +463,8 @@ class RequestContextConcurrencyTest {
                 context.tryCommitRoute(
                         attempt,
                         route,
-                        new RequestResult(context, RequestContext.ResponseKind.ACK, 1000L),
+                        SchedulerTestSupport.responseCandidate(
+                                context, RequestContext.ResponseKind.ACK),
                         1000L));
         var before = context.snapshot();
         assertFalse(
@@ -490,7 +492,7 @@ class RequestContextConcurrencyTest {
         assertTrue(context.recordEvent(closed));
         var after = context.snapshot();
         assertEquals(before.inactivityExpiresAtMs(), after.inactivityExpiresAtMs());
-        assertEquals(RequestContext.EndKind.ENDPOINT_CLOSED, after.requestEndResult().endKind());
+        assertEquals(RequestContext.EndKind.ENDPOINT_CLOSED, after.endKind());
         assertFalse(context.recordEvent(closed));
         assertEquals(after, context.snapshot());
     }
@@ -500,7 +502,8 @@ class RequestContextConcurrencyTest {
         var context = request();
         var attempt = context.beginRouteSelection();
         var route = acquiredRoute(context, attempt);
-        var response = new RequestResult(context, RequestContext.ResponseKind.ACK, 1000L);
+        var response =
+                SchedulerTestSupport.responseCandidate(context, RequestContext.ResponseKind.ACK);
         assertTrue(context.tryCommitRoute(attempt, route, response, 1000L));
         assertTrue(
                 context.requestCancel(
@@ -511,7 +514,7 @@ class RequestContextConcurrencyTest {
                         "client cancelled",
                         null));
         var ending = context.endRequest(null, 1000L, null);
-        assertEquals(RequestResult.State.CANCELLED, ending.requestEndResult().state());
+        assertEquals(RequestState.State.CANCELLED, ending.endState());
         assertSame(response, ending.responseForFuture());
         context.recordCleanupProgress(route, true, true, false, 1000L);
         var locallyCleaned = context.snapshot();
@@ -521,7 +524,7 @@ class RequestContextConcurrencyTest {
         assertFalse(
                 context.recordEvent(
                         new RequestContext.RequestEvent(
-                                mock(RequestResult.class),
+                                mock(RequestRoute.class),
                                 null,
                                 null,
                                 null,
@@ -565,7 +568,7 @@ class RequestContextConcurrencyTest {
         context.recordCleanupProgress(context.snapshot().route(), false, false, true, 1000L);
         var finished = context.snapshot();
         assertEquals(RequestContext.Phase.CLOSED, finished.phase());
-        assertEquals(RequestResult.State.CANCELLED, finished.requestRecordForArchive().state());
+        assertEquals(RequestState.State.CANCELLED, finished.requestRecordForArchive().state());
         assertNull(finished.route());
         assertSame(route, locallyCleaned.route());
         assertSame(response, finished.responseForFuture());
@@ -580,7 +583,8 @@ class RequestContextConcurrencyTest {
                 context.tryCommitRoute(
                         attempt,
                         route,
-                        new RequestResult(context, RequestContext.ResponseKind.ACK, 1000L),
+                        SchedulerTestSupport.responseCandidate(
+                                context, RequestContext.ResponseKind.ACK),
                         1000L));
         assertTrue(
                 context.requestCancel(
@@ -621,7 +625,8 @@ class RequestContextConcurrencyTest {
         var context = request();
         var attempt = context.beginRouteSelection();
         var route = acquiredRoute(context, attempt);
-        var response = new RequestResult(context, RequestContext.ResponseKind.ACK, 1000L);
+        var response =
+                SchedulerTestSupport.responseCandidate(context, RequestContext.ResponseKind.ACK);
         assertTrue(context.tryCommitRoute(attempt, route, response, 1000L));
         var before = context.snapshot();
         var cleanup =
@@ -636,7 +641,7 @@ class RequestContextConcurrencyTest {
                 after.decodeWorkerReleaseConfirmed());
         assertFalse(after.prefillCleanupCompleted());
         assertFalse(after.decodeCleanupCompleted());
-        assertNull(after.requestEndResult());
+        assertNull(after.endState());
         assertSame(response, after.responseForFuture());
         assertSame(route, after.committedRoute());
         assertSame(before.deadlines(), after.deadlines());
@@ -651,7 +656,7 @@ class RequestContextConcurrencyTest {
         var context = request();
         var attempt = context.beginRouteSelection();
         var route = acquiredRoute(context, attempt);
-        var foreign = mock(RequestResult.class);
+        var foreign = mock(RequestRoute.class);
         org.mockito.Mockito.when(foreign.ctx()).thenReturn(context);
         org.mockito.Mockito.when(foreign.requestId()).thenReturn(context.getRequestId());
         if (committed) {
@@ -659,7 +664,8 @@ class RequestContextConcurrencyTest {
                     context.tryCommitRoute(
                             attempt,
                             route,
-                            new RequestResult(context, RequestContext.ResponseKind.ACK, 1000L),
+                            SchedulerTestSupport.responseCandidate(
+                                    context, RequestContext.ResponseKind.ACK),
                             1000L));
         }
         var before = context.snapshot();
@@ -707,7 +713,7 @@ class RequestContextConcurrencyTest {
                         1100L);
         assertTrue(context.recordEvent(event));
         var waiting = context.endRequest(null, 1100L, null);
-        assertNull(waiting.requestEndResult());
+        assertNull(waiting.endState());
         assertEquals(attempt.id(), waiting.selectionId());
         assertSame(route, waiting.route());
 
@@ -719,16 +725,14 @@ class RequestContextConcurrencyTest {
         assertTrue(ended.decodeCleanupCompleted());
         assertNull(ended.responseForFuture());
         if (type == org.flexlb.worker.endpoint.RequestEventType.ENDPOINT_CLOSED) {
-            assertNull(ended.requestEndResult());
+            assertNull(ended.endState());
             assertEquals(RequestContext.Phase.OPEN, ended.phase());
             var retry = context.beginRouteSelection();
             assertTrue(retry != null && retry.id() != attempt.id());
         } else {
-            assertEquals(RequestResult.State.FAILED, ended.requestEndResult().state());
-            assertEquals(
-                    StrategyErrorType.WORKER_EXECUTION_FAILED,
-                    ended.requestEndResult().errorType());
-            assertEquals(RequestContext.EndKind.WORKER, ended.requestEndResult().endKind());
+            assertEquals(RequestState.State.FAILED, ended.endState());
+            assertEquals(StrategyErrorType.WORKER_EXECUTION_FAILED, ended.endError());
+            assertEquals(RequestContext.EndKind.WORKER, ended.endKind());
             assertNull(context.beginRouteSelection());
         }
         var beforeDuplicate = context.snapshot();
@@ -746,7 +750,8 @@ class RequestContextConcurrencyTest {
         var context = request();
         var attempt = context.beginRouteSelection();
         var route = acquiredRouteForEvent(context, attempt, role);
-        var response = new RequestResult(context, RequestContext.ResponseKind.ACK, 1000L);
+        var response =
+                SchedulerTestSupport.responseCandidate(context, RequestContext.ResponseKind.ACK);
         assertTrue(context.tryCommitRoute(attempt, route, response, 1000L));
         var endpoint = role == RoleType.ENCODER ? route.encoderEndpoint() : route.prefillEndpoint();
 
@@ -756,14 +761,14 @@ class RequestContextConcurrencyTest {
         var ended = context.endRequest(null, 1100L, null);
 
         org.junit.jupiter.api.Assertions.assertNotNull(
-                ended.requestEndResult(),
+                ended.endState(),
                 "a committed single-stage request cannot continue after its execution endpoint ends");
-        assertEquals(RequestResult.State.FAILED, ended.requestEndResult().state());
+        assertEquals(RequestState.State.FAILED, ended.endState());
         assertEquals(
                 type == org.flexlb.worker.endpoint.RequestEventType.ENDPOINT_CLOSED
                         ? RequestContext.EndKind.ENDPOINT_CLOSED
                         : RequestContext.EndKind.WORKER,
-                ended.requestEndResult().endKind());
+                ended.endKind());
         assertSame(response, ended.responseForFuture());
         assertTrue(ended.prefillCleanupCompleted());
         assertTrue(ended.decodeCleanupCompleted());
@@ -783,7 +788,8 @@ class RequestContextConcurrencyTest {
                 context.tryCommitRoute(
                         attempt,
                         route,
-                        new RequestResult(context, RequestContext.ResponseKind.ACK, 1000L),
+                        SchedulerTestSupport.responseCandidate(
+                                context, RequestContext.ResponseKind.ACK),
                         1000L));
 
         context.recordEvent(
@@ -800,9 +806,9 @@ class RequestContextConcurrencyTest {
         assertTrue(afterPrefill.prefillCleanupCompleted());
         assertFalse(afterPrefill.decodeCleanupCompleted());
         if (type == org.flexlb.worker.endpoint.RequestEventType.FAILED) {
-            assertEquals(RequestResult.State.FAILED, afterPrefill.requestEndResult().state());
+            assertEquals(RequestState.State.FAILED, afterPrefill.endState());
         } else {
-            assertNull(afterPrefill.requestEndResult());
+            assertNull(afterPrefill.endState());
             assertEquals(RequestContext.Phase.OPEN, afterPrefill.phase());
             context.recordEvent(
                     new RequestContext.RequestEvent(
@@ -815,19 +821,18 @@ class RequestContextConcurrencyTest {
                             "decode finished",
                             1200L));
             assertEquals(
-                    RequestResult.State.COMPLETED,
-                    context.endRequest(null, 1200L, null).requestEndResult().state());
+                    RequestState.State.COMPLETED, context.endRequest(null, 1200L, null).endState());
         }
     }
 
-    private static RequestResult acquiredRouteForEvent(
+    private static RequestRoute acquiredRouteForEvent(
             RequestContext context, RequestContext.SelectionAttempt attempt, RoleType role) {
         if (role == RoleType.PREFILL || role == RoleType.DECODE) {
             var route = acquiredRoute(context, attempt);
             org.mockito.Mockito.when(route.decodeEndpoint()).thenReturn(mock(DecodeEndpoint.class));
             return route;
         }
-        var route = mock(RequestResult.class);
+        var route = mock(RequestRoute.class);
         org.mockito.Mockito.when(route.ctx()).thenReturn(context);
         org.mockito.Mockito.when(route.requestId()).thenReturn(context.getRequestId());
         if (role == RoleType.ENCODER) {
@@ -841,10 +846,10 @@ class RequestContextConcurrencyTest {
         return route;
     }
 
-    private static RequestResult acquiredRoute(
+    private static RequestRoute acquiredRoute(
             RequestContext context, RequestContext.SelectionAttempt attempt) {
         var requestId = context.getRequestId();
-        var route = mock(RequestResult.class);
+        var route = mock(RequestRoute.class);
         org.mockito.Mockito.when(route.ctx()).thenReturn(context);
         org.mockito.Mockito.when(route.requestId()).thenReturn(requestId);
         org.mockito.Mockito.when(route.prefillEndpoint()).thenReturn(mock(PrefillEndpoint.class));

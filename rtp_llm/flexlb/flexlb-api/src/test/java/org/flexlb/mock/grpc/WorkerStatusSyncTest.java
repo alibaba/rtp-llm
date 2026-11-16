@@ -1,10 +1,10 @@
 package org.flexlb.mock.grpc;
 
+import org.flexlb.balance.request.Response;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.mock.MockWorkerBehavior;
 import org.flexlb.worker.endpoint.PrefillEndpoint;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.rpc.WorkerStatusRpcClient;
 import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.flexlb.worker.status.WorkerStatus;

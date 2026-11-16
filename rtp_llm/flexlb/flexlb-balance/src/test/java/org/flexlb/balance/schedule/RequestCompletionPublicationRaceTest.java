@@ -2,11 +2,11 @@ package org.flexlb.balance.schedule;
 
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.requestlog.TheoryCacheHitReporter;
 import org.flexlb.balance.schedule.ResponseCompletionExecutor.Registration;
 import org.flexlb.balance.schedule.ResponseCompletionExecutor.RequestFuture;
 import org.flexlb.config.ConfigService;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -145,7 +145,7 @@ class RequestCompletionPublicationRaceTest {
                     () -> registry.cancel("503", CancelReason.CLIENT_CANCELLED));
             assertThrows(ExecutionException.class, () -> future.get(2L, TimeUnit.SECONDS));
             assertEquals(
-                    RequestResult.State.CANCELLED,
+                    RequestState.State.CANCELLED,
                     org.flexlb.balance.schedule.SchedulerTestSupport.repository(registry)
                             .getRequestState("503")
                             .state());
@@ -353,8 +353,8 @@ class RequestCompletionPublicationRaceTest {
                     requestContext.snapshot().phase() == RequestContext.Phase.OPEN
                             && requestContext.snapshot().cancellationReason() == null);
             assertEquals(
-                    RequestResult.State.QUEUED,
-                    RequestResult.from(requestContext.snapshot()).state());
+                    RequestState.State.QUEUED,
+                    RequestState.from(requestContext.snapshot()).state());
             assertFalse(requestContext.getFuture().isDone());
         }
     }
@@ -368,8 +368,8 @@ class RequestCompletionPublicationRaceTest {
     private record Fixture(
             AbstractRequestScheduler scheduler,
             RequestContext requestContext,
-            RequestResult claim,
+            RequestRoute claim,
             Registration publication,
-            RequestResult candidate,
+            RequestRoute candidate,
             Response response) {}
 }

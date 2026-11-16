@@ -2,6 +2,8 @@ package org.flexlb.balance.schedule;
 
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
+import org.flexlb.balance.request.Request;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.requestlog.TheoryCacheHitReporter;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeStrategy;
@@ -16,8 +18,6 @@ import org.flexlb.config.service.RoleType;
 import org.flexlb.worker.endpoint.CapacityNotifier;
 import org.flexlb.worker.endpoint.EncoderEndpoint;
 import org.flexlb.worker.endpoint.EndpointRegistry;
-import org.flexlb.worker.endpoint.Request;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
 import org.flexlb.worker.status.WorkerStatus;
@@ -84,7 +84,7 @@ class EncoderSchedulingIntegrationTest {
         var resume = new java.util.concurrent.CountDownLatch(1);
         org.mockito.Mockito.doAnswer(
                         call -> {
-                            RequestResult route = call.getArgument(0);
+                            RequestRoute route = call.getArgument(0);
                             assertFalse(Thread.holdsLock(route.ctx()));
                             boolean committed = !beforeCommit && (boolean) call.callRealMethod();
                             entered.countDown();
@@ -134,7 +134,7 @@ class EncoderSchedulingIntegrationTest {
         var resume = new java.util.concurrent.CountDownLatch(1);
         org.mockito.Mockito.doAnswer(
                         call -> {
-                            RequestResult route = call.getArgument(0);
+                            RequestRoute route = call.getArgument(0);
                             assertFalse(Thread.holdsLock(route.ctx()));
                             boolean committed = !beforeCommit && (boolean) call.callRealMethod();
                             entered.countDown();

@@ -266,7 +266,7 @@ class MasterTargetRouterTest {
 
     @Test
     void perRequestNodeCarriesHaObservabilityFields() {
-        JavaLoadClient.RequestResult result = new JavaLoadClient.RequestResult();
+        JavaLoadClient.RequestRoute result = new JavaLoadClient.RequestRoute();
         result.rid = "rid-1";
         result.routePath = "failed";
         result.masterTarget = TARGET_B;
@@ -310,7 +310,7 @@ class MasterTargetRouterTest {
     void perRequestNodeDefaultsAreBackwardCompatible() {
         // A synthetic row (collector timeout) never touched the router: the
         // new fields serialize with neutral defaults instead of nulls.
-        JavaLoadClient.RequestResult result = new JavaLoadClient.RequestResult();
+        JavaLoadClient.RequestRoute result = new JavaLoadClient.RequestRoute();
         com.fasterxml.jackson.databind.node.ObjectNode node = JavaLoadClient.perRequestNode(result);
         assertEquals("", node.get("master_target").asText());
         assertFalse(node.get("failover").asBoolean());

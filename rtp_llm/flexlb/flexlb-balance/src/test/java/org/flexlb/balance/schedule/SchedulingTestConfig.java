@@ -25,9 +25,9 @@ public final class SchedulingTestConfig {
     /**
      * Construct protocol fixtures without exposing a production route factory that bypasses selection.
      */
-    public static RequestResult createRoute(
+    public static RequestRoute createRoute(
             RequestContext context,
-            org.flexlb.worker.endpoint.Response response,
+            org.flexlb.balance.request.Response response,
             org.flexlb.worker.status.ServerStatus prefill,
             org.flexlb.worker.status.ServerStatus decode,
             PrefillEndpoint prefillEndpoint,
@@ -88,7 +88,7 @@ public final class SchedulingTestConfig {
             roles.add(
                     RoleSelection.decode(
                             (DecodeEndpoint) fixtureWorker(decodeEndpoint), decode, reservation));
-        RequestResult selected = new RequestResult(context, roles);
+        RequestRoute selected = new RequestRoute(context, roles);
 
         return selected;
     }
@@ -96,7 +96,7 @@ public final class SchedulingTestConfig {
     /**
      * Project a fixture's selected roles into an independent response.
      */
-    public static org.flexlb.worker.endpoint.Response routeResponse(RequestResult route) {
+    public static org.flexlb.balance.request.Response routeResponse(RequestRoute route) {
         return route.successResponse();
     }
 
@@ -113,7 +113,7 @@ public final class SchedulingTestConfig {
 
     public static org.flexlb.balance.schedule.DecodePreemptionPlanner.DecodePreemptionDecision
             planDecode(
-                    org.flexlb.worker.endpoint.Request request,
+                    org.flexlb.balance.request.Request request,
                     int priority,
                     org.flexlb.worker.endpoint.DecodeResources.AdmissionCapacity capacity,
                     org.flexlb.worker.endpoint.DecodeResources.ResourceSnapshot snapshot,

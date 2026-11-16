@@ -1,11 +1,11 @@
 package org.flexlb.balance.requestlog;
 
+import org.flexlb.balance.request.Request;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.balance.schedule.RequestPhase;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.util.JsonUtils;
-import org.flexlb.worker.endpoint.Request;
-import org.flexlb.worker.endpoint.Response;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;

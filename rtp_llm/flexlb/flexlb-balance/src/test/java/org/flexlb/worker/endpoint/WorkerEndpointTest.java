@@ -1,7 +1,8 @@
 package org.flexlb.worker.endpoint;
 
+import org.flexlb.balance.request.Request;
 import org.flexlb.balance.schedule.RequestContext;
-import org.flexlb.balance.schedule.RequestResult;
+import org.flexlb.balance.schedule.RequestRoute;
 import org.flexlb.balance.schedule.SchedulingTestConfig;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.worker.status.TaskInfo;
@@ -185,7 +186,7 @@ class WorkerEndpointTest {
         EndpointTestSupport.applyStatus(endpoint, response).run();
     }
 
-    private RequestResult item(long requestId, long seqLen) {
+    private RequestRoute item(long requestId, long seqLen) {
         return org.flexlb.balance.schedule.RequestExecutionTestSupport.mockProtocolRoute(
                 SchedulingTestConfig.createRoute(
                         ctx(requestId, seqLen), null, null, null, endpoint, null, null, 0L));

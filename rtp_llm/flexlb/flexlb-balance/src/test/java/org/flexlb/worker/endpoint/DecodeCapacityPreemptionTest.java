@@ -4,7 +4,7 @@ import org.flexlb.balance.schedule.AbstractRequestScheduler;
 import org.flexlb.balance.schedule.DecodePreemptionPlanner.DecodePreemptionPlan;
 import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.balance.schedule.RequestRepository;
-import org.flexlb.balance.schedule.RequestResult;
+import org.flexlb.balance.schedule.RequestRoute;
 import org.flexlb.balance.schedule.SchedulingTestConfig;
 import org.flexlb.config.scheduler.PreemptionConfig;
 import org.flexlb.config.scheduler.PreemptionStage;
@@ -252,7 +252,7 @@ class DecodeCapacityPreemptionTest {
             DecodeEndpoint endpoint,
             DecodeEndpoint.RequestRegistration reservation) {
         var context = mock(RequestContext.class, RETURNS_DEEP_STUBS);
-        var route = mock(RequestResult.class);
+        var route = mock(RequestRoute.class);
         when(repository.findActive(reservation.requestId())).thenReturn(context);
         when(context.getRequestScheduler()).thenReturn(scheduler);
         when(context.snapshot().route()).thenReturn(route);
@@ -283,7 +283,7 @@ class DecodeCapacityPreemptionTest {
         preemption.setAllowedPreemptionStages(EnumSet.of(stage));
         var failures = new HashMap<String, String>();
         var request =
-                org.flexlb.worker.endpoint.Request.builder()
+                org.flexlb.balance.request.Request.builder()
                         .requestId("99")
                         .seqLen(hardKvTokens)
                         .maxNewTokens((int) (expectedKvTokens - hardKvTokens))

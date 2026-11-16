@@ -2,9 +2,10 @@ package org.flexlb.mock.grpc;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.tuple.Pair;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.balance.strategy.RequestRouteSelector;
-import org.flexlb.balance.strategy.RoutingResult;
+import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.service.ModelMetaConfig;
 import org.flexlb.config.service.RoleType;
@@ -13,7 +14,6 @@ import org.flexlb.mock.MockPrefillWorker;
 import org.flexlb.mock.MockWorkerBehavior;
 import org.flexlb.util.discovery.DiscoveryEndpoint;
 import org.flexlb.worker.cache.DynamicCacheIntervalService;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.rpc.WorkerStatusRpcClient;
 import org.flexlb.worker.status.ServerStatus;
 import org.flexlb.worker.status.ServiceMetricsReporter;
@@ -134,7 +134,7 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
                             if (candidates.isEmpty()) {
                                 Response empty = new Response();
                                 empty.setSuccess(false);
-                                return RoutingResult.rejected(empty);
+                                return SelectionResult.rejected(empty);
                             }
                             Collections.sort(candidates);
                             String chosen =

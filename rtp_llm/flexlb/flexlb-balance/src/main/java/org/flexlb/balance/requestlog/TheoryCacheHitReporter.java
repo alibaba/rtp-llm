@@ -1,5 +1,6 @@
 package org.flexlb.balance.requestlog;
 
+import org.flexlb.balance.request.Request;
 import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.cache.match.RecentCacheKeyWindow;
 import org.flexlb.cache.match.TheoryCacheKeyHistory;
@@ -7,7 +8,6 @@ import org.flexlb.cache.metrics.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.util.Logger;
-import org.flexlb.worker.endpoint.Request;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;

@@ -45,7 +45,7 @@ class JavaLoadClientLegacyFallbackTest {
             injectFailingScheduleStub(client);
             client.fallbackPrefillAddrs.add(UNREACHABLE_ENGINE);
 
-            JavaLoadClient.RequestResult result = handle(client, rec(0));
+            JavaLoadClient.RequestRoute result = handle(client, rec(0));
 
             // attemptFallback ran: the direct-to-engine row is stamped
             // route_path="fallback" even when the engine leg also fails
@@ -68,7 +68,7 @@ class JavaLoadClientLegacyFallbackTest {
             injectFailingScheduleStub(client);
             client.fallbackPrefillAddrs.add(UNREACHABLE_ENGINE);
 
-            JavaLoadClient.RequestResult result = handle(client, rec(1));
+            JavaLoadClient.RequestRoute result = handle(client, rec(1));
 
             // Opt-in semantics: without ENABLE_FALLBACK the schedule failure
             // surfaces as a plain master-path error row — the fallback list
@@ -146,7 +146,7 @@ class JavaLoadClientLegacyFallbackTest {
         stubs[0] = failing;
     }
 
-    private static JavaLoadClient.RequestResult handle(
+    private static JavaLoadClient.RequestRoute handle(
             JavaLoadClient client, JavaLoadClient.TraceRecord record) throws Exception {
         Method handle =
                 JavaLoadClient.class.getDeclaredMethod(
@@ -155,7 +155,7 @@ class JavaLoadClientLegacyFallbackTest {
                         Semaphore.class,
                         double.class);
         handle.setAccessible(true);
-        return (JavaLoadClient.RequestResult) handle.invoke(client, record, new Semaphore(4), 0.0);
+        return (JavaLoadClient.RequestRoute) handle.invoke(client, record, new Semaphore(4), 0.0);
     }
 
     private static void closeClient(JavaLoadClient client) throws Exception {

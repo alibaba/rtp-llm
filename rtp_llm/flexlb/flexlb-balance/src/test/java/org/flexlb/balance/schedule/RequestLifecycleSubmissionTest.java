@@ -4,14 +4,15 @@ import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.context.Context;
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.requestlog.TheoryCacheHitReporter;
 import org.flexlb.balance.strategy.RequestRouteSelector;
+import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.balance.trace.FlexlbTrace;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.worker.endpoint.CapacityNotifier;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -58,7 +59,7 @@ class RequestLifecycleSubmissionTest {
         context.setTraceContext(Context.root().with(span));
         when(router.select(context, null))
                 .thenReturn(
-                        RequestResult.rejected(
+                        SelectionResult.rejected(
                                 Response.error(StrategyErrorType.NO_PREFILL_WORKER)));
         try {
             var result =

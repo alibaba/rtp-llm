@@ -13,7 +13,7 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import org.flexlb.api.protocol.FlexlbScheduleProtocol;
 import org.flexlb.api.protocol.FlexlbServiceGrpc;
-import org.flexlb.balance.schedule.RequestResult;
+import org.flexlb.balance.schedule.RequestRoute;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.util.PriorityNormalizer;
 import org.flexlb.worker.rpc.RoleTypeProtoConverter;
@@ -119,7 +119,7 @@ public final class JavaLoadClient {
     private final Map<String, AtomicInteger> engineChannelRR = new ConcurrentHashMap<>();
     private final HttpClient httpClient =
             HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
-    private final List<RequestResult> results = new ArrayList<>();
+    private final List<RequestRoute> results = new ArrayList<>();
     final AtomicInteger actualSentCount = new AtomicInteger();
     private final AtomicInteger responseCount = new AtomicInteger();
 
@@ -132,7 +132,7 @@ public final class JavaLoadClient {
     final AtomicInteger errorCount = new AtomicInteger();
     final AtomicInteger inflightCount = new AtomicInteger();
     final AtomicInteger sentTotal = new AtomicInteger();
-    final List<RequestResult> completedResults = Collections.synchronizedList(new ArrayList<>());
+    final List<RequestRoute> completedResults = Collections.synchronizedList(new ArrayList<>());
 
     private volatile ScheduledExecutorService pushgatewayExecutor;
 
@@ -312,7 +312,7 @@ public final class JavaLoadClient {
 
         Semaphore semaphore = new Semaphore(config.maxConcurrency);
         ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
-        List<Future<RequestResult>> futures = new ArrayList<>();
+        List<Future<RequestRoute>> futures = new ArrayList<>();
         int sentCount = 0;
         int loopIdx = 0;
         // Per-shard uniform interval: total target rate SEND_MODE_QPS is split
@@ -423,7 +423,7 @@ public final class JavaLoadClient {
                         future -> {
                             if (future.isDone()) {
                                 try {
-                                    RequestResult collected = future.get();
+                                    RequestRoute collected = future.get();
                                     if (collected != null) {
                                         results.add(collected);
                                     }
@@ -772,12 +772,12 @@ public final class JavaLoadClient {
      *         futures are cancelled and synthesized
      * @return one result row per future, in submission order
      */
-    static List<RequestResult> collectOutstandingResults(
-            List<Future<RequestResult>> futures, long deadlineNanos) {
+    static List<RequestRoute> collectOutstandingResults(
+            List<Future<RequestRoute>> futures, long deadlineNanos) {
         if (futures.isEmpty()) {
             return new ArrayList<>();
         }
-        RequestResult[] collected = new RequestResult[futures.size()];
+        RequestRoute[] collected = new RequestRoute[futures.size()];
         int[] pending = new int[futures.size()];
         for (int i = 0; i < pending.length; i++) {
             pending[i] = i;
@@ -804,7 +804,7 @@ public final class JavaLoadClient {
         }
         for (int i = 0; i < pendingCount; i++) {
             int idx = pending[i];
-            Future<RequestResult> future = futures.get(idx);
+            Future<RequestRoute> future = futures.get(idx);
             // A future may race to completion between the last sweep and this
             // cancellation — prefer its real row when already available.
             if (future.isDone()) {
@@ -812,14 +812,14 @@ public final class JavaLoadClient {
                 continue;
             }
             future.cancel(true);
-            RequestResult timeoutResult = new RequestResult();
+            RequestRoute timeoutResult = new RequestRoute();
             timeoutResult.status = "timeout";
             timeoutResult.error = "response deadline exceeded";
             timeoutResult.synthetic = true;
             collected[idx] = timeoutResult;
         }
-        List<RequestResult> rows = new ArrayList<>(collected.length);
-        for (RequestResult row : collected) {
+        List<RequestRoute> rows = new ArrayList<>(collected.length);
+        for (RequestRoute row : collected) {
             rows.add(row);
         }
         return rows;
@@ -954,7 +954,7 @@ public final class JavaLoadClient {
      * counting them as unset p0 traffic.
      */
     // Package-visible for per-request row serialization assertions in tests.
-    static ObjectNode perRequestNode(RequestResult result) {
+    static ObjectNode perRequestNode(RequestRoute result) {
         ObjectNode node = MAPPER.createObjectNode();
         node.put("rid", result.rid);
         node.put("trace_id", result.traceId);
@@ -1043,13 +1043,13 @@ public final class JavaLoadClient {
                             util));
         }
 
-        List<RequestResult> snapshot;
+        List<RequestRoute> snapshot;
         synchronized (completedResults) {
             snapshot = new ArrayList<>(completedResults);
         }
         if (!snapshot.isEmpty()) {
             Map<String, Map<String, List<Double>>> groups = new LinkedHashMap<>();
-            for (RequestResult r : snapshot) {
+            for (RequestRoute r : snapshot) {
                 String rp = r.routePath == null ? "unknown" : r.routePath;
                 Map<String, List<Double>> vals =
                         groups.computeIfAbsent(
@@ -1130,8 +1130,8 @@ public final class JavaLoadClient {
      * Returns the new pending count.
      */
     private static int sweepCompletedFutures(
-            List<Future<RequestResult>> futures,
-            RequestResult[] collected,
+            List<Future<RequestRoute>> futures,
+            RequestRoute[] collected,
             int[] pending,
             int pendingCount) {
         int kept = 0;
@@ -1148,16 +1148,16 @@ public final class JavaLoadClient {
 
     /**
      * Retrieves the terminal result of a finished future. handleRequest always
-     * returns a RequestResult (it converts its own exceptions into error rows),
+     * returns a RequestRoute (it converts its own exceptions into error rows),
      * so the catch only fires when the task itself died or the future was
      * cancelled externally — a synthetic exception row keeps the
      * one-row-per-future invariant (legacy catch-Exception parity).
      */
-    private static RequestResult harvestFutureResult(Future<RequestResult> future) {
+    private static RequestRoute harvestFutureResult(Future<RequestRoute> future) {
         try {
             return future.get();
         } catch (Exception e) {
-            RequestResult errorResult = new RequestResult();
+            RequestRoute errorResult = new RequestRoute();
             errorResult.status = "exception";
             errorResult.error = e.toString();
             errorResult.synthetic = true;
@@ -1165,11 +1165,11 @@ public final class JavaLoadClient {
         }
     }
 
-    private RequestResult handleRequest(TraceRecord record, Semaphore semaphore, double dueS) {
+    private RequestRoute handleRequest(TraceRecord record, Semaphore semaphore, double dueS) {
         long startedNanos = System.nanoTime();
         double sendDueEpochMs = replayStartedEpochMs + dueS * 1000.0;
 
-        RequestResult result = new RequestResult();
+        RequestRoute result = new RequestRoute();
         result.rid = record.sourceRid;
         result.traceId = record.traceId;
         result.requestId = record.requestId;
@@ -1515,7 +1515,7 @@ public final class JavaLoadClient {
         return "";
     }
 
-    private void tallyResult(RequestResult result) {
+    private void tallyResult(RequestRoute result) {
         completedResults.add(result);
         if ("ok".equals(result.status) || "scheduled".equals(result.status)) {
             successCount.incrementAndGet();
@@ -1530,7 +1530,7 @@ public final class JavaLoadClient {
      * streams GenerateStreamCall directly against the prefill engine.
      */
     private void attemptFallback(
-            TraceRecord record, RequestResult result, long startedNanos, String masterErrorPrefix) {
+            TraceRecord record, RequestRoute result, long startedNanos, String masterErrorPrefix) {
         try {
             runFallbackStream(record, result, startedNanos);
         } catch (Exception fbExc) {
@@ -1542,7 +1542,7 @@ public final class JavaLoadClient {
         }
     }
 
-    private void runFallbackStream(TraceRecord record, RequestResult result, long startedNanos)
+    private void runFallbackStream(TraceRecord record, RequestRoute result, long startedNanos)
             throws IOException {
         String prefillAddr =
                 roundRobinAddr(
@@ -1826,7 +1826,7 @@ public final class JavaLoadClient {
         // mock engine's engine_events.jsonl.
         Path perRequestPath = Path.of(config.outputDir, "client_events.jsonl");
         try (BufferedWriter writer = Files.newBufferedWriter(perRequestPath)) {
-            for (RequestResult result : results) {
+            for (RequestRoute result : results) {
                 writer.write(perRequestNode(result).toString());
                 writer.newLine();
             }
@@ -2396,7 +2396,7 @@ public final class JavaLoadClient {
     /**
      * Collects one load-test request result and its scheduling and generation timings.
      */
-    static final class RequestResult {
+    static final class RequestRoute {
         String rid = "";
         String traceId = "";
         long requestId;

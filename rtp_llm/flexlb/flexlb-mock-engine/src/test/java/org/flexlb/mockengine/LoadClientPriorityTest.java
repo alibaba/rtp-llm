@@ -295,15 +295,15 @@ class LoadClientPriorityTest {
 
     /** A collector-synthesized row (timeout/exception fallback): no real
      *  request ever carried a priority for it. */
-    private static JavaLoadClient.RequestResult syntheticResult(String status) {
-        JavaLoadClient.RequestResult result = result(0, status, 0.0);
+    private static JavaLoadClient.RequestRoute syntheticResult(String status) {
+        JavaLoadClient.RequestRoute result = result(0, status, 0.0);
         result.synthetic = true;
         return result;
     }
 
-    private static JavaLoadClient.RequestResult result(
+    private static JavaLoadClient.RequestRoute result(
             int priority, String status, double scheduleMs) {
-        JavaLoadClient.RequestResult result = new JavaLoadClient.RequestResult();
+        JavaLoadClient.RequestRoute result = new JavaLoadClient.RequestRoute();
         result.priority = priority;
         result.status = status;
         result.scheduleMs = scheduleMs;

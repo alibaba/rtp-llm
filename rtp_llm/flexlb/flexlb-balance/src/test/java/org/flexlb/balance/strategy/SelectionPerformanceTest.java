@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.request.Request;
 import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.balance.schedule.SchedulingMetadata;
 import org.flexlb.cache.match.CacheAwareService;
@@ -11,7 +12,6 @@ import org.flexlb.util.metrics.NoOpFlexMonitor;
 import org.flexlb.worker.cache.WorkerCacheUpdateResult;
 import org.flexlb.worker.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.worker.endpoint.EndpointRegistry;
-import org.flexlb.worker.endpoint.Request;
 import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.flexlb.worker.status.WorkerStatus;
 import org.junit.jupiter.api.Tag;
@@ -85,12 +85,12 @@ class SelectionPerformanceTest {
                 long checksum = 0L;
                 for (int index = 0; index < operations; index++) {
                     var result = selector.select(context, null);
-                    assertEquals(RoutingResult.Status.SUCCESS, result.status());
+                    assertEquals(SelectionResult.Status.SUCCESS, result.status());
                     checksum +=
                             ((org.flexlb.balance.strategy.RoleSelection)
-                                            result.role(RoleType.PREFILL))
+                                            result.value().role(RoleType.PREFILL))
                                     .computeTokens();
-                    var route = result;
+                    var route = result.value();
                     route.prefillEndpoint().releaseRequest(route.prefillRegistration());
                     if (route.decodeRegistration() != null)
                         route.decodeEndpoint().releaseRequest(route.decodeRegistration());
@@ -160,7 +160,7 @@ class SelectionPerformanceTest {
                 new CostBasedPrefillStrategy(service, registry, cache, metrics),
                 new DecodeStrategy(service, new AdmissionCapacity(1000, 100), registry),
                 new VitStrategy(
-                        org.mockito.Mockito.mock(org.flexlb.cache.VitCacheDirectory.class),
+                        org.mockito.Mockito.mock(org.flexlb.cache.VitWorkerCacheManager.class),
                         registry),
                 org.mockito.Mockito.mock(EncoderStrategy.class),
                 model);

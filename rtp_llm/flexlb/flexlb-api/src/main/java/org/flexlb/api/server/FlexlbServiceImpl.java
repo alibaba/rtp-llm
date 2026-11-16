@@ -10,13 +10,15 @@ import org.flexlb.api.protocol.FlexlbScheduleProtocol;
 import org.flexlb.api.protocol.FlexlbServiceGrpc;
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
+import org.flexlb.balance.request.Request;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.requestlog.PvLogData;
 import org.flexlb.balance.schedule.AbstractRequestScheduler;
 import org.flexlb.balance.schedule.CancelReason;
 import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.balance.schedule.RequestPhase;
 import org.flexlb.balance.schedule.RequestRepository;
-import org.flexlb.balance.schedule.RequestResult;
+import org.flexlb.balance.schedule.RequestState;
 import org.flexlb.balance.schedule.SchedulingMetadata;
 import org.flexlb.balance.strategy.RequestRouteSelector;
 import org.flexlb.balance.trace.FlexlbTrace;
@@ -28,8 +30,6 @@ import org.flexlb.master.MasterStatusView;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.flexlb.worker.endpoint.AdmissionRejectReason;
-import org.flexlb.worker.endpoint.Request;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.status.ServerStatus;
 import org.flexlb.worker.status.ServiceMetricsReporter;
@@ -196,7 +196,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                             .asRuntimeException());
             return;
         }
-        RequestResult snapshot =
+        RequestState snapshot =
                 requestState.getRequestState(ScheduleRequestId.parse(request), phase);
         if (snapshot == null && shouldForwardToMaster()) {
             grpcForwarder
@@ -337,7 +337,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
     private FlexlbScheduleProtocol.FlexlbScheduleResponsePB notMasterResponse(
             String requestId, RequestContext context) {
-        RequestResult owned =
+        RequestState owned =
                 isAdmissionRequest(context)
                         ? requestState.getRequestState(
                                 requestId,
@@ -375,7 +375,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private static FlexlbScheduleProtocol.RequestLifecyclePB toLifecycleProto(
-            RequestResult snapshot) {
+            RequestState snapshot) {
         FlexlbScheduleProtocol.RequestLifecyclePB.Builder lifecycle =
                 FlexlbScheduleProtocol.RequestLifecyclePB.newBuilder()
                         .setRequestIdStr(snapshot.requestId())
@@ -610,14 +610,17 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                     if (response.isSuccess() && cacheService != null) {
                         try {
                             cacheService.updateFromRoutedRequest(
-                                    request, response.getServerStatus());
+                                    request.getRequestId(),
+                                    request.getBlockSize(),
+                                    request.getBlockCacheKeys(),
+                                    response.getServerStatus());
                         } catch (RuntimeException failure) {
                             Logger.warn("Routed cache metadata update failed", failure);
                         }
                     }
                     FlexlbScheduleProtocol.FlexlbScheduleResponsePB.Builder builder =
                             toProtoResponse(response).toBuilder();
-                    RequestResult lifecycle =
+                    RequestState lifecycle =
                             isAdmissionRequest(ctx)
                                     ? requestState.getRequestState(
                                             ctx.getRequestId(), ctx.getPhase())
@@ -1177,7 +1180,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
     private FlexlbScheduleProtocol.FlexlbCancelResponsePB cancelLocally(
             FlexlbScheduleProtocol.FlexlbCancelRequestPB request) {
-        RequestResult snapshot =
+        RequestState snapshot =
                 requestEntry.cancel(
                         ScheduleRequestId.parse(request),
                         toCancelReason(request.getReason()),

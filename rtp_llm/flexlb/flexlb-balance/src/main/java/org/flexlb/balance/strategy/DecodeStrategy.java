@@ -1,18 +1,19 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.request.Request;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.balance.schedule.SchedulingMetadata;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.util.Failures;
 import org.flexlb.util.formula.DecodeCostFormula;
+import org.flexlb.worker.endpoint.AdmissionRejectReason;
 import org.flexlb.worker.endpoint.CapacityKey;
 import org.flexlb.worker.endpoint.DecodeEndpoint;
 import org.flexlb.worker.endpoint.DecodeResources;
 import org.flexlb.worker.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.worker.endpoint.EndpointRegistry;
-import org.flexlb.worker.endpoint.Request;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
 import org.flexlb.worker.status.ServerStatus;
@@ -108,7 +109,8 @@ public class DecodeStrategy
         }
     }
 
-    public RoutingResult<RoleSelection, CapacityKey> select(RequestContext context, String group) {
+    public SelectionResult<RoleSelection, CapacityKey> select(
+            RequestContext context, String group) {
         DecodeInputs cached = DECODE_INPUTS.get();
         DecodeInputs inputs = cached.inUse ? new DecodeInputs() : cached;
         inputs.inUse = true;
@@ -146,12 +148,12 @@ public class DecodeStrategy
     }
 
     @Override
-    protected RoutingResult<RoleSelection, CapacityKey> capacityFull(
+    protected SelectionResult<RoleSelection, CapacityKey> capacityFull(
             Selection selected, CapacityKey scope) {
         return decodeCapacityBlocked(selected.snapshot());
     }
 
-    private RoutingResult<Selection, CapacityKey> chooseDecode(
+    private SelectionResult<Selection, CapacityKey> chooseDecode(
             RequestContext context,
             String group,
             List<DecodeEndpoint> workers,
@@ -181,7 +183,7 @@ public class DecodeStrategy
                     .isZero()) eligible.add(candidate);
         }
         if (possible == 0 && !candidates.isEmpty())
-            return RoutingResult.rejected(
+            return SelectionResult.rejected(
                     Response.error(
                             StrategyErrorType.RESOURCE_EXHAUSTED,
                             org.flexlb.worker.endpoint.AdmissionRejectReason.RESOURCE_EXHAUSTED,
@@ -201,7 +203,7 @@ public class DecodeStrategy
         }
         var selected = chooseBest(group, java.util.Collections.unmodifiableList(eligible));
         if (selected.isEmpty())
-            return RoutingResult.blocked(
+            return SelectionResult.blocked(
                     new CapacityKey(RoleType.DECODE, group, null),
                     Response.error(StrategyErrorType.NO_DECODE_WORKER),
                     null);
@@ -209,11 +211,11 @@ public class DecodeStrategy
         var snapshot = selected.get();
         for (var endpoint : workers)
             if (endpoint.ipPort().equals(snapshot.address()))
-                return RoutingResult.success(new Selection(endpoint, snapshot));
+                return SelectionResult.success(new Selection(endpoint, snapshot));
         throw new IllegalStateException("selected Decode worker is not a candidate");
     }
 
-    private RoutingResult<DecodeEndpoint.SelectionSnapshot, CapacityKey> decodeCapacityFailure(
+    private SelectionResult<DecodeEndpoint.SelectionSnapshot, CapacityKey> decodeCapacityFailure(
             RequestContext context,
             String group,
             List<DecodeEndpoint.SelectionSnapshot> candidates) {
@@ -230,10 +232,28 @@ public class DecodeStrategy
             } else {
                 var evaluation =
                         endpoint.evaluateSelection(
-                                context.getRequest(), context.getPriority(), admissionCapacity);
+                                context.getRequest().getHardKvTokens(),
+                                context.getRequest().getExpectedKvTokens(),
+                                context.getPriority(),
+                                admissionCapacity);
                 snapshot = evaluation.snapshot();
                 deficit = evaluation.deficit();
-                reason = evaluation.failure();
+                reason =
+                        switch (evaluation.failure()) {
+                            case NONE -> null;
+                            case INSUFFICIENT_CAPACITY ->
+                                    Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
+                            case UNKNOWN_BLOCKER ->
+                                    Response.error(StrategyErrorType.ADMISSION_UNAVAILABLE);
+                            case BLOCKED_BY_HIGHER_PRIORITY ->
+                                    Response.error(
+                                            StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
+                                            AdmissionRejectReason.HIGHER_PRIORITY_AHEAD);
+                            case BLOCKED_BY_SAME_PRIORITY ->
+                                    Response.error(
+                                            StrategyErrorType.PRIORITY_ADMISSION_REJECTED,
+                                            AdmissionRejectReason.SAME_PRIORITY_AHEAD);
+                        };
                 if (deficit.isZero()) {
                     snapshot = candidate;
                     deficit =
@@ -279,7 +299,7 @@ public class DecodeStrategy
                     Response.buildErrorResponse(
                             StrategyErrorType.NO_DECODE_WORKER,
                             "No allowed Decode endpoint admitted this request; candidate rejection reasons differ");
-        return RoutingResult.blocked(
+        return SelectionResult.blocked(
                 new CapacityKey(RoleType.DECODE, group, null),
                 failure,
                 Map.of(
@@ -302,9 +322,9 @@ public class DecodeStrategy
                 : null;
     }
 
-    private RoutingResult<RoleSelection, CapacityKey> decodeCapacityBlocked(
+    private SelectionResult<RoleSelection, CapacityKey> decodeCapacityBlocked(
             DecodeEndpoint.SelectionSnapshot selected) {
-        return RoutingResult.blocked(
+        return SelectionResult.blocked(
                 CapacityKey.exact(RoleType.DECODE, selected.topology().group(), selected.address()),
                 Response.error(StrategyErrorType.RESOURCE_EXHAUSTED),
                 Map.of(

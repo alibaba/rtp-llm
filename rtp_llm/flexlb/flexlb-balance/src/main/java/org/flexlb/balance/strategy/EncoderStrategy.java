@@ -1,5 +1,6 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.service.RoleType;
@@ -7,7 +8,6 @@ import org.flexlb.util.Failures;
 import org.flexlb.worker.endpoint.CapacityKey;
 import org.flexlb.worker.endpoint.EncoderEndpoint;
 import org.flexlb.worker.endpoint.EndpointRegistry;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
 import org.flexlb.worker.status.ServerStatus;
 import org.springframework.stereotype.Component;
@@ -56,7 +56,8 @@ public class EncoderStrategy
         return java.util.Optional.ofNullable(winner);
     }
 
-    public RoutingResult<RoleSelection, CapacityKey> select(RequestContext context, String group) {
+    public SelectionResult<RoleSelection, CapacityKey> select(
+            RequestContext context, String group) {
         var candidates = endpoints.<EncoderEndpoint>endpoints(RoleType.ENCODER, group);
         var scope = new CapacityKey(RoleType.ENCODER, group, null);
         var request = context.getRequest();
@@ -78,14 +79,14 @@ public class EncoderStrategy
                                     maxRequests)
                             .map(
                                     candidate ->
-                                            RoutingResult
+                                            SelectionResult
                                                     .<org.flexlb.worker.endpoint.EncoderEndpoint
                                                                     .SelectionSnapshot,
                                                             CapacityKey>
                                                             success(candidate))
                             .orElseGet(
                                     () ->
-                                            RoutingResult.blocked(
+                                            SelectionResult.blocked(
                                                     scope,
                                                     Response.error(
                                                             org.flexlb.worker.endpoint
@@ -147,9 +148,9 @@ public class EncoderStrategy
     }
 
     @Override
-    protected RoutingResult<RoleSelection, CapacityKey> capacityFull(
+    protected SelectionResult<RoleSelection, CapacityKey> capacityFull(
             EncoderEndpoint.SelectionSnapshot selected, CapacityKey scope) {
-        return RoutingResult.blocked(
+        return SelectionResult.blocked(
                 CapacityKey.exact(RoleType.ENCODER, selected.group(), selected.address()));
     }
 

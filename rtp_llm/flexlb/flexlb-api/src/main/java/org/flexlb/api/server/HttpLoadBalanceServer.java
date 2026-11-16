@@ -2,8 +2,10 @@ package org.flexlb.api.server;
 
 import org.flexlb.api.ServerScheduleLatencyRecorder;
 import org.flexlb.balance.queue.QueueSnapshotResponse;
+import org.flexlb.balance.request.Request;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.schedule.RequestRepository;
-import org.flexlb.balance.schedule.RequestResult;
+import org.flexlb.balance.schedule.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.routing.TrafficPolicyConfig;
 import org.flexlb.config.service.RoleType;
@@ -19,8 +21,6 @@ import org.flexlb.worker.cache.CacheStatus;
 import org.flexlb.worker.endpoint.DecodeEndpoint;
 import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.PrefillEndpoint;
-import org.flexlb.worker.endpoint.Request;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.status.WorkerStatus;
 import org.flexlb.worker.status.WorkerStatusSynchronizer;
 import org.springframework.context.annotation.Bean;
@@ -160,7 +160,7 @@ class HttpLoadBalanceServer {
 
     private Mono<ServerResponse> queueSnapshot(ServerRequest request) {
         try {
-            List<RequestResult> snapshot = requests.snapshotActiveRequests();
+            List<RequestState> snapshot = requests.snapshotActiveRequests();
             QueueSnapshotResponse response = persistSchedulerSnapshot(snapshot);
             return ServerResponse.ok()
                     .contentType(MediaType.APPLICATION_JSON)
@@ -173,7 +173,7 @@ class HttpLoadBalanceServer {
         }
     }
 
-    private QueueSnapshotResponse persistSchedulerSnapshot(List<RequestResult> snapshot)
+    private QueueSnapshotResponse persistSchedulerSnapshot(List<RequestState> snapshot)
             throws IOException {
         Files.createDirectories(SCHEDULER_SNAPSHOT_DIR);
         cleanOldSchedulerSnapshots();

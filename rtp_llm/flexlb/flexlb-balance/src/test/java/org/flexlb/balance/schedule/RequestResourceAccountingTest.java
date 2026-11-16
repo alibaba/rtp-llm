@@ -2,6 +2,7 @@ package org.flexlb.balance.schedule;
 
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.requestlog.TheoryCacheHitReporter;
 import org.flexlb.balance.schedule.RequestContext.SelectionAttempt;
 import org.flexlb.config.ConfigService;
@@ -14,7 +15,6 @@ import org.flexlb.worker.endpoint.DecodeResources.Capacity;
 import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.EndpointTestSupport;
 import org.flexlb.worker.endpoint.PrefillEndpoint;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
 import org.flexlb.worker.rpc.EngineGrpcClient;
 import org.flexlb.worker.status.TaskInfo;
@@ -109,7 +109,7 @@ class RequestResourceAccountingTest {
         RequestProtocolTestSupport.closing(item);
         var firstFailure =
                 AbstractRequestScheduler.releaseRouteResources(
-                        item, WorkerEndpoint.ReleaseReason.NOT_SENT, false);
+                        item, AbstractRequestScheduler.ReleaseReason.NOT_SENT, false);
         assertFalse(context.snapshot().prefillCleanupCompleted());
         assertTrue(context.snapshot().decodeCleanupCompleted());
         assertSame(releaseFailure, firstFailure);
@@ -118,7 +118,7 @@ class RequestResourceAccountingTest {
         org.mockito.Mockito.doReturn(true).when(prefill).releaseRequest(item.prefillRegistration());
         assertNull(
                 AbstractRequestScheduler.releaseRouteResources(
-                        item, WorkerEndpoint.ReleaseReason.NOT_SENT, false));
+                        item, AbstractRequestScheduler.ReleaseReason.NOT_SENT, false));
         assertTrue(context.snapshot().prefillCleanupCompleted());
         assertTrue(context.snapshot().decodeCleanupCompleted());
         org.mockito.Mockito.verify(decode, org.mockito.Mockito.times(1))
@@ -254,7 +254,7 @@ class RequestResourceAccountingTest {
         final SchedulerTestServices runtime;
         final PrefillEndpoint prefill;
         final DecodeEndpoint decode;
-        final RequestResult item;
+        final RequestRoute item;
         final DecodeEndpoint.RequestRegistration reservation;
         final PrefillEndpoint.RequestRegistration routeReservation;
         final boolean prefillHandoff;
@@ -373,7 +373,7 @@ class RequestResourceAccountingTest {
             if (!keepAdmissionOpen) {
                 assertTrue(prefillHandoff);
                 assertEquals(
-                        org.flexlb.balance.strategy.RoutingResult.Status.SUCCESS,
+                        org.flexlb.balance.strategy.SelectionResult.Status.SUCCESS,
                         RequestProtocolTestSupport.commitRoute(
                                 requests,
                                 item,

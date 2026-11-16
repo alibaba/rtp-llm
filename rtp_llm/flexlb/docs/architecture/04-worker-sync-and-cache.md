@@ -9,6 +9,14 @@ KVCM（外部 KV Cache Manager）、LOCAL_STANDBY（KVCM 的本地兜底）。
 
 ## Worker 状态同步
 
+ViT 图片与 embedding 缓存信息由 `VitWorkerCacheManager` 管理：保存各 Worker 的
+缓存快照、查询命中情况并记录待完成请求的缓存预留；Worker 替换和快照过期时使旧数据失效。
+`VitWorkerCacheSynchronizer` 负责定时拉取，通过 `MasterStatusView` 判断本机是否应执行同步：
+独立部署正常拉取，开启一致性时仅 Master 拉取，观察到本机重新成为 Master 后立即刷新。
+同步器每 5 秒检查一次，单个 Worker 的拉取间隔为 30 秒，RPC 超时 2 秒、并发上限 4；
+失败不覆盖已有快照，快照在 60 秒后失效。Manager 在响应写入时再次校验 Worker 身份，
+拒绝替换前实例的晚到响应；它不依赖选主服务、RPC 客户端或定时线程。
+
 每份有效响应统一通过 Endpoint 的 `applyWorkerStatus` 完整校准请求和资源，随后发布
 Worker 快照及游标；同版本响应也执行完整更新，版本倒退仍被拒绝。
 `WorkerEndpoint` 统一负责代际检查、Endpoint 加锁、异常时停止接纳和快照发布；

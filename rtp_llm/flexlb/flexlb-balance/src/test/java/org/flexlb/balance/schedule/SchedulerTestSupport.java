@@ -8,6 +8,7 @@ import org.flexlb.balance.requestlog.TheoryCacheHitReporter;
 import org.flexlb.balance.schedule.RequestContext.SelectionAttempt;
 import org.flexlb.balance.schedule.ResponseCompletionExecutor.Registration;
 import org.flexlb.balance.strategy.RequestRouteSelector;
+import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.config.ConfigService;
 import org.flexlb.worker.endpoint.CapacityNotifier;
 import org.flexlb.worker.endpoint.DecodeEndpoint;
@@ -66,7 +67,7 @@ public final class SchedulerTestSupport {
         endpointRepositories.put(endpoint, repository);
     }
 
-    public static void bindEndpointOwner(PrefillEndpoint endpoint, RequestResult route) {
+    public static void bindEndpointOwner(PrefillEndpoint endpoint, RequestRoute route) {
         if (route.ctx() == null) {
             var context = mock(RequestContext.class);
             when(route.ctx()).thenReturn(context);
@@ -104,7 +105,8 @@ public final class SchedulerTestSupport {
                     context.tryCommitRoute(
                             placement,
                             route,
-                            new RequestResult(context, RequestContext.ResponseKind.ACK, now),
+                            SchedulerTestSupport.responseCandidate(
+                                    context, RequestContext.ResponseKind.ACK),
                             now);
                 }
                 org.flexlb.balance.schedule.RequestChangeAssertions.record(
@@ -275,17 +277,21 @@ public final class SchedulerTestSupport {
         return testCloseQueues.computeIfAbsent(context, ignored -> new RequestCloseQueue());
     }
 
-    static RequestResult selectAndPublish(
+    static SelectionResult<RequestRoute, org.flexlb.worker.endpoint.CapacityKey> selectAndPublish(
             AbstractRequestScheduler scheduler,
             RequestContext context,
-            java.util.function.Supplier<RequestResult> selection) {
+            java.util.function.Supplier<
+                            SelectionResult<RequestRoute, org.flexlb.worker.endpoint.CapacityKey>>
+                    selection) {
         return scheduler.planRoute(context, selection);
     }
 
-    static RequestResult selectAndPublish(
+    static SelectionResult<RequestRoute, org.flexlb.worker.endpoint.CapacityKey> selectAndPublish(
             AbstractRequestScheduler scheduler,
             SelectionAttempt routing,
-            java.util.function.Supplier<RequestResult> selection) {
+            java.util.function.Supplier<
+                            SelectionResult<RequestRoute, org.flexlb.worker.endpoint.CapacityKey>>
+                    selection) {
         return scheduler.executeRouteSelection(routing, selection);
     }
 
@@ -357,7 +363,7 @@ public final class SchedulerTestSupport {
         return facts;
     }
 
-    static RequestResult delivery(RequestContext context) {
+    static RequestRoute delivery(RequestContext context) {
         return context.snapshot().committedRoute();
     }
 
@@ -379,20 +385,18 @@ public final class SchedulerTestSupport {
                 org.flexlb.balance.schedule.SchedulerTestServices.failure(runtime(owner));
     }
 
-    static RequestResult requestRecordForArchive(
-            AbstractRequestScheduler owner, RequestResult state) {
-        var record = repository(owner).findTerminal(state.requestId());
-        return record == state
-                ? record
-                : new RequestResult(
-                        state.requestId(),
-                        state.originalNumericRequestId(),
-                        state.requestPhase(),
-                        state.state(),
-                        state.createdAtMs(),
-                        state.updatedAtMs(),
-                        state.detail(),
-                        owner);
+    static RequestState requestRecordForArchive(
+            AbstractRequestScheduler owner, RequestState state) {
+        var archived = repository(owner).findTerminal(state.requestId());
+        return archived == null ? state : archived;
+    }
+
+    static ResponseCompletionExecutor.Registration responseCandidate(
+            RequestContext context, RequestContext.ResponseKind kind) {
+        var registration = org.mockito.Mockito.mock(ResponseCompletionExecutor.Registration.class);
+        org.mockito.Mockito.when(registration.requestContext()).thenReturn(context);
+        org.mockito.Mockito.when(registration.responseKind()).thenReturn(kind);
+        return registration;
     }
 
     static AbstractRequestScheduler create(
@@ -419,11 +423,26 @@ public final class SchedulerTestSupport {
     }
 
     static Registration responsePublication(ResponseCompletionExecutor executor) {
-        return new Registration(
+        return responseRegistration(
                 executor,
                 new Object(),
                 new ResponseCompletionExecutor.RequestFuture((kind, response, failure) -> false),
                 () -> true);
+    }
+
+    static Registration responseRegistration(
+            ResponseCompletionExecutor executor,
+            Object lock,
+            ResponseCompletionExecutor.RequestFuture future,
+            java.util.function.BooleanSupplier selected) {
+        var context = lock instanceof RequestContext request ? request : mock(RequestContext.class);
+        var snapshot = mock(RequestContext.Snapshot.class);
+        var registration =
+                new Registration(executor, context, future, RequestContext.ResponseKind.ACK);
+        org.mockito.Mockito.doReturn(snapshot).when(context).snapshot();
+        org.mockito.Mockito.when(snapshot.responseForFuture())
+                .thenAnswer(call -> selected.getAsBoolean() ? registration : null);
+        return registration;
     }
 
     private static RequestRepository mockRepository(AbstractRequestScheduler owner) {

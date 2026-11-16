@@ -140,7 +140,7 @@ class DefaultRequestPreemptionTest {
             task.setInputLength(10L);
             task.setPhase(TaskPhase.RUNNING);
             update(Map.of("victim", task));
-            var route = mock(RequestResult.class);
+            var route = mock(RequestRoute.class);
             var snapshot = mock(RequestContext.Snapshot.class);
             when(victim.snapshot()).thenReturn(snapshot);
             when(snapshot.route()).thenReturn(route);
@@ -164,7 +164,9 @@ class DefaultRequestPreemptionTest {
         public void close() {
             preemption.stopAdmission();
             runChecks();
-            if (acquired.get() != null) acquired.get().rollbackSelection();
+            if (acquired.get() != null)
+                ((org.flexlb.worker.endpoint.SelectionRollback) acquired.get().endpoint())
+                        .rollbackSelection(acquired.get().registration());
             preemption.close();
             EndpointTestSupport.closeAndWait(endpoint);
             RequestProtocolTestSupport.close(request.getRequestScheduler());

@@ -62,13 +62,13 @@ Endpoint 按请求保存已登记的 compute tokens。
 
 ## 请求状态与结束
 
-RequestRepository 保存活动请求及最近结束的 RequestResult；归档结果直接携带所属调度器，不再包装 TerminalRecord。
+RequestRepository 保存活动请求及最近结束的 RequestState。归档存储在 Repository 内将摘要与所属调度器关联，查询只返回纯数据摘要；摘要不持有路由或调度器引用。
 RequestContext 统一持有输入、配置、优先级、Future、遥测和生命周期事实，
 并串行记录本次选址、路由响应、取消、Worker 上报和清理进展。
 只读 Snapshot 在请求锁内按需捕获，只提供关闭、响应及诊断所需的信息。
 Worker 观察细节、取消错误码、过期标记和最后上报时间留在 Context 内部；routingPhase 从选址编号推导。
 pendingEndEvent 在 Context 内部保存待处理的结束事件，不通过 Snapshot 暴露；
-requestEndResult 保存已确定的结束结果，responseForFuture 保存选定的响应。
+endState、endKind、endError、endDetail 保存已确定的结束信息；responseForFuture 引用选中的响应执行登记。
 结束结果确定后立即清除 pendingEndEvent；结束事件只携带原因，资源释放进展统一保存在 Context。
 调度截止时间直接读取不可替换的 SchedulingMetadata，不再复制保存。
 WorkerReleaseConfirmed 表示远端释放已确认，CleanupCompleted 表示本地清理已完成；两者不互相替代。
@@ -119,7 +119,7 @@ EngineCancellation 通过 Scheduler.onEngineCancelReply 回报结果，由 Sched
 转换清理事件并推进资源释放；Context 校验具体路由。已归档请求的晚到回复被忽略，
 取消任务持有的 Context 引用不依赖请求仍在活跃索引中。
 取消确认和资源释放使用精确路由、预留及请求身份。
-RequestResult 不携带抢占资源或 continuation。RequestContext.currentResourceWait 指向当前精确等待，
+RequestRoute 不携带抢占资源或 continuation。RequestContext.currentResourceWait 指向当前精确等待，
 DecodeEndpoint 保存同一对象；取消、结束或选路退出清除 Context 引用后，残留索引立即失去优先级约束作用。
 多个等待者取有效等待中的最高优先级；更高优先级请求仍可接纳。
 等待的 Future 只在 Endpoint 锁外完成，晚到登记由结果接收方精确回滚；等待本身不占规划线程。

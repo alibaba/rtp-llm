@@ -1,6 +1,7 @@
 package org.flexlb.worker.endpoint;
 
 import org.flexlb.config.service.RoleType;
+import org.flexlb.worker.endpoint.DecodeEndpoint.CapacityFailure;
 import org.flexlb.worker.endpoint.DecodeEndpoint.RequestRegistration;
 import org.flexlb.worker.endpoint.DecodeResources.AdmissionCapacity;
 import org.flexlb.worker.endpoint.DecodeResources.Capacity;
@@ -56,27 +57,37 @@ class DecodeEndpointAdmissionTest {
             response.setRunningTaskInfo(java.util.Map.of("1", task));
             EndpointTestSupport.applyStatus(endpoint, response).run();
         }
-        var evaluation =
-                endpoint.evaluateSelection(
-                        Request.builder().requestId("2").seqLen(100).maxNewTokens(100).build(),
-                        50,
-                        limit);
+        var evaluation = endpoint.evaluateSelection(100, 200, 50, limit);
         assertEquals(new Capacity(1, 0, 0), evaluation.deficit());
         assertEquals(1L, evaluation.snapshot().usage().occupiedRequests());
         assertEquals(confirmed ? 100L : 200L, evaluation.snapshot().usage().expectedKvUsed());
         assertEquals(
-                (occupiedPriority < 50
-                                ? StrategyErrorType.RESOURCE_EXHAUSTED
-                                : StrategyErrorType.PRIORITY_ADMISSION_REJECTED)
-                        .getErrorCode(),
-                evaluation.failure().getCode());
-        if (occupiedPriority >= 50)
-            assertEquals(
-                    occupiedPriority == 50
-                            ? AdmissionRejectReason.SAME_PRIORITY_AHEAD
-                            : AdmissionRejectReason.HIGHER_PRIORITY_AHEAD,
-                    evaluation.failure().getAdmissionRejectReason());
+                occupiedPriority < 50
+                        ? CapacityFailure.INSUFFICIENT_CAPACITY
+                        : occupiedPriority == 50
+                                ? CapacityFailure.BLOCKED_BY_SAME_PRIORITY
+                                : CapacityFailure.BLOCKED_BY_HIGHER_PRIORITY,
+                evaluation.failure());
         org.mockito.Mockito.verify(endpoint, org.mockito.Mockito.never()).resourceSnapshot();
+    }
+
+    @Test
+    void availableCapacityHasNoFailure() {
+        var evaluation = endpoint().evaluateSelection(100, 200, 50, new AdmissionCapacity(1, 100));
+        assertEquals(Capacity.NONE, evaluation.deficit());
+        assertEquals(CapacityFailure.NONE, evaluation.failure());
+    }
+
+    @Test
+    void workerOccupancyWithoutLocalPriorityHasUnknownBlocker() {
+        var endpoint = endpoint();
+        var response = new WorkerStatusResponse();
+        response.setTotalKvCacheTokens(10000L);
+        response.setAvailableKvCacheTokens(0L);
+        EndpointTestSupport.applyStatus(endpoint, response).run();
+        var evaluation = endpoint.evaluateSelection(100, 200, 50, new AdmissionCapacity(10, 100));
+        assertFalse(evaluation.deficit().isZero());
+        assertEquals(CapacityFailure.UNKNOWN_BLOCKER, evaluation.failure());
     }
 
     @Test
@@ -223,6 +234,69 @@ class DecodeEndpointAdmissionTest {
         }
     }
 
+    @Test
+    void unconfirmedCleanupPreservesConfirmedRegistrationAndReportedCapacity() {
+        var endpoint = endpoint();
+        var registration = reserve(endpoint, "1", 100, 200, new AdmissionCapacity(0, 100)).value();
+        confirm(endpoint, "1");
+        assertFalse(endpoint.releaseUnconfirmedRequest(registration));
+        assertEquals(
+                DecodeResources.RegistrationState.CONFIRMED,
+                endpoint.registrationState(registration));
+        assertEquals(1, endpoint.selectionSnapshot().usage().occupiedRequests());
+        assertThrows(IllegalStateException.class, () -> endpoint.rollbackSelection(registration));
+        assertTrue(endpoint.releaseRequest(registration));
+        assertEquals(
+                1,
+                endpoint.selectionSnapshot().usage().occupiedRequests(),
+                "removing a confirmed registration must not erase reported Worker occupancy");
+    }
+
+    @Test
+    void absentOldRegistrationCompletesCleanupWithoutReleasingReplacement() {
+        var endpoint = endpoint();
+        var limit = new AdmissionCapacity(0, 100);
+        var old = reserve(endpoint, "1", 100, 200, limit).value();
+        assertTrue(endpoint.releaseUnconfirmedRequest(old));
+        assertTrue(endpoint.releaseUnconfirmedRequest(old));
+        var replacement = reserve(endpoint, "1", 200, 300, limit).value();
+        assertTrue(endpoint.releaseUnconfirmedRequest(old));
+        assertEquals(
+                DecodeResources.RegistrationState.UNCONFIRMED,
+                endpoint.registrationState(replacement));
+        assertEquals(9800, endpoint.selectionSnapshot().usage().hardKvAvailable());
+    }
+
+    @org.junit.jupiter.api.RepeatedTest(20)
+    void confirmationAndUnconfirmedCleanupRespectTheSameLock() throws Exception {
+        var endpoint = endpoint();
+        var registration = reserve(endpoint, "1", 100, 200, new AdmissionCapacity(0, 100)).value();
+        var start = new CyclicBarrier(2);
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var confirmation =
+                    executor.submit(
+                            () -> {
+                                start.await(5, TimeUnit.SECONDS);
+                                confirm(endpoint, "1");
+                                return null;
+                            });
+            var cleanup =
+                    executor.submit(
+                            () -> {
+                                start.await(5, TimeUnit.SECONDS);
+                                return endpoint.releaseUnconfirmedRequest(registration);
+                            });
+            confirmation.get(5, TimeUnit.SECONDS);
+            boolean removed = cleanup.get(5, TimeUnit.SECONDS);
+            assertEquals(
+                    removed
+                            ? DecodeResources.RegistrationState.NOT_REGISTERED
+                            : DecodeResources.RegistrationState.CONFIRMED,
+                    endpoint.registrationState(registration));
+            assertEquals(1, endpoint.selectionSnapshot().usage().occupiedRequests());
+        }
+    }
+
     private static DecodeEndpoint endpoint() {
         var status = EndpointTestSupport.workerStatus(RoleType.DECODE, "127.0.0.1", 8000, 8001);
         var endpoint = EndpointTestSupport.decodeEndpoint(status);
@@ -231,6 +305,18 @@ class DecodeEndpointAdmissionTest {
         response.setAvailableKvCacheTokens(10000L);
         EndpointTestSupport.applyStatus(endpoint, response).run();
         return endpoint;
+    }
+
+    private static void confirm(DecodeEndpoint endpoint, String id) {
+        var task = new org.flexlb.worker.status.TaskInfo();
+        task.setRequestId(id);
+        task.setInputLength(100L);
+        task.setPhase(org.flexlb.worker.status.TaskPhase.RUNNING);
+        var response = new WorkerStatusResponse();
+        response.setTotalKvCacheTokens(10000L);
+        response.setAvailableKvCacheTokens(9900L);
+        response.setRunningTaskInfo(java.util.Map.of(id, task));
+        EndpointTestSupport.applyStatus(endpoint, response).run();
     }
 
     private static WorkerEndpoint.Registration<RequestRegistration> reserve(

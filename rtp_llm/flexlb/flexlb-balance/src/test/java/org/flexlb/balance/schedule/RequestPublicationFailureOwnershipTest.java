@@ -2,11 +2,11 @@ package org.flexlb.balance.schedule;
 
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.requestlog.TheoryCacheHitReporter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.worker.endpoint.PrefillEndpoint;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -354,7 +354,7 @@ class RequestPublicationFailureOwnershipTest {
                 }
                 f.runtime.tasks.awaitIdle();
                 RequestProtocolTestSupport.awaitCondition(() -> registrations(f.runtime) == 0);
-                assertEquals(EndKind.INACTIVITY, context.snapshot().requestEndResult().endKind());
+                assertEquals(EndKind.INACTIVITY, context.snapshot().endKind());
                 assertEquals(Phase.CLOSED, context.snapshot().phase());
                 assertEquals(0, f.runtime.requests().liveRequestCount());
                 verify(endpoint, times(1)).releaseRequest(route.prefillRegistration());

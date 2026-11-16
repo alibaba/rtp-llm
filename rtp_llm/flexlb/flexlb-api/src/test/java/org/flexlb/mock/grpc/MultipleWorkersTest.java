@@ -1,12 +1,12 @@
 package org.flexlb.mock.grpc;
 
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.mock.MockPrefillWorker;
 import org.flexlb.mock.MockWorkerBehavior;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.status.ServerStatus;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;

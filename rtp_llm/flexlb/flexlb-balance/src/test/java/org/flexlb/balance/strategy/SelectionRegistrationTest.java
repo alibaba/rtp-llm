@@ -1,7 +1,8 @@
 package org.flexlb.balance.strategy;
 
+import org.flexlb.balance.request.Request;
 import org.flexlb.balance.schedule.RequestContext;
-import org.flexlb.balance.schedule.RequestResult;
+import org.flexlb.balance.schedule.RequestRoute;
 import org.flexlb.balance.schedule.SchedulingMetadata;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.metrics.CacheMetricsReporter;
@@ -12,7 +13,6 @@ import org.flexlb.util.metrics.NoOpFlexMonitor;
 import org.flexlb.worker.endpoint.DecodeEndpoint;
 import org.flexlb.worker.endpoint.DecodeResources;
 import org.flexlb.worker.endpoint.EndpointRegistry;
-import org.flexlb.worker.endpoint.Request;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -64,14 +64,22 @@ class SelectionRegistrationTest {
             org.springframework.test.util.ReflectionTestUtils.setField(
                     routing, "decodeStrategy", policy);
             var accepted = routing.select(context("registered"), null);
-            assertEquals(RoutingResult.Status.SUCCESS, accepted.status());
+            assertEquals(SelectionResult.Status.SUCCESS, accepted.status());
             assertEquals(
                     1,
-                    accepted.decodeEndpoint().resourceSnapshot().requests().values().stream()
+                    accepted
+                            .value()
+                            .decodeEndpoint()
+                            .resourceSnapshot()
+                            .requests()
+                            .values()
+                            .stream()
                             .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
                             .count());
-            accepted.prefillEndpoint().rollbackSelection(accepted.prefillRegistration());
-            accepted.decodeEndpoint().releaseRequest(accepted.decodeRegistration());
+            accepted.value()
+                    .prefillEndpoint()
+                    .rollbackSelection(accepted.value().prefillRegistration());
+            accepted.value().decodeEndpoint().releaseRequest(accepted.value().decodeRegistration());
             assertEquals(
                     0,
                     registry.<org.flexlb.worker.endpoint.PrefillEndpoint>endpoints(
@@ -99,12 +107,12 @@ class SelectionRegistrationTest {
             long initial = endpoint.selectionSnapshot().computeTokens();
             var selector = selector(registry);
             assertEquals(
-                    RoutingResult.Status.BLOCKED, selector.select(context("a"), null).status());
+                    SelectionResult.Status.BLOCKED, selector.select(context("a"), null).status());
             assertEquals(initial, endpoint.selectionSnapshot().computeTokens());
             add(registry, RoleType.DECODE, "d1");
             var next = selector.select(context("a"), null);
-            assertEquals(RoutingResult.Status.SUCCESS, next.status());
-            release(next);
+            assertEquals(SelectionResult.Status.SUCCESS, next.status());
+            release(next.value());
         }
     }
 
@@ -122,21 +130,26 @@ class SelectionRegistrationTest {
             add(registry, RoleType.DECODE, "d1");
             var selector = selector(registry);
             var first = selector.select(context("first"), null);
-            assertEquals(RoutingResult.Status.SUCCESS, first.status());
+            assertEquals(SelectionResult.Status.SUCCESS, first.status());
             var route = first;
             try {
                 var blocked = selector.select(context("second"), null);
-                assertEquals(RoutingResult.Status.BLOCKED, blocked.status());
+                assertEquals(SelectionResult.Status.BLOCKED, blocked.status());
                 assertEquals(RoleType.DECODE, blocked.blocker().role());
                 assertEquals(
-                        1, route.decodeEndpoint().selectionSnapshot().usage().occupiedRequests());
-                assertEquals(1, route.prefillEndpoint().stats().locallyOwnedRequests());
+                        1,
+                        route.value()
+                                .decodeEndpoint()
+                                .selectionSnapshot()
+                                .usage()
+                                .occupiedRequests());
+                assertEquals(1, route.value().prefillEndpoint().stats().locallyOwnedRequests());
             } finally {
-                release(route);
+                release(route.value());
             }
             var retry = selector.select(context("second"), null);
-            assertEquals(RoutingResult.Status.SUCCESS, retry.status());
-            release(retry);
+            assertEquals(SelectionResult.Status.SUCCESS, retry.status());
+            release(retry.value());
         }
     }
 
@@ -162,14 +175,14 @@ class SelectionRegistrationTest {
                             call -> {
                                 assertEquals(1, prefill.stats().locallyOwnedRequests());
                                 context.getFuture()
-                                        .complete(new org.flexlb.worker.endpoint.Response());
+                                        .complete(new org.flexlb.balance.request.Response());
                                 return null;
                             })
                     .when(cache)
                     .trackRoutingPrediction(
                             any(), any(), any(), any(), anyLong(), anyLong(), any());
             var result = selector.select(context, null);
-            assertEquals(RoutingResult.Status.CLOSED, result.status());
+            assertEquals(SelectionResult.Status.CLOSED, result.status());
             assertEquals(0, prefill.selectionSnapshot().computeTokens());
             var decode =
                     (DecodeEndpoint)
@@ -249,11 +262,13 @@ class SelectionRegistrationTest {
                             any(), any(), any(), any(), anyLong(), anyLong(), any());
             var context = context("retired");
             var route = selector.select(context, null);
-            assertEquals(RoutingResult.Status.SUCCESS, route.status());
+            assertEquals(SelectionResult.Status.SUCCESS, route.status());
             org.junit.jupiter.api.Assertions.assertNull(context.snapshot().route());
-            assertEquals(1, route.decodeEndpoint().selectionSnapshot().usage().occupiedRequests());
-            route.prefillEndpoint().rollbackSelection(route.prefillRegistration());
-            route.decodeEndpoint().rollbackSelection(route.decodeRegistration());
+            assertEquals(
+                    1,
+                    route.value().decodeEndpoint().selectionSnapshot().usage().occupiedRequests());
+            route.value().prefillEndpoint().rollbackSelection(route.value().prefillRegistration());
+            route.value().decodeEndpoint().rollbackSelection(route.value().decodeRegistration());
             assertEquals(0, prefill.selectionSnapshot().computeTokens());
             var decode =
                     (DecodeEndpoint)
@@ -298,13 +313,13 @@ class SelectionRegistrationTest {
                                 config.loadBalanceConfig()),
                         registry),
                 new VitStrategy(
-                        org.mockito.Mockito.mock(org.flexlb.cache.VitCacheDirectory.class),
+                        org.mockito.Mockito.mock(org.flexlb.cache.VitWorkerCacheManager.class),
                         registry),
                 mock(EncoderStrategy.class),
                 model);
     }
 
-    private void release(RequestResult route) {
+    private void release(RequestRoute route) {
         route.prefillEndpoint().releaseRequest(route.prefillRegistration());
         route.decodeEndpoint().releaseRequest(route.decodeRegistration());
     }

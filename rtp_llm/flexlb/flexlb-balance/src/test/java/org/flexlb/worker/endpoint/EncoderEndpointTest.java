@@ -1,8 +1,9 @@
 package org.flexlb.worker.endpoint;
 
+import org.flexlb.balance.request.Request;
 import org.flexlb.balance.schedule.AbstractRequestScheduler;
 import org.flexlb.balance.schedule.RequestContext;
-import org.flexlb.balance.schedule.RequestResult;
+import org.flexlb.balance.schedule.RequestRoute;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.worker.status.WorkerStatus;
 import org.junit.jupiter.api.Test;
@@ -292,8 +293,8 @@ class EncoderEndpointTest {
         }
     }
 
-    private RequestResult route(String id, long tokens) {
-        var route = mock(RequestResult.class);
+    private RequestRoute route(String id, long tokens) {
+        var route = mock(RequestRoute.class);
         var context = mock(RequestContext.class);
 
         when(route.requestId()).thenReturn(String.valueOf(id));

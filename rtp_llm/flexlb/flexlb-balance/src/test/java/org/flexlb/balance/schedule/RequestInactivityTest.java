@@ -1,9 +1,9 @@
 package org.flexlb.balance.schedule;
 
+import org.flexlb.balance.request.Request;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.worker.endpoint.DecodeEndpoint;
-import org.flexlb.worker.endpoint.Request;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -44,7 +44,7 @@ class RequestInactivityTest {
     void obsoleteRouteAndDecodeReservationCannotRenewInactivity() {
         var context = context();
         var before = context.snapshot();
-        var oldRoute = mock(RequestResult.class);
+        var oldRoute = mock(RequestRoute.class);
         when(oldRoute.ctx()).thenReturn(context);
         org.junit.jupiter.api.Assertions.assertFalse(
                 context.recordEvent(
@@ -107,7 +107,7 @@ class RequestInactivityTest {
                 60000L,
                 1000L,
                 StrategyErrorType.SCHEDULING_DEADLINE_EXCEEDED);
-        var route = mock(RequestResult.class);
+        var route = mock(RequestRoute.class);
         when(route.ctx()).thenReturn(context);
         when(route.requestId()).thenReturn("request");
         when(route.decodeEndpoint()).thenReturn(mock(DecodeEndpoint.class));
@@ -120,7 +120,8 @@ class RequestInactivityTest {
                     context.tryCommitRoute(
                             selecting,
                             route,
-                            new RequestResult(context, RequestContext.ResponseKind.ACK, 1000L),
+                            SchedulerTestSupport.responseCandidate(
+                                    context, RequestContext.ResponseKind.ACK),
                             1000L));
         }
         assertNull(context.currentSelectionAttempt());
@@ -129,7 +130,7 @@ class RequestInactivityTest {
     }
 
     private static RequestContext.RequestEvent event(
-            RequestResult route,
+            RequestRoute route,
             RoleType role,
             org.flexlb.worker.endpoint.RequestEventType type,
             long nowMs) {

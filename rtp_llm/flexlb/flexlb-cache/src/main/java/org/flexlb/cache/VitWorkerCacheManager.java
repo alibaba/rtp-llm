@@ -2,19 +2,11 @@ package org.flexlb.cache;
 
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.config.service.RoleType;
-import org.flexlb.master.MasterStatusService;
-import org.flexlb.util.Logger;
 import org.flexlb.worker.endpoint.EndpointRegistry;
-import org.flexlb.worker.rpc.EngineGrpcClient;
-import org.flexlb.worker.rpc.protocol.EngineRpcService.CacheVersionPB;
 import org.flexlb.worker.rpc.protocol.EngineRpcService.MultimodalCacheStatusPB;
 import org.flexlb.worker.status.WorkerStatus;
 import org.springframework.stereotype.Component;
-import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
 
-import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -23,61 +15,32 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 
 /**
- * Refreshes multimodal cache residency for live worker generations and provides group-scoped
- * candidates. Worker replacement invalidates the old generation's placements.
+ * Maintains local ViT worker cache snapshots and pending image reservations for cache-aware
+ * selection. Expired snapshots and replaced worker generations cannot provide cache hits.
  */
 @Component
-public class VitCacheDirectory {
+public class VitWorkerCacheManager {
     private static final long MIN_PENDING_TTL_MS = 120_000;
     private static final long MAX_PENDING_TTL_MS = 600_000;
     private static final int MAX_PENDING = 100_000;
-    // Cache residency changes after each image; ten-minute snapshots lose affinity.
-    static final long SYNC_INTERVAL_MS = 30_000;
+    private static final long SNAPSHOT_TTL_MS = 60_000;
 
     private final LinkedHashMap<String, Placement> pending = new LinkedHashMap<>();
 
     private long pendingPrunedAt;
 
     private final EndpointRegistry workers;
-    private final EngineGrpcClient grpc;
-    private final MasterStatusService consistency;
-    private final Map<String, Snapshot> snapshots = new HashMap<>();
+    private final Map<String, VitWorkerCacheStatus> snapshots = new HashMap<>();
     private final Map<String, Set<String>> owners = new HashMap<>();
-    private final Map<String, Long> attempts = new HashMap<>();
-    private final ScheduledExecutorService sync =
-            Executors.newSingleThreadScheduledExecutor(
-                    r -> {
-                        Thread thread = new Thread(r, "vit-cache-sync");
-                        thread.setDaemon(true);
-                        return thread;
-                    });
 
-    private boolean wasMaster;
-
-    public VitCacheDirectory(
-            EndpointRegistry workers, EngineGrpcClient grpc, MasterStatusService consistency) {
+    public VitWorkerCacheManager(EndpointRegistry workers) {
         this.workers = workers;
-        this.grpc = grpc;
-        this.consistency = consistency;
-    }
-
-    @PostConstruct
-    public void start() {
-        sync.scheduleWithFixedDelay(this::refresh, 0, 5, TimeUnit.SECONDS);
-    }
-
-    @PreDestroy
-    public void stop() {
-        sync.shutdownNow();
     }
 
     /**
-     * Cache matches share immutable key sets from one directory view.
+     * Cache matches share immutable key sets from one view of the worker snapshots.
      */
     public synchronized Map<String, Candidate> candidates(String group, List<String> keys) {
         Map<String, WorkerStatus> live = liveWorkers();
@@ -87,7 +50,7 @@ public class VitCacheDirectory {
             if (!isRoutable(worker)) {
                 continue;
             }
-            Snapshot snapshot = snapshots.get(worker.getLogicalIpPort());
+            VitWorkerCacheStatus snapshot = snapshots.get(worker.getLogicalIpPort());
             int hashHits = 0;
             int gpuHits = 0;
             int cpuHits = 0;
@@ -147,66 +110,6 @@ public class VitCacheDirectory {
         while (pending.size() > MAX_PENDING) pending.pollFirstEntry();
     }
 
-    void refresh() {
-        try {
-            if (consistency.isNeedConsistency() && !consistency.isMaster()) {
-                wasMaster = false;
-                return;
-            }
-            Map<String, WorkerStatus> live = liveWorkers();
-            List<WorkerStatus> due = new ArrayList<>();
-            long now = System.currentTimeMillis();
-            synchronized (this) {
-                prune(live, now);
-                if (!wasMaster) {
-                    attempts.clear();
-                }
-                for (WorkerStatus worker : live.values()) {
-                    if (isRoutable(worker)
-                            && now - attempts.getOrDefault(worker.getLogicalIpPort(), 0L)
-                                    >= SYNC_INTERVAL_MS) {
-                        attempts.put(worker.getLogicalIpPort(), now);
-                        due.add(worker);
-                    }
-                }
-                wasMaster = true;
-            }
-            CacheVersionPB request = CacheVersionPB.newBuilder().setNeedCacheKeys(true).build();
-            Flux.fromIterable(due)
-                    .flatMap(
-                            worker ->
-                                    Mono.defer(
-                                                    () ->
-                                                            Mono.fromFuture(
-                                                                    grpc
-                                                                            .getMultimodalCacheStatusAsync(
-                                                                                    worker.getIp(),
-                                                                                    worker
-                                                                                            .getWorkerStatusPort(),
-                                                                                    request,
-                                                                                    2000)))
-                                            .filter(response -> response.hasMultimodalCache())
-                                            .doOnNext(
-                                                    response ->
-                                                            replace(
-                                                                    worker,
-                                                                    response.getMultimodalCache()))
-                                            .onErrorResume(
-                                                    error -> {
-                                                        Logger.debug(
-                                                                "ViT cache snapshot unavailable for {}: {}",
-                                                                worker.getLogicalIpPort(),
-                                                                error.toString());
-                                                        return Mono.empty();
-                                                    }),
-                            4)
-                    .then()
-                    .block();
-        } catch (Exception error) {
-            Logger.warn("ViT cache sync failed: {}", error.toString());
-        }
-    }
-
     synchronized boolean replace(WorkerStatus worker, MultimodalCacheStatusPB response) {
         Map<String, WorkerStatus> live = liveWorkers();
         if (live.get(worker.getLogicalIpPort()) != worker
@@ -230,7 +133,7 @@ public class VitCacheDirectory {
         removeSnapshot(address);
         snapshots.put(
                 address,
-                new Snapshot(
+                new VitWorkerCacheStatus(
                         worker,
                         response.getWorkerInstance(),
                         keys,
@@ -243,25 +146,22 @@ public class VitCacheDirectory {
         return true;
     }
 
+    synchronized void prune(Map<String, WorkerStatus> live, long now) {
+        for (var entry : new ArrayList<>(snapshots.entrySet())) {
+            WorkerStatus worker = live.get(entry.getKey());
+            if (worker == null || !isRoutable(worker) || worker != entry.getValue().worker()) {
+                removeSnapshot(entry.getKey());
+            } else if (now - entry.getValue().time() > SNAPSHOT_TTL_MS) {
+                removeSnapshot(entry.getKey());
+            }
+        }
+    }
+
     private boolean validKeys(List<String> keys) {
         return keys == null
                 || (keys.size() <= 100_000
                         && keys.stream()
                                 .noneMatch(k -> k == null || k.isEmpty() || k.length() > 4096));
-    }
-
-    private void prune(Map<String, WorkerStatus> live, long now) {
-        for (var entry : new ArrayList<>(snapshots.entrySet())) {
-            WorkerStatus worker = live.get(entry.getKey());
-            if (worker == null || !isRoutable(worker) || worker != entry.getValue().worker()) {
-                removeSnapshot(entry.getKey());
-                attempts.remove(entry.getKey());
-            } else if (now - entry.getValue().time() > 2 * SYNC_INTERVAL_MS) {
-                removeSnapshot(entry.getKey());
-            }
-        }
-        attempts.keySet()
-                .removeIf(address -> !live.containsKey(address) || !isRoutable(live.get(address)));
     }
 
     private boolean isRoutable(WorkerStatus worker) {
@@ -277,7 +177,7 @@ public class VitCacheDirectory {
     }
 
     private void removeSnapshot(String address) {
-        Snapshot old = snapshots.remove(address);
+        VitWorkerCacheStatus old = snapshots.remove(address);
         if (old == null) {
             return;
         }
@@ -315,9 +215,9 @@ public class VitCacheDirectory {
     }
 
     /**
-     * Freezes transport timing and failure evidence used to attribute a completed RPC.
+     * Records one worker generation's image and embedding residency at the snapshot time.
      */
-    private record Snapshot(
+    private record VitWorkerCacheStatus(
             WorkerStatus worker,
             String instance,
             Set<String> keys,

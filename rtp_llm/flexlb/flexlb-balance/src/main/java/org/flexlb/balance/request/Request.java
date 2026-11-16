@@ -1,4 +1,4 @@
-package org.flexlb.worker.endpoint;
+package org.flexlb.balance.request;
 
 import com.fasterxml.jackson.annotation.JsonAlias;
 import com.fasterxml.jackson.annotation.JsonIgnore;

@@ -20,7 +20,7 @@ import org.flexlb.balance.strategy.RequestRouteSelector;
 import org.flexlb.balance.strategy.VitStrategy;
 import org.flexlb.cache.CacheMatchResult;
 import org.flexlb.cache.CacheMatchSource;
-import org.flexlb.cache.VitCacheDirectory;
+import org.flexlb.cache.VitWorkerCacheManager;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.metrics.CacheMetricsReporter;
 import org.flexlb.config.ConfigService;
@@ -169,7 +169,7 @@ abstract class AbstractRoutePerformanceTest extends FlexLBMockTestBase {
                         new org.flexlb.balance.schedule.SchedulerConfiguration()
                                 .decodeAdmissionCapacity(configService),
                         endpointRegistry),
-                new VitStrategy(mock(VitCacheDirectory.class), endpointRegistry),
+                new VitStrategy(mock(VitWorkerCacheManager.class), endpointRegistry),
                 new EncoderStrategy(configService, endpointRegistry),
                 meta);
     }

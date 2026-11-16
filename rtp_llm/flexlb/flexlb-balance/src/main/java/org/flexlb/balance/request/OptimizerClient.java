@@ -16,7 +16,6 @@ import org.flexlb.util.metrics.FlexMonitor;
 import org.flexlb.util.metrics.FlexPriorityType;
 import org.flexlb.util.metrics.MetricConstant;
 import org.flexlb.util.network.GeneralHttpNettyService;
-import org.flexlb.worker.endpoint.Request;
 import org.flexlb.worker.status.ServerStatus;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;

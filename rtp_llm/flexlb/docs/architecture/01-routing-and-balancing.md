@@ -1,5 +1,10 @@
 # Routing and Balancing
 
+调度输入 `Request` 和调度响应 `Response` 位于 `balance.request`，由 Balance 与 API 使用。
+Endpoint 不接收完整调度请求，也不构造调度响应：Decode 容量评估只接收硬 KV、预估 KV、
+优先级和容量限制，返回同一次持锁检查的快照、缺口及容量原因；DecodeStrategy 将原因映射为
+调度错误。Cache 的选路后更新只接收请求 ID、block size、缓存键和选中的 Worker。
+
 核心入口是 `RequestRouteSelector`，协调 Prefill/PDFusion、Decode、VIT、Encoder 的角色策略。
 Scheduler 决定何时调度请求、失败后等待还是重试；各角色 Strategy 负责捕获候选、评分和登记。
 P/D/V/E 策略继承 `AbstractWorkerSelectionStrategy`，共用有界登记重试循环；`RequestRouteSelector` 只组合角色结果并负责跨角色回滚。
@@ -9,7 +14,7 @@ P/D/V/E 策略继承 `AbstractWorkerSelectionStrategy`，共用有界登记重�
 
 ## 选择与登记
 
-`select(context, group)` 返回 `RequestResult`。
+`select(context, group)` 返回 `SelectionResult<RequestRoute, CapacityKey>`；成功值为完整路由，未成功时返回等待、重试、拒绝或关闭原因。
 结果直接保存成功选择的角色、失败原因或容量等待条件；成功结果绑定请求与已登记角色。队列和回调沿用该结果的精确身份。VIT 仅选择；Encoder 在选址时登记容量，提交完整路由时关联同一份登记。
 
 1. 校验请求、SchedulingMetadata 和请求指定的角色。`schedule_roles` 必须属于模型配置；
@@ -33,14 +38,14 @@ P/D/V/E 策略继承 `AbstractWorkerSelectionStrategy`，共用有界登记重�
 5. 某角色失败或请求已取消时，`RequestRouteSelector` 在返回前通过 `SelectionRollback.rollbackSelection`
    回滚本轮已登记资源，P/D/E 各自核对精确登记与允许回滚的阶段。
    普通等待队列不保留部分 P/D 登记。清理失败抛出异常，不能作为可重试失败交回队列。
-6. 全部角色成功后一次构造 `RequestResult`，交给 Scheduler 发布；没有结果包装、补登记或资源二次转交。
+6. 全部角色成功后一次构造 `RequestRoute`，通过 SelectionResult.success 交给 Scheduler 发布，不重新登记资源。
    指定的策略 group 始终优先；未指定时，首个成功角色的 group 约束后续角色。
 
 角色之间不同时持有 Endpoint 锁，不存在先占 P 锁再等 D 锁的过程。
 预测、cache 查询和资源通知均在 Endpoint 状态锁外；没有全局选点串行队列。
 
 选点元数据由 RoleSelection 冻结。返回路由、抢占构造取消目标时直接读取冻结的地址字段，
-内部直接读取冻结的角色字段；对外响应才由 RequestResult 生成独立协议对象。
+内部直接读取冻结的角色字段；对外响应才由 RequestRoute 生成独立协议对象。
 这些字段不从 Endpoint 的后续动态观测重新读取，保持已选路由的地址一致性。
 
 ## 数据归属
@@ -50,18 +55,18 @@ P/D/V/E 策略继承 `AbstractWorkerSelectionStrategy`，共用有界登记重�
 | 单角色事实     | `RoleSelection`                   | Endpoint、冻结拓扑、DP rank、对外协议需要的观测                                                |
 | Prefill 事实   | `RoleSelection`                   | 本请求预计工作量、精确 Prefill 登记                                                            |
 | Decode 事实    | `RoleSelection`                   | 精确 Decode 登记                                                                               |
-| 单次多角色结果 | `RequestResult`                   | Context、冻结 requestId、有序 RoleSelection 引用；同时作为队列和回调的精确身份，不复制角色字段 |
-| 生命周期       | `RequestContext`                  | 引用 RequestResult，记录发布、交付、取消和清理事实                                             |
+| 单次多角色结果 | `RequestRoute`                    | Context、冻结 requestId、有序 RoleSelection 引用；同时作为队列和回调的精确身份，不复制角色字段 |
+| 生命周期       | `RequestContext`                  | 引用 RequestRoute，记录发布、交付、取消和清理事实                                              |
 | 选址凭据       | `RequestContext.SelectionAttempt` | 只读的请求引用和选址编号；状态只由 RequestContext 持有                                         |
 | 诊断           | `RoutingDecision`                 | 选择原因与候选估计；不能代替资源账本                                                           |
-| 外部响应       | `Response` / `ServerStatus`       | 按需从 RequestResult 生成独立协议对象                                                          |
+| 外部响应       | `Response` / `ServerStatus`       | 按需从 RequestRoute 生成独立协议对象                                                           |
 
 Selector 用方法内的角色列表收集已登记结果，失败时撤销其中的登记；列表不进入等待队列，也不构造 SelectionAttempt 中间对象。
-不存在对外暴露的 RequestResult.Builder；ViT 服务只返回自己的 RoleSelection，不能修改整个组合。
+不存在对外暴露的 RequestRoute.Builder；ViT 服务只返回自己的 RoleSelection，不能修改整个组合。
 角色循环统一检查成功选择恰好新增一个对应角色；每个角色的成功结果直接加入列表，角色事实只从已登记列表读取。
 评分版本只在 Strategy/Endpoint 登记时校验，不保存在已完成的角色结果中。
 Prefill 登记保存不可变的排队输入和本次工作量，可以立即参与其他请求的投影，无需读取半成品路由。
-`RequestResult` 构造时角色组合完整，不修改 Endpoint 登记；Prefill 在 `commitSelection` 的同一次持锁操作中关联完整路由并提交登记；没有 attachReservation 入口，也不再创建另一个执行包装对象。
+`RequestRoute` 构造时角色组合完整，不修改 Endpoint 登记；Prefill 在 `commitSelection` 的同一次持锁操作中关联完整路由并提交登记；没有 attachReservation 入口，也不再创建另一个执行包装对象。
 规划直接使用 Prefill 登记中的不可变输入，不再另建规划缓存、加锁初始化或重复构造输入。
 RequestContext 同时持有请求输入、遥测和生命周期事实，不再有 RequestData 或 ContextResult 容器。
 选址开始时分配递增编号，回调同时核对请求对象和编号；完成后清除活动编号，旧回调不能完成下一次选址。
@@ -134,5 +139,5 @@ RequestRouteSelector 接收已取得的 RoleSelection，继续选择其余角色
 未提交 P/D 选择的抢占及角色策略生成计划仍是实施方案中的待完成项，当前默认执行器只处理已交付 Decode。
 取消、超时及发送结果未知的资源规则见 [队列调度](02-queue-scheduling.md) 和 [资源管理](03-resource-management.md)。
 
-请求状态查询、结束原因和响应选择使用 RequestResult 的对应字段，不再建立单独状态或结果包装。
+RequestRoute 只保存已选角色和精确登记。RequestContext 直接保存结束状态、原因和说明；响应选择引用 ResponseCompletionExecutor.Registration，执行登记同时作为精确响应身份。查询按 Context 快照生成 RequestState，清理完成后保留同一种摘要；摘要不实现 WorkerRoute。
 RoleSelection 用角色字段区分 Prefill、Decode 和辅助角色，资源登记与 compute tokens 直接保存在同一个对象中。

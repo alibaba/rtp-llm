@@ -7,7 +7,6 @@ import org.flexlb.config.cache.KvcmConfig;
 import org.flexlb.config.service.ModelMetaConfig;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.config.service.ServiceRoute;
-import org.flexlb.worker.endpoint.Request;
 import org.flexlb.worker.status.ServerStatus;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -146,11 +145,10 @@ class LocalStandbyCacheMatchProviderTest {
         LocalStandbyCacheManager cacheManager = mock(LocalStandbyCacheManager.class);
         LocalStandbyCacheMatchProvider provider =
                 new LocalStandbyCacheMatchProvider(kvcm(modelMetaConfig()), cacheManager, reporter);
-        Request request = request();
         ServerStatus selectedWorker = worker(RoleType.PREFILL);
         selectedWorker.setSelectedEngineIndex(engineIndex, multiEngineNum);
         try {
-            provider.updateFromRoutedRequest(request, List.of(selectedWorker));
+            provider.updateFromRoutedRequest("1", 4096, List.of(11L, 22L), List.of(selectedWorker));
             verify(cacheManager, timeout(1_000))
                     .addRoutedRequestBlocks(logicalIpPort, List.of(11L, 22L));
         } finally {
@@ -164,7 +162,8 @@ class LocalStandbyCacheMatchProviderTest {
         LocalStandbyCacheMatchProvider provider =
                 new LocalStandbyCacheMatchProvider(kvcm(modelMetaConfig()), cacheManager, reporter);
         try {
-            provider.updateFromRoutedRequest(request(), List.of(worker(RoleType.DECODE)));
+            provider.updateFromRoutedRequest(
+                    "1", 4096, List.of(11L, 22L), List.of(worker(RoleType.DECODE)));
         } finally {
             provider.shutdown();
         }
@@ -176,23 +175,15 @@ class LocalStandbyCacheMatchProviderTest {
         LocalStandbyCacheManager cacheManager = mock(LocalStandbyCacheManager.class);
         LocalStandbyCacheMatchProvider provider =
                 new LocalStandbyCacheMatchProvider(kvcm(modelMetaConfig()), cacheManager, reporter);
-        Request request = Request.builder().requestId("1").blockSize(4096).build();
         try {
-            provider.updateFromRoutedRequest(request(), null);
-            provider.updateFromRoutedRequest(request(), List.of());
-            provider.updateFromRoutedRequest(request, List.of(worker(RoleType.PREFILL)));
+            provider.updateFromRoutedRequest("1", 4096, List.of(11L, 22L), null);
+            provider.updateFromRoutedRequest("1", 4096, List.of(11L, 22L), List.of());
+            provider.updateFromRoutedRequest(
+                    "1", 4096, List.of(), List.of(worker(RoleType.PREFILL)));
             verifyNoInteractions(cacheManager);
         } finally {
             provider.shutdown();
         }
-    }
-
-    private Request request() {
-        return Request.builder()
-                .requestId("1")
-                .blockSize(4096)
-                .blockCacheKeys(List.of(11L, 22L))
-                .build();
     }
 
     private ServerStatus worker(RoleType role) {

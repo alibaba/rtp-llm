@@ -1,6 +1,7 @@
 package org.flexlb.balance.schedule;
 
 import org.flexlb.balance.strategy.RoleSelection;
+import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.worker.endpoint.CapacityKey;
 import org.flexlb.worker.endpoint.EndpointTestSupport;
@@ -16,9 +17,9 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * Checks frozen role selections, lightweight request state and preemption fields on the unified result.
+ * Checks frozen routes, selection failures and query records without mixing their responsibilities.
  */
-class RequestResultTest {
+class RequestRouteStateTest {
     @Test
     void frozenSelectionSurvivesInputResponseAndEndpointChanges() {
         var context = RequestProtocolTestSupport.context(SchedulingTestConfig.newConfig(), 42L);
@@ -45,11 +46,11 @@ class RequestResultTest {
             debug.setHitCacheLen(7);
             metadata.setDebugInfo(debug);
             roles.add(RoleSelection.prefill(endpoint, metadata, 13, null));
-            var result = new RequestResult(context, roles);
+            var result = new RequestRoute(context, roles);
             assertThrows(
                     IllegalStateException.class,
                     () ->
-                            new RequestResult(
+                            new RequestRoute(
                                     context,
                                     java.util.List.of(roles.getFirst(), roles.getFirst())));
             metadata.setGroup("changed");
@@ -69,7 +70,7 @@ class RequestResultTest {
                     "original", result.successResponse().getServerStatus().getFirst().getGroup());
             assertThrows(UnsupportedOperationException.class, () -> result.roles().clear());
 
-            var another = new RequestResult(context, result.roles());
+            var another = new RequestRoute(context, result.roles());
             assertNotSame(result, another);
             assertSame(context, result.ctx());
             assertSame(context, another.ctx());
@@ -86,25 +87,23 @@ class RequestResultTest {
     void roleFailureBecomesOneRequestDecisionWithItsOriginalCause() {
         var blocker = new CapacityKey(RoleType.PREFILL, "group", null);
         var failure =
-                org.flexlb.worker.endpoint.Response.error(
+                org.flexlb.balance.request.Response.error(
                         org.flexlb.worker.endpoint.StrategyErrorType.NO_PREFILL_WORKER);
         var diagnostics = new java.util.HashMap<String, Object>();
         diagnostics.put("cause", "capacity");
         var decision =
-                org.flexlb.balance.strategy.RoutingResult.blocked(blocker, failure, diagnostics);
-        var result = RequestResult.fromDecision(decision);
+                org.flexlb.balance.strategy.SelectionResult.blocked(blocker, failure, diagnostics);
+        var result = decision.asFailure();
         diagnostics.clear();
-        assertEquals(org.flexlb.balance.strategy.RoutingResult.Status.BLOCKED, result.status());
+        assertEquals(org.flexlb.balance.strategy.SelectionResult.Status.BLOCKED, result.status());
         assertSame(blocker, result.blocker());
         assertSame(failure, result.failure());
-        assertThrows(IllegalStateException.class, result::successResponse);
+        assertNull(result.value());
         assertEquals("capacity", result.diagnostics().get("cause"));
         assertThrows(UnsupportedOperationException.class, () -> result.diagnostics().clear());
         assertThrows(
                 IllegalArgumentException.class,
-                () ->
-                        RequestResult.fromDecision(
-                                org.flexlb.balance.strategy.RoutingResult.success("selected")));
+                () -> SelectionResult.success("selected").asFailure());
     }
 
     @Test
@@ -124,21 +123,22 @@ class RequestResultTest {
                         org.flexlb.worker.endpoint.StrategyErrorType.DISPATCH_FAILED,
                         "failed"),
                 1001L,
-                new RequestResult(context, RequestContext.ResponseKind.TERMINAL, 1001L));
+                SchedulerTestSupport.responseCandidate(
+                        context, RequestContext.ResponseKind.TERMINAL));
         context.recordCleanupProgress(context.snapshot().route(), false, false, true, 1002L);
-        var state = RequestResult.from(context.snapshot());
+        var state = RequestState.from(context.snapshot());
         assertSame(context.snapshot().requestRecordForArchive(), state);
-        assertEquals(RequestResult.State.FAILED, state.state());
+        assertEquals(RequestState.State.FAILED, state.state());
         assertEquals("ended", state.requestId());
-        assertNull(state.ctx());
-        assertEquals(java.util.List.of(), state.roles());
+        org.junit.jupiter.api.Assertions.assertFalse(
+                (Object) state instanceof org.flexlb.worker.endpoint.WorkerRoute);
         assertEquals(
                 state,
-                new RequestResult(
+                new RequestState(
                         "ended",
                         0L,
                         org.flexlb.balance.schedule.RequestPhase.GENERATION,
-                        RequestResult.State.FAILED,
+                        RequestState.State.FAILED,
                         1000L,
                         1002L,
                         "failed"));
@@ -148,15 +148,14 @@ class RequestResultTest {
     void requestStateJsonKeepsItsPublicFieldsAndOmitsRuntimeReferences() throws Exception {
         var owner = org.mockito.Mockito.mock(AbstractRequestScheduler.class);
         var state =
-                new RequestResult(
+                new RequestState(
                         "request",
                         42L,
                         org.flexlb.balance.schedule.RequestPhase.GENERATION,
-                        RequestResult.State.FAILED,
+                        RequestState.State.FAILED,
                         1000L,
                         1002L,
-                        "failed",
-                        owner);
+                        "failed");
         var json =
                 new com.fasterxml.jackson.databind.ObjectMapper()
                         .readTree(

@@ -9,7 +9,6 @@ import org.flexlb.cache.metrics.CacheMetricsReporter;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.worker.cache.CacheHitComparisonResult;
 import org.flexlb.worker.cache.WorkerCacheUpdateResult;
-import org.flexlb.worker.endpoint.Request;
 import org.flexlb.worker.status.ServerStatus;
 import org.flexlb.worker.status.WorkerStatus;
 import org.springframework.stereotype.Service;
@@ -73,8 +72,13 @@ public class CacheAwareService implements org.flexlb.worker.cache.WorkerCaches {
         updateOrchestrator.removeEngineBlockCache(engineIpPort);
     }
 
-    public void updateFromRoutedRequest(Request request, List<ServerStatus> selectedWorkers) {
-        updateOrchestrator.updateFromRoutedRequest(request, selectedWorkers);
+    public void updateFromRoutedRequest(
+            String requestId,
+            long blockSize,
+            List<Long> cacheKeys,
+            List<ServerStatus> selectedWorkers) {
+        updateOrchestrator.updateFromRoutedRequest(
+                requestId, blockSize, cacheKeys, selectedWorkers);
     }
 
     public void trackRoutingPrediction(

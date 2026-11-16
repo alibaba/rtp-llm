@@ -26,7 +26,7 @@ public final class EngineCancellation {
     private final java.util.concurrent.Executor stopWorkers =
             task -> Thread.ofVirtual().name("delivery-stop-work").start(task);
     // MapMaker weak keys use identity: equal-valued claims must not share an operation.
-    private final ConcurrentMap<RequestResult, StopTask> sessions =
+    private final ConcurrentMap<RequestRoute, StopTask> sessions =
             new MapMaker().weakKeys().makeMap();
     private final java.util.Set<StopTask> activeStops =
             java.util.concurrent.ConcurrentHashMap.newKeySet();
@@ -73,7 +73,7 @@ public final class EngineCancellation {
      * Cancels the committed route with bounded retries and applies cleanup replies to its scheduler.
      * Completion ends the cancellation attempts; the scheduler separately tracks resource cleanup.
      */
-    CompletableFuture<Void> stop(RequestResult claim) {
+    CompletableFuture<Void> stop(RequestRoute claim) {
         for (; ; ) {
             var delivery = claim.ctx().snapshot().committedRoute();
             if (delivery == null || delivery != claim) {
@@ -95,12 +95,12 @@ public final class EngineCancellation {
         }
     }
 
-    void forget(RequestResult route) {
+    void forget(RequestRoute route) {
         var task = sessions.remove(route);
         if (task != null) task.close();
     }
 
-    private StopTask record(RequestResult claim) {
+    private StopTask record(RequestRoute claim) {
         var existing = sessions.get(claim);
         if (existing != null) {
             return existing;
@@ -118,7 +118,7 @@ public final class EngineCancellation {
      * Serializes cancellation attempts and applies their replies to the owning request before completing.
      */
     private final class StopTask implements Runnable {
-        private final RequestResult claim;
+        private final RequestRoute claim;
         private final RequestContext context;
         private final AbstractRequestScheduler owner;
         private final CompletableFuture<Void> finished = new CompletableFuture<>();
@@ -139,7 +139,7 @@ public final class EngineCancellation {
         private int attempts;
         private long deadline, rpcDeadline;
 
-        StopTask(RequestResult claim) {
+        StopTask(RequestRoute claim) {
             this.claim = claim;
             this.context = claim.ctx();
             this.owner = context.getRequestScheduler();

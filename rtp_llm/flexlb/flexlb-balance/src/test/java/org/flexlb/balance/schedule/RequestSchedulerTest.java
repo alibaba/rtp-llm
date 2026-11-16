@@ -2,8 +2,11 @@ package org.flexlb.balance.schedule;
 
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
+import org.flexlb.balance.request.Request;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.requestlog.TheoryCacheHitReporter;
 import org.flexlb.balance.strategy.RequestRouteSelector;
+import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.service.RoleType;
@@ -11,8 +14,6 @@ import org.flexlb.worker.endpoint.CapacityKey;
 import org.flexlb.worker.endpoint.CapacityNotifier;
 import org.flexlb.worker.endpoint.CapacityNotifierTestSupport;
 import org.flexlb.worker.endpoint.PrefillEndpoint;
-import org.flexlb.worker.endpoint.Request;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.status.ServerStatus;
 import org.flexlb.worker.status.WorkerStatus;
@@ -86,7 +87,7 @@ class RequestSchedulerTest {
             RequestProtocolTestSupport.awaitCondition(
                     () -> lifecycle.repository.liveRequestCount() == 0);
             assertEquals(
-                    RequestResult.State.CANCELLED,
+                    RequestState.State.CANCELLED,
                     org.flexlb.balance.schedule.SchedulerTestSupport.repository(lifecycle)
                             .getRequestState("990009")
                             .state());
@@ -123,13 +124,13 @@ class RequestSchedulerTest {
         CountDownLatch planning = new CountDownLatch(1);
         CountDownLatch releasePlan = new CountDownLatch(1);
         CountDownLatch closeSettled = new CountDownLatch(1);
-        RequestResult route = RequestProtocolTestSupport.mockSelectedRoute(context);
+        RequestRoute route = RequestProtocolTestSupport.mockSelectedRoute(context);
         when(router.select(context, null))
                 .thenAnswer(
                         invocation -> {
                             planning.countDown();
                             assertTrue(releasePlan.await(5, TimeUnit.SECONDS));
-                            return route;
+                            return SelectionResult.success(route);
                         });
         doAnswer(
                         invocation -> {
@@ -223,13 +224,13 @@ class RequestSchedulerTest {
         CountDownLatch planning = new CountDownLatch(1);
         CountDownLatch releasePlan = new CountDownLatch(1);
         CountDownLatch planClosed = new CountDownLatch(1);
-        RequestResult route = RequestProtocolTestSupport.mockSelectedRoute(context);
+        RequestRoute route = RequestProtocolTestSupport.mockSelectedRoute(context);
         when(router.select(context, null))
                 .thenAnswer(
                         invocation -> {
                             planning.countDown();
                             assertTrue(releasePlan.await(5, TimeUnit.SECONDS));
-                            return route;
+                            return SelectionResult.success(route);
                         });
         doAnswer(
                         invocation -> {
@@ -262,7 +263,7 @@ class RequestSchedulerTest {
                 lifecycle.cancel("990001", CancelReason.CLIENT_CANCELLED);
             }
             assertEquals(
-                    RequestResult.State.CANCEL_REQUESTED,
+                    RequestState.State.CANCEL_REQUESTED,
                     org.flexlb.balance.schedule.SchedulerTestSupport.repository(lifecycle)
                             .getRequestState("990001")
                             .state());
@@ -356,10 +357,10 @@ class RequestSchedulerTest {
                                 request -> request != null && request.getFuture() == highFuture)))
                 .thenAnswer(i -> RequestProtocolTestSupport.admissionForInvocation(i));
         when(router.select(lowPriority, null))
-                .thenReturn(RequestResult.blocked(CapacityKey.anyGroup(RoleType.PREFILL)));
+                .thenReturn(SelectionResult.blocked(CapacityKey.anyGroup(RoleType.PREFILL)));
         when(router.select(highPriority, null))
                 .thenReturn(
-                        RequestResult.rejected(
+                        SelectionResult.rejected(
                                 Response.buildErrorResponse(
                                         StrategyErrorType.NO_PREFILL_WORKER, null)));
         AbstractRequestScheduler scheduler =
@@ -449,12 +450,12 @@ class RequestSchedulerTest {
             fixture.submitBlockedRequests();
             PrefillEndpoint other = mockPrefillEndpoint("other-prefill", 8080);
             for (CapacityRequest request : fixture.requests) {
-                RequestResult route = RequestProtocolTestSupport.mockSelectedRoute(request.context);
+                RequestRoute route = RequestProtocolTestSupport.mockSelectedRoute(request.context);
                 ServerStatus status = new ServerStatus();
                 status.setRole(RoleType.PREFILL);
                 status.setRequestId(request.context.getRequestId());
                 status.setSuccess(true);
-                RequestResult item =
+                RequestRoute item =
                         RequestProtocolTestSupport.mockSelectedRoute(
                                 request.context,
                                 List.of(SelectionTestSupport.metadata(other, status, 0L)));
@@ -598,7 +599,7 @@ class RequestSchedulerTest {
     void prioritySelectorMissWaitsWithoutInventingAnEvictionRoute() {
         Fixture fixture = new Fixture(true);
         when(fixture.router.select(fixture.context, null))
-                .thenReturn(RequestResult.blocked(CapacityKey.anyGroup(RoleType.PREFILL)));
+                .thenReturn(SelectionResult.blocked(CapacityKey.anyGroup(RoleType.PREFILL)));
         CompletableFuture<Response> waiting =
                 SchedulerTestServices.entry(fixture.scheduler).submit(fixture.context);
 
@@ -613,7 +614,7 @@ class RequestSchedulerTest {
     void fifoTemporaryDecodeMissRemainsQueued() {
         Fixture fixture = new Fixture(false);
         when(fixture.router.select(fixture.context, null))
-                .thenReturn(RequestResult.blocked(CapacityKey.anyGroup(RoleType.DECODE)));
+                .thenReturn(SelectionResult.blocked(CapacityKey.anyGroup(RoleType.DECODE)));
         CompletableFuture<Response> waiting =
                 SchedulerTestServices.entry(fixture.scheduler).submit(fixture.context);
 
@@ -788,11 +789,11 @@ class RequestSchedulerTest {
                                 var selected =
                                         alternative == null ? request.route : alternative.route();
                                 when(selected.ctx()).thenReturn(context);
-                                return selected;
+                                return SelectionResult.success(selected);
                             });
             org.mockito.Mockito.doAnswer(
                             invocation -> {
-                                RequestResult selectedRoute = invocation.getArgument(0);
+                                RequestRoute selectedRoute = invocation.getArgument(0);
                                 RequestContext context = selectedRoute.ctx();
                                 long requestId = Long.parseLong(context.getRequestId());
                                 CapacityRequest request = requestsById.get(requestId);
@@ -822,7 +823,7 @@ class RequestSchedulerTest {
                                         if (attempt > 1) {
                                             request.retryBlockedReturn.countDown();
                                         }
-                                        return RequestResult.blocked(key);
+                                        return SelectionResult.blocked(key);
                                     }
                                     admitted.add(requestId);
                                     if (requestId == 820L && slotsReleasedDuringPublication > 0) {
@@ -841,7 +842,7 @@ class RequestSchedulerTest {
                                 return published;
                             })
                     .when(RequestProtocolTestSupport.publication(lifecycle))
-                    .publishSelectedRoute(any(RequestResult.class));
+                    .publishSelectedRoute(any(RequestRoute.class));
             DeliveryMetricsReporter reporter = mock(DeliveryMetricsReporter.class);
             for (long requestId = 820L; requestId < 823L; requestId++) {
                 requests.add(createRequest(requestId, endpoint));
@@ -907,7 +908,7 @@ class RequestSchedulerTest {
         }
     }
 
-    private record AlternativeRoute(RequestResult route, RequestResult item) {}
+    private record AlternativeRoute(RequestRoute route, RequestRoute item) {}
 
     /**
      * Holds one request and its mocked placement outcomes for controlled capacity retries.
@@ -922,9 +923,9 @@ class RequestSchedulerTest {
 
         private final AtomicInteger attempts = new AtomicInteger();
 
-        private final RequestResult route;
+        private final RequestRoute route;
 
-        private final RequestResult item;
+        private final RequestRoute item;
 
         private final CountDownLatch retryBlockedReturn = new CountDownLatch(1);
 
@@ -1014,7 +1015,7 @@ class RequestSchedulerTest {
                     .publish(any(), any(), org.mockito.ArgumentMatchers.anyBoolean());
             when(router.select(context, null))
                     .thenReturn(
-                            RequestResult.rejected(
+                            SelectionResult.rejected(
                                     Response.buildErrorResponse(
                                             StrategyErrorType.NO_PREFILL_WORKER, null)));
             scheduler =

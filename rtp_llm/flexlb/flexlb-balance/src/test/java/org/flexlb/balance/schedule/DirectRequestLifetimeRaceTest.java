@@ -7,7 +7,7 @@ import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.DecodeStrategy;
 import org.flexlb.balance.strategy.EncoderStrategy;
 import org.flexlb.balance.strategy.RequestRouteSelector;
-import org.flexlb.balance.strategy.RoutingResult;
+import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.balance.strategy.VitStrategy;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
@@ -105,7 +105,7 @@ class DirectRequestLifetimeRaceTest {
                             call ->
                                     SelectionTestSupport.selectionResult(
                                             call,
-                                            RoutingResult.success(
+                                            SelectionResult.success(
                                                     new org.flexlb.balance.strategy
                                                             .CostBasedPrefillStrategy.Selection(
                                                             "127.0.0.1:8080",

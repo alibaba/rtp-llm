@@ -2,10 +2,11 @@ package org.flexlb.balance.schedule;
 
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.requestlog.TheoryCacheHitReporter;
 import org.flexlb.balance.schedule.ResponseCompletionExecutor.RequestFuture;
 import org.flexlb.balance.strategy.RequestRouteSelector;
-import org.flexlb.balance.strategy.RoutingResult;
+import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ConfigTestSupport;
 import org.flexlb.config.FlexlbConfig;
@@ -14,7 +15,6 @@ import org.flexlb.worker.endpoint.CapacityKey;
 import org.flexlb.worker.endpoint.CapacityNotifier;
 import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.PrefillEndpoint;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.rpc.EngineGrpcClient;
 import org.junit.jupiter.api.Test;
@@ -62,7 +62,7 @@ class RequestSchedulerContractTest {
         var scheduler =
                 mock(AbstractRequestScheduler.class, org.mockito.Mockito.CALLS_REAL_METHODS);
         var context = mock(RequestContext.class);
-        var route = mock(RequestResult.class);
+        var route = mock(RequestRoute.class);
         when(route.ctx()).thenReturn(context);
         when(context.getRequestScheduler()).thenReturn(scheduler);
         var cleanup =
@@ -87,7 +87,7 @@ class RequestSchedulerContractTest {
     void endingAWaitingRequestRemovesItFromScheduling(String ending) throws Exception {
         try (Fixture f = new Fixture(true)) {
             when(f.router.select(any(), any()))
-                    .thenReturn(RequestResult.blocked(CapacityKey.anyGroup(RoleType.PREFILL)));
+                    .thenReturn(SelectionResult.blocked(CapacityKey.anyGroup(RoleType.PREFILL)));
             var context = f.context(944L);
             var future = f.scheduler.submit(context);
             RequestProtocolTestSupport.awaitCondition(() -> f.scheduler.blockedRequestCount() == 1);
@@ -528,9 +528,9 @@ class RequestSchedulerContractTest {
                                         && runtime.requests().findTerminal("101") != null);
                 assertSame(
                         owner,
-                        runtime.requests().findTerminal("100").owner(),
+                        runtime.requests().ownerOf("100"),
                         "terminal records preserve ownership too");
-                assertSame(owner, runtime.requests().findTerminal("101").owner());
+                assertSame(owner, runtime.requests().ownerOf("101"));
             } finally {
                 SchedulerTestSupport.shutdown(runtime);
             }
@@ -721,7 +721,7 @@ class RequestSchedulerContractTest {
             try (var admissionCompletion5 = RequestProtocolTestSupport.finishOnExit(admission)) {
                 assertNotNull(admission);
                 assertEquals(
-                        RoutingResult.Status.SUCCESS,
+                        SelectionResult.Status.SUCCESS,
                         RequestProtocolTestSupport.commitRoute(
                                 f.requests,
                                 route,
@@ -816,8 +816,9 @@ class RequestSchedulerContractTest {
         }
     }
 
-    private static RequestResult rejection() {
-        return RequestResult.rejected(Response.error(StrategyErrorType.NO_PREFILL_WORKER));
+    private static SelectionResult<RequestRoute, org.flexlb.worker.endpoint.CapacityKey>
+            rejection() {
+        return SelectionResult.rejected(Response.error(StrategyErrorType.NO_PREFILL_WORKER));
     }
 
     /**

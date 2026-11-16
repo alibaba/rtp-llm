@@ -309,17 +309,6 @@ public class WorkerEndpoint {
         COMMITTED
     }
 
-    public enum ReleaseReason {
-        LOCAL_ROLLBACK,
-        /**
-         * Context revoked an unsent route; release its reservation without fencing a retry.
-         */
-        COUNTERPART_FINISHED,
-        NOT_SENT,
-        REMOTE_CLEANUP,
-        EXPIRED
-    }
-
     /**
      * Reports the factual outcome of registering resources, without deciding scheduling actions.
      */

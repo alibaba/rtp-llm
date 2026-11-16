@@ -1,5 +1,6 @@
 package org.flexlb.balance.schedule;
 
+import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
 import org.flexlb.balance.queue.SchedulingQueue;
@@ -112,7 +113,7 @@ public final class SchedulerTestServices {
     /**
      * Publish deterministic fixture choices through the production endpoint registration boundary.
      */
-    public static RequestResult registerSelection(
+    public static SelectionResult<RequestRoute, org.flexlb.worker.endpoint.CapacityKey> registerSelection(
             RequestContext context, List<RoleSelection> selections) {
         var data = context;
         var config = data.getConfig();
@@ -136,9 +137,9 @@ public final class SchedulerTestServices {
                     if (registration.status() == WorkerEndpoint.RegistrationStatus.VERSION_CONFLICT
                             || registration.status()
                                     == WorkerEndpoint.RegistrationStatus.UNAVAILABLE)
-                        return RequestResult.retry();
+                        return SelectionResult.retry();
                     if (registration.status() != WorkerEndpoint.RegistrationStatus.REGISTERED)
-                        return RequestResult.blocked(role.capacityKey());
+                        return SelectionResult.blocked(role.capacityKey());
                     registered.add(
                             RoleSelection.prefill(
                                     endpoint,
@@ -158,15 +159,15 @@ public final class SchedulerTestServices {
                                     capacity);
                     if (acquired.status() == WorkerEndpoint.RegistrationStatus.VERSION_CONFLICT
                             || acquired.status() == WorkerEndpoint.RegistrationStatus.UNAVAILABLE)
-                        return RequestResult.retry();
+                        return SelectionResult.retry();
                     if (acquired.status() != WorkerEndpoint.RegistrationStatus.REGISTERED)
-                        return RequestResult.blocked(role.capacityKey());
+                        return SelectionResult.blocked(role.capacityKey());
                     registered.add(RoleSelection.decode(endpoint, metadata, acquired.value()));
                 } else registered.add(role);
             }
-            var route = new RequestResult(context, registered);
+            var route = new RequestRoute(context, registered);
             transferred = true;
-            return route;
+            return SelectionResult.success(route);
         } finally {
             if (!transferred) {
                 Throwable failure = null;

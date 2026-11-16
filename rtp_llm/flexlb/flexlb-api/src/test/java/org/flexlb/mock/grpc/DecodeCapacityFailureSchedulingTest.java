@@ -6,7 +6,7 @@ import org.flexlb.balance.strategy.DecodeStrategy;
 import org.flexlb.balance.strategy.EncoderStrategy;
 import org.flexlb.balance.strategy.RequestRouteSelector;
 import org.flexlb.balance.strategy.VitStrategy;
-import org.flexlb.cache.VitCacheDirectory;
+import org.flexlb.cache.VitWorkerCacheManager;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.cache.metrics.CacheMetricsReporter;
 import org.flexlb.config.service.ModelMetaConfig;
@@ -51,7 +51,7 @@ class DecodeCapacityFailureSchedulingTest extends FlexLBMockTestBase {
                         new org.flexlb.balance.schedule.SchedulerConfiguration()
                                 .decodeAdmissionCapacity(configService),
                         endpointRegistry),
-                new VitStrategy(mock(VitCacheDirectory.class), endpointRegistry),
+                new VitStrategy(mock(VitWorkerCacheManager.class), endpointRegistry),
                 new EncoderStrategy(configService, endpointRegistry),
                 meta);
     }

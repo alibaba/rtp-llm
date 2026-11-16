@@ -2,7 +2,7 @@ package org.flexlb.balance.schedule;
 
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.strategy.RoleSelection;
-import org.flexlb.balance.strategy.RoutingResult;
+import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.worker.endpoint.CapacityNotifier;
 import org.flexlb.worker.endpoint.EncoderEndpoint;
@@ -43,8 +43,8 @@ class RequestRouteTest {
         metadata.setDebugInfo(debug);
         try {
             var result =
-                    RoutingResult.success(
-                            new RequestResult(
+                    SelectionResult.success(
+                            new RequestRoute(
                                     context,
                                     List.of(
                                             SelectionTestSupport.metadata(
@@ -114,7 +114,7 @@ class RequestRouteTest {
                                         selectedEndpoint,
                                         metadata,
                                         invalid.equals("work") ? -1L : 10L));
-                        new RequestResult(context(), route);
+                        new RequestRoute(context(), route);
                     });
             assertFalse(selectedEndpoint.hasStoppedAcceptingRequests());
         } finally {
@@ -132,7 +132,7 @@ class RequestRouteTest {
             assertThrows(
                     IllegalStateException.class,
                     () ->
-                            new RequestResult(
+                            new RequestRoute(
                                     context(),
                                     List.of(
                                             SelectionTestSupport.metadata(
@@ -182,11 +182,11 @@ class RequestRouteTest {
                 route.add(SelectionTestSupport.metadata(worker, metadata, 1L));
                 if (!retireBeforeAdd)
                     org.flexlb.worker.endpoint.EndpointTestSupport.closeAsync(worker);
-                var selected = new RequestResult(context(), route);
-                var result = selected.validateEndpoints(selected);
-                assertEquals(RoutingResult.Status.RETRY, result.status());
+                var selected = new RequestRoute(context(), route);
+                var result = selected.validateEndpoints(SelectionResult.success(selected));
+                assertEquals(SelectionResult.Status.RETRY, result.status());
                 assertNull(result.blocker());
-                assertEquals(java.util.List.of(), result.roles());
+                org.junit.jupiter.api.Assertions.assertNull(result.value());
             } finally {
                 org.flexlb.worker.endpoint.EndpointTestSupport.closeAsync(worker);
                 org.flexlb.worker.endpoint.EndpointTestSupport.closeAsync(prefill);
@@ -225,7 +225,7 @@ class RequestRouteTest {
                         SelectionTestSupport.metadata(
                                 selectedEndpoint, metadata(worker), role == 'P' ? 1L : -1L));
             }
-            var selected = new RequestResult(context(), route);
+            var selected = new RequestRoute(context(), route);
             assertEquals(
                     roles,
                     selected.successResponse().getServerStatus().stream()

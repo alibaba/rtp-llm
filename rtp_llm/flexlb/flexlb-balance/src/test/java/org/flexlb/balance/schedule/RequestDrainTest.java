@@ -1,7 +1,7 @@
 package org.flexlb.balance.schedule;
 
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.schedule.ResponseCompletionExecutor.RequestFuture;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.junit.jupiter.api.Test;
 

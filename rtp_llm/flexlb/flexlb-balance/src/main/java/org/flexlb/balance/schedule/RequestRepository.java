@@ -20,7 +20,7 @@ public final class RequestRepository implements org.flexlb.worker.endpoint.Worke
     private final Object registrationLock = new Object();
     private final EnumMap<RequestPhase, ConcurrentMap<String, RequestContext>> activeByPhase =
             new EnumMap<>(RequestPhase.class);
-    private final EnumMap<RequestPhase, ConcurrentMap<String, RequestResult>> terminalByPhase =
+    private final EnumMap<RequestPhase, ConcurrentMap<String, ArchivedRequest>> terminalByPhase =
             new EnumMap<>(RequestPhase.class);
 
     private volatile boolean closed;
@@ -47,7 +47,7 @@ public final class RequestRepository implements org.flexlb.worker.endpoint.Worke
         if (context != null) {
             return context.getRequestScheduler();
         }
-        RequestResult terminal = findTerminal(requestId, phase);
+        var terminal = terminalByPhase.get(phase).get(requestId);
         return terminal == null ? null : terminal.owner();
     }
 
@@ -76,15 +76,15 @@ public final class RequestRepository implements org.flexlb.worker.endpoint.Worke
         return oldest == Long.MAX_VALUE ? 0L : Math.max(0L, System.currentTimeMillis() - oldest);
     }
 
-    public List<RequestResult> snapshotActiveRequests() {
-        List<RequestResult> snapshots = new ArrayList<>(liveRequestCount());
+    public List<RequestState> snapshotActiveRequests() {
+        List<RequestState> snapshots = new ArrayList<>(liveRequestCount());
         for (RequestContext context :
                 snapshotActive(
                         request -> request.snapshot().phase() != RequestContext.Phase.CLOSED)) {
             synchronized (context) {
                 if (isCurrent(context)
                         && context.snapshot().phase() != RequestContext.Phase.CLOSED) {
-                    snapshots.add(RequestResult.from(context.snapshot()));
+                    snapshots.add(RequestState.from(context.snapshot()));
                 }
             }
         }
@@ -102,26 +102,33 @@ public final class RequestRepository implements org.flexlb.worker.endpoint.Worke
         return activeByPhase.values().stream().mapToInt(Map::size).sum();
     }
 
-    public RequestResult getRequestState(String requestId) {
+    public RequestState getRequestState(String requestId) {
         return getRequestState(requestId, RequestPhase.GENERATION);
     }
 
-    public RequestResult getRequestState(String requestId, RequestPhase phase) {
+    public RequestState getRequestState(String requestId, RequestPhase phase) {
         RequestContext context = findActive(requestId, phase);
-        RequestResult terminal = findTerminal(requestId, phase);
-        RequestResult state =
+        RequestState terminal = findTerminal(requestId, phase);
+        RequestState state =
                 context != null
-                        ? RequestResult.from(context.snapshot())
+                        ? RequestState.from(context.snapshot())
                         : terminal == null ? null : terminal;
         return state;
     }
 
-    RequestResult findTerminal(String requestId) {
+    RequestState findTerminal(String requestId) {
         return findTerminal(requestId, RequestPhase.GENERATION);
     }
 
-    RequestResult findTerminal(String requestId, RequestPhase phase) {
-        return terminalByPhase.get(phase).get(requestId);
+    RequestState findTerminal(String requestId, RequestPhase phase) {
+        var archived = terminalByPhase.get(phase).get(requestId);
+        return archived == null ? null : archived.state();
+    }
+
+    RequestState findTerminal(
+            String requestId, RequestPhase phase, AbstractRequestScheduler owner) {
+        var archived = terminalByPhase.get(phase).get(requestId);
+        return archived != null && archived.owner() == owner ? archived.state() : null;
     }
 
     boolean closeRegistration() {
@@ -245,12 +252,16 @@ public final class RequestRepository implements org.flexlb.worker.endpoint.Worke
         }
     }
 
-    void archive(RequestContext exact, RequestResult terminal) {
+    void archive(RequestContext exact, RequestState terminal) {
         synchronized (registrationLock) {
             if (activeByPhase.get(exact.getPhase()).get(exact.getRequestId()) != exact) {
                 return;
             }
-            terminalByPhase.get(exact.getPhase()).put(exact.getRequestId(), terminal);
+            terminalByPhase
+                    .get(exact.getPhase())
+                    .put(
+                            exact.getRequestId(),
+                            new ArchivedRequest(terminal, exact.getRequestScheduler()));
             activeByPhase.get(exact.getPhase()).remove(exact.getRequestId(), exact);
             exact.releaseSchedulingInput();
         }
@@ -259,20 +270,27 @@ public final class RequestRepository implements org.flexlb.worker.endpoint.Worke
     void expireTerminalRecords(long before) {
         terminalByPhase
                 .values()
-                .forEach(map -> map.forEach((id, record) -> removeExactTerminal(record, before)));
+                .forEach(
+                        map ->
+                                map.forEach(
+                                        (id, record) ->
+                                                removeExactTerminal(record.state(), before)));
     }
 
-    boolean removeExactTerminal(RequestResult exact, long before) {
+    boolean removeExactTerminal(RequestState exact, long before) {
         if (exact == null || exact.updatedAtMs() >= before) {
             return false;
         }
         synchronized (registrationLock) {
-            if (terminalByPhase.get(exact.requestPhase()).get(exact.requestId()) != exact) {
+            var archived = terminalByPhase.get(exact.requestPhase()).get(exact.requestId());
+            if (archived == null || archived.state() != exact) {
                 return false;
             }
-            return terminalByPhase.get(exact.requestPhase()).remove(exact.requestId(), exact);
+            return terminalByPhase.get(exact.requestPhase()).remove(exact.requestId(), archived);
         }
     }
+
+    private record ArchivedRequest(RequestState state, AbstractRequestScheduler owner) {}
 
     enum RegistrationResult {
         REGISTERED,

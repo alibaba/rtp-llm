@@ -2,8 +2,10 @@ package org.flexlb.balance.schedule;
 
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.queue.SchedulingQueue;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.schedule.RequestContext.SelectionAttempt;
 import org.flexlb.balance.strategy.RequestRouteSelector;
+import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.scheduler.PreemptionStage;
@@ -14,7 +16,6 @@ import org.flexlb.worker.endpoint.CapacityNotifierTestSupport;
 import org.flexlb.worker.endpoint.DecodeEndpoint;
 import org.flexlb.worker.endpoint.DecodeResources;
 import org.flexlb.worker.endpoint.PrefillEndpoint;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
 import org.flexlb.worker.status.ServerStatus;
 import org.flexlb.worker.status.WorkerStatus;
@@ -214,7 +215,7 @@ class GlobalQueueProgressTest {
                     id -> {
                         if (attempts.getAndIncrement() == 0) {
                             f.admissionBlocked.add(id);
-                            RequestResult route = f.routes.get(id);
+                            RequestRoute route = f.routes.get(id);
                             var scheduler =
                                     RequestProtocolTestSupport.placementScheduler(
                                             f.mutations.get(id));
@@ -244,7 +245,7 @@ class GlobalQueueProgressTest {
         try (Fixture f = new Fixture(RoleType.PREFILL)) {
             Map<String, Object> diagnostics = Map.of("reason", "no eligible worker");
             doReturn(
-                            RequestResult.blocked(
+                            SelectionResult.blocked(
                                     new CapacityKey(RoleType.PREFILL, "a", null),
                                     null,
                                     diagnostics))
@@ -1103,7 +1104,7 @@ class GlobalQueueProgressTest {
     void stalePublicationBlockerReplansImmediatelyWithFreshSelection(boolean priority)
             throws Exception {
         try (Fixture f = new Fixture(RoleType.PREFILL, priority)) {
-            var old = new AtomicReference<RequestResult>();
+            var old = new AtomicReference<RequestRoute>();
             var attempts = new AtomicInteger();
             f.onAdmission =
                     id -> {
@@ -1146,7 +1147,7 @@ class GlobalQueueProgressTest {
         private final FlexlbConfig config = twoPlannerConfig();
         private final CapacityNotifier availability = new CapacityNotifier();
         private final AtomicInteger aSlots = new AtomicInteger();
-        private final Map<Long, RequestResult> routes = new ConcurrentHashMap<>();
+        private final Map<Long, RequestRoute> routes = new ConcurrentHashMap<>();
         private final Map<Long, SelectionAttempt> mutations = new ConcurrentHashMap<>();
         private final Map<Long, String> groups = new ConcurrentHashMap<>();
         private final Map<Long, RequestContext> contexts = new ConcurrentHashMap<>();
@@ -1219,13 +1220,13 @@ class GlobalQueueProgressTest {
                             });
             org.mockito.Mockito.doAnswer(
                             commit -> {
-                                RequestResult selectedRoute = commit.getArgument(0);
+                                RequestRoute selectedRoute = commit.getArgument(0);
                                 RequestContext context = selectedRoute.ctx();
                                 long id = Long.parseLong(context.getRequestId());
                                 if (!preempt || role != RoleType.DECODE) onAdmission.accept(id);
-                                if (stalePublications.remove(id)) return RequestResult.retry();
+                                if (stalePublications.remove(id)) return SelectionResult.retry();
                                 if (admissionBlocked.contains(id)) {
-                                    return RequestResult.blocked(
+                                    return SelectionResult.blocked(
                                             CapacityKey.exact(role, "a", "a:8000"));
                                 }
                                 admissionOrder.add(id);
@@ -1234,7 +1235,7 @@ class GlobalQueueProgressTest {
                                 status.setRole(RoleType.PREFILL);
                                 status.setRequestId(context.getRequestId());
                                 status.setSuccess(true);
-                                RequestResult item =
+                                RequestRoute item =
                                         RequestProtocolTestSupport.mockSelectedRoute(
                                                 context,
                                                 List.of(
@@ -1252,13 +1253,14 @@ class GlobalQueueProgressTest {
                                 selected.add(id);
                                 onSelection.accept(id);
                                 if ("a".equals(groups.get(id)) && aSlots.get() == 0 && !preempt) {
-                                    return RequestResult.blocked(new CapacityKey(role, "a", null));
+                                    return SelectionResult.blocked(
+                                            new CapacityKey(role, "a", null));
                                 }
                                 if (decodeBlocked.contains(id)) {
-                                    return RequestResult.blocked(
+                                    return SelectionResult.blocked(
                                             new CapacityKey(RoleType.DECODE, groups.get(id), null));
                                 }
-                                RequestResult route =
+                                RequestRoute route =
                                         RequestProtocolTestSupport.mockSelectedRoute(context);
                                 when(route.ctx()).thenReturn(context);
                                 routes.put(id, route);
@@ -1268,10 +1270,10 @@ class GlobalQueueProgressTest {
                                         var blocker = CapacityKey.exact(role, "a", "a:8000");
                                         if (route.decodeEndpoint() != null)
                                             blockers.put(blocker, route.decodeEndpoint());
-                                        return RequestResult.blocked(blocker);
+                                        return SelectionResult.blocked(blocker);
                                     }
                                 }
-                                return route;
+                                return SelectionResult.success(route);
                             });
             when(router.blockedEndpoint(any()))
                     .thenAnswer(call -> blockers.get(call.getArgument(0)));
@@ -1283,7 +1285,7 @@ class GlobalQueueProgressTest {
                             call -> {
                                 RequestContext context = call.getArgument(0);
                                 long id = Long.parseLong(context.getRequestId());
-                                RequestResult route =
+                                RequestRoute route =
                                         RequestProtocolTestSupport.mockSelectedRoute(context);
                                 when(route.ctx()).thenReturn(context);
                                 when(route.requestId()).thenReturn(String.valueOf(id));
@@ -1307,7 +1309,7 @@ class GlobalQueueProgressTest {
                                                                 .registration());
                                 routes.put(id, route);
                                 onAdmission.accept(id);
-                                return route;
+                                return SelectionResult.success(route);
                             });
             scheduler =
                     RequestProtocolTestSupport.injectPlacementDependencies(
@@ -1340,7 +1342,7 @@ class GlobalQueueProgressTest {
                         if (id != requestId) {
                             return;
                         }
-                        RequestResult route = routes.get(id);
+                        RequestRoute route = routes.get(id);
                         when(route.decodeEndpoint()).thenReturn(decode);
                         when(decode.registrationState(any()))
                                 .thenReturn(DecodeResources.RegistrationState.UNCONFIRMED);

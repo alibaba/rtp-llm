@@ -3,10 +3,12 @@ package org.flexlb.mock;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
+import org.flexlb.balance.request.Request;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.schedule.AbstractRequestScheduler;
 import org.flexlb.balance.schedule.EngineCancellation;
 import org.flexlb.balance.schedule.RequestContext;
-import org.flexlb.balance.schedule.RequestResult;
+import org.flexlb.balance.schedule.RequestRoute;
 import org.flexlb.balance.schedule.RequestSchedulerTestRuntime;
 import org.flexlb.balance.schedule.SchedulingMetadata;
 import org.flexlb.balance.strategy.RequestRouteSelector;
@@ -19,8 +21,6 @@ import org.flexlb.util.metrics.NoOpFlexMonitor;
 import org.flexlb.worker.endpoint.DecodeEndpoint;
 import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.PrefillEndpoint;
-import org.flexlb.worker.endpoint.Request;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
 import org.flexlb.worker.rpc.EngineAddressResolver;
 import org.flexlb.worker.rpc.EngineGrpcClient;
@@ -304,7 +304,9 @@ public abstract class FlexLBMockTestBase {
     /**
      * Build the exact pinned queue admission for a fixture response.
      */
-    protected final RequestResult routeResult(RequestContext context, Response response) {
+    protected final org.flexlb.balance.strategy.SelectionResult<
+                    RequestRoute, org.flexlb.worker.endpoint.CapacityKey>
+            routeResult(RequestContext context, Response response) {
         return schedulerRuntime.routeResult(context, response);
     }
 

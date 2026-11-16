@@ -5,13 +5,14 @@ import org.flexlb.balance.metrics.RequestSchedulerReporter;
 import org.flexlb.balance.queue.ListSchedulingQueue;
 import org.flexlb.balance.queue.OrderedRequestQueue;
 import org.flexlb.balance.queue.SchedulingQueue;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.strategy.RequestRouteSelector;
+import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.worker.endpoint.CapacityKey;
 import org.flexlb.worker.endpoint.CapacityNotifier;
 import org.flexlb.worker.endpoint.EndpointRegistry;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.rpc.EngineGrpcClient;
 import org.junit.jupiter.api.Test;
@@ -49,7 +50,7 @@ class QueueRegistrationCancellationTest {
                     .thenAnswer(
                             call -> {
                                 selected.countDown();
-                                return RequestResult.blocked(
+                                return SelectionResult.blocked(
                                         CapacityKey.anyGroup(
                                                 org.flexlb.config.service.RoleType.PREFILL));
                             });
@@ -69,7 +70,7 @@ class QueueRegistrationCancellationTest {
         try (Fixture f = new Fixture(true, new ListSchedulingQueue())) {
             when(f.router.select(any(), nullable(String.class)))
                     .thenReturn(
-                            RequestResult.blocked(
+                            SelectionResult.blocked(
                                     CapacityKey.anyGroup(
                                             org.flexlb.config.service.RoleType.PREFILL)));
             var context = f.context(909L);
@@ -107,7 +108,7 @@ class QueueRegistrationCancellationTest {
             }
             f.queue.close();
             assertEquals(
-                    RequestResult.State.CANCELLED,
+                    RequestState.State.CANCELLED,
                     f.runtime.requests().getRequestState("908").state());
             verify(f.router, never()).select(any(), nullable(String.class));
         }
@@ -155,7 +156,7 @@ class QueueRegistrationCancellationTest {
         try (Fixture f = new Fixture()) {
             when(f.router.select(any(), nullable(String.class)))
                     .thenReturn(
-                            RequestResult.blocked(
+                            SelectionResult.blocked(
                                     new CapacityKey(
                                             org.flexlb.config.service.RoleType.DECODE, "g", null)));
             var future = SchedulerTestServices.entry(f.queue).submit(f.context(907L));
@@ -180,7 +181,7 @@ class QueueRegistrationCancellationTest {
                                 assertTrue(
                                         listening.get(),
                                         "selection cannot precede listener installation");
-                                return RequestResult.rejected(
+                                return SelectionResult.rejected(
                                         Response.error(StrategyErrorType.RESOURCE_EXHAUSTED));
                             });
             RequestContext context = f.context(901L);

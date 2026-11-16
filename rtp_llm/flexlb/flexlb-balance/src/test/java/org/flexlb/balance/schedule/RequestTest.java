@@ -1,7 +1,7 @@
 package org.flexlb.balance.schedule;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.flexlb.worker.endpoint.Request;
+import org.flexlb.balance.request.Request;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;

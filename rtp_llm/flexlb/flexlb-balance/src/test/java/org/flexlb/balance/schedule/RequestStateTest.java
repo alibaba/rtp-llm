@@ -12,11 +12,11 @@ class RequestStateTest {
 
     @Test
     void onlyTerminalPhasesAreTerminal() {
-        assertFalse(RequestResult.State.QUEUED.isTerminal());
-        assertFalse(RequestResult.State.CANCEL_REQUESTED.isTerminal());
-        assertTrue(RequestResult.State.CANCELLED.isTerminal());
-        assertTrue(RequestResult.State.TIMED_OUT.isTerminal());
-        assertTrue(RequestResult.State.FAILED.isTerminal());
-        assertTrue(RequestResult.State.COMPLETED.isTerminal());
+        assertFalse(RequestState.State.QUEUED.isTerminal());
+        assertFalse(RequestState.State.CANCEL_REQUESTED.isTerminal());
+        assertTrue(RequestState.State.CANCELLED.isTerminal());
+        assertTrue(RequestState.State.TIMED_OUT.isTerminal());
+        assertTrue(RequestState.State.FAILED.isTerminal());
+        assertTrue(RequestState.State.COMPLETED.isTerminal());
     }
 }

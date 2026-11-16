@@ -10,7 +10,6 @@ import org.flexlb.cache.metrics.CacheMetricsReporter;
 import org.flexlb.config.cache.CacheMatchConfiguration;
 import org.flexlb.config.cache.LocalStandbyConfig;
 import org.flexlb.config.service.RoleType;
-import org.flexlb.worker.endpoint.Request;
 import org.flexlb.worker.status.ServerStatus;
 import org.springframework.stereotype.Component;
 
@@ -119,17 +118,20 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
                 cacheManager.findMatchingEngines(blockCacheKeys, roleType, group));
     }
 
-    public void updateFromRoutedRequest(Request request, List<ServerStatus> selectedWorkers) {
+    public void updateFromRoutedRequest(
+            String requestId,
+            long blockSize,
+            List<Long> cacheKeys,
+            List<ServerStatus> selectedWorkers) {
         if (!enabled
-                || request == null
-                || request.getBlockSize() <= 0
-                || request.getBlockCacheKeys() == null
-                || request.getBlockCacheKeys().isEmpty()
+                || blockSize <= 0
+                || cacheKeys == null
+                || cacheKeys.isEmpty()
                 || selectedWorkers == null
                 || selectedWorkers.isEmpty()) {
             return;
         }
-        List<Long> blockCacheKeys = List.copyOf(request.getBlockCacheKeys());
+        List<Long> blockCacheKeys = List.copyOf(cacheKeys);
         List<ServerStatus> workers = new ArrayList<>(selectedWorkers);
         try {
             CompletableFuture.runAsync(
@@ -138,14 +140,12 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
                             error -> {
                                 log.warn(
                                         "Failed to update Local Standby cache metadata, requestId={}",
-                                        request.getRequestId(),
+                                        requestId,
                                         error);
                                 return null;
                             });
         } catch (RejectedExecutionException e) {
-            log.warn(
-                    "Local standby cache metadata update queue is full, requestId={}",
-                    request.getRequestId());
+            log.warn("Local standby cache metadata update queue is full, requestId={}", requestId);
         }
     }
 

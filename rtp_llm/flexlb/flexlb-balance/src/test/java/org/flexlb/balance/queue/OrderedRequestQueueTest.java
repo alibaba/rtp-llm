@@ -205,7 +205,7 @@ class OrderedRequestQueueTest {
 
     private static RequestContext entry(int priority) {
         var context = new RequestContext(ENTRY_CONFIG);
-        context.setRequest(org.flexlb.worker.endpoint.Request.builder().build());
+        context.setRequest(org.flexlb.balance.request.Request.builder().build());
         context.setSchedulingMetadata(
                 org.flexlb.balance.schedule.SchedulingMetadata.explicit(priority, Long.MAX_VALUE));
 

@@ -5,6 +5,7 @@ import org.flexlb.api.ServerScheduleLatencyRecorder;
 import org.flexlb.api.protocol.FlexlbScheduleProtocol;
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
+import org.flexlb.balance.request.Response;
 import org.flexlb.balance.schedule.AbstractRequestScheduler;
 import org.flexlb.cache.CacheMatchQuery;
 import org.flexlb.cache.localstandby.LocalStandbyCacheManager;
@@ -18,7 +19,6 @@ import org.flexlb.config.cache.CacheMatchConfiguration;
 import org.flexlb.config.cache.LocalStandbyConfig;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.master.MasterStatusService;
-import org.flexlb.worker.endpoint.Response;
 import org.flexlb.worker.status.ServerStatus;
 import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.flexlb.worker.status.WorkerStatus;
@@ -126,7 +126,9 @@ class FlexlbScheduleLocalStandbyTest {
         service(router, cache).schedule(request(), observer);
 
         verify(observer).onCompleted();
-        verify(cache, never()).updateFromRoutedRequest(any(), any());
+        verify(cache, never())
+                .updateFromRoutedRequest(
+                        any(), org.mockito.ArgumentMatchers.anyLong(), any(), any());
     }
 
     @Test
@@ -137,7 +139,8 @@ class FlexlbScheduleLocalStandbyTest {
         CacheAwareService cache = mock(CacheAwareService.class);
         doThrow(new IllegalStateException("metadata update unavailable"))
                 .when(cache)
-                .updateFromRoutedRequest(any(), any());
+                .updateFromRoutedRequest(
+                        any(), org.mockito.ArgumentMatchers.anyLong(), any(), any());
         StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer =
                 mock(StreamObserver.class);
 

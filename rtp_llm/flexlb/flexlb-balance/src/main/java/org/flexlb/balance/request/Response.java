@@ -1,9 +1,11 @@
-package org.flexlb.worker.endpoint;
+package org.flexlb.balance.request;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
+import org.flexlb.worker.endpoint.AdmissionRejectReason;
+import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.status.ServerStatus;
 
 import java.util.ArrayList;
