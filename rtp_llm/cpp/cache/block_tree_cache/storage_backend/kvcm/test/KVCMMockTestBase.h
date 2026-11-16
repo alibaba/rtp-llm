@@ -191,6 +191,15 @@ public:
                  const kv_cache_manager::BlockMask&,
                  const kv_cache_manager::Locations&),
                 (override));
+    std::function<FinishWriteResult(const kv_cache_manager::BlockMask&, const kv_cache_manager::Locations&)>
+        finish_write_result;
+    FinishWriteResult finishWriteWithResult(const std::string& unique_id, const std::string& trace_id,
+                                            const std::string& session, const kv_cache_manager::BlockMask& mask,
+                                            const kv_cache_manager::Locations& locations) override {
+        if (finish_write_result) return finish_write_result(mask, locations);
+        return finishWrite(unique_id, trace_id, session, mask, locations) ? FinishWriteResult::ACKNOWLEDGED :
+                                                                         FinishWriteResult::UNKNOWN;
+    }
     MOCK_METHOD(bool,
                 loadKvCachesForTag,
                 (const std::string&,

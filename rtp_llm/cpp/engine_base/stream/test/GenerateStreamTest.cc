@@ -344,6 +344,45 @@ TEST_F(GenerateStreamTest, PublishedVerifiedDraftCountPrecedesTerminalWindowClip
     EXPECT_EQ(output.value().generate_outputs[0].aux_info.speculative_verified_draft_tokens, 5);
 }
 
+TEST_F(GenerateStreamTest, SpeculativeEndpointBookkeepingIsDecodeOnly) {
+    for (const bool enabled : {false, true}) {
+        autil::EnvGuard publish("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
+            for (const auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+                SCOPED_TRACE(::testing::Message() << "enabled=" << enabled << " role=" << static_cast<int>(role));
+                ResourceContext context;
+                context.role_type = role;
+                auto stream = GenerateStreamBuilder().createContextStream({1, 2, 3}, nullptr, context);
+                stream->generateConfig()->max_new_tokens = 16;
+                stream->generate_status_->status.store(StreamState::RUNNING);
+                auto buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
+                buffer->tokens = torch::zeros({1, 1}, torch::kInt32);
+                stream->setSPOutputBuffer(buffer);
+                auto stale = std::make_shared<DecodeEndpoint>(); stale->end = 4096;
+                auto accepted = std::make_shared<DecodeEndpoint>(); accepted->end = 2;
+                auto& resource = stream->kvCacheMutable();
+                // A sentinel makes accidental P bookkeeping observable; no
+                // actual P capture or publication is introduced by the test.
+                resource.decode_endpoint = stale;
+                resource.decode_round_endpoints = {nullptr, accepted};
+                StreamSpecUpdateInfo update{torch::tensor({{17}}, torch::kInt32), 1, -1, {}, {}};
+                stream->specUpdate(update);
+                ASSERT_FALSE(stream->hasError()) << stream->statusInfo().ToString();
+                EXPECT_EQ(stream->outputTokenLen(), 1);
+                EXPECT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
+                if (enabled && role == RoleType::DECODE) {
+                    EXPECT_EQ(resource.decode_endpoint, accepted);
+                    EXPECT_TRUE(resource.decode_round_endpoints.empty());
+                } else {
+                    EXPECT_EQ(resource.decode_endpoint, stale);
+                    ASSERT_EQ(resource.decode_round_endpoints.size(), 2u);
+                    EXPECT_EQ(resource.decode_round_endpoints.back(), accepted);
+                }
+            }
+        });
+    }
+}
+
 TEST_F(GenerateStreamTest, LatestDecodeEndpointIncludesPendingCandidatesAndRetainsSnapshot) {
     auto stream = GenerateStreamBuilder().createContextStream({1, 2, 3});
     auto selected = std::make_shared<DecodeEndpoint>(); selected->end = 4;

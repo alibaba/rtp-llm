@@ -486,7 +486,9 @@ public:
         try {
             if (!kv_cache_config_.kvcm_client_config.empty()) {
                 // Explicit configs normally retain their original unmerged form.
-                // Also accept the exact compatible auto-generated P format on D.
+                // P and D both accept the compatible auto-generated P FULL
+                // format. Keep this explicit-config support independent of
+                // the Decode publication switch; D checks projected bytes below.
                 const auto selected = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
                     autil::legacy::ToJson(custom_config));
                 kvcm::KVCMConfig::LocationSpecInfoMap selected_infos;
@@ -1165,7 +1167,7 @@ public:
                         collector.remote_finish_write_time_us += elapsedTimeUs(stage_start);
                     });
                     try {
-                        if (!finishSession(publication, kv_cache_manager::BlockMaskOffset{0}, empty_locations, true)) {
+                        if (!finishSession(request, publication, kv_cache_manager::BlockMaskOffset{0}, empty_locations, true)) {
                             RTP_LLM_LOG_WARNING("KVCM failed to close empty write session [%s]",
                                                 write_session_id.c_str());
                         }
@@ -1290,7 +1292,7 @@ public:
             catch (...) {}
             // Preserve the original P best-effort zero-mask close on failure.
             // This legacy policy is not a proof of destination quiescence.
-            closeUnusedWrite(write, /*require_not_started=*/false);
+            closeUnusedWrite(request, write, /*require_not_started=*/false);
             return;
         }
         (void)source_may_be_touched;  // Source safety is not proof that the destination was never touched.
@@ -1310,7 +1312,7 @@ public:
                 reportRemoteMetrics<RtpLLMRemoteCacheOutcomeMetrics>(result);
             }
         } else if (action == kvcm::FailedPublicationAction::ABORT_UNCOMMITTED) {
-            closeUnusedWrite(write);
+            closeUnusedWrite(request, write);
         }
     }
 
@@ -1344,7 +1346,7 @@ public:
             block_tree_cache_detail::ScopeRollback timer(
                 [&] { collector.remote_finish_write_time_us += elapsedTimeUs(stage_start); });
             RTP_LLM_CHECK_WITH_INFO(
-                finishSession(write, write_location.locations.size(), actual_locations, false),
+                finishSession(request, write, write_location.locations.size(), actual_locations, false),
                 "KVCM FinishWrite failed");
         }
         collector.remote_write_cache_block_num = static_cast<int64_t>(write_location.locations.size());
@@ -1354,19 +1356,31 @@ public:
             lease->recordOutcome("committed", /*acknowledged=*/true);
     }
 
-    bool finishSession(WritePublication& write,
+    bool finishSession(const StorageRequest& request, WritePublication& write,
                        const kv_cache_manager::BlockMask& mask,
                        const kv_cache_manager::Locations& locations, bool unused_close) {
         const auto trace = nextTraceId(unused_close ? "close_write" : "finish_write", finish_write_trace_sequence_);
         RTP_LLM_CHECK_WITH_INFO(write.start_acknowledged && !write.finish_attempted,
                                 "KVCM metadata action already settled");
-        // Mark before the call: a false return or throw does not prove that
-        // FinishWrite was unsent. Never replay it or follow it with an abort.
+        // Anchor before the call, including exceptions. A cleanup may retry
+        // only a locally proved NOT_SENT result; a commit never retries here.
+        // Keep the anchor set across retries so no later abort can replay it.
         write.finish_attempted = true;
-        return client_wrapper_->finishWrite("", trace, write.sessionId(), mask, locations);
+        using Result = kvcm::ClientWrapper::FinishWriteResult;
+        constexpr int max_cleanup_attempts = 3;
+        for (int attempt = 0; ; ++attempt) {
+            const auto result = client_wrapper_->finishWriteWithResult("", trace, write.sessionId(), mask, locations);
+            if (result == Result::ACKNOWLEDGED) return true;
+            if (!unused_close || result != Result::NOT_SENT || attempt + 1 >= max_cleanup_attempts
+                || !request.transfer_task || request.transfer_task->expired()) return false;
+            const auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                request.transfer_task->deadline() - Clock::now()).count();
+            if (!client_wrapper_->waitForRetry(static_cast<int>(std::clamp<int64_t>(remaining_ms, 0, 20)))
+                || request.transfer_task->expired()) return false;
+        }
     }
 
-    void closeUnusedWrite(WritePublication& write, bool require_not_started = true) {
+    void closeUnusedWrite(const StorageRequest& request, WritePublication& write, bool require_not_started = true) {
         if (!write.start_acknowledged || write.finish_attempted
             || (require_not_started && !write.dispatch_proof.neverStarted())) {
             return;
@@ -1375,7 +1389,7 @@ public:
         block_tree_cache_detail::ScopeRollback timer(
             [&] { write.collector.remote_finish_write_time_us += elapsedTimeUs(stage_start); });
         try {
-            const bool aborted = finishSession(write, kv_cache_manager::BlockMaskOffset{0}, {}, true);
+            const bool aborted = finishSession(request, write, kv_cache_manager::BlockMaskOffset{0}, {}, true);
             if (!aborted) {
                 RTP_LLM_LOG_WARNING("KVCM failed to abort write session [%s]",
                                     write.sessionId().c_str());

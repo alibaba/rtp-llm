@@ -1063,6 +1063,7 @@ TEST(StorageBackendTest, WriteMaskReleasesOnlyUnusedTaskPinsBeforeCompletion) {
             EXPECT_EQ(pool->refCount(blocks[1]), 2u);
             EXPECT_EQ(pool->refCount(blocks[2]), 3u);
             retain_pins({1, 2});
+            retain_pins({1, 2}); // A repeated mask must not release a retained token twice.
             EXPECT_EQ(pool->refCount(blocks[0]), 2u);
             EXPECT_EQ(pool->refCount(blocks[1]), 2u);
             EXPECT_EQ(pool->refCount(blocks[2]), 2u);

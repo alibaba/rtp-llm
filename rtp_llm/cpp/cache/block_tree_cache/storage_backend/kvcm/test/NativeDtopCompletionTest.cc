@@ -817,8 +817,18 @@ TEST_P(EosGpuCompletionTest, UnboundedSwaNeverPretendsTwoTailPagesAreEnough) {
 }
 INSTANTIATE_TEST_SUITE_P(GenericCPAndIndependentDP,
                          EosGpuCompletionTest,
-                         ::testing::Combine(::testing::Values(1, 2, 4, 8, 16),
-                                            ::testing::Bool(),
-                                            ::testing::Values(1, 3, 8)));
+                         // Keep every CP/layout policy, including both CP1
+                         // policies despite equal geometry, and add CP4/DP4.
+                         // DP is independently varied instead of a Cartesian product.
+                         ::testing::Values(std::make_tuple(1, false, 1),
+                                           std::make_tuple(1, true, 1),
+                                           std::make_tuple(2, false, 3),
+                                           std::make_tuple(2, true, 1),
+                                           std::make_tuple(4, false, 4),
+                                           std::make_tuple(4, true, 4),
+                                           std::make_tuple(8, false, 8),
+                                           std::make_tuple(8, true, 3),
+                                           std::make_tuple(16, false, 1),
+                                           std::make_tuple(16, true, 8)));
 }  // namespace
 }  // namespace rtp_llm

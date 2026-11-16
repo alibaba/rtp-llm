@@ -1686,7 +1686,8 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                   .output_start_pos       = old_seq_length,
                   .logprobs_offset        = logprobs_offset});
     updateLogprobsContentStarted(old_seq_length);
-    if (remoteCacheDecodePublicationEnabled() && stream_cache_resource_ && seqLength() > 0) {
+    if (remoteCacheDecodePublicationEnabled() && stream_cache_resource_
+        && resourceContext().role_type == RoleType::DECODE && seqLength() > 0) {
         auto& resource = kvCacheMutable();
         const size_t final_computed = seqLength() - 1;
         if (resource.decode_endpoint && resource.decode_endpoint->end > final_computed) resource.decode_endpoint.reset();
