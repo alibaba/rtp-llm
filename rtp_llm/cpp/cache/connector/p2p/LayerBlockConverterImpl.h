@@ -38,7 +38,9 @@ public:
             info.scalar_type     = static_cast<int32_t>(t.scalar_type());
             info.addr            = t.data_ptr();
             info.size_bytes      = static_cast<size_t>(t.nbytes());
-            const size_t aligned = static_cast<size_t>(t.nbytes());
+            // Layer tensors are indexed by physical block on the leading axis.
+            // An MR boundary may separate blocks but must not bisect one.
+            const size_t aligned = static_cast<size_t>(t.stride(0)) * t.element_size();
             if (!seen.emplace(reinterpret_cast<uintptr_t>(info.addr),
                               info.size_bytes,
                               info.is_cuda,

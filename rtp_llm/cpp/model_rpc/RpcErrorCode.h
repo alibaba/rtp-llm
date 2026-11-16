@@ -41,6 +41,25 @@ inline grpc::StatusCode transErrorCodeToGrpc(ErrorCode error_code) {
     }
 }
 
+inline ErrorCode transGrpcStatusToErrorCode(grpc::StatusCode status_code) {
+    const static std::unordered_map<grpc::StatusCode, ErrorCode> status_code_map = {
+        {grpc::StatusCode::CANCELLED, ErrorCode::CANCELLED},
+        {grpc::StatusCode::UNAVAILABLE, ErrorCode::CONNECT_FAILED},
+        {grpc::StatusCode::RESOURCE_EXHAUSTED, ErrorCode::MALLOC_FAILED},
+        {grpc::StatusCode::DEADLINE_EXCEEDED, ErrorCode::GENERATE_TIMEOUT},
+        {grpc::StatusCode::OUT_OF_RANGE, ErrorCode::LONG_PROMPT_ERROR},
+        {grpc::StatusCode::INVALID_ARGUMENT, ErrorCode::INVALID_PARAMS},
+    };
+    auto it = status_code_map.find(status_code);
+    if (it != status_code_map.end()) {
+        return it->second;
+    }
+    // grpc::StatusCode::INTERNAL and any other status fall here. INTERNAL is
+    // a catch-all on the prefill side (transErrorCodeToGrpc default), so the
+    // original ErrorCode is genuinely lost — keep UNKNOWN_ERROR.
+    return ErrorCode::UNKNOWN_ERROR;
+}
+
 inline ErrorCode transRPCErrorCode(ErrorCodePB error_code) {
     const static std::unordered_map<ErrorCodePB, ErrorCode> error_code_map = {
         {ErrorCodePB::NONE_ERROR, ErrorCode::NONE_ERROR},
@@ -79,6 +98,16 @@ inline ErrorCode transRPCErrorCode(ErrorCodePB error_code) {
          ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE},
         {ErrorCodePB::INVALID_PARAMS, ErrorCode::INVALID_PARAMS},
         {ErrorCodePB::EXECUTION_EXCEPTION, ErrorCode::EXECUTION_EXCEPTION},
+        {ErrorCodePB::GENERATE_TIMEOUT, ErrorCode::GENERATE_TIMEOUT},
+        {ErrorCodePB::GET_CONNECTION_FAILED, ErrorCode::GET_CONNECTION_FAILED},
+        {ErrorCodePB::RPC_FINISH_FAILED, ErrorCode::RPC_FINISH_FAILED},
+        {ErrorCodePB::P2P_CONNECTOR_TRANSFER_BUILD_REQUEST_FAILED, ErrorCode::P2P_CONNECTOR_TRANSFER_BUILD_REQUEST_FAILED},
+        {ErrorCodePB::P2P_CONNECTOR_TRANSFER_CONNECTION_FAILED, ErrorCode::P2P_CONNECTOR_TRANSFER_CONNECTION_FAILED},
+        {ErrorCodePB::P2P_CONNECTOR_TRANSFER_RPC_FAILED, ErrorCode::P2P_CONNECTOR_TRANSFER_RPC_FAILED},
+        {ErrorCodePB::P2P_CONNECTOR_TRANSFER_NOT_INITIALIZED, ErrorCode::P2P_CONNECTOR_TRANSFER_NOT_INITIALIZED},
+        {ErrorCodePB::P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED, ErrorCode::P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED},
+        {ErrorCodePB::P2P_CONNECTOR_TRANSFER_COPY_FAILED, ErrorCode::P2P_CONNECTOR_TRANSFER_COPY_FAILED},
+        {ErrorCodePB::P2P_CONNECTOR_TRANSFER_CONTEXT_DESTROYED, ErrorCode::P2P_CONNECTOR_TRANSFER_CONTEXT_DESTROYED},
     };
     auto it = error_code_map.find(error_code);
     if (it != error_code_map.end()) {
@@ -126,6 +155,16 @@ inline ErrorCodePB transErrorCodeToRPC(ErrorCode error_code) {
          ErrorCodePB::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE},
         {ErrorCode::INVALID_PARAMS, ErrorCodePB::INVALID_PARAMS},
         {ErrorCode::EXECUTION_EXCEPTION, ErrorCodePB::EXECUTION_EXCEPTION},
+        {ErrorCode::GENERATE_TIMEOUT, ErrorCodePB::GENERATE_TIMEOUT},
+        {ErrorCode::GET_CONNECTION_FAILED, ErrorCodePB::GET_CONNECTION_FAILED},
+        {ErrorCode::RPC_FINISH_FAILED, ErrorCodePB::RPC_FINISH_FAILED},
+        {ErrorCode::P2P_CONNECTOR_TRANSFER_BUILD_REQUEST_FAILED, ErrorCodePB::P2P_CONNECTOR_TRANSFER_BUILD_REQUEST_FAILED},
+        {ErrorCode::P2P_CONNECTOR_TRANSFER_CONNECTION_FAILED, ErrorCodePB::P2P_CONNECTOR_TRANSFER_CONNECTION_FAILED},
+        {ErrorCode::P2P_CONNECTOR_TRANSFER_RPC_FAILED, ErrorCodePB::P2P_CONNECTOR_TRANSFER_RPC_FAILED},
+        {ErrorCode::P2P_CONNECTOR_TRANSFER_NOT_INITIALIZED, ErrorCodePB::P2P_CONNECTOR_TRANSFER_NOT_INITIALIZED},
+        {ErrorCode::P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED, ErrorCodePB::P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED},
+        {ErrorCode::P2P_CONNECTOR_TRANSFER_COPY_FAILED, ErrorCodePB::P2P_CONNECTOR_TRANSFER_COPY_FAILED},
+        {ErrorCode::P2P_CONNECTOR_TRANSFER_CONTEXT_DESTROYED, ErrorCodePB::P2P_CONNECTOR_TRANSFER_CONTEXT_DESTROYED},
     };
     auto it = error_code_map.find(error_code);
     if (it != error_code_map.end()) {
@@ -133,5 +172,34 @@ inline ErrorCodePB transErrorCodeToRPC(ErrorCode error_code) {
     } else {
         return ErrorCodePB::UNKNOWN_ERROR;
     }
+}
+
+// Preserve the application code/message when present; transport status is the
+// first observable cause only when the peer supplied no structured error.
+inline ErrorInfo errorInfoFromGrpcStatus(const grpc::Status& status, const std::string& location = "") {
+    if (status.ok())
+        return ErrorInfo::OkStatus();
+    ErrorDetailsPB details;
+    if (!status.error_details().empty() && details.ParseFromString(status.error_details())
+        && details.error_code() != 0) {
+        const std::string message = details.error_message().empty() ? status.error_message() : details.error_message();
+        return ErrorInfo(static_cast<ErrorCode>(details.error_code()),
+                         location.empty() ? message :
+                                            message + " [received_at " + location + " grpc_code="
+                                                + std::to_string(static_cast<int>(status.error_code())) + "]");
+    }
+    return ErrorInfo(transGrpcStatusToErrorCode(status.error_code()),
+                     (location.empty() ? "grpc_code=" : location + " grpc_code=")
+                         + std::to_string(static_cast<int>(status.error_code())) + ": "
+                         + status.error_message());
+}
+
+inline grpc::Status grpcStatusFromErrorInfo(const ErrorInfo& error) {
+    if (error.ok())
+        return grpc::Status::OK;
+    ErrorDetailsPB details;
+    details.set_error_code(static_cast<int>(error.code()));
+    details.set_error_message(error.ToString());
+    return grpc::Status(transErrorCodeToGrpc(error.code()), error.ToString(), details.SerializeAsString());
 }
 }  // namespace rtp_llm

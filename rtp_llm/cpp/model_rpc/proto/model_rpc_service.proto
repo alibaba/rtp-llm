@@ -424,6 +424,16 @@ enum ErrorCodePB {
     P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE = 25;
     INVALID_PARAMS = 26;
     EXECUTION_EXCEPTION = 27;
+    GENERATE_TIMEOUT = 603;
+    GET_CONNECTION_FAILED = 8201;
+    RPC_FINISH_FAILED = 8210;
+    P2P_CONNECTOR_TRANSFER_BUILD_REQUEST_FAILED = 8326;
+    P2P_CONNECTOR_TRANSFER_CONNECTION_FAILED = 8327;
+    P2P_CONNECTOR_TRANSFER_RPC_FAILED = 8328;
+    P2P_CONNECTOR_TRANSFER_NOT_INITIALIZED = 8329;
+    P2P_CONNECTOR_TRANSFER_QUEUE_REJECTED = 8330;
+    P2P_CONNECTOR_TRANSFER_COPY_FAILED = 8331;
+    P2P_CONNECTOR_TRANSFER_CONTEXT_DESTROYED = 8332;
 }
 
 // transfer between prefill and decode
@@ -889,10 +899,9 @@ message P2PConnectorBroadcastTpRequestPB {
     int64 request_id = 4;
     int64 deadline_ms = 5;
     P2PConnectorBroadcastType type = 6;
-    // TP size of the remote side (prefill_tp_size for decode, decode_tp_size for prefill).
-    int32 remote_tp_size = 8;
-    reserved 10;
-    reserved "allow_empty_projection";
+    // The transfer plan supplies explicit routes. Empty routes mean no work.
+    reserved 8, 10;
+    reserved "remote_tp_size", "allow_empty_projection";
     // Original user-request deadline. deadline_ms remains the physical
     // transfer deadline used by this broadcast and its worker operation.
     int64 request_deadline_ms = 9;
@@ -946,7 +955,8 @@ message LeaseStatusResponsePB {
 message P2PConnectorStartLoadRequestPB {
     string unique_key = 1;
     repeated TPWorkerInfoPB workers = 2;
-    int64 deadline_ms = 3;
+    // Load budget includes waiting for GenerateStream request registration on Prefill.
+    int64 timeout_ms = 3;
     // Decode already has all matched KV blocks locally. Prefill should still
     // complete the StartLoad lifecycle and return side-channel data, but must
     // not dispatch a data transfer.
