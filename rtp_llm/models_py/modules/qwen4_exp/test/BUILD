@@ -282,6 +282,15 @@ py_test(
 )
 
 py_test(
+    name = "fp8_sm90_quant_test",
+    srcs = ["fp8_sm90_quant_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "sparse_prefill_bitmap_test",
     srcs = ["sparse_prefill_bitmap_test.py", "reference/sparse_fmha.py", "reference/sparse_attention.py"],
     deps = ["//rtp_llm/models_py:qsa_sparse_prefill_testlib"],
