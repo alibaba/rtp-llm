@@ -4,17 +4,14 @@ import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import java.net.URI;
 import java.util.List;
+import java.util.ArrayList;
 import java.util.Objects;
 import java.util.ServiceLoader;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
-import org.flexlb.discovery.ServiceAddresses;
+import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.discovery.ServiceDiscovery;
-import org.flexlb.kvcm.grpc.ErrorCode;
-import org.flexlb.kvcm.grpc.GetClusterInfoRequest;
-import org.flexlb.kvcm.grpc.MetaServiceGrpc;
-
-import static org.flexlb.discovery.ServiceAddresses.authority;
+import org.flexlb.kvcm.grpc.*;
 
 /**
  * Engine cache reporting endpoint. Reporting owns lookup; close can cancel outstanding discovery.
@@ -26,7 +23,7 @@ public final class KvcmDiscovery implements AutoCloseable {
 
     private URI leader;
     private ManagedChannel activeChannel;
-    private FutureTask<List<String>> activeLookup;
+    private FutureTask<List<WorkerHost>> activeLookup;
 
     private boolean closed;
 
@@ -64,8 +61,12 @@ public final class KvcmDiscovery implements AutoCloseable {
             if (cached != null) return cached;
         }
         var failure = new IllegalStateException("No reachable authoritative KVCM leader");
-        List<String> addresses = discovery == null
-                ? ServiceAddresses.resolve(bootstrap, null) : bootstrapAddresses();
+        List<String> addresses = new ArrayList<>();
+        if (discovery == null) addresses.add(bootstrap);
+        else for (var host : hosts()) {
+            try { addresses.add(authority(host.getIp(), host.getPort())); }
+            catch (RuntimeException error) { failure.addSuppressed(error); }
+        }
         for (String address : addresses) {
             try {
                 URI found = resolve(address);
@@ -97,8 +98,8 @@ public final class KvcmDiscovery implements AutoCloseable {
         if (discovery != null) discovery.shutdown();
     }
 
-    private List<String> bootstrapAddresses() {
-        var lookup = new FutureTask<>(() -> ServiceAddresses.resolve(bootstrap, discovery));
+    private List<WorkerHost> hosts() {
+        var lookup = new FutureTask<>(() -> discovery.getHosts(bootstrap));
         synchronized (this) { requireOpen(); activeLookup = lookup; }
         try {
             Thread.ofVirtual().name("kvcm-bootstrap").start(lookup);
@@ -134,5 +135,12 @@ public final class KvcmDiscovery implements AutoCloseable {
             channel.shutdownNow();
             synchronized (this) { if (activeChannel == channel) activeChannel = null; }
         }
+    }
+
+    private static String authority(String host, int port) {
+        if (host == null || host.isBlank() || port < 1 || port > 65535)
+            throw new IllegalStateException("Invalid KVCM endpoint");
+        try { return new URI(null, null, host, port, null, null, null).getRawAuthority(); }
+        catch (java.net.URISyntaxException error) { throw new IllegalStateException("Invalid KVCM host", error); }
     }
 }

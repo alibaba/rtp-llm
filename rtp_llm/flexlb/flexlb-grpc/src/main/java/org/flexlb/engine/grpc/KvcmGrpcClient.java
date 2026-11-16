@@ -7,36 +7,21 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.KvcmCacheMatchingConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.route.KvcmConfig;
-import org.flexlb.discovery.ServiceAddresses;
 import org.flexlb.discovery.ServiceDiscovery;
-import org.flexlb.kvcm.grpc.CommonResponseHeader;
-import org.flexlb.kvcm.grpc.ErrorCode;
-import org.flexlb.kvcm.grpc.GetClusterInfoRequest;
-import org.flexlb.kvcm.grpc.GetHostCacheStateRequest;
-import org.flexlb.kvcm.grpc.MetaServiceGrpc;
-import org.flexlb.kvcm.grpc.QueryType;
+import org.flexlb.kvcm.grpc.*;
 import org.springframework.stereotype.Component;
 import javax.annotation.PreDestroy;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.TimeUnit;
 
-/**
- * Queries KVCM MetaService for cache matches on the current Master candidates.
- */
+/** MU MetaService contract, consumed by the existing DSV cache lookup boundary. */
 @Component
 public final class KvcmGrpcClient implements AutoCloseable {
     private final KvcmCacheMatchingConfig options;
     private final KvcmConfig topology;
     private final ServiceDiscovery discovery;
     private final Map<String, ManagedChannel> channels = new LinkedHashMap<>();
-
     private volatile String leader;
-
     private volatile long refreshAt;
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -55,6 +40,8 @@ public final class KvcmGrpcClient implements AutoCloseable {
             throw new IllegalArgumentException("KVCM requires MODEL_SERVICE_CONFIG.kvcm address, port and namespace");
         }
     }
+
+    public boolean enabled() { return options != null; }
 
     public Map<String, Integer> findMatchingEngines(List<Long> keys, long blockSize, List<String> candidates) {
         if (!enabled()) throw new IllegalStateException("KVCM is disabled");
@@ -88,16 +75,11 @@ public final class KvcmGrpcClient implements AutoCloseable {
         }
     }
 
-    public boolean enabled() { return options != null; }
-
-    @Override @PreDestroy public synchronized void close() {
-        channels.values().forEach(ManagedChannel::shutdownNow); channels.clear();
-    }
-
     private synchronized String refresh(String instance, Deadline deadline) {
         if (leader != null && System.nanoTime() < refreshAt) return leader;
-        String bootstrap = ServiceAddresses.resolveFirst(
-                topology.getAddress(), topology.getPort(), discovery);
+        var hosts = discovery.getHosts(topology.getAddress());
+        String host = hosts.isEmpty() ? topology.getAddress() : hosts.get(0).getIp();
+        String bootstrap = host + ":" + topology.getPort();
         var cluster = MetaServiceGrpc.newBlockingStub(channel(bootstrap)).withDeadline(deadline)
                 .getClusterInfo(GetClusterInfoRequest.newBuilder().setInstanceId(instance).build());
         requireOk(cluster.getHeader());
@@ -114,12 +96,16 @@ public final class KvcmGrpcClient implements AutoCloseable {
         return leader;
     }
 
+    private static void requireOk(CommonResponseHeader header) {
+        if (header.getStatus().getCode() != ErrorCode.OK)
+            throw new IllegalStateException("KVCM " + header.getStatus().getCode() + ": " + header.getStatus().getMessage());
+    }
+
     private synchronized ManagedChannel channel(String address) {
         return channels.computeIfAbsent(address, key -> ManagedChannelBuilder.forTarget(key).usePlaintext().build());
     }
 
-    private static void requireOk(CommonResponseHeader header) {
-        if (header.getStatus().getCode() != ErrorCode.OK)
-            throw new IllegalStateException("KVCM " + header.getStatus().getCode() + ": " + header.getStatus().getMessage());
+    @Override @PreDestroy public synchronized void close() {
+        channels.values().forEach(ManagedChannel::shutdownNow); channels.clear();
     }
 }
