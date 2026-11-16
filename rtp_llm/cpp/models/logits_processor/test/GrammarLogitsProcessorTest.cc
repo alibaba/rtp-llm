@@ -1,6 +1,8 @@
 // Unit tests for GrammarLogitsProcessor over a 128-char ASCII vocab.
 
 #include "rtp_llm/cpp/models/logits_processor/GrammarLogitsProcessor.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
+#include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 #include "rtp_llm/cpp/engine_base/grammar/XGrammarBackend.h"
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
@@ -147,6 +149,31 @@ int expectCapOk(ErrorResult<int>&& result) {
 }
 
 }  // namespace
+
+TEST(GrammarLogitsProcessorFactoryTest, ShutdownReleasesReporterAndAllowsReinitialization) {
+    ModelConfig model_config;
+    auto        config            = grammarConfig();
+    config.tokenizer_info_json    = makeAsciiTokenizerInfo().SerializeJSON();
+    auto input                    = std::make_shared<GenerateInput>();
+    input->generate_config        = std::make_shared<GenerateConfig>();
+    input->generate_config->regex = "ab";
+
+    for (int cycle = 0; cycle < 2; ++cycle) {
+        auto reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+        std::weak_ptr<kmonitor::MetricsReporter> weak_reporter = reporter;
+        LogitsProcessorFactory::init(model_config, config, "", std::move(reporter));
+        EXPECT_FALSE(weak_reporter.expired());
+        EXPECT_TRUE(LogitsProcessorFactory::createLogitsProcessors(input, 1, 1, kEos).ok());
+
+        // KMonitor teardown deletes its monitors even if reporters still exist.
+        // The factory must release its reporter now, not at static destruction.
+        LogitsProcessorFactory::shutdown();
+        EXPECT_TRUE(weak_reporter.expired());
+        LogitsProcessorFactory::shutdown();
+        auto result = LogitsProcessorFactory::createLogitsProcessors(input, 1, 1, kEos);
+        EXPECT_FALSE(result.ok());
+    }
+}
 
 TEST(GrammarLogitsProcessorTest, ProcessMasksInitialDecodeState) {
     auto backend = makeBackend();
@@ -369,8 +396,7 @@ TEST(GrammarLogitsProcessorTest, UpdateStatusRollsBackEntireRejectedBatch) {
 TEST(GrammarLogitsProcessorTest, DegenerateSelfReferenceMasksEverythingAndRejectsCommit) {
     auto backend = makeBackend(/*terminate_without_stop_token=*/false);
     ASSERT_TRUE(backend);
-    auto proc = makeProcessorFromKey(backend,
-                                     {"json", R"json({
+    auto proc = makeProcessorFromKey(backend, {"json", R"json({
   "$ref": "#/definitions/Self",
   "definitions": {
     "Self": {"$ref": "#/definitions/Self"}

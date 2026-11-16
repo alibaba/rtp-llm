@@ -424,7 +424,7 @@ ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB&                   
                                        grpc::ServerContext* server_context) {
     output.reset();
     try {
-        output = QueryConverter::transQuery(&input_pb);
+        output                 = QueryConverter::transQuery(&input_pb);
         const auto& model_type = maga_init_params_.model_config_.model_type;
         if ((model_type == "qwen4_exp" || model_type == "qwen4_exp_mtp") && output->v41_inputs) {
             return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR,
@@ -990,7 +990,11 @@ grpc::Status LocalRpcServer::UpdateSchedulerInfo(grpc::ServerContext*           
                                                  const UpdateSchedulerInfoRequestPB* request,
                                                  EmptyPB*                            response) {
     const std::string scheduler_info = request->scheduler_info();
-    engine_->getScheduler().updateSchedulerInfo(scheduler_info);
+    try {
+        engine_->getScheduler().updateSchedulerInfo(scheduler_info);
+    } catch (const std::exception& e) {
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, e.what());
+    }
     return grpc::Status::OK;
 }
 

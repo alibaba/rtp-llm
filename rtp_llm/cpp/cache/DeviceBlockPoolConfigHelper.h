@@ -83,6 +83,12 @@ public:
                                 group_layer_ids.size());
         RTP_LLM_CHECK_WITH_INFO(!config.memory_layouts.empty(), "group tag=%s has no layers", group.tag.c_str());
         config.total_size_bytes = current_offset;
+        const auto tiered       = cache_config.tiered_cache_configs.find(group.tag);
+        if (tiered != cache_config.tiered_cache_configs.end()) {
+            config.offload              = tiered->second;
+            config.offload_layout       = spec->entryLayout();
+            config.offload_owner_layers = group_layer_ids;
+        }
         return config;
     }
 
@@ -113,8 +119,8 @@ private:
         cfg.enable_hybrid_attention = enable_hybrid_attention;
         // Sparse GQA still owns ordinary MHA K/V and FP32 per-token/head scales.
         // Byte-packed scales belong to MLA/indexer regions, not the model-wide sparse flag.
-        cfg.is_mla = spec->type != KVCacheSpecType::MultiHeadAttention
-                     && (cache_config.use_mla || cache_config.is_sparse);
+        cfg.is_mla =
+            spec->type != KVCacheSpecType::MultiHeadAttention && (cache_config.use_mla || cache_config.is_sparse);
         cfg.use_mla                    = cache_config.use_mla;
         cfg.seq_size_per_block         = seq_size_per_block;
         cfg.kernel_blocks_per_kv_block = kernel_blocks_per_kv_block;

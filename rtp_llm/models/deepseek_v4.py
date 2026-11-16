@@ -633,6 +633,40 @@ class DeepSeekV4(DeepSeekV2):
     `_create_python_model` until M2 lands the HCA-only forward path.
     """
 
+    def _configure_sparse_kv_offload(self) -> None:
+        from rtp_llm.ops import CacheOffloadPolicy
+
+        if self.model_config.model_type not in {"deepseek_v4", "deepseek_v4_dspark"}:
+            raise ValueError(
+                "V4 sparse KV offload requires the V4 target/DSpark adapter"
+            )
+        if self.model_config.attn_config.kv_cache_dtype != KvCacheDataType.FP8:
+            raise ValueError("V4 sparse KV offload requires FP8 KV cache")
+        from rtp_llm.utils.sparse_kv_offload import sparse_kv_offload_max_selected_rows
+
+        selected = sparse_kv_offload_max_selected_rows(
+            int(self.kv_cache_config.sparse_kv_offload_hot_rows),
+            int(self.model_config.attn_config.indexer_topk),
+            self.max_generate_batch_size,
+            int(self.model_config.gen_num_per_cycle),
+        )
+        descs = self.model_config.kv_cache_spec_descs
+        for layer in descs:
+            for desc in layer:
+                # HCA is dense over its 128x-compressed history; SWA and
+                # compressor state are bounded rings. Only CSA is sparse.
+                if desc.tag == "csa_kv":
+                    if desc.entry_elems != 584 or desc.compression_ratio != 4:
+                        raise ValueError(
+                            "V4 offload requires native 4x-compressed FP8 CSA pages"
+                        )
+                    policy = CacheOffloadPolicy()
+                    policy.enabled = True
+                    policy.max_selected_rows = selected
+                    policy.max_requests = self.max_generate_batch_size
+                    desc.offload = policy
+        self.model_config.kv_cache_spec_descs = descs
+
     @classmethod
     def _create_config(cls, ckpt_path: str):
         config = ModelConfig()

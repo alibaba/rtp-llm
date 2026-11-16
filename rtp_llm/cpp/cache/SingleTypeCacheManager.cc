@@ -7,6 +7,11 @@
 namespace rtp_llm {
 
 bool SingleTypeCacheManager::init() {
+    if (block_pool_->isOffload()) {
+        RTP_LLM_CHECK_WITH_INFO(block_pool_->allLayerOffloadStorage().size() == global_layer_to_local_layer.size(),
+                                "offload owner count does not match group layers");
+        return true;
+    }
     auto layer_tensors = block_pool_->allLayerCacheBase();
     auto scale_tensors = block_pool_->allLayerScaleCacheBase();
 

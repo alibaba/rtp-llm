@@ -59,7 +59,8 @@ bool FullCacheManager::malloc(BlockIds&            block_ids,
                               bool                 enable_reuse_cache,
                               int                  reserve_step,
                               std::vector<size_t>* backfilled_positions,
-                              const RequiredPositions& /*required_positions*/) {
+                              const RequiredPositions& /*required_positions*/,
+                              int initial_seq_len) {
     if (backfilled_positions != nullptr) {
         backfilled_positions->clear();
     }
@@ -89,7 +90,20 @@ bool FullCacheManager::malloc(BlockIds&            block_ids,
         }
     }
 
-    auto result = block_pool_->malloc(static_cast<size_t>(need_blocks_num));
+    // Prefix reuse and staged admission may already have blocks in either tier.
+    // Initial routing still considers the entire request; only later growth
+    // follows its last allocated block (ignoring unloaded placeholders).
+    BlockIdxType last_block = 0;
+    if (initial_seq_len == 0) {
+        for (auto it = existing_blocks.rbegin(); it != existing_blocks.rend(); ++it) {
+            if (!isNullBlockIdx(*it)) {
+                last_block = *it;
+                break;
+            }
+        }
+    }
+    const int request_blocks = needBlocksNum(std::max(seq_len, initial_seq_len), 0, reserve_step);
+    auto      result = block_pool_->mallocForRequest(static_cast<size_t>(need_blocks_num), request_blocks, last_block);
     if (!result.has_value() || result->size() != static_cast<size_t>(need_blocks_num)) {
         return false;
     }

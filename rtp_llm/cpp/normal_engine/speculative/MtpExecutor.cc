@@ -60,8 +60,31 @@ int MtpExecutor::selectMtpPreviousSeqLenUpperBound(bool pending, int previous_ne
     return pending && previous_next_bound > 0 ? previous_next_bound : host_seq_len;
 }
 
-GptModelOutputs MtpExecutor::forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role) {
+GptModelOutputs
+MtpExecutor::forwardModel(ModelBase* model, GptModelInputs& inputs, ModelInputsModelRole role, bool is_draft_extend) {
     RTP_LLM_CHECK_WITH_INFO(model != nullptr, "model is null before forward");
+    inputs.is_draft_extend = is_draft_extend;
+    if (cache_manager_ && cache_manager_->hasSparseKvOffload()) {
+        // Allocation, P/D loads and speculative cache swaps may invalidate
+        // resident rows. Publish their generations before either model reads
+        // them, including the draft extend following rejection sampling.
+        auto offload_inputs = inputs;
+        if (isTpRank0()) {
+            offload_inputs.kv_cache_generation_updates = cache_manager_->takeOffloadVersionUpdates();
+        }
+        tpSyncModelInputs(offload_inputs, parallelism_config_);
+        cache_manager_->resizeOffloadHotCache(offload_inputs.is_fake_stream ? 0 : offload_inputs.input_lengths.size(0),
+                                              /*grow_only=*/role != ModelInputsModelRole::TARGET);
+        if (offload_inputs.kv_cache_generation_updates.defined()) {
+            buffer_holder_.hold_host(offload_inputs.kv_cache_generation_updates);
+            cache_manager_->publishOffloadVersions(offload_inputs.kv_cache_generation_updates,
+                                                   offload_inputs.kv_cache_group_tags);
+        }
+        if (model_inputs_logger_) {
+            model_inputs_logger_->log(offload_inputs, role, model->model_id_);
+        }
+        return model->forward(offload_inputs);
+    }
     if (model_inputs_logger_) {
         model_inputs_logger_->log(inputs, role, model->model_id_);
     }
@@ -1035,6 +1058,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         tpSyncModelInputs(model_input, parallelism_config_);
         target_only = model_input.skip_lm_head;
         if (model_input.skip_run) {
+            if (cache_manager_) {
+                cache_manager_->resizeOffloadHotCache(0);
+            }
             return absl::OkStatus();
         }
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -1413,6 +1439,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         // tpSyncModelInputs so every TP rank enters and leaves the same collective.
         model_input.skip_run = shouldSkipEmptyDecode(streams.empty());
         if (model_input.skip_run) {
+            if (cache_manager_) {
+                cache_manager_->resizeOffloadHotCache(0);
+            }
             tpSyncModelInputs(model_input, parallelism_config_);
             return absl::OkStatus();
         }
@@ -1431,8 +1460,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         return target_execution_status;
     }
 
-    mtp::DSparkRoundState                     dspark_round_state;
-    size_t                                    batch_size = 0;
+    mtp::DSparkRoundState dspark_round_state;
+    size_t                batch_size = 0;
 
     if (is_dspark_) {
         // Proposal and target verification are two model phases with different
@@ -1494,6 +1523,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             }
             tpSyncModelInputs(model_input, parallelism_config_);
             if (model_input.skip_run) {
+                if (cache_manager_) {
+                    cache_manager_->resizeOffloadHotCache(0);
+                }
                 return absl::OkStatus();
             }
             beginProfiledWork();
@@ -1581,13 +1613,13 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         launch_spec_logits_phase();
     }
 
-    // Launch draft-prefill prepare BEFORE target verify forward so it overlaps
-    // with target verify GPU work instead of running serially after it. Sync
-    // on this prepare happens just before draft_model_forward below.
-    // DSpARK commit reuses the verify token/length geometry verbatim. Only its
-    // rank-local feature tensor is bound after target forward, so attention
-    // preparation can overlap target verification just like ordinary MTP.
-    launchDraftPrefillPrepareAsync(model_input);
+    // Only dense commit layouts preserve verify's token/length geometry.
+    // Ordinary host-state MTP compacts to accept_len after rejection; preparing
+    // its metadata now would retain rejected rows in RoPE and KV writes.
+    const bool draft_geometry_preserved = is_dspark_ || useStreamAsync() || useAsyncDeviceState();
+    if (draft_geometry_preserved) {
+        launchDraftPrefillPrepareAsync(model_input);
+    }
 
     SpeculativeTargetCommitGuard target_commit_guard(model_.get());
 
@@ -1831,6 +1863,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     launchDraftPrefillPrepareAsync(model_input, /*post_rejection=*/true);
     broadcastPostRejectionInputs(model_input);
 
+    if (!draft_geometry_preserved) {
+        launchDraftPrefillPrepareAsync(model_input);
+    }
     draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
 
     {
@@ -2041,6 +2076,7 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
     model_input_copy.sequence_lengths =
         torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     model_input_copy.is_target_verify = true;
+    model_input_copy.is_draft_extend  = false;
     ensureModelInputsOnCuda(model_input_copy, "decode.target_prepare");
 
     // Device-first inputs are produced on the main stream; the async prepare
@@ -2083,8 +2119,10 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
     // AsyncRunner value-captures model_input on its own stream/thread, so later
     // main-stream mutations cannot affect draft prefill prepare.
-    auto* draft_prefill_model = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
-    auto  model_input_copy    = model_input;
+    auto* draft_prefill_model         = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
+    auto  model_input_copy            = model_input;
+    model_input_copy.is_target_verify = is_dspark_;
+    model_input_copy.is_draft_extend  = true;
     mtp::applyCacheStrideToModelInput(model_input_copy, mtp_cache_cfg);
     ensureModelInputsOnCuda(model_input_copy, "decode.draft_prefill_prepare");
     auto input_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
@@ -2149,7 +2187,6 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
     model_input.is_target_verify = false;
     return model_output;
 }
-
 
 bool MtpExecutor::asyncPrepareAllowed(bool requested, bool target_commit_hooks) {
     return requested && !target_commit_hooks;
@@ -2508,6 +2545,7 @@ GptModelOutputs MtpExecutor::runDSparkProposeForward(GptModelInputs& model_input
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dspark_propose_forward)");
     maybePrintModelInput(model_input, "decode dspark propose model");
     model_input.is_target_verify = true;
+    model_input.is_draft_extend  = false;
     ensureModelInputsOnCuda(model_input, "decode.dspark_propose_forward");
     return draft_model_->forward(model_input);
 }
@@ -2576,6 +2614,7 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
     // Use sp_prefill_draft_model_ if CUDA graph is enabled, otherwise use draft_model_.
     auto* draft_prefill_model = sp_prefill_draft_model_ ? sp_prefill_draft_model_.get() : draft_model_.get();
     RTP_LLM_CHECK_WITH_INFO(draft_prefill_model != nullptr, "commit model is null before forward");
+    model_input.is_draft_extend = true;
     if (speculativeTargetTransactionsEnabled()) {
         // Hooks mode disables the speculative early prepare. Rebuild draft
         // prefill metadata from the post-rejection input immediately before
@@ -2589,7 +2628,8 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
             draft_prefill_model->prepareAttentionInputs(model_input);
         }
     }
-    auto draft_prefill_model_output = draft_prefill_model->forward(model_input);
+    auto draft_prefill_model_output =
+        forwardModel(draft_prefill_model, model_input, ModelInputsModelRole::DRAFT_PREFILL, /*is_draft_extend=*/true);
     // Ordinary MTP chains this output into the next autoregressive draft step.
     if (!is_dspark_) {
         mtp::maybeOverrideLastHiddenWithMtpBuffer(draft_prefill_model_output, *draft_prefill_model);

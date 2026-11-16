@@ -8,10 +8,12 @@ cc_library(
     name = "device_block_pool",
     srcs = [
         "block_pool/DeviceBlockPool.cc",
+        "block_pool/OffloadDeviceBuffer.cc",
         "block_pool/IBlockPool.cc",
     ],
     hdrs = [
         "block_pool/DeviceBlockPool.h",
+        "block_pool/OffloadDeviceBuffer.h",
         "block_pool/IBlockPool.h",
     ],
     copts = copts(),
@@ -20,6 +22,7 @@ cc_library(
         "//rtp_llm/cpp/cache:block_info",
         "//rtp_llm/cpp/cache:cache_types",
         "//rtp_llm/cpp/cache:memory_layout_strategy",
+        "//rtp_llm/models_py/bindings/core:type_convert",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/utils:core_utils",
     ] + torch_deps() + select({
@@ -27,6 +30,7 @@ cc_library(
             "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
             "@local_config_cuda//cuda:cuda_headers",
             "@local_config_cuda//cuda:cudart",
+            "@local_config_cuda//cuda:cuda_driver",
         ],
         "//conditions:default": [],
     }),

@@ -144,7 +144,7 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
     if (!grammar_key_result.ok()) {
         return grammar_key_result.status();
     }
-    GrammarKeyCpp grammar_key = std::move(grammar_key_result.value());
+    GrammarKeyCpp grammar_key               = std::move(grammar_key_result.value());
     bool          output_vocab_incompatible = !grammar_key.empty();
 
     // Thinking constraints reach the execution layer as normalized grammar.
@@ -179,7 +179,8 @@ LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> ge
                 }
                 return ErrorInfo(error_code, std::string(matcher_or.status().message()));
             }
-            auto grammar_processor = std::make_shared<GrammarLogitsProcessor>(std::move(matcher_or.value()), eos_token_id);
+            auto grammar_processor =
+                std::make_shared<GrammarLogitsProcessor>(std::move(matcher_or.value()), eos_token_id);
             result.push_back(std::move(grammar_processor));
         }
     }

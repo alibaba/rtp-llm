@@ -12,6 +12,39 @@ filegroup(
     ),
 )
 
+custom_smoke_test(
+    name = "glm5_mtp_offload_model_test",
+    main = "glm5_mtp_offload_test.py",
+    args = ["Glm5MtpOffloadTest.test_native_pd"],
+    smoke_args = "--world_size 2",
+    gpu_type = ["SM103_CU13"],
+    tags = ["model_contract", "pd_contract"],
+    data = ["//rtp_llm:sdk", "offload_test_hooks/sitecustomize.py"],
+)
+
+custom_smoke_test(
+    name = "dsv4_sparse_kv_offload_accuracy_model_test",
+    main = "dsv4_sparse_kv_offload_accuracy_test.py",
+    args = ["Dsv4SparseKVOffloadAccuracyTest.test_full_model_dspark_pd"],
+    smoke_args = "--world_size 4",
+    gpu_type = ["SM103_CU13"],
+    tags = ["model_contract", "pd_contract", "accuracy_contract"],
+    data = ["//rtp_llm:sdk"],
+)
+
+custom_smoke_test(
+    name = "sparse_kv_offload_accuracy_model_test",
+    main = "sparse_kv_offload_accuracy_test.py",
+    args = [
+        "SparseKVOffloadAccuracyTest.test_glm_fp8_accuracy",
+        "SparseKVOffloadAccuracyTest.test_deepseek_v32_accuracy",
+    ],
+    smoke_args = "--world_size 2",
+    gpu_type = ["SM103_CU13"],
+    tags = ["model_contract", "pd_contract", "accuracy_contract"],
+    data = ["//rtp_llm:sdk", "sparse_kv_offload_test.py"],
+)
+
 py_test(
     name = "disk_path_preparation_test",
     srcs = glob(
@@ -67,6 +100,30 @@ exports_files([
     "entry.py",
     "data/prompt_candidates.json",
 ])
+
+custom_smoke_test(
+    name = "sparse_kv_offload_model_test",
+    main = "sparse_kv_offload_test.py",
+    args = [
+        "SparseKVOffloadModelTest.test_glm_fp8",
+        "SparseKVOffloadModelTest.test_glm_bf16",
+        "SparseKVOffloadModelTest.test_deepseek_v32",
+    ],
+    smoke_args = "--world_size 2",
+    gpu_type = ["SM103_CU13"],
+    tags = ["model_contract", "pd_contract"],
+    data = ["//rtp_llm:sdk"],
+)
+
+custom_smoke_test(
+    name = "glm53_sparse_kv_offload_model_test",
+    main = "sparse_kv_offload_test.py",
+    args = ["SparseKVOffloadModelTest.test_glm53"],
+    smoke_args = "--world_size 2",
+    gpu_type = ["SM103_CU13"],
+    tags = ["model_contract", "pd_contract"],
+    data = ["//rtp_llm:sdk", "offload_test_hooks/sitecustomize.py"],
+)
 
 filegroup(
     name = "smoke_model_configs",

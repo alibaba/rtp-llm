@@ -6,7 +6,7 @@ import sys
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 from unittest import SkipTest, TestCase, main
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import torch
 import torch.nn.functional as F
@@ -118,6 +118,9 @@ class RecordingSparseMlaImpl(MlaImplBase):
 def make_sparse_routing_attention():
     attention = object.__new__(MlaAttention)
     torch.nn.Module.__init__(attention)
+    attention.offload_plan = None
+    attention.offload_writer = None
+    attention.reuse_topk_indices = False
     topk_indices = torch.tensor([[1]], dtype=torch.int32)
     attention.indexer = Mock(return_value=topk_indices)
     attention.q_lora_rank = 0
@@ -260,6 +263,113 @@ class SparseMlaRoutingTest(TestCase):
         self.assertIs(default_impl.calls[0][5], None)
         attention.indexer.assert_not_called()
         indexer_cache_store_writer.write.assert_not_called()
+
+    def test_shared_indexer_empty_cp_rank_still_gathers_and_writes_kv(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
+            flashmla_sparse_cp_impl as cp_impl,
+        )
+
+        attention, _ = make_sparse_routing_attention()
+        attention.reuse_topk_indices = True
+        attention.indexer = None
+        default_inputs = self._attention_inputs("default")
+        default_impl = RecordingSparseMlaImpl(default_inputs, torch.empty(0))
+        indexer_impl = RecordingSparseMlaImpl(
+            self._attention_inputs("indexer_kv"), torch.empty(0)
+        )
+        local_query_ids = torch.empty(0, dtype=torch.int64)
+        indexer_impl.cp_params = SimpleNamespace(total_local_ids=local_query_ids)
+
+        # Exercise the production CP forward up to its padding-only return.
+        # Tensor shapes and collectives are CPU-controlled; no attention kernel
+        # or GPU allocation is needed for a rank with no valid query rows.
+        op = object.__new__(cp_impl.SparseMlaFp8CPOp)
+        op.total_local_ids = local_query_ids
+        op.kv_restore_unpad_indices = torch.tensor([0, 2])
+        op.kv_lora_rank = 1
+        op.mla_params = object()
+        op.attn_inputs = default_inputs
+        op.write_cache_store_impl = None
+        events = []
+        op.kv_cache_write_op = Mock()
+        op.kv_cache_write_op.forward.side_effect = lambda *args: events.append("write")
+
+        def gather(tensor, group):
+            events.append("gather")
+            return torch.cat((tensor, tensor), dim=0)
+
+        def forward_cp(q, compressed_kv, k_pe, cache, layer_id, topk_indices):
+            self.assertIsNone(topk_indices)
+            output = op.forward(
+                q,
+                compressed_kv,
+                k_pe,
+                topk_indices,
+                torch.empty(0, dtype=torch.int32),
+                cache,
+                layer_id,
+            )
+            return output.expand(-1, -1, attention.v_head_dim)
+
+        default_impl.forward = Mock(side_effect=forward_cp)
+        with patch.object(cp_impl, "all_gather", side_effect=gather), patch.object(
+            cp_impl.common,
+            "apply_write_cache_store",
+            side_effect=lambda *args: events.append("publish"),
+        ), patch.object(cp_impl, "flash_mla_with_kvcache") as kernel:
+            output, topk = attention(
+                torch.zeros((2, 4)),
+                {"default": default_impl, "indexer_kv": indexer_impl},
+                {"default": self.default_cache, "indexer_kv": self.indexer_cache},
+                return_topk=True,
+            )
+
+        self.assertIsNone(topk)
+        self.assertTrue(torch.equal(output, torch.zeros((2, 2))))
+        self.assertEqual(events, ["gather", "gather", "write", "publish"])
+        kernel.assert_not_called()
+        written = op.kv_cache_write_op.forward.call_args.args
+        self.assertIs(written[2], self.default_cache)
+        self.assertEqual(tuple(written[0].shape), (2, 1))
+
+    def test_shared_indexer_rejects_missing_topk_for_real_queries(self):
+        attention, _ = make_sparse_routing_attention()
+        attention.reuse_topk_indices = True
+        attention.indexer = None
+        hidden = torch.zeros((2, 4))
+        q = torch.zeros((2, 1, 2))
+        for prefill, cp_params in (
+            (True, None),
+            (True, SimpleNamespace(total_local_ids=None)),
+            (True, SimpleNamespace(total_local_ids=torch.tensor([0]))),
+            (False, SimpleNamespace(total_local_ids=torch.empty(0))),
+        ):
+            with self.subTest(prefill=prefill, cp_params=cp_params):
+                impl = RecordingSparseMlaImpl(
+                    SimpleNamespace(is_prefill=prefill), torch.empty(0)
+                )
+                impl.cp_params = cp_params
+                with self.assertRaisesRegex(RuntimeError, "needs previous top-k"):
+                    attention._run_sparse_indexer(
+                        hidden, None, q, self.indexer_cache, impl
+                    )
+
+    def test_shared_indexer_preserves_supplied_topk(self):
+        attention, topk = make_sparse_routing_attention()
+        attention.reuse_topk_indices = True
+        attention.indexer = None
+        impl = RecordingSparseMlaImpl(
+            self._attention_inputs("indexer_kv"), torch.empty(0)
+        )
+        reused = attention._run_sparse_indexer(
+            torch.zeros((2, 4)),
+            None,
+            torch.zeros((2, 1, 2)),
+            self.indexer_cache,
+            impl,
+            topk,
+        )
+        self.assertIs(reused, topk)
 
 
 class MLATest(TestCase):

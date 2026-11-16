@@ -76,25 +76,25 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
         // it keeps the full checkpoint config instead of an MTP module plan.
         auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
         mtp_params->push_back(std::move(std::make_unique<EngineInitParams>(model_id,
-                                                                          model_config,
-                                                                          base_params.parallelism_config,
-                                                                          base_params.runtime_config,
-                                                                          base_params.pd_sep_config,
-                                                                          base_params.concurrency_config,
-                                                                          base_params.fmha_config,
-                                                                          base_params.kv_cache_config,
-                                                                          base_params.profiling_debug_logging_config,
-                                                                          base_params.hw_kernel_config,
-                                                                          base_params.moe_config,
-                                                                          base_params.sp_config,
-                                                                          base_params.cache_store_config,
-                                                                          base_params.misc_config,
-                                                                          base_params.arpc_config,
-                                                                          base_params.grpc_config,
-                                                                          base_params.vit_config,
-                                                                          std::move(*gpt_weight),
-                                                                          py::none(),
-                                                                          py_eplb)));
+                                                                           model_config,
+                                                                           base_params.parallelism_config,
+                                                                           base_params.runtime_config,
+                                                                           base_params.pd_sep_config,
+                                                                           base_params.concurrency_config,
+                                                                           base_params.fmha_config,
+                                                                           base_params.kv_cache_config,
+                                                                           base_params.profiling_debug_logging_config,
+                                                                           base_params.hw_kernel_config,
+                                                                           base_params.moe_config,
+                                                                           base_params.sp_config,
+                                                                           base_params.cache_store_config,
+                                                                           base_params.misc_config,
+                                                                           base_params.arpc_config,
+                                                                           base_params.grpc_config,
+                                                                           base_params.vit_config,
+                                                                           std::move(*gpt_weight),
+                                                                           py::none(),
+                                                                           py_eplb)));
         return std::move(
             std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params)));
     }
@@ -136,7 +136,7 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
                                                                            base_params.misc_config,
                                                                            base_params.arpc_config,
                                                                            base_params.grpc_config,
-                                                                            base_params.vit_config,
+                                                                           base_params.vit_config,
                                                                            std::move(*gpt_weight),
                                                                            py::none(),
                                                                            py_eplb)));
@@ -239,14 +239,14 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
         auto kv_cache_config    = engine_config.attr("kv_cache_config").cast<KVCacheConfig>();
         auto profiling_debug_logging_config =
             engine_config.attr("profiling_debug_logging_config").cast<ProfilingDebugLoggingConfig>();
-        auto hw_kernel_config       = engine_config.attr("hw_kernel_config").cast<HWKernelConfig>();
-        auto moe_config             = engine_config.attr("moe_config").cast<MoeConfig>();
-        auto sp_config              = engine_config.attr("sp_config").cast<SpeculativeExecutionConfig>();
-        auto cache_store_config     = engine_config.attr("cache_store_config").cast<CacheStoreConfig>();
-        auto misc_config            = engine_config.attr("misc_config").cast<MiscellaneousConfig>();
-        auto arpc_config            = engine_config.attr("arpc_config").cast<ArpcConfig>();
-        auto grpc_config            = engine_config.attr("grpc_config").cast<GrpcConfig>();
-        auto grammar_config         = engine_config.attr("grammar_config").cast<GrammarConfig>();
+        auto hw_kernel_config   = engine_config.attr("hw_kernel_config").cast<HWKernelConfig>();
+        auto moe_config         = engine_config.attr("moe_config").cast<MoeConfig>();
+        auto sp_config          = engine_config.attr("sp_config").cast<SpeculativeExecutionConfig>();
+        auto cache_store_config = engine_config.attr("cache_store_config").cast<CacheStoreConfig>();
+        auto misc_config        = engine_config.attr("misc_config").cast<MiscellaneousConfig>();
+        auto arpc_config        = engine_config.attr("arpc_config").cast<ArpcConfig>();
+        auto grpc_config        = engine_config.attr("grpc_config").cast<GrpcConfig>();
+        auto grammar_config     = engine_config.attr("grammar_config").cast<GrammarConfig>();
 
         // Extract vit_config
         const VitConfig vit_config_cpp = extractVitConfig(vit_config);

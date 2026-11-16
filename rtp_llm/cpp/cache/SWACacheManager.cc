@@ -21,6 +21,10 @@ bool shouldAllocateBlock(int block_idx, int seq_slots, int reserve_step, int act
     return is_reserve || isActiveTailBlock(block_idx, seq_slots, active_tail_blocks);
 }
 
+int reserveBlocks(int reserve_tokens, int seq_size_per_block) {
+    return reserve_tokens > 0 ? (reserve_tokens + seq_size_per_block - 1) / seq_size_per_block : 0;
+}
+
 int estimatePeakFromSlotCosts(std::vector<int> block_costs,
                               int              first_decode_slots,
                               int              first_decode_tail_start,
@@ -141,6 +145,7 @@ int SWACacheManager::estimatePeakNeedBlocks(int                     seq_len,
         return std::accumulate(block_costs.begin(), block_costs.end(), 0) - allocated_blocks;
     }
     const int decode_tokens = std::max(1, reserve_step);
+    const int reserve_blocks = reserveBlocks(reserve_step, seqSizePerBlock());
     const int peak_blocks =
         estimatePeakFromSlotCosts(std::move(block_costs),
                                   needBlocksNum(seq_len + 1, 0, reserve_step),
@@ -149,7 +154,7 @@ int SWACacheManager::estimatePeakNeedBlocks(int                     seq_len,
                                   needBlocksNum(seq_len + remaining_tokens, 0, reserve_step),
                                   needBlocksNum(decode_tokens, 0),
                                   1,
-                                  active_tail_blocks + reserve_step);
+                                  active_tail_blocks + reserve_blocks);
     return std::max(peak_blocks - allocated_blocks, 0);
 }
 
@@ -177,6 +182,7 @@ int SWACacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
         return std::accumulate(block_costs.begin(), block_costs.end(), 0);
     }
     const int decode_tokens = std::max(1, reserve_step);
+    const int reserve_blocks = reserveBlocks(reserve_step, seqSizePerBlock());
     return estimatePeakFromSlotCosts(
         std::move(block_costs),
         needBlocksNum(seq_len + 1, 0, reserve_step),
@@ -185,7 +191,7 @@ int SWACacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
         needBlocksNum(seq_len + remaining_tokens, 0, reserve_step),
         needBlocksNum(decode_tokens, 0),
         batch_size,
-        active_tail_blocks + reserve_step);
+        active_tail_blocks + reserve_blocks);
 }
 
 NeedBlocksInfo SWACacheManager::getNeedBlocks(int                      common_seq_len,
@@ -220,7 +226,8 @@ bool SWACacheManager::malloc(BlockIds&                block_ids,
                              bool                     enable_reuse_cache,
                              int                      reserve_step,
                              std::vector<size_t>*     backfilled_positions,
-                             const RequiredPositions& required_positions) {
+                             const RequiredPositions& required_positions,
+                             int /*initial_seq_len*/) {
     (void)reserve_step;
     return mallocImpl(block_ids,
                       seq_len,
@@ -338,10 +345,13 @@ void SWACacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse
     (void)enable_reuse_cache;
     const int active_tail_blocks = activeTailBlockCount();
     const int block_size         = static_cast<int>(block_indices.size());
+    // reserve_step counts tokens, while block_indices also includes their reserved slots.
+    // Retain enough extra blocks to cover those tokens without treating each token as a block.
+    const int reserve_blocks = reserveBlocks(reserve_step, seqSizePerBlock());
 
     BlockIndicesType    blocks_to_free;
     std::vector<size_t> pos_to_remove;
-    for (int i = block_size - active_tail_blocks - 1 - reserve_step; i >= 0; i--) {
+    for (int i = block_size - active_tail_blocks - 1 - reserve_blocks; i >= 0; i--) {
         if (isNullBlockIdx(block_indices[i])) {
             continue;
         }

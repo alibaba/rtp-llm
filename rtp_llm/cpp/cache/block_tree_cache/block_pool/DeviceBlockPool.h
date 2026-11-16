@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -10,6 +11,8 @@
 #include <torch/torch.h>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
+#include "rtp_llm/cpp/cache/BufferTypes.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutConfig.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h"
@@ -23,10 +26,14 @@ class MemoryUtil;
 // lifecycle; physical_block_count is reconciled against memory_layouts[*].block_num by
 // normalizeConfig() - see DeviceBlockPool.cc.
 struct DeviceBlockPoolConfig: public BlockPoolConfigBase {
-    size_t                          total_size_bytes{0};
-    std::vector<MemoryLayoutConfig> memory_layouts;
-    bool                            use_pinned_cpu_backing{false};
-    bool                            use_device_malloc_backing{false};
+    size_t                           total_size_bytes{0};
+    std::vector<MemoryLayoutConfig>  memory_layouts;
+    bool                             use_pinned_cpu_backing{false};
+    bool                             use_device_malloc_backing{false};
+    std::optional<TieredCacheConfig> offload;
+    CacheEntryLayout                 offload_layout;
+    std::vector<int>                 offload_owner_layers;
+    bool                             offload_version_owner{true};
 };
 
 class DeviceBlockPool;
@@ -40,6 +47,10 @@ public:
     // Allocates the backing buffer, builds the per-layout MemoryLayoutStrategy objects and
     // the global-layer -> (layout, local layer) mapping. Invariants enforced via RTP_LLM_CHECK.
     bool init();
+
+    // Prefer host for a request larger than its share of currently free HBM.
+    // Growth follows last_block's tier; either tier may supply overflow blocks.
+    std::optional<BlockIdList> mallocForRequest(size_t n, size_t request_blocks, BlockIdxType last_block = 0);
 
     void incRef(BlockIdxType block);
     void incRef(const BlockIdList& blocks);
@@ -71,9 +82,16 @@ public:
     // Stable CUDA device index of the backing buffer. Returns -1 for non-CUDA builds.
     int deviceIndex() const;
 
-    MemoryType                 where() const;
-    std::vector<torch::Tensor> allLayerCacheBase() const;
-    std::vector<torch::Tensor> allLayerScaleCacheBase() const;
+    MemoryType                                    where() const;
+    std::vector<torch::Tensor>                    allLayerCacheBase() const;
+    std::vector<torch::Tensor>                    allLayerScaleCacheBase() const;
+    bool                                          isOffload() const;
+    const std::vector<OffloadStoragePtr>&         allLayerOffloadStorage() const;
+    std::vector<std::pair<BlockIdxType, int64_t>> takeOffloadVersionUpdates();
+    void                                          markOffloadOverwrite(const BlockIdList& blocks);
+    size_t                                        offloadHostSizeBytes() const;
+    size_t                                        offloadDeviceSizeBytes() const;
+    void                                          resizeOffloadHotCache(size_t requests, bool grow_only = false);
 
     void    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
     void    deregUserMr();
@@ -96,11 +114,14 @@ public:
     std::string debugString() const override;
 
 protected:
+    void onAllocatedNoLock(BlockIdxType block) override;
     void onFirstTreeRefNoLock(BlockIdxType block) override;
     bool onLastTreeRefNoLock(BlockIdxType block) override;
     bool hasExternalRefNoLock(BlockIdxType block) const override;
 
 private:
+    size_t offload_hbm_share_denominator_{0};
+
     bool hasRequestRefNoLock(BlockIdxType block) const;
     // global_layer_id -> {layout_index, local_layer_id}
     std::pair<int, int> mapGlobalLayerIdToLocal(int global_layer_id) const;
@@ -111,7 +132,9 @@ private:
          normalizeConfig(const std::shared_ptr<const DeviceBlockPoolConfig>& config);
     void initializeCacheBuffer();
     void initializePinnedCpuBuffer();
-    void initializeDeviceMallocBuffer();
+    void initializeDeviceMallocBuffer(size_t bytes);
+    void initializeOffloadStorage();
+    void changeOffloadMr(const std::shared_ptr<MemoryUtil>& memory_util, bool registering);
     void initializeLayerMappings();
     void initializeLayoutStrategies();
 
@@ -146,8 +169,13 @@ private:
     std::vector<uint32_t> refcounts_;
     size_t                request_referenced_blocks_num_{0};
 
-    torch::Tensor cache_aligned_buffer_;
-    void*         cache_base_ptr_{nullptr};
+    torch::Tensor                  cache_aligned_buffer_;
+    torch::Tensor                  offload_host_buffer_;
+    std::vector<OffloadStoragePtr> offload_storages_;
+    std::vector<int64_t>           offload_cpu_generations_;
+    std::vector<uint8_t>           offload_dirty_;
+    BlockIdList                    offload_dirty_blocks_;
+    void*                          cache_base_ptr_{nullptr};
 
     bool                        kvcache_reg_mr_  = false;
     int64_t                     mr_cost_time_ms_ = 0;

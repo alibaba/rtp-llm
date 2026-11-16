@@ -78,7 +78,11 @@ struct KVCacheSpecDesc {
     std::optional<CacheMemoryPolicyDesc>   memory;
     std::optional<CacheTailPolicyDesc>     tail;
     std::optional<CacheCpPolicyDesc>       cp;
-    TpCacheTransferMode                    tp_transfer_mode = TpCacheTransferMode::LEGACY;
+    std::optional<CacheOffloadPolicy>      offload;
+    // Equal IDs within a tag share runtime metadata; unset means one runtime per storage.
+    std::optional<uint32_t> offload_runtime_group;
+
+    TpCacheTransferMode tp_transfer_mode = TpCacheTransferMode::LEGACY;
 };
 
 struct SpecBuildContext {

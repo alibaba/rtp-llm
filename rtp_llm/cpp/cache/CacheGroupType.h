@@ -50,6 +50,13 @@ enum class CpBlockSliceMode : int8_t {
     PAYLOAD_BYTES = 2,
 };
 
+struct CacheOffloadPolicy {
+    bool     enabled           = false;
+    uint32_t max_selected_rows = 0;
+    // Zero preserves the full-batch quota of legacy serialized descriptors.
+    uint32_t max_requests = 0;
+};
+
 struct CacheGroupPolicy {
     CacheGroupType       group_type             = CacheGroupType::FULL;
     bool                 enable_prefix_reuse    = true;
@@ -65,7 +72,8 @@ struct CacheGroupPolicy {
     // window is configured and remains the default for non-SWA groups.
     int sliding_window_size = 0;
     // Share one state bank across logical blocks during chunked prefill.
-    bool shared_chunk_state = false;
+    bool               shared_chunk_state = false;
+    CacheOffloadPolicy offload;
 
     std::string policyFingerprint() const {
         std::ostringstream oss;
@@ -73,7 +81,8 @@ struct CacheGroupPolicy {
             << ':' << explicit_block_num << ':' << (charge_to_paged_budget ? 1 : 0) << ':'
             << static_cast<int>(memory_placement) << ':' << active_tail_blocks << ':' << (validate_tail_blocks ? 1 : 0)
             << ':' << static_cast<int>(cp_mapping) << ':' << static_cast<int>(cp_slice) << ':' << sliding_window_size
-            << ':' << (shared_chunk_state ? 1 : 0);
+            << ':' << (shared_chunk_state ? 1 : 0) << ':' << (offload.enabled ? 1 : 0) << ':'
+            << offload.max_selected_rows << ':' << offload.max_requests;
         return oss.str();
     }
 };
@@ -96,7 +105,7 @@ inline std::vector<CacheStoreBlockPair> buildCacheStorePlan(const CacheGroupPoli
                                                             int                     cp_size,
                                                             size_t                  key_blocks_per_logical_block = 1,
                                                             size_t                  cache_key_count              = 0,
-                                                            size_t                  publish_start_block           = 0) {
+                                                            size_t                  publish_start_block          = 0) {
     std::vector<CacheStoreBlockPair> plan;
     if (total_logical_blocks == 0) {
         return plan;

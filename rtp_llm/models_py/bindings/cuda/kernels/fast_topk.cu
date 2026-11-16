@@ -16,6 +16,9 @@
 #include <c10/util/Exception.h>
 #include <cuda.h>
 #include <cuda_fp16.h>
+#include <cub/block/block_scan.cuh>
+#include <cub/block/block_radix_sort.cuh>
+#include <cub/block/block_reduce.cuh>
 
 #include <cstddef>
 #include <cstdint>
@@ -89,13 +92,157 @@ __device__ void naive_topk_transform_ragged(const float* __restrict__ score,
 __device__ __forceinline__ auto convert_to_uint8(float x) -> uint8_t {
     __half   h    = __float2half_rn(x);
     uint16_t bits = __half_as_ushort(h);
+    if ((bits & 0x7fff) == 0) bits = 0;
     uint16_t key  = (bits & 0x8000) ? static_cast<uint16_t>(~bits) : static_cast<uint16_t>(bits | 0x8000);
     return static_cast<uint8_t>(key >> 8);
 }
 
 __device__ __forceinline__ auto convert_to_uint32(float x) -> uint32_t {
     uint32_t bits = __float_as_uint(x);
+    if ((bits & 0x7fffffffu) == 0) bits = 0;
     return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
+}
+
+struct SelectionCounts {
+    int greater;
+    int equal;
+};
+
+struct AddSelectionCounts {
+    __device__ SelectionCounts operator()(SelectionCounts a, SelectionCounts b) const {
+        return {a.greater + b.greater, a.equal + b.equal};
+    }
+};
+
+// Radix histograms determine the cutoff, but atomic append order must not
+// decide which equal-score keys reach attention. Compact in key-index order,
+// breaking cutoff ties by the smaller index.
+__device__ void write_stable_topk(const float* input,
+                                 int*         index,
+                                 int          row_start,
+                                 int          length,
+                                 uint32_t     cutoff,
+                                 int          equal_budget) {
+    using Scan = cub::BlockScan<SelectionCounts, kThreadsPerBlock>;
+    static_assert(sizeof(typename Scan::TempStorage) <= kSmem);
+    // Candidate refinement is finished: reuse its dynamic shared memory.
+    extern __shared__ int reorder_scratch[];
+    auto& storage = *reinterpret_cast<typename Scan::TempStorage*>(reorder_scratch);
+    SelectionCounts carried{0, 0};
+    for (int base = 0; base < length; base += kThreadsPerBlock) {
+        const int idx = base + threadIdx.x;
+        const uint32_t key = idx < length ? convert_to_uint32(input[row_start + idx]) : 0;
+        const SelectionCounts own{idx < length && key > cutoff, idx < length && key == cutoff};
+        SelectionCounts prefix, total;
+        Scan(storage).ExclusiveScan(own, prefix, SelectionCounts{0, 0}, AddSelectionCounts{}, total);
+        const int equal_before = carried.equal + prefix.equal;
+        if (own.greater || (own.equal && equal_before < equal_budget)) {
+            const int pos = carried.greater + prefix.greater + min(equal_before, equal_budget);
+            index[pos] = idx;
+        }
+        carried = AddSelectionCounts{}(carried, total);
+        __syncthreads();
+    }
+    __syncthreads();
+}
+
+template<int kTopK>
+__device__ void sort_topk_indices(int* index, int length) {
+    constexpr int items = (kTopK + kThreadsPerBlock - 1) / kThreadsPerBlock;
+    using Sort = cub::BlockRadixSort<int, kThreadsPerBlock, items>;
+    static_assert(sizeof(typename Sort::TempStorage) <= kSmem);
+    extern __shared__ int reorder_scratch[];
+    auto& storage = *reinterpret_cast<typename Sort::TempStorage*>(reorder_scratch);
+    int keys[items];
+#pragma unroll
+    for (int i = 0; i < items; ++i) {
+        const int pos = threadIdx.x * items + i;
+        keys[i] = pos < kTopK ? index[pos] : length;
+    }
+    // The row length sorts after every valid index, including padded lanes.
+    const int end_bit = 32 - __clz(length);
+    Sort(storage).Sort(keys, 0, end_bit);
+#pragma unroll
+    for (int i = 0; i < items; ++i) {
+        const int pos = threadIdx.x * items + i;
+        if (pos < kTopK) index[pos] = keys[i];
+    }
+    __syncthreads();
+}
+
+struct KeyRange {
+    uint32_t minimum;
+    uint32_t maximum;
+};
+
+struct MergeKeyRange {
+    __device__ KeyRange operator()(KeyRange a, KeyRange b) const {
+        return {min(a.minimum, b.minimum), max(a.maximum, b.maximum)};
+    }
+};
+
+// A coarse bucket can exceed the bounded candidate buffer for nearly equal
+// scores on long rows. Clipping that bucket loses genuine top-K candidates.
+// Refine the full row in that case; no additional global scratch is needed.
+template<int kTopK>
+__device__ void full_row_topk(const float* input, int* index, int row_start, int length) {
+    extern __shared__ int full_row_scratch[];
+    using Reduce = cub::BlockReduce<KeyRange, kThreadsPerBlock>;
+    static_assert(sizeof(typename Reduce::TempStorage) <= kSmem);
+    auto& reduce_storage = *reinterpret_cast<typename Reduce::TempStorage*>(full_row_scratch);
+    __shared__ KeyRange range;
+    KeyRange local{0xffffffffu, 0u};
+    for (int idx = threadIdx.x; idx < length; idx += kThreadsPerBlock) {
+        const uint32_t key = convert_to_uint32(input[row_start + idx]);
+        local = MergeKeyRange{}(local, KeyRange{key, key});
+    }
+    const auto reduced = Reduce(reduce_storage).Reduce(local, MergeKeyRange{});
+    if (threadIdx.x == 0) range = reduced;
+    __syncthreads();
+    if (range.minimum == range.maximum) {
+        naive_topk_cuda<kTopK>(input, index, length);
+        __syncthreads();
+        return;
+    }
+
+    constexpr int radix = 256;
+    auto* histogram = reinterpret_cast<int (*)[radix + 128]>(full_row_scratch);
+    int& cutoff_bin = full_row_scratch[2 * (radix + 128)];
+    // The range reduction already proves common leading bytes. Avoid
+    // histogramming them again when a narrow score range overflowed the
+    // coarse candidate buffer.
+    const int first_offset = ((31 - __clz(range.minimum ^ range.maximum)) / 8) * 8;
+    const uint32_t common_mask = first_offset == 24 ? 0u : 0xffffffffu << (first_offset + 8);
+    uint32_t prefix = range.minimum & common_mask, mask = common_mask;
+    int remaining = kTopK;
+    for (int offset = first_offset; offset >= 0; offset -= 8) {
+        if (threadIdx.x <= radix) histogram[0][threadIdx.x] = 0;
+        __syncthreads();
+        for (int idx = threadIdx.x; idx < length; idx += kThreadsPerBlock) {
+            const uint32_t key = convert_to_uint32(input[row_start + idx]);
+            if ((key & mask) == prefix) atomicAdd(&histogram[0][(key >> offset) & 0xff], 1);
+        }
+        __syncthreads();
+        for (int pass = 0; pass < 8; ++pass) {
+            if (threadIdx.x < radix) {
+                const int tx = threadIdx.x, distance = 1 << pass;
+                int value = histogram[pass & 1][tx];
+                if (tx + distance < radix) value += histogram[pass & 1][tx + distance];
+                histogram[(pass & 1) ^ 1][tx] = value;
+            }
+            __syncthreads();
+        }
+        if (threadIdx.x < radix && histogram[0][threadIdx.x] >= remaining
+            && histogram[0][threadIdx.x + 1] < remaining) {
+            cutoff_bin = threadIdx.x;
+        }
+        __syncthreads();
+        remaining -= histogram[0][cutoff_bin + 1];
+        prefix |= uint32_t(cutoff_bin) << offset;
+        mask |= 0xffu << offset;
+        __syncthreads();
+    }
+    write_stable_topk(input, index, row_start, length, prefix, remaining);
 }
 
 template<int kTopK>
@@ -166,6 +313,7 @@ __device__ void fast_topk_cuda_tl(const float* __restrict__ input, int* __restri
             }
         }
         __syncthreads();
+        sort_topk_indices<kTopK>(index, length);
         return;
     } else {
         __syncthreads();
@@ -194,6 +342,11 @@ __device__ void fast_topk_cuda_tl(const float* __restrict__ input, int* __restri
         __syncthreads();
     }
 
+    if (s_num_input[0] > SMEM_INPUT_SIZE) {
+        full_row_topk<kTopK>(input, index, row_start, length);
+        return;
+    }
+    uint32_t cutoff = 0;
     // stage 2: refine with 8bit radix passes
 #pragma unroll 4
     for (int round = 0; round < 4; ++round) {
@@ -213,9 +366,20 @@ __device__ void fast_topk_cuda_tl(const float* __restrict__ input, int* __restri
         __syncthreads();
 
         const auto threshold_bin = s_threshold_bin_id;
+        const int offset = 24 - round * 8;
+        cutoff |= uint32_t(threshold_bin) << offset;
         topk -= s_histogram[threshold_bin + 1];
+        if (round == 3 && s_histogram[threshold_bin] - s_histogram[threshold_bin + 1] > topk && topk > 0) {
+            write_stable_topk(input, index, row_start, length, cutoff, topk);
+            return;
+        }
 
         if (topk == 0) {
+            if (length <= 4096) {
+                cutoff |= offset == 0 ? 0u : (uint32_t(1) << offset) - 1;
+                write_stable_topk(input, index, row_start, length, cutoff, 0);
+                return;
+            }
             for (int i = tx; i < num_input; i += BLOCK_SIZE) {
                 const auto idx    = s_input_idx[r_idx][i];
                 const auto offset = 24 - round * 8;
@@ -226,7 +390,8 @@ __device__ void fast_topk_cuda_tl(const float* __restrict__ input, int* __restri
                 }
             }
             __syncthreads();
-            break;
+            sort_topk_indices<kTopK>(index, length);
+            return;
         } else {
             __syncthreads();
             if (tx < RADIX + 1) {
@@ -261,6 +426,11 @@ __device__ void fast_topk_cuda_tl(const float* __restrict__ input, int* __restri
             }
             __syncthreads();
         }
+    }
+    if (length <= 4096) {
+        write_stable_topk(input, index, row_start, length, cutoff, topk);
+    } else {
+        sort_topk_indices<kTopK>(index, length);
     }
 }
 

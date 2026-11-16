@@ -317,12 +317,19 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
         RTP_LLM_PROFILE_SCOPE("executor.tp_sync_input");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.skip_run  = streams.empty();
+        if (!model_input.skip_run && tp_rank_ == 0 && cache_manager_ && cache_manager_->hasSparseKvOffload()) {
+            model_input.kv_cache_generation_updates = cache_manager_->takeOffloadVersionUpdates();
+        }
 
         // Move metadata to CUDA before tpSyncModelInputs so broadcasts use the
         // GPU packed-buffer path instead of CPU execBroadcastCpu/unpack loops.
         ensureModelInputsOnCuda(model_input, "process.before_tp_sync");
 
         tpSyncModelInputs(model_input, parallelism_config_);
+        if (cache_manager_ && cache_manager_->hasSparseKvOffload()) {
+            cache_manager_->resizeOffloadHotCache(
+                model_input.skip_run || model_input.is_fake_stream ? 0 : model_input.input_lengths.size(0));
+        }
         if (model_input.skip_run) {
             return absl::OkStatus();
         }
@@ -363,6 +370,12 @@ absl::Status NormalExecutor::process(const ScheduleOutput& schedule_output, int6
             cache_manager_->blockBatchCopyForForward(model_input.kv_cache_update_mapping,
                                                      model_input.kv_cache_group_tags,
                                                      model_input.kv_cache_copy_token_lengths);
+        }
+        if (model_input.kv_cache_generation_updates.defined()) {
+            RTP_LLM_CHECK_WITH_INFO(static_cast<bool>(cache_manager_), "offload versions require a cache manager");
+            buffer_holder_.hold_host(model_input.kv_cache_generation_updates);
+            cache_manager_->publishOffloadVersions(model_input.kv_cache_generation_updates,
+                                                   model_input.kv_cache_group_tags);
         }
     }
     {

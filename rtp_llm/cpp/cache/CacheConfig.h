@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -20,6 +21,51 @@
 #include "rtp_llm/cpp/utils/StringUtil.h"
 
 namespace rtp_llm {
+
+// CUDA VMM backing uses bounded chunks so one request does not issue a
+// driver allocation for every minimum-size page. Include tail rounding in the budget.
+inline constexpr size_t kOffloadAllocationChunkBytes = 2 * 1024 * 1024;
+
+struct TieredCacheConfig {
+    uint32_t    total_blocks      = 0;
+    uint32_t    hbm_blocks        = 0;
+    uint32_t    max_selected_rows = 0;
+    uint32_t    max_requests      = 0;
+    bool        dynamic_hot_cache = false;
+    std::string eviction_policy   = "rr";
+
+    uint64_t residentRows(uint32_t rows_per_page) const {
+        return (static_cast<uint64_t>(max_selected_rows) + rows_per_page - 1) / rows_per_page * rows_per_page;
+    }
+};
+
+struct TieredCacheBudget {
+    size_t   gpu_bytes            = 0;
+    size_t   host_bytes           = 0;
+    size_t   offload_block_bytes  = 0;
+    size_t   device_block_bytes   = 0;
+    size_t   metadata_block_bytes = 0;
+    size_t   fixed_gpu_bytes      = 0;
+    size_t   swa_block_bytes      = 0;
+    size_t   fixed_host_bytes     = 0;
+    size_t   host_block_bytes     = 0;  // Non-offloaded host pools track total_blocks.
+    uint32_t max_selected_rows    = 0;
+    uint32_t test_hbm_blocks      = 0;
+    uint32_t max_blocks           = std::numeric_limits<int32_t>::max();
+};
+
+struct TieredCacheCapacity {
+    TieredCacheConfig config;
+    size_t            host_bytes     = 0;
+    size_t            gpu_bytes      = 0;
+    size_t            hbm_bytes      = 0;
+    size_t            device_bytes   = 0;
+    size_t            metadata_bytes = 0;
+    size_t            fixed_bytes    = 0;
+    size_t            swa_bytes      = 0;
+};
+
+TieredCacheCapacity solveTieredCacheCapacity(const TieredCacheBudget& budget);
 
 using PPBlockNumOverrides = std::unordered_map<std::string, uint32_t>;
 
@@ -62,7 +108,9 @@ public:
     size_t seq_size_per_block = 1;  // tokens/base cache-key block; groups may cover multiple key blocks
 
     // Attention-specific configuration
-    int reuse_cache_tail_blocks = std::numeric_limits<int>::max();
+    int                                      reuse_cache_tail_blocks = std::numeric_limits<int>::max();
+    std::map<std::string, TieredCacheConfig> tiered_cache_configs;
+    std::map<std::string, size_t>            offload_runtime_counts;
 
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;

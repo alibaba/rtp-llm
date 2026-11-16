@@ -505,6 +505,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("seq_size_per_block", &KVCacheConfig::seq_size_per_block)
         .def_readwrite("kernel_seq_size_per_block", &KVCacheConfig::kernel_seq_size_per_block)
         .def_readwrite("test_block_num", &KVCacheConfig::test_block_num)
+        .def_readwrite("enable_sparse_kv_offload", &KVCacheConfig::enable_sparse_kv_offload)
+        .def_readwrite("sparse_kv_offload_host_mb", &KVCacheConfig::sparse_kv_offload_host_mb)
+        .def_readwrite("sparse_kv_offload_hot_rows", &KVCacheConfig::sparse_kv_offload_hot_rows)
+        .def_readwrite("sparse_kv_offload_hot_cache_mode", &KVCacheConfig::sparse_kv_offload_hot_cache_mode)
+        .def_readwrite("sparse_kv_offload_policy", &KVCacheConfig::sparse_kv_offload_policy)
+        .def_readwrite("sparse_kv_offload_test_hbm_blocks", &KVCacheConfig::sparse_kv_offload_test_hbm_blocks)
         .def_readwrite("enable_memory_cache", &KVCacheConfig::enable_memory_cache)
         .def_readwrite("enable_disk_cache", &KVCacheConfig::enable_disk_cache)
         .def_readwrite("device_eviction_policy", &KVCacheConfig::device_eviction_policy)
@@ -566,7 +572,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      9,
+                                      13,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -636,14 +642,54 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kv_cache_event_host_ip_port,
                                       self.enable_crc,
                                       self.linear_pool_blocks,
-                                      self.swa_pool_blocks);
+                                      self.swa_pool_blocks,
+                                      self.enable_sparse_kv_offload,
+                                      self.sparse_kv_offload_host_mb,
+                                      self.sparse_kv_offload_test_hbm_blocks,
+                                      self.sparse_kv_offload_hot_rows,
+                                      self.sparse_kv_offload_hot_cache_mode,
+                                      self.sparse_kv_offload_policy);
             },
             [](py::tuple t) {
+                const py::tuple policy_state = t;
+                const bool      has_eviction_policy =
+                    t.size() == 78 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 13;
+                if (has_eviction_policy) {
+                    t    = t[py::slice(0, 77, 1)].cast<py::tuple>();
+                    t[1] = py::int_(12);
+                }
+                const py::tuple mode_state = t;
+                const bool      has_hot_cache_mode =
+                    t.size() == 77 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 12;
+                if (has_hot_cache_mode) {
+                    t    = t[py::slice(0, 76, 1)].cast<py::tuple>();
+                    t[1] = py::int_(11);
+                }
+                const py::tuple hot_rows_state = t;
+                const bool has_hot_rows = t.size() == 76 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 11;
+                if (has_hot_rows) {
+                    t    = t[py::slice(0, 75, 1)].cast<py::tuple>();
+                    t[1] = py::int_(10);
+                }
+                const py::tuple current_state = t;
+                const bool      has_current_fields =
+                    t.size() == 75 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 10;
+                if (has_current_fields) {
+                    t    = t[py::slice(0, 72, 1)].cast<py::tuple>();
+                    t[1] = py::int_(9);
+                }
                 const py::tuple tail_state = t;
                 const bool has_tail_fields = t.size() == 72 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 9;
                 if (has_tail_fields) {
                     t    = t[py::slice(0, 70, 1)].cast<py::tuple>();
                     t[1] = py::int_(8);
+                }
+                const py::tuple offload_state = t;
+                const bool      has_offload_fields =
+                    t.size() == 72 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 8;
+                if (has_offload_fields) {
+                    t    = t[py::slice(0, 69, 1)].cast<py::tuple>();
+                    t[1] = py::int_(7);
                 }
                 const py::tuple crc_state = t;
                 const bool has_crc_field  = t.size() == 70 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 8;
@@ -687,13 +733,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 const auto value = [&](size_t index) {
                     return t[index + 2 - (version >= 4 && index > 18 ? 1 : 0) - (version >= 5 && index > 49 ? 1 : 0)];
                 };
-                c.reuse_cache                          = value(0).cast<bool>();
-                c.multi_task_prompt                    = value(1).cast<std::string>();
-                c.multi_task_prompt_str                = value(2).cast<std::string>();
-                c.multi_task_prompt_tokens             = value(3).cast<std::map<std::string, std::vector<int>>>();
-                c.reserve_block_ratio                  = value(4).cast<int64_t>();
-                c.memory_cache_size_mb                 = value(6).cast<int64_t>();
-                c.memory_cache_sync_timeout_ms         = value(7).cast<int64_t>();
+                c.reuse_cache                  = value(0).cast<bool>();
+                c.multi_task_prompt            = value(1).cast<std::string>();
+                c.multi_task_prompt_str        = value(2).cast<std::string>();
+                c.multi_task_prompt_tokens     = value(3).cast<std::map<std::string, std::vector<int>>>();
+                c.reserve_block_ratio          = value(4).cast<int64_t>();
+                c.memory_cache_size_mb         = value(6).cast<int64_t>();
+                c.memory_cache_sync_timeout_ms = value(7).cast<int64_t>();
                 if (has_tail_fields) {
                     c.reuse_cache_tail_blocks = tail_state[10].cast<int>();
                     c.linear_pool_blocks      = tail_state[70].cast<uint32_t>();
@@ -704,44 +750,44 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         throw std::runtime_error("invalid KVCacheConfig tail or pool blocks");
                     }
                 }
-                c.fp8_kv_cache                         = value(9).cast<int>();
-                c.ssm_state_dtype                      = value(10).cast<std::string>();
-                c.kv_cache_mem_mb                      = value(11).cast<int64_t>();
-                c.seq_size_per_block                   = value(12).cast<int>();
-                c.kernel_seq_size_per_block            = value(13).cast<int>();
-                c.test_block_num                       = value(14).cast<int>();
-                c.enable_device_cache                  = value(16).cast<bool>();
-                c.enable_memory_cache                  = value(17).cast<bool>();
-                c.enable_disk_cache                    = value(19).cast<bool>();
-                c.enable_remote_cache                  = value(20).cast<bool>();
-                c.disk_cache_paths                     = value(21).cast<std::string>();
-                c.disk_cache_size_mb                   = value(22).cast<int64_t>();
-                c.disk_cache_buffered_io               = value(23).cast<bool>();
-                c.disk_cache_sync_timeout_ms           = value(24).cast<int64_t>();
-                c.disk_cache_staging_block_count       = value(25).cast<int64_t>();
-                c.device_eviction_policy               = value(26).cast<std::string>();
-                c.memory_eviction_policy               = value(27).cast<std::string>();
-                c.disk_eviction_policy                 = value(28).cast<std::string>();
-                c.kvcm_enable_vipserver                = value(29).cast<bool>();
-                c.kvcm_vipserver_domain                = value(30).cast<std::string>();
-                c.kvcm_server_address                  = value(31).cast<std::string>();
-                c.kvcm_instance_group                  = value(32).cast<std::string>();
-                c.kvcm_meta_channel_retry_time         = value(33).cast<uint32_t>();
-                c.kvcm_meta_channel_connection_timeout = value(34).cast<uint32_t>();
-                c.kvcm_meta_channel_call_timeout       = value(35).cast<uint32_t>();
-                c.kvcm_storage_thread_num              = value(36).cast<uint32_t>();
-                c.kvcm_storage_queue_size              = value(37).cast<uint32_t>();
-                c.kvcm_put_timeout_ms                  = value(38).cast<int>();
-                c.kvcm_get_timeout_ms                  = value(39).cast<int>();
-                c.kvcm_model_sdk_config                = value(40).cast<std::string>();
-                c.kvcm_model_user_data                 = value(41).cast<std::string>();
-                c.kvcm_model_extra_info                = value(42).cast<std::string>();
-                c.kvcm_instance_id_salt                = value(43).cast<std::string>();
-                c.kvcm_asyncwrapper_thread_num         = value(44).cast<size_t>();
-                c.kvcm_asyncwrapper_queue_size         = value(45).cast<size_t>();
-                c.kvcm_get_broadcast_timeout           = value(46).cast<int>();
-                c.kvcm_put_broadcast_timeout           = value(47).cast<int>();
-                c.kvcm_client_config                   = value(48).cast<std::string>();
+                c.fp8_kv_cache                                    = value(9).cast<int>();
+                c.ssm_state_dtype                                 = value(10).cast<std::string>();
+                c.kv_cache_mem_mb                                 = value(11).cast<int64_t>();
+                c.seq_size_per_block                              = value(12).cast<int>();
+                c.kernel_seq_size_per_block                       = value(13).cast<int>();
+                c.test_block_num                                  = value(14).cast<int>();
+                c.enable_device_cache                             = value(16).cast<bool>();
+                c.enable_memory_cache                             = value(17).cast<bool>();
+                c.enable_disk_cache                               = value(19).cast<bool>();
+                c.enable_remote_cache                             = value(20).cast<bool>();
+                c.disk_cache_paths                                = value(21).cast<std::string>();
+                c.disk_cache_size_mb                              = value(22).cast<int64_t>();
+                c.disk_cache_buffered_io                          = value(23).cast<bool>();
+                c.disk_cache_sync_timeout_ms                      = value(24).cast<int64_t>();
+                c.disk_cache_staging_block_count                  = value(25).cast<int64_t>();
+                c.device_eviction_policy                          = value(26).cast<std::string>();
+                c.memory_eviction_policy                          = value(27).cast<std::string>();
+                c.disk_eviction_policy                            = value(28).cast<std::string>();
+                c.kvcm_enable_vipserver                           = value(29).cast<bool>();
+                c.kvcm_vipserver_domain                           = value(30).cast<std::string>();
+                c.kvcm_server_address                             = value(31).cast<std::string>();
+                c.kvcm_instance_group                             = value(32).cast<std::string>();
+                c.kvcm_meta_channel_retry_time                    = value(33).cast<uint32_t>();
+                c.kvcm_meta_channel_connection_timeout            = value(34).cast<uint32_t>();
+                c.kvcm_meta_channel_call_timeout                  = value(35).cast<uint32_t>();
+                c.kvcm_storage_thread_num                         = value(36).cast<uint32_t>();
+                c.kvcm_storage_queue_size                         = value(37).cast<uint32_t>();
+                c.kvcm_put_timeout_ms                             = value(38).cast<int>();
+                c.kvcm_get_timeout_ms                             = value(39).cast<int>();
+                c.kvcm_model_sdk_config                           = value(40).cast<std::string>();
+                c.kvcm_model_user_data                            = value(41).cast<std::string>();
+                c.kvcm_model_extra_info                           = value(42).cast<std::string>();
+                c.kvcm_instance_id_salt                           = value(43).cast<std::string>();
+                c.kvcm_asyncwrapper_thread_num                    = value(44).cast<size_t>();
+                c.kvcm_asyncwrapper_queue_size                    = value(45).cast<size_t>();
+                c.kvcm_get_broadcast_timeout                      = value(46).cast<int>();
+                c.kvcm_put_broadcast_timeout                      = value(47).cast<int>();
+                c.kvcm_client_config                              = value(48).cast<std::string>();
                 c.memory_cache_max_descriptors_per_transfer_batch = value(50).cast<int64_t>();
                 c.dsv4_fixed_pool_blocks                          = value(51).cast<uint32_t>();
                 c.dsv4_hca_state_pool_blocks                      = value(52).cast<uint32_t>();
@@ -767,8 +813,37 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.kv_cache_event_instance_id      = event_state[67].cast<std::string>();
                     c.kv_cache_event_host_ip_port     = event_state[68].cast<std::string>();
                 }
+                if (has_offload_fields) {
+                    c.enable_sparse_kv_offload          = offload_state[69].cast<bool>();
+                    c.sparse_kv_offload_host_mb         = offload_state[70].cast<int64_t>();
+                    c.sparse_kv_offload_test_hbm_blocks = offload_state[71].cast<int>();
+                }
                 if (has_crc_field) {
                     c.enable_crc = crc_state[69].cast<bool>();
+                }
+                if (has_current_fields) {
+                    c.enable_sparse_kv_offload          = current_state[72].cast<bool>();
+                    c.sparse_kv_offload_host_mb         = current_state[73].cast<int64_t>();
+                    c.sparse_kv_offload_test_hbm_blocks = current_state[74].cast<int>();
+                }
+                if (has_hot_rows) {
+                    c.sparse_kv_offload_hot_rows = hot_rows_state[75].cast<int64_t>();
+                    if (c.sparse_kv_offload_hot_rows <= 0) {
+                        throw std::runtime_error("sparse_kv_offload_hot_rows must be positive");
+                    }
+                }
+                if (has_hot_cache_mode) {
+                    c.sparse_kv_offload_hot_cache_mode = mode_state[76].cast<std::string>();
+                    if (c.sparse_kv_offload_hot_cache_mode != "static"
+                        && c.sparse_kv_offload_hot_cache_mode != "dynamic") {
+                        throw std::runtime_error("sparse_kv_offload_hot_cache_mode must be static or dynamic");
+                    }
+                }
+                if (has_eviction_policy) {
+                    c.sparse_kv_offload_policy = policy_state[77].cast<std::string>();
+                    if (c.sparse_kv_offload_policy != "rr" && c.sparse_kv_offload_policy != "lru") {
+                        throw std::runtime_error("sparse_kv_offload_policy must be rr or lru");
+                    }
                 }
                 return c;
             }));
@@ -828,8 +903,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     (void)t[0].cast<bool>();
                     (void)t[1].cast<bool>();
                     (void)t[2].cast<bool>();
-                    c.ft_alog_conf_path         = t[3].cast<std::string>();
-                    c.gen_timeline_sync         = t[4].cast<bool>();
+                    c.ft_alog_conf_path = t[3].cast<std::string>();
+                    c.gen_timeline_sync = t[4].cast<bool>();
                     if (t.size() == 12 || t.size() == 13) {
                         c.torch_cuda_profiler_dir  = t[5].cast<std::string>();
                         c.log_file_backup_count    = t[6].cast<int>();
@@ -1054,12 +1129,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error("Invalid state!");
                 SpeculativeExecutionConfig c;
                 try {
-                    c.model_type                    = t[0].cast<std::string>();
-                    c.type                          = SpeculativeExecutionConfig::from_string(t[1].cast<std::string>());
-                    c.tree_decode_config            = t[2].cast<std::string>();
-                    c.gen_num_per_cycle             = t[3].cast<int64_t>();
-                    c.quantization                  = t[4].cast<std::string>();
-                    c.checkpoint_path               = t[5].cast<std::string>();
+                    c.model_type         = t[0].cast<std::string>();
+                    c.type               = SpeculativeExecutionConfig::from_string(t[1].cast<std::string>());
+                    c.tree_decode_config = t[2].cast<std::string>();
+                    c.gen_num_per_cycle  = t[3].cast<int64_t>();
+                    c.quantization       = t[4].cast<std::string>();
+                    c.checkpoint_path    = t[5].cast<std::string>();
                     if (t.size() == 7) {
                         c.sp_dspark_mask_token_id = t[6].cast<int64_t>();
                     }
@@ -1310,22 +1385,22 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error("Invalid state!");
                 ParallelismConfig c;
                 try {
-                    c.tp_size                 = t[0].cast<int64_t>();
-                    c.ep_size                 = t[1].cast<int64_t>();
-                    c.dp_size                 = t[2].cast<int64_t>();
-                    c.pp_size                 = t[3].cast<int64_t>();
-                    c.world_size              = t[4].cast<int64_t>();
-                    c.world_rank              = t[5].cast<int64_t>();
-                    c.local_world_size        = t[6].cast<int64_t>();
+                    c.tp_size          = t[0].cast<int64_t>();
+                    c.ep_size          = t[1].cast<int64_t>();
+                    c.dp_size          = t[2].cast<int64_t>();
+                    c.pp_size          = t[3].cast<int64_t>();
+                    c.world_size       = t[4].cast<int64_t>();
+                    c.world_rank       = t[5].cast<int64_t>();
+                    c.local_world_size = t[6].cast<int64_t>();
                     (void)t[7].cast<int64_t>();  // reserved: removed ffn_sp_size
-                    c.tp_rank                 = t[8].cast<int64_t>();
-                    c.ep_rank                 = t[9].cast<int64_t>();
-                    c.dp_rank                 = t[10].cast<int64_t>();
-                    c.ffn_tp_size             = t[11].cast<int64_t>();
-                    c.ffn_tp_rank             = t[12].cast<int64_t>();
+                    c.tp_rank     = t[8].cast<int64_t>();
+                    c.ep_rank     = t[9].cast<int64_t>();
+                    c.dp_rank     = t[10].cast<int64_t>();
+                    c.ffn_tp_size = t[11].cast<int64_t>();
+                    c.ffn_tp_rank = t[12].cast<int64_t>();
                     (void)t[13].cast<int64_t>();  // reserved slot: removed ffn_disaggregate_config
-                    c.prefill_cp_config       = t[14].cast<PrefillCPConfig>();
-                    c.use_ub_comm             = t[15].cast<bool>();
+                    c.prefill_cp_config = t[14].cast<PrefillCPConfig>();
+                    c.use_ub_comm       = t[15].cast<bool>();
                     if (t.size() >= 17) {
                         c.role_type = t[16].cast<RoleType>();
                     }
@@ -1899,6 +1974,23 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 return c;
             }));
 
+    py::class_<CacheOffloadPolicy>(m, "CacheOffloadPolicy")
+        .def(py::init<>())
+        .def_readwrite("enabled", &CacheOffloadPolicy::enabled)
+        .def_readwrite("max_selected_rows", &CacheOffloadPolicy::max_selected_rows)
+        .def_readwrite("max_requests", &CacheOffloadPolicy::max_requests)
+        .def(py::pickle(
+            [](const CacheOffloadPolicy& self) {
+                return py::make_tuple(self.enabled, self.max_selected_rows, self.max_requests);
+            },
+            [](py::tuple t) {
+                if (t.size() != 2 && t.size() != 3) {
+                    throw std::runtime_error("Invalid CacheOffloadPolicy state!");
+                }
+                return CacheOffloadPolicy{
+                    t[0].cast<bool>(), t[1].cast<uint32_t>(), t.size() == 3 ? t[2].cast<uint32_t>() : 0};
+            }));
+
     py::class_<KVCacheSpecDesc>(m, "KVCacheSpecDesc")
         .def(py::init<>())
         .def_readwrite("tag", &KVCacheSpecDesc::tag)
@@ -1922,6 +2014,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("memory", &KVCacheSpecDesc::memory)
         .def_readwrite("tail", &KVCacheSpecDesc::tail)
         .def_readwrite("cp", &KVCacheSpecDesc::cp)
+        .def_readwrite("offload", &KVCacheSpecDesc::offload)
+        .def_readwrite("offload_runtime_group", &KVCacheSpecDesc::offload_runtime_group)
         .def(py::pickle(
             [](const KVCacheSpecDesc& self) {
                 return py::make_tuple(self.tag,
@@ -1944,11 +2038,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.memory,
                                       self.tail,
                                       self.cp,
+                                      self.offload,
+                                      self.offload_runtime_group,
                                       self.tp_transfer_mode);
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
-                if (t.size() != 20 && t.size() != 21)
+                if (t.size() != 20 && t.size() != 21 && t.size() != 22 && t.size() != 23)
                     throw std::runtime_error("Invalid KVCacheSpecDesc state!");
                 c.tag                                  = t[0].cast<std::string>();
                 c.cache_type                           = t[1].cast<KVCacheSpecType>();
@@ -1970,8 +2066,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.memory                               = t[17].cast<std::optional<CacheMemoryPolicyDesc>>();
                 c.tail                                 = t[18].cast<std::optional<CacheTailPolicyDesc>>();
                 c.cp                                   = t[19].cast<std::optional<CacheCpPolicyDesc>>();
-                if (t.size() == 21) {
+                // main previously stored TP mode at index 20; the offload
+                // branch stored offload/group at 20/21. Accept both old shapes.
+                if (t.size() == 21 && py::isinstance<TpCacheTransferMode>(t[20])) {
                     c.tp_transfer_mode = t[20].cast<TpCacheTransferMode>();
+                } else if (t.size() >= 21) {
+                    c.offload = t[20].cast<std::optional<CacheOffloadPolicy>>();
+                }
+                if (t.size() >= 22) {
+                    c.offload_runtime_group = t[21].cast<std::optional<uint32_t>>();
+                }
+                if (t.size() == 23) {
+                    c.tp_transfer_mode = t[22].cast<TpCacheTransferMode>();
                 }
                 return c;
             }));

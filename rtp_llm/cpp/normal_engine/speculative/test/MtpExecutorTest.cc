@@ -1084,6 +1084,11 @@ public:
             test_config.dspark_mask_token_id = 0;
         }
         auto components = createMtpExecutorComponents(test_config);
+        for (auto* model : {components.fake_target_model.get(),
+                            components.fake_draft_model.get(),
+                            components.fake_draft_prefill_model.get()}) {
+            model->setInputObserver([](const GptModelInputs& inputs) { EXPECT_FALSE(inputs.is_draft_extend); });
+        }
         if (simulate_multi_dp) {
             ASSERT_EQ(components.executor->parallelism_config_.tp_size, 1);
             components.executor->parallelism_config_.dp_size    = 2;
@@ -1224,9 +1229,9 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
         if (with_linear) {
             config.layer_num = single_layer ? 1 : 2;
             config.fromGroupedSpecs({test::makeLinearSpec("linear", 4, TYPE_FP16, 1, 1), full},
-                                    {{0}, {single_layer ? 0 : 1}},
-                                    {CacheGroupType::LINEAR, CacheGroupType::FULL},
-                                    {"linear", "full"});
+                                               {{0}, {single_layer ? 0 : 1}},
+                                               {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                               {"linear", "full"});
         }
         auto groups = config.topology().groups();
         for (auto& group : groups) {
@@ -1312,6 +1317,46 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
 }
 
 INSTANTIATE_TEST_SUITE_P(CacheTopology, MtpCacheStrideTest, ::testing::Values(0, 1, 2));
+
+TEST_F(MtpExecutorTest, testDraftExtendPrepareAndForwardAgreeBeforeHiddenStatesExist) {
+    for (const bool dspark : {false, true}) {
+        SCOPED_TRACE(dspark);
+        MtpExecutorTestConfig config;
+        config.sp_type                              = dspark ? SP_TYPE_DSPARK : SP_TYPE_MTP;
+        config.dspark_mask_token_id                 = 0;
+        auto                             components = createMtpExecutorComponents(config);
+        auto*                            executor   = components.executor.get();
+        auto*                            draft      = components.fake_draft_prefill_model.get();
+        std::vector<std::array<bool, 3>> observed;
+        draft->setInputObserver([&](const GptModelInputs& inputs) {
+            observed.push_back({inputs.is_draft_extend, inputs.is_target_verify, inputs.last_hidden_states.defined()});
+        });
+        draft->expectTargetVerify(dspark);
+        executor->setDraftPrefillModel(std::move(components.fake_draft_prefill_model));
+
+        const auto     cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        GptModelInputs input;
+        input.combo_tokens     = torch::zeros({8}, cuda_i32);
+        input.input_lengths    = torch::full({2}, 4, cuda_i32);
+        input.prefix_lengths   = torch::full({2}, 8, cuda_i32);
+        input.sequence_lengths = torch::empty({0}, cuda_i32);
+        input.is_target_verify = true;
+        if (executor->useAsyncPrepare()) {
+            executor->launchDraftPrefillPrepareAsync(input);
+            // Target verification fills the live input after the async copy.
+            input.last_hidden_states = torch::zeros({8, 2}, torch::TensorOptions().device(torch::kCUDA));
+            executor->draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+            ASSERT_EQ(observed.size(), 1u);
+            EXPECT_EQ(observed.front(), (std::array<bool, 3>{true, dspark, false}));
+        } else {
+            input.last_hidden_states = torch::zeros({8, 2}, torch::TensorOptions().device(torch::kCUDA));
+        }
+        draft->setInputs({input});
+        draft->setOutputs({GptModelOutputs{}});
+        executor->runDraftPrefillForward(input);
+        EXPECT_EQ(observed.back(), (std::array<bool, 3>{true, dspark, true}));
+    }
+}
 
 TEST_F(MtpExecutorTest, MixedCacheSnapshotsPrepareTokensLengthsAndPositionsWithoutWaiting) {
     const char* previous = std::getenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE");
@@ -1634,6 +1679,13 @@ void MtpExecutorTest::runSingleBatchPrefillScenario(bool                        
 
     components.fake_draft_model->setInputs({draft_input});
     components.fake_draft_model->setOutputs({draft_output});
+
+    // Pure prompt prefill has no decode sequence_lengths. Both ordinary and
+    // CP draft seeding must keep prefill routing despite that empty tensor.
+    components.fake_draft_model->setInputObserver([](const GptModelInputs& inputs) {
+        EXPECT_TRUE(!inputs.sequence_lengths.defined() || inputs.sequence_lengths.numel() == 0);
+        EXPECT_FALSE(inputs.is_draft_extend);
+    });
 
     // set fake sampler outputs
     auto sampler_input  = SamplerInputs{target_output.logits};

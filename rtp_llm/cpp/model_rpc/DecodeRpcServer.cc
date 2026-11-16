@@ -425,6 +425,17 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
         RTP_LLM_LOG_ERROR("%s", error_msg.c_str());
     };
 
+    // makeStream performs engine admission checks before any destination KV is
+    // allocated. Rejected streams never reach the scheduler to finish themselves.
+    if (generate_stream->hasError()) {
+        const auto error = generate_stream->statusInfo();
+        finish_allocation_error(error.code() == ErrorCode::INVALID_PARAMS ? grpc::StatusCode::INVALID_ARGUMENT :
+                                                                            grpc::StatusCode::INTERNAL,
+                                error.code(),
+                                error.ToString());
+        return;
+    }
+
     int64_t allocation_attempts = 0;
     while (true) {
         const auto request_cost_ms = (currentTimeUs() - decode_context.request_begin_time_us) / 1000;
@@ -861,6 +872,40 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     return request;
 }
 
+void DecodeRpcServer::markLoadedOffloadOverwrite(KVCacheManager&           manager,
+                                                 const LoadKVCacheContext& context,
+                                                 const LoadCacheResult&    result) {
+    if (!manager.hasSparseKvOffload() || !manager.isAllocatorOwner()) {
+        return;
+    }
+    // A failed import may already have changed a subset of these blocks.
+    // Invalidate their hot copies without publishing a usable loaded prefix.
+    if (!result.ok()) {
+        RTP_LLM_LOG_DEBUG("invalidate partial offload import for request %s", context.request_key.c_str());
+    }
+    const auto& config = manager.cacheConfig();
+    for (const auto& [tag, tiered] : config.tiered_cache_configs) {
+        (void)tiered;
+        const auto&      group = config.topology().group(tag);
+        const auto&      ids   = context.blockIdsForGroup(tag).blocks();
+        const auto       plan  = buildGroupLoadPlan(group.policy,
+                                             ids.size(),
+                                             context.cache_keys.size(),
+                                             static_cast<size_t>(std::max<int64_t>(context.reuse_block_size, 0)),
+                                             config.groupNums() > 1,
+                                             group.seqSizePerBlock(),
+                                             config.seq_size_per_block);
+        BlockIndicesType overwritten;
+        for (const auto& pair : plan) {
+            const auto block = ids[pair.offset_index];
+            if (!isNullBlockIdx(block)) {
+                overwritten.push_back(block);
+            }
+        }
+        manager.markOffloadOverwrite(tag, overwritten);
+    }
+}
+
 BroadcastLoadRequestPB DecodeRpcServer::buildBroadcastLoadRequest(const LoadKVCacheContext& load_context) const {
     BroadcastLoadRequestPB request;
     request.set_request_id(load_context.request_id);
@@ -943,18 +988,26 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGene
                                     decode_context.prefill_cp_size,
                                     decode_context.remote_stage_peer_groups};
 
+    // Invalidate the destination projection used by the load requests,
+    // including potentially modified blocks on failure. Only a successful
+    // load may publish a completed prefix and enter localGenerate.
+    const auto finish = [&](LoadCacheResult result) {
+        markLoadedOffloadOverwrite(*engine_->resourceContext().cache_manager, load_context, result);
+        return result;
+    };
+
     // Prefill: TP = 1 && Decode: TP = 1
     if (resource_.workers.size() == 1 && decode_context.peer_addrs.size() == 1) {
         for (size_t i = 0; i < maga_init_params_.pd_sep_config.rdma_connect_retry_times + 1; i++) {
             auto load_result = loadCache(load_context);
             if (load_result.error_info.code() != ErrorCode::CACHE_STORE_LOAD_CONNECT_FAILED
                 && load_result.error_info.code() != ErrorCode::CACHE_STORE_LOAD_RDMA_CONNECT_FAILED) {
-                return load_result;
+                return finish(load_result);
             }
         }
     }
 
-    return loadCacheAsyncForTp(decode_context, load_context);
+    return finish(loadCacheAsyncForTp(decode_context, load_context));
 }
 
 DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheAsyncForTp(DecodeGenerateContext& decode_context,
@@ -1282,30 +1335,27 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         }
         return cpMapperForGroup(cfg, tag).layoutForGroup(cfg, tag).slice != CpBlockSliceMode::NONE;
     };
-    auto shouldLoadGroupFromPeer =
-        [&](const CacheConfig& cfg,
-            CacheGroupType     group_type,
-            const std::string& tag,
-            int                peer_idx,
-            bool               page_level_rr) {
-            if (typed_tp) {
-                const auto& group = cfg.topology().group(tag);
-                return tpCachePeerOwnsPayload(group.spec->tp_transfer.mode,
-                                              group.localKvHeadNum(),
-                                              transfer_topology,
-                                              static_cast<size_t>(peer_idx));
-            }
-            if (!page_level_rr) {
-                return true;
-            }
-            if (group_type == CacheGroupType::FULL) {
-                return true;
-            }
-            // Some specs are CP-sliced inside one logical block on prefill, while
-            // decode still owns the full block. Pull every peer slice and place it
-            // into the destination offset declared by the spec.
-            return groupUsesCpSlice(cfg, tag) || peer_idx == 0;
-        };
+    auto shouldLoadGroupFromPeer = [&](const CacheConfig& cfg,
+                                       CacheGroupType     group_type,
+                                       const std::string& tag,
+                                       int                peer_idx,
+                                       bool               page_level_rr) {
+        if (typed_tp) {
+            const auto& group = cfg.topology().group(tag);
+            return tpCachePeerOwnsPayload(
+                group.spec->tp_transfer.mode, group.localKvHeadNum(), transfer_topology, static_cast<size_t>(peer_idx));
+        }
+        if (!page_level_rr) {
+            return true;
+        }
+        if (group_type == CacheGroupType::FULL) {
+            return true;
+        }
+        // Some specs are CP-sliced inside one logical block on prefill, while
+        // decode still owns the full block. Pull every peer slice and place it
+        // into the destination offset declared by the spec.
+        return groupUsesCpSlice(cfg, tag) || peer_idx == 0;
+    };
     auto shouldLoadBlockFromPeer = [&](CacheGroupType group_type, size_t block_pos, int peer_idx, bool page_level_rr) {
         if (!page_level_rr || group_type != CacheGroupType::FULL) {
             return true;

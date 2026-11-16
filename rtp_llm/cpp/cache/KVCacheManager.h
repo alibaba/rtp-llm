@@ -94,6 +94,16 @@ public:
                                   const std::vector<std::string>& group_tags,
                                   const torch::Tensor&            valid_token_lengths = torch::Tensor());
 
+    bool hasSparseKvOffload() const {
+        return !config_.tiered_cache_configs.empty();
+    }
+    void          markOffloadOverwrite(const std::string& tag, const BlockIndicesType& blocks);
+    torch::Tensor takeOffloadVersionUpdates();
+    void          publishOffloadVersions(const torch::Tensor& updates, const std::vector<std::string>& group_tags);
+    // Called on the engine compute stream, after TP input synchronization.
+    void   resizeOffloadHotCache(size_t requests, bool grow_only = false);
+    size_t offloadDeviceSizeBytes() const;
+
     bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                        const std::vector<int>&         block_src_batch,
                        bool                            copy_last_block,
@@ -154,9 +164,9 @@ public:
     }
 
 private:
-    std::function<void()> allocationChangeCallback() const;
-    void                  reportMetricsLoop();
-    void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
+    std::function<void()>             allocationChangeCallback() const;
+    void                              reportMetricsLoop();
+    void                              reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
 
     // 成员变量

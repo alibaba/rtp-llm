@@ -49,13 +49,15 @@ public:
         py_model_inputs_.combo_position_ids                        = inputs.combo_position_ids;
 
         // for spec
-        py_model_inputs_.input_hiddens                            = inputs.input_hiddens;
-        py_model_inputs_.attention_inputs.cu_seqlens_device       = inputs.attention_inputs.cu_seqlens_device;
-        py_model_inputs_.attention_inputs.cu_seqlens              = inputs.attention_inputs.cu_seqlens;
-        py_model_inputs_.attention_inputs.cu_kv_seqlens_device    = inputs.attention_inputs.cu_kv_seqlens_device;
-        py_model_inputs_.attention_inputs.padding_offset          = inputs.attention_inputs.padding_offset;
-        py_model_inputs_.attention_inputs.is_prefill              = inputs.attention_inputs.is_prefill;
-        py_model_inputs_.attention_inputs.is_target_verify        = inputs.attention_inputs.is_target_verify;
+        py_model_inputs_.input_hiddens                         = inputs.input_hiddens;
+        py_model_inputs_.attention_inputs.cu_seqlens_device    = inputs.attention_inputs.cu_seqlens_device;
+        py_model_inputs_.attention_inputs.cu_seqlens           = inputs.attention_inputs.cu_seqlens;
+        py_model_inputs_.attention_inputs.cu_kv_seqlens_device = inputs.attention_inputs.cu_kv_seqlens_device;
+        py_model_inputs_.attention_inputs.padding_offset       = inputs.attention_inputs.padding_offset;
+        py_model_inputs_.attention_inputs.is_prefill           = inputs.attention_inputs.is_prefill;
+        py_model_inputs_.attention_inputs.is_target_verify     = inputs.attention_inputs.is_target_verify;
+        py_model_inputs_.attention_inputs.is_draft_extend      = inputs.attention_inputs.is_draft_extend;
+
         py_model_inputs_.attention_inputs.is_cuda_graph           = inputs.attention_inputs.is_cuda_graph;
         py_model_inputs_.attention_inputs.dtype                   = inputs.attention_inputs.dtype;
         py_model_inputs_.attention_inputs.context_total_kv_length = inputs.attention_inputs.context_total_kv_length;
