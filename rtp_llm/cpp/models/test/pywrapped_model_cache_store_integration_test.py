@@ -1522,6 +1522,7 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
                     )
                 )
 
+    @_skip_rocm_context_parallel
     @pytest.mark.gpu(type="H20")
     @_isolated_native_test
     def test_context_parallel_publishes_original_lengths_not_local_chunk(self) -> None:
