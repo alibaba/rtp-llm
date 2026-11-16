@@ -14,6 +14,7 @@ import yaml
 from mock_framework.config import compile_case
 from mock_framework.config.validation import Bounds
 from mock_framework.execution import ExecutionError
+from mock_framework.execution.environment import RunEnvironment
 from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.runner import run_case
 from mock_framework.execution.step.step import Reference, StepContext, resolve_refs
@@ -319,6 +320,20 @@ def test_cancel_records_and_reclaims(setup, tmp_path):
     asyncio.run(exercise())
     cleaned(out)
     assert json.loads((out / "result.json").read_text())["status"] == "CANCELLED"
+
+
+def test_cancelled_cleanup_records_error(setup, tmp_path, monkeypatch):
+    close = RunEnvironment.close
+
+    async def cancel_cleanup(runtime):
+        await close(runtime)
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(RunEnvironment, "close", cancel_cleanup)
+    result, out = run(setup, tmp_path, [step()])
+    assert result["status"] == "ERROR"
+    assert result["cleanup_errors"] == ["Runtime cleanup was cancelled"]
+    assert events(out)[-1]["event"] == "teardown_finished"
 
 
 def test_existing_output_is_not_overwritten(setup, tmp_path):

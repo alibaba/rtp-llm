@@ -132,6 +132,9 @@ async def run_case(case, launch, directory):
                 cleanup.extend(await asyncio.shield(closing))
                 break
             except asyncio.CancelledError:
+                if closing.cancelled():
+                    cleanup.append("Runtime cleanup was cancelled")
+                    break
                 cancelled = True
                 result.update(
                     status="CANCELLED", error="Execution cancelled during teardown"
