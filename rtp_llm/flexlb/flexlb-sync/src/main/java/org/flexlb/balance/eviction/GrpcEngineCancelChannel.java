@@ -12,9 +12,9 @@ import org.springframework.stereotype.Component;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * Sends cancellation to the victim's original Prefill worker and maps replies or transport failures
- * to asynchronous outcomes. RPC acceptance injects intent; release still requires the original
- * worker's typed cancellation feedback.
+ * Sends cancellation to Decode, which owns the cancel registry and forwards the
+ * terminal intent to the original Prefill. The Prefill address also lets Decode
+ * establish a control-only cancellation before inference admission.
  */
 @Slf4j
 @Component
@@ -26,10 +26,7 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
         this.engineGrpcClient = engineGrpcClient;
     }
 
-    /**
-     * The Decode argument is only the planning capability gate. The actual
-     * destination is the original Prefill route carried by {@code target}.
-     */
+    /** Decode implements the control-plane cancellation RPC. */
     @Override
     public boolean isSupported(DecodeEndpoint endpoint) {
         return true;
@@ -43,7 +40,7 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
             // intent never reached the engine, but release is still settled by
             // the WorkerStatus report (iron rule 4).
             log.debug(
-                    "[auto-tpm] cancel has no prefill control owner for request_id={}, not routed",
+                    "[auto-tpm] cancel has no decode control owner for request_id={}, not routed",
                     requestId);
             return CompletableFuture.completedFuture(CancelAck.FAILED);
         }
@@ -52,6 +49,7 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
             EngineRpcService.CancelRequestPB requestPB =
                     EngineRpcService.CancelRequestPB.newBuilder()
                             .setRequestId(RequestId.toEngineRequestId(requestId))
+                            .setPrefillAddress(target.prefillAddress())
                             .build();
 
             // Fire-and-forget contract: fork the gRPC Context so that when the
@@ -62,8 +60,8 @@ public class GrpcEngineCancelChannel implements EngineCancelChannel {
             try {
                 return engineGrpcClient
                         .cancelAsync(
-                                target.prefillIp(),
-                                target.prefillGrpcPort(),
+                                target.decodeIp(),
+                                target.decodeGrpcPort(),
                                 requestPB,
                                 Math.max(1, timeoutMs))
                         .thenApply(GrpcEngineCancelChannel::mapResponse)

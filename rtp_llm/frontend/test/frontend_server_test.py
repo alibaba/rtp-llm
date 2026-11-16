@@ -2,11 +2,12 @@ import asyncio
 import json
 from typing import Any
 from unittest import TestCase, main
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import torch
 from pydantic import BaseModel
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
@@ -113,6 +114,7 @@ class FrontendServerTest(TestCase):
                 )
             controller = MagicMock()
             controller.increment.return_value = 1
+            controller.request_counter.value = 1
             server = self.frontend_server
             original_controller = server._global_controller
             original_worker = server._frontend_worker
@@ -216,6 +218,47 @@ class FrontendServerTest(TestCase):
     async def _async_run(self, *args: Any, **kwargs: Any):
         res = await self.frontend_server.inference(*args, **kwargs)
         return res
+
+    def test_batch_request_ids_do_not_overlap_other_batches_or_single_requests(self):
+        worker = MagicMock()
+        worker.batch_infer = AsyncMock(return_value=FakePipelinResponse(res="batch"))
+        self.frontend_server._frontend_worker = worker
+        self.frontend_server._global_controller.request_counter.value = (1 << 31) - 3
+        with patch(
+            "rtp_llm.frontend.frontend_server.generate_request_id",
+            side_effect=lambda ip, port, server_id, sequence: sequence,
+        ):
+            for count in (3, 2):
+                asyncio.run(
+                    self.frontend_server.batch_infer(
+                        {"prompt_batch": ["hello"] * count}, FakeRawRequest()
+                    )
+                )
+        ids = []
+        for call in worker.batch_infer.call_args_list:
+            start = call.kwargs["request_id"]
+            self.assertLessEqual(start % 4096 + len(call.kwargs["prompts"]), 4096)
+            ids.extend(range(start, start + len(call.kwargs["prompts"])))
+        controller = self.frontend_server._global_controller
+        single_id = controller.increment()
+        controller.decrement()
+        self.assertEqual(len(set(ids)), 5)
+        self.assertNotIn(single_id, ids)
+        self.assertGreater(single_id, (1 << 31) - 1)
+        self.assertEqual(controller.current_concurrency.value, 0)
+
+    def test_oversized_batch_is_rejected_before_concurrency_admission(self):
+        controller = self.frontend_server._global_controller
+        before = controller.get_request_counter()
+        with self.assertRaises(FtRuntimeException) as caught:
+            asyncio.run(
+                self.frontend_server.batch_infer(
+                    {"prompt_batch": ["hello"] * 4097}, FakeRawRequest()
+                )
+            )
+        self.assertEqual(caught.exception.exception_type, ExceptionType.INVALID_PARAMS)
+        self.assertEqual(controller.get_request_counter(), before)
+        self.assertEqual(controller.current_concurrency.value, 0)
 
     def test_simple(self):
         loop = asyncio.new_event_loop()
@@ -798,9 +841,12 @@ class FrontendServerTest(TestCase):
             num_return_sequences=1,
             can_use_pd_separation=True,
         )
-        self.assertIs(_selected_pd_separation(RoleType.PREFILL, pd_config), True)
-        self.assertIs(_selected_pd_separation(RoleType.PDFUSION, pd_config), False)
-        self.assertIsNone(_selected_pd_separation(RoleType.DECODE, pd_config))
+        self.assertIs(_selected_pd_separation(RoleType.PREFILL, pd_config, False), False)
+        self.assertIs(_selected_pd_separation(RoleType.PDFUSION, pd_config, False), False)
+        self.assertIs(
+            _selected_pd_separation(RoleType.DECODE, pd_config, False), True
+        )
+        self.assertIsNone(_selected_pd_separation(None, pd_config, False))
 
         fallback_updates = (
             {"max_new_tokens": 1},
@@ -813,7 +859,7 @@ class FrontendServerTest(TestCase):
             with self.subTest(update=update):
                 fallback_config = pd_config.model_copy(update=update)
                 self.assertIs(
-                    _selected_pd_separation(RoleType.PREFILL, fallback_config),
+                    _selected_pd_separation(RoleType.PREFILL, fallback_config, False),
                     False,
                 )
 
@@ -847,7 +893,7 @@ class FrontendServerTest(TestCase):
         )
         cases = (
             (RoleType.PDFUSION, "127.0.0.1", 51001, False),
-            (RoleType.PREFILL, "prefill.test", 51002, True),
+            (RoleType.DECODE, "decode.test", 51002, True),
         )
         try:
             for request_id, (role, host, port, expected_pd_sep) in enumerate(

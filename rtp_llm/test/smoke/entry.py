@@ -37,10 +37,9 @@ def get_runner_type(
         return CaseRunner
     else:
         if "prefill" in env_args:
-            if "DECODE_ENTRANCE=1" in env_args["prefill"]:
-                return DpSeperationCaseRunner
-            else:
+            if any(role == "vit" or role.startswith("vit_") for role in env_args):
                 return PdSeperationCaseRunner
+            return DpSeperationCaseRunner
         elif "llm" in env_args and any(
             role == "vit" or role.startswith("vit_") for role in env_args
         ):

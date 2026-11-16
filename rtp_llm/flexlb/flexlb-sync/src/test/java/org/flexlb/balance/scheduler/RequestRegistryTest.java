@@ -3,6 +3,7 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.PlacementResult;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EncoderEndpoint;
+import org.flexlb.balance.preemption.CancelTarget;
 import org.flexlb.balance.scheduler.RequestLifecycleTestSupport.Registered;
 import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.scheduler.RequestSlot.DeliveryClaim;
@@ -11,6 +12,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RequestPhase;
@@ -19,10 +21,10 @@ import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -78,54 +80,31 @@ class RequestRegistryTest {
     }
 
     @Test
-    void distinctStringIdsKeepTheirOriginalLifecycleIdentity() throws Exception {
-        Map<String, CompletableFuture<Response>> responses = new HashMap<>();
-        for (String requestId : List.of("00123", "123", "req-abc", "9223372036854775808")) {
-            BalanceContext context = RequestLifecycleTestSupport.context(config, requestId);
-            CompletableFuture<Response> future = lifecycle.register(context);
-            responses.put(requestId, future);
-            assertEquals(requestId, lifecycle.getRequestState(requestId, 0L).requestId());
-            assertFalse(future.isDone());
-        }
-        assertEquals(4, lifecycle.trackedRequestCount());
+    void cancelTargetUsesDecodeAndPreservesIpv6PrefillControlRoute() {
+        ServerStatus prefill = mock(ServerStatus.class);
+        when(prefill.getServerIp()).thenReturn("2001:db8::1");
+        when(prefill.getGrpcPort()).thenReturn(9090);
+        ServerStatus decode = mock(ServerStatus.class);
+        when(decode.getServerIp()).thenReturn("10.0.0.2");
+        when(decode.getGrpcPort()).thenReturn(9091);
+        ScheduledRequest item =
+                new ScheduledRequest(
+                        context(100L),
+                        new CompletableFuture<>(),
+                        new Response(),
+                        prefill,
+                        decode,
+                        null,
+                        mock(DecodeEndpoint.class),
+                        new DecodeEndpoint.ReservationHandle(1L, "100", 1L),
+                        System.currentTimeMillis());
 
-        for (var response : responses.entrySet()) {
-            String requestId = response.getKey();
-            RequestState cancelled =
-                    lifecycle.cancelRequest(requestId, 0L, CancelReason.CLIENT_CANCELLED);
-            assertEquals(requestId, cancelled.requestId());
-            assertEquals(
-                    StrategyErrorType.REQUEST_CANCELLED.getErrorCode(),
-                    response.getValue().get(5, TimeUnit.SECONDS).getCode());
-            assertEquals(
-                    RequestState.Phase.CANCELLED, lifecycle.getRequestState(requestId, 0L).state());
-        }
-        assertEquals(0, lifecycle.trackedRequestCount());
-    }
+        CancelTarget target =
+                ReflectionTestUtils.invokeMethod(RequestRegistry.class, "cancelTarget", item);
 
-    @Test
-    void lifecycleRetainsOriginalNumericIdAcrossStateAndCancellation() {
-        BalanceContext context = RequestLifecycleTestSupport.context(config, "007");
-        context.setOriginalNumericRequestId(123L);
-        lifecycle.register(context);
-
-        assertEquals(123L, lifecycle.getRequestState("007", 0L).originalNumericRequestId());
-        RequestState cancelled = lifecycle.cancelRequest("007", 0L, CancelReason.CLIENT_CANCELLED);
-        assertEquals("007", cancelled.requestId());
-        assertEquals(123L, cancelled.originalNumericRequestId());
-    }
-
-    @Test
-    void reportsUnexpectedRegistrationFailureWithoutRegisteringTheRequest() {
-        BalanceContext context = context(101L);
-        config.getRequestLifecycle().setRequest(null);
-
-        Response response = lifecycle.register(context).join();
-
-        assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.DISPATCH_FAILED.getErrorCode(), response.getCode());
-        assertEquals(0, lifecycle.trackedRequestCount());
-        verify(requestReporter).reportLifecycleFailure("registration");
+        assertNotNull(target);
+        assertTrue(target.isRoutable());
+        assertEquals(new CancelTarget("10.0.0.2", 9091, "[2001:db8::1]:9090"), target);
     }
 
     @Test

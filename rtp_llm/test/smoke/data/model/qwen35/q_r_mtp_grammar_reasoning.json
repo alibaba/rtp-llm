@@ -5,6 +5,11 @@
     "_comment": "MTP + grammar + reasoning (sequential, thinking ON). Pairs with q_r_mtp_grammar.json (thinking OFF) and q_r_mtp_grammar_reasoning_concurrent.json (thinking ON + concurrency). Each axis has had a real bug in living memory: (1) MTP rollback non-reasoning active_steps formula bug; (2) ReasonerGrammarObject per-stream tokens_after_think_end reset (GrammarManager.cc:473-474); (3) MTP prefill bonus token T0 must be accepted into matcher; (4) grammar fork/DFS in spec decoding. With reasoning enabled, the matcher is in 'free-accept' (mask off) until </think> is seen, then locks onto the schema. Under MTP this means: the spec engine drafts N tokens including possibly </think>, the matcher must transition state synchronously, AND rollback must use the reasoning-mode active_steps formula. If any of those four breaks, the output is either non-JSON or never closes <think>. grammar_constraint_only=true because reasoning_content is model-version-dependent.",
     "query_result": [
         {
+            "compare_config": {
+                "ignore_aux_info_fields": [
+                    "role_addrs.ip"
+                ]
+            },
             "endpoint": "/v1/chat/completions",
             "query": {
                 "messages": [
@@ -112,6 +117,12 @@
                     "multimodal_lengths": {},
                     "role_addrs": [
                         {
+                            "role": "PREFILL",
+                            "ip": "127.0.0.1",
+                            "http_port": 0,
+                            "grpc_port": 0
+                        },
+                        {
                             "role": "DECODE",
                             "ip": "127.0.0.1",
                             "http_port": 10500,
@@ -125,6 +136,11 @@
             "_comment": "json_schema #1 (cache MISS) — first request triggers async compile of ReasonerGrammarObject under MTP. Verifies the freshly-built reasoner state propagates through MtpExecutor::dispatchDecode without leaking the compile-time default. max_thinking_tokens=64 caps the reasoning span so the matcher transitions to grammar lock within max_tokens=512."
         },
         {
+            "compare_config": {
+                "ignore_aux_info_fields": [
+                    "role_addrs.ip"
+                ]
+            },
             "endpoint": "/v1/chat/completions",
             "query": {
                 "messages": [
@@ -232,6 +248,12 @@
                     "multimodal_lengths": {},
                     "role_addrs": [
                         {
+                            "role": "PREFILL",
+                            "ip": "127.0.0.1",
+                            "http_port": 0,
+                            "grpc_port": 0
+                        },
+                        {
                             "role": "DECODE",
                             "ip": "127.0.0.1",
                             "http_port": 10500,
@@ -245,6 +267,11 @@
             "_comment": "json_schema #2 (memory cache HIT under MTP) — same schema, different prompt. The cache-hit branch must independently re-init the reasoner per request."
         },
         {
+            "compare_config": {
+                "ignore_aux_info_fields": [
+                    "role_addrs.ip"
+                ]
+            },
             "endpoint": "/v1/chat/completions",
             "query": {
                 "messages": [
@@ -324,6 +351,12 @@
                     "decode_memory_reuse_len": 0,
                     "multimodal_lengths": {},
                     "role_addrs": [
+                        {
+                            "role": "PREFILL",
+                            "ip": "127.0.0.1",
+                            "http_port": 0,
+                            "grpc_port": 0
+                        },
                         {
                             "role": "DECODE",
                             "ip": "127.0.0.1",

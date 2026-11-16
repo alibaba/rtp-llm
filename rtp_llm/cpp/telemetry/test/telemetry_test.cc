@@ -646,8 +646,8 @@ TEST_F(TelemetryTest, SpanFactoriesCarryRpcAttributes) {
     auto span_data = startInMemoryRuntime();
     auto parent    = TelemetryRuntime::tracer()->StartSpan("parent");
     auto client    = startChildClientSpan(
-        "rtp_llm.remote_generate", parent, "decode.example", 26101, 42, 1, "RpcService/RemoteGenerate");
-    auto server = startRpcServerSpan("rtp_llm.decode_remote_generate", nullptr, true, "RpcService/RemoteGenerate");
+        "rtp_llm.start_load", parent, "decode.example", 26101, 42, 1, "RpcService/StartLoad");
+    auto server = startRpcServerSpan("rtp_llm.prefill_start_load", nullptr, true, "RpcService/StartLoad");
     auto local  = startRpcServerSpan("rtp_llm.generate_stream_call", nullptr, false, "RpcService/GenerateStreamCall");
     ASSERT_NE(client, nullptr);
     ASSERT_NE(server, nullptr);
@@ -661,22 +661,22 @@ TEST_F(TelemetryTest, SpanFactoriesCarryRpcAttributes) {
     auto spans = span_data->GetSpans();
     ASSERT_EQ(spans.size(), 4u);
     for (const auto& span : spans) {
-        if (span->GetName() == "rtp_llm.remote_generate") {
+        if (span->GetName() == "rtp_llm.start_load") {
             const auto& attributes = span->GetAttributes();
             auto        it         = attributes.find("rpc.system");
             ASSERT_NE(it, attributes.end());
             EXPECT_EQ(nostd::get<std::string>(it->second), "grpc");
-            EXPECT_EQ(nostd::get<std::string>(attributes.at("rpc.method")), "RpcService/RemoteGenerate");
+            EXPECT_EQ(nostd::get<std::string>(attributes.at("rpc.method")), "RpcService/StartLoad");
             EXPECT_EQ(span->GetSpanKind(), trace_api::SpanKind::kClient);
             EXPECT_EQ(nostd::get<std::string>(attributes.at("server.address")), "decode.example");
             EXPECT_EQ(nostd::get<int64_t>(attributes.at("server.port")), 26101);
             EXPECT_EQ(nostd::get<std::string>(attributes.at("request_id")), "42");
             EXPECT_EQ(attributes.count("rtp_llm.request_id"), 0u);
             EXPECT_EQ(nostd::get<int64_t>(attributes.at("rtp_llm.retry_attempt")), 1);
-        } else if (span->GetName() == "rtp_llm.decode_remote_generate") {
+        } else if (span->GetName() == "rtp_llm.prefill_start_load") {
             const auto& attributes = span->GetAttributes();
             EXPECT_EQ(nostd::get<std::string>(attributes.at("rpc.system")), "grpc");
-            EXPECT_EQ(nostd::get<std::string>(attributes.at("rpc.method")), "RpcService/RemoteGenerate");
+            EXPECT_EQ(nostd::get<std::string>(attributes.at("rpc.method")), "RpcService/StartLoad");
             EXPECT_TRUE(nostd::get<bool>(attributes.at("rtp_llm.pd_sep")));
             EXPECT_EQ(span->GetSpanKind(), trace_api::SpanKind::kServer);
         } else if (span->GetName() == "rtp_llm.generate_stream_call") {

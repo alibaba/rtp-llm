@@ -12,6 +12,7 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import (
     update_stop_words_from_env,
@@ -344,6 +345,11 @@ class FrontendServer(object):
                 _record_http_status(trace_state, 200)
                 trace_state.finish(error=e)
             format_e = format_exception(e)
+            logging.warning(
+                "Frontend streaming failure: request_id=%s http_status=200 error_code=%s error_name=%s message=%s",
+                request.get(request_id_field_name), format_e.get("error_code"),
+                format_e.get("error_code_str"), format_e.get("message"),
+            )
             self._access_logger.log_exception_access(request, e, format_e)
             kmonitor.report(
                 AccMetrics.ERROR_QPS_METRIC,
@@ -565,38 +571,40 @@ class FrontendServer(object):
     async def batch_infer(self, req: dict, raw_request: Request):
         from rtp_llm.frontend.frontend_worker import BatchPipelineResponse
 
-        # Concurrency accounting: a batch counts as ONE scheduling unit because the engine
-        # atomically enqueues all prompts via BatchGenerateCall. Per-item counting would over-
-        # reject under the same concurrency_limit; the trade-off is that a large batch occupies
-        # only one slot regardless of N.
-        sequence = self._global_controller.increment() % 4096
-        request_id = generate_request_id(
-            self.py_env_configs.server_config.ip,
-            self.py_env_configs.server_config.server_port,
-            self.server_id,
-            sequence,
-        )
+        prompts = req.get("prompt_batch", [])
+        if len(prompts) > 4096:
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS, "prompt_batch may contain at most 4096 items"
+            )
+        # Reserve the whole sequence range while acquiring a single batch slot.
+        sequence = self._global_controller.increment(max(1, len(prompts)))
         previous_trace_state = CURRENT_TRACE_STATE.get()
-        trace_state = start_server_span(
-            "POST /batch_infer",
-            raw_request.headers,
-            initial_attributes={
-                trace_attrs.HTTP_REQUEST_METHOD: "POST",
-                trace_attrs.HTTP_METHOD: "POST",
-                trace_attrs.GEN_AI_SPAN_KIND: "LLM",
-                trace_attrs.LINGJI_FLAG: True,
-                trace_attrs.ACS_ARMS_TENANT_SPAN_POLICY: "mask",
-                trace_attrs.GEN_AI_SYSTEM: "rtp_llm",
-                trace_attrs.GEN_AI_OPERATION_NAME: "batch",
-            },
-        )
+        trace_state = None
         try:
+            trace_state = start_server_span(
+                "POST /batch_infer",
+                raw_request.headers,
+                initial_attributes={
+                    trace_attrs.HTTP_REQUEST_METHOD: "POST",
+                    trace_attrs.HTTP_METHOD: "POST",
+                    trace_attrs.GEN_AI_SPAN_KIND: "LLM",
+                    trace_attrs.LINGJI_FLAG: True,
+                    trace_attrs.ACS_ARMS_TENANT_SPAN_POLICY: "mask",
+                    trace_attrs.GEN_AI_SYSTEM: "rtp_llm",
+                    trace_attrs.GEN_AI_OPERATION_NAME: "batch",
+                },
+            )
             if trace_state is not None:
                 trace_state.begin_batch(
                     extract_correlation_request_id(raw_request.headers)
                 )
             assert self._frontend_worker is not None
-            prompts = req.get("prompt_batch", [])
+            request_id = generate_request_id(
+                self.py_env_configs.server_config.ip,
+                self.py_env_configs.server_config.server_port,
+                self.server_id,
+                sequence,
+            )
             generate_config = req.get("generate_config", {})
             result = await self._frontend_worker.batch_infer(
                 prompts=prompts,
@@ -631,6 +639,11 @@ class FrontendServer(object):
     def _handle_exception(self, request: Dict[str, Any], e: BaseException):
         exception_json = format_exception(e)
         error_code_str = exception_json.get("error_code_str", "")
+        logging.warning(
+            "Frontend failure: request_id=%s http_status=500 error_code=%s error_name=%s message=%s",
+            request.get(request_id_field_name), exception_json.get("error_code"),
+            error_code_str, exception_json.get("message"),
+        )
         if isinstance(e, ConcurrencyException):
             kmonitor.report(AccMetrics.CONFLICT_QPS_METRIC)
         elif isinstance(e, asyncio.CancelledError):

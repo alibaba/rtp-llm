@@ -64,7 +64,7 @@
           "iter_count": 100,
           "input_len": 2773,
           "output_len": 100,
-          "step_output_len": 99,
+          "step_output_len": 100,
           "pd_sep": true,
           "reuse_len": 0,
           "local_reuse_len": 0,
@@ -96,10 +96,22 @@
           "generation_prefill_cuda_graph_status": "not_requested",
           "role_addrs": [
             {
+              "role": "VIT",
+              "ip": "127.0.0.1",
+              "http_port": 13480,
+              "grpc_port": 13481
+            },
+            {
               "role": "DECODE",
               "ip": "127.0.0.1",
-              "http_port": 12532,
-              "grpc_port": 12533
+              "http_port": 17311,
+              "grpc_port": 17312
+            },
+            {
+              "role": "PREFILL",
+              "ip": "127.0.0.1",
+              "http_port": 13945,
+              "grpc_port": 13946
             }
           ],
           "aux_string": ""

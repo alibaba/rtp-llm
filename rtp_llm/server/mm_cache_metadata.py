@@ -7,6 +7,7 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalHashResponsePB
 
 MAX_METADATA_KEYS = 256
+MAX_METADATA_KEY_LENGTH = 4096
 MAX_METADATA_ROWS = 1048576
 MAX_METADATA_BYTES = 16 * 1024 * 1024
 
@@ -53,7 +54,7 @@ def get_mm_cache_metadata(
         raise NotImplementedError("worker-local cache required")
     if len(keys) > MAX_METADATA_KEYS:
         raise ValueError("too many multimodal cache keys")
-    if any(not key or len(key) > 4096 for key in keys):
+    if any(not key or len(key) > MAX_METADATA_KEY_LENGTH for key in keys):
         raise ValueError("invalid multimodal cache key")
     if timeout_ms <= 0:
         raise ValueError("multimodal hash timeout must be positive")
