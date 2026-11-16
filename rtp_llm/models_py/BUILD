@@ -69,12 +69,17 @@ py_library(
         "modules/dsv41/ppu/mega_gate.py",
         "modules/dsv41/ppu/ptpc_quant.py",
         "modules/dsv41/ppu/quant_conversion.py",
+        "modules/dsv41/ppu/gc_decode_moe.py",
+        "modules/dsv41/ppu/input_packer.py",
         "modules/dsv41/ppu/moe.py",
     ],
     deps = [
         ":v41_ppu_contract",
         "//rtp_llm:torch",
-    ],
+    ] + select({
+        "@//:using_ppu": ["@pip_ppu_torch//gc_moe"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
 
@@ -329,7 +334,7 @@ py_library(
         "@//:using_cuda13_x86": flashinfer + deep,
         "@//:using_cuda13_arm": flashinfer + deep,
         "@//:using_cuda12": flashinfer + deep,
-        "@//:using_ppu": deep,
+        "@//:using_ppu": deep + ["@pip_ppu_torch//gc_moe"],
         "@//:using_rocm": [
             "//rtp_llm/models_py/modules/base/rocm:rocm_base",
             "//rtp_llm/models_py/modules/base/rocm:trt_allreduce",

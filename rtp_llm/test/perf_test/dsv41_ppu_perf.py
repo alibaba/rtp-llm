@@ -267,6 +267,14 @@ def build_plan(args):
             environment["RTP_V41_PPU_MEGAMOE_MODULE"] = os.environ[
                 "RTP_V41_PPU_MEGAMOE_MODULE"
             ]
+        if decode:
+            from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import (
+                GC_MOE_MODE_ENV, GC_MOE_TOKEN_BOUND_ENV, gc_moe_mode,
+            )
+
+            environment[GC_MOE_MODE_ENV] = gc_moe_mode()
+            if GC_MOE_TOKEN_BOUND_ENV in os.environ:
+                environment[GC_MOE_TOKEN_BOUND_ENV] = os.environ[GC_MOE_TOKEN_BOUND_ENV]
         command = [
             sys.executable,
             "-B",
@@ -614,6 +622,10 @@ def check_graph_evidence(job):
         route: job["environment"].get(f"RTP_V41_PPU_GRAPH_{route.upper()}") == "1"
         for route in ("packed_attention", "visible_indexer")
     }
+    from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import gc_moe_mode
+
+    gc_mode = gc_moe_mode(job["environment"])
+    gc_enabled = gc_mode != "off"
     assignments = 0
     for rank in range(WORLD_SIZE):
         report = json.loads((directory / f"moe-rank{rank}.json").read_text())
@@ -633,12 +645,23 @@ def check_graph_evidence(job):
             e["backend"] != "megamoe"
             or e["precision"] != "w4a4"
             or e["grouped_gemm_calls"]
-            or (e["layers"] and e["mega_moe_calls"] <= 0)
             for e in engines
         ):
             raise ValueError(
                 f"rank {rank}: unexpected MoE backend or missing native calls"
             )
+        for engine in (e for e in engines if e["layers"]):
+            capture_calls = engine.get("gc_moe_capture_calls", 0)
+            if gc_enabled:
+                if (
+                    capture_calls < engine["layers"]
+                    or capture_calls % engine["layers"]
+                    or engine["mega_moe_calls"]
+                    or engine["gc_moe_mode"] != gc_mode
+                ):
+                    raise ValueError(f"rank {rank}: incorrect GC MoE Graph path")
+            elif engine["mega_moe_calls"] <= 0 or engine.get("gc_moe_calls", 0):
+                raise ValueError(f"rank {rank}: incorrect MegaMoE Graph path")
         mhc = report.get("mega_mhc", [])
         captured = sum(stats["graph_capture_calls"] for stats in mhc)
         if graph_mega_mhc and (
@@ -664,7 +687,7 @@ def check_graph_evidence(job):
         os.environ.get("RTP_V41_PPU_MEGAMOE_MODULE", "deep_gemm"),
     )
     # The separately packaged provider documents receive stats as reserved.
-    if mega_module != "deep_gemm_mega" and not assignments:
+    if not gc_enabled and mega_module != "deep_gemm_mega" and not assignments:
         raise ValueError("Graph reports contain no received expert assignments")
 
 

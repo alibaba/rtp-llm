@@ -1095,6 +1095,9 @@ fsspec==2026.9.0 \
     # via
     #   huggingface-hub
     #   torch
+gc-moe @ https://artlab.alibaba-inc.com/1/pypi/rtp_llm/gc_moe/gc_moe-0.6.1%2B59b8240.cu132-py3-none-any.whl#sha256=902f112d2b0c455604d33fbc1079466ae96503b6d98bdcf8337777572544d873 \
+    --hash=sha256:902f112d2b0c455604d33fbc1079466ae96503b6d98bdcf8337777572544d873
+    # via -r requirements_torch_ppu.txt
 grpcio==1.62.0 \
     --hash=sha256:0b9179478b09ee22f4a36b40ca87ad43376acdccc816ce7c2193a9061bf35701 \
     --hash=sha256:0d3dee701e48ee76b7d6fbbba18ba8bc142e5b231ef7d3d97065204702224e0e \

@@ -23,9 +23,11 @@ run it on a CPU host.
 from __future__ import annotations
 
 import importlib
+import inspect
 import os
 
 from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import (
+    gc_moe_mode,
     megamoe_module_name,
     moe_backend,
     moe_kernel_name,
@@ -93,7 +95,18 @@ def check_capabilities(runtime) -> None:
                 f"unapproved V4.1 PPU strategy {strategy!r}; expected {PPU_STRATEGY}"
             )
     missing: list[str] = []
-    for module_name, symbols in kernel_symbols():
+    required = kernel_symbols()
+    role = getattr(runtime, "role", None)
+    if role in ("DECODE", "PDFUSION") and gc_moe_mode() != "off":
+        gc_symbols = (("gc_moe", (
+            "get_symm_buffer_for_gc_moe_ppu",
+            "transform_weights_for_gc_moe_ppu",
+            "ppu_fp4_fp4_gc_moe",
+        )), ("deep_gemm", ("fp8_gemm_nt",)))
+        if role == "DECODE":
+            required = COMMON_KERNEL_SYMBOLS
+        required += gc_symbols
+    for module_name, symbols in required:
         try:
             module = importlib.import_module(module_name)
         except Exception as error:  # noqa: BLE001 - report any import failure
@@ -102,6 +115,10 @@ def check_capabilities(runtime) -> None:
         for symbol in symbols:
             if not callable(getattr(module, symbol, None)):
                 missing.append(f"{module_name}.{symbol}")
+        if module_name == "gc_moe" and getattr(runtime, "cuda_graph", False):
+            allocate = getattr(module, "get_symm_buffer_for_gc_moe_ppu", None)
+            if callable(allocate) and "graph_safe" not in inspect.signature(allocate).parameters:
+                missing.append("a PPU GC MoE wheel with graph_safe workspace support")
         if module_name == "deep_gemm":
             try:
                 check_moe_preprocess(module)

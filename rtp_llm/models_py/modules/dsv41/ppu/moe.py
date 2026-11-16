@@ -1681,6 +1681,7 @@ class PPUMoE:
         self._prefill_fake_pattern_builds = 0
         self._prefill_fake_pattern_calls = 0
         self.group = group
+        self.gc_decode = None
         if self.num_physical_experts < self.num_routed_experts:
             raise ValueError("physical expert slots must cover logical experts")
         if self.num_local_experts <= 0 or self.num_physical_experts % self.num_local_experts != 0:
@@ -1707,6 +1708,24 @@ class PPUMoE:
         if self.backend == "megamoe":
             with self._BUFFER_LOCK:
                 self._MEGA_ENGINES.add(self)
+
+    def configure_gc_decode(self, num_topk, token_bound, *, mode, graph_safe=False):
+        from .gc_decode_moe import DecodeGCMoE
+
+        self.gc_decode = DecodeGCMoE(
+            self, num_topk, token_bound, mode=mode, graph_safe=graph_safe,
+        )
+        with self._BUFFER_LOCK:
+            self._MEGA_ENGINES.add(self)
+
+    def forward_gc_decode(self, x, ids, weights, *, layer_id, expert_load, valid,
+                          shared_weights):
+        ids, weights = self._apply_fake_balance(ids, weights)
+        ids = self._map_expert_ids(ids, weights, layer_id)
+        return self.gc_decode.forward(
+            x, ids, weights, layer_id=layer_id, expert_load=expert_load, valid=valid,
+            shared_weights=shared_weights,
+        )
 
     def configure_fake_balance(self, enabled, *, top_k, dp_rank, dp_size):
         """Freeze the performance-only route override for this model instance."""
@@ -1967,6 +1986,8 @@ class PPUMoE:
         for key in list(self._processed):
             if key[0] == int(layer_id):
                 del self._processed[key]
+        if self.gc_decode is not None:
+            self.gc_decode.bind_weights(int(layer_id), w13_weight, w13_scale, w2_weight, w2_scale)
         self._current_layer = int(layer_id)
 
     def execution_stats(self) -> dict:
@@ -1978,6 +1999,11 @@ class PPUMoE:
             "grouped_forward_calls": self.grouped_forward_calls,
             "grouped_gemm_calls": self.grouped_gemm_calls,
             "mega_moe_calls": self.mega_moe_calls,
+            "gc_moe_calls": self.gc_decode.calls if self.gc_decode is not None else 0,
+            "gc_moe_capture_calls": (
+                self.gc_decode.capture_calls if self.gc_decode is not None else 0
+            ),
+            "gc_moe_mode": self.gc_decode.mode if self.gc_decode is not None else "off",
             "fake_balance_expert": bool(
                 self._fake_balance_config and self._fake_balance_config[0]
             ),
@@ -2548,6 +2574,8 @@ class PPUMoE:
 
     def close(self, *, group=None):
         """Release this model's workspace after coordinated rank drain."""
+        if self.gc_decode is not None:
+            self.gc_decode.close()
         if self._mega_buffer is not None:
             torch.cuda.synchronize(device=self._mega_device)
             if group is not None:

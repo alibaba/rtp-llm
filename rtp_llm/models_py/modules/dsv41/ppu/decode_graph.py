@@ -34,6 +34,9 @@ class SharedPPUDecodeGraphImpl(PPUDecodeGraphImpl):
             raise ValueError("N4 shared Graph requires text-only Decode")
         self.runtime = model.shared_graph_runtime
         self.rows = batch
+        gc_decode = self.runtime.gc_decode
+        if gc_decode is not None and batch > gc_decode.token_bound:
+            raise ValueError("Decode Graph bucket exceeds the PPU GC MoE token bound")
         self.runtime.validate()
         if self.runtime.grouped is not None:
             from rtp_llm.models_py.modules.dsv41.ppu.graph_metadata import (

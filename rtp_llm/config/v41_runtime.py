@@ -147,10 +147,11 @@ class V41RuntimeConfig:
         expected = {
             "PREFILL": ((8, 1, "ALL_GATHER", 8), (1, 8, "DISABLED", 1)),
             "DECODE": ((1, decode_dp, "PREFILL_CP", 8), (1, decode_dp, "DISABLED", 1)),
+            "PDFUSION": ((1, 8, "DISABLED", 1),),
         }
         errors = []
         if self.role not in expected:
-            errors.append("role must be PREFILL or DECODE")
+            errors.append("role must be PREFILL, DECODE, or PDFUSION")
         elif (
             self.physical_tp,
             self.attention_dp,
