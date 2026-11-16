@@ -67,7 +67,7 @@ cc_test(
         "L20_CU13",
         "exclusive-if-local",
     ],
-    deps = test_deps + [
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + test_deps + [
         ":block_transfer_engine_test_utils",
         "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
         "@havenask//aios/autil:env_util",
@@ -81,7 +81,7 @@ cc_test(
     testonly = True,
     srcs = ["PerRankBlockTransferEngineHostDiskTest.cc"],
     copts = test_copts,
-    deps = test_deps + [
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + test_deps + [
         ":block_transfer_engine_test_utils",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "@havenask//aios/autil:env_util",
@@ -286,9 +286,10 @@ cc_test(
 
 cc_test(
     name = "transfer_work_loop_test",
+    testonly = True,
     srcs = ["TransferWorkLoopTest.cc"],
     copts = test_copts,
-    deps = test_deps + [
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + test_deps + [
         ":block_transfer_engine_test_utils",
         "@havenask//aios/autil:env_util",
         "//rtp_llm/cpp/utils:async_profile_trace",

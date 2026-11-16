@@ -343,26 +343,6 @@ bool CoordinatorCacheManager::detachSharedBlocksForRecompute(const BatchKVCacheR
             }
         }
     }
-    if (remoteCacheDecodePublicationEnabled()) {
-        // The allocator may keep an exclusively owned numeric block ID for
-        // recomputation. Its payload will change without a new allocation:
-        // invalidate that suffix, while preserving the proven ready prefix
-        // and the old cache/other-request pages detached above.
-        for (const auto& group : groups) {
-            const auto& tag  = group->tag();
-            const auto& pool = group->blockPool();
-            const int   local_reuse_length =
-                cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, tag, device_ready_reuse_length);
-            const size_t begin = local_reuse_length / group->seqSizePerBlock();
-            for (int batch = 0; batch < resource->batchSize(); ++batch) {
-                const auto& blocks = resource->blocks(batch, tag);
-                for (size_t pos = begin; pos < blocks.size(); ++pos) {
-                    if (!isNullBlockIdx(blocks[pos]))
-                        pool->bindDecodeOrigin(blocks[pos], pool->decodeOriginIncarnation(blocks[pos]), tag, nullptr);
-                }
-            }
-        }
-    }
     rollback.dismiss();
     return true;
 }
@@ -505,7 +485,6 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&                 cac
     BlockTreeMatchResult match_result =
         block_tree_cache_->match(cache_keys, valid_prefix, enable_storage_backend, request_id);
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
-    prepared.decode_sources                        = std::move(match_result.matched_device_decode_sources);
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
     prepared.total_logical_blocks =
         load_context ? load_context->localMatchedBlocks() : match_result.matched_device_blocks;
@@ -631,7 +610,6 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
                             load_context};
         result.match_end_time_us = match_end_time_us;
         result.load_attempted    = load_attempted;
-        result.decode_sources    = deferred_prepared->decode_sources;
         return result;
     }
 
@@ -642,7 +620,6 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
         true, static_cast<int>(prepared.matched_device_blocks) * reuse_unit_tokens, match_cost_time_us, load_context};
     result.match_end_time_us = match_end_time_us;
     result.load_attempted    = load_attempted;
-    result.decode_sources    = std::move(prepared.decode_sources);
     return result;
 }
 
@@ -947,6 +924,21 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
         return;
     }
 
+    // Unsupported reusable LINEAR models retain their existing local-cache
+    // insertion policy even when this process-level DSV4.1 switch is set.
+    const bool native_decode = remoteCacheDecodePublicationEnabled() && role_type_ == RoleType::DECODE
+        && std::none_of(config_.topology().groups().begin(), config_.topology().groups().end(), [](const auto& group) {
+            return group.policy.enable_prefix_reuse && group.policy.group_type == CacheGroupType::LINEAR;
+        });
+    const bool unused_decode_tree = native_decode && config_.use_opaque_kv_cache_store
+                                    && config_.disable_decode_first_malloc_device_reuse;
+    // Native publication already prepared its own source pins before release.
+    // This D policy never looks up request entries, so avoid retaining/copying
+    // them. Resident system prompts still require the original insertion count.
+    if (unused_decode_tree && !insert_info.is_resident) return;
+    const bool native_insert = native_decode && !insert_info.is_resident;
+    const auto endpoint = native_insert ? kv_cache_resource->decode_endpoint : nullptr;
+    if (native_insert && !config_.mtp_sub_configs.empty() && !endpoint) return;
     const auto& cp_mapper = cp_slot_mapper_;
     const bool  cp_active = cp_mapper && cp_mapper->isSharded();
     // Preserve the single-group publication contract: only batch zero becomes
@@ -960,6 +952,18 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
             continue;
         }
         CacheKeysType insert_keys = cp_active ? cpCanonicalCacheKeys(cp_mapper, full_keys) : full_keys;
+        const bool cap_computed_end = native_insert && !endpoint && insert_info.complete_token_ids;
+        const size_t endpoint_key_unit = (endpoint || cap_computed_end) ?
+            (cp_active ? cp_mapper->reuseBlockTokens(config_) : config_.seq_size_per_block) : 0;
+        if (endpoint) {
+            insert_keys.resize(std::min(insert_keys.size(), endpoint->end / endpoint_key_unit));
+        } else if (cap_computed_end) {
+            // Final publication refreshes keys after sampling. The last token
+            // has no KV yet, even if the refreshed key is block-aligned.
+            const auto seq_len = insert_info.complete_token_ids->seqLength();
+            const size_t computed_end = seq_len > 0 ? static_cast<size_t>(seq_len - 1) : 0;
+            insert_keys.resize(std::min(insert_keys.size(), computed_end / endpoint_key_unit));
+        }
         if (insert_keys.empty()) {
             continue;
         }
@@ -984,12 +988,21 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
                     mapping_valid = false;
                     break;
                 }
-                const auto type           = config_.group(tag).policy.group_type;
+                const auto& group         = config_.group(tag);
+                const auto type           = group.policy.group_type;
                 const bool sparse_logical = cp_active
                                             && (type == CacheGroupType::LINEAR
                                                 || (type == CacheGroupType::SWA && !cpCompactSwaGroup(tag, cp_mapper)));
                 const auto& blocks = kv_cache_resource->blocks(batch_id, tag);
+                const auto* native = endpoint ? &endpoint->blocks.at(tag) : nullptr;
+                const size_t span = endpoint ? group.seqSizePerBlock() : 0;
                 for (size_t i = 0; i < insert_keys.size(); ++i) {
+                    if (native) {
+                        const size_t tokens = (i + 1) * endpoint_key_unit;
+                        if (tokens % span == 0 && tokens / span - 1 < native->size())
+                            resources[i][group_set_id].device_blocks[member_group_id] = (*native)[tokens / span - 1];
+                        continue; // Original tree acquires CACHE refs before this endpoint owner is released.
+                    }
                     const size_t position = sparse_logical ? (i + 1) * static_cast<size_t>(cp_mapper->cpSize()) - 1 : i;
                     if (position >= blocks.size() || isNullBlockIdx(blocks[position])) {
                         continue;
@@ -1850,16 +1863,6 @@ void CoordinatorCacheManager::blockBatchCopyForForward(const torch::Tensor&     
                                 tag.c_str());
     }
     if (gpu_block_copy_ && group_tags.size() == 1 && group_tags.front() == config_.groupTags().front()) {
-        if (remoteCacheDecodePublicationEnabled()) {
-            const auto& pool = group_block_pools_.front();
-            const auto* rows = copy_mapping.data_ptr<int32_t>();
-            for (int64_t i = 0; i < copy_mapping.size(0); ++i) {
-                if (rows[3 * i + 1] != rows[3 * i + 2]) {
-                    const auto target = rows[3 * i + 2];
-                    pool->bindDecodeOrigin(target, pool->decodeOriginIncarnation(target), group_tags.front(), nullptr);
-                }
-            }
-        }
         gpu_block_copy_->copy(copy_mapping);
         return;
     }
@@ -1889,10 +1892,6 @@ void CoordinatorCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBloc
         const auto copy_type =
             BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(group_id)]->where(),
                                            group_block_pools_[static_cast<size_t>(group_id)]->where());
-        if (mapping.src != mapping.dst && remoteCacheDecodePublicationEnabled()) {
-            const auto& pool = group_block_pools_[static_cast<size_t>(group_id)];
-            pool->bindDecodeOrigin(mapping.dst, pool->decodeOriginIncarnation(mapping.dst), mapping.tag, nullptr);
-        }
         for (int layer_id : config_.layerIdsForGroup(mapping.tag)) {
             const auto& physical_group = config_.physicalGroupForLayer(layer_id, mapping.tag);
             copy_nums[copy_type] += physical_group.kvScaleStrideBytes() > 0 ? 2 : 1;

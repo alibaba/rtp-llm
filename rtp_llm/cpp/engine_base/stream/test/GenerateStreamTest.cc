@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 
 #include "gtest/gtest.h"
 
@@ -343,107 +344,63 @@ TEST_F(GenerateStreamTest, PublishedVerifiedDraftCountPrecedesTerminalWindowClip
     EXPECT_EQ(output.value().generate_outputs[0].aux_info.speculative_verified_draft_tokens, 5);
 }
 
-TEST_F(GenerateStreamTest, DecodeCacheActualUseIncludesHotTiersWithoutRemoteRestore) {
-    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
-    for (const auto tier : {Tier::DEVICE, Tier::HOST, Tier::DISK, Tier::REMOTE}) {
-        SCOPED_TRACE(tierName(tier));
-        // The same published interval can be used once by each independent
-        // request, including a context update that immediately reaches EOS.
-        for (int request = 0; request < 2; ++request) {
-            auto stream                              = GenerateStreamBuilder().createContextStream({1, 2, 3});
-            stream->generateConfig()->max_new_tokens = 1;
-            auto& resource                           = stream->streamCacheResource();
-            resource.resource_context_.role_type     = RoleType::PREFILL;
-            kmonitor::MetricsTags tags;
-            stream->setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
-            auto origin =
-                std::make_shared<const DecodeCacheOrigin>(DecodeCacheOrigin{std::string(32, 'a'), 1, 0, 2, 2, 3});
-            const auto sources =
-                std::make_shared<const DecodeReuseSources>(DecodeReuseSources{{std::move(origin), tier}});
-            resource.adoptDecodeReuse(sources, 2);
-            ASSERT_TRUE(resource.hasPendingDecodeReuse());
-            ASSERT_FALSE(resource.hasPendingRemoteRestore());
-
-            StreamUpdateInfo update{torch::tensor({{42}}, torch::kInt32), 1};
-            update.context_kv_all_rank_gpu_ready_at = RemoteRestoreTiming::Clock::now();
-            stream->update(update);
-
-            EXPECT_TRUE(resource.decode_reuse_use_state_.consumed_);
-            EXPECT_FALSE(resource.hasPendingDecodeReuse());
-            // Allocator retries cannot re-arm the count for this request.
-            resource.clearCacheReuseState();
-            resource.adoptDecodeReuse(sources, 2);
-            EXPECT_FALSE(resource.hasPendingDecodeReuse());
-        }
-    }
-}
-
-TEST_F(GenerateStreamTest, DecodeCacheActualUseRejectsUnprovenForcedAndFailedContextUpdates) {
-    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
-    enum class Case {
-        CPU_OBSERVATION,
-        FORCED,
-        WORKER_ERROR,
-        CANCELLED,
-        DECODE_UPDATE,
-        INVALID_TOKEN
-    };
-    for (const auto scenario : {Case::CPU_OBSERVATION,
-                                Case::FORCED,
-                                Case::WORKER_ERROR,
-                                Case::CANCELLED,
-                                Case::DECODE_UPDATE,
-                                Case::INVALID_TOKEN}) {
-        SCOPED_TRACE(static_cast<int>(scenario));
-        auto stream                              = GenerateStreamBuilder().createContextStream({1, 2, 3});
-        stream->generateConfig()->max_new_tokens = 4;
-        auto& resource                           = stream->streamCacheResource();
-        resource.resource_context_.role_type     = RoleType::PREFILL;
-        kmonitor::MetricsTags tags;
-        stream->setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
-        auto origin = std::make_shared<const DecodeCacheOrigin>(DecodeCacheOrigin{std::string(32, 'a'), 1, 0, 2, 2, 3});
-        resource.adoptDecodeReuse(
-            std::make_shared<const DecodeReuseSources>(DecodeReuseSources{{std::move(origin), Tier::DEVICE}}), 2);
-        ASSERT_TRUE(resource.hasPendingDecodeReuse());
-
-        StreamUpdateInfo update{torch::tensor({{scenario == Case::INVALID_TOKEN ? 2048 : 42}}, torch::kInt32), 1};
-        if (scenario != Case::CPU_OBSERVATION)
-            update.context_kv_all_rank_gpu_ready_at = RemoteRestoreTiming::Clock::now();
-        update.force_update_info = scenario == Case::FORCED;
-        if (scenario == Case::WORKER_ERROR)
-            update.error_info = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "worker failed");
-        if (scenario == Case::CANCELLED)
-            stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "request cancelled");
-        if (scenario == Case::DECODE_UPDATE)
-            stream->setIsContextStream(false);
-        stream->update(update);
-        EXPECT_FALSE(resource.decode_reuse_use_state_.consumed_);
-
-        // A later decode update carrying a GPU timestamp must not turn a CPU
-        // observation or forced P-to-D token into a successful context use.
-        if (scenario == Case::CPU_OBSERVATION || scenario == Case::FORCED) {
-            StreamUpdateInfo later{torch::tensor({{43}}, torch::kInt32), 1};
-            later.context_kv_all_rank_gpu_ready_at = RemoteRestoreTiming::Clock::now();
-            stream->update(later);
-            EXPECT_FALSE(resource.decode_reuse_use_state_.consumed_);
-        }
-    }
-}
-
-TEST_F(GenerateStreamTest, DecodeCacheActualUseIsNotAdoptedWhenFeatureOffOrRoleIsDecode) {
+TEST_F(GenerateStreamTest, SpeculativeEndpointBookkeepingIsDecodeOnly) {
     for (const bool enabled : {false, true}) {
-        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
-        auto            stream               = GenerateStreamBuilder().createContextStream({1, 2, 3});
-        auto&           resource             = stream->streamCacheResource();
-        resource.resource_context_.role_type = enabled ? RoleType::DECODE : RoleType::PREFILL;
-        kmonitor::MetricsTags tags;
-        stream->setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
-        auto origin = std::make_shared<const DecodeCacheOrigin>(DecodeCacheOrigin{std::string(32, 'a'), 1, 0, 2, 2, 3});
-        resource.adoptDecodeReuse(
-            std::make_shared<const DecodeReuseSources>(DecodeReuseSources{{std::move(origin), Tier::DEVICE}}), 2);
-        EXPECT_FALSE(resource.hasPendingDecodeReuse());
-        EXPECT_FALSE(resource.decode_reuse_use_state_.sources_);
+        autil::EnvGuard publish("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
+            for (const auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+                SCOPED_TRACE(::testing::Message() << "enabled=" << enabled << " role=" << static_cast<int>(role));
+                ResourceContext context;
+                context.role_type = role;
+                auto stream = GenerateStreamBuilder().createContextStream({1, 2, 3}, nullptr, context);
+                stream->generateConfig()->max_new_tokens = 16;
+                stream->generate_status_->status.store(StreamState::RUNNING);
+                auto buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
+                buffer->tokens = torch::zeros({1, 1}, torch::kInt32);
+                stream->setSPOutputBuffer(buffer);
+                auto stale = std::make_shared<DecodeEndpoint>(); stale->end = 4096;
+                auto accepted = std::make_shared<DecodeEndpoint>(); accepted->end = 2;
+                auto& resource = stream->kvCacheMutable();
+                // A sentinel makes accidental P bookkeeping observable; no
+                // actual P capture or publication is introduced by the test.
+                resource.decode_endpoint = stale;
+                resource.decode_round_endpoints = {nullptr, accepted};
+                StreamSpecUpdateInfo update{torch::tensor({{17}}, torch::kInt32), 1, -1, {}, {}};
+                stream->specUpdate(update);
+                ASSERT_FALSE(stream->hasError()) << stream->statusInfo().ToString();
+                EXPECT_EQ(stream->outputTokenLen(), 1);
+                EXPECT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
+                if (enabled && role == RoleType::DECODE) {
+                    EXPECT_EQ(resource.decode_endpoint, accepted);
+                    EXPECT_TRUE(resource.decode_round_endpoints.empty());
+                } else {
+                    EXPECT_EQ(resource.decode_endpoint, stale);
+                    ASSERT_EQ(resource.decode_round_endpoints.size(), 2u);
+                    EXPECT_EQ(resource.decode_round_endpoints.back(), accepted);
+                }
+            }
+        });
     }
+}
+
+TEST_F(GenerateStreamTest, LatestDecodeEndpointIncludesPendingCandidatesAndRetainsSnapshot) {
+    auto stream = GenerateStreamBuilder().createContextStream({1, 2, 3});
+    auto selected = std::make_shared<DecodeEndpoint>(); selected->end = 4;
+    auto pending = std::make_shared<DecodeEndpoint>(); pending->end = 12;
+    auto middle = std::make_shared<DecodeEndpoint>(); middle->end = 8;
+    auto& resource = stream->kvCacheMutable();
+    resource.decode_endpoint = selected;
+    resource.decode_round_endpoints = {nullptr, pending, middle};
+    auto snapshot = stream->latestDecodePublicationEndpoint();
+    EXPECT_EQ(snapshot, pending);
+    std::weak_ptr<const DecodeEndpoint> lifetime = pending;
+    resource.decode_endpoint.reset();
+    resource.decode_round_endpoints.clear();
+    pending.reset();
+    EXPECT_FALSE(lifetime.expired());
+    snapshot.reset();
+    EXPECT_TRUE(lifetime.expired());
+    EXPECT_FALSE(stream->latestDecodePublicationEndpoint());
 }
 
 TEST_F(GenerateStreamTest, generationPrefillCudaGraphReplayStatusIsReturnedInAuxInfo) {
@@ -1973,6 +1930,47 @@ TEST_F(GenerateStreamTest, logprobsAcceptDefaultSingleSequenceSentinel) {
                             stream->inputLength());
         EXPECT_FLOAT_EQ(stream->getTokenLogProbs().index({0, 0}).item<float>(), -0.5f);
     }
+}
+
+TEST(DecodePublicationSubmission, SourceGateDoesNotPretendBookkeepingIsPending) {
+    auto stream = GenerateStreamBuilder().createContextStream({1, 2, 3});
+    ASSERT_TRUE(stream->beginDecodePublicationSubmission());
+    EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+    stream->incPendingAsyncBookkeeping();
+    stream->markDeferredRelease();
+    stream->endDecodePublicationSubmission();
+    EXPECT_TRUE(stream->hasPendingAsyncBookkeeping());
+    EXPECT_TRUE(stream->isDeferredReleasePending());
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+    EXPECT_FALSE(stream->isDeferredReleasePending());
+}
+
+TEST(DecodePublicationSubmission, CopiedStreamRetainsOriginalSubmissionClaim) {
+    auto stream = GenerateStreamBuilder().createContextStream({1, 2, 3});
+    ASSERT_TRUE(stream->beginDecodePublicationSubmission());
+    auto copied = std::make_shared<NormalGenerateStream>(*stream);
+    copied->releaseResource();
+    EXPECT_TRUE(stream->isDeferredReleasePending());
+    EXPECT_FALSE(copied->hasPendingAsyncBookkeeping()); // Submission is distinct from worker bookkeeping.
+    stream->endDecodePublicationSubmission();
+    EXPECT_FALSE(copied->isDeferredReleasePending());
+}
+
+TEST(DecodePublicationSubmission, ReleaseDefersInsteadOfWaitingForUnlaunchedWorker) {
+    auto stream = GenerateStreamBuilder().createContextStream({1, 2, 3});
+    stream->incPendingAsyncBookkeeping(); // Previous worker is still running.
+    ASSERT_TRUE(stream->beginDecodePublicationSubmission()); // Next launch can be joining it.
+    auto released = std::async(std::launch::async, [stream] { stream->releaseResource(); });
+    const auto status = released.wait_for(std::chrono::seconds(1));
+    // Always unblock/collect even if the nonblocking contract regresses.
+    if (status != std::future_status::ready) stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    released.get();
+    EXPECT_EQ(status, std::future_status::ready);
+    EXPECT_TRUE(stream->isDeferredReleasePending());
+    stream->endDecodePublicationSubmission();
+    if (status == std::future_status::ready) stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    EXPECT_FALSE(stream->isDeferredReleasePending());
 }
 
 }  // namespace rtp_llm

@@ -27,7 +27,6 @@ struct BlockTreeMatchResult {
     std::vector<MultiNodeResource>                      matched_device_resources;
     std::shared_ptr<LoadAsyncContext>                   async_context;
     std::vector<BlockTreeCacheReuseTimeMetrics>         reuse_time_metrics;
-    DecodeReuseSourcesPtr                               matched_device_decode_sources;
 };
 
 // Owns matching and the complete lower-tier-to-device load workflow.
@@ -60,7 +59,6 @@ public:
     void                 shutdown();
 
 private:
-    DecodeReuseSourcesPtr snapshotDecodeSources(const std::vector<TreeNode*>& path, size_t prefix) const;
     bool                  validMatch(std::vector<TreeNode*>&            path,
                                      std::vector<bool>&                 candidate_valid,
                                      const std::function<bool(size_t)>& valid_prefix) const;
@@ -113,7 +111,6 @@ private:
     LoadTaskRunner                          load_task_runner_;
     LoadJoinRegistry                        load_join_registry_;
     std::shared_ptr<LoadContextCoordinator> load_context_coordinator_;
-    bool                                    track_decode_origins_{false};
 };
 
 }  // namespace rtp_llm

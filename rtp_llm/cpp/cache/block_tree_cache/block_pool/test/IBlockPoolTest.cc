@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
+#include <future>
+#include <mutex>
 #include <csignal>
 #include <limits>
 #include <memory>
@@ -14,6 +17,7 @@
 #include "gtest/gtest.h"
 
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 
 namespace rtp_llm {
@@ -331,34 +335,6 @@ TEST(IBlockPoolTest, BlockZeroIsInvalidAndNeverAllocated) {
     ASSERT_TRUE(blocks.has_value());
     EXPECT_EQ(blocks->size(), 3u);
     EXPECT_EQ(std::find(blocks->begin(), blocks->end(), 0), blocks->end());
-}
-
-TEST(IBlockPoolTest, OriginTrackingIsOptionalAndFollowsAllocatedPhysicalLifetime) {
-    auto       pool   = makeInitializedPool(2);
-    const auto block  = *pool->malloc();
-    const auto parsed = DecodeCacheOrigin::parse("v1." + std::string(32, 'a') + ".7680.7680.8192.8200.8201");
-    ASSERT_TRUE(parsed);
-    auto source = std::make_shared<const DecodeCacheOrigin>(*parsed);
-    EXPECT_EQ(pool->decodeOriginIncarnation(block), uint64_t{0});
-    EXPECT_FALSE(pool->bindDecodeOrigin(block, 1, "full", source));
-    ASSERT_TRUE(pool->enableDecodeOriginTracking());
-    const auto stamp = pool->decodeOriginIncarnation(block);
-    ASSERT_NE(stamp, uint64_t{0});
-    ASSERT_TRUE(pool->bindDecodeOrigin(block, stamp, "full", source));
-    pool->incTreeRef(block, BlockTreeRefType::CACHE);
-    pool->incTreeRef(block, BlockTreeRefType::CACHE);
-    pool->decTreeRef(block, BlockTreeRefType::CACHE);
-    EXPECT_EQ(pool->decodeOrigin(block, "full"), source);
-    ASSERT_TRUE(pool->enableDecodeOriginTracking());  // idempotent, not a new incarnation
-    EXPECT_EQ(pool->decodeOriginIncarnation(block), stamp);
-    pool->decTreeRef(block, BlockTreeRefType::CACHE);
-    EXPECT_FALSE(pool->decodeOrigin(block, "full"));
-    EXPECT_EQ(pool->decodeOriginIncarnation(block), uint64_t{0});
-    ASSERT_EQ(*pool->malloc(), block);
-    EXPECT_NE(pool->decodeOriginIncarnation(block), stamp);
-    EXPECT_FALSE(pool->bindDecodeOrigin(block, stamp, "full", source));
-    EXPECT_EQ(pool->decodeOriginIncarnation(NULL_BLOCK_IDX), uint64_t{0});
-    EXPECT_FALSE(pool->bindDecodeOrigin(NULL_BLOCK_IDX, stamp, "full", source));
 }
 
 TEST(IBlockPoolTest, MallocReturnsAllocatedTreeRefcountZeroBlocks) {

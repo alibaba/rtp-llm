@@ -22,6 +22,8 @@
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
+#include "autil/EnvUtil.h"
 
 #define private public
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
@@ -220,6 +222,13 @@ TEST(MtpExecutorPolicyTest, V41DecodeReservationKeepsGenericAndPrefillPolicies) 
     EXPECT_EQ(MtpExecutor::bookkeepingReadyEvent(false, transfer, commit), transfer);
     EXPECT_EQ(MtpExecutor::bookkeepingReadyEvent(false, transfer, nullptr), transfer);
     EXPECT_ANY_THROW(MtpExecutor::bookkeepingReadyEvent(true, transfer, nullptr));
+    // Publication also needs the final draft even with device reservation off.
+    EXPECT_EQ(MtpExecutor::bookkeepingReadyEvent(false, transfer, commit, true), commit);
+    EXPECT_EQ(MtpExecutor::bookkeepingReadyEvent(true, transfer, commit, true), commit);
+    EXPECT_ANY_THROW(MtpExecutor::bookkeepingReadyEvent(false, transfer, nullptr, true));
+    // Prefill/toggle-off keep the original selection, including a missing draft.
+    EXPECT_EQ(MtpExecutor::bookkeepingReadyEvent(false, transfer, commit, false), transfer);
+    EXPECT_EQ(MtpExecutor::bookkeepingReadyEvent(false, transfer, nullptr, false), transfer);
 }
 
 TEST(MtpExecutorPolicyTest, DSparkPositionStateAdvancesByAcceptedLength) {
@@ -1348,6 +1357,81 @@ TEST_F(MtpExecutorTest, testMtpConstructorRejectsZeroProposalWidth) {
         FAIL() << "expected ordinary MTP construction to reject zero proposal width";
     } catch (const std::exception& e) {
         EXPECT_NE(std::string(e.what()).find("proposal width/gen_num_per_cycle must be positive"), std::string::npos);
+    }
+}
+
+TEST_F(MtpExecutorTest, testPackedDsparkKeepsSharedIdentityAndCommitOnlyPrefill) {
+    py::scoped_interpreter interpreter;
+    auto module = py::module_::import("__main__");
+    py::class_<torch_ext::PyModelInitResources>(module, "PackedRoleModelInitResources");
+    auto py_model = py::module_::import("types").attr("SimpleNamespace")();
+    py_model.attr("initialize") = py::cpp_function([](py::object) { return true; });
+    auto forward = py::cpp_function([](py::args) { ADD_FAILURE() << "role admission must not run model forward"; });
+    py_model.attr("forward") = forward;
+    py_model.attr("forward_propose") = forward;
+    py_model.attr("forward_commit") = forward;
+    py_model.attr("get_eplb_layers") = py::cpp_function([]() { return py::list(); });
+    ModelConfig model_config;
+    RuntimeConfig runtime_config;
+    KVCacheConfig kv_cache_config;
+    auto params = createEngineInitParams(CustomConfig{}, model_config, runtime_config, kv_cache_config);
+    params.model_config_.model_type = "deepseek_v41";
+    params.device_resource_config.enable_layer_micro_batch = 0;
+    params.hw_kernel_config.enable_cuda_graph = false;
+    params.py_model = py_model;
+    params.py_sp_model = py_model;
+    params.sp_config.type = SP_TYPE_DSPARK;
+    params.sp_config.model_type = "deepseek_v41_dspark";
+    params.sp_config.gen_num_per_cycle = 5;
+    params.sp_config.sp_dspark_mask_token_id = 0;
+    params.sp_config.sp_dspark_confidence_mode = "bounded";
+    params.sp_config.sp_dspark_verify_budget = 3;
+    params.sp_config.sp_dspark_verify_mode = "packed";
+    auto make_propose = [&] {
+        auto draft = std::make_unique<EngineInitParams>(params);
+        draft->model_id = 1;
+        const auto options = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+        draft->gpt_weights.dspark_markov_w1 = torch::zeros({params.model_config_.vocab_size, 1}, options);
+        draft->gpt_weights.dspark_markov_w2 = torch::zeros({params.model_config_.vocab_size, 1}, options);
+        draft->gpt_weights.dspark_confidence_head = torch::zeros({1, params.model_config_.hidden_size + 1}, options);
+        auto modules = std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
+        modules->push_back(std::move(draft));
+        return std::make_unique<ProposeModelEngineInitParams>(SP_TYPE_DSPARK, 5, std::move(modules));
+    };
+    for (const std::string budget_mode : {"fixed", "adaptive"}) {
+        params.sp_config.sp_dspark_verify_budget_mode = budget_mode;
+        const auto shared_identity = params.sp_config.to_string();
+        for (const auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+            SCOPED_TRACE(::testing::Message() << budget_mode << " role=" << static_cast<int>(role));
+            params.pd_sep_config.role_type = role;
+            params.parallelism_config.role_type = role;
+            auto propose = make_propose();
+            MtpExecutor executor(params, propose, nullptr);
+            const bool prefill = role == RoleType::PREFILL;
+            EXPECT_TRUE(executor.is_dspark_);
+            EXPECT_EQ(executor.dspark_prefill_commit_only_, prefill);
+            EXPECT_EQ(executor.dspark_packed_verify_, !prefill);
+            EXPECT_EQ(executor.dspark_adaptive_budget_ != nullptr, !prefill && budget_mode == "adaptive");
+            EXPECT_EQ(executor.draft_model_ != nullptr, !prefill);
+            EXPECT_NE(executor.sp_prefill_draft_model_, nullptr);
+            EXPECT_EQ(params.sp_config.to_string(), shared_identity);
+        }
+    }
+    params.sp_config.sp_dspark_verify_budget_mode = "fixed";
+    // Invalid executing roles and missing budgets still fail before wrappers.
+    for (int invalid = 0; invalid < 3; ++invalid) {
+        params.pd_sep_config.role_type = invalid == 0 ? RoleType::DECODE :
+                                              invalid == 1 ? RoleType::PDFUSION : RoleType::PREFILL;
+        params.parallelism_config.role_type = params.pd_sep_config.role_type;
+        params.parallelism_config.tp_size = invalid == 0 ? 4 : 1;
+        params.sp_config.sp_dspark_verify_budget = invalid == 2 ? -1 : 3;
+        auto propose = make_propose();
+        try {
+            MtpExecutor executor(params, propose, nullptr);
+            FAIL() << "invalid packed DSpARK role/budget must be rejected";
+        } catch (const std::exception& error) {
+            EXPECT_NE(std::string(error.what()).find("Packed DSpARK configuration requires"), std::string::npos);
+        }
     }
 }
 
@@ -3735,6 +3819,41 @@ TEST_F(MtpExecutorTest, testAcceptLenMetricsQueueOwnsRowsAndRejectsOverflowWitho
 }
 
 #if USING_CUDA
+TEST_F(MtpExecutorTest, DecodeEndpointSkipsFakeAndUnsampledRoundsBeforeWaitingOnTransfer) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    test::withDecodePublicationStartup([&] {
+        MtpExecutorTestConfig config;
+        config.role_type = RoleType::DECODE;
+        auto components = createMtpExecutorComponents(config);
+        auto& executor = *components.executor;
+        auto stream = createContextStream(components.model_config, components.runtime_config,
+                                          components.resource_context, {0, 1});
+        const auto unit = executor.cache_manager_->decodePublicationUnit();
+        ASSERT_GT(unit, 0u);
+        ASSERT_TRUE(stream->mayCrossDecodePublicationBoundary(unit, executor.propose_step_ + 1));
+        for (int missing = 0; missing < 3; ++missing) {
+            SCOPED_TRACE(missing);
+            GptModelInputs target, draft;
+            target.prefix_lengths = draft.prefix_lengths = torch::zeros({1}, torch::kInt32);
+            target.input_lengths = draft.input_lengths = torch::ones({1}, torch::kInt32);
+            target.kv_cache_block_id = torch::zeros({1, 1, 1}, torch::kInt32);
+            target.is_fake_stream = missing == 0;
+            draft.is_fake_stream = missing == 1;
+            spec::SpeculativeSamplerOutput sampled;
+            if (missing != 2) sampled.accept_len_cpu = torch::ones({1}, torch::kInt32);
+            sampled.transfer_done_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+            ScopedMetricsStreamGate gate(cuda_graph::toGraphStream(executor.collect_metrics_stream_));
+            sampled.transfer_done_event->record(executor.collect_metrics_stream_);
+            executor.retainDecodePublicationPages(StreamGroups({stream}), target, draft, sampled);
+            EXPECT_FALSE(gate.timedOut()) << "idle/unsampled round waited for a transfer event";
+            EXPECT_FALSE(sampled.transfer_done_event->query());
+            EXPECT_FALSE(stream->latestDecodePublicationEndpoint());
+            gate.release();
+            sampled.transfer_done_event->synchronize();
+        }
+    });
+}
+
 TEST_F(MtpExecutorTest, testAcceptLenMetricsConsumeReadyPrefixWithoutWaitingOrSkippingPendingGpuRound) {
     MtpExecutorTestConfig config;
     config.gen_num_per_cycle = 5;

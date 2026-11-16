@@ -1,6 +1,8 @@
 #pragma once
 
 #include <memory>
+#include <functional>
+#include <unordered_map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -10,6 +12,30 @@
 #include "rtp_llm/cpp/utils/DecodePublicationLifecycle.h"
 
 namespace rtp_llm {
+class DeviceBlockPool;
+// One actual complete endpoint. No schema, per-token history or Graph inputs.
+struct DecodeEndpoint {
+    size_t end{0};
+    std::unordered_map<std::string, BlockIndicesType> blocks;
+    // The original per-page pin, shared only for matching FULL slots. Holding
+    // a pool/block prevents recycling; it is not a writer-completion proof.
+    struct PageHold {
+        std::shared_ptr<DeviceBlockPool> pool;
+        BlockIdxType block{NULL_BLOCK_IDX};
+        RemotePublicationPin pin;
+        PageHold() = default;
+        PageHold(const PageHold&) = delete;
+        PageHold& operator=(const PageHold&) = delete;
+        PageHold(PageHold&&) = delete;
+        PageHold& operator=(PageHold&&) = delete;
+        ~PageHold() = default;
+    };
+    using PageHolds = std::vector<std::shared_ptr<const PageHold>>;
+    // FULL holds are slot-indexed. STATE/SWA hold only this endpoint's required
+    // tail pages and are never inherited from another endpoint.
+    std::unordered_map<std::string, PageHolds> pages;
+    mutable std::shared_ptr<const DecodeEndpoint> unknown_owner;
+};
 class BatchKVCacheResource {
 public:
     BatchKVCacheResource() {}
@@ -22,6 +48,7 @@ public:
         if (batch_size != batch_resource.size()) {
             decode_completion_submitted_ = false;
             decode_completion_lifecycle_.reset();
+            decode_endpoint.reset(); decode_round_endpoints.clear();
         }
         batch_resource.resize(batch_size);
         cache_keys_initialized_ = false;
@@ -98,6 +125,7 @@ public:
     void clearBlocks() {
         decode_completion_submitted_ = false;
         decode_completion_lifecycle_.reset();
+        decode_endpoint.reset(); decode_round_endpoints.clear();
         resizeBlocks(0, 0);
     }
 
@@ -182,6 +210,8 @@ public:
     }
 
     void swap(BatchKVCacheResource& other) noexcept {
+        decode_endpoint.swap(other.decode_endpoint);
+        decode_round_endpoints.swap(other.decode_round_endpoints);
         std::swap(decode_completion_submitted_, other.decode_completion_submitted_);
         std::swap(decode_completion_lifecycle_, other.decode_completion_lifecycle_);
         swapBlockStorage(other);
@@ -248,6 +278,10 @@ public:
     void swapBlocks(int32_t batch_id, std::string_view group_tag, size_t rhs, size_t lhs) {
         cacheResource(batch_id).swapBlocks(group_tag, rhs, lhs);
     }
+
+    std::shared_ptr<const DecodeEndpoint> decode_endpoint;
+    // Candidates belong only to the current verify packet, not token history.
+    std::vector<std::shared_ptr<const DecodeEndpoint>> decode_round_endpoints;
 
     // Scheduler-owned idempotency only. Payloads stay in their native GPU pools;
     // StorageBackend owns the retained references after EOS admission.

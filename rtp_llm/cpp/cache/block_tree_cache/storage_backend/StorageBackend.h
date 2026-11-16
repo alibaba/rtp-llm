@@ -19,7 +19,6 @@
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
-#include "rtp_llm/cpp/cache/DecodeReuseSources.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageCompletionAdmission.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackendExecutor.h"
@@ -37,14 +36,10 @@ class SharedTransferStageTimer;
 struct StorageBlockHandle {
     std::string  tag;
     BlockIdxType block{NULL_BLOCK_IDX};
-    // A Decode source owns all target P peers locally; replicas can name the
-    // same page. Only completed-Decode writes may carry this projection.
-    std::vector<BlockIdxType> peer_blocks;
 };
 
 struct StorageBackendMatchMeta {
     virtual ~StorageBackendMatchMeta() = default;
-    DecodeReuseSourcesPtr decode_sources;
 };
 
 enum class StorageQuarantineReason {
@@ -52,7 +47,6 @@ enum class StorageQuarantineReason {
     RPC_TIMEOUT,
     RPC_ERROR,
     INVALID_RESPONSE,
-    SDK_ERROR,
 };
 
 struct StorageQuarantineCounts {
@@ -61,7 +55,7 @@ struct StorageQuarantineCounts {
 };
 
 // Read/write rows and StorageQuarantineReason columns share one state snapshot.
-using StorageQuarantineBreakdown = std::array<std::array<StorageQuarantineCounts, 5>, 2>;
+using StorageQuarantineBreakdown = std::array<std::array<StorageQuarantineCounts, 4>, 2>;
 
 // Describes who protects local targets after UNKNOWN, not whether I/O is safe.
 // Protected completion ownership always takes precedence over this marker.
@@ -95,6 +89,13 @@ private:
     StorageLocalTargetProtection local_target_protection_;
 };
 
+// An exceptional SDK exit after possible submission, distinct from an
+// ordinary returned error. Its pending destination must not be aborted.
+class StorageOperationPayloadExceptionUnknown: public StorageOperationCompletionUnknown {
+public:
+    using StorageOperationCompletionUnknown::StorageOperationCompletionUnknown;
+};
+
 // The transport reported an explicit timeout. Buffer ownership is still
 // unknown, so this remains a completion-unknown failure for quarantine while
 // allowing callers to preserve the timeout error code.
@@ -115,6 +116,10 @@ struct StorageMatchResult {
     std::shared_ptr<StorageBackendMatchMeta> match_meta;
 };
 
+// Decode-only projected pages, indexed by group tag and canonical key.
+// Ordinary Prefill handles retain their original (tag, block) representation.
+using DecodePeerBlocks = std::unordered_map<std::string, std::vector<BlockIndicesType>>;
+
 struct StorageRequest {
     std::shared_ptr<const CacheKeysType> keys;
     // handles[i] contains every group block associated with (*keys)[i].
@@ -125,10 +130,11 @@ struct StorageRequest {
     std::optional<int64_t> request_id;
     std::optional<TransferTask> transfer_task;
     bool decode_completion{false};
+    std::shared_ptr<const DecodePeerBlocks> decode_peer_blocks;
     size_t computed_tokens{0};
     size_t published_tokens{0};
     std::optional<int64_t> prefill_computed_tokens;
-    std::shared_ptr<void> completion_budget_lease;
+    std::shared_ptr<const void> source_owner;
     std::shared_ptr<StorageCompletionAdmission> completion_admission;
 
     bool empty() const {
@@ -228,6 +234,7 @@ public:
 
 protected:
     using Task = StorageBackendExecutor::Task;
+    std::chrono::milliseconds operationTimeout() const noexcept { return timeout_; }
     // The completion callable only checks results and updates local state; it
     // must not start blocking I/O on the RPC completion/settlement thread.
     using ReadCompletion = std::function<void(Task)>;

@@ -68,6 +68,16 @@ public:
     void insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
     bool captureCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end, bool finished = true) const;
 
+    size_t decodePublicationUnit() const;
+    // No writer last-use proof: keep ownership and charge the existing frozen
+    // pool guard rather than silently accumulating invisible request holds.
+    void freezeUnknownDecodeWriter(const BatchKVCacheResource& resource) const noexcept;
+    // writer_already_fenced is only for later captures in the same caller-thread
+    // round, with no intervening writer submission and request pages still held.
+    std::shared_ptr<const DecodeEndpoint> retainDecodeEndpoint(const torch::Tensor& physical_ids,
+        const std::vector<std::string>& tags, size_t row, size_t end,
+        const std::shared_ptr<const DecodeEndpoint>& previous = {}, bool writer_already_fenced = false) const;
+
     // Decode-side P/D admission allocates destination blocks before cache handoff.  When pools are
     // temporarily full, waiters use this generation instead of polling malloc in a tight loop.
     // Capture the generation before an allocation attempt; waitForAllocationChange() then cannot
@@ -179,6 +189,7 @@ private:
     // 成员变量
     CacheConfig                config_;
     CoordinatorCacheManagerPtr coordinator_manager_;
+    mutable std::atomic<bool>  decode_capture_stopped_{false};
 
     const kmonitor::MetricsReporterPtr metrics_reporter_;
     const KVCacheConfig                kv_cache_config_;

@@ -24,6 +24,8 @@
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
+#include "autil/EnvUtil.h"
 
 namespace rtp_llm {
 namespace test {
@@ -2182,11 +2184,24 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, InsertIntoCacheStopsBeforeFullHole
 }
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, DefaultHybridLinearPrefixReuseSupportsInsertThenReuse) {
+    for (const char* enabled : {"0", "1"}) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled);
+    withDecodePublicationStartup([&] {
+    for (const bool draft : {false, true}) for (auto role : {RoleType::PDFUSION, RoleType::DECODE}) {
+    SCOPED_TRACE(::testing::Message() << "enabled=" << enabled << " draft=" << draft << " role=" << int(role));
     auto config = makeTinyHybridConfig();
+    if (draft) {
+        auto draft_config = config;
+        draft_config.layer_num = 1;
+        draft_config.setTopology({config.group("full1")}, {LayerBase{0, {"full1"}}});
+        config.mtp_sub_configs.push_back(config.mergeMTPModule(draft_config, 0, config.layer_num));
+    }
+    KVCacheManager manager(config);
+    EXPECT_EQ(manager.decodePublicationUnit(), 0u); // Optional DSV4.1 capture must never start for LINEAR.
     ASSERT_EQ(config.groupNums(), 2);
     EXPECT_TRUE(config.group("linear").policy.enable_prefix_reuse);
 
-    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<TestHybridTypeCoordinatorCacheManager>(config, AllocationType::DEVICE, nullptr, 0, role);
     ASSERT_TRUE(allocator->init());
 
     auto seed_res    = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102});
@@ -2218,6 +2233,9 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, DefaultHybridLinearPrefixReuseSupp
     auto result                    = allocator->malloc(hit_malloc);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.reuse_len, 12);
+    }
+    });
+    }
 }
 
 TEST_F(HybridTypeCoordinatorCacheManagerTest, ConvertIndexToBufferAndAllLayerCacheBaseSmoke) {

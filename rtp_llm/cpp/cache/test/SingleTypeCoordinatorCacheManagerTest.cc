@@ -16,6 +16,9 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
@@ -720,6 +723,100 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, InsertIntoCache) {
     {
         size_t resident_prefix_length = 0;
         allocator_->insertIntoCache(insert_info, resident_prefix_length);
+    }
+}
+
+TEST(SingleTypeDecodeInsertTest, FinalSampledTokenCannotCompleteALocalCacheBlock) {
+    struct Case {
+        int length;
+        size_t original_keys;
+        size_t native_keys;
+        size_t endpoint_end{0};
+        bool has_tokens{true};
+        bool opaque{false};
+        bool disable_first_lookup{false};
+        bool resident{false};
+        bool has_draft{false};
+    };
+    // Fixed boundary expectations, including the aligned 512/511 regression.
+    const std::vector<Case> cases{{0, 0, 0}, {1, 0, 0}, {255, 0, 0},
+                                  {256, 1, 0}, {257, 1, 1}, {512, 2, 1}, {513, 2, 2},
+                                  {513, 2, 1, 256}, {512, 2, 2, 0, false},
+                                  {512, 2, 0, 0, true, true, true, false},
+                                  {512, 2, 2, 0, true, true, true, true},
+                                  {512, 2, 1, 0, true, true, false, false},
+                                  {512, 2, 1, 0, true, false, true, false},
+                                  {512, 2, 2, 0, true, false, true, true},
+                                  {512, 2, 2, 0, true, false, false, true},
+                                  {512, 2, 2, 0, true, false, false, true, true},
+                                  {512, 2, 0, 0, true, false, false, false, true},
+                                  {513, 2, 2, 256, true, true, true, true},
+                                  {513, 2, 0, 256, true, true, true, false}};
+    for (const auto* setting : {"0", "1"}) {
+        autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", setting);
+        withDecodePublicationStartup([&] {
+            createDevice();
+            for (const auto role : {RoleType::PREFILL, RoleType::DECODE, RoleType::PDFUSION}) {
+                for (const auto& c : cases) {
+                    SCOPED_TRACE(::testing::Message() << "setting=" << setting << " role=" << static_cast<int>(role)
+                                                       << " length=" << c.length << " endpoint=" << c.endpoint_end
+                                                       << " has_tokens=" << c.has_tokens << " opaque=" << c.opaque
+                                                       << " disable_first=" << c.disable_first_lookup
+                                                       << " resident=" << c.resident);
+                    auto config = createSingleTypeTestConfig(2, 8, 256);
+                    // Policy matrix only; the native stream call-point tests
+                    // exercise these flags from actual opaque descriptors.
+                    config.use_opaque_kv_cache_store = c.opaque;
+                    config.disable_decode_first_malloc_device_reuse = c.disable_first_lookup;
+                    if (c.has_draft) {
+                        const auto draft_config = config;
+                        config.mtp_sub_configs.push_back(config.mergeMTPModule(draft_config, 0, config.layer_num));
+                    }
+                    auto allocator = std::make_shared<TestSingleTypeCoordinatorCacheManager>(
+                        config, AllocationType::DEVICE, nullptr, 0, role);
+                    ASSERT_TRUE(allocator->init());
+                    auto pool = allocator->groupBlockPools().front();
+                    const auto allocated = pool->malloc(3);
+                    ASSERT_TRUE(allocated.has_value());
+                    const auto blocks = *allocated;
+                    ASSERT_EQ(blocks.size(), 3u);
+                    pool->incRef(blocks);
+                    const auto request_hold = std::shared_ptr<void>(pool.get(), [pool, blocks](void*) {
+                        pool->decRef(blocks);
+                    });
+                    auto resource = createBatchKVCacheResource(1, config);
+                    resource->setBatchBlocks(0, "default", blocks);
+                    auto tokens = createCompleteTokenIds(1, std::max(c.length, 1), 256);
+                    tokens->setSeqLength(c.length);
+                    // Reproduce the real final-refresh -> drop-partial -> insert chain.
+                    initCacheKeys(resource, tokens, 256, config.cache_key_hash_seed);
+                    dropLastPartialBlock(resource);
+                    const auto keys = resource->cacheKeys();
+                    ASSERT_EQ(keys.size(), c.original_keys);
+                    if (c.endpoint_end) {
+                        auto endpoint = std::make_shared<DecodeEndpoint>();
+                        endpoint->end = c.endpoint_end;
+                        endpoint->blocks["default"] = blocks;
+                        resource->decode_endpoint = std::move(endpoint);
+                    }
+                    size_t resident = 0;
+                    allocator->insertIntoCache(
+                        InsertInfo{resource, c.has_tokens ? tokens : nullptr, c.resident}, resident);
+                    const size_t expected = setting[0] == '1' && role == RoleType::DECODE ?
+                                                c.native_keys : c.original_keys;
+                    const auto path = allocator->blockTreeCacheOwner()->tree()->findNode(keys);
+                    ASSERT_EQ(path.size(), expected);
+                    if (c.resident) {
+                        EXPECT_EQ(resident, expected);
+                    }
+                    for (size_t i = 0; i < path.size(); ++i) {
+                        EXPECT_EQ(path[i]->group_set_resources.front().device_blocks,
+                                  (BlockIndicesType{blocks[i]}));
+                    }
+                    EXPECT_EQ(resource->cacheKeys(), keys); // Only insertion is capped.
+                }
+            }
+        });
     }
 }
 

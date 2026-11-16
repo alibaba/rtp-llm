@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -18,6 +19,18 @@ using CacheKeyType = int64_t;
 using BlockIdxType = int32_t;
 
 constexpr BlockIdxType NULL_BLOCK_IDX = static_cast<BlockIdxType>(-1);
+
+class DeviceBlockPool;
+// A non-owning pool pointer paired with one connector reference. The caller's
+// strong pool owner must outlive this token; the deleter never deletes the pool.
+// A fixed function pointer avoids both a heap closure and a pool-header cycle.
+struct RemotePublicationPinDeleter {
+    BlockIdxType block{NULL_BLOCK_IDX};
+    std::function<void()> notify;
+    void (*release)(DeviceBlockPool*, BlockIdxType, const std::function<void()>&) noexcept {nullptr};
+    void operator()(DeviceBlockPool* pool) const noexcept { release(pool, block, notify); }
+};
+using RemotePublicationPin = std::unique_ptr<DeviceBlockPool, RemotePublicationPinDeleter>;
 
 inline bool isNullBlockIdx(BlockIdxType block_idx) {
     return block_idx == NULL_BLOCK_IDX;

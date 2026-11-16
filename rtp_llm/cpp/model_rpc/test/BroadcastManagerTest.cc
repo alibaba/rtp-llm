@@ -416,6 +416,27 @@ TEST_F(BroadcastManagerTest, Broadcast_OnDoneCompletesWithoutWaitDone) {
     EXPECT_TRUE(result->success());
 }
 
+TEST_F(BroadcastManagerTest, DefinitelyUnsentDispatchReleasesTagAndContextWithoutCq) {
+    std::vector<FunctionRequestPB> requests(manager_->workerNum());
+    std::weak_ptr<grpc::ClientContext> retained_context;
+    size_t calls = 0;
+    auto rpc_call = [&](const std::shared_ptr<RpcService::Stub>&,
+                        const std::shared_ptr<grpc::ClientContext>& context,
+                        const FunctionRequestPB&,
+                        grpc::CompletionQueue*) -> std::unique_ptr<grpc::ClientAsyncResponseReader<FunctionResponsePB>> {
+        ++calls;
+        retained_context = context;
+        throw BroadcastRpcNotStarted("expired in local preflight");
+    };
+    auto result = manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
+        requests, 1000, rpc_call, 42, "REMOTE2D", /*fatal_on_error=*/false);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(calls, 1u);
+    EXPECT_TRUE(result->done()); EXPECT_FALSE(result->success());
+    result.reset();
+    EXPECT_TRUE(retained_context.expired()); // No CQ was registered to break an accidental tag self-cycle.
+}
+
 TEST_F(BroadcastManagerTest, CachePartialSubmissionFailureSettlesSubmittedRankWithoutFatal) {
     auto server = std::make_unique<TestRpcServer>(std::make_unique<TestRpcService>());
     ASSERT_TRUE(server->start());

@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/BlockTreeLoader.h"
 
 #include <atomic>
@@ -34,32 +35,27 @@ using block_tree_cache_test::makeHostPool;
 using block_tree_cache_test::makeStructuralDevicePool;
 using block_tree_cache_test::releaseDeviceBlocks;
 
-TEST(BlockTreeLoaderTest, LocalOnlyCompletionNeverFabricatesRemoteTiming) {
+TEST(BlockTreeLoaderTest, LocalOnlyCompletionKeepsOriginalCommitReadiness) {
     for (const bool enabled : {false, true}) {
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
         auto            coordinator = std::make_shared<LoadContextCoordinator>(
             [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, LoadContextCoordinator::AbortCallback{});
         auto context = coordinator->create({}, {}, 0);
-        auto origin  = DecodeCacheOrigin::parse("v1." + std::string(32, 'a') + ".4.0.8.8.9");
-        ASSERT_TRUE(origin);
-        auto sources = std::make_shared<const DecodeReuseSources>(
-            DecodeReuseSources{{std::make_shared<const DecodeCacheOrigin>(*origin), Tier::DEVICE}});
-        context->setLocalDecodeSources(sources);
-        EXPECT_FALSE(context->decodeSources());
         ASSERT_TRUE(coordinator->registerContext(context));
         ASSERT_TRUE(context->commit());
         ASSERT_TRUE(context->success());
-        EXPECT_FALSE(context->remoteRestoreTiming().has_value());
-        EXPECT_EQ(context->decodeSources(), sources);
+        });
     }
 }
 
-TEST(BlockTreeLoaderTest, DeviceHotOriginsRequirePhysicalRequiredMemberConsensusAndRespectFeatureOff) {
+TEST(BlockTreeLoaderTest, DeviceHotReuseIsIndependentOfDecodePublication) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
     for (const bool enabled : {false, true}) {
         autil::EnvGuard           feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
         FullSWAEnvironmentOptions options;
         options.path_length = 1;
         options.enable_disk = false;
@@ -67,48 +63,15 @@ TEST(BlockTreeLoaderTest, DeviceHotOriginsRequirePhysicalRequiredMemberConsensus
         ASSERT_NE(environment, nullptr);
         environment->insertRequestPath();
         environment->releaseRequestRefs();
-        const auto resources = environment->resourcesForPathNode(0);
-        const auto unit =
-            environment->groups.front()->group(environment->groups.front()->groupTags().front()).cacheKeyTokenStride();
-        auto origin = std::make_shared<const DecodeCacheOrigin>(DecodeCacheOrigin{std::string(32, 'a'),
-                                                                                  0,
-                                                                                  0,
-                                                                                  static_cast<int64_t>(unit),
-                                                                                  static_cast<int64_t>(unit),
-                                                                                  static_cast<int64_t>(unit + 1)});
-        for (size_t group_id = 0; group_id < environment->groups.size(); ++group_id) {
-            const auto& group = environment->groups[group_id];
-            for (size_t member = 0; member < group->groupTags().size(); ++member) {
-                const auto& pool  = group->devicePools()[member];
-                const auto  block = resources[group_id].device_blocks[member];
-                ASSERT_TRUE(pool->enableDecodeOriginTracking());
-                ASSERT_TRUE(pool->bindDecodeOrigin(
-                    block, pool->decodeOriginIncarnation(block), group->groupTags()[member], origin));
-            }
-        }
-        for (const bool consensus : {true, false}) {
-            if (!consensus) {
-                const auto& group = environment->groups.back();
-                const auto& pool  = group->devicePools().front();
-                const auto  block = resources.back().device_blocks.front();
-                auto        other = *origin;
-                other.session     = std::string(32, 'b');
-                ASSERT_TRUE(pool->bindDecodeOrigin(block,
-                                                   pool->decodeOriginIncarnation(block),
-                                                   group->groupTags().front(),
-                                                   std::make_shared<const DecodeCacheOrigin>(other)));
-            }
+        for (int request = 0; request < 2; ++request) {
             auto result = environment->cache->match(environment->keys);
             ASSERT_EQ(result.matched_device_blocks, 1u);  // payload reuse remains usable
-            EXPECT_EQ(static_cast<bool>(result.matched_device_decode_sources), enabled && consensus);
-            if (result.matched_device_decode_sources) {
-                EXPECT_EQ(countDecodeReuse(*result.matched_device_decode_sources, unit).total(), unit);
-            }
             for (const auto& resource : result.matched_device_resources)
                 environment->groups[resource.group_set_id]->unreferenceBlocks(resource);
         }
         environment->reclaimAll();
         environment->expectFullyReclaimed();
+        });
     }
 }
 
@@ -143,6 +106,7 @@ TEST(BlockTreeLoaderTest, LocalHostLoadSettlesDespiteBackendFailure) {
         GTEST_SKIP() << "CUDA not available";
     }
     autil::EnvGuard           feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     FullSWAEnvironmentOptions options;
     options.path_length = 1;
     options.enable_disk = false;
@@ -237,8 +201,6 @@ TEST(BlockTreeLoaderTest, LocalHostLoadSettlesDespiteBackendFailure) {
     backend->shutdown();
     EXPECT_EQ(backend->read_calls.load(), 1u);
     EXPECT_FALSE(context->success());
-    EXPECT_FALSE(context->remoteRestoreTiming().has_value());
-    EXPECT_FALSE(joined->remoteRestoreTiming().has_value());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
     resources = environment->resourcesForPathNode(0);
     EXPECT_TRUE(resources[0].hasTier(Tier::DEVICE));
@@ -258,6 +220,7 @@ TEST(BlockTreeLoaderTest, LocalHostLoadSettlesDespiteBackendFailure) {
     }
     environment->reclaimAll();
     environment->expectFullyReclaimed();
+    });
 }
 
 TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
@@ -1119,114 +1082,66 @@ TEST(BlockTreeLoaderTest, HostSuccessUsesResidentSwaFallbackWithoutLoadingAnExtr
     }
 }
 
-TEST(BlockTreeLoaderTest, DecodeSourcesValidateTheActualFallbackSwaWindow) {
+TEST(BlockTreeLoaderTest, FallbackSwaWindowKeepsOnlyGpuReadyPrefix) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
-    for (const int source_case : {0, 1, 2}) {  // Consistent, conflicting, missing fallback SWA origins.
-        for (const auto& [host_success, disk_success] :
-             {std::pair<bool, bool>{true, true}, {true, false}, {false, true}}) {
-            SCOPED_TRACE(source_case);
-            SCOPED_TRACE(host_success);
-            SCOPED_TRACE(disk_success);
-            FullSWAEnvironmentOptions options;
-            options.path_length = 4;
-            auto env            = FullSWAEnvironment::create(options);
-            ASSERT_NE(env, nullptr);
-            env->insertRequestPath();
-            env->releaseRequestRefs();
-            env->demoteAll(Tier::DEVICE);
-            auto warmup = env->cache->match({env->keys[0], env->keys[1]});
-            ASSERT_NE(warmup.async_context, nullptr);
-            auto warmup_refs = bindTargets(*env, warmup.async_context);
-            ASSERT_TRUE(warmup.async_context->commit());
-            warmup.async_context->waitDone();
-            ASSERT_TRUE(warmup.async_context->success());
-            releaseTargets(warmup_refs);
-            env->releaseMatch(warmup);
-            using Peer = block_tree_cache_test::BlockTreeCacheTestPeer;
-            for (const Tier tier : {Tier::DEVICE, Tier::HOST}) {
-                ASSERT_TRUE(Peer::demoteOneForGroupSetForTest(*env->cache, 0, tier));
-                Peer::waitForTaskPoolIdleForTest(*env->cache);
-            }
-            const auto& first = env->groups.front();
-            const auto  unit  = static_cast<int64_t>(first->group(first->groupTags().front()).cacheKeyTokenStride());
-            for (size_t i = 0; i < options.path_length; ++i) {
-                const auto resources = env->resourcesForPathNode(i);
-                for (size_t group_id = 0; group_id < env->groups.size(); ++group_id) {
-                    const auto& group    = env->groups[group_id];
-                    const auto& resource = resources[group_id];
-                    const auto  tier     = resource.getTopTier();
-                    for (size_t member = 0; member < group->groupTags().size(); ++member) {
-                        std::shared_ptr<IBlockPool> pool;
-                        BlockIdxType                block;
-                        if (tier == Tier::DEVICE) {
-                            pool  = group->devicePools()[member];
-                            block = resource.device_blocks[member];
-                        } else if (tier == Tier::HOST) {
-                            pool  = group->hostPool();
-                            block = resource.host_block;
-                        } else {
-                            pool  = group->diskPool();
-                            block = resource.disk_block;
-                        }
-                        ASSERT_TRUE(pool->enableDecodeOriginTracking());
-                        if (group_id == 1 && i < 2 && source_case == 2) {
-                            continue;
-                        }
-                        auto origin = std::make_shared<const DecodeCacheOrigin>(
-                            DecodeCacheOrigin{std::string(32, group_id == 1 && i == 0 && source_case == 1 ? 'b' : 'a'),
-                                              0,
-                                              static_cast<int64_t>(i) * unit,
-                                              static_cast<int64_t>(i + 1) * unit,
-                                              4 * unit,
-                                              4 * unit + 1});
-                        ASSERT_TRUE(pool->bindDecodeOrigin(
-                            block, pool->decodeOriginIncarnation(block), group->groupTags()[member], origin));
-                    }
-                }
-            }
-            auto engine                                        = std::make_shared<DeferredLoadEngine>(env->groups);
-            env->cache->transfer_dispatcher_->per_rank_engine_ = engine;
-            block_tree_cache_detail::ScopeRollback drain([&] { engine->releaseAll(); });
-            auto match = env->cache->match(env->keys, [](size_t prefix) { return prefix != 3; });
-            ASSERT_EQ(match.matched_device_blocks, 1u);
-            ASSERT_EQ(match.matched_device_host_blocks, 2u);
-            EXPECT_EQ(static_cast<bool>(match.matched_device_decode_sources), source_case == 0);
-            auto context = match.async_context;
-            ASSERT_NE(context, nullptr);
-            auto refs = bindTargets(*env, context);
-            ASSERT_TRUE(context->commit());
-            ASSERT_TRUE(engine->waitForBatches(3));
-            const auto finish = [&](size_t index, bool success) {
-                engine->completeResult(index,
-                                       success ? ErrorInfo::OkStatus() :
-                                                 ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected copy failure"));
-            };
-            finish(0, host_success);
-            finish(1, host_success);
-            finish(2, disk_success);
-            context->waitDone();
-            const bool   success = host_success && disk_success;
-            const size_t ready   = success ? 4 : host_success ? 2 : 1;
-            EXPECT_EQ(context->success(), success);
-            EXPECT_EQ(context->deviceReadyBlocks(), ready);
-            const auto sources = context->decodeSources(true);
-            EXPECT_EQ(static_cast<bool>(sources), success || source_case == 0 || (host_success && source_case == 1));
-            const auto counts = sources ? countDecodeReuse(*sources, ready * unit) : DecodeReuseCounts{};
-            EXPECT_EQ(counts.by_tier[static_cast<size_t>(Tier::DEVICE)], success || source_case == 0 ? unit : 0);
-            EXPECT_EQ(counts.by_tier[static_cast<size_t>(Tier::HOST)],
-                      success                          ? 2 * unit :
-                      host_success && source_case != 2 ? unit :
-                                                         0);
-            EXPECT_EQ(counts.by_tier[static_cast<size_t>(Tier::DISK)], success ? unit : 0);
-            releaseTargets(refs);
-            env->releaseMatch(match);
-            env->reclaimAll();
-            env->expectFullyReclaimed();
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+    for (const auto& [host_success, disk_success] :
+         {std::pair<bool, bool>{true, true}, {true, false}, {false, true}}) {
+        SCOPED_TRACE(host_success);
+        SCOPED_TRACE(disk_success);
+        FullSWAEnvironmentOptions options;
+        options.path_length = 4;
+        auto env            = FullSWAEnvironment::create(options);
+        ASSERT_NE(env, nullptr);
+        env->insertRequestPath();
+        env->releaseRequestRefs();
+        env->demoteAll(Tier::DEVICE);
+        auto warmup = env->cache->match({env->keys[0], env->keys[1]});
+        ASSERT_NE(warmup.async_context, nullptr);
+        auto warmup_refs = bindTargets(*env, warmup.async_context);
+        ASSERT_TRUE(warmup.async_context->commit());
+        warmup.async_context->waitDone();
+        ASSERT_TRUE(warmup.async_context->success());
+        releaseTargets(warmup_refs);
+        env->releaseMatch(warmup);
+        using Peer = block_tree_cache_test::BlockTreeCacheTestPeer;
+        for (const Tier tier : {Tier::DEVICE, Tier::HOST}) {
+            ASSERT_TRUE(Peer::demoteOneForGroupSetForTest(*env->cache, 0, tier));
+            Peer::waitForTaskPoolIdleForTest(*env->cache);
         }
+        auto engine                                        = std::make_shared<DeferredLoadEngine>(env->groups);
+        env->cache->transfer_dispatcher_->per_rank_engine_ = engine;
+        block_tree_cache_detail::ScopeRollback drain([&] { engine->releaseAll(); });
+        auto match = env->cache->match(env->keys, [](size_t prefix) { return prefix != 3; });
+        ASSERT_EQ(match.matched_device_blocks, 1u);
+        ASSERT_EQ(match.matched_device_host_blocks, 2u);
+        auto context = match.async_context;
+        ASSERT_NE(context, nullptr);
+        auto refs = bindTargets(*env, context);
+        ASSERT_TRUE(context->commit());
+        ASSERT_TRUE(engine->waitForBatches(3));
+        const auto finish = [&](size_t index, bool success) {
+            engine->completeResult(index,
+                                   success ? ErrorInfo::OkStatus() :
+                                             ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected copy failure"));
+        };
+        finish(0, host_success);
+        finish(1, host_success);
+        finish(2, disk_success);
+        context->waitDone();
+        const bool   success = host_success && disk_success;
+        const size_t ready   = success ? 4 : host_success ? 2 : 1;
+        EXPECT_EQ(context->success(), success);
+        EXPECT_EQ(context->deviceReadyBlocks(), ready);
+        releaseTargets(refs);
+        env->releaseMatch(match);
+        env->reclaimAll();
+        env->expectFullyReclaimed();
     }
+    });
 }
 
 TEST(BlockTreeLoaderTest, UnknownDiskCompletionFreezesOnlyItsTargetBeforeHostCompletion) {

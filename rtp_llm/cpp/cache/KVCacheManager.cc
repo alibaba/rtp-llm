@@ -5,6 +5,11 @@
 #include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
 
 #include <algorithm>
+#if USING_CUDA
+#include <cuda_runtime.h>
+#include <ATen/cuda/CUDAContext.h>
+#include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
+#endif
 #include <array>
 #include <stdexcept>
 #include <chrono>
@@ -588,6 +593,118 @@ std::function<void()> KVCacheManager::allocationChangeCallback() const {
             notifyAllocationChangeState(state);
         }
     };
+}
+
+void KVCacheManager::freezeUnknownDecodeWriter(const BatchKVCacheResource& resource) const noexcept {
+    if (!isAllocatorOwner() || !coordinator_manager_) return;
+    const auto& pools = coordinator_manager_->groupBlockPools();
+    const auto& tags = config_.groupTags();
+    for (size_t group = 0; group < tags.size() && group < pools.size(); ++group) {
+        const auto& pool = pools[group];
+        if (!pool) continue;
+        for (int batch = 0; batch < resource.batchSize(); ++batch) {
+            for (auto block : resource.blocks(batch, tags[group])) {
+                // Own a frozen reference even if another operation already
+                // froze this page: its later recovery must not hide our hold.
+                if (pool->isAllocated(block))
+                    pool->freezeBlock(block, "Decode writer completion unknown; request owner retained");
+            }
+        }
+    }
+}
+
+size_t KVCacheManager::decodePublicationUnit() const {
+    const auto& cp = parallelism_config_.prefill_cp_config;
+    size_t unit = config_.seq_size_per_block * (cp.kv_cache_sharded ? cp.prefill_cp_size : 1);
+    for (const auto& group : config_.topology().groups()) {
+        if (!group.policy.enable_prefix_reuse || group.policy.group_type == CacheGroupType::FULL) continue;
+        if (group.policy.group_type == CacheGroupType::LINEAR) return 0;
+        const auto span = group.seqSizePerBlock();
+        const auto multiplier = span / std::gcd(unit, span);
+        if (!unit || multiplier > std::numeric_limits<size_t>::max() / unit) return 0;
+        unit *= multiplier;
+    }
+    return unit;
+}
+
+std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpoint(
+    const torch::Tensor& physical_ids, const std::vector<std::string>& tags, size_t row, size_t end,
+    const std::shared_ptr<const DecodeEndpoint>& previous, bool writer_already_fenced) const {
+    // Decode owns the native pages locally; the existing D->P projection
+    // performs the actual target-CP slicing at publication time.
+    if (decode_capture_stopped_.load() || !isAllocatorOwner() || !coordinator_manager_ || !end) return {};
+    const auto unit = decodePublicationUnit();
+    if (!unit || end % unit || physical_ids.dim() != 3 || !physical_ids.is_cpu()
+        || physical_ids.scalar_type() != torch::kInt32 || row >= static_cast<size_t>(physical_ids.size(1))
+        || tags.size() != static_cast<size_t>(physical_ids.size(0))) return {};
+    auto endpoint = std::make_shared<DecodeEndpoint>(); endpoint->end = end;
+    const auto& pools = coordinator_manager_->groupBlockPools();
+    const size_t canonical = config_.seq_size_per_block *
+        (parallelism_config_.prefill_cp_config.kv_cache_sharded ? parallelism_config_.prefill_cp_config.prefill_cp_size : 1);
+    for (size_t group_id = 0; group_id < config_.groupTags().size(); ++group_id) {
+        const auto& tag = config_.groupTags()[group_id];
+        const auto& group = config_.topology().group(tag);
+        if (!group.policy.enable_prefix_reuse) continue;
+        if (group.policy.group_type != CacheGroupType::FULL && group.policy.group_type != CacheGroupType::SWA)
+            throw std::runtime_error("DSV4.1 endpoint requires native FULL/SWA pages");
+        const auto it = std::find(tags.begin(), tags.end(), tag);
+        if (it == tags.end() || group_id >= pools.size()) return {};
+        const auto& pool = pools[group_id];
+        if (!pool || pool->where() != MemoryType::MEMORY_GPU) return {};
+        const size_t count = end / group.seqSizePerBlock();
+        if (!count) return {};
+        auto& blocks = endpoint->blocks[tag]; blocks.assign(count, NULL_BLOCK_IDX);
+        const size_t first = group.policy.group_type == CacheGroupType::FULL ? 0 :
+            count - std::min(count, group.reuseBlockCount(end / canonical));
+        auto& holds = endpoint->pages[tag];
+        holds.reserve(count - first);
+        const DecodeEndpoint::PageHolds* prior = nullptr;
+        if (group.policy.group_type == CacheGroupType::FULL && previous && previous->end <= end) {
+            const auto found = previous->pages.find(tag);
+            if (found != previous->pages.end()) prior = &found->second;
+        }
+        const auto input = physical_ids.select(0, it - tags.begin()).select(0, row);
+        const auto values = input.accessor<int32_t, 1>();
+        for (size_t slot = first; slot < count; ++slot) {
+            if (!input.numel() || (group.policy.group_type == CacheGroupType::FULL && slot >= static_cast<size_t>(input.numel()))) return {};
+            const auto source = values[slot % input.numel()];
+            if (isNullBlockIdx(source)) return {};
+            const auto* held = prior && slot < prior->size() ? (*prior)[slot].get() : nullptr;
+            if (held && held->pool.get() == pool.get() && held->block == source
+                && held->pin && held->pin.get() == pool.get() && held->pin.get_deleter().block == source) {
+                // This exact page's live connector pin already proves allocation.
+                holds.push_back((*prior)[slot]); // Share this FULL page, never the old endpoint's owner.
+            } else {
+                auto hold = std::make_shared<DecodeEndpoint::PageHold>();
+                hold->pool = pool;
+                hold->block = source;
+                holds.push_back(hold); // Prepare host ownership before acquiring a page.
+                hold->pin = pool->tryPinForRemotePublication(source);
+                if (!hold->pin) return {};
+            }
+            blocks[slot] = source; // Actual DSV4.1 STATE/SWA use position-based pages, not LINEAR accept swaps.
+        }
+    }
+    try {
+#if USING_CUDA
+        // Pin prevents recycling, not an unfinished writer. Fence the actual
+        // writer stream before exposing this native endpoint; no payload copy.
+        if (!writer_already_fenced)
+            check_cuda_value(cudaStreamSynchronize(at::cuda::getCurrentCUDAStream().stream()));
+#endif
+    } catch (...) {
+#if USING_CUDA
+        if (cudaDeviceSynchronize() != cudaSuccess) {
+            // No release without last-use proof. Stop optional capture and
+            // retain this preallocated owner; pool capacity bounds the hold.
+            decode_capture_stopped_.store(true);
+            endpoint->unknown_owner = endpoint;
+        }
+#endif
+        throw;
+    }
+    RTP_LLM_LOG_DEBUG("DSV41_NATIVE_ENDPOINT H=%zu state_copies=0 source=original_pages", end);
+    return endpoint;
 }
 
 bool KVCacheManager::captureCompletedDecode(const BatchKVCacheResource& resource,

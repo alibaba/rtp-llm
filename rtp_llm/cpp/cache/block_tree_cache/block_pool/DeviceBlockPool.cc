@@ -51,17 +51,25 @@ DeviceBlockPool::DeviceBlockPool(std::shared_ptr<const DeviceBlockPoolConfig> co
     }
 }
 
-std::function<void()> DeviceBlockPool::pinForRemotePublication(BlockIdxType block) {
+RemotePublicationPin DeviceBlockPool::pinForRemotePublication(BlockIdxType block) {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     checkAllocatedNoLock(block);
+    return pinForRemotePublicationNoLock(block);
+}
+
+RemotePublicationPin DeviceBlockPool::tryPinForRemotePublication(BlockIdxType block) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    if (!isAllocatedNoLock(block)) return {};
+    return pinForRemotePublicationNoLock(block);
+}
+
+RemotePublicationPin DeviceBlockPool::pinForRemotePublicationNoLock(BlockIdxType block) {
     // Reserve free-list capacity before acquiring storage I/O pins. At most
     // totalBlocksNumNoLock() block IDs can be in the free list at any time.
     reserveAllReleasedBlocksNoLock();
     auto notify = capacityChangeCallbackNoLock();
-    std::function<void()> release = [this, block, notify = std::move(notify)] {
-        releaseRemotePublicationPin(block, notify);
-    };
     const auto type = static_cast<size_t>(DeviceBlockRefType::REMOTE_CONNECTOR);
     const bool was_active = isActiveNoLock(block);
     const bool was_available = isAvailableNoLock(block);
@@ -71,7 +79,10 @@ std::function<void()> DeviceBlockPool::pinForRemotePublication(BlockIdxType bloc
     }
     updateActiveBlocksNumNoLock(block, was_active);
     updateAvailableBlocksNumNoLock(block, was_available);
-    return release;
+    return RemotePublicationPin(this, RemotePublicationPinDeleter{block, std::move(notify),
+        [](DeviceBlockPool* pool, BlockIdxType id, const std::function<void()>& callback) noexcept {
+            pool->releaseRemotePublicationPin(id, callback);
+        }});
 }
 
 void DeviceBlockPool::releaseRemotePublicationPin(BlockIdxType block, const std::function<void()>& notify) noexcept {
@@ -221,9 +232,6 @@ bool DeviceBlockPool::tryReplaceRequestReferences(const std::vector<RequestRefer
             auto& change     = changes[reclaimable[i]];
             change.new_count = 1;
             replacements.push_back(change.block);
-            // This donor stays allocated but will hold a replacement value.
-            // An unchanged numeric ID must not preserve the old provenance.
-            beginDecodeOriginIncarnationNoLock(change.block);
         }
         replacements.insert(replacements.end(), fresh_blocks->begin(), fresh_blocks->end());
 

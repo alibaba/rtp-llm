@@ -19,20 +19,34 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-cc_library(
-    name = "dtop_origin_metadata",
-    hdrs = ["DtopOriginMetadata.h"],
-    deps = [
-        "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client_headers",
-        "//rtp_llm/cpp/utils:decode_cache_origin",
-    ],
-    visibility = ["//visibility:public"],
-)
-
 config_setting(
     name = "RECO_INTERNAL",
     values = {"copt": "-DRECO_INTERNAL=1"},
 )
+
+kvcm_backend_implementation_deps = [
+    ":client",
+    ":decode_publication_accounting",
+    ":sdk_buffer_safety",
+    "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+    "//rtp_llm/cpp/cache:cp_slot_mapper",
+    ":group_policy",
+    "//rtp_llm/cpp/cache/block_tree_cache",
+    "//rtp_llm/cpp/cache/block_tree_cache:block_tree_task_pool",
+    "//rtp_llm/cpp/cache/block_tree_cache:transfer_common",
+    "//rtp_llm/cpp/cache/block_tree_cache:transfer_buffer_safety",
+    "//rtp_llm/cpp/cache/block_tree_cache:transfer_task_registry",
+    "//rtp_llm/cpp/metrics:metrics",
+    "//rtp_llm/cpp/model_rpc:broadcast_manager",
+    "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+    "//rtp_llm/cpp/utils:core_utils",
+    "//rtp_llm/models_py/bindings/core:types",
+    "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+    "@havenask//aios/autil:env_util",
+    "@havenask//aios/autil:json",
+    "@local_config_cuda//cuda:cuda_headers",
+    "@local_config_cuda//cuda:cudart",
+]
 
 cc_library(
     name = "kvcm_storage_backend",
@@ -40,31 +54,7 @@ cc_library(
     hdrs = ["KVCMStorageBackend.h", "DtopCompletionBridge.inc", "WorkerPayloadProof.h"],
     copts = copts(),
     visibility = ["//visibility:public"],
-    deps = [
-        ":client",
-        ":decode_publication_accounting",
-        ":dtop_origin_metadata",
-        ":sdk_buffer_safety",
-        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
-        "//rtp_llm/cpp/cache:cp_slot_mapper",
-        ":group_policy",
-        "//rtp_llm/cpp/cache/block_tree_cache",
-        "//rtp_llm/cpp/cache/block_tree_cache:block_tree_task_pool",
-        "//rtp_llm/cpp/cache/block_tree_cache:transfer_common",
-        "//rtp_llm/cpp/cache/block_tree_cache:transfer_buffer_safety",
-        "//rtp_llm/cpp/cache/block_tree_cache:transfer_task_registry",
-        "//rtp_llm/cpp/metrics:metrics",
-        "//rtp_llm/cpp/model_rpc:broadcast_manager",
-        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:decode_cache_origin",
-        "//rtp_llm/models_py/bindings/core:types",
-        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
-        "@havenask//aios/autil:env_util",
-        "@havenask//aios/autil:json",
-        "@local_config_cuda//cuda:cuda_headers",
-        "@local_config_cuda//cuda:cudart",
-    ],
+    deps = kvcm_backend_implementation_deps,
 )
 
 cc_library(
@@ -97,9 +87,9 @@ cc_library(
     ],
     hdrs = [
         "ClientFactory.h",
-        "PackedSsdTransferClient.h",
-        "SdkTransferObserver.h",
         "ClientWrapper.h",
+        "PayloadDispatchProof.h",
+        "PublicationSettlement.h",
         "KVCMConfig.h",
     ],
     copts = copts(),
@@ -148,4 +138,23 @@ cc_library(
 exports_files(
     ["VIPServerSubscriber.cc", "VIPServerSubscriber.h", "Subscriber.h"],
     visibility = ["//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test:__pkg__"],
+)
+
+# White-box boundary tests compile the current implementation once, with test-only
+# dependency gates. The production backend has no runtime hook or extra branch.
+genrule(
+    name = "submission_boundary_test_implementation",
+    testonly = True,
+    srcs = ["KVCMStorageBackend.cc"],
+    outs = ["KVCMSubmissionBoundaryImplementation.inc"],
+    cmd = "cat $(location KVCMStorageBackend.cc) > $@",
+)
+
+cc_library(
+    name = "submission_boundary_test_source",
+    testonly = True,
+    textual_hdrs = [":submission_boundary_test_implementation"],
+    hdrs = ["KVCMStorageBackend.h", "DtopCompletionBridge.inc", "WorkerPayloadProof.h"],
+    visibility = ["//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test:__pkg__"],
+    deps = kvcm_backend_implementation_deps,
 )

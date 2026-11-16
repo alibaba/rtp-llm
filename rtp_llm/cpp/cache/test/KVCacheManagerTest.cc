@@ -11,6 +11,8 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <stdexcept>
+#include <utility>
 #include <algorithm>
 #include <limits>
 #include <string>
@@ -97,6 +99,231 @@ protected:
 private:
     bool old_core_dump_on_exception_{false};
 };
+
+namespace {
+// Real page pools and retainDecodeEndpoint, without a model writer or SDK.
+// These cases prove pin/owner behavior, not STATE contents or kernel ranges.
+struct EndpointHoldFixture {
+    std::shared_ptr<KVCacheManager> manager;
+    std::vector<std::string> tags;
+    std::unordered_map<std::string, DeviceBlockPoolPtr> pools;
+    std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> allocated;
+    torch::Tensor ids;
+
+    EndpointHoldFixture() {
+        CacheConfig config;
+        config.dtype = DataType::TYPE_FP16;
+        config.layer_num = 3;
+        config.seq_size_per_block = 4;
+        auto full = defaultCacheGroupPolicy(CacheGroupType::FULL);
+        auto tail = defaultCacheGroupPolicy(CacheGroupType::SWA);
+        tail.enable_prefix_reuse = true;
+        tail.sliding_window_size = 4;
+        config.fromGroupedSpecs({makeMhaSpec("full", 4, config.dtype, 1, 1),
+                                 makeMhaSpec("state", 4, config.dtype, 1, 1),
+                                 makeMhaSpec("swa", 4, config.dtype, 1, 1)},
+                                {{0}, {1}, {2}}, {CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::SWA},
+                                {"full", "state", "swa"}, {full, tail, tail});
+        config.finalizeBlockNums(16, RuntimeConfig{});
+        ParallelismConfig parallel;
+        parallel.role_type = RoleType::DECODE;
+        parallel.prefill_cp_config.prefill_cp_size = 1;
+        manager = std::make_shared<KVCacheManager>(config, false, nullptr, KVCacheConfig{}, parallel);
+        if (!manager->init()) throw std::runtime_error("endpoint test manager init failed");
+        tags = manager->cacheConfig().groupTags();
+        ids = torch::full({static_cast<int64_t>(tags.size()), 1, 4}, NULL_BLOCK_IDX, torch::kInt32);
+        const auto& group_pools = manager->coordinator_manager_->groupBlockPools();
+        for (size_t group = 0; group < tags.size(); ++group) {
+            const auto pool = group_pools.at(group);
+            pools.emplace(tags[group], pool);
+            for (size_t slot = 0; slot < 4; ++slot) {
+                const auto block = pool->malloc();
+                if (!block) throw std::runtime_error("endpoint test page allocation failed");
+                pool->incRef(*block, DeviceBlockRefType::REQUEST);
+                allocated.emplace_back(pool, *block);
+                ids.data_ptr<int32_t>()[group * 4 + slot] = *block;
+            }
+        }
+    }
+    ~EndpointHoldFixture() {
+        for (const auto& value : allocated) value.first->decRef(value.second, DeviceBlockRefType::REQUEST);
+    }
+    BlockIdxType block(const std::string& tag, size_t slot) const {
+        const auto group = std::find(tags.begin(), tags.end(), tag) - tags.begin();
+        return ids.data_ptr<int32_t>()[group * 4 + slot];
+    }
+    uint32_t refs(const std::string& tag, size_t slot) const { return pools.at(tag)->refCount(block(tag, slot)); }
+    std::vector<uint32_t> refs() const {
+        std::vector<uint32_t> result;
+        for (const auto& value : allocated) result.push_back(value.first->refCount(value.second));
+        return result;
+    }
+    std::shared_ptr<const DecodeEndpoint> capture(size_t end, const std::shared_ptr<const DecodeEndpoint>& previous = {},
+                                                 bool writer_already_fenced = false) {
+        return manager->retainDecodeEndpoint(ids, tags, 0, end, previous, writer_already_fenced);
+    }
+};
+} // namespace
+
+TEST_F(KVCacheManagerTest, EndpointFullHoldsShareAcrossBoundariesAndBothReleaseOrders) {
+    for (const bool writer_already_fenced : {false, true})
+    for (const bool reversed : {false, true}) {
+        EndpointHoldFixture f;
+        const auto baseline = f.refs();
+        auto first = f.capture(4);
+        ASSERT_TRUE(first);
+        auto second = f.capture(8, first, writer_already_fenced);
+        ASSERT_TRUE(second);
+        auto third = f.capture(12, second, writer_already_fenced);
+        ASSERT_TRUE(third);
+        EXPECT_EQ(first->pages.at("full").at(0), second->pages.at("full").at(0));
+        EXPECT_EQ(second->pages.at("full").at(1), third->pages.at("full").at(1));
+        EXPECT_EQ(f.refs("full", 0), 2u);
+        EXPECT_EQ(f.refs("full", 1), 2u);
+        EXPECT_EQ(f.refs("full", 2), 2u);
+        for (const auto& tag : {"state", "swa"}) {
+            EXPECT_EQ(f.refs(tag, 0), 2u);
+            EXPECT_EQ(f.refs(tag, 1), 2u);
+            EXPECT_EQ(f.refs(tag, 2), 2u);
+        }
+        std::weak_ptr<const DecodeEndpoint::PageHold> old_state = second->pages.at("state").at(0);
+        second.reset();
+        EXPECT_TRUE(old_state.expired()); // No chain retaining old endpoint STATE/SWA.
+        EXPECT_EQ(f.refs("state", 1), 1u);
+        EXPECT_EQ(f.refs("swa", 1), 1u);
+        if (reversed) {
+            third.reset();
+            EXPECT_EQ(f.refs("full", 0), 2u);
+            EXPECT_EQ(f.refs("full", 1), 1u);
+            first.reset();
+        } else {
+            first.reset();
+            EXPECT_EQ(f.refs("full", 0), 2u);
+            EXPECT_EQ(f.refs("state", 0), 1u);
+            third.reset();
+        }
+        EXPECT_EQ(f.refs(), baseline);
+    }
+}
+
+TEST_F(KVCacheManagerTest, EndpointReadsStridedCpuBlockTablesWithoutChangingPagesOrPins) {
+    EndpointHoldFixture f;
+    const auto baseline = f.refs();
+    auto contiguous = f.capture(12);
+    ASSERT_TRUE(contiguous);
+    auto backing = torch::full({static_cast<int64_t>(f.tags.size()), 4, 2}, NULL_BLOCK_IDX, torch::kInt32);
+    auto strided = backing.select(2, 0).unsqueeze(1);
+    strided.copy_(f.ids);
+    ASSERT_FALSE(strided.is_contiguous());
+    f.ids = strided;
+    auto endpoint = f.capture(12);
+    ASSERT_TRUE(endpoint);
+    EXPECT_EQ(endpoint->blocks, contiguous->blocks);
+    for (const auto& tag : f.tags)
+        EXPECT_EQ(endpoint->pages.at(tag).size(), contiguous->pages.at(tag).size());
+    endpoint.reset();
+    contiguous.reset();
+    EXPECT_EQ(f.refs(), baseline);
+}
+
+TEST_F(KVCacheManagerTest, EndpointRejectsPriorHoldsWithoutAnEngagedPinForTheExactPage) {
+    for (int kind = 0; kind < 3; ++kind) {
+        EndpointHoldFixture f;
+        EndpointHoldFixture other;
+        const auto baseline = f.refs(), other_baseline = other.refs();
+        auto previous = std::make_shared<DecodeEndpoint>();
+        previous->end = 4;
+        auto hold = std::make_shared<DecodeEndpoint::PageHold>();
+        hold->pool = f.pools.at("full");
+        hold->block = f.block("full", 0);
+        if (kind == 1) // The token belongs to a different pool.
+            hold->pin = other.pools.at("full")->pinForRemotePublication(other.block("full", 0));
+        else if (kind == 2) // Same pool, but a different block's token is no proof.
+            hold->pin = f.pools.at("full")->pinForRemotePublication(f.block("full", 1));
+        previous->pages["full"].push_back(hold);
+        auto endpoint = f.capture(4, previous);
+        ASSERT_TRUE(endpoint);
+        EXPECT_NE(endpoint->pages.at("full").at(0), hold);
+        EXPECT_TRUE(endpoint->pages.at("full").at(0)->pin);
+        EXPECT_EQ(f.refs("full", 0), 2u); // Fresh pin, even though the synthetic hold claims this page.
+        endpoint.reset(); previous.reset(); hold.reset();
+        EXPECT_EQ(f.refs(), baseline);
+        EXPECT_EQ(other.refs(), other_baseline);
+    }
+}
+
+TEST_F(KVCacheManagerTest, EndpointPhysicalRemapAndLocalTailPagesAreNotShared) {
+    EndpointHoldFixture f;
+    const auto baseline = f.refs();
+    auto first = f.capture(4);
+    ASSERT_TRUE(first);
+    const auto old_full = f.block("full", 0);
+    const auto full_group = std::find(f.tags.begin(), f.tags.end(), "full") - f.tags.begin();
+    f.ids.data_ptr<int32_t>()[full_group * 4] = f.block("full", 3);
+    auto remapped = f.capture(4, first);
+    ASSERT_TRUE(remapped);
+    EXPECT_NE(first->pages.at("full").at(0), remapped->pages.at("full").at(0));
+    EXPECT_EQ(f.pools.at("full")->refCount(old_full), 2u);
+    EXPECT_EQ(f.refs("full", 3), 2u);
+    for (const auto& tag : {"state", "swa"}) {
+        EXPECT_NE(first->pages.at(tag).at(0), remapped->pages.at(tag).at(0));
+        EXPECT_EQ(f.refs(tag, 0), 3u);
+    }
+    first.reset();
+    EXPECT_EQ(f.pools.at("full")->refCount(old_full), 1u);
+    EXPECT_EQ(f.refs("state", 0), 2u);
+    remapped.reset();
+    EXPECT_EQ(f.refs(), baseline);
+}
+
+TEST_F(KVCacheManagerTest, EndpointPoolIdentityAndPreviousEndBoundSharing) {
+    EndpointHoldFixture first_pool;
+    EndpointHoldFixture other_pool;
+    const auto first_baseline = first_pool.refs(), other_baseline = other_pool.refs();
+    ASSERT_NE(first_pool.pools.at("full").get(), other_pool.pools.at("full").get());
+    ASSERT_EQ(first_pool.block("full", 0), other_pool.block("full", 0));
+    auto first = first_pool.capture(4);
+    ASSERT_TRUE(first);
+    auto other = other_pool.capture(4, first);
+    ASSERT_TRUE(other);
+    EXPECT_NE(first->pages.at("full").at(0), other->pages.at("full").at(0));
+    EXPECT_EQ(first_pool.refs("full", 0), 2u);
+    EXPECT_EQ(other_pool.refs("full", 0), 2u);
+    other.reset();
+    EXPECT_EQ(other_pool.refs(), other_baseline);
+    auto longer = first_pool.capture(8, first);
+    ASSERT_TRUE(longer);
+    auto shorter = first_pool.capture(4, longer);
+    ASSERT_TRUE(shorter);
+    EXPECT_NE(shorter->pages.at("full").at(0), longer->pages.at("full").at(0));
+    EXPECT_EQ(first_pool.refs("full", 0), 3u);
+    shorter.reset(); longer.reset(); first.reset();
+    EXPECT_EQ(first_pool.refs(), first_baseline);
+}
+
+TEST_F(KVCacheManagerTest, EndpointPartialFailureRollsBackFreshPinsAndKeepsSharedHolds) {
+    for (const bool null_id : {false, true}) {
+        EndpointHoldFixture f;
+        auto first = f.capture(4);
+        ASSERT_TRUE(first);
+        const auto before = f.refs();
+        const auto last = f.tags.size() - 1;
+        BlockIdxType unavailable = NULL_BLOCK_IDX;
+        if (!null_id) {
+            const auto pool = f.pools.at(f.tags.back());
+            const auto block = pool->malloc();
+            ASSERT_TRUE(block);
+            pool->incRef(*block, DeviceBlockRefType::REQUEST);
+            pool->decRef(*block, DeviceBlockRefType::REQUEST);
+            EXPECT_FALSE(pool->isAllocated(*block));
+            unavailable = *block; // Valid index, but no allocated page.
+        }
+        f.ids.data_ptr<int32_t>()[last * 4 + 1] = unavailable;
+        EXPECT_FALSE(f.capture(8, first));
+        EXPECT_EQ(f.refs(), before);
+        EXPECT_EQ(f.refs("full", 0), 2u);
+    }
+}
 
 static void assertBlockBytesEq(const std::shared_ptr<rtp_llm::KVCacheManager>& cache_manager,
                                int                                             layer_id,

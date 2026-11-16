@@ -58,6 +58,7 @@ struct KVCMBroadcastState {
     grpc::StatusCode                      failure_code{grpc::StatusCode::INTERNAL};
     // Installed before requests are submitted; callbacks may run on both ranks.
     std::function<void()>                 on_request;
+    std::function<void(const RemoteOperationRequestPB&, RemoteOperationResponsePB&)> execute;
 };
 
 class KVCMBroadcastRpcService final: public RpcService::Service {
@@ -82,6 +83,11 @@ public:
             return grpc::Status(state_->failure_code, "injected KVCM broadcast failure");
         }
         auto* remote_response = response->mutable_remote_response();
+        if (state_->execute) {
+            state_->execute(remote_request, *remote_response);
+            // Same handled-transfer convention as KVCacheManager::executeFunction.
+            return grpc::Status::OK;
+        }
         remote_response->set_transfer_status(REMOTE_TRANSFER_STATUS_SUCCESS);
         remote_response->set_payload_buffer_safe(true);
         if (remote_request.op() == REMOTE_OPERATION_WRITE) {
@@ -135,14 +141,7 @@ snapshotRequests(const std::shared_ptr<KVCMBroadcastState>& state) {
 
 class MockClientWrapper final: public kvcm::ClientWrapper {
 public:
-    MockClientWrapper(): ClientWrapper(std::make_unique<kvcm::MockClientFactory>()) {
-        ON_CALL(*this, abortWrite(_, _, _)).WillByDefault(Invoke(
-            [this](const std::string& id, const std::string& trace, const std::string& session) {
-                return finishWrite(id, trace, session, kv_cache_manager::BlockMaskOffset{0}, {});
-            }));
-    }
-
-    MOCK_METHOD(bool, abortWrite, (const std::string&, const std::string&, const std::string&), (override));
+    MockClientWrapper(): ClientWrapper(std::make_unique<kvcm::MockClientFactory>()) {}
 
     std::optional<kv_cache_manager::ClientErrorCode> load_status;
     std::optional<kv_cache_manager::ClientErrorCode> save_status;
@@ -192,6 +191,15 @@ public:
                  const kv_cache_manager::BlockMask&,
                  const kv_cache_manager::Locations&),
                 (override));
+    std::function<FinishWriteResult(const kv_cache_manager::BlockMask&, const kv_cache_manager::Locations&)>
+        finish_write_result;
+    FinishWriteResult finishWriteWithResult(const std::string& unique_id, const std::string& trace_id,
+                                            const std::string& session, const kv_cache_manager::BlockMask& mask,
+                                            const kv_cache_manager::Locations& locations) override {
+        if (finish_write_result) return finish_write_result(mask, locations);
+        return finishWrite(unique_id, trace_id, session, mask, locations) ? FinishWriteResult::ACKNOWLEDGED :
+                                                                         FinishWriteResult::UNKNOWN;
+    }
     MOCK_METHOD(bool,
                 loadKvCachesForTag,
                 (const std::string&,
@@ -229,6 +237,7 @@ public:
             *completion = sdkResultCompletion(ec);
         return ec;
     }
+    std::function<bool()> reject_save_before_handoff;
     std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec>
     saveKvCachesForTagWithStatus(const std::string&                                          tag,
                                  const kv_cache_manager::UriStrVec&                          uris,
@@ -238,6 +247,8 @@ public:
                                  std::optional<std::chrono::steady_clock::time_point> = std::nullopt) override {
         if (completion)
             *completion = TransferCompletion::NOT_STARTED;
+        if (reject_save_before_handoff && reject_save_before_handoff())
+            return {kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS, {}};
         if (save_status.has_value()) {
             if (completion)
                 *completion = sdkResultCompletion(*save_status);
@@ -456,7 +467,7 @@ makeMultiGroupBackendEnvironment(const std::string& pool_name, size_t full_group
 
 [[maybe_unused]] BackendHandle makeBackend(const BackendEnvironment&                  environment,
                                            const ParallelismConfig&                   parallelism_config,
-                                           const std::shared_ptr<MockClientWrapper>&  client_wrapper,
+                                           const std::shared_ptr<kvcm::ClientWrapper>& client_wrapper,
                                            std::shared_ptr<BroadcastManager>          broadcast_manager = nullptr,
                                            std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter  = nullptr,
                                            bool                                       gdr_enabled       = false,
