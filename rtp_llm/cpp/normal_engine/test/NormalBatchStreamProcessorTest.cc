@@ -2090,7 +2090,7 @@ TEST_F(NormalBatchStreamProcessorTest, testProcessOverlapsMropeSnapshotButJoinsB
     std::exception_ptr process_exception;
     std::thread        process_thread([&] {
         try {
-            process_status = executor.process({stream});
+            process_status = executor.process(ScheduleOutput{{stream}});
         } catch (...) {
             process_exception = std::current_exception();
         }
@@ -2209,7 +2209,7 @@ TEST_F(NormalBatchStreamProcessorTest, testProcessJoinsBeforeFallbackGatherWitho
     std::exception_ptr process_exception;
     std::thread        process_thread([&] {
         try {
-            process_status = executor.process({stream});
+            process_status = executor.process(ScheduleOutput{{stream}});
         } catch (...) {
             process_exception = std::current_exception();
         }
