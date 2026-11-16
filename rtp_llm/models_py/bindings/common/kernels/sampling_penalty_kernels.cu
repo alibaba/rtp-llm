@@ -33,8 +33,8 @@ __global__ void batchApplyTemperaturePenalty(T*           logits,
     const bool              IS_FP16   = std::is_same<T, half>::value;
     const T                 MAX_T_VAL = (IS_FP16) ? 65504.F : FLT_MAX;
     extern __shared__ float inv_temperatures[];
-    if (threadIdx.x < batch_size) {
-        inv_temperatures[threadIdx.x] = 1.0f / (temperatures[threadIdx.x] + 1e-6f);
+    for (int row = threadIdx.x; row < batch_size; row += blockDim.x) {
+        inv_temperatures[row] = 1.0f / (temperatures[row] + 1e-6f);
     }
     __syncthreads();
 
@@ -62,8 +62,8 @@ __global__ void batchApplyTemperaturePenalty_h2(half2*       logits,
     assert(vocab_size % 2 == 0);
     assert(vocab_size_padded % 2 == 0);
     extern __shared__ half2 h2_inv_temperatures[];
-    if (threadIdx.x < batch_size) {
-        h2_inv_temperatures[threadIdx.x] = __float2half2_rn(1.f / (temperatures[threadIdx.x] + 1e-6f));
+    for (int row = threadIdx.x; row < batch_size; row += blockDim.x) {
+        h2_inv_temperatures[row] = __float2half2_rn(1.f / (temperatures[row] + 1e-6f));
     }
     __syncthreads();
 

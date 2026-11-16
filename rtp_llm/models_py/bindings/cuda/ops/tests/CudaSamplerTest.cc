@@ -3,6 +3,7 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
 #include "rtp_llm/models_py/bindings/cuda/ops/tests/CudaTestUtils.h"
 #include "rtp_llm/models_py/bindings/common/kernels/banRepeatNgram.h"
+#include "rtp_llm/models_py/bindings/common/kernels/sampling_penalty_kernels.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include <ATen/cuda/CUDAContext.h>
 #include "rtp_llm/models_py/bindings/cuda/kernels/attention_input_metadata.h"
@@ -119,6 +120,37 @@ protected:
         return std::vector<float>(cpu.data_ptr<float>(), cpu.data_ptr<float>() + cpu.numel());
     }
 };
+
+TEST_F(CudaSamplerTest, testTemperaturePenaltyLoadsAllRowsWhenBatchExceedsBlockSize) {
+    constexpr int batch_size   = 8;
+    constexpr int vocab_size   = 4;
+    auto          temperatures = cudaTensor({0.25f, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f}, {batch_size});
+    auto          values       = torch::arange(-16, 16, temperatures.options()).reshape({batch_size, vocab_size});
+    auto          expected     = values / (temperatures.unsqueeze(1) + 1e-6f);
+    auto          stream       = at::cuda::getCurrentCUDAStream();
+    for (auto dtype : {torch::kFloat32, torch::kFloat16}) {
+        SCOPED_TRACE(dtype);
+        auto logits = values.to(dtype).clone();
+        if (dtype == torch::kFloat32) {
+            invokeBatchApplyTemperaturePenalty<float>(logits.data_ptr<float>(),
+                                                      nullptr,
+                                                      temperatures.data_ptr<float>(),
+                                                      batch_size,
+                                                      vocab_size,
+                                                      vocab_size,
+                                                      stream);
+        } else {
+            invokeBatchApplyTemperaturePenalty<half>(reinterpret_cast<half*>(logits.data_ptr<at::Half>()),
+                                                     nullptr,
+                                                     temperatures.data_ptr<float>(),
+                                                     batch_size,
+                                                     vocab_size,
+                                                     vocab_size,
+                                                     stream);
+        }
+        ASSERT_TRUE(torch::allclose(logits.to(torch::kFloat32), expected, 1e-3, 1e-3));
+    }
+}
 
 TEST_F(CudaSamplerTest, testBatchedSeedOffsetsMatchSequentialGeneratorDraws) {
     auto default_generator = at::cuda::detail::getDefaultCUDAGenerator();
