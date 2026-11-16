@@ -156,7 +156,10 @@ ErrorInfo P2PWorkerDecodeRead::buildRecvTasks(const P2PWorkerRoutePlan&         
         }
     }
     // No receiver task is registered until every route/layer has valid metadata.
+    task_group->partition_keys.reserve(prepared.size());
+    task_group->tasks.reserve(prepared.size());
     for (const auto& receive : prepared) {
+        task_group->partition_keys.push_back(receive.request.unique_key);
         task_group->task_start_time_us.emplace(receive.request.unique_key, 0);
         ++task_group->pending_buffer_tasks.at(task_group->task_buffer_keys.at(receive.request.unique_key));
     }
@@ -167,7 +170,6 @@ ErrorInfo P2PWorkerDecodeRead::buildRecvTasks(const P2PWorkerRoutePlan&         
             return fail_registration(receive.context + ": create recv task failed");
         }
         task_group->lease->onTransferStarted();
-        task_group->partition_keys.push_back(receive.request.unique_key);
         task_group->tasks.push_back(task);
         task_group->task_start_time_us.at(receive.request.unique_key) = recv_start_us;
         registerTaskCompletionCallback(task, unique_key, task_group);
@@ -297,7 +299,14 @@ ErrorInfo P2PWorkerDecodeRead::read(int64_t                   request_id,
     }
 
     const auto prepare_start_us = currentTimeUs();
-    ErrorInfo  build_result     = buildRecvTasks(worker_plan, unique_key, deadline_ms, task_group, total_block_count);
+    ErrorInfo  build_result;
+    try {
+        build_result = buildRecvTasks(worker_plan, unique_key, deadline_ms, task_group, total_block_count);
+    } catch (const std::exception& error) {
+        build_result = ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+                                 std::string("recv registration failed: ") + error.what());
+        cleanupRecvTaskStore(task_group, /*cancel_pending_tasks=*/true);
+    }
     collector.decode_worker_prepare_time_us   = currentTimeUs() - prepare_start_us;
     collector.decode_worker_total_block_count = total_block_count;
     if (build_result.hasError()) {
@@ -480,7 +489,7 @@ void P2PWorkerDecodeRead::registerTaskCompletionCallback(
     const std::shared_ptr<ReadTaskGroup>& task_group) {
     const auto callback_state = completion_callback_state_;
     const std::weak_ptr<ReadTaskGroup> weak_task_group = task_group;
-    const std::string task_key = task_group->partition_keys.empty() ? unique_key : task_group->partition_keys.back();
+    const std::string task_key = task_group->partition_keys.at(task_group->tasks.size() - 1);
     std::weak_ptr<transfer::IKVCacheRecvTask> weak_task = task;
     const auto                                start_it  = task_group->task_start_time_us.find(task_key);
     const int64_t recv_start_us = start_it == task_group->task_start_time_us.end() ? -1 : start_it->second;
