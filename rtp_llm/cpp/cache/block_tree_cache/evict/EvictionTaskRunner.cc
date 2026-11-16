@@ -23,9 +23,9 @@ void EvictionTaskRunner::runTransfer(std::shared_ptr<const EvictionTransferTask>
                && desc.target_tier == first.target_tier;
     });
     const int64_t transfer_begin =
-        metrics_reporter.reportTransferStarted(CacheTransferOperation::EVICT, first.source_tier, first.target_tier);
+        metrics_reporter.reportTransferStarted(TransferOperation::EVICT, first.source_tier, first.target_tier);
     if (!valid) {
-        metrics_reporter.reportTransferFinished(CacheTransferOperation::EVICT,
+        metrics_reporter.reportTransferFinished(TransferOperation::EVICT,
                                                 first.source_tier,
                                                 first.target_tier,
                                                 descriptors.size(),
@@ -50,7 +50,7 @@ void EvictionTaskRunner::runTransfer(std::shared_ptr<const EvictionTransferTask>
             CompletionStageScope total(observation, "callback_total", "workflow_callback");
             {
                 CompletionStageScope metrics(observation, "metrics_report", "workflow_callback");
-                metrics_reporter.reportTransferFinished(CacheTransferOperation::EVICT,
+                metrics_reporter.reportTransferFinished(TransferOperation::EVICT,
                                                         task->descriptors().front().source_tier,
                                                         task->descriptors().front().target_tier,
                                                         task->descriptors().size(),

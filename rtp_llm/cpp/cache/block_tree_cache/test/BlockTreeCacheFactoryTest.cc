@@ -961,7 +961,7 @@ TEST_F(BlockTreeCacheFactoryTest, HeterogeneousMtpPreservesExactGeometryAcrossCo
 
     const auto host_block = group_set->hostPool()->malloc();
     ASSERT_TRUE(host_block.has_value());
-    group_set->hostPool()->incTreeRef(*host_block, BlockTreeRefType::EVICTION);
+    group_set->hostPool()->incTreeRef(*host_block, BlockTreeRefType::EVICT);
     EXPECT_TRUE(cache
                     ->executeTransfer(block_transfer_engine_test::makeTransferTask(
                         {TransferDescriptor::deviceToHost(group_set->groupSetId(), {src}, *host_block)}))
@@ -1005,7 +1005,7 @@ TEST_F(BlockTreeCacheFactoryTest, HeterogeneousMtpPreservesExactGeometryAcrossCo
         }
     }
 
-    group_set->hostPool()->decTreeRef(*host_block, BlockTreeRefType::EVICTION);
+    group_set->hostPool()->decTreeRef(*host_block, BlockTreeRefType::EVICT);
     pool->decRef(*blocks);
 }
 
@@ -1264,7 +1264,7 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
     const BlockIdxType device_block      = device_blocks->front();
     const auto         host_block_result = group_set->hostPool()->malloc();
     ASSERT_TRUE(host_block_result.has_value());
-    group_set->hostPool()->incTreeRef(*host_block_result, BlockTreeRefType::EVICTION);
+    group_set->hostPool()->incTreeRef(*host_block_result, BlockTreeRefType::EVICT);
     const BlockIdxType host_block = *host_block_result;
 
     const size_t layer_bytes = full_group->config().kvBlockStrideBytes() + full_group->config().kvScaleStrideBytes();
@@ -1286,7 +1286,7 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
     expectDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x31);
     expectDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x72);
 
-    group_set->hostPool()->decTreeRef(host_block, BlockTreeRefType::EVICTION);
+    group_set->hostPool()->decTreeRef(host_block, BlockTreeRefType::EVICT);
     full_group->blockPool()->decRef(*device_blocks);
 }
 
@@ -1464,7 +1464,7 @@ TEST_F(BlockTreeCacheFactoryTest, SparseMlaIndexerPoolsShareAtomicReuseAndPacked
     ASSERT_EQ(device_blocks[0].size(), 2u);
     const auto host_block = group_set->hostPool()->malloc();
     ASSERT_TRUE(host_block.has_value());
-    group_set->hostPool()->incTreeRef(*host_block, BlockTreeRefType::EVICTION);
+    group_set->hostPool()->incTreeRef(*host_block, BlockTreeRefType::EVICT);
 
     for (size_t member = 0; member < cache_groups.size(); ++member) {
         const auto&  cache_group = cache_groups[member];
@@ -1508,7 +1508,7 @@ TEST_F(BlockTreeCacheFactoryTest, SparseMlaIndexerPoolsShareAtomicReuseAndPacked
         }
     }
     block_tree_cache_test::unreferenceDeviceBlocksForTest(*group_set, device_blocks);
-    group_set->hostPool()->decTreeRef(*host_block, BlockTreeRefType::EVICTION);
+    group_set->hostPool()->decTreeRef(*host_block, BlockTreeRefType::EVICT);
 
     allocator->attachBlockTreeCache(cache);
     EXPECT_EQ(allocator->blockTreeCache(), cache);
@@ -1995,8 +1995,8 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     EXPECT_EQ(group_set_a->hostPool()->treeRefCount(host_a), 1u);
     node->group_set_resources[0].host_block = NULL_BLOCK_IDX;
     group_set_a->releaseSingleBlock(Tier::HOST, host_a, BlockTreeRefType::CACHE);
-    for (const auto state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOADING}) {
-        SCOPED_TRACE(state == GroupSetTransferState::DEMOTING ? "demoting" : "loading");
+    for (const auto state : {GroupSetTransferState::EVICTING, GroupSetTransferState::LOADING}) {
+        SCOPED_TRACE(transferStateName(state));
         node->group_set_resources[0].transfer_state = state;
         const auto before_in_flight                 = cache->getKeySnapshot();
         cache->insert(CacheKeysType{703}, {{blocked_incoming_a, incoming_b}}, Tier::DEVICE);
@@ -2933,10 +2933,10 @@ TEST_P(BlockTreeCacheFactoryRatioTest, IndependentHostCapacitiesPreserveTransfer
         const size_t other_free = other->availableBlocksNum();
         const auto   all        = pool->malloc(pool->totalBlocksNum());
         ASSERT_TRUE(all.has_value());
-        pool->incTreeRef(*all, BlockTreeRefType::EVICTION);
+        pool->incTreeRef(*all, BlockTreeRefType::EVICT);
         EXPECT_FALSE(pool->malloc().has_value());
         EXPECT_EQ(other->availableBlocksNum(), other_free);
-        pool->decTreeRef(*all, BlockTreeRefType::EVICTION);
+        pool->decTreeRef(*all, BlockTreeRefType::EVICT);
         EXPECT_EQ(pool->availableBlocksNum(), pool->totalBlocksNum());
     }
 
@@ -2985,8 +2985,8 @@ TEST_P(BlockTreeCacheFactoryRatioTest, IndependentHostCapacitiesPreserveTransfer
         const auto disk_block_result = group->diskPool()->malloc();
         ASSERT_TRUE(host_block_result.has_value());
         ASSERT_TRUE(disk_block_result.has_value());
-        group->hostPool()->incTreeRef(*host_block_result, BlockTreeRefType::EVICTION);
-        group->diskPool()->incTreeRef(*disk_block_result, BlockTreeRefType::EVICTION);
+        group->hostPool()->incTreeRef(*host_block_result, BlockTreeRefType::EVICT);
+        group->diskPool()->incTreeRef(*disk_block_result, BlockTreeRefType::EVICT);
         const BlockIdxType host_block = *host_block_result;
         const BlockIdxType disk_block = *disk_block_result;
 
@@ -3022,8 +3022,8 @@ TEST_P(BlockTreeCacheFactoryRatioTest, IndependentHostCapacitiesPreserveTransfer
                         .ok());
 
         block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, device_blocks);
-        group->hostPool()->decTreeRef(host_block, BlockTreeRefType::EVICTION);
-        group->diskPool()->decTreeRef(disk_block, BlockTreeRefType::EVICTION);
+        group->hostPool()->decTreeRef(host_block, BlockTreeRefType::EVICT);
+        group->diskPool()->decTreeRef(disk_block, BlockTreeRefType::EVICT);
     }
 }
 
@@ -3090,7 +3090,7 @@ void verifyCrcResidencyRoundTrip(CacheConfig              config,
                   expected_crc[index] ? CrcCopyWorkspace::encodedBytes(group->payloadBytes()) : group->payloadBytes());
         blocks.push_back(block_tree_cache_test::allocateDeviceBlocksForTest(*group, 1));
         ASSERT_EQ(blocks.back().size(), 1u);
-        host_blocks.push_back(group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICTION));
+        host_blocks.push_back(group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICT));
         ASSERT_NE(host_blocks.back(), NULL_BLOCK_IDX);
         stores.push_back(TransferDescriptor::deviceToHost(index, blocks.back().front(), host_blocks.back()));
         loads.push_back(TransferDescriptor::hostToDevice(index, host_blocks.back(), blocks.back().front()));
@@ -3143,7 +3143,7 @@ void verifyCrcResidencyRoundTrip(CacheConfig              config,
         std::vector<BlockIdxType> disk_blocks;
         for (size_t index = 0; index < cache->groupSets().size(); ++index) {
             const auto& group = cache->groupSets()[index];
-            disk_blocks.push_back(group->allocateSingleBlock(Tier::DISK, BlockTreeRefType::EVICTION));
+            disk_blocks.push_back(group->allocateSingleBlock(Tier::DISK, BlockTreeRefType::EVICT));
             ASSERT_NE(disk_blocks.back(), NULL_BLOCK_IDX);
             ASSERT_TRUE(cache
                             ->executeTransfer(block_transfer_engine_test::makeTransferTask(
@@ -3156,7 +3156,7 @@ void verifyCrcResidencyRoundTrip(CacheConfig              config,
                             ->executeTransfer(block_transfer_engine_test::makeTransferTask(
                                 {TransferDescriptor::diskToDevice(index, disk_blocks[index], blocks[index].front())}))
                             .ok());
-            cache->groupSets()[index]->releaseSingleBlock(Tier::DISK, disk_blocks[index], BlockTreeRefType::EVICTION);
+            cache->groupSets()[index]->releaseSingleBlock(Tier::DISK, disk_blocks[index], BlockTreeRefType::EVICT);
         }
         ASSERT_NO_FATAL_FAILURE(visit(expect, -1));
     }
@@ -3180,7 +3180,7 @@ void verifyCrcResidencyRoundTrip(CacheConfig              config,
     }
     for (size_t index = 0; index < cache->groupSets().size(); ++index) {
         const auto& group = cache->groupSets()[index];
-        group->releaseSingleBlock(Tier::HOST, host_blocks[index], BlockTreeRefType::EVICTION);
+        group->releaseSingleBlock(Tier::HOST, host_blocks[index], BlockTreeRefType::EVICT);
         block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, blocks[index]);
     }
 }
@@ -3313,7 +3313,7 @@ void verifyCrcLocalTierBudgets(bool enable_crc, int tokens_per_block = 64) {
         for (const auto& blocks : device_blocks) {
             ASSERT_EQ(blocks.size(), 1u);
             if (host_on) {
-                host_blocks.push_back(group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICTION));
+                host_blocks.push_back(group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICT));
                 ASSERT_NE(host_blocks.back(), NULL_BLOCK_IDX);
                 const auto buffer = group->hostPool()->blockBuffer(host_blocks.back());
                 EXPECT_EQ(reinterpret_cast<uintptr_t>(buffer.addr) % (direct_io ? 4096u : 16u), 0u);
@@ -3322,7 +3322,7 @@ void verifyCrcLocalTierBudgets(bool enable_crc, int tokens_per_block = 64) {
                 loads.push_back(TransferDescriptor::hostToDevice(0, host_blocks.back(), blocks));
             }
             if (disk_on) {
-                disk_blocks.push_back(group->allocateSingleBlock(Tier::DISK, BlockTreeRefType::EVICTION));
+                disk_blocks.push_back(group->allocateSingleBlock(Tier::DISK, BlockTreeRefType::EVICT));
                 ASSERT_NE(disk_blocks.back(), NULL_BLOCK_IDX);
                 if (host_on) {
                     disk_stores.push_back(TransferDescriptor::hostToDisk(0, host_blocks.back(), disk_blocks.back()));
@@ -3376,10 +3376,10 @@ void verifyCrcLocalTierBudgets(bool enable_crc, int tokens_per_block = 64) {
             }
         }
         for (const auto block : host_blocks) {
-            group->releaseSingleBlock(Tier::HOST, block, BlockTreeRefType::EVICTION);
+            group->releaseSingleBlock(Tier::HOST, block, BlockTreeRefType::EVICT);
         }
         for (const auto block : disk_blocks) {
-            group->releaseSingleBlock(Tier::DISK, block, BlockTreeRefType::EVICTION);
+            group->releaseSingleBlock(Tier::DISK, block, BlockTreeRefType::EVICT);
         }
         block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, device_blocks);
     }
@@ -3421,10 +3421,10 @@ void verifyLocalTierIntegrityProtection(bool enable_crc) {
         const auto device_blocks = block_tree_cache_test::allocateDeviceBlocksForTest(*group, 1);
         ASSERT_EQ(device_blocks.size(), 1u);
         ASSERT_EQ(device_blocks.front().size(), 1u);
-        const BlockIdxType lower_block = group->allocateSingleBlock(tier, BlockTreeRefType::EVICTION);
+        const BlockIdxType lower_block = group->allocateSingleBlock(tier, BlockTreeRefType::EVICT);
         ASSERT_NE(lower_block, NULL_BLOCK_IDX);
         const BlockIdxType host_block =
-            tier == Tier::HOST ? lower_block : group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICTION);
+            tier == Tier::HOST ? lower_block : group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICT);
         ASSERT_NE(host_block, NULL_BLOCK_IDX);
         const auto   device_block = device_blocks.front().front();
         const auto   target_group = allocator->cacheGroups().front();
@@ -3478,9 +3478,9 @@ void verifyLocalTierIntegrityProtection(bool enable_crc) {
         ASSERT_TRUE(cache->executeTransfer(block_transfer_engine_test::makeTransferTask({load})).ok());
         expectDevicePattern(first_layer, layer_bytes, 0x35);
         expectDevicePattern(second_layer, layer_bytes, 0x79);
-        group->releaseSingleBlock(tier, lower_block, BlockTreeRefType::EVICTION);
+        group->releaseSingleBlock(tier, lower_block, BlockTreeRefType::EVICT);
         if (tier == Tier::DISK)
-            group->releaseSingleBlock(Tier::HOST, host_block, BlockTreeRefType::EVICTION);
+            group->releaseSingleBlock(Tier::HOST, host_block, BlockTreeRefType::EVICT);
         block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, device_blocks);
     }
 }

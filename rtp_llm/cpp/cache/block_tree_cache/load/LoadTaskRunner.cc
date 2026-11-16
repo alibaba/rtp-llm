@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadTaskRunner.h"
 
 #include <exception>
+#include <map>
 #include <string>
 #include <utility>
 
@@ -121,7 +122,7 @@ void LoadTaskRunner::runTransfer(TaskPtr                        task,
             auto                 observation = CompletionStageContext::forTransfer(metrics_reporter, transfer, "load");
             CompletionStageScope submit(observation, "next_stage_submit", "workflow_callback");
             transfer_begin =
-                metrics_reporter.reportTransferStarted(CacheTransferOperation::LOAD, source_tier, Tier::DEVICE);
+                metrics_reporter.reportTransferStarted(TransferOperation::LOAD, source_tier, Tier::DEVICE);
             transfer_started = true;
             transfer_dispatcher.runTransfer(
                 transfer,
@@ -150,7 +151,7 @@ void LoadTaskRunner::reportStageFinished(const Task&                            
                                          int64_t                                begin_time_us,
                                          bool                                   success) const {
     static const std::vector<TransferDescriptor> empty_descriptors;
-    metrics_reporter.reportTransferFinished(CacheTransferOperation::LOAD,
+    metrics_reporter.reportTransferFinished(TransferOperation::LOAD,
                                             source_tier,
                                             Tier::DEVICE,
                                             descriptors.size(),
@@ -161,16 +162,20 @@ void LoadTaskRunner::reportStageFinished(const Task&                            
 }
 
 void LoadTaskRunner::releaseTaskResources(const Task& task) {
-    const auto& descriptors = task.load_descs;
+    std::map<size_t, MultiNodeResource> target_holders;
+    const auto&                         descriptors = task.load_descs;
     for (size_t desc_index = 0; desc_index < descriptors.size(); ++desc_index) {
-        const TransferDescriptor& desc      = descriptors[desc_index];
-        const GroupSetPtr&        group_set = group_sets_[desc.group_set_id];
         if (task.target_installed[desc_index]) {
             continue;
         }
-        group_set->unreferenceBlocks(
-            MultiNodeResource{desc.group_set_id, Tier::DEVICE, {{desc.node, desc.target_blocks}}},
-            BlockTreeRefType::LOAD);
+        const TransferDescriptor& desc = descriptors[desc_index];
+        auto&                     holder =
+            target_holders.try_emplace(desc.group_set_id, MultiNodeResource{desc.group_set_id, Tier::DEVICE, {}})
+                .first->second;
+        holder.node_blocks.emplace_back(desc.node, desc.target_blocks);
+    }
+    for (const auto& [group_set_id, holder] : target_holders) {
+        group_sets_[group_set_id]->unreferenceBlocks(holder, BlockTreeRefType::LOAD);
     }
 }
 

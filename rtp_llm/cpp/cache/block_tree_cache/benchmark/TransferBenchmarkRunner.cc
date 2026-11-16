@@ -798,12 +798,12 @@ bool TransferBenchmarkRunner::runPurePathTransfer() {
         }
     }
     for (const auto block : host_blocks) {
-        host_pool->incTreeRef(block, BlockTreeRefType::EVICTION);
-        host_pool->decTreeRef(block, BlockTreeRefType::EVICTION);
+        host_pool->incTreeRef(block, BlockTreeRefType::EVICT);
+        host_pool->decTreeRef(block, BlockTreeRefType::EVICT);
     }
     for (const auto block : disk_blocks) {
-        disk_pool->incTreeRef(block, BlockTreeRefType::EVICTION);
-        disk_pool->decTreeRef(block, BlockTreeRefType::EVICTION);
+        disk_pool->incTreeRef(block, BlockTreeRefType::EVICT);
+        disk_pool->decTreeRef(block, BlockTreeRefType::EVICT);
     }
 
     const bool strategy_ok = options_.copy_strategy == "auto" || actual_strategy == options_.copy_strategy;

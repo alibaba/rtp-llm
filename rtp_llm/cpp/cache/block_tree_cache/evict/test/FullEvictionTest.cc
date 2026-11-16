@@ -494,8 +494,8 @@ TEST(FullPruneTest, DetachesBusyClosureAndKeepsTransferSourceAlive) {
 
     const int64_t key_version = environment.cache->tree()->keyVersion();
     environment.cache->evictor_.discardDetachedTransfer(
-        {{busy_descendant, 0, 2, Tier::HOST, Tier::DEVICE, {host_block}}});
-    environment.cache->tree()->removePendingNodes({busy_descendant});
+        {{busy_descendant, 0, 2, Tier::HOST, Tier::DEVICE, {host_block}, /*initial_owner=*/true}});
+    environment.cache->tree()->removePendingNodes({{busy_descendant, 0}});
     EXPECT_TRUE(environment.cache->tree()->pending_node_pool_.empty());
     EXPECT_FALSE(environment.host_pool->isAllocated(host_block));
     EXPECT_EQ(environment.cache->tree()->keyVersion(), key_version);
@@ -629,8 +629,9 @@ TEST(FullPruneTest, DetachesBusyDescendantGroupResource) {
     EXPECT_FALSE(full_host_pool->isAllocated(full_host_block));
 
     const int64_t key_version = cache->tree()->keyVersion();
-    cache->evictor_.discardDetachedTransfer({{busy_descendant, 1, 2, Tier::HOST, Tier::DEVICE, {swa_host_block}}});
-    cache->tree()->removePendingNodes({busy_descendant});
+    cache->evictor_.discardDetachedTransfer(
+        {{busy_descendant, 1, 2, Tier::HOST, Tier::DEVICE, {swa_host_block}, /*initial_owner=*/true}});
+    cache->tree()->removePendingNodes({{busy_descendant, 0}});
     EXPECT_TRUE(cache->tree()->pending_node_pool_.empty());
     EXPECT_FALSE(swa_host_pool->isAllocated(swa_host_block));
     EXPECT_EQ(cache->tree()->keyVersion(), key_version);
@@ -677,8 +678,9 @@ TEST(FullPruneTest, DetachesBusyClosureRootGroupResource) {
     EXPECT_TRUE(swa_host_pool->isAllocated(swa_host_block));
 
     const int64_t key_version = cache->tree()->keyVersion();
-    cache->evictor_.discardDetachedTransfer({{busy_root, 1, 1, Tier::HOST, Tier::DEVICE, {swa_host_block}}});
-    cache->tree()->removePendingNodes({busy_root});
+    cache->evictor_.discardDetachedTransfer(
+        {{busy_root, 1, 1, Tier::HOST, Tier::DEVICE, {swa_host_block}, /*initial_owner=*/true}});
+    cache->tree()->removePendingNodes({{busy_root, 0}});
     EXPECT_TRUE(cache->tree()->pending_node_pool_.empty());
     EXPECT_FALSE(swa_host_pool->isAllocated(swa_host_block));
     EXPECT_EQ(cache->tree()->keyVersion(), key_version);
