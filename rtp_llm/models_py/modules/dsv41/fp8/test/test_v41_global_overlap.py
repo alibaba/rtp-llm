@@ -10,6 +10,8 @@ from unittest.mock import Mock, patch
 
 import torch
 
+from rtp_llm.models_py.modules.dsv41.fp8 import _v41_full_projection, _v41_wo_a_quant
+from rtp_llm.models_py.modules.dsv41.fp8 import attention as fp8_attention
 from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
 from rtp_llm.models_py.modules.dsv41.fp8.decode import full_overlap
 from rtp_llm.models_py.modules.dsv41.fp8.decode import global_overlap as overlap
@@ -168,12 +170,7 @@ class GlobalOverlapCPUTest(unittest.TestCase):
         stack.enter_context(
             patch("torch.cuda.current_stream", return_value=self.current)
         )
-        stack.enter_context(
-            patch(
-                "rtp_llm.models_py.modules.dsv41.fp8._v41_wo_a_quant._context",
-                return_value=17,
-            )
-        )
+        stack.enter_context(patch.object(_v41_wo_a_quant, "_context", return_value=17))
         self.device_guard = stack.enter_context(
             patch("torch.cuda.device", side_effect=lambda _: contextlib.nullcontext())
         )
@@ -376,20 +373,16 @@ class FullOverlapCPUTest(unittest.TestCase):
             _pool_view_3d_fp8=lambda _: None,
             _produce_global_decode=Mock(),
         )
-        main, glob, aux = Mock(), Mock(), Mock()
+        main, aux = Mock(), Mock()
         main.cuda_stream = 51
-        glob.cuda_stream, aux.cuda_stream = 123, 456
-        glob.device = aux.device = torch.device("cuda", 0)
-        attn._full_decode_overlap_warmed = {(0, tuple(x.shape), 123, 456)}
+        aux.cuda_stream = 456
+        aux.device = torch.device("cuda", 0)
+        attn._full_decode_overlap_warmed = {(0, tuple(x.shape), 51, 456)}
         with patch.dict(
             sys.modules, {"deep_gemm": SimpleNamespace(get_pdl=lambda: True)}
         ), patch.object(full_overlap, "is_supported", return_value=True), patch.object(
             full_overlap,
             "_GLOBAL_COMPUTE_STREAMS",
-            SimpleNamespace(streams={(0, 17, 51): glob}),
-        ), patch.object(
-            full_overlap,
-            "_INDEXER_STREAMS",
             SimpleNamespace(streams={(0, 17, 51): aux}),
         ), patch(
             "rtp_llm.models_py.modules.dsv41.fp8.attention._cuda_device_index",
@@ -485,9 +478,10 @@ class FullOverlapCPUTest(unittest.TestCase):
             )
 
     def test_candidate_fork_and_exit_join_preserve_lifetimes(self):
-        main, glob, aux = Mock(), Mock(), Mock()
+        main, aux = Mock(), Mock()
         logits, lengths, candidates, flags = (Mock() for _ in range(4))
-        work = full_overlap.FullDecodeWork(main, glob, aux)
+        work = full_overlap.FullDecodeWork(main, aux)
+        work.fork()
         with patch(
             "torch.cuda.stream", return_value=contextlib.nullcontext()
         ), patch.object(
@@ -503,15 +497,16 @@ class FullOverlapCPUTest(unittest.TestCase):
         self.assertEqual(work.inputs, [logits, lengths])
         work.finish()
         work.finish()
-        self.assertEqual(main.wait_stream.call_count, 2)
+        main.wait_stream.assert_called_once_with(aux)
         candidates.record_stream.assert_called_once_with(main)
         flags.record_stream.assert_called_once_with(main)
         self.assertEqual(work.inputs, [])
 
     def test_sorted_candidate_fork_without_bitmap(self):
-        main, glob, aux = Mock(), Mock(), Mock()
+        main, aux = Mock(), Mock()
         logits, lengths, candidates = (Mock() for _ in range(3))
-        work = full_overlap.FullDecodeWork(main, glob, aux)
+        work = full_overlap.FullDecodeWork(main, aux)
+        work.fork()
         with patch(
             "torch.cuda.stream", return_value=contextlib.nullcontext()
         ), patch.object(
@@ -532,6 +527,18 @@ class FullOverlapCPUTest(unittest.TestCase):
         work.finish()
         candidates.record_stream.assert_called_once_with(main)
 
+    def test_sparse_plan_owns_candidate_inputs_and_join(self):
+        main, aux = Mock(), Mock()
+        work = full_overlap.FullDecodeWork(main, aux)
+        work.fork()
+        logits, lengths = Mock(), Mock()
+        work.inputs.extend((logits, lengths))
+        planner = SimpleNamespace(inputs=())
+        work.handoff_candidates(planner)
+        work.finish()
+        main.wait_stream.assert_not_called()
+        self.assertEqual(planner.inputs, (logits, lengths))
+
     def test_cold_capture_and_failed_producer(self):
         x = torch.empty(1, 1, 5120)
         metadata = SimpleNamespace(
@@ -545,32 +552,30 @@ class FullOverlapCPUTest(unittest.TestCase):
             tp_size=1,
             _produce_global_decode=Mock(side_effect=RuntimeError("producer failed")),
         )
-        main, glob, aux = Mock(), Mock(), Mock()
+        main, aux = Mock(), Mock()
         main.cuda_stream = 51
-        glob.cuda_stream, aux.cuda_stream = 123, 456
-        glob.device = aux.device = torch.device("cuda", 0)
+        aux.cuda_stream = 456
+        aux.device = torch.device("cuda", 0)
         with patch.dict(
             os.environ, {"DSV41_FULL_DECODE_MULTISTREAM": "1"}
         ), patch.object(full_overlap, "is_supported", return_value=True), patch.object(
             full_overlap,
-            "_GLOBAL_COMPUTE_STREAMS",
-            SimpleNamespace(streams={(0, 17, 51): glob}),
+            "_get_compute_stream",
+            return_value=aux,
         ), patch.object(
-            full_overlap,
-            "_INDEXER_STREAMS",
-            SimpleNamespace(streams={(0, 17, 51): aux}),
-        ), patch(
-            "rtp_llm.models_py.modules.dsv41.fp8.attention._cuda_device_index",
+            fp8_attention,
+            "_cuda_device_index",
             return_value=0,
-        ), patch(
-            "rtp_llm.models_py.modules.dsv41.fp8._v41_wo_a_quant._context",
-            return_value=17,
         ), patch(
             "torch.cuda.current_stream", return_value=main
         ), patch(
             "torch.cuda.device", side_effect=lambda _: contextlib.nullcontext()
         ), patch(
             "torch.cuda.stream", side_effect=lambda _: contextlib.nullcontext()
+        ), patch.object(
+            _v41_full_projection,
+            "project",
+            side_effect=RuntimeError("producer failed"),
         ):
             with patch("torch.cuda.is_current_stream_capturing", return_value=True):
                 self.assertIsNone(
@@ -584,7 +589,7 @@ class FullOverlapCPUTest(unittest.TestCase):
                     full_overlap.try_full_decode(
                         attn, x, metadata, None, None, None, None
                     )
-            self.assertEqual(main.wait_stream.call_count, 2)
+            main.wait_stream.assert_called_once_with(aux)
             self.assertFalse(hasattr(attn, "_full_decode_overlap_warmed"))
 
 

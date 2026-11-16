@@ -23,15 +23,16 @@ class SparsePlanWork:
     plan: sparse.SparseDecodePlan | None = None
     joined: bool = False
 
-    def wait(self):
+    def wait(self, stream=None):
+        stream = self.current if stream is None else stream
         if not self.joined:
-            self.current.wait_stream(self.auxiliary)
+            stream.wait_stream(self.auxiliary)
             if self.plan is not None:
                 # Outputs were allocated on auxiliary but outlive the join:
                 # all four reindex layers consume them on current.
                 for tensor in self.plan:
                     if tensor is not None:
-                        tensor.record_stream(self.current)
+                        tensor.record_stream(stream)
             self.inputs = ()
             self.joined = True
         return self.plan
@@ -53,7 +54,7 @@ def has_consumer(attn):
     )
 
 
-def start_plan(attn, keys, lengths, *, query_len, producer_stream=None):
+def start_plan(attn, keys, lengths, *, query_len, producer_stream=None, stream=None):
     """Default-on overlap; cold capture and unsupported layouts stay serial.
 
     Call only after the candidate source has published its complete result.
@@ -87,7 +88,8 @@ def start_plan(attn, keys, lengths, *, query_len, producer_stream=None):
     current = torch.cuda.current_stream(device)
     with torch.cuda.device(device):
         capturing = torch.cuda.is_current_stream_capturing()
-    stream = _PLAN_STREAMS.get(device_index)
+    if stream is None:
+        stream = _PLAN_STREAMS.get(device_index)
     if stream is None:
         if capturing:
             return
@@ -128,11 +130,14 @@ def start_plan(attn, keys, lengths, *, query_len, producer_stream=None):
     if request_ids is not None:
         inputs += (request_ids,)
     work = SparsePlanWork(current, stream, inputs)
-    stream.wait_stream(current)
+    # With a shared producer queue the candidate fork already ordered all
+    # plan inputs. Joining current again would wait for parallel token top-k.
+    if stream != producer_stream:
+        stream.wait_stream(current)
     # FULL publishes candidate tensors while their writes are still queued on
     # its indexer stream. Order the planner directly after that producer,
     # without joining it onto (and blocking) the main attention stream.
-    if producer_stream is not None:
+    if producer_stream is not None and stream != producer_stream:
         stream.wait_stream(producer_stream)
     try:
         with torch.cuda.stream(stream):
@@ -152,9 +157,11 @@ def start_plan(attn, keys, lengths, *, query_len, producer_stream=None):
     if not capturing:
         warmed.add(warm_key)
     shared["decode_sparse_plan_ready"] = work
+    return work
 
 
 def wait_plan(shared):
     work = shared.pop("decode_sparse_plan_ready", None)
     if work is not None:
-        shared["decode_sparse_plan"] = work.wait()
+        consumer = torch.cuda.current_stream(work.auxiliary.device)
+        shared["decode_sparse_plan"] = work.wait(consumer)

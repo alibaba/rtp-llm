@@ -159,12 +159,12 @@ EngramVerifyGraphNodes captureEngramVerifyFork(cudaStream_t stream) {
     C10_CUDA_CHECK(cudaStreamGetCaptureInfo_v2(stream, &status, nullptr, &graph, nullptr, nullptr));
 #endif
     TORCH_CHECK(status == cudaStreamCaptureStatusActive && graph, "Engram verify fork requires active capture");
-    // Everything submitted so far reads only the static Engram windows. Stage
-    // those before the existing roots, with no edge from attention metadata.
+    // Insert the main input path first so replay can continue on its launch
+    // stream. Only the previously captured Engram roots need the windows.
     EngramVerifyGraphNodes nodes;
-    nodes.windows  = addCudaGraphPrepareNode(graph);
     nodes.prepare  = addIndependentCudaGraphPrepareNode(graph);
     nodes.metadata = addAttentionInputMetadataNode(graph, nodes.prepare);
+    nodes.windows  = addCudaGraphPrepareNode(graph, nodes.metadata);
     // The main stream's next work can consume live inputs. Its previously
     // forked lookup stream keeps only the hash dependency it already had.
 #if CUDART_VERSION >= 13000

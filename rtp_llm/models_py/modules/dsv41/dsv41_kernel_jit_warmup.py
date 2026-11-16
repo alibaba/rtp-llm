@@ -379,7 +379,8 @@ def warmup_v41_engram_jit(model, *, max_m, device):
         for layer in layers
     )
     prefetch_layers = [
-        layer for layer, capabilities in zip(layers, lookup_capabilities)
+        layer
+        for layer, capabilities in zip(layers, lookup_capabilities)
         if capabilities[1]
     ]
     # External Fabric views prefetch on a side stream with the plain host-row
@@ -427,7 +428,7 @@ def warmup_v41_engram_jit(model, *, max_m, device):
         for layer in async_layers:
             layer.prepare_lookup_prefetch()
         for layer in layers:
-            _engram_decode_prefetch.prepare(layer)
+            _engram_decode_prefetch.prepare(layer, model.v4)
         common._sync_cuda(device)
         prepare_engram_cpu_lookup(model, max_m=max_m)
         return
@@ -508,7 +509,7 @@ def warmup_v41_engram_jit(model, *, max_m, device):
     for layer in async_layers:
         layer.prepare_lookup_prefetch()
     for layer in layers:
-        _engram_decode_prefetch.prepare(layer)
+        _engram_decode_prefetch.prepare(layer, model.v4)
     common._sync_cuda(device)
     prepare_engram_cpu_lookup(model, max_m=max_m)
     _ENGRAM_WARMED.add(key)
