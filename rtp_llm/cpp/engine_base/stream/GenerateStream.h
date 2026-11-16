@@ -245,11 +245,19 @@ public:
     int    seqLength() const;
     // NOTE: In generatestream, set seq len must use setSeqLength api, we need to save start_check_seq_length_
     // for checking EOS and stop words
-    void    setSeqLength(int seq_length);
-    int     seqSizePerBlock() const;
-    int     contextLength() const;
-    int     prefixLength() const;
-    int     reuseLength() const;
+    void setSeqLength(int seq_length);
+    int  seqSizePerBlock() const;
+    int  contextLength() const;
+    int  prefixLength() const;
+    int  reuseLength() const;
+    // TPS cache credit is distinct from attention's growing KV prefix. Once a
+    // chunk has completed, its prefix was already counted in an earlier step.
+    // Keep this suppressed across chunk resizing or re-admission; actual
+    // recomputed tokens still count via currentExecuteTokenSize(). Non-chunked
+    // streams retain their existing cache-credit behavior.
+    int contextTpsReuseLength() const {
+        return chunk_advanced_ ? 0 : reuseLength();
+    }
     int     initialReuseLength() const;
     size_t  maxTokenNum() const;
     void    setReuseLength(int reuse_length);
@@ -656,12 +664,12 @@ public:
 
     struct MtpAsyncDeviceState {
         std::shared_ptr<const MtpBatchDeviceState> batch;
-        int64_t batch_row = -1;
-        uint64_t      epoch = 0;
-        torch::Tensor accept_len_gpu;
-        torch::Tensor accept_tokens_gpu;
-        torch::Tensor next_seq_len_gpu;
-        torch::Tensor propose_tokens_gpu;
+        int64_t                                    batch_row = -1;
+        uint64_t                                   epoch     = 0;
+        torch::Tensor                              accept_len_gpu;
+        torch::Tensor                              accept_tokens_gpu;
+        torch::Tensor                              next_seq_len_gpu;
+        torch::Tensor                              propose_tokens_gpu;
         // Main-thread mirrors used when DROP_BROAD_SYNC lets the next step run
         // before worker-side specUpdate has written sp_output_buffer fields.
         torch::Tensor last_hidden_states_gpu;

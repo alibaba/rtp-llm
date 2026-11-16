@@ -109,3 +109,12 @@ cc_test(
     tags = ["manual"],
     exec_properties = {"gpu": "L20D_DEV"},
 )
+
+# Stream/collector accounting only: CPU tensors, no runtime or GPU initialization.
+cc_test(
+    name = "chunk_prefill_metrics_test",
+    srcs = ["ChunkPrefillMetricsTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {"CUDA_VISIBLE_DEVICES": ""},
+)

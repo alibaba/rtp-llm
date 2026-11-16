@@ -32,8 +32,8 @@ public:
                 ++total_sampler_batch_size_in_;
                 ++total_sampler_batch_size_out_;
                 max_blocks_num_ = std::max(max_blocks_num_, stream->curBlocksNum());
-                max_seq_len_ = std::max(max_seq_len_,
-                    static_cast<size_t>(stream->getMtpAsyncDeviceState().next_real_seq_len));
+                max_seq_len_ =
+                    std::max(max_seq_len_, static_cast<size_t>(stream->getMtpAsyncDeviceState().next_real_seq_len));
                 total_score_batch_size_ += stream->scoreLen();
                 adapter_names.push_back(stream->adapterName());
                 // genTimeline() reads worker-owned CPU seqLength. Gather its
@@ -70,7 +70,11 @@ public:
             }
             auto execute_token_size = static_cast<size_t>(stream->currentExecuteTokenSize());
             if (stream->isContextStream()) {
-                auto reuse_length = stream->reuseLength();
+                // Preserve the actual KV extent for diagnostics, independently
+                // of the once-per-prompt cache credit used by TPS metrics.
+                context_kv_token_size_ +=
+                    execute_token_size + static_cast<size_t>(std::max(stream->reuseLength(), 0)) * cur_batch_size;
+                auto reuse_length = stream->contextTpsReuseLength();
                 context_execute_token_size_ += execute_token_size;
                 context_execute_token_size_with_cache_ += execute_token_size;
                 if (reuse_length > 0) {
@@ -127,6 +131,9 @@ public:
     size_t contextExecuteTokenSize() const {
         return context_execute_token_size_;
     }
+    size_t contextKvTokenSize() const {
+        return context_kv_token_size_;
+    }
     size_t contextExecuteTokenSizeWithCache() const {
         return context_execute_token_size_with_cache_;
     }
@@ -139,8 +146,9 @@ public:
             counts.context += execute_token_size;
             counts.context_with_cache += execute_token_size;
             counts.total += execute_token_size;
-            if (stream->reuseLength() > 0) {
-                counts.context_with_cache += static_cast<int64_t>(stream->reuseLength()) * stream->currentBatchSize();
+            if (stream->contextTpsReuseLength() > 0) {
+                counts.context_with_cache +=
+                    static_cast<int64_t>(stream->contextTpsReuseLength()) * stream->currentBatchSize();
             }
         }
         for (const auto& stream : decode_streams_) {
@@ -197,7 +205,7 @@ public:
             execute_time_us,
             [](const GenerateStreamPtr& stream) {
                 return static_cast<int64_t>(stream->currentExecuteTokenSize()
-                                            + stream->reuseLength() * stream->currentBatchSize());
+                                            + stream->contextTpsReuseLength() * stream->currentBatchSize());
             },
             [](const GenerateStreamPtr& stream, int64_t allocated_time_us) {
                 stream->addContextExecuteTimeWithCacheUs(allocated_time_us);
@@ -421,6 +429,7 @@ private:
     size_t                       model_execute_token_size_              = 0;
     size_t                       context_execute_token_size_            = 0;
     size_t                       context_execute_token_size_with_cache_ = 0;
+    size_t                       context_kv_token_size_                 = 0;
     size_t                       max_seq_len_                           = 0;
     size_t                       max_context_seq_len_                   = 0;
     size_t                       max_reuse_length_                      = 0;

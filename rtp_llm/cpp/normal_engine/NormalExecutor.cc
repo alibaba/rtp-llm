@@ -456,7 +456,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
                              start_time_us,
                              stream_groups.totalContextBatchSize(),
                              stream_groups.modelExecuteTokenSize(),
-                             stream_groups.contextExecuteTokenSizeWithCache(),
+                             stream_groups.contextKvTokenSize(),
                              stream_groups.maxSeqLen(),
                              executor_collector.model_forward_us);
         }
