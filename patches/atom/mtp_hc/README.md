@@ -1,18 +1,18 @@
-# Opt-in ROCm Qwen4 MTP hyper-connection fusion
+# Default-on ROCm Qwen4 MTP hyper-connection fusion
 
 This patch enables ATOM's existing fused HC path inside the MTP drafter,
 materializes the final pending residual before returning its hidden states,
 and uses the fused HC head-input mixer. It does not change the target model,
 GDN state handling, KV layout, acceptance algorithm or sampling configuration.
-The switch defaults off and is ignored on non-ROCm builds. Enable it only on
-the validated D role; P keeps its baseline configuration.
+The switch defaults on only on the ROCm RTP-ATOM path. Non-ROCm and
+non-RTP paths retain their original behavior. Set ATOM_RTP_MTP_HC_FUSION=0
+to explicitly disable it.
 
 ## Install after the ATOM wheel and existing dependency patches
 
 Requires ATOM `0.1.8+g9af739efc` (wheel SHA256 in `manifest.json`), the
 existing RTP/ATOM adapters, amd-aiter `0.1.29+rocm7.2.0.git97d2389` and FlyDSL
-0.4.2. Do not apply to the older 0.1.1 wheel. This directory is an optional
-post-wheel patch, not a change to the default image dependency installation.
+0.4.2. Do not apply to the older 0.1.1 wheel. The ROCm image installs and verifies this post-wheel patch by default.
 Use the Python interpreter that actually runs the service:
 
 ```sh
@@ -31,8 +31,8 @@ Using the committed service profile (run each role in its own terminal):
 export MODEL_DIR=/local_model_root/qwen4-125b-qsa-taobao-v16-ptpc-fp8
 export WORK_DIR=/home/xingjunna.xjn/xjn_116_debug/hc_repro
 export RTP_PYTHON=/home/xingjunna.xjn/xjn_116_debug/repro/venv/bin/python
-ATOM_RTP_MTP_HC_FUSION=0 bash rtp_llm/test/perf_test/rocm_pd_qwen4/serve_pd.sh prefill
-ATOM_RTP_MTP_HC_FUSION=1 bash rtp_llm/test/perf_test/rocm_pd_qwen4/serve_pd.sh decode
+bash rtp_llm/test/perf_test/rocm_pd_qwen4/serve_pd.sh prefill
+bash rtp_llm/test/perf_test/rocm_pd_qwen4/serve_pd.sh decode
 ```
 
 Use `ATOM_RTP_MTP_HC_FUSION=0` for the D baseline. P uses GPUs0/1, D2/3,
