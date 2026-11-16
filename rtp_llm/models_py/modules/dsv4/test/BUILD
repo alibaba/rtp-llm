@@ -191,6 +191,7 @@ _MOVED_CONTRACT_TESTS = [
 ]
 
 _PAIRED_GPU_TESTS = [
+    ":test_glm53_fp8_requant",
     ":test_prefill_fast_path_cuda",
     "//rtp_llm/models_py/modules/factory/fused_moe/utils/test:test_shared_expert_executor",
     "//rtp_llm/models_py/modules/factory/fused_moe/utils/test:test_mega_moe_input_packer",
