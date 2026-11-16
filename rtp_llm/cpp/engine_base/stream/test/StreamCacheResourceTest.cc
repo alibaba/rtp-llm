@@ -563,7 +563,7 @@ TEST_F(StreamCacheResourceTest, LinearHistoryReclaimUsesAcceptedSpecTokensAndPre
     StreamSpecUpdateInfo update_info{
         .new_tokens          = torch::tensor({{14, 15, 16}}, torch::kInt32),
         .num_new_tokens      = 3,
-        .draft_token         = -1,
+        .draft_tokens        = torch::Tensor(),
         .draft_hidden_states = torch::Tensor(),
         .draft_token_probs   = torch::Tensor(),
         .draft_token_gpu     = std::nullopt,
