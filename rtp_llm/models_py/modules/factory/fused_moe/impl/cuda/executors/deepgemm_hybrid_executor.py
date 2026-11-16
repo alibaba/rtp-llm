@@ -179,6 +179,17 @@ def get_sm120_triton_fp8_config(
     return config
 
 
+def _empty_fp32_moe_scale(shape, device, *, mn_major=False):
+    if not mn_major:
+        return torch.empty(shape, device=device, dtype=torch.float32)
+    # Expert rows are padded to 128, satisfying the 16-byte TMA alignment.
+    # DeepGEMM accepts these strides directly without its transpose kernel.
+    m, groups = shape[-2:]
+    assert m % 4 == 0
+    strides = (1, m) if len(shape) == 2 else (m * groups, 1, m)
+    return torch.empty_strided(shape, strides, device=device, dtype=torch.float32)
+
+
 class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
     BLOCK_SIZE = 128
     EXPERT_ALIGNMENT = 128
@@ -278,6 +289,13 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         )
 
         self.num_gemm_sms = get_num_device_sms()
+        self._sm90_mn_major_scales = (
+            torch.cuda.get_device_capability(self.w13_weight.device) == (9, 0)
+            and (self.E, self.N, self.K) == (256, 1280, 2560)
+            and self.top_k == 10
+            and self.ep_size == 2
+            and not is_deep_gemm_e8m0_used()
+        )
 
     def execute(
         self,
@@ -477,6 +495,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             num_recv_tokens_per_expert = payload.expert_tokens_meta.expert_num_tokens
 
             token_num = hidden_states_fp8.shape[0]
+            mn_major_scales = self._sm90_mn_major_scales and token_num in (16, 32, 64)
             num_experts = num_recv_tokens_per_expert.shape[0]
             max_token_num = token_num * self.top_k
             token_num_mean_per_expert = ceil_div(max_token_num, num_experts)
@@ -504,14 +523,14 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                         dtype=torch.int,
                     ).transpose(1, 2)
                     if is_deep_gemm_e8m0_used()
-                    else torch.empty(
+                    else _empty_fp32_moe_scale(
                         (
                             self.num_experts_per_partition,
                             alignment,
                             self.K // self.BLOCK_SIZE,
                         ),
                         device=hidden_states_fp8_device,
-                        dtype=torch.float32,
+                        mn_major=mn_major_scales,
                     )
                 ),
             ]
@@ -584,14 +603,14 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 )
             else:
                 # Standard path for other SM versions
-                down_input_scale = torch.empty(
+                down_input_scale = _empty_fp32_moe_scale(
                     (
                         self.num_experts_per_partition,
                         alignment,
                         self.N // 2 // self.DEEPGEMM_BLOCK_SHAPE[0],
                     ),
                     device=hidden_states_fp8_device,
-                    dtype=torch.float32,
+                    mn_major=mn_major_scales,
                 )
                 # SiLU Activation
                 silu_mul_masked_fp8_post_quant_fwd(
@@ -708,6 +727,10 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             )
 
         num_experts_local = num_recv_tokens_per_expert.shape[0]
+        mn_major_scales = self._sm90_mn_major_scales and hidden_states_fp8.shape[0] in (
+            8192,
+            32768,
+        )
         routed_tokens = hidden_states_fp8.shape[0] * topk_idx.shape[1]
         if routed_tokens == 0:
             return CombineForwardPayload(
@@ -779,10 +802,10 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                     dtype=torch.int,
                 ).transpose(0, 1)
                 if is_deep_gemm_e8m0_used()
-                else torch.empty(
+                else _empty_fp32_moe_scale(
                     (all_tokens, K // self.BLOCK_SIZE),
                     device=hidden_states_fp8.device,
-                    dtype=torch.float32,
+                    mn_major=mn_major_scales,
                 )
             ),
         ]
@@ -831,7 +854,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             device=hidden_states_fp8_device,
             dtype=torch.bfloat16,
         )
-        if not is_deep_gemm_e8m0_used():
+        if not is_deep_gemm_e8m0_used() and not mn_major_scales:
             input_tensor[1] = tma_align_input_scale(input_tensor[1])
         if self.is_sm120:
             configure_deep_gemm_mk_alignment_context = configure_deep_gemm_mk_alignment(
@@ -873,9 +896,14 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 scale_ue8m0=is_deep_gemm_e8m0_used(),
             )
         else:
-            down_input_fp8, down_input_scale = trt_fp8_quantize_128(down_input, False)
+            down_input_fp8, down_input_scale = trt_fp8_quantize_128(
+                down_input, mn_major_scales
+            )
+            if mn_major_scales:
+                # Native col_major_scale returns [groups, padded_rows].
+                down_input_scale = down_input_scale.t()
         del down_input
-        if not is_deep_gemm_e8m0_used():
+        if not is_deep_gemm_e8m0_used() and not mn_major_scales:
             down_input_scale = tma_align_input_scale(down_input_scale)
         if self.is_sm120:
             configure_deep_gemm_mk_alignment_context = configure_deep_gemm_mk_alignment(
