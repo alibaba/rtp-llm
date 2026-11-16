@@ -1,6 +1,15 @@
 load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
+py_test(
+    name = "fp8_sm90_shared_b64_test",
+    srcs = ["fp8_sm90_shared_b64_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
 py_library(
     name = "math_references",
     srcs = glob(["reference/*.py"]),

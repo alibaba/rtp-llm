@@ -82,7 +82,7 @@ class Fp8Linear(nn.Module):
         return out
 
     def forward_silu_and_mul(self, gate_up):
-        """Consume a gated projection with one activation/FP8 quant launch."""
+        """Consume a gated projection with the qualified activation/FP8 path."""
         if not (
             torch.version.hip is None
             and self.compute_weight is None
@@ -94,6 +94,12 @@ class Fp8Linear(nn.Module):
                     gate_up.shape[0] in (4, 8, 12, 16)
                     and gate_up.shape[1] == 1280
                     and self.weight.shape[1] == 640
+                )
+                or (
+                    tuple(gate_up.shape) == (64, 640)
+                    and tuple(self.weight.shape) == (2560, 320)
+                    and torch.cuda.is_current_stream_capturing()
+                    and torch.cuda.get_device_capability(gate_up.device) == (9, 0)
                 )
                 or (
                     os.environ.get("QWEN_MOE_FP8_SMALL_ROWS_FUSION", "0") == "1"
