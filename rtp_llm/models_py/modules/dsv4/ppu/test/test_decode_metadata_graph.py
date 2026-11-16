@@ -12,6 +12,13 @@ from rtp_llm.models_py.modules.dsv4.ppu.manifest import DECODE_EXECUTION_OPTIONS
 
 
 class MetadataFactoryTest(unittest.TestCase):
+    def test_metadata_graph_declares_device_only_replay_inputs(self):
+        from rtp_llm.models_py.modules.dsv4.ppu.metadata.ppu_decode_metadata import (
+            PpuDecodeMetadataGraph,
+        )
+
+        self.assertIs(PpuDecodeMetadataGraph.uses_device_only_cuda_graph_metadata, True)
+
     def test_shared_rope_options_and_late_materialization(self):
         from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_fmha_impl import (
             DSv4DecodeFmhaImplFP8,

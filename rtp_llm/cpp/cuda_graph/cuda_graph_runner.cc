@@ -179,6 +179,26 @@ void callPrepareCudaGraph(py::object attn_pyobj, PyModelInputs& inputs) {
     }
 }
 
+bool usesDeviceOnlyCudaGraphMetadata(const py::object& attn_pyobj) {
+    if (!attn_pyobj || attn_pyobj.is_none()) {
+        return false;
+    }
+    if (py::isinstance<py::dict>(attn_pyobj)) {
+        auto impls = attn_pyobj.cast<py::dict>();
+        if (impls.empty()) {
+            return false;
+        }
+        for (auto item : impls) {
+            if (!usesDeviceOnlyCudaGraphMetadata(py::reinterpret_borrow<py::object>(item.second))) {
+                return false;
+            }
+        }
+        return true;
+    }
+    return py::hasattr(attn_pyobj, "uses_device_only_cuda_graph_metadata")
+           && py::cast<bool>(attn_pyobj.attr("uses_device_only_cuda_graph_metadata"));
+}
+
 #if USING_CUDA || USING_ROCM
 void addCudaGraphPrepareFillRegion(
     CudaGraphPrepareFillParams& params, torch::Tensor& tensor, int64_t start, int64_t end, int32_t value) {
@@ -491,9 +511,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
 
     const size_t graph_idx =
         is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
-    auto&      py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
-    auto       attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
-    const bool has_tagged_cache = !inputs.attention_inputs_by_tag.empty();
+    auto&      py_model_inputs_     = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
+    auto       attn_pyobj           = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
+    const bool device_only_metadata = device_only_attention_metadata_;
+    const bool has_tagged_cache     = !inputs.attention_inputs_by_tag.empty();
     const int  selected_graph_batch_size =
         is_prefill_cuda_graph_mode_ ? static_cast<int>(py_model_inputs_.attention_inputs.input_lengths.numel()) :
                                        state.current_real_graph_bs;
@@ -504,12 +525,16 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // KV length, so refresh them for every cache group before replanning. Dummy
     // graph rows are an implementation detail and must not contribute to the
     // request-level totals.
-    py_model_inputs_.attention_inputs.context_total_kv_length = inputs.attention_inputs.context_total_kv_length;
-    py_model_inputs_.attention_inputs.total_tokens            = inputs.attention_inputs.total_tokens;
+    if (!device_only_metadata) {
+        py_model_inputs_.attention_inputs.context_total_kv_length = inputs.attention_inputs.context_total_kv_length;
+    }
+    py_model_inputs_.attention_inputs.total_tokens = inputs.attention_inputs.total_tokens;
     for (auto& [tag, tagged_inputs] : py_model_inputs_.attention_inputs_by_tag) {
         (void)tag;
-        tagged_inputs.context_total_kv_length = inputs.attention_inputs.context_total_kv_length;
-        tagged_inputs.total_tokens            = inputs.attention_inputs.total_tokens;
+        if (!device_only_metadata) {
+            tagged_inputs.context_total_kv_length = inputs.attention_inputs.context_total_kv_length;
+        }
+        tagged_inputs.total_tokens = inputs.attention_inputs.total_tokens;
     }
 
     // Per-launch capacity contract: see fuse_copy_util.h sizing rationale.
@@ -891,28 +916,30 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             }
         };
 
-        if (!isGenerationPrefillCudaGraph()) {
+        if (!device_only_metadata && !isGenerationPrefillCudaGraph()) {
             copyToHostMirror(inputs.attention_inputs.cu_seqlens,
                              py_model_inputs_.attention_inputs.cu_seqlens,
                              (state.current_batch_size + 1) * sizeof(int));
         }
 
-        copyToHostMirror(inputs.attention_inputs.input_lengths,
-                         py_model_inputs_.attention_inputs.input_lengths,
-                         state.current_batch_size * sizeof(int));
+        if (!device_only_metadata) {
+            copyToHostMirror(inputs.attention_inputs.input_lengths,
+                             py_model_inputs_.attention_inputs.input_lengths,
+                             state.current_batch_size * sizeof(int));
+        }
 
-        if (!isGenerationPrefillCudaGraph()) {
+        if (!device_only_metadata && !isGenerationPrefillCudaGraph()) {
             copyToHostMirror(inputs.attention_inputs.prefix_lengths,
                              py_model_inputs_.attention_inputs.prefix_lengths,
                              state.current_batch_size * sizeof(int));
         }
 
-        if (!has_tagged_cache) {
+        if (!device_only_metadata && !has_tagged_cache) {
             // Common H2H strided copies for kv_cache block tables (both decode & prefill)
             stridedCopyHost(inputs.attention_inputs.kv_cache_kernel_block_id,
                             py_model_inputs_.attention_inputs.kv_cache_kernel_block_id);
         }
-        if (!is_prefill_cuda_graph_mode_) {
+        if (!device_only_metadata && !is_prefill_cuda_graph_mode_) {
             copyToHostMirror(inputs.attention_inputs.sequence_lengths,
                              py_model_inputs_.attention_inputs.sequence_lengths,
                              state.current_batch_size * sizeof(int));
@@ -998,7 +1025,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         }
 
         // Multi-group cache: H2H strided copies for group-local block tables.
-        if (has_tagged_cache) {
+        if (!device_only_metadata && has_tagged_cache) {
             for (const auto& [tag, src_inputs] : inputs.attention_inputs_by_tag) {
                 auto& dst_inputs = py_model_inputs_.attention_inputs_by_tag.at(tag);
                 stridedCopyHost(src_inputs.kv_cache_kernel_block_id, dst_inputs.kv_cache_kernel_block_id);
@@ -2011,6 +2038,12 @@ void CudaGraphRunner::initCapture() {
             capturePrefill();
         } else {
             captureDecode();
+        }
+        device_only_attention_metadata_ = !graph_instances_.empty();
+        for (const auto& [key, instance] : graph_instances_) {
+            (void)key;
+            device_only_attention_metadata_ =
+                device_only_attention_metadata_ && usesDeviceOnlyCudaGraphMetadata(instance.mem_hold_.attn_pyobj_);
         }
         logCudaGraphPoolMemory("after_capture");
     } else {

@@ -31,6 +31,10 @@ class PpuDecodeMetadataGraph(DSv4DecodeFmhaImplFP8):
     by the base class and shared with the model's captured attention kernels.
     """
 
+    # CudaGraphRunner may leave host mirrors and aggregate host scalars stale:
+    # this implementation validates and consumes only device positions/tables.
+    uses_device_only_cuda_graph_metadata = True
+
     def __init__(
         self,
         config,
