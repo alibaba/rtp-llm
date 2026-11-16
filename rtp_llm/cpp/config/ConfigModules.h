@@ -407,6 +407,17 @@ struct CacheStoreConfig {
     int     cache_store_tcp_anet_rpc_thread_num          = 3;
     int     cache_store_tcp_anet_rpc_queue_num           = 100;
 
+    int64_t p2p_lease_query_timeout_ms                 = 20 * 1000;
+    int     p2p_kv_leak_exit_threshold_percent         = 30;
+    int64_t p2p_cancelled_keys_ttl_ms                   = 3600 * 1000;
+    int     cache_store_tcp_worker_queue_size          = 500;
+    int     rdma_transfer_worker_thread_count           = 16;
+    int     rdma_transfer_worker_queue_size             = 100;
+    bool    p2p_rdma_enable_h2d_copy                    = false;
+    int64_t p2p_rdma_staging_total_bytes                = 0;
+    int     p2p_prefill_sender_thread_count             = 4;
+    int     p2p_prefill_sender_queue_size               = 10000;
+
     std::string to_string() const;
 };
 
