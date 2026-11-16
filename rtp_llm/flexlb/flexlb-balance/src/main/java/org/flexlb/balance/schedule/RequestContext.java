@@ -5,7 +5,6 @@ import lombok.Getter;
 import lombok.Setter;
 import org.flexlb.balance.request.Request;
 import org.flexlb.balance.request.Response;
-import org.flexlb.balance.requestlog.RoutingDecision;
 import org.flexlb.balance.schedule.ResponseCompletionExecutor.RequestFuture;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.service.RoleType;
@@ -66,14 +65,8 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
 
     @Getter @Setter private volatile Map<String, Object> schedulingDiagnostics;
     @Getter @Setter private Long requestMessageBytes;
-    private String cacheSource;
-
-    private long cacheQueryUs;
-    private int cacheQueryCount;
 
     private final EnumMap<RoleType, CacheMatchSelection> cacheSelections =
-            new EnumMap<>(RoleType.class);
-    private final EnumMap<RoleType, RoutingDecision> routingDecisions =
             new EnumMap<>(RoleType.class);
     private final EnumMap<RoleType, Integer> routingAttempts = new EnumMap<>(RoleType.class);
 
@@ -238,12 +231,6 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
         timing = timing.withTotalElapsedUs((System.nanoTime() - timing.startedNanos()) / 1_000L);
     }
 
-    public synchronized void recordCacheQuery(String source, long queryTimeUs) {
-        cacheSource = source;
-        cacheQueryUs += Math.max(0L, queryTimeUs);
-        cacheQueryCount++;
-    }
-
     public synchronized void recordCacheSelection(
             RoleType role, String selectedIp, long hitCacheTokens) {
         cacheSelections.put(role, new CacheMatchSelection(role, selectedIp, hitCacheTokens));
@@ -252,42 +239,10 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
     public synchronized void beginRoutingAttempt(RoleType role) {
         routingAttempts.merge(role, 1, Integer::sum);
         cacheSelections.remove(role);
-        routingDecisions.remove(role);
-    }
-
-    public synchronized void recordRoutingDecision(RoutingDecision decision) {
-        Objects.requireNonNull(decision.role(), "role");
-        Objects.requireNonNull(decision.selectionReason(), "selectionReason");
-        routingDecisions.put(
-                decision.role(),
-                new RoutingDecision(
-                        decision.role(),
-                        decision.group(),
-                        decision.strategy(),
-                        decision.selectionReason(),
-                        decision.decisionTimeMs(),
-                        routingAttempts.getOrDefault(decision.role(), 0),
-                        decision.selectedEndpoint(),
-                        decision.totalWorkerCount(),
-                        decision.candidateWorkerCount(),
-                        decision.snapshotTruncated(),
-                        decision.rejections(),
-                        decision.candidates()));
-    }
-
-    public synchronized String selectionReason(RoleType role) {
-        var decision = routingDecisions.get(role);
-        return decision == null ? null : decision.selectionReason();
     }
 
     public synchronized RoutingTelemetry getRoutingTelemetry() {
-        return new RoutingTelemetry(
-                cacheSource,
-                cacheQueryUs,
-                cacheQueryCount,
-                cacheSelections,
-                routingDecisions,
-                routingAttempts);
+        return new RoutingTelemetry(cacheSelections, routingAttempts);
     }
 
     public synchronized SelectionAttempt currentSelectionAttempt() {
@@ -867,15 +822,10 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
      * Captures routing diagnostics with copied maps so later decisions cannot change the captured view.
      */
     public record RoutingTelemetry(
-            String cacheSource,
-            long cacheQueryUs,
-            int cacheQueryCount,
             Map<RoleType, CacheMatchSelection> cacheSelections,
-            Map<RoleType, RoutingDecision> routingDecisions,
             Map<RoleType, Integer> routingAttempts) {
         public RoutingTelemetry {
             cacheSelections = Map.copyOf(cacheSelections);
-            routingDecisions = Map.copyOf(routingDecisions);
             routingAttempts = Map.copyOf(routingAttempts);
         }
     }

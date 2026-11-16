@@ -482,7 +482,8 @@ class EndpointRegistryRoleTest {
                 replacement.resourceSnapshot().requests().values().stream()
                                 .filter(
                                         snapshotRequest ->
-                                                !snapshotRequest.phase().isEngineConfirmed())
+                                                !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                        .isEngineConfirmed(snapshotRequest.phase()))
                                 .count()
                         == 0,
                 "A's exact generation handle must never mutate same-address B");

@@ -7,7 +7,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.net.http.HttpClient;
 import java.net.http.HttpResponse;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -42,7 +41,6 @@ import static org.junit.jupiter.api.Assertions.fail;
  */
 class PythonCompatControlApiTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
 
     private static final int BASE_PORT = 63100;
 

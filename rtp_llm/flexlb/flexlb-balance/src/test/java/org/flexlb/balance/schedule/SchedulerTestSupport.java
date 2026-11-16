@@ -72,13 +72,15 @@ public final class SchedulerTestSupport {
             var context = mock(RequestContext.class);
             when(route.ctx()).thenReturn(context);
             var repository = endpointRepositories.get(endpoint);
-            var owner = repository == null ? null : repository.ownerOf(route.requestId());
+            var active = repository == null ? null : repository.findActive(route.requestId());
+            var owner = active == null ? null : active.getRequestScheduler();
 
             when(context.getRequestScheduler())
                     .thenReturn(owner == null ? mock(AbstractRequestScheduler.class) : owner);
         } else if (route.ctx().getRequestScheduler() == null) {
             var repository = endpointRepositories.get(endpoint);
-            var owner = repository == null ? null : repository.ownerOf(route.requestId());
+            var active = repository == null ? null : repository.findActive(route.requestId());
+            var owner = active == null ? null : active.getRequestScheduler();
             bindOwner(route.ctx(), owner == null ? mock(AbstractRequestScheduler.class) : owner);
         }
         var context = route.ctx();
@@ -96,7 +98,7 @@ public final class SchedulerTestSupport {
                         context,
                         route.requestId(),
                         now,
-                        route.expiresAtMs(),
+                        route.ctx().getRequestExpiresAtMs(),
                         context.getConfig().getRequestLifecycle().getRequest().getTimeoutMs(),
                         org.flexlb.worker.endpoint.StrategyErrorType.SCHEDULING_DEADLINE_EXCEEDED);
                 var placement = (SelectionAttempt) context.beginRouteSelection();
@@ -250,6 +252,16 @@ public final class SchedulerTestSupport {
         return context != null && context.getFuture() == future
                 ? scheduler.tryBeginRouteSelection(context)
                 : null;
+    }
+
+    static boolean isAdmissionOpen(AbstractRequestScheduler scheduler, RequestContext context) {
+        synchronized (context) {
+            return !repository(scheduler).isClosed()
+                    && repository(scheduler).isCurrent(context)
+                    && context.getRequestScheduler() == scheduler
+                    && context.snapshot().phase() == RequestContext.Phase.OPEN
+                    && context.snapshot().cancellationReason() == null;
+        }
     }
 
     static void submitClose(
@@ -451,7 +463,6 @@ public final class SchedulerTestSupport {
 
     private static RequestRepository mockRepository(AbstractRequestScheduler owner) {
         var repository = mock(RequestRepository.class);
-        when(repository.ownerOf(org.mockito.ArgumentMatchers.anyString())).thenReturn(owner);
         when(repository.findActive(org.mockito.ArgumentMatchers.anyString()))
                 .thenAnswer(
                         call -> {

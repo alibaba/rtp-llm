@@ -821,7 +821,7 @@ class RequestRouteSelectorTest {
                                 SelectionTestSupport.selectionResult(
                                         call,
                                         SelectionResult.blocked(
-                                                CapacityKey.anyGroup(RoleType.DECODE))))
+                                                new CapacityKey(RoleType.DECODE, null, null))))
                 .when(prefillStrategy)
                 .chooseBest(
                         org.mockito.ArgumentMatchers.eq(context.getRequest()),
@@ -1382,8 +1382,8 @@ class RequestRouteSelectorTest {
         RequestContext context = new RequestContext(config);
         context.setRequest(request);
         context.setSchedulingMetadata(
-                SchedulingMetadata.explicit(
-                        50, System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(1)));
+                SchedulingMetadata.of(
+                        50, null, System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(1), 50));
         return context;
     }
 

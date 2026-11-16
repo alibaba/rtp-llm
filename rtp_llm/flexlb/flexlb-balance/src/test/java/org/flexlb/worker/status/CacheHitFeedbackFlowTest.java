@@ -369,7 +369,7 @@ class CacheHitFeedbackFlowTest {
         RequestContext context = new RequestContext(config);
         context.setRequest(request);
         context.setSchedulingMetadata(
-                SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60_000));
+                SchedulingMetadata.of(50, null, System.currentTimeMillis() + 60_000, 50));
         var selected = selector.select(context, "group");
         assertEquals(SelectionResult.Status.SUCCESS, selected.status());
         var route = selected;
@@ -390,7 +390,7 @@ class CacheHitFeedbackFlowTest {
                                     org.flexlb.worker.status.WorkerStatusTestSupport
                                             .freezeStatusResponse(status, value)))
                     .endpoint();
-            status.recordSuccessfulPoll(true);
+            org.flexlb.worker.status.WorkerStatusTestSupport.recordSuccessfulPoll(status, true);
         } finally {
             status.lock.unlock();
         }

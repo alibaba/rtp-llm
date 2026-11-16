@@ -143,6 +143,9 @@ public final class SelectionTestSupport {
                 null,
                 null,
                 status.getRoutingEngineIndex(),
-                status.getRoutingMultiEngineNum());
+                (int)
+                        org.springframework.test.util.ReflectionTestUtils.getField(
+                                status, "routingMultiEngineNum"));
     }
+
 }

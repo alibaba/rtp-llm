@@ -123,7 +123,7 @@ class RequestContextConcurrencyTest {
     void registrationFreezesInputsOnTheSameRequestObject() {
         var context = new RequestContext(new FlexlbConfig());
         context.setRequest(Request.builder().requestId("request").seqLen(100L).build());
-        context.setSchedulingMetadata(SchedulingMetadata.explicit(50, Long.MAX_VALUE));
+        context.setSchedulingMetadata(SchedulingMetadata.of(50, null, Long.MAX_VALUE, 50));
         var input = context.getRequest();
         var metadata = context.getSchedulingMetadata();
         var future =
@@ -143,7 +143,7 @@ class RequestContextConcurrencyTest {
                 () -> context.setRequest(input.toBuilder().requestId("other").build()));
         assertThrows(
                 IllegalStateException.class,
-                () -> context.setSchedulingMetadata(SchedulingMetadata.explicit(70, 60000L)));
+                () -> context.setSchedulingMetadata(SchedulingMetadata.of(70, null, 60000L, 50)));
         assertThrows(
                 IllegalStateException.class,
                 () -> context.setPhase(org.flexlb.balance.schedule.RequestPhase.ENCODER));
@@ -303,7 +303,7 @@ class RequestContextConcurrencyTest {
                                     .defaultAnswer(org.mockito.Mockito.CALLS_REAL_METHODS));
             var context = org.mockito.Mockito.spy(new RequestContext(new FlexlbConfig()));
             context.setRequest(Request.builder().requestId("commit-test").seqLen(100L).build());
-            context.setSchedulingMetadata(SchedulingMetadata.explicit(50, Long.MAX_VALUE));
+            context.setSchedulingMetadata(SchedulingMetadata.of(50, null, Long.MAX_VALUE, 50));
             var future =
                     new ResponseCompletionExecutor.RequestFuture(
                             (kind, response, failure) ->
@@ -862,7 +862,7 @@ class RequestContextConcurrencyTest {
     private static RequestContext request() {
         var context = new RequestContext(new FlexlbConfig());
         context.setRequest(Request.builder().requestId("request").seqLen(100L).build());
-        context.setSchedulingMetadata(SchedulingMetadata.explicit(50, Long.MAX_VALUE));
+        context.setSchedulingMetadata(SchedulingMetadata.of(50, null, Long.MAX_VALUE, 50));
         context.setFuture(new java.util.concurrent.CompletableFuture<>());
         RequestProtocolTestSupport.register(
                 context,

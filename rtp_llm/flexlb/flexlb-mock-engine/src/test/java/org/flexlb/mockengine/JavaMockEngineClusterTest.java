@@ -1,6 +1,5 @@
 package org.flexlb.mockengine;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -28,8 +27,6 @@ import static org.junit.jupiter.api.Assertions.fail;
  * Checks mock engine cluster startup, controls and shutdown.
  */
 class JavaMockEngineClusterTest {
-
-    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @TempDir Path tempDir;
 

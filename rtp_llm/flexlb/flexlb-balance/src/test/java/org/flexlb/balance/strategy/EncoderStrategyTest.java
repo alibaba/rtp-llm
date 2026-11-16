@@ -108,7 +108,7 @@ class EncoderStrategyTest {
                         RoleType.ENCODER, "group", "127.0.0.1", 8001, 8002, "test");
         status.lock.lock();
         try {
-            status.recordSuccessfulPoll(true);
+            org.flexlb.worker.status.WorkerStatusTestSupport.recordSuccessfulPoll(status, true);
         } finally {
             status.lock.unlock();
         }
@@ -230,7 +230,7 @@ class EncoderStrategyTest {
                         RoleType.ENCODER, "g1", "127.0.0.1", 8001, 8002, "test");
         status.lock.lock();
         try {
-            status.recordSuccessfulPoll(true);
+            org.flexlb.worker.status.WorkerStatusTestSupport.recordSuccessfulPoll(status, true);
         } finally {
             status.lock.unlock();
         }
@@ -290,7 +290,7 @@ class EncoderStrategyTest {
                         RoleType.ENCODER, "group", address, 8001, 8002, "test");
         status.lock.lock();
         try {
-            status.recordSuccessfulPoll(true);
+            org.flexlb.worker.status.WorkerStatusTestSupport.recordSuccessfulPoll(status, true);
         } finally {
             status.lock.unlock();
         }

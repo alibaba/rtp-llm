@@ -96,13 +96,6 @@ public class VitStrategy
                                 .orElseGet(() -> SelectionResult.blocked(scope)));
     }
 
-    public synchronized ServerStatus validate(RequestContext ctx, String group) {
-        var selection = validateSelection(ctx, group);
-        return selection == null
-                ? errorStatus(StrategyErrorType.NO_VIT_WORKER)
-                : selection.toServerStatus(ctx.getRequestId());
-    }
-
     @Override
     protected Candidate candidate(Candidate selected) {
         return selected;
@@ -213,13 +206,6 @@ public class VitStrategy
         if (comparison == 0) comparison = Integer.compare(left.gpuHits(), right.gpuHits());
         if (comparison == 0) comparison = Integer.compare(left.pendingHits(), right.pendingHits());
         return comparison;
-    }
-
-    private static ServerStatus errorStatus(StrategyErrorType error) {
-        ServerStatus status = new ServerStatus();
-        status.setCode(error.getErrorCode());
-        status.setMessage(error.getErrorMsg());
-        return status;
     }
 
     /**

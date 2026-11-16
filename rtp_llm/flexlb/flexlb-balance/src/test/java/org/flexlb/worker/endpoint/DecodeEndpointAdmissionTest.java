@@ -97,7 +97,10 @@ class DecodeEndpointAdmissionTest {
         var first = reserve(endpoint, "a", 500, 700, limit);
         assertEquals(RegistrationStatus.REGISTERED, first.status());
         assertEquals(1, endpoint.selectionSnapshot().usage().occupiedRequests());
-        assertEquals(9500L, endpoint.selectionSnapshot().usage().hardKvAvailable());
+        assertEquals(
+                9500L,
+                org.flexlb.worker.status.WorkerStatusTestSupport.hardKvAvailable(
+                        endpoint.selectionSnapshot().usage()));
         assertEquals(700L, endpoint.selectionSnapshot().realKvUsed());
         assertEquals(
                 RegistrationStatus.CAPACITY_FULL, reserve(endpoint, "b", 100, 100, limit).status());
@@ -144,7 +147,10 @@ class DecodeEndpointAdmissionTest {
             var second = two.get(5, TimeUnit.SECONDS);
             assertEquals(1, (first.value() == null ? 0 : 1) + (second.value() == null ? 0 : 1));
             assertEquals(1, endpoint.selectionSnapshot().usage().occupiedRequests());
-            assertEquals(9900, endpoint.selectionSnapshot().usage().hardKvAvailable());
+            assertEquals(
+                    9900,
+                    org.flexlb.worker.status.WorkerStatusTestSupport.hardKvAvailable(
+                            endpoint.selectionSnapshot().usage()));
         }
     }
 
@@ -161,7 +167,10 @@ class DecodeEndpointAdmissionTest {
                 endpoint.releaseRequest(
                         new RequestRegistration(current.endpointGenerationId(), "a")));
         assertEquals(1, endpoint.selectionSnapshot().usage().occupiedRequests());
-        assertEquals(9800, endpoint.selectionSnapshot().usage().hardKvAvailable());
+        assertEquals(
+                9800,
+                org.flexlb.worker.status.WorkerStatusTestSupport.hardKvAvailable(
+                        endpoint.selectionSnapshot().usage()));
         assertTrue(endpoint.releaseRequest(current));
     }
 
@@ -264,7 +273,10 @@ class DecodeEndpointAdmissionTest {
         assertEquals(
                 DecodeResources.RegistrationState.UNCONFIRMED,
                 endpoint.registrationState(replacement));
-        assertEquals(9800, endpoint.selectionSnapshot().usage().hardKvAvailable());
+        assertEquals(
+                9800,
+                org.flexlb.worker.status.WorkerStatusTestSupport.hardKvAvailable(
+                        endpoint.selectionSnapshot().usage()));
     }
 
     @org.junit.jupiter.api.RepeatedTest(20)

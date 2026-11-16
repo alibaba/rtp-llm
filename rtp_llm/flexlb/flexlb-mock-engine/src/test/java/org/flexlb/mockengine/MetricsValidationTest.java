@@ -1,12 +1,10 @@
 package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -32,8 +30,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * resulting engine state.
  */
 class MetricsValidationTest {
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
 
     private static final int BASE_PORT = 62800;
 

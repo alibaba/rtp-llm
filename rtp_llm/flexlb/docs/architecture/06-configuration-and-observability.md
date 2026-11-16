@@ -271,7 +271,7 @@ PV 顶层与嵌套 `response` 的成功标识、错误码和错误消息表达�
 `requestMessageBytes`（gRPC 接收的未压缩 protobuf 字节数，不含帧头）。transport tracer
 累计已读取/解压的字节，并通过 gRPC Context 传到入口；调度线程不为监控额外遍历 PB。
 `app.request.message.bytes` 保留该 Message 口径；绕过 transport 的直接调用不制造 0 样本。
-`cacheMatchCount/cacheMatchUs`累计实际缓存查询尝试，角色的缓存选择和决策记录反映最近一次路由尝试。
+角色的缓存选择记录反映最近一次路由尝试。PV 不输出没有生产采集来源的缓存查询次数、耗时和候选决策字段。
 
 路由遥测由串行处理阶段在请求独立的 `RoutingTelemetryState` 中原地累计。
 终态读取依赖处理链的完成发布，不与写入并发；字段记录和角色 Map 操作不使用同步锁。

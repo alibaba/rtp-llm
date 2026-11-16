@@ -74,7 +74,10 @@ class SelectionRegistrationTest {
                             .requests()
                             .values()
                             .stream()
-                            .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                            .filter(
+                                    snapshotRequest ->
+                                            !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                    .isEngineConfirmed(snapshotRequest.phase()))
                             .count());
             accepted.value()
                     .prefillEndpoint()
@@ -282,7 +285,7 @@ class SelectionRegistrationTest {
     private RequestContext context(String id) {
         var context = new RequestContext(config.loadBalanceConfig());
         context.setRequest(Request.builder().requestId(id).seqLen(1000L).maxNewTokens(1).build());
-        context.setSchedulingMetadata(SchedulingMetadata.explicit(50, Long.MAX_VALUE));
+        context.setSchedulingMetadata(SchedulingMetadata.of(50, null, Long.MAX_VALUE, 50));
         return context;
     }
 

@@ -79,12 +79,18 @@ class DecodeEndpointLayeredViewTest {
         assertEquals(
                 2,
                 endpoint.resourceSnapshot().requests().values().stream()
-                        .filter(snapshotRequest -> snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count());
         assertEquals(
                 0,
                 endpoint.resourceSnapshot().requests().values().stream()
-                        .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count());
         assertTrue(isConfirmed(1L));
         assertTrue(isConfirmed(2L));
@@ -163,7 +169,10 @@ class DecodeEndpointLayeredViewTest {
         assertEquals(
                 0,
                 endpoint.resourceSnapshot().requests().values().stream()
-                        .filter(snapshotRequest -> snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count());
     }
 
@@ -197,7 +206,10 @@ class DecodeEndpointLayeredViewTest {
         assertEquals(
                 0,
                 endpoint.resourceSnapshot().requests().values().stream()
-                        .filter(snapshotRequest -> snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count(),
                 "TTL removal clears the local request record");
         assertEquals(1, endpoint.selectionSnapshot().usage().occupiedRequests());
@@ -222,7 +234,10 @@ class DecodeEndpointLayeredViewTest {
         updateStatus(Map.of("701", runningTask(701L, TaskPhase.RUNNING, 400)), null, 19_600);
         assertTrue(endpoint.registrationState(reservation).registered());
         assertEquals(1, endpoint.selectionSnapshot().usage().occupiedRequests());
-        assertEquals(19_600, endpoint.selectionSnapshot().usage().hardKvAvailable());
+        assertEquals(
+                19_600,
+                org.flexlb.worker.status.WorkerStatusTestSupport.hardKvAvailable(
+                        endpoint.selectionSnapshot().usage()));
 
         updateStatus(Map.of(), Map.of("701", runningTask(701L, TaskPhase.RUNNING, 400)), 20_000);
         assertFalse(endpoint.registrationState(reservation).registered());
@@ -248,7 +263,10 @@ class DecodeEndpointLayeredViewTest {
 
     private DecodeResources.DecodeRequestView confirmedView(long requestId) {
         return endpoint.resourceSnapshot().requests().values().stream()
-                .filter(snapshotRequest -> snapshotRequest.phase().isEngineConfirmed())
+                .filter(
+                        snapshotRequest ->
+                                org.flexlb.worker.status.WorkerStatusTestSupport.isEngineConfirmed(
+                                        snapshotRequest.phase()))
                 .filter(view -> view.requestId().equals(String.valueOf(requestId)))
                 .findFirst()
                 .orElseThrow(() -> new AssertionError("request " + requestId + " not tracked"));
@@ -282,7 +300,10 @@ class DecodeEndpointLayeredViewTest {
 
     private boolean isConfirmed(long requestId) {
         return endpoint.resourceSnapshot().requests().values().stream()
-                .filter(snapshotRequest -> snapshotRequest.phase().isEngineConfirmed())
+                .filter(
+                        snapshotRequest ->
+                                org.flexlb.worker.status.WorkerStatusTestSupport.isEngineConfirmed(
+                                        snapshotRequest.phase()))
                 .anyMatch(view -> view.requestId().equals(String.valueOf(requestId)));
     }
 

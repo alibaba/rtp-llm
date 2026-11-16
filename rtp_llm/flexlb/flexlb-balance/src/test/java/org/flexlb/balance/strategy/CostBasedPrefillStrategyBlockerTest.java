@@ -245,7 +245,7 @@ class CostBasedPrefillStrategyBlockerTest {
     }
 
     private static SchedulingMetadata metadata() {
-        return SchedulingMetadata.explicit(50, Long.MAX_VALUE);
+        return SchedulingMetadata.of(50, null, Long.MAX_VALUE, 50);
     }
 
     private record Fixture(CostBasedPrefillStrategy strategy, CacheMatchResult matches) {}

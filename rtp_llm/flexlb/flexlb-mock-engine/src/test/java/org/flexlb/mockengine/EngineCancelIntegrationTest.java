@@ -1,6 +1,5 @@
 package org.flexlb.mockengine;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.balance.schedule.CancelReason;
 import org.flexlb.worker.rpc.EngineGrpcClient;
 import org.flexlb.worker.rpc.EngineGrpcClient.CancelReply;
@@ -52,7 +51,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class EngineCancelIntegrationTest {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BASE_PORT = 62500;
 
     @TempDir Path tempDir;

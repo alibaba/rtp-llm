@@ -110,7 +110,7 @@ class GrpcWorkerStatusRunnerTest {
         org.mockito.Mockito.doAnswer(
                         invocation -> {
                             publicationHeldLock.set(status.lock.isHeldByCurrentThread());
-                            status.publishPreparedStatus(invocation.getArgument(2));
+                            status.publishReducedStatus(invocation.getArgument(2));
                             return new EndpointRegistry.EndpointUpdate(endpoint, expectedChange);
                         })
                 .when(registry)

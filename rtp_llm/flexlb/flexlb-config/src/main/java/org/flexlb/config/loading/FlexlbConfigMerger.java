@@ -14,15 +14,10 @@ import java.util.Set;
  */
 public final class FlexlbConfigMerger {
 
-    private static final String FLEXLB_CONFIG = "FLEXLB_CONFIG";
     private static final Set<String> REPLACE_ON_TYPE_CHANGE_PATHS =
             Set.of("cacheMatching", "consistency", "scheduler.ordering", "scheduler.decision");
 
     private FlexlbConfigMerger() {}
-
-    public static FlexlbConfig mergeWithDefaults(String content) {
-        return merge(new FlexlbConfig(), content, FLEXLB_CONFIG);
-    }
 
     public static FlexlbConfig merge(FlexlbConfig baseConfig, String content, String sourceName) {
         ObjectNode overrides = parseOverrides(content, sourceName);

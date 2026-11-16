@@ -21,10 +21,6 @@ public record CapacityKey(RoleType role, String group, String endpoint) {
         }
     }
 
-    public static CapacityKey anyGroup(RoleType role) {
-        return new CapacityKey(role, null, null);
-    }
-
     public static CapacityKey exact(RoleType role, String group, String endpoint) {
         return new CapacityKey(role, group, Objects.requireNonNull(endpoint, "endpoint"));
     }

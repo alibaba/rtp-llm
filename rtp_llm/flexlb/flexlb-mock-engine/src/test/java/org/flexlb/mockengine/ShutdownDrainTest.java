@@ -1,6 +1,5 @@
 package org.flexlb.mockengine;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
@@ -45,7 +44,6 @@ import static org.junit.jupiter.api.Assertions.fail;
  */
 class ShutdownDrainTest {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BASE_PORT = 63200;
 
     @TempDir Path tempDir;

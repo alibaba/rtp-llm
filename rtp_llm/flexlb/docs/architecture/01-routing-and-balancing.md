@@ -59,7 +59,6 @@ ViT 代际读取 Endpoint 绑定的 WorkerStatus，内部选址不再构造成�
 | 单次多角色结果 | `RequestRoute`                    | Context、冻结 requestId、有序 RoleSelection 引用；同时作为队列和回调的精确身份，不复制角色字段 |
 | 生命周期       | `RequestContext`                  | 引用 RequestRoute，记录发布、交付、取消和清理事实                                              |
 | 选址凭据       | `RequestContext.SelectionAttempt` | 只读的请求引用和选址编号；状态只由 RequestContext 持有                                         |
-| 诊断           | `RoutingDecision`                 | 选择原因与候选估计；不能代替资源账本                                                           |
 | 外部响应       | `Response` / `ServerStatus`       | 按需从 RequestRoute 生成独立协议对象                                                           |
 
 Selector 用方法内的角色列表收集已登记结果，失败时撤销其中的登记；列表不进入等待队列，也不构造 SelectionAttempt 中间对象。
@@ -68,6 +67,11 @@ Selector 用方法内的角色列表收集已登记结果，失败时撤销其�
 评分版本只在 Strategy/Endpoint 登记时校验，不保存在已完成的角色结果中。
 Prefill 登记保存不可变的排队输入和本次工作量，可以立即参与其他请求的投影，无需读取半成品路由。
 `RequestRoute` 构造时角色组合完整，不修改 Endpoint 登记；Prefill 在 `commitSelection` 的同一次持锁操作中关联完整路由并提交登记；没有 attachReservation 入口，也不再创建另一个执行包装对象。
+
+`firstUnavailableEndpoint(selections)` 只返回不可用的已选 Endpoint，不改写选择结果；调用方在角色选择失败和最终发布前使用。
+Prefill/Encoder 的 `commitSelection` 在锁内返回 `COMMITTED`、`UNAVAILABLE` 或 `INVALID_REGISTRATION`，由 Scheduler 决定后续动作；发布失败后不再扫描 Endpoint 推测原因。
+完整路由交接前由 Selector 回滚已取得的登记，交接后由 Scheduler 的统一失败清理释放；局部 Endpoint 提交成功不代表路由发布成功。取消和发布竞争时继续按精确登记清理，不释放其他重试的登记。
+
 规划直接使用 Prefill 登记中的不可变输入，不再另建规划缓存、加锁初始化或重复构造输入。
 RequestContext 同时持有请求输入、遥测和生命周期事实，不再有 RequestData 或 ContextResult 容器。
 选址开始时分配递增编号，回调同时核对请求对象和编号；完成后清除活动编号，旧回调不能完成下一次选址。

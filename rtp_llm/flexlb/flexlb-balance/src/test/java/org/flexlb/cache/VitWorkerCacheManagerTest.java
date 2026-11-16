@@ -40,6 +40,8 @@ import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
@@ -421,10 +423,10 @@ class VitWorkerCacheManagerTest {
         var ctx = context("image");
         var selected = selector.selectCache(ctx, "two");
         ctx.setRequest(ctx.getRequest().toBuilder().selectedVit(selected).build());
-        assertTrue(selector.validate(ctx, "two").isSuccess());
-        assertFalse(selector.validate(ctx, "one").isSuccess());
+        assertNotNull(selector.selectForRoute(ctx, "two"));
+        assertNull(selector.selectForRoute(ctx, "one"));
         live.remove(b.getLogicalIpPort());
-        assertFalse(selector.validate(ctx, null).isSuccess());
+        assertNull(selector.selectForRoute(ctx, null));
     }
 
     @Test
@@ -523,7 +525,7 @@ class VitWorkerCacheManagerTest {
         assertEquals(a.getGenerationId(), copied.getWorkerGeneration());
         copied.setWorkerGeneration(0);
         ctx.setRequest(ctx.getRequest().toBuilder().selectedVit(copied).build());
-        assertFalse(selector.validate(ctx, "one").isSuccess());
+        assertNull(selector.selectForRoute(ctx, "one"));
         copied.setWorkerGeneration(a.getGenerationId());
         ctx.setRequest(ctx.getRequest().toBuilder().selectedVit(copied).build());
         {
@@ -534,7 +536,7 @@ class VitWorkerCacheManagerTest {
                     routeSelection.toServerStatus(ctx.getRequestId()).getWorkerGeneration());
         }
         live.put(a.getLogicalIpPort(), worker(a.getIp(), "one"));
-        assertFalse(selector.validate(ctx, "one").isSuccess());
+        assertNull(selector.selectForRoute(ctx, "one"));
         {
             org.junit.jupiter.api.Assertions.assertNull(selector.selectForRoute(ctx, "one"));
         }

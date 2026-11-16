@@ -53,11 +53,6 @@ class UniConfigConfigSourceTest {
             {"schemaVersion":4,"requestLifecycle":{"request":{"timeoutMs":60000}},"consistency":{"type":"NONE"},
             "router":{"roles":{"prefill":{"maxComputeTokens":1048585}}}}
             """;
-    private static final String UPDATED_CONFIG =
-            """
-            {"schemaVersion":4,"requestLifecycle":{"request":{"timeoutMs":60000}},"consistency":{"type":"NONE"},
-            "router":{"roles":{"prefill":{"maxComputeTokens":1048586}}}}
-            """;
 
     private final ScheduledExecutorService executor = mock(ScheduledExecutorService.class);
     private final AtomicReference<Response> response =

@@ -357,7 +357,7 @@ class RequestSchedulerTest {
                                 request -> request != null && request.getFuture() == highFuture)))
                 .thenAnswer(i -> RequestProtocolTestSupport.admissionForInvocation(i));
         when(router.select(lowPriority, null))
-                .thenReturn(SelectionResult.blocked(CapacityKey.anyGroup(RoleType.PREFILL)));
+                .thenReturn(SelectionResult.blocked(new CapacityKey(RoleType.PREFILL, null, null)));
         when(router.select(highPriority, null))
                 .thenReturn(
                         SelectionResult.rejected(
@@ -599,7 +599,7 @@ class RequestSchedulerTest {
     void prioritySelectorMissWaitsWithoutInventingAnEvictionRoute() {
         Fixture fixture = new Fixture(true);
         when(fixture.router.select(fixture.context, null))
-                .thenReturn(SelectionResult.blocked(CapacityKey.anyGroup(RoleType.PREFILL)));
+                .thenReturn(SelectionResult.blocked(new CapacityKey(RoleType.PREFILL, null, null)));
         CompletableFuture<Response> waiting =
                 SchedulerTestServices.entry(fixture.scheduler).submit(fixture.context);
 
@@ -614,7 +614,7 @@ class RequestSchedulerTest {
     void fifoTemporaryDecodeMissRemainsQueued() {
         Fixture fixture = new Fixture(false);
         when(fixture.router.select(fixture.context, null))
-                .thenReturn(SelectionResult.blocked(CapacityKey.anyGroup(RoleType.DECODE)));
+                .thenReturn(SelectionResult.blocked(new CapacityKey(RoleType.DECODE, null, null)));
         CompletableFuture<Response> waiting =
                 SchedulerTestServices.entry(fixture.scheduler).submit(fixture.context);
 
@@ -680,7 +680,7 @@ class RequestSchedulerTest {
         context.setRequest(request);
 
         context.setSchedulingMetadata(
-                SchedulingMetadata.explicit(priority, System.currentTimeMillis() + 60_000L));
+                SchedulingMetadata.of(priority, null, System.currentTimeMillis() + 60_000L, 50));
         return context;
     }
 

@@ -53,14 +53,6 @@ public class ModelMetaConfig {
         }
     }
 
-    public ServiceRoute getServiceRoute(String serviceId) {
-        return modelServiceRoute.get(serviceId);
-    }
-
-    public ServiceRoute getServiceRoute() {
-        return primaryRoute;
-    }
-
     public Collection<ServiceRoute> getServiceRoutes() {
         return List.copyOf(modelServiceRoute.values());
     }

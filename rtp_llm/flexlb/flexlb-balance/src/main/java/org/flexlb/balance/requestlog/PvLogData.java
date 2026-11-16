@@ -58,14 +58,6 @@ public class PvLogData {
     private Long arrivalMs;
 
     @JsonInclude(JsonInclude.Include.NON_EMPTY)
-    @JsonIgnoreProperties("prefillPolicy")
-    private List<RoutingDecision> routingDecisions;
-
-    private String cacheMatchSource;
-    private long cacheMatchUs;
-    private int cacheMatchCount;
-
-    @JsonInclude(JsonInclude.Include.NON_EMPTY)
     private List<RequestContext.CacheMatchSelection> cacheMatchSelections;
 
     public PvLogData(
@@ -105,11 +97,6 @@ public class PvLogData {
             this.encoderCacheHitLen = request.getEncoderCacheHitLen();
             this.requestTimeMs = request.getRequestTimeMs();
         }
-        this.routingDecisions =
-                telemetry.routingDecisions().entrySet().stream()
-                        .sorted(Map.Entry.comparingByKey())
-                        .map(Map.Entry::getValue)
-                        .toList();
         if (ctx.getResponse() != null) {
             Response source = ctx.getResponse();
             Response projected = new PvResponse();
@@ -122,31 +109,11 @@ public class PvLogData {
         this.startTime = ctx.getTiming().startedAtMs();
         this.totalUs = ctx.getTiming().totalElapsedUs();
         this.arrivalMs = ctx.getTiming().arrivalDelayMs();
-        this.cacheMatchSource = telemetry.cacheSource();
-        this.cacheMatchUs = telemetry.cacheQueryUs();
-        this.cacheMatchCount = telemetry.cacheQueryCount();
         this.cacheMatchSelections =
                 telemetry.cacheSelections().entrySet().stream()
                         .sorted(Map.Entry.comparingByKey())
                         .map(Map.Entry::getValue)
-                        .filter(selection -> !hasRecordedCacheSelection(selection))
                         .toList();
-    }
-
-    private boolean hasRecordedCacheSelection(RequestContext.CacheMatchSelection selection) {
-        return routingDecisions.stream()
-                .filter(decision -> decision.role() == selection.role())
-                .flatMap(decision -> decision.candidates().stream())
-                .anyMatch(
-                        candidate ->
-                                candidate.selected()
-                                        && candidate.endpoint() != null
-                                        && candidate
-                                                .endpoint()
-                                                .startsWith(selection.selectedIp() + ":")
-                                        && java.util.Objects.equals(
-                                                candidate.routingMatchTokens(),
-                                                selection.hitCacheTokens()));
     }
 
     /**

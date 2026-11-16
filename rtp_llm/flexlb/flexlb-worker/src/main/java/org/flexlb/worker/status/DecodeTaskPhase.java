@@ -43,13 +43,6 @@ public enum DecodeTaskPhase {
         return this == ENGINE_MAY_HAVE_SEEN || this == ACCEPTED_NOT_RUNNING || this == RUNNING;
     }
 
-    /**
-     * Whether the phase is represented by Engine WorkerStatus.
-     */
-    public boolean isEngineConfirmed() {
-        return this == ACCEPTED_NOT_RUNNING || this == RUNNING;
-    }
-
     public boolean isMasterQueued() {
         return this == MASTER_QUEUED_NOT_DISPATCHED;
     }

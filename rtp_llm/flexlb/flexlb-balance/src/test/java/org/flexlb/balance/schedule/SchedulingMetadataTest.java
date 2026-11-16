@@ -51,7 +51,7 @@ class SchedulingMetadataTest {
 
     @Test
     void expirationUsesTheSingleAbsoluteDeadline() {
-        SchedulingMetadata metadata = SchedulingMetadata.explicit(50, 2_000L);
+        SchedulingMetadata metadata = SchedulingMetadata.of(50, null, 2_000L, 50);
 
         assertEquals(2_000L, metadata.expiresAtMs());
     }
@@ -61,7 +61,7 @@ class SchedulingMetadataTest {
         for (long expiresAtMs : new long[] {0L, -1L}) {
             assertThrows(
                     IllegalArgumentException.class,
-                    () -> SchedulingMetadata.explicit(50, expiresAtMs));
+                    () -> SchedulingMetadata.of(50, null, expiresAtMs, 50));
             assertThrows(
                     IllegalArgumentException.class,
                     () -> SchedulingMetadata.of(0, null, expiresAtMs, 60));

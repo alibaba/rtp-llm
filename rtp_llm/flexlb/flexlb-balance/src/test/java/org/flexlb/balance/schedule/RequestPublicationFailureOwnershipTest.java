@@ -133,7 +133,7 @@ class RequestPublicationFailureOwnershipTest {
                         context.snapshot().requestRecordForArchive());
                 assertNotNull(context.snapshot().deadlines().inactivity());
                 accepting.set(true);
-                f.owner.onRequestStateChanged(context);
+                f.owner.processPendingRequestActions(context);
                 assertFalse(future.get(3, TimeUnit.SECONDS).isSuccess());
                 RequestProtocolTestSupport.awaitCondition(
                         () -> context.snapshot().phase() == Phase.CLOSED);

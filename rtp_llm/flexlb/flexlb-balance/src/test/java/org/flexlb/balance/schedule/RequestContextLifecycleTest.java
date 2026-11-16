@@ -172,9 +172,12 @@ class RequestContextLifecycleTest {
         context.setRequest(context.getRequest().toBuilder().rawPriority(73).build());
         context.setSchedulingMetadata(
                 suppliedMetadata
-                        ? SchedulingMetadata.explicit(64, Long.MAX_VALUE)
-                        : SchedulingMetadata.explicit(
-                                73, config.resolveExpiresAtMs(context.getTiming().startedAtMs())));
+                        ? SchedulingMetadata.of(64, null, Long.MAX_VALUE, 50)
+                        : SchedulingMetadata.of(
+                                73,
+                                null,
+                                config.resolveExpiresAtMs(context.getTiming().startedAtMs()),
+                                50));
         int priority = context.getPriority();
         long expiresAt = context.getRequestExpiresAtMs();
         RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
@@ -185,7 +188,7 @@ class RequestContextLifecycleTest {
         assertThrows(IllegalStateException.class, () -> context.setSchedulingMetadata(null));
         assertThrows(
                 IllegalStateException.class,
-                () -> context.setSchedulingMetadata(SchedulingMetadata.explicit(1, 1L)));
+                () -> context.setSchedulingMetadata(SchedulingMetadata.of(1, null, 1L, 50)));
         assertThrows(
                 IllegalStateException.class,
                 () -> context.setRequest(context.getRequest().toBuilder().rawPriority(1).build()));
@@ -201,12 +204,15 @@ class RequestContextLifecycleTest {
     void queueReadsFrozenPriorityAndPreservesInternalDefaulting(int priority) {
         var context = context(808L);
         context.setSchedulingMetadata(
-                SchedulingMetadata.explicit(
-                        priority, config.resolveExpiresAtMs(context.getTiming().startedAtMs())));
+                SchedulingMetadata.of(
+                        priority,
+                        null,
+                        config.resolveExpiresAtMs(context.getTiming().startedAtMs()),
+                        50));
         context.setRequest(context.getRequest().toBuilder().rawPriority(priority).build());
         RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context);
-        assertEquals(priority, context.getSchedulingMetadata().priority());
         int queuePriority = priority >= 1 && priority <= 100 ? priority : 50;
+        assertEquals(queuePriority, context.getSchedulingMetadata().priority());
         var entry = context;
         for (boolean priorityOrdering : new boolean[] {false, true}) {
             var queue = new OrderedRequestQueue(priorityOrdering);
@@ -518,11 +524,11 @@ class RequestContextLifecycleTest {
     @Test
     void globalWaitingRequestsHaveNoQuantityAdmissionLimit() {
         var low = context(1L);
-        low.setSchedulingMetadata(SchedulingMetadata.explicit(10, Long.MAX_VALUE));
+        low.setSchedulingMetadata(SchedulingMetadata.of(10, null, Long.MAX_VALUE, 50));
         var waiting = RequestProtocolTestSupport.submitForManualPlacement(lifecycle, low);
         for (long id = 2; id <= 1001; id++) {
             var high = context(id);
-            high.setSchedulingMetadata(SchedulingMetadata.explicit(90, Long.MAX_VALUE));
+            high.setSchedulingMetadata(SchedulingMetadata.of(90, null, Long.MAX_VALUE, 50));
             assertFalse(
                     RequestProtocolTestSupport.submitForManualPlacement(lifecycle, high).isDone());
         }
@@ -736,7 +742,13 @@ class RequestContextLifecycleTest {
             RequestState terminal =
                     org.flexlb.balance.schedule.SchedulerTestSupport.repository(lifecycle)
                             .getRequestState("709");
-            assertTrue(terminal.state().isTerminal());
+            assertTrue(
+                    java.util.EnumSet.of(
+                                    RequestState.State.CANCELLED,
+                                    RequestState.State.TIMED_OUT,
+                                    RequestState.State.FAILED,
+                                    RequestState.State.COMPLETED)
+                            .contains(terminal.state()));
             assertSame(
                     terminal,
                     org.flexlb.balance.schedule.SchedulerTestSupport.repository(lifecycle)
@@ -1060,7 +1072,7 @@ class RequestContextLifecycleTest {
         var low = RequestProtocolTestSupport.submitForManualPlacement(lifecycle, context(1));
         var expired = context(2);
         expired.setSchedulingMetadata(
-                SchedulingMetadata.explicit(90, System.currentTimeMillis() - 1L));
+                SchedulingMetadata.of(90, null, System.currentTimeMillis() - 1L, 50));
         // Expiry before selection establishes a queue timeout, not a capacity rejection.
         assertEquals(
                 StrategyErrorType.QUEUE_TIMEOUT.getErrorCode(),

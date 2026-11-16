@@ -250,18 +250,6 @@ public abstract class AbstractRequestScheduler
                 ctx, RequestFuture.Completion.RESPONSE, response, null, synchronous);
     }
 
-    public boolean isAdmissionOpen(RequestContext ctx) {
-        if (repository.isClosed() || ctx == null || ctx.getRequestScheduler() != this) {
-            return false;
-        }
-        synchronized (ctx) {
-            var state = ctx.snapshot();
-            return repository.isCurrent(ctx)
-                    && state.phase() == Phase.OPEN
-                    && state.cancellationReason() == null;
-        }
-    }
-
     /**
      * Checks that this selection may still commit its acquired route.
      */
@@ -525,19 +513,6 @@ public abstract class AbstractRequestScheduler
         }
     }
 
-    void onRequestStateChanged(RequestContext ctx) {
-        if (!isCurrentRequest(ctx)) return;
-        try {
-            processPendingRequestActions(ctx);
-        } catch (RuntimeException | Error failure) {
-            recordRequestFailure(failure);
-        }
-    }
-
-    boolean isCurrentRequest(RequestContext ctx) {
-        return ctx.getRequestScheduler() == this && repository.isCurrent(ctx);
-    }
-
     /**
      * Roll back unpublished resources and finish selection, returning any cleanup or completion failure.
      */
@@ -711,6 +686,10 @@ public abstract class AbstractRequestScheduler
         var cleanup = Failures.run(null, () -> closeRequest(ctx, null));
         if (cleanup != null) recordRequestFailure(cleanup);
         return publication.publish(synchronous);
+    }
+
+    boolean isCurrentRequest(RequestContext ctx) {
+        return ctx.getRequestScheduler() == this && repository.isCurrent(ctx);
     }
 
     /**

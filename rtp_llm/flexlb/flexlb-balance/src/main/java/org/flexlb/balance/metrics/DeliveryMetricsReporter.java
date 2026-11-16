@@ -171,13 +171,6 @@ public class DeliveryMetricsReporter implements org.flexlb.worker.endpoint.Endpo
         monitor.report(INFLIGHT_TTL_EXPIRED_QPS, tags, count);
     }
 
-    /**
-     * Report an existing schedule-path latency series with its role and engine tags.
-     */
-    public void reportLatency(Latency latency, String role, String engineIp, long durationMs) {
-        monitor.report(latency.metric, FlexMetricTags.ofEngine(engineIp, "role", role), durationMs);
-    }
-
     // ==================== Queue metrics ====================
 
     /**
@@ -249,19 +242,6 @@ public class DeliveryMetricsReporter implements org.flexlb.worker.endpoint.Endpo
             Logger.warn(message, failure);
         } catch (Throwable ignored) {
             // Telemetry must never couple otherwise independent metric leaves.
-        }
-    }
-
-    /**
-     * Maps delivery timing observations to their exported metric names.
-     */
-    public enum Latency {
-        ROUTE_SUBMIT(ROUTE_SUBMIT_TIME_MS);
-
-        private final String metric;
-
-        Latency(String metric) {
-            this.metric = metric;
         }
     }
 }

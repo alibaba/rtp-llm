@@ -241,7 +241,7 @@ class ExpirationTimerInstallationRecoveryTest {
             when(request.getRequestId()).thenReturn(String.valueOf(7502L));
             context.setRequest(request);
             context.setSchedulingMetadata(
-                    org.flexlb.balance.schedule.SchedulingMetadata.explicit(50, 100_000L));
+                    org.flexlb.balance.schedule.SchedulingMetadata.of(50, null, 100_000L, 50));
             context.register(
                     owner,
                     new RequestFuture((kind, response, failure) -> false),

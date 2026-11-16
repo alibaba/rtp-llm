@@ -87,7 +87,8 @@ class RequestSchedulerContractTest {
     void endingAWaitingRequestRemovesItFromScheduling(String ending) throws Exception {
         try (Fixture f = new Fixture(true)) {
             when(f.router.select(any(), any()))
-                    .thenReturn(SelectionResult.blocked(CapacityKey.anyGroup(RoleType.PREFILL)));
+                    .thenReturn(
+                            SelectionResult.blocked(new CapacityKey(RoleType.PREFILL, null, null)));
             var context = f.context(944L);
             var future = f.scheduler.submit(context);
             RequestProtocolTestSupport.awaitCondition(() -> f.scheduler.blockedRequestCount() == 1);
@@ -512,12 +513,12 @@ class RequestSchedulerContractTest {
                 var future = owner.submit(request, () -> {});
 
                 assertSame(owner, request.getRequestScheduler());
-                assertSame(owner, runtime.requests().ownerOf("100"));
+                assertSame(owner, runtime.requests().findActive("100").getRequestScheduler());
 
                 var next = f.context(101);
                 var nextFuture = owner.submit(next, () -> {});
                 assertSame(owner, next.getRequestScheduler());
-                assertSame(owner, runtime.requests().ownerOf("101"));
+                assertSame(owner, runtime.requests().findActive("101").getRequestScheduler());
                 owner.cancel("100", CancelReason.CLIENT_CANCELLED);
                 owner.cancel("101", CancelReason.CLIENT_CANCELLED);
                 future.get(3, TimeUnit.SECONDS);
@@ -526,11 +527,10 @@ class RequestSchedulerContractTest {
                         () ->
                                 runtime.requests().findTerminal("100") != null
                                         && runtime.requests().findTerminal("101") != null);
-                assertSame(
-                        owner,
-                        runtime.requests().ownerOf("100"),
-                        "terminal records preserve ownership too");
-                assertSame(owner, runtime.requests().ownerOf("101"));
+                org.junit.jupiter.api.Assertions.assertNotNull(
+                        runtime.requests().findTerminal("100", RequestPhase.GENERATION, owner));
+                org.junit.jupiter.api.Assertions.assertNotNull(
+                        runtime.requests().findTerminal("101", RequestPhase.GENERATION, owner));
             } finally {
                 SchedulerTestSupport.shutdown(runtime);
             }

@@ -28,9 +28,10 @@ public final class InflightAssertions {
                                 ? decodeEp.resourceSnapshot().requests().values().stream()
                                         .filter(
                                                 snapshotRequest ->
-                                                        !snapshotRequest
-                                                                .phase()
-                                                                .isEngineConfirmed())
+                                                        !org.flexlb.worker.status
+                                                                .WorkerStatusTestSupport
+                                                                .isEngineConfirmed(
+                                                                        snapshotRequest.phase()))
                                         .count()
                                 : "null")
                         + ")");
@@ -55,9 +56,11 @@ public final class InflightAssertions {
                             || decodeEp.resourceSnapshot().requests().values().stream()
                                             .filter(
                                                     snapshotRequest ->
-                                                            !snapshotRequest
-                                                                    .phase()
-                                                                    .isEngineConfirmed())
+                                                            !org.flexlb.worker.status
+                                                                    .WorkerStatusTestSupport
+                                                                    .isEngineConfirmed(
+                                                                            snapshotRequest
+                                                                                    .phase()))
                                             .count()
                                     == 0;
             if (prefillOk && decodeOk) {

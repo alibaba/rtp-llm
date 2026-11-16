@@ -67,7 +67,6 @@ public final class SchedulerTestSupport {
 
     private static RequestRepository mockRepository(AbstractRequestScheduler owner) {
         var repository = mock(RequestRepository.class);
-        when(repository.ownerOf(org.mockito.ArgumentMatchers.anyString())).thenReturn(owner);
         when(repository.findActive(org.mockito.ArgumentMatchers.anyString()))
                 .thenAnswer(
                         call -> {

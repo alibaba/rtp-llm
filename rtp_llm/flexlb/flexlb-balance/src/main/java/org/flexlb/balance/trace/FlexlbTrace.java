@@ -38,8 +38,6 @@ public final class FlexlbTrace {
             AttributeKey.stringKey("rtp_llm.prefill_address");
     public static final AttributeKey<String> DECODE_ADDRESS =
             AttributeKey.stringKey("rtp_llm.decode_address");
-    private static final AttributeKey<String> DISPATCH_REASON =
-            AttributeKey.stringKey("rtp_llm.dispatch_reason");
     public static final AttributeKey<String> SCHEDULE_MODE =
             AttributeKey.stringKey("flexlb.schedule.mode");
     public static final AttributeKey<Long> SCHEDULE_CODE =

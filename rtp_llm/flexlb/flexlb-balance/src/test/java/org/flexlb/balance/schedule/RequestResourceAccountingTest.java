@@ -473,7 +473,10 @@ class RequestResourceAccountingTest {
             assertEquals(
                     0,
                     view.requests().values().stream()
-                            .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                            .filter(
+                                    snapshotRequest ->
+                                            !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                    .isEngineConfirmed(snapshotRequest.phase()))
                             .count(),
                     "Decode queued ownership");
             assertEquals(
@@ -501,14 +504,19 @@ class RequestResourceAccountingTest {
                     view.requests().values().stream()
                                     .filter(
                                             snapshotRequest ->
-                                                    !snapshotRequest.phase().isEngineConfirmed())
+                                                    !org.flexlb.worker.status
+                                                            .WorkerStatusTestSupport
+                                                            .isEngineConfirmed(
+                                                                    snapshotRequest.phase()))
                                     .count()
                             == 0);
             assertTrue(
                     view.requests().values().stream()
                                     .filter(
                                             snapshotRequest ->
-                                                    snapshotRequest.phase().isEngineConfirmed())
+                                                    org.flexlb.worker.status.WorkerStatusTestSupport
+                                                            .isEngineConfirmed(
+                                                                    snapshotRequest.phase()))
                                     .count()
                             == 0);
         }

@@ -1,14 +1,12 @@
 package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
-import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
@@ -38,8 +36,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class HighConcurrencyStressTest {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
     private static final int BASE_PORT = 62600;
 
     @TempDir Path tempDir;

@@ -47,7 +47,9 @@ class ModelServiceConfigurationTest {
                             assertThat(context).hasNotFailed();
                             ModelMetaConfig config = context.getBean(ModelMetaConfig.class);
                             var endpoint =
-                                    config.getServiceRoute("test-service")
+                                    config.getServiceRoutes()
+                                            .iterator()
+                                            .next()
                                             .getAllEndpoints()
                                             .getFirst();
                             assertThat(endpoint.getDiscovery().getType())
@@ -71,7 +73,9 @@ class ModelServiceConfigurationTest {
                             assertThat(context).hasNotFailed();
                             var endpoint =
                                     context.getBean(ModelMetaConfig.class)
-                                            .getServiceRoute("test-service")
+                                            .getServiceRoutes()
+                                            .iterator()
+                                            .next()
                                             .getAllEndpoints()
                                             .getFirst();
                             assertThat(endpoint.getMultiEngineNum()).isEqualTo(2);
@@ -185,7 +189,9 @@ class ModelServiceConfigurationTest {
                             assertThat(context).hasNotFailed();
                             var route =
                                     context.getBean(ModelMetaConfig.class)
-                                            .getServiceRoute("test-service");
+                                            .getServiceRoutes()
+                                            .iterator()
+                                            .next();
                             assertThat(route.getKvcm()).isNotNull();
                             assertThat(route.getKvcm().getPort()).isEqualTo(7381);
                             assertThat(route.getAllEndpoints()).hasSize(1);
@@ -200,7 +206,9 @@ class ModelServiceConfigurationTest {
                             assertThat(context).hasNotFailed();
                             OptimizerConfig optimizer =
                                     context.getBean(ModelMetaConfig.class)
-                                            .getServiceRoute("test-service")
+                                            .getServiceRoutes()
+                                            .iterator()
+                                            .next()
                                             .getOptimizer();
                             assertThat(optimizer.getAddress()).isEqualTo("optimizer-service");
                             assertThat(optimizer.getPort()).isEqualTo(9090);
@@ -224,7 +232,9 @@ class ModelServiceConfigurationTest {
                             assertThat(context).hasNotFailed();
                             OptimizerConfig optimizer =
                                     context.getBean(ModelMetaConfig.class)
-                                            .getServiceRoute("test-service")
+                                            .getServiceRoutes()
+                                            .iterator()
+                                            .next()
                                             .getOptimizer();
                             assertThat(optimizer.getPath()).isEqualTo(OptimizerConfig.DEFAULT_PATH);
                             assertThat(optimizer.getPort()).isEqualTo(OptimizerConfig.DEFAULT_PORT);

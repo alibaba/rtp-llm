@@ -1365,8 +1365,11 @@ class GlobalQueueProgressTest {
             RequestContext context =
                     org.mockito.Mockito.spy(RequestProtocolTestSupport.context(config, id));
             context.setSchedulingMetadata(
-                    org.flexlb.balance.schedule.SchedulingMetadata.explicit(
-                            priority, System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(1)));
+                    org.flexlb.balance.schedule.SchedulingMetadata.of(
+                            priority,
+                            null,
+                            System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(1),
+                            50));
             SchedulerTestServices.entry(scheduler).submit(context);
         }
 

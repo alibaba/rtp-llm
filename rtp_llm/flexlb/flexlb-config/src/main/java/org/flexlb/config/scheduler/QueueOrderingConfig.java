@@ -15,6 +15,7 @@ public final class QueueOrderingConfig {
 
     private PreemptionConfig preemption;
 
+    @com.fasterxml.jackson.annotation.JsonSetter("type")
     public void setType(Type type) {
         this.type = type;
         if (type == Type.PRIORITY && preemption == null) {

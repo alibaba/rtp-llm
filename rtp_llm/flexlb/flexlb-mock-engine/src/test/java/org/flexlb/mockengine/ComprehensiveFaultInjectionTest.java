@@ -1,6 +1,5 @@
 package org.flexlb.mockengine;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.grpc.Server;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
@@ -14,7 +13,6 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.net.ServerSocket;
-import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -43,8 +41,6 @@ import static org.junit.jupiter.api.Assertions.fail;
  * ordinary behavior after clearing faults.
  */
 class ComprehensiveFaultInjectionTest {
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
     private static final AtomicInteger PORT_ALLOCATOR = new AtomicInteger(62900);
 
     private static final long TOTAL_KV_TOKENS = 6_291_456L;

@@ -15,7 +15,6 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
-import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -46,7 +45,6 @@ import static org.junit.jupiter.api.Assertions.fail;
  */
 class EngineCrashRecoveryTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
     private static final AtomicInteger PORT_ALLOCATOR = new AtomicInteger(62400);
 
     @TempDir Path tempDir;

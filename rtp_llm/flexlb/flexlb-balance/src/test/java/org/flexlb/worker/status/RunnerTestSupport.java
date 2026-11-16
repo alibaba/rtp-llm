@@ -59,8 +59,9 @@ public final class RunnerTestSupport {
             WorkerStatus.PreparedStatus prepared =
                     status.prepareStatus(
                             WorkerStatusTestSupport.freezeStatusResponse(status, response));
-            status.publishPreparedStatus(prepared);
-            status.recordSuccessfulPoll(response.isAlive());
+            status.publishReducedStatus(prepared);
+            org.flexlb.worker.status.WorkerStatusTestSupport.recordSuccessfulPoll(
+                    status, response.isAlive());
         } finally {
             status.lock.unlock();
         }
@@ -101,7 +102,7 @@ public final class RunnerTestSupport {
                     status.prepareStatus(
                             WorkerStatusTestSupport.freezeStatusResponse(status, response));
             WorkerEndpoint endpoint = registry.updateEndpoint(address, status, prepared).endpoint();
-            status.recordSuccessfulPoll(true);
+            org.flexlb.worker.status.WorkerStatusTestSupport.recordSuccessfulPoll(status, true);
             return endpoint;
         } finally {
             status.lock.unlock();

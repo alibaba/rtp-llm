@@ -784,7 +784,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                                     server.getRole(), outcome.isSuccess(), outcome.getCode());
                             serviceMetricsReporter.reportSelectedWorker(
                                     server.getRole(),
-                                    ctx.selectionReason(server.getRole()),
+                                    null,
                                     server.getMetricIpPort(),
                                     outcome.isSuccess(),
                                     outcome.getCode());

@@ -1,7 +1,6 @@
 package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -28,7 +27,6 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
  */
 class TpsMetricsAccountingTest {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final int BASE_PORT = 62900;
 
     /**

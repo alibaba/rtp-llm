@@ -110,15 +110,6 @@ public final class RequestRoute implements WorkerRoute {
         return decode == null ? null : (DecodeEndpoint.RequestRegistration) decode.registration();
     }
 
-    public boolean requestExpired(long nowMs) {
-        long expiry = expiresAtMs();
-        return expiry <= 0L || nowMs >= expiry;
-    }
-
-    public long expiresAtMs() {
-        return ctx.getRequestExpiresAtMs();
-    }
-
     public int priority() {
         return ctx.getPriority();
     }

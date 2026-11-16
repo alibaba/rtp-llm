@@ -304,7 +304,7 @@ class RequestRouteTest {
 
     private static ServerStatus metadata(WorkerEndpoint worker) {
         var result =
-                ServerStatus.forWorker(
+                org.flexlb.worker.status.WorkerStatusTestSupport.serverStatus(
                         worker.getStatus().getRole(),
                         String.valueOf(42L),
                         worker.getStatus().topologySnapshot(),

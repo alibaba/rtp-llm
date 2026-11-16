@@ -33,13 +33,6 @@ public final class SchedulingMetadata {
     }
 
     /**
-     * Bind an already-normalized priority to its absolute expiry.
-     */
-    public static SchedulingMetadata explicit(int priority, long expiresAtMs) {
-        return new SchedulingMetadata(priority, expiresAtMs);
-    }
-
-    /**
      * Normalized priority (1-100, higher is more important).
      */
     public int priority() {

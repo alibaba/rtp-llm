@@ -44,7 +44,10 @@ class DecodeRequestExpirationTest {
         assertEquals(
                 0,
                 endpoint.resourceSnapshot().requests().values().stream()
-                        .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count());
         assertEquals(0, endpoint.selectionSnapshot().usage().occupiedRequests());
         assertEquals(0, endpoint.selectionSnapshot().usage().hardReservedKvTokens());
@@ -52,14 +55,18 @@ class DecodeRequestExpirationTest {
         assertEquals(
                 0,
                 endpoint.resourceSnapshot().requests().values().stream()
-                        .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count());
 
         updateStatus(Map.of("1", task(1L, TaskPhase.RUNNING, 500)), Map.of(), 9_500);
         assertFalse(isConfirmed(1L), "late status cannot recreate expired local ownership");
         assertEquals(
                 9_500,
-                endpoint.selectionSnapshot().usage().hardKvAvailable(),
+                org.flexlb.worker.status.WorkerStatusTestSupport.hardKvAvailable(
+                        endpoint.selectionSnapshot().usage()),
                 "physical KV remains Engine-reported");
     }
 
@@ -73,7 +80,10 @@ class DecodeRequestExpirationTest {
         assertEquals(false, endpoint.releaseRequest(reservation));
         assertEquals(0, confirmedCount());
         assertEquals(1, endpoint.selectionSnapshot().usage().occupiedRequests());
-        assertEquals(9_500, endpoint.selectionSnapshot().usage().hardKvAvailable());
+        assertEquals(
+                9_500,
+                org.flexlb.worker.status.WorkerStatusTestSupport.hardKvAvailable(
+                        endpoint.selectionSnapshot().usage()));
         assertEquals(500, endpoint.selectionSnapshot().realKvUsed());
     }
 
@@ -85,7 +95,10 @@ class DecodeRequestExpirationTest {
         assertEquals(2, endpoint.evictExpiredRequests(-1L, requestId -> false));
         assertTrue(endpoint.resourceSnapshot().requests().isEmpty());
         assertEquals(1, endpoint.selectionSnapshot().usage().occupiedRequests());
-        assertEquals(9_500, endpoint.selectionSnapshot().usage().hardKvAvailable());
+        assertEquals(
+                9_500,
+                org.flexlb.worker.status.WorkerStatusTestSupport.hardKvAvailable(
+                        endpoint.selectionSnapshot().usage()));
         assertEquals(0, endpoint.selectionSnapshot().usage().hardReservedKvTokens());
         assertEquals(500, endpoint.selectionSnapshot().realKvUsed());
         assertEquals(0, endpoint.evictExpiredRequests(-1L, requestId -> false));
@@ -107,7 +120,10 @@ class DecodeRequestExpirationTest {
         assertEquals(
                 1,
                 endpoint.resourceSnapshot().requests().values().stream()
-                        .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count());
 
         assertEquals(true, endpoint.releaseRequest(original));
@@ -146,13 +162,19 @@ class DecodeRequestExpirationTest {
 
     private boolean isConfirmed(long requestId) {
         return endpoint.resourceSnapshot().requests().values().stream()
-                .filter(snapshotRequest -> snapshotRequest.phase().isEngineConfirmed())
+                .filter(
+                        snapshotRequest ->
+                                org.flexlb.worker.status.WorkerStatusTestSupport.isEngineConfirmed(
+                                        snapshotRequest.phase()))
                 .anyMatch(view -> view.requestId().equals(String.valueOf(requestId)));
     }
 
     private long confirmedCount() {
         return endpoint.resourceSnapshot().requests().values().stream()
-                .filter(snapshotRequest -> snapshotRequest.phase().isEngineConfirmed())
+                .filter(
+                        snapshotRequest ->
+                                org.flexlb.worker.status.WorkerStatusTestSupport.isEngineConfirmed(
+                                        snapshotRequest.phase()))
                 .count();
     }
 

@@ -50,8 +50,8 @@ final class RequestProtocolTestSupport {
                     org.flexlb.balance.request.Request.builder().requestId(requestId).build());
         }
         context.setSchedulingMetadata(
-                org.flexlb.balance.schedule.SchedulingMetadata.explicit(
-                        context.getPriority(), expiresAtMs));
+                org.flexlb.balance.schedule.SchedulingMetadata.of(
+                        context.getPriority(), null, expiresAtMs, 50));
         var future = context.getFuture();
         context.register(
                 context.getRequestScheduler(),
@@ -613,8 +613,8 @@ final class RequestProtocolTestSupport {
         context.setRequest(request);
 
         context.setSchedulingMetadata(
-                SchedulingMetadata.explicit(
-                        50, System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(1)));
+                SchedulingMetadata.of(
+                        50, null, System.currentTimeMillis() + TimeUnit.MINUTES.toMillis(1), 50));
         return context;
     }
 

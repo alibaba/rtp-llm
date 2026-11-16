@@ -77,11 +77,7 @@ Engine 的生成、取消、结果拉取和 KV 传输协议仍使用现有 int64
 
 Python VIPServer 同样保留最近一次非空域名缓存，持续空结果不覆盖旧地址。
 
-`OptimizerClient` 保留可显式调用的 trace 接口，当前调度链路没有调用该接口。初始化仅注册指标，
-首次具备 block keys 与有效 namespace 的 `traceQuery` 才启动 `OptimizerAddressResolver`；
-重复调用复用同一发现任务。动态发现由后台轮询更新地址快照，首次快照尚未就绪时跳过本次 trace。
-关闭后不再启动发现；关闭仅停止自有任务，不关闭共享的 `ServiceDiscovery`。trace 启动或发送
-失败仅记录日志和指标，不改变调度结果。
+当前调度链路不发送 optimizer trace，也不启动 optimizer 地址发现任务。
 
 一个服务发现 frontend 会按 Endpoint `multi_engine_num` 展开为 N 个逻辑 worker，map key
 统一为 `ip:httpPort@index`（N=1 也是 `@0`）。frontend HTTP/gRPC 地址保持共享；第 i 个

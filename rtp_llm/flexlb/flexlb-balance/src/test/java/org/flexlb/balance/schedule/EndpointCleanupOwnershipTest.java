@@ -97,14 +97,20 @@ class EndpointCleanupOwnershipTest {
         assertEquals(
                 1,
                 endpoint.resourceSnapshot().requests().values().stream()
-                        .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count());
         // Models moving the ownership scan outside the endpoint lock without revalidation.
         assertEquals(1, endpoint.evictExpiredRequests(-1L, beforeRegistration::contains));
         assertEquals(
                 0,
                 endpoint.resourceSnapshot().requests().values().stream()
-                        .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count());
         assertTrue(
                 org.flexlb.balance.schedule.SchedulerTestSupport.repository(registry)
@@ -324,17 +330,26 @@ class EndpointCleanupOwnershipTest {
         assertEquals(
                 reserved,
                 endpoint.resourceSnapshot().requests().values().stream()
-                        .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count());
         assertEquals(
                 reserved,
                 view.requests().values().stream()
-                        .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count());
         assertEquals(
                 confirmed,
                 view.requests().values().stream()
-                        .filter(snapshotRequest -> snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count());
         assertEquals(reserved + confirmed, view.selection().usage().occupiedRequests());
         // Queued selections own KV, while confirmed Engine owners consume dispatch capacity.
@@ -342,7 +357,10 @@ class EndpointCleanupOwnershipTest {
         assertEquals(
                 reserved,
                 view.requests().values().stream()
-                        .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count());
         assertEquals(hardKv, view.selection().usage().hardReservedKvTokens());
         assertEquals(expectedKv, EndpointTestSupport.expectedReservedKv(view));

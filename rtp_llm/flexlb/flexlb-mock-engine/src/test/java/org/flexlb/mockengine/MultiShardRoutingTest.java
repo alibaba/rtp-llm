@@ -1,14 +1,12 @@
 package org.flexlb.mockengine;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
-import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -34,8 +32,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * to decode engines within the same shard via {@code RoleAddrPB} port hints.
  */
 class MultiShardRoutingTest {
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final HttpClient HTTP_CLIENT = HttpClient.newHttpClient();
 
     private static final int BASE_PORT = 63000;
 

@@ -30,10 +30,6 @@ public final class DecodeResources {
         public boolean confirmed() {
             return this == CONFIRMED;
         }
-
-        public boolean unconfirmed() {
-            return this == UNCONFIRMED;
-        }
     }
 
     /**
@@ -176,10 +172,6 @@ public final class DecodeResources {
                             && hardReservedKvTokens >= 0L
                             && expectedKvUsed >= 0L,
                     "Decode occupancy must be non-negative");
-        }
-
-        public long hardKvAvailable() {
-            return Math.max(0L, availableKvTokens - hardReservedKvTokens);
         }
     }
 

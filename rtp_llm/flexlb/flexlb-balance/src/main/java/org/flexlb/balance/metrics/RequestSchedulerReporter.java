@@ -7,14 +7,12 @@ import org.flexlb.util.metrics.FlexMetricType;
 import org.flexlb.util.metrics.FlexMonitor;
 import org.flexlb.util.metrics.FlexPriorityType;
 import org.flexlb.util.metrics.SafeFlexMonitor;
-import org.flexlb.worker.endpoint.DecodeResources.DecodeRequestView;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 import java.util.Collections;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 
 import static org.flexlb.util.metrics.MetricConstant.AUTO_TPM_CANCEL_CONFIRM_COUNT;
@@ -131,31 +129,6 @@ public class RequestSchedulerReporter {
                 1.0);
     }
 
-    public void reportPreemptionCancelRequests(
-            String endpoint, List<DecodeRequestView> requestsToPreempt) {
-        for (var requestToPreempt : requestsToPreempt) {
-            reportEngineCancel(CancelEvent.REQUEST, endpoint, requestToPreempt.priority());
-            reportCancel(requestToPreempt.priority(), "PRIORITY_PREEMPTED");
-        }
-    }
-
-    public void reportEngineCancel(CancelEvent event, String endpoint, int priority) {
-        monitor.report(
-                event.metric,
-                FlexMetricTags.of("endpoint", endpoint, "priority", String.valueOf(priority)),
-                1.0);
-    }
-
-    /**
-     * Count one Engine Cancel intent by requestToPreempt priority and cancellation reason.
-     */
-    public void reportCancel(int priority, String reason) {
-        monitor.report(
-                AUTO_TPM_CANCEL_QPS,
-                FlexMetricTags.of("priority", String.valueOf(priority), "reason", reason),
-                1.0);
-    }
-
     public void reportDecodePreemption(
             String endpoint, org.flexlb.worker.endpoint.EndpointStats.DecodeCounts view) {
         FlexMetricTags tags = FlexMetricTags.of("endpoint", endpoint);
@@ -232,30 +205,6 @@ public class RequestSchedulerReporter {
         private final String metric;
 
         PreemptionEvent(String metric) {
-            this.metric = metric;
-        }
-    }
-
-    /**
-     * Maps cancellation requests, confirmations and timeouts to their exported counters.
-     */
-    public enum CancelEvent {
-        /**
-         * One issued cancel, tagged with the requestToPreempt's priority.
-         */
-        REQUEST(AUTO_TPM_CANCEL_REQUEST_COUNT),
-        /**
-         * Release confirmation, including after a timed-out wait; uses requestToPreempt priority.
-         */
-        CONFIRM(AUTO_TPM_CANCEL_CONFIRM_COUNT),
-        /**
-         * Failed plan wait; uses incoming priority and does not release the requestToPreempt.
-         */
-        TIMEOUT(AUTO_TPM_CANCEL_TIMEOUT_COUNT);
-
-        private final String metric;
-
-        CancelEvent(String metric) {
             this.metric = metric;
         }
     }

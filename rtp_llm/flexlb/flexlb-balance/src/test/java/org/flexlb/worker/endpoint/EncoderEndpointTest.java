@@ -312,7 +312,7 @@ class EncoderEndpointTest {
                         RoleType.ENCODER, "default", "127.0.0.1", 8001, 8002, "");
         status.lock.lock();
         try {
-            status.recordSuccessfulPoll(true);
+            org.flexlb.worker.status.WorkerStatusTestSupport.recordSuccessfulPoll(status, true);
         } finally {
             status.lock.unlock();
         }

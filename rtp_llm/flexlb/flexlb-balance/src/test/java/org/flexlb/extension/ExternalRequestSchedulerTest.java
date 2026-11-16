@@ -350,7 +350,7 @@ class ExternalRequestSchedulerTest {
             context.setRequest(Request.builder().requestId(String.valueOf(id)).seqLen(16L).build());
 
             context.setSchedulingMetadata(
-                    SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60_000L));
+                    SchedulingMetadata.of(50, null, System.currentTimeMillis() + 60_000L, 50));
             return context;
         }
     }

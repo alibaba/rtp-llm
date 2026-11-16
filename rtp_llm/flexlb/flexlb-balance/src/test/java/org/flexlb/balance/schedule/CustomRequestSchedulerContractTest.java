@@ -63,8 +63,8 @@ class CustomRequestSchedulerContractTest {
                 }) {
             var expired = RequestProtocolTestSupport.context(scheduler.config, 81901L);
             expired.setSchedulingMetadata(
-                    org.flexlb.balance.schedule.SchedulingMetadata.explicit(
-                            50, System.currentTimeMillis() - 1));
+                    org.flexlb.balance.schedule.SchedulingMetadata.of(
+                            50, null, System.currentTimeMillis() - 1, 50));
             assertEquals(
                     StrategyErrorType.ADMISSION_UNAVAILABLE.getErrorCode(),
                     scheduler.submit(expired).get(2, TimeUnit.SECONDS).getCode());
@@ -128,7 +128,9 @@ class CustomRequestSchedulerContractTest {
             assertNotNull(admission);
             try {
                 scheduler.cancel("81004", CancelReason.CLIENT_CANCELLED);
-                assertFalse(scheduler.isAdmissionOpen(context));
+                assertFalse(
+                        org.flexlb.balance.schedule.SchedulerTestSupport.isAdmissionOpen(
+                                scheduler, context));
                 scheduler.advance();
                 org.mockito.Mockito.verifyNoInteractions(scheduler.selector);
             } finally {

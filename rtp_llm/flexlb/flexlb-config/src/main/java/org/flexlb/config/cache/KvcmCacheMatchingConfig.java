@@ -53,6 +53,7 @@ public final class KvcmCacheMatchingConfig implements CacheMatchingConfig {
 
     private LocalStandbyConfig localStandby = new LocalStandbyConfig();
 
+    @com.fasterxml.jackson.annotation.JsonSetter("medium")
     public void setMedium(List<String> medium) {
         this.medium = medium == null ? List.of() : List.copyOf(medium);
     }

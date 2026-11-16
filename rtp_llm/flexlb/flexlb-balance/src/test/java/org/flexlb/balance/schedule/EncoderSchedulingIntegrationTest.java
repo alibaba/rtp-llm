@@ -332,7 +332,7 @@ class EncoderSchedulingIntegrationTest {
         var worker = worker("busy", 8001, true, "group", Map.of(), 1, 0);
         var context = context("7", 100, 0L);
         context.setSchedulingMetadata(
-                SchedulingMetadata.explicit(50, System.currentTimeMillis() + 300));
+                SchedulingMetadata.of(50, null, System.currentTimeMillis() + 300, 50));
         var response = lifecycle.submit(context).get(2, TimeUnit.SECONDS);
         assertEquals(StrategyErrorType.QUEUE_TIMEOUT.getErrorCode(), response.getCode());
         publish(worker, Map.of(), Map.of(), 0, 0);
@@ -491,7 +491,7 @@ class EncoderSchedulingIntegrationTest {
         context.setPhase(RequestPhase.ENCODER);
         context.setRequestedRoles(List.of(RoleType.ENCODER));
         context.setSchedulingMetadata(
-                SchedulingMetadata.explicit(50, System.currentTimeMillis() + 60_000));
+                SchedulingMetadata.of(50, null, System.currentTimeMillis() + 60_000, 50));
         return context;
     }
 
@@ -515,7 +515,7 @@ class EncoderSchedulingIntegrationTest {
         publish(endpoint, tasks, Map.of(), running, waiting);
         status.lock.lock();
         try {
-            status.recordSuccessfulPoll(alive);
+            org.flexlb.worker.status.WorkerStatusTestSupport.recordSuccessfulPoll(status, alive);
         } finally {
             status.lock.unlock();
         }

@@ -27,7 +27,7 @@ class RequestCleanupPassTest {
         context.setRequest(
                 org.flexlb.balance.request.Request.builder().requestId("late-response").build());
         context.setSchedulingMetadata(
-                org.flexlb.balance.schedule.SchedulingMetadata.explicit(0, 100_000L));
+                org.flexlb.balance.schedule.SchedulingMetadata.of(0, null, 100_000L, 50));
         context.register(
                 mock(AbstractRequestScheduler.class),
                 new ResponseCompletionExecutor.RequestFuture((kind, response, error) -> false),

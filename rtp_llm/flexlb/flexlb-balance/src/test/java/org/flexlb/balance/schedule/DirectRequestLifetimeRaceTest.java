@@ -150,11 +150,17 @@ class DirectRequestLifetimeRaceTest {
                                         requestContext,
                                         requestContext.snapshot().inactivityExpiresAtMs());
                                 assertTrue(
-                                        org.flexlb.balance.schedule.SchedulerTestSupport.repository(
-                                                        requests)
-                                                .getRequestState("101")
-                                                .state()
-                                                .isTerminal());
+                                        java.util.EnumSet.of(
+                                                        RequestState.State.CANCELLED,
+                                                        RequestState.State.TIMED_OUT,
+                                                        RequestState.State.FAILED,
+                                                        RequestState.State.COMPLETED)
+                                                .contains(
+                                                        org.flexlb.balance.schedule
+                                                                .SchedulerTestSupport.repository(
+                                                                        requests)
+                                                                .getRequestState("101")
+                                                                .state()));
                                 Object result = invocation.callRealMethod();
                                 cleanupProcessed.set(true);
                                 return result;

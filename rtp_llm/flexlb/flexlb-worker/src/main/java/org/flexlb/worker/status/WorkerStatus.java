@@ -34,7 +34,7 @@ import static com.google.common.base.Preconditions.checkState;
  *
  * <p>A status response is first converted into an opaque {@link PreparedStatus}.
  * Endpoint and scheduler reducers consume its frozen observation, and only
- * then does {@link #publishPreparedStatus(PreparedStatus)} replace the one
+ * then does {@link #publishReducedStatus(PreparedStatus)} replace the one
  * committed holder. Readers therefore cannot observe fields from a response
  * whose cursor is still uncommitted.</p>
  */
@@ -102,6 +102,7 @@ public class WorkerStatus {
         return trace;
     }
 
+    @com.fasterxml.jackson.annotation.JsonProperty("syncTrace")
     public EndpointTrace.Snapshot getSyncTrace() {
         return trace.snapshot();
     }
@@ -271,15 +272,6 @@ public class WorkerStatus {
     }
 
     /**
-     * Publish fields and both cursors at one linearization point after every
-     * response reducer has succeeded.
-     */
-    public void publishPreparedStatus(PreparedStatus prepared) {
-        requireGenerationLock();
-        publishReducedStatus(prepared);
-    }
-
-    /**
      * Commit a prepared observation after its DiscoveryEndpoint has reduced the request records.
      * The DiscoveryEndpoint serializes this commit with cleanup; the source cursor CAS
      * rejects a prepared update whose base has already been replaced.
@@ -303,16 +295,6 @@ public class WorkerStatus {
         checkState(
                 committedStatus.compareAndSet(prepared.baseCommitted, prepared.nextCommitted),
                 "prepared status is stale or has already been published");
-    }
-
-    /**
-     * Record a validated response for a status transaction.
-     */
-    public PollHealth recordSuccessfulPoll(boolean reportedAlive) {
-        requireActiveGeneration();
-        synchronized (healthGate) {
-            return updatePollHealth(reportedAlive);
-        }
     }
 
     /**

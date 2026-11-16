@@ -41,7 +41,7 @@ import static org.flexlb.worker.endpoint.EndpointTestSupport.decodeRoutingSnapsh
  */
 class DecodeStrategyTest {
     private static final SchedulingMetadata SCHEDULING =
-            SchedulingMetadata.explicit(0, Long.MAX_VALUE);
+            SchedulingMetadata.of(0, null, Long.MAX_VALUE, 50);
 
     private ConfigService configService;
     private Map<String, WorkerStatus> decodeStatuses;
@@ -1073,7 +1073,7 @@ class DecodeStrategyTest {
                     StrategyTestSupport.select(
                             availableStrategy(registry),
                             request(100L, 1001L),
-                            SchedulingMetadata.explicit(50, Long.MAX_VALUE),
+                            SchedulingMetadata.of(50, null, Long.MAX_VALUE, 50),
                             null);
             Assertions.assertEquals(SelectionResult.Status.BLOCKED, result.status());
             Assertions.assertEquals(
@@ -1364,7 +1364,7 @@ class DecodeStrategyTest {
         Assertions.assertEquals(SelectionResult.Status.BLOCKED, result.status());
         Assertions.assertNull(result.value());
         var view = (DecodeEndpoint.SelectionSnapshot) result.diagnostics().get("decodeCandidate");
-        return ServerStatus.forWorker(
+        return org.flexlb.worker.status.WorkerStatusTestSupport.serverStatus(
                 RoleType.DECODE,
                 inputs.getRequestId(),
                 view.topology(),

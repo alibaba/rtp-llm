@@ -79,7 +79,9 @@ class RequestAdmissionResourceLeakTest {
                             registered.item(),
                             RequestProtocolTestSupport.publication(() -> false)));
             assertNull(activeRoute(1L));
-            assertTrue(lifecycle.isAdmissionOpen(registered.item().ctx()));
+            assertTrue(
+                    org.flexlb.balance.schedule.SchedulerTestSupport.isAdmissionOpen(
+                            lifecycle, registered.item().ctx()));
             verify(registered.item().decodeEndpoint())
                     .rollbackSelection(registered.item().decodeRegistration());
         }
@@ -104,7 +106,9 @@ class RequestAdmissionResourceLeakTest {
                                                         "publication failed");
                                             })));
             assertNull(activeRoute(2L));
-            assertTrue(lifecycle.isAdmissionOpen(registered.item().ctx()));
+            assertTrue(
+                    org.flexlb.balance.schedule.SchedulerTestSupport.isAdmissionOpen(
+                            lifecycle, registered.item().ctx()));
         }
     }
 
@@ -309,7 +313,8 @@ class RequestAdmissionResourceLeakTest {
                 org.flexlb.balance.schedule.SchedulerTestSupport.runtime(lifecycle));
         assertEquals(0, lifecycle.repository.liveRequestCount());
         org.junit.jupiter.api.Assertions.assertFalse(
-                lifecycle.isAdmissionOpen(registered.item().ctx()));
+                org.flexlb.balance.schedule.SchedulerTestSupport.isAdmissionOpen(
+                        lifecycle, registered.item().ctx()));
         verify(registered.item().decodeEndpoint())
                 .rollbackSelection(registered.item().decodeRegistration());
         lifecycle.cancel("71", CancelReason.SHUTDOWN);

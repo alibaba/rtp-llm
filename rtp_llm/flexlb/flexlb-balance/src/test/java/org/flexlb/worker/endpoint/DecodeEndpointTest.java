@@ -71,7 +71,10 @@ class DecodeEndpointTest {
             assertEquals(
                     0,
                     endpoint.resourceSnapshot().requests().values().stream()
-                            .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                            .filter(
+                                    snapshotRequest ->
+                                            !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                    .isEngineConfirmed(snapshotRequest.phase()))
                             .count());
             assertEquals(1, endpoint.selectionSnapshot().usage().occupiedRequests());
             assertEquals(0L, endpoint.selectionSnapshot().usage().hardReservedKvTokens());
@@ -145,7 +148,10 @@ class DecodeEndpointTest {
         assertEquals(
                 0,
                 endpoint.resourceSnapshot().requests().values().stream()
-                        .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count());
         assertEquals(
                 phase == TaskPhase.RUNNING
@@ -187,7 +193,10 @@ class DecodeEndpointTest {
         assertEquals(
                 0,
                 endpoint.resourceSnapshot().requests().values().stream()
-                        .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count());
     }
 
@@ -198,9 +207,15 @@ class DecodeEndpointTest {
         assertEquals(
                 1,
                 endpoint.resourceSnapshot().requests().values().stream()
-                        .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count());
-        assertEquals(9500, endpoint.selectionSnapshot().usage().hardKvAvailable());
+        assertEquals(
+                9500,
+                org.flexlb.worker.status.WorkerStatusTestSupport.hardKvAvailable(
+                        endpoint.selectionSnapshot().usage()));
     }
 
     @Test
@@ -212,7 +227,10 @@ class DecodeEndpointTest {
         assertEquals(
                 1,
                 endpoint.resourceSnapshot().requests().values().stream()
-                        .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count());
     }
 
@@ -223,7 +241,10 @@ class DecodeEndpointTest {
         assertEquals(
                 1,
                 endpoint.resourceSnapshot().requests().values().stream()
-                        .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count());
     }
 
@@ -235,9 +256,15 @@ class DecodeEndpointTest {
         assertEquals(
                 0,
                 endpoint.resourceSnapshot().requests().values().stream()
-                        .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count());
-        assertEquals(0, endpoint.selectionSnapshot().usage().hardKvAvailable());
+        assertEquals(
+                0,
+                org.flexlb.worker.status.WorkerStatusTestSupport.hardKvAvailable(
+                        endpoint.selectionSnapshot().usage()));
     }
 
     @Test
@@ -251,20 +278,32 @@ class DecodeEndpointTest {
         response.setTotalKvCacheTokens(10_000L);
         response.setAvailableKvCacheTokens(9_500L);
         EndpointTestSupport.applyStatus(endpoint, response).run();
-        assertEquals(9_500L, endpoint.selectionSnapshot().usage().hardKvAvailable());
+        assertEquals(
+                9_500L,
+                org.flexlb.worker.status.WorkerStatusTestSupport.hardKvAvailable(
+                        endpoint.selectionSnapshot().usage()));
 
         endpoint.releaseRequest(reservation);
-        assertEquals(9_500L, endpoint.selectionSnapshot().usage().hardKvAvailable());
+        assertEquals(
+                9_500L,
+                org.flexlb.worker.status.WorkerStatusTestSupport.hardKvAvailable(
+                        endpoint.selectionSnapshot().usage()));
         assertEquals(1, endpoint.selectionSnapshot().usage().occupiedRequests());
         endpoint.releaseRequest(reservation);
         EndpointTestSupport.applyStatus(endpoint, response).run();
-        assertEquals(9_500L, endpoint.selectionSnapshot().usage().hardKvAvailable());
+        assertEquals(
+                9_500L,
+                org.flexlb.worker.status.WorkerStatusTestSupport.hardKvAvailable(
+                        endpoint.selectionSnapshot().usage()));
         assertEquals(1, endpoint.selectionSnapshot().usage().occupiedRequests());
 
         response.setRunningTaskInfo(Map.of());
         response.setAvailableKvCacheTokens(10_000L);
         EndpointTestSupport.applyStatus(endpoint, response).run();
-        assertEquals(10_000L, endpoint.selectionSnapshot().usage().hardKvAvailable());
+        assertEquals(
+                10_000L,
+                org.flexlb.worker.status.WorkerStatusTestSupport.hardKvAvailable(
+                        endpoint.selectionSnapshot().usage()));
         assertEquals(0L, endpoint.selectionSnapshot().realKvUsed());
     }
 
@@ -279,9 +318,15 @@ class DecodeEndpointTest {
         assertEquals(
                 0,
                 endpoint.resourceSnapshot().requests().values().stream()
-                        .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count());
-        assertEquals(10000, endpoint.selectionSnapshot().usage().hardKvAvailable());
+        assertEquals(
+                10000,
+                org.flexlb.worker.status.WorkerStatusTestSupport.hardKvAvailable(
+                        endpoint.selectionSnapshot().usage()));
     }
 
     @Test
@@ -296,7 +341,10 @@ class DecodeEndpointTest {
         assertEquals(
                 0,
                 endpoint.resourceSnapshot().requests().values().stream()
-                        .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count());
     }
 
@@ -311,7 +359,10 @@ class DecodeEndpointTest {
         assertEquals(
                 0,
                 endpoint.resourceSnapshot().requests().values().stream()
-                        .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count());
     }
 
@@ -320,7 +371,10 @@ class DecodeEndpointTest {
         reserve(100L, 500, 500);
         updateStatus(null, null, 10000);
 
-        assertEquals(9500, endpoint.selectionSnapshot().usage().hardKvAvailable());
+        assertEquals(
+                9500,
+                org.flexlb.worker.status.WorkerStatusTestSupport.hardKvAvailable(
+                        endpoint.selectionSnapshot().usage()));
     }
 
     @Test
@@ -330,7 +384,10 @@ class DecodeEndpointTest {
         reserve(100L, 3000, 3000);
         reserve(101L, 2000, 2000);
 
-        assertEquals(5000, endpoint.selectionSnapshot().usage().hardKvAvailable());
+        assertEquals(
+                5000,
+                org.flexlb.worker.status.WorkerStatusTestSupport.hardKvAvailable(
+                        endpoint.selectionSnapshot().usage()));
     }
 
     @Test
@@ -355,7 +412,10 @@ class DecodeEndpointTest {
         assertEquals(
                 1,
                 endpoint.resourceSnapshot().requests().values().stream()
-                        .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                        .filter(
+                                snapshotRequest ->
+                                        !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                .isEngineConfirmed(snapshotRequest.phase()))
                         .count());
         assertEquals(1, endpoint.selectionSnapshot().usage().occupiedRequests());
         assertEquals(1, endpoint.selectionSnapshot().usage().occupiedRequests());

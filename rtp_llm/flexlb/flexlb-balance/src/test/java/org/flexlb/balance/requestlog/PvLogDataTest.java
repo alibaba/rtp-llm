@@ -9,45 +9,16 @@ import org.flexlb.util.JsonUtils;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
-import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Checks request log data construction and serialized fields.
  */
 class PvLogDataTest {
-    @Test
-    void keepsCacheSelectionWhenSelectedCandidateHasNoEndpoint() {
-        RequestContext context = new RequestContext(new org.flexlb.config.FlexlbConfig());
-        context.recordCacheSelection(RoleType.PREFILL, "10.0.0.2", 512L);
-        context.recordRoutingDecision(
-                new RoutingDecision(
-                        RoleType.PREFILL,
-                        "default",
-                        "CostBasedPrefill",
-                        "CACHE_LEADER",
-                        1600L,
-                        1,
-                        "10.0.0.2:8080",
-                        1,
-                        1,
-                        false,
-                        Map.of(),
-                        List.of(
-                                new RoutingDecision.Candidate(
-                                        null, true, 90L, 20L, 70L, 512L, 512L, 1L, null, null, null,
-                                        "MODELED", 1L))));
-
-        PvLogData data = pv(context);
-
-        assertEquals(1, data.getCacheMatchSelections().size());
-        assertEquals("10.0.0.2", data.getCacheMatchSelections().getFirst().selectedIp());
-    }
 
     @Test
     void includesPhaseToDistinguishTwoDecisionsWithTheSameRequestId() throws Exception {
@@ -167,106 +138,6 @@ class PvLogDataTest {
     }
 
     @Test
-    void includesSelectionReasonInDecisionSnapshot() {
-        RequestContext context = new RequestContext(new org.flexlb.config.FlexlbConfig());
-        context.recordRoutingDecision(
-                new org.flexlb.balance.requestlog.RoutingDecision(
-                        RoleType.PREFILL,
-                        null,
-                        null,
-                        "SHORTEST_TTFT_FALLBACK",
-                        0L,
-                        0,
-                        null,
-                        0,
-                        0,
-                        false,
-                        java.util.Map.of(),
-                        java.util.List.of()));
-
-        String json = JsonUtils.toStringOrEmpty(pv(context));
-
-        assertTrue(json.contains("\"selectionReason\":\"SHORTEST_TTFT_FALLBACK\""));
-        assertTrue(json.contains("routingDecisions"));
-        assertFalse(json.contains("\"selectionReasons\""));
-    }
-
-    @Test
-    void includesKvcmTimings() {
-        Request request = Request.builder().requestId("1").seqLen(128).requestTimeMs(1000).build();
-
-        RequestContext context = new RequestContext(new org.flexlb.config.FlexlbConfig());
-        context.setRequest(request);
-        context.setFuture(java.util.concurrent.CompletableFuture.completedFuture(new Response()));
-        context.recordRequestArrival(context.getTiming().startedAtMs() - 500);
-        context.recordCacheQuery("KVCM", 56);
-        context.recordCacheSelection(RoleType.PREFILL, "10.0.0.1", 256);
-        context.recordCacheQuery("KVCM", 78);
-        context.recordCacheSelection(RoleType.PREFILL, "10.0.0.2", 512);
-        context.recordCacheQuery("KVCM", 10);
-        context.recordCacheSelection(RoleType.DECODE, "10.0.0.3", 128);
-        context.recordRoutingDecision(
-                new RoutingDecision(
-                        RoleType.PREFILL,
-                        "default",
-                        "CostBasedPrefill",
-                        "CACHE_LEADER",
-                        1600L,
-                        1,
-                        "10.0.0.2:8080",
-                        2,
-                        1,
-                        false,
-                        java.util.Map.of(),
-                        List.of(
-                                new RoutingDecision.Candidate(
-                                        "10.0.0.2:8080",
-                                        true,
-                                        90L,
-                                        20L,
-                                        70L,
-                                        512L,
-                                        512L,
-                                        1L,
-                                        null,
-                                        null,
-                                        null,
-                                        "MODELED",
-                                        1L))));
-        context.finishRequestTiming();
-
-        PvLogData data = pv(context);
-
-        assertEquals(context.getTiming().totalElapsedUs(), data.getTotalUs());
-        assertEquals(500, data.getArrivalMs());
-        assertEquals("KVCM", data.getCacheMatchSource());
-        assertEquals(144, data.getCacheMatchUs());
-        assertEquals(3, data.getCacheMatchCount());
-        assertEquals(1, data.getCacheMatchSelections().size());
-        assertEquals(1, data.getRoutingDecisions().size());
-        assertEquals("10.0.0.3", data.getCacheMatchSelections().getFirst().selectedIp());
-        assertEquals(128, data.getCacheMatchSelections().getFirst().hitCacheTokens());
-
-        String json = JsonUtils.toStringOrEmpty(data);
-        assertTrue(json.contains("\"totalUs\":" + context.getTiming().totalElapsedUs()));
-        assertTrue(json.contains("\"arrivalMs\":500"));
-        assertFalse(json.contains("\"reqParseUs\""));
-        assertFalse(json.contains("\"hashWaitUs\""));
-        assertFalse(json.contains("\"hashUs\""));
-        assertTrue(json.contains("\"cacheMatchSource\":\"KVCM\""));
-        assertTrue(json.contains("\"cacheMatchUs\":144"));
-        assertTrue(json.contains("\"cacheMatchCount\":3"));
-        assertTrue(json.contains("\"cacheMatchSelections\":[{\"role\":\"DECODE\""));
-        assertFalse(json.contains("\"selectionReasons\""));
-        assertTrue(json.contains("\"routingDecisions\":[{\"role\":\"PREFILL\""));
-        assertTrue(json.contains("\"strategy\":\"CostBasedPrefill\""));
-        assertTrue(json.contains("\"projectedWorkTokens\":90"));
-        assertFalse(json.contains("trackedTasks"));
-        assertFalse(json.contains("waitingTasks"));
-        assertFalse(json.contains("runningTasks"));
-    }
-
-    @Test
     void includesSequenceLengthAndOmitsPayloadDiagnostics() {
         Request request = Request.builder().requestId("2").seqLen(999).build();
 
@@ -298,121 +169,6 @@ class PvLogDataTest {
         assertFalse(json.contains("\"inputIdsCount\""));
         assertFalse(json.contains("\"requestBodyBytes\""));
         assertTrue(json.contains("\"success\":false"));
-    }
-
-    @Test
-    void retainedPvSnapshotDoesNotChangeAfterSequentialRoutingUpdates() throws Exception {
-        RequestContext context = new RequestContext(new org.flexlb.config.FlexlbConfig());
-        var published = new java.util.concurrent.CountDownLatch(1);
-        var resume = new java.util.concurrent.CountDownLatch(1);
-        try (var executor = java.util.concurrent.Executors.newSingleThreadExecutor()) {
-            var writer =
-                    executor.submit(
-                            () -> {
-                                for (int attempt = 0; attempt < 1_000; attempt++) {
-                                    context.beginRoutingAttempt(RoleType.PREFILL);
-                                    context.recordCacheQuery("LOCAL_SYNC", 2);
-                                    context.recordRoutingDecision(
-                                            new RoutingDecision(
-                                                    RoleType.PREFILL,
-                                                    "default",
-                                                    "CostBasedPrefill",
-                                                    "attempt-" + attempt,
-                                                    attempt,
-                                                    attempt + 1,
-                                                    "worker:8080",
-                                                    1,
-                                                    0,
-                                                    false,
-                                                    java.util.Map.of(),
-                                                    List.of()));
-                                    if (attempt == 0) {
-                                        published.countDown();
-                                        if (!resume.await(
-                                                5, java.util.concurrent.TimeUnit.SECONDS)) {
-                                            throw new AssertionError(
-                                                    "PV reader did not resume the route writer");
-                                        }
-                                    }
-                                }
-                                return null;
-                            });
-            try {
-                assertTrue(published.await(5, java.util.concurrent.TimeUnit.SECONDS));
-                PvLogData terminalPv = pv(context);
-                String terminalJson = JsonUtils.toStringOrEmpty(terminalPv);
-                resume.countDown();
-                writer.get(5, java.util.concurrent.TimeUnit.SECONDS);
-                for (int i = 0; i < 1_000; i++) {
-                    PvLogData snapshot = pv(context);
-                    assertEquals(snapshot.getCacheMatchCount() * 2L, snapshot.getCacheMatchUs());
-                    assertEquals(
-                            "attempt-999",
-                            snapshot.getRoutingDecisions().getFirst().selectionReason());
-                    assertFalse(JsonUtils.toStringOrEmpty(snapshot).isEmpty());
-                }
-                writer.get(5, java.util.concurrent.TimeUnit.SECONDS);
-                assertEquals(terminalJson, JsonUtils.toStringOrEmpty(terminalPv));
-                assertEquals(1, terminalPv.getCacheMatchCount());
-                assertEquals(1_000, pv(context).getCacheMatchCount());
-            } finally {
-                resume.countDown();
-            }
-        }
-    }
-
-    @Test
-    void completedProcessingPublishesTimingFieldsToFinalReader() throws Exception {
-        RequestContext context = new RequestContext(new org.flexlb.config.FlexlbConfig());
-        try (var executor = java.util.concurrent.Executors.newSingleThreadExecutor()) {
-            executor.submit(
-                            () -> {
-                                for (int i = 1; i <= 5_000; i++) {
-                                    context.recordCacheQuery("KVCM", 2);
-                                }
-                            })
-                    .get(5, java.util.concurrent.TimeUnit.SECONDS);
-        }
-        PvLogData result = pv(context);
-        assertEquals(5_000, result.getCacheMatchCount());
-        assertEquals(10_000, result.getCacheMatchUs());
-    }
-
-    @Test
-    void rejectedSelectionReasonCannotCorruptLaterPvSnapshot() {
-        RequestContext context = new RequestContext(new org.flexlb.config.FlexlbConfig());
-        context.recordRoutingDecision(
-                new org.flexlb.balance.requestlog.RoutingDecision(
-                        RoleType.PREFILL,
-                        null,
-                        null,
-                        "BEST_ONLY",
-                        0L,
-                        0,
-                        null,
-                        0,
-                        0,
-                        false,
-                        java.util.Map.of(),
-                        java.util.List.of()));
-        assertThrows(
-                NullPointerException.class,
-                () ->
-                        context.recordRoutingDecision(
-                                new org.flexlb.balance.requestlog.RoutingDecision(
-                                        RoleType.PREFILL,
-                                        null,
-                                        null,
-                                        null,
-                                        0L,
-                                        0,
-                                        null,
-                                        0,
-                                        0,
-                                        false,
-                                        java.util.Map.of(),
-                                        java.util.List.of())));
-        assertEquals("BEST_ONLY", pv(context).getRoutingDecisions().getFirst().selectionReason());
     }
 
     private static PvLogData pv(RequestContext data) {

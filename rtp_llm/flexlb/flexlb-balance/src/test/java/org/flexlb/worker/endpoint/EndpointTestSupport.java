@@ -210,7 +210,9 @@ public final class EndpointTestSupport {
 
     public static boolean isReserved(DecodeResources.ResourceSnapshot snapshot, String requestId) {
         var request = snapshot.requests().get(requestId);
-        return request != null && !request.phase().isEngineConfirmed();
+        return request != null
+                && !org.flexlb.worker.status.WorkerStatusTestSupport.isEngineConfirmed(
+                        request.phase());
     }
 
     /**
@@ -221,7 +223,8 @@ public final class EndpointTestSupport {
     public static long expectedReservedKv(DecodeResources.ResourceSnapshot snapshot) {
         long expected = 0L;
         for (var request : snapshot.requests().values()) {
-            if (!request.phase().isEngineConfirmed()) {
+            if (!org.flexlb.worker.status.WorkerStatusTestSupport.isEngineConfirmed(
+                    request.phase())) {
                 expected += request.expectedKvTokens();
             }
         }
@@ -287,12 +290,13 @@ public final class EndpointTestSupport {
                 new DecodeEndpoint(
                         status, repository, new org.flexlb.worker.endpoint.CapacityNotifier());
         if (org.mockito.Mockito.mockingDetails(repository).isMock()) {
+            var fixtureContext = repository.findActive("fixture");
+            var owner = fixtureContext == null ? null : fixtureContext.getRequestScheduler();
             org.mockito.Mockito.when(
                             repository.findActive(org.mockito.ArgumentMatchers.anyString()))
                     .thenAnswer(
                             call -> {
                                 String id = call.getArgument(0);
-                                var owner = repository.ownerOf(String.valueOf(id));
                                 if (owner == null) {
                                     return null;
                                 }
@@ -378,7 +382,8 @@ public final class EndpointTestSupport {
                     status.prepareStatus(
                             WorkerStatusTestSupport.freezeStatusResponse(status, response));
             WorkerEndpoint.StatusChange projection = endpoint.applyWorkerStatus(status, prepared);
-            status.recordSuccessfulPoll(response.isAlive());
+            org.flexlb.worker.status.WorkerStatusTestSupport.recordSuccessfulPoll(
+                    status, response.isAlive());
             return () -> endpoint.publishStatus(projection);
         } finally {
             status.lock.unlock();
@@ -431,8 +436,9 @@ public final class EndpointTestSupport {
             WorkerStatus.PreparedStatus prepared =
                     status.prepareStatus(
                             WorkerStatusTestSupport.freezeStatusResponse(status, response));
-            status.publishPreparedStatus(prepared);
-            status.recordSuccessfulPoll(response.isAlive());
+            status.publishReducedStatus(prepared);
+            org.flexlb.worker.status.WorkerStatusTestSupport.recordSuccessfulPoll(
+                    status, response.isAlive());
         } finally {
             status.lock.unlock();
         }

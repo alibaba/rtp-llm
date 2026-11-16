@@ -578,9 +578,11 @@ class DirectAdmissionContractTest {
                                                     .stream()
                                                     .filter(
                                                             snapshotRequest ->
-                                                                    !snapshotRequest
-                                                                            .phase()
-                                                                            .isEngineConfirmed())
+                                                                    !org.flexlb.worker.status
+                                                                            .WorkerStatusTestSupport
+                                                                            .isEngineConfirmed(
+                                                                                    snapshotRequest
+                                                                                            .phase()))
                                                     .count());
                                 }
                                 return call.callRealMethod();
@@ -607,7 +609,10 @@ class DirectAdmissionContractTest {
             assertEquals(
                     1,
                     fixture.decode.resourceSnapshot().requests().values().stream()
-                            .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                            .filter(
+                                    snapshotRequest ->
+                                            !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                    .isEngineConfirmed(snapshotRequest.phase()))
                             .count());
             verify(fixture.decode).rollbackSelection(any());
         }
@@ -731,7 +736,10 @@ class DirectAdmissionContractTest {
             assertEquals(
                     1,
                     fixture.decode.resourceSnapshot().requests().values().stream()
-                            .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                            .filter(
+                                    snapshotRequest ->
+                                            !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                    .isEngineConfirmed(snapshotRequest.phase()))
                             .count());
             assertEquals(1, SchedulerTestSupport.repository(fixture.requests).liveRequestCount());
             assertEquals(
@@ -803,7 +811,10 @@ class DirectAdmissionContractTest {
             assertEquals(
                     1,
                     fixture.decode.resourceSnapshot().requests().values().stream()
-                            .filter(snapshotRequest -> !snapshotRequest.phase().isEngineConfirmed())
+                            .filter(
+                                    snapshotRequest ->
+                                            !org.flexlb.worker.status.WorkerStatusTestSupport
+                                                    .isEngineConfirmed(snapshotRequest.phase()))
                             .count());
             assertEquals(0, SchedulerTestSupport.repository(fixture.requests).liveRequestCount());
         }

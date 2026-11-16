@@ -46,7 +46,7 @@ final class StrategyTestSupport {
         var context = new org.flexlb.balance.schedule.RequestContext(config());
         context.setRequest(request);
         context.setSchedulingMetadata(
-                org.flexlb.balance.schedule.SchedulingMetadata.explicit(50, Long.MAX_VALUE));
+                org.flexlb.balance.schedule.SchedulingMetadata.of(50, null, Long.MAX_VALUE, 50));
         return new Selection(context, new java.util.ArrayList<>());
     }
 
@@ -170,8 +170,9 @@ final class StrategyTestSupport {
             WorkerStatus.PreparedStatus prepared =
                     status.prepareStatus(
                             WorkerStatusTestSupport.freezeStatusResponse(status, response));
-            status.publishPreparedStatus(prepared);
-            status.recordSuccessfulPoll(response.isAlive());
+            status.publishReducedStatus(prepared);
+            org.flexlb.worker.status.WorkerStatusTestSupport.recordSuccessfulPoll(
+                    status, response.isAlive());
         } finally {
             status.lock.unlock();
         }

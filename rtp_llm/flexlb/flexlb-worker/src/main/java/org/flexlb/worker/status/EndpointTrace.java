@@ -42,8 +42,6 @@ public final class EndpointTrace {
     private volatile long cleanupAcquiredNanos;
     private volatile long cleanupWaitUs = -1L;
     private volatile long cleanupHoldUs = -1L;
-    private volatile long scannedKeys;
-    private volatile long removedMappings;
 
     public void record(Stage stage) {
         if (stage == Stage.ENDPOINT_PUBLISHED && !endpointPublished.compareAndSet(false, true)) {
@@ -92,11 +90,6 @@ public final class EndpointTrace {
         record(stage);
     }
 
-    public void recordCleanupCounts(long scanned, long removed) {
-        scannedKeys = scanned;
-        removedMappings = removed;
-    }
-
     /**
      * Captures both poll kinds without locks; concurrent fields can describe adjacent instants.
      */
@@ -117,8 +110,6 @@ public final class EndpointTrace {
                 gateClosedAtMs.get(),
                 ongoingTotalUs(cleanupWaitUs, cleanupAttemptNanos, now),
                 ongoingTotalUs(cleanupHoldUs, cleanupAcquiredNanos, now),
-                scannedKeys,
-                removedMappings,
                 error.get(),
                 statusPoll == null ? null : statusPoll.snapshot(now),
                 cachePoll == null ? null : cachePoll.snapshot(now));
@@ -448,8 +439,6 @@ public final class EndpointTrace {
             long gateClosedAtMs,
             long cleanupWaitUs,
             long cleanupHoldUs,
-            long scannedKeys,
-            long removedMappings,
             String error,
             PollSnapshot statusPoll,
             PollSnapshot cachePoll) {
@@ -469,11 +458,7 @@ public final class EndpointTrace {
                         .append(" cleanupWaitUs=")
                         .append(cleanupWaitUs)
                         .append(" cleanupHoldUs=")
-                        .append(cleanupHoldUs)
-                        .append(" scanned=")
-                        .append(scannedKeys)
-                        .append(" removed=")
-                        .append(removedMappings);
+                        .append(cleanupHoldUs);
             }
             if (error != null) {
                 text.append(" error=").append(error);

@@ -38,27 +38,6 @@ public final class RequestRepository implements org.flexlb.worker.endpoint.Worke
         if (!closed) expireTerminalRecords(System.currentTimeMillis() - 10_000L);
     }
 
-    public AbstractRequestScheduler ownerOf(String requestId) {
-        return ownerOf(requestId, RequestPhase.GENERATION);
-    }
-
-    public AbstractRequestScheduler ownerOf(String requestId, RequestPhase phase) {
-        RequestContext context = findActive(requestId, phase);
-        if (context != null) {
-            return context.getRequestScheduler();
-        }
-        var terminal = terminalByPhase.get(phase).get(requestId);
-        return terminal == null ? null : terminal.owner();
-    }
-
-    public RequestContext findActive(String requestId) {
-        return findActive(requestId, RequestPhase.GENERATION);
-    }
-
-    public RequestContext findActive(String requestId, RequestPhase phase) {
-        return activeByPhase.get(phase).get(requestId);
-    }
-
     public boolean retainsIdentity(String requestId) {
         return activeByPhase.values().stream().anyMatch(map -> map.containsKey(requestId))
                 || terminalByPhase.values().stream().anyMatch(map -> map.containsKey(requestId));
@@ -114,6 +93,14 @@ public final class RequestRepository implements org.flexlb.worker.endpoint.Worke
                         ? RequestState.from(context.snapshot())
                         : terminal == null ? null : terminal;
         return state;
+    }
+
+    public RequestContext findActive(String requestId) {
+        return findActive(requestId, RequestPhase.GENERATION);
+    }
+
+    public RequestContext findActive(String requestId, RequestPhase phase) {
+        return activeByPhase.get(phase).get(requestId);
     }
 
     public boolean closeRegistration() {

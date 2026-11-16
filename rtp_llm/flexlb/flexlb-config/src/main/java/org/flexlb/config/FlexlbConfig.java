@@ -13,7 +13,6 @@ import org.flexlb.config.master.ZookeeperConsistencyConfig;
 import org.flexlb.config.monitoring.ObservabilityConfig;
 import org.flexlb.config.routing.OptimizerRuntimeConfig;
 import org.flexlb.config.routing.RoutingConfig;
-import org.flexlb.config.scheduler.PreemptionStage;
 import org.flexlb.config.scheduler.QueueOrderingConfig;
 import org.flexlb.config.scheduler.RequestLifecycleConfig;
 import org.flexlb.config.scheduler.SchedulerConfig;
@@ -81,15 +80,8 @@ public final class FlexlbConfig {
     }
 
     @JsonIgnore
-    public boolean allowsPreemption(PreemptionStage stage) {
-        return isPriorityOrdering()
-                && scheduler.getOrdering().getPreemption() != null
-                && scheduler.getOrdering().getPreemption().allows(stage);
-    }
-
-    @JsonIgnore
-    public boolean isPriorityOrdering() {
-        return isQueue() && scheduler.getOrdering().getType() == QueueOrderingConfig.Type.PRIORITY;
+    public long resolveExpiresAtMs(long startTime) {
+        return isQueue() ? scheduler.resolveExpiresAtMs(startTime) : Long.MAX_VALUE;
     }
 
     @JsonIgnore
@@ -98,13 +90,13 @@ public final class FlexlbConfig {
     }
 
     @JsonIgnore
-    public long resolveExpiresAtMs(long startTime) {
-        return isQueue() ? scheduler.resolveExpiresAtMs(startTime) : Long.MAX_VALUE;
+    public int defaultPriority() {
+        return isPriorityOrdering() ? scheduler.getOrdering().getDefaultPriority() : 50;
     }
 
     @JsonIgnore
-    public int defaultPriority() {
-        return isPriorityOrdering() ? scheduler.getOrdering().getDefaultPriority() : 50;
+    public boolean isPriorityOrdering() {
+        return isQueue() && scheduler.getOrdering().getType() == QueueOrderingConfig.Type.PRIORITY;
     }
 
     @JsonIgnore

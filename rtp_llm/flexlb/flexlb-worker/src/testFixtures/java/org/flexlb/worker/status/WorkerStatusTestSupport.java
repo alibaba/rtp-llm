@@ -10,6 +10,40 @@ import java.util.Objects;
 public final class WorkerStatusTestSupport {
     private WorkerStatusTestSupport() {}
 
+    public static boolean isEngineConfirmed(DecodeTaskPhase phase) {
+        return phase == DecodeTaskPhase.ACCEPTED_NOT_RUNNING || phase == DecodeTaskPhase.RUNNING;
+    }
+
+    public static long hardKvAvailable(
+            org.flexlb.worker.endpoint.DecodeResources.CapacityUsage usage) {
+        return Math.max(0L, usage.availableKvTokens() - usage.hardReservedKvTokens());
+    }
+
+    public static WorkerStatus.PollHealth recordSuccessfulPoll(WorkerStatus status, boolean alive) {
+        try (var lease = Objects.requireNonNull(status.tryBeginStatusPoll(), "status poll slot")) {
+            status.recordStatusRpcResult(lease, true, alive);
+        }
+        return status.pollHealth();
+    }
+
+    public static ServerStatus serverStatus(
+            org.flexlb.config.service.RoleType role,
+            String requestId,
+            WorkerStatus.TopologySnapshot topology,
+            WorkerStatus.EngineObservation observation) {
+        ServerStatus result = new ServerStatus();
+        result.setSuccess(true);
+        result.setRole(role);
+        result.setRequestId(requestId);
+        result.setGroup(topology.group());
+        result.setServerIp(topology.ip());
+        result.setHttpPort(topology.port());
+        result.setGrpcPort(topology.grpcPort());
+        result.setSelectedEngineIndex(topology.engineIndex(), topology.multiEngineNum());
+        result.setDpRank(observation.dpRank());
+        return result;
+    }
+
     public static WorkerStatus.StatusObservation freezeStatusResponse(
             WorkerStatus status, WorkerStatusResponse response) {
         Objects.requireNonNull(response, "response");

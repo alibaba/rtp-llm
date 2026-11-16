@@ -41,7 +41,9 @@ final class MockEngineTestSupport {
     static boolean isReserved(
             org.flexlb.worker.endpoint.DecodeResources.ResourceSnapshot snapshot, long requestId) {
         var request = snapshot.requests().get(String.valueOf(requestId));
-        return request != null && !request.phase().isEngineConfirmed();
+        return request != null
+                && !org.flexlb.worker.status.WorkerStatusTestSupport.isEngineConfirmed(
+                        request.phase());
     }
 
     static EngineRpcService.GenerateInputPB inputWithDecode(

@@ -63,8 +63,9 @@ public final class WorkerStatusTestSupport {
                     org.flexlb.worker.status.WorkerStatusTestSupport.freezeStatusResponse(
                             workerStatus, response);
             WorkerStatus.PreparedStatus prepared = workerStatus.prepareStatus(observation);
-            workerStatus.publishPreparedStatus(prepared);
-            workerStatus.recordSuccessfulPoll(alive);
+            workerStatus.publishReducedStatus(prepared);
+            org.flexlb.worker.status.WorkerStatusTestSupport.recordSuccessfulPoll(
+                    workerStatus, alive);
         } finally {
             workerStatus.lock.unlock();
         }

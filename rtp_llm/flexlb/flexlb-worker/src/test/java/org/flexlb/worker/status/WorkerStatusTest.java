@@ -41,7 +41,6 @@ class WorkerStatusTest {
     @Test
     void generationChangesStillRequireTheGenerationLock() {
         var status = discovered();
-        assertThrows(IllegalStateException.class, () -> status.recordSuccessfulPoll(true));
         assertThrows(
                 IllegalStateException.class, () -> status.updateDiscoveryLabels("s", "g", "d"));
     }
@@ -121,7 +120,7 @@ class WorkerStatusTest {
             WorkerStatus.StatusObservation observation =
                     WorkerStatusTestSupport.freezeStatusResponse(status, response);
             WorkerStatus.PreparedStatus prepared = status.prepareStatus(observation);
-            status.publishPreparedStatus(prepared);
+            status.publishReducedStatus(prepared);
         } finally {
             status.lock.unlock();
         }
@@ -302,23 +301,6 @@ class WorkerStatusTest {
         }
 
         @Test
-        @DisplayName("publishPreparedStatus requires the generation lock")
-        void publishRequiresGenerationLock() {
-            WorkerStatus status = discovered();
-            WorkerStatus.PreparedStatus prepared;
-            status.lock.lock();
-            try {
-                prepared =
-                        status.prepareStatus(
-                                WorkerStatusTestSupport.freezeStatusResponse(
-                                        status, responseWithMarker(1L)));
-            } finally {
-                status.lock.unlock();
-            }
-            assertThrows(IllegalStateException.class, () -> status.publishPreparedStatus(prepared));
-        }
-
-        @Test
         @DisplayName("A stale prepared status loses the publish CAS")
         void stalePreparedStatusIsRejectedByCas() {
             WorkerStatus status = discovered();
@@ -344,9 +326,9 @@ class WorkerStatusTest {
 
             status.lock.lock();
             try {
-                status.publishPreparedStatus(first);
+                status.publishReducedStatus(first);
                 assertThrows(
-                        IllegalStateException.class, () -> status.publishPreparedStatus(second));
+                        IllegalStateException.class, () -> status.publishReducedStatus(second));
             } finally {
                 status.lock.unlock();
             }
@@ -420,7 +402,7 @@ class WorkerStatusTest {
                                             WorkerStatus.StatusObservation observation =
                                                     WorkerStatusTestSupport.freezeStatusResponse(
                                                             status, responseWithMarker(next));
-                                            status.publishPreparedStatus(
+                                            status.publishReducedStatus(
                                                     status.prepareStatus(observation));
                                         } finally {
                                             status.lock.unlock();
@@ -498,7 +480,9 @@ class WorkerStatusTest {
             WorkerStatus status = discovered();
             status.lock.lock();
             try {
-                WorkerStatus.PollHealth health = status.recordSuccessfulPoll(true);
+                WorkerStatus.PollHealth health =
+                        org.flexlb.worker.status.WorkerStatusTestSupport.recordSuccessfulPoll(
+                                status, true);
                 assertTrue(health.reportedAlive());
                 assertEquals(0L, health.consecutiveWorkerFailures());
             } finally {

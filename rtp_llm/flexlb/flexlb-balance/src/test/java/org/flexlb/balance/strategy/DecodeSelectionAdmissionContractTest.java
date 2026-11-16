@@ -58,8 +58,8 @@ class DecodeSelectionAdmissionContractTest {
                         StrategyTestSupport.select(
                                 fixture.strategy,
                                 request,
-                                org.flexlb.balance.schedule.SchedulingMetadata.explicit(
-                                        70, Long.MAX_VALUE),
+                                org.flexlb.balance.schedule.SchedulingMetadata.of(
+                                        70, null, Long.MAX_VALUE, 50),
                                 null);
                 assertEquals(SelectionResult.Status.SUCCESS, result.status());
                 try (Selection selected = result.value()) {
@@ -112,8 +112,8 @@ class DecodeSelectionAdmissionContractTest {
                         StrategyTestSupport.select(
                                 fixture.strategy,
                                 fixture.request(requestId),
-                                org.flexlb.balance.schedule.SchedulingMetadata.explicit(
-                                        70, Long.MAX_VALUE),
+                                org.flexlb.balance.schedule.SchedulingMetadata.of(
+                                        70, null, Long.MAX_VALUE, 50),
                                 null);
                 assertEquals(SelectionResult.Status.SUCCESS, result.status());
                 try (Selection selected = result.value()) {

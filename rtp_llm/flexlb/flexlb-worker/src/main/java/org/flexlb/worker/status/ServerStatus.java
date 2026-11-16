@@ -67,6 +67,7 @@ public class ServerStatus {
 
     @JsonIgnore
     @Setter(AccessLevel.NONE)
+    @Getter(AccessLevel.NONE)
     private int routingMultiEngineNum = 1;
 
     @JsonIgnore
@@ -100,26 +101,9 @@ public class ServerStatus {
     @JsonProperty("message")
     private String message;
 
+    @com.fasterxml.jackson.annotation.JsonSetter("preempt_request_ids")
     public void setPreemptRequestIds(List<String> preemptRequestIds) {
         this.preemptRequestIds = preemptRequestIds == null ? List.of() : preemptRequestIds;
-    }
-
-    public static ServerStatus forWorker(
-            RoleType role,
-            String requestId,
-            WorkerStatus.TopologySnapshot topology,
-            WorkerStatus.EngineObservation observation) {
-        ServerStatus result = new ServerStatus();
-        result.setSuccess(true);
-        result.setRole(role);
-        result.setRequestId(requestId);
-        result.setGroup(topology.group());
-        result.setServerIp(topology.ip());
-        result.setHttpPort(topology.port());
-        result.setGrpcPort(topology.grpcPort());
-        result.setSelectedEngineIndex(topology.engineIndex(), topology.multiEngineNum());
-        result.setDpRank(observation.dpRank());
-        return result;
     }
 
     /**
@@ -167,14 +151,6 @@ public class ServerStatus {
         routingMultiEngineNum = multiEngineNum;
         engineIndex = multiEngineNum > 1 ? selectedEngineIndex : null;
         refreshWorkerIdentity();
-    }
-
-    /**
-     * Returns the logical worker count used to derive the schedule response.
-     */
-    @JsonIgnore
-    public int getRoutingMultiEngineNum() {
-        return routingMultiEngineNum;
     }
 
     /**

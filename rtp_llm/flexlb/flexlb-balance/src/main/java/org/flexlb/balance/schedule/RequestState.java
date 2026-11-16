@@ -66,9 +66,5 @@ public record RequestState(
         TIMED_OUT,
         FAILED,
         COMPLETED;
-
-        public boolean isTerminal() {
-            return this == CANCELLED || this == TIMED_OUT || this == FAILED || this == COMPLETED;
-        }
     }
 }

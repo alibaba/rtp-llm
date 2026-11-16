@@ -51,8 +51,10 @@ class QueueRegistrationCancellationTest {
                             call -> {
                                 selected.countDown();
                                 return SelectionResult.blocked(
-                                        CapacityKey.anyGroup(
-                                                org.flexlb.config.service.RoleType.PREFILL));
+                                        new CapacityKey(
+                                                org.flexlb.config.service.RoleType.PREFILL,
+                                                null,
+                                                null));
                             });
             var request = f.context(907L);
             var future = SchedulerTestServices.entry(f.queue).submit(request);
@@ -71,8 +73,10 @@ class QueueRegistrationCancellationTest {
             when(f.router.select(any(), nullable(String.class)))
                     .thenReturn(
                             SelectionResult.blocked(
-                                    CapacityKey.anyGroup(
-                                            org.flexlb.config.service.RoleType.PREFILL)));
+                                    new CapacityKey(
+                                            org.flexlb.config.service.RoleType.PREFILL,
+                                            null,
+                                            null)));
             var context = f.context(909L);
             var future = SchedulerTestServices.entry(f.queue).submit(context);
             RequestProtocolTestSupport.awaitGlobalCapacityWaiters(f.queue, 1);

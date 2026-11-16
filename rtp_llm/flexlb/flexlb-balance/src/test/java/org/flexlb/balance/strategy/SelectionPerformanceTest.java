@@ -70,7 +70,7 @@ class SelectionPerformanceTest {
             var selector = selector(service, registry);
             var context = new RequestContext(service.loadBalanceConfig());
             context.setRequest(Request.builder().requestId("91001").seqLen(1000L).build());
-            context.setSchedulingMetadata(SchedulingMetadata.explicit(50, Long.MAX_VALUE));
+            context.setSchedulingMetadata(SchedulingMetadata.of(50, null, Long.MAX_VALUE, 50));
             var bean = (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
             assertTrue(bean.isThreadAllocatedMemorySupported());
             bean.setThreadAllocatedMemoryEnabled(true);

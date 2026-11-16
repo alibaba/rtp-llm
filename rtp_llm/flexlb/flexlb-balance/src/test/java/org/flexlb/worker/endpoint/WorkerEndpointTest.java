@@ -110,8 +110,8 @@ class WorkerEndpointTest {
 
         status.lock.lock();
         try {
-            status.publishPreparedStatus(prepared);
-            status.recordSuccessfulPoll(true);
+            status.publishReducedStatus(prepared);
+            org.flexlb.worker.status.WorkerStatusTestSupport.recordSuccessfulPoll(status, true);
         } finally {
             status.lock.unlock();
         }

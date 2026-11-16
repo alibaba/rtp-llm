@@ -113,7 +113,11 @@ class ResponseCopyTest {
         ServerStatus copy = Response.copyOf(source).getServerStatus().getFirst();
 
         assertEquals(1, copy.getEngineIndex());
-        assertEquals(2, copy.getRoutingMultiEngineNum());
+        assertEquals(
+                2,
+                (int)
+                        org.springframework.test.util.ReflectionTestUtils.getField(
+                                copy, "routingMultiEngineNum"));
         assertEquals("10.0.0.8:8080@1", copy.getLogicalIpPort());
     }
 

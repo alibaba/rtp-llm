@@ -46,8 +46,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 @DisplayName("DecodePreemptionPlanner.planDecode recompute contracts")
 class DecodePreemptionPlannerTest {
-    private static final long H_SLOT = 4L;
-    private static final long H_KV = 8L;
 
     @Test
     void negativeHarmPropagatesDiagnosticFormattingFailure() {

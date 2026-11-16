@@ -213,7 +213,8 @@ class SchedulerTestServicesTest {
                             .build());
 
             wrongMode.setSchedulingMetadata(
-                    org.flexlb.balance.schedule.SchedulingMetadata.explicit(50, Long.MAX_VALUE));
+                    org.flexlb.balance.schedule.SchedulingMetadata.of(
+                            50, null, Long.MAX_VALUE, 50));
             var rejected =
                     SchedulerTestServices.entry(
                                     (AbstractRequestScheduler)

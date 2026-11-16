@@ -36,7 +36,10 @@ class DecodeResourceTest {
         var reservation = reserve(endpoint, "a");
         report(endpoint, Map.of("a", task("a", phase)), Map.of());
         assertEquals(1, endpoint.selectionSnapshot().usage().occupiedRequests());
-        assertEquals(10000, endpoint.selectionSnapshot().usage().hardKvAvailable());
+        assertEquals(
+                10000,
+                org.flexlb.worker.status.WorkerStatusTestSupport.hardKvAvailable(
+                        endpoint.selectionSnapshot().usage()));
         assertSame(reservation, endpoint.resourceSnapshot().requests().get("a").reservation());
         report(endpoint, Map.of("a", task("a", phase)), Map.of());
         assertEquals(1, endpoint.selectionSnapshot().usage().occupiedRequests());
@@ -60,12 +63,21 @@ class DecodeResourceTest {
         reserve(endpoint, "a");
         report(endpoint, Map.of("a", task("a", TaskPhase.RECEIVED)), Map.of());
         assertEquals(1, endpoint.selectionSnapshot().usage().occupiedRequests());
-        assertEquals(10000, endpoint.selectionSnapshot().usage().hardKvAvailable());
+        assertEquals(
+                10000,
+                org.flexlb.worker.status.WorkerStatusTestSupport.hardKvAvailable(
+                        endpoint.selectionSnapshot().usage()));
         report(endpoint, Map.of("a", task("a", TaskPhase.KV_ALLOCATED)), Map.of());
         assertEquals(1, endpoint.selectionSnapshot().usage().occupiedRequests());
-        assertEquals(10000, endpoint.selectionSnapshot().usage().hardKvAvailable());
+        assertEquals(
+                10000,
+                org.flexlb.worker.status.WorkerStatusTestSupport.hardKvAvailable(
+                        endpoint.selectionSnapshot().usage()));
         report(endpoint, Map.of("a", task("a", TaskPhase.RECEIVED)), Map.of());
-        assertEquals(10000, endpoint.selectionSnapshot().usage().hardKvAvailable());
+        assertEquals(
+                10000,
+                org.flexlb.worker.status.WorkerStatusTestSupport.hardKvAvailable(
+                        endpoint.selectionSnapshot().usage()));
     }
 
     @Test
@@ -213,7 +225,10 @@ class DecodeResourceTest {
             finished.get(5, TimeUnit.SECONDS);
         }
         assertEquals(1, endpoint.selectionSnapshot().usage().occupiedRequests());
-        assertEquals(9900, endpoint.selectionSnapshot().usage().hardKvAvailable());
+        assertEquals(
+                9900,
+                org.flexlb.worker.status.WorkerStatusTestSupport.hardKvAvailable(
+                        endpoint.selectionSnapshot().usage()));
         assertTrue(endpoint.resourceSnapshot().requests().containsKey("b"));
     }
 

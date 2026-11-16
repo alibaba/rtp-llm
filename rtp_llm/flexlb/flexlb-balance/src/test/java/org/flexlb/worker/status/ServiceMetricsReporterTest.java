@@ -3,7 +3,6 @@ package org.flexlb.worker.status;
 import org.flexlb.balance.request.Request;
 import org.flexlb.balance.request.Response;
 import org.flexlb.balance.schedule.RequestContext;
-import org.flexlb.cache.metrics.CacheMetricsReporter;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.master.ZkMasterEvent;
@@ -19,7 +18,6 @@ import org.flexlb.worker.cache.CacheStatus;
 import org.flexlb.worker.endpoint.EncoderEndpoint;
 import org.flexlb.worker.endpoint.EndpointStats;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
-import org.flexlb.worker.rpc.EngineGrpcClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -31,10 +29,8 @@ import org.springframework.scheduling.TaskScheduler;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.scheduling.annotation.ScheduledAnnotationBeanPostProcessor;
 import org.springframework.scheduling.support.ScheduledMethodRunnable;
-import reactor.netty.resources.LoopResources;
 
 import java.util.Arrays;
-import java.util.List;
 import java.util.Map;
 import java.util.OptionalLong;
 
@@ -53,9 +49,6 @@ import static org.mockito.Mockito.when;
  */
 class ServiceMetricsReporterTest {
     private final FlexMonitor monitor = mock(FlexMonitor.class);
-    private final CacheMetricsReporter cacheMetricsReporter = mock(CacheMetricsReporter.class);
-    private final EngineGrpcClient engineGrpcClient = mock(EngineGrpcClient.class);
-    private final LoopResources loopResources = mock(LoopResources.class);
     private final EndpointStats workerDirectory = mock(EndpointStats.class);
 
     private ServiceMetricsReporter reporter;
@@ -286,32 +279,9 @@ class ServiceMetricsReporterTest {
 
     @Test
     void shouldReportSelectedEngineWithConfiguredStrategy() {
-        ServerStatus serverStatus = new ServerStatus();
-        serverStatus.setRole(RoleType.PREFILL);
-        serverStatus.setServerIp("10.0.0.1");
-        serverStatus.setHttpPort(8080);
-        Response response = new Response();
-        response.setSuccess(true);
-        response.setCode(200);
-        response.setServerStatus(List.of(serverStatus));
-        RequestContext context = new RequestContext(new FlexlbConfig());
-        context.recordRoutingDecision(
-                new org.flexlb.balance.requestlog.RoutingDecision(
-                        RoleType.PREFILL,
-                        null,
-                        null,
-                        "LEAST_RECENTLY_USED_IN_POOL",
-                        0L,
-                        0,
-                        null,
-                        0,
-                        0,
-                        false,
-                        java.util.Map.of(),
-                        java.util.List.of()));
-        context.setFuture(java.util.concurrent.CompletableFuture.completedFuture(response));
-
-        reportBalance(context);
+        reporter.reportSelectionResult(RoleType.PREFILL, true, 200);
+        reporter.reportSelectedWorker(
+                RoleType.PREFILL, "LEAST_RECENTLY_USED_IN_POOL", "10.0.0.1:8080", true, 200);
 
         verify(monitor)
                 .report(
@@ -1269,8 +1239,9 @@ class ServiceMetricsReporterTest {
                     workerStatus.prepareStatus(
                             org.flexlb.worker.status.WorkerStatusTestSupport.freezeStatusResponse(
                                     workerStatus, response));
-            workerStatus.publishPreparedStatus(prepared);
-            workerStatus.recordSuccessfulPoll(true);
+            workerStatus.publishReducedStatus(prepared);
+            org.flexlb.worker.status.WorkerStatusTestSupport.recordSuccessfulPoll(
+                    workerStatus, true);
         } finally {
             workerStatus.lock.unlock();
         }
@@ -1287,7 +1258,7 @@ class ServiceMetricsReporterTest {
                     selected.getRole(), response.isSuccess(), response.getCode());
             reporter.reportSelectedWorker(
                     selected.getRole(),
-                    data.selectionReason(selected.getRole()),
+                    null,
                     selected.getServerIp() + ":" + selected.getHttpPort(),
                     response.isSuccess(),
                     response.getCode());

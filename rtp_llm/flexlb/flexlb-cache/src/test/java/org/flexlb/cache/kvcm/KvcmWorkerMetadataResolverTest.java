@@ -109,8 +109,9 @@ class KvcmWorkerMetadataResolverTest {
                     workerStatus.prepareStatus(
                             org.flexlb.worker.status.WorkerStatusTestSupport.freezeStatusResponse(
                                     workerStatus, response));
-            workerStatus.publishPreparedStatus(prepared);
-            workerStatus.recordSuccessfulPoll(true);
+            workerStatus.publishReducedStatus(prepared);
+            org.flexlb.worker.status.WorkerStatusTestSupport.recordSuccessfulPoll(
+                    workerStatus, true);
         } finally {
             workerStatus.lock.unlock();
         }

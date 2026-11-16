@@ -166,6 +166,8 @@ public class FlexlbGrpcServer implements ExecutorStats {
                         .directExecutor()
                         .callExecutor(receivingGuard)
                         .addStreamTracerFactory(receivingGuard)
+                        .addStreamTracerFactory(
+                                grpcServerTimingInterceptor.requestSizeTracerFactory())
                         .intercept(new GrpcOverloadInterceptor(grpcExecutor, grpcControlExecutor))
                         .intercept(receivingGuard)
                         .addService(

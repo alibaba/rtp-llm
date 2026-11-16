@@ -6,7 +6,6 @@ import org.flexlb.config.service.RoleType;
 import org.flexlb.worker.endpoint.CapacityKey;
 import org.flexlb.worker.endpoint.EndpointTestSupport;
 import org.flexlb.worker.status.DebugInfo;
-import org.flexlb.worker.status.ServerStatus;
 import org.flexlb.worker.status.WorkerStatus;
 import org.junit.jupiter.api.Test;
 
@@ -37,7 +36,7 @@ class RequestRouteStateTest {
         var roles = new java.util.ArrayList<RoleSelection>();
         try {
             var metadata =
-                    ServerStatus.forWorker(
+                    org.flexlb.worker.status.WorkerStatusTestSupport.serverStatus(
                             RoleType.PREFILL,
                             "42",
                             status.topologySnapshot(),

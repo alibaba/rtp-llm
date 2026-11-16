@@ -21,7 +21,7 @@ import static org.mockito.Mockito.when;
 class CapacityWaitQueueTest {
     private final CapacityWaitQueue queue =
             new CapacityWaitQueue(Comparator.comparingLong(RequestContext::getPlacementSequence));
-    private final CapacityKey capacity = CapacityKey.anyGroup(RoleType.DECODE);
+    private final CapacityKey capacity = new CapacityKey(RoleType.DECODE, null, null);
 
     @Test
     void oneNotificationAllowsOnlyOneRetryUntilCapacityIsAvailable() {
@@ -66,7 +66,7 @@ class CapacityWaitQueueTest {
         var third = request(3);
         queue.park(third, capacity);
         queue.park(first, capacity);
-        queue.park(second, CapacityKey.anyGroup(RoleType.PREFILL));
+        queue.park(second, new CapacityKey(RoleType.PREFILL, null, null));
         queue.capacityChanged();
         assertEquals(List.of(first, second), resume());
         assertTrue(queue.isWaiting(third));
@@ -80,7 +80,7 @@ class CapacityWaitQueueTest {
         var first = request(1);
         var second = request(2);
         queue.park(first, capacity);
-        queue.park(second, CapacityKey.anyGroup(RoleType.PREFILL));
+        queue.park(second, new CapacityKey(RoleType.PREFILL, null, null));
         queue.capacityChanged();
         var resumed = new ArrayList<RequestContext>();
         queue.resumeReady(2, request -> request != first, resumed::add);

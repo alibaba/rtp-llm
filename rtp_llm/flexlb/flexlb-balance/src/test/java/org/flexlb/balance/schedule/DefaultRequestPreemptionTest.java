@@ -149,7 +149,7 @@ class DefaultRequestPreemptionTest {
             when(route.decodeRegistration()).thenReturn(victimRegistration);
             doReturn(victim).when(repository).findActive("victim");
             request = RequestProtocolTestSupport.context(config, 99001L);
-            request.setSchedulingMetadata(SchedulingMetadata.explicit(90, Long.MAX_VALUE));
+            request.setSchedulingMetadata(SchedulingMetadata.of(90, null, Long.MAX_VALUE, 50));
             selection = RequestProtocolTestSupport.admissionHandle(request);
             preemption =
                     new DefaultRequestPreemption(

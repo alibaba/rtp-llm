@@ -17,8 +17,6 @@ import java.util.EnumSet;
  * Test-only builders for the public scheduler and dispatcher variants.
  */
 public final class SchedulingTestConfig {
-    private static final java.util.concurrent.atomic.AtomicLong fixtureQueueSequence =
-            new java.util.concurrent.atomic.AtomicLong();
 
     private SchedulingTestConfig() {}
 
@@ -36,10 +34,12 @@ public final class SchedulingTestConfig {
             long enqueuedAtMs) {
         if (context.getSchedulingMetadata() == null) {
             context.setSchedulingMetadata(
-                    org.flexlb.balance.schedule.SchedulingMetadata.explicit(
+                    org.flexlb.balance.schedule.SchedulingMetadata.of(
                             context.getRequest().getRawPriority(),
+                            null,
                             context.getConfig()
-                                    .resolveExpiresAtMs(context.getTiming().startedAtMs())));
+                                    .resolveExpiresAtMs(context.getTiming().startedAtMs()),
+                            50));
         }
         // Production selection always supplies Prefill; state-only fixtures may omit its behavior.
         if (prefillEndpoint == null) {

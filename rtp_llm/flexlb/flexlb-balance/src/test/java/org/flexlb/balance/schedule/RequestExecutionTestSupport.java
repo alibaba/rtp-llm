@@ -40,10 +40,12 @@ public final class RequestExecutionTestSupport {
             long enqueuedAtMs) {
         if (context.getSchedulingMetadata() == null)
             context.setSchedulingMetadata(
-                    org.flexlb.balance.schedule.SchedulingMetadata.explicit(
+                    org.flexlb.balance.schedule.SchedulingMetadata.of(
                             context.getRequest().getRawPriority(),
+                            null,
                             context.getConfig()
-                                    .resolveExpiresAtMs(context.getTiming().startedAtMs())));
+                                    .resolveExpiresAtMs(context.getTiming().startedAtMs()),
+                            50));
         var ledger = org.flexlb.worker.endpoint.EndpointTestSupport.resources(prefill);
         var registered =
                 ledger.tryRegisterSelection(

@@ -106,7 +106,7 @@ class ServerScheduleLatencyRecorderTest {
 
     private static SchedulingMetadata metadata(int priority) {
         long now = System.currentTimeMillis();
-        return SchedulingMetadata.explicit(priority, now + 1000);
+        return SchedulingMetadata.of(priority, null, now + 1000, 50);
     }
 
     private static void assertLatency(Map<String, Object> snapshot, String name, long expectedMs) {

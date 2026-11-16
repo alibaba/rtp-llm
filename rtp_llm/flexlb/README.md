@@ -136,6 +136,24 @@ in an isolated environment. Java then runs read-only `spotless:check` across the
 FlexLB reactor. Reviewers still assess the accuracy and brevity of the descriptions.
 Do not bypass failed checks with `--no-verify`, `SKIP`, or disabled hooks.
 
+`tools/flexlb-clean-obvious.py --check` also audits all FlexLB Java source files,
+including test fixtures and Mock Engine, for unused explicit imports, unreferenced
+private fields, and production methods with no calls or only test calls. The hook
+runs this full-tree, read-only check on every commit, including deletion-only
+commits, so deleting the last caller is checked even when its callee is not
+modified. It excludes `target`.
+Framework annotations, generated accessors and production reflection references
+are retained. This parser does not resolve Java receiver types: same-named methods,
+overloads, write-only fields and implicit Lombok APIs still require semantic review.
+It is not a proof that every member is used. Checker changes also run the regression
+tests in `tools/test_*.py` through pre-commit.
+
+The reusable checks live in `tools/`: `flexlb-clean-obvious.py`,
+`check_flexlb_java.py` and `order_java_members.py`. Temporary source inventories,
+baseline copies, generated patches, build logs and one-off source/HTML rewriting
+scripts are investigation artifacts, not commit hooks. The checks do not depend
+on `/tmp`, a developer's checkout path, or an IDE installation.
+
 The other formatters process staged files. If a formatter changes a file,
 review and stage the result, then commit again. Unstaged changes are preserved by pre-commit.
 Java formatting requires JDK 21; Maven is supplied by `mvnw`. The first run downloads
