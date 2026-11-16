@@ -1498,7 +1498,6 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
     } else {
         bool need_prefill = false;
         bool need_decode  = false;
-        const bool is_dspark = isBlockDraftType(propose_params_->sp_type);
         switch (pd_sep_config.role_type) {
             case RoleType::PREFILL:
                 need_prefill = streams.empty();

@@ -1991,6 +1991,20 @@ TEST_F(MtpExecutorTest, DFlashInitializesWithoutMarkovWeights) {
     EXPECT_EQ(components.executor->fast_topk_sampler_, nullptr);
 }
 
+// Build SpeculativeSamplingParams for direct sampler tests the way production
+// gatherSpeculativeSamplingParams does: one stochastic/generator row per stream.
+static spec::SpeculativeSamplingParams makeSpecSamplingParams(const std::list<GenerateStreamPtr>& streams) {
+    spec::SpeculativeSamplingParams params;
+    params.do_sample    = torch::empty({(int64_t)streams.size()}, torch::TensorOptions().dtype(torch::kBool));
+    params.force_accept = torch::zeros({(int64_t)streams.size()}, torch::kBool);
+    for (const auto& stream : streams) {
+        const size_t row                      = params.generators.size();
+        params.do_sample.data_ptr<bool>()[row] = stream->generateConfig()->stochastic();
+        params.generators.push_back(stream->getGenerator());
+    }
+    return params;
+}
+
 TEST_F(MtpExecutorTest, DFlashExecutorRoutesOneBlockForwardToPlainSampler) {
     MtpExecutorTestConfig config;
     config.sp_type              = SP_TYPE_DFLASH;
@@ -2015,7 +2029,7 @@ TEST_F(MtpExecutorTest, DFlashExecutorRoutesOneBlockForwardToPlainSampler) {
     components.fake_draft_model->setOutputs({model_output});
     auto* model = components.fake_draft_model.get();
     components.executor->setDraftModel(std::move(components.fake_draft_model));
-    MtpBatchStreamProcessor::DSparkRoundState state;
+    mtp::DSparkRoundState state;
     state.anchors = torch::tensor({1}, torch::kInt32);
     SamplerOutput draft;
     int64_t       forward_us = 0;
@@ -2068,7 +2082,7 @@ TEST_F(MtpExecutorTest, DFlashMixedSamplingAndPaddedVocabularyRejection) {
     target_tokens.narrow(1, 0, 7).copy_(draft.token_ids);
     target.token_ids = target_tokens.reshape({16, 1});
     // Equal p and q must accept every proposal, including mixed greedy rows.
-    auto result = sampler.forward(streams, draft, target);
+    auto result = sampler.forward(makeSpecSamplingParams(streams), draft, target);
     EXPECT_TRUE(torch::equal(result.accept_len.cpu(), torch::tensor({8, 8}, torch::kInt32)));
     EXPECT_TRUE(torch::equal(result.accept_tokens.cpu(), target_tokens.cpu()));
 
@@ -2127,7 +2141,7 @@ TEST_F(MtpExecutorTest, DFlashPartialRejectionUsesTargetResidualWithPaddedVocabu
         target.all_probs.narrow(1, 0, first_rejected).select(2, 3).fill_(1.0f);
         target.token_ids = torch::zeros({8, 1}, options.dtype(torch::kInt32));
         target.token_ids.narrow(0, 0, first_rejected).fill_(3);
-        auto result = sampler.forward({stream}, draft, target);
+        auto result = sampler.forward(makeSpecSamplingParams({stream}), draft, target);
         EXPECT_EQ(result.accept_len.cpu()[0].item<int32_t>(), first_rejected + 1);
         auto tokens = result.accept_tokens.cpu()[0];
         EXPECT_EQ(tokens[first_rejected].item<int32_t>(), 0);
