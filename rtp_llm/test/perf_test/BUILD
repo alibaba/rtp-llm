@@ -24,6 +24,7 @@ py_library(
         "hub_download.py",
         "offline_bench_test.py",
         "offline_runner.py",
+        "perf_behavior.py",
         "perf_config.py",
         "perf_utils.py",
         "tps_runner.py",

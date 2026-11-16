@@ -1002,11 +1002,3 @@ gpu_type = "RTX_5000_PRO"
 markexpr = "manual and smoke and RTX_5000_PRO"
 expected_count = 1
 forbid_skips = true
-
-[tool.rtp_llm.pytest_ci.profiles.perf_sm9x]
-description = "Performance tests on H20 / SM9x (perf-test)"
-paths = ["../internal_source/rtp_llm/test/perf_test/suites/"]
-gpu_type = "H20"
-markexpr = "manual and perf and H20"
-expected_count = 3
-forbid_skips = true

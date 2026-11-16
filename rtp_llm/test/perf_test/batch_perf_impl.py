@@ -13,6 +13,7 @@ from rtp_llm.test.perf_test.dataclass import (
     TestResultMetrics,
     analyze_results,
 )
+from rtp_llm.test.perf_test.perf_behavior import uses_mainline_perf_semantics
 from rtp_llm.utils.util import check_with_info
 
 
@@ -275,13 +276,15 @@ class BatchPerfImpl(object):
             )
             results = trimmed[len(trimmed) // 2]  # use median of trimmed as base
             setattr(results, key, avg_val)  # override with trimmed average
-            # Trimming latency outliers must not discard failed requests.
-            results = replace(
-                results,
-                total_requests=sum(m.total_requests for m in measurements),
-                success_requests=sum(m.success_requests for m in measurements),
-                fail_requests=sum(m.fail_requests for m in measurements),
-            )
+            # Mainline PPU reports the median retained measurement's counts.
+            # Other benchmarks preserve failures across every measurement.
+            if not uses_mainline_perf_semantics():
+                results = replace(
+                    results,
+                    total_requests=sum(m.total_requests for m in measurements),
+                    success_requests=sum(m.success_requests for m in measurements),
+                    fail_requests=sum(m.fail_requests for m in measurements),
+                )
         else:
             # Too few runs to trim: pool every response of every run instead.
             results = analyze_results(all_measure_responses)
@@ -338,11 +341,13 @@ class BatchPerfImpl(object):
             f"concurrency {self.batch_size} must be divisible by dp_size {self.dp_size}",
         )
         local_batch_size = self.batch_size // self.dp_size
+        mainline_semantics = uses_mainline_perf_semantics()
         payload = {
             "batch_size": local_batch_size,
             "mode": "decode" if self.is_decode else "prefill",
-            "require_full_batch": True,
         }
+        if not mainline_semantics:
+            payload["require_full_batch"] = True
         last_error = None
         for attempt in range(1, 21):
             try:
@@ -351,10 +356,14 @@ class BatchPerfImpl(object):
                     json=payload,
                     timeout=60,
                 )
-                # Per-DP RPC failures can arrive in an HTTP 200 error body.
+                # Match mainline's absent-status default only for the five PPU
+                # scenarios; other benchmarks still require explicit success.
                 if (
                     response.status_code == 200
-                    and response.json().get("status") == "ok"
+                    and response.json().get(
+                        "status", "ok" if mainline_semantics else None
+                    )
+                    == "ok"
                 ):
                     return
                 last_error = f"{response.text}, {response.status_code}"

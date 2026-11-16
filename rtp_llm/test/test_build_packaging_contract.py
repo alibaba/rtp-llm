@@ -2209,37 +2209,93 @@ class BuildPackagingContractTest(TestCase):
             ).read_text()
             self.assertNotIn("@pytest.mark.timeout(7200)", suite_source)
 
-    def test_main_perf_jobs_use_native_pytest(self):
-        """Retained Native perf jobs must keep pytest ownership after retirement."""
-        main_yaml = PROJECT_ROOT.parent / ".aoneci" / "main.yaml"
+    def test_main_perf_entries_match_manual_mainline_scope(self):
+        """Keep five manual PPU scenarios and no retired H20/performance jobs."""
+        from rtp_llm.test.perf_test.perf_behavior import MAINLINE_PPU_PERF_TESTS
+
+        with open(PROJECT_ROOT / "pyproject.toml", "rb") as f:
+            public = tomllib.load(f)
+        self.assertNotIn("perf_sm9x", public["tool"]["rtp_llm"]["pytest_ci"]["profiles"])
+
+        build = ast.parse((PROJECT_ROOT / "rtp_llm/test/perf_test/BUILD").read_text())
+        targets = {}
+        for node in ast.walk(build):
+            if isinstance(node, ast.Call):
+                fields = {keyword.arg: keyword.value for keyword in node.keywords}
+                name = fields.get("name")
+                if isinstance(name, ast.Constant):
+                    targets[name.value] = fields
+        self.assertEqual(
+            set(MAINLINE_PPU_PERF_TESTS),
+            {name.lstrip(":") for name in ast.literal_eval(targets["perf_ppu_qwen35"]["tests"])},
+        )
+        self.assertEqual(["manual"], ast.literal_eval(targets["perf_ppu_qwen35"]["tags"]))
+
+        internal = PROJECT_ROOT.parent / "internal_source"
+        main_yaml = PROJECT_ROOT.parent / ".aoneci/main.yaml"
         if not main_yaml.exists():
             return
-
         source = main_yaml.read_text()
-        for job, profile in (
-            ("perf-test", "perf_sm9x"),
-            ("perf-ppu", "perf_ppu_internal"),
-        ):
-            with self.subTest(job=job):
-                match = re.search(
-                    rf"(?ms)^      {re.escape(job)}:\n(.*?)(?=^      \S|\Z)",
-                    source,
-                )
-                self.assertIsNotNone(match, f"missing Native performance job {job}")
-                job_source = match.group(1)
-                self.assertRegex(
-                    job_source,
-                    rf"\bPYTEST_PROFILE:\s*(?:\"{profile}\"|'{profile}'|{profile})(?=[,\s}}])",
-                )
-                self.assertNotIn("BAZEL_TEST_TARGET", job_source)
-                self.assertNotIn("basic_test.sh test", job_source)
-                self.assertIn("--remote", job_source)
-                if job == "perf-ppu":
-                    self.assertIn("--remote-concurrency=1", job_source)
+        for job in ("perf-test", "perf-ppu", "main-perf-test"):
+            self.assertNotRegex(source, rf"(?m)^      {re.escape(job)}:")
+            self.assertNotIn(f'contains("{job}")', source)
+        self.assertFalse((internal / "rtp_llm/test/perf_test/suites/test_perf_qwen35.py").exists())
 
-        entry = (
-            PROJECT_ROOT.parent / "internal_source/ci/run_native_ci.sh"
-        ).read_text()
+        with open(internal / "pyproject_internal.toml", "rb") as f:
+            profiles = tomllib.load(f)["tool"]["rtp_llm"]["pytest_ci"]["profiles"]
+        profile = profiles["perf_ppu_internal"]
+        self.assertEqual(5, profile["expected_count"])
+        self.assertTrue(profile["forbid_skips"])
+        self.assertEqual("manual and perf and PPU_ZW810E", profile["markexpr"])
+        self.assertEqual("PPU_ZW810E", profile["gpu_type"])
+        self.assertEqual(
+            ["../internal_source/rtp_llm/test/perf_test/suites/test_perf_qwen35_ppu.py"],
+            profile["paths"],
+        )
+
+        suite = ast.parse((internal / "rtp_llm/test/perf_test/suites/test_perf_qwen35_ppu.py").read_text())
+        assignments = {
+            node.targets[0].id: node.value for node in suite.body
+            if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+        }
+        common = {key.value: value for key, value in
+                  zip(assignments["_COMMON"].keys, assignments["_COMMON"].values)}
+        cases = {key.value: value for key, value in
+                 zip(assignments["PERF_TESTS"].keys, assignments["PERF_TESTS"].values)}
+        self.assertEqual(set(MAINLINE_PPU_PERF_TESTS), set(cases))
+        self.assertEqual(3600, ast.literal_eval(common["timeout"]))
+        self.assertEqual(8, ast.literal_eval(common["gpu_count"]))
+        self.assertEqual(["perf", "ppu", "PPU_ZW810E"], ast.literal_eval(common["markers"]))
+        for name, config in cases.items():
+            with self.subTest(scenario=name):
+                target = targets[name]
+                self.assertEqual(ast.literal_eval(target["ckpt_path"]), ast.literal_eval(assignments["_MODEL"]))
+                for field in ("gpu_type", "model_type"):
+                    self.assertEqual(ast.literal_eval(target[field]), ast.literal_eval(common[field]))
+                self.assertEqual(
+                    {**ast.literal_eval(target["envs"]), "WORLD_SIZE": "8"},
+                    ast.literal_eval(common["envs"]),
+                )
+                if isinstance(config, ast.Call):
+                    self.assertEqual("_decode_test", config.func.id)
+                    seq, batch, capture = [ast.literal_eval(arg) for arg in config.args]
+                    args = ["--input_len", seq, "--batch_size", batch]
+                    args += ast.literal_eval(assignments["_DECODE_COMMON"])
+                    args += ["--decode_capture_config", capture]
+                else:
+                    fields = {key.value: value for key, value in zip(config.keys, config.values()) if key}
+                    args = ast.literal_eval(fields["perf_args"])
+                self.assertEqual(ast.literal_eval(target["args"]), args)
+        method = next(node for node in suite.body
+                      if isinstance(node, ast.FunctionDef) and node.name == "test_perf_qwen35_ppu")
+        timeout = next(decorator for decorator in method.decorator_list
+                       if isinstance(decorator, ast.Call) and
+                       isinstance(decorator.func, ast.Attribute) and decorator.func.attr == "timeout")
+        self.assertEqual(3600, ast.literal_eval(timeout.args[0]))
+        self.assertIn("marks.append(pytest_module.mark.manual)",
+                      (PROJECT_ROOT / "rtp_llm/test/perf_test/perf_runner.py").read_text())
+
+        entry = (internal / "ci/run_native_ci.sh").read_text()
         self.assertIn('pytest --rtp-ci-profile="${PYTEST_PROFILE}"', entry)
         self.assertIn("--remote-no-cache --remote-no-test-cache", entry)
 

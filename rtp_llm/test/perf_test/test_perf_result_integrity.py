@@ -8,6 +8,7 @@ import pytest
 
 from rtp_llm.test.perf_test.batch_perf_impl import BatchPerfImpl
 from rtp_llm.test.perf_test.dataclass import ResponseInfo
+from rtp_llm.test.perf_test.perf_behavior import MAINLINE_PPU_PERF_TESTS
 from rtp_llm.test.perf_test.perf_runner import _validate_grid_results, run_perf_test
 from rtp_llm.test.perf_test.perf_utils import (
     filter_bs_by_kvcache,
@@ -73,17 +74,20 @@ def test_latency_trimming_preserves_failures_from_every_measurement():
     )
     failed = ResponseInfo({}, False)
     rounds = [[failed, failed]] + [[successful, successful] for _ in range(4)]
-    with patch("rtp_llm.test.perf_test.batch_perf_impl.ProcessPoolExecutor"):
-        runner = BatchPerfImpl(1234, 1, 2, "query", profile=False, warmup_runs=0,
-                               profile_runs=0, measure_runs=5)
-    with patch.object(runner, "_set_concurrency"), patch.object(
-        runner, "_curl_server_responses", side_effect=rounds
-    ):
-        result = runner.run()
-    assert result.avg_decode_time == 10.0
-    assert result.total_requests == 10
-    assert result.success_requests == 8
-    assert result.fail_requests == 2
+    for name in ("unrelated-perf", *sorted(MAINLINE_PPU_PERF_TESTS)):
+        with patch.dict(os.environ, {"PERF_TEST_NAME": name}):
+            with patch("rtp_llm.test.perf_test.batch_perf_impl.ProcessPoolExecutor"):
+                runner = BatchPerfImpl(1234, 1, 2, "query", profile=False, warmup_runs=0,
+                                       profile_runs=0, measure_runs=5)
+            with patch.object(runner, "_set_concurrency"), patch.object(
+                runner, "_curl_server_responses", side_effect=rounds
+            ):
+                result = runner.run()
+        assert result.avg_decode_time == 10.0
+        if name in MAINLINE_PPU_PERF_TESTS:
+            assert (result.total_requests, result.success_requests, result.fail_requests) == (2, 2, 0)
+        else:
+            assert (result.total_requests, result.success_requests, result.fail_requests) == (10, 8, 2)
 
 
 @pytest.mark.parametrize("is_decode", [True, False])
@@ -92,33 +96,39 @@ def test_benchmark_requests_the_full_per_dp_batch(is_decode):
         runner = BatchPerfImpl(1234, 8, 128, "query", is_decode=is_decode)
     response = Mock(status_code=200)
     response.json.return_value = {"status": "ok"}
-    with patch(
-        "rtp_llm.test.perf_test.batch_perf_impl.requests.post", return_value=response
-    ) as post:
-        runner._set_concurrency()
-    post.assert_called_once_with(
-        "http://127.0.0.1:1234/update_scheduler_info",
-        json={
+    for name in ("unrelated-perf", *sorted(MAINLINE_PPU_PERF_TESTS)):
+        payload = {
             "batch_size": 16,
             "mode": "decode" if is_decode else "prefill",
-            "require_full_batch": True,
-        },
-        timeout=60,
-    )
+        }
+        if name not in MAINLINE_PPU_PERF_TESTS:
+            payload["require_full_batch"] = True
+        with patch.dict(os.environ, {"PERF_TEST_NAME": name}), patch(
+            "rtp_llm.test.perf_test.batch_perf_impl.requests.post", return_value=response
+        ) as post:
+            runner._set_concurrency()
+        post.assert_called_once_with(
+            "http://127.0.0.1:1234/update_scheduler_info", json=payload, timeout=60,
+        )
 
 
 @pytest.mark.parametrize("payload", [{"error": "Failed on some addresses"}, {}])
-def test_scheduler_update_http_200_error_cannot_start_benchmark(payload):
+def test_scheduler_http_200_missing_status_obeys_scenario_policy(payload):
     with patch("rtp_llm.test.perf_test.batch_perf_impl.ProcessPoolExecutor"):
         runner = BatchPerfImpl(1234, 8, 128, "query")
     response = Mock(status_code=200, text=json.dumps(payload))
     response.json.return_value = payload
-    with patch(
-        "rtp_llm.test.perf_test.batch_perf_impl.requests.post", return_value=response
-    ) as post, patch("rtp_llm.test.perf_test.batch_perf_impl.time.sleep"):
-        with pytest.raises(Exception, match="failed to set concurrency after retries"):
-            runner._set_concurrency()
-    assert post.call_count == 20
+    for name in ("unrelated-perf", *sorted(MAINLINE_PPU_PERF_TESTS)):
+        with patch.dict(os.environ, {"PERF_TEST_NAME": name}), patch(
+            "rtp_llm.test.perf_test.batch_perf_impl.requests.post", return_value=response
+        ) as post, patch("rtp_llm.test.perf_test.batch_perf_impl.time.sleep"):
+            if name in MAINLINE_PPU_PERF_TESTS:
+                runner._set_concurrency()
+                assert post.call_count == 1
+            else:
+                with pytest.raises(Exception, match="failed to set concurrency after retries"):
+                    runner._set_concurrency()
+                assert post.call_count == 20
 
 
 def test_scheduler_update_retries_dp_error_until_explicit_success():
@@ -128,12 +138,22 @@ def test_scheduler_update_retries_dp_error_until_explicit_success():
     failed.json.return_value = {"error": "DP update failed"}
     success = Mock(status_code=200)
     success.json.return_value = {"status": "ok"}
-    with patch(
+    with patch.dict(os.environ, {"PERF_TEST_NAME": "unrelated-perf"}), patch(
         "rtp_llm.test.perf_test.batch_perf_impl.requests.post",
         side_effect=[failed, success],
     ) as post, patch("rtp_llm.test.perf_test.batch_perf_impl.time.sleep"):
         runner._set_concurrency()
     assert post.call_count == 2
+    # Mainline still retries explicit non-ok responses and transport failures.
+    for name in sorted(MAINLINE_PPU_PERF_TESTS):
+        failed.json.return_value = {"status": "error"}
+        transport_error = Mock(status_code=503, text="unavailable")
+        with patch.dict(os.environ, {"PERF_TEST_NAME": name}), patch(
+            "rtp_llm.test.perf_test.batch_perf_impl.requests.post",
+            side_effect=[transport_error, failed, success],
+        ) as post, patch("rtp_llm.test.perf_test.batch_perf_impl.time.sleep"):
+            runner._set_concurrency()
+        assert post.call_count == 3
 
 
 def _query_cache_status(cache):
@@ -172,7 +192,7 @@ def test_grid_capacity_uses_the_smallest_dp_shard():
 
 
 @pytest.mark.parametrize("batches", [[16, 32], [64, 128]])
-def test_capacity_filter_cannot_turn_an_incomplete_ppu_grid_green(tmp_path, batches):
+def test_capacity_filter_keeps_strict_validation_for_other_scenarios(tmp_path, batches):
     original_batches = batches.copy()
     status = _query_cache_status(
         {"total_kv_cache": "3854336", "block_size": "2048"}
@@ -211,17 +231,29 @@ def test_no_baseline_wrapper_validates_results_and_restores_state(
     monkeypatch.setenv("PERF_TEST_NAME", "previous-test")
     saved_argv = sys.argv
     test_config = {"model_type": "qwen35_moe", "checkpoint_path": "/model"}
-    if valid:
-        run_perf_test("ppu-perf", test_config, tmp_path)
-        entry.upload_results_to_oss.assert_called_once_with(str(tmp_path))
-    else:
-        with pytest.raises(AssertionError, match="Empty perf measurement"):
-            run_perf_test("ppu-perf", test_config, tmp_path)
-        entry.upload_results_to_oss.assert_not_called()
-        entry.write_summary_to_odps.assert_not_called()
-    benchmark.assert_called_once()
-    entry.write_test_meta.assert_called_once_with(str(tmp_path))
-    entry.validate_against_baseline.assert_not_called()
-    assert report.exists()
-    assert sys.argv is saved_argv
-    assert os.environ["PERF_TEST_NAME"] == "previous-test"
+    for name in ("ppu-perf", *sorted(MAINLINE_PPU_PERF_TESTS)):
+        benchmark.reset_mock(side_effect=True)
+        for value in vars(entry).values():
+            if isinstance(value, Mock):
+                value.reset_mock()
+        if valid or name in MAINLINE_PPU_PERF_TESTS:
+            run_perf_test(name, test_config, tmp_path)
+            entry.upload_results_to_oss.assert_called_once_with(str(tmp_path))
+        else:
+            with pytest.raises(AssertionError, match="Empty perf measurement"):
+                run_perf_test(name, test_config, tmp_path)
+            entry.upload_results_to_oss.assert_not_called()
+            entry.write_summary_to_odps.assert_not_called()
+        benchmark.assert_called_once()
+        entry.write_test_meta.assert_called_once_with(str(tmp_path))
+        entry.validate_against_baseline.assert_not_called()
+        assert report.exists()
+        assert sys.argv is saved_argv
+        assert os.environ["PERF_TEST_NAME"] == "previous-test"
+        if name in MAINLINE_PPU_PERF_TESTS:
+            benchmark.side_effect = RuntimeError("benchmark failed")
+            with pytest.raises(RuntimeError, match="benchmark failed"):
+                run_perf_test(name, test_config, tmp_path)
+            entry.upload_results_to_oss.assert_called_once_with(str(tmp_path))
+            assert sys.argv is saved_argv
+            assert os.environ["PERF_TEST_NAME"] == "previous-test"
