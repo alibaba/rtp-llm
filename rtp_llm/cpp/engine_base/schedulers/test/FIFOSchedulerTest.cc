@@ -1055,10 +1055,12 @@ TEST_F(FIFOSchedulerTest, LinearHistoryAdmissionAllowsLongGenerationWithinPhysic
         // and only short rolling linear tails (13 available). Since #1574 the
         // admission peak bills the rolling decode tail instead of the full
         // history, so the second stream is admitted with or without reclaim;
-        // physical history retirement is exercised below with reclaim on.
+        // reclaim keeps the whole history with committed-watermark retirement
+        // while reclaim-off folds to the same rolling tail, and both stay
+        // within the linear pool for the whole generation below.
         verifyOnlyScheduledStream(scheduler, candidate);
         EXPECT_EQ(scheduler.waiting_streams_.size(), 0u);
-        if (reclaim) {
+        {
             commit_token(candidate);
             // Exercise the real stream state machine and allocator to the
             // output limit; passing only the admission gate is insufficient.
@@ -1076,8 +1078,10 @@ TEST_F(FIFOSchedulerTest, LinearHistoryAdmissionAllowsLongGenerationWithinPhysic
                 const auto& pools = resources.cache_manager->coordinator_manager_->groupBlockPools();
                 for (size_t group_id = 0; group_id < config.topology().groups().size(); ++group_id) {
                     if (config.topology().groups()[group_id].policy.group_type == CacheGroupType::LINEAR) {
-                        // Two completed checkpoints plus the current block per
-                        // stream. CACHE-only historical blocks remain evictable.
+                        // Reclaim keeps two completed checkpoints plus the
+                        // current block per stream before retiring them;
+                        // reclaim-off folds to the same rolling tail window.
+                        // CACHE-only historical blocks remain evictable.
                         EXPECT_LE(pools[group_id]->referencedBlocksNum(), 6u);
                     }
                 }

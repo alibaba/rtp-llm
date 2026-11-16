@@ -203,6 +203,64 @@ def _unsupported_reason(
     return _runtime_unsupported_reason(str(hidden_states.device))
 
 
+def fail_closed_on_unsupported_runtime(
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    activation: aiter.ActivationType,
+    topk: int,
+    ep_size: int,
+    compute_dtype: torch.dtype,
+) -> None:
+    """Constructor-time environment gate for the deterministic FP8 MoE path.
+
+    The forward-time check inside try_deterministic_fp8_moe stays to cover
+    environment drift after startup. This constructor check exists so that a
+    fully matching workload on an unsupported environment fails during model
+    loading instead of on the first generation request: the forward-time
+    RuntimeError escapes the engine loop thread, which has no per-step error
+    recovery, and would stall the whole service after it reports ready.
+    Only the weight-side conditions are checked here; anything that depends
+    on the per-forward inputs keeps the graceful fallback.
+    """
+    if not is_rocm_fp8_moe_deterministic_reduce_enabled():
+        return
+    if ep_size > 1:
+        # Expert-parallel masking keeps the deterministic path off; the
+        # forward gate falls back gracefully for those workloads.
+        return
+    if activation != aiter.ActivationType.Silu or topk != _SUPPORTED_TOPK:
+        return
+    if compute_dtype is not torch.bfloat16:
+        return
+    if w1.shape != (
+        _SUPPORTED_EXPERTS,
+        _SUPPORTED_INTER_SIZE * 2,
+        _SUPPORTED_HIDDEN_SIZE,
+    ):
+        return
+    if w2.shape != (_SUPPORTED_EXPERTS, _SUPPORTED_HIDDEN_SIZE, _SUPPORTED_INTER_SIZE):
+        return
+    if w1.dtype != torch.float8_e4m3fnuz or w2.dtype != torch.float8_e4m3fnuz:
+        return
+    if w1_scale.dtype != torch.float32 or w2_scale.dtype != torch.float32:
+        return
+    if w1_scale.shape != (_SUPPORTED_EXPERTS, _SUPPORTED_INTER_SIZE * 2, 1):
+        return
+    if w2_scale.shape != (_SUPPORTED_EXPERTS, _SUPPORTED_HIDDEN_SIZE, 1):
+        return
+    # Every weight-side condition of the forward gate matches, so the first
+    # small forward on this workload would hit the runtime check.
+    runtime_reason = _runtime_unsupported_reason(str(w1.device))
+    if runtime_reason is not None:
+        raise RuntimeError(
+            f"{ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV}=1 requires the "
+            f"deterministic ROCm FP8 MoE path for this workload, but the "
+            f"runtime is unsupported: {runtime_reason}"
+        )
+
+
 def _route_local_stage2(
     ck_stage2,
     expected_topk: int,

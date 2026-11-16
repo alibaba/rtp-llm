@@ -513,7 +513,7 @@ TEST_F(StreamCacheResourceTest, LinearHistoryReclaimDefersAsyncWorkerMutationUnt
     EXPECT_EQ(resource.kvCache().blocks(0, "linear")[5], before[5]);
 }
 
-TEST_F(StreamCacheResourceTest, LinearHistoryReclaimDisabledPreservesRequestReferences) {
+TEST_F(StreamCacheResourceTest, LinearHistoryReclaimDisabledFoldsHistoryToDecodeTail) {
     prepareLinearHistoryResource(/*enable_reclaim=*/false);
     auto&      resource = stream_->streamCacheResource();
     const auto before   = resource.kvCache().blocks(0, "linear");
@@ -521,10 +521,17 @@ TEST_F(StreamCacheResourceTest, LinearHistoryReclaimDisabledPreservesRequestRefe
     ASSERT_TRUE(resource.incrKVBlock().ok());
     const auto& after = resource.kvCache().blocks(0, "linear");
     ASSERT_GE(after.size(), before.size());
-    EXPECT_TRUE(std::equal(before.begin(), before.end(), after.begin()));
+    // Without the committed-watermark retirement the decode cleanup restores
+    // the base folding semantics: history below the retained decode window is
+    // released to the pool instead of staying pinned by request references for
+    // the whole request lifetime.
+    const size_t live =
+        std::count_if(after.begin(), after.end(), [](int block) { return !isNullBlockIdx(block); });
+    EXPECT_LE(live, 3u);
+    EXPECT_EQ(after.front(), NULL_BLOCK_IDX);
 }
 
-TEST_F(StreamCacheResourceTest, LinearHistoryReclaimDefersForPdTransferAndLowerTierOnlyCache) {
+TEST_F(StreamCacheResourceTest, LinearHistoryIneligibleTransfersAndTiersFoldToDecodeTail) {
     for (bool pd_transfer : {true, false}) {
         SCOPED_TRACE(pd_transfer ? "PD transfer" : "asynchronous lower tier publication");
         prepareLinearHistoryResource();
@@ -532,15 +539,22 @@ TEST_F(StreamCacheResourceTest, LinearHistoryReclaimDefersForPdTransferAndLowerT
         const auto before                              = resource.kvCache().blocks(0, "linear");
         stream_->generateConfig()->pd_separation       = pd_transfer;
         resource.resource_context_.enable_device_cache = pd_transfer;
-        resource.resource_context_.enable_memory_cache = !pd_transfer;
+        resource.resource_context_.enable_memory_cache  = !pd_transfer;
+        ASSERT_FALSE(resource.canReclaimLinearHistory(1));
         commitLinearHistoryToken();
         ASSERT_TRUE(resource.incrKVBlock().ok());
         const auto& after = resource.kvCache().blocks(0, "linear");
         ASSERT_GE(after.size(), before.size());
-        EXPECT_TRUE(std::equal(before.begin(), before.end(), after.begin()));
+        // These streams never own the committed-watermark retirement, so they
+        // keep the base folding semantics instead of pinning the whole
+        // history without any release path.
+        const size_t live =
+            std::count_if(after.begin(), after.end(), [](int block) { return !isNullBlockIdx(block); });
+        EXPECT_LE(live, 3u);
+        EXPECT_EQ(after.front(), NULL_BLOCK_IDX);
         // Restore the configured storage tier before ordinary end-of-request cleanup.
         resource.resource_context_.enable_device_cache = true;
-        resource.resource_context_.enable_memory_cache = false;
+        resource.resource_context_.enable_memory_cache  = false;
         stream_->releaseResource();
     }
 }
@@ -589,7 +603,7 @@ TEST_F(StreamCacheResourceTest, LinearHistoryReclaimUsesAcceptedSpecTokensAndPre
     EXPECT_EQ(after[9], before[9]);
 }
 
-TEST_F(StreamCacheResourceTest, LinearHistoryReclaimPreservesBorrowedResourcesAndPendingCopies) {
+TEST_F(StreamCacheResourceTest, LinearHistoryIneligibleGuardsFoldToDecodeTail) {
     for (int guard = 0; guard < 3; ++guard) {
         SCOPED_TRACE(guard);
         prepareLinearHistoryResource();
@@ -603,10 +617,17 @@ TEST_F(StreamCacheResourceTest, LinearHistoryReclaimPreservesBorrowedResourcesAn
         } else {
             resource.holdKVCacheForPDSep();
         }
+        ASSERT_FALSE(resource.canReclaimLinearHistory(1));
         ASSERT_TRUE(resource.incrKVBlock().ok());
         const auto& after = resource.kvCache().blocks(0, "linear");
         ASSERT_GE(after.size(), before.size());
-        EXPECT_TRUE(std::equal(before.begin(), before.end(), after.begin()));
+        // None of these guards grants the committed-watermark retirement, so
+        // the decode cleanup folds to the retained decode tail exactly like
+        // base instead of pinning the whole history without a release path.
+        const size_t live =
+            std::count_if(after.begin(), after.end(), [](int block) { return !isNullBlockIdx(block); });
+        EXPECT_LE(live, 3u);
+        EXPECT_EQ(after.front(), NULL_BLOCK_IDX);
         stream_->setNeedReleaseResource(true);
         resource.clearKVBlockUpdateMapping();
         resource.releaseKVCacheForPDSep();
@@ -625,7 +646,12 @@ TEST_F(StreamCacheResourceTest, LinearHistoryPeakForecastIncludesFutureDecodeFor
     ASSERT_EQ(resource.curBlocksNum(), 0);
     const int legacy = cache_manager_->estimatePeakNeedBlocks(
         resource.batch_kv_cache_resource_, 2, 2, 40, 0, true, 1, LinearCachePolicy::KEEP_HISTORY);
-    EXPECT_LT(stream_->estimatePeakNeedBlocks(40), legacy);
+    // With the folding gate, the keep-history forecast bills the same retained
+    // decode window, so the reclaim forecast matches it for this tiny prompt
+    // instead of staying strictly below the retired full-accumulation model;
+    // both still include the future decode growth beyond the initial prefill.
+    EXPECT_LE(stream_->estimatePeakNeedBlocks(40), legacy);
+    EXPECT_GT(stream_->estimatePeakNeedBlocks(40), stream_->estimateInitialNeedBlocks());
     EXPECT_EQ(stream_->estimateInitialNeedBlocks(), 1);
 }
 
@@ -757,19 +783,20 @@ TEST_F(StreamCacheResourceTest, LinearCacheSwitchCombinationsPreserveRoleOwnersh
                 ASSERT_TRUE(resource.initKVBlock().ok());
                 EXPECT_EQ(peak_before, static_cast<int>(free_before - cache_manager_->freeBlocksNum()));
                 const auto original_full  = resource.kvCache().blocks(0, "full1");
-                const bool reclaim_fusion = role == RoleType::PDFUSION && enable_reclaim;
                 for (int step = 0; step < 16; ++step) {
                     commitLinearHistoryToken();
                     ASSERT_TRUE(resource.incrKVBlock().ok());
                     const auto& linear = resource.kvCache().blocks(0, "linear");
                     const auto  live =
                         std::count_if(linear.begin(), linear.end(), [](int block) { return !isNullBlockIdx(block); });
-                    if (handoff || reclaim_fusion) {
-                        EXPECT_LE(live, 3);
-                        EXPECT_TRUE(isNullBlockIdx(linear.front()));
-                    } else {
-                        EXPECT_EQ(live, linear.size());
-                    }
+                    // Reclaim retires committed history to NULL slots while the
+                    // decode tail stays live; every other combination (reclaim
+                    // off, or a role without the retirement path) folds the
+                    // layout to the same retained tail window via the decode
+                    // cleanup, exactly like base. Both keep the live tail
+                    // bounded instead of pinning the whole history.
+                    EXPECT_LE(live, 3);
+                    EXPECT_TRUE(isNullBlockIdx(linear.front()));
                     const auto& full = resource.kvCache().blocks(0, "full1");
                     ASSERT_GE(full.size(), original_full.size());
                     EXPECT_TRUE(std::equal(original_full.begin(), original_full.end(), full.begin()));
@@ -826,6 +853,29 @@ TEST_F(StreamCacheResourceTest, LinearHistoryAsyncReservationJoinsOnlyAtPhysical
         stream_->setNormalAsyncDeviceState(state);
         EXPECT_GT(resource.singleBatchNeedBlocks(15, 0), 0);
         EXPECT_EQ(stream_->needsAsyncBookkeepingJoinForKvReservation(), enabled);
+        stream_->decPendingAsyncBookkeepingAndMaybeRelease();
+    }
+}
+
+TEST_F(StreamCacheResourceTest, LinearHistoryAsyncReservationKeepsBaseJoinGuardWithoutReclaimEligibility) {
+    for (bool enabled : {false, true}) {
+        SCOPED_TRACE(enabled);
+        prepareLinearHistoryResource(enabled);
+        // A PD decode stream never owns the committed-watermark retirement:
+        // with reclaim enabled it must keep the base "join while no device
+        // length is published" guard instead of allocating the KV reservation
+        // against a length the async worker has not committed yet.
+        stream_->streamCacheResource().resource_context_.role_type = RoleType::DECODE;
+        ASSERT_FALSE(stream_->streamCacheResource().canReclaimLinearHistory(1));
+        commitLinearHistoryToken();
+        ASSERT_TRUE(stream_->streamCacheResource().incrKVBlock().ok());
+        stream_->incPendingAsyncBookkeeping();
+        EXPECT_TRUE(stream_->needsAsyncBookkeepingJoinForKvReservation());
+        GenerateStream::NormalAsyncDeviceState state;
+        state.next_real_seq_len = 14;
+        stream_->setNormalAsyncDeviceState(state);
+        // Once published, the base policy allocates from the published length.
+        EXPECT_FALSE(stream_->needsAsyncBookkeepingJoinForKvReservation());
         stream_->decPendingAsyncBookkeepingAndMaybeRelease();
     }
 }

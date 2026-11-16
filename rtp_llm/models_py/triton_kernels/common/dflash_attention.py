@@ -295,7 +295,12 @@ def _dflash_write_kv_kernel(
     HEAD_DIM: tl.constexpr,
     LAYOUT: tl.constexpr,
 ):
-    row = tl.program_id(0)
+    # Promote the row index to int64 before the constexpr stride multiplies
+    # below: a strided commit V view reaches row * value_stride_row >= 2^31
+    # for legal production row counts, and an int32 multiply would silently
+    # wrap into a negative source offset. Same convention as the cache-side
+    # _cache_offsets promotion and fixed_order_route_reduce.
+    row = tl.program_id(0).to(tl.int64)
     head = tl.program_id(1)
     request = tl.load(Requests + row)
     position = tl.load(Positions + row)

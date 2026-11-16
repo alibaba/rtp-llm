@@ -1034,12 +1034,18 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
                     kv_cache_groups_[static_cast<size_t>(group_id)]->releaseRequestStateToDecodeTail(block_ids,
                                                                                                       reserve_step);
                 } else if (config_.group(tag).policy.group_type == CacheGroupType::LINEAR
+                           && malloc_info.linear_cache_policy == LinearCachePolicy::RECLAIM_COMMITTED
                            && malloc_info.enable_cache_lookup
                            && config_.reuse_cache_tail_blocks == std::numeric_limits<int>::max()) {
                     // A cache-lookup request with an unbounded reuse tail keeps
-                    // its whole linear prefill as reusable cache content: the
-                    // decode path must not free it, history retirement belongs
-                    // to the committed-watermark reclaim path instead.
+                    // its whole linear prefill as reusable cache content only
+                    // when it owns the committed-watermark retirement path
+                    // (RECLAIM_COMMITTED): the decode path must not free it
+                    // because history retirement belongs to that path instead.
+                    // Every other request folds to the retained decode tail
+                    // exactly like base, otherwise its history would have no
+                    // release path at all and would pin the linear pool for
+                    // the request's whole lifetime.
                     continue;
                 } else {
                     kv_cache_groups_[static_cast<size_t>(group_id)]->removeSkippedBlocks(
@@ -1960,7 +1966,7 @@ bool CoordinatorCacheManager::doInit() {
         SingleTypeCacheManagerPtr group;
         if (group_type == CacheGroupType::LINEAR) {
             group = std::make_shared<LinearCacheManager>(
-                cache_group, group_pool, group_id, config_.reuse_cache_tail_blocks, config_.enable_linear_cache_reclaim);
+                cache_group, group_pool, group_id, config_.reuse_cache_tail_blocks);
             linear_group_ids_.push_back(group_id);
         } else if (group_type == CacheGroupType::SWA) {
             group =

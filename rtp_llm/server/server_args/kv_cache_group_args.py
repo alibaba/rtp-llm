@@ -260,6 +260,8 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help=(
             "回收运行中请求不再读取的历史 Linear Attention state，默认关闭；"
             "首版用于声明该能力模型的单序列、非 PD 请求；保留活动状态和推测回滚所需状态。"
+            "开启后符合条件的请求在 decode 期间保留整段 Linear 历史并按已提交水位退役"
+            "（未开启或不符合条件的请求与基线一致，按 active tail 折叠）。"
         ),
     )
     kv_cache_group.add_argument(
@@ -271,6 +273,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help=(
             "按 cache group tag 设置 pool block 数量权重的 JSON 对象，权重为正整数；"
             "例如 {\"full\":8,\"linear\":1}。权重表示 block 数量比例而非显存比例，"
+            "PP>1 时各 stage 只需包含本 stage 拥有的 tag，其余 tag 自动忽略；"
             "空字符串保持默认分配策略。"
         ),
     )

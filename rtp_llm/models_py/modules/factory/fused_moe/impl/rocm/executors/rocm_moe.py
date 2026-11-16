@@ -298,6 +298,25 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
                     "layout), but w1/w2 lack the is_shuffled marker"
                 )
 
+            # Fail closed at construction time when the loaded workload matches
+            # the deterministic path and the runtime environment does not: the
+            # forward-time RuntimeError escapes the engine loop thread (no
+            # per-step recovery) and would stall the service after readiness.
+            from rtp_llm.models_py.modules.factory.fused_moe.impl.rocm.executors.deterministic_fp8_moe import (
+                fail_closed_on_unsupported_runtime,
+            )
+
+            fail_closed_on_unsupported_runtime(
+                self.w1,
+                self.w2,
+                self.w1_scale,
+                self.w2_scale,
+                self._configured_activation_type,
+                config.moe_k,
+                self.ep_size,
+                config.model_config.compute_dtype,
+            )
+
         self.expert_mask = build_ep_expert_mask(
             self.num_experts, self.ep_rank, self.ep_size, self.w1
         )
