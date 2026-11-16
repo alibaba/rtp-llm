@@ -183,7 +183,6 @@ update_target() {
 }
 
 start_spring_boot() {
-    local REDIRECT_OUT=/proc/1/fd/1
     echo "INFO: spring boot output redirected to container stdout"
 
     if [ ! -z "$SERVICE_PID" ]; then
@@ -233,8 +232,7 @@ start_spring_boot() {
             -jar "\"${APP_HOME}/target/${APP_NAME}.jar\"" \
             -Dapp.location="\"${APP_HOME}/target/${APP_NAME}\"" \
             -Djava.io.tmpdir="\"$SERVICE_TMPDIR\"" \
-            ${SPRING_BOOT_ARGS} "$@" \
-            "&" >>"$REDIRECT_OUT" 2>&1
+            ${SPRING_BOOT_ARGS} "$@" >&3 2>&1 3>&- &
     else
         echo "Using classpath ${APP_HOME}/target/${APP_NAME}"
         eval exec "\"$JAVA_HOME/bin/java\"" $SERVICE_OPTS \
@@ -242,8 +240,7 @@ start_spring_boot() {
             -Dapp.location="\"${APP_HOME}/target/${APP_NAME}\"" \
             -Djava.endorsed.dirs="\"$JAVA_ENDORSED_DIRS\"" \
             -Djava.io.tmpdir="\"$SERVICE_TMPDIR\"" \
-            org.springframework.boot.loader.JarLauncher ${SPRING_BOOT_ARGS} "$@" \
-            "&" >>"$REDIRECT_OUT" 2>&1
+            org.springframework.boot.loader.JarLauncher ${SPRING_BOOT_ARGS} "$@" >&3 2>&1 3>&- &
     fi
 
     if [ ! -z "$SERVICE_PID" ]; then
@@ -524,5 +521,7 @@ main() {
     esac
 }
 
+# Keep Java output on the original stdout so the child cannot hold tee open.
+exec 3>&1
 main | tee -a ${APP_HOME}/logs/${APP_NAME}_deploy.log
 check_first_pipe_exit_code
