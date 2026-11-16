@@ -207,6 +207,11 @@ public:
     virtual absl::Status initKVBlock();
     virtual absl::Status incrKVBlock();
     virtual void         releaseResource();
+    // Attempt release after generation and async workers finish. A live
+    // Connector lease keeps cleanup pending after the stream releases its blocks.
+    bool                 tryCompleteLocalCleanup();
+    // Read-only check for outstanding local work during late cancellation.
+    bool                 hasPendingLocalCleanup() const;
     int                  nextNeedBlockNums(int reserve_step) const;
     int                  estimateInitialNeedBlocks() const;
     int                  estimatePeakNeedBlocks(int remaining_tokens) const;
@@ -940,6 +945,8 @@ protected:
     // same mutex to commit accepted tokens/cache swaps.  Decide whether a
     // capacity-boundary join is needed before taking mutex_.
     bool needsAsyncBookkeepingJoinForKvReservation() const;
+
+    bool canReleaseFinishedResources() const;
 
     // Consumer-visible state is read and written under mutex_. Public readers
     // acquire the lock; already-locked engine paths use these helpers.
