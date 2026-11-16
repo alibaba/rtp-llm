@@ -2,9 +2,10 @@
 
 import json
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import torch
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import MlaAttnAtomicWeight
@@ -13,6 +14,7 @@ from rtp_llm.model_loader.linear_attn_weight import (
     LinearAttnAtomicWeight,
     LinearAttnConfig,
 )
+from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.weight_module import (
     AtomicWeight,
@@ -36,6 +38,7 @@ from rtp_llm.ops import (
     KVCacheSpecType,
     OpaqueBlockEntryCountMode,
 )
+from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
     W,
@@ -360,6 +363,26 @@ def _merge_conv1d(tensors: List[torch.Tensor]) -> torch.Tensor:
 
 class Glm53FlashWeight(DeepSeekV2Weight):
     """GLM-5.3 manifest reusing the DeepSeek MLA, MoE and FP8 loaders."""
+
+    def create_load_config(
+        self,
+        compute_dtype: torch.dtype,
+        database: BaseDatabase,
+        phy2log: Optional[List[List[int]]] = None,
+        exported_device: Optional[Any] = None,
+        force_cpu_load_weights: bool = False,
+        moe_pure_tp_preshard: bool = False,
+    ) -> LoadConfig:
+        load_config = super().create_load_config(
+            compute_dtype,
+            database,
+            phy2log=phy2log,
+            exported_device=exported_device,
+            force_cpu_load_weights=force_cpu_load_weights,
+            moe_pure_tp_preshard=moe_pure_tp_preshard,
+        )
+        load_config.fp8_requant_preserve_fp32 = True
+        return load_config
 
     def _process_meta(self, meta_dict, weight_keys):
         self.q_use_lora = any(

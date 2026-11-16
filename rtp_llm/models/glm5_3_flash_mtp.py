@@ -3,11 +3,14 @@
 import functools
 import json
 from pathlib import Path
-from typing import List
+from typing import Any, List, Optional
+
+import torch
 
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import MlaAttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnWeight
+from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
 from rtp_llm.models.deepseek_v2 import DeepSeekV2Weight
@@ -16,6 +19,7 @@ from rtp_llm.models.glm5_3_flash import (
     _configure_glm53_mtp_attention_layout,
     parse_glm53_flash_config,
 )
+from rtp_llm.utils.database import BaseDatabase
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity, transpose, zeros
 
 
@@ -36,6 +40,28 @@ class Glm53FlashMtpWeight(DeepSeekV2Weight):
     """
 
     checkpoint_prefix = "model."
+
+    def create_load_config(
+        self,
+        compute_dtype: torch.dtype,
+        database: BaseDatabase,
+        phy2log: Optional[List[List[int]]] = None,
+        exported_device: Optional[Any] = None,
+        force_cpu_load_weights: bool = False,
+        moe_pure_tp_preshard: bool = False,
+    ) -> LoadConfig:
+        load_config = super().create_load_config(
+            compute_dtype,
+            database,
+            phy2log=phy2log,
+            exported_device=exported_device,
+            force_cpu_load_weights=force_cpu_load_weights,
+            moe_pure_tp_preshard=moe_pure_tp_preshard,
+        )
+        load_config.fp8_requant_preserve_fp32 = bool(
+            getattr(self.model_config, "is_glm53_mtp", False)
+        )
+        return load_config
 
     def _get_hf_ffn_layer_weight_info(self, layer_id: int):
         from rtp_llm.models.glm53_prefill_parallel import shared_expert_local_enabled

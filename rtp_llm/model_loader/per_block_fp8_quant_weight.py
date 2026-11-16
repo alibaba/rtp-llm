@@ -895,9 +895,19 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             # inputs still arrive with floating-point block scales and require
             # the old dequantize/requantize conversion here.
             if is_deep_gemm_e8m0_used() and scale_weight.dtype != torch.int32:
-                kernel_weight, scale_weight = requant_weight_ue8m0(
-                    kernel_weight, scale_weight
-                )
+                if (
+                    getattr(load_config, "fp8_requant_preserve_fp32", False)
+                    and self.quant_config.is_quanted()
+                    and kernel_weight.dtype == torch.float8_e4m3fn
+                    and scale_weight.dtype == torch.float32
+                ):
+                    kernel_weight, scale_weight = requant_weight_ue8m0(
+                        kernel_weight, scale_weight, dequant_dtype=torch.float32
+                    )
+                else:
+                    kernel_weight, scale_weight = requant_weight_ue8m0(
+                        kernel_weight, scale_weight
+                    )
 
             processed_res[self.scale.name] = scale_weight
             processed_res[self.kernel.name] = kernel_weight

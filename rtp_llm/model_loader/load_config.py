@@ -64,6 +64,8 @@ class LoadConfig(BaseModel):
     use_swizzleA: bool = False
     force_cpu_load_weights: bool = False
     moe_pure_tp_preshard: bool = False
+    # Preserve GLM53's FP32 dequantization before offline FP8 -> UE8M0 conversion.
+    fp8_requant_preserve_fp32: bool = False
 
     @field_validator("database", "compute_dtype", "quant_algo")
     @classmethod
