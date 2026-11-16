@@ -179,7 +179,7 @@ def _mhc_pre_norm_quant(
                     output_shared = T.alloc_shared(hidden_size, T.bfloat16)
                     sumsq_per_pos = T.alloc_fragment(hidden_block, T.float32)
                     T.clear(sumsq_per_pos)
-                for i0_h in T.Pipelined(hidden_size // hidden_block, num_stages=2):
+                for i0_h in T.Pipelined(hidden_size // hidden_block, num_stages=3):
                     xs = T.alloc_shared((mhc_mult, hidden_block), T.bfloat16)
                     xl = T.alloc_fragment((mhc_mult, hidden_block), T.float32)
                     T.copy(residual[pid, 0, i0_h * hidden_block], xs, disable_tma=True)
@@ -212,7 +212,7 @@ def _mhc_pre_norm_quant(
                     T.reduce_sum(sumsq_per_pos, sumsq, dim=0)
                     inv_rms = T.alloc_fragment(1, T.float32)
                     inv_rms[0] = T.rsqrt(sumsq[0] / hidden_size + norm_eps)
-                    for i0_h in T.Pipelined(hidden_size // hidden_block, num_stages=2):
+                    for i0_h in T.Pipelined(hidden_size // hidden_block, num_stages=3):
                         ws = T.alloc_shared(hidden_block, T.bfloat16)
                         wl = T.alloc_fragment(hidden_block, T.float32)
                         T.copy(norm_weight[i0_h * hidden_block], ws, disable_tma=True)
