@@ -10,7 +10,29 @@ from rtp_llm.models_py.sampling.adaptive_controller import AdaptiveDraftControll
 
 
 class AdaptiveVerificationSession:
-    def __init__(self, capacity: int, steps: int, device: str) -> None:
+    def __init__(
+        self,
+        capacity: int,
+        steps: int,
+        device: str,
+        capture_rows: list[int] | None = None,
+    ) -> None:
+        # C++ passes its actual target graph grid, avoiding a second grid formula.
+        rows = list(capture_rows or [])
+        maximum = capacity * (steps + 1)
+        if rows and (
+            any(type(n) is not int or n <= 0 for n in rows)
+            or rows != sorted(set(rows))
+            or rows[-1] != maximum
+        ):
+            raise ValueError(
+                "capture_rows must be sorted unique positive buckets ending at capacity * (steps + 1)"
+            )
+        self._execution_rows = np.arange(maximum + 1)
+        if rows:
+            self._execution_rows[1:] = np.asarray(rows)[
+                np.searchsorted(rows, self._execution_rows[1:])
+            ]
         self.controller = AdaptiveDraftController(capacity, steps, torch.device(device))
         self.steps = steps
         self.fixed_cap = int(os.environ.get("RTP_LLM_ADAPTIVE_VERIFY_CAP", "-1"))
@@ -95,6 +117,9 @@ class AdaptiveVerificationSession:
             )
         )
 
+    def _cost_key(self, total: int) -> int:
+        return int(self._execution_rows[total])
+
     def _collect_costs(self) -> None:
         pending = []
         for batch, total, events, cpu_ms in self.pending_costs:
@@ -164,12 +189,14 @@ class AdaptiveVerificationSession:
                 (
                     n
                     for n in range(self.steps, -1, -1)
-                    if batch * (n + 1) not in costs and batch * (n + 1) not in in_flight
+                    if self._cost_key(batch * (n + 1)) not in costs
+                    and self._cost_key(batch * (n + 1)) not in in_flight
                 ),
                 -1,
             )
             if cap < 0 and any(
-                batch * (n + 1) not in costs for n in range(self.steps + 1)
+                self._cost_key(batch * (n + 1)) not in costs
+                for n in range(self.steps + 1)
             ):
                 cap = self.steps
         draft = np.zeros(batch + 1)
@@ -182,7 +209,9 @@ class AdaptiveVerificationSession:
             # measurements: real kernels need not have monotonic latency, and
             # inflating the full-cap baseline can falsely favor a smaller cap.
             measured = np.asarray([costs[n] for n in points])
-            sizes = np.arange(batch, len(verify))
+            # Every live row count in one graph bucket pays the same cost,
+            # including when the full-cap logical count itself needs padding.
+            sizes = self._execution_rows[batch : len(verify)]
             buckets = np.minimum(
                 np.searchsorted(points, sizes, side="left"), len(points) - 1
             )
@@ -256,7 +285,9 @@ class AdaptiveVerificationSession:
         # A wall-clock adjustment in C++ telemetry must not fail a valid forward
         # on rank0 while its TP peers continue. Fall back to our monotonic clock.
         self.events[1].record()
-        self.pending_costs.append((len(self.ids), self.total, self.events, elapsed))
+        self.pending_costs.append(
+            (len(self.ids), self._cost_key(self.total), self.events, elapsed)
+        )
         self.events = None
 
     def observe(
@@ -279,6 +310,6 @@ class AdaptiveVerificationSession:
 
 
 def create_session(
-    capacity: int, steps: int, device: str
+    capacity: int, steps: int, device: str, capture_rows: list[int] | None = None
 ) -> AdaptiveVerificationSession:
-    return AdaptiveVerificationSession(capacity, steps, device)
+    return AdaptiveVerificationSession(capacity, steps, device, capture_rows)

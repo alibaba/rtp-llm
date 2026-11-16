@@ -27,6 +27,7 @@ cc_library(
         "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/models:eplb",
         "//rtp_llm/cpp/cuda_graph:cuda_graph_base",
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_capture_range",
         "//rtp_llm/cpp/distribute:rpc_cpu_tp_broadcaster_hdr",
         "//rtp_llm/cpp/utils:tensor_debug_utils",
         "//rtp_llm/cpp/utils:coordinated_stop_util",

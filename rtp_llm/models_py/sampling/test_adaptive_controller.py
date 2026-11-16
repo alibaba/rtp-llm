@@ -216,6 +216,74 @@ class AdaptiveControllerTest(unittest.TestCase):
             prepare.call_args.kwargs["verify_cost_ms"][2:], [1.0, 1.0, 0.5, 5.0, 5.0]
         )
 
+    def test_sparse_bucket_costs_calibration_and_eager_fallback(self) -> None:
+        grid = [1, 2, 4, 8, 10, 12]
+        with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
+            session = AdaptiveVerificationSession(2, 5, "cuda", grid)
+            eager = AdaptiveVerificationSession(2, 5, "cuda")
+        self.assertEqual(
+            [session._cost_key(n) for n in range(1, 13)],
+            [1, 2, 4, 4, 8, 8, 8, 8, 10, 10, 12, 12],
+        )
+        self.assertEqual([eager._cost_key(n) for n in range(1, 13)], list(range(1, 13)))
+        session.begin([10, 20])
+        # All fixed caps are calibrated in execution buckets: logical6 uses8.
+        session.round_costs[2] = {2: 1.0, 4: 2.0, 8: 4.0, 10: 5.0, 12: 6.0}
+        session.pending_costs = []
+        with patch.object(
+            session.controller,
+            "prepare_from_host",
+            wraps=session.controller.prepare_from_host,
+        ) as prepare:
+            session._prepare_plan()
+        self.assertFalse(session._calibration)
+        np.testing.assert_array_equal(
+            prepare.call_args.kwargs["verify_cost_ms"][2:],
+            [1, 2, 2, 4, 4, 4, 4, 5, 5, 6, 6],
+        )
+        # Full-cap count can itself be between buckets (one request, 6 rows).
+        session.begin([10])
+        session.round_costs[1] = {1: 1.0, 2: 2.0, 4: 3.0, 8: 4.0}
+        with patch.object(
+            session.controller,
+            "prepare_from_host",
+            wraps=session.controller.prepare_from_host,
+        ) as prepare:
+            session._prepare_plan()
+        np.testing.assert_array_equal(
+            prepare.call_args.kwargs["verify_cost_ms"][1:], [1, 2, 3, 3, 4, 4]
+        )
+        session.total = 5
+        session.events = [Mock(), Mock()]
+        session.finish()
+        self.assertEqual(session.pending_costs[-1][1], 8)
+        # A pending measurement in the same execution bucket prevents duplicate
+        # calibration, while the plan waits conservatively at full cap.
+        session.round_costs[1] = {1: 1.0, 2: 2.0, 4: 3.0}
+        session._prepare_plan()
+        self.assertTrue(session._calibration)
+        self.assertEqual(session.total, 6)
+
+    def test_budget_uses_free_rows_within_bucket_without_crossing_expensive_bucket(
+        self,
+    ):
+        with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
+            session = AdaptiveVerificationSession(2, 5, "cuda", [1, 2, 4, 8, 10, 12])
+        session.begin([10, 20])
+        session.round_costs[2] = {2: 1.0, 4: 2.0, 8: 3.0, 10: 100.0, 12: 100.0}
+        session._host_predictions = {
+            i: (session.round, np.full(5, 0.9)) for i in session.ids
+        }
+        session._prepare_plan()
+        # 8-row bucket is optimal; no fictional savings for 5,6,7 live rows.
+        self.assertEqual(session.total, 8)
+        self.assertFalse(session._calibration)
+
+    def test_invalid_capture_grids_are_rejected(self) -> None:
+        for grid in ([1, 2, 2, 12], [2, 1, 12], [0, 12], [1, 8], [True, 12], [1, 12.0]):
+            with self.subTest(grid=grid), self.assertRaises(ValueError):
+                AdaptiveVerificationSession(2, 5, "cuda", grid)
+
     def test_host_plan_keeps_prefixes_and_matches_budget(self) -> None:
         controller = ready_controller([10, 20])
         costs = dict(draft_cost_ms=np.zeros(3), verify_cost_ms=np.ones(9))

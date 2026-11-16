@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_capture_range.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
@@ -1532,8 +1533,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     parallelism_config_ = params.parallelism_config;
     if (adaptive_verification_ && !warm_up_ && isTpRank0()) {
         py::gil_scoped_acquire gil;
-        auto                   session = py::module_::import("rtp_llm.models_py.sampling.adaptive_session")
-                           .attr("create_session")(params.concurrency_config.concurrency_limit, propose_step_, "cuda");
+        // Pass the same grid used by target capture. Eager execution keeps
+        // logical-row costs; never infer graph enablement from an env default.
+        const auto capture_rows =
+            params.hw_kernel_config.enable_cuda_graph ?
+                configuredAdaptiveVerifyCaptureRows(params.concurrency_config.concurrency_limit, propose_step_ + 1) :
+                std::vector<int>{};
+        auto session = py::module_::import("rtp_llm.models_py.sampling.adaptive_session")
+                           .attr("create_session")(
+                               params.concurrency_config.concurrency_limit, propose_step_, "cuda", capture_rows);
         adaptive_session_ = std::shared_ptr<py::object>(new py::object(std::move(session)), [](py::object* value) {
             py::gil_scoped_acquire gil;
             delete value;

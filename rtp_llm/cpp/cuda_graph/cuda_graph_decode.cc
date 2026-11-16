@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_capture_range.h"
 #if USING_CUDA
 #include <cuda_runtime.h>
 #endif
@@ -18,6 +19,10 @@ void CudaGraphRunner::replayDecode(int bs) {
 }
 
 std::vector<int> CudaGraphRunner::getDecodeBatchSizesToCapture() {
+    if (adaptive_verification_) {
+        // Ignore sparse decode BS buckets only for adaptive target verification.
+        return configuredAdaptiveVerifyCaptureRows(static_cast<int>(max_bs_), num_tokens_per_bs_);
+    }
     // If decode_capture_batch_sizes_ is provided from Python, use it directly
     if (!decode_capture_batch_sizes_.empty()) {
         RTP_LLM_LOG_INFO("Using decode capture batch sizes from Python: %zu sizes", decode_capture_batch_sizes_.size());
@@ -54,6 +59,37 @@ void CudaGraphRunner::captureDecode() {
     RTP_LLM_LOG_INFO("Capture Decode Start");
     RTP_LLM_CHECK_WITH_INFO(!adaptive_verification_ || (is_target_verify_ && num_tokens_per_bs_ > 1),
                             "adaptive verification graphs require a multi-token target model");
+    if (adaptive_verification_) {
+        // Largest first retains shared-pool reuse and the single distributed warmup.
+        for (int rows : capture_range_) {
+            graph_instances_.try_emplace(rows, enable_cuda_graph_debug_mode_);
+        }
+        for (auto it = capture_range_.rbegin(); it != capture_range_.rend(); ++it) {
+            const auto    shape   = adaptiveVerifyGraphShape(static_cast<int>(max_bs_), num_tokens_per_bs_, *it);
+            const auto    lengths = adaptiveVerifyCaptureLengths(shape);
+            const int     bs      = shape.batch_capacity;
+            PyModelInputs inputs;
+            prepareCaptureInputs(inputs, bs, shape.rows);
+            auto lengths_cpu = torch::tensor(lengths, options_cpu_int32_);
+            auto offsets     = torch::zeros({bs + 1}, options_cpu_int32_);
+            offsets.slice(0, 1).copy_(lengths_cpu.cumsum(0));
+            inputs.attention_inputs.input_lengths.copy_(lengths_cpu);
+            inputs.attention_inputs.prefix_lengths.copy_(max_seq_len_ - lengths_cpu);
+            inputs.attention_inputs.cu_seqlens_host.copy_(offsets);
+            inputs.attention_inputs.cu_seqlens.copy_(offsets);
+            inputs.attention_inputs.cu_kv_seqlens.copy_(torch::arange(bs + 1, options_cpu_int32_) * max_seq_len_);
+            inputs.attention_inputs.total_tokens            = shape.rows;
+            inputs.attention_inputs.context_total_kv_length = static_cast<int64_t>(bs) * max_seq_len_;
+            graph_instances_[shape.rows].mem_hold_          = createCaptureMemoryHold(inputs, shape.rows);
+            graph_instances_[shape.rows].mem_hold_.attn_pyobj_ =
+                py_attn_pyobj_method_(graph_instances_[shape.rows].mem_hold_.py_model_inputs_, true);
+            captureDecodeOneBatchSize(shape.rows, it == capture_range_.rbegin());
+            replayAndSyncCheck(shape.rows, "adaptive verify rows");
+            RTP_LLM_LOG_INFO("capture adaptive verify rows=%d batch_capacity=%d", shape.rows, bs);
+        }
+        RTP_LLM_LOG_INFO("Capture adaptive Decode End: %zu sparse token-bucket graphs", graph_instances_.size());
+        return;
+    }
     // Pre-initialize all graph instances with keep_graph based on debug mode
     const int min_tokens = adaptive_verification_ ? 1 : num_tokens_per_bs_;
     for (int tokens = num_tokens_per_bs_; tokens >= min_tokens; --tokens) {
@@ -63,7 +99,7 @@ void CudaGraphRunner::captureDecode() {
     }
     int capture_range_size = capture_range_.size();
     for (int i = capture_range_size - 1; i >= 0; i--) {
-        int           bs = capture_range_[i];
+        int bs = capture_range_[i];
         for (int tokens = num_tokens_per_bs_; tokens >= min_tokens; --tokens) {
             const int     key = decodeGraphKey(bs, tokens);
             PyModelInputs inputs;
@@ -102,16 +138,16 @@ void CudaGraphRunner::captureDecode() {
             } catch (const std::exception& e) {
                 RTP_LLM_LOG_ERROR("CUDA graph capture failed for decode batch size %d: %s", bs, e.what());
 #if USING_CUDA
-            cudaGetLastError();
-            auto sync_err = cudaDeviceSynchronize();
-            if (sync_err != cudaSuccess) {
-                RTP_LLM_LOG_ERROR("cudaDeviceSynchronize after capture failure returned: %s",
-                                  cudaGetErrorString(sync_err));
                 cudaGetLastError();
-            }
+                auto sync_err = cudaDeviceSynchronize();
+                if (sync_err != cudaSuccess) {
+                    RTP_LLM_LOG_ERROR("cudaDeviceSynchronize after capture failure returned: %s",
+                                      cudaGetErrorString(sync_err));
+                    cudaGetLastError();
+                }
 #endif
-            throw;
-        }
+                throw;
+            }
         }
     }
     RTP_LLM_LOG_INFO("Capture Decode End");
