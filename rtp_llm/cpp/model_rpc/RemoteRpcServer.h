@@ -14,6 +14,8 @@ public:
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                       py::object                                             mm_process_engine);
 
+    void stop() override;
+
     auto& resource() {
         return resource_;
     }

@@ -28,6 +28,15 @@ grpc::Status RemoteRpcServer::init(const EngineInitParams&                      
     return grpc::Status::OK;
 }
 
+void RemoteRpcServer::stop() {
+    LocalRpcServer::stop();
+    // KV tensors can retain the store after the RPC service is destroyed.
+    // Stop its background work before process-wide RDMA singletons are released.
+    if (cache_store_) {
+        cache_store_->stop();
+    }
+}
+
 void RemoteRpcServer::initLocalHostInfo() {
     string local_id, local_ip, hostname;
     if (!autil::NetUtil::GetDefaultIp(local_ip) || local_ip.empty()) {

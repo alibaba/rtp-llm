@@ -6,6 +6,7 @@
 #include <pybind11/embed.h>
 
 #include "rtp_llm/cpp/disaggregate/cache_store/NoRdmaMemoryUtilImpl.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/NormalCacheStore.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/normal_engine/test/MockEngine.h"
 
@@ -102,6 +103,27 @@ TEST_F(RemoteRpcServerInitTest, RdmaInitializesBeforeEngineAndReusesPreparedMemo
     }
     EXPECT_TRUE(init_trace.memory_util.expired());
     EXPECT_EQ(init_trace.released, 1);
+}
+
+TEST_F(RemoteRpcServerInitTest, StopClosesBackgroundWorkWhileCacheOwnersRetainMemory) {
+    for (bool rdma_mode : {false, true}) {
+        ScopedRemoteRpcServer server;
+        ASSERT_TRUE(server.init(initParams(rdma_mode), nullptr, py::none()).ok());
+        auto retained_store = server.resource().cache_store;
+        ASSERT_NE(retained_store, nullptr);
+        auto memory = retained_store->getMemoryUtil();
+        ASSERT_NE(retained_store->messager_, nullptr);
+        ASSERT_NE(retained_store->thread_pool_, nullptr);
+
+        // RtpLLMOp owns the service through this base type.
+        LocalRpcServer& service = server;
+        service.stop();
+        EXPECT_EQ(retained_store->messager_, nullptr);
+        EXPECT_EQ(retained_store->thread_pool_, nullptr);
+        EXPECT_EQ(retained_store->getMemoryUtil(), memory);
+        service.stop();
+        EXPECT_EQ(retained_store->getMemoryUtil(), memory);
+    }
 }
 
 TEST_F(RemoteRpcServerInitTest, LocalInitFailureReleasesPreparedMemoryUtil) {
