@@ -1244,6 +1244,104 @@ def engine_stage_event(observer, stage, started_ns, finished_ns, details):
     return emitted
 
 
+def _bind_pp_pipeline_state_audit(observer, stepper):
+    """Observe Native hand-offs without interpreting host futures as GPU clocks."""
+    if getattr(observer, "_pp_pipeline_audit_stepper", None) is stepper:
+        return True
+    names = ("_dispatch", "_push", "_settle")
+    if not all(callable(getattr(stepper, name, None)) for name in names) or not all(
+        hasattr(stepper, name)
+        for name in ("wave", "slots", "stages", "first_slot", "last_real", "ratio", "measured")
+    ):
+        return False
+
+    def failed():
+        observer._pp_pipeline_audit_failures = (
+            getattr(observer, "_pp_pipeline_audit_failures", 0) + 1
+        )
+
+    def number(value):
+        if value is None:
+            return None
+        value = float(value)
+        if not math.isfinite(value):
+            raise ValueError("Nonfinite Native PP diagnostic value")
+        return value
+
+    def snapshot():
+        try:
+            stages = stepper.stages
+            if type(stages) is not int or not 1 <= stages <= 16:
+                raise ValueError("Invalid Native PP stage count")
+            return dict(
+                stages=stages,
+                wave_open=bool(stepper.wave.open),
+                first_slot=int(stepper.first_slot),
+                last_real=int(stepper.last_real),
+                cost_model_ratio=number(stepper.ratio),
+                measured_forward_seconds=number(stepper.measured),
+                slots=[
+                    dict(
+                        dispatched_monotonic_seconds=number(slot.dispatched),
+                        expected_forward_seconds=number(slot.expected),
+                        modelled_forward_ms=number(slot.modelled_ms),
+                        started_last_monotonic_seconds=number(slot.started_last),
+                    )
+                    for slot in stepper.slots[-stages:]
+                ],
+                unfinished_host_results=[
+                    dict(
+                        scheduler_output_key=id(step.scheduler_output),
+                        has_sample_call=step.future is not step.exec_future,
+                        execute_reply_ready=bool(step.exec_future.done()),
+                        result_ready=bool(step.future.done()),
+                    )
+                    for step in itertools.islice(stepper.in_flight, 2 * stages)
+                ],
+            )
+        except Exception:
+            failed()
+            return None
+
+    def wrap(name, original):
+        @wraps(original)
+        def call(*args, **kwargs):
+            before = None if name == "_dispatch" else snapshot()
+            entered = time.perf_counter_ns()
+            succeeded = False
+            result = None
+            try:
+                result = original(*args, **kwargs)
+                succeeded = True
+                return result
+            finally:
+                finished = time.perf_counter_ns()
+                # Empty scheduler polls are frequent and have no pipeline slot.
+                if name != "_dispatch" or result or not succeeded:
+                    try:
+                        observer.on_request_lifecycle_event(
+                            dict(
+                                event="pp_pipeline_transition",
+                                event_time_us=time.time_ns() // 1000,
+                                operation=name[1:],
+                                entered_perf_ns=entered,
+                                finished_perf_ns=finished,
+                                succeeded=succeeded,
+                                before=before,
+                                after=snapshot(),
+                            )
+                        )
+                    except Exception:
+                        failed()
+
+        return call
+
+    for name in names:
+        setattr(stepper, name, wrap(name, getattr(stepper, name)))
+    observer._pp_pipeline_audit_stepper = stepper
+    return True
+
+
 def bind_pp_sample_result_audit(observer, engine_core):
     """Record when Native PP sample results become observable to the host.
 
@@ -1300,6 +1398,7 @@ def bind_pp_sample_result_audit(observer, engine_core):
             return result
 
         stepper._dispatch = dispatch
+        _bind_pp_pipeline_state_audit(observer, stepper)
         observer._pp_sample_audit_stepper = stepper
         return True
     except Exception:
