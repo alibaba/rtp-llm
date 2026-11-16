@@ -1,0 +1,145 @@
+import os
+import unittest
+
+import torch
+
+from rtp_llm.models_py.kernels.cuda.scaled_rope import scaled_rope_qk_inplace
+from rtp_llm.models_py.kernels.cuda.test.scaled_rope_reference import reference_rope
+
+
+class ScaledRopeTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.interpreter = os.environ.get("TRITON_INTERPRET") == "1"
+        cls.device = "cpu" if cls.interpreter else "cuda"
+        if not cls.interpreter and not torch.cuda.is_available():
+            raise RuntimeError(
+                "scaled RoPE GPU target requires its assigned accelerator"
+            )
+
+    def fixture(self, dtype):
+        torch.manual_seed(523)
+        qkv = torch.randn(9, 8, 128, device=self.device, dtype=dtype)
+        positions = torch.tensor(
+            [0, 1, 3, 31, 32, 45, 63, 81, 127], device=self.device, dtype=torch.int32
+        )
+        batches = torch.tensor(
+            [0, 0, 0, 1, 1, 1, 2, 2, 2], device=self.device, dtype=torch.int32
+        )
+        lengths = torch.tensor([4, 46, 128], device=self.device, dtype=torch.int32)
+        return qkv, positions, batches, lengths
+
+    def assert_result(self, actual, original, positions, batches, lengths, **kwargs):
+        token_lengths = lengths[batches.long()]
+        for start, end in ((0, 4), (4, 6)):
+            expected = reference_rope(
+                original[:, start:end], positions, token_lengths, **kwargs
+            )
+            torch.testing.assert_close(
+                actual[:, start:end], expected, rtol=4e-3, atol=2e-2
+            )
+        torch.testing.assert_close(actual[:, 6:], original[:, 6:], rtol=0, atol=0)
+        dim = kwargs["rotary_dim"]
+        torch.testing.assert_close(
+            actual[:, :6, dim:], original[:, :6, dim:], rtol=0, atol=0
+        )
+
+    def test_strided_gqa_full_and_partial_rotary_against_reference(self):
+        # The three requests straddle the NTK threshold; Llama3 exercises low,
+        # high and interpolated frequencies. Q/K are non-contiguous QKV views.
+        for dtype in (torch.float32, torch.float16, torch.bfloat16):
+            for llama3 in (True, False):
+                for dim in (96, 128):
+                    with self.subTest(dtype=dtype, llama3=llama3, dim=dim):
+                        qkv, positions, batches, lengths = self.fixture(dtype)
+                        original = qkv.clone()
+                        kwargs = dict(
+                            rotary_dim=dim,
+                            base=10000.0,
+                            scale=8.0,
+                            original_max_position=32,
+                            llama3=llama3,
+                        )
+                        scaled_rope_qk_inplace(
+                            qkv[:, :4],
+                            qkv[:, 4:6],
+                            positions,
+                            batches,
+                            lengths,
+                            **kwargs
+                        )
+                        self.assert_result(
+                            qkv, original, positions, batches, lengths, **kwargs
+                        )
+                        base = dict(kwargs, scale=1.0, llama3=False)
+                        unscaled = reference_rope(
+                            original[:, :4], positions, lengths[batches.long()], **base
+                        )
+                        self.assertGreater(
+                            (qkv[:, :4].float() - unscaled.float()).abs().max().item(),
+                            0.1,
+                        )
+
+    def test_llama3_long_context_positions(self):
+        for dtype in (torch.float32, torch.float16, torch.bfloat16):
+            with self.subTest(dtype=dtype):
+                qkv, positions, batches, lengths = self.fixture(dtype)
+                positions.copy_(
+                    torch.tensor(
+                        [0, 8191, 8192, 16383, 32767, 65535, 65536, 98304, 131071],
+                        device=self.device,
+                        dtype=torch.int32,
+                    )
+                )
+                original = qkv.clone()
+                kwargs = dict(
+                    rotary_dim=128,
+                    base=500000.0,
+                    scale=8.0,
+                    original_max_position=8192,
+                    llama3=True,
+                )
+                scaled_rope_qk_inplace(
+                    qkv[:, :4], qkv[:, 4:6], positions, batches, lengths, **kwargs
+                )
+                self.assert_result(qkv, original, positions, batches, lengths, **kwargs)
+
+    def test_graph_replay_reads_updated_positions_and_request_lengths(self):
+        if self.interpreter:
+            self.skipTest("Triton interpreter verifies math, not CUDA graph execution")
+        for llama3 in (True, False):
+            qkv, positions, batches, lengths = self.fixture(torch.float16)
+            original = qkv.clone()
+            kwargs = dict(
+                rotary_dim=128,
+                base=10000.0,
+                scale=8.0,
+                original_max_position=32,
+                llama3=llama3,
+            )
+
+            def run():
+                scaled_rope_qk_inplace(
+                    qkv[:, :4], qkv[:, 4:6], positions, batches, lengths, **kwargs
+                )
+
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                for _ in range(3):
+                    qkv.copy_(original)
+                    run()
+            torch.cuda.current_stream().wait_stream(stream)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                run()
+            for offset in (7, 39):
+                qkv.copy_(original)
+                positions.add_(offset)
+                lengths.add_(offset)
+                graph.replay()
+                self.assert_result(qkv, original, positions, batches, lengths, **kwargs)
+
+
+if __name__ == "__main__":
+    unittest.main()
