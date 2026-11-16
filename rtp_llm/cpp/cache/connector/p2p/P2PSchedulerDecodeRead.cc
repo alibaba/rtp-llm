@@ -297,10 +297,8 @@ P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
         RTP_LLM_LOG_WARNING("asyncRead: request deadline expired, unique_key: %s", unique_key.c_str());
         return {nullptr, ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "P2P request deadline expired")};
     }
-    // Decode keeps both deadlines locally. StartLoad carries only the load
-    // timeout; Prefill obtains its request deadline from GenerateStream registration.
-    const int64_t     transfer_deadline_ms =
-        now_ms + std::min(request_deadline_ms - now_ms, config_.load_cache_timeout_ms);
+    // READ registration and StartLoad stay live while Prefill produces KV.
+    const int64_t transfer_deadline_ms = request_deadline_ms;
     const auto& prefill_addr    = routing->prefill_addr;
     const int   prefill_tp_size = routing->prefill_tp_size;
     const int   prefill_cp_size = routing->prefill_cp_size;

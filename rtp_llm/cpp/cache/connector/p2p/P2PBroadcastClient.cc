@@ -123,6 +123,7 @@ void P2PBroadcastClient::genBroadcastRequest(FunctionRequestPB&                 
     p2p_request->set_deadline_ms(params.deadline_ms);
     p2p_request->set_request_deadline_ms(params.request_deadline_ms);
     p2p_request->set_type(params.type);
+    p2p_request->set_communication_timeout_ms(params.communication_timeout_ms);
 
     // 本 worker 那一份传输计划。为空即「该 worker 无任务」—— 这取代了
     // allow_empty_projection 作为空投影的权威信号。

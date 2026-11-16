@@ -549,6 +549,7 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
                      route_layer_key,
                      chunk_id,
                      reporter = metrics_reporter_,
+                     communication_timeout_ms = transfer_result->communication_timeout_ms,
                      enqueue_time_us]() mutable {
             P2PConnectorMetricsCollector submit_collector;
             submit_collector.prefill_worker_write_sender_queue_time_us = currentTimeUs() - enqueue_time_us;
@@ -568,6 +569,17 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
             }
             // Measure inside-pool cost; the sync prefix of sender->send()
             // (cuda copy + sync) can take seconds under contention.
+            if (communication_timeout_ms > 0) {
+                const auto now_ms = currentTimeMs();
+                const auto remaining_ms = send_req_local->deadline_ms - now_ms;
+                if (remaining_ms <= 0) {
+                    done_cb(transfer::TransferErrorCode::TIMEOUT, "request expired before async send started");
+                    return;
+                }
+                const auto budget_ms = std::min(communication_timeout_ms, remaining_ms);
+                send_req_local->deadline_ms = now_ms + budget_ms;
+                send_req_local->timeout_ms = budget_ms;
+            }
             const int64_t pool_task_start_us = currentTimeUs();
             auto measured_done_cb = [done_cb, reporter, pool_task_start_us, buffer_keepalive_local](
                                         transfer::TransferErrorCode ec, const std::string& message) {
@@ -717,7 +729,8 @@ P2PWorkerPrefillRead::sendKVCache(int64_t                   request_id,
                                        const std::string&        unique_key,
                                        int64_t                   deadline_ms,
                                        const P2PWorkerRoutePlan& worker_plan,
-                                       int64_t                   request_deadline_ms) {
+                                       int64_t                   request_deadline_ms,
+                                       int64_t                   communication_timeout_ms) {
     if (request_deadline_ms <= 0 || request_deadline_ms == std::numeric_limits<int64_t>::max()
         || deadline_ms <= currentTimeMs() || deadline_ms == std::numeric_limits<int64_t>::max()) {
         return ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "sendKVCache: invalid or expired deadlines");
@@ -774,6 +787,7 @@ P2PWorkerPrefillRead::sendKVCache(int64_t                   request_id,
         return ErrorInfo::OkStatus();
     }
     auto transfer_result = std::make_shared<SendTransferResult>();
+    transfer_result->communication_timeout_ms = communication_timeout_ms;
 
     auto cancel_flag = std::make_shared<std::atomic<bool>>(false);
     {

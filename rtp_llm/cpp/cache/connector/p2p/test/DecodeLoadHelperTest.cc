@@ -208,9 +208,8 @@ TEST_F(DecodeLoadHelperTest, LoadCarriesRemainingBudgetAndKeepsLocalDeadline) {
                                 plan_digest);
 
     ASSERT_NE(result, nullptr);
-    EXPECT_EQ(result->request.timeout_ms(), result->timeout_ms);
-    EXPECT_GT(result->request.timeout_ms(), 0);
-    EXPECT_LE(result->request.timeout_ms(), 500);
+    EXPECT_EQ(result->request.timeout_ms(), 1000);
+    EXPECT_EQ(result->request.handoff_timeout_ms(), result->timeout_ms);
     EXPECT_EQ(result->request.plan_digest(), plan_digest);
     EXPECT_GT(result->timeout_ms, 0);
     EXPECT_LE(result->timeout_ms, 500);
@@ -219,7 +218,7 @@ TEST_F(DecodeLoadHelperTest, LoadCarriesRemainingBudgetAndKeepsLocalDeadline) {
     EXPECT_EQ(server_->service()->getLastStartLoadRequest().timeout_ms(), result->request.timeout_ms());
 }
 
-TEST_F(DecodeLoadHelperTest, LoadRemainingBudgetDoesNotExceedConfiguredTimeout) {
+TEST_F(DecodeLoadHelperTest, LoadCarriesCommunicationBudgetSeparately) {
     const int64_t deadline_ms = currentTimeMs() + 5000;
     auto result = client_->load(1011,
                                 "127.0.0.1",
@@ -230,9 +229,9 @@ TEST_F(DecodeLoadHelperTest, LoadRemainingBudgetDoesNotExceedConfiguredTimeout) 
                                 1000);
 
     ASSERT_NE(result, nullptr);
-    EXPECT_EQ(result->request.timeout_ms(), std::min<int64_t>(1000, result->timeout_ms));
-    EXPECT_GT(result->request.timeout_ms(), 0);
-    EXPECT_LE(result->request.timeout_ms(), 1000);
+    EXPECT_EQ(result->request.timeout_ms(), 1000);
+    EXPECT_EQ(result->request.handoff_timeout_ms(), result->timeout_ms);
+    EXPECT_GT(result->request.handoff_timeout_ms(), result->request.timeout_ms());
     EXPECT_TRUE(waitDone(result));
     EXPECT_EQ(server_->service()->getLastStartLoadRequest().timeout_ms(), result->request.timeout_ms());
 }

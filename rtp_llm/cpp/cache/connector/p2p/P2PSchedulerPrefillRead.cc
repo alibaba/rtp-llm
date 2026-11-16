@@ -108,7 +108,8 @@ P2PSchedulerPrefillRead::sendKVCache(const std::string&                         
                                           std::function<bool()>                                is_cancelled,
                                           bool                                                 no_transfer,
                                           int64_t                                              request_deadline_ms,
-                                          const std::set<int>&                                 active_route_ids) {
+                                          const std::set<int>&                                 active_route_ids,
+                                          int64_t                                              communication_timeout_ms) {
     RTP_LLM_LOG_DEBUG("sendKVCache start, request_id: %ld, unique_key: %s, decode_transfer_servers_size: %zu",
                       request_id,
                       unique_key.c_str(),
@@ -176,6 +177,7 @@ P2PSchedulerPrefillRead::sendKVCache(const std::string&                         
     params.deadline_ms         = deadline_ms;
     params.request_deadline_ms = request_deadline_ms;
     params.type                = broadcast_type;
+    params.communication_timeout_ms = communication_timeout_ms;
     params.peer_workers        = decode_transfer_servers;
     // no_transfer 时 rank_routes 为空 ⇒ 所有 worker 收到同一份不带传输计划的请求。
     params.routes      = std::move(rank_routes);

@@ -265,7 +265,8 @@ bool DecodeLoadHelper::buildAndStartAsyncRpc(const std::shared_ptr<Result>& resu
     }
     result->timeout_ms = static_cast<int>(std::min<int64_t>(
         transfer_deadline_ms - now_ms, std::numeric_limits<int>::max()));
-    result->request.set_timeout_ms(std::min<int64_t>(load_timeout_ms, result->timeout_ms));
+    result->request.set_timeout_ms(load_timeout_ms);
+    result->request.set_handoff_timeout_ms(transfer_deadline_ms - now_ms);
     result->client_context->set_deadline(
         std::chrono::system_clock::time_point(std::chrono::milliseconds(transfer_deadline_ms)));
 

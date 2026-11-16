@@ -351,7 +351,7 @@ TEST_F(P2PConnectorTest, StartLoadRegistrationWaitObservesRpcCancellation) {
     EXPECT_GT(connector_->streamStore()->requestDeadline(request.unique_key(), 5000), currentTimeMs());
 }
 
-TEST_F(P2PConnectorTest, StartLoadDoesNotRestartLoadBudgetAfterRegistrationWait) {
+TEST_F(P2PConnectorTest, StartLoadRegistrationWaitDoesNotConsumeCommunicationBudget) {
     const std::string key    = "registration-load-budget";
     auto              stream = createGenerateStream(key, 5022, 5000);
     ASSERT_NE(connector_->asyncRead(createValidKVCacheResource(), createMockMeta(stream.get()), 0, 0), nullptr);
@@ -361,6 +361,7 @@ TEST_F(P2PConnectorTest, StartLoadDoesNotRestartLoadBudgetAfterRegistrationWait)
     connector_->streamStore()->publishPrefillPayload(key, stream->deadlineMs(), std::move(data));
     auto request = createValidStartLoadRequest(key, currentTimeMs() + 5000);
     request.set_timeout_ms(20);
+    request.set_handoff_timeout_ms(5000);
     request.set_no_transfer(true);
     std::promise<void> waiting;
     auto               started = waiting.get_future();
@@ -378,19 +379,15 @@ TEST_F(P2PConnectorTest, StartLoadDoesNotRestartLoadBudgetAfterRegistrationWait)
         });
         return response;
     });
-    // Hold the registration wait across its load deadline, then allow it to observe registration.
+    // Hold the registration wait past the communication budget.
     // Always release before a fatal assertion so async teardown cannot block on the gate.
     EXPECT_EQ(started.wait_for(std::chrono::seconds(1)), std::future_status::ready);
     EXPECT_EQ(result.wait_for(std::chrono::milliseconds(40)), std::future_status::timeout);
     release.set_value();
     ASSERT_EQ(result.wait_for(std::chrono::seconds(1)), std::future_status::ready);
     const auto response = result.get();
-    EXPECT_EQ(response.error_code(), transErrorCodeToRPC(ErrorCode::GENERATE_TIMEOUT));
-    EXPECT_NE(response.error_message().find("registration or load deadline expired"), std::string::npos);
-    EXPECT_TRUE(connector_->streamStore()->isMarkedCancelled(key));
-    for (const auto& server : tp_broadcast_servers_) {
-        EXPECT_EQ(server->service()->getBroadcastTpCallCount(), 0);
-    }
+    EXPECT_EQ(response.error_code(), ErrorCodePB::NONE_ERROR) << response.error_message();
+    EXPECT_EQ(response.payload().first_generate_token_id(), 42);
 }
 
 TEST_F(P2PConnectorTest, StartLoadUsesRegisteredRequestDeadlineWithoutRenewingIt) {

@@ -278,9 +278,8 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadUsesConfiguredLoadBudgetAndRequestDea
     waitAsyncContextDone(result.context);
     ASSERT_TRUE(result.context->success());
     auto request = prefill_server_->service()->getLastStartLoadRequest();
-    EXPECT_GT(request.timeout_ms(), 0);
-    EXPECT_LE(request.timeout_ms(), 1000);
-    EXPECT_GE(request.timeout_ms(), before + 1000 - currentTimeMs());
+    EXPECT_EQ(request.timeout_ms(), 1000);
+    EXPECT_GE(request.handoff_timeout_ms(), request_deadline_ms - currentTimeMs());
 }
 
 TEST_F(P2PConnectorSchedulerTest, AsyncReadKeepsRequestDeadlineSeparateFromLoadBudget) {
@@ -291,11 +290,11 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadKeepsRequestDeadlineSeparateFromLoadB
     waitAsyncContextDone(result.context);
     ASSERT_TRUE(result.context->success());
     auto request = prefill_server_->service()->getLastStartLoadRequest();
-    EXPECT_GT(request.timeout_ms(), 0);
-    EXPECT_LE(request.timeout_ms(), 2000);
-    EXPECT_GE(request.timeout_ms(), request_deadline_ms - currentTimeMs());
+    EXPECT_EQ(request.timeout_ms(), PDSepConfig{}.load_cache_timeout_ms);
+    EXPECT_LE(request.handoff_timeout_ms(), 2000);
+    EXPECT_GE(request.handoff_timeout_ms(), request_deadline_ms - currentTimeMs());
     EXPECT_EQ(result.context->request_deadline_ms_, request_deadline_ms);
-    EXPECT_LE(result.context->transfer_deadline_ms_, request_deadline_ms);
+    EXPECT_EQ(result.context->transfer_deadline_ms_, request_deadline_ms);
 }
 
 TEST(P2PSchedulerDecodeReadTest, UnshardedPeerUsesOnePhysicalCpShard) {
@@ -332,9 +331,7 @@ TEST_F(P2PConnectorSchedulerTest, InvalidLoadConfigurationUsesBoundedSharedFallb
         waitAsyncContextDone(result.context);
         ASSERT_TRUE(result.context->success());
         const int64_t wire_timeout = prefill_server_->service()->getLastStartLoadRequest().timeout_ms();
-        EXPECT_GT(wire_timeout, 0);
-        EXPECT_LE(wire_timeout, std::min<int64_t>(expected, 60000));
-        EXPECT_GE(wire_timeout, std::min<int64_t>(expected, request_deadline_ms - currentTimeMs()));
+        EXPECT_EQ(wire_timeout, expected);
     }
 }
 
@@ -1358,7 +1355,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_StartLoadTimeout_HoldsTargetUntilAll
     }
 
     auto result = decode_scheduler_->asyncRead(
-        allocated.resource, createMockMeta(5100, "start_load_timeout_hold", currentTimeMs() + 5000), {0, -1});
+        allocated.resource, createMockMeta(5100, "start_load_timeout_hold", currentTimeMs() + 150), {0, -1});
     allocated.resource.reset();
     ASSERT_TRUE(result.ok());
     auto context = result.context;
@@ -1395,7 +1392,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReadPerRankTimeout_WaitsForEveryRank
     }
 
     auto result = decode_scheduler_->asyncRead(
-        allocated.resource, createMockMeta(5101, "read_per_rank_timeout_hold", currentTimeMs() + 5000), {0, -1});
+        allocated.resource, createMockMeta(5101, "read_per_rank_timeout_hold", currentTimeMs() + 150), {0, -1});
     allocated.resource.reset();
     ASSERT_TRUE(result.ok());
     auto context = result.context;
@@ -1432,7 +1429,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_CancelTimeout_DoesNotQueryOrReleaseT
     }
 
     auto result = decode_scheduler_->asyncRead(
-        allocated.resource, createMockMeta(5102, "cancel_timeout_hold", currentTimeMs() + 5000), {0, -1});
+        allocated.resource, createMockMeta(5102, "cancel_timeout_hold", currentTimeMs() + 150), {0, -1});
     allocated.resource.reset();
     ASSERT_TRUE(result.ok());
     auto context = result.context;
@@ -1473,7 +1470,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_QueryTimeout_RetainsTargetUntilRetry
     }
 
     auto result = decode_scheduler_->asyncRead(
-        allocated.resource, createMockMeta(5103, "query_timeout_hold", currentTimeMs() + 5000), {0, -1});
+        allocated.resource, createMockMeta(5103, "query_timeout_hold", currentTimeMs() + 150), {0, -1});
     allocated.resource.reset();
     ASSERT_TRUE(result.ok());
     auto context = result.context;

@@ -48,7 +48,8 @@ public:
                           const std::string&        unique_key,
                           int64_t                   deadline_ms,
                           const P2PWorkerRoutePlan& worker_plan,
-                          int64_t                   request_deadline_ms);
+                          int64_t                   request_deadline_ms,
+                          int64_t                   communication_timeout_ms = 0);
 
     void finishPublication(int64_t request_id, int64_t request_deadline_ms);
     void completeNoTransfer(int64_t request_id, int64_t deadline_ms, int64_t request_deadline_ms);
@@ -68,6 +69,7 @@ private:
     void loopCheckProc();
 
     struct SendTransferResult {
+        int64_t communication_timeout_ms = 0;
         // Written by the dispatch thread, sampled after dispatch returns.
         int64_t                 first_buffer_ready_us = -1;
         int64_t                 last_buffer_ready_us  = -1;

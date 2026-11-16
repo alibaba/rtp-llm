@@ -88,6 +88,7 @@ public:
         int64_t deadline_ms{0};
         /// 原始用户请求 deadline，必须 > 0 且不早于 deadline_ms。
         int64_t                   request_deadline_ms{0};
+        int64_t                   communication_timeout_ms{0};
         P2PConnectorBroadcastType type;
         /// 传输端点索引表，route 里的 peer_index 指向它。
         std::vector<std::pair<std::string, uint32_t>> peer_workers;

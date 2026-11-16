@@ -31,7 +31,8 @@ public:
                           std::function<bool()>                                is_cancelled = nullptr,
                           bool                                                 no_transfer = false,
                           int64_t                                              request_deadline_ms = 0,
-                          const std::set<int>&                                 active_route_ids = {});
+                          const std::set<int>&                                 active_route_ids = {},
+                          int64_t                                              communication_timeout_ms = 0);
 
     /// @brief 与 decode 侧用**同一个 planner 函数**算镜像 plan。
     /// decode 的 (tp_size, cp_size) 由本端推导：tp_size = decode_transfer_servers.size()，

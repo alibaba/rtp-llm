@@ -187,8 +187,11 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
         report_process_metrics();
         return;
     }
-    // Registration wait consumes this same load budget; never restart it after registration.
-    int64_t    transfer_deadline_ms = now_ms + request.timeout_ms();
+    const auto handoff_timeout_ms = request.handoff_timeout_ms();
+    const auto communication_timeout_ms = handoff_timeout_ms > 0 ? request.timeout_ms() : 0;
+    // Older clients send a single timeout for the whole operation.
+    const auto wait_timeout_ms = handoff_timeout_ms > 0 ? handoff_timeout_ms : request.timeout_ms();
+    int64_t transfer_deadline_ms = now_ms + std::min(wait_timeout_ms, std::numeric_limits<int64_t>::max() - now_ms);
     const auto handle_read_start_us = currentTimeUs();
 
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
@@ -293,7 +296,8 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
                                                    direct_cancel,
                                                    request.no_transfer(),
                                                    request_deadline_ms,
-                                                   active_route_ids);
+                                                   active_route_ids,
+                                                   communication_timeout_ms);
     auto send_cost_us = currentTimeUs() - send_start_us;
     if (error_info.hasError()) {
         RTP_LLM_LOG_ERROR("[PD-DIAG] handleRead sendKVCache failed, unique_key=%s, send_cost_us=%ld, error=%s",
@@ -420,7 +424,12 @@ bool P2PConnectorPrefill::processReadPerRank(int64_t                            
     }
 
     ErrorInfo error_info = worker_->sendKVCache(
-        request_id, unique_key, deadline_ms, worker_plan, p2p_request.request_deadline_ms());
+        request_id,
+        unique_key,
+        deadline_ms,
+        worker_plan,
+        p2p_request.request_deadline_ms(),
+        p2p_request.communication_timeout_ms());
     if (error_info.hasError()) {
         RTP_LLM_LOG_WARNING("executeHandleRead failed, request_id: %ld, unique_key: %s, error: %s",
                             request_id,

@@ -921,6 +921,8 @@ message P2PConnectorBroadcastTpRequestPB {
     // CANCEL_READ only: remaining request lifetime for an early-cancel fence.
     // This is a retention budget, never evidence that a physical read has stopped.
     int64 cancel_retention_ms = 14;
+    // Per-send transport budget. Zero uses the legacy worker deadline.
+    int64 communication_timeout_ms = 15;
 }
 
 // GetPeerInfo: Decode queries the selected Prefill for its TP/CP layout before recv registration.
@@ -955,7 +957,8 @@ message LeaseStatusResponsePB {
 message P2PConnectorStartLoadRequestPB {
     string unique_key = 1;
     repeated TPWorkerInfoPB workers = 2;
-    // Load budget includes waiting for GenerateStream request registration on Prefill.
+    // Per-send communication budget when handoff_timeout_ms is present.
+    // Legacy peers interpret this as the entire StartLoad budget.
     int64 timeout_ms = 3;
     // Decode already has all matched KV blocks locally. Prefill should still
     // complete the StartLoad lifecycle and return side-channel data, but must
@@ -971,6 +974,8 @@ message P2PConnectorStartLoadRequestPB {
     // this request's concrete key range. Prefill uses the same ids to avoid
     // dispatching routes whose key set is empty for short/windowed requests.
     repeated int32 active_route_ids = 7;
+    // Remaining Decode request lifetime at submission, relative to the receiver clock.
+    int64 handoff_timeout_ms = 8;
 }
 
 // Side-channel tensor blob: carries named tensor data between prefill and decode
