@@ -116,6 +116,9 @@ class AccMetrics(Enum):
         "py_rtp_vit_remote_embedding_cache_operation_qps"
     )
     VIT_REMOTE_EMB_SKIP_QPS_METRIC = "py_rtp_vit_remote_embedding_cache_skip_qps"
+    VIT_REMOTE_EMB_WRITE_IN_PROGRESS_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_write_in_progress_qps"
+    )
 
     # Creation is distinct from per-operation acquisition of a shared client.
     VIT_REMOTE_EMB_CLIENT_CREATE_QPS_METRIC = (

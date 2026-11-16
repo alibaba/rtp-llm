@@ -32,6 +32,18 @@ from rtp_llm.utils.cuda_graph_gate import cuda_graph_gate
 _TIMEOUT_ERRORS = (TimeoutError, concurrent.futures.TimeoutError)
 
 
+def _is_write_in_progress(error):
+    """Recognize a known pre-I/O KVMeta conflict without importing the optional wheel."""
+    code = getattr(error, "code", None)
+    return (
+        type(error).__name__ == "KvMetaObjectClientError"
+        and getattr(code, "name", None) == "ER_SERVICE_WRITE_IN_PROGRESS"
+        and getattr(error, "operation", None) == "save"
+        and getattr(error, "unknown_outcome", True) is False
+        and getattr(error, "data_transfer_may_be_inflight", None) is False
+    )
+
+
 def _log_error(marker, error, **context):
     try:
         logging.error(
@@ -448,10 +460,12 @@ class MMRemoteEmbeddingCache:
     def _report_operation(self, operation, started, outcome, nbytes=0):
         elapsed_ms = (time.perf_counter() - started) * 1000
         if outcome != "admission_skip":
-            self._report_outcome(
-                operation,
-                "success" if outcome in ("hit", "miss", "success") else "error",
+            status = (
+                "success"
+                if outcome in ("hit", "miss", "success")
+                else "skipped" if outcome == "skipped" else "error"
             )
+            self._report_outcome(operation, status)
         if operation == "read":
             qps = AccMetrics.VIT_REMOTE_EMB_READ_QPS_METRIC
             error_qps = AccMetrics.VIT_REMOTE_EMB_READ_ERROR_QPS_METRIC
@@ -500,13 +514,22 @@ class MMRemoteEmbeddingCache:
         except _TIMEOUT_ERRORS:
             outcome = "timeout"
             raise
-        except Exception:
-            outcome = "error"
+        except Exception as error:
+            outcome = (
+                "skipped"
+                if operation == "write" and stage == "transfer"
+                and _is_write_in_progress(error)
+                else "error"
+            )
             raise
         finally:
             elapsed_ms = (time.perf_counter() - started) * 1000
-            cls._report_outcome(operation + "_stage", outcome, stage=stage)
-            tags = {"operation": operation, "stage": stage}
+            metric_stage = (
+                "metadata_put_start"
+                if outcome == "skipped" and stage == "transfer" else stage
+            )
+            cls._report_outcome(operation + "_stage", outcome, stage=metric_stage)
+            tags = {"operation": operation, "stage": metric_stage}
             outcome_tags = dict(tags, status=outcome)
             cls._report_metric(
                 AccMetrics.VIT_REMOTE_EMB_STAGE_QPS_METRIC, 1, outcome_tags
@@ -516,10 +539,10 @@ class MMRemoteEmbeddingCache:
             )
             cls._report_metric(
                 AccMetrics.VIT_REMOTE_EMB_STAGE_ERROR_QPS_METRIC,
-                int(outcome != "success"),
+                int(outcome not in ("success", "skipped")),
                 tags,
             )
-            if stage == "transfer":
+            if stage == "transfer" and outcome != "skipped":
                 tags = {"operation": operation}
                 completed_bytes = nbytes if outcome == "success" else 0
                 cls._report_metric(
@@ -552,9 +575,13 @@ class MMRemoteEmbeddingCache:
                 {"operation": operation, "stage": stage, "status": label},
             )
 
-    def _report_skip(self, operation, reason):
-        if operation in ("read", "write"):
+    def _report_skip(self, operation, reason, *, report_outcome=True):
+        if report_outcome and operation in ("read", "write"):
             self._report_outcome(operation, "skipped")
+        if operation == "write" and reason == "write_in_progress":
+            self._report_metric(
+                AccMetrics.VIT_REMOTE_EMB_WRITE_IN_PROGRESS_QPS_METRIC, 1, {}
+            )
         self._report_metric(
             AccMetrics.VIT_REMOTE_EMB_SKIP_QPS_METRIC,
             1,
@@ -756,16 +783,23 @@ class MMRemoteEmbeddingCache:
                     tensors=tensors,
                 )
             except Exception as error:
-                outcome = "timeout" if isinstance(error, _TIMEOUT_ERRORS) else "error"
-                self.record(
-                    "write_error",
-                    key=key,
-                    trace_id=trace_id,
-                    stage=failure_stage,
-                    nbytes=nbytes,
-                    elapsed_ms=(time.perf_counter() - started) * 1000,
-                    **self._error_context(error),
-                )
+                if _is_write_in_progress(error):
+                    outcome = "skipped"
+                    self.record("write_skipped")
+                    self._report_skip(
+                        "write", "write_in_progress", report_outcome=False
+                    )
+                else:
+                    outcome = "timeout" if isinstance(error, _TIMEOUT_ERRORS) else "error"
+                    self.record(
+                        "write_error",
+                        key=key,
+                        trace_id=trace_id,
+                        stage=failure_stage,
+                        nbytes=nbytes,
+                        elapsed_ms=(time.perf_counter() - started) * 1000,
+                        **self._error_context(error),
+                    )
             finally:
                 self._report_operation("write", started, outcome, nbytes)
                 self._benchmark(

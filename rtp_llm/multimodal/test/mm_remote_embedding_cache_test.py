@@ -1,4 +1,5 @@
 import concurrent.futures
+from enum import Enum
 import json
 import os
 import threading
@@ -823,6 +824,93 @@ class RemoteCacheTest(unittest.TestCase):
                             AccMetrics.VIT_REMOTE_EMB_PAYLOAD_BYTES_PER_SECOND_METRIC,
                         ),
                         [(0, {"operation": "read"})],
+                    )
+
+    def test_write_in_progress_is_a_skip_with_separate_metric(self):
+        class ClientErrorCode(Enum):
+            ER_SERVICE_WRITE_IN_PROGRESS = 61
+
+        class KvMetaObjectClientError(RuntimeError):
+            def __init__(self, *, inflight=False, unknown=False):
+                super().__init__("another writer owns the key")
+                self.code = ClientErrorCode.ER_SERVICE_WRITE_IN_PROGRESS
+                self.operation = "save"
+                self.unknown_outcome = unknown
+                self.data_transfer_may_be_inflight = inflight
+
+        for inflight, unknown in ((False, False), (True, False), (False, True)):
+            with self.subTest(inflight=inflight, unknown=unknown):
+                remote = self.remote(Store())
+                error = KvMetaObjectClientError(
+                    inflight=inflight, unknown=unknown
+                )
+                with patch.object(
+                    remote._client, "save_one", side_effect=error
+                ), patch(
+                    "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
+                ) as report, patch(
+                    "rtp_llm.multimodal.mm_remote_embedding_cache.logging.error"
+                ) as error_log:
+                    remote.submit_result("key", (torch.ones(3, 4), None))
+                    deadline = time.monotonic() + 2
+                    while remote.stats()["inflight_tasks"] and time.monotonic() < deadline:
+                        time.sleep(0.005)
+                    self.assertEqual(remote.stats()["inflight_tasks"], 0)
+                skipped = not inflight and not unknown
+                self.assertEqual(remote.stats()["write_skipped"], int(skipped))
+                self.assertEqual(remote.stats()["write_error"], int(not skipped))
+                self.assertEqual(error_log.call_count, int(not skipped))
+                self.assertEqual(
+                    self.metric_values(
+                        report, AccMetrics.VIT_REMOTE_EMB_WRITE_QPS_METRIC
+                    ),
+                    [(1, {"status": "skipped" if skipped else "error"})],
+                )
+                self.assertEqual(
+                    self.metric_values(
+                        report, AccMetrics.VIT_REMOTE_EMB_WRITE_ERROR_QPS_METRIC
+                    ),
+                    [(int(not skipped), {})],
+                )
+                self.assertEqual(
+                    self.metric_values(
+                        report,
+                        AccMetrics.VIT_REMOTE_EMB_WRITE_IN_PROGRESS_QPS_METRIC,
+                    ),
+                    [(1, {})] if skipped else [],
+                )
+                self.assertEqual(
+                    self.metric_values(
+                        report, AccMetrics.VIT_REMOTE_EMB_SKIP_QPS_METRIC
+                    ),
+                    [(1, {"operation": "write", "reason": "write_in_progress"})]
+                    if skipped else [],
+                )
+                stage = "metadata_put_start" if skipped else "transfer"
+                self.assertIn(
+                    (1, {"operation": "write", "stage": stage,
+                         "status": "skipped" if skipped else "error"}),
+                    self.metric_values(
+                        report, AccMetrics.VIT_REMOTE_EMB_STAGE_QPS_METRIC
+                    ),
+                )
+                self.assertIn(
+                    (int(not skipped), {"operation": "write", "stage": stage}),
+                    self.metric_values(
+                        report, AccMetrics.VIT_REMOTE_EMB_STAGE_ERROR_QPS_METRIC
+                    ),
+                )
+                for label, expected in (
+                    ("total", 1),
+                    ("skipped", int(skipped)),
+                    ("error", int(not skipped)),
+                ):
+                    self.assertIn(
+                        (expected, {"operation": "write", "stage": "all",
+                                    "status": label}),
+                        self.metric_values(
+                            report, AccMetrics.VIT_REMOTE_EMB_OPERATION_QPS_METRIC
+                        ),
                     )
 
     def test_sdk_timeout_types_are_classified_in_write_and_stage_metrics(self):
