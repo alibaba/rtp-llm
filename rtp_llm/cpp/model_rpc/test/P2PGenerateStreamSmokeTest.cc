@@ -912,9 +912,7 @@ TEST_F(P2PPayloadWorker, DISABLED_PrefillProcess) {
     {
         PrefillRpcServer prefill;
         prefill.meta_ = std::make_shared<RpcServerRuntimeMeta>();
-        prefill.cancel_registry_              = std::make_unique<PDCancelRegistry>(prefill.meta_);
-        prefill.batch_context_cleanup_thread_ = autil::LoopThread::createLoopThread(
-            [&prefill] { prefill.batchContextCleanupTick(); }, 10000, "BatchSmokePrefillCleanup");
+        prefill.cancel_registry_ = std::make_unique<PDCancelRegistry>(prefill.meta_);
         PayloadEndpoint endpoint(prefill, &prefill, host);
         endpoint.service.drop_batch_ack = hello.fault == static_cast<int>(Fault::DropBatchAck);
         endpoint.service.reject_second_batch_item = hello.fault == static_cast<int>(Fault::RejectSecondBatchItem);
@@ -1009,9 +1007,7 @@ protected:
                   << " request_timeout_ms=" << timeouts_.request_ms << " load_timeout_ms=" << timeouts_.load_ms
                   << std::endl;
         decode_.meta_           = std::make_shared<RpcServerRuntimeMeta>();
-        decode_.cancel_registry_       = std::make_unique<PDCancelRegistry>(decode_.meta_);
-        decode_.cancel_cleanup_thread_ = autil::LoopThread::createLoopThread(
-            [this] { decode_.cancelCleanupTick(); }, 10000, "BatchSmokeDecodeCleanup");
+        decode_.initCancelRegistry();
         decode_rpc_             = std::make_unique<PayloadEndpoint>(decode_, nullptr, host_);
         const auto cache_config = test::makeSimpleMhaCacheConfig(kLayers, kBlocks, kTokensPerBlock, dtype, 2, 16);
         decode_engine_ =

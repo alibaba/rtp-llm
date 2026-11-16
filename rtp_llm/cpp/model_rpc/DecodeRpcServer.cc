@@ -24,6 +24,8 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/RpcTimeoutUtils.h"
+#include "rtp_llm/cpp/model_rpc/RPCPool.h"
+#include "rtp_llm/cpp/utils/RpcCompletionQueue.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
@@ -32,6 +34,7 @@
 #include "autil/NetUtil.h"
 #include <cerrno>
 #include <cstring>
+#include <deque>
 #include <unistd.h>
 #include <utility>
 #include <unordered_set>
@@ -141,11 +144,152 @@ grpc::Status DecodeRpcServer::parsePrefillDpAddr(const std::string& addr, std::s
     return grpc::Status::OK;
 }
 
-DecodeRpcServer::~DecodeRpcServer() {
-    if (cancel_cleanup_thread_) {
-        cancel_cleanup_thread_->stop();
-        cancel_cleanup_thread_.reset();
+class DecodeRpcServer::CancelClient: public std::enable_shared_from_this<CancelClient> {
+public:
+    using Handle = PDCancelRegistry::Handle;
+
+    explicit CancelClient(std::weak_ptr<PDCancelRegistry> registry): registry_(std::move(registry)) {}
+
+    void schedule(const Handle& handle, int64_t delay_ms = 0) {
+        RpcCompletionQueue::instance().scheduleAfter(
+            delay_ms, [weak = weak_from_this(), request = std::weak_ptr<PDCancelRegistry::Entry>(handle)](bool ok) {
+                auto client = weak.lock();
+                auto entry  = request.lock();
+                if (ok && client && entry) {
+                    client->ready_.push_back(request);
+                    client->pump();
+                }
+            });
     }
+
+private:
+    template<typename Response, typename Request, typename Start, typename Completion>
+    bool submit(const std::shared_ptr<RpcService::Stub>& stub, Request request, Start start, Completion complete) {
+        struct Call {
+            std::shared_ptr<grpc::ClientContext> context = std::make_shared<grpc::ClientContext>();
+            std::unique_ptr<grpc::ClientAsyncResponseReader<Response>> reader;
+            std::shared_ptr<RpcService::Stub>                          stub;
+            Request                                                    request;
+            Response                                                   response;
+            grpc::Status                                               status;
+        };
+        auto call     = std::make_shared<Call>();
+        call->stub    = stub;
+        call->request = std::move(request);
+        call->context->set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(200));
+        return RpcCompletionQueue::instance().submit(
+            call->context,
+            [call, start](grpc::CompletionQueue* queue, void* tag) {
+                call->reader = start(*call->stub, call->context.get(), call->request, queue);
+                if (!call->reader)
+                    return false;
+                call->reader->Finish(&call->response, &call->status, tag);
+                return true;
+            },
+            [call, complete](bool ok) { complete(ok && call->status.ok(), call->response); });
+    }
+
+    void pump() {
+        // Preserve one in-flight Prefill cancellation round per Decode server.
+        // CQ callbacks own this queue; callers only post events.
+        auto registry = registry_.lock();
+        while (registry && !active_ && !ready_.empty()) {
+            auto handle = ready_.front().lock();
+            ready_.pop_front();
+            if (!handle || !registry->needsDownstreamCancel(handle))
+                continue;
+            auto connection = pool_.getConnection(handle->downstream_address);
+            if (!connection.ok()) {
+                retry(handle);
+                continue;
+            }
+            CancelRequestPB request;
+            request.set_request_id(handle->identity.request_id);
+            request.set_cancel_error_code(static_cast<int64_t>(handle->cancel_reason.code()));
+            request.set_cancel_error_message(handle->cancel_reason.ToString());
+            const auto& stub = connection->stub;
+            active_          = submit<CancelResponsePB>(
+                stub,
+                std::move(request),
+                [](auto& rpc, auto* context, const auto& request, auto* queue) {
+                    return rpc.AsyncCancel(context, request, queue);
+                },
+                [weak = weak_from_this(), handle, stub](bool ok, const CancelResponsePB& response) {
+                    auto client = weak.lock();
+                    if (!client)
+                        return;
+                    const bool confirmed = ok
+                                           && (response.status() == CANCEL_STATUS_TOMBSTONED
+                                               || response.status() == CANCEL_STATUS_NOT_FOUND);
+                    if (ok && response.status() == CANCEL_STATUS_ACCEPTED && client->queryStatus(handle, stub))
+                        return;
+                    client->finishRound(handle, confirmed);
+                });
+            if (!active_)
+                retry(handle);
+        }
+    }
+
+    bool queryStatus(const Handle& handle, const std::shared_ptr<RpcService::Stub>& stub) {
+        auto registry = registry_.lock();
+        if (!registry || !registry->needsDownstreamCancel(handle))
+            return false;
+        StatusVersionPB request;
+        request.set_latest_finished_version(0);
+        return submit<WorkerStatusPB>(
+            stub,
+            std::move(request),
+            [](auto& rpc, auto* context, const auto& request, auto* queue) {
+                return rpc.AsyncGetWorkerStatus(context, request, queue);
+            },
+            [weak = weak_from_this(), handle](bool ok, const WorkerStatusPB& status) {
+                auto client = weak.lock();
+                if (!client)
+                    return;
+                const bool confirmed =
+                    ok
+                    && std::any_of(status.finished_task_list().begin(),
+                                   status.finished_task_list().end(),
+                                   [&](const auto& task) { return task.request_id() == handle->identity.request_id; });
+                client->finishRound(handle, confirmed);
+            });
+    }
+
+    void retry(const Handle& handle) {
+        auto registry = registry_.lock();
+        if (registry && registry->needsDownstreamCancel(handle)) {
+            const auto delay = handle->cancel_retry_delay_ms.load();
+            handle->cancel_retry_delay_ms.store(std::min<int64_t>(delay * 2, 1000));
+            schedule(handle, delay);
+        }
+    }
+
+    void finishRound(const Handle& handle, bool confirmed) {
+        if (confirmed) {
+            if (auto registry = registry_.lock())
+                registry->finishDownstream(handle);
+        } else {
+            retry(handle);
+        }
+        active_ = false;
+        pump();
+    }
+
+    std::weak_ptr<PDCancelRegistry>                    registry_;
+    Pool<RpcService>                                   pool_;
+    std::deque<std::weak_ptr<PDCancelRegistry::Entry>> ready_;
+    bool                                               active_{false};
+};
+
+DecodeRpcServer::~DecodeRpcServer() = default;
+
+void DecodeRpcServer::initCancelRegistry() {
+    cancel_registry_ = std::make_shared<PDCancelRegistry>(meta_);
+    cancel_client_   = std::make_shared<CancelClient>(cancel_registry_);
+    cancel_registry_->setCancelStarted([weak = std::weak_ptr<CancelClient>(cancel_client_)](const auto& handle) {
+        if (auto client = weak.lock())
+            client->schedule(handle);
+    });
 }
 
 grpc::Status DecodeRpcServer::Cancel(grpc::ServerContext*, const CancelRequestPB* request, CancelResponsePB* response) {
@@ -189,79 +333,6 @@ grpc::Status DecodeRpcServer::Cancel(grpc::ServerContext*, const CancelRequestPB
     return grpc::Status::OK;
 }
 
-void DecodeRpcServer::cancelCleanupTick() {
-    const auto pending = cancel_registry_->pending();
-    // Publish every locally safe terminal in this bounded batch before any
-    // potentially slow remote operation. Local-completion selection has its own
-    // fair cursor, independent of retained remote retry history.
-    for (const auto& handle : pending) {
-        cancel_registry_->complete(handle);
-    }
-    // Retry the oldest due record only. This bounds remote work per tick and
-    // prevents one batch of dead peers from multiplying the RPC deadline.
-    PDCancelRegistry::Handle next;
-    int64_t earliest_retry = std::numeric_limits<int64_t>::max();
-    for (const auto& handle : pending) {
-        if (handle->downstream_address.empty()) {
-            continue;
-        }
-        const auto retry = handle->next_cancel_retry_ms.load(std::memory_order_acquire);
-        if (retry < earliest_retry) {
-            earliest_retry = retry;
-            next = handle;
-        }
-    }
-    if (!next) {
-        return;
-    }
-    const auto& handle = next;
-    const auto monotonic_ms = [] {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-                   std::chrono::steady_clock::now().time_since_epoch()).count();
-    };
-    auto next_retry = handle->next_cancel_retry_ms.load(std::memory_order_acquire);
-    if (monotonic_ms() < next_retry
-        || !handle->next_cancel_retry_ms.compare_exchange_strong(
-            next_retry, std::numeric_limits<int64_t>::max(), std::memory_order_acq_rel)) {
-        return;
-    }
-    autil::ScopeGuard retry_guard([&] {
-        const auto delay = handle->cancel_retry_delay_ms.load();
-        handle->cancel_retry_delay_ms.store(std::min<int64_t>(delay * 2, 1000));
-        handle->next_cancel_retry_ms.store(monotonic_ms() + delay, std::memory_order_release);
-    });
-    auto connection = cancel_pool_.getConnection(handle->downstream_address);
-    if (!connection.ok())
-        return;
-    CancelRequestPB request;
-    request.set_request_id(handle->identity.request_id);
-    request.set_cancel_error_code(static_cast<int64_t>(handle->cancel_reason.code()));
-    request.set_cancel_error_message(handle->cancel_reason.ToString());
-    CancelResponsePB    response;
-    grpc::ClientContext context;
-    context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(200));
-    if (!connection->stub->Cancel(&context, request, &response).ok())
-        return;
-    if (response.status() == CANCEL_STATUS_TOMBSTONED || response.status() == CANCEL_STATUS_NOT_FOUND) {
-        cancel_registry_->finishDownstream(handle);
-    } else if (response.status() == CANCEL_STATUS_ACCEPTED) {
-        StatusVersionPB version;
-        version.set_latest_finished_version(0);
-        WorkerStatusPB      status;
-        grpc::ClientContext status_context;
-        status_context.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(200));
-        if (connection->stub->GetWorkerStatus(&status_context, version, &status).ok()) {
-            for (const auto& task : status.finished_task_list()) {
-                if (task.request_id() == handle->identity.request_id) {
-                    cancel_registry_->finishDownstream(handle);
-                    break;
-                }
-            }
-        }
-    }
-    cancel_registry_->complete(handle);
-}
-
 grpc::Status DecodeRpcServer::init(const EngineInitParams&                                maga_init_params,
                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                                    py::object                                             mm_process_engine) {
@@ -282,11 +353,7 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
     }
 
     prefill_server_caller_ = std::make_shared<PrefillServerCaller>();
-    cancel_registry_       = std::make_unique<PDCancelRegistry>(meta_);
-    cancel_cleanup_thread_ =
-        autil::LoopThread::createLoopThread([this]() { cancelCleanupTick(); }, 10 * 1000, "P2PDecodeCancel");
-    if (!cancel_cleanup_thread_)
-        return grpc::Status(grpc::StatusCode::INTERNAL, "failed to start Decode cancel cleanup");
+    initCancelRegistry();
 
     RTP_LLM_LOG_INFO("decode rpc server new2 init");
     return grpc::Status::OK;
@@ -335,12 +402,7 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
     }
     const auto client_cancelled = [context]() { return context && context->IsCancelled(); };
     const bool single_dp        = maga_init_params_.parallelism_config.dp_size == 1;
-    if (!all_pd || !single_dp) {
-        if (master_admitted && !single_dp)
-            return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "P2P batch inference requires single-DP mode");
-        if (master_admitted)
-            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT,
-                                "cannot forward a mixed batch after Master Prefill admission");
+    if ((!all_pd || !single_dp) && !master_admitted) {
         // Match single-request fallback, while retaining the existing batch result contract.
         for (auto& item : *effective.mutable_inputs())
             item.mutable_generate_config()->set_can_use_pd_separation(false);
@@ -402,6 +464,32 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
     } guard{*cancel_registry_, *engine_, {}, {}, {}, {}, grpc::Status::OK};
 
     try {
+        if (master_admitted && (!all_pd || !single_dp)) {
+            const ErrorInfo reason(ErrorCode::INVALID_PARAMS,
+                                   !single_dp ? "P2P batch inference requires single-DP mode" :
+                                                "cannot forward a mixed batch after Master Prefill admission");
+            guard.status = serializeErrorMsg(std::to_string(request->inputs(0).request_id()), reason);
+            for (const auto& item : effective.inputs()) {
+                if (!item.enqueued_by_master()) {
+                    continue;
+                }
+                const auto timeout = item.generate_config().timeout_ms();
+                const auto deadline_ms = entry_ms + (timeout > 0 ? timeout : kDefaultRpcTimeoutMs);
+                PDCancelRegistry::Handle handle;
+                const auto admission =
+                    cancel_registry_->admit(item, masterEnqueuedHandoffUniqueKey(item.request_id()), address,
+                                            deadline_ms, handle);
+                if (!admission.ok()) {
+                    RTP_LLM_LOG_WARNING("PD rejected batch cleanup registration failed, request_id=%ld status=%s",
+                                        item.request_id(),
+                                        admission.ToString().c_str());
+                    continue;
+                }
+                guard.handles.push_back(handle);
+                guard.submitted_prefill.insert(item.request_id());
+            }
+            return guard.status;
+        }
         EnqueueBatchRequestPB prefill_request;
         prefill_request.set_batch_id(request->inputs(0).request_id());
         auto* slot = prefill_request.add_dp_slots();

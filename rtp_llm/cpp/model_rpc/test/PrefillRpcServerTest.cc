@@ -4,6 +4,7 @@
 #include <string>
 #include <thread>
 #include <atomic>
+#include <chrono>
 
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServiceImpl.h"
@@ -339,77 +340,34 @@ TEST(PrefillRpcServerTest, CancelCapacityFailureDoesNotAcknowledgeAnUnstoredFenc
     EXPECT_EQ(server.cancel_registry_->absent_fences_.count(131), 0u);
 }
 
-TEST(PDCancelRegistryTest, PendingSnapshotIsBoundedAndRotatesAcrossAllLocalCancellations) {
-    auto             meta = std::make_shared<RpcServerRuntimeMeta>();
-    PDCancelRegistry registry(meta);
-    const auto       count = 3 * registry.kPendingBatchSize + 7;
-    for (size_t id = 1; id <= count; ++id) {
-        GenerateInputPB request;
-        request.set_request_id(id);
-        PDCancelRegistry::Handle handle;
-        ASSERT_TRUE(registry.admit(request, "local-" + std::to_string(id), "", currentTimeMs() + 10000, handle).ok());
-        ASSERT_TRUE(registry.cancel(id, {ErrorCode::CANCELLED, "cancel"}).ok());
+namespace {
+template<typename Predicate>
+bool waitForRegistryEvent(Predicate predicate) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (!predicate() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
-    std::set<int64_t> seen;
-    for (size_t pass = 0; pass < 4; ++pass) {
-        const auto batch = registry.pending();
-        EXPECT_LE(batch.size(), 2 * registry.kPendingBatchSize);
-        std::set<int64_t> batch_ids;
-        for (const auto& handle : batch) {
-            EXPECT_TRUE(batch_ids.insert(handle->identity.request_id).second);
-            seen.insert(handle->identity.request_id);
-        }
-    }
-    EXPECT_EQ(seen.size(), count);
-    // Removing selected entries must not invalidate a stored map iterator or
-    // keep later local requests behind the already-consumed cursor.
-    for (size_t pass = 0; pass < 4; ++pass) {
-        for (const auto& handle : registry.pending()) {
-            registry.finishLocal(handle);
-            ASSERT_TRUE(registry.complete(handle));
-        }
-    }
-    EXPECT_TRUE(registry.pending().empty());
-    EXPECT_TRUE(registry.local_pending_cancels_.empty());
-    EXPECT_TRUE(meta->getEngineScheduleInfo(0).running_task_info_list.empty());
+    return predicate();
 }
+}  // namespace
 
-TEST(PDCancelRegistryTest, RemoteRetryHistoryCannotStarveNewLocalCompletionBatch) {
-    auto             meta = std::make_shared<RpcServerRuntimeMeta>();
-    PDCancelRegistry registry(meta);
-    const auto       count = 3 * registry.kPendingBatchSize + 7;
-    for (size_t id = 1; id <= count; ++id) {
+TEST(PDCancelRegistryTest, LocalEventsPublishEveryFinishedCancel) {
+    auto                                  meta     = std::make_shared<RpcServerRuntimeMeta>();
+    auto                                  registry = std::make_shared<PDCancelRegistry>(meta);
+    std::vector<PDCancelRegistry::Handle> handles;
+    for (int64_t id = 1; id <= 150; ++id) {
         GenerateInputPB request;
         request.set_request_id(id);
         PDCancelRegistry::Handle handle;
-        ASSERT_TRUE(
-            registry.admit(request, "remote-" + std::to_string(id), "prefill:123", currentTimeMs() + 10000, handle)
-                .ok());
-        ASSERT_TRUE(registry.cancel(id, {ErrorCode::CANCELLED, "cancel"}).ok());
-        registry.finishLocal(handle);
-        ASSERT_TRUE(registry.complete(handle));
-        EXPECT_FALSE(handle->downstream_done);
+        ASSERT_TRUE(registry->admit(request, "local-" + std::to_string(id), "", currentTimeMs() + 10000, handle).ok());
+        ASSERT_TRUE(registry->cancel(id, {ErrorCode::CANCELLED, "cancel"}).ok());
+        registry->finishLocal(handle);
+        handles.push_back(handle);
     }
-    GenerateInputPB local_request;
-    local_request.set_request_id(99100);
-    PDCancelRegistry::Handle local;
-    ASSERT_TRUE(registry.admit(local_request, "new-local", "", currentTimeMs() + 10000, local).ok());
-    ASSERT_TRUE(registry.cancel(99100, {ErrorCode::CANCELLED, "cancel"}).ok());
-    std::set<int64_t> seen_remote;
-    for (size_t pass = 0; pass < 4; ++pass) {
-        const auto batch = registry.pending();
-        EXPECT_LE(batch.size(), 2 * registry.kPendingBatchSize);
-        EXPECT_NE(std::find(batch.begin(), batch.end(), local), batch.end());
-        for (const auto& handle : batch) {
-            if (handle != local)
-                seen_remote.insert(handle->identity.request_id);
-        }
-    }
-    EXPECT_EQ(seen_remote.size(), count);
-    EXPECT_FALSE(local->terminal);
-    registry.finishLocal(local);
-    ASSERT_TRUE(registry.complete(local));
-    EXPECT_TRUE(registry.local_pending_cancels_.empty());
+    EXPECT_TRUE(waitForRegistryEvent([&] {
+        return std::all_of(handles.begin(), handles.end(), [](const auto& handle) { return handle->terminal.load(); });
+    }));
+    EXPECT_TRUE(meta->getEngineScheduleInfo(0).running_task_info_list.empty());
 }
 
 TEST(PDCancelRegistryTest, CancelBeforeAdmissionFencesRepeatedAndLateEnqueue) {
@@ -445,9 +403,9 @@ TEST(PDCancelRegistryTest, AcceptedCancelRequiresLocalTransferCompletion) {
     registry.endRead("handoff102");
     ASSERT_TRUE(registry.complete(handle));
     EXPECT_FALSE(handle->downstream_done);
-    ASSERT_EQ(registry.pending().size(), 1u);
+    EXPECT_TRUE(registry.needsDownstreamCancel(handle));
     registry.finishDownstream(handle);
-    EXPECT_TRUE(registry.pending().empty());
+    EXPECT_FALSE(registry.needsDownstreamCancel(handle));
     EXPECT_FALSE(registry.complete(handle));
     auto info = meta->getEngineScheduleInfo(0);
     EXPECT_TRUE(info.running_task_info_list.empty());
@@ -499,7 +457,7 @@ TEST(PDCancelRegistryTest, PriorityCancelLosingToStreamFailureDoesNotInstallPree
     stream->reportError(ErrorCode::EXECUTION_EXCEPTION, "original execution failure");
     EXPECT_EQ(registry.cancel(107, {ErrorCode::PRIORITY_PREEMPTED, "priority"}).value(), CANCEL_STATUS_NOT_FOUND);
     EXPECT_FALSE(handle->canceled.load());
-    EXPECT_TRUE(registry.pending().empty());
+    EXPECT_FALSE(registry.needsDownstreamCancel(handle));
     EXPECT_EQ(stream->firstError().error.code(), ErrorCode::EXECUTION_EXCEPTION);
 }
 
@@ -516,19 +474,19 @@ TEST(PDCancelRegistryTest, LatePriorityCancelPreservesPublishedCompletion) {
     EXPECT_EQ(registry.cancel(request.request_id(), {ErrorCode::PRIORITY_PREEMPTED, "late"}).value(),
               CANCEL_STATUS_NOT_FOUND);
     EXPECT_FALSE(handle->canceled.load());
-    EXPECT_TRUE(registry.pending().empty());
+    EXPECT_FALSE(registry.needsDownstreamCancel(handle));
     const auto info = meta->getEngineScheduleInfo(-1);
     ASSERT_EQ(info.finished_task_info_list.size(), 1u);
     EXPECT_EQ(info.finished_task_info_list.front().request_id, request.request_id());
     EXPECT_EQ(info.finished_task_info_list.front().error_code, 0);
 }
 
-TEST(PDCancelRegistryTest, CleanupTickDropsStreamAfterDeferredReleaseWithoutExpiringRecord) {
-    PDCancelRegistry registry(std::make_shared<RpcServerRuntimeMeta>());
+TEST(PDCancelRegistryTest, StreamEventDropsStreamAfterDeferredReleaseWithoutExpiringRecord) {
+    auto            registry = std::make_shared<PDCancelRegistry>(std::make_shared<RpcServerRuntimeMeta>());
     GenerateInputPB request;
     request.set_request_id(118);
     PDCancelRegistry::Handle handle;
-    ASSERT_TRUE(registry.admit(request, "deferred-release", "", currentTimeMs() + 10000, handle).ok());
+    ASSERT_TRUE(registry->admit(request, "deferred-release", "", currentTimeMs() + 10000, handle).ok());
     auto input = std::make_shared<GenerateInput>();
     input->request_id = request.request_id();
     input->generate_config = std::make_shared<GenerateConfig>();
@@ -540,25 +498,27 @@ TEST(PDCancelRegistryTest, CleanupTickDropsStreamAfterDeferredReleaseWithoutExpi
     ASSERT_TRUE(stream->finishWithoutGenerate());
     stream->incPendingAsyncBookkeeping();
     stream->markDeferredRelease();
-    registry.attach(handle, stream);
+    registry->attach(handle, stream);
 
-    registry.finishLocal(handle);
-    EXPECT_TRUE(registry.pending().empty());
+    registry->finishLocal(handle);
+
     EXPECT_EQ(handle->stream, stream);
     stream->decPendingAsyncBookkeepingAndMaybeRelease();
 
-    EXPECT_TRUE(registry.pending().empty());
-    EXPECT_FALSE(handle->stream);
-    EXPECT_EQ(registry.find(request.request_id()), handle);
+    EXPECT_TRUE(waitForRegistryEvent([&] {
+        std::lock_guard<std::mutex> lock(registry->mutex_);
+        return !handle->stream;
+    }));
+    EXPECT_EQ(registry->find(request.request_id()), handle);
     EXPECT_FALSE(handle->canceled.load());
 }
 
 TEST(PDCancelRegistryTest, RetentionWaitsForStreamCleanupAndThenReclaimsRecord) {
-    PDCancelRegistry registry(std::make_shared<RpcServerRuntimeMeta>());
+    auto             registry = std::make_shared<PDCancelRegistry>(std::make_shared<RpcServerRuntimeMeta>());
     GenerateInputPB  request;
     request.set_request_id(119);
     PDCancelRegistry::Handle handle;
-    ASSERT_TRUE(registry.admit(request, "pending-release", "", currentTimeMs() + 1000, handle).ok());
+    ASSERT_TRUE(registry->admit(request, "pending-release", "", currentTimeMs() + 1000, handle).ok());
     auto input             = std::make_shared<GenerateInput>();
     input->request_id      = request.request_id();
     input->generate_config = std::make_shared<GenerateConfig>();
@@ -570,19 +530,19 @@ TEST(PDCancelRegistryTest, RetentionWaitsForStreamCleanupAndThenReclaimsRecord) 
     ASSERT_TRUE(stream->finishWithoutGenerate());
     stream->incPendingAsyncBookkeeping();
     stream->markDeferredRelease();
-    registry.attach(handle, stream);
-    registry.finishLocal(handle);
+    registry->attach(handle, stream);
+    registry->finishLocal(handle);
     {
-        std::lock_guard<std::mutex> lock(registry.mutex_);
-        registry.scheduleExpirationLocked(handle, currentTimeMs() - 1);
-        registry.trimLocked(currentTimeMs());
+        std::lock_guard<std::mutex> lock(registry->mutex_);
+        registry->scheduleExpirationLocked(handle, currentTimeMs() - 1);
+        registry->trimLocked(currentTimeMs());
     }
-    EXPECT_EQ(registry.find(request.request_id()), handle);
+    EXPECT_EQ(registry->find(request.request_id()), handle);
     EXPECT_EQ(handle->stream, stream);
 
     stream->decPendingAsyncBookkeepingAndMaybeRelease();
-    EXPECT_TRUE(registry.pending().empty());
-    EXPECT_FALSE(registry.find(request.request_id()));
+
+    EXPECT_TRUE(waitForRegistryEvent([&] { return !registry->find(request.request_id()); }));
 }
 
 TEST(PDCancelRegistryTest, RacingOrdinaryAndPriorityCancelAckMatchesPublishedTerminal) {
@@ -631,7 +591,7 @@ TEST(PDCancelRegistryTest, FinishedDecodeReturnsNotFoundWithoutAbsentFence) {
     ASSERT_TRUE(registry.admit(request, "handoff103", "", currentTimeMs() + 1000, handle).ok());
     registry.finishLocal(handle);
     EXPECT_EQ(registry.cancel(103, {ErrorCode::PRIORITY_PREEMPTED, "preempted"}).value(), CANCEL_STATUS_NOT_FOUND);
-    EXPECT_TRUE(registry.pending().empty());
+    EXPECT_FALSE(registry.needsDownstreamCancel(handle));
     EXPECT_TRUE(meta->getEngineScheduleInfo(0).finished_task_info_list.empty());
 }
 
@@ -647,12 +607,12 @@ TEST(PDCancelRegistryTest, LocalTerminalRetainsRemoteCleanupRecordUntilPrefillFi
     ASSERT_TRUE(registry.complete(handle));
     EXPECT_TRUE(handle->terminal.load());
     EXPECT_FALSE(handle->downstream_done);
-    ASSERT_EQ(registry.pending().size(), 1u);
+    EXPECT_TRUE(registry.needsDownstreamCancel(handle));
     EXPECT_TRUE(registry.isCanceled("handoff104"));
     EXPECT_TRUE(meta->getEngineScheduleInfo(0).running_task_info_list.empty());
     ASSERT_EQ(meta->getEngineScheduleInfo(0).finished_task_info_list.size(), 1u);
     registry.finishDownstream(handle);
-    EXPECT_TRUE(registry.pending().empty());
+    EXPECT_FALSE(registry.needsDownstreamCancel(handle));
     EXPECT_FALSE(registry.complete(handle));
 }
 
@@ -763,61 +723,84 @@ TEST(PrefillRpcServerTest, ShutdownWaitCountIncludesAcknowledgedBatchLifetime) {
 
 TEST(PrefillRpcServerTest, BatchAttachDeadlineUsesDefaultAndOverallCap) {
     PrefillRpcServer server;
-    server.registerBatchAttach("default", nullptr, 0, 1000000, 100);
-    server.registerBatchAttach("negative", nullptr, -1, 1000000, 100);
-    server.registerBatchAttach("short", nullptr, 50, 1000000, 100);
-    server.registerBatchAttach("capped", nullptr, 500, 120, 100);
-    server.registerBatchAttach("huge", nullptr, INT64_MAX, 120, 100);
-    EXPECT_EQ(server.batch_entries_.at("default").deadline_ms, 600100);
-    EXPECT_EQ(server.batch_entries_.at("negative").deadline_ms, 600100);
-    EXPECT_EQ(server.batch_entries_.at("short").deadline_ms, 150);
-    EXPECT_EQ(server.batch_entries_.at("capped").deadline_ms, 120);
-    EXPECT_EQ(server.batch_entries_.at("huge").deadline_ms, 120);
+    const auto       now = currentTimeMs();
+    server.registerBatchAttach("default", nullptr, 0, now + 1000000, now);
+    server.registerBatchAttach("negative", nullptr, -1, now + 1000000, now);
+    server.registerBatchAttach("short", nullptr, 5000, now + 1000000, now);
+    server.registerBatchAttach("capped", nullptr, 50000, now + 20000, now);
+    server.registerBatchAttach("huge", nullptr, INT64_MAX, now + 20000, now);
+    EXPECT_EQ(server.batch_entries_.at("default").deadline_ms, now + 600000);
+    EXPECT_EQ(server.batch_entries_.at("negative").deadline_ms, now + 600000);
+    EXPECT_EQ(server.batch_entries_.at("short").deadline_ms, now + 5000);
+    EXPECT_EQ(server.batch_entries_.at("capped").deadline_ms, now + 20000);
+    EXPECT_EQ(server.batch_entries_.at("huge").deadline_ms, now + 20000);
 }
 
 TEST(PrefillRpcServerTest, BatchAttachBeforeDeadlineDisarmsExpiry) {
     PrefillRpcServer server;
-    server.registerBatchAttach("attached", nullptr, 50, 1000, 100);
-    EXPECT_TRUE(server.attachBatch("attached", 149));
-    server.expireBatchAttachments(200);
+    const auto       now = currentTimeMs();
+    server.registerBatchAttach("attached", nullptr, 5000, now + 10000, now);
+    const auto generation = server.batch_entries_.at("attached").generation;
+    EXPECT_TRUE(server.attachBatch("attached", now + 4999));
+    server.expireBatchAttachment("attached", generation, now + 5000);
     EXPECT_EQ(server.batch_entries_.count("attached"), 0);
-    EXPECT_TRUE(server.attachBatch("ordinary", 200));
+    EXPECT_TRUE(server.attachBatch("ordinary", now + 5000));
 }
 
 TEST(PrefillRpcServerTest, BatchAttachDoesNotReleaseActiveAdmission) {
     PrefillRpcServer server;
+    const auto       now                     = currentTimeMs();
     server.batch_entries_["active"].reserved = true;
-    server.registerBatchAttach("active", nullptr, 50, 1000, 100);
-    ASSERT_TRUE(server.attachBatch("active", 149));
-    server.expireBatchAttachments(1000);
+    server.registerBatchAttach("active", nullptr, 5000, now + 10000, now);
+    ASSERT_TRUE(server.attachBatch("active", now + 4999));
+    server.expireBatchAttachment("active", server.batch_entries_.at("active").generation, now + 10000);
     ASSERT_EQ(server.batch_entries_.count("active"), 1);
     EXPECT_TRUE(server.batch_entries_.at("active").reserved);
     EXPECT_FALSE(server.batch_entries_.at("active").attach_pending);
+    EXPECT_FALSE(server.batch_entries_.at("active").cancel_alarm);
 }
 
 TEST(PrefillRpcServerTest, ExpiredBatchAdmissionRetainsFenceUntilLocalCleanup) {
     PrefillRpcServer server;
+    const auto       now                     = currentTimeMs();
     server.batch_entries_["active"].reserved = true;
-    server.registerBatchAttach("active", nullptr, 50, 1000, 100);
-    server.expireBatchAttachments(1000);
+    server.registerBatchAttach("active", nullptr, 5000, now + 10000, now);
+    const auto generation = server.batch_entries_.at("active").generation;
+    server.expireBatchAttachment("active", generation, now + 10000);
     ASSERT_EQ(server.batch_entries_.count("active"), 1);
-    EXPECT_FALSE(server.attachBatch("active", 1000));
+    EXPECT_FALSE(server.attachBatch("active", now + 10000));
     server.batch_entries_.at("active").reserved = false;
-    server.expireBatchAttachments(1000);
+    server.expireBatchAttachment("active", generation, now + 10000);
     EXPECT_EQ(server.batch_entries_.count("active"), 0);
 }
 
 TEST(PrefillRpcServerTest, LateBatchAttachCannotBeatCleanupOrReviveExpiredEntry) {
     PrefillRpcServer server;
-    server.registerBatchAttach("late", nullptr, 50, 1000, 100);
-    EXPECT_FALSE(server.attachBatch("late", 150));
-    server.expireBatchAttachments(150);
+    const auto       now = currentTimeMs();
+    server.registerBatchAttach("late", nullptr, 5000, now + 10000, now);
+    const auto generation = server.batch_entries_.at("late").generation;
+    EXPECT_FALSE(server.attachBatch("late", now + 5000));
+    server.expireBatchAttachment("late", generation, now + 5000);
     EXPECT_TRUE(server.batch_entries_.at("late").expired);
-    EXPECT_FALSE(server.attachBatch("late", 151));
-    server.expireBatchAttachments(200);
-    EXPECT_FALSE(server.attachBatch("late", 200));
-    server.expireBatchAttachments(1000);
+    EXPECT_FALSE(server.attachBatch("late", now + 5001));
+    server.expireBatchAttachment("late", generation, now + 10000);
     EXPECT_EQ(server.batch_entries_.count("late"), 0);
+}
+
+TEST(PrefillRpcServerTest, BatchAttachExpiresWithoutAnotherRpc) {
+    PrefillRpcServer server;
+    const auto       now = currentTimeMs();
+    server.registerBatchAttach("unattached", nullptr, 10, now + 10000, now);
+    const auto until   = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    const auto expired = [&] {
+        std::lock_guard<std::mutex> lock(server.batch_mutex_);
+        return server.batch_entries_.at("unattached").expired;
+    };
+    while (!expired() && std::chrono::steady_clock::now() < until) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    EXPECT_TRUE(expired());
+    EXPECT_FALSE(server.attachBatch("unattached", currentTimeMs()));
 }
 }  // namespace rtp_llm
 
@@ -854,9 +837,9 @@ TEST(PDCancelRegistryTest, OrdinaryCleanupRetainsCauseAndDoesNotPublishPriorityP
         EXPECT_NE(rpc_error.ToString().find("original failure"), std::string::npos);
         registry.finishLocal(handle);
         ASSERT_TRUE(registry.complete(handle));
-        ASSERT_EQ(registry.pending().size(), 1u);
+        EXPECT_TRUE(registry.needsDownstreamCancel(handle));
         registry.finishDownstream(handle);
-        EXPECT_TRUE(registry.pending().empty());
+        EXPECT_FALSE(registry.needsDownstreamCancel(handle));
         const auto info = meta->getEngineScheduleInfo(0);
         ASSERT_EQ(info.finished_task_info_list.size(), 1);
         EXPECT_EQ(info.finished_task_info_list.front().error_code, static_cast<int64_t>(code));
@@ -920,10 +903,10 @@ TEST(PDCancelRegistryTest, UnconfirmedCancelCannotExpireBeforeLocalTerminalButRe
         EXPECT_EQ(registry.entries_.count(111), 1u);
     }
     EXPECT_TRUE(registry.isCanceled("pending111"));
-    EXPECT_EQ(registry.pending().size(), 1u);
+    EXPECT_TRUE(registry.needsDownstreamCancel(handle));
     ASSERT_TRUE(registry.complete(handle));
     ASSERT_FALSE(handle->downstream_done);
-    ASSERT_EQ(registry.pending().size(), 1u);
+    EXPECT_TRUE(registry.needsDownstreamCancel(handle));
     {
         std::lock_guard<std::mutex> lock(registry.mutex_);
         registry.trimLocked(handle->retain_until_ms - 1);
@@ -933,7 +916,7 @@ TEST(PDCancelRegistryTest, UnconfirmedCancelCannotExpireBeforeLocalTerminalButRe
         EXPECT_TRUE(registry.entry_expirations_.empty());
     }
     EXPECT_FALSE(handle->downstream_done);  // Expiry is not a physical-stop ACK.
-    EXPECT_TRUE(registry.pending().empty());
+    EXPECT_FALSE(registry.needsDownstreamCancel(handle));
     EXPECT_FALSE(registry.find(111));
     EXPECT_FALSE(registry.isCanceled("pending111"));
     EXPECT_TRUE(meta->getEngineScheduleInfo(0).running_task_info_list.empty());
@@ -964,8 +947,7 @@ TEST(PDCancelRegistryTest, LateRemoteAckCannotRemoveReplacementRequestAfterRetry
     EXPECT_FALSE(old_handle->downstream_done);
     EXPECT_FALSE(replacement->downstream_done);
     EXPECT_EQ(registry.find(116), replacement);
-    ASSERT_EQ(registry.pending().size(), 1u);
-    EXPECT_EQ(registry.pending().front(), replacement);
+    EXPECT_TRUE(registry.needsDownstreamCancel(replacement));
     EXPECT_EQ(replacement->retain_until_ms, replacement_expiry);
     EXPECT_TRUE(registry.isCanceled("new116"));
     {
@@ -1059,7 +1041,8 @@ TEST(PDCancelRegistryTest, CancelKeyIndexKeepsOtherCanceledRequestWithSameKey) {
         registry.trimLocked(first->retain_until_ms);
     }
     EXPECT_TRUE(registry.isCanceled("shared-key"));
-    EXPECT_EQ(registry.pending().size(), 1u);
+    EXPECT_TRUE(second->canceled.load());
+    EXPECT_FALSE(second->terminal.load());
     registry.finishLocal(second);
     ASSERT_TRUE(registry.complete(second));
     {

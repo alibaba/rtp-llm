@@ -134,6 +134,7 @@ public:
     }
 
 private:
+    void         trackReleasedP2PLoad();
     void         clearCacheReuseState();
     void         recordCacheReuseMallocResult(const MallocResult& result);
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);

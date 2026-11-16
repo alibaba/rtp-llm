@@ -264,6 +264,25 @@ void GenerateStream::releaseResource() {
     }
 }
 
+void GenerateStream::onLocalCleanupProgress(std::function<void()> callback) {
+    {
+        std::lock_guard<std::mutex> lock(cleanup_observers_mutex_);
+        cleanup_observers_.push_back(callback);
+    }
+    callback();
+}
+
+void GenerateStream::notifyLocalCleanupProgress() {
+    std::vector<std::function<void()>> callbacks;
+    {
+        std::lock_guard<std::mutex> lock(cleanup_observers_mutex_);
+        callbacks = cleanup_observers_;
+    }
+    for (const auto& callback : callbacks) {
+        callback();
+    }
+}
+
 bool GenerateStream::canReleaseFinishedResources() const {
     return isFinished() && !isDeferredReleasePending() && !hasPendingAsyncBookkeeping();
 }
@@ -299,6 +318,9 @@ void GenerateStream::decPendingAsyncBookkeepingAndMaybeRelease() {
         if (async_bookkeeping_->defer_release.exchange(false, std::memory_order_acq_rel)) {
             releaseResource();
         }
+        if (isFinished()) {
+            notifyLocalCleanupProgress();
+        }
     }
 }
 
@@ -313,6 +335,16 @@ void GenerateStream::waitPendingAsyncBookkeeping() {
 
 void GenerateStream::markDeferredRelease() {
     async_bookkeeping_->defer_release.store(true, std::memory_order_release);
+}
+
+bool GenerateStream::deferResourceReleaseIfBusy() {
+    // The last worker takes this same mutex before observing defer_release.
+    std::lock_guard<std::mutex> lock(async_bookkeeping_->mu);
+    if (!hasPendingAsyncBookkeeping()) {
+        return false;
+    }
+    markDeferredRelease();
+    return true;
 }
 
 bool GenerateStream::hasPendingP2PResourceHold() const {
@@ -951,6 +983,7 @@ bool GenerateStream::finishWithoutGenerate() {
         consumer_cv_->notify_all();
     }
     releaseResource();
+    notifyLocalCleanupProgress();
     reportMetricOnce();
     return true;
 }
@@ -1046,6 +1079,7 @@ StreamState GenerateStream::moveToNext() {
     // Report terminal stream metrics outside the stream mutex; the reporter
     // may take its own locks and must not nest under mutex_.
     if (should_report_metric) {
+        notifyLocalCleanupProgress();
         reportMetricOnce();
     }
     return state;
