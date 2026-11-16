@@ -2,10 +2,12 @@
 
 import argparse
 import ctypes
+import errno
 import hashlib
 import json
 import logging
 import os
+import select
 import shlex
 import signal
 import socket
@@ -22,11 +24,14 @@ WORKER_CGROUP_ENV = "RTP_LLM_WORKER_CGROUP"
 STOP_TIMEOUT_ENV = "RTP_LLM_SUPERVISOR_STOP_TIMEOUT_S"
 STARTUP_TIMEOUT_ENV = "RTP_LLM_PREFILL_STARTUP_TIMEOUT_S"
 READY_FILE_ENV = "RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE"
+PACE_SOCKET_ENV = "TAIR_MEMPOOL_SOCK"
 OWNER_MODULE = "rtp_llm.models_py.modules.dsv41.engram_distributed.resident"
 _MODEL_METADATA_LIMIT = 16 * 1024 * 1024
 _LOGGER = logging.getLogger(__name__)
 _POLL_S = 0.1
 _REAP_TIMEOUT_S = 10
+_PACE_RESTART_TIMEOUT_S = 60
+_PACE_SERVER = "/usr/local/tair_mempool/bin/tair_mempool_server"
 _STABLE_S = 600
 _REAP_TIMEOUT_ERRORS = (TimeoutError, subprocess.TimeoutExpired)
 _CANONICALIZE_SENTINEL = "__RTP_CANONICAL_OPTIONS__"
@@ -104,8 +109,8 @@ def _enable_subreaper():
     libc = ctypes.CDLL(None, use_errno=True)
     # Adopt orphaned ranks even when the container shares its PID namespace.
     if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
-        errno = ctypes.get_errno()
-        raise OSError(errno, os.strerror(errno))
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
 
 
 def _exited(process):
@@ -181,7 +186,7 @@ def _stop(process, grace):
     _kill_and_reap(process)
 
 
-def _kill_adopted_worker_children():
+def _kill_adopted_worker_children(deadline=None):
     """Empty a worker-only subreaper, including descendants that called setsid."""
     count = 0
     children_file = Path(f"/proc/self/task/{os.getpid()}/children")
@@ -192,6 +197,8 @@ def _kill_adopted_worker_children():
             break
         if pid:
             continue
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("detached Prefill worker children did not exit")
         # A direct child cannot reuse its PID before this process reaps it.
         # Repeat the snapshot because reparenting can expose more children.
         for child in children_file.read_text().split():
@@ -232,6 +239,7 @@ def _guard_worker(command):
         "prefill event=worker_started pid=%d guard_pid=%d", worker.pid, os.getpid()
     )
     forwarded_term = False
+    pace_enabled = bool(_local_pace_socket(os.environ))
     try:
         while not _exited(worker) and requested != signal.SIGUSR1:
             if requested == signal.SIGTERM and not forwarded_term:
@@ -251,10 +259,13 @@ def _guard_worker(command):
                     _kill_and_reap(worker)
                     break
                 except _REAP_TIMEOUT_ERRORS:
+                    if pace_enabled:
+                        raise
                     _LOGGER.warning(
                         "prefill event=worker_cleanup_pending pid=%d", worker.pid
                     )
-            _kill_adopted_worker_children()
+            deadline = time.monotonic() + _REAP_TIMEOUT_S if pace_enabled else None
+            _kill_adopted_worker_children(deadline)
             _LOGGER.info(
                 "prefill event=worker_exited pid=%d rc=%s",
                 worker.pid,
@@ -273,6 +284,90 @@ def _spawn_worker_guard(command, env):
         )
     finally:
         signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+
+
+def _local_pace_socket(env):
+    # pace_start.sh exports this socket when starting its local consumer.
+    if env.get("PACE_META_SERVER_ADDR"):
+        return env.get(PACE_SOCKET_ENV)
+    return None
+
+
+def _is_local_pace(process):
+    try:
+        return os.readlink(process / "exe") == _PACE_SERVER and os.path.samefile(
+            process / "ns/mnt", "/proc/self/ns/mnt"
+        )
+    except (FileNotFoundError, ProcessLookupError, PermissionError):
+        return False
+
+
+def _pidfd_syscall(number, *args):
+    # The image's Conda Python may omit pidfd bindings. These syscall numbers
+    # are shared by the supported 64-bit x86 and ARM Linux images.
+    if sys.platform != "linux" or os.uname().machine not in {"x86_64", "aarch64"}:
+        raise OSError(errno.ENOSYS, "pidfd is unavailable on this platform")
+    syscall = ctypes.CDLL(None, use_errno=True).syscall
+    syscall.restype = ctypes.c_long
+    result = syscall(ctypes.c_long(number), *args)
+    if result == -1:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return result
+
+
+def _pidfd_open(pid):
+    if hasattr(os, "pidfd_open"):
+        return os.pidfd_open(pid)
+    return _pidfd_syscall(434, pid, 0)
+
+
+def _terminate_pidfd(fd):
+    if hasattr(signal, "pidfd_send_signal"):
+        signal.pidfd_send_signal(fd, signal.SIGTERM)
+    else:
+        _pidfd_syscall(424, fd, signal.SIGTERM, ctypes.c_void_p(), 0)
+
+
+def _pace_process():
+    """Pin the sole PACE daemon in this container, even if its socket is wedged."""
+    candidates = [
+        process for process in Path("/proc").glob("[0-9]*") if _is_local_pace(process)
+    ]
+    if len(candidates) != 1:
+        return None
+    process = candidates[0]
+    pid = int(process.name)
+    try:
+        fd = _pidfd_open(pid)
+    except ProcessLookupError:
+        return None
+    keep = False
+    try:
+        # Recheck identity after opening the pidfd in case the PID changed.
+        keep = _is_local_pace(process) and not _pidfd_exited(fd)
+        if keep:
+            return pid, fd
+    finally:
+        if not keep:
+            os.close(fd)
+    return None
+
+
+def _pidfd_exited(fd):
+    poller = select.poll()
+    poller.register(fd, select.POLLIN)
+    return bool(poller.poll(0))
+
+
+def _pace_listening(path):
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.settimeout(0.25)
+            connection.connect(path)
+        return True
+    except (FileNotFoundError, ConnectionRefusedError, BlockingIOError, TimeoutError):
+        return False
 
 
 class PrefillSupervisor:
@@ -313,14 +408,17 @@ class PrefillSupervisor:
                     _LOGGER.warning("prefill event=worker_stop_grace_expired")
             if guard.returncode is None and not _exited(guard):
                 os.kill(guard.pid, signal.SIGUSR1)
+        pace_enabled = bool(_local_pace_socket(self.worker_env))
+        # The guard can spend a reap interval on each of the group and orphans.
+        cleanup_timeout = 3 * _REAP_TIMEOUT_S if pace_enabled else _REAP_TIMEOUT_S
         while guard.returncode is None:
             try:
-                guard.wait(timeout=_REAP_TIMEOUT_S)
+                guard.wait(timeout=cleanup_timeout)
             except subprocess.TimeoutExpired:
                 _LOGGER.warning(
                     "prefill event=worker_cleanup_pending; holding readiness"
                 )
-                if self.stopping or self._owner_exited():
+                if pace_enabled or self.stopping or self._owner_exited():
                     raise
         if guard.returncode:
             raise OSError(
@@ -337,7 +435,7 @@ class PrefillSupervisor:
             )
         except OSError:
             _LOGGER.exception("prefill event=worker_spawn_failed; retrying")
-            return
+            return False
         _LOGGER.info(
             "prefill event=worker_guard_started guard_pid=%s generation=%s",
             guard.pid,
@@ -387,15 +485,74 @@ class PrefillSupervisor:
             guard.returncode,
             oom_after - oom_before if oom_after is not None else None,
         )
+        return True
+
+    def _wait_for_pace(self, deadline, ready_socket=None):
+        while not self.stopping and not self._owner_exited():
+            if time.monotonic() >= deadline:
+                stage = "replacement_socket" if ready_socket else "old_daemon"
+                raise TimeoutError(f"PACE restart timed out waiting for {stage}")
+            process = _pace_process()
+            if process is not None:
+                pid, fd = process
+                keep = False
+                try:
+                    keep = not ready_socket or (
+                        _pace_listening(ready_socket) and not _pidfd_exited(fd)
+                    )
+                    if keep:
+                        return pid, fd
+                finally:
+                    if not keep:
+                        os.close(fd)
+            if not self._wait(0.5):
+                break
+        return None
+
+    def _restart_pace(self, path):
+        deadline = time.monotonic() + _PACE_RESTART_TIMEOUT_S
+        old = self._wait_for_pace(deadline)
+        if old is None:
+            return False
+        old_pid, old_fd = old
+        try:
+            if self.stopping or self._owner_exited():
+                return False
+            _LOGGER.info("prefill event=pace_restart_requested old_pid=%s", old_pid)
+            try:
+                _terminate_pidfd(old_fd)
+            except ProcessLookupError:
+                pass  # The existing PACE monitor also replaces independent exits.
+            while not _pidfd_exited(old_fd):
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"PACE restart timed out waiting for PID {old_pid} to exit"
+                    )
+                if not self._wait(_POLL_S):
+                    return False
+        finally:
+            os.close(old_fd)
+
+        new = self._wait_for_pace(deadline, ready_socket=path)
+        if new is None:
+            return False
+        new_pid, new_fd = new
+        os.close(new_fd)
+        _LOGGER.info("prefill event=pace_restarted old_pid=%s new_pid=%s", old_pid, new_pid)
+        return not self.stopping and not self._owner_exited()
 
     def run(self, directory):
         backoff = 1
         gate = directory / "ready"
+        pace_socket = _local_pace_socket(self.worker_env)
+        worker_ran = False
         try:
             while not self.stopping and not self._owner_exited():
+                if worker_ran and pace_socket and not self._restart_pace(pace_socket):
+                    break
                 started = time.monotonic()
                 gate.unlink(missing_ok=True)
-                self._run_worker(gate)
+                worker_ran = self._run_worker(gate)
                 if time.monotonic() - started >= _STABLE_S:
                     backoff = 1
                 if not self.stopping and not self._owner_exited():
@@ -415,6 +572,11 @@ class PrefillSupervisor:
                     owner.returncode,
                 )
         except (OSError, TimeoutError, subprocess.TimeoutExpired):
+            if pace_socket and not self.stopping and not self._owner_exited():
+                _LOGGER.exception(
+                    "prefill event=pace_worker_recovery_failed; exiting container"
+                )
+                raise SystemExit(1) from None
             _LOGGER.exception(
                 "prefill event=worker_supervision_failed; holding container"
             )
