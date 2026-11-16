@@ -7,20 +7,31 @@ from typing import Callable, NamedTuple
 
 import torch
 
+from rtp_llm.device.device_type import is_sm90
 from rtp_llm.models_py.modules.dsv4 import _record_tensor
 from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCUnit
 from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import try_fused_post_pre
+from rtp_llm.models_py.modules.dsv41.moe.shared_expert import PendingCombine
+
+# ``combine`` is only passed when a deferred pair exists, so the fused-seam
+# signature stays backward compatible for every other caller.
+_NO_COMBINE_KW: dict[str, object] = {}
 
 
 class PendingDecodePost(NamedTuple):
-    output: torch.Tensor
+    # Either the materialized sublayer output or the deferred routed/shared
+    # pair the fused boundary rebuilds as bf16(routed + shared).
+    output: "torch.Tensor | PendingCombine"
     residual: torch.Tensor
     post: torch.Tensor
     comb: torch.Tensor
     previous: DelayedHCUnit
 
     def materialize(self) -> torch.Tensor:
-        return self.previous.post(self.output, self.residual, self.post, self.comb)
+        output = self.output
+        if isinstance(output, PendingCombine):
+            output = output.materialize()
+        return self.previous.post(output, self.residual, self.post, self.comb)
 
 
 def _enabled() -> bool:
@@ -87,8 +98,22 @@ def forward_decode_layer(
     prepared = None
     if isinstance(hidden, PendingDecodePost):
         if _enabled() and _plain_decode_block(layer) and layer.engram is None:
+            output = hidden.output
+            combine = None
+            if isinstance(output, PendingCombine):
+                # Hand the two BF16 operands over instead of the materialized
+                # bf16(routed + shared); the SM90 seam rebuilds it inline.
+                combine = (output.routed, output.shared)
+                output = output.routed
+            # The SM90 seam returns a BF16 normalized input. Let the existing
+            # QKV linear choose its native BF16 small-M path or its established
+            # group-32 FP8 quantizer. MegaMHC's optional FP8 output uses a
+            # different minimum scale and would change tiny-input results.
+            output_fp8 = _can_quantize_attention_input(
+                layer, output, attn_fn
+            ) and not is_sm90(output.device)
             prepared = try_fused_post_pre(
-                hidden.output,
+                output,
                 hidden.residual,
                 hidden.post,
                 hidden.comb,
@@ -96,7 +121,8 @@ def forward_decode_layer(
                 layer.attn_hc,
                 layer.attn_norm,
                 use_prepared=True,
-                output_fp8=_can_quantize_attention_input(layer, hidden.output, attn_fn),
+                output_fp8=output_fp8,
+                **(_NO_COMBINE_KW if combine is None else {"combine": combine}),
             )
         hidden = hidden.materialize() if prepared is None else prepared[0]
     # MegaMHC already produces the same layer-entry residual needed by aux

@@ -1,4 +1,5 @@
 load("@arch_config//:arch_select.bzl", "requirement")
+load("@pip_gpu_cuda13_torch//:requirements.bzl", cuda13_requirement = "requirement")
 
 # Import-only dependency checks reuse the production Python 3.10 adapter.
 exports_files(["modules/dsv41/vision_swiglu.py"])
@@ -106,12 +107,18 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+# Experimental implementations are retained for independent comparison tests.
+# Keep their original import paths, but exclude them from serving libraries.
+_DSV41_SM90_EXPERIMENT_SRCS = [
+    "modules/dsv41/fp8/_v41_sm90_attention.py",
+]
+
 py_library(
     name = "modules",
     srcs = glob([
         "modules/*.py",
         "modules/**/*.py",
-    ]),
+    ], exclude = _DSV41_SM90_EXPERIMENT_SRCS),
     data = [
         ":cutlass_moe_config",
         ":dsv41_jit_sources",
@@ -131,7 +138,9 @@ py_library(
         "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
         # cuda13 locks ship flashinfer-python and deep-ep.
-        "@//:using_cuda13_x86": flashinfer + deep,
+        "@//:using_cuda13_x86": flashinfer + deep + [
+            "@flash_mla_sm90_sidecar//:pkg",  # Hopper sparse attention.
+        ],
         "@//:using_cuda13_arm": flashinfer + deep,
         "@//:using_cuda12": flashinfer + deep,
         "@//:using_ppu": deep,
@@ -201,6 +210,17 @@ py_library(
         "kernels/**/*.py",
     ]),
 )
+
+# Test-only implementations remain separate from serving libraries.
+
+py_library(
+    name = "dsv41_sm90_attention_reference",
+    testonly = True,
+    srcs = ["modules/dsv41/fp8/_v41_sm90_attention.py"],
+    deps = [":modules"],
+    visibility = ["//rtp_llm/models_py/modules/dsv41/fp8/test:__pkg__"],
+)
+
 
 py_library(
     name = "configs",

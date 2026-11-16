@@ -8,6 +8,9 @@ V4.1 retains its private strategy implementation during the main migration.
 
 Strategies (priority high→low for ``forced=None``):
 
+    NVIDIA SM90: FlashInfer W4A8; DeepEP V2 for EP>1.
+    Other devices retain the existing selection below:
+
     ep_size  env / kernel                 → strategy
     --------------------------------------------------------
     >1       DSV4_USE_MEGA_MOE_SE!=0       MegaMoEStrategySE (strict; default)
@@ -35,6 +38,7 @@ import torch
 import torch.nn as nn
 
 from rtp_llm.models_py.utils.expert_load_monitor import ExpertLoadContext
+from rtp_llm.device.device_type import is_cuda
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,10 @@ class RoutedExpertsStrategy(nn.Module):
       - producing ``[N, D] fp32`` per-token routed-sum from
         ``(x: [N, D] BF16, weights: [N, topk] FP32, indices: [N, topk] int64)``
 
+    H20 static decode may retain DeepEP's BF16 output until the shared-expert
+    epilogue, which promotes both inputs to FP32 before adding. Debug recording
+    keeps the materialized FP32 output.
+
     A strategy MUST handle cuda-graph capture state internally (e.g.
     ``LocalLoopStrategy.forward`` checks ``torch.cuda.is_current_stream_capturing()``
     and dispatches to a graph-safe variant). The MoE layer does NOT switch
@@ -104,8 +112,8 @@ class RoutedExpertsStrategy(nn.Module):
     define ``setup_weights`` + ``can_handle``.
     """
 
-    # Registered names currently include mega, mega_se, grouped_fp4,
-    # local_loop, and deepep.
+    # Registered names currently include mega, mega_se, mega_fused,
+    # grouped_fp4, local_loop, deepep, and mega_sm90.
     name: ClassVar[str]
 
     # True when ``forward`` already returns ``routed + shared`` (the strategy
@@ -313,6 +321,43 @@ def select_strategy(
     """
     explicit_env = os.environ.get("DSV4_MOE_STRATEGY", "").strip()
     explicit_env = bool(explicit_env and explicit_env != "auto")
+
+    # V4.1 Hopper cannot consume Mega / grouped FP4's SM100 instructions.
+    # Select its native packed-weight adapter before the SM100-only EP policy.
+    # Explicit requests for another strategy still fail rather than silently
+    # overriding an operator's backend selection.
+    if is_cuda() and torch.cuda.get_device_capability() == (9, 0):
+        from .mega_sm90 import SM90MegaMoEStrategy, sm90_mega_moe_unavailable_reason
+        if forced == "gc_sm90_se":
+            from .gc_sm90_se import SM90GCMoESEStrategy
+
+            if SM90GCMoESEStrategy.can_handle(cfg):
+                return SM90GCMoESEStrategy
+            raise RuntimeError(
+                "gc_sm90_se requires decode, supported SM90 geometry, K32 "
+                "shared weights, Triton, and the gc_moe SM90 SE API"
+            )
+        if forced == "mega_sm90_se":
+            from .mega_sm90_se import SM90MegaMoEFusedSEStrategy
+
+            if SM90MegaMoEFusedSEStrategy.can_handle(cfg, explicit=True):
+                return SM90MegaMoEFusedSEStrategy
+            raise RuntimeError(
+                "mega_sm90_se requires a decode-role SM90 shape, one shared "
+                "expert with 128x128 FP32 or MXFP8 32x32 scales, and a "
+                "deep_gemm build with the native G32 shared-expert MegaMoE API"
+            )
+        if forced not in (None, "mega_sm90") and strict:
+            raise RuntimeError(
+                "V4.1 SM90 supports mega_sm90, mega_sm90_se and gc_sm90_se; "
+                f"requested strategy {forced!r}"
+            )
+        if SM90MegaMoEStrategy.can_handle(cfg, explicit=True):
+            return SM90MegaMoEStrategy
+        raise RuntimeError(
+            "SM90 MegaMoE cannot handle the V4.1 MoE shape/topology: "
+            f"{sm90_mega_moe_unavailable_reason() or 'shape unsupported'}"
+        )
 
     # Native shared activations use K32 for both weight recipes. V4.1's
     # 32x32 checkpoint scales need a different weight layout from V4's

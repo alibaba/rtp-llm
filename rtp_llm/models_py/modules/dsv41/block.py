@@ -93,6 +93,7 @@ class Block(nn.Module):
         self.engram = None
         self.engram_hashes = None
         self.engram_token_mask = None
+        self.engram_prefetch = None
 
         attn_cls = CommitOnlyAttentionFP8 if commit_only else AttentionFP8
         attn_extra = {}
@@ -284,11 +285,27 @@ class Block(nn.Module):
         if self.engram is None:
             return hidden
         shape = hidden.shape
-        return self.engram(
+        args = (
             hidden.reshape(-1, shape[-2], shape[-1]),
             self.engram_hashes,
             self.engram_token_mask,
-        ).reshape(shape)
+        )
+        prefetch = getattr(self, "engram_prefetch", None)
+        if prefetch is None:
+            return self.engram(*args).reshape(shape)
+        return self.engram(*args, embedding_rows=prefetch.wait(self.layer_id)).reshape(
+            shape
+        )
+
+    # ``MoE`` alone can hand the deferred routed/shared pair to the mHC post;
+    # every other FFN keeps the original two-argument call.
+    _FFN_DEFER_COMBINE_KW: Dict[str, bool] = {"defer_combine": True}
+    _FFN_NO_KW: Dict[str, bool] = {}
+
+    def _ffn_extra_kwargs(self, defer_ffn_post: bool) -> Dict[str, bool]:
+        if defer_ffn_post and isinstance(self.ffn, MoE):
+            return self._FFN_DEFER_COMBINE_KW
+        return self._FFN_NO_KW
 
     def _try_mega_mhc(
         self, attn_out, residual, post, comb, *, original_tokens=None, moe_inputs=None
@@ -481,14 +498,16 @@ class Block(nn.Module):
                 x_pre, input_ids, expert_load=expert_load, mhc_inputs=moe_inputs
             )
         else:
+            ffn_extra = self._ffn_extra_kwargs(_defer_ffn_post)
             ffn_out = (
-                self.ffn(x_pre, input_ids, expert_load=expert_load)
+                self.ffn(x_pre, input_ids, expert_load=expert_load, **ffn_extra)
                 if routing_metadata is None
                 else self.ffn(
                     x_pre,
                     input_ids,
                     expert_load=expert_load,
                     routing_metadata=routing_metadata,
+                    **ffn_extra,
                 )
             )
         if _dbg_layer:
@@ -630,6 +649,9 @@ class Block(nn.Module):
             if fused_mhc is None
             else fused_mhc[0]
         )
+        # HC post has submitted its last read of this attention output.
+        # Keep its full-prefill storage out of the subsequent FFN lifetime.
+        del attn_out
         self._sync_after_first_cp_prefill_attention()
 
         residual = x

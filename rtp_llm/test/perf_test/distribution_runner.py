@@ -35,6 +35,7 @@ class DistributionRunner:
         self._generate_config = generate_config or {}
         self._num_measures = num_measures
         self._log_path = log_path
+        self._log_flush_offset = 0
         self._title = "Distribution Decode Result"
 
     def warmup(self) -> None:
@@ -83,7 +84,7 @@ class DistributionRunner:
                 trace_name = (
                     f"bs{actual_bs}_seq{min(seq_len_list)}-{max(seq_len_list)}_decode"
                 )
-                metric = BatchPerfImpl(
+                impl = BatchPerfImpl(
                     self._port,
                     self._dp_size,
                     actual_bs * self._dp_size,
@@ -95,7 +96,10 @@ class DistributionRunner:
                     self._generate_config,
                     trace_name,
                     log_path=self._log_path,
-                ).run(num_measures=self._num_measures)
+                    log_flush_offset=self._log_flush_offset,
+                )
+                metric = impl.run(num_measures=self._num_measures)
+                self._log_flush_offset = impl.log_flush_offset
 
                 metrics_list.append(
                     DistributionMetricState(actual_bs, seq_len_list, metric)

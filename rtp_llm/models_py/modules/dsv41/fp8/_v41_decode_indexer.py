@@ -19,6 +19,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.device.device_type import is_cuda
+
 if TYPE_CHECKING:
     from ._indexer_score import PagedMQAMetadata
 
@@ -342,6 +344,8 @@ def is_supported(
         or block_size not in (64, 128)
     ):
         return False
+    if is_cuda() and torch.cuda.get_device_capability(device) == (9, 0):
+        return True
     from ._indexer_score import has_fp8_fp4_paged_mqa_logits
 
     if not has_fp8_fp4_paged_mqa_logits():
@@ -431,6 +435,7 @@ def score_decode_indexer(
     metadata: DecodeIndexerMetadata | None = None,
     prepared_query: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     request_ids: torch.Tensor | None = None,
+    candidate_blocks: torch.Tensor | None = None,
 ) -> torch.Tensor | None:
     """Return [B*S,max_ctx_len], or None for an unsupported fast path.
 
@@ -484,6 +489,23 @@ def score_decode_indexer(
     physical lengths for the unchanged DG scheduler/scorer.
     FULL multistream can prepare Q before joining the independent KV producer.
     """
+    if pool.shape[-1] == 132:
+        if q is None or positions is None:
+            raise ValueError("FP8 DeepGEMM indexer Q requires token positions")
+        if torch.cuda.get_device_capability(q.device) != (9, 0):
+            raise ValueError("FP8 primary indexer is enabled only on SM90")
+        from ._v41_sm90_fp8_indexer_score import score_paged_fp8_indexer
+
+        if request_ids is not None:
+            b, s, h, d = q.shape
+            block_table = block_table.index_select(0, request_ids.long())
+            q = q.reshape(b * s, 1, h, d)
+            weights = weights.reshape(b * s, 1, h)
+            context_lens = context_lens.reshape(b * s, 1)
+        return score_paged_fp8_indexer(
+            q, weights, freqs_cis, positions, pool, block_table, context_lens,
+            max_ctx_len=max_ctx_len, rope_head_dim=rope_head_dim,
+        )
     if prepared_query is None:
         b, s, h, d = q.shape
         device = q.device
@@ -497,6 +519,8 @@ def score_decode_indexer(
     )
     if not is_supported(device, block_size, h, d):
         return None
+    if torch.cuda.get_device_capability(device) == (9, 0):
+        metadata = None
     if request_ids is not None and metadata is None:
         # The uncached fallback also needs real request boundaries. Expand
         # only the tiny page table and use one query per scorer request;
@@ -529,6 +553,37 @@ def score_decode_indexer(
             positions,
             rope_head_dim,
             weights_out_dtype=torch.bfloat16,
+        )
+    if torch.cuda.get_device_capability(device) == (9, 0):
+        from ._v41_sm90_indexer import paged_score
+
+        if candidate_blocks is not None:
+            from ._v41_sm90_decode_candidate import try_score
+
+            candidate_logits = try_score(
+                q_payload,
+                q_sf,
+                pool,
+                weights,
+                block_table,
+                context_lens.reshape(-1),
+                candidate_blocks,
+                capacity=max_ctx_len,
+                logical_entries=logical_entries,
+                output_dtype=torch.bfloat16 if preserve_score_dtype else torch.float32,
+            )
+            if candidate_logits is not None:
+                return candidate_logits
+        return paged_score(
+            q_payload,
+            q_sf,
+            pool,
+            weights,
+            block_table,
+            context_lens,
+            max_ctx_len,
+            logical_entries,
+            output_dtype=torch.bfloat16 if preserve_score_dtype else torch.float32,
         )
     if metadata is None:
         lengths = context_lens.to(torch.int32).contiguous()

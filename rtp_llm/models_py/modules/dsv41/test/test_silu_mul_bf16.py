@@ -157,6 +157,14 @@ class SiluMulGroup32QuantEquivTest(unittest.TestCase):
         cls.quantize = staticmethod(sgl_per_token_group_quant_fp8)
         cls.bf16 = staticmethod(_load_kernel())
         cls.fused = staticmethod(_load_kernel("silu_mul_fp8_g32_quant"))
+        cls.fused_native = staticmethod(
+            _load_kernel("silu_mul_fp8_g32_quant_mn_major")
+        )
+        from rtp_llm.models_py.modules.dsv41._sm90_quant_scale_fused import (
+            unpack_ue8m0_to_fp32,
+        )
+
+        cls.unpack = staticmethod(unpack_ue8m0_to_fp32)
 
     def reference(self, gate_up, clamp, mode):
         hidden = self.bf16(gate_up, clamp_limit=clamp)
@@ -209,6 +217,42 @@ class SiluMulGroup32QuantEquivTest(unittest.TestCase):
                 for mode in ("legacy", "v2", "auto"):
                     with self.subTest(rows=rows, width=width, clamp=clamp, mode=mode):
                         self.check(gate_up, clamp, mode)
+
+    def test_mn_major_variant_matches_packed_after_unpack(self):
+        """Native FP32 scales must be the exact decode of the packed words."""
+        torch.manual_seed(77)
+        for rows, width in ((1, 32), (4, 2304), (7, 160), (16, 1024)):
+            for clamp in (0.0, 10.0):
+                for mode in ("legacy", "v2"):
+                    with self.subTest(
+                        rows=rows, width=width, clamp=clamp, mode=mode
+                    ):
+                        gate_up = (
+                            torch.randn(rows, 2 * width, device="cuda") * 16
+                        ).bfloat16()
+                        with patch.dict(
+                            os.environ, DSV4_FP8_QUANT_KERNEL=mode
+                        ):
+                            q_p, sf_p = self.fused(gate_up, clamp_limit=clamp)
+                            q_n, sf_n = self.fused_native(
+                                gate_up, clamp_limit=clamp
+                            )
+                        self.assertTrue(
+                            torch.equal(q_p.view(torch.uint8), q_n.view(torch.uint8))
+                        )
+                        self.assertEqual(sf_n.dtype, torch.float32)
+                        self.assertEqual(sf_n.shape, (rows, width // 32))
+                        self.assertEqual(
+                            sf_n.stride(), (1, max(4, -(-rows // 4) * 4))
+                        )
+                        expected = self.unpack(sf_p, mn_major=True)[
+                            :, : width // 32
+                        ]
+                        self.assertTrue(
+                            torch.equal(
+                                sf_n.view(torch.int32), expected.view(torch.int32)
+                            )
+                        )
 
     def test_auto_keeps_legacy_scales_across_former_size_boundary(self):
         # Zero Q alone cannot distinguish the policies: check packed scales too.

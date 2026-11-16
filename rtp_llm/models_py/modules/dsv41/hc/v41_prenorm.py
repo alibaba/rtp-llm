@@ -13,6 +13,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.device.device_type import is_cuda, is_sm90
+
 
 @lru_cache(maxsize=1)
 def _has_prenorm_gemm() -> bool:
@@ -36,7 +38,8 @@ def max_supported_tokens() -> int:
 def is_supported(residual: torch.Tensor, fn: torch.Tensor) -> bool:
     """Static inference gate; large prefills retain the existing implementation."""
     if (
-        residual.device.type != "cuda"
+        not is_cuda()
+        or residual.device.type != "cuda"
         or residual.dtype != torch.bfloat16
         or residual.ndim not in (3, 4)
         or residual.shape[-2:] != (4, 5120)
@@ -49,8 +52,11 @@ def is_supported(residual: torch.Tensor, fn: torch.Tensor) -> bool:
         or (torch.is_grad_enabled() and (residual.requires_grad or fn.requires_grad))
     ):
         return False
+    major = torch.cuda.get_device_capability(residual.device)[0]
+    max_tokens = 256 if is_sm90(residual.device) else 64
     return (
-        torch.cuda.get_device_capability(residual.device)[0] == 10
+        major in (9, 10)
+        and residual.numel() // 20480 <= max_tokens
         and _has_prenorm_gemm()
     )
 
@@ -88,7 +94,11 @@ def _reduce_prenorm_kernel(
     partial,
     square_sum,
     output,
-    TOKENS: tl.constexpr,
+    # Runtime, not constexpr: TOKENS is the per-chunk token count and changes on
+    # every chunk. As a constexpr it produced 224 cached variants on L20Z
+    # prefill, each costing a full Triton compilation. SPLITS must stay
+    # constexpr because it drives tl.static_range.
+    TOKENS,
     SPLITS: tl.constexpr,
     EPS: tl.constexpr,
 ):
@@ -123,8 +133,10 @@ def prenorm(
 
     from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import tf32_hc_prenorm_gemm
 
-    # vLLM bounds its small-token prenorm specialization to 16 K partitions.
-    splits = 16
+    # Shorter K reductions keep large-batch cancellation within the same
+    # FP64-oracle tolerance. Preserve the established <=64-token path.
+    splits = 32 if tokens > 64 else 16
+    weight = prepare_tf32_weight(fn)
     partial = torch.empty(
         (splits, tokens, 24), dtype=torch.float32, device=residual.device
     )

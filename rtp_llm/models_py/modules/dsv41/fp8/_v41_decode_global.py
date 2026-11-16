@@ -19,6 +19,7 @@ import triton
 import triton.language as tl
 import triton.language.extra.cuda.libdevice as libdevice
 
+from rtp_llm.device.device_type import is_cuda
 from rtp_llm.models_py.modules.dsv41.attn_type import CSA_STATE, INDEXER_KV
 from rtp_llm.models_py.modules.dsv41.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
@@ -32,6 +33,10 @@ from rtp_llm.models_py.modules.dsv41.fp8._v41_fp4_triton import (
     _round_power_of_two_scale,
 )
 from rtp_llm.models_py.modules.dsv41.kv_cache_utils import indexer_region_for_ratio
+from rtp_llm.models_py.modules.dsv41.fp8._v41_sm90_v4_cache import (
+    _fake_quantize_global_fp4_values,
+    _store_v4_row,
+)
 
 
 @triton.jit
@@ -142,6 +147,7 @@ def _compress_norm_main_store_kernel(
     INDEX_TABLE_STRIDE: tl.constexpr,
     STATE_BLOCKS: tl.constexpr,
     TRAP: tl.constexpr,
+    V4_CACHE: tl.constexpr = False,
 ):
     token = tl.program_id(0).to(tl.int64)
     columns = tl.arange(0, 512)
@@ -222,6 +228,15 @@ def _compress_norm_main_store_kernel(
             if block >= MAIN_BLOCKS:
                 _trap()
         rotated = _rope_bf16(latent, frequencies, (position // RATIO) * RATIO, 512)
+        if V4_CACHE:
+            _store_v4_row(
+                _fake_quantize_global_fp4_values(rotated),
+                main_cache,
+                block * MAIN_EB + offset,
+                MAIN_CACHE_STRIDE,
+                MAIN_EB,
+            )
+            return
         # FP4 GLOBAL store: group-16 E4M3 scales, the official compressed-KV
         # quantization. Byte-identical to quantize_and_insert_k_cache_fp4.
         grouped = tl.reshape(rotated.to(tl.float32), (32, 16))
@@ -352,7 +367,8 @@ def _index_norm_store_state_kernel(
 def is_supported(attn, x, positions, req_ids, starts) -> bool:
     """Static decode gate; unsupported layouts retain the unmodified path."""
     if (
-        x.device.type != "cuda"
+        not is_cuda()
+        or x.device.type != "cuda"
         or x.dtype != torch.bfloat16
         or x.ndim != 3
         or x.shape[-1] != 5120
@@ -368,7 +384,8 @@ def is_supported(attn, x, positions, req_ids, starts) -> bool:
     cp = attn._cp_ctx
     if cp is not None and cp.cp_size > 1:
         return False
-    if torch.cuda.get_device_capability(x.device)[0] != 10:
+    capability = torch.cuda.get_device_capability(x.device)
+    if capability != (9, 0) and capability[0] != 10:
         return False
     for metadata, size in (
         (positions, x.shape[0] * x.shape[1]),
@@ -452,7 +469,7 @@ def is_supported(attn, x, positions, req_ids, starts) -> bool:
             pool.dtype != torch.uint8
             or pool.ndim != 3
             or (region == INDEXER_KV and not pool.is_contiguous())
-            or pool.shape[2] != (68 if region == INDEXER_KV else 288)
+            or pool.shape[2] not in ((68,) if region == INDEXER_KV else (288, 584))
             or pool.stride(2) != 1
             or pool.stride(1) != pool.shape[2]
             or pool.stride(0) < pool.shape[1] * pool.shape[2]
@@ -554,6 +571,7 @@ def try_produce_global(
         ),
         INDEX_COLS=index_table.shape[1],
         INDEX_TABLE_STRIDE=index_table.stride(0),
+        V4_CACHE=main.shape[-1] == 584,
         **state_geometry,
         num_warps=4,
         enable_fp_fusion=False,

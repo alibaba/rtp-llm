@@ -3,7 +3,7 @@
 import unittest
 from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -114,7 +114,12 @@ class DSparkCommitWKVTest(unittest.TestCase):
             import os
 
             os.environ.pop("DSV4_DSPARK_COMMIT_WKV", None)
-            automatic = commit_wkv.prepare_dspark_commit_wkv(self.linears)
+            # The default is baseline (shared WKV is opt-in); auto dispatch is
+            # exercised explicitly so this test keeps covering both branches.
+            self.assertEqual(
+                commit_wkv.prepare_dspark_commit_wkv(self.linears).mode, "baseline"
+            )
+            automatic = commit_wkv.prepare_dspark_commit_wkv(self.linears, "auto")
         self.assertEqual(automatic.mode, "auto")
         self.assertIsNotNone(automatic.stacked)
         for rows in (1, 3072, 3073):
@@ -382,6 +387,346 @@ class DSparkCommitWKVTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "before capture"):
                 self.prepare("stacked")
         torch.cuda.current_stream().wait_stream(stream)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class DSparkCommitWKVSM90Test(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if torch.cuda.get_device_capability() != (9, 0):
+            raise unittest.SkipTest("SM90 shared-quantization contract")
+        cls.linears = make_linears()
+
+    def test_auto_reuses_one_native_group32_quantization(self):
+        from rtp_llm.models_py.modules.dsv41 import _sm90_quant_scale_fused
+
+        prepared = commit_wkv.prepare_dspark_commit_wkv(self.linears, "auto")
+        self.assertIsNotNone(prepared)
+        self.assertTrue(prepared.sm90)
+        self.assertIsNone(prepared.stacked)
+        for rows in (1, 4, 16):
+            x = torch.randn(rows, 5120, device="cuda", dtype=torch.bfloat16)
+            expected = [linear(x) for linear in self.linears]
+            with patch.object(
+                _sm90_quant_scale_fused,
+                "quantize_g32",
+                wraps=_sm90_quant_scale_fused.quantize_g32,
+            ) as quantize, patch.object(
+                V41MXFP8Linear,
+                "forward_quantized",
+                side_effect=AssertionError("SM90 native scales must bypass wrapper"),
+            ):
+                actual = prepared.project(x)
+            quantize.assert_called_once()
+            self.assertIsNotNone(actual)
+            for got, wanted in zip(actual, expected):
+                exact(self, got, wanted)
+
+        x = torch.randn(4, 5120, device="cuda", dtype=torch.bfloat16)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            prepared.project(x)
+        stream.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            captured = prepared.project(x)
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                x.normal_()
+                graph.replay()
+                for actual, linear in zip(captured, self.linears):
+                    exact(self, actual, linear(x))
+        torch.cuda.current_stream().wait_stream(stream)
+
+        with self.assertRaisesRegex(ValueError, "shared, not stacked"):
+            commit_wkv.prepare_dspark_commit_wkv(self.linears, "stacked")
+
+
+def _make_commit_attention(v4_layout=None, device="cpu"):
+    from rtp_llm.models_py.modules.dsv41.fp8 import attention as base
+    from rtp_llm.models_py.modules.dsv41.fp8 import attention_v41_commit as commit
+    from rtp_llm.utils.model_weight import W
+
+    weights = {
+        W.v4_attn_wkv_w: torch.empty(1, device=device),
+        W.v4_attn_wkv_s: torch.empty(1, device=device),
+        W.v4_attn_kv_norm: torch.ones(512, device=device),
+    }
+    selection = (
+        nullcontext()
+        if v4_layout is None
+        else patch.object(
+            commit, "use_v4_kv_cache", return_value=v4_layout, create=True
+        )
+    )
+    # Keep the real minimal constructor and pool helpers; only projection
+    # preparation and RoPE allocation are irrelevant to these cache contracts.
+    with selection, patch.object(
+        base, "_v4_fp8_linear", return_value=torch.nn.Identity()
+    ) as linear, patch.object(
+        base, "precompute_freqs_cis", return_value=torch.empty(0)
+    ):
+        attn = commit.CommitOnlyAttentionV41FP8(
+            layer_id=0,
+            dim=5120,
+            n_heads=64,
+            q_lora_rank=1024,
+            head_dim=512,
+            rope_head_dim=64,
+            o_lora_rank=1024,
+            o_groups=8,
+            window_size=128,
+            compress_ratio=0,
+            compress_rope_theta=10000.0,
+            rope_theta=10000.0,
+            rope_factor=1.0,
+            beta_fast=32,
+            beta_slow=1,
+            original_seq_len=0,
+            max_batch_size=1,
+            max_seq_len=1024,
+            index_n_heads=1,
+            index_head_dim=128,
+            index_topk=1,
+            layer_weights=weights,
+        )
+        linear.assert_called_once()
+    return attn
+
+
+def _bind_commit_cache(attn, raw, entries, cp_size, tag="decoder_swa_kv"):
+    attn._swa_cache_region = tag
+    attn._cp_ctx = SimpleNamespace(
+        cp_size=cp_size, cp_rank=0, kv_cache_sharded=cp_size > 1
+    )
+    attn._kv_cache = SimpleNamespace(
+        get_entries_per_block=Mock(
+            side_effect=lambda requested: entries if requested == tag else 128
+        ),
+        get_layer_cache=Mock(return_value=SimpleNamespace(kv_cache_base=raw)),
+    )
+
+
+class DSparkCommitCacheTest(unittest.TestCase):
+    def test_pool_abi_matches_allocator_without_query_weights(self):
+        from rtp_llm.models.dsv41_kv_cache import build_v41_kv_cache_spec_descs
+        from rtp_llm.models_py.modules.dsv41.attn_type import SWA_KV
+
+        for v4_layout, width in ((True, 584), (False, 528)):
+            with self.subTest(v4_layout=v4_layout):
+                attn = _make_commit_attention(v4_layout)
+                desc = build_v41_kv_cache_spec_descs(
+                    1,
+                    [0],
+                    [],
+                    512,
+                    bounded_replay=True,
+                    draft=True,
+                    v4_kv_layout=v4_layout,
+                )[0][0]
+                self.assertEqual(attn._pool_spec[SWA_KV], (torch.uint8, width))
+                self.assertEqual(desc.entry_elems, width)
+                self.assertEqual(desc.tag, "decoder_swa_kv")
+                self.assertIsNone(attn.wq_a)
+                self.assertIsNone(attn.wo_b)
+
+    def test_logical_ring_matches_decode_despite_padding_and_cp_slices(self):
+        from rtp_llm.models_py.modules.dsv41.attn_type import SWA_KV
+        from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
+
+        for v4_layout, width, stride in ((True, 584, 79488), (False, 528, 84480)):
+            for cp_size in (1, 8):
+                for tag in (SWA_KV, "decoder_swa_kv"):
+                    with self.subTest(layout=v4_layout, cp_size=cp_size, tag=tag):
+                        attn = _make_commit_attention(v4_layout)
+                        raw = torch.zeros(4, stride // cp_size, dtype=torch.uint8)
+                        _bind_commit_cache(attn, raw, 136, cp_size, tag)
+                        self.assertEqual(attn._swa_entries_per_block(), 136)
+                        self.assertEqual(
+                            attn._swa_entries_per_block(),
+                            AttentionV41FP8._swa_entries_per_block(attn),
+                        )
+                        attn._kv_cache.get_entries_per_block.assert_called_with(tag)
+                        view = attn._pool_view_3d_fp8(SWA_KV)
+                        self.assertEqual(view.shape[-1], width)
+                        self.assertEqual(view.stride(0), stride // cp_size)
+                        self.assertEqual(
+                            view.shape[1], min(136, stride // cp_size // width)
+                        )
+                        attn._kv_cache.get_layer_cache.assert_called_with(0, tag)
+
+    def test_cp_missing_logical_metadata_fails_instead_of_guessing(self):
+        for v4_layout, stride in ((True, 79488), (False, 84480)):
+            for entries in (None, 0, -1):
+                with self.subTest(layout=v4_layout, entries=entries):
+                    attn = _make_commit_attention(v4_layout)
+                    _bind_commit_cache(
+                        attn, torch.zeros(4, stride // 8, dtype=torch.uint8), entries, 8
+                    )
+                    with self.assertRaisesRegex(
+                        RuntimeError, "logical entries_per_block.*decoder_swa_kv"
+                    ):
+                        attn._swa_entries_per_block()
+                    attn._kv_cache.get_entries_per_block = None
+                    with self.assertRaisesRegex(
+                        RuntimeError, "logical entries_per_block"
+                    ):
+                        attn._swa_entries_per_block()
+
+    def test_non_cp_legacy_geometry_and_unbound_cache(self):
+        for v4_layout, width in ((True, 584), (False, 528)):
+            with self.subTest(layout=v4_layout):
+                attn = _make_commit_attention(v4_layout)
+                self.assertEqual(attn._swa_entries_per_block(), 0)
+                _bind_commit_cache(
+                    attn, torch.zeros(4, 132 * width, dtype=torch.uint8), None, 1
+                )
+                attn._kv_cache.get_entries_per_block = None
+                self.assertEqual(attn._swa_entries_per_block(), 132)
+
+
+@unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+class DSparkCommitCacheCudaTest(unittest.TestCase):
+    def test_planar_cp_partial_updates_preserve_entries_and_padding(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _swa_kv_insert_triton as planar
+        from rtp_llm.models_py.modules.dsv41.fp8._swa_cp_byte_sliced import (
+            build_cp_byte_sliced_slot_compaction,
+        )
+
+        for entries, cp_size in ((136, 8), (128, 3), (130, 5)):
+            with self.subTest(entries=entries, cp_size=cp_size):
+                alignment = 576 * cp_size
+                stride = (entries * 584 + alignment - 1) // alignment * alignment
+                initial = torch.full(
+                    (5, stride), 173, dtype=torch.uint8, device="cuda"
+                )
+                expected = initial.clone()
+                view = expected.as_strided((5, entries, 584), (stride, 584, 1))
+                shards = [
+                    part.contiguous().clone() for part in initial.chunk(cp_size, dim=1)
+                ]
+                for start, end in ((0, 128), (128, 131), (131, 140)):
+                    positions = torch.arange(start, end, device="cuda")
+                    slots = torch.cat(
+                        (
+                            3 * entries + positions % entries,
+                            entries + positions % entries,
+                            positions.new_tensor([-1]),
+                        )
+                    )
+                    indices = torch.arange(slots.numel() * 512, device="cuda")
+                    keys = (
+                        (((indices * 73 + 19 + start) % 4093 - 2046).float() / 256)
+                        .reshape(-1, 512)
+                        .bfloat16()
+                    )
+                    compaction = build_cp_byte_sliced_slot_compaction(
+                        slots, entries, 5, "dspark_partial_page_test", "skip_minus_one"
+                    )
+                    planar.quantize_and_insert_k_cache(keys, view, slots)
+                    for rank, raw in enumerate(shards):
+                        planar.quantize_and_insert_k_cache_cp_byte_sliced(
+                            keys, raw, slots, entries, rank, cp_size, compaction
+                        )
+                    torch.cuda.synchronize()
+                    actual = torch.cat(shards, dim=1)
+                    exact(self, actual, expected)
+                    exact(self, actual[[0, 2, 4]], initial[[0, 2, 4]])
+                    exact(self, actual[:, entries * 584 :], initial[:, entries * 584 :])
+
+                # A skipped-only update must not touch any page or padding.
+                slots = torch.tensor([-1], device="cuda", dtype=torch.long)
+                compaction = build_cp_byte_sliced_slot_compaction(
+                    slots, entries, 5, "dspark_skip_page_test", "skip_minus_one"
+                )
+                for rank, raw in enumerate(shards):
+                    planar.quantize_and_insert_k_cache_cp_byte_sliced(
+                        keys[:1], raw, slots, entries, rank, cp_size, compaction
+                    )
+                exact(self, torch.cat(shards, dim=1), expected)
+
+    def test_cp8_prefill_bytes_match_decode_codec_across_ring_wraps(self):
+        from rtp_llm.models_py.modules.dsv41.attn_type import SWA_KV
+        from rtp_llm.models_py.modules.dsv41.fp8 import _swa_kv_insert_triton as planar
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_swa_triton as compact
+        from rtp_llm.models_py.modules.dsv41.fp8._swa_cp_byte_sliced import (
+            build_cp_byte_sliced_slot_compaction,
+        )
+        from rtp_llm.models_py.modules.dsv41.kv_cache_layout import use_v4_kv_cache
+
+        attn = _make_commit_attention(device="cuda")
+        planar_decode = use_v4_kv_cache(torch.device("cuda"))
+        width, alignment = (584, 576) if planar_decode else (528, 16896)
+        entries, cp_size, blocks = 136, 8, 4
+        stride = (entries * width + alignment - 1) // alignment * alignment
+        expected_codec = planar if planar_decode else compact
+        dense_writer = (
+            planar.quantize_and_insert_k_cache
+            if planar_decode
+            else compact.quantize_and_insert_swa_k_cache
+        )
+        for end in (64, 128, 136, 250, 1024):
+            with self.subTest(context_end=end):
+                positions = torch.arange(max(0, end - 128), end, device="cuda")
+                indices = torch.arange(
+                    (positions.numel() + 1) * 512, device="cuda", dtype=torch.int64
+                )
+                keys = (
+                    (((indices * 73 + 19) % 4093 - 2046).float() / 256)
+                    .reshape(-1, 512)
+                    .bfloat16()
+                )
+                shards = []
+                for rank in range(cp_size):
+                    raw = torch.zeros(
+                        blocks, stride // cp_size, dtype=torch.uint8, device="cuda"
+                    )
+                    _bind_commit_cache(attn, raw, entries, cp_size)
+                    attn._cp_ctx.cp_rank = rank
+                    producer_entries = attn._swa_entries_per_block()
+                    pool = attn._pool_view_3d_fp8(SWA_KV)
+                    self.assertEqual(pool.shape[-1], width)
+                    self.assertEqual(producer_entries, entries)
+                    slots = torch.cat(
+                        (
+                            2 * producer_entries + positions % producer_entries,
+                            positions.new_tensor([-1]),
+                        )
+                    )
+                    compaction = build_cp_byte_sliced_slot_compaction(
+                        slots,
+                        producer_entries,
+                        blocks,
+                        "dspark_cache_test",
+                        "skip_minus_one",
+                    )
+                    # This is the same pool-view dispatch as forward_commit.
+                    producer_codec = compact if pool.shape[-1] == 528 else planar
+                    self.assertIs(producer_codec, expected_codec)
+                    producer_codec.quantize_and_insert_k_cache_cp_byte_sliced(
+                        keys,
+                        attn._pool_raw_u8(SWA_KV),
+                        slots,
+                        producer_entries,
+                        rank,
+                        cp_size,
+                        compaction,
+                    )
+                    shards.append(raw)
+                actual = torch.cat(shards, dim=1)
+                expected = torch.zeros_like(actual)
+                view = expected.as_strided(
+                    (blocks, entries, width), (stride, width, 1)
+                )
+                expected_slots = torch.cat(
+                    (2 * entries + positions % entries, positions.new_tensor([-1]))
+                )
+                dense_writer(keys, view, expected_slots)
+                torch.cuda.synchronize()
+                exact(self, actual, expected)
+                self.assertEqual(torch.count_nonzero(actual[:2]).item(), 0)
+                self.assertEqual(torch.count_nonzero(actual[3:]).item(), 0)
 
 
 if __name__ == "__main__":
