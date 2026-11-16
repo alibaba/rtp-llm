@@ -1,15 +1,22 @@
-diff --git a/atom/models/qwen4_exp_mtp.py b/atom/models/qwen4_exp_mtp.py
 --- a/atom/models/qwen4_exp_mtp.py
 +++ b/atom/models/qwen4_exp_mtp.py
-@@ -119,6 +119,7 @@
+@@ -10,6 +10,7 @@
+ from torch import nn
+ 
+ from atom.config import Config
++from atom.plugin.prepare import is_rtpllm
+ from atom.model_loader.weight_utils import local_model_dir
+ from atom.model_ops.embed_head import ParallelLMHead, VocabParallelEmbedding
+ from atom.model_ops.linear import ReplicatedLinear
+@@ -119,6 +120,7 @@
                      prefix="mtp.layers.0",
                      layer_num=self.mtp_start_layer_idx,
                      quant_config=quant_config,
-+                    fused_hc=(torch.version.hip is not None and os.environ.get("ATOM_RTP_MTP_HC_FUSION", "0") == "1"),
++                    fused_hc=(torch.version.hip is not None and is_rtpllm() and os.environ.get("ATOM_RTP_MTP_HC_FUSION", "1") == "1"),
                  )
              ]
          )
-@@ -146,6 +147,9 @@
+@@ -146,6 +148,9 @@
          hidden = self.fc_hidden(hidden.reshape(-1, self.hidden_size))
          hidden = hidden.view(n, self.hc_count, self.hidden_size) + embedding[:, None, :]
          hidden = self.layers[0](positions, hidden.flatten(1), None)
@@ -19,7 +26,7 @@ diff --git a/atom/models/qwen4_exp_mtp.py b/atom/models/qwen4_exp_mtp.py
          return hidden.view(n, self.hc_count, self.hidden_size)
  
  
-@@ -183,7 +187,10 @@
+@@ -183,7 +188,10 @@
          return self.model(input_ids, positions, hidden_states, inputs_embeds)
  
      def _head_input(self, hidden_states: torch.Tensor) -> torch.Tensor:
