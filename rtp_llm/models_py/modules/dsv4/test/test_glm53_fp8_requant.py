@@ -275,6 +275,8 @@ class TestGlm53Fp8Requant(unittest.TestCase):
 
         # Validate the actual loader and model consumers up to the foreign
         # transform boundary. No symmetric buffer or full-model equivalence claim.
+        # ARM's DeepGEMM package omits this optional backend; provide the mocked
+        # boundary there too, without weakening checks on its real inputs.
         for shared in (False, True):
             prefix = () if shared else (2,)
             w13, s13 = _fixture((*prefix, 256, 512), 1.06251)
@@ -308,6 +310,7 @@ class TestGlm53Fp8Requant(unittest.TestCase):
                         deep_gemm,
                         "transform_weights_for_mega_moe_fp8",
                         side_effect=lambda a, b: (a, b),
+                        create=True,
                     ) as transform, patch.object(
                         exported_fp8,
                         "requant_weight_ue8m0",
@@ -349,6 +352,7 @@ class TestGlm53Fp8Requant(unittest.TestCase):
                     deep_gemm,
                     "transform_weights_for_mega_moe_fp8",
                     side_effect=lambda a, b: (a, b),
+                    create=True,
                 ) as transform:
                     module.setup_shared_expert_from_fp8(w13, s13, w2, s2)
                 (actual13, actual_s13), (actual2, actual_s2) = transform.call_args.args
