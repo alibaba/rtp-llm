@@ -159,14 +159,22 @@ cc_library(
 )
 
 cc_library(
+    name = "agreed_decode_execution",
+    hdrs = ["AgreedDecodeExecution.h"],
+    deps = ["//rtp_llm/cpp/cuda_graph:decode_execution"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "models",
     hdrs = glob([
         "*.h",
-    ], exclude = ["ModelInputsLogger.h"]),
+    ], exclude = ["AgreedDecodeExecution.h", "ModelInputsLogger.h"]),
     srcs = glob([
         "*.cc",
     ], exclude = ["ModelInputsLogger.cc"]),
     deps = [
+        ":agreed_decode_execution",
         ":model_inputs_logger",
         ":sample_infos",
         ":logits_processor",

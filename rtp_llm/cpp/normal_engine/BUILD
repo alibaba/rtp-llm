@@ -28,12 +28,43 @@ cc_library(
 )
 
 cc_library(
+    name = "decode_replica_coordinator",
+    hdrs = ["DecodeReplicaCoordinator.h"],
+    deps = [
+        "//rtp_llm/cpp/models:agreed_decode_execution",
+    ],
+)
+
+cc_library(
+    name = "dsv4_dp_decode_policy",
+    hdrs = ["Dsv4DpDecodePolicy.h"],
+    deps = [
+        ":decode_replica_coordinator",
+        "//rtp_llm/cpp/config:role_types",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "dsv4_dp_decode_runtime",
+    srcs = ["Dsv4DpDecodeRuntime.cc"],
+    hdrs = ["Dsv4DpDecodeRuntime.h"],
+    copts = copts(),
+    deps = [
+        ":dsv4_dp_decode_policy",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:profiling_scope",
+    ] + torch_deps(),
+    visibility = ["//rtp_llm/cpp/normal_engine/test:__pkg__"],
+)
+
+cc_library(
     name = "normal_engine",
     hdrs = glob([
         "*.h",
         "speculative/*.h",
         "accuracy/*.h",
-    ]) + [
+    ], exclude = ["DecodeReplicaCoordinator.h", "Dsv4DpDecodeRuntime.h"]) + [
         "pipeline/PPBatchStreamProcessor.h",
         "pipeline/PPExecutor.h",
         "pipeline/PPSerialization.h",
@@ -42,7 +73,7 @@ cc_library(
     srcs = glob([
         "*.cc",
         "speculative/*.cc",
-    ]) + [
+    ], exclude = ["Dsv4DpDecodeRuntime.cc"]) + [
         "pipeline/PPBatchStreamProcessor.cc",
         "pipeline/PPExecutor.cc",
         "pipeline/PPSerialization.cc",
@@ -52,6 +83,9 @@ cc_library(
         "//conditions:default": [],
     }),
     deps = [
+        ":decode_replica_coordinator",
+        ":dsv4_dp_decode_policy",
+        ":dsv4_dp_decode_runtime",
         ":dsv4_dp_prefill_policy",
         "//rtp_llm/cpp/distribute:cpu_tp_broadcaster",
         ":pipeline_types",
@@ -94,6 +128,7 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "@havenask//aios/autil:json",
         "@havenask//aios/autil:lock_free",
+        "//rtp_llm/cpp/pybind:py_utils",
         "//rtp_llm/models_py/bindings:op_defs",
     ] + select({
         "//:using_cuda": [
