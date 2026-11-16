@@ -1,4 +1,3 @@
-import glob
 import logging
 import multiprocessing
 import os
@@ -40,7 +39,6 @@ from rtp_llm.utils.scr.template_utils import (
 )
 from rtp_llm.utils.scr.template_utils import (
     build_scr_participant_manifest,
-    configure_scr_environment,
     get_scr_barrier_return_time,
     is_scr_template_phase_active,
 )
@@ -76,47 +74,6 @@ STARTUP_REAL_WARMUP_MAX_NEW_TOKENS = 1
 STARTUP_REAL_WARMUP_TOKEN_ID = 100
 
 
-def _visible_device_count() -> int:
-    """Count visible CUDA devices without initializing the driver.
-
-    Manifest enumeration must work without another CUDA query. Earlier
-    platform setup may inspect device availability and GPU names.
-    """
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
-    if visible is not None:
-        return sum(entry.strip() not in {"", "-1"} for entry in visible.split(","))
-    try:
-        return len(glob.glob("/dev/nvidia[0-9]*"))
-    except OSError:
-        return 0
-
-
-def _scr_local_world_size(py_env_configs: PyEnvConfigs) -> int:
-    """Resolve the process count used by the SCR manifest and rank launcher.
-
-    An explicit launcher value is authoritative. Backend ranks are bounded by
-    both the resolved local topology and the visible CUDA devices. A
-    frontend-only process uses the resolved topology of the backend it serves.
-    """
-
-    raw = os.environ.get("LOCAL_WORLD_SIZE", "")
-    try:
-        value = int(raw)
-    except ValueError:
-        if raw.strip():
-            raise ValueError(f"LOCAL_WORLD_SIZE must be an integer, got {raw!r}")
-        value = 0
-    if value > 0:
-        return value
-
-    pc = py_env_configs.parallelism_config
-    local_world_size = max(1, min(pc.local_world_size, pc.world_size))
-    if py_env_configs.role_config.role_type == RoleType.FRONTEND:
-        return local_world_size
-    device_count = _visible_device_count()
-    return max(1, min(device_count, local_world_size))
-
-
 def _build_scr_participant_manifest(
     py_env_configs: PyEnvConfigs,
 ) -> ScrParticipantManifest | None:
@@ -139,7 +96,14 @@ def _build_scr_participant_manifest(
         # ViT separation describes the deployment. Prefill and decode still
         # own their LLM ranks. The backend dispatches from this frozen plan.
         pc = py_env_configs.parallelism_config
-        local_world_size = _scr_local_world_size(py_env_configs)
+        local_world_size = pc.local_world_size
+        if (
+            local_world_size <= 0
+            or pc.world_size % local_world_size
+            or pc.world_rank % local_world_size
+            or not 0 <= pc.world_rank < pc.world_size
+        ):
+            raise ValueError("SCR backend ranks require aligned Pod topology")
         if local_world_size > 1:
             participants.append(("backend_manager", "0"))
         for world_rank in range(pc.world_rank, pc.world_rank + local_world_size):
@@ -333,17 +297,9 @@ def _iter_serving_world_ranks(py_env_configs: PyEnvConfigs) -> Iterator[int]:
     pc = py_env_configs.parallelism_config
     if pc.local_world_size <= 0:
         raise ValueError("local_world_size must be positive to enumerate serving ranks")
-    # sCR template phases may start fewer local ranks than the configured
-    # local_world_size; the manifest and the launcher must agree on that count.
-    # Never enumerate past this node's configured ranks.
-    local_world_size = pc.local_world_size
-    if is_scr_template_phase_active():
-        local_world_size = min(
-            _scr_local_world_size(py_env_configs), pc.local_world_size
-        )
     layout = RankLayout.from_parallelism_config(pc)
     node_base = pc.world_rank // pc.local_world_size * pc.local_world_size
-    for local_rank in range(local_world_size):
+    for local_rank in range(pc.local_world_size):
         world_rank = node_base + local_rank
         coord = layout.coord_of(world_rank)
         if local_rank == 0 or (coord.tp == 0 and coord.pp == 0):
@@ -458,30 +414,17 @@ def start_dash_sc_server_impl(
     return dash_sc_processes
 
 
-# VIT separation is deliberately outside the checkpoint template: it neither
-# arrives at the barrier nor restores runtime state.  Children still inherit the
-# launcher environment, so the SCR markers are dropped before the VIT entry
-# point runs; otherwise shared helpers would treat the process as a participant.
-_SCR_CHILD_ENV_KEYS = (
-    "RTPLLM_ENABLE_SCR",
-    "SCR_PHASE",
-    "SCR_GENERATION",
-    "RTP_LLM_SCR_GENERATION",
-    "RTP_LLM_SCR_TIMEOUT",
-    "RTP_LLM_SCR_INACTIVITY_TIMEOUT",
-    "RTP_LLM_SCR_RESTORE_START_EPOCH_MS",
-)
-
-
 @contextmanager
 def _vit_without_scr():
-    # Spawn imports application modules before calling the process target.
-    # Remove the markers in the parent so import-time reporters start eagerly.
-    saved = {key: os.environ.pop(key) for key in _SCR_CHILD_ENV_KEYS if key in os.environ}
+    # Spawn imports modules before invoking the child entry point. Disable
+    # RTP-LLM template participation before spawning standalone ViT.
+    key = "RTPLLM_ENABLE_SCR"
+    saved = os.environ.pop(key, None)
     try:
         yield
     finally:
-        os.environ.update(saved)
+        if saved is not None:
+            os.environ[key] = saved
 
 
 @timer_wrapper(description="start vit server")
@@ -821,7 +764,6 @@ def main():
     # Ranks must survive a closed helper/RPC pipe: a SIGPIPE death here would
     # still be captured by the checkpoint and break the restored process group.
     ignore_sigpipe("at server start")
-    configure_scr_environment()
     py_env_configs: PyEnvConfigs = setup_args()
     _install_hot_hook_runtime("main", py_env_configs)
     setup_and_configure_server(py_env_configs)
@@ -830,7 +772,6 @@ def main():
 
 def start_server(py_env_configs: PyEnvConfigs):
     logging.info(f"[PROCESS_START]Start server")
-    configure_scr_environment()
     configure_warmup(
         py_env_configs.runtime_config.warm_up,
         py_env_configs.runtime_config.model_warm_up,
@@ -896,10 +837,7 @@ def start_server(py_env_configs: PyEnvConfigs):
         is_scr_template_phase_active()
         and py_env_configs.role_config.role_type != RoleType.VIT
     ):
-        py_env_configs.parallelism_config.local_world_size = _scr_local_world_size(
-            py_env_configs
-        )
-        # All spawned participants rederive local rank from this topology.
+        # Children derive local rank from the launcher-resolved topology.
         os.environ["LOCAL_WORLD_SIZE"] = str(
             py_env_configs.parallelism_config.local_world_size
         )

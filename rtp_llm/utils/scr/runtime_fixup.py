@@ -13,7 +13,7 @@ import logging
 import os
 import socket
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -40,8 +40,6 @@ RESTORE_ENV_KEYS = frozenset(
         "kmonitorPort",
     }
 )
-RestoreEnvProvider = Callable[[str], Mapping[str, str | None]]
-_restore_env_provider: RestoreEnvProvider | None = None
 
 
 @dataclass(frozen=True)
@@ -57,18 +55,6 @@ _runtime_identity: RestoreRuntimeIdentity | None = None
 def get_restore_runtime_identity() -> RestoreRuntimeIdentity | None:
     """Latest repaired identity in this process; never used as the next input."""
     return _runtime_identity
-
-
-def register_restore_env_provider(provider: RestoreEnvProvider | None) -> None:
-    """Override the default file reader; None restores the default reader.
-
-    The adapter must validate the file's generation/current Pod identity and select
-    supported keys. Returning None for an allowed key removes its seed value.
-    Each participating process needs its own registration for a custom adapter.
-    Without one, each fixup reads /etc/scr/envs.json if present.
-    """
-    global _restore_env_provider
-    _restore_env_provider = provider
 
 
 def _read_restore_env_file() -> Mapping[str, str | None]:
@@ -122,8 +108,6 @@ def _validate_environment(values: Mapping[str, str | None]) -> dict[str, str | N
 def fixup_runtime_after_restore(
     generation: str,
     lifecycle: TemplateLifecycle,
-    *,
-    restore_env: Mapping[str, str | None] | None = None,
 ) -> RestoreRuntimeIdentity:
     """Fresh inputs -> Logger/identity -> registered component repairs.
 
@@ -133,22 +117,15 @@ def fixup_runtime_after_restore(
     the caller must not release serving after a partial fixup.
     """
     global _runtime_identity
-    read_platform_file = restore_env is None and _restore_env_provider is None
-    if restore_env is None:
-        if _restore_env_provider is not None:
-            restore_env = _restore_env_provider(generation)
-        else:
-            restore_env = _read_restore_env_file()
-    updates = _validate_environment(restore_env)
-    # Only an explicitly fresh provider may override namespace discovery.
-    # os.environ['RequestedIP'] by itself can still be the seed's value.
+    updates = _validate_environment(_read_restore_env_file())
+    # RequestedIP in the inherited environment may still be the seed's value.
     supplied_ip = updates.get("RequestedIP")
     pod_ip = current_pod_ip() if supplied_ip is None else supplied_ip
     parsed = ipaddress.IPv4Address(pod_ip)
     if parsed.is_loopback or parsed.is_unspecified or parsed.is_multicast:
         raise ValueError("restore identity requires a non-loopback Pod IP")
     pod_ip = str(parsed)
-    if read_platform_file and supplied_ip is not None:
+    if supplied_ip is not None:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
             try:
                 probe.bind((pod_ip, 0))

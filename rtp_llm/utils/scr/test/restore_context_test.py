@@ -1,97 +1,35 @@
 import os
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from rtp_llm.utils.gang_info import GangInfoReader
 from rtp_llm.utils.scr.restore_context import RestoreContext
 
 
 class RestoreContextTest(unittest.TestCase):
-    def test_single_pod_restore_does_not_read_unused_endpoint_manifest(self):
+
+    def test_single_pod_restore_changes_only_control_address(self):
         from rtp_llm.distribute.distributed_server import WorldInfo
         from rtp_llm.distribute.worker_info import WorkerInfo
 
         member = WorkerInfo("192.0.2.10", 0, 0, "seed", 9000, 9)
         world = WorldInfo([member], member, member, 1, True)
         pc = SimpleNamespace(world_size=1, local_world_size=1)
-        with patch.dict(
-            os.environ, {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "restore"}
-        ), patch("rtp_llm.utils.scr.endpoint.read_restore_manifest") as read:
+        with patch.dict(os.environ, {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "restore"}):
             restored = RestoreContext("seed", "192.0.2.20").resolve_world_info(
                 world, pc, GangInfoReader("/unused/annotations")
             )
-        read.assert_not_called()
         self.assertEqual(restored.self.ip, "127.0.0.1")
-        self.assertEqual(restored.self.rpc_server_port, world.self.rpc_server_port)
-
-    def test_changed_local_listener_ports_fail_before_endpoint_publication(self):
-        from rtp_llm.distribute.distributed_server import WorldInfo
-        from rtp_llm.distribute.worker_info import WorkerInfo
-
-        member = WorkerInfo("192.0.2.10", 0, 0, "seed", 9000, 9)
-        world = WorldInfo([member], member, member, 1, True)
-        manifest = {
-            "generation": "seed",
-            "phase": "restore",
-            "transport": {"ready": True},
-            "members": [
-                {
-                    "world_rank": 0,
-                    "local_rank": 0,
-                    "ip": "192.0.2.20",
-                    "server_port": 19000,
-                }
-            ],
-        }
-        # Exercise explicit manifest mode. Single-Pod SCR uses loopback.
-        with patch.dict(os.environ, {"SCR_PHASE": "restore", "RTPLLM_ENABLE_SCR": "0"}), patch(
-            "rtp_llm.utils.scr.endpoint.read_restore_manifest",
-            return_value=manifest,
-        ):
-            with self.assertRaisesRegex(RuntimeError, "local listener port layout"):
-                RestoreContext("seed", "192.0.2.20").resolve_world_info(
-                    world,
-                    SimpleNamespace(world_size=1, local_world_size=1),
-                    GangInfoReader("/unused/annotations"),
-                )
         self.assertEqual(world.self.ip, "192.0.2.10")
-        self.assertEqual(world.self.cache_store_listen_port, 9002)
-
-    def test_manifest_is_read_once_per_attempt_even_for_same_seed(self):
-        first = {"generation": "seed", "phase": "restore"}
-        second = {"generation": "seed", "phase": "checkpoint"}
-        reader = Mock(side_effect=[first, second])
-        with patch("rtp_llm.utils.scr.endpoint.read_restore_manifest", reader):
-            for expected in (first, second):
-                context = RestoreContext("seed", "192.0.2.20")
-                self.assertIs(context.endpoint_manifest, expected)
-                self.assertIs(context.endpoint_manifest, expected)
-        self.assertEqual(reader.call_count, 2)
-
-    def test_absent_manifest_is_shared_without_a_second_provider_read(self):
-        world = SimpleNamespace(num_nodes=1, members=[])
-        pc = SimpleNamespace(world_size=1, local_world_size=1)
-        with patch.dict(os.environ, {"RTPLLM_ENABLE_SCR": "0"}), patch(
-            "rtp_llm.utils.scr.endpoint.read_restore_manifest",
-            return_value=None,
-        ) as reader, patch(
-            "rtp_llm.utils.scr.endpoint.is_restore_phase", return_value=False
+        self.assertIs(restored.self, restored.master)
+        for attr in (
+            "server_port",
+            "rpc_server_port",
+            "cache_store_listen_port",
+            "cache_store_rdma_listen_port",
         ):
-            context = RestoreContext("seed", "192.0.2.20")
-            self.assertIs(
-                context.resolve_world_info(
-                    world, pc, GangInfoReader("/unused/annotations")
-                ),
-                world,
-            )
-            self.assertIs(
-                context.resolve_world_info(
-                    world, pc, GangInfoReader("/unused/annotations")
-                ),
-                world,
-            )
-        reader.assert_called_once_with("seed")
+            self.assertEqual(getattr(restored.self, attr), getattr(world.self, attr))
 
 
 if __name__ == "__main__":

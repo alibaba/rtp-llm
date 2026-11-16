@@ -24,9 +24,7 @@ struct AccuracyScenario;
 
 class NormalEngine: public EngineBase {
 public:
-    NormalEngine(const EngineInitParams& params,
-                 std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                 bool defer_loop_start = false);
+    NormalEngine(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams> propose_params);
     ~NormalEngine();
 
     std::shared_ptr<GenerateStream> makeStream(const std::shared_ptr<GenerateInput>& input) override;

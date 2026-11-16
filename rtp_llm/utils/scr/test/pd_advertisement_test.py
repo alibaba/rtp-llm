@@ -12,11 +12,11 @@ from rtp_llm.distribute.distributed_server import (
     get_dp_addrs_from_world_info,
 )
 from rtp_llm.distribute.worker_info import WorkerInfo
+from rtp_llm.utils.gang_info import GangInfoReader
 from rtp_llm.utils.scr import runtime_fixup as fixup
 from rtp_llm.utils.scr import template_utils as scr
-from rtp_llm.utils.scr.endpoint import resolve_world_info
-from rtp_llm.utils.scr.restore_context import RestoreContext
 from rtp_llm.utils.scr.lifecycle import CallbackHook, TemplateLifecycle
+from rtp_llm.utils.scr.restore_context import RestoreContext
 from rtp_llm.utils.scr.template_utils import _BackendVisitorTemplateHook
 
 
@@ -48,7 +48,6 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         )
         for context in (
             patch.object(fixup, "_runtime_identity", None),
-            patch.object(fixup, "_restore_env_provider", None),
         ):
             context.start()
             self.addCleanup(context.stop)
@@ -57,7 +56,6 @@ class ScrPdAdvertisementTest(unittest.TestCase):
             {
                 "RTPLLM_ENABLE_SCR": "1",
                 "SCR_PHASE": "restore",
-                "RTP_LLM_SCR_ENDPOINT_MANIFEST": "",
             },
         )
         self.env.start()
@@ -72,7 +70,9 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         with patch.dict(os.environ, {"SCR_PHASE": "checkpoint"}), patch(
             "socket.gethostbyname", return_value="192.0.2.20"
         ):
-            local_world = resolve_world_info(current, generation="g1")
+            local_world = RestoreContext("g1", "192.0.2.20").resolve_world_info(
+                current, self.pc, GangInfoReader("/unused/annotations")
+            )
             update_worker_addrs(runtime, self.pc, local_world)
             self.assertEqual(
                 get_dp_addrs_from_world_info(local_world, self.pc), ["127.0.0.1:18631"]
@@ -118,9 +118,6 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         visitor = Mock(source_ip="192.0.2.1")
         with patch(
             "rtp_llm.distribute.distributed_server.get_world_info",
-            return_value=self.world,
-        ), patch(
-            "rtp_llm.utils.scr.endpoint.resolve_world_info",
             return_value=self.world,
         ), patch(
             "rtp_llm.distribute.distributed_server.get_dp_addrs_from_world_info",
@@ -189,9 +186,10 @@ class ScrPdAdvertisementTest(unittest.TestCase):
                 {"RequestedIP": "192.0.2.40"},
             ]
         )
-        fixup.register_restore_env_provider(provider)
         # Exercise the seed return and clones restored with the same generation.
-        with patch.dict(os.environ, {"SCR_PHASE": "checkpoint"}), patch.dict(
+        with patch.object(fixup, "_read_restore_env_file", provider), patch.object(
+            fixup.socket, "socket"
+        ), patch.dict(os.environ, {"SCR_PHASE": "checkpoint"}), patch.dict(
             sys.modules,
             {
                 "libth_transformer": None,

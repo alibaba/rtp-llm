@@ -11,7 +11,6 @@ is an implementation detail.
     lifecycle        template lifecycle callbacks
     restore_context  the restored-Pod identity carried across CRIU
     runtime_fixup    re-derive runtime state after a restore
-    endpoint         endpoint resolution from the restore manifest
     network          VIP topology and single-Pod loopback addressing
 """
 
@@ -29,7 +28,6 @@ __all__ = [
     "arrive_scr_checkpoint_barrier",
     "arrive_scr_template_barrier",
     "build_scr_participant_manifest",
-    "configure_scr_environment",
     "epsilon_backend_mode",
     "get_scr_barrier_return_time",
     "get_template_lifecycle",

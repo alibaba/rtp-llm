@@ -402,7 +402,7 @@ class BackendScrIntegrationTest(unittest.TestCase):
             os.environ,
             {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "normal"},
             clear=True,
-        ), mock.patch.object(launcher, "_visible_device_count", return_value=1):
+        ):
             self.assertIsNone(launcher._build_scr_participant_manifest(config))
 
     def test_frontend_role_does_not_add_phantom_vit_participant(self):
@@ -414,7 +414,7 @@ class BackendScrIntegrationTest(unittest.TestCase):
             os.environ,
             {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "checkpoint"},
             clear=True,
-        ), mock.patch.object(launcher, "_visible_device_count", return_value=1):
+        ):
             manifest = launcher._build_scr_participant_manifest(config)
 
         self.assertIsNotNone(manifest)
@@ -430,7 +430,7 @@ class BackendScrIntegrationTest(unittest.TestCase):
             os.environ,
             {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "checkpoint"},
             clear=True,
-        ), mock.patch.object(launcher, "_visible_device_count", return_value=1):
+        ):
             manifest = launcher._build_scr_participant_manifest(config)
 
         self.assertIsNone(manifest)
@@ -443,16 +443,20 @@ class BackendScrIntegrationTest(unittest.TestCase):
             )
             with mock.patch.dict(
                 os.environ,
-                {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "checkpoint", "LOCAL_WORLD_SIZE": "1"},
+                {
+                    "RTPLLM_ENABLE_SCR": "1",
+                    "SCR_PHASE": "checkpoint",
+                    "LOCAL_WORLD_SIZE": "1",
+                },
                 clear=True,
-            ), mock.patch.object(launcher, "_visible_device_count", return_value=4):
+            ):
                 manifest = launcher._build_scr_participant_manifest(config)
             self.assertEqual(
                 set(manifest.participant_ids),
                 {"start_server:0", "backend_rank:2", "frontend:2:0", "dash_sc:2:0"},
             )
 
-    def test_vit_children_run_without_the_scr_environment(self):
+    def test_vit_children_do_not_participate_in_scr(self):
         scr_env = {
             "RTPLLM_ENABLE_SCR": "1",
             "SCR_PHASE": "checkpoint",
@@ -460,7 +464,6 @@ class BackendScrIntegrationTest(unittest.TestCase):
             "RTP_LLM_SCR_GENERATION": "3",
             "RTP_LLM_SCR_TIMEOUT": "900",
             "RTP_LLM_SCR_INACTIVITY_TIMEOUT": "10",
-            "RTP_LLM_SCR_RESTORE_START_EPOCH_MS": "1",
             "UNRELATED": "keep",
         }
         seen = {}
@@ -475,52 +478,44 @@ class BackendScrIntegrationTest(unittest.TestCase):
             self.assertEqual(dict(os.environ), scr_env)
 
         self.assertEqual(result, "started")
-        self.assertEqual(seen["env"], {"UNRELATED": "keep"})
+        expected = dict(scr_env)
+        del expected["RTPLLM_ENABLE_SCR"]
+        self.assertEqual(seen["env"], expected)
 
-    def test_manifest_uses_visible_device_count_when_local_world_size_is_unset(self):
-        config = self._launcher_config(world_size=4)
-        with mock.patch.dict(
-            os.environ,
-            {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "checkpoint"},
-            clear=True,
-        ), mock.patch.object(launcher, "_visible_device_count", return_value=1):
-            manifest = launcher._build_scr_participant_manifest(config)
-
-        self.assertIsNotNone(manifest)
-        self.assertEqual(manifest.worker_num, 4)
-        self.assertIn("backend_rank:0", manifest.participant_ids)
-        self.assertNotIn("backend_rank:1", manifest.participant_ids)
-        self.assertNotIn("frontend:1:0", manifest.participant_ids)
-        self.assertNotIn("dash_sc:1:0", manifest.participant_ids)
-
-    def test_scr_topology_respects_configured_local_ranks(self):
-        config = self._launcher_config(world_size=4)
-        config.parallelism_config.local_world_size = 2
-        with mock.patch.dict(os.environ, clear=True), mock.patch.object(
-            launcher, "_visible_device_count", return_value=4
-        ):
-            self.assertEqual(launcher._scr_local_world_size(config), 2)
-
-    def test_frontend_topology_does_not_depend_on_visible_devices(self):
-        config = self._launcher_config(role_type=RoleType.FRONTEND, world_size=4)
-        config.parallelism_config.local_world_size = 2
-        with mock.patch.dict(os.environ, clear=True), mock.patch.object(
-            launcher, "_visible_device_count", return_value=0
-        ):
-            self.assertEqual(launcher._scr_local_world_size(config), 2)
-
-    def test_manifest_keeps_explicit_local_world_size_in_sync_with_rank_dispatch(self):
-        config = self._launcher_config(world_size=4)
+    def test_manifest_uses_the_resolved_pod_rank_range(self):
+        config = self._launcher_config(world_size=8, world_rank=4)
+        config.parallelism_config.local_world_size = 4
         with mock.patch.dict(
             os.environ,
             {
                 "RTPLLM_ENABLE_SCR": "1",
                 "SCR_PHASE": "checkpoint",
-                "LOCAL_WORLD_SIZE": "4",
+                "CUDA_VISIBLE_DEVICES": "0,1,2",
             },
             clear=True,
-        ), mock.patch.object(launcher, "_visible_device_count", return_value=1):
-            self.assertEqual(launcher._scr_local_world_size(config), 4)
+        ):
+            manifest = launcher._build_scr_participant_manifest(config)
+            self.assertEqual(
+                list(launcher._iter_serving_world_ranks(config)), [4, 5, 6, 7]
+            )
+        self.assertEqual(
+            {
+                key
+                for key in manifest.participant_ids
+                if key.startswith("backend_rank:")
+            },
+            {"backend_rank:4", "backend_rank:5", "backend_rank:6", "backend_rank:7"},
+        )
+
+    def test_manifest_rejects_misaligned_backend_ranks(self):
+        config = self._launcher_config(world_size=12, world_rank=4)
+        config.parallelism_config.local_world_size = 3
+        with mock.patch.dict(
+            os.environ,
+            {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "checkpoint"},
+            clear=True,
+        ), self.assertRaisesRegex(ValueError, "aligned Pod topology"):
+            launcher._build_scr_participant_manifest(config)
 
 
 if __name__ == "__main__":

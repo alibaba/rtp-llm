@@ -17,7 +17,7 @@ protected:
         NormalExecutor::test_model_factory = [vocab](const GptModelInitParams&) {
             return std::make_unique<MockModel>(vocab);
         };
-        auto engine = std::make_shared<NormalEngine>(params, nullptr, true);
+        auto engine                        = std::make_shared<NormalEngine>(params, nullptr);
         NormalExecutor::test_model_factory = nullptr;
         return engine;
     }
@@ -27,13 +27,6 @@ protected:
         DeviceTestBase::TearDown();
     }
 };
-
-TEST_F(DeferredEngineStartTest, OrdinaryStartupStillStartsImmediately) {
-    auto engine = createMockEngine(CustomConfig{});
-    EXPECT_TRUE(engine->running_.load());
-    EXPECT_NE(engine->loop_thread_, nullptr);
-    EXPECT_NE(engine->resourceContext().cache_manager->blockTreeCache(), nullptr);
-}
 
 TEST_F(DeferredEngineStartTest, RpcReleaseStartsEachRankAndOnlyLeaderCreatesBroadcaster) {
     autil::EnvGuard restored_ip("RequestedIP", "192.0.2.20");

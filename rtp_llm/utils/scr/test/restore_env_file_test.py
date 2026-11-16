@@ -22,7 +22,6 @@ class ScrRestoreEnvFileTest(unittest.TestCase):
         self.local_probe.__enter__.return_value = self.local_probe
         for context in (
             patch.object(runtime, "RESTORE_ENV_FILE", str(self.path)),
-            patch.object(runtime, "_restore_env_provider", None),
             patch.object(runtime, "_runtime_identity", None),
             patch.object(runtime.socket, "socket", return_value=self.local_probe),
             patch.dict(
@@ -217,27 +216,6 @@ class ScrRestoreEnvFileTest(unittest.TestCase):
         ), self.assertRaises(PermissionError):
             self.barrier(events)
         self.assertEqual(events, ["prepare", "barrier", "abort"])
-
-    def test_custom_provider_overrides_file_and_none_restores_default(self):
-        self.publish({"RequestedIP": "192.0.2.30"})
-        provider = Mock(return_value={"RequestedIP": "192.0.2.20"})
-        runtime.register_restore_env_provider(provider)
-        self.barrier([])
-        self.assertEqual(os.environ["RequestedIP"], "192.0.2.20")
-        provider.assert_called_once_with("same-seed")
-        runtime.register_restore_env_provider(None)
-        self.barrier([])
-        self.assertEqual(os.environ["RequestedIP"], "192.0.2.30")
-
-    def test_explicit_input_overrides_provider_and_file(self):
-        self.path.write_text("not-json", encoding="utf-8")
-        provider = Mock(side_effect=AssertionError("explicit input wins"))
-        runtime.register_restore_env_provider(provider)
-        runtime.fixup_runtime_after_restore(
-            "same-seed", Mock(), restore_env={"RequestedIP": "192.0.2.40"}
-        )
-        self.assertEqual(os.environ["RequestedIP"], "192.0.2.40")
-        provider.assert_not_called()
 
     def test_normal_startup_does_not_read_file(self):
         self.path.write_text("not-json", encoding="utf-8")

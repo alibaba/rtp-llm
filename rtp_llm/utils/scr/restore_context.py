@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from functools import cached_property
-from typing import Any
+from copy import copy
+from dataclasses import dataclass, replace
 
 from rtp_llm.utils.gang_info import GangInfoReader
 
@@ -14,64 +13,30 @@ class RestoreContext:
     generation: str
     pod_ip: str
 
-    @cached_property
-    def endpoint_manifest(self) -> dict[str, Any] | None:
-        # Identity-only participants need not import the distributed stack.
-        # A new context is created on every restore, even for the same seed.
-        from rtp_llm.utils.scr.endpoint import read_restore_manifest
-
-        return read_restore_manifest(self.generation)
-
     def resolve_world_info(
         self, current, parallelism_config, gang_info: GangInfoReader
     ):
-        """Apply the same endpoint/readiness policy in backend and frontend."""
+        """Keep checkpointed VIP routes or restore single-Pod control to loopback."""
         from rtp_llm.utils.scr import network
-        from rtp_llm.utils.scr.endpoint import (
-            is_restore_phase,
-            resolve_world_info,
-        )
 
-        if network.enabled(parallelism_config):
-            if self.endpoint_manifest is not None:
-                raise RuntimeError(
-                    "SCR VIP and endpoint manifest modes are mutually exclusive"
-                )
-            return network.validate_world_info(current, parallelism_config, gang_info)
-
-        # Single-Pod control channels use loopback; CacheStore and P/D RPC
-        # connections are first initialized after this barrier. Only the
-        # existing multi-node topology needs the external transport gate.
-        use_loopback = network.local_comm_enabled(
-            parallelism_config.world_size,
-            parallelism_config.local_world_size,
-            current.num_nodes,
-        )
-        # A loopback Pod does not consume the optional endpoint projection.
-        manifest = None if use_loopback else self.endpoint_manifest
-        require_transport = is_restore_phase(manifest) and current.num_nodes > 1
-        restored = resolve_world_info(
+        pc = parallelism_config
+        if network.enabled(pc):
+            return network.validate_world_info(current, pc, gang_info)
+        if not network.local_comm_enabled(
+            pc.world_size, pc.local_world_size, current.num_nodes
+        ):
+            return current
+        if sorted(member.local_rank for member in current.members) != list(
+            range(pc.local_world_size)
+        ):
+            return current
+        members = [copy(member) for member in current.members]
+        for member in members:
+            member.ip = "127.0.0.1"
+        by_rank = {member.world_rank: member for member in members}
+        return replace(
             current,
-            generation=self.generation,
-            require_manifest=require_transport,
-            require_transport=require_transport,
-            expected_world_size=parallelism_config.world_size,
-            manifest=manifest,
+            members=members,
+            self=by_rank[current.self.world_rank] if current.self else None,
+            master=by_rank.get(current.master.world_rank) if current.master else None,
         )
-        # The template also captures listener addresses and local rendezvous
-        # ports. Publishing a different port layout without rebuilding those
-        # objects would advertise endpoints on which this worker never listens.
-        previous_self = getattr(current, "self", None)
-        restored_self = getattr(restored, "self", None)
-        if previous_self is not None and restored_self is not None:
-            for attr in (
-                "server_port",
-                "rpc_server_port",
-                "cache_store_listen_port",
-                "cache_store_rdma_listen_port",
-            ):
-                if getattr(previous_self, attr) != getattr(restored_self, attr):
-                    raise RuntimeError(
-                        "SCR restore must preserve the template's local listener port layout"
-                    )
-        return restored

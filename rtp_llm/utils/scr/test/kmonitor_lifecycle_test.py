@@ -121,17 +121,18 @@ class ScrKmonitorLifecycleTest(unittest.TestCase):
                     CallbackHook(release=lambda _: worker.start_after_restore()),
                 )
                 lifecycle.prepare_for_template("seed", "checkpoint")
-                runtime.fixup_runtime_after_restore(
-                    "seed",
-                    lifecycle,
-                    restore_env={
+                with mock.patch.object(
+                    runtime,
+                    "_read_restore_env_file",
+                    return_value={
                         "RequestedIP": pod_ip,
                         "HIPPO_SLAVE_IP": "10.0.0.2",
                         "HIPPO_ROLE": "restored_role",
                         "HIPPO_APP": "restored_app",
                         "HIPPO_SERVICE_NAME": "restored_group",
                     },
-                )
+                ), mock.patch.object(runtime.socket, "socket"):
+                    runtime.fixup_runtime_after_restore("seed", lifecycle)
                 start.assert_not_called()
                 lifecycle.release_template("seed")
                 worker.start_after_restore()

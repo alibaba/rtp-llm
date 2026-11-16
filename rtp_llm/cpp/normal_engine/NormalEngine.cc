@@ -185,8 +185,7 @@ int NormalEngine::calculateReserveStep(const EngineInitParams& params) {
 }
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
-                           std::unique_ptr<ProposeModelEngineInitParams> propose_params,
-                           bool defer_loop_start):
+                           std::unique_ptr<ProposeModelEngineInitParams> propose_params):
     EngineBase(params),
     model_config_(params.model_config_),
     parallelism_config(params.parallelism_config),
@@ -320,13 +319,6 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     releaseHostMemoryCache();
 
     initScheduler();
-    if (defer_loop_start) {
-        // DP dummy streams also launch kernels without incoming requests.
-        // Keep the loop absent until the template has been released.
-        RTP_LLM_LOG_INFO("normal engine loop deferred until SCR release");
-    } else {
-        THROW_IF_STATUS_ERROR(startLoop());
-    }
     (void)construction_guard.release();
 }
 

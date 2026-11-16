@@ -18,13 +18,23 @@ if TYPE_CHECKING:
     from rtp_llm.utils.scr.restore_context import RestoreContext
 
 LOGGER = logging.getLogger(__name__)
+RTPLLM_ENABLE_SCR_ENV = "RTPLLM_ENABLE_SCR"
+SCR_PHASE_ENV = "SCR_PHASE"
+
+
+def is_scr_enabled() -> bool:
+    """Read the RTP-LLM participation switch without importing Epsilon."""
+    return os.environ.get(RTPLLM_ENABLE_SCR_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def template_phase_active() -> bool:
     """Return whether the external controller selected a template phase."""
-    enabled = os.environ.get("RTPLLM_ENABLE_SCR", "").strip().lower()
-    phase = os.environ.get("SCR_PHASE", "").strip().lower()
-    return enabled in {"1", "true", "yes", "on"} and phase in {
+    return is_scr_enabled() and os.environ.get(SCR_PHASE_ENV, "").strip().lower() in {
         "checkpoint",
         "restore",
     }

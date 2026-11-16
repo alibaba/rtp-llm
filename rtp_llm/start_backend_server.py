@@ -42,7 +42,6 @@ from rtp_llm.utils.scr.template_utils import (
     arrive_scr_template_barrier as arrive_scr_checkpoint_barrier,
 )
 from rtp_llm.utils.scr.template_utils import (
-    configure_scr_environment,
     is_scr_template_phase_active,
     register_for_scr,
 )

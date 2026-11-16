@@ -20,7 +20,7 @@ class ScrRuntimeFixupTest(unittest.TestCase):
         for context in (
             patch.object(runtime, "RESTORE_ENV_FILE", temp.name + "/absent-envs.json"),
             patch.object(runtime, "_runtime_identity", None),
-            patch.object(runtime, "_restore_env_provider", None),
+            patch.object(runtime.socket, "socket"),
             patch.dict(
                 os.environ,
                 {
@@ -54,6 +54,15 @@ class ScrRuntimeFixupTest(unittest.TestCase):
                 context.start()
                 self.addCleanup(context.stop)
 
+    def mock_restore_reader(self, *args, **kwargs):
+        reader = patch.object(runtime, "_read_restore_env_file", *args, **kwargs)
+        reader.start()
+        self.addCleanup(reader.stop)
+
+    def restore_with_environment(self, generation, lifecycle, values):
+        with patch.object(runtime, "_read_restore_env_file", return_value=values):
+            return runtime.fixup_runtime_after_restore(generation, lifecycle)
+
     def lifecycle(self, events):
         lifecycle = TemplateLifecycle()
         lifecycle.register(
@@ -71,8 +80,9 @@ class ScrRuntimeFixupTest(unittest.TestCase):
         events = []
         lifecycle = self.lifecycle(events)
         native = NS(refresh_logger_after_scr=lambda ip: events.append(("logger", ip)))
-        runtime.register_restore_env_provider(
-            lambda g: events.append(("read-env", g)) or {"RequestedIP": "192.0.2.20"}
+        self.mock_restore_reader(
+            side_effect=lambda: events.append("read-env")
+            or {"RequestedIP": "192.0.2.20"},
         )
         with patch.dict(sys.modules, {"libth_transformer": native}), patch.object(
             scr, "is_scr_template_phase_active", return_value=True
@@ -94,7 +104,7 @@ class ScrRuntimeFixupTest(unittest.TestCase):
             [
                 "prepare",
                 "barrier",
-                ("read-env", "g1"),
+                "read-env",
                 ("logger", "192.0.2.20"),
                 ("component", "192.0.2.20"),
                 "release",
@@ -102,13 +112,13 @@ class ScrRuntimeFixupTest(unittest.TestCase):
         )
         self.assertEqual(os.environ["POD_IP"], "192.0.2.20")
 
-    def test_repeated_restore_rereads_provider_even_with_same_checkpoint_generation(
+    def test_repeated_restore_rereads_input_even_with_same_checkpoint_generation(
         self,
     ):
         provider = Mock(
             side_effect=[{"RequestedIP": "192.0.2.20"}, {"RequestedIP": "192.0.2.30"}]
         )
-        runtime.register_restore_env_provider(provider)
+        self.mock_restore_reader(provider)
         events = []
         lifecycle = self.lifecycle(events)
         for ip in ("192.0.2.20", "192.0.2.30"):
@@ -118,7 +128,7 @@ class ScrRuntimeFixupTest(unittest.TestCase):
             lifecycle.release_template("same-seed")
         self.assertEqual(provider.call_count, 2)
 
-    def test_without_provider_ignores_seed_environment_and_previous_snapshot(self):
+    def test_without_restore_file_ignores_seed_environment_and_previous_snapshot(self):
         lifecycle = self.lifecycle([])
         lifecycle.prepare_for_template("g1", "checkpoint")
         with patch.object(
@@ -151,7 +161,7 @@ class ScrRuntimeFixupTest(unittest.TestCase):
             with self.subTest(values=values), self.assertRaises(
                 (ValueError, TypeError)
             ):
-                runtime.fixup_runtime_after_restore("g1", lifecycle, restore_env=values)
+                self.restore_with_environment("g1", lifecycle, values)
             self.assertEqual(os.environ["RequestedIP"], "192.0.2.10")
             self.assertEqual(os.environ["POD_IP"], "192.0.2.10")
         with patch.object(
@@ -180,12 +190,10 @@ class ScrRuntimeFixupTest(unittest.TestCase):
         self.assertEqual(events, ["prepare", "abort"])
         self.assertEqual(os.environ["RequestedIP"], "192.0.2.10")
 
-    def test_failed_provider_does_not_release(self):
+    def test_failed_restore_read_does_not_release(self):
         events = []
         lifecycle = self.lifecycle(events)
-        runtime.register_restore_env_provider(
-            Mock(side_effect=ValueError("stale generation"))
-        )
+        self.mock_restore_reader(side_effect=ValueError("invalid restore data"))
         with patch.object(
             scr, "is_scr_template_phase_active", return_value=True
         ), patch.object(
@@ -193,7 +201,7 @@ class ScrRuntimeFixupTest(unittest.TestCase):
         ), patch.object(
             scr, "arrive_scr_checkpoint_barrier", return_value=0
         ):
-            with self.assertRaisesRegex(ValueError, "stale generation"):
+            with self.assertRaisesRegex(ValueError, "invalid restore data"):
                 scr.arrive_scr_template_barrier(
                     worker_id=0, worker_num=1, generation="g1"
                 )
@@ -208,7 +216,7 @@ class ScrRuntimeFixupTest(unittest.TestCase):
                 events = []
                 lifecycle = self.lifecycle(events)
                 provider = Mock(side_effect=AssertionError("must not read identity"))
-                runtime.register_restore_env_provider(provider)
+                self.mock_restore_reader(provider)
                 with patch.object(
                     scr, "get_template_lifecycle", return_value=lifecycle
                 ), patch.object(
@@ -224,7 +232,7 @@ class ScrRuntimeFixupTest(unittest.TestCase):
 
     def test_normal_startup_does_not_read_restore_input(self):
         provider = Mock(side_effect=AssertionError("unexpected read"))
-        runtime.register_restore_env_provider(provider)
+        self.mock_restore_reader(provider)
         with patch.object(
             scr, "is_scr_template_phase_active", return_value=False
         ), patch.object(scr, "arrive_scr_checkpoint_barrier", return_value=None):
@@ -246,7 +254,7 @@ class ScrRuntimeFixupTest(unittest.TestCase):
             with self.subTest(epsilon=epsilon):
                 events = []
                 provider = Mock(return_value={"RequestedIP": "192.0.2.20"})
-                runtime.register_restore_env_provider(provider)
+                self.mock_restore_reader(provider)
                 with patch.dict(
                     os.environ,
                     {
@@ -279,9 +287,7 @@ class ScrRuntimeFixupTest(unittest.TestCase):
                 epsilon = NS(
                     is_snapstart_enable=lambda: True, snapstart_checkpoint=checkpoint
                 )
-                runtime.register_restore_env_provider(
-                    lambda _g: {"RequestedIP": "192.0.2.20"}
-                )
+                self.mock_restore_reader(return_value={"RequestedIP": "192.0.2.20"})
                 with patch.dict(
                     os.environ,
                     {
@@ -310,51 +316,6 @@ class ScrRuntimeFixupTest(unittest.TestCase):
                     events, ["prepare", ("component", "192.0.2.20"), "release"]
                 )
 
-    def test_frontend_identity_updates_outside_loopback_mode(self):
-        visitor = Mock(source_ip="192.0.2.10")
-        configs = NS(
-            server_config=NS(),
-            distribute_config=NS(gang_annotation_path="/unused/annotations"),
-            parallelism_config=NS(world_size=2, local_world_size=1),
-            role_config=NS(role_type="PREFILL"),
-        )
-        endpoint_module = NS(
-            resolve_world_info=Mock(return_value=NS()),
-            read_restore_manifest=Mock(return_value=None),
-            is_restore_phase=Mock(return_value=True),
-        )
-        distributed_module = NS(
-            get_world_info=Mock(return_value=NS(num_nodes=2)),
-            get_dp_addrs_from_world_info=Mock(return_value=["192.0.2.40:9000"]),
-        )
-        lifecycle = TemplateLifecycle()
-        lifecycle.register_fixup(
-            "visitor",
-            scr._BackendVisitorTemplateHook(
-                visitor, configs, distributed_module.get_world_info.return_value
-            ),
-        )
-        lifecycle.prepare_for_template("g1", "restore")
-        # This test exercises the legacy endpoint-manifest path; VIP restore
-        # has separate topology and checkpointed-route tests.
-        with patch("rtp_llm.utils.scr.network.enabled", return_value=False), patch.dict(
-            os.environ, {"SCR_PHASE": "restore"}
-        ), patch.dict(
-            sys.modules,
-            {
-                "rtp_llm.distribute.distributed_server": distributed_module,
-                "rtp_llm.utils.scr.endpoint": endpoint_module,
-            },
-        ):
-            runtime.fixup_runtime_after_restore(
-                "g1", lifecycle, restore_env={"RequestedIP": "192.0.2.20"}
-            )
-        self.assertEqual(visitor.source_ip, "192.0.2.20")
-        visitor.update_addresses.assert_called_once_with(["192.0.2.40:9000"])
-        self.assertTrue(
-            endpoint_module.resolve_world_info.call_args.kwargs["require_manifest"]
-        )
-
     def test_server_config_ip_follows_restored_pod_identity(self):
         configs = NS(server_config=NS(ip="192.0.2.10"))
         observed = []
@@ -368,16 +329,12 @@ class ScrRuntimeFixupTest(unittest.TestCase):
             CallbackHook(fixup=lambda _g: observed.append(configs.server_config.ip)),
         )
         lifecycle.prepare_for_template("g1", "restore")
-        runtime.fixup_runtime_after_restore(
-            "g1", lifecycle, restore_env={"RequestedIP": "192.0.2.20"}
-        )
+        self.restore_with_environment("g1", lifecycle, {"RequestedIP": "192.0.2.20"})
         self.assertEqual(configs.server_config.ip, "192.0.2.20")
         self.assertEqual(observed, ["192.0.2.20"])
         # A repeat restore of the same generation must re-read the new Pod IP.
         lifecycle.prepare_for_template("g1", "restore")
-        runtime.fixup_runtime_after_restore(
-            "g1", lifecycle, restore_env={"RequestedIP": "192.0.2.30"}
-        )
+        self.restore_with_environment("g1", lifecycle, {"RequestedIP": "192.0.2.30"})
         self.assertEqual(configs.server_config.ip, "192.0.2.30")
 
     def test_native_or_component_fixup_failure_blocks_normal_release(self):
@@ -437,10 +394,10 @@ class ScrRuntimeFixupTest(unittest.TestCase):
             os.environ,
             {"HIPPO_ROLE_SHORT_NAME": "seed-role"},
         ):
-            runtime.fixup_runtime_after_restore(
+            self.restore_with_environment(
                 "g1",
                 lifecycle,
-                restore_env={
+                {
                     "RequestedIP": "192.0.2.20",
                     "HIPPO_SLAVE_IP": "192.0.2.200",
                     "HIPPO_ROLE": "restored-role",

@@ -27,16 +27,20 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 from typing import Mapping as TypingMapping
-from typing import Optional
 
 from rtp_llm.utils.gang_info import GangInfoReader
-from rtp_llm.utils.scr.restore_context import RestoreContext
-from rtp_llm.utils.scr.runtime_fixup import fixup_runtime_after_restore
 from rtp_llm.utils.scr.lifecycle import (
+    RTPLLM_ENABLE_SCR_ENV,
+    SCR_PHASE_ENV,
     CallbackHook,
     get_template_lifecycle,
+    is_scr_enabled,
+)
+from rtp_llm.utils.scr.lifecycle import (
     template_phase_active as is_scr_template_phase_active,
 )
+from rtp_llm.utils.scr.restore_context import RestoreContext
+from rtp_llm.utils.scr.runtime_fixup import fixup_runtime_after_restore
 from rtp_llm.utils.signal_guard import ignore_sigpipe
 
 LOGGER = logging.getLogger(__name__)
@@ -136,9 +140,6 @@ def register_server_config_template_hook(py_env_configs: Any) -> None:
 # ``RTPLLM_ENABLE_SCR`` is RTP-LLM's own participation switch.  ``SCR_ENABLE``
 # and ``SCR_PHASE`` are external control-plane inputs and are never derived or
 # mutated here. Checkpoint versus restore is chosen by the controller/platform.
-RTPLLM_ENABLE_SCR_ENV = "RTPLLM_ENABLE_SCR"
-SCR_PHASE_ENV = "SCR_PHASE"
-
 SCR_PHASE_CHECKPOINT = "checkpoint"
 SCR_PHASE_RESTORE = "restore"
 SCR_PHASE_NORMAL = "normal"
@@ -151,69 +152,25 @@ SCR_TIMEOUT_ENV = "RTP_LLM_SCR_TIMEOUT"
 SCR_INACTIVITY_TIMEOUT_ENV = "RTP_LLM_SCR_INACTIVITY_TIMEOUT"
 SCR_GENERATION_ENV = "RTP_LLM_SCR_GENERATION"
 SCR_GENERATION_ALIAS_ENV = "SCR_GENERATION"
-SCR_RESTORE_START_TIME_ENV = "RTP_LLM_SCR_RESTORE_START_EPOCH_MS"
 SCR_TIMEOUT_ALIASES = (
-    "RTPLLM_SCR_CHECKPOINT_TIMEOUT_S",
     "SCR_TIMEOUT",
     "EPSILON_CR_TIMEOUT",
 )
 SCR_INACTIVITY_TIMEOUT_ALIASES = (
-    "RTPLLM_SCR_INACTIVITY_TIMEOUT_S",
     "SCR_INACTIVITY_TIMEOUT",
 )
 DEFAULT_TIMEOUT_SECONDS = 900
 DEFAULT_INACTIVITY_TIMEOUT_SECONDS = 10
 
 
-def _flag(value: Optional[str]) -> bool:
-    return value is not None and value.strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
 def _scr_generation() -> str:
     """Return the controller-provided generation for structured diagnostics."""
 
-    for name in (SCR_GENERATION_ENV, SCR_GENERATION_ALIAS_ENV, "SCR_GENERATION_ID"):
+    for name in (SCR_GENERATION_ENV, SCR_GENERATION_ALIAS_ENV):
         value = os.environ.get(name)
         if value is not None and value.strip():
             return value.strip()
     return "<unset>"
-
-
-def _unified_scr_value() -> Optional[str]:
-    """Return the sole RTP-LLM feature-gate value."""
-
-    value = os.environ.get(RTPLLM_ENABLE_SCR_ENV)
-    return value.strip().lower() if value is not None else None
-
-
-def configure_scr_environment() -> bool:
-    """Read the RTP-LLM switch before importing Epsilon.
-
-    ``RTPLLM_ENABLE_SCR=1`` enables the RTP-LLM integration. ``SCR_ENABLE`` and
-    ``SCR_PHASE`` must already have been provided by the controller/container;
-    this function deliberately does not set or normalize either variable.
-    """
-
-    value = _unified_scr_value()
-    if not _flag(value):
-        return False
-
-    return True
-
-
-def is_scr_enabled() -> bool:
-    """Return whether the RTP-LLM sCR integration was explicitly requested.
-
-    The default is false.  This function does not import ``epsilon`` and is
-    therefore safe to call before CUDA/PyTorch initialization.
-    """
-
-    return configure_scr_environment()
 
 
 def epsilon_backend_mode(epsilon: Any | None = None) -> str:
@@ -710,23 +667,6 @@ def _scr_timeouts() -> tuple[int, int]:
     return timeout, inactivity_timeout
 
 
-def _restore_elapsed_ms() -> float | None:
-    """Return restore elapsed time when the platform exported its epoch start."""
-
-    raw = os.environ.get(SCR_RESTORE_START_TIME_ENV)
-    if not raw or not raw.strip():
-        return None
-    try:
-        return max(0.0, time.time() * 1000.0 - float(raw))
-    except (TypeError, ValueError):
-        LOGGER.warning(
-            "invalid %s=%r; restore elapsed time unavailable",
-            SCR_RESTORE_START_TIME_ENV,
-            raw,
-        )
-        return None
-
-
 def register_for_scr(
     engine: Any,
     *,
@@ -848,7 +788,7 @@ def _register_for_scr_once(
         _registrations[engine_key] = registration
     LOGGER.info(
         "sCR registration completed generation=%s phase=%s tensors=%d cache_result=%s "
-        "hook_result=%s ok=%s api_version=%s elapsed_ms=%.3f restore_elapsed_ms=%s kv_bytes=%d",
+        "hook_result=%s ok=%s api_version=%s elapsed_ms=%.3f kv_bytes=%d",
         _scr_generation(),
         os.environ.get(SCR_PHASE_ENV, "<unset>"),
         len(tensors),
@@ -857,7 +797,6 @@ def _register_for_scr_once(
         ok,
         adapter.capabilities.api_version,
         registration.registration_duration_ms,
-        _restore_elapsed_ms(),
         kv_bytes,
     )
     return ok
@@ -1041,15 +980,13 @@ def arrive_scr_checkpoint_barrier(
     try:
         LOGGER.info(
             "sCR snapshot arrival started generation=%s phase=%s worker_id=%d "
-            "worker_num=%d timeout_s=%d inactivity_timeout_s=%d "
-            "restore_elapsed_ms=%s",
+            "worker_num=%d timeout_s=%d inactivity_timeout_s=%d",
             _scr_generation(),
             os.environ.get(SCR_PHASE_ENV, "<unset>"),
             worker_id,
             worker_num,
             resolved_timeout,
             resolved_inactivity,
-            _restore_elapsed_ms(),
         )
         prepare_device = _capture_cuda_device()
         try:
@@ -1084,15 +1021,13 @@ def arrive_scr_checkpoint_barrier(
         if result not in (None, 0):
             LOGGER.error(
                 "sCR snapshot arrival returned non-zero generation=%s phase=%s "
-                "worker_id=%d worker_num=%d result=%s elapsed_ms=%.3f "
-                "restore_elapsed_ms=%s",
+                "worker_id=%d worker_num=%d result=%s elapsed_ms=%.3f",
                 _scr_generation(),
                 os.environ.get(SCR_PHASE_ENV, "<unset>"),
                 worker_id,
                 worker_num,
                 result,
                 elapsed_ms,
-                _restore_elapsed_ms(),
             )
             if fail_closed:
                 raise ScrArrivalError(
@@ -1106,8 +1041,7 @@ def arrive_scr_checkpoint_barrier(
             _scr_barrier_return_time = time.monotonic()
             LOGGER.info(
                 "sCR snapstart checkpoint reached pid=%d generation=%s phase=%s "
-                "worker_id=%d worker_num=%d result=%s elapsed_ms=%.3f "
-                "restore_elapsed_ms=%s",
+                "worker_id=%d worker_num=%d result=%s elapsed_ms=%.3f",
                 os.getpid(),
                 _scr_generation(),
                 os.environ.get(SCR_PHASE_ENV, "<unset>"),
@@ -1115,7 +1049,6 @@ def arrive_scr_checkpoint_barrier(
                 worker_num,
                 result,
                 elapsed_ms,
-                _restore_elapsed_ms(),
             )
         return result
     except Exception as exc:
@@ -1123,15 +1056,13 @@ def arrive_scr_checkpoint_barrier(
         # not take down a serving rank; the control plane can use a fallback.
         LOGGER.exception(
             "sCR snapshot barrier arrival failed generation=%s phase=%s "
-            "worker_id=%d worker_num=%d elapsed_ms=%.3f timeout_s=%d "
-            "restore_elapsed_ms=%s",
+            "worker_id=%d worker_num=%d elapsed_ms=%.3f timeout_s=%d",
             _scr_generation(),
             os.environ.get(SCR_PHASE_ENV, "<unset>"),
             worker_id,
             worker_num,
             (time.monotonic() - started) * 1000.0,
             resolved_timeout,
-            _restore_elapsed_ms(),
         )
         if fail_closed:
             raise ScrArrivalError(
@@ -1213,7 +1144,6 @@ __all__ = [
     "arrive_scr_template_barrier",
     "build_scr_participant_manifest",
     "epsilon_backend_mode",
-    "configure_scr_environment",
     "get_scr_barrier_return_time",
     "is_scr_enabled",
     "is_scr_template_phase_active",

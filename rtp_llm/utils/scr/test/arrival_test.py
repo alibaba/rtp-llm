@@ -173,8 +173,8 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             os.environ,
             {
                 "RTPLLM_ENABLE_SCR": "1",
-                "RTPLLM_SCR_CHECKPOINT_TIMEOUT_S": "37",
-                "RTPLLM_SCR_INACTIVITY_TIMEOUT_S": "5",
+                "RTP_LLM_SCR_TIMEOUT": "37",
+                "RTP_LLM_SCR_INACTIVITY_TIMEOUT": "5",
             },
             clear=True,
         ):
@@ -183,8 +183,8 @@ class ScrTemplateUtilsTest(unittest.TestCase):
         with mock.patch.dict(
             os.environ,
             {
-                "RTPLLM_SCR_CHECKPOINT_TIMEOUT_S": "not-a-number",
-                "RTPLLM_SCR_INACTIVITY_TIMEOUT_S": "0",
+                "RTP_LLM_SCR_TIMEOUT": "not-a-number",
+                "RTP_LLM_SCR_INACTIVITY_TIMEOUT": "0",
             },
             clear=True,
         ), mock.patch.object(scr.LOGGER, "error") as log_error:
@@ -200,28 +200,23 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             ), self.assertRaisesRegex(scr.EpsilonProtocolError, "conflicting"):
                 scr._scr_timeouts()
 
-    def test_arrival_passes_timeout_budget_and_restore_elapsed_is_observable(self):
+    def test_arrival_passes_timeout_budget(self):
         epsilon = _EpsilonDouble()
-        restore_elapsed_ms = None
         generation = None
         with mock.patch.dict(
             os.environ,
             {
                 "RTPLLM_ENABLE_SCR": "1",
-                "RTPLLM_SCR_CHECKPOINT_TIMEOUT_S": "37",
-                "RTPLLM_SCR_INACTIVITY_TIMEOUT_S": "5",
+                "RTP_LLM_SCR_TIMEOUT": "37",
+                "RTP_LLM_SCR_INACTIVITY_TIMEOUT": "5",
                 scr.SCR_GENERATION_ENV: "generation-7",
                 scr.SCR_PHASE_ENV: scr.SCR_PHASE_RESTORE,
-                scr.SCR_RESTORE_START_TIME_ENV: "1000000",
             },
             clear=True,
-        ), mock.patch.object(scr, "_load_epsilon", return_value=epsilon), mock.patch(
-            "time.time", return_value=1002
-        ):
+        ), mock.patch.object(scr, "_load_epsilon", return_value=epsilon):
             self.assertEqual(
                 scr.arrive_scr_checkpoint_barrier(worker_id=0, worker_num=1), 0
             )
-            restore_elapsed_ms = scr._restore_elapsed_ms()
             generation = scr._scr_generation()
 
         self.assertEqual(
@@ -237,7 +232,6 @@ class ScrTemplateUtilsTest(unittest.TestCase):
             ],
         )
         self.assertEqual(generation, "generation-7")
-        self.assertEqual(restore_elapsed_ms, 2000.0)
 
     def test_nonzero_epsilon_result_is_preserved_for_controller_diagnostics(self):
         epsilon = _EpsilonDouble(result=17)

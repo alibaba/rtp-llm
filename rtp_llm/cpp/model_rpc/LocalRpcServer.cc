@@ -282,7 +282,7 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
         pybind11::gil_scoped_release release;
         RTP_LLM_CHECK_WITH_INFO(!PyGILState_Check(),
                                 "running engine init with gil held may cause program hang, please check");
-        engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params), /*defer_loop_start=*/true));
+        engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
     }
     if (mm_kind == MMProcessorKind::LOCAL) {
         mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
