@@ -29,6 +29,22 @@ public final class RoutingConfig {
         private ExecutionTimeEstimatorConfig executionTimeEstimator =
                 new ExecutionTimeEstimatorConfig();
         private CacheAffinityConfig cacheAffinity;
+        /** Opt-in cache-first routing; null preserves shortest-TTFT behavior. */
+        private TokenBalanceConfig tokenBalance;
+    }
+
+    @Getter
+    @Setter
+    public static final class TokenBalanceConfig {
+        /** Above this percentage, the largest reusable prefix wins without a TTFT cap. */
+        private double minPrefixHitPercent = 5.0;
+        /** Actual Engine waiting-stream watermark; not an inflight or unobserved-dispatch quota.
+         * Excludes Master queues and running requests. Null disables Engine queue admission.
+         * Unknown telemetry imposes no queue gate; explicit concurrency limits still apply.
+         */
+        private Long engineQueueAdmissionThreshold = 10L;
+        /** Consecutive observed time above the watermark before sustained overload; actual waiting gates dispatch immediately. */
+        private long engineQueueOverloadDurationMs = 5_000L;
     }
 
     @Getter
@@ -36,7 +52,7 @@ public final class RoutingConfig {
     public static final class ExecutionTimeEstimatorConfig {
         private EstimatorType type = EstimatorType.FORMULA;
         private String expression =
-                "sum(computeTokens) + 0.3*sum(hitCacheTokens)";
+                "sum(computeTokens) + 0.02*sum(hitCacheTokens)";
     }
 
     public enum EstimatorType {
@@ -48,7 +64,7 @@ public final class RoutingConfig {
     @Setter
     public static final class CacheAffinityConfig {
         /** Maximum TTFT penalty accepted for choosing a cache leader. */
-        private long maxExtraTtftMs;
+        private volatile long maxExtraTtftMs;
 
         /** Minimum reusable-prefix percentage required before affinity applies. */
         private double minPrefixHitPercent = 5;
@@ -65,7 +81,7 @@ public final class RoutingConfig {
     @Getter
     @Setter
     public static final class DecodeCostEstimatorConfig {
-        private volatile String expression = "kvcache_used_ratio";
+        private volatile String expression = "running_size";
 
         @JsonIgnore
         @Getter(AccessLevel.NONE)

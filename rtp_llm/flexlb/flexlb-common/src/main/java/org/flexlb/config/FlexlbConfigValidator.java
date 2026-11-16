@@ -66,9 +66,9 @@ final class FlexlbConfigValidator {
         }
         String type = ordering.path("type").asText("FIFO");
         if ("FIFO".equals(type)) {
-            rejectFieldsExcept(ordering, "scheduler.ordering", "type");
+            rejectFieldsExcept(ordering, "scheduler.ordering", "type", "prefillCostOrder");
         } else if ("PRIORITY".equals(type)) {
-            rejectFieldsExcept(ordering, "scheduler.ordering", "type",
+            rejectFieldsExcept(ordering, "scheduler.ordering", "type", "prefillCostOrder",
                     "defaultPriority", "preemption");
             validatePreemptionShape(ordering.path("preemption"));
         }
@@ -127,8 +127,14 @@ final class FlexlbConfigValidator {
         if (!config.isDirect()) {
             validateQueue(config.queueScheduler());
         }
+        if (config.getScheduler().getOrdering() != null && config.getScheduler().getOrdering().isPrefillCostOrder()) {
+            require(config.isQueue() && config.decisionPolicy().getType() == DecisionPolicyConfig.Type.SINGLE
+                            && config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH
+                            && config.getRouter().getRoles().getPrefill().getTokenBalance() != null,
+                    "scheduler.ordering.prefillCostOrder", "requires QUEUE, SINGLE, NON_BATCH and tokenBalance");
+        }
         config.getDispatcher().validateFor(config.getScheduler());
-        validateRequestLifecycle(config.getRequestLifecycle());
+        requiredPositive(config.getDispatchTimeoutMs(), "dispatchTimeoutMs");
         validateRouting(config.getRouter());
         validateWorkerRegistry(config.getWorkerRegistry());
         validateObservability(config.getObservability());
@@ -143,7 +149,6 @@ final class FlexlbConfigValidator {
     }
 
     private static void validateQueue(SchedulerConfig queue) {
-        positive(queue.getQueueTimeoutMs(), "scheduler.queueTimeoutMs");
         require(Double.isFinite(queue.getScanBudgetMultiplier()) && queue.getScanBudgetMultiplier() >= 1.0,
                 "scheduler.scanBudgetMultiplier", "must be finite and at least 1.0");
         require(queue.getOrdering() != null, "scheduler.ordering", "is required for QUEUE");
@@ -211,6 +216,19 @@ final class FlexlbConfigValidator {
                         "contains an invalid formula: " + error.getMessage(), error);
             }
         }
+        var balance = prefill.getTokenBalance();
+        if (balance != null) {
+            range(balance.getMinPrefixHitPercent(), 0, RoutingConfig.PERCENTAGE_SCALE,
+                    "router.roles.prefill.tokenBalance.minPrefixHitPercent");
+            nonNegative(balance.getEngineQueueOverloadDurationMs(),
+                    "router.roles.prefill.tokenBalance.engineQueueOverloadDurationMs");
+            if (balance.getEngineQueueAdmissionThreshold() != null) {
+                nonNegative(balance.getEngineQueueAdmissionThreshold(),
+                        "router.roles.prefill.tokenBalance.engineQueueAdmissionThreshold");
+            }
+            require(prefill.getCacheAffinity() == null, "router.roles.prefill",
+                    "tokenBalance and cacheAffinity are mutually exclusive");
+        }
         CacheAffinityConfig affinity = prefill.getCacheAffinity();
         if (affinity != null) {
             nonNegative(affinity.getMaxExtraTtftMs(),
@@ -255,16 +273,6 @@ final class FlexlbConfigValidator {
         }
     }
 
-    private static void validateRequestLifecycle(RequestLifecycleConfig lifecycle) {
-        require(lifecycle != null, "requestLifecycle", "is required");
-        require(lifecycle.getRequest() != null, "requestLifecycle.request", "is required");
-        requiredPositive(lifecycle.getRequest().getTimeoutMs(), "requestLifecycle.request.timeoutMs");
-        require(lifecycle.getDecision() != null, "requestLifecycle.decision", "is required");
-        Double lifetime = lifecycle.getDecision().getLifetime();
-        require(lifetime != null, "requestLifecycle.decision.lifetime", "is required");
-        require(Double.isFinite(lifetime) && lifetime >= 1.0,
-                "requestLifecycle.decision.lifetime", "must be finite and at least 1");
-    }
 
     private static void requiredPositive(Long value, String field) {
         require(value != null, field, "is required");

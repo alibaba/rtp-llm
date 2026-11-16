@@ -12,6 +12,7 @@ final class GlobalQueueEntry {
 
     final RequestContext context;
     final String routingGroup;
+    boolean knownColdRequest;
     long sequence;
     volatile boolean removed = true;
     GlobalQueueEntry previous;

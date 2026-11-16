@@ -20,7 +20,8 @@ public final class FlexlbConfig {
     private int schemaVersion = CURRENT_SCHEMA_VERSION;
     private SchedulerConfig scheduler = new SchedulerConfig();
     private DispatcherConfig dispatcher = new DispatcherConfig();
-    private RequestLifecycleConfig requestLifecycle = new RequestLifecycleConfig();
+    /** Maximum elapsed time from arrival until delivery starts; retries never renew it. */
+    private Long dispatchTimeoutMs = 60_000L;
     private RoutingConfig router = new RoutingConfig();
     private WorkerRegistryConfig workerRegistry = new WorkerRegistryConfig();
     private ObservabilityConfig observability = new ObservabilityConfig();
@@ -60,7 +61,8 @@ public final class FlexlbConfig {
 
     @JsonIgnore
     public long resolveExpiresAtMs(long startTime) {
-        return isQueue() ? scheduler.resolveExpiresAtMs(startTime) : Long.MAX_VALUE;
+        long timeout = dispatchTimeoutMs;
+        return startTime > Long.MAX_VALUE - timeout ? Long.MAX_VALUE : startTime + timeout;
     }
 
     @JsonIgnore

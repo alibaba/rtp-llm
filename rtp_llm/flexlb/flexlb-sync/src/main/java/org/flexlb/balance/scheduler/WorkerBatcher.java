@@ -410,8 +410,11 @@ public final class WorkerBatcher {
     private GroupPlanner.Constraints schedulingConstraints() {
         WorkerStatus status = prefillEndpoint.getStatus();
         var engine = status == null ? null : status.committedEngineObservation();
-        return new GroupPlanner.Constraints(settings.maxRequests(), schedulingCapacity(engine, PlanningResource.TOKENS),
-                schedulingCapacity(engine, PlanningResource.KV), settings.executionBudgetMs(), settings.collectionWaitMs());
+        boolean queueAccepts = prefillEndpoint.engineQueueAllowsDispatch();
+        return new GroupPlanner.Constraints(settings.maxRequests(),
+                queueAccepts ? Long.MAX_VALUE : schedulingCapacity(engine, PlanningResource.TOKENS),
+                queueAccepts ? Long.MAX_VALUE : schedulingCapacity(engine, PlanningResource.KV),
+                settings.executionBudgetMs(), settings.collectionWaitMs());
     }
 
     public enum PlanningResource { TOKENS, KV }
@@ -519,7 +522,7 @@ public final class WorkerBatcher {
                 long nowMs = System.currentTimeMillis();
                 claim.owner().data().getScheduler().onDeliveryEvidence(claim,
                         new ContextResult.RouteDelivered(claim, PrefillPredictionBoundary.predictedVisibilityDeadlineMs(precedingWork, unstarted,
-                                claim.owner().data().getConfig().getRequestLifecycle().getDecision().getLifetime(), nowMs), nowMs));
+                                claim.owner().data().getConfig().getInternalRuntime().getEngineVisibilityMultiplier(), nowMs), nowMs));
                 delivered.add(claim.item());
             } catch (Throwable problem) { failure = Failures.append(failure, problem); }
         }
@@ -626,6 +629,10 @@ public final class WorkerBatcher {
         if (head.requestExpired(nowMs)) {
             removeAndNotify(head, null, false);
             return BatcherCycleResult.NO_ACTION;
+        }
+        if (prefillEndpoint.engineQueueDispatchBlocked()) {
+            return BatcherCycleResult.awaitingSchedulingChange(head, snapshot.queueVersion(),
+                    snapshot.schedulingInputVersion(), head.expiresAtMs(), "Prefill Engine waiting streams above threshold");
         }
         GroupPlanner.Constraints constraints = schedulingConstraints();
         if (Math.max(0L, head.seqLen()) > constraints.batchKvCapacity()) {
@@ -742,7 +749,8 @@ public final class WorkerBatcher {
             }
         } finally {
             try {
-                if (capacityWait) {
+                // Once stop claims cleanup, it owns listener removal and its failure result.
+                if (capacityWait && !drainClaimed) {
                     setCapacityBlockedHeadLocked(null);
                 }
             } finally {
@@ -783,7 +791,7 @@ public final class WorkerBatcher {
     public void signal(boolean capacityOnly) {
         queueLock.lock();
         try {
-            if (!capacityOnly || capacityBlockedHead != null) {
+            if (!capacityOnly || capacityBlockedHead != null || !prefillState.engineQueueDispatchBlocked()) {
                 prefillState.schedulingInputsChangedLocked();
                 stateChanged.signal();
             }

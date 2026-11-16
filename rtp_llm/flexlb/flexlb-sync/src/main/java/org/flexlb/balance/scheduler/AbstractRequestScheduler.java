@@ -214,7 +214,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                 boolean inactivity = exact.kind() == ExpirationTimer.Kind.INACTIVITY
                         && before.deadlines().inactivity() == exact && nowMs >= before.inactivityExpiresAtMs();
                 boolean scheduling = exact.kind() == ExpirationTimer.Kind.REQUEST && before.deadlines().request() == exact
-                        && nowMs >= exact.atMs() && (before.delivery() == null || before.placement() != null);
+                        && nowMs >= exact.atMs() && ctx.isAwaitingDispatch();
                 if (before.phase() == Phase.OPEN && before.cancellation() == null && (inactivity || scheduling)) {
                     String detail = inactivity ? "REQUEST_INACTIVE: no matching Engine request status before inactivity timeout"
                             : before.placement() != null ? "request scheduling deadline exceeded during admission"
@@ -378,7 +378,10 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
 
     boolean tryStartSend(DeliveryClaim claim) {
         var started = claim.owner().beginSend(claim, System.currentTimeMillis());
-        if (started instanceof Granted<?>) { return true; }
+        if (started instanceof Granted<?>) {
+            runtime.deadlines().update(claim.owner(), started.after().deadlines());
+            return true;
+        }
         if (started instanceof Rejected<DeliveryClaim> rejected && rejected.reason() == Rejection.CANCELLED) {
             var state = started.after();
             CancelReason reason = state.cancellation() != null ? state.cancellation().reason()
@@ -784,8 +787,20 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
                         Math.max(0L, ctx.data().getAckAtMs() - delivery.startedAtMs())); }
                 catch (Throwable ignored) { }
             }
-            var selected = ctx.selectResponse(candidate);
-            return selected instanceof Granted<ResponseSelection> && publication.complete(completion, response, failure);
+            var actual = candidate.kind() == ResponseKind.ACK
+                    ? new ResponseCandidate(ctx, candidate.kind(), candidate.result(), System.currentTimeMillis()) : candidate;
+            var selected = ctx.selectResponse(actual);
+            try {
+                if (selected instanceof Granted<ResponseSelection>) {
+                    return publication.complete(completion, response, failure);
+                }
+                if (candidate.kind() == ResponseKind.ACK && selected.after().pendingEnd() != null) {
+                    closeRequest(ctx, selected.after().pendingEnd(), null);
+                }
+                return false;
+            } finally {
+                if (candidate.kind() == ResponseKind.ACK) { runtime.deadlines().update(ctx, ctx.snapshot().deadlines()); }
+            }
         };
         if (synchronous) { return publication.completeNow(task); }
         publication.submit(task);
@@ -892,5 +907,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         closeRequest(ctx, new EndEvidence(state.route(), EndKind.FRONTEND, null, false, 0L,
                 cancellation.errorType(), cancellation.detail(), false, false), null);
     }
+
+
     protected Map<String, Object> cancellationDiagnostics(RequestContext ctx, CancelReason reason, String detail) { return null; }
 }

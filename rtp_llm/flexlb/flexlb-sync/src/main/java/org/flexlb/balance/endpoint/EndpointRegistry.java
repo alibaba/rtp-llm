@@ -168,6 +168,15 @@ public class EndpointRegistry {
                 placementAvailability, "placementAvailability");
     }
 
+    /** Cache ownership can open a new maximum-hit route without releasing Engine capacity. */
+    public void publishCacheAvailability(WorkerStatus status) {
+        if (status.getRole().supportsPrefill() && status.isActiveGeneration()
+                && isCurrentStatus(status.getRole(), status.getIpPort(), status)) {
+            placementAvailability.changed(new org.flexlb.balance.scheduler.PlacementKey(
+                    status.getRole(), status.getGroup(), null));
+        }
+    }
+
     public WorkerEndpoint get(RoleType roleType, String ipPort) {
         Map<String, WorkerEndpoint> endpoints = endpointsByRole.get(roleType);
         return endpoints == null ? null : endpoints.get(ipPort);

@@ -12,9 +12,9 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.util.Logger;
-import org.flexlb.util.Failures;
 import org.flexlb.service.VitCacheSelector;
+import org.flexlb.util.Failures;
+import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -79,7 +79,8 @@ public class RequestWorkerSelector {
                     Logger.debug("Failed to select {} worker for request {}", role.getCode(), context.data().getRequestId());
                     return switch (result.status()) {
                         case REJECTED -> PlacementResult.rejected(result.failure(), result.diagnostics());
-                        case BLOCKED -> PlacementResult.blocked(new PlacementKey(result.blocker(), group, null),
+                        case BLOCKED -> PlacementResult.blocked(new PlacementKey(result.blocker(), group, null,
+                                result.blocker().supportsPrefill() ? routing.prefillCacheWorkers() : java.util.Set.of()),
                                 result.failure(), result.diagnostics());
                         default -> throw new IllegalStateException("unexpected selector result: " + result.status());
                     };
@@ -98,10 +99,20 @@ public class RequestWorkerSelector {
         } finally {
             if (!complete) {
                 Throwable cleanup = Failures.close(routing);
-                if (primary != null) { Failures.append(primary, cleanup); }
-                else { Failures.rethrow(cleanup, "route selection cleanup failed"); }
+                if (primary != null) { Failures.append(primary, cleanup); } else { Failures.rethrow(cleanup, "route selection cleanup failed"); }
             }
         }
+    }
+
+    CostBasedPrefillStrategy.TokenEstimate estimateQueuedTokens(RequestContext context, String policyGroup) {
+        var selectedVit = context.data().getRequest().getSelectedVit();
+        String group = selectedVit == null ? policyGroup : selectedVit.getGroup();
+        for (RoleType role : requiredRoles) {
+            if (role.supportsPrefill()) {
+                return prefillSelector.estimateQueuedTokens(context.data().getRequest(), role, group);
+            }
+        }
+        return null;
     }
 
     public Response routeVit(RequestContext context) {

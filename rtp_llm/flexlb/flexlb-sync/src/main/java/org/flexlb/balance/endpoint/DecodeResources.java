@@ -203,6 +203,9 @@ public final class DecodeResources {
         }
     }
 
+    public record AdmissionMetrics(int reservedCount, int runningCount, int acceptedCount,
+                                   long inflightHardKv, int engineLoad) { }
+
     /** One immutable request table and capacity view captured under the admission lock. */
     public record ResourceSnapshot(DecodeRoutingView routing,
                                    Map<Long, DecodeRequestView> requests,

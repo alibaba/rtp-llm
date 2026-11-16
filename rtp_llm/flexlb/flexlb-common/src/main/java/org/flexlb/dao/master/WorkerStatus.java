@@ -550,10 +550,22 @@ public class WorkerStatus {
                 current.cacheStatus(), true, version));
     }
 
+    /** Record skipped cycles; due polls remain retryable until the accepted task starts. */
+    public boolean prepareCachePoll(long cycleId, long intervalCycles) {
+        checkArgument(intervalCycles > 0L, "cache poll interval must be positive");
+        long previous = lastCachePollCycle.getAndUpdate(value ->
+                cachePollDue(cycleId, intervalCycles, value) ? value : Math.max(value, cycleId));
+        return cachePollDue(cycleId, intervalCycles, previous);
+    }
+
     /** Preserve cache cadence when a coalesced discovery cycle crosses a due tick. */
     public boolean shouldPollCache(long cycleId, long intervalCycles) {
         checkArgument(intervalCycles > 0L, "cache poll interval must be positive");
         long previous = lastCachePollCycle.getAndAccumulate(cycleId, Math::max);
+        return cachePollDue(cycleId, intervalCycles, previous);
+    }
+
+    private static boolean cachePollDue(long cycleId, long intervalCycles, long previous) {
         return cycleId >= previous && (cycleId % intervalCycles == 0L
                 || previous != Long.MIN_VALUE && cycleId / intervalCycles > previous / intervalCycles);
     }

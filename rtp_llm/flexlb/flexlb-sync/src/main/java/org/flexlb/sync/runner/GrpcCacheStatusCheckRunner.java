@@ -23,6 +23,8 @@ import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
 
 public class GrpcCacheStatusCheckRunner implements Runnable {
 
+    private static final long DECODE_CACHE_METADATA_INTERVAL_MS = 1_000L;
+
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final String ipPort;
@@ -42,6 +44,9 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private final LongAdder syncCount;
     private final Long syncEngineStatusInterval;
     private final Executor callbackExecutor;
+    private Boolean pollDue;
+    private long pollCycle;
+    private long pollInterval;
 
     public GrpcCacheStatusCheckRunner(String modelName, WorkerStatus workerStatus,
                                       WorkerStatus.PollLease pollLease,
@@ -77,23 +82,36 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
         this.callbackExecutor = callbackExecutor;
     }
 
+    /** Resolve cadence once, before executor handoff; a delayed task keeps its due decision. */
+    Runnable whenDue() {
+        if (pollDue == null) {
+            long cacheIntervalMs = roleType == RoleType.DECODE
+                    ? DECODE_CACHE_METADATA_INTERVAL_MS : cacheIntervalService.getCurrentIntervalMs();
+            long roundInterval = roleType == RoleType.DECODE
+                    ? 1L + (cacheIntervalMs - 1L) / syncEngineStatusInterval
+                    : Math.max(cacheIntervalMs / syncEngineStatusInterval, 1L);
+            if (roleType.requiresCacheKeys() || roleType == RoleType.DECODE) {
+                pollCycle = syncCount.longValue();
+                pollInterval = roundInterval;
+                boolean due = workerStatus.prepareCachePoll(pollCycle, pollInterval);
+                boolean initializeDecode = roleType == RoleType.DECODE && workerStatus.getCacheStatus() == null;
+                pollDue = due || initializeDecode;
+            } else {
+                pollDue = true;
+            }
+        }
+        return pollDue ? this : null;
+    }
+
     @Override
     public void run() {
         boolean asyncInitiated = false;
         try {
             logger.debug("GrpcCacheStatusCheckRunner run for {}", ipPort);
-            long prefillCacheStatusCheckInterval =
-                    cacheIntervalService.getCurrentIntervalMs();
-            long roundInterval = prefillCacheStatusCheckInterval / syncEngineStatusInterval;
-            roundInterval = Math.max(roundInterval, 1);
-
-            // EngineSyncRunner is invoked on the status-poll cadence. Prefill
-            // cache polling uses an integer number of those ticks so a changing
-            // interval does not require a second scheduler or timer.
-            if (roleType.requiresCacheKeys()
-                        && !workerStatus.shouldPollCache(syncCount.longValue(), roundInterval)) {
-                logger.debug("Skip prefill cache status check for {} because not in {}ms interval", ipPort, prefillCacheStatusCheckInterval);
-                return; // The synchronous scope still owns the poll lease.
+            if (whenDue() == null) { return; }
+            if (pollInterval > 0L) {
+                // Keep the accepted due decision, but account for periods crossed in the executor queue.
+                workerStatus.shouldPollCache(Math.max(pollCycle, syncCount.longValue()), pollInterval);
             }
 
             long startTime = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
@@ -134,6 +152,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             }
 
             long successfulIntervalUs;
+            boolean cacheIndexed = false;
             workerStatus.lock.lock();
             try {
                 if (!endpointRegistry.isCurrentStatus(
@@ -154,6 +173,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                         if (updateLocalKvCache()) {
                             workerStatus.publishCacheIndexedVersion(
                                     newCacheStatus.getVersion());
+                            cacheIndexed = true;
                         }
                     }
                     logCacheStatusUpdate(newCacheStatus, startTime);
@@ -164,6 +184,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 workerStatus.lock.unlock();
             }
 
+            if (cacheIndexed) { endpointRegistry.publishCacheAvailability(workerStatus); }
             engineHealthReporter.reportCacheStatusCheckRemoteInfo(
                     modelName, roleType.name(), startTime);
             engineHealthReporter.reportCacheStatusCheckerSuccess(

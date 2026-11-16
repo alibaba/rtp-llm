@@ -5,6 +5,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.endpoint.PrefillState;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
+import org.flexlb.balance.prediction.PrefillPredictionBoundary;
 import org.flexlb.balance.prediction.PrefillTimePredictor;
 import org.flexlb.balance.projection.RouteProjection;
 import org.flexlb.balance.projection.RouteTimelineProjector;
@@ -52,9 +53,12 @@ public class CostBasedPrefillStrategy {
 
     private final boolean priorityOrdering;
     private final boolean preemptQueued;
-    private final Long cacheAffinityExtraTtftMs;
+    private final RoutingConfig.CacheAffinityConfig cacheAffinity;
     private final double cacheAffinityMinHitRate;
     private final String deliveryMode;
+    private final int maxInflightBatches;
+    private final RoutingConfig.TokenBalanceConfig tokenBalance;
+    private final Object tokenSelectionLock = new Object();
 
     public CostBasedPrefillStrategy(EndpointRegistry endpointRegistry,
                                     CacheAwareService cacheAwareService,
@@ -69,9 +73,37 @@ public class CostBasedPrefillStrategy {
         priorityOrdering = config.isPriorityOrdering();
         preemptQueued = config.allowsPreemption(VictimStage.PREFILL_QUEUED);
         deliveryMode = config.getDispatcher().typeName();
+        maxInflightBatches = config.getDispatcher().requiresGenerateInput() ? config.getDispatcher().getMaxInflightPerPrefillWorker() : 0;
+        tokenBalance = config.getRouter().getRoles().getPrefill().getTokenBalance();
         var affinity = config.getRouter().getRoles().getPrefill().getCacheAffinity();
-        cacheAffinityExtraTtftMs = affinity == null ? null : Math.max(0L, affinity.getMaxExtraTtftMs());
+        cacheAffinity = affinity;
         cacheAffinityMinHitRate = affinity == null ? 0.0 : normalizedHitRate(affinity.getMinPrefixHitPercent());
+    }
+
+    /** Payload-free token estimate for benefit ordering; no time predictor or capacity reservation. */
+    public record TokenEstimate(long inputTokens, long hitTokens) {
+        public TokenEstimate {
+            if (inputTokens < 0 || hitTokens < 0 || hitTokens > inputTokens) {
+                throw new IllegalArgumentException("invalid Prefill token estimate");
+            }
+        }
+        public long computeTokens() { return inputTokens - hitTokens; }
+    }
+
+    public TokenEstimate estimateQueuedTokens(Request request, RoleType role, String group) {
+        var fleet = endpointRegistry.prefillRoutingSnapshot(role).stream()
+                .filter(entry -> group == null || group.equals(entry.endpoint().getStatus().topologySnapshot().group()))
+                .toList();
+        if (fleet.isEmpty()) { return null; }
+        var matches = cacheAwareService.findMatchingEngines(request.getBlockCacheKeys(), role,
+                fleet.stream().map(EndpointRegistry.PrefillRoutingEntry::address).toList());
+        long hit = 0L;
+        for (var entry : fleet) {
+            hit = Math.max(hit, calculateCacheMatch(entry.endpoint(), entry.address(), matches, request).effectiveHitTokens());
+        }
+        if (tokenBalance != null && !PrefillTokenBalance.cacheFirst(
+                hit, request.getSeqLen(), tokenBalance.getMinPrefixHitPercent())) { hit = 0L; }
+        return new TokenEstimate(request.getSeqLen(), hit);
     }
 
     public PlacementResult<ServerStatus, RoleType> select(
@@ -97,20 +129,34 @@ public class CostBasedPrefillStrategy {
         long seqLen = request.getSeqLen();
 
         EndpointDiscovery discovery = discoverAvailableEndpoints(request, metadata, roleType, group);
-        if (discovery.candidates().isEmpty()) {
-            Logger.debug("Prefill select failed: no admission capacity, request_id={}",
-                    requestId);
-            return classifyAdmissionFailure(
-                    discovery.directory(), metadata.priority(), roleType, group);
+        if (tokenBalance == null && discovery.candidates().isEmpty()) {
+            return classifyAdmissionFailure(discovery.directory(), metadata.priority(), roleType, group);
         }
         Map<String, Integer> cacheMatchResults =
                 cacheAwareService.findMatchingEngines(request.getBlockCacheKeys(), roleType, discovery.addresses());
+        long fleetMaxHit = 0L;
+        var cacheWorkers = new java.util.HashSet<String>();
+        if (tokenBalance != null) {
+            for (var entry : discovery.cacheCandidates()) {
+                long hit = calculateCacheMatch(entry.endpoint(), entry.address(), cacheMatchResults, request).effectiveHitTokens();
+                if (hit > fleetMaxHit) { cacheWorkers.clear(); fleetMaxHit = hit; }
+                if (hit == fleetMaxHit) { cacheWorkers.add(entry.address()); }
+            }
+        }
+        boolean hot = tokenBalance != null && PrefillTokenBalance.cacheFirst(
+                fleetMaxHit, seqLen, tokenBalance.getMinPrefixHitPercent());
+        // Cache eligibility survives capacity filtering: a failure on one hot
+        // worker is not evidence that requests cached elsewhere cannot run.
+        route.setPrefillCacheWorkers(hot ? cacheWorkers : java.util.Set.of());
+        if (discovery.candidates().isEmpty()) {
+            return classifyAdmissionFailure(discovery.directory(), metadata.priority(), roleType, group);
+        }
         Map<String, Integer> rejections = new java.util.HashMap<>();
         Map<RoleType, Integer> poolWideBlockers =
                 new EnumMap<>(RoleType.class);
         PrefillCandidateSet survivors = evaluateCandidates(
                 discovery, request, metadata,
-                cacheMatchResults, rejections, poolWideBlockers, candidates);
+                cacheMatchResults, rejections, poolWideBlockers, candidates, tokenBalance != null && !hot);
         if (survivors.size() == 0) {
             Logger.debug(
                     "Prefill select failed: no available endpoints, request_id={},"
@@ -130,9 +176,24 @@ public class CostBasedPrefillStrategy {
                     roleType, discovery.registeredCount(), rejections);
         }
 
-        int selectedIndex = selectBestCandidate(
-                survivors, survivors.minimumTtftRank,
-                roleType, group, seqLen);
+        if (hot && survivors.maximumCacheHit < fleetMaxHit) {
+            return PlacementResult.blocked(roleType);
+        }
+        route.setColdTokenBalance(tokenBalance != null && !hot);
+        int selectedIndex;
+        if (tokenBalance == null) {
+            selectedIndex = selectBestCandidate(survivors, survivors.minimumTtftRank, roleType, group, seqLen);
+        } else {
+            // Parallel planners must see earlier choices before asynchronous admission commits.
+            // Only scoring + soft reservation are serialized; cache lookup/projection stay parallel.
+            synchronized (tokenSelectionLock) {
+                selectedIndex = selectTokenBalancedCandidate(survivors, roleType, group, seqLen, fleetMaxHit);
+                if (selectedIndex >= 0) {
+                    route.reserveTokenPlan(survivors.endpoint(selectedIndex).ownership.planTokenWork(
+                            Math.max(0L, seqLen - survivors.cacheHit(selectedIndex))));
+                }
+            }
+        }
 
         if (selectedIndex < 0) {
             Logger.debug(
@@ -239,16 +300,20 @@ public class CostBasedPrefillStrategy {
             return -1;
         }
 
+        if (tokenBalance != null) {
+            return selectTokenBalancedCandidate(survivors, roleType, group, seqLen);
+        }
+
         long bestHit = Long.MIN_VALUE;
         long bestTtft = Long.MAX_VALUE;
         long affinityCutoffMs = 0L;
         String affinityReason = null;
-        if (cacheAffinityExtraTtftMs != null && survivors.hasKnownTtft) {
+        if (cacheAffinity != null && survivors.hasKnownTtft) {
             long referenceHitTokens = 0L;
             long maxHitTokens = survivors.maximumCacheHit;
             affinityCutoffMs = saturatedAdd(
                     minProjectedTtftMs,
-                    cacheAffinityExtraTtftMs);
+                    Math.max(0L, cacheAffinity.getMaxExtraTtftMs()));
             affinityReason = "NO_CACHE_LEAD";
             for (int i = 0; i < survivors.size(); i++) {
                 if (survivors.ttftRank(i)
@@ -323,6 +388,29 @@ public class CostBasedPrefillStrategy {
         return selectedIndex;
     }
 
+    private int selectTokenBalancedCandidate(PrefillCandidateSet candidates, RoleType role, String group, long seqLen) {
+        return selectTokenBalancedCandidate(candidates, role, group, seqLen, candidates.maximumCacheHit);
+    }
+
+    private int selectTokenBalancedCandidate(PrefillCandidateSet candidates, RoleType role, String group, long seqLen, long maxHit) {
+        boolean cacheFirst = PrefillTokenBalance.cacheFirst(maxHit, seqLen, tokenBalance.getMinPrefixHitPercent());
+        double[] scores = new double[candidates.size()];
+        java.util.Arrays.fill(scores, Double.POSITIVE_INFINITY);
+        double minimum = Double.POSITIVE_INFINITY;
+        for (int i = 0; i < candidates.size(); i++) {
+            if (!PrefillTokenBalance.eligible(candidates.cacheHit(i), maxHit, cacheFirst)) { continue; }
+            var work = candidates.endpoint(i).ownership.tokenWorkload();
+            // Preserve cache eligibility while waiting for Engine queue capacity.
+            if (candidates.endpoint(i).engineQueueAdmissionBlocked()) { continue; }
+            scores[i] = cacheFirst ? 0.0 : work.score() + Math.max(0L, seqLen);
+            minimum = Math.min(minimum, scores[i]);
+        }
+        if (!Double.isFinite(minimum)) { return -1; }
+        double selectedScore = minimum;
+        return tieRotation.next(role, group, candidates.size(), i -> scores[i] == selectedScore,
+                candidates::endpointAddress);
+    }
+
     private static double normalizedHitRate(double configuredRate) {
         return Double.isNaN(configuredRate)
                 ? RoutingConfig.PERCENTAGE_SCALE
@@ -340,6 +428,7 @@ public class CostBasedPrefillStrategy {
     private record EndpointDiscovery(
             List<EndpointRegistry.PrefillRoutingEntry> directory,
             List<EndpointRegistry.PrefillRoutingEntry> candidates,
+            List<EndpointRegistry.PrefillRoutingEntry> cacheCandidates,
             int registeredCount) {
 
         private EndpointDiscovery {
@@ -352,12 +441,12 @@ public class CostBasedPrefillStrategy {
             return new AbstractList<>() {
                 @Override
                 public String get(int index) {
-                    return candidates.get(index).address();
+                    return cacheCandidates.get(index).address();
                 }
 
                 @Override
                 public int size() {
-                    return candidates.size();
+                    return cacheCandidates.size();
                 }
             };
         }
@@ -369,7 +458,7 @@ public class CostBasedPrefillStrategy {
             SchedulingMetadata metadata,
             Map<String, Integer> cacheMatchResults,
             Map<String, Integer> rejections,
-            Map<RoleType, Integer> poolWideBlockers, PrefillCandidateSet candidates) {
+            Map<RoleType, Integer> poolWideBlockers, PrefillCandidateSet candidates, boolean ignoreCache) {
         int eligibleSize = discovery.candidates().size();
         candidates.reset(eligibleSize);
         long planningAtMs = System.currentTimeMillis();
@@ -383,7 +472,7 @@ public class CostBasedPrefillStrategy {
             String endpointAddress = routingEntry.address();
             CacheTokenMatch cacheMatch =
                     calculateCacheMatch(ep, endpointAddress, cacheMatchResults, request);
-            long cacheHit = cacheMatch.effectiveHitTokens();
+            long cacheHit = ignoreCache ? 0L : cacheMatch.effectiveHitTokens();
             long routingCacheMatchTokens = cacheMatch.routingHitTokens();
             RouteProjection.Inputs projectionInputs =
                     ep.captureRouteProjectionInputs();
@@ -405,6 +494,13 @@ public class CostBasedPrefillStrategy {
                                     ? null : predictor.evaluator(),
                             ep.deliveryProjection,
                             planningAtMs);
+            if (!projection.selectable() && !projection.engineWorkUnmodeled()
+                    && ep.engineQueueAllowsAdmission()
+                    && (projection.blockerRole() == null || projection.blockerRole().supportsPrefill())) {
+                projection = new RouteProjection.Candidate(RouteProjection.Candidate.State.UNMODELED_ENGINE_WORK,
+                        RouteProjection.Candidate.UNKNOWN, projection.incomingPrefillMs(), projection.initialHeadDisposition(),
+                        "Engine queue accepts Prefill", null, cacheHit, routingCacheMatchTokens);
+            }
             if (!projection.selectable() && !projection.engineWorkUnmodeled()) {
                 RoleType blockerRole = projection.blockerRole();
                 if (blockerRole != null) {
@@ -448,6 +544,11 @@ public class CostBasedPrefillStrategy {
         return null;
     }
 
+    private boolean hasInflightCapacity(PrefillEndpoint endpoint) {
+        return !endpoint.engineQueueAdmissionBlocked() && (endpoint.requestLimit == 0L || endpoint.ownership.progress().outstandingRequests() < endpoint.requestLimit)
+                && (maxInflightBatches == 0 || endpoint.ownership.batchCapacityAvailable(maxInflightBatches));
+    }
+
     private EndpointDiscovery discoverAvailableEndpoints(
             Request request,
             SchedulingMetadata metadata,
@@ -456,6 +557,7 @@ public class CostBasedPrefillStrategy {
         List<EndpointRegistry.PrefillRoutingEntry> directory =
                 endpointRegistry.prefillRoutingSnapshot(roleType);
         var matching = new ArrayList<EndpointRegistry.PrefillRoutingEntry>();
+        var cacheCandidates = tokenBalance == null ? matching : new ArrayList<EndpointRegistry.PrefillRoutingEntry>();
         int registered = 0;
         for (EndpointRegistry.PrefillRoutingEntry entry : directory) {
             PrefillEndpoint endpoint = entry.endpoint();
@@ -463,13 +565,18 @@ public class CostBasedPrefillStrategy {
                 continue;
             }
             registered++;
+            // Capacity can remove dispatch candidates, but must not redefine cache eligibility.
+            if (tokenBalance != null) { cacheCandidates.add(entry); }
+            if (endpoint.engineQueueAdmissionBlocked()) { continue; }
+            if (tokenBalance != null && maxInflightBatches > 0
+                    && !endpoint.ownership.batchCapacityAvailable(maxInflightBatches)) { continue; }
             if ((endpoint.requestLimit == 0L || endpoint.ownership.progress().outstandingRequests() < endpoint.requestLimit)
                     || preemptQueued && endpoint.ownership.canPreemptQueuedRequest(metadata.priority(), endpoint.requestLimit)) {
                 if (group == null && matching.isEmpty()) { matching.ensureCapacity(directory.size()); }
                 matching.add(entry);
             }
         }
-        return new EndpointDiscovery(directory, matching, registered);
+        return new EndpointDiscovery(directory, matching, cacheCandidates, registered);
     }
 
     private record CacheTokenMatch(

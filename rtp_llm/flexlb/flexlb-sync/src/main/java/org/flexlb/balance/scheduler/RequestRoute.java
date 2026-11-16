@@ -38,6 +38,36 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
     private ServerStatus decode;
     private ServerStatus vit;
     private long prefillWorkMs;
+    private boolean coldTokenBalance;
+    private java.util.Set<String> prefillCacheWorkers = java.util.Set.of();
+
+    public void setPrefillCacheWorkers(java.util.Set<String> workers) {
+        prefillCacheWorkers = java.util.Set.copyOf(workers);
+    }
+
+    java.util.Set<String> prefillCacheWorkers() { return prefillCacheWorkers; }
+
+
+    public void setColdTokenBalance(boolean cold) {
+        checkState(constructionState == BUILDING, "routing policy is frozen after selection");
+        coldTokenBalance = cold;
+    }
+
+    public boolean coldTokenBalance() { return coldTokenBalance; }
+    private org.flexlb.balance.strategy.PrefillTokenWorkload.Reservation tokenPlan;
+
+    public void reserveTokenPlan(org.flexlb.balance.strategy.PrefillTokenWorkload.Reservation plan) {
+        if (constructionState != BUILDING || tokenPlan != null) {
+            if (plan != null) { plan.close(); }
+            throw new IllegalStateException("token plan requires a new route selection");
+        }
+        tokenPlan = plan;
+    }
+
+    /** Idempotent across selected/canonical route copies and failed admission cleanup. */
+    public void releaseTokenPlan() {
+        if (tokenPlan != null) { tokenPlan.close(); }
+    }
     private long prefillVersion;
     private long decodeVersion;
     private final DecodeResources.ReservationHandle decodeReservation;
@@ -60,6 +90,8 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
             prefill = selected.prefill;
             decode = selected.decode;
             prefillWorkMs = selected.prefillWorkMs;
+            coldTokenBalance = selected.coldTokenBalance;
+            tokenPlan = selected.tokenPlan;
             prefillVersion = selected.prefillVersion;
             decodeVersion = selected.decodeVersion;
         }
@@ -228,6 +260,7 @@ public final class RequestRoute implements GroupPlanner.Input, AutoCloseable {
 
     @Override
     public void close() {
+        releaseTokenPlan();
         if (constructionState == BUILDING) { constructionState = ABORTED; }
         if (pins == null) { return; }
         Throwable failure = null;

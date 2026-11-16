@@ -8,7 +8,7 @@ import lombok.Setter;
 @Setter
 public final class DispatcherConfig {
 
-    public static final int DEFAULT_MAX_INFLIGHT_PER_PREFILL_WORKER = 2;
+    public static final int DEFAULT_MAX_INFLIGHT_PER_PREFILL_WORKER = 128;
     public static final int DEFAULT_FETCH_ATTACH_TIMEOUT_MS = 60_000;
 
     public enum Type {
@@ -16,7 +16,8 @@ public final class DispatcherConfig {
         NON_BATCH
     }
 
-    private Type type = Type.BATCH;
+    private Type type = Type.NON_BATCH;
+    /** Hard local admission ceiling, including reservations; low Engine waiting never bypasses it. */
     private int maxInflightPerPrefillWorker = DEFAULT_MAX_INFLIGHT_PER_PREFILL_WORKER;
     /** BATCH only: engine wait for FetchResponse attachment, not generation duration. */
     private int fetchAttachTimeoutMs = DEFAULT_FETCH_ATTACH_TIMEOUT_MS;

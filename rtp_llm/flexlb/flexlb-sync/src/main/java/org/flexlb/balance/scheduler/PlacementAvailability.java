@@ -77,7 +77,11 @@ public final class PlacementAvailability {
     }
 
     long lastChangedSequence(PlacementKey key) {
-        return lastChanged.getOrDefault(key.capacityDomain(), 0L);
+        // The pool edge conservatively covers both member capacity and topology
+        // changes while an affinity-aware plan is outside the scheduler lock.
+        PlacementKey versionKey = key.cacheWorkers().isEmpty() ? key.capacityDomain()
+                : new PlacementKey(key.role(), key.group(), null);
+        return lastChanged.getOrDefault(versionKey, 0L);
     }
 
 }

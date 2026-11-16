@@ -13,6 +13,8 @@ import org.flexlb.enums.FlexPriorityType;
  */
 public interface FlexMonitor extends AutoCloseable {
 
+    default boolean isEnabled(String metricName) { return true; }
+
     /**
      * Register monitoring metric
      *

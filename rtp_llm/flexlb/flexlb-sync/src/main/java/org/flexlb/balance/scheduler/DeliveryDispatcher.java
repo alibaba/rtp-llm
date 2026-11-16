@@ -124,7 +124,7 @@ public class DeliveryDispatcher {
                 long now = System.currentTimeMillis();
                 claim.owner().data().getScheduler().onDeliveryEvidence(claim, new ContextResult.Prediction(claim,
                         PrefillPredictionBoundary.predictedVisibilityDeadlineMs(batch.precedingWork(), prediction,
-                                claim.owner().data().getConfig().getRequestLifecycle().getDecision().getLifetime(), now), now));
+                                claim.owner().data().getConfig().getInternalRuntime().getEngineVisibilityMultiplier(), now), now));
             }
         } catch (Throwable failure) { failBeforeSend(batch, claims, failure); return; }
         BatchCall call;
@@ -268,6 +268,24 @@ public class DeliveryDispatcher {
     private static void logFailure(String operation, long batchId, Throwable failure) {
         try { Logger.error("{} batch_id={}", operation, batchId, failure); }
         catch (Throwable ignored) { }
+    }
+
+    /** A route can outlive its local request; only a remote fence/cleanup returns that capacity. */
+    public void cancelUnobservedRoute(PrefillEndpoint endpoint, long requestId) {
+        try {
+            var reply = grpcClient.cancelAsync(endpoint.getIp(), endpoint.getGrpcPort(),
+                    CancelReason.CLIENT_CANCELLED.toRequest(requestId), CLEANUP_TIMEOUT_MS);
+            if (reply != null) {
+                reply.whenComplete((result, failure) -> {
+                    if (failure == null && (result == EngineGrpcClient.CancelReply.REQUEST_CLEANED
+                            || result == EngineGrpcClient.CancelReply.REQUEST_FENCED)) {
+                        endpoint.confirmUnobservedDispatchStopped(requestId, 0L);
+                    }
+                });
+            }
+        } catch (RuntimeException failure) {
+            logFailure("Unobserved route cleanup", 0L, failure);
+        }
     }
 
     /** Accept the entire stop operation; callers do not drive retries or sender completion. */

@@ -181,18 +181,18 @@ different policy groups progress independently; an unbound group overlaps all
 groups. The policy group is frozen at ingress and reused for route selection. Once a route is committed, delivery backpressure can delay
 the group but cannot trigger a second route selection.
 
-PRIORITY does not create a separate request TTL. QUEUE resolves one absolute
+PRIORITY does not create a separate request TTL. QUEUE and DIRECT resolve one absolute
 scheduling expiration from the public configuration:
 
 ```text
-expires_at_ms = flexlb_admission_time_ms + scheduler.queueTimeoutMs
+expires_at_ms = flexlb_admission_time_ms + dispatchTimeoutMs
 ```
 
-The deadline covers queueing, routing, and delivery acknowledgement. Prompt
+The deadline covers queueing, routing, and preparation until Engine send starts (BATCH)
+or the route response is published (NON_BATCH). Prompt
 length, priority, queue movement, generation replanning, and preemption never
 extend or
-multiply it. DIRECT does not queue and therefore does not apply a scheduling
-timeout. The caller's protobuf `generate_timeout` remains a transport/engine
+multiply it. DIRECT uses the same deadline before publishing its route. The caller's protobuf `generate_timeout` remains a transport/engine
 field and does not control FlexLB scheduling. Consequently there are no SLO
 length buckets, SLO budgets, or priority TTL multipliers to configure.
 
@@ -208,7 +208,7 @@ accepted.
 | JSON path | Applies to | Default | Meaning |
 | --- | --- | ---: | --- |
 | `scheduler.type` | all | `QUEUE` | `DIRECT` or `QUEUE` |
-| `scheduler.queueTimeoutMs` | `QUEUE` | `3600000` ms | Total scheduling lifetime from FlexLB admission through delivery acknowledgement |
+| `dispatchTimeoutMs` | All modes | `60000` ms | Maximum elapsed time from FlexLB admission until dispatch starts |
 | `scheduler.ordering.type` | `QUEUE` | `FIFO` | `FIFO` or `PRIORITY` |
 | `scheduler.ordering.defaultPriority` | `QUEUE + PRIORITY` | `50` | Fallback priority in `[1, 100]` |
 | `scheduler.decision.type` | `QUEUE` | `FIXED_WINDOW` | `SINGLE` or `FIXED_WINDOW` |
@@ -363,7 +363,6 @@ A fuller PRIORITY example with explicit FIXED_WINDOW decision and BATCH delivery
   "schemaVersion": 2,
   "scheduler": {
     "type": "QUEUE",
-    "queueTimeoutMs": 3600000,
     "ordering": {
       "type": "PRIORITY",
       "defaultPriority": 50,

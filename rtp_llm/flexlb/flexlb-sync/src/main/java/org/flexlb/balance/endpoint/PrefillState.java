@@ -4,6 +4,7 @@ import org.flexlb.balance.prediction.PrefillBatchFeatures;
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.projection.WorkSnapshot.Phase;
 import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.util.Failures;
 import org.flexlb.util.PriorityNormalizer;
@@ -138,7 +139,7 @@ public final class PrefillState {
     }
 
     /** One exact ownership transaction; predictions are computed before entering the ledger lock. */
-    public enum CommitKind { DIRECT, QUEUED, BATCH }
+    public enum CommitKind { DIRECT, QUEUED, BATCH, UNQUEUED_BATCH }
 
     public record CommitPlan(CommitKind kind, List<RequestRoute> items, List<RouteReservation> routeReservations,
             BatchReservation batchReservation, long[] predictions, RequestRoute failedMember, long selectionTimeMs) {
@@ -217,6 +218,9 @@ public final class PrefillState {
 
     /** Canonical resource facts for one exact route. Guarded by {@link #lock}. */
     static final class RequestEntry {
+        long engineCoveredTokens;
+        boolean engineObserved;
+        EngineWorkKey observedExecution;
         OwnershipStage ownership;
         final RequestRoute route;
         Phase individualPhase;
@@ -285,6 +289,142 @@ public final class PrefillState {
     /** Canonical request ownership, changed only under the endpoint lock. */
     final Map<Long, RequestEntry> requests = new HashMap<>();
     final LongSupplier clock;
+    private org.flexlb.balance.strategy.PrefillTokenWorkload tokenWorkload;
+    record EngineWorkKey(long requestId, long batchId) {
+        EngineWorkKey {
+            // Ordinary C++ streams use -1; legacy protobuf reports may omit the field (0).
+            if (batchId == -1L) { batchId = 0L; }
+        }
+    }
+    private Map<EngineWorkKey, Long> engineTokenWork = Map.of();
+    private long engineTokens;
+    private long engineCoveredTokens;
+    private int engineCoveredRequests;
+    // Compact capacity ownership survives local expiry until remote evidence arrives.
+    private final java.util.LinkedHashMap<EngineWorkKey, Long> unconfirmedDispatches = new java.util.LinkedHashMap<>();
+    private long nextUnconfirmedRetryMs;
+    private long unconfirmedTokens;
+    private java.util.function.BooleanSupplier engineQueueDispatchBlocked = () -> false;
+
+    private static EngineWorkKey engineKey(RequestEntry entry) {
+        long batchId = entry.batch != null ? entry.batch.batchId
+                : entry.reservation instanceof BatchReservation lease ? lease.batchId : 0L;
+        return new EngineWorkKey(entry.route.requestId(), batchId);
+    }
+
+    Map<EngineWorkKey, Long> prepareEngineTokenWork(WorkerStatus.StatusObservation observation, Set<EngineWorkKey> finished) {
+        if (tokenWorkload == null) { return Map.of(); }
+        Map<EngineWorkKey, Long> work = new HashMap<>();
+        for (var task : observation.engine().runningTaskList().values()) {
+            var key = new EngineWorkKey(task.requestId(), task.batchId());
+            if (task.isPriorityCancelOverlayOnly() || finished.contains(key)) { continue; }
+            long input = Math.max(0L, task.inputLength());
+            long tokens = input - Math.clamp(task.prefixLength(), 0L, input);
+            var local = requests.get(task.requestId());
+            if (input == 0L) {
+                tokens = local != null && engineKey(local).equals(key)
+                        ? computeTokens(local.route) : engineTokenWork.getOrDefault(key, 0L);
+            }
+            work.merge(key, tokens, Math::max);
+        }
+        return Map.copyOf(work);
+    }
+
+    private void refreshEngineCoverage(RequestEntry entry) {
+        var key = engineKey(entry);
+        boolean observed = engineTokenWork.containsKey(key);
+        engineCoveredRequests += (observed ? 1 : 0) - (entry.engineObserved ? 1 : 0);
+        entry.engineObserved = observed;
+        if (observed) { entry.observedExecution = key; }
+        long covered = Math.min(computeTokens(entry.route), engineTokenWork.getOrDefault(key, 0L));
+        engineCoveredTokens = Math.addExact(engineCoveredTokens - entry.engineCoveredTokens, covered);
+        entry.engineCoveredTokens = covered;
+    }
+
+    void configureEngineQueueDispatchBlocked(java.util.function.BooleanSupplier blocked) {
+        engineQueueDispatchBlocked = Objects.requireNonNull(blocked);
+    }
+
+    public boolean engineQueueDispatchBlocked() { return engineQueueDispatchBlocked.getAsBoolean(); }
+
+    private java.util.function.LongPredicate unobservedAdmissionBlocked = ignored -> false;
+    void configureUnobservedAdmission(java.util.function.LongPredicate blocked) {
+        unobservedAdmissionBlocked = Objects.requireNonNull(blocked);
+    }
+
+    /** Admission reserves headroom; already reserved work may still dispatch. */
+    boolean engineQueueAdmissionBlocked() {
+        lock.lock();
+        try {
+            long unobserved = (long) requests.size() - engineCoveredRequests + unconfirmedDispatches.size();
+            return engineQueueDispatchBlocked() || unobservedAdmissionBlocked.test(unobserved);
+        } finally { lock.unlock(); }
+    }
+
+    /** Status scans are linear; admission, release and routing only update/read aggregate counters. */
+    private void replaceEngineTokenWork(Map<EngineWorkKey, Long> next) {
+        for (var key : engineTokenWork.keySet()) {
+            var local = requests.get(key.requestId());
+            if (local != null) { local.engineCoveredTokens = 0L; local.engineObserved = false; }
+        }
+        engineTokenWork = next;
+        engineTokens = 0L;
+        engineCoveredTokens = 0L;
+        engineCoveredRequests = 0;
+        for (var entry : next.entrySet()) {
+            engineTokens = Math.addExact(engineTokens, entry.getValue());
+            var local = requests.get(entry.getKey().requestId());
+            if (local != null) { refreshEngineCoverage(local); }
+        }
+    }
+
+    private org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot tokenWorkloadLocked() {
+        var local = tokenWorkload.snapshot();
+        return new org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot(saturatedAdd(saturatedAdd(local.pendingTokens(), engineTokens - engineCoveredTokens), unconfirmedTokens), local.plannedTokens());
+    }
+    private java.util.function.Supplier<EngineQueueAdmission.State> engineQueueState = () -> EngineQueueAdmission.State.UNKNOWN;
+
+    void configureEngineQueueAdmission(java.util.function.Supplier<EngineQueueAdmission.State> state) {
+        engineQueueState = java.util.Objects.requireNonNull(state);
+    }
+
+    /** Queue telemetry gates admission independently of explicit request/batch concurrency limits. */
+    private boolean admissionCapacityAvailable() {
+        return switch (engineQueueState.get()) {
+            case AVAILABLE -> !engineQueueAdmissionBlocked();
+            case CONGESTED -> false;
+            case UNKNOWN -> true;
+        };
+    }
+    /** Installed before this endpoint generation is published. */
+    void enableTokenWorkload() {
+        tokenWorkload = new org.flexlb.balance.strategy.PrefillTokenWorkload();
+    }
+
+    public org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot tokenWorkload() {
+        lock.lock();
+        try {
+            return tokenWorkload == null
+                    ? new org.flexlb.balance.strategy.PrefillTokenWorkload.Snapshot(0L, 0L)
+                    : tokenWorkloadLocked();
+        } finally { lock.unlock(); }
+    }
+
+    private static long computeTokens(RequestRoute route) {
+        return Math.max(0L, route.seqLen() - Math.clamp(route.hitCache(), 0L, Math.max(0L, route.seqLen())));
+    }
+
+    public org.flexlb.balance.strategy.PrefillTokenWorkload.Reservation planTokenWork(long tokens) {
+        return tokenWorkload == null ? null : tokenWorkload.plan(tokens);
+    }
+
+    private void acceptTokenWork(RequestRoute route) {
+        route.releaseTokenPlan();
+        if (tokenWorkload != null) {
+            tokenWorkload.accept(computeTokens(route));
+        }
+        refreshEngineCoverage(requests.get(route.requestId()));
+    }
     /** Monotonic ownership/work revision used by projection snapshots. */
     private volatile long mutationVersion;
     private volatile long schedulingInputVersion;
@@ -302,7 +442,7 @@ public final class PrefillState {
 
     /** Publish the capacity summary before readers observe a new ownership revision. */
     private void recordMutationLocked() {
-        outstandingRequestCount = saturatedAdd(requests.size(), unknownEngineRequestCount);
+        outstandingRequestCount = outstandingRequestsLocked();
         mutationVersion++;
         progress = new Progress(activeIndex.version(), schedulingInputVersion, mutationVersion, activeIndex.size(), batches.size(), outstandingRequestCount);
     }
@@ -317,6 +457,12 @@ public final class PrefillState {
     public record Progress(long queueVersion, long schedulingInputVersion, long ownershipVersion, int queueDepth, int batchSlots, long outstandingRequests) { }
 
     public Progress progress() { return progress; }
+
+    private long outstandingRequestsLocked() {
+        // Local cleanup is not evidence that an observed Engine stream has finished.
+        long unowned = Math.max(unknownEngineRequestCount, engineTokenWork.size() - engineCoveredRequests);
+        return saturatedAdd(saturatedAdd(requests.size(), unowned), unconfirmedDispatches.size());
+    }
 
     /** Enable waiting work without replacing the ledger of existing DIRECT reservations. */
     void enableQueueLocked(Comparator<RequestRoute> ordering) {
@@ -342,7 +488,7 @@ public final class PrefillState {
                 byPriority[priority] = activeIndex.size(priority);
             }
             return new QueueCounters(activeIndex.version(), byPriority,
-                    saturatedAdd(requests.size(), unknownEngineRequestCount), batches.size());
+                    outstandingRequestsLocked(), batches.size());
         } finally {
             lock.unlock();
         }
@@ -381,7 +527,14 @@ public final class PrefillState {
             if (batch.members.isEmpty()) { batches.remove(batch.batchId, batch); committedBatchCount--; }
         }
         if (entry.ownership == OwnershipStage.COMMITTED || entry.ownership == OwnershipStage.DIRECT_RESERVED) { committedWorkCapture = null; }
-        return requests.remove(entry.route.requestId(), entry);
+        boolean removed = requests.remove(entry.route.requestId(), entry);
+        if (removed && tokenWorkload != null) {
+            tokenWorkload.release(computeTokens(entry.route));
+            engineCoveredTokens -= entry.engineCoveredTokens;
+            entry.engineCoveredTokens = 0L;
+            if (entry.engineObserved) { engineCoveredRequests--; entry.engineObserved = false; }
+        }
+        return removed;
     }
 
     public enum QueueChange { ENQUEUE, REMOVE, REMOVE_UNEXPIRED, STOP, ACK_STOP }
@@ -394,11 +547,12 @@ public final class PrefillState {
             if (route == null) { return null; }
             var entry = requests.get(route.requestId());
             if (change == QueueChange.ENQUEUE) {
-                if (entry != null || requestLimit > 0L && outstandingRequestCount >= requestLimit) { return null; }
+                if (entry != null || unconfirmedDispatches.containsKey(new EngineWorkKey(route.requestId(), 0L)) || (requestLimit > 0L && outstandingRequestCount >= requestLimit) || !admissionCapacityAvailable()) { return null; }
                 entry = new RequestEntry(route, OwnershipStage.QUEUED);
                 requests.put(route.requestId(), entry);
                 try { activeIndex.add(route); }
                 catch (RuntimeException | Error failed) { requests.remove(route.requestId(), entry); throw failed; }
+                acceptTokenWork(route);
             } else if (change == QueueChange.ACK_STOP) {
                 if (entry == null) { return route; }
                 if (entry.route != route || entry.ownership != OwnershipStage.STOP_PENDING || activeIndex.contains(route)) { return null; }
@@ -457,7 +611,7 @@ public final class PrefillState {
             }
             if (requestCountsByPriority == null || requestCountsVersion != mutationVersion) {
                 long[] updatedCounts = new long[PriorityNormalizer.MAX_PRIORITY + 1];
-                updatedCounts[0] = unknownEngineRequestCount;
+                updatedCounts[0] = outstandingRequestCount - requests.size();
                 for (RequestEntry entry : requests.values()) {
                     int occupant = entry.route.priority();
                     updatedCounts[occupant > 0 && occupant <= PriorityNormalizer.MAX_PRIORITY ? occupant : 0]++;
@@ -541,7 +695,7 @@ public final class PrefillState {
                 return new ReservationResult<>(
                         CapacityStatus.BATCH_ID_ALREADY_RESERVED, null);
             }
-            if (batches.size() >= maximum) {
+            if (batches.size() >= maximum || !admissionCapacityAvailable()) {
                 return new ReservationResult<>(
                         CapacityStatus.CAPACITY_FULL, null);
             }
@@ -549,6 +703,7 @@ public final class PrefillState {
                     this, entry, batchId, generationHandoff);
             batches.put(batchId, new PrefillBatch(batchId, lease));
             entry.reservation = lease;
+            if (tokenWorkload != null) { refreshEngineCoverage(entry); }
             recordMutationLocked();
             return new ReservationResult<>(CapacityStatus.ACQUIRED, lease);
         } finally {
@@ -556,11 +711,33 @@ public final class PrefillState {
         }
     }
 
+    /** Cold batch requests acquire a batch slot and token work without entering a worker queue. */
+    ReservationResult<BatchReservation> reserveUnqueuedBatch(RequestRoute route, long batchId, int maximum,
+            EndpointGenerationLifecycle.HandoffPermit handoff) {
+        checkArgument(maximum > 0, "maximumInflightBatches must be positive");
+        lock.lock();
+        try {
+            if (requests.containsKey(route.requestId()) || unconfirmedDispatches.containsKey(new EngineWorkKey(route.requestId(), 0L))) { return new ReservationResult<>(CapacityStatus.REQUEST_ALREADY_RESERVED, null); }
+            if (batches.containsKey(batchId)) { return new ReservationResult<>(CapacityStatus.BATCH_ID_ALREADY_RESERVED, null); }
+            if (batches.size() >= maximum
+                    || !admissionCapacityAvailable()) { return new ReservationResult<>(CapacityStatus.CAPACITY_FULL, null); }
+            var entry = new RequestEntry(route, OwnershipStage.DIRECT_RESERVED);
+            var lease = new BatchReservation(this, entry, batchId, handoff);
+            entry.reservation = lease;
+            requests.put(route.requestId(), entry);
+            batches.put(batchId, new PrefillBatch(batchId, lease));
+            acceptTokenWork(route);
+            committedWorkCapture = null;
+            recordMutationLocked();
+            return new ReservationResult<>(CapacityStatus.ACQUIRED, lease);
+        } finally { lock.unlock(); }
+    }
+
     public boolean batchCapacityAvailable(int maximum) {
         checkArgument(maximum > 0, "maximumInflightBatches must be positive");
         lock.lock();
         try {
-            return batches.size() < maximum;
+            return batches.size() < maximum && admissionCapacityAvailable();
         } finally {
             lock.unlock();
         }
@@ -573,11 +750,14 @@ public final class PrefillState {
         var leases = plan.routeReservations();
         var batchLease = plan.batchReservation();
         var predictions = plan.predictions;
-        boolean direct = plan.kind() == CommitKind.DIRECT;
+        boolean direct = plan.kind() == CommitKind.DIRECT || plan.kind() == CommitKind.UNQUEUED_BATCH;
+        boolean batchPlan = plan.kind() == CommitKind.BATCH || plan.kind() == CommitKind.UNQUEUED_BATCH;
         if (plan.kind() == CommitKind.BATCH && !ownsSelectionLocked(items, plan.selectionTimeMs())) { return null; }
-        checkArgument((plan.kind() == CommitKind.BATCH) == (batchLease != null), "plan kind does not match batch preparation");
-        checkArgument(direct ? !leases.isEmpty() : leases.isEmpty(), "DIRECT plan requires reservations; queued plan cannot own them");
-        checkArgument(direct ? predictions.length == 0 : predictions.length == (batchLease == null ? items.size() : 1),
+        // Recheck actual Engine pressure when a queued selection reaches dispatch.
+        if (!direct && engineQueueDispatchBlocked()) { return null; }
+        checkArgument(batchPlan == (batchLease != null), "plan kind does not match batch preparation");
+        checkArgument(direct && !batchPlan ? !leases.isEmpty() : leases.isEmpty(), "DIRECT plan requires reservations; queued plan cannot own them");
+        checkArgument(direct && !batchPlan ? predictions.length == 0 : predictions.length == (batchLease == null ? items.size() : 1),
                 "prediction count does not match plan");
         checkState(!items.isEmpty(), "committed group requires members");
         Set<RequestEntry> unique = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
@@ -590,7 +770,7 @@ public final class PrefillState {
             checkState(activeIndex.contains(route) == !direct, "plan member has inconsistent queue ownership");
             members.add(entry);
         }
-        checkArgument(!direct || leases.size() == items.size(), "DIRECT plan requires one exact lease per member");
+        checkArgument(!direct || batchPlan || leases.size() == items.size(), "DIRECT plan requires one exact lease per member");
         PrefillBatch batch = batchLease == null ? null : batches.get(batchLease.batchId);
         if (batchLease != null) {
             checkState(batchLease.owner == this && batch != null && batch.preparation == batchLease
@@ -601,7 +781,7 @@ public final class PrefillState {
         Objects.requireNonNull(handoff, "generationHandoff");
         for (int i = 0; i < members.size(); i++) {
             var member = members.get(i);
-            Reservation expected = direct ? leases.get(i) : batchLease != null && member == batchLease.originalOwner ? batchLease : null;
+            Reservation expected = direct && !batchPlan ? leases.get(i) : batchLease != null && member == batchLease.originalOwner ? batchLease : null;
             checkArgument(expected == null || expected.owner == this, "preparation belongs to another ledger");
             checkState(member.reservation == expected && (expected == null
                     || expected.originalOwner == member), "plan does not own exact member preparation");
@@ -650,6 +830,7 @@ public final class PrefillState {
                 member.reservation = null;
                 member.ownership = OwnershipStage.COMMITTED;
             }
+            refreshEngineCoverage(member);
         }
         if (failed != null) { removeEntry(failed); }
         committedWorkCapture = null;
@@ -668,10 +849,11 @@ public final class PrefillState {
         checkArgument(maxOutstandingRequests >= 0L, "request limit must be non-negative");
         lock.lock();
         try {
-            if (requests.containsKey(item.requestId())) {
+            if (requests.containsKey(item.requestId()) || unconfirmedDispatches.containsKey(new EngineWorkKey(item.requestId(), 0L))) {
                 return new ReservationResult<>(CapacityStatus.REQUEST_ALREADY_RESERVED, null);
             }
-            if (maxOutstandingRequests > 0L && outstandingRequestCount >= maxOutstandingRequests) {
+            if ((maxOutstandingRequests > 0L && outstandingRequestCount >= maxOutstandingRequests)
+                    || !admissionCapacityAvailable()) {
                 return new ReservationResult<>(CapacityStatus.CAPACITY_FULL, null);
             }
             RequestEntry entry = new RequestEntry(item, OwnershipStage.DIRECT_RESERVED);
@@ -679,6 +861,7 @@ public final class PrefillState {
             ReservationResult<RouteReservation> result = new ReservationResult<>(CapacityStatus.ACQUIRED, reservation);
             entry.reservation = reservation;
             requests.put(item.requestId(), entry);
+            acceptTokenWork(item);
             committedWorkCapture = null;
             recordMutationLocked();
             return result;
@@ -700,6 +883,10 @@ public final class PrefillState {
 
     /** Preparation rollback and exact resource cleanup share a result contract, never execution callbacks. */
     public Release release(Reservation preparation, RequestRoute route) {
+        return release(preparation, route, false);
+    }
+
+    public Release release(Reservation preparation, RequestRoute route, boolean retainUnconfirmed) {
         checkArgument((preparation == null) != (route == null), "release needs one exact resource identity");
         if (preparation != null) {
             checkArgument(preparation.owner == this, "preparation belongs to another ledger");
@@ -737,15 +924,54 @@ public final class PrefillState {
                 if (entry != null) {
                     entry.reservation = null;
                     if (entry.ownership == OwnershipStage.DIRECT_RESERVED) { removeEntry(entry); }
+                    else if (tokenWorkload != null) { refreshEngineCoverage(entry); }
                 }
                 kind = RequestRelease.RESERVED; // A queue preparation never consumes its waiting seat.
             } else if (entry != null) {
                 if (entry.batch != null) { entry.batch.lastObservedAtMs = Math.max(entry.batch.lastObservedAtMs, clock.getAsLong()); entry.batch.outcome.learningEligible = false; }
+                if (retainUnconfirmed) { retainUnconfirmedDispatch(entry); }
                 checkState(removeEntry(entry), "exact release lost canonical ownership");
             }
             recordMutationLocked();
             return handoff != null ? new Release(kind, handoff)
                     : kind == RequestRelease.RESERVED ? Release.RESERVED : kind == RequestRelease.COMMITTED ? Release.COMMITTED : Release.QUEUED;
+        } finally { lock.unlock(); }
+    }
+
+    private void retainUnconfirmedDispatch(RequestEntry entry) {
+        if (tokenWorkload == null || entry.ownership != OwnershipStage.COMMITTED || Objects.equals(entry.observedExecution, engineKey(entry))) { return; }
+        var key = engineKey(entry);
+        long tokens = computeTokens(entry.route);
+        if (unconfirmedDispatches.putIfAbsent(key, tokens) == null) { unconfirmedTokens = saturatedAdd(unconfirmedTokens, tokens); }
+    }
+
+    private boolean removeUnconfirmed(EngineWorkKey key) {
+        Long tokens = unconfirmedDispatches.remove(key);
+        if (tokens == null) { return false; }
+        unconfirmedTokens -= tokens;
+        return true;
+    }
+
+    /** At most one retry per worker per second; status polling drives recovery after transport failure. */
+    Long nextUnconfirmedCancellation() {
+        lock.lock();
+        try {
+            long now = clock.getAsLong();
+            if (unconfirmedDispatches.isEmpty() || now < nextUnconfirmedRetryMs) { return null; }
+            var first = unconfirmedDispatches.pollFirstEntry();
+            unconfirmedDispatches.put(first.getKey(), first.getValue());
+            nextUnconfirmedRetryMs = saturatedAdd(now, 1000L);
+            return first.getKey().requestId();
+        } finally { lock.unlock(); }
+    }
+
+    public boolean confirmUnobservedDispatchStopped(long requestId, long batchId) {
+        lock.lock();
+        try {
+            if (!removeUnconfirmed(new EngineWorkKey(requestId, batchId))) { return false; }
+            schedulingInputsChangedLocked();
+            recordMutationLocked();
+            return true;
         } finally { lock.unlock(); }
     }
 
@@ -760,6 +986,8 @@ public final class PrefillState {
         // Assigned before publication; only the owning State applies the facts under its lock.
         long nowMs;
         long unknownRequests;
+        Map<EngineWorkKey, Long> engineTokenWork;
+        Set<EngineWorkKey> finishedExecutions;
         Map<Long, List<RequestRoute>> predictionInputs;
         StatusReconciliation result;
 
@@ -801,13 +1029,17 @@ public final class PrefillState {
         for (long prediction : predictions.values()) {
             checkArgument(prediction >= 0L, "Negative batch prediction");
         }
+        long previousPending = tokenWorkload == null ? 0L : tokenWorkloadLocked().pendingTokens();
+        boolean engineWorkChanged = !engineTokenWork.equals(reduction.engineTokenWork);
         // The version check also validates the capacity facts captured in the prepared result.
         for (var change : reduction.batchOutcomes.entrySet()) {
             PrefillBatch batch = change.getKey();
             batch.outcome = change.getValue();
             batch.lastObservedAtMs = Math.max(batch.lastObservedAtMs, reduction.nowMs);
         }
-        for (TerminalObservation terminal : reduction.terminals.values()) { removeEntry(terminal.owner); }
+        for (TerminalObservation terminal : reduction.terminals.values()) {
+            removeEntry(terminal.owner);
+        }
         for (var phase : reduction.individualPhases.entrySet()) {
             var entry = phase.getKey();
             entry.remainingWorkMs = remainingWorkAt(entry.individualPhase, entry.remainingWorkMs, entry.phaseBaseMs, reduction.nowMs);
@@ -822,6 +1054,12 @@ public final class PrefillState {
             batch.outcome.executionStarted |= phase.getValue() == Phase.ENGINE_RUNNING;
             batch.servicePhase = phase.getValue();
         }
+        boolean confirmed = false;
+        if (!unconfirmedDispatches.isEmpty()) {
+            for (var key : reduction.engineTokenWork.keySet()) { confirmed |= removeUnconfirmed(key); }
+            for (var key : reduction.finishedExecutions) { confirmed |= removeUnconfirmed(key); }
+        }
+        replaceEngineTokenWork(reduction.engineTokenWork);
         unknownEngineRequestCount = reduction.unknownRequests;
         for (long batchId : reduction.predictionInputs.keySet()) {
             PrefillBatch batch = batches.get(batchId);
@@ -829,11 +1067,16 @@ public final class PrefillState {
             batch.phaseBaseMs = reduction.nowMs;
             batch.lastObservedAtMs = Math.max(batch.lastObservedAtMs, reduction.nowMs);
         }
-        if (reduction.result.schedulingInputsChanged()) {
+        var result = reduction.result;
+        if (engineWorkChanged || confirmed) {
+            result = new StatusReconciliation(result.requestStatuses(), result.batchCompletions(), true,
+                    result.capacityReleased() || confirmed || tokenWorkload != null && tokenWorkloadLocked().pendingTokens() < previousPending);
+        }
+        if (result.schedulingInputsChanged()) {
             committedWorkCapture = null;
             recordMutationLocked();
         }
-        return reduction.result;
+        return result;
     }
 
     /**
@@ -870,6 +1113,7 @@ public final class PrefillState {
             var retiredProgress = new Progress(activeIndex.version() + (activeIndex.isEmpty() ? 0L : 1L),
                     schedulingInputVersion, mutationVersion + 1L, 0, 0, 0L);
             for (RequestEntry entry : requests.values()) {
+                if (tokenWorkload != null) { tokenWorkload.release(computeTokens(entry.route)); }
                 if (entry.reservation != null) { entry.reservation.originalOwner = null; }
                 entry.reservation = null;
             }
@@ -881,6 +1125,12 @@ public final class PrefillState {
             }
             for (PrefillBatch batch : batches.values()) { if (batch.preparation == null) { batch.members.clear(); } }
             requests.clear();
+            engineTokenWork = Map.of();
+            engineTokens = 0L;
+            engineCoveredTokens = 0L;
+            engineCoveredRequests = 0;
+            unconfirmedDispatches.clear();
+            unconfirmedTokens = 0L;
             batches.clear();
             committedBatchCount = 0;
             activeIndex.clear();
@@ -933,6 +1183,7 @@ public final class PrefillState {
                 }
             }
             for (RequestEntry entry : individuals) {
+                retainUnconfirmedDispatch(entry);
                 if (entry.batch != null) { entry.batch.lastObservedAtMs = Math.max(entry.batch.lastObservedAtMs, nowMs); entry.batch.outcome.learningEligible = false; }
                     removeEntry(entry);
                     recordMutationLocked();

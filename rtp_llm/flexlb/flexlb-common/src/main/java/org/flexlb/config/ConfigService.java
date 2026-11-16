@@ -45,7 +45,7 @@ public class ConfigService {
     ConfigService(String document) {
         if (document == null || document.isBlank()) {
             throw new ConfigValidationException(FLEXLB_CONFIG_ENV,
-                    "is required; configure requestLifecycle.request.timeoutMs");
+                    "is required; configure dispatchTimeoutMs");
         }
         this.flexlbConfig = parse(document);
         FlexlbConfigValidator.validate(flexlbConfig);
