@@ -40,7 +40,7 @@ public class VitCacheSelector {
     }
 
     /** Holds the selected endpoint generation through the admission handoff. */
-    public synchronized SelectedRole selectPinned(BalanceContext ctx, String group) {
+    public SelectedRole selectPinned(BalanceContext ctx, String group) {
         ServerStatus result =
                 ctx.getRequest().getSelectedVit() == null
                         ? select(ctx, group)
@@ -60,7 +60,7 @@ public class VitCacheSelector {
         return SelectedRole.stateless(pin, result);
     }
 
-    public synchronized ServerStatus select(BalanceContext ctx, String group) {
+    public ServerStatus select(BalanceContext ctx, String group) {
         var keys = ctx.getRequest().getCacheAffinityKeys();
         if (keys == null
                 || keys.isEmpty()
@@ -70,56 +70,64 @@ public class VitCacheSelector {
         }
         keys = new ArrayList<>(new LinkedHashSet<>(keys));
         Map<String, Candidate> candidates = directory.candidates(group, keys);
-        long now = System.currentTimeMillis();
-        if (now - pendingPrunedAt >= 5000) {
-            pending.values()
-                    .removeIf(p -> !p.matches(candidates.get(p.worker().getLogicalIpPort()), now));
-            pendingPrunedAt = now;
-        }
-        List<Candidate> best = new ArrayList<>();
-        MatchScore bestScore = null;
-        for (Candidate candidate : candidates.values()) {
-            if (group != null && !Objects.equals(group, candidate.worker().getGroup())) {
-                continue;
+        Candidate selected;
+        synchronized (pending) {
+            long now = System.currentTimeMillis();
+            if (now - pendingPrunedAt >= 5000) {
+                pending.values()
+                        .removeIf(
+                                p ->
+                                        !p.matches(
+                                                candidates.get(p.worker().getLogicalIpPort()),
+                                                now));
+                pendingPrunedAt = now;
             }
-            int pendingHits = 0;
-            for (String key : keys) {
-                Placement placement = pending.get(key);
-                if (placement != null && placement.matches(candidate, now)) {
-                    pendingHits++;
+            List<Candidate> best = new ArrayList<>();
+            MatchScore bestScore = null;
+            for (Candidate candidate : candidates.values()) {
+                if (group != null && !Objects.equals(group, candidate.worker().getGroup())) {
+                    continue;
+                }
+                int pendingHits = 0;
+                for (String key : keys) {
+                    Placement placement = pending.get(key);
+                    if (placement != null && placement.matches(candidate, now)) {
+                        pendingHits++;
+                    }
+                }
+                MatchScore score =
+                        new MatchScore(
+                                candidate.hashHits(),
+                                candidate.embeddingHits(),
+                                candidate.gpuHits(),
+                                pendingHits);
+                int comparison = bestScore == null ? 1 : score.compareTo(bestScore);
+                if (comparison > 0) {
+                    best.clear();
+                    bestScore = score;
+                }
+                if (comparison >= 0) {
+                    best.add(candidate);
                 }
             }
-            MatchScore score =
-                    new MatchScore(
-                            candidate.hashHits(),
-                            candidate.embeddingHits(),
-                            candidate.gpuHits(),
-                            pendingHits);
-            int comparison = bestScore == null ? 1 : score.compareTo(bestScore);
-            if (comparison > 0) {
-                best.clear();
-                bestScore = score;
+            if (best.isEmpty()) {
+                return errorStatus(StrategyErrorType.NO_VIT_WORKER);
             }
-            if (comparison >= 0) {
-                best.add(candidate);
+            selected = best.get(ThreadLocalRandom.current().nextInt(best.size()));
+            long timeout = ctx.getRequest().getGenerateTimeout();
+            long ttl =
+                    timeout <= 0
+                            ? MIN_PENDING_TTL_MS
+                            : Math.min(MAX_PENDING_TTL_MS, Math.max(MIN_PENDING_TTL_MS, timeout));
+            for (String key : keys) {
+                if (!selected.hashKeys().contains(key)) {
+                    pending.put(
+                            key, new Placement(selected.worker(), selected.instance(), now + ttl));
+                }
             }
-        }
-        if (best.isEmpty()) {
-            return errorStatus(StrategyErrorType.NO_VIT_WORKER);
-        }
-        Candidate selected = best.get(ThreadLocalRandom.current().nextInt(best.size()));
-        long timeout = ctx.getRequest().getGenerateTimeout();
-        long ttl =
-                timeout <= 0
-                        ? MIN_PENDING_TTL_MS
-                        : Math.min(MAX_PENDING_TTL_MS, Math.max(MIN_PENDING_TTL_MS, timeout));
-        for (String key : keys) {
-            if (!selected.hashKeys().contains(key)) {
-                pending.put(key, new Placement(selected.worker(), selected.instance(), now + ttl));
+            while (pending.size() > MAX_PENDING) {
+                pending.remove(pending.keySet().iterator().next());
             }
-        }
-        while (pending.size() > MAX_PENDING) {
-            pending.remove(pending.keySet().iterator().next());
         }
         return status(selected.worker(), ctx.getRequestId());
     }
@@ -129,7 +137,7 @@ public class VitCacheSelector {
      * current endpoint generation. Address equality alone cannot identify a worker
      * after replacement; generation zero is not a wildcard.
      */
-    public synchronized ServerStatus validate(BalanceContext ctx, String group) {
+    public ServerStatus validate(BalanceContext ctx, String group) {
         ServerStatus selected = ctx.getRequest().getSelectedVit();
         if (selected == null) {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
