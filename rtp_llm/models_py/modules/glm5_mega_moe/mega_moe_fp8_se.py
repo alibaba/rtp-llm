@@ -144,8 +144,12 @@ class GLM5MegaMoEFP8SE(GLM5MegaMoEFP8):
                 )
             from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
 
-            w1_w, w1_sf = requant_weight_ue8m0(w1_w.contiguous(), w1_s)
-            w2_w, w2_sf = requant_weight_ue8m0(w2_w.contiguous(), w2_s)
+            w1_w, w1_sf = requant_weight_ue8m0(
+                w1_w.contiguous(), w1_s, dequant_dtype=torch.float32
+            )
+            w2_w, w2_sf = requant_weight_ue8m0(
+                w2_w.contiguous(), w2_s, dequant_dtype=torch.float32
+            )
         else:
             w1_sf = prepare_fp8_weight_scale_for_deepgemm(
                 w1_s, 2 * shared_intermediate, cfg.dim

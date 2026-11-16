@@ -8,15 +8,22 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.model_loader.ffn_weight import (
+    FfnAtomicWeight,
+    FfnConfig,
+    MoeAtomicWeight,
+    MoeConfig,
+)
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.per_block_fp8_quant_weight import (
     LoadQuantPerBlockFp8Weight,
     PerBlockFp8Weight,
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
+from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.deepseek_v2 import DeepSeekV2Weight
-from rtp_llm.models.glm5_3_flash import Glm53FlashWeight
-from rtp_llm.models.glm5_3_flash_mtp import Glm53FlashMtpWeight
+from rtp_llm.models.glm5_3_flash import Glm53Flash, Glm53FlashWeight
+from rtp_llm.models.glm5_3_flash_mtp import Glm53FlashMtp, Glm53FlashMtpWeight
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import fp8_kernel
 from rtp_llm.utils.model_weight import CkptWeightInfo, W
 
@@ -77,6 +84,9 @@ def _unpack(packed, k):
 
 class _IdentityDevice:
     def maybe_rewrite_weight_by_key(self, key, tensor, **kwargs):
+        return tensor
+
+    def shuffle_moe_weight(self, tensor, compute_dtype, name):
         return tensor
 
 
@@ -182,15 +192,170 @@ class TestGlm53Fp8Requant(unittest.TestCase):
             witnessed_difference, "synthetic fixture must distinguish the bridge"
         )
 
-    def _descriptor(self, offline):
+    def _descriptor(self, offline, name=W.attn_gate_w):
+        weights = [CkptWeightInfo("gate.weight")]
+        if name in (W.moe_w1, W.ffn_w13):
+            weights.append(CkptWeightInfo("up.weight"))
+        if name in (W.moe_w1, W.moe_w2):
+            source = MoeAtomicWeight(name, weights, config=MoeConfig(expert_num=2))
+        elif name in (W.ffn_w13, W.ffn_w2):
+            source = FfnAtomicWeight(name, weights, config=FfnConfig())
+        else:
+            source = AtomicWeight(name, weights)
         descriptor = WeightModule.create(
-            AtomicWeight(W.attn_gate_w, [CkptWeightInfo("gate.weight")]),
+            source,
             Fp8BlockWiseQuantConfig(is_quanted=offline),
         )
         self.assertIsInstance(
             descriptor, PerBlockFp8Weight if offline else LoadQuantPerBlockFp8Weight
         )
         return descriptor
+
+    def test_resolved_model_backend_owns_routed_conversion(self):
+        self.assertFalse(LoadConfig.model_construct().fp8_defer_moe_requant)
+        for model_type in (Glm53Flash, Glm53FlashMtp):
+            for capability in (False, True):
+                for strategy in (
+                    "auto",
+                    "fp8_per_block",
+                    "mega_moe_fp8",
+                    "mega_moe_fp8_se",
+                ):
+                    with self.subTest(
+                        model=model_type, capability=capability, strategy=strategy
+                    ):
+                        config = LoadConfig.model_construct(
+                            fp8_requant_preserve_fp32=capability
+                        )
+                        loader = SimpleNamespace(get_load_config=lambda: config)
+                        model = object.__new__(model_type)
+                        model.moe_config = SimpleNamespace(moe_strategy=strategy)
+                        with patch.object(
+                            BaseModel, "create_model_loader", return_value=loader
+                        ) as base:
+                            self.assertIs(model.create_model_loader(), loader)
+                        base.assert_called_once_with()
+                        self.assertEqual(
+                            config.fp8_defer_moe_requant,
+                            capability
+                            and strategy in ("mega_moe_fp8", "mega_moe_fp8_se"),
+                        )
+                        self.assertEqual(
+                            config.model_copy().fp8_defer_moe_requant,
+                            config.fp8_defer_moe_requant,
+                        )
+
+    def _postprocess_checkpoint_weight(self, name, weight, scale, deferred):
+        from rtp_llm.models_py.kernels.cuda import deepgemm_wrapper
+
+        descriptor = self._descriptor(True, name)
+        config = LoadConfig.model_construct(
+            fp8_requant_preserve_fp32=True,
+            fp8_defer_moe_requant=deferred,
+            exported_device=_IdentityDevice(),
+        )
+        with patch.object(
+            deepgemm_wrapper, "is_deep_gemm_e8m0_used", return_value=True
+        ):
+            result = descriptor._postprocess(
+                {descriptor.kernel.name: weight, descriptor.scale.name: scale},
+                "cuda",
+                config,
+            )
+        return result[descriptor.kernel.name], result[descriptor.scale.name]
+
+    def test_loader_to_mega_moe_fp32_boundary(self):
+        import deep_gemm
+
+        from rtp_llm.models_py.kernels.cuda import fp8_kernel as exported_fp8
+        from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fp8 import GLM5MegaMoEFP8
+        from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fp8_se import (
+            GLM5MegaMoEFP8SE,
+        )
+
+        # Validate the actual loader and model consumers up to the foreign
+        # transform boundary. No symmetric buffer or full-model equivalence claim.
+        for shared in (False, True):
+            prefix = () if shared else (2,)
+            w13, s13 = _fixture((*prefix, 256, 512), 1.06251)
+            w2, s2 = _fixture((*prefix, 512, 128), 1.06249)
+            originals = [tensor.clone() for tensor in (w13, s13, w2, s2)]
+            ref13, refs13 = _reference(w13, s13, torch.float32)
+            ref2, refs2 = _reference(w2, s2, torch.float32)
+            for deferred in (False, True):
+                with self.subTest(shared=shared, deferred=deferred):
+                    names = (W.ffn_w13, W.ffn_w2) if shared else (W.moe_w1, W.moe_w2)
+                    loaded13, loaded_s13 = self._postprocess_checkpoint_weight(
+                        names[0], w13, s13, deferred
+                    )
+                    loaded2, loaded_s2 = self._postprocess_checkpoint_weight(
+                        names[1], w2, s2, deferred
+                    )
+                    expect_raw = deferred and not shared
+                    self.assertEqual(
+                        loaded_s13.dtype, torch.float32 if expect_raw else torch.int32
+                    )
+                    self.assertEqual(
+                        loaded_s2.dtype, torch.float32 if expect_raw else torch.int32
+                    )
+                    cls = GLM5MegaMoEFP8SE if shared else GLM5MegaMoEFP8
+                    module = object.__new__(cls)
+                    torch.nn.Module.__init__(module)
+                    module.cfg = SimpleNamespace(
+                        n_local_experts=2, dim=512, moe_inter_dim=128, layer_id=0
+                    )
+                    with patch.object(module, "_setup_buffer_and_warmup"), patch.object(
+                        deep_gemm,
+                        "transform_weights_for_mega_moe_fp8",
+                        side_effect=lambda a, b: (a, b),
+                    ) as transform, patch.object(
+                        exported_fp8,
+                        "requant_weight_ue8m0",
+                        wraps=fp8_kernel.requant_weight_ue8m0,
+                    ) as requant:
+                        if shared:
+                            module.setup_shared_expert_from_fp8(
+                                loaded13, loaded_s13, loaded2, loaded_s2
+                            )
+                        else:
+                            gate, up = loaded13.chunk(2, -2)
+                            gate_s, up_s = loaded_s13.chunk(2, -2)
+                            module.setup_weights_from_fp8(
+                                gate, gate_s, loaded2, loaded_s2, up, up_s
+                            )
+                    transform.assert_called_once()
+                    self.assertEqual(requant.call_count, 2 if expect_raw else 0)
+                    for call in requant.call_args_list:
+                        self.assertEqual(call.kwargs, {"dequant_dtype": torch.float32})
+                    (actual13, actual_s13), (actual2, actual_s2) = (
+                        transform.call_args.args
+                    )
+                    self.assert_bytes_equal(actual13, ref13)
+                    self.assert_bytes_equal(actual2, ref2)
+                    self.assert_packed(actual_s13, refs13, 256, 512)
+                    self.assert_packed(actual_s2, refs2, 512, 128)
+                    for tensor, original in zip((w13, s13, w2, s2), originals):
+                        self.assert_bytes_equal(tensor, original)
+
+            if shared:
+                # A raw shared-expert input may bypass the generic loader.
+                # Its owned converter must still preserve FP32 intermediates.
+                module = object.__new__(GLM5MegaMoEFP8SE)
+                torch.nn.Module.__init__(module)
+                module.cfg = SimpleNamespace(
+                    n_local_experts=2, dim=512, moe_inter_dim=128, layer_id=0
+                )
+                with patch.object(module, "_setup_buffer_and_warmup"), patch.object(
+                    deep_gemm,
+                    "transform_weights_for_mega_moe_fp8",
+                    side_effect=lambda a, b: (a, b),
+                ) as transform:
+                    module.setup_shared_expert_from_fp8(w13, s13, w2, s2)
+                (actual13, actual_s13), (actual2, actual_s2) = transform.call_args.args
+                self.assert_bytes_equal(actual13, ref13)
+                self.assert_bytes_equal(actual2, ref2)
+                self.assert_packed(actual_s13, refs13, 256, 512)
+                self.assert_packed(actual_s2, refs2, 512, 128)
 
     def test_real_descriptor_postprocess_routing(self):
         from rtp_llm.models_py.kernels.cuda import deepgemm_wrapper

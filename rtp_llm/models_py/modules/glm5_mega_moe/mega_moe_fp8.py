@@ -152,10 +152,14 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
                 "layer=%d",
                 cfg.layer_id,
             )
-            w13_fp8, s13_int = requant_weight_ue8m0(w13_fp8, s13)
+            w13_fp8, s13_int = requant_weight_ue8m0(
+                w13_fp8, s13, dequant_dtype=torch.float32
+            )
             del s13
             torch.cuda.empty_cache()
-            w2_fp8, s2_int = requant_weight_ue8m0(w2_fp8.contiguous(), w2_scale)
+            w2_fp8, s2_int = requant_weight_ue8m0(
+                w2_fp8.contiguous(), w2_scale, dequant_dtype=torch.float32
+            )
             del w2_scale
             torch.cuda.empty_cache()
         else:

@@ -894,7 +894,16 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             # UE8M0 representation directly from source weights.  Legacy/pre-quantized
             # inputs still arrive with floating-point block scales and require
             # the old dequantize/requantize conversion here.
-            if is_deep_gemm_e8m0_used() and scale_weight.dtype != torch.int32:
+            defer_moe_requant = (
+                getattr(load_config, "fp8_defer_moe_requant", False)
+                and self.quant_config.is_quanted()
+                and self.kernel.name in (W.moe_w1, W.moe_w2)
+            )
+            if (
+                is_deep_gemm_e8m0_used()
+                and not defer_moe_requant
+                and scale_weight.dtype != torch.int32
+            ):
                 if (
                     getattr(load_config, "fp8_requant_preserve_fp32", False)
                     and self.quant_config.is_quanted()
