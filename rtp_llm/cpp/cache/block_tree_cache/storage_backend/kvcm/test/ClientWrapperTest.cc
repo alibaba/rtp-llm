@@ -539,7 +539,6 @@ TEST(TransferClientCompatTest, PositiveDeadlineAndSdkErrorsPassThroughUnchanged)
     EXPECT_EQ(client.deadline_writes, 1u);
 }
 
-#if defined(KVCM_HAS_TRANSFER_DEADLINE)
 class DeadlineTransferClient: public kv_cache_manager::MockTransferClient {
 public:
     using MockTransferClient::MockTransferClient;
@@ -548,12 +547,15 @@ public:
     using Buffers = kv_cache_manager::BlockBuffers;
     using Trace = std::shared_ptr<kv_cache_manager::TransferTraceInfo>;
 
-    MOCK_METHOD(Code, LoadKvCachesWithDeadline, (const Uris&, const Buffers&, int64_t, Trace), (override));
+    MOCK_METHOD(Code, LoadKvCachesWithDeadline, (const Uris&, const Buffers&, int64_t, Trace));
     MOCK_METHOD((std::pair<Code, Uris>), SaveKvCachesWithDeadline,
-                (const Uris&, const Buffers&, int64_t, Trace), (override));
+                (const Uris&, const Buffers&, int64_t, Trace));
 };
 
 TEST(ClientWrapperTest, ReadAndWriteForwardParentDeadlineAndPreserveSubmissionState) {
+    if constexpr (!detail::HasTransferDeadline<kv_cache_manager::TransferClient>::value) {
+        GTEST_SKIP() << "SDK does not expose transfer deadline methods";
+    }
     using namespace kv_cache_manager;
     using Completion = ClientWrapper::TransferCompletion;
     unsigned char byte = 7;
@@ -607,7 +609,6 @@ TEST(ClientWrapperTest, ReadAndWriteForwardParentDeadlineAndPreserveSubmissionSt
     client->shutdown();
     EXPECT_EQ(*destruction_count, 1);
 }
-#endif
 
 TEST(ClientWrapperTest, RejectsInvalidConfigBeforeCreatingSubscriberOrClients) {
     auto                         valid      = makeConfig(false, "endpoint");
