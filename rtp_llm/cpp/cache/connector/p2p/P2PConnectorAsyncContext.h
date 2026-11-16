@@ -76,6 +76,8 @@ public:
 public:
     void waitDone() override;
     void onDone(DoneCallback callback) override;
+    // Fires once the read is terminal and no transport can still write the target.
+    void onTargetSafeToRelease(std::function<void()> callback);
     bool done() const override;
     bool success() const override;
 
@@ -164,6 +166,7 @@ private:
         ~DoneNotifier() { context.dispatchDoneCallbacks(); }
     };
     std::vector<DoneCallback> done_callbacks_;
+    std::vector<std::function<void()>> target_release_callbacks_;
 
     enum class KickoffState {
         QUEUED,

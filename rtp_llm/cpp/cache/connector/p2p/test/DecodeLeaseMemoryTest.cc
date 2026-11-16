@@ -339,6 +339,8 @@ TEST_P(DecodeLeaseMemoryTest, CancelRetainsBlockUntilLastWriteAndProtectsReusedB
     checker_->addContext(context);
     ASSERT_TRUE(waitUntil([&] { return receiver_->tasks().size() == 2; }));
     const auto tasks = receiver_->tasks();
+    auto       safe_to_release = std::make_shared<std::atomic<int>>(0);
+    context->onTargetSafeToRelease([safe_to_release] { ++*safe_to_release; });
 
     context->cancel(client_);
     ASSERT_TRUE(waitUntil([&] { return context->done(); }));
@@ -354,6 +356,7 @@ TEST_P(DecodeLeaseMemoryTest, CancelRetainsBlockUntilLastWriteAndProtectsReusedB
     if (GetParam() > 0) {
         ASSERT_TRUE(waitUntil([&] { return service_.lease_queries.load() > 0; }));
         EXPECT_FALSE(weak_context.expired());
+        EXPECT_EQ(safe_to_release->load(), 0);
         EXPECT_EQ(blockRefs(block_a), 1u);
         EXPECT_EQ(pool_->freeBlocksNum(), initial_free_ - 1);
         request_b = allocate(initial_free_ - 1);
@@ -386,6 +389,7 @@ TEST_P(DecodeLeaseMemoryTest, CancelRetainsBlockUntilLastWriteAndProtectsReusedB
     }
 
     ASSERT_TRUE(waitUntil([&] { return weak_context.expired() && blockRefs(block_a) == 0; }));
+    EXPECT_EQ(safe_to_release->load(), 1);
     EXPECT_EQ(pool_->freeBlocksNum(), request_b ? 1u : initial_free_);
     for (int layer = 0; layer < GetParam(); ++layer) {
         expectBytes(block_a, layer, 0xA0 + layer);
