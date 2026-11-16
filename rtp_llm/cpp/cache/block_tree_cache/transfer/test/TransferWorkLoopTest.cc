@@ -669,6 +669,36 @@ TEST_F(TransferWorkLoopTest, EngineIdleWaitIncludesCallbackSuccessorOnAnEarlierO
     engine->shutdown();
 }
 
+TEST(TransferWorkLoopLifecycleDeathTest, IdleLoadAndEvictOwnersRemainCancellableAndShutdown) {
+    const auto previous_style               = ::testing::GTEST_FLAG(death_test_style);
+    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
+    block_tree_cache_detail::ScopeRollback restore_style(
+        [&] { ::testing::GTEST_FLAG(death_test_style) = previous_style; });
+    for (const auto operation : {TransferOperation::LOAD, TransferOperation::EVICT}) {
+        SCOPED_TRACE(transferOperationName(operation));
+        ASSERT_EXIT(
+            {
+                // Keep a deadlocked owner bounded without detaching a thread
+                // that still references the fixture. This child owns no GPU/I/O.
+                std::signal(SIGALRM, SIG_DFL);
+                alarm(5);
+                for (size_t iteration = 0; iteration < 4; ++iteration) {
+                    TransferWorkLoop owner({}, nullptr, nullptr, operation, 1, 1, {});
+                    owner.start();
+                    // Test-only quiet time lets the empty owner enter its idle wait.
+                    std::this_thread::sleep_for(20ms);
+                    owner.cancelPendingStagingTransfers();
+                    owner.shutdown();
+                    owner.shutdown();
+                }
+                alarm(0);
+                _exit(0);
+            },
+            ::testing::ExitedWithCode(0),
+            "");
+    }
+}
+
 TEST_F(TransferWorkLoopDeathTest, EntryBadAllocIsFatal) {
     EXPECT_EXIT(
         {

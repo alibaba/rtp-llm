@@ -657,12 +657,18 @@ void TransferWorkLoop::run() {
         if (!accepting_ && entry_count_ == 0 && incoming_.empty() && disk_completed_.empty())
             return;
         if (ready_.empty() && completed_.empty() && !has_crc_pending_) {
-            const auto wake =
-                wait_deadlines_.empty() ? TransferTask::Clock::time_point::max() : wait_deadlines_.begin()->first;
-            cv_.wait_until(lock, wake, [&] {
+            const auto wake_up = [this] {
                 return !incoming_.empty() || !disk_completed_.empty() || cancel_staging_
                        || (!accepting_ && entry_count_ == 0);
-            });
+            };
+            if (wait_deadlines_.empty()) {
+                // No resource deadline exists. Converting steady_clock::time_point::max()
+                // to system_clock in older condition_variable implementations can
+                // overflow and spin without releasing mutex_, blocking shutdown.
+                cv_.wait(lock, wake_up);
+            } else {
+                cv_.wait_until(lock, wait_deadlines_.begin()->first, wake_up);
+            }
             lock.unlock();
             // Give already completed Disk stages and their successors the first
             // opportunity after waking, before admitting this turn's new work.
