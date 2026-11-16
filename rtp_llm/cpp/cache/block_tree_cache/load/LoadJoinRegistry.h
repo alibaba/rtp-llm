@@ -16,19 +16,24 @@ public:
 
     bool start(TreeNode*                                node,
                size_t                                   group_set_id,
+               uint64_t                                 generation,
                const std::vector<BlockIdxType>&         target_blocks,
                const std::shared_ptr<LoadAsyncContext>& context);
     bool join(const std::shared_ptr<LoadAsyncContext>& context);
-    bool finish(TreeNode* node, size_t group_set_id, std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts);
-    bool eraseForContext(TreeNode* node, size_t group_set_id, uint64_t context_id);
+    bool finish(TreeNode*                                       node,
+                size_t                                          group_set_id,
+                uint64_t                                        generation,
+                std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts);
+    bool eraseForContext(TreeNode* node, size_t group_set_id, uint64_t generation, uint64_t context_id);
 
 private:
     struct Key {
         TreeNode* node;
         size_t    group_set_id;
+        uint64_t  generation;
 
         bool operator==(const Key& other) const {
-            return node == other.node && group_set_id == other.group_set_id;
+            return node == other.node && group_set_id == other.group_set_id && generation == other.generation;
         }
     };
 
@@ -36,7 +41,7 @@ private:
         size_t operator()(const Key& key) const {
             const size_t node_hash  = std::hash<TreeNode*>{}(key.node);
             const size_t group_hash = std::hash<size_t>{}(key.group_set_id);
-            return node_hash ^ (group_hash << 1);
+            return node_hash ^ (group_hash << 1) ^ (std::hash<uint64_t>{}(key.generation) << 2);
         }
     };
 

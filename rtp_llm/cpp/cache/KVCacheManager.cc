@@ -141,8 +141,7 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
     pool_collector.pd_connector_ref_blocks           = static_cast<int64_t>(pool_metrics.pd_connector_ref_blocks);
     pool_collector.block_cache_ref_blocks            = static_cast<int64_t>(pool_metrics.block_cache_ref_blocks);
     pool_collector.load_ref_blocks                   = static_cast<int64_t>(pool_metrics.load_ref_blocks);
-    pool_collector.eviction_target_ref_blocks        = static_cast<int64_t>(pool_metrics.eviction_target_ref_blocks);
-    pool_collector.report_eviction_target_ref_blocks = pool_metrics.tier != Tier::DEVICE;
+    pool_collector.eviction_ref_blocks               = static_cast<int64_t>(pool_metrics.eviction_ref_blocks);
     pool_collector.frozen_ref_blocks                 = static_cast<int64_t>(pool_metrics.frozen_ref_blocks);
     pool_collector.report_frozen_ref_blocks          = report_frozen_ref_blocks;
     pool_collector.used_ratio                        = pool_metrics.used_ratio;

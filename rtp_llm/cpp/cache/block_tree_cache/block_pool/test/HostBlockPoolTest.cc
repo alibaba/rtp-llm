@@ -176,9 +176,9 @@ TEST(HostBlockPoolTest, LastTreeRefReleasesBlock) {
     EXPECT_TRUE(pool.isAllocated(*block));
     EXPECT_EQ(pool.treeRefCount(*block), 0u);
 
-    pool.incTreeRef(*block, BlockTreeRefType::EVICTION);
+    pool.incTreeRef(*block, BlockTreeRefType::EVICT);
     EXPECT_EQ(pool.treeRefCount(*block), 1u);
-    pool.decTreeRef(*block, BlockTreeRefType::EVICTION);
+    pool.decTreeRef(*block, BlockTreeRefType::EVICT);
     EXPECT_FALSE(pool.isAllocated(*block));
 }
 

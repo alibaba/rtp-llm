@@ -8,6 +8,7 @@ namespace rtp_llm {
 
 bool LoadJoinRegistry::start(TreeNode*                                node,
                              size_t                                   group_set_id,
+                             uint64_t                                 generation,
                              const std::vector<BlockIdxType>&         target_blocks,
                              const std::shared_ptr<LoadAsyncContext>& context) {
     Record record;
@@ -15,7 +16,7 @@ bool LoadJoinRegistry::start(TreeNode*                                node,
     record.owner_context_id              = context->contextId();
     record.owner_workflow_id = context->workflowId();
     const std::pair<decltype(records_)::iterator, bool> insert_result =
-        records_.emplace(Key{node, group_set_id}, std::move(record));
+        records_.emplace(Key{node, group_set_id, generation}, std::move(record));
     return insert_result.second;
 }
 
@@ -28,7 +29,7 @@ bool LoadJoinRegistry::join(const std::shared_ptr<LoadAsyncContext>& context) {
             continue;
         }
         const TransferDescriptor& desc      = load_descs[desc_index];
-        const auto                record_it = records_.find(Key{desc.node, desc.group_set_id});
+        const auto                record_it = records_.find(Key{desc.node, desc.group_set_id, desc.generation});
         if (record_it == records_.end()) {
             RTP_LLM_LOG_ERROR("failed to attach joined load context, group_set_id=%zu", desc.group_set_id);
             return false;
@@ -46,8 +47,9 @@ bool LoadJoinRegistry::join(const std::shared_ptr<LoadAsyncContext>& context) {
 
 bool LoadJoinRegistry::finish(TreeNode*                                       node,
                               size_t                                          group_set_id,
+                              uint64_t                                        generation,
                               std::vector<std::shared_ptr<LoadAsyncContext>>& joined_contexts) {
-    const auto record_it = records_.find(Key{node, group_set_id});
+    const auto record_it = records_.find(Key{node, group_set_id, generation});
     if (record_it == records_.end()) {
         return false;
     }
@@ -63,8 +65,8 @@ bool LoadJoinRegistry::finish(TreeNode*                                       no
     return true;
 }
 
-bool LoadJoinRegistry::eraseForContext(TreeNode* node, size_t group_set_id, uint64_t context_id) {
-    const auto record_it = records_.find(Key{node, group_set_id});
+bool LoadJoinRegistry::eraseForContext(TreeNode* node, size_t group_set_id, uint64_t generation, uint64_t context_id) {
+    const auto record_it = records_.find(Key{node, group_set_id, generation});
     if (record_it == records_.end()) {
         return false;
     }

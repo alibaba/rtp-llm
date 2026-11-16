@@ -508,7 +508,8 @@ TEST(LoadAsyncContextTest, ConcurrentCommitRunsCoordinatorCallbackOnceAndKeepsWi
                              /*path_index=*/0,
                              Tier::HOST,
                              Tier::DEVICE,
-                             BlockIndicesType{1});
+                             BlockIndicesType{1},
+                             /*initial_owner=*/false);
     std::shared_ptr<LoadAsyncContext> context = coordinator->create(std::move(descriptors), {false}, 1);
     ASSERT_TRUE(coordinator->registerContext(context));
 
@@ -557,7 +558,8 @@ TEST(LoadAsyncContextTest, ImmediateTransferFailureAfterSuccessfulCommitKeepsFal
                              /*path_index=*/0,
                              Tier::HOST,
                              Tier::DEVICE,
-                             BlockIndicesType{1});
+                             BlockIndicesType{1},
+                             /*initial_owner=*/false);
     auto context = coordinator->create(std::move(descriptors), {false}, 1);
     ASSERT_TRUE(coordinator->registerContext(context));
 

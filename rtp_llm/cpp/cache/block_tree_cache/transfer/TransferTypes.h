@@ -13,6 +13,7 @@
 #include <variant>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSetResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBufferSafety.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
@@ -20,13 +21,20 @@
 
 namespace rtp_llm {
 
-struct TreeNode;
-
-// Transfer lanes describe cache movement, independently of business priority.
-enum class TransferDirection {
+enum class TransferOperation : uint8_t {
     LOAD,
     EVICT,
 };
+
+inline const char* transferOperationName(TransferOperation operation) {
+    switch (operation) {
+        case TransferOperation::LOAD:
+            return "load";
+        case TransferOperation::EVICT:
+            return "evict";
+    }
+    return "unknown";
+}
 
 // Disk -> Device uses host staging internally without exposing Disk -> Host.
 inline bool isLoadTransfer(Tier source, Tier target) {
@@ -281,13 +289,16 @@ struct TransferDescriptor {
                        size_t                    path_index,
                        Tier                      source_tier,
                        Tier                      target_tier,
-                       std::vector<BlockIdxType> source_blocks):
+                       std::vector<BlockIdxType> source_blocks,
+                       bool                      initial_owner):
         node(node),
         group_set_id(group_set_id),
         path_index(path_index),
         source_tier(source_tier),
         target_tier(target_tier),
-        source_blocks(std::move(source_blocks)) {}
+        source_blocks(std::move(source_blocks)),
+        initial_owner(initial_owner),
+        generation(node ? node->group_set_resources.at(group_set_id).generation : 0) {}
 
     static TransferDescriptor
     deviceToHost(size_t group_set_id, std::vector<BlockIdxType> device_blocks, BlockIdxType host_block) {
@@ -359,8 +370,6 @@ struct TransferDescriptor {
                + blocksDebugString(source_blocks) + "], target_blocks=[" + blocksDebugString(target_blocks) + "]}";
     }
 
-    // Null for node-independent descriptors, including DEVICE-source reuse
-    // whose blocks may outlive eviction of the originating tree node.
     TreeNode*                 node{nullptr};
     size_t                    group_set_id{0};
     size_t                    path_index{0};
@@ -368,6 +377,12 @@ struct TransferDescriptor {
     Tier                      target_tier{Tier::NONE};
     std::vector<BlockIdxType> source_blocks;
     std::vector<BlockIdxType> target_blocks;
+    bool                      initial_owner{true};
+    uint64_t                  generation{0};
+
+    bool isCurrentOwner() const {
+        return node && initial_owner && generation == node->group_set_resources[group_set_id].generation;
+    }
 
 private:
     static bool endpointResolved(Tier tier, const std::vector<BlockIdxType>& blocks) {
