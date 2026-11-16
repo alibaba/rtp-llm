@@ -312,6 +312,8 @@ class TestGlm53Fp8Requant(unittest.TestCase):
                         side_effect=lambda a, b: (a, b),
                         create=True,
                     ) as transform, patch.object(
+                        deep_gemm, "get_block_m_for_mega_moe_fp8", create=True
+                    ), patch.object(
                         exported_fp8,
                         "requant_weight_ue8m0",
                         wraps=fp8_kernel.requant_weight_ue8m0,
@@ -353,13 +355,29 @@ class TestGlm53Fp8Requant(unittest.TestCase):
                     "transform_weights_for_mega_moe_fp8",
                     side_effect=lambda a, b: (a, b),
                     create=True,
-                ) as transform:
+                ) as transform, patch.object(
+                    deep_gemm, "get_block_m_for_mega_moe_fp8", create=True
+                ):
                     module.setup_shared_expert_from_fp8(w13, s13, w2, s2)
                 (actual13, actual_s13), (actual2, actual_s2) = transform.call_args.args
                 self.assert_bytes_equal(actual13, ref13)
                 self.assert_bytes_equal(actual2, ref2)
                 self.assert_packed(actual_s13, refs13, 256, 512)
                 self.assert_packed(actual_s2, refs2, 512, 128)
+
+    def test_shared_expert_rejects_missing_foreign_backend(self):
+        from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fp8_se import (
+            GLM5MegaMoEFP8SE,
+        )
+
+        module = object.__new__(GLM5MegaMoEFP8SE)
+        torch.nn.Module.__init__(module)
+        module.cfg = SimpleNamespace()
+        with patch.dict("sys.modules", {"deep_gemm": SimpleNamespace()}):
+            with self.assertRaisesRegex(
+                RuntimeError, "requires DeepGEMM shared-expert support"
+            ):
+                module.setup_shared_expert_from_fp8(None, None, None, None)
 
     def test_real_descriptor_postprocess_routing(self):
         from rtp_llm.models_py.kernels.cuda import deepgemm_wrapper
