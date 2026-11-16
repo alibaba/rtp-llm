@@ -520,7 +520,7 @@ class StackedMoePerChannelWeightTest(unittest.TestCase):
         )
 
         stacked_keys = ModelLoader._build_stacked_key_config(
-            [SimpleNamespace(weight=weight, layer_id=0)]
+            SimpleNamespace(layer_weights=[weight], weights=[])
         )
         self.assertEqual(
             stacked_keys[self._fused_key.format(i="0")],
@@ -561,7 +561,7 @@ class StackedMoePerChannelWeightTest(unittest.TestCase):
         self.assertIs(weight.scale.weights[0].merge_fun, identity)
 
         stacked_keys = ModelLoader._build_stacked_key_config(
-            [SimpleNamespace(weight=weight, layer_id=0)]
+            SimpleNamespace(layer_weights=[weight], weights=[])
         )
         self.assertIn(self._fused_key.format(i="0"), stacked_keys)
         self.assertIn((self._fused_key + ".weight_scale").format(i="0"), stacked_keys)
@@ -599,7 +599,7 @@ class StackedMoePerChannelWeightTest(unittest.TestCase):
         torch.testing.assert_close(loaded[W.moe_s2], scale, rtol=0, atol=0)
 
         stacked_keys = ModelLoader._build_stacked_key_config(
-            [SimpleNamespace(weight=weight, layer_id=0)]
+            SimpleNamespace(layer_weights=[weight], weights=[])
         )
         self.assertIn(fused_key.format(i="0"), stacked_keys)
         self.assertIn((fused_key + ".weight_scale").format(i="0"), stacked_keys)
