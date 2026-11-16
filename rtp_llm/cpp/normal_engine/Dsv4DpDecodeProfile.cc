@@ -22,7 +22,7 @@ void reserveDsv4DecodeWorkspace(const EngineInitParams& params, std::optional<Wa
 }  // namespace
 
 std::unique_ptr<DecodeReplicaCoordinator>
-createDsv4DpDecodeCoordinator(const EngineInitParams& params, std::string_view resolved_moe_strategy, bool) {
+createDsv4DpDecodeCoordinator(const EngineInitParams& params, std::string_view resolved_moe_strategy, bool has_draft) {
     const auto& parallelism_config = params.parallelism_config;
     const auto& pd_sep_config      = params.pd_sep_config;
     const auto& sp_config          = params.sp_config;
@@ -43,6 +43,10 @@ createDsv4DpDecodeCoordinator(const EngineInitParams& params, std::string_view r
                                              parallelism_config.local_world_size,
                                              parallelism_config.prefill_cp_config.is_enabled()),
         "SM120 DSv4 dedicated decode requires single-host PP1/TP1 and DP=EP=world in {4, 8}, with local CP off");
+    RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE
+                                || (has_draft && sp_config.gen_num_per_cycle > 0
+                                    && sp_config.gen_num_per_cycle < std::numeric_limits<int>::max()),
+                            "sm120_graph_decode requires a local draft and a positive speculative width");
 #if USING_CUDA
     const auto [major, minor] = getComputeCapability(parallelism_config.local_rank);
     RTP_LLM_CHECK_WITH_INFO(major == 12 && minor == 0 && params.hw_kernel_config.enable_cuda_graph,
@@ -50,36 +54,58 @@ createDsv4DpDecodeCoordinator(const EngineInitParams& params, std::string_view r
 #else
     RTP_LLM_FAIL("sm120_graph_decode requires an exact SM120 CUDA device");
 #endif
-    RTP_LLM_CHECK_WITH_INFO(sp_config.type == SP_TYPE_NONE, "sm120_graph_decode supports ordinary decode only");
-    RTP_LLM_CHECK_WITH_INFO(!eplb_config.enable_eplb() && kv_cache_config.multi_task_prompt_tokens.empty(),
-                            "sm120_graph_decode requires fixed expert ownership and a dedicated decode worker "
-                            "without local system prompts");
+    RTP_LLM_CHECK_WITH_INFO(
+        !eplb_config.enable_eplb()
+            && (sp_config.type == SP_TYPE_NONE || sp_config.type == SP_TYPE_MTP || sp_config.type == SP_TYPE_DSPARK)
+            && kv_cache_config.multi_task_prompt_tokens.empty(),
+        "sm120_graph_decode requires fixed expert ownership and a dedicated decode worker "
+        "without local system prompts, using ordinary decode, MTP, or DSpARK");
     RTP_LLM_CHECK_WITH_INFO(!runtime_config.use_batch_decode_scheduler
                                 || runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_warmup_type == 0,
                             "sm120_graph_decode requires the decode warmup for batch scheduling");
-    constexpr int phase_width = 1;
-    auto          buckets     = params.hw_kernel_config.decode_capture_batch_sizes;
+    const int phase_width = sp_config.targetDecodeTokenWidth();
+    auto      buckets     = params.hw_kernel_config.decode_capture_batch_sizes;
     std::sort(buckets.begin(), buckets.end());
     RTP_LLM_CHECK_WITH_INFO(validDsv4DecodeCaptureBuckets(buckets, parallelism_config.world_size, phase_width)
                                 && buckets.back() <= params.concurrency_config.concurrency_limit
                                 && params.model_config_.max_seq_len > phase_width
                                 && params.model_config_.max_seq_len <= std::numeric_limits<int>::max(),
                             "sm120_graph_decode requires an explicit, bounded decode capture catalog and context");
-    return std::make_unique<Dsv4DpDecodeRuntime>(parallelism_config.world_size, reserveDsv4DecodeWorkspace);
+    const auto first_phase =
+        sp_config.type == SP_TYPE_NONE ?
+            DecodeExecutionPhase::TARGET :
+            firstSpeculativeDecodePhase(sp_config.type == SP_TYPE_DSPARK, sp_config.gen_num_per_cycle);
+    return std::make_unique<Dsv4DpDecodeRuntime>(
+        parallelism_config.world_size, reserveDsv4DecodeWorkspace, first_phase);
 }
 
 namespace {
 
 void reserveDsv4DecodeWorkspace(const EngineInitParams& params, std::optional<WarmUpResult>& warm_up_result) {
-    const auto& buckets   = params.hw_kernel_config.decode_capture_batch_sizes;
-    const auto  device_id = getDeviceId();
-    const auto  before    = getGpuExecStatus().device_memory_status.available_bytes;
-    size_t      workspace_bytes;
+    const auto&   sp_config   = params.sp_config;
+    const auto&   buckets     = params.hw_kernel_config.decode_capture_batch_sizes;
+    const bool    speculative = sp_config.type != SP_TYPE_NONE;
+    const int64_t width       = sp_config.targetDecodeTokenWidth();
+    const auto    device_id   = getDeviceId();
+    const auto    before      = getGpuExecStatus().device_memory_status.available_bytes;
+    size_t        workspace_bytes;
     {
         py::gil_scoped_acquire gil;
         workspace_bytes =
-            params.py_model.attr("reserve_sm120_decode_workspace")(buckets, std::vector<int64_t>{1}, device_id)
+            params.py_model.attr("reserve_sm120_decode_workspace")(buckets, std::vector<int64_t>{width}, device_id)
                 .cast<size_t>();
+        if (speculative) {
+            const std::vector<int64_t> draft_widths = sp_config.type == SP_TYPE_DSPARK ?
+                                                          // DSpARK commit updates feature KV without running MoE.
+                                                          std::vector<int64_t>{sp_config.dsparkProposalTokenWidth()} :
+                                                          std::vector<int64_t>{1, width};
+            const auto                 draft_bytes =
+                params.py_sp_model.attr("reserve_sm120_decode_workspace")(buckets, draft_widths, device_id)
+                    .cast<size_t>();
+            RTP_LLM_CHECK_WITH_INFO(workspace_bytes <= std::numeric_limits<size_t>::max() - draft_bytes,
+                                    "DSv4 decode workspace size overflows");
+            workspace_bytes += draft_bytes;
+        }
     }
 
     const auto after                   = getGpuExecStatus().device_memory_status.available_bytes;

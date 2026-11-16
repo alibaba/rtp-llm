@@ -15,7 +15,9 @@ from rtp_llm.cpp.normal_engine.test.libdsv4_dp_decode_runtime_test_bindings impo
     Status,
     prepare_cache_capacity,
     prepare_model,
+    prepare_speculative_input,
     prepare_startup,
+    report_invalid_speculative_input,
 )
 
 
@@ -234,7 +236,65 @@ def run_speculative_phases(runtime, rank):
         width,
     )
     test.assertFalse(runtime.agree_speculative_status(rank != 3))
+    for i, (phase, width) in enumerate(
+        (mtp_draft, target_verify, mtp_commit, dspark_proposal, dspark_commit)
+    ):
+        failing_rank = i % 4
+        test.assertEqual(schedule_round(runtime, requests), Round.EXECUTE)
+        if rank == failing_rank:
+            with test.assertRaisesRegex(
+                RuntimeError, "injected rank-local preparation failure"
+            ):
+                prepare_speculative_input(runtime, phase, requests, True)
+        else:
+            prepared = prepare_speculative_input(runtime, phase, requests, False)
+            with test.assertRaisesRegex(RuntimeError, "invalid input geometry"):
+                runtime.plan(phase, width, prepared, True)
+
+        # The error path must vote exactly once; a following round can plan normally.
+        test.assertEqual(schedule_round(runtime, requests), Round.EXECUTE)
+        planned = runtime.plan(phase, width, requests, True)
+        check_execution(
+            test,
+            runtime.finish_preparation(planned.execution, Status.READY),
+            Mode.GRAPH,
+            phase,
+            2,
+            width,
+        )
+
+    phase, width = mtp_commit
+    if rank == 1:
+        test.assertEqual(report_invalid_speculative_input(runtime, phase, 17), 17)
+    else:
+        with test.assertRaisesRegex(RuntimeError, "invalid input geometry"):
+            runtime.plan(phase, width, requests, True)
     test.assertEqual(schedule_round(runtime, 0), Round.IDLE)
+
+
+def run_first_phase_rejection(world_size, rank):
+    test = unittest.TestCase()
+    for phase, width in (
+        (Phase.MTP_DRAFT, 1),
+        (Phase.TARGET_VERIFY, 2),
+        (Phase.DSPARK_PROPOSAL, 3),
+    ):
+        runtime = Runtime(world_size, first_phase=phase)
+        try:
+            runtime.verify_capture(phase, width, [1, 2])
+            runtime.finish_capture(phase)
+            requests = int(rank == 0)
+            test.assertEqual(schedule_round(runtime, requests), Round.EXECUTE)
+            with test.assertRaisesRegex(RuntimeError, "invalid input geometry"):
+                if rank == 1:
+                    runtime.reject_unprepared_round()
+                else:
+                    runtime.plan(phase, width, requests, True)
+            if rank == 1:
+                runtime.reject_unprepared_round()
+            test.assertEqual(schedule_round(runtime, 0), Round.IDLE)
+        finally:
+            del runtime
 
 
 def worker(rank, world_size, rendezvous):
@@ -256,7 +316,8 @@ def worker(rank, world_size, rendezvous):
             )
         finally:
             del runtime
-        # The runtime must destroy its subgroup without destroying WORLD.
+        run_first_phase_rejection(world_size, rank)
+        # The runtime must destroy its subgroups without destroying WORLD.
         dist.barrier()
     finally:
         dist.destroy_process_group()

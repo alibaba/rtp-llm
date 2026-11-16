@@ -538,6 +538,17 @@ TEST_F(MtpComputeTest, PrefillDropsFeaturesRemovedAtRequestStart) {
     }
 }
 
+TEST(MtpDecodeValidityTest, DenseCommitMaskFollowsEachAcceptedPrefix) {
+    const auto accept   = torch::tensor({1, 4, 2, 0}, torch::kInt32);
+    const auto mask     = mtp::acceptedDecodeLanes(accept, 4, 4);
+    const auto expected = torch::tensor(
+        {true, false, false, false, true, true, true, true, true, true, false, false, false, false, false, false},
+        torch::kBool);
+    EXPECT_TRUE(torch::equal(mask, expected));
+    EXPECT_TRUE(mask.is_contiguous());
+    EXPECT_THROW(mtp::acceptedDecodeLanes(accept, 3, 4), std::exception);
+}
+
 TEST_F(MtpComputeTest, DraftPrefillAfterVerifyCompactsDifferentAcceptLengths) {
     for (bool device_input : {false, true}) {
         const auto     device = device_input ? torch::kCUDA : torch::kCPU;

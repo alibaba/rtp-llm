@@ -343,6 +343,13 @@ AcceptedTokens getHostAcceptedTokens(const speculative::SpeculativeSamplerOutput
             output.accept_len_cpu.defined() ? output.accept_len_cpu : output.accept_len.cpu()};
 }
 
+torch::Tensor acceptedDecodeLanes(const torch::Tensor& accept_len, int64_t batch_size, int64_t width) {
+    RTP_LLM_CHECK_WITH_INFO(accept_len.defined() && accept_len.numel() == batch_size && width > 0,
+                            "invalid speculative decode acceptance geometry");
+    const auto offsets = torch::arange(width, accept_len.options()).reshape({1, width});
+    return (offsets < accept_len.reshape({batch_size, 1})).reshape({-1});
+}
+
 DraftInputLayout selectDraftInputLayout(bool device_state_enabled) {
     return device_state_enabled ? DraftInputLayout::FIXED_WIDTH : DraftInputLayout::COMPACT;
 }

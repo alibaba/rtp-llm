@@ -536,17 +536,16 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // clang-format on
 
         if (dspark_model_role_ == DSparkModelRole::PROPOSE) {
-            graph_params.num_tokens_per_bs =
-                params.sp_config.gen_num_per_cycle + static_cast<int>(!params.sp_config.sp_dspark_sample_from_anchor);
+            graph_params.num_tokens_per_bs = params.sp_config.dsparkProposalTokenWidth();
         } else if (dspark_model_role_ == DSparkModelRole::COMMIT) {
-            graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle + 1;
+            graph_params.num_tokens_per_bs = params.sp_config.targetDecodeTokenWidth();
         } else if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
             // for embedding model
             graph_params.num_tokens_per_bs = params.max_seq_len;
         } else if (params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 0
                    && (!params.model_id || is_prefill_cuda_graph_mode)) {
             // for target model verify and draft model prefill
-            graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle + 1;
+            graph_params.num_tokens_per_bs = params.sp_config.targetDecodeTokenWidth();
         } else {
             graph_params.num_tokens_per_bs = 1;
         }
@@ -565,6 +564,17 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                                                                      CudaGraphRole::MTP_DRAFT_PREFILL) :
                                             CudaGraphRole::DECODE;
         if (agreed_decode_execution_) {
+            if (dspark_model_role_ == DSparkModelRole::PROPOSE) {
+                agreed_decode_phase_ = DecodeExecutionPhase::DSPARK_PROPOSAL;
+            } else if (dspark_model_role_ == DSparkModelRole::COMMIT) {
+                agreed_decode_phase_ = DecodeExecutionPhase::DSPARK_COMMIT;
+            } else if (params.model_id && is_prefill_cuda_graph_mode) {
+                agreed_decode_phase_ = DecodeExecutionPhase::MTP_COMMIT;
+            } else if (params.model_id) {
+                agreed_decode_phase_ = DecodeExecutionPhase::MTP_DRAFT;
+            } else if (graph_params.is_target_verify) {
+                agreed_decode_phase_ = DecodeExecutionPhase::TARGET_VERIFY;
+            }
             agreed_decode_token_width_       = graph_params.num_tokens_per_bs;
             graph_params.agreed_decode_phase = agreed_decode_phase_;
         }

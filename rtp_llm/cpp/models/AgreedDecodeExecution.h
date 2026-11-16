@@ -36,6 +36,37 @@ public:
     virtual bool            agreeSpeculativeStatus(bool local_ok)                                             = 0;
 };
 
+inline DecodeExecutionPhase firstSpeculativeDecodePhase(bool dspark, int64_t proposal_width) {
+    if (dspark) {
+        return DecodeExecutionPhase::DSPARK_PROPOSAL;
+    }
+    return proposal_width > 1 ? DecodeExecutionPhase::MTP_DRAFT : DecodeExecutionPhase::TARGET_VERIFY;
+}
+
+inline void reportInvalidSpeculativeInput(AgreedDecodeExecution* agreement, DecodeExecutionPhase phase) noexcept {
+    if (agreement != nullptr) {
+        try {
+            agreement->rejectSpeculativeInput(phase);
+        } catch (...) {
+            // The rejection exchange also fails on this rank. Keep the
+            // original local error or status for the caller.
+        }
+    }
+}
+
+template<typename Prepare>
+decltype(auto)
+prepareSpeculativeInput(AgreedDecodeExecution* agreement, DecodeExecutionPhase phase, Prepare&& prepare) {
+    // Only wrap local preparation. Once forward enters PLAN, its own error
+    // handling owns the protocol and a second rejection would desynchronize it.
+    try {
+        return std::forward<Prepare>(prepare)();
+    } catch (...) {
+        reportInvalidSpeculativeInput(agreement, phase);
+        throw;
+    }
+}
+
 inline DecodeExecution finishPendingDecodePreparation(AgreedDecodeExecution&          agreement,
                                                       std::optional<DecodeExecution>& pending,
                                                       DecodePreparationStatus         status) {

@@ -49,6 +49,9 @@ enum class DraftInputLayout {
 /** Fixed-width inputs avoid host synchronization on accept_len in device-state mode. */
 DraftInputLayout selectDraftInputLayout(bool device_state_enabled);
 
+// Dense commit layout holds all verification lanes but writes only the accepted prefix.
+torch::Tensor acceptedDecodeLanes(const torch::Tensor& accept_len, int64_t batch_size, int64_t width);
+
 void prepareDraftPrefillAfterTargetPrefill(GptModelInputs&      draft_input,
                                            const torch::Tensor& target_hidden_states,
                                            const torch::Tensor& sampled_token_ids,

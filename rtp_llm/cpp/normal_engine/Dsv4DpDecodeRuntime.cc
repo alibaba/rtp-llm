@@ -34,8 +34,10 @@ struct Dsv4DpDecodeRuntime::ControlGroup {
     }
 };
 
-Dsv4DpDecodeRuntime::Dsv4DpDecodeRuntime(int world_size, WorkspaceReservation reserve_workspace):
-    world_size_(world_size), reserve_workspace_(reserve_workspace) {
+Dsv4DpDecodeRuntime::Dsv4DpDecodeRuntime(int                  world_size,
+                                         WorkspaceReservation reserve_workspace,
+                                         DecodeExecutionPhase first_phase):
+    world_size_(world_size), reserve_workspace_(reserve_workspace), first_phase_(first_phase) {
     py::gil_scoped_acquire gil;
     auto                   distributed = py::module_::import("torch.distributed");
     auto                   timeout     = py::module_::import("datetime").attr("timedelta")(py::arg("seconds") = 120);
@@ -139,11 +141,16 @@ DecodeReplicaRound Dsv4DpDecodeRuntime::beginRound(bool paused, bool stopping) {
 }
 
 void Dsv4DpDecodeRuntime::rejectUnpreparedRound() {
-    rejectUnpreparedTarget();
+    if (first_phase_ == DecodeExecutionPhase::TARGET) {
+        rejectUnpreparedTarget();
+    } else if (scheduled_requests_) {
+        scheduled_requests_.reset();
+        rejectSpeculativeInput(first_phase_);
+    }
 }
 
 void Dsv4DpDecodeRuntime::rejectUnpreparedTarget() {
-    if (!scheduled_requests_ || target_preparation_voted_) {
+    if (first_phase_ != DecodeExecutionPhase::TARGET || !scheduled_requests_ || target_preparation_voted_) {
         return;
     }
     const auto phase   = DecodeExecutionPhase::TARGET;

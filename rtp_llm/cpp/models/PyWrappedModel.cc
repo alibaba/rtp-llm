@@ -951,15 +951,22 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
 
     try {
         if (agreed_decode_execution_) {
-            const int64_t rows  = inputs.input_lengths.defined() ? inputs.input_lengths.numel() : 0;
-            const bool    valid = rows > 0 && inputs.input_lengths.dim() == 1 && inputs.combo_tokens.defined()
+            const int64_t rows     = inputs.input_lengths.defined() ? inputs.input_lengths.numel() : 0;
+            const bool    verifies = agreed_decode_phase_ == DecodeExecutionPhase::TARGET_VERIFY
+                                  || agreed_decode_phase_ == DecodeExecutionPhase::DSPARK_PROPOSAL
+                                  || agreed_decode_phase_ == DecodeExecutionPhase::DSPARK_COMMIT;
+            const bool prefill_shape = verifies || agreed_decode_phase_ == DecodeExecutionPhase::MTP_COMMIT;
+            const bool valid         = rows > 0 && inputs.input_lengths.dim() == 1 && inputs.combo_tokens.defined()
                                && inputs.combo_tokens.numel() / agreed_decode_token_width_ == rows
                                && inputs.combo_tokens.numel() % agreed_decode_token_width_ == 0
-                               && !inputs.is_target_verify && inputs.sequence_lengths.defined()
-                               && inputs.sequence_lengths.numel() == rows;
+                               && inputs.is_target_verify == verifies && inputs.sequence_lengths.defined()
+                               && inputs.sequence_lengths.numel() == (prefill_shape ? 0 : rows);
             const int64_t local_requests = valid ? (inputs.is_fake_stream ? 0 : rows) : -1;
-            pending_decode_execution     = agreed_decode_execution_->plan(
+            const auto    planned        = agreed_decode_execution_->plan(
                 agreed_decode_phase_, agreed_decode_token_width_, local_requests, owns_py_model_);
+            pending_decode_execution = planned.execution;
+            RTP_LLM_CHECK_WITH_INFO(planned.valid_local_input,
+                                    "decode input geometry does not match the agreed scheduling round");
         }
         if (hidden_state_capture_publisher_) {
             hidden_state_capture_publisher_->beginForward();
@@ -1063,8 +1070,17 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // The graph and fallback each prepare all rank-local inputs before a
         // final readiness exchange. Only the resulting plan may launch work.
         if (pending_decode_execution) {
-            py_model_inputs.decode_row_validity =
-                torch::full({token_ids.numel()}, !inputs.is_fake_stream, token_ids.options().dtype(torch::kBool));
+            if (inputs.is_fake_stream || !inputs.decode_row_validity.defined()) {
+                py_model_inputs.decode_row_validity =
+                    torch::full({token_ids.numel()}, !inputs.is_fake_stream, token_ids.options().dtype(torch::kBool));
+            } else {
+                const auto& validity = inputs.decode_row_validity;
+                RTP_LLM_CHECK_WITH_INFO(
+                    validity.device() == token_ids.device() && validity.scalar_type() == torch::kBool
+                        && validity.dim() == 1 && validity.is_contiguous() && validity.numel() == token_ids.numel(),
+                    "agreed decode row validity must be a contiguous device mask matching token rows");
+                py_model_inputs.decode_row_validity = validity;
+            }
             const auto agreed = prepareAgreedDecodeExecution(
                 *agreed_decode_execution_,
                 pending_decode_execution,

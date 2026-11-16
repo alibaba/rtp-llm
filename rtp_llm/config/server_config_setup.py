@@ -477,13 +477,22 @@ def _validate_sm120_decode_graph_config(configs, world: int) -> None:
         torch.cuda.get_device_capability(rank) != (12, 0) for rank in range(world)
     ):
         raise ValueError("sm120_graph_decode requires homogeneous exact SM120 devices")
+    if configs.sp_config.type not in (
+        SpeculativeType.NONE,
+        SpeculativeType.MTP,
+        SpeculativeType.DSPARK,
+    ):
+        raise ValueError("sm120_graph_decode supports ordinary decode, MTP and DSpARK")
+    width = 1
     if configs.sp_config.type != SpeculativeType.NONE:
-        raise ValueError("sm120_graph_decode supports ordinary decode only")
+        width = int(configs.sp_config.gen_num_per_cycle) + 1
+        if width <= 1:
+            raise ValueError("sm120_graph_decode requires a positive speculative width")
     buckets = configs.py_hw_kernel_config.decode_capture_batch_sizes
     # Match the fixed-size startup control record and signed row-count bounds.
     limit = min(
         configs.concurrency_config.concurrency_limit,
-        (2**31 - 1) // world,
+        (2**31 - 1) // (world * width),
     )
     if (
         not buckets

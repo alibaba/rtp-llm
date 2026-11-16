@@ -13,7 +13,9 @@ namespace rtp_llm {
 class Dsv4DpDecodeRuntime final: public DecodeReplicaCoordinator {
 public:
     using WorkspaceReservation = void (*)(const EngineInitParams&, std::optional<WarmUpResult>&);
-    explicit Dsv4DpDecodeRuntime(int world_size, WorkspaceReservation reserve_workspace = nullptr);
+    explicit Dsv4DpDecodeRuntime(int                  world_size,
+                                 WorkspaceReservation reserve_workspace = nullptr,
+                                 DecodeExecutionPhase first_phase       = DecodeExecutionPhase::TARGET);
     ~Dsv4DpDecodeRuntime() override;
 
     const char*        admissionError(const DecodeReplicaRequest& request) const override;
@@ -56,6 +58,7 @@ private:
     std::unique_ptr<ControlGroup>                  control_group_;
     const int                                      world_size_;
     const WorkspaceReservation                     reserve_workspace_;
+    const DecodeExecutionPhase                     first_phase_;
     int64_t                                        sequence_                 = 0;
     bool                                           target_preparation_voted_ = false;
     std::map<DecodeExecutionPhase, CaptureCatalog> capture_catalogs_;

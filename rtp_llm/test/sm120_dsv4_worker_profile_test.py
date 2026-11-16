@@ -28,6 +28,7 @@ def _configs(
     local_world_size=1,
     cp_enabled=False,
     spec_type=SpeculativeType.NONE,
+    speculative_width=3,
     moe_strategy="auto",
     cuda_graph=False,
     buckets=(1, 4),
@@ -45,7 +46,7 @@ def _configs(
             local_world_size=local_world_size,
             prefill_cp_config=SimpleNamespace(is_enabled=lambda: cp_enabled),
         ),
-        sp_config=SimpleNamespace(type=spec_type),
+        sp_config=SimpleNamespace(type=spec_type, gen_num_per_cycle=speculative_width),
         moe_config=SimpleNamespace(moe_strategy=moe_strategy),
         py_hw_kernel_config=SimpleNamespace(
             enable_cuda_graph=cuda_graph, decode_capture_batch_sizes=buckets
@@ -136,40 +137,37 @@ class Sm120Dsv4WorkerProfileTest(TestCase):
 
     def test_decode_graph_profiles(self):
         for world in (4, 8):
-            for strategy in ("auto", "sm120_graph_decode"):
-                with self.subTest(world=world, strategy=strategy):
-                    cfg = _configs(
-                        RoleType.DECODE,
-                        dp_size=world,
-                        ep_size=world,
-                        world_size=world,
-                        local_world_size=world,
-                        moe_strategy=strategy,
-                        cuda_graph=True,
-                    )
-                    self._validate(cfg)
-                    self.assertEqual(cfg.moe_config.moe_strategy, "sm120_graph_decode")
-
-    def test_decode_graph_rejects_speculation(self):
-        for spec_type in (SpeculativeType.MTP, SpeculativeType.DSPARK):
-            for strategy in ("auto", "sm120_graph_decode"):
-                with self.subTest(spec_type=spec_type, strategy=strategy):
-                    cfg = _configs(
-                        RoleType.DECODE,
-                        dp_size=8,
-                        ep_size=8,
-                        world_size=8,
-                        local_world_size=8,
-                        spec_type=spec_type,
-                        moe_strategy=strategy,
-                        cuda_graph=True,
-                    )
-                    with self.assertRaisesRegex(ValueError, "ordinary decode only"):
+            for spec_type in (
+                SpeculativeType.NONE,
+                SpeculativeType.MTP,
+                SpeculativeType.DSPARK,
+            ):
+                for strategy in ("auto", "sm120_graph_decode"):
+                    with self.subTest(
+                        world=world, spec_type=spec_type, strategy=strategy
+                    ):
+                        cfg = _configs(
+                            RoleType.DECODE,
+                            dp_size=world,
+                            ep_size=world,
+                            world_size=world,
+                            local_world_size=world,
+                            spec_type=spec_type,
+                            moe_strategy=strategy,
+                            cuda_graph=True,
+                        )
                         self._validate(cfg)
+                        self.assertEqual(
+                            cfg.moe_config.moe_strategy, "sm120_graph_decode"
+                        )
 
     def test_decode_graph_rejects_incompatible_strategy_and_topology(self):
         for changes, message in (
             ({"buckets": (1, 1)}, "unique positive buckets"),
+            (
+                {"spec_type": SpeculativeType.MTP, "speculative_width": 0},
+                "positive speculative width",
+            ),
             ({"moe_strategy": "sm120_a2a_decode"}, "requires eager execution"),
             (
                 {"cuda_graph": False, "moe_strategy": "sm120_graph_decode"},
@@ -194,7 +192,7 @@ class Sm120Dsv4WorkerProfileTest(TestCase):
                 with self.assertRaisesRegex(ValueError, message):
                     self._validate(_configs(RoleType.DECODE, **kwargs))
 
-    def test_decode_graph_workspace_bounds(self):
+    def test_decode_graph_workspace_bounds_and_phase_accounting(self):
         from rtp_llm.models_py.modules.factory.fused_moe.utils.sm120.graph_decode import (
             Sm120DecodeMoeGeometry,
             decode_workspace_geometry,
@@ -203,9 +201,11 @@ class Sm120Dsv4WorkerProfileTest(TestCase):
         one = Sm120DecodeMoeGeometry(16, 8, 4096, 2048, 256, 6)
         self.assertEqual(one.expert_capacity, 128)
         self.assertEqual(one.local_experts, 32)
+        verify = Sm120DecodeMoeGeometry(64, 8, 4096, 2048, 256, 6)
+        self.assertEqual(verify.expert_capacity, 512)
         self.assertEqual(
-            decode_workspace_geometry([16, 16], [1], 8, 4096, 2048, 256, 6),
-            one,
+            decode_workspace_geometry([16, 8], [1, 4, 4], 8, 4096, 2048, 256, 6),
+            verify,
         )
         with self.assertRaisesRegex(ValueError, "kernel extents"):
             Sm120DecodeMoeGeometry(1 << 22, 8, 4096, 2048, 256, 6)

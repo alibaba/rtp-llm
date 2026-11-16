@@ -370,8 +370,12 @@ void NormalEngine::initExecutor(const EngineInitParams& params) {
             [this]() { step_profiler_.finishStep(); },
             propose_params_.get()));
     } else if (sp_config.type != SP_TYPE_NONE) {
-        auto mtp_executor = std::make_unique<MtpExecutor>(
-            params, propose_params_, resource_context_.cache_manager, kv_cache_group_num_);
+        auto mtp_executor = std::make_unique<MtpExecutor>(params,
+                                                          propose_params_,
+                                                          resource_context_.cache_manager,
+                                                          kv_cache_group_num_,
+                                                          false,
+                                                          decode_replica_coordinator_.get());
         mtp_executor->setModelForwardCallbacks([this]() { step_profiler_.startStep(); },
                                                [this]() { step_profiler_.finishStep(); });
         executor_ = std::move(mtp_executor);

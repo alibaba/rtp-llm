@@ -100,7 +100,11 @@ PYBIND11_MODULE(libdsv4_dp_decode_runtime_test_bindings, m) {
         .def_readonly("execution", &AgreedDecodePlan::execution)
         .def_readonly("valid_local_input", &AgreedDecodePlan::valid_local_input);
     py::class_<Dsv4DpDecodeRuntime>(m, "Runtime")
-        .def(py::init<int>())
+        .def(py::init([](int world_size, DecodeExecutionPhase first_phase) {
+                 return std::make_unique<Dsv4DpDecodeRuntime>(world_size, nullptr, first_phase);
+             }),
+             py::arg("world_size"),
+             py::arg("first_phase") = DecodeExecutionPhase::TARGET)
         .def("begin_round", &Dsv4DpDecodeRuntime::beginRound)
         .def("agree_scheduled_requests", &Dsv4DpDecodeRuntime::agreeScheduledRequests)
         .def("reject_unprepared_target", &Dsv4DpDecodeRuntime::rejectUnpreparedTarget)
@@ -136,6 +140,20 @@ PYBIND11_MODULE(libdsv4_dp_decode_runtime_test_bindings, m) {
           py::arg("fail_graph"),
           py::arg("fail_eager"),
           py::arg("fail_discard") = false);
+    m.def("prepare_speculative_input",
+          [](Dsv4DpDecodeRuntime& runtime, DecodeExecutionPhase phase, int64_t requests, bool fail) {
+              return prepareSpeculativeInput(&runtime, phase, [&] {
+                  if (fail) {
+                      throw std::runtime_error("injected rank-local preparation failure");
+                  }
+                  return requests;
+              });
+          });
+    m.def("report_invalid_speculative_input",
+          [](Dsv4DpDecodeRuntime& runtime, DecodeExecutionPhase phase, int original_status) {
+              reportInvalidSpeculativeInput(&runtime, phase);
+              return original_status;
+          });
 }
 
 }  // namespace rtp_llm

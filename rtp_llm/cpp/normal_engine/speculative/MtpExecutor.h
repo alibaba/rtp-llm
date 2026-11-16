@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <list>
 #include <map>
 #include <memory>
@@ -22,8 +23,10 @@
 namespace rtp_llm {
 
 enum class ModelInputsModelRole;
+enum class DecodeExecutionPhase : uint8_t;
 
 class ModelInputsLogger;
+class AgreedDecodeExecution;
 
 struct MtpMetricsCollector {
     std::unique_ptr<FrontendMetricsStep<GenerateStreamPtr>> frontend_prefill_step;
@@ -44,8 +47,9 @@ public:
     explicit MtpExecutor(const EngineInitParams&                        params,
                          std::unique_ptr<ProposeModelEngineInitParams>& propose_params,
                          const std::shared_ptr<KVCacheManager>&         cache_manager,
-                         int32_t                                        kv_cache_group_num = 1,
-                         bool                                           warm_up            = false);
+                         int32_t                                        kv_cache_group_num      = 1,
+                         bool                                           warm_up                 = false,
+                         AgreedDecodeExecution*                         agreed_decode_execution = nullptr);
 
     absl::Status process(const ScheduleOutput& schedule_output, int64_t schedule_time_us = 0) override;
     void         syncMutableStreamState() override;
@@ -137,6 +141,8 @@ protected:
                              int64_t                             schedule_time_us);
 
     absl::Status decodeStep(const std::list<GenerateStreamPtr>& streams, MtpMetricsCollector& metrics_collector);
+    DecodeExecutionPhase firstDecodePhase() const;
+    DecodeExecutionPhase draftCommitPhase() const;
 
     // Phase-2 speculative recording: build the sp_verify record rows (one per
     // request slot, decode streams first then context streams to match
@@ -280,6 +286,7 @@ private:
     std::unique_ptr<ModelBase>                                               model_;
     std::unique_ptr<Sampler>                                                 sampler_;
     std::unique_ptr<MtpBatchStreamProcessor>                                 batch_stream_processor_;
+    AgreedDecodeExecution*                                                   agreed_decode_execution_ = nullptr;
     std::shared_ptr<KVCacheManager>                                          cache_manager_;
     std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
     bool                                                                     enable_detail_log_ = false;
