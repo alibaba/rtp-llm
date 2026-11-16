@@ -16,12 +16,14 @@ from rtp_llm.models_py.model_desc.block_map import (
 )
 from rtp_llm.models_py.model_desc.glm53_moe import GenericMoeDecoderLayer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.models_py.modules import Embedding, LinearFactory, RMSNorm, RMSResNorm
+from rtp_llm.models_py.modules import Embedding, LinearFactory
 from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
     MultimodalEmbeddingInjector,
     prepare_mtp_multimodal_inputs,
 )
 from rtp_llm.models_py.modules.dsv4.forward_metadata import scoped_forward_metadata
+from rtp_llm.models_py.modules.glm53.norm import Glm53RMSNorm as RMSNorm
+from rtp_llm.models_py.modules.glm53.norm import Glm53RMSResNorm as RMSResNorm
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 

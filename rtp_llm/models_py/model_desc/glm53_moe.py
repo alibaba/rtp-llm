@@ -32,7 +32,6 @@ from rtp_llm.models_py.modules import (
     FusedMoeFactory,
     GroupTopK,
     LinearFactory,
-    RMSResNorm,
     SelectTopk,
     SigmoidGateScaleAdd,
 )
@@ -40,6 +39,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
 from rtp_llm.models_py.modules.factory.linear.fixed_m_linear import fixed_m_linear
+from rtp_llm.models_py.modules.glm53.norm import Glm53RMSResNorm as RMSResNorm
 from rtp_llm.models_py.modules.hybrid.glm53_mla_attention import MlaAttention
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, LayerKVCache, PyModelInputs, PyModelOutputs

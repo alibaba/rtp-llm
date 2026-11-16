@@ -1,20 +1,21 @@
 from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
+from torch import nn
+
 from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.distributed.collective_torch import (
     Group,
     all_reduce,
     reduce_scatter_padded,
 )
-from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.modules.factory.attention.attn_factory import MlaImplBase
+from rtp_llm.models_py.modules.glm53.norm import Glm53RMSNorm as RMSNorm
 from rtp_llm.models_py.modules.hybrid.glm53_indexer import Indexer
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache, LayerKVCache
 from rtp_llm.utils.model_weight import W
-from torch import nn
 
 # CUDA-only fused strided RMSNorm (replaces .contiguous() + RMSNorm). When
 # q_b_proj is fp8, we additionally emit fp8+scale to skip a separate

@@ -44,8 +44,6 @@ from rtp_llm.models_py.modules import (
     FMHAImplBase,
     LinearFactory,
     MultimodalEmbeddingInjector,
-    RMSNorm,
-    RMSResNorm,
 )
 from rtp_llm.models_py.modules.dsv4.forward_metadata import (
     cached_prefill_prefix_summary,
@@ -54,6 +52,8 @@ from rtp_llm.models_py.modules.dsv4.forward_metadata import (
     tensor_key,
 )
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
+from rtp_llm.models_py.modules.glm53.norm import Glm53RMSNorm as RMSNorm
+from rtp_llm.models_py.modules.glm53.norm import Glm53RMSResNorm as RMSResNorm
 from rtp_llm.models_py.modules.glm53_mega_mhc import (
     can_use_mega_mhc,
     fused_post_pre_rms,
