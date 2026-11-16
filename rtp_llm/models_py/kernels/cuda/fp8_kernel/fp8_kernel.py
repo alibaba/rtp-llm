@@ -494,14 +494,47 @@ def quant_weight_ue8m0_packed(
 def requant_weight_ue8m0(
     weight: torch.Tensor,
     weight_scale_inv: torch.Tensor,
+    *,
+    dequant_dtype: torch.dtype = torch.bfloat16,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Requantize offline FP8 weights; FP32 is an explicit model capability."""
+    if dequant_dtype not in (torch.bfloat16, torch.float32):
+        raise ValueError(
+            f"Unsupported FP8 requant dequantization dtype: {dequant_dtype}"
+        )
     weight_block_size = [128, 128]
+
+    if (
+        dequant_dtype == torch.float32
+        and weight.ndim == 3
+        and weight.shape[-2] % 128 == 0
+        and weight.shape[-1] % 128 == 0
+    ):
+        # Bound the FP32 temporary to one expert, as in the GLM53 producer.
+        out_w = torch.empty(
+            weight.shape, device=weight.device, dtype=torch.float8_e4m3fn
+        )
+        out_s = torch.empty(
+            weight_scale_inv.shape, device=weight.device, dtype=torch.float32
+        )
+        for expert in range(weight.shape[0]):
+            dequant = block_quant_dequant(
+                weight[expert],
+                weight_scale_inv[expert],
+                weight_block_size,
+                dequant_dtype,
+            )
+            expert_w, expert_s = per_block_cast_to_fp8(dequant, use_ue8m0=True)
+            out_w[expert].copy_(expert_w)
+            out_s[expert].copy_(expert_s)
+            del dequant, expert_w, expert_s
+        return out_w, _transform_scale_ue8m0(out_s, mn=out_w.shape[-2])
 
     weight_dequant = block_quant_dequant(
         weight,
         weight_scale_inv,
         weight_block_size,
-        torch.bfloat16,
+        dequant_dtype,
     )
     out_w, out_s = quant_weight_ue8m0(
         weight_dequant=weight_dequant,

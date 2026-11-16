@@ -12,6 +12,12 @@ _MODEL_TEST_DEPS = [
     "//rtp_llm:testlib",
 ]
 
+# Keep GLM53's offline FP32 producer separate from generic BF16 requantization.
+dsv4_sm100_py_test(
+    name = "test_glm53_fp8_requant",
+    deps = _MODEL_TEST_DEPS + ["//rtp_llm/models_py:kernels"],
+)
+
 # Source GLM53 mHC initial-pre contract: keep one-token reductions across
 # decode/verify padding and prefill token shards without changing other models.
 dsv4_sm100_py_test(
