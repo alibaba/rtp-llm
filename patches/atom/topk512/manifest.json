@@ -1,0 +1,14 @@
+{
+  "atom_version": "0.1.8+g9af739efc",
+  "patch_sha256": "d7254b106b24c1371c40d6c12f6c36f13ac557a4e8c17577b5ce233cd1ecab4f",
+  "files": {
+    "atom/plugin/rtpllm/utils/topk_compat.py": {
+      "source_sha256": "6e8e28670dc29e3e1ac25e47a5faebff72b3288ee0cc9429131aaae64c476d79",
+      "patched_sha256": "3878de536d929825424097924ed40d2788e1e3b852589d87d2628b1cf6e2294f"
+    },
+    "atom/plugin/rtpllm/utils/topk512.py": {
+      "source_sha256": null,
+      "patched_sha256": "282bb5ab13470524de10816c7a2760042dcb67f3935a432791e6a31474c73502"
+    }
+  }
+}
