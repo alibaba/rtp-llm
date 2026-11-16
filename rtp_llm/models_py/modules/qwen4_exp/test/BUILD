@@ -379,6 +379,15 @@ models_py_test(
     deps = _REFERENCE_DEPS,
 )
 
+py_test(
+    name = "fp8_sm90_quant_test",
+    srcs = ["fp8_sm90_quant_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
 models_py_test(
     name = "pd_cache_store_test",
     src = "qsa/pd_cache_store_test.py",
