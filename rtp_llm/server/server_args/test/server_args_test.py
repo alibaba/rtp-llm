@@ -122,6 +122,47 @@ class PipelinePartitionArgumentsTest(TestCase):
                     server_args.setup_args(["--tp_size", "1"])
 
 
+class AsyncCachePrepareArgumentsTest(TestCase):
+    def test_environment_cli_and_transport(self):
+        from rtp_llm.server.server_args import server_args
+
+        for env, args, expected in (
+            ({}, [], False),
+            ({"RTP_LLM_ASYNC_PREPARE_CACHE": "1"}, [], True),
+            ({"RTP_LLM_ASYNC_PREPARE_CACHE": "0"}, [], False),
+            (
+                {"RTP_LLM_ASYNC_PREPARE_CACHE": "1"},
+                ["--async_cache_prepare", "0"],
+                False,
+            ),
+        ):
+            with (
+                self.subTest(env=env, args=args),
+                patch.dict(os.environ, env, clear=True),
+            ):
+                config = server_args.setup_args(
+                    args
+                ).runtime_config.fifo_scheduler_config
+                self.assertEqual(config.async_cache_prepare, expected)
+                restored = pickle.loads(pickle.dumps(config))
+                self.assertEqual(restored.async_cache_prepare, expected)
+
+    def test_legacy_pickles_keep_preparation_disabled(self):
+        from rtp_llm.ops import FIFOSchedulerConfig
+
+        for state in (
+            (1, 8192),
+            (1, 8192, "", "1:1"),
+            (1, 8192, "", "1:1", True, 0),
+            (1, 8192, "", "1:1", True, 0, 2048),
+            (1, 8192, "", "1:1", True, 0, 2048, 128),
+        ):
+            with self.subTest(state=state):
+                config = FIFOSchedulerConfig.__new__(FIFOSchedulerConfig)
+                config.__setstate__(state)
+                self.assertFalse(config.async_cache_prepare)
+
+
 class CPRotateMethodArgumentsTest(TestCase):
     def test_serialized_disabled_environment_matches_default(self):
         from rtp_llm.ops import CPRotateMethod

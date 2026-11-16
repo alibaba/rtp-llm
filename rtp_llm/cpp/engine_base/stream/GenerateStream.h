@@ -204,6 +204,8 @@ public:
     int                  reuseBlockSize() const;
     void                 fakeInitKVBlock(size_t reserved_blocks = 0);
     virtual absl::Status initKVBlock();
+    // Prepare the initial allocator transaction without granting execution.
+    CachePrepareResult   prepareCache();
     virtual absl::Status incrKVBlock();
     virtual void         releaseResource();
     int                  nextNeedBlockNums(int reserve_step) const;
@@ -302,7 +304,7 @@ public:
     bool isLastChunk() const;      // current chunk reaches seqLength()
     bool isMiddleChunk() const;    // chunked + context + !last → no sample / no output row
     bool hasPendingChunk() const;  // remaining context window, read consistently with result updates
-    void advanceChunk();  // reuse_length_ += currentChunkLen()
+    void advanceChunk();           // reuse_length_ += currentChunkLen()
     bool hasAdvancedChunk() const {
         return chunk_advanced_;
     }
