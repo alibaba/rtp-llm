@@ -93,7 +93,9 @@ class Qwen3DFlash(QwenV3):
         # on the full target vocabulary (dflashDraftProbabilities). A borrowed
         # pruned head would silently sample out-of-subset tokens, so refuse the
         # share at config time instead of corrupting generation.
-        if target_config.enable_output_vocab_pruning or getattr(target_config, "output_vocab_ids", None):
+        if getattr(target_config, "enable_output_vocab_pruning", False) or getattr(
+            target_config, "output_vocab_ids", None
+        ):
             raise ValueError(
                 "DFlash cannot borrow the target embedding/lm-head while output "
                 "vocabulary pruning is enabled on the target model"
