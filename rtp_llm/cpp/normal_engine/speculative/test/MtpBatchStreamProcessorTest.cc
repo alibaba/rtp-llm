@@ -1302,8 +1302,16 @@ TEST_F(MtpBatchStreamProcessorTest, DFlashSevenProposalsExcludeAnchorAndPreserve
 
     GptModelInputs input;
     TensorHolder   holder;
-    processor.buildDSparkProposeInput(
-        input, torch::tensor({101, 255}, torch::kInt32), torch::tensor({4096, 8192}, torch::kInt32), holder);
+    mtp::DSparkRoundState round{torch::tensor({101, 255}, torch::kInt32),
+                                torch::tensor({4096, 8192}, torch::kInt32)};
+    mtp::DSparkProposeInputBuffers propose_buffers;
+    mtp::prepareDSparkProposeInput(input,
+                                   round,
+                                   /*propose_step=*/7,
+                                   /*mask_token_id=*/255,
+                                   /*sample_from_anchor=*/false,
+                                   propose_buffers,
+                                   holder);
     EXPECT_EQ((std::vector<int32_t>{101, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255}),
               toVec<int32_t>(input.combo_tokens));
     EXPECT_EQ((std::vector<int32_t>{8, 8}), toVec<int32_t>(input.input_lengths));

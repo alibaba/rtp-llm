@@ -1066,8 +1066,8 @@ TEST_F(FIFOSchedulerTest, LinearHistoryAdmissionAllowsLongGenerationWithinPhysic
             while ((!running->isFinished() || !candidate->isFinished()) && rounds++ < 42) {
                 auto batch = scheduler.schedule();
                 ASSERT_TRUE(batch.ok());
-                ASSERT_FALSE(batch->empty() && (!running->isFinished() || !candidate->isFinished()));
-                for (const auto& stream : *batch) {
+                ASSERT_FALSE(batch->streams.empty() && (!running->isFinished() || !candidate->isFinished()));
+                for (const auto& stream : batch->streams) {
                     ASSERT_FALSE(stream->isContextStream());
                     commit_token(stream);
                     ASSERT_FALSE(stream->hasError());
@@ -1192,10 +1192,10 @@ TEST_F(FIFOSchedulerTest, PDLinearTailSwitchCombinationsFinishLongRequestsWithin
                     ASSERT_TRUE(batch.ok());
                     // The final schedule applies GenerateDone and releases both
                     // streams; it legitimately returns no work once both are done.
-                    ASSERT_FALSE(batch->empty() && (!streams[0]->isFinished() || !streams[1]->isFinished()))
+                    ASSERT_FALSE(batch->streams.empty() && (!streams[0]->isFinished() || !streams[1]->isFinished()))
                         << "round=" << rounds << " seq_lengths=" << streams[0]->seqLength() << ","
                         << streams[1]->seqLength();
-                    for (const auto& stream : *batch) {
+                    for (const auto& stream : batch->streams) {
                         EXPECT_FALSE(stream->isContextStream());
                         commit_token(stream);
                         ASSERT_FALSE(stream->hasError());
