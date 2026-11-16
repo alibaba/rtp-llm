@@ -175,17 +175,17 @@ protected:
                                        int64_t&                                         model_forward_us);
     GptModelOutputs  runDraftPrefillForward(GptModelInputs& model_input);
     SpecLogitsVerifyRunner::LaunchResult
-         buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
-                                     const torch::Tensor&                draft_tokens,
-                                     std::shared_ptr<torch::Event>       draft_tokens_ready_event);
-    void collectDecodeMetrics(const StreamGroups&                          stream_groups,
-                              torch::Event&                                accept_len_ready_event,
-                              const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
-                              MtpMetricsCollector&                         metrics_collector,
-                              int64_t                                      model_forward_us,
-                              const torch::Tensor&                         confidence_rates         = torch::Tensor(),
-                              const torch::Tensor&                         confidence_valid_lengths = torch::Tensor(),
-                              int64_t                                      verify_draft_token_num   = -1);
+                 buildSpecLogitsVerifyInline(const std::list<GenerateStreamPtr>& streams,
+                                             const torch::Tensor&                draft_tokens,
+                                             std::shared_ptr<torch::Event>       draft_tokens_ready_event);
+    void         collectDecodeMetrics(const StreamGroups&                          stream_groups,
+                                      torch::Event&                                accept_len_ready_event,
+                                      const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
+                                      MtpMetricsCollector&                         metrics_collector,
+                                      int64_t                                      model_forward_us,
+                                      const torch::Tensor&                         confidence_rates = torch::Tensor(),
+                                      const torch::Tensor&                         confidence_valid_lengths = torch::Tensor(),
+                                      int64_t                                      verify_draft_token_num = -1);
     absl::Status dispatchDecodeOutput(const StreamGroups&                          stream_groups,
                                       const std::list<GenerateStreamPtr>&          streams,
                                       const speculative::SpeculativeSamplerOutput& speculative_sampler_output,

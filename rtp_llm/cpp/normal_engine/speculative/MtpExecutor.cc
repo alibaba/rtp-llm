@@ -1430,6 +1430,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         if (model_inputs_logger_) {
             model_inputs_logger_->log(model_input, ModelInputsModelRole::TARGET, model_->model_id_);
         }
+        // The full input snapshot and target/draft owners are already fixed.
+        startNextPrefillPrepare();
         if (telemetry::TelemetryRuntime::isActive()) {
             const auto forward_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
             for (const auto& stream : streams) {

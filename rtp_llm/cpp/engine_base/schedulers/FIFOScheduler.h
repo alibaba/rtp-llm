@@ -34,6 +34,13 @@ public:
     enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override;
 
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override;
+    bool                                         pruneInvalidPreparedPrefill(std::list<GenerateStreamPtr>& streams);
+    bool                                         refreshPreparedPrefill(std::list<GenerateStreamPtr>& streams);
+    bool                                         beginPrefillExecution();
+    int64_t                                      completePrefillExecution();
+    void                                         discardPreparedPrefill(const std::string& error);
+    absl::Status                                 stop() override;
+    absl::Status                                 finalizeStop() override;
 
 public:
     // for test. Group-aware shadow of the FIFOSchedulerBase helper so that
@@ -80,7 +87,8 @@ private:
                                   size_t                   admitted_tokens,
                                   size_t                   admitted_max_seq_len,
                                   size_t                   admitted_sequence_count,
-                                  const GenerateStreamPtr& candidate) const;
+                                  const GenerateStreamPtr& candidate,
+                                  size_t                   running_token_reserve) const;
     size_t prefillTokenCostWithoutCache(const GenerateStreamPtr& stream) const;
     size_t prefillSeqLenWithCache(const GenerateStreamPtr& stream) const;
     size_t prefillTokenCostWithCache(const GenerateStreamPtr& stream) const;
@@ -97,7 +105,8 @@ private:
     // finalized. FIFOSchedulerBase::evaluateWaitingStreams() is left untouched for the other
     // FIFOSchedulerBase subclasses.
     void admitWaitingStreams(std::list<GenerateStreamPtr>&       waiting_streams,
-                             const std::list<GenerateStreamPtr>& already_admitted_streams);
+                             const std::list<GenerateStreamPtr>& already_admitted_streams,
+                             bool                                allow_admission = true);
 
     void cancelGroups(StreamGroupQueue& group_queue);
     void evaluateWaitingGroupQueue();
@@ -109,6 +118,7 @@ private:
     void dispatchPreparedGroup(StreamGroup& group);
 
     void    updateCacheExposedWait();
+    void    notifyCacheLoadCompleted();
     void    cancelExtraStreams() override;
     bool    hasExtraStreams() const override;
     int64_t extraOnflightStreams() const override;
@@ -117,6 +127,18 @@ private:
     // Explicit request groups (enqueueGroup). Each group is admitted as a whole
     // to an isolated execution boundary; a partially admitted group keeps its
     // residual members at the queue head.
+    struct CacheLoadWakeup {
+        std::mutex     mutex;
+        FIFOScheduler* owner = nullptr;
+    };
+
+    const bool                       prefill_async_scheduling_;
+    std::shared_ptr<CacheLoadWakeup> cache_load_wakeup_             = std::make_shared<CacheLoadWakeup>();
+    std::atomic<bool>                cache_load_completion_pending_ = false;
+    StreamGroup                      executing_prefill_streams_;
+    size_t                           executing_inited_kv_streams_ = 0;
+    bool                             prepared_prefill_reserved_   = false;
+
     StreamGroupQueue waiting_group_queue_;
     StreamGroupQueue loading_cache_group_queue_;
 

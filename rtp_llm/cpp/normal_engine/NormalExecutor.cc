@@ -309,6 +309,8 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
             const auto role = is_propose_ ? ModelInputsModelRole::DRAFT : ModelInputsModelRole::NORMAL;
             model_inputs_logger_->log(model_input, role, model_->model_id_);
         }
+        // Input ownership is fixed; only independent next-batch host work overlaps.
+        startNextPrefillPrepare();
         if (telemetry::TelemetryRuntime::isActive()) {
             const auto forward_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
             for (const auto& stream : streams) {
@@ -369,9 +371,8 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         executor_collector.sample_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
-    // Stream-async dispatch is opt-in and only useful for decode-only batches:
-    // the next iteration can overlap forward prep with worker D2H/update work.
-    // Prefill gets no overlap benefit and would only add worker startup cost.
+    // Decode uses asynchronous output dispatch. Prefill overlaps its next
+    // host preparation separately and retains completion on this thread.
     const bool is_decode_only = stream_groups.totalContextBatchSize() == 0 && stream_groups.totalDecodeBatchSize() > 0;
     StreamGroups::TokenCountsByPriority token_counts_by_priority;
     if (metrics_reporter_ && tp_rank_ == 0) {

@@ -395,6 +395,7 @@ class EplbMode:
         ...
 class FIFOSchedulerConfig:
     cp_force_single_prefill: bool
+    prefill_async_scheduling: bool
     decode_prefill_ratio: str
     max_batch_tokens_size: int
     max_batch_tokens_without_cache: int

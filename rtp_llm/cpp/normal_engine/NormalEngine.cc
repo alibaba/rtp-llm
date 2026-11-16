@@ -153,6 +153,29 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                    params.parallelism_config.dp_rank * params.parallelism_config.tp_size
                        + params.parallelism_config.tp_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
+    // Reject unsupported ownership/capture combinations before warmup, KV
+    // allocation or executor creation. OFF keeps the existing configuration path.
+    if (runtime_config.fifo_scheduler_config.prefill_async_scheduling) {
+        RTP_LLM_CHECK_WITH_INFO(pd_sep_config.role_type == RoleType::PREFILL && parallelism_config.dp_size == 1
+                                    && parallelism_config.pp_size == 1
+                                    && !ffn_disaggregate_config.enable_ffn_disaggregate
+                                    && !runtime_config.use_batch_decode_scheduler
+                                    && (!propose_params_ || propose_params_->sp_type == SP_TYPE_DSPARK),
+                                "Prefill async scheduling requires text PREFILL/FIFO, DP1/PP1, "
+                                "no FFN disaggregation, and Normal or DSpark execution");
+        RTP_LLM_CHECK_WITH_INFO(
+            !params.hw_kernel_config.enable_cuda_graph
+                || (params.hw_kernel_config.prefill_capture_seq_lens.empty()
+                    && !isGenerationPrefillCudaGraphRequested(params.hw_kernel_config, pd_sep_config.role_type)),
+            "Prefill async scheduling does not support Prefill CUDA graph capture");
+        for (const char* name :
+             {"RTP_LLM_MTP_ASYNC_PREPARE", "RTP_LLM_MTP_ASYNC_DEVICE_STATE", "RTP_LLM_DROP_BROAD_SYNC"}) {
+            const char* value = std::getenv(name);
+            RTP_LLM_CHECK_WITH_INFO(value == nullptr || std::strcmp(value, "1") != 0,
+                                    "Prefill async scheduling does not support %s=1",
+                                    name);
+        }
+    }
     // Claim before warmup/initExecutor can consume this shared CPU TP channel.
     // A deferred start_loop=false engine owns the session during preparation too.
     if (shouldCoordinateCpuTpShutdown(parallelism_config, ffn_disaggregate_config)) {
@@ -271,6 +294,13 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     releaseHostMemoryCache();
 
     initScheduler();
+    if (runtime_config.fifo_scheduler_config.prefill_async_scheduling) {
+        if (parallelism_config.tp_rank == 0) {
+            prefill_prepare_pool_ = std::make_unique<autil::LockFreeThreadPool>(1, 1, nullptr, "PrefillPrepare");
+            RTP_LLM_CHECK_WITH_INFO(prefill_prepare_pool_->start(), "cannot start Prefill prepare worker");
+        }
+        RTP_LLM_LOG_INFO("Prefill async scheduling enabled: one execution and one host preparation");
+    }
     step_profiler_.configureFromConfig(profiling_debug_logging_config);
     if (start_loop) {
         (void)startLoop();
@@ -716,6 +746,11 @@ absl::Status NormalEngine::stop() {
         loop_thread_->join();
         loop_thread_.reset();
     }
+    if (prefill_prepare_pool_) {
+        prefill_prepare_pool_->stop();
+        prepared_prefill_batch_.reset();
+        prefill_prepare_pool_.reset();
+    }
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
     const auto finalize_status = scheduler_->finalizeStop();
@@ -882,6 +917,34 @@ NormalEngine::enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>&
     return {std::move(enqueue_successes), std::move(streams)};
 }
 
+void NormalEngine::startNextPrefillPrepare() {
+    if (!prefill_prepare_pool_ || prepared_prefill_batch_) {
+        return;
+    }
+    prepared_prefill_batch_.emplace(prefill_prepare_pool_->async([this] {
+        auto prepared = prepareNextPrefillBatch();
+        // An empty poll can start cache recovery. Keep preparing while it
+        // completes, and seal immediately when runnable work appears.
+        while (prepared.streams.empty() && running_) {
+            prepared = prepareNextPrefillBatch();
+        }
+        return prepared;
+    }));
+}
+
+NormalEngine::PreparedPrefillBatch NormalEngine::prepareNextPrefillBatch() {
+    c10::InferenceMode             inference_guard;
+    at::DisableRecordFunctionGuard record_guard;
+    setCurrentThreadDevice(getDeviceId());
+    PreparedPrefillBatch prepared;
+    auto                 result = scheduler_->schedule();
+    THROW_IF_STATUS_ERROR(result.status());
+    prepared.streams = std::move(result.value());
+    // Cache admission and loading run ahead; pinned model-input allocation stays
+    // on the execution thread to avoid competing with the active GPU forward.
+    return prepared;
+}
+
 absl::Status NormalEngine::step() try {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
     while (pause_ && running_) {
@@ -889,12 +952,41 @@ absl::Status NormalEngine::step() try {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
+    // Keep throughput intervals disjoint: background preparation may start during the preceding batch.
     int64_t                 tps_schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     list<GenerateStreamPtr> streams;
+    bool                    leased_prefill_batch = false;
     if (parallelism_config.tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
         {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
-            CHECK_AND_ASSIGN(streams, scheduler_->schedule());
+            if (prefill_prepare_pool_) {
+                PreparedPrefillBatch prepared;
+                if (prepared_prefill_batch_) {
+                    RTP_LLM_PROFILE_SCOPE("engine.prefill.wait_prepared_batch");
+                    prepared = prepared_prefill_batch_->get();
+                    prepared_prefill_batch_.reset();
+                } else {
+                    // No preceding batch to overlap: keep idle/first-batch
+                    // preparation on the engine thread without a pool round trip.
+                    prepared = prepareNextPrefillBatch();
+                }
+                auto* fifo_scheduler = static_cast<FIFOScheduler*>(scheduler_.get());
+                fifo_scheduler->pruneInvalidPreparedPrefill(prepared.streams);
+                fifo_scheduler->refreshPreparedPrefill(prepared.streams);
+                RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.prefill.prepared(streams=%zu)", prepared.streams.size());
+                streams = std::move(prepared.streams);
+                if (!streams.empty()) {
+                    leased_prefill_batch = static_cast<FIFOScheduler*>(scheduler_.get())->beginPrefillExecution();
+                    // Local Decode continuation keeps the serial scheduler lane.
+                    if (leased_prefill_batch && std::all_of(streams.begin(), streams.end(), [](const auto& stream) {
+                            return stream->queryPdSep() || stream->generateConfig()->max_new_tokens <= 1;
+                        })) {
+                        executor_->setNextPrefillPrepare([this] { startNextPrefillPrepare(); });
+                    }
+                }
+            } else {
+                CHECK_AND_ASSIGN(streams, scheduler_->schedule());
+            }
         }
         if (parallelism_config.dp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
@@ -952,7 +1044,11 @@ absl::Status NormalEngine::step() try {
         }
     }
 
-    if (!streams.empty()) {
+    executor_->setNextPrefillPrepare(nullptr);
+    if (leased_prefill_batch) {
+        previous_execution_release_us_ = static_cast<FIFOScheduler*>(scheduler_.get())->completePrefillExecution();
+    }
+    if (!streams.empty() && !leased_prefill_batch) {
         previous_execution_release_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
     }
 

@@ -357,8 +357,9 @@ torch::Tensor publishInt32ToCuda(const torch::Tensor& tensor, TensorHolder& host
     return tensor.to(cuda_i32, /*non_blocking=*/true);
 }
 
-void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolder& host_holder,
-                                      bool publish_page_tables) {
+void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input,
+                                        TensorHolder&   host_holder,
+                                        bool            publish_page_tables) {
     // TODO(async): stream state is still gathered through CPU pointers above.
     // Publish only device tensors at the model boundary.
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.publish_core_tensors_to_cuda");

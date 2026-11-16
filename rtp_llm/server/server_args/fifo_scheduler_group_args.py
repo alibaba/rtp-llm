@@ -71,3 +71,12 @@ def init_fifo_scheduler_group_args(parser, fifo_scheduler_config):
         default=0,
         help="FIFO 中已初始化 KV cache block 的 stream 数上限，0 表示不限制。",
     )
+
+    fifo_scheduler_group.add_argument(
+        "--prefill_async_scheduling",
+        env_name="RTP_LLM_PREFILL_ASYNC_SCHEDULING",
+        bind_to=[(fifo_scheduler_config, "prefill_async_scheduling")],
+        type=str2bool,
+        default=False,
+        help="Prepare one independent text Prefill batch on a CPU worker during current execution.",
+    )
