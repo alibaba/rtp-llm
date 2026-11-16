@@ -55,7 +55,10 @@ class ModelLoader:
         self.model_config = model_config
         self._task_type = model_config.task_type
         self._load_method = load_method
-        self._load_time_w8a8 = is_load_time_w8a8(model_config.quant_config)
+        # Some callers construct partial configs (and unit-test loaders bypass
+        # __init__ entirely); a missing quant_config simply disables the
+        # load-time W8A8 path.
+        self._load_time_w8a8 = is_load_time_w8a8(getattr(model_config, "quant_config", None))
         if self._load_time_w8a8:
             if load_method not in (LoadMethod.AUTO, LoadMethod.SCRATCH):
                 raise ValueError(
@@ -850,7 +853,7 @@ class ModelLoader:
                 weights.set_layer_weight(layer_id, name, tensor)
             else:
                 weights.set_global_weight(name, tensor)
-        if self._load_time_w8a8:
+        if getattr(self, "_load_time_w8a8", False):
             logging.info(
                 "w8a8_load_quant_complete seconds=%.3f tp=%d rank=%d",
                 time.perf_counter() - started,

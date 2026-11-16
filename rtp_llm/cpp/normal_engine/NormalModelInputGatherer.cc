@@ -574,7 +574,33 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.process_decode_streams");
     auto ctx = createGatherContext(config_, model_input, stream_groups, GatherContextMode::DECODE);
 
-    const bool                 use_normal_device_state = stream_groups.hasNormalDeviceStates();
+    // Snapshot device states captured at batch selection keep MRoPE anchors
+    // and recorded lengths coherent across async steps. A StreamGroups built
+    // without snapshots (direct construction, e.g. unit tests) keeps main's
+    // live-state contract: read each stream's published device state under
+    // the same environment and batch-shape gates.
+    const bool has_normal_snapshot = stream_groups.hasNormalDeviceStates();
+    bool       use_normal_device_state = has_normal_snapshot;
+    if (!has_normal_snapshot) {
+        use_normal_device_state = deviceInputEnabled() && stream_groups.totalContextBatchSize() == 0
+                                  && stream_groups.totalDecodeBatchSize() > 0 && !ctx.need_cal_position_id;
+        if (use_normal_device_state) {
+            for (const auto& stream : stream_groups.decodeStreams()) {
+                if (stream->hasMtpCacheSnapshot()) {
+                    use_normal_device_state = false;
+                    break;
+                }
+                const auto& state = stream->getNormalAsyncDeviceState();
+                if (stream->currentBatchSize() != 1 || !state.last_sample_token_gpu.defined()
+                    || !state.last_sample_token_gpu.is_cuda() || !state.next_seq_len_gpu.defined()
+                    || !state.next_seq_len_gpu.is_cuda()
+                    || (config_.has_engram && !state.engram_token_window_gpu.defined())) {
+                    use_normal_device_state = false;
+                    break;
+                }
+            }
+        }
+    }
     std::vector<torch::Tensor> normal_engram_windows_gpu;
     std::vector<torch::Tensor> normal_combo_tokens_gpu;
     std::vector<torch::Tensor> normal_sequence_lengths_gpu;
@@ -622,8 +648,13 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                                 0);
                 }
             } else if (use_normal_device_state) {
-                const auto&             snapshot = stream_groups.normalDeviceInput(stream);
-                const auto&             state    = snapshot.state;
+                // Snapshot states captured at batch selection keep MRoPE
+                // anchors coherent; a snapshot-less StreamGroups reads the
+                // stream's live published state (the gate above keeps that
+                // fallback decode-only without position ids).
+                const StreamGroups::NormalDeviceInput* snapshot =
+                    has_normal_snapshot ? &stream_groups.normalDeviceInput(stream) : nullptr;
+                const auto&             state = snapshot != nullptr ? snapshot->state : stream->getNormalAsyncDeviceState();
                 static std::atomic<int> debug_log_budget{200};
                 if (asyncDebugEnabled() && stream->hasPendingAsyncBookkeeping()
                     && debug_log_budget.fetch_sub(1, std::memory_order_relaxed) > 0) {
@@ -655,7 +686,8 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                     // needsGatherPositions is the single gate that admits this
                     // device state with a valid anchor; a divergent gate would
                     // feed an undefined anchor here, so fail loudly instead.
-                    if (!snapshot.context_position_ids.defined()) {
+                    // (The snapshot-less fallback never enables positions.)
+                    if (snapshot == nullptr || !snapshot->context_position_ids.defined()) {
                         return absl::InternalError(
                             "async device state lacks context_position_ids while the gather needs positions");
                     }
@@ -663,7 +695,7 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                                                                      + ctx.batch_idx * config_.position_id_len_factor,
                                                                  state.next_real_seq_len,
                                                                  config_.mm_position_ids_style,
-                                                                 snapshot.context_position_ids);
+                                                                 snapshot->context_position_ids);
                 }
             } else {
                 auto currentTokens = stream->currentExecuteTokens(i);
@@ -702,7 +734,7 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
             }
             ctx.batch_idx += 1;
         }
-        if (!use_normal_device_state) {
+        if (!has_normal_snapshot) {
             addCacheUpdateCopy(ctx,
                                stream->streamCacheResource().getKVBlockUpdateMapping(),
                                model_input.kv_cache_group_tags,
