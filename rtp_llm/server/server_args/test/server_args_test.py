@@ -122,6 +122,52 @@ class PipelinePartitionArgumentsTest(TestCase):
                     server_args.setup_args(["--tp_size", "1"])
 
 
+class CPRotateMethodArgumentsTest(TestCase):
+    def test_serialized_disabled_environment_matches_default(self):
+        from rtp_llm.ops import CPRotateMethod
+        from rtp_llm.server.server_args import server_args
+
+        for args in (None, [], ["--tp_size", "8"]):
+            with (
+                self.subTest(args=args),
+                patch("sys.argv", ["start_server.py"]),
+                patch.dict(os.environ, {}, clear=True),
+            ):
+                default = server_args.setup_args(args).prefill_cp_config.method
+                os.environ["CP_ROTATE_METHOD"] = "DISABLED"
+                explicit = server_args.setup_args(args).prefill_cp_config.method
+                self.assertEqual(default, CPRotateMethod.DISABLED)
+                self.assertEqual(explicit, default)
+
+    def test_disabled_cli_overrides_active_environment(self):
+        from rtp_llm.ops import CPRotateMethod
+        from rtp_llm.server.server_args import server_args
+
+        for value in ("DISABLED", "disabled", "DiSaBlEd"):
+            with (
+                self.subTest(value=value),
+                patch.dict(os.environ, {"CP_ROTATE_METHOD": "ALL_GATHER"}, clear=True),
+            ):
+                config = server_args.setup_args(["--cp_rotate_method", value])
+                self.assertEqual(
+                    config.prefill_cp_config.method, CPRotateMethod.DISABLED
+                )
+
+    def test_invalid_rotation_method_is_rejected(self):
+        from rtp_llm.server.server_args import server_args
+
+        for value in ("DISABLE", "none", ""):
+            for args in (None, ["--cp_rotate_method", value]):
+                with (
+                    self.subTest(value=value, args=args),
+                    patch("sys.argv", ["start_server.py"]),
+                    patch.dict(os.environ, {"CP_ROTATE_METHOD": value}, clear=True),
+                    patch("sys.stderr", io.StringIO()),
+                    self.assertRaises(SystemExit),
+                ):
+                    server_args.setup_args(args)
+
+
 class CacheConfigArgumentsTest(TestCase):
     # Keep the supported startup fields explicit, independently of parser registration.
     samples = {

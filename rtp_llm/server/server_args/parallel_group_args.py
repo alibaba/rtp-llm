@@ -29,9 +29,7 @@ def parse_pp_stage_layer_counts(raw_value: str):
     return counts
 
 
-def init_parallel_group_args(
-    parser, parallelism_config, prefill_cp_config
-):
+def init_parallel_group_args(parser, parallelism_config, prefill_cp_config):
     ##############################################################################################################
     # Parallelism and Distributed Setup Configuration
     ##############################################################################################################
@@ -112,7 +110,7 @@ def init_parallel_group_args(
         bind_to=(prefill_cp_config, "method"),
         type=str2_cp_rotate_method,
         default=CPRotateMethod.DISABLED,
-        help="指定用于上下文并行通信方法。可选值: ALL_GATHER, ALL_GATHER_WITH_OVERLAP, ALLTOALL",
+        help="指定用于上下文并行通信方法。可选值: DISABLED, ALL_GATHER, ALL_GATHER_WITH_OVERLAP, ALLTOALL, PREFILL_CP",
     )
     parallel_group.add_argument(
         "--comm_buffer_size",
