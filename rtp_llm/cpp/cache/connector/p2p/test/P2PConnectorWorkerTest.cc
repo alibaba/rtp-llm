@@ -228,6 +228,9 @@ public:
     void forceCancel() override {
         cancel();
     }
+    void setDoneCallback(std::function<void()>) override {
+        ADD_FAILURE() << "Legacy P2P connector must not register a read lease callback";
+    }
     transfer::TransferErrorCode errorCode() const override {
         return error_code_;
     }

@@ -4,6 +4,9 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "aios/network/arpc/arpc/ANetRPCController.h"
 #include "autil/NetUtil.h"
+#include <algorithm>
+#include <limits>
+#include <memory>
 
 namespace rtp_llm {
 namespace transfer {
@@ -23,6 +26,16 @@ inline TransferErrorCode transRdmaErrorCode(::rdma_transfer::RdmaTransferErrorCo
             return TransferErrorCode::TIMEOUT;
         case ::rdma_transfer::RDMA_TRANSFER_TASK_CANCELLED:
             return TransferErrorCode::CANCELLED;
+        case ::rdma_transfer::RDMA_TRANSFER_CONNECTION_FAILED:
+            return TransferErrorCode::CONNECTION_FAILED;
+        case ::rdma_transfer::RDMA_TRANSFER_NOT_INITIALIZED:
+            return TransferErrorCode::NOT_INITIALIZED;
+        case ::rdma_transfer::RDMA_TRANSFER_QUEUE_REJECTED:
+            return TransferErrorCode::QUEUE_REJECTED;
+        case ::rdma_transfer::RDMA_TRANSFER_COPY_FAILED:
+            return TransferErrorCode::COPY_FAILED;
+        case ::rdma_transfer::RDMA_TRANSFER_CONTEXT_DESTROYED:
+            return TransferErrorCode::CONTEXT_DESTROYED;
         default:
             return TransferErrorCode::UNKNOWN;
     }
@@ -41,26 +54,43 @@ public:
         request_(request),
         response_(response),
         controller_(controller),
-        callback_(callback) {}
+        callback_(std::move(callback)) {}
 
     ~RdmaTransferClosure() {
         delete controller_;
     }
 
     void Run() override {
+        std::unique_ptr<RdmaTransferClosure> self_guard(this);
         TransferErrorCode error_code = TransferErrorCode::OK;
         std::string       error_msg;
 
         if (controller_->Failed()) {
             error_code = TransferErrorCode::RPC_FAILED;
-            error_msg  = "rdma transfer failed: " + controller_->ErrorText() + " peer [" + peer_ip_ + ":"
+            error_msg  = "rdma transfer failed: rpc_code=" + std::to_string(controller_->GetErrorCode())
+                        + " " + controller_->ErrorText() + " peer [" + peer_ip_ + ":"
                         + std::to_string(peer_port_) + "]";
         } else if (response_->has_error_code()
                    && response_->error_code() != ::rdma_transfer::RDMA_TRANSFER_NONE_ERROR) {
             error_code = transRdmaErrorCode(response_->error_code());
-            error_msg  = response_->has_error_message() ? response_->error_message() : "";
+            error_msg  = "wire_code=" + std::to_string(static_cast<int>(response_->error_code())) + ": "
+                         + (response_->has_error_message() ? response_->error_message() : "");
         }
 
+        if (error_code != TransferErrorCode::OK) {
+            error_msg += " [received_at location=RDMATransferClosure::Run peer=" + peer_ip_ + ":"
+                         + std::to_string(peer_port_) + " partition_layer_key=" + request_->unique_key() + "]";
+            RTP_LLM_LOG_WARNING("P2P RDMA send RPC failed, partition_layer_key=%s peer=%s:%u "
+                                "transfer_code=%d transfer_name=%s rpc_code=%d wire_code=%d error=%s",
+                                request_->unique_key().c_str(),
+                                peer_ip_.c_str(),
+                                peer_port_,
+                                static_cast<int>(error_code),
+                                transferErrorCodeToString(error_code),
+                                controller_->GetErrorCode(),
+                                response_->has_error_code() ? static_cast<int>(response_->error_code()) : -1,
+                                error_msg.c_str());
+        }
         callback_(error_code, error_msg);
     }
 
@@ -111,22 +141,25 @@ bool RdmaKVCacheSender::regMem(const BlockInfo& block_info, uint64_t aligned_siz
 }
 
 bool RdmaKVCacheSender::setBlockBufferInfo(::rdma_transfer::RdmaBlockBufferInfo* block_buffer_info,
-                                           int64_t /*cache_key*/,
+                                           int64_t cache_key,
                                            const BlockInfo& block_info) {
     auto remote_buffer = rdma_memory_manager_->findMemoryMr(block_info);
-    if (!remote_buffer) {
+    if (!remote_buffer || !remote_buffer->nic_rkeys || remote_buffer->nic_rkeys->empty()) {
+        RTP_LLM_LOG_ERROR("RDMA send MR/rkey lookup failed, cache_key=%ld addr=%p size=%lu cuda=%d",
+                          cache_key,
+                          block_info.addr,
+                          block_info.size_bytes,
+                          block_info.is_cuda);
         return false;
     }
 
     block_buffer_info->set_len(static_cast<uint32_t>(block_info.size_bytes));
     auto* rdma_info = block_buffer_info->mutable_rdma_info();
     rdma_info->set_addr(remote_buffer->addr);
-    if (remote_buffer->nic_rkeys) {
-        for (const auto& [nicid, rkey] : *remote_buffer->nic_rkeys) {
-            auto nic_rkey = rdma_info->add_nic_rkeys();
-            nic_rkey->set_nicid(nicid);
-            nic_rkey->set_rkey(rkey);
-        }
+    for (const auto& [nicid, rkey] : *remote_buffer->nic_rkeys) {
+        auto nic_rkey = rdma_info->add_nic_rkeys();
+        nic_rkey->set_nicid(nicid);
+        nic_rkey->set_rkey(rkey);
     }
     return true;
 }
@@ -136,7 +169,6 @@ RdmaKVCacheSender::makeTransferRequest(const transfer::SendRequest&             
                                        const std::shared_ptr<TransferClientMetricsCollector>& collector) {
     auto transfer_request = std::make_shared<::rdma_transfer::RdmaLayerBlockTransferRequest>();
     transfer_request->set_unique_key(request.unique_key);
-    transfer_request->set_deadline_ms(request.deadline_ms);
 
     transfer_request->set_server_rdma_ip(autil::NetUtil::getBindIp());
     transfer_request->set_server_rdma_port(rdma_server_->getListenPort());
@@ -179,18 +211,29 @@ void RdmaKVCacheSender::loadToRemote(
         return;
     }
 
+    if (deadline_ms <= currentTimeMs()) {
+        callback(TransferErrorCode::TIMEOUT, "transfer deadline expired before RDMA submission");
+        return;
+    }
     auto channel = tcp_client_->getChannel(ip, port);
     if (!channel) {
         callback(TransferErrorCode::CONNECTION_FAILED, "get channel failed");
         return;
     }
 
+    const auto remaining_ms = deadline_ms - currentTimeMs();
+    if (remaining_ms <= 0) {
+        callback(TransferErrorCode::TIMEOUT, "transfer deadline expired during RDMA preparation");
+        return;
+    }
+    const auto timeout_ms = std::min<int64_t>(remaining_ms, std::numeric_limits<int32_t>::max());
+    transfer_request->set_timeout_ms(timeout_ms);
     auto transfer_response = std::make_shared<::rdma_transfer::RdmaLayerBlockTransferResponse>();
     auto controller        = new arpc::ANetRPCController();
-    auto timeout_ms        = deadline_ms - currentTimeMs();
-    controller->SetExpireTime(timeout_ms > 0 ? timeout_ms : 1);
+    controller->SetExpireTime(timeout_ms);
 
-    auto closure = new RdmaTransferClosure(ip, port, transfer_request, transfer_response, controller, callback);
+    auto closure = new RdmaTransferClosure(
+        ip, port, transfer_request, transfer_response, controller, callback);
     ::rdma_transfer::RdmaTransferService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),
                                                    ::google::protobuf::Service::STUB_DOESNT_OWN_CHANNEL);
     stub.transfer(controller, transfer_request.get(), transfer_response.get(), closure);

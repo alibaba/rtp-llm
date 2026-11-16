@@ -19,7 +19,6 @@ namespace tcp {
 class TcpKVCacheSender: public transfer::IKVCacheSender {
 public:
     explicit TcpKVCacheSender(const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr);
-    ~TcpKVCacheSender() = default;
 
 public:
     /// @brief 初始化 TCP client；idle_ttl_ms 为 0 时关闭 idle 淘汰，sweep_interval_calls 为 0 时仅 miss 路径清扫

@@ -5,6 +5,7 @@
 // overlay).
 #include <torch/extension.h>
 #include "rtp_llm/cpp/cache/BlockInfo.h"
+#include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferErrorCode.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -19,6 +20,8 @@ struct RemoteBuffer {
     int64_t                                       addr;
     uint32_t                                      len;
     std::shared_ptr<std::map<uint32_t, uint32_t>> nic_rkeys;
+    // Diagnostic identity only; never used for routing or transfer decisions.
+    std::string partition_layer_key;
     RemoteBuffer(int64_t addr, uint32_t len, const std::shared_ptr<std::map<uint32_t, uint32_t>>& nic_rkeys):
         addr(addr), len(len), nic_rkeys(nic_rkeys) {}
 };
@@ -31,12 +34,18 @@ public:
     virtual std::shared_ptr<RemoteBuffer> findMemoryMr(const BlockInfo& block_info) = 0;
 };
 
+using RdmaReadCallback = std::function<void(TransferErrorCode, const std::string&)>;
+
 class IRdmaConnection {
 public:
     virtual ~IRdmaConnection() = default;
+    // Close requests transport shutdown. It does not confirm posted DMA has stopped.
+    virtual void close() = 0;
+    // A completion callback delivers the physical outcome for this batch.
+    // Timeout or close does not guarantee a callback for an already posted read.
     virtual void read(const std::vector<std::pair<torch::Tensor, std::shared_ptr<RemoteBuffer>>>& local_remote_buffers,
-                      std::function<void(bool)>                                                  callback,
-                      uint64_t                                                                   deadline_ms) = 0;
+                      RdmaReadCallback callback,
+                      uint64_t deadline_ms) = 0;
 };
 
 class IRdmaClient {

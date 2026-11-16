@@ -94,7 +94,7 @@ cc_test(
     deps = [
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-    ] + select({
+    ] + device_impl_target() + torch_deps() + select({
         "//:using_rdma": [
             "//rtp_llm/cpp/cache/connector/p2p/transfer/barex_rdma:rdma_interface",
             "//rtp_llm/cpp/cache/connector/p2p/transfer/barex_rdma:rdma_transfer_service",
@@ -102,6 +102,8 @@ cc_test(
             "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
             "//rtp_llm/cpp/config:config_modules",
             "//rtp_llm/cpp/utils:time_util",
+            "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+            "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
             "@havenask//aios/autil:log",
         ],
         "//conditions:default": [],

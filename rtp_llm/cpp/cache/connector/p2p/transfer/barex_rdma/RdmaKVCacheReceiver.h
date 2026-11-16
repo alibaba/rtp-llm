@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TcpServer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/barex_rdma/RdmaInterface.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/barex_rdma/RdmaTransferService.h"
+#include <cstddef>
 #include <memory>
 
 namespace rtp_llm {
@@ -21,15 +22,22 @@ public:
 public:
     /// @brief 启动 TCP server 注册 RDMA 传输服务，并创建 RDMA client 用于主动读取
     bool init(uint32_t listen_port,
-              int      tcp_io_thread_count,
-              int      tcp_worker_thread_count,
-              int      rdma_io_thread_count,
-              int      rdma_worker_thread_count,
+              int tcp_io_thread_count,
+              int tcp_worker_thread_count,
+              int rdma_io_thread_count,
+              int rdma_worker_thread_count,
               uint32_t rdma_connections_per_host,
-              int      rdma_max_block_pairs_per_connection = 0,
-              int      tcp_anet_rpc_thread_num               = 3,
-              int      tcp_anet_rpc_queue_num                = 100,
-              int64_t  wait_check_interval_us                = 1000);
+              int rdma_max_block_pairs_per_connection = 0,
+              int tcp_anet_rpc_thread_num = 3,
+              int tcp_anet_rpc_queue_num = 100,
+              int64_t wait_check_interval_us = 1000,
+              uint32_t tcp_worker_queue_size = 500,
+              int rdma_transfer_worker_thread_count = 16,
+              int rdma_transfer_worker_queue_size = 100,
+              bool p2p_rdma_enable_h2d_copy = false,
+              int64_t p2p_rdma_staging_total_bytes = 0,
+              size_t llm_kv_block_size_bytes = 0,
+              int64_t rdma_disconnect_after_deadline_ms = 10 * 1000);
 
     /// @brief 将 block 内存注册为 RDMA MR
     bool                regMem(const BlockInfo& block_info, uint64_t aligned_size = 0) override;
@@ -53,12 +61,12 @@ private:
                      int                                 tcp_worker_thread_count,
                      const std::shared_ptr<IRdmaClient>& rdma_client);
 
-
     bool startTcpServer(uint32_t listen_port,
-                        int      tcp_io_thread_count,
-                        int      tcp_worker_thread_count,
-                        int      tcp_anet_rpc_thread_num = 3,
-                        int      tcp_anet_rpc_queue_num  = 100);
+                        int tcp_io_thread_count,
+                        int tcp_worker_thread_count,
+                        int tcp_anet_rpc_thread_num = 3,
+                        int tcp_anet_rpc_queue_num = 100,
+                        uint32_t tcp_worker_queue_size = 500);
 
 private:
     std::shared_ptr<TcpServer>           tcp_server_;
@@ -66,6 +74,7 @@ private:
     std::shared_ptr<IRdmaMemoryManager>  rdma_memory_manager_;
     std::shared_ptr<TransferTaskStore>   task_store_;
     std::shared_ptr<RdmaTransferService> transfer_service_;
+    std::shared_ptr<RdmaStagingBufferPool> staging_pool_;
     kmonitor::MetricsReporterPtr         metrics_reporter_;
 };
 

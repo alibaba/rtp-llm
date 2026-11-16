@@ -845,6 +845,41 @@ enum P2PConnectorBroadcastType {
     HANDLE_READ = 1;
     CANCEL_READ = 2;
     CANCEL_HANDLE_READ = 3;
+    QUERY_LEASE_STATUS = 4;
+    HANDLE_READ_NO_TRANSFER = 5;
+}
+
+// One transfer route as minted by KVCacheTransferPlanner, projected onto the side that
+// receives it. rank0 sends each worker only that worker's own routes, and only that
+// worker's own partition/slice — the peer's half never crosses this wire.
+//
+// A route is layer-independent: it expands at execution time into one transfer unit per
+// layer owned by cache_tag, keyed by <unique_key>_<layer_id>_<cache_tag>_r<route_id>.
+message TransferRoutePB {
+    // Orchestrator-minted id. This is the ONLY thing that names the transfer key, so both
+    // sides agree without any independent partition arithmetic.
+    int32 route_id = 1;
+    string cache_tag = 2;
+
+    // Prefill direction: index into peer_workers identifying the decode target.
+    // Decode direction: unused (this route's blocks are carried inline below).
+    int32 peer_index = 3;
+
+    // This side's head-dimension partition, fed to LayerBlockConverter.
+    int32 partition_count = 4;
+    int32 partition_id = 5;
+
+    // This side's CP byte slice, fed to CPSlotMapper::sliceBlockForPeer.
+    // slice_mode mirrors CpBlockSliceMode: 0=NONE, 1=EQUAL_BYTES, 2=PAYLOAD_BYTES.
+    int32 slice_mode = 6;
+    int32 slice_count = 7;
+    int32 slice_index = 8;
+
+    // Decode direction: the concrete (cache_key, block_id) pairs this route covers, per
+    // layer. rank0 resolves the key rule itself, so decode workers stay pure executors and
+    // never re-derive a key set. Empty in the Prefill direction: the caller must
+    // select the route's keys using its cache group's projection rules.
+    repeated LayerCacheBlockPB layer_blocks = 9;
 }
 
 message P2PConnectorBroadcastTpRequestPB {
@@ -854,29 +889,78 @@ message P2PConnectorBroadcastTpRequestPB {
     int64 request_id = 4;
     int64 deadline_ms = 5;
     P2PConnectorBroadcastType type = 6;
-    // TP size of the remote side (prefill_tp_size for decode, decode_tp_size for prefill)
+    // TP size of the remote side (prefill_tp_size for decode, decode_tp_size for prefill).
     int32 remote_tp_size = 8;
+    reserved 10;
+    reserved "allow_empty_projection";
+    // Original user-request deadline. deadline_ms remains the physical
+    // transfer deadline used by this broadcast and its worker operation.
+    int64 request_deadline_ms = 9;
+
+    // This worker's slice of the transfer plan. Empty means no work for this worker.
+    // Additive for now: carried alongside the legacy fields so the plan can be shadow-
+    // compared (P1) before it drives execution (P2).
+    repeated TransferRoutePB routes = 11;
+    // Stable hash of the whole plan, appended to every transfer key so that two sides whose
+    // plans diverged (config drift) fail as "no matching recv task within deadline" rather
+    // than silently copying into the wrong byte range.
+    uint64 plan_digest = 12;
+    // READ/HANDLE_READ/HANDLE_READ_NO_TRANSFER budget at submission. The receiver reanchors this
+    // duration to its own clock; the two source deadlines remain identity/validation
+    // fields and must not be compared to the receiver's wall clock.
+    int64 transfer_timeout_ms = 13;
+    // CANCEL_READ only: remaining request lifetime for an early-cancel fence.
+    // This is a retention budget, never evidence that a physical read has stopped.
+    int64 cancel_retention_ms = 14;
 }
 
-// GetPeerInfo: Decode calls this on Prefill to exchange TP size before recv registration
+// GetPeerInfo: Decode queries the selected Prefill for its TP/CP layout before recv registration.
 message GetPeerInfoRequestPB {
     string requester_ip = 1;
     int32  requester_tp_size = 2;
 }
 
 message GetPeerInfoResponsePB {
-    int32  tp_size = 1;
+    int32  tp_size                = 1;
+    reserved 2, 3;
+    reserved "dp_size", "dp_grpc_addrs";
+    // Effective KV-cache context-parallel size. This is 1 when TP is enabled
+    // but Prefill CP KV-cache sharding is disabled.
+    int32  cp_size                = 4;
 }
 
 message P2PConnectorBroadcastTpResponsePB {
     ErrorCodePB error_code = 1;
     string error_message = 2;
+    // Populated when request type == QUERY_LEASE_STATUS
+    LeaseStatusResponsePB lease_status = 3;
+}
+
+message LeaseStatusResponsePB {
+    bool sealed = 1;       // no_more_new_ops
+    int32 started_ops = 2;
+    int32 finished_ops = 3;
+    bool stopped = 4;      // sealed && started_ops == finished_ops
 }
 
 message P2PConnectorStartLoadRequestPB {
     string unique_key = 1;
     repeated TPWorkerInfoPB workers = 2;
     int64 deadline_ms = 3;
+    // Decode already has all matched KV blocks locally. Prefill should still
+    // complete the StartLoad lifecycle and return side-channel data, but must
+    // not dispatch a data transfer.
+    bool no_transfer = 4;
+    // Request timeout is carried only by GenerateStream.
+    reserved 5;
+    reserved "request_timeout_ms";
+    // Digest of the Decode-side transfer plan. Prefill computes its mirror
+    // plan before resource wait and rejects a mismatch immediately.
+    uint64 plan_digest = 6;
+    // Route ids that remain after Decode projects the static transfer plan onto
+    // this request's concrete key range. Prefill uses the same ids to avoid
+    // dispatching routes whose key set is empty for short/windowed requests.
+    repeated int32 active_route_ids = 7;
 }
 
 // Side-channel tensor blob: carries named tensor data between prefill and decode
@@ -894,6 +978,17 @@ message SideChannelPayloadPB {
     int32  local_reuse_len         = 4;
     int32  remote_reuse_len        = 5;
     int32  memory_reuse_len        = 6;
+    bool   has_first_generate_token = 7;
+    int32  disk_reuse_len          = 8;
+    // GenerationPrefillCudaGraphStatus value; zero means NOT_REQUESTED.
+    uint32 generation_prefill_cuda_graph_status = 9;
+    bool prefill_use_independent_block_pools = 10;
+    // Post-Prefill request-local CUDA RNG position; seed is in GenerateConfigPB.
+    bool has_rng_state = 11;
+    uint64 rng_offset = 12;
+    // Prefill owns embedding-derived media lengths; Decode has no embedding.
+    map<int32, int32> multimodal_lengths = 13;
+    PromptLogitsOutputPB prompt_logits = 14;
 }
 
 message P2PConnectorStartLoadResponsePB {

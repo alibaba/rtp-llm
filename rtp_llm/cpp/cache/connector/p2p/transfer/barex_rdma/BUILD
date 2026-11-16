@@ -25,6 +25,7 @@ cc_library(
     hdrs = ["RdmaInterface.h"],
     deps = [
         "//rtp_llm/cpp/cache:block_info",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
     ] + torch_deps(),
     visibility = ["//visibility:public"],
 )
@@ -114,8 +115,10 @@ cc_library(
     hdrs = ["RdmaTaskContext.h"],
     srcs = ["RdmaTaskContext.cc"],
     deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_metric",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:cuda_copy_util",
         ":rdma_interface",
         "//rtp_llm/cpp/cache/connector/p2p/transfer/barex_rdma/proto:rdma_service_cc_proto",
         "//rtp_llm/cpp/utils:core_utils",
@@ -130,6 +133,7 @@ cc_library(
     srcs = ["RdmaTransferService.cc"],
     deps = [
         ":rdma_task_context",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:cuda_copy_util",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
         ":rdma_interface",
         "//rtp_llm/cpp/cache/connector/p2p/transfer/barex_rdma/proto:rdma_service_cc_proto",

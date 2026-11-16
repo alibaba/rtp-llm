@@ -43,8 +43,8 @@ private:
                         const std::shared_ptr<TransferClientMetricsCollector>& collector);
 
     bool setBlockBufferInfo(::rdma_transfer::RdmaBlockBufferInfo* block_buffer_info,
-                            int64_t                               cache_key,
-                            const BlockInfo&                      block_info);
+                            int64_t cache_key,
+                            const BlockInfo& block_info);
 
     void loadToRemote(const std::string&                                                             ip,
                       uint32_t                                                                       port,

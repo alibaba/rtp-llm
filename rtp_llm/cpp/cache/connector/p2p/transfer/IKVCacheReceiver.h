@@ -1,8 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/Types.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferErrorCode.h"
 #include "rtp_llm/cpp/cache/BlockInfo.h"
@@ -35,16 +37,25 @@ public:
 
     /// @brief 获取错误描述（done() == true 时有效）
     virtual std::string errorMessage() const = 0;
+
+    /// @brief 安装任务完成回调，替换此前待执行的回调。若任务已结束则立即调用。
+    virtual void setDoneCallback(std::function<void()> callback) = 0;
 };
 
 using IKVCacheRecvTaskPtr = std::shared_ptr<IKVCacheRecvTask>;
 
+// Invoked synchronously under the receive task lock. Return true once the
+// route's requested blocks are complete, or false to accept more batches.
+// Do not block, throw, or call back into the task or the receiver task store.
+using BatchCopiedCallback = std::function<bool(const std::vector<int64_t>&)>;
+
 /// @brief 注册一层 KV cache 接收任务的请求参数
 struct RecvRequest {
-    /// unique_key = base_key + "_" + layer_id + "_" + remote_partition_id
+    /// Identifies the receive task and its route-wide target block table.
     std::string     unique_key;
     KeyBlockInfoMap block_info;
     int64_t         deadline_ms = 0;
+    BatchCopiedCallback on_batch_copied;
 };
 
 using RecvRequestPtr = std::shared_ptr<RecvRequest>;

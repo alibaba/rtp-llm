@@ -153,3 +153,26 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
 )
+
+cc_library(
+    name = "p2p_key_util",
+    hdrs = ["P2PKeyUtil.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "prefill_result_store",
+    srcs = ["PrefillResultStore.cc"],
+    hdrs = ["PrefillResultStore.h"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/engine_base/stream:generate_config",
+        "//rtp_llm/cpp/engine_base/stream:generate_types",
+        "//rtp_llm/cpp/model_rpc:tensor_pb_convert",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:time_util",
+    ] + torch_deps(),
+    visibility = ["//rtp_llm/cpp/cache/connector/p2p:__subpackages__"],
+)
