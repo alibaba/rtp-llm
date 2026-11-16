@@ -397,6 +397,12 @@ struct CacheStoreConfig {
     int     rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
     int64_t p2p_transfer_not_done_resource_hold_ms =
         10 * 1000;  // D 后等待 RDMA 物理完成的时间；到期后 close 相关 connection
+    // Keep legacy config fields readable during upgrade. The P2P path uses request deadlines and leases.
+    int64_t rdma_transfer_wait_timeout_ms = 180 * 1000;
+    int64_t p2p_read_steal_before_deadline_ms = 250;
+    int64_t p2p_read_return_before_deadline_ms = 100;
+    int p2p_resource_store_timeout_check_interval_ms = 100;
+    int64_t p2p_layer_cache_buffer_store_timeout_ms = 100 * 1000;
     int64_t p2p_lease_query_timeout_ms = 20 * 1000;  // 单轮 lease 查询的超时上限，内部最多等待 500ms
     int     p2p_kv_leak_exit_threshold_percent = 30;         // 滞留目标 KV 字节占总 KV 容量持续 30 秒超过该百分比则退出
 
@@ -516,6 +522,7 @@ struct PDSepConfig {
     int64_t  load_cache_timeout_ms           = 5000;
     int64_t  max_rpc_timeout_ms              = 2 * 3600 * 1000;  // 2h default
     int64_t  worker_port_offset              = 0;
+    bool     decode_entrance                 = false;  // Legacy config only. PD always uses Decode ingress.
     // ========== Prefill Thread Pool Configuration ==========
     // prepare-resource pool size. 0 = concurrency_limit * 2; effective minimum is 128.
     int64_t prefill_prepare_resource_pool_size = 0;

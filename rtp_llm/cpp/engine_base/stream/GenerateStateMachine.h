@@ -23,6 +23,7 @@ class StreamCacheResource;  // forward declaration
 // 的调用串行化（通常通过 GenerateStream::mutex_ 保护）。
 struct GenerateStateMachine {
     FirstError first_error;
+    int64_t initial_kv_allocation_rt_us = 0;
 
 public:
     GenerateStateMachine(std::shared_ptr<StreamCacheResource> stream_cache_resource):

@@ -454,96 +454,82 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*              
     return grpc::Status::OK;
 }
 
-grpc::Status LocalRpcServer::pollBatchStreamOutput(grpc::ServerContext*                                context,
-                                                   const std::vector<std::shared_ptr<GenerateStream>>& streams,
-                                                   BatchGenerateOutputsPB*                             response,
-                                                   const std::function<FirstError::Snapshot(bool&)>&   check_remote) {
+grpc::Status LocalRpcServer::pollBatchStreamOutput(
+    grpc::ServerContext* context,
+    const std::vector<GenerateStreamPtr>& streams,
+    BatchGenerateOutputsPB* response,
+    const std::function<void(int64_t, const ErrorInfo&)>& fail_item) {
     std::vector<BatchStreamOutputCollector> collectors;
     collectors.reserve(streams.size());
     for (const auto& stream : streams) {
-        collectors.emplace_back(stream->generateConfig()->logits_index);
+        collectors.emplace_back(stream ? stream->generateConfig()->logits_index : std::nullopt);
     }
-    std::vector<bool>                       terminal_outputs(streams.size(), false);
-    FirstError::Snapshot                    observed_error;
-    auto                                    fail = [&](const grpc::Status& status) {
-        FirstError failure;
-        failure.record(errorInfoFromGrpcStatus(status));
-        auto first = FirstError::earlier(observed_error, failure.snapshot());
-        for (const auto& stream : streams)
-            first = FirstError::earlier(first, stream->firstError());
-        for (const auto& stream : streams) {
-            if (!stream->hasError() && stream->getStatus() != StreamState::FINISHED) {
-                stream->reportError(first.error.code(), first.error.ToString());
-            }
-        }
-        return grpcStatusFromErrorInfo(first.error);
-    };
+    std::vector<bool> settled(streams.size(), false);
     while (true) {
-        bool remote_done = true;
-        auto first       = check_remote ? check_remote(remote_done) : FirstError::Snapshot{};
-        for (const auto& stream : streams)
-            first = FirstError::earlier(first, stream->firstError());
-        observed_error = first;
-        if (first.error.hasError())
-            return fail(grpcStatusFromErrorInfo(first.error));
-        if (context->IsCancelled()) {
-            return fail(grpcStatusFromErrorInfo(ErrorInfo(ErrorCode::CANCELLED, "BatchGenerateCall cancelled")));
+        if (context && context->IsCancelled()) {
+            return grpcStatusFromErrorInfo({ErrorCode::CANCELLED, "BatchGenerateCall cancelled"});
         }
         bool all_finished = true;
-        bool progress     = false;
+        bool progress = false;
         for (size_t i = 0; i < streams.size(); ++i) {
-            auto&      stream = streams[i];
-            const auto key =
-                "batch item " + std::to_string(i) + " request " + std::to_string(stream->generateInput()->request_id);
-            if (stream->hasError())
-                return fail(serializeErrorMsg(
-                    key, ErrorInfo(stream->statusInfo().code(), key + ": " + stream->statusInfo().ToString())));
-            if (terminal_outputs[i]) {
+            auto stream = streams[i];
+            if (!stream || settled[i])
+                continue;
+
+            const auto fail = [&](const ErrorInfo& error) {
+                fail_item(stream->generateInput()->request_id, error);
+                settled[i] = true;
+            };
+            if (stream->hasError()) {
+                fail(stream->statusInfo());
                 continue;
             }
+
+            bool terminal_output = false;
             if (stream->hasOutput()) {
                 auto output = stream->nextOutput();
-                if (!output.ok())
-                    return fail(serializeErrorMsg(
-                        key, ErrorInfo(output.status().code(), key + ": " + output.status().ToString())));
-                const auto& rows    = output.value().generate_outputs;
-                terminal_outputs[i] = !rows.empty() && std::all_of(rows.begin(), rows.end(), [](const auto& row) {
-                    return row.finished;
-                });
-                auto status = collectors[i].add(std::move(output.value()));
-                if (!status.ok())
-                    return fail(serializeErrorMsg(key, ErrorInfo(status.code(), key + ": " + status.ToString())));
-                progress = true;
-            }
-            if (!terminal_outputs[i] && (stream->getStatus() != StreamState::FINISHED || stream->hasOutput())) {
-                all_finished = false;
-                if (stream->deadlineMs() <= currentTimeMs()) {
-                    return fail(grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, key + " deadline exceeded"));
+                if (!output.ok() && output.status().code() != ErrorCode::FINISHED) {
+                    fail(output.status());
+                    continue;
+                }
+                if (output.ok()) {
+                    const auto& rows = output.value().generate_outputs;
+                    terminal_output = !rows.empty() && std::all_of(rows.begin(), rows.end(), [](const auto& row) {
+                        return row.finished;
+                    });
+                    auto status = collectors[i].add(std::move(output.value()));
+                    if (!status.ok()) {
+                        fail(status);
+                        continue;
+                    }
+                    progress = true;
                 }
             }
+            if (terminal_output || (stream->isFinished() && !stream->hasOutput())) {
+                if (collectors[i].empty()) {
+                    fail({ErrorCode::EXECUTION_EXCEPTION, "batch item completed without output"});
+                    continue;
+                }
+                auto output = collectors[i].finish();
+                auto* pb = response->mutable_results(static_cast<int>(i))->mutable_final_output();
+                QueryConverter::transResponse(pb,
+                                              &output,
+                                              stream->generateConfig()->aux_info,
+                                              maga_init_params_.misc_config.aux_string,
+                                              stream->specialTokens().eos_token_id);
+                updateAuxInfo(*pb, stream);
+                settled[i] = true;
+            } else if (stream->deadlineMs() <= currentTimeMs()) {
+                fail({ErrorCode::GENERATE_TIMEOUT, "batch item deadline exceeded"});
+            } else {
+                all_finished = false;
+            }
         }
-        if (all_finished && remote_done)
-            break;
+        if (all_finished)
+            return grpc::Status::OK;
         if (!progress)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    response->Clear();
-    for (size_t i = 0; i < streams.size(); ++i) {
-        if (collectors[i].empty()) {
-            return fail(grpc::Status(grpc::StatusCode::INTERNAL,
-                                     "batch item " + std::to_string(i) + " completed without output"));
-        }
-        auto  output = collectors[i].finish();
-        auto* pb     = response->add_results()->mutable_final_output();
-        auto  stream = streams[i];
-        QueryConverter::transResponse(pb,
-                                      &output,
-                                      stream->generateConfig()->aux_info,
-                                      maga_init_params_.misc_config.aux_string,
-                                      stream->specialTokens().eos_token_id);
-        updateAuxInfo(*pb, stream);
-    }
-    return grpc::Status::OK;
 }
 
 

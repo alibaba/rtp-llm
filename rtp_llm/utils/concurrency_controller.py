@@ -1,5 +1,5 @@
 import logging
-import os
+import time
 from multiprocessing import Lock, Value
 from typing import Optional
 
@@ -20,16 +20,15 @@ class ConcurrencyController:
             return self.max_concurrency - self.current_concurrency.value
 
     def increment(self, request_count: int = 1) -> int:
-        if not 1 <= request_count <= 4096:
-            raise ValueError("request_count must fit in the request ID sequence")
+        if request_count < 1:
+            raise ValueError("request_count must be positive")
         with self.lock:
             if self.current_concurrency.value >= self.max_concurrency:
                 raise ConcurrencyException(
                     f"Concurrency limit {self.max_concurrency} reached"
                 )
-            sequence = self.request_counter.value + 1
-            if sequence % 4096 + request_count > 4096:
-                sequence += (-sequence) % 4096
+            # A logical slot contains the wall-clock millisecond and a 12-bit sequence.
+            sequence = max(self.request_counter.value + 1, (time.time_ns() // 1_000_000) << 12)
             self.request_counter.value = sequence + request_count - 1
             self.current_concurrency.value += 1
             return sequence

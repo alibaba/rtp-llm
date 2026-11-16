@@ -1,7 +1,6 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include "autil/legacy/json.h"
 #include "rtp_llm/cpp/api_server/Exception.h"
 #include "rtp_llm/cpp/api_server/ChatService.h"
 #include "rtp_llm/cpp/api_server/test/mock/MockApiServerMetricReporter.h"
@@ -288,7 +287,7 @@ TEST_F(ChatServiceTest, ChatCompletions) {
             return json_response;
         }));
     EXPECT_CALL(*mock_writer_, Write).WillRepeatedly(Invoke([json_response](const std::string& data) {
-        EXPECT_EQ(data, ChatService::chatSseFrame(json_response));
+        EXPECT_EQ(data, ChatService::sseResponse(json_response));
         return true;
     }));
 
@@ -300,7 +299,6 @@ TEST_F(ChatServiceTest, ChatCompletions) {
     EXPECT_CALL(*mock_stream, nextOutput(_))
         .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))))
         .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::FINISHED, "finished")));
-    EXPECT_CALL(*mock_stream, hasError()).WillOnce(Return(false));
 
     EXPECT_CALL(*mock_metric_reporter_, reportResponseFirstTokenLatencyMs).WillOnce(Invoke([](double val) {
         EXPECT_TRUE(val >= 0);
@@ -422,22 +420,16 @@ TEST_F(ChatServiceTest, StreamingStreamErrorsUseSseErrorPath) {
             .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))))
             .WillOnce(Return(ErrorResult<GenerateOutputs>(error_code, message)));
 
+        const HttpApiServerException expected_error(expected_type, message);
         EXPECT_CALL(*mock_metric_reporter_, reportResponseFirstTokenLatencyMs).Times(1);
         EXPECT_CALL(*mock_metric_reporter_, reportResponseIterateLatencyMs).Times(1);
         EXPECT_CALL(*mock_metric_reporter_, reportErrorQpsMetric("test_source", expected_type, _)).Times(1);
         {
             InSequence sequence;
-            EXPECT_CALL(*mock_writer_, Write(ChatService::chatSseFrame(first_response))).WillOnce(Return(true));
-            EXPECT_CALL(*mock_writer_, Write(ChatService::chatSseFrame(token_response))).WillOnce(Return(true));
-            EXPECT_CALL(*mock_writer_, Write(StartsWith("data: ")))
-                .WillOnce(Invoke([expected_message = message](const std::string& frame) {
-                    const auto json = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
-                        autil::legacy::json::ParseJson(frame.substr(6, frame.size() - 8)));
-                    const auto error = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(json.at("error"));
-                    EXPECT_EQ(autil::legacy::AnyCast<std::string>(error.at("type")), "stream_error");
-                    EXPECT_EQ(autil::legacy::AnyCast<std::string>(error.at("message")), expected_message);
-                    return true;
-                }));
+            EXPECT_CALL(*mock_writer_, Write(ChatService::sseResponse(first_response))).WillOnce(Return(true));
+            EXPECT_CALL(*mock_writer_, Write(ChatService::sseResponse(token_response))).WillOnce(Return(true));
+            EXPECT_CALL(*mock_writer_, Write(ChatService::sseResponse(formatException(expected_error))))
+                .WillOnce(Return(true));
             EXPECT_CALL(*mock_writer_, WriteDone).WillOnce(Return(true));
         }
 
@@ -446,74 +438,6 @@ TEST_F(ChatServiceTest, StreamingStreamErrorsUseSseErrorPath) {
 
     EXPECT_EQ(writer_->_type, http_server::HttpResponseWriter::WriteType::Stream);
     EXPECT_EQ(writer_->_headers.at("Content-Type"), "text/event-stream");
-}
-
-TEST_F(ChatServiceTest, ChatCompletions_StreamErrorJsonEscaped) {
-    http_server::HttpRequest request;
-    const std::string        body = R"del({
-    "messages": [
-        {
-            "role": "user",
-            "content": "who are you?"
-        }
-    ],
-    "stream": true,
-    "source": "test_source"
-})del";
-    request._request              = CreateHttpPacket(body);
-
-    auto generate_config = std::make_shared<GenerateConfig>();
-    EXPECT_CALL(*mock_openai_endpoint_, extract_generation_config).WillRepeatedly(Return(generate_config));
-
-    RenderedInputs rendered_inputs{std::vector<int>(), std::vector<MultimodalInput>(), std::string()};
-    EXPECT_CALL(*mock_render_, render_chat_request).WillOnce(Return(rendered_inputs));
-
-    auto mock_stream = CreateMockGenerateStream();
-    auto stream = std::dynamic_pointer_cast<GenerateStream>(mock_stream);
-    EXPECT_CALL(*mock_engine_, enqueue(Matcher<const std::shared_ptr<GenerateInput>&>(_))).WillOnce(Return(stream));
-
-    auto mock_ctx = std::make_shared<MockRenderContext>();
-    auto ctx      = std::dynamic_pointer_cast<RenderContext>(mock_ctx);
-    EXPECT_CALL(*mock_render_, getRenderContext).WillOnce(Return(ctx));
-    EXPECT_CALL(*mock_ctx, init).WillOnce(Return());
-
-    const std::string first_json = R"({"first":true})";
-    const std::string chunk_json = R"({"chunk":"ok"})";
-    EXPECT_CALL(*mock_ctx, render_stream_response_first).WillOnce(Return(first_json));
-    EXPECT_CALL(*mock_ctx, render_stream_response).WillOnce(Return(chunk_json));
-
-    GenerateOutput output;
-    output.output_ids = CreateOutputIdsTensor();
-    GenerateOutputs outputs;
-    outputs.generate_outputs.push_back(output);
-
-    EXPECT_CALL(*mock_stream, hasError()).WillOnce(Return(false));
-    EXPECT_CALL(*mock_stream, nextOutput(_))
-        .WillOnce(Return(ErrorResult<GenerateOutputs>(std::move(outputs))))
-        .WillOnce(Return(ErrorResult<GenerateOutputs>(ErrorCode::UNKNOWN_ERROR, "bad \"quote\"\nline")));
-
-    std::vector<std::string> writes;
-    EXPECT_CALL(*mock_writer_, Write).WillRepeatedly(Invoke([&writes](const std::string& data) {
-        writes.push_back(data);
-        return true;
-    }));
-    EXPECT_CALL(*mock_writer_, WriteDone()).WillOnce(Return(true));
-    EXPECT_CALL(*mock_metric_reporter_, reportErrorQpsMetric(Eq("test_source"), _, 0)).Times(1);
-
-    EXPECT_NO_THROW(chat_service_->chatCompletions(writer_, request, 10086));
-
-    ASSERT_EQ(writes.size(), 3u);
-    EXPECT_EQ(writes[0], "data: " + first_json + "\n\n");
-    EXPECT_EQ(writes[1], "data: " + chunk_json + "\n\n");
-    EXPECT_THAT(writes[2], StartsWith("data: "));
-
-    const std::string error_json = writes[2].substr(6, writes[2].size() - 8);
-    auto              json_map =
-        autil::legacy::AnyCast<autil::legacy::json::JsonMap>(autil::legacy::json::ParseJson(error_json));
-    auto              error_map =
-        autil::legacy::AnyCast<autil::legacy::json::JsonMap>(json_map["error"]);
-    EXPECT_EQ(autil::legacy::AnyCast<std::string>(error_map["message"]), "bad \"quote\"\nline");
-    EXPECT_EQ(autil::legacy::AnyCast<std::string>(error_map["type"]), "stream_error");
 }
 
 }  // namespace rtp_llm

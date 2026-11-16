@@ -208,10 +208,7 @@ public:
     virtual absl::Status initKVBlock();
     virtual absl::Status incrKVBlock();
     virtual void         releaseResource();
-    // Attempt release after generation and async workers finish. A live
-    // Connector lease keeps cleanup pending after the stream releases its blocks.
-    bool                 tryCompleteLocalCleanup();
-    // Read-only check for outstanding local work during late cancellation.
+    // Observe Engine release and Connector lease completion during cancellation.
     bool                 hasPendingLocalCleanup() const;
     // Callbacks may run on the Engine or transport thread and should only enqueue work.
     void                 onLocalCleanupProgress(std::function<void()> callback);
@@ -674,7 +671,6 @@ public:
     void markDeferredRelease();
     bool deferResourceReleaseIfBusy();
     bool isDeferredReleasePending() const;
-    bool hasPendingP2PResourceHold() const;
 
     // Per-stream CUDA state used to prepare the next MTP decode step while host
     // bookkeeping may still be in flight. It carries accept_len/tokens,
@@ -937,6 +933,7 @@ public:
         int64_t first_token_rt_us       = 0;
         bool    generation_done         = false;
         int64_t generation_done_time_us = 0;
+        int64_t initial_kv_allocation_rt_us = 0;
         int64_t loading_cache_start_time_us = 0;
         int64_t loading_cache_done_time_us = 0;
         bool loading_cache_succeeded = false;
@@ -950,7 +947,6 @@ protected:
     // capacity-boundary join is needed before taking mutex_.
     bool needsAsyncBookkeepingJoinForKvReservation() const;
 
-    bool canReleaseFinishedResources() const;
     void                               notifyLocalCleanupProgress();
     std::mutex                         cleanup_observers_mutex_;
     std::vector<std::function<void()>> cleanup_observers_;

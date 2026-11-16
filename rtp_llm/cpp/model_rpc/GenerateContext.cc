@@ -209,6 +209,18 @@ void GenerateContext::collectBasicMetrics(RpcMetricsCollector& collector) {
     collector.total_rt_us        = executeTimeMs() * 1000;
     collector.retry_times        = retry_times;
     collector.retry_cost_time_ms = retry_cost_time_ms;
+    if (stream_ && stream_->resourceContext().role_type == RoleType::DECODE && stream_->queryPdSep()) {
+        const auto timing = stream_->getTimeInfo();
+        collector.allocate_resource_rt_us = timing.initial_kv_allocation_rt_us;
+        if (timing.loading_cache_start_time_us > 0
+            && timing.loading_cache_done_time_us >= timing.loading_cache_start_time_us) {
+            collector.load_cache_from_prefill_rt_us =
+                timing.loading_cache_done_time_us - timing.loading_cache_start_time_us;
+        }
+        if (timing.running_started_time_us > 0 && timing.generation_done_time_us >= timing.running_started_time_us) {
+            collector.local_generate_rt_us = timing.generation_done_time_us - timing.running_started_time_us;
+        }
+    }
 }
 
 void GenerateContext::reportMetrics(RpcMetricsCollector& collector) {

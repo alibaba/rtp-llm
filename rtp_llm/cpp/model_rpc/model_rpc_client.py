@@ -1811,14 +1811,9 @@ class ModelRpcClient(object):
                 response_iterator.cancel()
 
     async def batch_generate(
-        self, inputs: list[GenerateInput]
-    ) -> list[GenerateOutputs]:
-        """Run BatchGenerateCall with atomic batch failure semantics.
-
-        The service must return one result per input. Any item-level error, result
-        cardinality mismatch, transport error, or conversion failure fails the
-        entire batch; partial successes are never returned to the caller.
-        """
+        self, inputs: list[GenerateInput], *, allow_partial: bool = False
+    ) -> list[GenerateOutputs | FtRuntimeException]:
+        """Return results in input order, optionally preserving per-item RPC errors."""
         if not inputs:
             return []
         selected_roles = [
@@ -1980,10 +1975,14 @@ class ModelRpcClient(object):
                             "batch item %d request=%s wire_code=%d frontend_error_code=%d: %s",
                             i, inputs[i].request_id, error.error_code, exception_type.value, error_message,
                         )
-                        raise FtRuntimeException(
+                        item_error = FtRuntimeException(
                             exception_type,
                             f"batch item {i} failed: {self._client_backend_message(exception_type, error_message)}",
                         )
+                        if not allow_partial:
+                            raise item_error
+                        results.append(item_error)
+                        continue
                     conversion_index = i
                     stream_state = StreamState()
                     output = trans_output(
@@ -2119,6 +2118,7 @@ class ModelRpcClient(object):
                 )
             break
 
-    async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
-        """Compatibility alias for callers using the historical enqueue name."""
-        return await self.batch_generate(inputs)
+    async def batch_enqueue(
+        self, inputs: list[GenerateInput]
+    ) -> list[GenerateOutputs | FtRuntimeException]:
+        return await self.batch_generate(inputs, allow_partial=True)

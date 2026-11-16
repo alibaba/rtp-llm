@@ -323,33 +323,26 @@ protected:
     size_t                                initial_free_blocks_ = 0;
 };
 
-TEST_F(PdSepKVCacheReleaseTest, MissingGroupIdentityRejectsAsyncLoadBeforeConnecting) {
+TEST_F(PdSepKVCacheReleaseTest, RejectsMissingOrMalformedGroupIdentityBeforeConnecting) {
     const auto config = makeConfig();
     P2PConnectorSchedulerConfig scheduler_config;
     scheduler_config.topology = config.topologyPtr();
+    scheduler_config.cache_key_tokens_per_block = config.seq_size_per_block;
     scheduler_config.parallelism_config.tp_size = 1;
     // No RPC client or worker pool: route validation must finish before either is needed.
     P2PSchedulerDecodeRead scheduler(scheduler_config, nullptr, nullptr);
-    const auto plan = scheduler.planFor(1, 1, "missing-identity");
-    ASSERT_TRUE(plan->ok());
+    const auto plan = scheduler.planFor(1, 1, "invalid-identity");
+    ASSERT_TRUE(plan->ok()) << plan->error.ToString();
     KVCacheResource resource;
     resource.cacheKeys() = {42};
-    auto result = scheduler.buildDecodeRankRoutes(plan->plan, resource, {0, 1}, 1);
-    EXPECT_FALSE(result.ok());
-    EXPECT_EQ(result.status().code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
-}
+    const auto expect_invalid_route = [&] {
+        auto result = scheduler.buildDecodeRankRoutes(plan->plan, resource, {0, 1}, 1);
+        EXPECT_FALSE(result.ok());
+        EXPECT_EQ(result.status().code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
+    };
+    expect_invalid_route();
 
-TEST_F(PdSepKVCacheReleaseTest, MalformedGroupIndexRejectsAsyncLoadBeforeConnecting) {
-    const auto config = makeConfig();
-    P2PConnectorSchedulerConfig scheduler_config;
-    scheduler_config.topology = config.topologyPtr();
-    scheduler_config.parallelism_config.tp_size = 1;
-    P2PSchedulerDecodeRead scheduler(scheduler_config, nullptr, nullptr);
-    const auto plan = scheduler.planFor(1, 1, "malformed-identity");
-    ASSERT_TRUE(plan->ok());
-    KVCacheResource resource;
     resource.initGroups(config.topologyPtr());
-    resource.cacheKeys() = {42};
     auto holder = std::make_shared<BlockIds>();
     holder->assign({1});
     const auto tag = config.groupTags().front();
@@ -361,9 +354,7 @@ TEST_F(PdSepKVCacheReleaseTest, MalformedGroupIndexRejectsAsyncLoadBeforeConnect
     for (const auto& blocks : malformed) {
         // Fault injection: the dispatch projection must reject malformed identity before any RPC.
         const_cast<GroupBlockIds&>(resource.groupBlockIds()) = blocks;
-        auto result = scheduler.buildDecodeRankRoutes(plan->plan, resource, {0, 1}, 1);
-        EXPECT_FALSE(result.ok());
-        EXPECT_EQ(result.status().code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
+        expect_invalid_route();
     }
 }
 

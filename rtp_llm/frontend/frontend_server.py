@@ -12,7 +12,6 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import (
     update_stop_words_from_env,
@@ -244,6 +243,15 @@ class FrontendServer(object):
         if self._frontend_worker is not None:
             self._frontend_worker.stop()
 
+    def _request_id_for_slot(self, slot: int) -> int:
+        return generate_request_id(
+            self.py_env_configs.server_config.ip,
+            self.py_env_configs.server_config.server_port,
+            self.server_id,
+            slot % 4096,
+            timestamp_ms=slot >> 12,
+        )
+
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
         start_time = time.time()
         try:
@@ -252,13 +260,8 @@ class FrontendServer(object):
             kmonitor.report(
                 AccMetrics.QPS_METRIC, 1, {"source": request.get("source", "unknown")}
             )
-            sequence = self._global_controller.increment() % 4096  # 12 bits
-            request[request_id_field_name] = generate_request_id(
-                self.py_env_configs.server_config.ip,
-                self.py_env_configs.server_config.server_port,
-                self.server_id,
-                sequence,
-            )
+            sequence = self._global_controller.increment()
+            request[request_id_field_name] = self._request_id_for_slot(sequence)
         except Exception as e:
             return self._handle_exception(request, e)
 
@@ -376,13 +379,8 @@ class FrontendServer(object):
             if isinstance(req, str):
                 req = json.loads(req)
             assert isinstance(req, dict)
-            sequence = self._global_controller.increment() % 4096  # 12 bits
-            req[request_id_field_name] = generate_request_id(
-                self.py_env_configs.server_config.ip,
-                self.py_env_configs.server_config.server_port,
-                self.server_id,
-                sequence,
-            )
+            sequence = self._global_controller.increment()
+            req[request_id_field_name] = self._request_id_for_slot(sequence)
             request_headers = extract_request_headers(
                 getattr(raw_request, "headers", None)
             )
@@ -433,13 +431,8 @@ class FrontendServer(object):
     async def chat_completion(
         self, request: ChatCompletionRequest, raw_request: Request
     ):
-        sequence = self._global_controller.increment() % 4096  # 12 bits
-        request_id = generate_request_id(
-            self.py_env_configs.server_config.ip,
-            self.py_env_configs.server_config.server_port,
-            self.server_id,
-            sequence,
-        )
+        sequence = self._global_controller.increment()
+        request_id = self._request_id_for_slot(sequence)
 
         # Chat completions HTTP SERVER span.
         # Returns None when telemetry is disabled; all calls below are no-ops then.
@@ -516,13 +509,8 @@ class FrontendServer(object):
     async def batch_chat_completion(self, request, raw_request: Request):
         from rtp_llm.openai.api_datatype import BatchChatCompletionResponse
 
-        sequence = self._global_controller.increment() % 4096
-        request_id = generate_request_id(
-            self.py_env_configs.server_config.ip,
-            self.py_env_configs.server_config.server_port,
-            self.server_id,
-            sequence,
-        )
+        sequence = self._global_controller.increment(max(1, len(request.requests)))
+        request_id = self._request_id_for_slot(sequence)
         previous_trace_state = CURRENT_TRACE_STATE.get()
         trace_state = start_server_span(
             "POST /v1/batch/chat/completions",
@@ -544,11 +532,12 @@ class FrontendServer(object):
                 )
             assert self._openai_endpoint is not None
             responses = await self._openai_endpoint.batch_chat_completion(
-                request_id, request
+                request_id, request,
+                request_ids=[self._request_id_for_slot(sequence + i) for i in range(len(request.requests))],
             )
             return ORJSONResponse(
                 content=BatchChatCompletionResponse(
-                    responses=[r.model_dump(exclude_none=True) for r in responses]
+                    responses=[r if isinstance(r, dict) else r.model_dump(exclude_none=True) for r in responses]
                 ).model_dump()
             )
         except BaseException as error:
@@ -572,11 +561,6 @@ class FrontendServer(object):
         from rtp_llm.frontend.frontend_worker import BatchPipelineResponse
 
         prompts = req.get("prompt_batch", [])
-        if len(prompts) > 4096:
-            raise FtRuntimeException(
-                ExceptionType.INVALID_PARAMS, "prompt_batch may contain at most 4096 items"
-            )
-        # Reserve the whole sequence range while acquiring a single batch slot.
         sequence = self._global_controller.increment(max(1, len(prompts)))
         previous_trace_state = CURRENT_TRACE_STATE.get()
         trace_state = None
@@ -599,17 +583,13 @@ class FrontendServer(object):
                     extract_correlation_request_id(raw_request.headers)
                 )
             assert self._frontend_worker is not None
-            request_id = generate_request_id(
-                self.py_env_configs.server_config.ip,
-                self.py_env_configs.server_config.server_port,
-                self.server_id,
-                sequence,
-            )
+            request_id = self._request_id_for_slot(sequence)
             generate_config = req.get("generate_config", {})
             result = await self._frontend_worker.batch_infer(
                 prompts=prompts,
                 request_id=request_id,
                 generate_config=generate_config,
+                request_ids=[self._request_id_for_slot(sequence + i) for i in range(len(prompts))],
             )
             return ORJSONResponse(content=result.model_dump(exclude_none=True))
         except BaseException as error:

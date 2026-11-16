@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <iterator>
-#include <tuple>
 #include <torch/python.h>
 
 #include "rtp_llm/cpp/pybind/PyUtils.h"
@@ -202,9 +201,10 @@ void InferenceService::inferResponse(int64_t                                    
                                               "InferenceService does not support partial enqueue");
             }
         }
-        const auto error = ori_streams[rejected_idx] ? ori_streams[rejected_idx]->statusInfo() :
-                                                     ErrorInfo(ErrorCode::UNKNOWN_ERROR, "scheduler returned a null rejected stream");
-        throw HttpApiServerException(transErrorCodeToHttpExceptionType(error.code()), error.ToString());
+        const auto rejection = ori_streams[rejected_idx] ? ori_streams[rejected_idx]->statusInfo().ToString() :
+                                                           "scheduler returned a null rejected stream";
+        throw HttpApiServerException(HttpApiServerException::UNKNOWN_ERROR,
+                                     "InferenceService does not support partial enqueue: " + rejection);
     }
     std::vector<std::shared_ptr<GenerateStreamWrapper>> streams;
     streams.reserve(ori_streams.size());
@@ -214,30 +214,7 @@ void InferenceService::inferResponse(int64_t                                    
         streams.push_back(stream_wrapper);
     }
 
-    bool response_started = false;
-    int  iterate_count    = 0;
-    std::vector<std::string> complete_response;
-    try {
-        std::tie(iterate_count, complete_response) =
-            iterateStreams(streams, writer, req, iterate_stage_timer, &response_started);
-    } catch (const std::exception& e) {
-        if (req.is_streaming && response_started) {
-            writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Stream);
-            writer->AddHeader("Content-Type", "text/event-stream");
-            writer->Write(inferenceSseFrame(formatException(e)));
-            writer->WriteDone();
-            if (metric_reporter_) {
-                int error_code = HttpApiServerException::UNKNOWN_ERROR;
-                if (const auto he = dynamic_cast<const HttpApiServerException*>(&e); he) {
-                    error_code = he->getType();
-                }
-                metric_reporter_->reportErrorQpsMetric(req.source, error_code);
-            }
-            AccessLogWrapper::logExceptionAccess(body, request_id, e.what());
-            return;
-        }
-        throw;
-    }
+    auto [iterate_count, complete_response] = iterateStreams(streams, writer, req, iterate_stage_timer);
 
     writer->WriteDone();
     AccessLogWrapper::logSuccessAccess(body, request_id, complete_response, req.private_request);
@@ -293,11 +270,7 @@ std::pair<int, std::vector<std::string>>
 InferenceService::iterateStreams(std::vector<std::shared_ptr<GenerateStreamWrapper>>&    streams,
                                  const std::unique_ptr<http_server::HttpResponseWriter>& writer,
                                  const InferenceParsedRequest&                           req,
-                                 autil::StageTime&                                       iterate_stage_timer,
-                                 bool*                                                   response_started) {
-    if (response_started) {
-        *response_started = false;
-    }
+                                 autil::StageTime&                                       iterate_stage_timer) {
 
     std::vector<MultiSeqsResponse> batch_state(streams.size());
     std::vector<std::string>       complete_response;
@@ -321,9 +294,6 @@ InferenceService::iterateStreams(std::vector<std::shared_ptr<GenerateStreamWrapp
         if (err) {
             throw HttpApiServerException(HttpApiServerException::CANCELLED_ERROR, "client disconnects");
         }
-        if (response_started) {
-            *response_started = true;
-        }
         complete_response.push_back(response);
 
         if (metric_reporter_) {
@@ -338,10 +308,6 @@ InferenceService::iterateStreams(std::vector<std::shared_ptr<GenerateStreamWrapp
         iterate_counter++;
     }
     return std::make_pair(iterate_counter, complete_response);
-}
-
-std::string InferenceService::inferenceSseFrame(const std::string& response) {
-    return "data:" + response + "\n\n";
 }
 
 std::pair<bool, std::string>
