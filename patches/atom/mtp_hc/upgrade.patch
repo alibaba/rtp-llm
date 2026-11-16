@@ -1,0 +1,19 @@
+--- a/atom/models/qwen4_exp_mtp.py
++++ b/atom/models/qwen4_exp_mtp.py
+@@ -10,6 +10,7 @@
+ from torch import nn
+ 
+ from atom.config import Config
++from atom.plugin.prepare import is_rtpllm
+ from atom.model_loader.weight_utils import local_model_dir
+ from atom.model_ops.embed_head import ParallelLMHead, VocabParallelEmbedding
+ from atom.model_ops.linear import ReplicatedLinear
+@@ -119,7 +120,7 @@
+                     prefix="mtp.layers.0",
+                     layer_num=self.mtp_start_layer_idx,
+                     quant_config=quant_config,
+-                    fused_hc=(torch.version.hip is not None and os.environ.get("ATOM_RTP_MTP_HC_FUSION", "0") == "1"),
++                    fused_hc=(torch.version.hip is not None and is_rtpllm() and os.environ.get("ATOM_RTP_MTP_HC_FUSION", "1") == "1"),
+                 )
+             ]
+         )

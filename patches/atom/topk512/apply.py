@@ -1,4 +1,4 @@
-"""Apply the opt-in ROCm ATOM small-row TopK patch to the pinned wheel."""
+"""Apply the default-on ROCm RTP-ATOM optimization patch to the pinned wheel."""
 import argparse
 import hashlib
 import importlib.metadata
@@ -20,7 +20,7 @@ def main():
     manifest = json.loads((directory / "manifest.json").read_text())
     patch = directory / "topk512.patch"
     if digest(patch.read_bytes()) != manifest["patch_sha256"]:
-        raise RuntimeError("TopK patch hash mismatch")
+        raise RuntimeError("ATOM optimization patch hash mismatch")
     package = importlib.metadata.distribution("atom")
     if package.version != manifest["atom_version"]:
         raise RuntimeError(f"Unsupported ATOM version: {package.version}")
@@ -28,9 +28,15 @@ def main():
     current = {name: path.read_bytes() if path.exists() else None for name, path in targets.items()}
     hashes = {name: digest(data) if data is not None else None for name, data in current.items()}
     if all(hashes[name] == meta["patched_sha256"] for name, meta in manifest["files"].items()):
-        print("TopK patch verified")
+        print("ATOM optimization patch verified")
         return
-    if args.verify_only or any(hashes[name] != meta["source_sha256"] for name, meta in manifest["files"].items()):
+    if args.verify_only:
+        raise RuntimeError("Default-on patch is missing")
+    if all(hashes[name] == meta["previous_sha256"] for name, meta in manifest["files"].items()):
+        patch = directory / "upgrade.patch"
+        if digest(patch.read_bytes()) != manifest["upgrade_sha256"]:
+            raise RuntimeError("Upgrade patch hash mismatch")
+    elif any(hashes[name] != meta["source_sha256"] for name, meta in manifest["files"].items()):
         raise RuntimeError("Unknown or partially patched ATOM files; refusing to overwrite")
     with tempfile.TemporaryDirectory(prefix="atom_topk512_") as temporary:
         root = Path(temporary)
@@ -47,7 +53,7 @@ def main():
             compile(data, name, "exec")
         for name, data in payloads.items():
             targets[name].write_bytes(data)
-    print("TopK patch installed; restart workers before enabling ATOM_RTP_TOPK512=1")
+    print("Patch installed; restart workers to use ROCm RTP-ATOM defaults")
 
 
 if __name__ == "__main__":
