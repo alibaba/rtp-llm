@@ -47,3 +47,8 @@ phases:
       - id: stop_client
         describe: 停止回放，收齐已发请求的终态。
         interface: client/stop/playback
+      - id: check_total_success_rate
+        describe: 整轮已发请求全部成功。
+        interface: client/query/success_rate
+        args: { range: [-40s, 0s] }
+        expect: { eq: 1.0 }
