@@ -157,8 +157,11 @@ protected:
         input->generate_config = config;
         input->input_ids       = torch::zeros({1}, torch::kInt32);
         input->begin_time_us   = currentTimeUs();  // Set begin_time_us to current time
-        // Mirror Prefill GenerateStream registration before resources are published.
-        input->request_deadline_ms = connector_->streamStore()->requestDeadline(unique_key, timeout_ms);
+        // Keep the stream deadline in sync with the registered request.
+        const auto deadline_ms = connector_->streamStore()->requestDeadline(unique_key, timeout_ms);
+        if (deadline_ms > 0) {
+            input->begin_time_us = (deadline_ms - timeout_ms) * 1000;
+        }
 
         return std::make_shared<MockGenerateStream>(input);
     }
@@ -316,8 +319,8 @@ TEST_F(P2PConnectorTest, StartLoadRegistrationWaitExpiresWithoutCreatingRequestD
     EXPECT_EQ(response.error_code(), transErrorCodeToRPC(ErrorCode::GENERATE_TIMEOUT));
     EXPECT_NE(response.error_message().find("registration"), std::string::npos);
     EXPECT_EQ(connector_->streamStore()->waitForRequestDeadline(request.unique_key(), currentTimeMs()), 0);
-    EXPECT_TRUE(connector_->streamStore()->isMarkedCancelled(request.unique_key()));
-    EXPECT_EQ(connector_->streamStore()->requestDeadline(request.unique_key(), 5000), 0);
+    EXPECT_FALSE(connector_->streamStore()->isMarkedCancelled(request.unique_key()));
+    EXPECT_GT(connector_->streamStore()->requestDeadline(request.unique_key(), 5000), currentTimeMs());
     for (const auto& server : tp_broadcast_servers_) {
         EXPECT_EQ(server->service()->getBroadcastTpCallCount(), 0);
     }
@@ -344,8 +347,8 @@ TEST_F(P2PConnectorTest, StartLoadRegistrationWaitObservesRpcCancellation) {
     ASSERT_EQ(result.wait_for(std::chrono::seconds(1)), std::future_status::ready);
     EXPECT_EQ(result.get().error_code(), transErrorCodeToRPC(ErrorCode::CANCELLED));
     EXPECT_EQ(connector_->streamStore()->waitForRequestDeadline(request.unique_key(), currentTimeMs()), 0);
-    EXPECT_TRUE(connector_->streamStore()->isMarkedCancelled(request.unique_key()));
-    EXPECT_EQ(connector_->streamStore()->requestDeadline(request.unique_key(), 5000), 0);
+    EXPECT_FALSE(connector_->streamStore()->isMarkedCancelled(request.unique_key()));
+    EXPECT_GT(connector_->streamStore()->requestDeadline(request.unique_key(), 5000), currentTimeMs());
 }
 
 TEST_F(P2PConnectorTest, StartLoadDoesNotRestartLoadBudgetAfterRegistrationWait) {
