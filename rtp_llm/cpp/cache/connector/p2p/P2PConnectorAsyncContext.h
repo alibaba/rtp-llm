@@ -291,7 +291,7 @@ private:
     size_t                               control_capacity_{0};
     std::map<std::string, size_t>                              group_block_bytes_;
     size_t                                                     total_kv_bytes_{0};
-    int                                                        kv_leak_exit_threshold_percent_{30};
+    int                                                        kv_leak_exit_threshold_bps_{3000};
     int64_t                                                    last_leak_log_ms_{0};
     int64_t                                                    retained_kv_over_threshold_since_ms_{0};
 };
