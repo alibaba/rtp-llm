@@ -105,10 +105,11 @@ class V41RuntimeConfig:
         expected = {
             "PREFILL": ((8, 1, "ALL_GATHER", 8), (1, 8, "DISABLED", 1)),
             "DECODE": ((1, 8, "PREFILL_CP", 8), (1, 8, "DISABLED", 1)),
+            "PDFUSION": ((1, 8, "DISABLED", 1),),
         }
         errors = []
         if self.role not in expected:
-            errors.append("role must be PREFILL or DECODE")
+            errors.append("role must be PREFILL, DECODE, or PDFUSION")
         elif (
             self.physical_tp,
             self.attention_dp,
@@ -120,7 +121,7 @@ class V41RuntimeConfig:
                 f"{expected[self.role]}"
             )
         if (self.world_size, self.ep, self.enp) != (8, 8, 8):
-            errors.append("world_size=EP=ENP=8 (separate P/D worlds)")
+            errors.append("world_size=EP=ENP=8")
         if self.max_seq_len <= 0:
             errors.append("max_seq_len must be positive and cover input + output")
         if self.kv_sharded and (self.source_cp != 8 or (self.role == "PREFILL" and self.physical_tp != 8)):

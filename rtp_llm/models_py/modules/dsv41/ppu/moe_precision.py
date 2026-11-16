@@ -9,6 +9,16 @@ from rtp_llm.models_py.modules.dsv41.ppu.quant_mode import MXFP4_FP8_PTPC, quant
 
 MOE_PRECISION_ENV = "RTP_V41_PPU_MOE_PRECISION"
 MOE_BACKEND_ENV = "RTP_V41_PPU_MOE_BACKEND"
+GC_MOE_MODE_ENV = "RTP_V41_PPU_GC_MOE_MODE"
+GC_MOE_TOKEN_BOUND_ENV = "RTP_V41_PPU_GC_MOE_DECODE_TOKEN_BOUND"
+
+
+def gc_moe_mode(env: Optional[Mapping[str, str]] = None) -> str:
+    env = os.environ if env is None else env
+    mode = env.get(GC_MOE_MODE_ENV, "off").strip().lower()
+    if mode not in ("off", "routed", "w4a4", "w8a8"):
+        raise ValueError(f"{GC_MOE_MODE_ENV} must be off, routed, w4a4, or w8a8, got {mode!r}")
+    return mode
 
 
 def megamoe_module_name(env: Optional[Mapping[str, str]] = None) -> str:

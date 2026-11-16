@@ -101,7 +101,12 @@ class SharedGraphRuntime:
         engine = self.ops.moe_engine
         example = torch.empty((self.max_rows, g.hidden_size), dtype=torch.bfloat16, device=self.device)
         self.grouped = None
-        if (engine.backend, engine.precision) == ("grouped", "w4a8"):
+        self.gc_decode = getattr(engine, "gc_decode", None)
+        if self.gc_decode is not None:
+            if not self.gc_decode.graph_safe or draft or row_width != 1:
+                raise ValueError("PPU GC MoE Graph requires ordinary single-token Decode")
+            self.workspace = self.gc_decode.prepare_workspace()
+        elif (engine.backend, engine.precision) == ("grouped", "w4a8"):
             from rtp_llm.models_py.modules.dsv41.ppu.graph_moe import GroupedW4A8Graph
 
             if model._v4_args.fake_balance_expert:
@@ -162,12 +167,19 @@ class SharedGraphRuntime:
             weights.extend(values)
         for values in self.ops.moe_engine._processed.values():
             weights.extend(v for v in values if isinstance(v, torch.Tensor))
+        if self.gc_decode is not None:
+            for pair in self.gc_decode.weights.values():
+                for weight, scale in pair:
+                    weights.extend((weight, scale))
         signature = tuple((t.data_ptr(), tuple(t.shape), t.dtype) for t in weights)
         return signature
 
     def validate(self):
         self.engram.validate()
-        if self.grouped is None and self.workspace is not self.ops.moe_engine._mega_buffer:
+        if self.gc_decode is not None:
+            if self.workspace is not self.gc_decode.workspace:
+                raise RuntimeError("shared Graph GC MoE workspace changed; recapture required")
+        elif self.grouped is None and self.workspace is not self.ops.moe_engine._mega_buffer:
             raise RuntimeError("shared Graph MegaMoE workspace changed; recapture required")
         if self._pointers != self._storage_signature():
             raise RuntimeError("shared Graph weight storage changed; recapture required")
@@ -220,7 +232,7 @@ class SharedGraphRuntime:
             shared={}, engram=self.engram, freqs=self.freqs,
             layer_calls=self.layer_calls, moe_calls=self.moe_calls,
             engram_calls=self.engram_calls, routed_rows_device=self.routed_rows_device,
-            grouped_moe=self.grouped,
+            grouped_moe=self.grouped, gc_decode=self.gc_decode,
             verify=verify, proposal=mode == "proposal", bulk_counters=bulk_counters,
             verify_moe_overlap=(
                 self.verify_moe_overlap.lookup_current_stream()
