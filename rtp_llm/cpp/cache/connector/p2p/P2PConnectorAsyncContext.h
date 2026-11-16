@@ -13,11 +13,14 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <map>
+#include <cstdint>
+#include <functional>
 #include <limits>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -94,8 +97,8 @@ public:
     void markStartFailed(const ErrorInfo& error_info);
     // An exception may follow a partial RPC dispatch: retain KV until workers confirm stop.
     void markKickoffUnconfirmed(const ErrorInfo& error_info);
-    void    setNotification(const std::shared_ptr<P2PNotification>& notification);
-    // Local steady-clock deadline for the checker notification.
+    void    setWakeupCallback(std::function<void()> callback);
+    // Next due event on the local steady clock.
     int64_t nextWakeupMs(bool allow_control) const;
     bool    needsControl() const;
     void    runControl(const std::shared_ptr<P2PBroadcastClient>& client);
@@ -229,19 +232,19 @@ private:
     std::atomic<bool>    calls_ready_{false};
     std::atomic<bool>    cancel_requested_{false};
     KickoffState         kickoff_state_{KickoffState::QUEUED};  // guarded by state_mutex_
-    std::shared_ptr<P2PNotification> notification_;                         // accessed with atomic_load/store
+    std::shared_ptr<const std::function<void()>> wakeup_callback_;  // accessed with atomic_load/store
     std::atomic<int64_t>             control_retry_ms_{0};
     std::atomic<bool>                control_active_{false};
 };
 
-/// @brief 完成事件唤醒状态检查；定时器只处理 deadline 和控制 RPC 重试
-class P2PConnectorAsyncReadContextChecker {
+// Owns live reads through transport stop confirmation and advances them on the shared RPC CQ.
+class P2PConnectorAsyncReadContextChecker:
+    public std::enable_shared_from_this<P2PConnectorAsyncReadContextChecker> {
 public:
     P2PConnectorAsyncReadContextChecker() = default;
     ~P2PConnectorAsyncReadContextChecker();
 
 public:
-    /// @brief 启动后台检查线程
     bool init(const kmonitor::MetricsReporterPtr&               metrics_reporter,
               const std::shared_ptr<P2PBroadcastClient>&        tp_broadcast_client,
               const std::shared_ptr<autil::LockFreeThreadPool>& control_pool,
@@ -252,7 +255,16 @@ public:
     size_t inflightContextCount() const;
 
 private:
-    void checkOnce();
+    struct TrackedRead {
+        std::shared_ptr<P2PConnectorAsyncReadContext> context;
+        std::function<void()>                        cancel_wakeup;
+        int64_t                                     wakeup_ms = std::numeric_limits<int64_t>::max();
+        uint64_t                                    generation = 0;
+    };
+    void scheduleRead(const std::shared_ptr<P2PConnectorAsyncReadContext>& context, int64_t wakeup_ms);
+    void advanceRead(const P2PConnectorAsyncReadContext* key, uint64_t generation);
+    void scheduleRetainedCheck(int64_t delay_ms);
+    void runRetainedCheck();
     void checkRetainedResources(const std::vector<std::shared_ptr<P2PConnectorAsyncReadContext>>& contexts);
 
     // 上报一个终态的 read 上下文采样（必要时补算 total），保证每个上下文恰好上报一次。
@@ -262,16 +274,18 @@ private:
     kmonitor::MetricsReporterPtr                               metrics_reporter_;
     std::shared_ptr<P2PBroadcastClient>                        tp_broadcast_client_;
     mutable std::mutex                                         async_contexts_mutex_;
-    std::vector<std::shared_ptr<P2PConnectorAsyncReadContext>> async_contexts_;
-    std::thread                                                async_read_check_thread_;
-    std::atomic<bool>                                          stopping_{false};
-    std::shared_ptr<P2PNotification>                           notification_{std::make_shared<P2PNotification>()};
+    std::unordered_map<const P2PConnectorAsyncReadContext*, TrackedRead> async_contexts_;
+    uint64_t next_generation_{0};  // guarded by async_contexts_mutex_
+    // Serializes shutdown with callbacks already executing on the CQ.
+    std::mutex                                                  processing_mutex_;
+    bool                                                        stopping_{false};  // guarded by async_contexts_mutex_
+    std::unordered_map<const P2PConnectorAsyncReadContext*, std::shared_ptr<P2PConnectorAsyncReadContext>>
+        retained_contexts_;  // guarded by processing_mutex_
+    std::function<void()>                                      cancel_retained_check_;
     std::shared_ptr<autil::LockFreeThreadPool>                 control_pool_;
     // Independent leases may be queried concurrently on the dedicated pool.
     std::shared_ptr<std::atomic<size_t>> control_inflight_{std::make_shared<std::atomic<size_t>>(0)};
     size_t                               control_capacity_{0};
-    size_t                                                     lease_poll_cursor_{0};
-    int64_t                                                    control_submit_retry_ms_{0};
     std::map<std::string, size_t>                              group_block_bytes_;
     size_t                                                     total_kv_bytes_{0};
     int                                                        kv_leak_exit_threshold_percent_{30};

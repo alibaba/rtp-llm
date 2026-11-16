@@ -588,6 +588,10 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
                 }
             };
             try {
+                if (currentTimeMs() >= send_req_local->deadline_ms) {
+                    done_cb(transfer::TransferErrorCode::TIMEOUT, "send deadline expired in the Prefill worker queue");
+                    return;
+                }
                 sender->send(*send_req_local, measured_done_cb);
             } catch (const std::exception& e) {
                 RTP_LLM_LOG_WARNING("P2PWorkerPrefillRead async send threw, route_layer_key=%s chunk_id=%d error=%s",

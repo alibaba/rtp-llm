@@ -204,7 +204,7 @@ protected:
         ASSERT_TRUE(client_->init());
         control_pool_ = std::make_shared<autil::LockFreeThreadPool>(1, 16, nullptr, "LeaseMemoryTest");
         ASSERT_TRUE(control_pool_->start());
-        checker_ = std::make_unique<P2PConnectorAsyncReadContextChecker>();
+        checker_ = std::make_shared<P2PConnectorAsyncReadContextChecker>();
         P2PConnectorSchedulerConfig scheduler_config;
         scheduler_config.topology = config_.topologyPtr();
         ASSERT_TRUE(checker_->init(nullptr, client_, control_pool_, scheduler_config));
@@ -295,7 +295,7 @@ protected:
     std::unique_ptr<grpc::Server>                        server_;
     std::shared_ptr<P2PBroadcastClient>                  client_;
     std::shared_ptr<autil::LockFreeThreadPool>           control_pool_;
-    std::unique_ptr<P2PConnectorAsyncReadContextChecker> checker_;
+    std::shared_ptr<P2PConnectorAsyncReadContextChecker> checker_;
 };
 
 TEST_P(DecodeLeaseMemoryTest, CancelRetainsBlockUntilLastWriteAndProtectsReusedBytes) {

@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferErrorCode.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include <algorithm>
 #include <exception>
 #include <future>
 #include <limits>
@@ -101,15 +102,31 @@ RdmaStagingBufferPool::~RdmaStagingBufferPool() {
 }
 
 std::optional<HostStagingBlockPool::HostStagingBlockBatch>
-RdmaStagingBufferPool::mallocBatchWithBackoff(size_t count, std::chrono::milliseconds timeout) {
+RdmaStagingBufferPool::mallocBatchWithBackoff(size_t count,
+                                            std::chrono::milliseconds timeout,
+                                            const std::shared_ptr<TransferTask>& task) {
     using Batch = HostStagingBlockPool::HostStagingBlockBatch;
     auto ready = std::make_shared<std::promise<std::optional<Batch>>>();
     auto result = ready->get_future();
     const auto deadline = HostStagingBlockPool::Clock::now() + timeout;
-    pool_->requestBatch(count, deadline, [ready](std::optional<Batch> batch) { ready->set_value(std::move(batch)); });
-    // Pool deadlines are processed on release; bound this worker's wait even
-    // when every slot remains in flight. The callback owns no stack references.
-    if (result.wait_until(deadline) != std::future_status::ready) {
+    const auto waiter_id = pool_->requestBatch(
+        count, deadline, [ready](std::optional<Batch> batch) { ready->set_value(std::move(batch)); });
+    size_t cancel_id = 0;
+    if (task && waiter_id != 0) {
+        cancel_id = task->addCancelCallback([pool = pool_, waiter_id] { pool->cancelBatchWaiter(waiter_id); });
+        if (cancel_id == 0) {
+            pool_->cancelBatchWaiter(waiter_id);
+            return std::nullopt;
+        }
+    }
+    const bool completed = result.wait_until(deadline) == std::future_status::ready;
+    if (cancel_id != 0) {
+        task->removeCancelCallback(cancel_id);
+    }
+    if (!completed) {
+        if (waiter_id != 0) {
+            pool_->cancelBatchWaiter(waiter_id);
+        }
         return std::nullopt;
     }
     return result.get();
@@ -171,11 +188,12 @@ std::string RdmaTaskContext::getUniqueKey() const {
 }
 
 bool RdmaTaskContext::isTimeout() const {
-    return currentTimeMs() > deadline_ms_;
+    return static_cast<uint64_t>(currentTimeMs()) >= getDeadlineMs();
 }
 
 uint64_t RdmaTaskContext::getDeadlineMs() const {
-    return static_cast<uint64_t>(deadline_ms_);
+    const auto effective_deadline_ms = task_ ? std::min(deadline_ms_, task_->deadlineMs()) : deadline_ms_;
+    return static_cast<uint64_t>(std::max<int64_t>(0, effective_deadline_ms));
 }
 
 std::string RdmaTaskContext::getRdmaServerIp() const {
@@ -346,13 +364,16 @@ RdmaTaskContext::buildRdmaBlockPairs(const std::shared_ptr<RdmaStagingBufferPool
     }
 
     const int64_t now_ms = currentTimeMs();
-    const int64_t remaining_ms = deadline_ms_ > now_ms ? deadline_ms_ - now_ms : 0;
+    const auto deadline_ms = static_cast<int64_t>(getDeadlineMs());
+    const int64_t remaining_ms = deadline_ms > now_ms ? deadline_ms - now_ms : 0;
     auto leases =
-        staging_pool->mallocBatchWithBackoff(required_staging_blocks, std::chrono::milliseconds(remaining_ms));
+        staging_pool->mallocBatchWithBackoff(required_staging_blocks, std::chrono::milliseconds(remaining_ms), task_);
     if (!leases) {
         RdmaBlockPairBuildResult failure;
-        failure.error_message = "rdma staging pool acquire timed out";
-        failure.error_code = TransferErrorCode::TIMEOUT;
+        const auto task_error = task_->errorCode();
+        failure.error_code = task_error == TransferErrorCode::OK ? TransferErrorCode::TIMEOUT : task_error;
+        failure.error_message = task_error == TransferErrorCode::OK ? "rdma staging pool acquire timed out" :
+                                                                     task_->errorMessage();
         return failure;
     }
     size_t staging_index  = 0;

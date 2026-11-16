@@ -1,8 +1,11 @@
 #pragma once
 
 #include <grpc++/grpc++.h>
+#include <grpc++/alarm.h>
+#include <grpc/support/time.h>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <functional>
@@ -20,6 +23,7 @@ class RpcCompletionQueue {
     struct Tag {
         std::shared_ptr<grpc::ClientContext> context;
         std::function<void(bool)>            complete;
+        std::shared_ptr<grpc::Alarm>        alarm;
     };
     struct State {
         grpc::CompletionQueue                           queue;
@@ -77,6 +81,9 @@ public:
             if (entry.second->context) {
                 entry.second->context->TryCancel();
             }
+            if (entry.second->alarm) {
+                entry.second->alarm->Cancel();
+            }
         }
         state_->queue.Shutdown();
         submit_lock.unlock();
@@ -97,7 +104,7 @@ public:
     bool submit(const std::shared_ptr<grpc::ClientContext>& context,
                 const Start&                                start,
                 std::function<void(bool)>                   complete) {
-        auto                        tag = std::make_unique<Tag>(Tag{context, std::move(complete)});
+        auto                        tag = std::make_unique<Tag>(Tag{context, std::move(complete), nullptr});
         void*                       key = tag.get();
         std::lock_guard<std::mutex> submit_lock(state_->submit_mutex);
         {
@@ -119,6 +126,34 @@ public:
         std::lock_guard<std::mutex> lock(state_->mutex);
         state_->tags.erase(key);
         return false;
+    }
+
+    std::function<void()> scheduleAfter(int64_t delay_ms, std::function<void(bool)> complete) {
+        auto alarm = std::make_shared<grpc::Alarm>();
+        auto tag = std::make_unique<Tag>(Tag{nullptr, std::move(complete), alarm});
+        void* key = tag.get();
+        const auto deadline = gpr_time_add(gpr_now(GPR_CLOCK_MONOTONIC), gpr_time_from_millis(delay_ms, GPR_TIMESPAN));
+        std::function<void()> cancel =
+            [weak_state = std::weak_ptr<State>(state_), weak_alarm = std::weak_ptr<grpc::Alarm>(alarm), key] {
+                auto state = weak_state.lock();
+                auto alarm = weak_alarm.lock();
+                if (!state || !alarm) {
+                    return;
+                }
+                std::lock_guard<std::mutex> lock(state->mutex);
+                const auto it = state->tags.find(key);
+                if (!state->stopping && it != state->tags.end() && it->second->alarm == alarm) {
+                    alarm->Cancel();
+                }
+            };
+        // Scheduling a timer must not wait behind another caller starting an RPC.
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        if (state_->stopping) {
+            return {};
+        }
+        state_->tags.emplace(key, std::move(tag));
+        alarm->Set(&state_->queue, deadline, key);
+        return cancel;
     }
 
 private:
