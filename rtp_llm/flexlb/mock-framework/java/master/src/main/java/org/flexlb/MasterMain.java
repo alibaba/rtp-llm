@@ -4,10 +4,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.net.InetAddresses;
 import org.flexlb.config.MasterLoopbackAddress;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.mock.master.MockFlexlbGrpcServer;
 import org.flexlb.mock.protocol.ControlHttpServer;
 import org.flexlb.mock.protocol.Role;
 import org.flexlb.service.grace.ApplicationLifecycle;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.springframework.beans.factory.support.BeanDefinitionRegistry;
+import org.springframework.beans.factory.support.RootBeanDefinition;
 import org.springframework.boot.SpringApplication;
 import org.springframework.core.SpringProperties;
 import org.springframework.core.env.AbstractEnvironment;
@@ -59,9 +62,19 @@ public final class MasterMain {
         org.flexlb.OpenTelemetryBootstrap.configureFromEnvironment();
         var application = new SpringApplication(Application.class);
         application.addInitializers(
-                context ->
-                        context.getBeanFactory()
-                                .registerSingleton("masterLoopbackAddress", loopbackAddress));
+                context -> {
+                    context.getBeanFactory()
+                            .registerSingleton("masterLoopbackAddress", loopbackAddress);
+                    // Replace the scanned server definition before Spring starts either listener.
+                    context.addBeanFactoryPostProcessor(
+                            factory -> {
+                                var registry = (BeanDefinitionRegistry) factory;
+                                String name = "flexlbGrpcServer";
+                                registry.removeBeanDefinition(name);
+                                registry.registerBeanDefinition(
+                                        name, new RootBeanDefinition(MockFlexlbGrpcServer.class));
+                            });
+                });
         application.setRegisterShutdownHook(false);
         var context =
                 application.run(

@@ -17,7 +17,6 @@ import org.junit.jupiter.api.Timeout;
 import org.springframework.core.env.Environment;
 import org.springframework.test.util.ReflectionTestUtils;
 
-import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -77,8 +76,7 @@ class FlexlbGrpcPayloadTest {
                         serverGroup,
                         NoOpFlexMonitor.getInstance(),
                         new GrpcServerTimingInterceptor(),
-                        new GrpcQosHeaderInterceptor(),
-                        Optional.empty());
+                        new GrpcQosHeaderInterceptor());
         LBStatusConsistencyService election = mock(LBStatusConsistencyService.class);
         FlexlbGrpcForwarder forwarder =
                 new FlexlbGrpcForwarder(

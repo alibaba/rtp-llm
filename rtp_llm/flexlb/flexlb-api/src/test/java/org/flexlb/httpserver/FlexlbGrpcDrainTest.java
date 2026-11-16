@@ -27,7 +27,6 @@ import org.junit.jupiter.api.Test;
 import org.springframework.mock.env.MockEnvironment;
 import org.springframework.test.util.ReflectionTestUtils;
 
-import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -114,8 +113,7 @@ class FlexlbGrpcDrainTest {
                         null,
                         NoOpFlexMonitor.getInstance(),
                         timing,
-                        null,
-                        Optional.empty());
+                        null);
         ReflectionTestUtils.setField(grpc, "server", server);
         var channel =
                 NettyChannelBuilder.forAddress("127.0.0.1", server.getPort())
@@ -241,8 +239,7 @@ class FlexlbGrpcDrainTest {
                             null,
                             NoOpFlexMonitor.getInstance(),
                             timing,
-                            null,
-                            Optional.empty());
+                            null);
             server =
                     NettyServerBuilder.forPort(0)
                             .addService(

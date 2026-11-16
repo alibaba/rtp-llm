@@ -8,7 +8,7 @@
 
 `environment.master.config` 使用原生环境变量字符串。`FLEXLB_CONFIG` 是业务 JSON，`MODEL_SERVICE_CONFIG` 是路由 JSON。本地支持单 endpoint 组、P/D/V 分离角色和 gRPC。Runner 使用实验内的发现文件替换路由目标，保留服务 ID、组和角色信息。
 
-本地 Runner 负责写入 `FLEXLB_CONFIG.consistency` 和实验的部署身份。多个 Master JVM 使用不同的回环 IP，共用 HTTP 端口及其加 2 的 gRPC 端口。Mock Master 启动器在 Spring 初始化前注册 `MasterLoopbackAddress`，把同一个 IPv4 回环地址用于 gRPC 监听、ZooKeeper 选主身份和主备转发的本机判断。这个 Bean 只用于本地 Mock，由 Runner 分配地址，生产 Master 启动器走系统本机地址。宿主机必须能绑定分配给各 JVM 的回环地址。
+本地 Runner 负责写入 `FLEXLB_CONFIG.consistency` 和实验的部署身份。多个 Master JVM 使用不同的回环 IP，共用 HTTP 端口及其加 2 的 gRPC 端口。Mock Master 启动器在 Spring 实例化 Bean 前将 gRPC 服务替换为 `MockFlexlbGrpcServer`，由它绑定 Runner 分配的 IPv4 回环地址。ZooKeeper 选主身份和主备转发的本机判断也使用同一个地址。生产 Master 使用默认 gRPC 服务和系统本机地址。宿主机必须能绑定分配给各 JVM 的回环地址。
 
 本地 Engine endpoint 使用 `file` 发现。Runner 在拓扑变动后更新 `discovery.json`，Master 每次轮询读取当前地址，并由 FlexLB 的公共发现路由计算各端口。
 

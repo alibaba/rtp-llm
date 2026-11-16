@@ -9,7 +9,6 @@ import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.MasterLoopbackAddress;
 import org.flexlb.constant.MetricConstant;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
@@ -26,9 +25,7 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 import java.io.IOException;
-import java.net.InetSocketAddress;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -55,7 +52,6 @@ public class FlexlbGrpcServer {
     private final FlexlbServiceImpl flexlbServiceImpl;
     private final ConfigService configService;
     private final Environment environment;
-    private final Optional<MasterLoopbackAddress> loopbackAddress;
     private final EventLoopGroup grpcServerEventLoopGroup;
     private final FlexMonitor monitor;
     private final GrpcServerTimingInterceptor grpcServerTimingInterceptor;
@@ -74,12 +70,10 @@ public class FlexlbGrpcServer {
             @Qualifier("grpcServerEventLoopGroup") EventLoopGroup grpcServerEventLoopGroup,
             FlexMonitor monitor,
             GrpcServerTimingInterceptor grpcServerTimingInterceptor,
-            GrpcQosHeaderInterceptor grpcQosHeaderInterceptor,
-            Optional<MasterLoopbackAddress> loopbackAddress) {
+            GrpcQosHeaderInterceptor grpcQosHeaderInterceptor) {
         this.flexlbServiceImpl = flexlbServiceImpl;
         this.configService = configService;
         this.environment = environment;
-        this.loopbackAddress = loopbackAddress;
         this.quietPeriodNanos =
                 TimeUnit.MILLISECONDS.toNanos(
                         configService
@@ -129,13 +123,9 @@ public class FlexlbGrpcServer {
         registerMetrics();
         reportExecutorMetrics();
 
-        NettyServerBuilder builder =
-                loopbackAddress.isEmpty()
-                        ? NettyServerBuilder.forPort(port)
-                        : NettyServerBuilder.forAddress(
-                                new InetSocketAddress(loopbackAddress.get().address(), port));
         server =
-                builder.channelType(NioServerSocketChannel.class)
+                createServerBuilder(port)
+                        .channelType(NioServerSocketChannel.class)
                         .bossEventLoopGroup(bossGroup)
                         .workerEventLoopGroup(grpcServerEventLoopGroup)
                         .executor(grpcExecutor)
@@ -220,6 +210,10 @@ public class FlexlbGrpcServer {
                 Thread.currentThread().interrupt();
             }
         }
+    }
+
+    protected NettyServerBuilder createServerBuilder(int port) {
+        return NettyServerBuilder.forPort(port);
     }
 
     private void registerMetrics() {
