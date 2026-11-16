@@ -16,8 +16,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 import static org.flexlb.balance.schedule.RequestContext.EndCause;
 import static org.flexlb.balance.schedule.RequestContext.Phase;
 import static org.flexlb.balance.schedule.RequestContext.RequestEndEvent;
-import static org.flexlb.balance.schedule.RequestContext.RequestEvent;
 import static org.flexlb.balance.schedule.SchedulerTestSupport.stage;
+import static org.flexlb.balance.schedule.WorkerEventTestSupport.RequestEvent;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -181,7 +181,7 @@ class RequestTerminalSettlementTest {
                     f.scheduler(),
                     f.requestContext(),
                     f.item().decodeEndpoint(),
-                    DecodeResources.DecodeRequestStatus.terminal(RESERVATION, 0L));
+                    DecodeResources.DecodeRequestStatus.terminal(RESERVATION, null, 0L));
         }
         assertFalse((stage(f.requestContext()) == Stage.FINISHED));
         assertFalse(f.requestContext().getFuture().isDone());
@@ -203,9 +203,11 @@ class RequestTerminalSettlementTest {
     @ValueSource(ints = {1, 2, 3, 4, 5})
     void transientTerminalTimerFailureRetriesAfterActualResourceSettlement(int failures) {
         Fixture f = fixture(true, true);
+        var prefillRegistration = f.item().prefillRegistration();
         var context = f.requestContext();
-        context.recordEvent(
-                new RequestContext.RequestEvent(
+        WorkerEventTestSupport.record(
+                context,
+                new WorkerEventTestSupport.RequestEvent(
                         f.item(),
                         null,
                         null,
@@ -252,7 +254,6 @@ class RequestTerminalSettlementTest {
                                                 new RequestEndEvent(
                                                         f.item(),
                                                         EndCause.ROUTE_PUBLICATION_FAILED,
-                                                        0L,
                                                         org.flexlb.worker.endpoint.StrategyErrorType
                                                                 .DISPATCH_FAILED,
                                                         "original terminal failure"))));
@@ -270,8 +271,7 @@ class RequestTerminalSettlementTest {
                     "real pending notification keeps its existing watch");
             assertSame(context, f.scheduler().repository.findActive(RESERVATION.requestId()));
             assertNull(f.scheduler().repository.findTerminal(RESERVATION.requestId()));
-            verify(f.item().prefillEndpoint(), times(1))
-                    .releaseRequest(f.item().prefillRegistration());
+            verify(f.item().prefillEndpoint(), times(1)).releaseRequest(prefillRegistration);
             verify(f.item().decodeEndpoint(), times(1)).releaseRequest(RESERVATION);
             if (failures > 3) {
                 assertSame(
@@ -295,7 +295,7 @@ class RequestTerminalSettlementTest {
                 "retries preserve the frozen outcome and first cause");
         assertTrue(context.snapshot().notificationsDone());
         assertNull(context.snapshot().deadlines().inactivity());
-        verify(f.item().prefillEndpoint(), times(1)).releaseRequest(f.item().prefillRegistration());
+        verify(f.item().prefillEndpoint(), times(1)).releaseRequest(prefillRegistration);
         verify(f.item().decodeEndpoint(), times(1)).releaseRequest(RESERVATION);
         verify(timer, times(failures + 1)).update(any(), any());
     }

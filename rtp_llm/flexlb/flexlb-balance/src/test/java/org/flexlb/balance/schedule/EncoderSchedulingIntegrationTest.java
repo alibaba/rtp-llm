@@ -20,6 +20,7 @@ import org.flexlb.worker.endpoint.EncoderEndpoint;
 import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
+import org.flexlb.worker.endpoint.WorkerEndpoint.CommitStatus;
 import org.flexlb.worker.status.WorkerStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -84,15 +85,20 @@ class EncoderSchedulingIntegrationTest {
         var resume = new java.util.concurrent.CountDownLatch(1);
         org.mockito.Mockito.doAnswer(
                         call -> {
-                            RequestRoute route = call.getArgument(0);
-                            assertFalse(Thread.holdsLock(route.ctx()));
-                            boolean committed = !beforeCommit && (boolean) call.callRealMethod();
+                            EncoderEndpoint.RequestRegistration registration = call.getArgument(0);
+                            var context =
+                                    requests.findActive(
+                                            registration.requestId(), RequestPhase.ENCODER);
+                            assertNotNull(context);
+                            assertFalse(Thread.holdsLock(context));
+                            var committed =
+                                    beforeCommit ? null : (CommitStatus) call.callRealMethod();
                             entered.countDown();
                             assertTrue(resume.await(5, TimeUnit.SECONDS));
                             return beforeCommit ? call.callRealMethod() : committed;
                         })
                 .when(endpoint)
-                .commitSelection(any());
+                .confirmSelection(any(), any());
         try (var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
             try {
                 var context = context("9900", 100, 0L);
@@ -134,15 +140,20 @@ class EncoderSchedulingIntegrationTest {
         var resume = new java.util.concurrent.CountDownLatch(1);
         org.mockito.Mockito.doAnswer(
                         call -> {
-                            RequestRoute route = call.getArgument(0);
-                            assertFalse(Thread.holdsLock(route.ctx()));
-                            boolean committed = !beforeCommit && (boolean) call.callRealMethod();
+                            EncoderEndpoint.RequestRegistration registration = call.getArgument(0);
+                            var context =
+                                    requests.findActive(
+                                            registration.requestId(), RequestPhase.ENCODER);
+                            assertNotNull(context);
+                            assertFalse(Thread.holdsLock(context));
+                            var committed =
+                                    beforeCommit ? null : (CommitStatus) call.callRealMethod();
                             entered.countDown();
                             assertTrue(resume.await(5, TimeUnit.SECONDS));
                             return beforeCommit ? call.callRealMethod() : committed;
                         })
                 .when(first)
-                .commitSelection(any());
+                .confirmSelection(any(), any());
         try (var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
             try {
                 var submitted = executor.submit(() -> submit(9901, 100, 0L));

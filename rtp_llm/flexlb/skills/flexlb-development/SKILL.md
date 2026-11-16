@@ -87,7 +87,7 @@ description: FlexLB 开发、缺陷修复、重构和代码审核规范。适用
 - 先明确要改变的行为与必须保持的语义。用户只要求解释、评审或方案时不直接改逻辑；
   只要求命名、排序或排版时不顺带修改生命周期、重试或同步策略。
 - 跨模块职责调整按需读取 [workflow-first-design](../workflow-first-design/SKILL.md)，
-  局部实现按需读取 [evidence-first-implementation](../evidence-first-implementation/SKILL.md)；
+  局部实现按需读取 [class-implementation](../class-implementation/SKILL.md)；
   不把小修改强制升级成架构设计。
 
 ## 从业务路径判断设计是否直观
@@ -204,7 +204,7 @@ description: FlexLB 开发、缺陷修复、重构和代码审核规范。适用
 - **校验：** 参数所属对象在入口负责检查，接纳状态、精确身份和容量在实际提交变化处检查。
   同时核对 `Objects.requireNonNull`、`checkState`、`checkArgument` 及等价条件，不只清理一种写法。
   同一次持锁调用的包装层不重复下层已有校验；跨登记、入队、交付阶段的取消或下线复查仍须保留。
-  具体删除判据按 [方法与校验职责](../evidence-first-implementation/SKILL.md#5-让方法和接口表达完整语义) 执行。
+  具体删除判据按 [方法与校验职责](../class-implementation/SKILL.md#5-让方法和接口表达完整语义) 执行。
 - **收益：** 清理目标是减少事实来源、交接步骤和理解成本。搬迁、改名或增加包装不算消除复杂度。
   对照本轮开始时的工作区统计生产、测试、文档净变化，排除其他并行改动；若整体精简却净增，
   逐段列出新增代码与用途，继续检查残留协议，而不是只解释“新增了输入和结果类型”。

@@ -37,7 +37,6 @@ public class DecodeEndpoint extends WorkerEndpoint
     private final Object resourceWaitEndpointId = new Object();
     private final java.util.Set<ResourceWait> resourceWaits =
             java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
-    private final WorkerRequests requests;
     private final CapacityNotifier capacityNotifier;
     private final Map<String, RequestRecord> registeredRequests = new ConcurrentHashMap<>();
 
@@ -50,10 +49,8 @@ public class DecodeEndpoint extends WorkerEndpoint
 
     private volatile DecodeEndpoint.SelectionSnapshot selectionSnapshotCache;
 
-    DecodeEndpoint(
-            WorkerStatus status, WorkerRequests requests, CapacityNotifier capacityNotifier) {
+    DecodeEndpoint(WorkerStatus status, CapacityNotifier capacityNotifier) {
         super(status);
-        this.requests = java.util.Objects.requireNonNull(requests, "requests");
         this.capacityNotifier =
                 java.util.Objects.requireNonNull(capacityNotifier, "capacityNotifier");
     }
@@ -184,6 +181,23 @@ public class DecodeEndpoint extends WorkerEndpoint
         }
     }
 
+    /**
+     * Confirms the exact local reservation and its feedback receiver without changing worker occupancy.
+     */
+    public CommitStatus confirmSelection(RequestRegistration registration, WorkerEventSink events) {
+        stateLock().lock();
+        try {
+            if (!acceptsNewRequests()) return CommitStatus.UNAVAILABLE;
+            var record = registeredRequests.get(registration.requestId());
+            if (record == null || !record.matches(registration) || record.events != null)
+                return CommitStatus.INVALID_REGISTRATION;
+            record.events = java.util.Objects.requireNonNull(events, "events");
+            return CommitStatus.COMMITTED;
+        } finally {
+            stateLock().unlock();
+        }
+    }
+
     @Override
     public void publishStatus(StatusChange change) {
         if (change instanceof StatusChange.None) {
@@ -193,13 +207,9 @@ public class DecodeEndpoint extends WorkerEndpoint
         if (effects.capacityChanged()) capacityNotifier.notifyChanged(this);
         for (var observed : effects.requests()) {
             var reservation = observed.reservation();
-            var context = requests.findActive(reservation.requestId());
-            if (context == null) continue;
-            var route = context.snapshot().route();
-            if (route == null || route.decodeEndpoint() != this) continue;
             publishWorkerRequest(
-                    route,
                     reservation,
+                    observed.events(),
                     RoleType.DECODE,
                     workerEventType(observed),
                     observed.errorCode(),
@@ -423,7 +433,8 @@ public class DecodeEndpoint extends WorkerEndpoint
             var completed = finished.get(request.requestId);
             if (completed != null) {
                 events.add(
-                        DecodeRequestStatus.terminal(request.reservation(), completed.errorCode()));
+                        DecodeRequestStatus.terminal(
+                                request.reservation(), request.events, completed.errorCode()));
                 removeRequestLocked(request);
                 continue;
             }
@@ -438,7 +449,7 @@ public class DecodeEndpoint extends WorkerEndpoint
                     request.expectedKvTokens = request.kvTokens;
                 }
                 request.observedAtMs = now;
-                events.add(DecodeRequestStatus.confirmed(request.reservation()));
+                events.add(DecodeRequestStatus.confirmed(request.reservation(), request.events));
             } else if (request.confirmed) {
                 removeRequestLocked(request);
             }
@@ -459,15 +470,15 @@ public class DecodeEndpoint extends WorkerEndpoint
     @Override
     protected void closeEndpoint() {
         closeResourceWaits();
-        var removedReservations = removeRequestsOnClose();
+        var removedRequests = removeRequestsOnClose();
         // Records are already cleared; notification failures must not block registry cleanup.
-        for (var reservation : removedReservations) {
+        for (var request : removedRequests) {
             try {
-                notifyRequestOfEndpointClose(reservation);
+                notifyRequestOfEndpointClose(request);
             } catch (RuntimeException notificationFailure) {
                 Logger.error(
                         "Decode endpoint close notification failed for request "
-                                + reservation.requestId(),
+                                + request.requestId,
                         notificationFailure);
             }
         }
@@ -546,27 +557,22 @@ public class DecodeEndpoint extends WorkerEndpoint
         return RequestEventType.ALLOCATED;
     }
 
-    private void notifyRequestOfEndpointClose(RequestRegistration reservation) {
-        var context = requests.findActive(reservation.requestId());
-        if (context == null) return;
-        var event =
-                new org.flexlb.worker.endpoint.WorkerRequestEvent(
-                        context.snapshot().route(),
-                        reservation,
-                        RoleType.DECODE,
-                        this,
-                        org.flexlb.worker.endpoint.RequestEventType.ENDPOINT_CLOSED,
-                        0L,
-                        "Decode generation closed: " + reservation.endpointGenerationId(),
-                        System.currentTimeMillis());
-        context.getRequestScheduler().onWorkerRequestEvent(context, event);
+    private void notifyRequestOfEndpointClose(RequestRecord request) {
+        var reservation = request.reservation();
+        publishWorkerRequest(
+                reservation,
+                request.events,
+                RoleType.DECODE,
+                RequestEventType.ENDPOINT_CLOSED,
+                0L,
+                "Decode generation closed: " + reservation.endpointGenerationId());
     }
 
-    private List<RequestRegistration> removeRequestsOnClose() {
-        List<RequestRegistration> removed;
+    private List<RequestRecord> removeRequestsOnClose() {
+        List<RequestRecord> removed;
         stateLock().lock();
         try {
-            removed = registeredRequests.values().stream().map(RequestRecord::reservation).toList();
+            removed = List.copyOf(registeredRequests.values());
             registeredRequests.clear();
             unconfirmedRequests = 0;
             unconfirmedKvTokens = 0L;
@@ -740,10 +746,15 @@ public class DecodeEndpoint extends WorkerEndpoint
      * Tracks an exact Decode registration, KV estimates and the latest worker observation under the
      * endpoint lock.
      */
+    /**
+     * Owns Decode capacity and the receiver bound at selection confirmation. Status notifications
+     * capture the receiver under the endpoint lock; removed records are no longer modified.
+     */
     private static final class RequestRecord {
         private final String requestId;
         private final RequestRegistration registration;
         private boolean confirmed;
+        private WorkerEventSink events;
         private final int priority;
         private long kvTokens;
         private long expectedKvTokens;

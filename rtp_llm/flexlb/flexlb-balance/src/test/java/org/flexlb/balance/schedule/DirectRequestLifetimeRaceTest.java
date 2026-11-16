@@ -17,6 +17,7 @@ import org.flexlb.worker.endpoint.CapacityNotifier;
 import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.PrefillEndpoint;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
+import org.flexlb.worker.endpoint.WorkerEndpoint.CommitStatus;
 import org.flexlb.worker.status.ServerStatus;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -77,12 +78,13 @@ class DirectRequestLifetimeRaceTest {
         try {
             var context = RequestProtocolTestSupport.context(config, 101L);
             var prefill = mock(PrefillEndpoint.class);
+            var reservation = mock(PrefillEndpoint.RequestRegistration.class);
+            when(reservation.requestId()).thenReturn(context.getRequestId());
             when(prefill.acceptsNewRequests()).thenReturn(true);
             when(prefill.tryRegisterSelection(any(), any(), org.mockito.ArgumentMatchers.anyLong()))
                     .thenReturn(
                             new WorkerEndpoint.Registration<PrefillEndpoint.RequestRegistration>(
-                                    WorkerEndpoint.RegistrationStatus.REGISTERED,
-                                    mock(PrefillEndpoint.RequestRegistration.class)));
+                                    WorkerEndpoint.RegistrationStatus.REGISTERED, reservation));
             var selectedEndpoint = prefill;
             var metadata = new ServerStatus();
             metadata.setSuccess(true);
@@ -94,9 +96,9 @@ class DirectRequestLifetimeRaceTest {
             when(selectedEndpoint.hasStoppedAcceptingRequests()).thenReturn(false);
             when(prefill.getIp()).thenReturn(metadata.getServerIp());
             when(prefill.getHttpPort()).thenReturn(metadata.getHttpPort());
-            var reservation = mock(PrefillEndpoint.RequestRegistration.class);
 
-            when(prefill.commitSelection(any())).thenReturn(true);
+            when(prefill.confirmSelection(any(), any(), org.mockito.ArgumentMatchers.anyLong()))
+                    .thenReturn(CommitStatus.COMMITTED);
             var status =
                     org.flexlb.worker.status.WorkerStatus.createDiscovered(
                             RoleType.PDFUSION, null, "127.0.0.1", 8080, 8081, null);
@@ -184,8 +186,13 @@ class DirectRequestLifetimeRaceTest {
                     cleanupProcessed.get(),
                     "cancellation must finish execution without replacing the response");
             verify(prefill)
-                    .commitSelection(
-                            org.mockito.ArgumentMatchers.argThat(route -> route.ctx() == context));
+                    .confirmSelection(
+                            org.mockito.ArgumentMatchers.argThat(
+                                    registration ->
+                                            context.getRequestId()
+                                                    .equals(registration.requestId())),
+                            org.mockito.ArgumentMatchers.any(),
+                            org.mockito.ArgumentMatchers.anyLong());
             org.flexlb.worker.endpoint.EndpointTestSupport.closeAsync(
                     verify(selectedEndpoint, org.mockito.Mockito.never()));
         } finally {

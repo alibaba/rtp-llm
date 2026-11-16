@@ -5,6 +5,7 @@ import org.flexlb.balance.schedule.AbstractRequestScheduler;
 import org.flexlb.balance.schedule.EngineCancellation;
 import org.flexlb.balance.schedule.RequestRoute;
 import org.flexlb.config.service.RoleType;
+import org.flexlb.worker.endpoint.WorkerEndpoint.CommitStatus;
 import org.flexlb.worker.status.WorkerStatus;
 import org.flexlb.worker.status.WorkerStatusResponse;
 import org.flexlb.worker.status.WorkerStatusTestSupport;
@@ -284,45 +285,8 @@ public final class EndpointTestSupport {
         }
     }
 
-    public static DecodeEndpoint decode(
-            WorkerStatus status, org.flexlb.balance.schedule.RequestRepository repository) {
-        var endpoint =
-                new DecodeEndpoint(
-                        status, repository, new org.flexlb.worker.endpoint.CapacityNotifier());
-        if (org.mockito.Mockito.mockingDetails(repository).isMock()) {
-            var fixtureContext = repository.findActive("fixture");
-            var owner = fixtureContext == null ? null : fixtureContext.getRequestScheduler();
-            org.mockito.Mockito.when(
-                            repository.findActive(org.mockito.ArgumentMatchers.anyString()))
-                    .thenAnswer(
-                            call -> {
-                                String id = call.getArgument(0);
-                                if (owner == null) {
-                                    return null;
-                                }
-                                var context =
-                                        org.mockito.Mockito.mock(
-                                                org.flexlb.balance.schedule.RequestContext.class);
-
-                                var snapshot =
-                                        org.mockito.Mockito.mock(
-                                                org.flexlb.balance.schedule.RequestContext.Snapshot
-                                                        .class);
-                                var route = org.mockito.Mockito.mock(RequestRoute.class);
-
-                                org.mockito.Mockito.when(context.getRequestScheduler())
-                                        .thenReturn(owner);
-                                org.mockito.Mockito.when(context.getRequestId())
-                                        .thenReturn(String.valueOf(id));
-                                org.mockito.Mockito.when(context.snapshot()).thenReturn(snapshot);
-                                org.mockito.Mockito.when(snapshot.route()).thenReturn(route);
-                                org.mockito.Mockito.when(route.ctx()).thenReturn(context);
-                                org.mockito.Mockito.when(route.decodeEndpoint())
-                                        .thenReturn(endpoint);
-                                return context;
-                            });
-        }
-        return endpoint;
+    public static DecodeEndpoint decode(WorkerStatus status) {
+        return new DecodeEndpoint(status, new CapacityNotifier());
     }
 
     public static PrefillEndpoint prefill(
@@ -392,10 +356,7 @@ public final class EndpointTestSupport {
     }
 
     static DecodeEndpoint decodeEndpoint(WorkerStatus status) {
-        return new DecodeEndpoint(
-                status,
-                org.mockito.Mockito.mock(org.flexlb.balance.schedule.RequestRepository.class),
-                new org.flexlb.worker.endpoint.CapacityNotifier());
+        return new DecodeEndpoint(status, new org.flexlb.worker.endpoint.CapacityNotifier());
     }
 
     static WorkerEndpoint.Registration<DecodeEndpoint.RequestRegistration> reserveQueuedDecode(
@@ -486,7 +447,13 @@ public final class EndpointTestSupport {
                         tokens);
         if (registered.status() != WorkerEndpoint.RegistrationStatus.REGISTERED) return false;
         org.mockito.Mockito.doReturn(registered.value()).when(route).encoderRegistration();
-        return endpoint.commitSelection(route);
+        return endpoint.confirmSelection(
+                        registered.value(),
+                        event ->
+                                route.ctx()
+                                        .getRequestScheduler()
+                                        .onWorkerRequestEvent(route, event))
+                == CommitStatus.COMMITTED;
     }
 
     static void commitUnqueued(PrefillEndpoint endpoint, long requestId, long predictedMs) {
@@ -496,7 +463,14 @@ public final class EndpointTestSupport {
         {
             var reservation = reserveUnqueued(endpoint, item, predictedMs);
             {
-                var handoff = endpoint.commitSelection(item);
+                var handoff =
+                        endpoint.confirmSelection(
+                                reservation,
+                                event ->
+                                        item.ctx()
+                                                .getRequestScheduler()
+                                                .onWorkerRequestEvent(item, event),
+                                item.ctx().getPlacementSequence());
                 try (var preparationReservation =
                         EndpointTestSupport.preparation(endpoint, reservation)) {
                     // The endpoint ledger owns this request until authoritative termination.

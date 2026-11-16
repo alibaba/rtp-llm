@@ -30,7 +30,6 @@ class RequestCleanupArchiveRaceTest {
                         new RequestEndEvent(
                                 context.snapshot().route(),
                                 EndCause.ROUTE_PUBLICATION_FAILED,
-                                0L,
                                 StrategyErrorType.DISPATCH_FAILED,
                                 "cleanup required"),
                         1001L,

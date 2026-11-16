@@ -9,7 +9,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Tracks Encoder routes until worker status observes them, then until completion or cancellation.
+ * Tracks Encoder registrations until worker status observes them, then until completion or cancellation.
  * Its state lock serializes request admission, status changes and removal.
  * Orphan records expire from their last admission or worker observation once the scheduler no
  * longer retains them.
@@ -69,19 +69,23 @@ public final class EncoderEndpoint extends WorkerEndpoint implements SelectionRo
         }
     }
 
-    public boolean commitSelection(WorkerRoute route) {
+    public CommitStatus confirmSelection(RequestRegistration registration, WorkerEventSink events) {
         stateLock().lock();
         try {
-            var registration = route.encoderRegistration();
-            var entry = requests.get(route.requestId());
-            if (!acceptsNewRequests()
-                    || entry == null
+            var entry = requests.get(registration.requestId());
+            if (!acceptsNewRequests()) return CommitStatus.UNAVAILABLE;
+            if (entry == null
                     || entry.registration() != registration
-                    || entry.phase() != RegistrationPhase.REGISTERED) return false;
+                    || entry.phase() != RegistrationPhase.REGISTERED)
+                return CommitStatus.INVALID_REGISTRATION;
             requests.put(
-                    route.requestId(),
-                    new Tracked(registration, route, entry.observed(), entry.lastObservedAtMs()));
-            return true;
+                    registration.requestId(),
+                    new Tracked(
+                            registration,
+                            java.util.Objects.requireNonNull(events, "events"),
+                            entry.observed(),
+                            entry.lastObservedAtMs()));
+            return CommitStatus.COMMITTED;
         } finally {
             stateLock().unlock();
         }
@@ -137,8 +141,8 @@ public final class EncoderEndpoint extends WorkerEndpoint implements SelectionRo
                             failure,
                             () ->
                                     publishWorkerRequest(
-                                            request.route(),
-                                            null,
+                                            request.registration(),
+                                            request.events(),
                                             org.flexlb.config.service.RoleType.ENCODER,
                                             request.kind(),
                                             request.errorCode(),
@@ -158,14 +162,15 @@ public final class EncoderEndpoint extends WorkerEndpoint implements SelectionRo
                 entry.setValue(
                         new Tracked(
                                 tracked.registration(),
-                                tracked.route(),
+                                tracked.events(),
                                 true,
                                 System.currentTimeMillis()));
                 if (tracked.phase() == RegistrationPhase.COMMITTED)
                     changes.add(
                             new RequestStatus(
-                                    tracked.route(),
-                                    org.flexlb.worker.endpoint.RequestEventType.ACTIVE,
+                                    tracked.registration(),
+                                    tracked.events(),
+                                    RequestEventType.ACTIVE,
                                     0));
             }
             var task = observation.finishedTasks().get(entry.getKey());
@@ -174,10 +179,11 @@ public final class EncoderEndpoint extends WorkerEndpoint implements SelectionRo
                 if (tracked.phase() == RegistrationPhase.COMMITTED)
                     changes.add(
                             new RequestStatus(
-                                    tracked.route(),
+                                    tracked.registration(),
+                                    tracked.events(),
                                     task.errorCode() == 0
-                                            ? org.flexlb.worker.endpoint.RequestEventType.COMPLETED
-                                            : org.flexlb.worker.endpoint.RequestEventType.FAILED,
+                                            ? RequestEventType.COMPLETED
+                                            : RequestEventType.FAILED,
                                     task.errorCode()));
             }
         }
@@ -197,29 +203,18 @@ public final class EncoderEndpoint extends WorkerEndpoint implements SelectionRo
         }
         Throwable failure = null;
         for (var request : retired.values()) {
-            var route = request.route();
             if (request.phase() != RegistrationPhase.COMMITTED) continue;
             failure =
                     Failures.run(
                             failure,
                             () ->
-                                    route.ctx()
-                                            .getRequestScheduler()
-                                            .onWorkerRequestEvent(
-                                                    route.ctx(),
-                                                    new org.flexlb.worker.endpoint
-                                                            .WorkerRequestEvent(
-                                                            route,
-                                                            null,
-                                                            org.flexlb.config.service.RoleType
-                                                                    .ENCODER,
-                                                            this,
-                                                            org.flexlb.worker.endpoint
-                                                                    .RequestEventType
-                                                                    .ENDPOINT_CLOSED,
-                                                            0L,
-                                                            "Encoder endpoint retired: " + ipPort(),
-                                                            System.currentTimeMillis())));
+                                    publishWorkerRequest(
+                                            request.registration(),
+                                            request.events(),
+                                            getStatus().getRole(),
+                                            RequestEventType.ENDPOINT_CLOSED,
+                                            0L,
+                                            "Encoder endpoint retired: " + ipPort()));
         }
         failure = Failures.run(failure, () -> capacityNotifier.notifyChanged(this));
         Failures.rethrow(failure, "Encoder retirement publication failed");
@@ -311,11 +306,11 @@ public final class EncoderEndpoint extends WorkerEndpoint implements SelectionRo
     }
 
     /**
-     * Retains an Encoder registration, its optional committed route and the last worker observation.
+     * Retains an Encoder registration, its confirmed event receiver and the last worker observation.
      */
     private record Tracked(
             RequestRegistration registration,
-            WorkerRoute route,
+            WorkerEventSink events,
             boolean observed,
             long lastObservedAtMs) {
         long uncachedTokens() {
@@ -323,10 +318,13 @@ public final class EncoderEndpoint extends WorkerEndpoint implements SelectionRo
         }
 
         RegistrationPhase phase() {
-            return route == null ? RegistrationPhase.REGISTERED : RegistrationPhase.COMMITTED;
+            return events == null ? RegistrationPhase.REGISTERED : RegistrationPhase.COMMITTED;
         }
     }
 
     public record RequestStatus(
-            WorkerRoute route, org.flexlb.worker.endpoint.RequestEventType kind, long errorCode) {}
+            RequestRegistration registration,
+            WorkerEventSink events,
+            RequestEventType kind,
+            long errorCode) {}
 }

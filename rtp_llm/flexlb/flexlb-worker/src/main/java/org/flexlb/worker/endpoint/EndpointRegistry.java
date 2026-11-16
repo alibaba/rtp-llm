@@ -429,7 +429,7 @@ public class EndpointRegistry
             case PREFILL, PDFUSION ->
                     new PrefillEndpoint(
                             status, configService.loadBalanceConfig(), capacityNotifier);
-            case DECODE -> new DecodeEndpoint(status, requests, capacityNotifier);
+            case DECODE -> new DecodeEndpoint(status, capacityNotifier);
             case ENCODER -> new EncoderEndpoint(status, capacityNotifier);
             case VIT -> new WorkerEndpoint(status);
             case FRONTEND -> throw new AssertionError("validated above");

@@ -34,7 +34,6 @@ class DecodeCapacityPreemptionTest {
         var endpoint =
                 new DecodeEndpoint(
                         EndpointTestSupport.workerStatus(RoleType.DECODE, "10.0.0.1", 8080, 8081),
-                        mock(RequestRepository.class),
                         notifier);
         updateCapacity(endpoint, 1000);
         var capacity = new DecodeResources.AdmissionCapacity(1, 100);
@@ -299,9 +298,7 @@ class DecodeCapacityPreemptionTest {
     private static DecodeEndpoint endpoint(long availableKv) {
         DecodeEndpoint endpoint =
                 EndpointTestSupport.decode(
-                        EndpointTestSupport.workerStatus(RoleType.DECODE, "10.0.0.1", 8080, 8081),
-                        org.flexlb.balance.schedule.SchedulerTestSupport.repository(
-                                EndpointTestSupport.noopEventSink()));
+                        EndpointTestSupport.workerStatus(RoleType.DECODE, "10.0.0.1", 8080, 8081));
         updateCapacity(endpoint, availableKv);
         return endpoint;
     }

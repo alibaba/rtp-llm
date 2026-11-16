@@ -56,7 +56,7 @@ class EndpointRegistrationTest {
                                         .value();
             }
             case DECODE -> {
-                var decode = new DecodeEndpoint(status, repository, notifications);
+                var decode = new DecodeEndpoint(status, notifications);
                 endpoint = decode;
                 register =
                         id ->

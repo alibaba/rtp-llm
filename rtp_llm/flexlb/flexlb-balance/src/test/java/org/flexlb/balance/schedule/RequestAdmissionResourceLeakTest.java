@@ -68,6 +68,7 @@ class RequestAdmissionResourceLeakTest {
     @Test
     void declinedPublicationLeavesNoCanonicalItem() {
         Registered registered = registerItem(1L);
+        var decodeRegistration = registered.item().decodeRegistration();
         SelectionAttempt admission =
                 SchedulerTestSupport.claim(lifecycle, "1", registered.future());
         try (var admissionCompletion1 = RequestProtocolTestSupport.finishOnExit(admission)) {
@@ -82,14 +83,14 @@ class RequestAdmissionResourceLeakTest {
             assertTrue(
                     org.flexlb.balance.schedule.SchedulerTestSupport.isAdmissionOpen(
                             lifecycle, registered.item().ctx()));
-            verify(registered.item().decodeEndpoint())
-                    .rollbackSelection(registered.item().decodeRegistration());
+            verify(registered.item().decodeEndpoint()).rollbackSelection(decodeRegistration);
         }
     }
 
     @Test
     void throwingPublicationLeavesTheExactRegistrationRetryable() {
         Registered registered = registerItem(2L);
+        var decodeRegistration = registered.item().decodeRegistration();
         SelectionAttempt admission =
                 SchedulerTestSupport.claim(lifecycle, "2", registered.future());
         try (var admissionCompletion2 = RequestProtocolTestSupport.finishOnExit(admission)) {
@@ -115,20 +116,19 @@ class RequestAdmissionResourceLeakTest {
     @Test
     void duplicatePublicationDoesNotReleaseCanonicalDecodeReservation() {
         Registered registered = registerItem(3L);
+        var decodeRegistration = registered.item().decodeRegistration();
         RequestProtocolTestSupport.beginRouteResult(lifecycle, registered);
-        registered
-                .item()
-                .ctx()
-                .recordEvent(
-                        new RequestContext.RequestEvent(
-                                registered.item(),
-                                null,
-                                null,
-                                null,
-                                org.flexlb.worker.endpoint.RequestEventType.REMOTE_CLEANED,
-                                0L,
-                                null,
-                                System.currentTimeMillis()));
+        WorkerEventTestSupport.record(
+                registered.item().ctx(),
+                new WorkerEventTestSupport.RequestEvent(
+                        registered.item(),
+                        null,
+                        null,
+                        null,
+                        org.flexlb.worker.endpoint.RequestEventType.REMOTE_CLEANED,
+                        0L,
+                        null,
+                        System.currentTimeMillis()));
         assertEquals(
                 SelectionResult.Status.CLOSED,
                 RequestProtocolTestSupport.commitRoute(
@@ -141,13 +141,13 @@ class RequestAdmissionResourceLeakTest {
         assertTrue(registered.future().join().isSuccess());
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.schedule.SchedulerTestSupport.runtime(lifecycle));
-        verify(registered.item().decodeEndpoint(), times(1))
-                .releaseRequest(registered.item().decodeRegistration());
+        verify(registered.item().decodeEndpoint(), times(1)).releaseRequest(decodeRegistration);
     }
 
     @Test
     void cancellationWaitsForPublicationMutationBeforeReleasingReservation() {
         Registered registered = registerItem(4L);
+        var decodeRegistration = registered.item().decodeRegistration();
         SelectionAttempt admission =
                 SchedulerTestSupport.claim(lifecycle, "4", registered.future());
         assertNotNull(admission);
@@ -167,7 +167,7 @@ class RequestAdmissionResourceLeakTest {
         SchedulerTestSupport.awaitRequestWork(
                 org.flexlb.balance.schedule.SchedulerTestSupport.runtime(lifecycle));
         verify(registered.item().decodeEndpoint(), times(1))
-                .releaseUnconfirmedRequest(registered.item().decodeRegistration());
+                .releaseUnconfirmedRequest(decodeRegistration);
     }
 
     @Test
@@ -175,20 +175,19 @@ class RequestAdmissionResourceLeakTest {
         try (var executor = Executors.newFixedThreadPool(2)) {
             for (long id = 10; id < 42; id++) {
                 Registered registered = registerItem(id);
+                var decodeRegistration = registered.item().decodeRegistration();
                 RequestProtocolTestSupport.beginRouteResult(lifecycle, registered);
-                registered
-                        .item()
-                        .ctx()
-                        .recordEvent(
-                                new RequestContext.RequestEvent(
-                                        registered.item(),
-                                        null,
-                                        null,
-                                        null,
-                                        org.flexlb.worker.endpoint.RequestEventType.REMOTE_CLEANED,
-                                        0L,
-                                        null,
-                                        System.currentTimeMillis()));
+                WorkerEventTestSupport.record(
+                        registered.item().ctx(),
+                        new WorkerEventTestSupport.RequestEvent(
+                                registered.item(),
+                                null,
+                                null,
+                                null,
+                                org.flexlb.worker.endpoint.RequestEventType.REMOTE_CLEANED,
+                                0L,
+                                null,
+                                System.currentTimeMillis()));
                 CountDownLatch start = new CountDownLatch(1);
                 long requestId = id;
                 var canceled =
@@ -213,7 +212,7 @@ class RequestAdmissionResourceLeakTest {
                 canceled.get(5, TimeUnit.SECONDS);
                 completed.get(5, TimeUnit.SECONDS);
                 verify(registered.item().decodeEndpoint(), timeout(1000).times(1))
-                        .releaseRequest(registered.item().decodeRegistration());
+                        .releaseRequest(decodeRegistration);
             }
         }
     }
@@ -221,27 +220,24 @@ class RequestAdmissionResourceLeakTest {
     @Test
     void shutdownReleasesQueuedReservationsOnce() {
         Registered registered = registerItem(51L);
+        var decodeRegistration = registered.item().decodeRegistration();
         RequestProtocolTestSupport.beginRouteResult(lifecycle, registered);
-        registered
-                .item()
-                .ctx()
-                .recordEvent(
-                        new RequestContext.RequestEvent(
-                                registered.item(),
-                                null,
-                                null,
-                                null,
-                                org.flexlb.worker.endpoint.RequestEventType.REMOTE_CLEANED,
-                                0L,
-                                null,
-                                System.currentTimeMillis()));
+        WorkerEventTestSupport.record(
+                registered.item().ctx(),
+                new WorkerEventTestSupport.RequestEvent(
+                        registered.item(),
+                        null,
+                        null,
+                        null,
+                        org.flexlb.worker.endpoint.RequestEventType.REMOTE_CLEANED,
+                        0L,
+                        null,
+                        System.currentTimeMillis()));
         assertTrue(RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(lifecycle));
         lifecycle.finishRequestCleanup();
-        verify(registered.item().decodeEndpoint(), times(1))
-                .releaseRequest(registered.item().decodeRegistration());
+        verify(registered.item().decodeEndpoint(), times(1)).releaseRequest(decodeRegistration);
         lifecycle.finishRequestCleanup();
-        verify(registered.item().decodeEndpoint(), times(1))
-                .releaseRequest(registered.item().decodeRegistration());
+        verify(registered.item().decodeEndpoint(), times(1)).releaseRequest(decodeRegistration);
         SchedulerTestSupport.timer(
                         org.flexlb.balance.schedule.SchedulerTestSupport.runtime(lifecycle))
                 .close();
@@ -255,6 +251,7 @@ class RequestAdmissionResourceLeakTest {
             String publicationOutcome, CancelReason reason, boolean inactivityExpired)
             throws Exception {
         Registered registered = registerItem(71L);
+        var decodeRegistration = registered.item().decodeRegistration();
         var context = registered.item().ctx();
         SelectionAttempt admission =
                 SchedulerTestSupport.claim(lifecycle, "71", registered.future());
@@ -315,8 +312,7 @@ class RequestAdmissionResourceLeakTest {
         org.junit.jupiter.api.Assertions.assertFalse(
                 org.flexlb.balance.schedule.SchedulerTestSupport.isAdmissionOpen(
                         lifecycle, registered.item().ctx()));
-        verify(registered.item().decodeEndpoint())
-                .rollbackSelection(registered.item().decodeRegistration());
+        verify(registered.item().decodeEndpoint()).rollbackSelection(decodeRegistration);
         lifecycle.cancel("71", CancelReason.SHUTDOWN);
         assertSame(response, registered.future().join());
     }

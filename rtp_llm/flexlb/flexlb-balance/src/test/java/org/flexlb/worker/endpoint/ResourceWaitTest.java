@@ -19,11 +19,7 @@ class ResourceWaitTest {
     void anotherEndpointCannotInstallWaitEvenWhenWorkerTopologyIsShared() {
         try (var fixture = new Fixture()) {
             var wait = fixture.waiter(60, Long.MAX_VALUE).resourceWait;
-            var other =
-                    new DecodeEndpoint(
-                            fixture.endpoint.getStatus(),
-                            mock(org.flexlb.balance.schedule.RequestRepository.class),
-                            new CapacityNotifier());
+            var other = new DecodeEndpoint(fixture.endpoint.getStatus(), new CapacityNotifier());
             try {
                 org.junit.jupiter.api.Assertions.assertThrows(
                         IllegalArgumentException.class, () -> other.registerResourceWait(wait));
@@ -158,8 +154,7 @@ class ResourceWaitTest {
                 new DecodeResources.AdmissionCapacity(1, 100);
         private final DecodeEndpoint endpoint =
                 EndpointTestSupport.decode(
-                        EndpointTestSupport.workerStatus(RoleType.DECODE, "127.0.0.1", 8000, 8001),
-                        mock(org.flexlb.balance.schedule.RequestRepository.class));
+                        EndpointTestSupport.workerStatus(RoleType.DECODE, "127.0.0.1", 8000, 8001));
 
         private int sequence;
 

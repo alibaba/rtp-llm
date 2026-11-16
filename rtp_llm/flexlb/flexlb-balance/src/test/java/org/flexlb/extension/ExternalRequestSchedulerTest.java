@@ -276,8 +276,7 @@ class ExternalRequestSchedulerTest {
                                             "127.0.0.2",
                                             8081,
                                             8091,
-                                            null),
-                                    requests)
+                                            null))
                             : null;
             when(selector.selectAndRegister(any(), isNull()))
                     .thenAnswer(

@@ -130,7 +130,7 @@ class EncoderEndpointTest {
                             return null;
                         })
                 .when(lifecycle)
-                .onWorkerRequestEvent(eq(context), any());
+                .onWorkerRequestEvent(eq(route), any());
 
         var publish = EndpointTestSupport.applyStatus(endpoint, response);
         assertTrue(events.isEmpty());
@@ -247,7 +247,7 @@ class EncoderEndpointTest {
                 });
         EndpointTestSupport.awaitClosed(endpoint, 2000L);
         assertEquals(0, endpoint.selectionSnapshot().requestCount());
-        verify(lifecycle).onWorkerRequestEvent(eq(route.ctx()), any());
+        verify(lifecycle).onWorkerRequestEvent(eq(route), any());
     }
 
     @Test

@@ -70,8 +70,8 @@ Decode 关闭先清除本地请求记录，再逐个通知请求和容量变化�
 
 ## Prefill
 
-PrefillEndpoint.RequestRegistration 保存 requestId、computeTokens、绑定的完整路由和 REGISTERED/COMMITTED 状态。
-登记时预留 compute tokens，commitSelection 同时绑定完整路由并提交；完成、回滚或清理时移除精确记录并扣减工作量。
+PrefillEndpoint.RequestRegistration 保存 requestId、computeTokens、事件接收入口和 REGISTERED/COMMITTED 状态；另保留请求顺序号，用于 Endpoint 关闭后的重试通知排序。
+登记时预留 compute tokens，confirmSelection 同时关联该登记的事件接收入口并提交；完成、回滚或清理时移除精确记录并扣减工作量。
 本地请求按登记值计数，不根据经过时间衰减，也不学习执行耗时。
 
 上报的未知运行请求按 inputLength 减有效 prefixLength 统计 compute tokens。
@@ -111,7 +111,7 @@ Endpoint 在锁外交付等待结果；结果已结束而无法交付的新登�
 ## Encoder 与监控
 
 EncoderEndpoint 在选址时通过 tryRegisterSelection 记录精确 RequestRegistration，立即计入并发和未命中工作量。
-commitSelection 将完整路由关联到同一登记，不再次扣减容量；是否已关联路由决定 REGISTERED/COMMITTED 阶段。
+confirmSelection 将事件接收入口关联到同一登记，不再次扣减容量；是否已关联反馈决定 REGISTERED/COMMITTED 阶段。
 提交和下线使用同一把状态锁，完成、取消或下线后清除对应记录。
 登记接收请求侧计算好的未命中 token 数，不从请求 Context 读取输入长度与缓存命中参数。
 

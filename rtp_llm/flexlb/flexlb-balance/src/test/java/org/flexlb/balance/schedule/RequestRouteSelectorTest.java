@@ -24,6 +24,7 @@ import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.PrefillEndpoint;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
+import org.flexlb.worker.endpoint.WorkerEndpoint.CommitStatus;
 import org.flexlb.worker.status.ServerStatus;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -1577,7 +1578,8 @@ class RequestRouteSelectorTest {
     }
 
     private static boolean stubPrefillCommit(PrefillEndpoint endpoint) {
-        when(endpoint.commitSelection(any())).thenReturn(true);
+        when(endpoint.confirmSelection(any(), any(), org.mockito.ArgumentMatchers.anyLong()))
+                .thenReturn(CommitStatus.COMMITTED);
         return true;
     }
 

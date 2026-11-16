@@ -2,6 +2,7 @@ package org.flexlb.worker.endpoint;
 
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.service.RoleType;
+import org.flexlb.worker.endpoint.WorkerEndpoint.CommitStatus;
 import org.flexlb.worker.status.WorkerStatusResponse;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -40,14 +41,14 @@ class PrefillComputeTokensTest {
     }
 
     @Test
-    void commitAssociatesTheRouteWithoutAnEarlierBind() {
+    void finalConfirmationAssociatesFeedbackOnlyOnce() {
         var registration =
                 endpoint.tryRegisterSelection("request", endpoint.selectionSnapshot(), 40L).value();
-        var route = org.mockito.Mockito.mock(WorkerRoute.class);
-        org.mockito.Mockito.when(route.requestId()).thenReturn("request");
-        org.mockito.Mockito.when(route.prefillRegistration()).thenReturn(registration);
-        assertTrue(endpoint.commitSelection(route));
-        assertFalse(endpoint.commitSelection(route));
+        WorkerEventSink events = event -> {};
+        assertEquals(CommitStatus.COMMITTED, endpoint.confirmSelection(registration, events, 0L));
+        assertEquals(
+                CommitStatus.INVALID_REGISTRATION,
+                endpoint.confirmSelection(registration, events, 0L));
         assertFalse(endpoint.rollbackSelection(registration));
         assertTrue(endpoint.releaseRequest(registration));
         assertEquals(0L, endpoint.selectionSnapshot().computeTokens());

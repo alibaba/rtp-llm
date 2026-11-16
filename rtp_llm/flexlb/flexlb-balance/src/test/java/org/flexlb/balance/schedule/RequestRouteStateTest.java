@@ -137,8 +137,7 @@ class RequestRouteStateTest {
         assertSame(context.snapshot().requestRecordForArchive(), state);
         assertEquals(RequestState.State.FAILED, state.state());
         assertEquals("ended", state.requestId());
-        org.junit.jupiter.api.Assertions.assertFalse(
-                (Object) state instanceof org.flexlb.worker.endpoint.WorkerRoute);
+        org.junit.jupiter.api.Assertions.assertFalse((Object) state instanceof RequestRoute);
         assertEquals(
                 state,
                 new RequestState(

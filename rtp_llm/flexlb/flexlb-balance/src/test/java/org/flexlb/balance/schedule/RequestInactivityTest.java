@@ -28,7 +28,8 @@ class RequestInactivityTest {
         var route = context.snapshot().route();
         var previous = context.snapshot().deadlines().inactivity();
         org.junit.jupiter.api.Assertions.assertFalse(
-                context.recordEvent(
+                WorkerEventTestSupport.record(
+                        context,
                         event(
                                 route,
                                 role,
@@ -47,7 +48,8 @@ class RequestInactivityTest {
         var oldRoute = mock(RequestRoute.class);
         when(oldRoute.ctx()).thenReturn(context);
         org.junit.jupiter.api.Assertions.assertFalse(
-                context.recordEvent(
+                WorkerEventTestSupport.record(
+                        context,
                         event(
                                 oldRoute,
                                 RoleType.PREFILL,
@@ -55,8 +57,9 @@ class RequestInactivityTest {
                                 1500L)));
         var route = before.route();
         org.junit.jupiter.api.Assertions.assertFalse(
-                context.recordEvent(
-                        new RequestContext.RequestEvent(
+                WorkerEventTestSupport.record(
+                        context,
+                        new WorkerEventTestSupport.RequestEvent(
                                 route,
                                 new DecodeEndpoint.RequestRegistration(1L, "request"),
                                 RoleType.DECODE,
@@ -73,21 +76,24 @@ class RequestInactivityTest {
         var context = context();
         var route = context.snapshot().route();
         assertNull(context.snapshot().deadlines().visibility());
-        context.recordEvent(
+        WorkerEventTestSupport.record(
+                context,
                 event(
                         route,
                         RoleType.PREFILL,
                         org.flexlb.worker.endpoint.RequestEventType.ACTIVE,
                         1200L));
         assertNull(context.snapshot().deadlines().visibility());
-        context.recordEvent(
+        WorkerEventTestSupport.record(
+                context,
                 event(
                         route,
                         RoleType.PREFILL,
                         org.flexlb.worker.endpoint.RequestEventType.COMPLETED,
                         1500L));
         assertEquals(11500L, context.snapshot().deadlines().visibility().atMs());
-        context.recordEvent(
+        WorkerEventTestSupport.record(
+                context,
                 event(
                         route,
                         RoleType.DECODE,
@@ -107,12 +113,33 @@ class RequestInactivityTest {
                 60000L,
                 1000L,
                 StrategyErrorType.SCHEDULING_DEADLINE_EXCEEDED);
-        var route = mock(RequestRoute.class);
-        when(route.ctx()).thenReturn(context);
-        when(route.requestId()).thenReturn("request");
-        when(route.decodeEndpoint()).thenReturn(mock(DecodeEndpoint.class));
-        when(route.decodeRegistration())
-                .thenReturn(new DecodeEndpoint.RequestRegistration(1L, "request"));
+        var prefill = org.mockito.Mockito.mock(org.flexlb.worker.endpoint.PrefillEndpoint.class);
+        var decode = mock(DecodeEndpoint.class);
+        var prefillStatus =
+                org.flexlb.worker.status.WorkerStatus.createDiscovered(
+                        RoleType.PREFILL, null, "127.0.0.1", 8080, 8090, null);
+        var decodeStatus =
+                org.flexlb.worker.status.WorkerStatus.createDiscovered(
+                        RoleType.DECODE, null, "127.0.0.2", 8080, 8090, null);
+        when(prefill.getStatus()).thenReturn(prefillStatus);
+        when(decode.getStatus()).thenReturn(decodeStatus);
+        var prefillRegistration =
+                mock(org.flexlb.worker.endpoint.PrefillEndpoint.RequestRegistration.class);
+        when(prefillRegistration.requestId()).thenReturn("request");
+        var route =
+                new RequestRoute(
+                        context,
+                        java.util.List.of(
+                                org.flexlb.balance.strategy.RoleSelection.prefill(
+                                        prefill,
+                                        prefillStatus.topologySnapshot(),
+                                        0L,
+                                        0L,
+                                        prefillRegistration),
+                                org.flexlb.balance.strategy.RoleSelection.decode(
+                                        decode,
+                                        decodeStatus.topologySnapshot(),
+                                        new DecodeEndpoint.RequestRegistration(1L, "request"))));
         var selecting = context.beginRouteSelection();
         synchronized (context) {
             context.registerSelectedRoute(selecting, route);
@@ -129,12 +156,12 @@ class RequestInactivityTest {
         return context;
     }
 
-    private static RequestContext.RequestEvent event(
+    private static WorkerEventTestSupport.RequestEvent event(
             RequestRoute route,
             RoleType role,
             org.flexlb.worker.endpoint.RequestEventType type,
             long nowMs) {
-        return new RequestContext.RequestEvent(
+        return new WorkerEventTestSupport.RequestEvent(
                 route,
                 role == RoleType.DECODE ? route.decodeRegistration() : null,
                 role,

@@ -26,7 +26,7 @@ import java.util.function.BooleanSupplier;
 
 import static org.flexlb.balance.schedule.RequestContext.EndCause;
 import static org.flexlb.balance.schedule.RequestContext.RequestEndEvent;
-import static org.flexlb.balance.schedule.RequestContext.RequestEvent;
+import static org.flexlb.balance.schedule.WorkerEventTestSupport.RequestEvent;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -156,6 +156,7 @@ final class RequestProtocolTestSupport {
         for (var role : roles) {
             if (role.role().supportsPrefill() && role.registration() == null) {
                 var record = org.mockito.Mockito.mock(PrefillEndpoint.RequestRegistration.class);
+                org.mockito.Mockito.doReturn(context.getRequestId()).when(record).requestId();
                 registered.add(
                         org.flexlb.balance.schedule.SelectionTestSupport.prefill(
                                 (PrefillEndpoint) role.endpoint(),
@@ -170,9 +171,6 @@ final class RequestProtocolTestSupport {
                         org.mockito.Mockito.withSettings()
                                 .useConstructor(context, registered)
                                 .defaultAnswer(org.mockito.Mockito.CALLS_REAL_METHODS));
-        org.mockito.Mockito.doAnswer(call -> call.getArgument(0))
-                .when(route)
-                .validateEndpoints(org.mockito.ArgumentMatchers.any(SelectionResult.class));
         return route;
     }
 
@@ -477,7 +475,7 @@ final class RequestProtocolTestSupport {
             PrefillEndpoint.PrefillRequestStatus status) {
         applyPrefillStatus(
                 scheduler,
-                scheduler.repository.findActive(status.route().requestId()),
+                scheduler.repository.findActive(status.registration().requestId()),
                 source,
                 role,
                 status);
@@ -489,18 +487,16 @@ final class RequestProtocolTestSupport {
             PrefillEndpoint source,
             RoleType role,
             PrefillEndpoint.PrefillRequestStatus status) {
-        if (context == null || status.route().prefillEndpoint() != source) {
+        if (context == null) {
             return;
         }
-        var kind = status.eventType();
-        scheduler.onRequestEvent(
-                context,
-                new RequestEvent(
-                        (RequestRoute) status.route(),
-                        status.route().decodeRegistration(),
+        scheduler.onWorkerRequestEvent(
+                context.snapshot().route(),
+                new org.flexlb.worker.endpoint.WorkerRequestEvent(
+                        status.registration(),
                         role,
-                        null,
-                        kind,
+                        source,
+                        status.eventType(),
                         status.errorCode(),
                         null,
                         System.currentTimeMillis()));
@@ -537,7 +533,8 @@ final class RequestProtocolTestSupport {
                                 ? RequestEventType.COMPLETED
                                 : RequestEventType.FAILED
                         : RequestEventType.ALLOCATED;
-        scheduler.onRequestEvent(
+        WorkerEventTestSupport.publish(
+                scheduler,
                 context,
                 new RequestEvent(
                         route,
@@ -760,9 +757,10 @@ final class RequestProtocolTestSupport {
         if (route == null || route.decodeEndpoint() != source) {
             return;
         }
-        scheduler.onRequestEvent(
+        WorkerEventTestSupport.publish(
+                scheduler,
                 context,
-                new RequestContext.RequestEvent(
+                new WorkerEventTestSupport.RequestEvent(
                         route,
                         reservation,
                         RoleType.DECODE,

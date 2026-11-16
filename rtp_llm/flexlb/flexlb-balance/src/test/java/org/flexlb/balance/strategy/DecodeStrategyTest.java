@@ -1029,7 +1029,7 @@ class DecodeStrategyTest {
             Assertions.assertEquals(RoleType.DECODE, result.blocker());
             Assertions.assertNotNull(result.failure());
             Assertions.assertEquals(
-                    org.flexlb.worker.endpoint.AdmissionRejectReason.HIGHER_PRIORITY_AHEAD,
+                    org.flexlb.worker.endpoint.AdmissionRejectReason.SAME_PRIORITY_AHEAD,
                     result.failure().getAdmissionRejectReason());
             Assertions.assertEquals(
                     result.failure().getErrorMessage(), result.diagnostics().get("cause"));
@@ -1040,7 +1040,7 @@ class DecodeStrategyTest {
                             .contains(evidence.get("endpoint")));
             Assertions.assertEquals(
                     new DecodeResources.Capacity(1L, 0L, 0L), evidence.get("deficit"));
-            Assertions.assertEquals("higher-priority requests are ahead", evidence.get("reason"));
+            Assertions.assertEquals("same-priority requests are ahead", evidence.get("reason"));
 
         } finally {
             registry.close();

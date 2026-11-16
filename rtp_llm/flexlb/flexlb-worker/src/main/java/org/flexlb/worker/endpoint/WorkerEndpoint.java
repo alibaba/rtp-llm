@@ -150,25 +150,22 @@ public class WorkerEndpoint {
      * Delivers an already validated request event outside the status and DiscoveryEndpoint locks.
      */
     protected final void publishWorkerRequest(
-            WorkerRoute route,
-            DecodeEndpoint.RequestRegistration reservation,
+            RequestRegistration registration,
+            WorkerEventSink events,
             RoleType role,
             org.flexlb.worker.endpoint.RequestEventType kind,
             long errorCode,
             String detail) {
-        var context = route.ctx();
-        context.getRequestScheduler()
-                .onWorkerRequestEvent(
-                        context,
-                        new org.flexlb.worker.endpoint.WorkerRequestEvent(
-                                route,
-                                reservation,
-                                role,
-                                this,
-                                kind,
-                                errorCode,
-                                detail,
-                                System.currentTimeMillis()));
+        if (events == null) return;
+        events.onWorkerRequestEvent(
+                new org.flexlb.worker.endpoint.WorkerRequestEvent(
+                        registration,
+                        role,
+                        this,
+                        kind,
+                        errorCode,
+                        detail,
+                        System.currentTimeMillis()));
     }
 
     /**
@@ -299,6 +296,15 @@ public class WorkerEndpoint {
         String requestId();
 
         long endpointGenerationId();
+    }
+
+    /**
+     * Reports whether the selected registration was committed, without deciding whether to retry.
+     */
+    public enum CommitStatus {
+        COMMITTED,
+        UNAVAILABLE,
+        INVALID_REGISTRATION
     }
 
     /**

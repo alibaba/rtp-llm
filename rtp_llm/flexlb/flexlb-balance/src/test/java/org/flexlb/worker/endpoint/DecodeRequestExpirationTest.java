@@ -27,11 +27,7 @@ class DecodeRequestExpirationTest {
     @BeforeEach
     void setUp() {
         status = EndpointTestSupport.workerStatus(RoleType.DECODE, "10.0.0.8", 8080, 8081);
-        endpoint =
-                EndpointTestSupport.decode(
-                        status,
-                        org.flexlb.balance.schedule.SchedulerTestSupport.repository(
-                                EndpointTestSupport.noopEventSink()));
+        endpoint = EndpointTestSupport.decode(status);
         updateStatus(Map.of(), Map.of(), 10_000);
     }
 

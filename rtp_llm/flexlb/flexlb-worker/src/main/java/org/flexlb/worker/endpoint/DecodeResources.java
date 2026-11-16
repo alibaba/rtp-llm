@@ -33,9 +33,11 @@ public final class DecodeResources {
     }
 
     /**
-     * Request status matched to its exact Decode reservation, published after ledger reconciliation.
+     * Request status and receiver captured together under the ledger lock for later publication.
+     * The receiver is null if selection had not been confirmed when the status was captured.
      */
-    public record DecodeRequestStatus(Kind kind, RequestRegistration reservation, long errorCode) {
+    public record DecodeRequestStatus(
+            Kind kind, RequestRegistration reservation, WorkerEventSink events, long errorCode) {
         public DecodeRequestStatus {
             java.util.Objects.requireNonNull(kind, "kind");
             java.util.Objects.requireNonNull(reservation, "reservation");
@@ -44,13 +46,14 @@ public final class DecodeResources {
                     "only a terminal Decode request status may carry an error code");
         }
 
-        public static DecodeRequestStatus confirmed(RequestRegistration reservation) {
-            return new DecodeRequestStatus(Kind.CONFIRMED, reservation, 0L);
+        public static DecodeRequestStatus confirmed(
+                RequestRegistration reservation, WorkerEventSink events) {
+            return new DecodeRequestStatus(Kind.CONFIRMED, reservation, events, 0L);
         }
 
         public static DecodeRequestStatus terminal(
-                RequestRegistration reservation, long errorCode) {
-            return new DecodeRequestStatus(Kind.TERMINAL, reservation, errorCode);
+                RequestRegistration reservation, WorkerEventSink events, long errorCode) {
+            return new DecodeRequestStatus(Kind.TERMINAL, reservation, events, errorCode);
         }
 
         public enum Kind {

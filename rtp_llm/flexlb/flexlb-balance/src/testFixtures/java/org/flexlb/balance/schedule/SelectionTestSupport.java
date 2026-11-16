@@ -28,6 +28,7 @@ public final class SelectionTestSupport {
             DecodeEndpoint endpoint,
             ServerStatus status,
             DecodeEndpoint.RequestRegistration registration) {
+        initializeMockStatus(endpoint, status);
         return RoleSelection.decode(endpoint, topology(status), registration);
     }
 
@@ -49,6 +50,7 @@ public final class SelectionTestSupport {
             ServerStatus status,
             long computeTokens,
             PrefillEndpoint.RequestRegistration registration) {
+        initializeMockStatus(endpoint, status);
         return RoleSelection.prefill(
                 endpoint,
                 topology(status),
@@ -61,10 +63,12 @@ public final class SelectionTestSupport {
             EncoderEndpoint endpoint,
             ServerStatus status,
             EncoderEndpoint.RequestRegistration registration) {
+        initializeMockStatus(endpoint, status);
         return RoleSelection.encoder(endpoint, topology(status), registration);
     }
 
     public static RoleSelection auxiliary(WorkerEndpoint endpoint, ServerStatus status) {
+        initializeMockStatus(endpoint, status);
         return RoleSelection.auxiliary(endpoint, topology(status));
     }
 
@@ -131,6 +135,25 @@ public final class SelectionTestSupport {
             org.mockito.Mockito.doReturn(registered.value()).when(route).prefillRegistration();
         }
         return registered;
+    }
+
+    private static void initializeMockStatus(WorkerEndpoint endpoint, ServerStatus selected) {
+        var mock = org.mockito.Mockito.mockingDetails(endpoint);
+        if (!mock.isMock() || mock.isSpy()) return;
+        var status = endpoint.getStatus();
+        if (status == null) {
+            status =
+                    org.flexlb.worker.status.WorkerStatus.createDiscovered(
+                            selected.getRole(),
+                            selected.getGroup(),
+                            java.util.Objects.requireNonNullElse(selected.getServerIp(), "127.0.0.1"),
+                            selected.getHttpPort() > 0 ? selected.getHttpPort() : 8080,
+                            selected.getGrpcPort() > 0 ? selected.getGrpcPort() : 8081,
+                            null);
+            org.mockito.Mockito.when(endpoint.getStatus()).thenReturn(status);
+        } else if (org.mockito.Mockito.mockingDetails(status).isMock() && status.getRole() == null) {
+            org.mockito.Mockito.when(status.getRole()).thenReturn(selected.getRole());
+        }
     }
 
     private static org.flexlb.worker.status.WorkerStatus.TopologySnapshot topology(

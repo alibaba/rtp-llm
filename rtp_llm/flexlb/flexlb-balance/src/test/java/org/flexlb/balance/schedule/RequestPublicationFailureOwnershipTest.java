@@ -62,6 +62,7 @@ class RequestPublicationFailureOwnershipTest {
                             null,
                             null,
                             System.currentTimeMillis());
+            var prefillRegistration = route.prefillRegistration();
             RequestProtocolTestSupport.bind(
                     f.owner, new RequestProtocolTestSupport.Registered(route, future));
             context.endRequest(
@@ -77,9 +78,10 @@ class RequestPublicationFailureOwnershipTest {
             var cancellations = mock(EngineCancellation.class);
             SchedulerTestServices.setDependency(f.runtime, "dispatcher", cancellations);
             try {
-                f.owner.onRequestEvent(
+                WorkerEventTestSupport.publish(
+                        f.owner,
                         context,
-                        new RequestContext.RequestEvent(
+                        new WorkerEventTestSupport.RequestEvent(
                                 route,
                                 null,
                                 org.flexlb.config.service.RoleType.PREFILL,
@@ -161,6 +163,7 @@ class RequestPublicationFailureOwnershipTest {
                             null,
                             null,
                             System.currentTimeMillis());
+            var prefillRegistration = route.prefillRegistration();
             RequestProtocolTestSupport.bind(
                     f.owner, new RequestProtocolTestSupport.Registered(route, future));
             var notificationEntered = new CountDownLatch(1);
@@ -178,7 +181,7 @@ class RequestPublicationFailureOwnershipTest {
                             })
                     .when(timer)
                     .update(eq(context), any());
-            when(endpoint.releaseRequest(route.prefillRegistration()))
+            when(endpoint.releaseRequest(prefillRegistration))
                     .thenAnswer(
                             call -> {
                                 released.countDown();
@@ -215,7 +218,7 @@ class RequestPublicationFailureOwnershipTest {
                         f.runtime, "timer", originalTimer);
             }
             assertEquals(Phase.CLOSED, context.snapshot().phase());
-            verify(endpoint, times(1)).releaseRequest(route.prefillRegistration());
+            verify(endpoint, times(1)).releaseRequest(prefillRegistration);
         }
     }
 
@@ -235,6 +238,7 @@ class RequestPublicationFailureOwnershipTest {
                             null,
                             null,
                             System.currentTimeMillis());
+            var prefillRegistration = route.prefillRegistration();
             var admission = SchedulerTestSupport.claim(f.owner, "9303", future);
             {
                 assertNotNull(admission);
@@ -262,7 +266,7 @@ class RequestPublicationFailureOwnershipTest {
             assertEquals(Phase.CLOSED, context.snapshot().phase());
             assertEquals(0, f.runtime.requests().liveRequestCount());
             assertTrue(future.isCancelled());
-            verify(endpoint).releaseRequest(route.prefillRegistration());
+            verify(endpoint).releaseRequest(prefillRegistration);
         }
     }
 
@@ -284,6 +288,7 @@ class RequestPublicationFailureOwnershipTest {
                             null,
                             null,
                             System.currentTimeMillis());
+            var prefillRegistration = route.prefillRegistration();
             RequestProtocolTestSupport.bind(
                     f.owner, new RequestProtocolTestSupport.Registered(route, future));
             var workers =
@@ -336,7 +341,7 @@ class RequestPublicationFailureOwnershipTest {
                     assertTrue(future.get(5, TimeUnit.SECONDS).isSuccess());
                     assertEquals(0, registrations(f.runtime));
                     assertFalse(context.snapshot().notificationsDone());
-                    verify(endpoint, never()).releaseRequest(route.prefillRegistration());
+                    verify(endpoint, never()).releaseRequest(prefillRegistration);
                     finish.countDown();
                 } else {
                     assertTrue(future.get(5, TimeUnit.SECONDS).isSuccess());
@@ -345,7 +350,7 @@ class RequestPublicationFailureOwnershipTest {
                     assertEquals(Phase.ENDING, context.snapshot().phase());
                     assertSame(route, context.snapshot().route());
                     assertTrue(f.runtime.requests().isCurrent(context));
-                    verify(endpoint, never()).releaseRequest(route.prefillRegistration());
+                    verify(endpoint, never()).releaseRequest(prefillRegistration);
                     ReflectionTestUtils.setField(f.runtime.tasks, "requestWorkers", workers);
                     f.owner.closeRequest(context, null);
                 }
@@ -357,7 +362,7 @@ class RequestPublicationFailureOwnershipTest {
                 assertEquals(EndCause.WORKER_REPORT_TIMEOUT, context.snapshot().endCause());
                 assertEquals(Phase.CLOSED, context.snapshot().phase());
                 assertEquals(0, f.runtime.requests().liveRequestCount());
-                verify(endpoint, times(1)).releaseRequest(route.prefillRegistration());
+                verify(endpoint, times(1)).releaseRequest(prefillRegistration);
                 if (startedBeforeFailure) {
                     assertDoesNotThrow(
                             () -> SchedulerTestServices.throwIfFailed(f.runtime.tasks),

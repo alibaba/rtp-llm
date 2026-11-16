@@ -8,12 +8,14 @@ import org.flexlb.balance.schedule.ResponseCompletionExecutor.Registration;
 import org.flexlb.balance.schedule.ResponseCompletionExecutor.RequestFuture;
 import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.balance.trace.FlexlbTrace;
-import org.flexlb.config.service.RoleType;
 import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
 import org.flexlb.worker.endpoint.AdmissionRejectReason;
 import org.flexlb.worker.endpoint.CapacityKey;
 import org.flexlb.worker.endpoint.StrategyErrorType;
+import org.flexlb.worker.endpoint.WorkerEndpoint.CommitStatus;
+import org.flexlb.worker.endpoint.WorkerEventSink;
+import org.flexlb.worker.endpoint.WorkerRequestEvent;
 import org.flexlb.worker.rpc.EngineGrpcClient;
 
 import java.util.Map;
@@ -34,8 +36,7 @@ import static org.flexlb.util.Failures.recover;
  * Runs shared route selection, publication and cleanup; subclasses supply waiting and rejection policies.
  * Stops and cleans up its own requests; the application closes shared resources.
  */
-public abstract class AbstractRequestScheduler
-        implements RequestScheduler, org.flexlb.worker.endpoint.WorkerEventSink {
+public abstract class AbstractRequestScheduler implements RequestScheduler {
     protected final RequestRepository repository;
     protected final RequestTaskPool taskPool;
     private final ExpirationTimer expirationTimer;
@@ -63,41 +64,20 @@ public abstract class AbstractRequestScheduler
         this.cacheTrace = Objects.requireNonNull(cacheTrace);
     }
 
-    @Override
-    public void onWorkerRequestEvent(
-            org.flexlb.worker.endpoint.WorkerRequest request,
-            org.flexlb.worker.endpoint.WorkerRequestEvent event) {
-        onRequestEvent(
-                (RequestContext) request,
-                new RequestContext.RequestEvent(
-                        (RequestRoute) event.route(),
-                        event.reservation(),
-                        event.role(),
-                        event.endpoint(),
-                        event.type(),
-                        event.errorCode(),
-                        event.detail(),
-                        event.nowMs()));
-    }
-
-    /**
-     * Advance on the status caller; user callbacks use their response executor.
-     */
-    public void onRequestEvent(RequestContext ctx, RequestContext.RequestEvent event) {
-        if (ctx == null || ctx.getRequestScheduler() != this) return;
+    public void onWorkerRequestEvent(RequestRoute route, WorkerRequestEvent event) {
+        var ctx = route.ctx();
+        if (ctx.getRequestScheduler() != this) return;
         try {
-            if (ctx.recordEvent(event)) {
+            if (ctx.recordWorkerEvent(route, event)) {
                 try {
-                    if (ctx.snapshot().phase() == Phase.CLOSED) {
-                        engineCancellation.forget(event.route());
-                    }
+                    if (ctx.snapshot().phase() == Phase.CLOSED) engineCancellation.forget(route);
                 } finally {
                     processPendingRequestActions(ctx);
                 }
             }
         } catch (Throwable failure) {
             recordRequestFailure(failure);
-            Logger.error("Request event processing failed: type={}", event.type(), failure);
+            Logger.error("Worker request event processing failed", failure);
         }
     }
 
@@ -411,9 +391,7 @@ public abstract class AbstractRequestScheduler
                     || !request.canPublishRoute(exact)
                     || routeSelectionStopped()) result = SelectionResult.closed();
             else if (acquired != null) {
-                result = acquired.validateEndpoints(SelectionResult.success(acquired));
-                if (result.status() == SelectionResult.Status.SUCCESS)
-                    result = publishSelectedRoute(acquired);
+                result = publishSelectedRoute(acquired);
                 committed = result.status() == SelectionResult.Status.SUCCESS;
             }
             return acquired == null ? result : selectedRouteResult(result);
@@ -455,25 +433,39 @@ public abstract class AbstractRequestScheduler
         var request = route.ctx();
         request.recordRouteCommitStart(System.nanoTime());
         var exact = currentSelectionAttempt(route);
-        if (exact == null) return route.validateEndpoints(SelectionResult.closed());
-        if (route.encoderEndpoint() != null) {
-            if (!route.encoderEndpoint().commitSelection(route))
-                return route.validateEndpoints(
-                        SelectionResult.blocked(
-                                new CapacityKey(
-                                        RoleType.ENCODER,
-                                        route.encoderEndpoint().getStatus().getGroup(),
-                                        route.encoderEndpoint().ipPort())));
-        } else if (!route.prefillEndpoint().commitSelection(route)) {
-            return route.validateEndpoints(
-                    SelectionResult.rejected(
-                            Response.buildErrorResponse(
-                                    StrategyErrorType.DISPATCH_FAILED,
-                                    "Selected Prefill registration was not valid for commit")));
+        if (exact == null) return SelectionResult.closed();
+        WorkerEventSink events = event -> onWorkerRequestEvent(route, event);
+        if (route.decodeEndpoint() != null) {
+            var decodeStatus =
+                    route.decodeEndpoint().confirmSelection(route.decodeRegistration(), events);
+            if (decodeStatus == CommitStatus.UNAVAILABLE)
+                return SelectionResult.retry(Response.error(StrategyErrorType.NO_DECODE_WORKER));
+            if (decodeStatus == CommitStatus.INVALID_REGISTRATION) return SelectionResult.closed();
         }
-        return commitRoute(route, exact)
-                ? SelectionResult.success(route)
-                : route.validateEndpoints(SelectionResult.closed());
+        var endpoint =
+                route.encoderEndpoint() != null ? route.encoderEndpoint() : route.prefillEndpoint();
+        var status =
+                route.encoderEndpoint() != null
+                        ? route.encoderEndpoint()
+                                .confirmSelection(route.encoderRegistration(), events)
+                        : route.prefillEndpoint()
+                                .confirmSelection(
+                                        route.prefillRegistration(),
+                                        events,
+                                        request.getPlacementSequence());
+        if (request.isResponseDone() || request.snapshot().cancellationReason() != null)
+            return SelectionResult.closed();
+        if (status == CommitStatus.UNAVAILABLE)
+            return SelectionResult.retry(
+                    Response.error(StrategyErrorType.forRole(endpoint.getStatus().getRole())));
+        if (status == CommitStatus.INVALID_REGISTRATION)
+            return SelectionResult.rejected(
+                    Response.buildErrorResponse(
+                            StrategyErrorType.DISPATCH_FAILED,
+                            "Selected "
+                                    + (route.encoderEndpoint() != null ? "Encoder" : "Prefill")
+                                    + " registration was not valid for commit"));
+        return commitRoute(route, exact);
     }
 
     protected SelectionResult<RequestRoute, CapacityKey> selectedRouteResult(
@@ -683,19 +675,23 @@ public abstract class AbstractRequestScheduler
     void onEngineCancelReply(RequestRoute route, EngineGrpcClient.CancelReply reply) {
         var ctx = route.ctx();
         if (!isCurrentRequest(ctx)) return;
-        var type =
-                switch (reply) {
-                    case REQUEST_CLEANED ->
-                            org.flexlb.worker.endpoint.RequestEventType.REMOTE_CLEANED;
-                    case REQUEST_FENCED ->
-                            org.flexlb.worker.endpoint.RequestEventType.REMOTE_FENCED;
-                    default -> null;
-                };
-        if (type == null) return;
-        onRequestEvent(
-                ctx,
-                new RequestContext.RequestEvent(
-                        route, null, null, null, type, 0L, null, System.currentTimeMillis()));
+        if (reply != EngineGrpcClient.CancelReply.REQUEST_CLEANED
+                && reply != EngineGrpcClient.CancelReply.REQUEST_FENCED) return;
+        try {
+            if (ctx.recordRemoteCleanup(
+                    route,
+                    reply == EngineGrpcClient.CancelReply.REQUEST_CLEANED,
+                    System.currentTimeMillis())) {
+                try {
+                    if (ctx.snapshot().phase() == Phase.CLOSED) engineCancellation.forget(route);
+                } finally {
+                    processPendingRequestActions(ctx);
+                }
+            }
+        } catch (Throwable failure) {
+            recordRequestFailure(failure);
+            Logger.error("Remote cleanup reply processing failed", failure);
+        }
     }
 
     /**
@@ -743,7 +739,7 @@ public abstract class AbstractRequestScheduler
         else stage = state.route() == null ? "WAITING_FOR_PLACEMENT" : "BEFORE_DELIVERY";
         details.put("stage", stage);
         details.put("capturedAtMs", System.currentTimeMillis());
-        if (state.selectionId() != 0) details.put("routingPhase", state.routingPhase().name());
+        if (state.isSelectingRoute()) details.put("routingPhase", "SELECTING");
         if (state.committedRoute() == null
                 && state.route() == null
                 && request.getSchedulingDiagnostics() != null)
@@ -758,8 +754,13 @@ public abstract class AbstractRequestScheduler
     private void scheduleRequestCleanup(RequestContext ctx, Registration publication) {
         var state = ctx.snapshot();
         boolean responseBeforeCleanup =
-                state.endState() != null && state.endCause() == EndCause.ENDPOINT_CLOSED;
-        boolean inactivity = state.endState() != null && state.endCause().isTimeout();
+                state.endState() != null
+                        && state.workerEndType()
+                                == org.flexlb.worker.endpoint.RequestEventType.ENDPOINT_CLOSED;
+        boolean inactivity =
+                state.endState() != null
+                        && state.endCause() != null
+                        && state.endCause().isTimeout();
         Throwable queueFailure = !inactivity ? Failures.run(null, () -> removeRequest(ctx)) : null;
         if (publication != null && responseBeforeCleanup && !inactivity) {
             var ready = publication;
@@ -950,29 +951,36 @@ public abstract class AbstractRequestScheduler
     /**
      * Reserves response execution, commits once, then invokes the response outside the request lock.
      */
-    private boolean commitRoute(RequestRoute route, SelectionAttempt attempt) {
+    private SelectionResult<RequestRoute, CapacityKey> commitRoute(
+            RequestRoute route, SelectionAttempt attempt) {
         var ctx = route.ctx();
         Registration publication = null;
         boolean committed = false;
         try {
             synchronized (ctx) {
                 if (!repository.isCurrent(ctx)
-                        || ctx.getFuture().isDone()
-                        || !route.selectedEndpointsAvailable()
-                        || route.decodeEndpoint() != null
-                                && !route.decodeEndpoint()
-                                        .registrationState(route.decodeRegistration())
-                                        .registered()) return false;
+                        || ctx.isResponseDone()
+                        || ctx.snapshot().cancellationReason() != null)
+                    return SelectionResult.closed();
+                var unavailable = RequestRoute.firstUnavailableEndpoint(route.roles());
+                if (unavailable != null)
+                    return SelectionResult.retry(
+                            Response.error(
+                                    StrategyErrorType.forRole(unavailable.getStatus().getRole())));
+                if (route.decodeEndpoint() != null
+                        && !route.decodeEndpoint()
+                                .registrationState(route.decodeRegistration())
+                                .registered()) return SelectionResult.closed();
                 long nowMs = System.currentTimeMillis();
                 var candidate = reserveResponse(ctx, ResponseKind.ACK);
                 publication = candidate;
                 committed = ctx.tryCommitRoute(attempt, route, candidate, nowMs);
-                if (!committed) return false;
+                if (!committed) return SelectionResult.closed();
                 publication.prepare(RESPONSE, route.successResponse(), null);
             }
             publication.publish(false);
             processPendingRequestActions(ctx);
-            return true;
+            return SelectionResult.success(route);
         } catch (RuntimeException | Error failure) {
             if (committed) {
                 if (publication != null) publication.failIfUnsubmitted(failure);
@@ -990,7 +998,7 @@ public abstract class AbstractRequestScheduler
                                                         StrategyErrorType.DISPATCH_FAILED,
                                                         "route response failed")));
                 if (cleanupFailure != null) recordRequestFailure(cleanupFailure);
-                return true;
+                return SelectionResult.success(route);
             }
             throw failure;
         } finally {

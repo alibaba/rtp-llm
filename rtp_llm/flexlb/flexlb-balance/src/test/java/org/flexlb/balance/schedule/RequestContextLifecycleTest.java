@@ -97,9 +97,10 @@ class RequestContextLifecycleTest {
             assertNotNull(lifecycle.currentSelectionAttempt(route));
             context.registerSelectedRoute(admission, route);
             var original = context.snapshot().deadlines().inactivity();
-            lifecycle.onRequestEvent(
+            WorkerEventTestSupport.publish(
+                    lifecycle,
                     context,
-                    new RequestContext.RequestEvent(
+                    new WorkerEventTestSupport.RequestEvent(
                             route,
                             null,
                             org.flexlb.config.service.RoleType.PDFUSION,
@@ -222,7 +223,8 @@ class RequestContextLifecycleTest {
                     () ->
                             context.setRequest(
                                     context.getRequest().toBuilder().rawPriority(99).build()));
-            assertEquals(priority, context.getPriority());
+            assertEquals(queuePriority, context.getPriority());
+            assertEquals(priority, context.getRequest().getRawPriority());
             assertEquals(queuePriority, org.flexlb.balance.queue.SchedulingQueue.priority(entry));
             assertEquals(1, queue.priorityCounts()[queuePriority]);
             queue.remove(entry);
@@ -484,7 +486,6 @@ class RequestContextLifecycleTest {
                 new RequestContext.RequestEndEvent(
                         context.snapshot().route(),
                         RequestContext.EndCause.SCHEDULER_SHUTDOWN,
-                        0L,
                         StrategyErrorType.DISPATCH_FAILED,
                         "shutdown"));
         assertEquals(RequestState.State.TIMED_OUT, RequestState.from(context.snapshot()).state());
@@ -587,8 +588,9 @@ class RequestContextLifecycleTest {
         assertTrue(requestContext.snapshot().phase() != RequestContext.Phase.CLOSED);
         var before = requestContext.snapshot();
         assertFalse(
-                requestContext.recordEvent(
-                        new RequestContext.RequestEvent(
+                WorkerEventTestSupport.record(
+                        requestContext,
+                        new WorkerEventTestSupport.RequestEvent(
                                 null,
                                 null,
                                 RoleType.PREFILL,
@@ -671,8 +673,9 @@ class RequestContextLifecycleTest {
                     RequestProtocolTestSupport.commitRoute(
                             lifecycle, item, RequestProtocolTestSupport.publication(() -> true)));
         }
+        var prefillRegistration = item.prefillRegistration();
         AtomicReference<Thread> cleanupThread = new AtomicReference<>();
-        when(prefill.releaseRequest(item.prefillRegistration()))
+        when(prefill.releaseRequest(prefillRegistration))
                 .thenAnswer(
                         invocation -> {
                             assertFalse(Thread.holdsLock(context));
@@ -689,7 +692,7 @@ class RequestContextLifecycleTest {
                 org.flexlb.balance.schedule.SchedulerTestSupport.runtime(lifecycle));
         assertNotNull(cleanupThread.get());
         assertNotEquals(Thread.currentThread(), cleanupThread.get());
-        verify(prefill).releaseRequest(item.prefillRegistration());
+        verify(prefill).releaseRequest(prefillRegistration);
         assertEquals(
                 RequestState.State.TIMED_OUT, RequestState.from(requestContext.snapshot()).state());
     }
@@ -821,9 +824,10 @@ class RequestContextLifecycleTest {
         var route = registered.item();
         var context = route.ctx();
         var before = context.snapshot();
-        lifecycle.onRequestEvent(
+        WorkerEventTestSupport.publish(
+                lifecycle,
                 context,
-                new RequestContext.RequestEvent(
+                new WorkerEventTestSupport.RequestEvent(
                         route,
                         route.decodeRegistration(),
                         RoleType.DECODE,
@@ -856,6 +860,8 @@ class RequestContextLifecycleTest {
                         original.decodeEndpoint(),
                         original.decodeRegistration(),
                         original.ctx().getTiming().startedAtMs());
+        var prefillRegistration = route.prefillRegistration();
+        var decodeRegistration = route.decodeRegistration();
         var callbacks = new java.util.concurrent.atomic.AtomicInteger();
         var published =
                 registered
@@ -870,9 +876,10 @@ class RequestContextLifecycleTest {
         try (var finish = RequestProtocolTestSupport.finishOnExit(admission)) {
             assertNotNull(admission);
             context.registerSelectedRoute(admission, route);
-            lifecycle.onRequestEvent(
+            WorkerEventTestSupport.publish(
+                    lifecycle,
                     route.ctx(),
-                    new RequestContext.RequestEvent(
+                    new WorkerEventTestSupport.RequestEvent(
                             route,
                             route.decodeRegistration(),
                             RoleType.PREFILL,
@@ -889,7 +896,9 @@ class RequestContextLifecycleTest {
                     prefill,
                     RoleType.PREFILL,
                     new PrefillEndpoint.PrefillRequestStatus(
-                            route, org.flexlb.worker.endpoint.RequestEventType.FAILED, 42L));
+                            route.prefillRegistration(),
+                            org.flexlb.worker.endpoint.RequestEventType.FAILED,
+                            42L));
             assertFalse(
                     registered.future().isDone(),
                     "the routing owner still retains all terminal evidence");
@@ -913,9 +922,11 @@ class RequestContextLifecycleTest {
         assertEquals(Stage.FINISHED, SchedulerTestSupport.stage(context));
         assertEquals(RequestState.State.FAILED, RequestState.from(context.snapshot()).state());
         assertEquals(0, SchedulerTestSupport.repository(lifecycle).liveRequestCount());
-        verify(route.decodeEndpoint()).releaseRequest(route.decodeRegistration());
+        verify(route.decodeEndpoint()).releaseUnconfirmedRequest(decodeRegistration);
+        verify(route.decodeEndpoint(), org.mockito.Mockito.never())
+                .releaseRequest(decodeRegistration);
         org.mockito.Mockito.verify(prefill, org.mockito.Mockito.never())
-                .releaseRequest(route.prefillRegistration());
+                .releaseRequest(prefillRegistration);
     }
 
     @Test
@@ -963,7 +974,6 @@ class RequestContextLifecycleTest {
                             new RequestContext.RequestEndEvent(
                                     null,
                                     RequestContext.EndCause.SCHEDULER_SHUTDOWN,
-                                    0L,
                                     StrategyErrorType.DISPATCH_FAILED,
                                     "request scheduler is shutting down"),
                             System.currentTimeMillis(),

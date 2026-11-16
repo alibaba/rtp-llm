@@ -1,6 +1,5 @@
 package org.flexlb.worker.endpoint;
 
-import org.flexlb.balance.schedule.RequestRepository;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.worker.status.WorkerStatusResponse;
 import org.junit.jupiter.api.Test;
@@ -21,7 +20,6 @@ import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 /**
  * Verifies endpoint retirement completes resource cleanup despite notification failures.
@@ -29,19 +27,18 @@ import static org.mockito.Mockito.when;
 class WorkerEndpointCloseTest {
     @Test
     void decodeNotificationFailuresDoNotBlockOtherRequestsOrFinalization() throws Exception {
-        var repository = mock(RequestRepository.class);
+        var notified = new java.util.ArrayList<String>();
         var notifier = mock(CapacityNotifier.class);
         var endpoint =
                 new DecodeEndpoint(
                         EndpointTestSupport.workerStatus(RoleType.DECODE, "10.0.0.1", 8080, 8081),
-                        repository,
                         notifier);
         var status = new WorkerStatusResponse();
         status.setTotalKvCacheTokens(1000L);
         status.setAvailableKvCacheTokens(1000L);
         EndpointTestSupport.applyStatus(endpoint, status).run();
         for (var id : java.util.List.of("first", "second")) {
-            assertNotNull(
+            var registration =
                     endpoint.tryRegisterSelection(
                                     id,
                                     endpoint.selectionSnapshot(),
@@ -49,9 +46,14 @@ class WorkerEndpointCloseTest {
                                     10,
                                     1,
                                     new DecodeResources.AdmissionCapacity(2, 100))
-                            .value());
-            when(repository.findActive(id))
-                    .thenThrow(new IllegalStateException("request notification failed"));
+                            .value();
+            assertNotNull(registration);
+            endpoint.confirmSelection(
+                    registration,
+                    event -> {
+                        notified.add(event.registration().requestId());
+                        throw new IllegalStateException("request notification failed");
+                    });
         }
         clearInvocations(notifier);
         doThrow(new IllegalStateException("capacity notification failed"))
@@ -62,8 +64,8 @@ class WorkerEndpointCloseTest {
                 .thenRun(finalized::incrementAndGet)
                 .toCompletableFuture()
                 .get(2, TimeUnit.SECONDS);
-        verify(repository).findActive("first");
-        verify(repository).findActive("second");
+        assertEquals(java.util.Set.of("first", "second"), java.util.Set.copyOf(notified));
+        assertEquals(2, notified.size());
         verify(notifier).notifyChanged(endpoint);
         assertEquals(0, endpoint.selectionSnapshot().usage().occupiedRequests());
         assertEquals(1, finalized.get());

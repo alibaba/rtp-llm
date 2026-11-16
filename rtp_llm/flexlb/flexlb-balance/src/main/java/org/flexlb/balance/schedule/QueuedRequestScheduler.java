@@ -531,7 +531,6 @@ public class QueuedRequestScheduler extends AbstractRequestScheduler {
                 new RequestContext.RequestEndEvent(
                         request.snapshot().route(),
                         RequestContext.EndCause.SCHEDULER_SHUTDOWN,
-                        0L,
                         StrategyErrorType.DISPATCH_FAILED,
                         "request scheduler is shutting down"));
     }

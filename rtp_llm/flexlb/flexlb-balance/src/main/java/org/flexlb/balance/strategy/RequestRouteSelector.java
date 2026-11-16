@@ -136,7 +136,13 @@ public class RequestRouteSelector {
                             "Failed to select {} worker for request {}",
                             role.getCode(),
                             context.getRequestId());
-                    return RequestRoute.validateEndpoints(selections, result.asFailure());
+                    var unavailable = RequestRoute.firstUnavailableEndpoint(selections);
+                    return unavailable == null
+                            ? result.asFailure()
+                            : SelectionResult.retry(
+                                    Response.error(
+                                            StrategyErrorType.forRole(
+                                                    unavailable.getStatus().getRole())));
                 }
                 RoleSelection selection = result.value();
                 try {
@@ -154,8 +160,9 @@ public class RequestRouteSelector {
                     || context.snapshot().cancellationReason() != null)
                 return SelectionResult.closed();
             var execution = new RequestRoute(context, selections);
+            var result = SelectionResult.<RequestRoute, CapacityKey>success(execution);
             transferred = true;
-            return SelectionResult.success(execution);
+            return result;
         } catch (RuntimeException | Error failure) {
             selectionFailure = failure;
             throw failure;

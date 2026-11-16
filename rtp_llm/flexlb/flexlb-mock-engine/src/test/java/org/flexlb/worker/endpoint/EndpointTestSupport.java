@@ -1,6 +1,5 @@
 package org.flexlb.worker.endpoint;
 
-import org.flexlb.balance.schedule.RequestRepository;
 import org.flexlb.worker.status.WorkerStatus;
 
 /**
@@ -13,8 +12,8 @@ public final class EndpointTestSupport {
         return endpoint.stateLock();
     }
 
-    public static DecodeEndpoint decode(WorkerStatus status, RequestRepository repository) {
-        return new DecodeEndpoint(status, repository, new CapacityNotifier());
+    public static DecodeEndpoint decode(WorkerStatus status) {
+        return new DecodeEndpoint(status, new CapacityNotifier());
     }
 
     public static long occupiedRequestCount(PrefillEndpoint endpoint) {

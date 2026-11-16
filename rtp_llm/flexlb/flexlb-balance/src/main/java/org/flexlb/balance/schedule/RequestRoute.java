@@ -2,15 +2,11 @@ package org.flexlb.balance.schedule;
 
 import org.flexlb.balance.request.Response;
 import org.flexlb.balance.strategy.RoleSelection;
-import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.config.service.RoleType;
-import org.flexlb.worker.endpoint.CapacityKey;
 import org.flexlb.worker.endpoint.DecodeEndpoint;
 import org.flexlb.worker.endpoint.EncoderEndpoint;
 import org.flexlb.worker.endpoint.PrefillEndpoint;
-import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
-import org.flexlb.worker.endpoint.WorkerRoute;
 import org.flexlb.worker.status.ServerStatus;
 
 import java.util.ArrayList;
@@ -26,9 +22,7 @@ import static com.google.common.base.Preconditions.checkState;
  */
 @lombok.Getter
 @lombok.experimental.Accessors(fluent = true)
-public final class RequestRoute implements WorkerRoute {
-    private static final List<RoleType> ENDPOINT_CHECK_ORDER =
-            List.of(RoleType.PREFILL, RoleType.DECODE, RoleType.ENCODER, RoleType.VIT);
+public final class RequestRoute {
     private final RequestContext ctx;
     private final String requestId;
     private final List<RoleSelection> roles;
@@ -114,38 +108,12 @@ public final class RequestRoute implements WorkerRoute {
         return ctx.getPriority();
     }
 
-    public static SelectionResult<RequestRoute, CapacityKey> validateEndpoints(
-            List<RoleSelection> roles, SelectionResult<RequestRoute, CapacityKey> result) {
-        for (var role : roles) {
-            if (!role.endpoint().acceptsNewRequests())
-                return SelectionResult.retry(
-                        Response.buildErrorResponse(
-                                StrategyErrorType.forRole(role.role()),
-                                "Selected "
-                                        + role.role()
-                                        + " endpoint became unavailable: "
-                                        + role.endpoint().getIp()
-                                        + (result.failure() == null
-                                                ? ""
-                                                : "; preceding failure: "
-                                                        + result.failure().getErrorMessage())));
-        }
-        return result;
-    }
-
-    SelectionResult<RequestRoute, CapacityKey> validateEndpoints(
-            SelectionResult<RequestRoute, CapacityKey> result) {
-        return validateEndpoints(roles, result);
-    }
-
-    boolean selectedEndpointsAvailable() {
-        return firstUnavailableEndpoint() == null;
-    }
-
-    WorkerEndpoint firstUnavailableEndpoint() {
-        for (RoleType role : ENDPOINT_CHECK_ORDER) {
-            var endpoint = endpoint(role);
-            if (endpoint != null && !endpoint.acceptsNewRequests()) return endpoint;
+    /**
+     * Returns the first selected endpoint that no longer accepts requests, or null if all are available.
+     */
+    public static WorkerEndpoint firstUnavailableEndpoint(List<RoleSelection> selections) {
+        for (var selection : selections) {
+            if (!selection.endpoint().acceptsNewRequests()) return selection.endpoint();
         }
         return null;
     }
@@ -153,9 +121,5 @@ public final class RequestRoute implements WorkerRoute {
     WorkerEndpoint endpoint(RoleType role) {
         var selected = role(role);
         return selected == null ? null : selected.endpoint();
-    }
-
-    CapacityKey capacityKey(RoleType role) {
-        return role(role).capacityKey();
     }
 }

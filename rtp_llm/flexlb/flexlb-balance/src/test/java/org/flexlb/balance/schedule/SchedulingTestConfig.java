@@ -81,9 +81,15 @@ public final class SchedulingTestConfig {
             decode.setRequestId(context.getRequestId());
             if (decode.getRole() == null) decode.setRole(org.flexlb.config.service.RoleType.DECODE);
         }
+        var prefillRegistration =
+                org.mockito.Mockito.mock(PrefillEndpoint.RequestRegistration.class);
+        org.mockito.Mockito.doReturn(context.getRequestId()).when(prefillRegistration).requestId();
         roles.add(
                 org.flexlb.balance.schedule.SelectionTestSupport.prefill(
-                        (PrefillEndpoint) fixtureWorker(prefillEndpoint), prefill, 0L, null));
+                        (PrefillEndpoint) fixtureWorker(prefillEndpoint),
+                        prefill,
+                        0L,
+                        prefillRegistration));
         if (decode != null)
             roles.add(
                     org.flexlb.balance.schedule.SelectionTestSupport.decode(

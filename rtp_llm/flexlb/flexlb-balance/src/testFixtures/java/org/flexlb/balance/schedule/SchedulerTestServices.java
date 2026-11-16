@@ -173,13 +173,16 @@ public final class SchedulerTestServices {
         } finally {
             if (!transferred) {
                 Throwable failure = null;
-                for (var role : registered)
-                    failure =
-                            Failures.run(
-                                    failure,
-                                    () ->
-                                            org.springframework.test.util.ReflectionTestUtils
-                                                    .invokeMethod(role, "rollbackSelection"));
+                for (var role : registered) {
+                    if (role.registration() != null)
+                        failure =
+                                Failures.run(
+                                        failure,
+                                        () ->
+                                                ((org.flexlb.worker.endpoint.SelectionRollback)
+                                                                role.endpoint())
+                                                        .rollbackSelection(role.registration()));
+                }
                 Failures.rethrow(failure, "fixture registration rollback");
             }
         }

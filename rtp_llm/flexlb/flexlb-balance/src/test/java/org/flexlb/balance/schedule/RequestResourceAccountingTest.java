@@ -15,6 +15,7 @@ import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.EndpointTestSupport;
 import org.flexlb.worker.endpoint.PrefillEndpoint;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
+import org.flexlb.worker.endpoint.WorkerEndpoint.CommitStatus;
 import org.flexlb.worker.rpc.EngineGrpcClient;
 import org.flexlb.worker.status.TaskInfo;
 import org.flexlb.worker.status.TaskPhase;
@@ -335,8 +336,7 @@ class RequestResourceAccountingTest {
             decode =
                     EndpointTestSupport.decode(
                             WorkerStatus.createDiscovered(
-                                    RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test"),
-                            SchedulerTestSupport.repository(projector));
+                                    RoleType.DECODE, "g", "127.0.0.2", 8080, 8081, "test"));
             decodeStatus(Map.of(), Map.of(), TOTAL_KV);
             {
                 var selectedEndpoint = decode;
@@ -367,7 +367,20 @@ class RequestResourceAccountingTest {
             assertNotNull(admission);
             routeReservation = item.prefillRegistration();
             context.registerSelectedRoute(admission, item);
-            prefillHandoff = !keepAdmissionOpen && prefill.commitSelection(item);
+            assertEquals(
+                    CommitStatus.COMMITTED,
+                    decode.confirmSelection(
+                            reservation, event -> requests.onWorkerRequestEvent(item, event)));
+            prefillHandoff =
+                    !keepAdmissionOpen
+                            && prefill.confirmSelection(
+                                            item.prefillRegistration(),
+                                            event ->
+                                                    item.ctx()
+                                                            .getRequestScheduler()
+                                                            .onWorkerRequestEvent(item, event),
+                                            item.ctx().getPlacementSequence())
+                                    == CommitStatus.COMMITTED;
             if (!keepAdmissionOpen) {
                 assertTrue(prefillHandoff);
                 assertEquals(

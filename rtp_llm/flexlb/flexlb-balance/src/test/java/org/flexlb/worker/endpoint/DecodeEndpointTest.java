@@ -45,11 +45,106 @@ class DecodeEndpointTest {
     @BeforeEach
     void setUp() {
         status = EndpointTestSupport.workerStatus(RoleType.DECODE, "10.0.0.1", 8080, 8081);
-        endpoint =
-                EndpointTestSupport.decode(
-                        status,
-                        org.flexlb.balance.schedule.SchedulerTestSupport.repository(
-                                EndpointTestSupport.noopEventSink()));
+        endpoint = EndpointTestSupport.decode(status);
+    }
+
+    @Test
+    void registrationIdentityDoesNotRetainMutableNotificationState() {
+        for (var field : DecodeEndpoint.RequestRegistration.class.getDeclaredFields()) {
+            if (java.lang.reflect.Modifier.isStatic(field.getModifiers())) continue;
+            assertTrue(java.lang.reflect.Modifier.isFinal(field.getModifiers()), field.getName());
+            assertFalse(WorkerEventSink.class.isAssignableFrom(field.getType()), field.getName());
+        }
+    }
+
+    @Test
+    void finalConfirmationAssociatesFeedbackWithoutConfirmingWorkerCapacity() {
+        var registration = reserve(701L, 100L, 200L);
+        var before = endpoint.selectionSnapshot().usage();
+        var events = new java.util.ArrayList<WorkerRequestEvent>();
+        assertEquals(
+                WorkerEndpoint.CommitStatus.COMMITTED,
+                endpoint.confirmSelection(
+                        registration,
+                        event -> {
+                            assertFalse(endpoint.stateLock().isHeldByCurrentThread());
+                            events.add(event);
+                        }));
+        assertEquals(before, endpoint.selectionSnapshot().usage());
+        assertEquals(
+                DecodeResources.RegistrationState.UNCONFIRMED,
+                endpoint.registrationState(registration));
+        assertEquals(
+                WorkerEndpoint.CommitStatus.INVALID_REGISTRATION,
+                endpoint.confirmSelection(registration, events::add));
+        updateStatus(Map.of("701", task(701L)), Map.of(), 10000L);
+        assertEquals(1, events.size());
+        assertTrue(events.getFirst().registration() == registration);
+        assertTrue(events.getFirst().endpoint() == endpoint);
+        assertEquals(
+                DecodeResources.RegistrationState.CONFIRMED,
+                endpoint.registrationState(registration));
+    }
+
+    @Test
+    void finishedBeforeFinalConfirmationRejectsTheRemovedRegistration() {
+        var registration = reserve(702L, 100L, 200L);
+        updateStatus(Map.of(), Map.of("702", task(702L)), 10000L);
+        var events = new java.util.ArrayList<WorkerRequestEvent>();
+        assertEquals(
+                WorkerEndpoint.CommitStatus.INVALID_REGISTRATION,
+                endpoint.confirmSelection(registration, events::add));
+        assertTrue(events.isEmpty());
+        assertEquals(0, endpoint.selectionSnapshot().usage().occupiedRequests());
+    }
+
+    @Test
+    void delayedFeedbackKeepsTheOriginalReceiverWhenRequestIdIsReused() {
+        var first = reserve(703L, 100L, 200L);
+        var oldEvents = new java.util.ArrayList<WorkerRequestEvent>();
+        var newEvents = new java.util.ArrayList<WorkerRequestEvent>();
+        assertEquals(
+                WorkerEndpoint.CommitStatus.COMMITTED,
+                endpoint.confirmSelection(first, oldEvents::add));
+        var response = new WorkerStatusResponse();
+        response.setFinishedTaskInfo(Map.of("703", task(703L)));
+        response.setAvailableKvCacheTokens(10000L);
+        response.setTotalKvCacheTokens(10000L);
+        var delayed = EndpointTestSupport.applyStatus(endpoint, response);
+        var second = reserve(703L, 100L, 200L);
+        assertEquals(
+                WorkerEndpoint.CommitStatus.COMMITTED,
+                endpoint.confirmSelection(second, newEvents::add));
+        delayed.run();
+        assertEquals(1, oldEvents.size());
+        assertTrue(oldEvents.getFirst().registration() == first);
+        assertTrue(newEvents.isEmpty());
+        assertEquals(
+                DecodeResources.RegistrationState.UNCONFIRMED, endpoint.registrationState(second));
+        assertEquals(
+                WorkerEndpoint.CommitStatus.INVALID_REGISTRATION,
+                endpoint.confirmSelection(first, newEvents::add));
+    }
+
+    @Test
+    void notificationUsesTheReceiverPresentWhenStatusWasCaptured() {
+        var registration = reserve(704L, 100L, 200L);
+        var response = new WorkerStatusResponse();
+        response.setRunningTaskInfo(Map.of("704", task(704L)));
+        response.setAvailableKvCacheTokens(10000L);
+        response.setTotalKvCacheTokens(10000L);
+        var beforeBinding = EndpointTestSupport.applyStatus(endpoint, response);
+        var events = new java.util.ArrayList<WorkerRequestEvent>();
+        assertEquals(
+                WorkerEndpoint.CommitStatus.COMMITTED,
+                endpoint.confirmSelection(registration, events::add));
+        beforeBinding.run();
+        assertTrue(events.isEmpty());
+
+        EndpointTestSupport.applyStatus(endpoint, response).run();
+        assertEquals(1, events.size());
+        assertTrue(events.getFirst().registration() == registration);
+        assertEquals(RequestEventType.ALLOCATED, events.getFirst().type());
     }
 
     @ParameterizedTest
@@ -118,10 +213,13 @@ class DecodeEndpointTest {
     @EnumSource(TaskPhase.class)
     void confirmationPreservesExactReservationAndDerivesPhaseFromWorker(TaskPhase phase) {
         var sink = EndpointTestSupport.noopEventSink();
-        endpoint =
-                EndpointTestSupport.decode(
-                        status, org.flexlb.balance.schedule.SchedulerTestSupport.repository(sink));
+        endpoint = EndpointTestSupport.decode(status);
         var reservation = reserve(100L, 500L, 500L);
+        var route = org.mockito.Mockito.mock(org.flexlb.balance.schedule.RequestRoute.class);
+        assertEquals(
+                WorkerEndpoint.CommitStatus.COMMITTED,
+                endpoint.confirmSelection(
+                        reservation, event -> sink.onWorkerRequestEvent(route, event)));
         TaskInfo active = task(100L);
         active.setPhase(phase);
         WorkerStatusResponse response = new WorkerStatusResponse();
@@ -130,15 +228,13 @@ class DecodeEndpointTest {
         response.setAvailableKvCacheTokens(10000L);
 
         EndpointTestSupport.applyStatus(endpoint, response).run();
-        var requestStatus = DecodeResources.DecodeRequestStatus.confirmed(reservation);
         verify(sink)
                 .onWorkerRequestEvent(
                         org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.argThat(
                                 e ->
-                                        e.route().decodeEndpoint() == endpoint
-                                                && e.reservation()
-                                                        .equals(requestStatus.reservation())
+                                        e.endpoint() == endpoint
+                                                && e.registration().equals(reservation)
                                                 && e.type()
                                                         == org.flexlb.worker.endpoint
                                                                 .RequestEventType.ALLOCATED));
@@ -165,9 +261,8 @@ class DecodeEndpointTest {
                         org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.argThat(
                                 e ->
-                                        e.route().decodeEndpoint() == endpoint
-                                                && e.reservation()
-                                                        .equals(requestStatus.reservation())
+                                        e.endpoint() == endpoint
+                                                && e.registration().equals(reservation)
                                                 && e.type()
                                                         == org.flexlb.worker.endpoint
                                                                 .RequestEventType.ALLOCATED));
@@ -183,8 +278,8 @@ class DecodeEndpointTest {
                         org.mockito.ArgumentMatchers.any(),
                         org.mockito.ArgumentMatchers.argThat(
                                 e ->
-                                        e.route().decodeEndpoint() == endpoint
-                                                && e.reservation().equals(reservation)
+                                        e.endpoint() == endpoint
+                                                && e.registration().equals(reservation)
                                                 && e.type()
                                                         == org.flexlb.worker.endpoint
                                                                 .RequestEventType.COMPLETED

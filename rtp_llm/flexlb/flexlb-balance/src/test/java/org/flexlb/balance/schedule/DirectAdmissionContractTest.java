@@ -68,6 +68,37 @@ import static org.mockito.Mockito.when;
 class DirectAdmissionContractTest {
 
     @Test
+    void cancelledSelectionDoesNotBecomeRetryWhenEndpointIsUnavailable() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            var context = fixture.context(109L);
+            RequestProtocolTestSupport.submitForManualPlacement(fixture.scheduler, context);
+            var roles =
+                    List.of(
+                            SelectionTestSupport.metadata(
+                                    fixture.prefill,
+                                    Fixture.metadata(fixture.prefill, 109L),
+                                    30_000L),
+                            SelectionTestSupport.metadata(
+                                    fixture.decode, Fixture.metadata(fixture.decode, 109L), -1L));
+            var route = SchedulerTestServices.registerSelection(context, roles).value();
+            fixture.scheduler.cancel(context, CancelReason.CLIENT_CANCELLED);
+            EndpointTestSupport.closeAndWait(fixture.prefill);
+            try {
+                assertEquals(
+                        SelectionResult.Status.CLOSED,
+                        fixture.scheduler.publishSelectedRoute(route).status());
+            } finally {
+                var failure = AbstractRequestScheduler.finishUnpublishedRoute(route, null);
+                org.flexlb.util.Failures.rethrow(failure, "rollback failed");
+            }
+            assertNull(AbstractRequestScheduler.finishUnpublishedRoute(route, null));
+            fixture.assertNoPrefillOwnership();
+            assertNull(EndpointTestSupport.decodeRegistration(fixture.decode, 109L));
+            assertEquals(0, fixture.decode.selectionSnapshot().usage().occupiedRequests());
+        }
+    }
+
+    @Test
     void queuedSelectionReturnsRouteWithoutWaitingInPrefillQueue() throws Exception {
         try (Fixture fixture = new Fixture(16, 1, true)) {
             var context = fixture.context(9115L);
@@ -206,6 +237,7 @@ class DirectAdmissionContractTest {
     void failedUnpublishedRollbackRemainsReachableUntilResourcesAreReleased() throws Exception {
         var fixture = new Fixture();
         var failure = new IllegalStateException("temporary cleanup failure");
+        Throwable testFailure = null;
         try {
             var context = fixture.context(9099L);
             var future =
@@ -214,10 +246,11 @@ class DirectAdmissionContractTest {
             assertNotNull(operation);
             var route = fixture.router.selectAndRegister(context, null);
             assertNotNull(route);
+            var decodeRegistration = route.value().decodeRegistration();
             org.mockito.Mockito.doThrow(failure)
                     .doCallRealMethod()
                     .when(fixture.decode)
-                    .rollbackSelection(route.value().decodeRegistration());
+                    .rollbackSelection(decodeRegistration);
             EndpointTestSupport.closeAndWait(fixture.prefill);
             assertSame(
                     failure,
@@ -231,8 +264,13 @@ class DirectAdmissionContractTest {
             assertNull(EndpointTestSupport.decodeRegistration(fixture.decode, 9099L));
             fixture.assertNoPrefillOwnership();
             assertEquals(0, fixture.requests.repository.liveRequestCount());
+        } catch (Throwable problem) {
+            testFailure = problem;
+            throw problem;
         } finally {
-            assertSame(failure, assertThrows(IllegalStateException.class, fixture::close));
+            var closeFailure = assertThrows(IllegalStateException.class, fixture::close);
+            if (testFailure == null) assertSame(failure, closeFailure);
+            else testFailure.addSuppressed(closeFailure);
         }
     }
 
@@ -371,9 +409,7 @@ class DirectAdmissionContractTest {
             boolean queued, boolean afterBinding) throws Exception {
         try (Fixture fixture = new Fixture(16, 1, queued)) {
             var worker = Fixture.worker(RoleType.DECODE, "127.0.0.4");
-            var replacement =
-                    EndpointTestSupport.decode(
-                            worker, SchedulerTestSupport.repository(fixture.requests));
+            var replacement = EndpointTestSupport.decode(worker);
             try {
                 fixture.applyWorkerStatus(replacement, Map.of(), Map.of());
                 org.mockito.stubbing.Answer<Object> retireDuringAdmission =
@@ -884,7 +920,9 @@ class DirectAdmissionContractTest {
                     RequestProtocolTestSupport.submitForManualPlacement(fixture.scheduler, context);
             var primary = new IllegalStateException("Prefill commit unavailable");
             var cleanup = new IllegalStateException("Decode cleanup observer failed");
-            org.mockito.Mockito.doThrow(primary).when(prefill).commitSelection(any());
+            org.mockito.Mockito.doThrow(primary)
+                    .when(prefill)
+                    .confirmSelection(any(), any(), org.mockito.ArgumentMatchers.anyLong());
             doAnswer(
                             call -> {
                                 boolean released = (boolean) call.callRealMethod();
@@ -932,6 +970,42 @@ class DirectAdmissionContractTest {
     }
 
     @Test
+    void cancellationDuringFinalConfirmationLeavesRollbackToTheSelectionExit() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            var context = fixture.context(109L);
+            var prefill = spy(fixture.prefill);
+            fixture.bindPrefill(prefill);
+            var selected = fixture.prefillSelection(prefill);
+            doAnswer(call -> SelectionTestSupport.selectionResult(call, selected))
+                    .when(fixture.prefillStrategy)
+                    .chooseBest(eq(context.getRequest()), any(), any(), any());
+            AtomicBoolean confirmed = new AtomicBoolean();
+            doAnswer(
+                            call -> {
+                                var result = call.callRealMethod();
+                                fixture.scheduler.cancel(context, CancelReason.CLIENT_CANCELLED);
+                                assertNotNull(context.currentSelectionAttempt());
+                                assertEquals(
+                                        1,
+                                        fixture.decode
+                                                .selectionSnapshot()
+                                                .usage()
+                                                .occupiedRequests());
+                                assertEquals(1, prefill.stats().locallyOwnedRequests());
+                                confirmed.set(true);
+                                return result;
+                            })
+                    .when(prefill)
+                    .confirmSelection(any(), any(), org.mockito.ArgumentMatchers.anyLong());
+            assertFalse(fixture.scheduler.submit(context).get(2, TimeUnit.SECONDS).isSuccess());
+            assertTrue(confirmed.get());
+            SchedulerTestSupport.awaitRequestWork(fixture.runtime);
+            assertEquals(0, fixture.decode.selectionSnapshot().usage().occupiedRequests());
+            fixture.assertNoPrefillOwnership();
+        }
+    }
+
+    @Test
     void cancellationAfterPrefillCommitRejectsClaimAndSettlesBothLedgers() throws Exception {
         try (Fixture fixture = new Fixture()) {
             var context = fixture.context(108L);
@@ -945,7 +1019,7 @@ class DirectAdmissionContractTest {
                                 return handoff;
                             })
                     .when(prefill)
-                    .commitSelection(any());
+                    .confirmSelection(any(), any(), org.mockito.ArgumentMatchers.anyLong());
 
             fixture.bindPrefill(prefill);
             var selected = fixture.prefillSelection(prefill);
@@ -1103,10 +1177,7 @@ class DirectAdmissionContractTest {
             } finally {
                 worker.lock.unlock();
             }
-            decode =
-                    spy(
-                            EndpointTestSupport.decode(
-                                    worker(RoleType.DECODE, "127.0.0.2"), repository));
+            decode = spy(EndpointTestSupport.decode(worker(RoleType.DECODE, "127.0.0.2")));
             applyWorkerStatus(decode, Map.of(), Map.of());
             bindPrefill(prefill);
             org.mockito.Mockito.doAnswer(

@@ -66,7 +66,7 @@ class RequestSchedulerContractTest {
         when(route.ctx()).thenReturn(context);
         when(context.getRequestScheduler()).thenReturn(scheduler);
         var cleanup =
-                new RequestContext.RequestEvent(
+                new WorkerEventTestSupport.RequestEvent(
                         route,
                         null,
                         null,
@@ -76,9 +76,9 @@ class RequestSchedulerContractTest {
                         null,
                         1000L);
 
-        scheduler.onRequestEvent(context, cleanup);
+        WorkerEventTestSupport.publish(scheduler, context, cleanup);
 
-        verify(context).recordEvent(cleanup);
+        WorkerEventTestSupport.record(verify(context), cleanup);
         verify(context, org.mockito.Mockito.never()).snapshot();
     }
 
@@ -728,7 +728,8 @@ class RequestSchedulerContractTest {
                                 RequestProtocolTestSupport.publication(() -> true)));
             }
             var failure = new IllegalStateException("endpoint release failed");
-            doThrow(failure).when(endpoint).releaseRequest(route.prefillRegistration());
+            var prefillRegistration = route.prefillRegistration();
+            doThrow(failure).when(endpoint).releaseRequest(prefillRegistration);
             SchedulerTestSupport.runtime(api).requests().stopAccepting();
             assertTrue(future.join().isSuccess());
             assertSame(
@@ -747,16 +748,14 @@ class RequestSchedulerContractTest {
                     "cleanup failure must not revoke the selected response");
             assertEquals(
                     SchedulerTestSupport.Stage.FINALIZING, SchedulerTestSupport.stage(request));
-            verify(endpoint, times(3)).releaseRequest(route.prefillRegistration());
-            org.mockito.Mockito.doReturn(true)
-                    .when(endpoint)
-                    .releaseRequest(route.prefillRegistration());
+            verify(endpoint, times(3)).releaseRequest(prefillRegistration);
+            org.mockito.Mockito.doReturn(true).when(endpoint).releaseRequest(prefillRegistration);
             f.requests.closeRequest(request, null);
             RequestProtocolTestSupport.awaitCondition(
                     () -> !f.requests.repository.isCurrent(request));
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.schedule.SchedulerTestSupport.runtime(f.requests));
-            verify(endpoint, times(4)).releaseRequest(route.prefillRegistration());
+            verify(endpoint, times(4)).releaseRequest(prefillRegistration);
             assertSame(failure, SchedulerTestSupport.failure(api));
             assertSame(
                     failure,
@@ -773,7 +772,7 @@ class RequestSchedulerContractTest {
     void placementCompletionFailureIsRecordedAndFinishesPlacement() throws Exception {
         try (Fixture f = new Fixture(false)) {
             var context = f.context(940L);
-            var future = f.requests.submit(context, () -> {});
+            var future = RequestProtocolTestSupport.submitForManualPlacement(f.requests, context);
             var handle = SchedulerTestSupport.claim(f.requests, "940", future);
             assertNotNull(handle);
             var originalTimer =

@@ -1,6 +1,5 @@
 package org.flexlb.worker.endpoint;
 
-import org.flexlb.balance.schedule.RequestRepository;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.worker.endpoint.DecodeEndpoint.RequestRegistration;
 import org.flexlb.worker.endpoint.DecodeResources.AdmissionCapacity;
@@ -23,7 +22,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.mock;
 
 /**
  * Checks that worker reports, confirmed releases and orphan cleanup count each request once.
@@ -248,7 +246,7 @@ class DecodeResourceTest {
 
     private static DecodeEndpoint endpoint(CapacityNotifier notifier) {
         var status = EndpointTestSupport.workerStatus(RoleType.DECODE, "127.0.0.1", 8000, 8001);
-        var endpoint = new DecodeEndpoint(status, mock(RequestRepository.class), notifier);
+        var endpoint = new DecodeEndpoint(status, notifier);
         report(endpoint, Map.of(), Map.of());
         return endpoint;
     }

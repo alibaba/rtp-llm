@@ -40,6 +40,24 @@ class SelectionRegistrationTest {
             """);
 
     @Test
+    void prefillFailureRollsBackDecodeAcquiredByTheSelector() throws Exception {
+        var registry = StrategyTestSupport.endpointRegistry(config);
+        try (AutoCloseable cleanup = registry::close) {
+            add(registry, RoleType.DECODE, "d1");
+            var router = selector(registry);
+            var model = mock(ModelMetaConfig.class);
+            when(model.requiredRoles()).thenReturn(List.of(RoleType.DECODE, RoleType.PREFILL));
+            ReflectionTestUtils.setField(router, "requiredRoles", model.requiredRoles());
+            var decode = registry.<DecodeEndpoint>endpoints(RoleType.DECODE, null).getFirst();
+            var result = router.selectAndRegister(context("partial-decode"), null);
+            assertEquals(SelectionResult.Status.BLOCKED, result.status());
+            assertEquals(RoleType.PREFILL, result.blocker().role());
+            assertEquals(0, decode.selectionSnapshot().usage().occupiedRequests());
+            assertEquals(0, decode.resourceSnapshot().requests().size());
+        }
+    }
+
+    @Test
     void successfulPolicyResultStillRequiresActualDecodeRegistration() throws Exception {
         var registry = StrategyTestSupport.endpointRegistry(config);
         try (AutoCloseable cleanup = registry::close) {

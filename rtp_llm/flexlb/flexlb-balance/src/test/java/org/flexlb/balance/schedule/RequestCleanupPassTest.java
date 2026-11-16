@@ -1,8 +1,12 @@
 package org.flexlb.balance.schedule;
 
+import org.flexlb.balance.strategy.RoleSelection;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.service.RoleType;
 import org.flexlb.worker.endpoint.DecodeEndpoint;
+import org.flexlb.worker.endpoint.RequestEventType;
 import org.flexlb.worker.endpoint.StrategyErrorType;
+import org.flexlb.worker.endpoint.WorkerRequestEvent;
 import org.junit.jupiter.api.Test;
 
 import static org.flexlb.balance.schedule.RequestContext.EndCause;
@@ -23,9 +27,6 @@ import static org.mockito.Mockito.when;
 class RequestCleanupPassTest {
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.CsvSource({
-        "WORKER_COMPLETED, COMPLETED",
-        "WORKER_FAILED, FAILED",
-        "PRIORITY_PREEMPTED, CANCELLED",
         "WORKER_REPORT_TIMEOUT, TIMED_OUT",
         "REQUEST_DEADLINE_EXCEEDED, TIMED_OUT",
         "ROUTE_PUBLICATION_FAILED, FAILED",
@@ -37,7 +38,7 @@ class RequestCleanupPassTest {
         var context = openContext(7400L);
         var ended =
                 context.endRequest(
-                        new RequestEndEvent(context.snapshot().route(), cause, 0L, null, "ended"),
+                        new RequestEndEvent(context.snapshot().route(), cause, null, "ended"),
                         1001L,
                         null);
         assertEquals(cause, ended.endCause());
@@ -75,6 +76,26 @@ class RequestCleanupPassTest {
         return value;
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({
+        "COMPLETED, COMPLETED",
+        "FAILED, FAILED",
+        "PRIORITY_CANCELLED, CANCELLED",
+        "ENDPOINT_CLOSED, FAILED"
+    })
+    void workerEventDeterminesResult(RequestEventType type, RequestState.State expected) {
+        var context = openContext(7402L);
+        reportWorkerEnd(context, type, null);
+        var ended = context.snapshot();
+        assertEquals(type, ended.workerEndType());
+        assertNull(ended.endCause());
+        assertEquals(expected, ended.endState());
+        if (type == RequestEventType.FAILED) {
+            assertEquals(StrategyErrorType.WORKER_EXECUTION_FAILED, ended.endError());
+            assertEquals("worker error code 42", ended.endDetail());
+        }
+    }
+
     @Test
     void cancellationKeepsItsResultWhenWorkerCompletionArrives() {
         var context = openContext(7401L);
@@ -85,16 +106,8 @@ class RequestCleanupPassTest {
                 StrategyErrorType.REQUEST_CANCELLED,
                 "client cancelled",
                 null);
-        var ended =
-                context.endRequest(
-                        new RequestEndEvent(
-                                context.snapshot().route(),
-                                EndCause.WORKER_COMPLETED,
-                                0L,
-                                null,
-                                "worker completed"),
-                        1002L,
-                        null);
+        reportWorkerEnd(context, RequestEventType.COMPLETED, "worker completed");
+        var ended = context.snapshot();
         assertEquals(RequestState.State.CANCELLED, ended.endState());
         assertEquals(StrategyErrorType.REQUEST_CANCELLED, ended.endError());
     }
@@ -202,7 +215,6 @@ class RequestCleanupPassTest {
                         new RequestEndEvent(
                                 context.snapshot().route(),
                                 EndCause.ROUTE_PUBLICATION_FAILED,
-                                0L,
                                 StrategyErrorType.DISPATCH_FAILED,
                                 "cleanup required"),
                         1001L,
@@ -281,7 +293,6 @@ class RequestCleanupPassTest {
                                 new RequestEndEvent(
                                         route,
                                         EndCause.SCHEDULER_SHUTDOWN,
-                                        0L,
                                         StrategyErrorType.DISPATCH_FAILED,
                                         "shutdown"),
                                 1001L,
@@ -304,5 +315,27 @@ class RequestCleanupPassTest {
                                 StrategyErrorType.RESOURCE_EXHAUSTED, "KV capacity unavailable")
                         .getErrorMessage(),
                 context.snapshot().endDetail());
+    }
+
+    private static void reportWorkerEnd(
+            RequestContext context, RequestEventType type, String detail) {
+        var route = context.snapshot().route();
+        var role = mock(RoleSelection.class);
+        var registration = route.decodeRegistration();
+        var endpoint = route.decodeEndpoint();
+        when(role.registration()).thenReturn(registration);
+        when(role.endpoint()).thenReturn(endpoint);
+        when(route.role(RoleType.DECODE)).thenReturn(role);
+        assertTrue(
+                context.recordWorkerEvent(
+                        route,
+                        new WorkerRequestEvent(
+                                route.decodeRegistration(),
+                                RoleType.DECODE,
+                                route.decodeEndpoint(),
+                                type,
+                                42L,
+                                detail,
+                                1002L)));
     }
 }

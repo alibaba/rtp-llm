@@ -128,8 +128,7 @@ class DefaultRequestPreemptionTest {
                 new DecodeResources.AdmissionCapacity(1, 100);
         private final DecodeEndpoint endpoint =
                 EndpointTestSupport.decode(
-                        EndpointTestSupport.workerStatus(RoleType.DECODE, "127.0.0.1", 8000, 8001),
-                        repository);
+                        EndpointTestSupport.workerStatus(RoleType.DECODE, "127.0.0.1", 8000, 8001));
         private final RequestContext request;
         private final RequestContext.SelectionAttempt selection;
         private final DefaultRequestPreemption preemption;

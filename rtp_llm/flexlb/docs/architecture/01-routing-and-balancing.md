@@ -69,10 +69,12 @@ Selector 用方法内的角色列表收集已登记结果，失败时撤销其�
 角色循环统一检查成功选择恰好新增一个对应角色；每个角色的成功结果直接加入列表，角色事实只从已登记列表读取。
 评分版本只在 Strategy/Endpoint 登记时校验，不保存在已完成的角色结果中。
 Prefill 登记保存不可变的排队输入和本次工作量，可以立即参与其他请求的投影，无需读取半成品路由。
-`RequestRoute` 构造时角色组合完整，不修改 Endpoint 登记；Prefill 在 `commitSelection` 的同一次持锁操作中关联完整路由并提交登记；没有 attachReservation 入口，也不再创建另一个执行包装对象。
+`RequestRoute` 构造时角色组合完整，不修改 Endpoint 登记。Selector 成功返回后，Scheduler 才调用各角色的 `confirmSelection`，传入该角色的精确登记和事件接收入口。
+P/Encoder 在同一次持锁操作中确认登记并关联反馈；Decode 只关联反馈，不改变 Worker 是否已确认执行，也不转移 KV 占用。
+Endpoint 不持有完整路由；事件接收入口由 Scheduler 创建并捕获本次 RequestRoute。
 
 `firstUnavailableEndpoint(selections)` 只返回不可用的已选 Endpoint，不改写选择结果；调用方在角色选择失败和最终发布前使用。
-Prefill/Encoder 的 `commitSelection` 在锁内返回 `COMMITTED`、`UNAVAILABLE` 或 `INVALID_REGISTRATION`，由 Scheduler 决定后续动作；发布失败后不再扫描 Endpoint 推测原因。
+各角色的 `confirmSelection` 在锁内返回 `COMMITTED`、`UNAVAILABLE` 或 `INVALID_REGISTRATION`，由 Scheduler 决定后续动作；发布失败后不再扫描 Endpoint 推测原因。
 完整路由交接前由 Selector 回滚已取得的登记，交接后由 Scheduler 的统一失败清理释放；局部 Endpoint 提交成功不代表路由发布成功。取消和发布竞争时继续按精确登记清理，不释放其他重试的登记。
 
 规划直接使用 Prefill 登记中的不可变输入，不再另建规划缓存、加锁初始化或重复构造输入。
@@ -147,5 +149,5 @@ RequestRouteSelector 接收已取得的 RoleSelection，继续选择其余角色
 未提交 P/D 选择的抢占及角色策略生成计划仍是实施方案中的待完成项，当前默认执行器只处理已交付 Decode。
 取消、超时及发送结果未知的资源规则见 [队列调度](02-queue-scheduling.md) 和 [资源管理](03-resource-management.md)。
 
-RequestRoute 只保存已选角色和精确登记。RequestContext 直接保存结束状态、原因和说明；响应选择引用 ResponseCompletionExecutor.Registration，执行登记同时作为精确响应身份。查询按 Context 快照生成 RequestState，清理完成后保留同一种摘要；摘要不实现 WorkerRoute。
+RequestRoute 只保存已选角色和精确登记。RequestContext 直接保存结束状态、原因和说明；响应选择引用 ResponseCompletionExecutor.Registration，执行登记同时作为精确响应身份。查询按 Context 快照生成 RequestState，清理完成后保留同一种摘要；摘要不提供回到完整路由的导航接口。
 RoleSelection 从 Endpoint 获取角色，资源登记与 compute tokens 直接保存在同一个对象中。

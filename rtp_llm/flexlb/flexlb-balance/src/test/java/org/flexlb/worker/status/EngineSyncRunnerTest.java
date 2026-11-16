@@ -422,9 +422,10 @@ class EngineSyncRunnerTest {
         WorkerStatus oldStatus =
                 RunnerTestSupport.discovered(
                         RoleType.PREFILL, oldGroup, "127.0.0.1", 61000, 61001, "site-a");
-        assertNotNull(oldStatus.tryBeginStatusPoll());
         discover(directory, oldStatus);
         RunnerTestSupport.publishEndpoint(registry, RoleType.PREFILL, ipPort, oldStatus);
+        var hungPoll = oldStatus.tryBeginStatusPoll();
+        assertNotNull(hungPoll);
         WorkerHost replacement =
                 new WorkerHost("127.0.0.1", 61000, 61001, 61005, "site-b", newGroup);
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
@@ -475,6 +476,7 @@ class EngineSyncRunnerTest {
                     registry.getEndpoint(RoleType.PREFILL, ipPort),
                     "replacement endpoint is unpublished before its first status commit");
         } finally {
+            hungPoll.close();
             registry.close();
         }
     }

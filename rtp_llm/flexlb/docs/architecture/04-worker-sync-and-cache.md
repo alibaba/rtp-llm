@@ -22,6 +22,9 @@ Worker 快照及游标；同版本响应也执行完整更新，版本倒退仍�
 `WorkerEndpoint` 统一负责代际检查、Endpoint 加锁、异常时停止接纳和快照发布；
 各角色只在 `updateStatusLocked` 中更新本地请求与容量事实。请求事件通过父类统一构造和发送，
 各角色保留自己的请求身份检查、事件类型及容量通知条件；发送仍由 Runner 在锁外触发。
+Decode 的 RequestRegistration 只保存登记身份，通知接收器由 Endpoint 的 RequestRecord 持有。
+状态更新在锁内同时捕获登记和接收器，锁外发送使用这份通知；关闭通知使用已移出的资源记录，
+不按 requestId 重新查找接收器，因此同 ID 的新登记不会接收旧登记的反馈。
 Runner 统一调用 Registry 的 `updateEndpoint`：查找 Endpoint，不存在则创建，随后统一更新；
 新建 Endpoint 更新成功后再注册为可路由节点。返回的请求通知在 WorkerStatus 锁外发布。
 完成任务按本地请求记录去重，`latestFinishedTaskVersion` 保留为后续 RPC 获取增量完成记录的游标。

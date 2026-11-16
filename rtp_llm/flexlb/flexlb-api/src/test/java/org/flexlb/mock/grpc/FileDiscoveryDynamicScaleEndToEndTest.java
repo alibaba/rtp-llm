@@ -465,14 +465,19 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         }
         for (int i = 0; i < count; i++) {
             Response response = futures.get(i).get(5, TimeUnit.SECONDS);
+            assertTrue(
+                    response.isSuccess(),
+                    "request "
+                            + (firstId + i)
+                            + " should succeed, code="
+                            + response.getCode()
+                            + ", error="
+                            + response.getErrorMessage());
             for (var worker : response.getServerStatus()) {
                 if (worker.getRole() == RoleType.PREFILL)
                     selectedCounts.merge(
                             worker.getServerIp() + ":" + worker.getHttpPort(), 1, Integer::sum);
             }
-            assertTrue(
-                    response.isSuccess(),
-                    "request " + (firstId + i) + " should succeed, code=" + response.getCode());
         }
     }
 

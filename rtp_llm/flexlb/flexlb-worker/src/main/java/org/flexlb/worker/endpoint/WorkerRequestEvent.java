@@ -1,13 +1,14 @@
 package org.flexlb.worker.endpoint;
 
+import org.flexlb.config.service.RoleType;
+
 /**
- * Reports an event for an exact route, endpoint generation and resource registration.
+ * Reports one role's event for an exact endpoint and resource registration.
  */
 public record WorkerRequestEvent(
-        WorkerRoute route,
-        org.flexlb.worker.endpoint.DecodeEndpoint.RequestRegistration reservation,
-        org.flexlb.config.service.RoleType role,
-        org.flexlb.worker.endpoint.WorkerEndpoint endpoint,
+        WorkerEndpoint.RequestRegistration registration,
+        RoleType role,
+        WorkerEndpoint endpoint,
         RequestEventType type,
         long errorCode,
         String detail,

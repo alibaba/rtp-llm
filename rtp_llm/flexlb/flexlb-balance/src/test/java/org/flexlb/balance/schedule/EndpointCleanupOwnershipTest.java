@@ -79,9 +79,7 @@ class EndpointCleanupOwnershipTest {
         var endpoint =
                 EndpointTestSupport.decode(
                         WorkerStatus.createDiscovered(
-                                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
-                        org.flexlb.balance.schedule.SchedulerTestSupport.repository(
-                                mock(AbstractRequestScheduler.class)));
+                                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null));
         {
             var selectedEndpoint = endpoint;
 
@@ -125,9 +123,7 @@ class EndpointCleanupOwnershipTest {
         var endpoint =
                 EndpointTestSupport.decode(
                         WorkerStatus.createDiscovered(
-                                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
-                        org.flexlb.balance.schedule.SchedulerTestSupport.repository(
-                                mock(AbstractRequestScheduler.class)));
+                                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null));
         var oldReservation = reserve(endpoint, id, 100L, 150L);
         if (confirmed) {
             EndpointCleanupTestSupport.confirmDecode(endpoint, id);
@@ -229,9 +225,7 @@ class EndpointCleanupOwnershipTest {
         var endpoint =
                 EndpointTestSupport.decode(
                         WorkerStatus.createDiscovered(
-                                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null),
-                        org.flexlb.balance.schedule.SchedulerTestSupport.repository(
-                                mock(AbstractRequestScheduler.class)));
+                                RoleType.DECODE, null, "127.0.0.1", 8080, 8081, null));
         var reservation = reserve(endpoint, id, 100L, 150L);
         EndpointCleanupTestSupport.confirmDecode(endpoint, id);
         assertEquals(

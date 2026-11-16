@@ -20,7 +20,6 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -177,8 +176,7 @@ class RequestRouteTest {
                                         new RequestRepository(),
                                         mock(DeliveryMetricsReporter.class));
                         case DECODE ->
-                                org.flexlb.worker.endpoint.EndpointTestSupport.decode(
-                                        status, new RequestRepository());
+                                org.flexlb.worker.endpoint.EndpointTestSupport.decode(status);
                         case ENCODER -> new EncoderEndpoint(status, new CapacityNotifier());
                         case VIT -> new WorkerEndpoint(status);
                         default -> throw new AssertionError(role);
@@ -195,10 +193,8 @@ class RequestRouteTest {
                 if (!retireBeforeAdd)
                     org.flexlb.worker.endpoint.EndpointTestSupport.closeAsync(worker);
                 var selected = new RequestRoute(context(), route);
-                var result = selected.validateEndpoints(SelectionResult.success(selected));
-                assertEquals(SelectionResult.Status.RETRY, result.status());
-                assertNull(result.blocker());
-                org.junit.jupiter.api.Assertions.assertNull(result.value());
+                org.junit.jupiter.api.Assertions.assertSame(
+                        worker, RequestRoute.firstUnavailableEndpoint(selected.roles()));
             } finally {
                 org.flexlb.worker.endpoint.EndpointTestSupport.closeAsync(worker);
                 org.flexlb.worker.endpoint.EndpointTestSupport.closeAsync(prefill);
@@ -213,8 +209,7 @@ class RequestRouteTest {
         var decode =
                 org.flexlb.worker.endpoint.EndpointTestSupport.decode(
                         WorkerStatus.createDiscovered(
-                                RoleType.DECODE, "original", "decode", 8080, 8090, null),
-                        new RequestRepository());
+                                RoleType.DECODE, "original", "decode", 8080, 8090, null));
         var vit =
                 new WorkerEndpoint(
                         WorkerStatus.createDiscovered(

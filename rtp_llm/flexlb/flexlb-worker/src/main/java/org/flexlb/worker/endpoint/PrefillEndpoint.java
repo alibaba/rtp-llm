@@ -109,17 +109,19 @@ public class PrefillEndpoint extends WorkerEndpoint
         }
     }
 
-    public boolean commitSelection(WorkerRoute route) {
+    public CommitStatus confirmSelection(
+            RequestRegistration entry, WorkerEventSink events, long sequence) {
         stateLock().lock();
         try {
-            var entry = route.prefillRegistration();
-            if (!acceptsNewRequests()
-                    || entry == null
-                    || requests.get(route.requestId()) != entry
-                    || entry.phase != RegistrationPhase.REGISTERED) return false;
-            entry.route = route;
+            if (!acceptsNewRequests()) return CommitStatus.UNAVAILABLE;
+            if (entry == null
+                    || requests.get(entry.requestId()) != entry
+                    || entry.phase != RegistrationPhase.REGISTERED)
+                return CommitStatus.INVALID_REGISTRATION;
+            entry.events = Objects.requireNonNull(events, "events");
+            entry.sequence = sequence;
             entry.commit(clock.getAsLong());
-            return true;
+            return CommitStatus.COMMITTED;
         } finally {
             stateLock().unlock();
         }
@@ -137,8 +139,8 @@ public class PrefillEndpoint extends WorkerEndpoint
 
     @Override
     public int evictExpiredRequests(long ttlMs, Predicate<String> retained) {
-        var candidates = new HashSet<WorkerRoute>();
-        for (var route : captureCommittedRoutes())
+        var candidates = new HashSet<RequestRegistration>();
+        for (var route : captureCommittedRegistrations())
             if (!retained.test(route.requestId())) candidates.add(route);
         return removeExpiredOrphanRequests(ttlMs, candidates);
     }
@@ -185,12 +187,14 @@ public class PrefillEndpoint extends WorkerEndpoint
             notifyCapacityChanged();
         }
         for (var status : reconciliation.requestStatuses()) {
-            var route = status.route();
-            if (route.prefillEndpoint() != this) {
-                continue;
-            }
+            var registration = status.registration();
             publishWorkerRequest(
-                    route, null, getStatus().getRole(), status.eventType(), status.errorCode(), "");
+                    registration,
+                    registration.events,
+                    getStatus().getRole(),
+                    status.eventType(),
+                    status.errorCode(),
+                    "");
         }
     }
 
@@ -225,20 +229,15 @@ public class PrefillEndpoint extends WorkerEndpoint
         Throwable cleanupFailure = null;
         try {
             RemovedRequests cleanup = removeRequestsOnClose();
-            for (WorkerRoute route : cleanup.ownedItems()) {
+            for (var registration : cleanup.ownedItems()) {
                 try {
-                    var context = route.ctx();
-                    var event =
-                            new org.flexlb.worker.endpoint.WorkerRequestEvent(
-                                    route,
-                                    null,
-                                    getStatus().getRole(),
-                                    this,
-                                    org.flexlb.worker.endpoint.RequestEventType.ENDPOINT_CLOSED,
-                                    0L,
-                                    "Prefill generation retired: " + ipPort(),
-                                    System.currentTimeMillis());
-                    context.getRequestScheduler().onWorkerRequestEvent(context, event);
+                    publishWorkerRequest(
+                            registration,
+                            registration.events,
+                            getStatus().getRole(),
+                            RequestEventType.ENDPOINT_CLOSED,
+                            0L,
+                            "Prefill generation retired: " + ipPort());
                 } catch (Throwable notificationFailure) {
                     cleanupFailure = Failures.append(cleanupFailure, notificationFailure);
                 }
@@ -255,12 +254,12 @@ public class PrefillEndpoint extends WorkerEndpoint
      * Captures cleanup notifications and clears all records in one Endpoint lock.
      */
     RemovedRequests removeRequestsOnClose() {
-        List<WorkerRoute> ownedItems = new ArrayList<>();
+        List<RequestRegistration> ownedItems = new ArrayList<>();
 
         stateLock().lock();
         try {
             for (var entry : requests.values()) {
-                if (entry.route != null) ownedItems.add(entry.route);
+                if (entry.events != null) ownedItems.add(entry);
             }
 
             requests.clear();
@@ -272,34 +271,33 @@ public class PrefillEndpoint extends WorkerEndpoint
             stateLock().unlock();
         }
         ownedItems.sort(
-                Comparator.comparingLong((WorkerRoute route) -> route.ctx().getPlacementSequence())
-                        .thenComparing(WorkerRoute::requestId));
+                Comparator.comparingLong((RequestRegistration entry) -> entry.sequence)
+                        .thenComparing(RequestRegistration::requestId));
 
         return new RemovedRequests(ownedItems);
     }
 
     /**
-     * Captures committed routes before querying Scheduler retention outside the state lock.
+     * Captures committed registrations before querying Scheduler retention outside the state lock.
      */
-    private List<WorkerRoute> captureCommittedRoutes() {
+    private List<RequestRegistration> captureCommittedRegistrations() {
         stateLock().lock();
         try {
             return requests.values().stream()
                     .filter(entry -> entry.phase == RegistrationPhase.COMMITTED)
-                    .map(entry -> entry.route)
                     .toList();
         } finally {
             stateLock().unlock();
         }
     }
 
-    private int removeExpiredOrphanRequests(long ttlMs, Set<WorkerRoute> candidates) {
+    private int removeExpiredOrphanRequests(long ttlMs, Set<RequestRegistration> candidates) {
         int removed = 0;
         stateLock().lock();
         try {
             for (var entry : List.copyOf(requests.values())) {
                 if (entry.phase == RegistrationPhase.COMMITTED
-                        && candidates.contains(entry.route)
+                        && candidates.contains(entry)
                         && clock.getAsLong() - entry.lastObservedAtMs >= Math.max(0L, ttlMs)) {
                     removeRequestRecordLocked(entry);
                     removed++;
@@ -360,7 +358,7 @@ public class PrefillEndpoint extends WorkerEndpoint
                 kind = RequestEventType.FAILED;
             }
             var entry = finished.owner();
-            statuses.add(new PrefillRequestStatus(entry.route, kind, finished.errorCode()));
+            statuses.add(new PrefillRequestStatus(entry, kind, finished.errorCode()));
         }
 
         boolean changed = !finishedRequests.isEmpty();
@@ -387,8 +385,7 @@ public class PrefillEndpoint extends WorkerEndpoint
             if (!task.isPriorityCancelOverlayOnly()) {
                 known.add(task.requestId());
                 if (entry.phase == RegistrationPhase.COMMITTED) {
-                    statuses.add(
-                            new PrefillRequestStatus(entry.route, RequestEventType.ACTIVE, 0L));
+                    statuses.add(new PrefillRequestStatus(entry, RequestEventType.ACTIVE, 0L));
                 }
             }
             if (entry.phase != RegistrationPhase.COMMITTED) continue;
@@ -436,12 +433,12 @@ public class PrefillEndpoint extends WorkerEndpoint
     }
 
     /**
-     * Request status matched to its exact Prefill route, published after ledger reconciliation.
+     * Request status matched to its exact Prefill registration, published after ledger reconciliation.
      */
     public record PrefillRequestStatus(
-            WorkerRoute route, RequestEventType eventType, long errorCode) {
+            RequestRegistration registration, RequestEventType eventType, long errorCode) {
         public PrefillRequestStatus {
-            Objects.requireNonNull(route, "route");
+            Objects.requireNonNull(registration, "registration");
             Objects.requireNonNull(eventType, "eventType");
             checkArgument(
                     eventType != RequestEventType.ALLOCATED,
@@ -453,9 +450,9 @@ public class PrefillEndpoint extends WorkerEndpoint
     }
 
     /**
-     * Captures an immutable list of routes removed from a Prefill endpoint.
+     * Captures an immutable list of registrations removed from a Prefill endpoint.
      */
-    public record RemovedRequests(List<WorkerRoute> ownedItems) {
+    public record RemovedRequests(List<RequestRegistration> ownedItems) {
         public RemovedRequests {
             ownedItems = List.copyOf(ownedItems);
         }
@@ -468,7 +465,7 @@ public class PrefillEndpoint extends WorkerEndpoint
             long generationId, long resourceVersion, long computeTokens, long maxComputeTokens) {}
 
     /**
-     * Retains one Prefill selection and its compute-token charge; route association and updates
+     * Retains one Prefill selection and its compute-token charge; event association and updates
      * require the endpoint lock.
      */
     public static final class RequestRegistration implements WorkerEndpoint.RequestRegistration {
@@ -478,7 +475,9 @@ public class PrefillEndpoint extends WorkerEndpoint
 
         final String requestId;
 
-        WorkerRoute route;
+        private volatile WorkerEventSink events;
+        // Keeps retry notifications in submission order when this endpoint closes.
+        private long sequence;
 
         /**
          * Input tokens requiring computation after cache reuse; charged until this record is removed.
