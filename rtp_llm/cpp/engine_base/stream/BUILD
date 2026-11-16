@@ -58,7 +58,7 @@ cc_library(
         "//rtp_llm/cpp/models:logits_processor",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/cache:cp_slot_mapper",
-        "//rtp_llm/cpp/cache/connector:connector_context",
+        "//rtp_llm/cpp/cache/connector:connector_base",
         "//rtp_llm/cpp/cache/connector/p2p:connector",
         "//rtp_llm/cpp/model_rpc:tensor_pb_convert",
         "//rtp_llm/cpp/models:dfa_utils",

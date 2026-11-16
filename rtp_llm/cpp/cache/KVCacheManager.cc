@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
 
@@ -22,7 +23,6 @@
 #endif
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
-#include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
@@ -901,9 +901,11 @@ bool KVCacheManager::writeP2PLayer(size_t                               model_id
 // 异步连接器操作
 
 std::shared_ptr<AsyncContext>
-KVCacheManager::asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteContext>& connector_context) {
+KVCacheManager::asyncLoadCache(const KVCacheResource&       kv_cache_resource,
+                               const std::shared_ptr<Meta>& meta,
+                               size_t                       tree_covered_block_num) {
     RTP_LLM_PROFILE_FUNCTION();
-    if (!p2p_connector_ || !connector_context) {
+    if (!p2p_connector_ || !meta) {
         return nullptr;
     }
 
@@ -911,7 +913,6 @@ KVCacheManager::asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteCo
         return nullptr;
     }
 
-    const auto& meta = connector_context->meta();
     const auto routing = meta ? meta->p2pRouting() : std::nullopt;
     const bool no_transfer = pd_sep_config_.role_type == RoleType::DECODE && routing
                              && !routing->decode_needs_compute;
@@ -921,7 +922,6 @@ KVCacheManager::asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteCo
         return p2p_connector_->asyncRead(std::make_shared<KVCacheResource>(), meta, 0, 0);
     }
 
-    const auto& kv_cache_resource = connector_context->kvCacheResource();
     if (kv_cache_resource.cacheKeys().empty()) {
         return nullptr;
     }
@@ -935,7 +935,7 @@ KVCacheManager::asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteCo
     }
 
     if (pd_sep_config_.role_type == RoleType::PREFILL) {
-        auto context = p2p_connector_->asyncRead(resource, connector_context->meta(), 0, 0);
+        auto context = p2p_connector_->asyncRead(resource, meta, 0, 0);
         if (!context) {
             return std::make_shared<CompletedAsyncContext>(ErrorInfo(
                 ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "P2P Prefill resource registration failed"));
@@ -943,7 +943,6 @@ KVCacheManager::asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteCo
         return context;
     }
 
-    const size_t tree_covered_block_num = connector_context->treeCoveredBlockNum();
     const int    matched_blocks         = static_cast<int>(resource->cacheKeys().size());
     const int    p2p_start_block        = static_cast<int>(
         std::min(tree_covered_block_num, static_cast<size_t>(std::max(matched_blocks, 0))));
@@ -953,10 +952,10 @@ KVCacheManager::asyncLoadCache(const std::shared_ptr<KVCacheConnectorReadWriteCo
         // release the request-scoped KV resource. A zero-sized range is an
         // explicit P2P no-transfer request; Decode will not register buffers
         // or issue RDMA READs.
-        return p2p_connector_->asyncRead(resource, connector_context->meta(), matched_blocks, 0);
+        return p2p_connector_->asyncRead(resource, meta, matched_blocks, 0);
     }
     return p2p_connector_->asyncRead(resource,
-                                     connector_context->meta(),
+                                     meta,
                                      p2p_start_block,
                                      matched_blocks - p2p_start_block);
 }
