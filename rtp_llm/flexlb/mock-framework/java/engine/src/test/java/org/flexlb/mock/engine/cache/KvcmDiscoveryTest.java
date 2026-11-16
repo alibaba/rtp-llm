@@ -12,7 +12,8 @@ import java.util.concurrent.atomic.*;
 import java.util.function.BooleanSupplier;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.Endpoint;
-import org.flexlb.discovery.ServiceDiscovery;
+import org.flexlb.discovery.ServiceDiscoveryProvider;
+import org.flexlb.discovery.ServiceDiscoveryType;
 import org.flexlb.discovery.ServiceHostListener;
 import org.flexlb.kvcm.grpc.*;
 import org.junit.jupiter.api.Test;
@@ -96,7 +97,7 @@ class KvcmDiscoveryTest {
     @Test void closeCancelsBlockedVipLookupWithoutWaitingForItsMonitor() throws Exception {
         var entered = new CountDownLatch(1); var interrupted = new CountDownLatch(1);
         var vip = new Vip() {
-            @Override public List<WorkerHost> getHosts(String domain) {
+            @Override public List<WorkerHost> getHosts(Endpoint endpoint) {
                 entered.countDown();
                 try { new CountDownLatch(1).await(); }
                 catch (InterruptedException expected) { interrupted.countDown(); Thread.currentThread().interrupt(); }
@@ -139,12 +140,12 @@ class KvcmDiscoveryTest {
     /**
      * Supplies bootstrap hosts and exposes discovery shutdown to the tests.
      */
-    static class Vip implements ServiceDiscovery {
+    static class Vip implements ServiceDiscoveryProvider {
         final AtomicReference<List<WorkerHost>> hosts = new AtomicReference<>(List.of());
         boolean closed;
-        public List<WorkerHost> getHosts(String domain) { assertEquals("kvcm-domain", domain); return hosts.get(); }
-        @Override public void validate(Endpoint endpoint) { fail("Only address-based bootstrap is expected"); }
-        @Override public List<WorkerHost> getHosts(Endpoint endpoint) { return fail("Only address-based bootstrap is expected"); }
+        public List<WorkerHost> getHosts(Endpoint endpoint) { assertEquals("kvcm-domain", endpoint.getAddress()); return hosts.get(); }
+        @Override public ServiceDiscoveryType getType() { return ServiceDiscoveryType.VIPSERVER; }
+        @Override public void validate(Endpoint endpoint) { assertEquals("kvcm-domain", endpoint.getAddress()); }
         @Override public void listen(Endpoint endpoint, ServiceHostListener listener) { fail("No watcher is needed"); }
         public void shutdown() { closed = true; }
     }

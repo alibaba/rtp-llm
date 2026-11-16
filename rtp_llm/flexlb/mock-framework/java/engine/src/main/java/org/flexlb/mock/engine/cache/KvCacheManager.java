@@ -100,6 +100,11 @@ public final class KvCacheManager implements AutoCloseable {
         return current == null ? Map.of() : current.status();
     }
 
+    /** Read the current prefix without touching its eviction order or pinning blocks. */
+    public synchronized int localPrefixLength(List<Long> keys) {
+        return tree.prefixLength(keys);
+    }
+
     public synchronized Preparation prepare(long requiredTokens, List<Long> keys) {
         if (closed) throw new IllegalStateException("Cache is closed");
         validate(keys);
