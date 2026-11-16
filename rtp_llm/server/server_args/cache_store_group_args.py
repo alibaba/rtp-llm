@@ -133,7 +133,7 @@ def init_cache_store_group_args(parser, cache_store_config):
         bind_to=(cache_store_config, "p2p_layer_cache_buffer_store_timeout_ms"),
         type=int,
         default=100000,
-        help="P2P LayerCacheBufferStore 条目保留时长（毫秒），默认 100s。",
+        help="保留用于兼容旧配置。当前 P2P 缓冲区使用请求截止时间。",
     )
     cache_store_group.add_argument(
         "--p2p_cancel_broadcast_timeout_ms",
