@@ -216,7 +216,16 @@ abstract class AbstractRoutePerformanceTest extends FlexLBMockTestBase {
                                 (org.flexlb.balance.strategy.RequestRouteSelector)
                                         org.springframework.test.util.ReflectionTestUtils.getField(
                                                 scheduler, "router"),
-                                mock(org.flexlb.cache.match.CacheAwareService.class)),
+                                new CacheAwareService(null, null, null, null) {
+                                    @Override
+                                    public void updateFromRoutedRequest(
+                                            String requestId,
+                                            long blockSize,
+                                            List<Long> cacheKeys,
+                                            List<org.flexlb.worker.status.ServerStatus> workers) {
+                                        // Cache persistence is outside this routing benchmark.
+                                    }
+                                }),
                         config,
                         requestRegistry(),
                         standalone,
