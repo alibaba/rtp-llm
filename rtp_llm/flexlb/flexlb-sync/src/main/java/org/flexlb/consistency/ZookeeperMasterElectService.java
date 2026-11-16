@@ -33,12 +33,20 @@ import java.net.URI;
 import java.net.UnknownHostException;
 import java.time.Duration;
 import java.util.Collection;
+import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.flexlb.consistency.LBStatusConsistencyService.MASTER_CHANGE_NOTIFY_PATH;
 
+/**
+ * ZooKeeper-backed master election per role: wins the leader lock, blocks in
+ * {@link #takeLeadership} while master duty runs, and answers master identity
+ * from the cached leader lookup. Offline or a suspended ZK session withdraws
+ * leadership and fences stale lookups by connection revision, so observers
+ * never schedule against a revoked connection.
+ */
 @Slf4j
 @Component
 public class ZookeeperMasterElectService implements LeaderSelectorListener {
@@ -72,6 +80,16 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     private volatile String cachedMasterHostIp;
 
     private final AtomicReference<CountDownLatch> leaderCloseLatchRef = new AtomicReference<>();
+
+    /**
+     * Serializes leadership acceptance/release and leader-lookup publication.
+     * {@code connectionRevision} fences pre-disconnect lookups: a lookup that
+     * started before a session suspension must not publish the old leader
+     * after the connection was replaced.
+     */
+    private final Object leadershipGate = new Object();
+    private boolean leadershipPermitted = true;
+    private long connectionRevision;
 
     public ZookeeperMasterElectService(GeneralHttpNettyService generalHttpNettyService,
                                        EngineHealthReporter engineHealthReporter,
@@ -170,11 +188,21 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     public void offline() {
         log.warn("ZKMasterElector roleId:{} currentHost:{} offline start.", roleId, localIp);
 
-        markOffline = true;
-        autoRejoin = false;
+        // Withdraw authority under the same gate that accepts leadership, so
+        // a concurrent takeLeadership can never observe a half-released state.
+        boolean wasMaster;
+        synchronized (leadershipGate) {
+            markOffline = true;
+            autoRejoin = false;
+            connectionRevision++;
+            wasMaster = isMaster;
+            isMaster = false;
+            cachedMasterHostIp = null;
+            trySignalCloseLatch();
+        }
         reportMasterEvent(ZkMasterEvent.LB_SERVICE_OFFLINE);
 
-        if (!isMaster) {
+        if (!wasMaster) {
             closeLeaderSelector();
         } else {
             handleMasterOffline();
@@ -270,20 +298,22 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     @Override
     public void takeLeadership(CuratorFramework curatorFramework) {
         LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} takeLeadership", roleId, localIp);
-        if (markOffline) {
-            LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} markOffline, return.", roleId, localIp);
-            return;
+        CountDownLatch countDownLatch = new CountDownLatch(1);
+        // Publish the stop signal and accept leadership atomically: a session
+        // suspended after this gate cannot leave the latch unpublished while
+        // isMaster is already visible to other threads.
+        synchronized (leadershipGate) {
+            if (markOffline || !leadershipPermitted) {
+                LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} leadership withdrawn, return.", roleId, localIp);
+                return;
+            }
+            leaderCloseLatchRef.set(countDownLatch);
+            leadershipEpoch++;
+            isMaster = true;
         }
 
-        // Become master
-        leadershipEpoch++;
-        isMaster = true;
-        reportMasterEvent(ZkMasterEvent.MASTER_TAKE_LEADERSHIP);
-
         try {
-            CountDownLatch countDownLatch = new CountDownLatch(1);
-            leaderCloseLatchRef.set(countDownLatch);
-
+            reportMasterEvent(ZkMasterEvent.MASTER_TAKE_LEADERSHIP);
             // Actively notify other participants that current node has become master
             activelyNotifyParticipants();
 
@@ -301,8 +331,10 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
             LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} takeLeadership error.", roleId, localIp, e);
         } finally {
             // Release leadership
-            leaderCloseLatchRef.set(null);
-            isMaster = false;
+            synchronized (leadershipGate) {
+                leaderCloseLatchRef.compareAndSet(countDownLatch, null);
+                isMaster = false;
+            }
             if (!autoRejoin) {
                 closeLeaderSelector();
             }
@@ -321,17 +353,20 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
         LOGGER.warn("ZKMasterElector roleId:{} stateChanged:{}", roleId, connectionState);
         switch (connectionState) {
             case CONNECTED:
+                permitLeadership();
                 reportMasterEvent(ZkMasterEvent.ZK_CONNECTED);
                 break;
             case RECONNECTED:
+                permitLeadership();
                 reportMasterEvent(ZkMasterEvent.ZK_RECONNECTED);
                 break;
             case SUSPENDED:
+                withdrawLeadership();
                 reportMasterEvent(ZkMasterEvent.ZK_SUSPENDED);
                 throw new CancelLeadershipException();
             case LOST:
+                withdrawLeadership();
                 reportMasterEvent(ZkMasterEvent.ZK_LOST);
-                clearMasterHost();
                 throw new CancelLeadershipException();
             case READ_ONLY:
                 reportMasterEvent(ZkMasterEvent.ZK_READ_ONLY);
@@ -340,23 +375,61 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
     }
 
     /**
-     * Update and retrieve latest master node
+     * Update and retrieve latest master node. The method-level monitor
+     * serializes concurrent lookups; the revision fence drops a lookup that
+     * started before a session suspension or offline, so the pre-disconnect
+     * leader cannot be re-published over a newer connection's answer.
      */
-    public void updateLatestMaster() {
-        synchronized (this) {
-            try {
-                String leaderId = leaderSelector.getLeader().getId();
-                if (StringUtils.isNotBlank(leaderId)) {
-                    if (!leaderId.equals(cachedMasterHostIp)) {
-                        LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} leaderId change from {} to {}.", roleId,
-                                localIp,
-                                cachedMasterHostIp, leaderId);
-                    }
-                    cachedMasterHostIp = leaderId;
-                }
-            } catch (Exception e) {
-                LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} getLeaderID error.", roleId, localIp, e);
+    public synchronized void updateLatestMaster() {
+        long revision;
+        synchronized (leadershipGate) {
+            if (!leadershipPermitted) {
+                return;
             }
+            revision = connectionRevision;
+        }
+        try {
+            String leaderId = leaderSelector.getLeader().getId();
+            String next = StringUtils.isBlank(leaderId) ? null : leaderId;
+            String previous;
+            synchronized (leadershipGate) {
+                if (!leadershipPermitted || revision != connectionRevision) {
+                    return;
+                }
+                previous = cachedMasterHostIp;
+                cachedMasterHostIp = next;
+            }
+            if (!Objects.equals(previous, next)) {
+                LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} leaderId change from {} to {}.", roleId,
+                        localIp, previous, next);
+            }
+        } catch (Exception e) {
+            LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} getLeaderID error.", roleId, localIp, e);
+        }
+    }
+
+    /**
+     * Revoke master authority for the current connection: withdraw
+     * {@code isMaster}, forget the cached leader, and signal the master
+     * callback to exit. Called before {@code CancelLeadershipException} is
+     * thrown from {@link #stateChanged} so disconnected-session observers
+     * never run with authority.
+     */
+    private void withdrawLeadership() {
+        synchronized (leadershipGate) {
+            leadershipPermitted = false;
+            connectionRevision++;
+            isMaster = false;
+            cachedMasterHostIp = null;
+            trySignalCloseLatch();
+        }
+    }
+
+    /** Admit leadership candidates again after a (re)connected session. */
+    private void permitLeadership() {
+        synchronized (leadershipGate) {
+            leadershipPermitted = true;
+            connectionRevision++;
         }
     }
 
@@ -420,15 +493,6 @@ public class ZookeeperMasterElectService implements LeaderSelectorListener {
             engineHealthReporter.reportPrefillBalanceMasterEvent(event);
         } catch (Exception e) {
             LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} reportMasterEvent error.", roleId, localIp, e);
-        }
-    }
-
-    private void clearMasterHost() {
-        synchronized (this) {
-            cachedMasterHostIp = null;
-            LOGGER.warn("ZKMasterElector roleId:{} currentHost:{} masterHost cleared due to ZK unavailability.", roleId,
-                    localIp
-            );
         }
     }
 
