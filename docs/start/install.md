@@ -40,6 +40,57 @@ ln  -sf `pwd`/bazel-out/k8-opt/bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service
 ```
 
 
+### Optional SM120 NVFP4 hybrid Decode runtime
+
+The CUDA 13 default FlashInfer wheel does not expose the static b12x controls
+or the CUTLASS `profile_ids` argument used by the hybrid executor. For an
+isolated SM120 CUDA 13 environment, the official FlashInfer 0.7.3 wheel contains
+the adapter's reference implementations from FlashInfer commit
+`7fa5c3b909a74c435a5b89d1bec82ce012cd3ca1`.
+
+```bash
+python -m pip install 'flashinfer-python[b12x]==0.7.3'
+python -m pip check
+```
+
+The upstream `b12x` extra requires PyTorch 2.12 or newer and the CUDA 13
+CuTe DSL runtime. Build the RTP-LLM native extension against the PyTorch
+version in that environment. Before deployment, run the opt-in regression on
+an SM120 GPU from that same runtime.
+
+```bash
+RTP_TEST_B12X_NVFP4_GPU=1 python -m \
+  rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.test.nvfp4_hybrid_executor_test \
+  B12xNvfp4GpuTest
+```
+
+Set `RTP_NVFP4_HYBRID_MOE=1` on Decode workers to enable the executor.
+`decode_b12x_max_rows` accepts 0 through 16 physical input rows. Set it to 0
+to use CUTLASS for all rows. Omit `decode_cutlass_profile_ids` to use the
+runtime's normal tactic selection. Explicit tactic IDs are specific to the
+FlashInfer build and GPU shape, so validate them on the deployment wheel.
+
+The separate TP2 LSA shared-expert fusion uses an ABI 3 CUDA shared library.
+Build it on Linux with CUDA 13.2 and the same NCCL major/minor headers and
+runtime (NCCL 2.28 or newer). Point `NCCL_INCLUDE_DIR` and `NCCL_LIB_DIR`
+at that installation.
+
+```bash
+nvcc -O3 -std=c++17 -arch=sm_120a -shared -Xcompiler=-fPIC \
+  -I"${NCCL_INCLUDE_DIR}" -L"${NCCL_LIB_DIR}" \
+  rtp_llm/models_py/kernels/cuda/qwen38_moe/reduce_gate.cu -lnccl \
+  -o libqwen38_moe_lsa.so
+export RTP_QWEN4_MOE_LSA_LIBRARY="$PWD/libqwen38_moe_lsa.so"
+export RTP_QWEN4_MOE_LSA_LIBRARY_SHA256="$(sha256sum libqwen38_moe_lsa.so | cut -d ' ' -f1)"
+export RTP_QWEN4_MOE_LSA_RESULTS="$PWD/lsa-regression.json"
+torchrun --standalone --nproc_per_node=2 -m \
+  rtp_llm.models_py.modules.qwen4_exp.test.moe.reduce_gate_integration_test
+```
+
+Use two local SM120 GPUs with peer access for this test. To enable the fusion
+in serving, set `RTP_QWEN4_MOE_REDUCE_GATE_FUSION=1` and provide the same
+library and SHA256 on both TP2 Decode workers.
+
 ## Method 3: Using docker
 More Docker versions can be obtained from [RTP-LLM Release](../release/index.rst)
 ```bash
