@@ -118,12 +118,14 @@ cc_test(
 
 cc_test(
     name = "mtp_executor_test",
+    testonly = True,
     srcs = glob([
         "MtpExecutorTest.cc",
     ]),
     data = [],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/utils:decode_publication_test_support",
         "//rtp_llm/cpp/cache",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/config:config_modules",
@@ -147,6 +149,7 @@ cc_test(
 
 cc_test(
     name = "mtp_main_thread_wait_test",
+    testonly = True,
     args = ["--gtest_filter=MtpExecutorTest.testMainThreadWait*"],
     srcs = glob([
         "MtpExecutorTest.cc",
@@ -154,6 +157,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = [
+        "//rtp_llm/cpp/utils:decode_publication_test_support",
         "//rtp_llm/cpp/cache",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/config:config_modules",

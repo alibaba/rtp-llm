@@ -736,6 +736,7 @@ TEST(SingleTypeDecodeInsertTest, FinalSampledTokenCannotCompleteALocalCacheBlock
         bool opaque{false};
         bool disable_first_lookup{false};
         bool resident{false};
+        bool has_draft{false};
     };
     // Fixed boundary expectations, including the aligned 512/511 regression.
     const std::vector<Case> cases{{0, 0, 0}, {1, 0, 0}, {255, 0, 0},
@@ -745,7 +746,10 @@ TEST(SingleTypeDecodeInsertTest, FinalSampledTokenCannotCompleteALocalCacheBlock
                                   {512, 2, 2, 0, true, true, true, true},
                                   {512, 2, 1, 0, true, true, false, false},
                                   {512, 2, 1, 0, true, false, true, false},
-                                  {512, 2, 1, 0, true, false, true, true},
+                                  {512, 2, 2, 0, true, false, true, true},
+                                  {512, 2, 2, 0, true, false, false, true},
+                                  {512, 2, 2, 0, true, false, false, true, true},
+                                  {512, 2, 0, 0, true, false, false, false, true},
                                   {513, 2, 2, 256, true, true, true, true},
                                   {513, 2, 0, 256, true, true, true, false}};
     for (const auto* setting : {"0", "1"}) {
@@ -764,6 +768,10 @@ TEST(SingleTypeDecodeInsertTest, FinalSampledTokenCannotCompleteALocalCacheBlock
                     // exercise these flags from actual opaque descriptors.
                     config.use_opaque_kv_cache_store = c.opaque;
                     config.disable_decode_first_malloc_device_reuse = c.disable_first_lookup;
+                    if (c.has_draft) {
+                        const auto draft_config = config;
+                        config.mtp_sub_configs.push_back(config.mergeMTPModule(draft_config, 0, config.layer_num));
+                    }
                     auto allocator = std::make_shared<TestSingleTypeCoordinatorCacheManager>(
                         config, AllocationType::DEVICE, nullptr, 0, role);
                     ASSERT_TRUE(allocator->init());
@@ -798,7 +806,9 @@ TEST(SingleTypeDecodeInsertTest, FinalSampledTokenCannotCompleteALocalCacheBlock
                                                 c.native_keys : c.original_keys;
                     const auto path = allocator->blockTreeCacheOwner()->tree()->findNode(keys);
                     ASSERT_EQ(path.size(), expected);
-                    if (c.resident) EXPECT_EQ(resident, expected);
+                    if (c.resident) {
+                        EXPECT_EQ(resident, expected);
+                    }
                     for (size_t i = 0; i < path.size(); ++i) {
                         EXPECT_EQ(path[i]->group_set_resources.front().device_blocks,
                                   (BlockIndicesType{blocks[i]}));

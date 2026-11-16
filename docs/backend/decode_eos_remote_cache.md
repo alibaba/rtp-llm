@@ -31,8 +31,11 @@ TP1 and an independent positive DP count. Both roles use the same `prefill_cp_si
 implementation; a shape accepted by the code is not proof of real-model
 qualification on every physical CP/DP topology.
 
-Remote cache identity includes target CP, physical shard count and base block
-size. A layout change causes a cold miss. D retains its normal local hot-cache
+Auto-generated remote identity includes wire TP/DP, base block size and location
+specifications. DSV4.1 STATE/SWA byte geometry reflects physical CP shards; there
+is no separate CP/shard suffix. Do not infer that every FULL-only CP layout or
+explicit custom identity is isolated automatically. P and D must describe the
+same actual target layout. D retains its normal local hot-cache
 reuse and receives prompt KV through the existing P-to-D transfer; this feature
 does not implement remote-to-D reconstruction from the P-layout wire format.
 
@@ -172,22 +175,21 @@ coordination. It adds explicit shutdown of the asynchronous cache-store writer
 and detaches surviving Python owners. Acceptance must inspect every native rank
 and owned helper exit, rather than the service root's exit code alone.
 
-## SSD transfer bounds
+## SDK transfer bounds and SSD qualification
 
-A process/device shares a registered 64 MiB GPU arena, with a 512 MiB
-process-wide arena cap and a 64 MiB operation limit. Reads use at most four
-objects and 256 KiB of live payload per window. One larger object can use a
-window alone within the operation limit. Each concurrent object has a disjoint
-GPU span; every sibling finishes before scatter or span reuse. Worker threads
-select the originating CUDA device. Callers without a worker initializer retain
-the single-object path; writes retain single-object completion ordering.
+RTP no longer owns an SSD packing arena or its copy/I/O windows. It forwards
+each object's original ordered IOVs to the native SDK. Projected D calls are
+partitioned at object boundaries into at most 64 MiB, 256 URIs and 1024 IOVs;
+an object exceeding those limits is rejected before SDK submission. Original P
+calls retain whole-call granularity. These limits do not specify the SDK's
+internal packing, concurrency or disk scheduling.
 
-Gather/scatter is D2D and completes before external RDMA uses or releases the
-span. Failure, exception or uncertain completion joins all workers and quarantines
-the operation's range until the delegate drains. Independent ranges can continue;
-quarantine consumes capacity. There is no CPU KV fallback and no claim of
-GPUDirect Storage on the remote SSD host. Actual SDK concurrency and DRAM/SSD URI
-compatibility still require validation against the deployed dependency versions.
+Raw `pace_ssd` multi-IOV behavior must be qualified against the deployed SDK
+version with a byte-for-byte write/read comparison. Evidence obtained with a
+dependency override does not establish the behavior of a different pinned RPM.
+An uncertain D transfer retains its descriptors, registered client and source
+owners; a returned error alone does not authorize reuse or abort. There is no
+CPU KV fallback and no claim of GPUDirect Storage on the remote SSD host.
 
 ## Eight monitoring categories
 

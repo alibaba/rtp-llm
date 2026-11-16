@@ -311,7 +311,13 @@ bool GenerateStream::beginDecodePublicationSubmission() {
 void GenerateStream::retainUnknownDecodePublication(const std::shared_ptr<GenerateStream>& owner) {
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_CHECK(owner.get() == this);
+    const bool first_unknown = !unknown_decode_publication_;
     unknown_decode_publication_ = owner; // No GPU last-use proof: retain actual pages, not just logical IDs.
+    if (first_unknown) {
+        RTP_LLM_LOG_ERROR("Decode writer completion UNKNOWN; retaining stream and freezing its blocks until process recovery");
+        const auto& manager = stream_cache_resource_->resourceContext().cache_manager;
+        if (manager) manager->freezeUnknownDecodeWriter(stream_cache_resource_->kvCache());
+    }
     // Set the code before emitting the bitmask event, so reporting does not
     // construct a diagnostic string on this destructor/error path. Keep the
     // first error (including cancellation) and the actual UNKNOWN owner.

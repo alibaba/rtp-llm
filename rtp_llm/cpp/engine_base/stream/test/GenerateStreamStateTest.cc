@@ -165,9 +165,11 @@ TEST_F(GenerateStreamStateTest, SubmissionAloneDefersSchedulerReleaseUntilItsHan
 TEST_F(GenerateStreamStateTest, UnknownWriterReportsErrorAndSurvivesBothReleasePathsAfterBookkeepingDrains) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     test::withDecodePublicationStartup([&] {
-        for (bool cancelled : {false, true}) for (bool pending_worker : {false, true}) {
+        for (bool cancelled : {false, true}) for (bool pending_worker : {false, true})
+        for (bool externally_frozen : {false, true}) {
             SCOPED_TRACE(cancelled);
             SCOPED_TRACE(pending_worker);
+            SCOPED_TRACE(externally_frozen);
             auto stream = createStream({1, 2, 3, 4}, false, RoleType::DECODE);
             stream->generate_status_->status = StreamState::RUNNING;
             auto& resource = stream->streamCacheResource();
@@ -176,10 +178,15 @@ TEST_F(GenerateStreamStateTest, UnknownWriterReportsErrorAndSurvivesBothReleaseP
             auto pool = cache_manager_->coordinator_manager_->groupBlockPools().front();
             const auto blocks = resource.kvCache().blocks(0, "default");
             ASSERT_FALSE(blocks.empty());
+            if (externally_frozen) for (auto block : blocks) pool->freezeBlock(block, "independent operation");
             // No executor or GPU writer is submitted in this test. Only this
             // test-owned proof permits clearing its simulated UNKNOWN at scope
             // exit; no production reset/quiescence API is added.
-            auto mock_quiescence = std::shared_ptr<void>(nullptr, [stream](void*) {
+            auto release_frozen = pool->prepareFrozenReferenceRelease(blocks);
+            auto mock_quiescence = std::shared_ptr<void>(nullptr, [stream, pool, blocks, release_frozen](void*) {
+                bool all_frozen = true;
+                for (auto block : blocks) all_frozen = all_frozen && pool->isFrozen(block);
+                if (all_frozen) release_frozen(); // Preserve assertion diagnostics if freezing regresses.
                 {
                     std::lock_guard<std::mutex> lock(*stream->mutex_);
                     stream->unknown_decode_publication_.reset();
@@ -193,6 +200,10 @@ TEST_F(GenerateStreamStateTest, UnknownWriterReportsErrorAndSurvivesBothReleaseP
                     stream->decPendingAsyncBookkeepingAndMaybeRelease();
                 });
             }
+            auto external_recovery = std::shared_ptr<void>(nullptr, [pool, blocks, externally_frozen](void*) {
+                if (externally_frozen)
+                    for (auto block : blocks) pool->decTreeRef(block, BlockTreeRefType::FROZEN);
+            }); // Drops before mock_quiescence on assertion early return.
             if (cancelled) stream->reportError(ErrorCode::CANCELLED, "original cancellation");
             stream->retainUnknownDecodePublication(stream);
             const auto expected = cancelled ? ErrorCode::CANCELLED : ErrorCode::EXECUTION_EXCEPTION;
@@ -220,6 +231,11 @@ TEST_F(GenerateStreamStateTest, UnknownWriterReportsErrorAndSurvivesBothReleaseP
             }
             stream->retainUnknownDecodePublication(stream); // Duplicate notification preserves the first error/hold.
             EXPECT_EQ(stream->statusInfo().code(), expected);
+            external_recovery.reset(); // Another operation's recovery must not remove this writer's protection.
+            for (auto block : blocks) {
+                EXPECT_TRUE(pool->isFrozen(block));
+                EXPECT_EQ(pool->treeRefCount(block), 1u);
+            }
             mock_quiescence.reset();
             EXPECT_TRUE(resource.isResourceReleased());
             for (auto block : blocks) EXPECT_FALSE(pool->isAllocated(block));
@@ -227,6 +243,17 @@ TEST_F(GenerateStreamStateTest, UnknownWriterReportsErrorAndSurvivesBothReleaseP
             stream.reset();
             EXPECT_TRUE(weak.expired()); // Test cleanup broke only its simulated hold.
         }
+        // Idle DP streams own placeholder zero IDs, never allocated pages.
+        auto fake = createStream({1, 2}, false, RoleType::DECODE);
+        fake->streamCacheResource().fakeInitKVBlock(2);
+        auto mock_quiescence = std::shared_ptr<void>(nullptr, [fake](void*) {
+            fake->unknown_decode_publication_.reset(); // No real writer exists in this test.
+            fake->releaseResource();
+        });
+        fake->retainUnknownDecodePublication(fake);
+        EXPECT_TRUE(fake->hasError());
+        for (const auto& pool : cache_manager_->coordinator_manager_->groupBlockPools())
+            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
     }, [&] { TearDown(); cache_manager_.reset(); });
 }
 

@@ -226,7 +226,15 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& schedul
                 return;
             }
         }
-        for (const auto& stream : frame->streams) stream->endDecodePublicationSubmission();
+        for (const auto& stream : frame->streams) {
+            try { stream->endDecodePublicationSubmission(); }
+            catch (...) {
+                // Writer work is drained or owned by bookkeeping already.
+                // A release failure is not a new UNKNOWN writer obligation.
+                try { RTP_LLM_LOG_ERROR("Decode submission cleanup failed after writer handoff/drain"); }
+                catch (...) {}
+            }
+        }
     }) : std::shared_ptr<void>{};
     std::list<GenerateStreamPtr> publication_streams;
     const auto& streams = publication_frame ? publication_streams : scheduled_streams;
@@ -818,7 +826,10 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           s
                 }
             } catch (...) { safe = false; }
             for (const auto& stream : streams) {
-                if (!safe) stream->retainUnknownDecodePublication(stream);
+                if (!safe) {
+                    try { stream->retainUnknownDecodePublication(stream); }
+                    catch (...) {} // The UNKNOWN self-hold is installed before fallible notification.
+                }
                 stream->decPendingAsyncBookkeepingAndMaybeRelease();
             }
         }

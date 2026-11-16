@@ -1028,8 +1028,6 @@ public:
     }
 
     [[noreturn]] void rethrowPayloadFailure(bool source_may_be_touched) const {
-        if (!decode_publication_enabled_)
-            throw; // Original P failure classes determine task-local freezing.
         try {
             throw;
         } catch (const StorageOperationBufferSafeFailure&) {
@@ -2331,14 +2329,18 @@ private:
         // alone cannot prove buffer safety, including on the ordinary path.
         block_tree_cache_detail::ScopeRollback reconcile_completion([&] {
             source_may_be_touched = completion == kvcm::ClientWrapper::TransferCompletion::UNKNOWN;
-            if (transfer_attempted && completion != kvcm::ClientWrapper::TransferCompletion::NOT_SUBMITTED) {
-                *transfer_attempted = true;
+            if (completion != kvcm::ClientWrapper::TransferCompletion::NOT_SUBMITTED) {
+                if (proof) proof->started();
+                if (transfer_attempted) *transfer_attempted = true;
             }
         });
         if (task.expired()) {
             return TransferResult::TIMEOUT;
         }
-        if (proof) proof->started(); // Before the SDK wrapper can submit, including throw/inline completion.
+        // Local peers retain HANDOFF_PENDING until their run/expire terminal.
+        // Reconcile the wrapper's explicit handoff status before that terminal:
+        // a local preflight rejection proves NOT_SUBMITTED, including on throw.
+        // Once any SDK call started, the aggregate proof can never be downgraded.
         try {
             if (operation == REMOTE_OPERATION_READ) {
                 const auto ec = client_wrapper_->loadKvCachesForTagWithStatus(

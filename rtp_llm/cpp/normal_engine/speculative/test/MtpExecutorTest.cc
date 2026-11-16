@@ -23,6 +23,8 @@
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/models/SamplingRows.h"
 #include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
+#include "autil/EnvUtil.h"
 
 #define private public
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
@@ -3818,6 +3820,41 @@ TEST_F(MtpExecutorTest, testAcceptLenMetricsQueueOwnsRowsAndRejectsOverflowWitho
 }
 
 #if USING_CUDA
+TEST_F(MtpExecutorTest, DecodeEndpointSkipsFakeAndUnsampledRoundsBeforeWaitingOnTransfer) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    test::withDecodePublicationStartup([&] {
+        MtpExecutorTestConfig config;
+        config.role_type = RoleType::DECODE;
+        auto components = createMtpExecutorComponents(config);
+        auto& executor = *components.executor;
+        auto stream = createContextStream(components.model_config, components.runtime_config,
+                                          components.resource_context, {0, 1});
+        const auto unit = executor.cache_manager_->decodePublicationUnit();
+        ASSERT_GT(unit, 0u);
+        ASSERT_TRUE(stream->mayCrossDecodePublicationBoundary(unit, executor.propose_step_ + 1));
+        for (int missing = 0; missing < 3; ++missing) {
+            SCOPED_TRACE(missing);
+            GptModelInputs target, draft;
+            target.prefix_lengths = draft.prefix_lengths = torch::zeros({1}, torch::kInt32);
+            target.input_lengths = draft.input_lengths = torch::ones({1}, torch::kInt32);
+            target.kv_cache_block_id = torch::zeros({1, 1, 1}, torch::kInt32);
+            target.is_fake_stream = missing == 0;
+            draft.is_fake_stream = missing == 1;
+            spec::SpeculativeSamplerOutput sampled;
+            if (missing != 2) sampled.accept_len_cpu = torch::ones({1}, torch::kInt32);
+            sampled.transfer_done_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+            ScopedMetricsStreamGate gate(cuda_graph::toGraphStream(executor.collect_metrics_stream_));
+            sampled.transfer_done_event->record(executor.collect_metrics_stream_);
+            executor.retainDecodePublicationPages(StreamGroups({stream}), target, draft, sampled);
+            EXPECT_FALSE(gate.timedOut()) << "idle/unsampled round waited for a transfer event";
+            EXPECT_FALSE(sampled.transfer_done_event->query());
+            EXPECT_FALSE(stream->latestDecodePublicationEndpoint());
+            gate.release();
+            sampled.transfer_done_event->synchronize();
+        }
+    });
+}
+
 TEST_F(MtpExecutorTest, testAcceptLenMetricsConsumeReadyPrefixWithoutWaitingOrSkippingPendingGpuRound) {
     MtpExecutorTestConfig config;
     config.gen_num_per_cycle = 5;
