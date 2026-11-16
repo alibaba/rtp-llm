@@ -1,10 +1,10 @@
 package org.flexlb.api;
 
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.flexlb.util.metrics.FlexMetricTags;
 import org.flexlb.util.metrics.FlexMetricType;
 import org.flexlb.util.metrics.FlexMonitor;
 import org.flexlb.util.metrics.FlexPriorityType;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -32,17 +32,11 @@ class GracefulLifecycleReporterTest {
         doThrow(failure)
                 .when(monitor)
                 .register(GRACEFUL_LIFECYCLE_EVENT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
-        var reporter =
-                assertDoesNotThrow(
-                        () ->
-                                new ServiceMetricsReporter(
-                                        monitor,
-                                        org.mockito.Mockito.mock(
-                                                org.flexlb.worker.endpoint.EndpointStats.class)));
+        var reporter = assertDoesNotThrow(() -> new ApiMetricsReporter(monitor));
         var tags = FlexMetricTags.of("type", "shutdown_complete", "duration_ms", "17");
         doThrow(failure).when(monitor).report(GRACEFUL_LIFECYCLE_EVENT, tags, 1);
         assertDoesNotThrow(
-                () -> reporter.reportDuration(ServiceMetricsReporter.Event.SHUTDOWN_COMPLETE, 17));
+                () -> reporter.reportDuration(ApiMetricsReporter.Event.SHUTDOWN_COMPLETE, 17));
         reporter.reportProcessOk();
         verify(monitor)
                 .report(GRACEFUL_LIFECYCLE_EVENT, FlexMetricTags.of("type", "process_ok"), 1);
@@ -57,15 +51,11 @@ class GracefulLifecycleReporterTest {
         "WARMER_COMPLETE, warmer_complete",
         "ONLINE_COMPLETE, online_complete"
     })
-    void preservesPublishedDurationTags(ServiceMetricsReporter.Event event, String type) {
+    void preservesPublishedDurationTags(ApiMetricsReporter.Event event, String type) {
         var monitor = mock(FlexMonitor.class);
-        var reporter =
-                new ServiceMetricsReporter(
-                        monitor,
-                        org.mockito.Mockito.mock(org.flexlb.worker.endpoint.EndpointStats.class));
+        var reporter = new ApiMetricsReporter(monitor);
+        org.mockito.Mockito.clearInvocations(monitor);
         reporter.reportDuration(event, 17L);
-        verify(monitor)
-                .register(GRACEFUL_LIFECYCLE_EVENT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor)
                 .report(
                         GRACEFUL_LIFECYCLE_EVENT,
@@ -77,12 +67,9 @@ class GracefulLifecycleReporterTest {
     @Test
     void processReadinessHasNoDurationTag() {
         var monitor = mock(FlexMonitor.class);
-        new ServiceMetricsReporter(
-                        monitor,
-                        org.mockito.Mockito.mock(org.flexlb.worker.endpoint.EndpointStats.class))
-                .reportProcessOk();
-        verify(monitor)
-                .register(GRACEFUL_LIFECYCLE_EVENT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        var reporter = new ApiMetricsReporter(monitor);
+        org.mockito.Mockito.clearInvocations(monitor);
+        reporter.reportProcessOk();
         verify(monitor)
                 .report(GRACEFUL_LIFECYCLE_EVENT, FlexMetricTags.of("type", "process_ok"), 1);
         verifyNoMoreInteractions(monitor);

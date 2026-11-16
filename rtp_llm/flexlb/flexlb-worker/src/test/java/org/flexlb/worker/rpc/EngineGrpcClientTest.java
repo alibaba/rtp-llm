@@ -6,12 +6,12 @@ import io.grpc.inprocess.InProcessChannelBuilder;
 import io.grpc.inprocess.InProcessServerBuilder;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.config.cache.CacheMatchConfiguration;
-import org.flexlb.util.discovery.DiscoveredHost;
 import org.flexlb.util.metrics.GrpcReporter;
 import org.flexlb.util.network.GrpcChannelFactory;
 import org.flexlb.util.network.GrpcTarget;
 import org.flexlb.worker.rpc.protocol.EngineRpcService;
 import org.flexlb.worker.rpc.protocol.RpcServiceGrpc;
+import org.flexlb.worker.status.WorkerHost;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -53,7 +53,7 @@ class EngineGrpcClientTest {
                 ArgumentCaptor.forClass(EngineAddressResolver.Listener.class);
         verify(addressResolver).subscribe(listener.capture());
 
-        DiscoveredHost host = new DiscoveredHost("10.0.0.1", 8080, 8081, 8085, 18002, "", "", "");
+        WorkerHost host = new WorkerHost("10.0.0.1", 8080, 8081, 8085, 18002, "", "", "");
         listener.getValue().onAddressUpdate(List.of(host));
         listener.getValue().onAddressUpdate(List.of(host));
 
@@ -86,9 +86,7 @@ class EngineGrpcClientTest {
 
         listener.getValue()
                 .onAddressUpdate(
-                        List.of(
-                                new DiscoveredHost(
-                                        "10.0.0.1", 8080, 8081, 8085, 18002, "", "", "")));
+                        List.of(new WorkerHost("10.0.0.1", 8080, 8081, 8085, 18002, "", "", "")));
 
         verify(channelFactory, times(1)).create(new GrpcTarget("10.0.0.1", 8081));
         verify(channelFactory, times(2)).create(new GrpcTarget("10.0.0.1", 18002));
@@ -113,9 +111,9 @@ class EngineGrpcClientTest {
         listener.getValue()
                 .onAddressUpdate(
                         List.of(
-                                new DiscoveredHost(
+                                new WorkerHost(
                                         "10.0.0.1", 8080, 8081, 8085, 18002, "", "", "", 0, 2),
-                                new DiscoveredHost(
+                                new WorkerHost(
                                         "10.0.0.1", 8080, 8081, 8085, 18003, "", "", "", 1, 2)));
 
         verify(channelFactory, times(1)).create(new GrpcTarget("10.0.0.1", 8081));
@@ -168,7 +166,7 @@ class EngineGrpcClientTest {
             listener.getValue()
                     .onAddressUpdate(
                             List.of(
-                                    new DiscoveredHost(
+                                    new WorkerHost(
                                             "10.0.0.1", 8080, 8081, 8085, 18002, "", "", "")));
 
             assertTrue(

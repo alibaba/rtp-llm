@@ -14,6 +14,7 @@ import io.grpc.stub.MetadataUtils;
 import io.netty.channel.EventLoopGroup;
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.context.Context;
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.flexlb.api.protocol.FlexlbScheduleProtocol;
 import org.flexlb.api.protocol.FlexlbServiceGrpc;
 import org.flexlb.balance.trace.FlexlbTrace;
@@ -22,7 +23,6 @@ import org.flexlb.master.MasterStatusService;
 import org.flexlb.util.Logger;
 import org.flexlb.util.network.GrpcConstants;
 import org.flexlb.worker.endpoint.StrategyErrorType;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
@@ -55,7 +55,7 @@ public class FlexlbGrpcForwarder {
     private final AtomicLong forwardInflightBytes = new AtomicLong(0L);
     private final MasterStatusService masterStatusService;
     private final ConfigService configService;
-    private final ServiceMetricsReporter serviceMetricsReporter;
+    private final ApiMetricsReporter serviceMetricsReporter;
     private final EventLoopGroup eventLoopGroup;
     private final Executor executor;
     private final ConcurrentHashMap<String, ManagedChannel> channels = new ConcurrentHashMap<>();
@@ -64,7 +64,7 @@ public class FlexlbGrpcForwarder {
     public FlexlbGrpcForwarder(
             MasterStatusService masterStatusService,
             ConfigService configService,
-            ServiceMetricsReporter serviceMetricsReporter,
+            ApiMetricsReporter serviceMetricsReporter,
             @Qualifier("managedChannelEventLoopGroup") EventLoopGroup eventLoopGroup,
             @Qualifier("forwarderChannelExecutor") Executor executor) {
         this.masterStatusService = masterStatusService;

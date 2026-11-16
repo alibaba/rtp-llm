@@ -5,7 +5,6 @@ import org.apache.curator.framework.recipes.leader.LeaderSelector;
 import org.apache.curator.framework.recipes.leader.Participant;
 import org.apache.curator.framework.state.ConnectionState;
 import org.flexlb.util.network.GeneralHttpNettyService;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.env.Environment;
 
@@ -34,7 +33,7 @@ class ZkLeadershipLifecycleTest {
         var service =
                 new ZookeeperMasterElectService(
                         mock(GeneralHttpNettyService.class),
-                        mock(ServiceMetricsReporter.class),
+                        mock(MasterMetrics.class),
                         mock(Environment.class),
                         org.flexlb.balance.schedule.SchedulingTestConfig.configService(
                                 new org.flexlb.config.FlexlbConfig()),
@@ -81,7 +80,7 @@ class ZkLeadershipLifecycleTest {
         var service =
                 new ZookeeperMasterElectService(
                         mock(GeneralHttpNettyService.class),
-                        mock(ServiceMetricsReporter.class),
+                        mock(MasterMetrics.class),
                         mock(Environment.class),
                         org.flexlb.balance.schedule.SchedulingTestConfig.configService(
                                 new org.flexlb.config.FlexlbConfig()),
@@ -129,7 +128,7 @@ class ZkLeadershipLifecycleTest {
     @Test
     @org.junit.jupiter.api.Timeout(5)
     void suspendedSessionCannotReenterLeadershipBeforeReconnection() {
-        ServiceMetricsReporter reporter = mock(ServiceMetricsReporter.class);
+        MasterMetrics reporter = mock(MasterMetrics.class);
         ZookeeperMasterElectService service =
                 new ZookeeperMasterElectService(
                         mock(GeneralHttpNettyService.class),
@@ -157,7 +156,7 @@ class ZkLeadershipLifecycleTest {
     }
 
     private void exercise(boolean offline) throws Exception {
-        ServiceMetricsReporter reporter = mock(ServiceMetricsReporter.class);
+        MasterMetrics reporter = mock(MasterMetrics.class);
         ZookeeperMasterElectService service =
                 new ZookeeperMasterElectService(
                         mock(GeneralHttpNettyService.class),

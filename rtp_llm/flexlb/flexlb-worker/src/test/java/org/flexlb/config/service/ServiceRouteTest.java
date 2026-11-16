@@ -3,7 +3,6 @@ package org.flexlb.config.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.flexlb.config.cache.KvcmConfig;
 import org.flexlb.util.JsonUtils;
-import org.flexlb.util.discovery.DiscoveryEndpoint;
 import org.flexlb.util.discovery.DiscoverySettings;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.junit.jupiter.api.Assertions;
@@ -153,7 +152,8 @@ class ServiceRouteTest {
                 }
                 """;
 
-        DiscoveryEndpoint endpoint = objectMapper.readValue(json, DiscoveryEndpoint.class);
+        WorkerDiscoveryEndpoint endpoint =
+                objectMapper.readValue(json, WorkerDiscoveryEndpoint.class);
 
         Assertions.assertEquals(
                 DiscoverySettings.DEFAULT_DASHSCOPE_BASE_URL, endpoint.getDiscovery().getBaseUrl());
@@ -188,13 +188,13 @@ class ServiceRouteTest {
         Assertions.assertEquals(1, serviceRoute.getRoleEndpoints().size());
         GroupRoleEndPoint roleEndpoint = serviceRoute.getRoleEndpoints().getFirst();
         Assertions.assertEquals("ea119_PPU_ZW810E_16TP_decode64", roleEndpoint.getGroup());
-        DiscoveryEndpoint prefillEndpoint = new DiscoveryEndpoint();
+        WorkerDiscoveryEndpoint prefillEndpoint = new WorkerDiscoveryEndpoint();
         prefillEndpoint.setAddress("com.aicheng.whale.pre.deepseek_dp_tp_test");
         prefillEndpoint.setProtocol("http");
         prefillEndpoint.setPath("/");
         prefillEndpoint.setGroup("ea119_PPU_ZW810E_16TP_decode64");
         Assertions.assertEquals(prefillEndpoint, roleEndpoint.getPrefillEndpoint());
-        DiscoveryEndpoint decodeEndpoint = new DiscoveryEndpoint();
+        WorkerDiscoveryEndpoint decodeEndpoint = new WorkerDiscoveryEndpoint();
         decodeEndpoint.setAddress("com.aicheng.whale.pre.test_pd_gang2.decode");
         decodeEndpoint.setProtocol("http");
         decodeEndpoint.setPath("/");

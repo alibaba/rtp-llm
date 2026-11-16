@@ -2,7 +2,6 @@ package org.flexlb.master;
 
 import org.apache.curator.framework.recipes.leader.LeaderSelector;
 import org.flexlb.util.network.GeneralHttpNettyService;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.env.Environment;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -23,7 +22,7 @@ import static org.mockito.Mockito.when;
 class ZkLeadershipShutdownRaceTest {
     @Test
     void offlineDuringLeadershipNotificationCannotLoseShutdownSignal() throws Exception {
-        var reporter = mock(ServiceMetricsReporter.class);
+        var reporter = mock(MasterMetrics.class);
         var service =
                 new ZookeeperMasterElectService(
                         mock(GeneralHttpNettyService.class),

@@ -2,7 +2,7 @@ package org.flexlb.api.server;
 
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.api.ApplicationLifecycle;
-import org.flexlb.worker.status.ServiceMetricsReporter;
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.event.EventListener;
@@ -27,14 +27,14 @@ import static org.springframework.web.reactive.function.server.RouterFunctions.r
 @Component
 class AppStateHookServer {
     private final ApplicationLifecycle applicationLifecycle;
-    private final ServiceMetricsReporter lifecycleReporter;
+    private final ApiMetricsReporter lifecycleReporter;
 
     private volatile boolean processReady = false;
 
     private volatile InetAddress localAddress;
 
     AppStateHookServer(
-            ApplicationLifecycle applicationLifecycle, ServiceMetricsReporter lifecycleReporter) {
+            ApplicationLifecycle applicationLifecycle, ApiMetricsReporter lifecycleReporter) {
         this.applicationLifecycle = applicationLifecycle;
         this.lifecycleReporter = lifecycleReporter;
     }
@@ -102,8 +102,7 @@ class AppStateHookServer {
         try {
             applicationLifecycle.online();
             long duration = System.currentTimeMillis() - startTime;
-            lifecycleReporter.reportDuration(
-                    ServiceMetricsReporter.Event.ONLINE_COMPLETE, duration);
+            lifecycleReporter.reportDuration(ApiMetricsReporter.Event.ONLINE_COMPLETE, duration);
             log.info("online service run success.");
             return ServerResponse.ok().body(Mono.just("success"), String.class);
         } catch (Exception e) {

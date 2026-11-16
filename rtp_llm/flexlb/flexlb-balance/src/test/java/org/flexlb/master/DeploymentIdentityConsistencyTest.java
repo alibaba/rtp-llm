@@ -6,7 +6,6 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.master.ZookeeperConsistencyConfig;
 import org.flexlb.config.service.DeploymentIdentity;
 import org.flexlb.util.network.GeneralHttpNettyService;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullSource;
@@ -89,7 +88,7 @@ class DeploymentIdentityConsistencyTest {
         ZookeeperMasterElectService service =
                 new ZookeeperMasterElectService(
                         mock(GeneralHttpNettyService.class),
-                        mock(ServiceMetricsReporter.class),
+                        mock(MasterMetrics.class),
                         mock(Environment.class),
                         configService(false),
                         identity);
@@ -106,7 +105,7 @@ class DeploymentIdentityConsistencyTest {
         var election =
                 new ZookeeperMasterElectService(
                         mock(GeneralHttpNettyService.class),
-                        mock(ServiceMetricsReporter.class),
+                        mock(MasterMetrics.class),
                         mock(Environment.class),
                         configService(false),
                         identity);
@@ -121,7 +120,7 @@ class DeploymentIdentityConsistencyTest {
         ZookeeperMasterElectService electionService =
                 new ZookeeperMasterElectService(
                         mock(GeneralHttpNettyService.class),
-                        mock(ServiceMetricsReporter.class),
+                        mock(MasterMetrics.class),
                         mock(Environment.class),
                         configService(false),
                         mock(DeploymentIdentity.class));

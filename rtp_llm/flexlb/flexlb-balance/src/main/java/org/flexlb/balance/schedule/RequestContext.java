@@ -249,12 +249,6 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
         return activeSelectionId == 0 ? null : new SelectionAttempt(this, activeSelectionId);
     }
 
-    @Override
-    public DecodeEndpoint.ResourceWait currentResourceWait() {
-        return currentResourceWait;
-    }
-
-    @Override
     public boolean isResponseDone() {
         return future != null && future.isDone();
     }
@@ -302,7 +296,7 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
 
     synchronized boolean clearResourceWait(DecodeEndpoint.ResourceWait exact) {
         if (currentResourceWait != exact) return false;
-        currentResourceWait = null;
+        revokeResourceWait();
         return true;
     }
 
@@ -314,7 +308,7 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
             SelectionAttempt exact, Response failure, long nowMs) {
         if (!matchesSelection(exact)) return null;
         activeSelectionId = 0;
-        currentResourceWait = null;
+        revokeResourceWait();
         if (pendingEndEvent != null) {
             boolean rolledBackBeforePublication =
                     route == null
@@ -522,7 +516,7 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
         }
         routeCommittedAtMs = nowMs;
         activeSelectionId = 0;
-        currentResourceWait = null;
+        revokeResourceWait();
         responseForFuture = response;
         decodeWorkerReleaseConfirmed = acquired.decodeRegistration() == null;
         refreshState(nowMs);
@@ -666,10 +660,17 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
     }
 
     private void recordCancellation(CancelReason reason, StrategyErrorType error, String detail) {
-        currentResourceWait = null;
+        revokeResourceWait();
         cancellationReason = reason;
         cancellationError = error;
         cancellationDetail = detail;
+    }
+
+    private void revokeResourceWait() {
+        if (currentResourceWait != null) {
+            currentResourceWait.revoke();
+            currentResourceWait = null;
+        }
     }
 
     /**
@@ -677,7 +678,7 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
      * ending becomes the request result; resource cleanup remains a separate step.
      */
     private boolean retainEnd(RequestEndEvent evidence) {
-        currentResourceWait = null;
+        revokeResourceWait();
         if (endState != null) {
             boolean newlyExpired = !expired && evidence.cause().isTimeout();
             expired |= newlyExpired;

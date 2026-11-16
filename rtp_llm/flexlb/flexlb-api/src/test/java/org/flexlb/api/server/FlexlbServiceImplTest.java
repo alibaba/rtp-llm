@@ -6,6 +6,7 @@ import io.grpc.Context;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.api.ServerScheduleLatencyRecorder;
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.flexlb.api.protocol.FlexlbScheduleProtocol;
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
@@ -19,7 +20,6 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.master.MasterStatusService;
 import org.flexlb.worker.endpoint.AdmissionRejectReason;
 import org.flexlb.worker.endpoint.StrategyErrorType;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -67,7 +67,7 @@ class FlexlbServiceImplTest {
     private final AbstractRequestScheduler requestState = mock(AbstractRequestScheduler.class);
 
     private MasterStatusService masterStatusService;
-    private ServiceMetricsReporter serviceMetricsReporter;
+    private ApiMetricsReporter serviceMetricsReporter;
     private FlexlbGrpcForwarder grpcForwarder;
     private ConfigService configService;
     private DeliveryMetricsReporter deliveryMetricsReporter;
@@ -83,7 +83,7 @@ class FlexlbServiceImplTest {
                 io.opentelemetry.api.OpenTelemetry.noop(), "");
         requestScheduler = mock(AbstractRequestScheduler.class);
         masterStatusService = mock(MasterStatusService.class);
-        serviceMetricsReporter = mock(ServiceMetricsReporter.class);
+        serviceMetricsReporter = mock(ApiMetricsReporter.class);
         grpcForwarder = mock(FlexlbGrpcForwarder.class);
         deliveryMetricsReporter = mock(DeliveryMetricsReporter.class);
         serverLatencyRecorder = mock(ServerScheduleLatencyRecorder.class);
@@ -113,7 +113,7 @@ class FlexlbServiceImplTest {
     void vitRouteDoesNotOwnOrCancelGenerationLifecycle() {
         when(masterStatusService.isNeedConsistency()).thenReturn(false);
         var selector = mock(org.flexlb.balance.strategy.RequestRouteSelector.class);
-        service.configureRouting(selector);
+        FlexlbServiceTestSupport.configureRouting(service, selector);
         var request =
                 FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
                         .setRequestId(12345L)

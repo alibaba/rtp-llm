@@ -4,8 +4,8 @@ import org.apache.commons.lang3.tuple.Pair;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.service.ModelMetaConfig;
 import org.flexlb.config.service.RoleType;
+import org.flexlb.config.service.WorkerDiscoveryEndpoint;
 import org.flexlb.util.discovery.DiscoveredHost;
-import org.flexlb.util.discovery.DiscoveryEndpoint;
 import org.flexlb.util.discovery.ServiceDiscovery;
 import org.flexlb.util.network.BackendServiceProtocolEnum;
 import org.junit.jupiter.api.AfterEach;
@@ -65,7 +65,7 @@ class WorkerAddressServiceTest {
         String address = "TestAddress";
         when(modelMetaConfig.endpointsWithGroup(modelName, RoleType.PREFILL))
                 .thenReturn(List.of(Pair.of("group1", endpoint(address))));
-        when(serviceDiscovery.getHosts(Mockito.any(DiscoveryEndpoint.class)))
+        when(serviceDiscovery.getHosts(Mockito.any(WorkerDiscoveryEndpoint.class)))
                 .thenThrow(new IllegalStateException("discovery unavailable"));
 
         Assertions.assertThrows(
@@ -81,13 +81,13 @@ class WorkerAddressServiceTest {
         String modelName = "TestModel";
         String address = "TestAddress";
         List<DiscoveredHost> expectedHosts =
-                List.of(new DiscoveredHost("127.0.0.1", 8080, 8081, 8082, "site1", "group1"));
+                List.of(new DiscoveredHost("127.0.0.1", 8080, "site1"));
         when(modelMetaConfig.endpointsWithGroup(modelName, RoleType.PREFILL))
                 .thenReturn(List.of(Pair.of("group1", endpoint(address))));
-        when(serviceDiscovery.getHosts(Mockito.any(DiscoveryEndpoint.class)))
+        when(serviceDiscovery.getHosts(Mockito.any(WorkerDiscoveryEndpoint.class)))
                 .thenReturn(expectedHosts);
 
-        List<DiscoveredHost> actualHosts =
+        List<WorkerHost> actualHosts =
                 workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL);
 
         Assertions.assertFalse(actualHosts.isEmpty());
@@ -114,13 +114,11 @@ class WorkerAddressServiceTest {
                     }
                 };
         Mockito.lenient()
-                .when(serviceDiscovery.getHosts(Mockito.any(DiscoveryEndpoint.class)))
+                .when(serviceDiscovery.getHosts(Mockito.any(WorkerDiscoveryEndpoint.class)))
                 .thenAnswer(
                         call -> {
                             release.await();
-                            return List.of(
-                                    new DiscoveredHost(
-                                            "127.0.0.1", 8080, 8081, 8082, "site", "group"));
+                            return List.of(new DiscoveredHost("127.0.0.1", 8080, "site"));
                         });
         try {
             for (int i = 0; i < executor.getCorePoolSize(); i++) {
@@ -137,7 +135,7 @@ class WorkerAddressServiceTest {
                                             workerAddressService.getEngineWorkerList(
                                                     "model", RoleType.PREFILL)));
             Mockito.verify(serviceDiscovery, Mockito.never())
-                    .getHosts(Mockito.any(DiscoveryEndpoint.class));
+                    .getHosts(Mockito.any(WorkerDiscoveryEndpoint.class));
         } finally {
             executor.getQueue().clear();
             release.countDown();
@@ -151,7 +149,7 @@ class WorkerAddressServiceTest {
         CountDownLatch entered = new CountDownLatch(1);
         CountDownLatch exited = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
-        when(serviceDiscovery.getHosts(Mockito.any(DiscoveryEndpoint.class)))
+        when(serviceDiscovery.getHosts(Mockito.any(WorkerDiscoveryEndpoint.class)))
                 .thenAnswer(
                         call -> {
                             entered.countDown();
@@ -200,8 +198,8 @@ class WorkerAddressServiceTest {
         }
     }
 
-    private static DiscoveryEndpoint endpoint(String address) {
-        DiscoveryEndpoint endpoint = new DiscoveryEndpoint();
+    private static WorkerDiscoveryEndpoint endpoint(String address) {
+        WorkerDiscoveryEndpoint endpoint = new WorkerDiscoveryEndpoint();
         endpoint.setAddress(address);
         endpoint.setProtocol(BackendServiceProtocolEnum.GRPC.getName());
         return endpoint;

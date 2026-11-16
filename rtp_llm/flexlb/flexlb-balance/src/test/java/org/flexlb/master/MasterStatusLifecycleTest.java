@@ -2,7 +2,6 @@ package org.flexlb.master;
 
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.network.GeneralHttpNettyService;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -73,7 +72,7 @@ class MasterStatusLifecycleTest {
             var election =
                     new ZookeeperMasterElectService(
                             mock(GeneralHttpNettyService.class),
-                            mock(ServiceMetricsReporter.class),
+                            mock(MasterMetrics.class),
                             environment,
                             org.flexlb.balance.schedule.SchedulingTestConfig.configService(
                                     new org.flexlb.config.FlexlbConfig()),
@@ -97,7 +96,7 @@ class MasterStatusLifecycleTest {
             var election =
                     new ZookeeperMasterElectService(
                             mock(GeneralHttpNettyService.class),
-                            mock(ServiceMetricsReporter.class),
+                            mock(MasterMetrics.class),
                             environment,
                             org.flexlb.balance.schedule.SchedulingTestConfig.configService(
                                     new org.flexlb.config.FlexlbConfig()),
@@ -128,7 +127,7 @@ class MasterStatusLifecycleTest {
         var election =
                 new ZookeeperMasterElectService(
                         mock(GeneralHttpNettyService.class),
-                        mock(ServiceMetricsReporter.class),
+                        mock(MasterMetrics.class),
                         environment,
                         org.flexlb.balance.schedule.SchedulingTestConfig.configService(
                                 new org.flexlb.config.FlexlbConfig()),

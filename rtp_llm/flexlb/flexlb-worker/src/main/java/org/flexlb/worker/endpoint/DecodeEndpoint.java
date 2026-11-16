@@ -67,6 +67,7 @@ public class DecodeEndpoint extends WorkerEndpoint
     }
 
     public final void removeResourceWait(ResourceWait wait) {
+        wait.revoke();
         stateLock().lock();
         try {
             resourceWaits.remove(wait);
@@ -735,6 +736,7 @@ public class DecodeEndpoint extends WorkerEndpoint
      * Waits for Decode capacity for one exact request selection; cancellation or endpoint closure ends the wait.
      */
     public static final class ResourceWait {
+        private volatile boolean revoked;
         private final DecodeEndpoint endpoint;
         private final WorkerRequest request;
         private final long selectionId;
@@ -786,9 +788,15 @@ public class DecodeEndpoint extends WorkerEndpoint
             return result.isDone();
         }
 
+        /**
+         * Removes priority protection immediately; the preemption owner drains the result separately.
+         */
+        public void revoke() {
+            revoked = true;
+        }
+
         public final boolean isEffective(long nowMs) {
-            return request.currentResourceWait() == this
-                    && !request.isResponseDone()
+            return !revoked
                     && !result.isDone()
                     && nowMs < deadlineMs
                     && endpoint.acceptsNewRequests()

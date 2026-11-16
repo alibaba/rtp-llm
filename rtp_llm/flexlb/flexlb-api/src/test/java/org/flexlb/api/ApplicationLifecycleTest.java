@@ -1,9 +1,9 @@
 package org.flexlb.api;
 
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.flexlb.api.server.FlexlbGrpcServer;
 import org.flexlb.balance.schedule.AbstractRequestScheduler;
 import org.flexlb.master.MasterStatusService;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
@@ -52,7 +52,7 @@ class ApplicationLifecycleTest {
                 new ApplicationLifecycle(
                         consistency,
                         grpc,
-                        mock(ServiceMetricsReporter.class),
+                        mock(ApiMetricsReporter.class),
                         context.getEnvironment(),
                         new org.flexlb.util.ApplicationWarmupState(),
                         mock(AbstractRequestScheduler.class),
@@ -90,7 +90,7 @@ class ApplicationLifecycleTest {
                     new ApplicationLifecycle(
                             consistency,
                             grpc,
-                            mock(ServiceMetricsReporter.class),
+                            mock(ApiMetricsReporter.class),
                             context.getEnvironment(),
                             new org.flexlb.util.ApplicationWarmupState(),
                             mock(AbstractRequestScheduler.class),
@@ -115,8 +115,7 @@ class ApplicationLifecycleTest {
         try (var context = new AnnotationConfigApplicationContext()) {
             context.registerBean(MasterStatusService.class, () -> mock(MasterStatusService.class));
             context.registerBean(FlexlbGrpcServer.class, () -> mock(FlexlbGrpcServer.class));
-            context.registerBean(
-                    ServiceMetricsReporter.class, () -> mock(ServiceMetricsReporter.class));
+            context.registerBean(ApiMetricsReporter.class, () -> mock(ApiMetricsReporter.class));
             context.registerBean(org.flexlb.util.ApplicationWarmupState.class);
             context.registerBean(
                     org.flexlb.balance.schedule.RequestRepository.class,
@@ -148,7 +147,7 @@ class ApplicationLifecycleTest {
     void normalServiceDoesNotDrainAndRepeatedOfflineIsIdempotent() {
         var consistency = mock(MasterStatusService.class);
         var grpc = mock(FlexlbGrpcServer.class);
-        var reporter = mock(ServiceMetricsReporter.class);
+        var reporter = mock(ApiMetricsReporter.class);
         var environment = mock(Environment.class);
         when(environment.getActiveProfiles()).thenReturn(new String[0]);
         var lifecycle =
@@ -176,8 +175,7 @@ class ApplicationLifecycleTest {
         verify(grpc).drain();
         verify(reporter)
                 .reportDuration(
-                        org.mockito.ArgumentMatchers.eq(
-                                ServiceMetricsReporter.Event.SHUTDOWN_COMPLETE),
+                        org.mockito.ArgumentMatchers.eq(ApiMetricsReporter.Event.SHUTDOWN_COMPLETE),
                         anyLong());
     }
 }

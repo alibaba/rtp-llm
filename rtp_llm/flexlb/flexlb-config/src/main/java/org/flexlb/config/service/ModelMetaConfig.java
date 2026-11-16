@@ -4,7 +4,6 @@ import org.apache.commons.lang3.tuple.Pair;
 import org.flexlb.config.loading.parser.ModelServiceConfigParser;
 import org.flexlb.util.CommonConstants;
 import org.flexlb.util.IdUtils;
-import org.flexlb.util.discovery.DiscoveryEndpoint;
 
 import java.util.Collection;
 import java.util.Collections;
@@ -71,7 +70,7 @@ public class ModelMetaConfig {
     /**
      * Return a fresh structural list for the single configured service.
      */
-    public List<Pair<String, DiscoveryEndpoint>> endpointsWithGroup(
+    public List<Pair<String, WorkerDiscoveryEndpoint>> endpointsWithGroup(
             String requestedModelName, RoleType role) {
         if (requestedModelName == null || role == null) {
             return Collections.emptyList();

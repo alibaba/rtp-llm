@@ -7,10 +7,10 @@ import org.flexlb.cache.match.CacheMatchProvider;
 import org.flexlb.cache.metrics.CacheMetricsReporter;
 import org.flexlb.config.cache.CacheMatchConfiguration;
 import org.flexlb.config.service.RoleType;
-import org.flexlb.util.discovery.DiscoveredHost;
 import org.flexlb.worker.cache.CacheStatus;
 import org.flexlb.worker.cache.WorkerCacheUpdateResult;
 import org.flexlb.worker.rpc.EngineAddressResolver;
+import org.flexlb.worker.status.WorkerHost;
 import org.flexlb.worker.status.WorkerStatus;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -48,13 +48,12 @@ public class LocalSyncCacheMatchProvider
     }
 
     @Override
-    public void onAddressUpdate(List<DiscoveredHost> hosts) {
+    public void onAddressUpdate(List<WorkerHost> hosts) {
         if (hosts == null) {
             log.warn("Ignoring null engine address update for local cache cleanup");
             return;
         }
-        kvCacheManager.removeStaleEngineCaches(
-                hosts.stream().map(DiscoveredHost::getIpPort).toList());
+        kvCacheManager.removeStaleEngineCaches(hosts.stream().map(WorkerHost::getIpPort).toList());
     }
 
     @Override

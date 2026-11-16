@@ -17,7 +17,7 @@ class WorkerHostTest {
     @ParameterizedTest
     @NullAndEmptySource
     @ValueSource(strings = "cn-hangzhou")
-    void discoveryFactoryPreservesSiteAndDefaultPorts(String site) {
+    void discoveryFactoryPreservesSiteAndProviderPort(String site) {
         // Keep the three-argument API used by the separately built internal VipServer adapter.
         List<DiscoveredHost> hosts =
                 List.of("127.0.0.1").stream()
@@ -27,9 +27,6 @@ class WorkerHostTest {
         DiscoveredHost host = hosts.get(0);
         assertEquals("127.0.0.1:8080", host.getIpPort());
         assertEquals(8080, host.getPort());
-        assertEquals(8081, host.getGrpcPort());
-        assertEquals(8085, host.getHttpServerPort());
         assertEquals(site == null ? "" : site, host.getSite());
-        assertEquals("", host.getGroup());
     }
 }

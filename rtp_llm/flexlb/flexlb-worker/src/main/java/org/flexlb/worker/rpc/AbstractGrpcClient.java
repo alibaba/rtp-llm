@@ -4,11 +4,11 @@ import io.grpc.Deadline;
 import io.grpc.ManagedChannel;
 import lombok.Getter;
 import org.flexlb.util.Logger;
-import org.flexlb.util.discovery.DiscoveredHost;
 import org.flexlb.util.metrics.GrpcReporter;
 import org.flexlb.util.network.GrpcCallTrace;
 import org.flexlb.worker.rpc.protocol.MultimodalRpcServiceGrpc;
 import org.flexlb.worker.rpc.protocol.RpcServiceGrpc;
+import org.flexlb.worker.status.WorkerHost;
 import org.springframework.scheduling.annotation.Scheduled;
 
 import javax.annotation.PreDestroy;
@@ -45,7 +45,7 @@ public abstract class AbstractGrpcClient implements EngineAddressResolver.Listen
      * @param hosts Latest worker address list in format ip:httpPort
      */
     @Override
-    public void onAddressUpdate(List<DiscoveredHost> hosts) {
+    public void onAddressUpdate(List<WorkerHost> hosts) {
         if (hosts == null) {
             Logger.error("received null ipPort list");
             return;
@@ -142,12 +142,12 @@ public abstract class AbstractGrpcClient implements EngineAddressResolver.Listen
         throw new IllegalArgumentException("Invalid service key format: " + serviceKey);
     }
 
-    private void updateGrpcChannelPool(List<DiscoveredHost> hosts) {
+    private void updateGrpcChannelPool(List<WorkerHost> hosts) {
         Set<String /*ip:port:serviceType*/> currentKeys = new HashSet<>(channelPool.keySet());
         Set<String /*ip:port:serviceType*/> addedKeys = new HashSet<>();
 
         // Identify new and retained workers, mark channels to be removed
-        for (DiscoveredHost host : hosts) {
+        for (WorkerHost host : hosts) {
             String ip = host.getIp();
             for (ServiceType serviceType : ServiceType.values()) {
                 if (!precreate(serviceType)) continue;

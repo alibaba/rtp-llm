@@ -5,7 +5,6 @@ import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.cache.KvcmConfig;
-import org.flexlb.util.discovery.DiscoveryEndpoint;
 import org.flexlb.util.discovery.RoutingServiceDiscovery;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -54,7 +53,7 @@ public class ModelServiceConfiguration {
             throw new IllegalArgumentException(
                     "MODEL_SERVICE_CONFIG must contain at least one role endpoint");
         }
-        for (DiscoveryEndpoint endpoint : endpoints) {
+        for (WorkerDiscoveryEndpoint endpoint : endpoints) {
             validateEngineEndpointConfiguration(endpoint);
             serviceDiscovery.validate(endpoint);
         }
@@ -63,7 +62,7 @@ public class ModelServiceConfiguration {
         validateOptimizer(serviceRoute.getOptimizer(), serviceDiscovery);
     }
 
-    private void validateEngineEndpointConfiguration(DiscoveryEndpoint endpoint) {
+    private void validateEngineEndpointConfiguration(WorkerDiscoveryEndpoint endpoint) {
         int multiEngineNum = endpoint.getMultiEngineNum();
         if (multiEngineNum < 1) {
             throw new IllegalArgumentException(

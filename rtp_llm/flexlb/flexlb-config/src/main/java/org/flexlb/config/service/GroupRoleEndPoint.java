@@ -3,7 +3,6 @@ package org.flexlb.config.service;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
-import org.flexlb.util.discovery.DiscoveryEndpoint;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -18,21 +17,21 @@ public class GroupRoleEndPoint {
     private String group;
 
     @JsonProperty("prefill_endpoint")
-    private DiscoveryEndpoint prefillEndpoint;
+    private WorkerDiscoveryEndpoint prefillEndpoint;
 
     @JsonProperty("decode_endpoint")
-    private DiscoveryEndpoint decodeEndpoint;
+    private WorkerDiscoveryEndpoint decodeEndpoint;
 
     @JsonProperty("vit_endpoint")
-    private DiscoveryEndpoint vitEndpoint;
+    private WorkerDiscoveryEndpoint vitEndpoint;
 
     @JsonProperty("encoder_endpoint")
-    private DiscoveryEndpoint encoderEndpoint;
+    private WorkerDiscoveryEndpoint encoderEndpoint;
 
     @JsonProperty("pd_fusion_endpoint")
-    private DiscoveryEndpoint pdFusionEndpoint;
+    private WorkerDiscoveryEndpoint pdFusionEndpoint;
 
-    public DiscoveryEndpoint getRoleEndpoint(RoleType roleType) {
+    public WorkerDiscoveryEndpoint getRoleEndpoint(RoleType roleType) {
         if (roleType == RoleType.PREFILL) {
             return prefillEndpoint;
         } else if (roleType == RoleType.DECODE) {
@@ -49,13 +48,13 @@ public class GroupRoleEndPoint {
 
     void applyGroupToEndpoints() {
         String endpointGroup = group == null ? "" : group;
-        for (DiscoveryEndpoint endpoint : getAllEndpoints()) {
+        for (WorkerDiscoveryEndpoint endpoint : getAllEndpoints()) {
             endpoint.setGroup(endpointGroup);
         }
     }
 
-    List<DiscoveryEndpoint> getAllEndpoints() {
-        List<DiscoveryEndpoint> endpoints = new ArrayList<>();
+    List<WorkerDiscoveryEndpoint> getAllEndpoints() {
+        List<WorkerDiscoveryEndpoint> endpoints = new ArrayList<>();
         if (prefillEndpoint != null) {
             endpoints.add(prefillEndpoint);
         }

@@ -11,6 +11,7 @@ import io.grpc.netty.NettyServerBuilder;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.api.ServerScheduleLatencyRecorder;
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.flexlb.api.protocol.FlexlbScheduleProtocol;
 import org.flexlb.api.protocol.FlexlbServiceGrpc;
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
@@ -22,7 +23,6 @@ import org.flexlb.balance.schedule.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.master.MasterStatusService;
 import org.flexlb.worker.endpoint.StrategyErrorType;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -443,7 +443,7 @@ class FlexlbForwardHopGuardNettyTest {
             local.setCode(200);
             when(requestScheduler.submit(any()))
                     .thenReturn(CompletableFuture.completedFuture(local));
-            ServiceMetricsReporter healthReporter = mock(ServiceMetricsReporter.class);
+            ApiMetricsReporter healthReporter = mock(ApiMetricsReporter.class);
 
             channelEventLoop = new NioEventLoopGroup(1);
             channelExecutor = Executors.newFixedThreadPool(2);

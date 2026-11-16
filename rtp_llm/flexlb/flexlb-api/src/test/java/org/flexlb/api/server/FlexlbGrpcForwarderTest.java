@@ -12,10 +12,10 @@ import io.grpc.MethodDescriptor;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.netty.channel.EventLoopGroup;
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.flexlb.api.protocol.FlexlbScheduleProtocol;
 import org.flexlb.config.ConfigService;
 import org.flexlb.master.MasterStatusService;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.slf4j.LoggerFactory;
@@ -50,7 +50,7 @@ class FlexlbGrpcForwarderTest {
     @Test
     void missingMasterDoesNotAttemptRpc() {
         MasterStatusService consistency = mock(MasterStatusService.class);
-        ServiceMetricsReporter reporter = mock(ServiceMetricsReporter.class);
+        ApiMetricsReporter reporter = mock(ApiMetricsReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
 
         FlexlbGrpcForwarder.MasterForwardResult result =
@@ -65,7 +65,7 @@ class FlexlbGrpcForwarderTest {
     @Test
     void missingMasterStateQueryReturnsNullWithoutGuardSideEffects() {
         MasterStatusService consistency = mock(MasterStatusService.class);
-        ServiceMetricsReporter reporter = mock(ServiceMetricsReporter.class);
+        ApiMetricsReporter reporter = mock(ApiMetricsReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
 
         FlexlbScheduleProtocol.GetRequestStateResponsePB result =
@@ -86,7 +86,7 @@ class FlexlbGrpcForwarderTest {
     @Test
     void grpcFailureDoesNotSetIndependentDeadlineAndKeepsChannelUntilShutdown() throws Exception {
         MasterStatusService consistency = masterAt("10.0.0.2:7001");
-        ServiceMetricsReporter reporter = mock(ServiceMetricsReporter.class);
+        ApiMetricsReporter reporter = mock(ApiMetricsReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
         ManagedChannel channel = mock(ManagedChannel.class);
         ArgumentCaptor<CallOptions> callOptions = ArgumentCaptor.forClass(CallOptions.class);
@@ -115,7 +115,7 @@ class FlexlbGrpcForwarderTest {
     @Test
     void grpcFailureLogsStatusDescriptionAndThrowableForScheduleAndCancel() throws Exception {
         MasterStatusService consistency = masterAt("10.0.0.2:7001");
-        ServiceMetricsReporter reporter = mock(ServiceMetricsReporter.class);
+        ApiMetricsReporter reporter = mock(ApiMetricsReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
         ManagedChannel channel = mock(ManagedChannel.class);
         String description = "stream reset\nfrom peer";
@@ -202,7 +202,7 @@ class FlexlbGrpcForwarderTest {
     void forwardedRequestCannotBeForwardedAgain() throws Exception {
         MasterStatusService consistency = masterAt("10.0.0.2:7001");
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
-        ServiceMetricsReporter reporter = mock(ServiceMetricsReporter.class);
+        ApiMetricsReporter reporter = mock(ApiMetricsReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
 
         FlexlbGrpcForwarder.MasterForwardResult result =
@@ -223,7 +223,7 @@ class FlexlbGrpcForwarderTest {
     void cancellationReceivedBySecondFollowerIsNotRelayedAgain() throws Exception {
         MasterStatusService consistency = masterAt("10.0.0.2:7001");
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
-        ServiceMetricsReporter reporter = mock(ServiceMetricsReporter.class);
+        ApiMetricsReporter reporter = mock(ApiMetricsReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
 
         FlexlbGrpcForwarder.CancelForwardResult result =
@@ -246,7 +246,7 @@ class FlexlbGrpcForwarderTest {
     void staleSelfLeaderIsRejectedWithoutOpeningChannel() throws Exception {
         MasterStatusService consistency = masterAt("10.0.0.3:7001");
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
-        ServiceMetricsReporter reporter = mock(ServiceMetricsReporter.class);
+        ApiMetricsReporter reporter = mock(ApiMetricsReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
 
         FlexlbGrpcForwarder.MasterForwardResult result =
@@ -263,7 +263,7 @@ class FlexlbGrpcForwarderTest {
         MasterStatusService consistency = mock(MasterStatusService.class);
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
         when(consistency.getMasterHostIpPort()).thenReturn("10.0.0.3:7001");
-        ServiceMetricsReporter reporter = mock(ServiceMetricsReporter.class);
+        ApiMetricsReporter reporter = mock(ApiMetricsReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
 
         FlexlbGrpcForwarder.MasterForwardResult result =
@@ -280,7 +280,7 @@ class FlexlbGrpcForwarderTest {
     void shutdownRejectsNewForwardWithoutCreatingOrLeakingAChannel() throws Exception {
         MasterStatusService consistency = masterAt("10.0.0.2:7001");
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
-        ServiceMetricsReporter reporter = mock(ServiceMetricsReporter.class);
+        ApiMetricsReporter reporter = mock(ApiMetricsReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
 
         forwarder.shutdown();
@@ -297,7 +297,7 @@ class FlexlbGrpcForwarderTest {
     void forwardedStateQueryCannotBeForwardedAgain() throws Exception {
         MasterStatusService consistency = masterAt("10.0.0.2:7001");
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
-        ServiceMetricsReporter reporter = mock(ServiceMetricsReporter.class);
+        ApiMetricsReporter reporter = mock(ApiMetricsReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
 
         FlexlbScheduleProtocol.GetRequestStateResponsePB result =
@@ -319,7 +319,7 @@ class FlexlbGrpcForwarderTest {
     void stateQueryNeverForwardsToStaleSelfTarget() throws Exception {
         MasterStatusService consistency = masterAt("10.0.0.3:7001");
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
-        ServiceMetricsReporter reporter = mock(ServiceMetricsReporter.class);
+        ApiMetricsReporter reporter = mock(ApiMetricsReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
 
         FlexlbScheduleProtocol.GetRequestStateResponsePB result =
@@ -340,7 +340,7 @@ class FlexlbGrpcForwarderTest {
     void unifiedGuardGivesHopLimitPrecedenceForBothOperations() throws Exception {
         MasterStatusService consistency = masterAt("10.0.0.3:7001");
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
-        ServiceMetricsReporter reporter = mock(ServiceMetricsReporter.class);
+        ApiMetricsReporter reporter = mock(ApiMetricsReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
 
         FlexlbGrpcForwarder.MasterForwardResult scheduleResult =
@@ -572,7 +572,7 @@ class FlexlbGrpcForwarderTest {
     void forwardByteBudgetRejectsOversizeForwardBeforeRpcAndReleasesFully() throws Exception {
         MasterStatusService consistency = masterAt("10.0.0.2:7001");
         when(consistency.getLocalHostIp()).thenReturn("10.0.0.3");
-        ServiceMetricsReporter reporter = mock(ServiceMetricsReporter.class);
+        ApiMetricsReporter reporter = mock(ApiMetricsReporter.class);
         FlexlbGrpcForwarder forwarder = forwarder(consistency, reporter);
         // Shrink the budget below the serialized request size via reflection
         // (the production default is 4GiB; the constructor path is not injectable
@@ -624,7 +624,7 @@ class FlexlbGrpcForwarderTest {
     }
 
     private static FlexlbGrpcForwarder forwarder(
-            MasterStatusService consistency, ServiceMetricsReporter reporter) {
+            MasterStatusService consistency, ApiMetricsReporter reporter) {
         return new FlexlbGrpcForwarder(
                 consistency,
                 mock(ConfigService.class),

@@ -2,9 +2,7 @@ package org.flexlb.util.discovery;
 
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
-import org.flexlb.util.network.BackendServiceProtocolEnum;
 
-import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
@@ -49,18 +47,13 @@ public class RoutingServiceDiscovery implements ServiceDiscovery {
     @Override
     public List<DiscoveredHost> getHosts(DiscoveryEndpoint endpoint) {
         bindRuntimeConfig(endpoint);
-        List<DiscoveredHost> discoveredHosts = validatedProviderFor(endpoint).getHosts(endpoint);
-        return normalizeHosts(discoveredHosts, endpoint);
+        return validatedProviderFor(endpoint).getHosts(endpoint);
     }
 
     @Override
     public void listen(DiscoveryEndpoint endpoint, ServiceHostListener listener) {
         bindRuntimeConfig(endpoint);
-        ServiceHostListener normalizedListener =
-                listener == null
-                        ? null
-                        : hosts -> listener.onHostsChanged(normalizeHosts(hosts, endpoint));
-        validatedProviderFor(endpoint).listen(endpoint, normalizedListener);
+        validatedProviderFor(endpoint).listen(endpoint, listener);
     }
 
     @Override
@@ -108,55 +101,6 @@ public class RoutingServiceDiscovery implements ServiceDiscovery {
     private void bindRuntimeConfig(DiscoveryEndpoint endpoint) {
         if (endpoint != null && endpoint.getDiscovery() != null) {
             endpoint.getDiscovery().bindRuntimeConfig(runtimeConfigSupplier);
-        }
-    }
-
-    private List<DiscoveredHost> normalizeHosts(
-            List<DiscoveredHost> discoveredHosts, DiscoveryEndpoint endpoint) {
-        if (discoveredHosts == null || discoveredHosts.isEmpty()) {
-            return List.of();
-        }
-
-        boolean grpcEndpoint =
-                BackendServiceProtocolEnum.GRPC.getName().equals(endpoint.getProtocol());
-        int multiEngineNum = endpoint.getMultiEngineNum();
-        List<DiscoveredHost> normalizedHosts =
-                new ArrayList<>(discoveredHosts.size() * multiEngineNum);
-        for (DiscoveredHost host : discoveredHosts) {
-            int discoveredPort = host.getPort();
-            int httpPort = grpcEndpoint ? discoveredPort - 1 : discoveredPort;
-            int grpcPort = grpcEndpoint ? discoveredPort : discoveredPort + 1;
-            int workerStatusBasePort =
-                    endpoint.getWorkerStatusPort() == null
-                            ? grpcPort
-                            : endpoint.getWorkerStatusPort();
-            requireValidPort(httpPort, "httpPort");
-            requireValidPort(grpcPort, "grpcPort");
-            requireValidPort(httpPort + 5, "httpServerPort");
-            requireValidPort(workerStatusBasePort, "workerStatusPort");
-            requireValidPort(
-                    (long) workerStatusBasePort + multiEngineNum - 1, "lastWorkerStatusPort");
-            for (int engineIndex = 0; engineIndex < multiEngineNum; engineIndex++) {
-                normalizedHosts.add(
-                        new DiscoveredHost(
-                                host.getIp(),
-                                httpPort,
-                                grpcPort,
-                                httpPort + 5,
-                                workerStatusBasePort + engineIndex,
-                                host.getSite(),
-                                endpoint.getGroup(),
-                                host.getDeploymentName(),
-                                engineIndex,
-                                multiEngineNum));
-            }
-        }
-        return normalizedHosts;
-    }
-
-    private static void requireValidPort(long port, String name) {
-        if (port <= 0 || port > 65535) {
-            throw new IllegalArgumentException(name + " must be in [1, 65535], received " + port);
         }
     }
 }

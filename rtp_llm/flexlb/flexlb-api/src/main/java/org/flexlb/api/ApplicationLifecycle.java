@@ -1,6 +1,7 @@
 package org.flexlb.api;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.flexlb.api.server.FlexlbGrpcServer;
 import org.flexlb.balance.schedule.AbstractRequestScheduler;
 import org.flexlb.balance.schedule.EngineCancellation;
@@ -13,7 +14,6 @@ import org.flexlb.util.ApplicationWarmupState;
 import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
 import org.flexlb.worker.endpoint.EndpointRegistry;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.ApplicationContextAware;
@@ -45,7 +45,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
 
     private final MasterStatusService consistency;
     private final FlexlbGrpcServer grpcServer;
-    private final ServiceMetricsReporter reporter;
+    private final ApiMetricsReporter reporter;
     private final Environment environment;
     private final ApplicationWarmupState warmupState;
 
@@ -60,7 +60,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
     public ApplicationLifecycle(
             MasterStatusService consistency,
             FlexlbGrpcServer grpcServer,
-            ServiceMetricsReporter reporter,
+            ApiMetricsReporter reporter,
             Environment environment,
             ApplicationWarmupState warmupState,
             AbstractRequestScheduler scheduling,
@@ -89,7 +89,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
     ApplicationLifecycle(
             MasterStatusService consistency,
             FlexlbGrpcServer grpcServer,
-            ServiceMetricsReporter reporter,
+            ApiMetricsReporter reporter,
             Environment environment,
             ApplicationWarmupState warmupState,
             AbstractRequestScheduler scheduling,
@@ -134,7 +134,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         try {
             consistency.start();
             reporter.reportDuration(
-                    ServiceMetricsReporter.Event.ZK_NODE_ONLINE,
+                    ApiMetricsReporter.Event.ZK_NODE_ONLINE,
                     System.currentTimeMillis() - consistencyStartedAt);
         } catch (Exception e) {
             Logger.error("application online registration failed", e);
@@ -145,7 +145,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         try {
             Thread.sleep(warmUpWaitMs);
             reporter.reportDuration(
-                    ServiceMetricsReporter.Event.WARMER_COMPLETE,
+                    ApiMetricsReporter.Event.WARMER_COMPLETE,
                     System.currentTimeMillis() - warmUpStartedAt);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -180,12 +180,12 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         }
         if (!shutdownReceived) {
             shutdownReceived = true;
-            reporter.reportDuration(ServiceMetricsReporter.Event.HEALTH_CHECK_OFFLINE, 0L);
+            reporter.reportDuration(ApiMetricsReporter.Event.HEALTH_CHECK_OFFLINE, 0L);
             long consistencyStartedAt = System.currentTimeMillis();
             try {
                 consistency.offline();
                 reporter.reportDuration(
-                        ServiceMetricsReporter.Event.ZK_NODE_OFFLINE,
+                        ApiMetricsReporter.Event.ZK_NODE_OFFLINE,
                         System.currentTimeMillis() - consistencyStartedAt);
             } catch (Throwable failure) {
                 Logger.error("application offline deregistration failed", failure);
@@ -199,7 +199,7 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         closeScheduling(System.nanoTime() + TimeUnit.SECONDS.toNanos(30));
         shutdownCompletedSuccessfully = true;
         reporter.reportDuration(
-                ServiceMetricsReporter.Event.SHUTDOWN_COMPLETE,
+                ApiMetricsReporter.Event.SHUTDOWN_COMPLETE,
                 TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - drainStartedAt));
         return true;
     }

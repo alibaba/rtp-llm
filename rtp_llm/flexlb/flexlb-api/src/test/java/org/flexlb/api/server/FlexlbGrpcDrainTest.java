@@ -11,6 +11,7 @@ import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.api.ServerScheduleLatencyRecorder;
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.flexlb.api.protocol.FlexlbScheduleProtocol.FlexlbScheduleRequestPB;
 import org.flexlb.api.protocol.FlexlbScheduleProtocol.FlexlbScheduleResponsePB;
 import org.flexlb.api.protocol.FlexlbServiceGrpc;
@@ -20,7 +21,6 @@ import org.flexlb.balance.request.Response;
 import org.flexlb.balance.schedule.AbstractRequestScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.master.MasterStatusService;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.env.MockEnvironment;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -68,7 +68,7 @@ class FlexlbGrpcDrainTest {
                         org.flexlb.balance.schedule.SchedulerTestSupport.repository(
                                 mock(AbstractRequestScheduler.class)),
                         mock(MasterStatusService.class),
-                        mock(ServiceMetricsReporter.class),
+                        mock(ApiMetricsReporter.class),
                         mock(FlexlbGrpcForwarder.class),
                         config,
                         mock(DeliveryMetricsReporter.class),

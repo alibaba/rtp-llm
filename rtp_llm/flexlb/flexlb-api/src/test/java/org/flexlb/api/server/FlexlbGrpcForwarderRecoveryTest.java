@@ -7,6 +7,7 @@ import io.grpc.Status;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.flexlb.api.protocol.FlexlbScheduleProtocol.FlexlbCancelRequestPB;
 import org.flexlb.api.protocol.FlexlbScheduleProtocol.FlexlbCancelResponsePB;
 import org.flexlb.api.protocol.FlexlbScheduleProtocol.FlexlbScheduleRequestPB;
@@ -17,7 +18,6 @@ import org.flexlb.api.protocol.FlexlbServiceGrpc;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.master.MasterStatusService;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -313,7 +313,7 @@ class FlexlbGrpcForwarderRecoveryTest {
                     new FlexlbGrpcForwarder(
                             consistency,
                             config,
-                            mock(ServiceMetricsReporter.class),
+                            mock(ApiMetricsReporter.class),
                             eventLoops,
                             executor);
             if (rejectDrain) {

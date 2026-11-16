@@ -10,7 +10,7 @@ import org.flexlb.config.service.GroupRoleEndPoint;
 import org.flexlb.config.service.ModelMetaConfig;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.config.service.ServiceRoute;
-import org.flexlb.util.discovery.DiscoveryEndpoint;
+import org.flexlb.config.service.WorkerDiscoveryEndpoint;
 import org.flexlb.worker.cache.CacheStatus;
 import org.flexlb.worker.status.WorkerStatus;
 import org.flexlb.worker.status.WorkerStatusProvider;
@@ -266,7 +266,7 @@ class LocalStandbyCacheManagerTest {
         route.setKvcm(kvcmTopology);
         GroupRoleEndPoint roleEndpoint = new GroupRoleEndPoint();
         roleEndpoint.setGroup("default");
-        roleEndpoint.setPrefillEndpoint(new DiscoveryEndpoint());
+        roleEndpoint.setPrefillEndpoint(new WorkerDiscoveryEndpoint());
         route.setRoleEndpoints(List.of(roleEndpoint));
 
         ModelMetaConfig config = new ModelMetaConfig();

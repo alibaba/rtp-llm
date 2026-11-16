@@ -22,6 +22,7 @@ import io.opentelemetry.sdk.trace.SdkTracerProvider;
 import io.opentelemetry.sdk.trace.data.SpanData;
 import io.opentelemetry.sdk.trace.export.SimpleSpanProcessor;
 import io.opentelemetry.sdk.trace.export.SpanExporter;
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.flexlb.api.protocol.FlexlbScheduleProtocol;
 import org.flexlb.api.protocol.FlexlbServiceGrpc;
 import org.flexlb.balance.trace.FlexlbTrace;
@@ -29,7 +30,6 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.InternalRuntimeSettings;
 import org.flexlb.master.MasterStatusService;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -98,7 +98,7 @@ class FlexlbGrpcForwarderAsyncTest {
                                         received.countDown();
                                     })) {
                 FlexlbGrpcForwarder forwarder =
-                        forwarder(fixture.channel, mock(ServiceMetricsReporter.class));
+                        forwarder(fixture.channel, mock(ApiMetricsReporter.class));
                 CompletionStage<FlexlbGrpcForwarder.MasterForwardResult> pending;
                 try (var scope = traceParent().makeCurrent()) {
                     pending = forwarder.forwardScheduleToMaster(request("901"));
@@ -186,7 +186,7 @@ class FlexlbGrpcForwarderAsyncTest {
                 RpcFixture fixture =
                         RpcFixture.start((request, observer) -> received.countDown())) {
             FlexlbGrpcForwarder forwarder =
-                    forwarder(fixture.channel, mock(ServiceMetricsReporter.class));
+                    forwarder(fixture.channel, mock(ApiMetricsReporter.class));
             CompletionStage<FlexlbGrpcForwarder.MasterForwardResult> pending;
             try (var scope = traceParent().makeCurrent()) {
                 pending = forwarder.forwardScheduleToMaster(request("902"));
@@ -225,7 +225,7 @@ class FlexlbGrpcForwarderAsyncTest {
                                     observer.onCompleted();
                                 })) {
             FlexlbGrpcForwarder forwarder =
-                    forwarder(fixture.channel, mock(ServiceMetricsReporter.class));
+                    forwarder(fixture.channel, mock(ApiMetricsReporter.class));
             Context.CancellableContext cancelled = Context.current().withCancellation();
             cancelled.cancel(null);
             var result =
@@ -271,7 +271,7 @@ class FlexlbGrpcForwarderAsyncTest {
                                             .build());
                             observer.onCompleted();
                         })) {
-            ServiceMetricsReporter reporter = mock(ServiceMetricsReporter.class);
+            ApiMetricsReporter reporter = mock(ApiMetricsReporter.class);
             FlexlbGrpcForwarder forwarder = forwarder(fixture.channel, reporter);
 
             FlexlbGrpcForwarder.MasterForwardResult result =
@@ -295,7 +295,7 @@ class FlexlbGrpcForwarderAsyncTest {
                                         Status.UNAVAILABLE
                                                 .withDescription("leader unavailable")
                                                 .asRuntimeException()))) {
-            ServiceMetricsReporter reporter = mock(ServiceMetricsReporter.class);
+            ApiMetricsReporter reporter = mock(ApiMetricsReporter.class);
             FlexlbGrpcForwarder forwarder = forwarder(fixture.channel, reporter);
 
             FlexlbGrpcForwarder.MasterForwardResult result =
@@ -319,7 +319,7 @@ class FlexlbGrpcForwarderAsyncTest {
                         .usePlaintext()
                         .disableRetry()
                         .build();
-        FlexlbGrpcForwarder forwarder = forwarder(channel, mock(ServiceMetricsReporter.class));
+        FlexlbGrpcForwarder forwarder = forwarder(channel, mock(ApiMetricsReporter.class));
         try {
             var result = await(forwarder.forwardScheduleToMaster(request("107")));
             assertEquals(Status.Code.UNAVAILABLE, Status.fromThrowable(result.error()).getCode());
@@ -340,7 +340,7 @@ class FlexlbGrpcForwarderAsyncTest {
         CountDownLatch masterReceivedRequest = new CountDownLatch(1);
         try (RpcFixture fixture =
                 RpcFixture.start((request, observer) -> masterReceivedRequest.countDown())) {
-            ServiceMetricsReporter reporter = mock(ServiceMetricsReporter.class);
+            ApiMetricsReporter reporter = mock(ApiMetricsReporter.class);
             FlexlbGrpcForwarder forwarder = forwarder(fixture.channel, reporter);
             Context.CancellableContext inbound = Context.current().withCancellation();
 
@@ -365,7 +365,7 @@ class FlexlbGrpcForwarderAsyncTest {
         ScheduledExecutorService deadlineTimer = Executors.newSingleThreadScheduledExecutor();
         try (RpcFixture fixture =
                 RpcFixture.start((request, observer) -> masterReceivedRequest.countDown())) {
-            ServiceMetricsReporter reporter = mock(ServiceMetricsReporter.class);
+            ApiMetricsReporter reporter = mock(ApiMetricsReporter.class);
             FlexlbGrpcForwarder forwarder = forwarder(fixture.channel, reporter);
             Context.CancellableContext inbound =
                     Context.current().withDeadlineAfter(500, TimeUnit.MILLISECONDS, deadlineTimer);
@@ -397,7 +397,7 @@ class FlexlbGrpcForwarderAsyncTest {
                                             .build());
                             observer.onCompleted();
                         })) {
-            ServiceMetricsReporter reporter = mock(ServiceMetricsReporter.class);
+            ApiMetricsReporter reporter = mock(ApiMetricsReporter.class);
             doThrow(new RuntimeException("monitor unavailable"))
                     .when(reporter)
                     .reportForwardToMasterResult("10.0.0.2", "200");
@@ -428,7 +428,7 @@ class FlexlbGrpcForwarderAsyncTest {
                             masterObserver.set(observer);
                             masterReceivedRequest.countDown();
                         })) {
-            ServiceMetricsReporter reporter = mock(ServiceMetricsReporter.class);
+            ApiMetricsReporter reporter = mock(ApiMetricsReporter.class);
             FlexlbGrpcForwarder forwarder = forwarder(fixture.channel, reporter);
             AtomicReference<CompletionStage<FlexlbGrpcForwarder.CancelForwardResult>> pending =
                     new AtomicReference<>();
@@ -481,7 +481,7 @@ class FlexlbGrpcForwarderAsyncTest {
             FlexlbGrpcForwarder forwarder =
                     forwarder(
                             fixture.channel,
-                            mock(ServiceMetricsReporter.class),
+                            mock(ApiMetricsReporter.class),
                             "10.0.0.9:7001",
                             1000L);
 
@@ -506,7 +506,7 @@ class FlexlbGrpcForwarderAsyncTest {
         CountDownLatch masterReceivedRequest = new CountDownLatch(1);
         try (RpcFixture fixture =
                 RpcFixture.startCancel((request, observer) -> masterReceivedRequest.countDown())) {
-            ServiceMetricsReporter reporter = mock(ServiceMetricsReporter.class);
+            ApiMetricsReporter reporter = mock(ApiMetricsReporter.class);
             FlexlbGrpcForwarder forwarder =
                     forwarder(fixture.channel, reporter, MASTER_HTTP_ADDRESS, 100L);
 
@@ -553,7 +553,7 @@ class FlexlbGrpcForwarderAsyncTest {
                     new FlexlbGrpcForwarder(
                             consistency,
                             config,
-                            mock(ServiceMetricsReporter.class),
+                            mock(ApiMetricsReporter.class),
                             eventLoopGroup,
                             Runnable::run);
             try {
@@ -607,12 +607,12 @@ class FlexlbGrpcForwarderAsyncTest {
     }
 
     private static FlexlbGrpcForwarder forwarder(
-            ManagedChannel channel, ServiceMetricsReporter reporter) throws Exception {
+            ManagedChannel channel, ApiMetricsReporter reporter) throws Exception {
         return forwarder(channel, reporter, MASTER_HTTP_ADDRESS);
     }
 
     private static FlexlbGrpcForwarder forwarder(
-            ManagedChannel channel, ServiceMetricsReporter reporter, String currentMaster)
+            ManagedChannel channel, ApiMetricsReporter reporter, String currentMaster)
             throws Exception {
         return forwarder(
                 channel,
@@ -623,7 +623,7 @@ class FlexlbGrpcForwarderAsyncTest {
 
     private static FlexlbGrpcForwarder forwarder(
             ManagedChannel channel,
-            ServiceMetricsReporter reporter,
+            ApiMetricsReporter reporter,
             String currentMaster,
             long timeoutMs)
             throws Exception {

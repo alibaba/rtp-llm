@@ -5,7 +5,6 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
 import org.apache.commons.lang3.tuple.Pair;
 import org.flexlb.config.cache.KvcmConfig;
-import org.flexlb.util.discovery.DiscoveryEndpoint;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -50,19 +49,19 @@ public class ServiceRoute {
         }
     }
 
-    public List<Pair<String, DiscoveryEndpoint>> getAllEndpointsWithGroup(RoleType roleType) {
-        List<Pair<String, DiscoveryEndpoint>> endpoints = new ArrayList<>();
+    public List<Pair<String, WorkerDiscoveryEndpoint>> getAllEndpointsWithGroup(RoleType roleType) {
+        List<Pair<String, WorkerDiscoveryEndpoint>> endpoints = new ArrayList<>();
         for (GroupRoleEndPoint groupRoleEndPoint : roleEndpoints) {
-            DiscoveryEndpoint endpoint = groupRoleEndPoint.getRoleEndpoint(roleType);
+            WorkerDiscoveryEndpoint endpoint = groupRoleEndPoint.getRoleEndpoint(roleType);
             endpoints.add(Pair.of(groupRoleEndPoint.getGroup(), endpoint));
         }
         return endpoints;
     }
 
-    public List<DiscoveryEndpoint> getAllEndpoints() {
-        List<DiscoveryEndpoint> allEndpoints = new ArrayList<>();
+    public List<WorkerDiscoveryEndpoint> getAllEndpoints() {
+        List<WorkerDiscoveryEndpoint> allEndpoints = new ArrayList<>();
         for (GroupRoleEndPoint groupRoleEndPoint : roleEndpoints) {
-            List<DiscoveryEndpoint> endpointList = groupRoleEndPoint.getAllEndpoints();
+            List<WorkerDiscoveryEndpoint> endpointList = groupRoleEndPoint.getAllEndpoints();
             allEndpoints.addAll(endpointList);
         }
         return allEndpoints;

@@ -2,9 +2,7 @@ package org.flexlb.worker.status;
 
 import org.flexlb.config.service.RoleType;
 import org.flexlb.util.metrics.FlexMetricTags;
-import org.flexlb.util.metrics.FlexMetricType;
 import org.flexlb.util.metrics.FlexMonitor;
-import org.flexlb.util.metrics.FlexPriorityType;
 import org.flexlb.worker.endpoint.EndpointStats;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -37,11 +35,6 @@ class ServiceMetricsReporterSelectionMetricTest {
     @BeforeEach
     void setUp() {
         reporter = new ServiceMetricsReporter(monitor, workerDirectory);
-        verify(monitor)
-                .register(
-                        org.flexlb.util.metrics.MetricConstant.GRACEFUL_LIFECYCLE_EVENT,
-                        FlexMetricType.GAUGE,
-                        FlexPriorityType.PRECISE);
     }
 
     @ParameterizedTest

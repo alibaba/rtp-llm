@@ -54,7 +54,9 @@ class DefaultRequestPreemptionTest {
     void cancelAckDoesNotCompleteWaitAndLowerPriorityCannotTakeReleasedResources() {
         try (var f = new Fixture()) {
             assertTrue(f.preemption.start(f.selection, f.endpoint, f.acquired::set));
-            assertNotNull(f.request.currentResourceWait());
+            assertNotNull(
+                    org.springframework.test.util.ReflectionTestUtils.getField(
+                            f.request, "currentResourceWait"));
             verify(f.victimScheduler).cancel(f.victim, CancelReason.PRIORITY_PREEMPTED);
             f.runChecks();
             assertNull(f.acquired.get());
@@ -68,7 +70,9 @@ class DefaultRequestPreemptionTest {
             f.endpoint.rollbackSelection(c);
             f.runChecks();
             assertNotNull(f.acquired.get());
-            assertNull(f.request.currentResourceWait());
+            assertNull(
+                    org.springframework.test.util.ReflectionTestUtils.getField(
+                            f.request, "currentResourceWait"));
             assertTrue(f.preemption.isIdle());
             assertEquals(1, f.endpoint.selectionSnapshot().usage().occupiedRequests());
         }
@@ -86,7 +90,9 @@ class DefaultRequestPreemptionTest {
                             StrategyErrorType.REQUEST_CANCELLED,
                             "cancelled",
                             null));
-            assertNull(f.request.currentResourceWait());
+            assertNull(
+                    org.springframework.test.util.ReflectionTestUtils.getField(
+                            f.request, "currentResourceWait"));
             f.releaseWorker();
             assertNotNull(f.register("b", 20));
             f.runChecks();
@@ -101,7 +107,9 @@ class DefaultRequestPreemptionTest {
         try (var f = new Fixture()) {
             f.preemption.start(f.selection, f.endpoint, f.acquired::set);
             f.preemption.stopAdmission();
-            assertNull(f.request.currentResourceWait());
+            assertNull(
+                    org.springframework.test.util.ReflectionTestUtils.getField(
+                            f.request, "currentResourceWait"));
             f.runChecks();
             assertTrue(f.preemption.isIdle());
             assertEquals(1, f.endpoint.selectionSnapshot().usage().occupiedRequests());

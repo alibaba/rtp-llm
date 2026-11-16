@@ -3,13 +3,13 @@ package org.flexlb.worker.rpc;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
 import org.flexlb.config.service.ModelMetaConfig;
+import org.flexlb.config.service.WorkerDiscoveryEndpoint;
 import org.flexlb.util.Logger;
-import org.flexlb.util.discovery.DiscoveredHost;
-import org.flexlb.util.discovery.DiscoveryEndpoint;
 import org.flexlb.util.discovery.DiscoverySettings;
 import org.flexlb.util.discovery.ServiceDiscovery;
 import org.flexlb.util.discovery.ServiceDiscoveryType;
 import org.flexlb.util.discovery.ServiceHostListener;
+import org.flexlb.worker.status.WorkerHost;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -33,14 +33,14 @@ import java.util.concurrent.CopyOnWriteArrayList;
 @Slf4j
 @Component
 public class EngineAddressResolver {
-    private final Map<DiscoveryEndpoint, List<DiscoveredHost>> domainHostsMap =
+    private final Map<WorkerDiscoveryEndpoint, List<WorkerHost>> domainHostsMap =
             new ConcurrentHashMap<>();
     private final ServiceDiscovery serviceDiscovery;
     private final CopyOnWriteArrayList<Listener> listeners = new CopyOnWriteArrayList<>();
 
-    private volatile List<DiscoveredHost> allHosts = List.of();
+    private volatile List<WorkerHost> allHosts = List.of();
 
-    private final List<DiscoveryEndpoint> serviceEndpoints;
+    private final List<WorkerDiscoveryEndpoint> serviceEndpoints;
 
     public EngineAddressResolver(
             ServiceDiscovery serviceDiscovery, ModelMetaConfig modelMetaConfig) {
@@ -67,9 +67,14 @@ public class EngineAddressResolver {
     }
 
     private void setupListeners(
-            ServiceDiscovery serviceDiscovery, List<DiscoveryEndpoint> endpoints) {
-        for (DiscoveryEndpoint endpoint : endpoints) {
-            ServiceHostListener addressListener = hosts -> updateEndpointHosts(endpoint, hosts);
+            ServiceDiscovery serviceDiscovery, List<WorkerDiscoveryEndpoint> endpoints) {
+        for (WorkerDiscoveryEndpoint endpoint : endpoints) {
+            ServiceHostListener addressListener =
+                    hosts ->
+                            updateEndpointHosts(
+                                    endpoint,
+                                    org.flexlb.worker.status.WorkerAddressService.expandWorkerHosts(
+                                            hosts, endpoint));
             serviceDiscovery.listen(endpoint, addressListener);
         }
     }
@@ -80,15 +85,15 @@ public class EngineAddressResolver {
      * @param endpoint Service endpoint
      * @param hostList Host list
      */
-    private void updateEndpointHosts(DiscoveryEndpoint endpoint, List<DiscoveredHost> hostList) {
+    private void updateEndpointHosts(WorkerDiscoveryEndpoint endpoint, List<WorkerHost> hostList) {
         if (hostList == null || hostList.isEmpty()) {
             // Empty discovery must not retire existing channels or worker caches.
             return;
         }
         domainHostsMap.put(endpoint, List.copyOf(hostList));
         // Aggregate host lists from all addresses
-        List<DiscoveredHost> aggregatedHosts = new ArrayList<>();
-        for (List<DiscoveredHost> hosts : domainHostsMap.values()) {
+        List<WorkerHost> aggregatedHosts = new ArrayList<>();
+        for (List<WorkerHost> hosts : domainHostsMap.values()) {
             aggregatedHosts.addAll(hosts);
         }
         Logger.info(
@@ -102,7 +107,7 @@ public class EngineAddressResolver {
         }
     }
 
-    private void notifyListener(Listener listener, List<DiscoveredHost> hosts) {
+    private void notifyListener(Listener listener, List<WorkerHost> hosts) {
         try {
             listener.onAddressUpdate(hosts);
         } catch (Exception e) {
@@ -111,11 +116,13 @@ public class EngineAddressResolver {
     }
 
     private void initializeDomainHosts() {
-        Map<DiscoveryEndpoint, List<DiscoveredHost>> initialHosts = new LinkedHashMap<>();
-        for (DiscoveryEndpoint endpoint : serviceEndpoints) {
-            List<DiscoveredHost> hosts;
+        Map<WorkerDiscoveryEndpoint, List<WorkerHost>> initialHosts = new LinkedHashMap<>();
+        for (WorkerDiscoveryEndpoint endpoint : serviceEndpoints) {
+            List<WorkerHost> hosts;
             try {
-                hosts = serviceDiscovery.getHosts(endpoint);
+                hosts =
+                        org.flexlb.worker.status.WorkerAddressService.expandWorkerHosts(
+                                serviceDiscovery.getHosts(endpoint), endpoint);
             } catch (Exception e) {
                 throw new IllegalStateException(
                         "Failed to fetch initial engine hosts for endpoint: "
@@ -133,9 +140,11 @@ public class EngineAddressResolver {
     }
 
     private void fetchAllDomainsHosts() {
-        for (DiscoveryEndpoint endpoint : serviceEndpoints) {
+        for (WorkerDiscoveryEndpoint endpoint : serviceEndpoints) {
             try {
-                List<DiscoveredHost> hosts = serviceDiscovery.getHosts(endpoint);
+                List<WorkerHost> hosts =
+                        org.flexlb.worker.status.WorkerAddressService.expandWorkerHosts(
+                                serviceDiscovery.getHosts(endpoint), endpoint);
                 Logger.info(
                         "Fetched {} hosts for address: {}",
                         hosts != null ? hosts.size() : 0,
@@ -151,14 +160,14 @@ public class EngineAddressResolver {
         }
     }
 
-    private List<DiscoveryEndpoint> initServiceEndpoints(ModelMetaConfig modelMetaConfig) {
-        Map<AddressSource, DiscoveryEndpoint> uniqueSources = new LinkedHashMap<>();
+    private List<WorkerDiscoveryEndpoint> initServiceEndpoints(ModelMetaConfig modelMetaConfig) {
+        Map<AddressSource, WorkerDiscoveryEndpoint> uniqueSources = new LinkedHashMap<>();
         modelMetaConfig.getServiceRoutes().stream()
                 .flatMap(serviceRoute -> serviceRoute.getAllEndpoints().stream())
                 .forEach(
                         endpoint ->
                                 uniqueSources.putIfAbsent(AddressSource.from(endpoint), endpoint));
-        List<DiscoveryEndpoint> endpoints = List.copyOf(uniqueSources.values());
+        List<WorkerDiscoveryEndpoint> endpoints = List.copyOf(uniqueSources.values());
         if (CollectionUtils.isEmpty(endpoints)) {
             throw new IllegalArgumentException(
                     "MODEL_SERVICE_CONFIG must contain at least one role endpoint");
@@ -192,7 +201,7 @@ public class EngineAddressResolver {
             Integer workerStatusPort,
             int multiEngineNum,
             DiscoverySource discovery) {
-        private static AddressSource from(DiscoveryEndpoint endpoint) {
+        private static AddressSource from(WorkerDiscoveryEndpoint endpoint) {
             return new AddressSource(
                     endpoint.getAddress(),
                     endpoint.getProtocol(),
@@ -208,6 +217,6 @@ public class EngineAddressResolver {
      */
     public interface Listener {
 
-        void onAddressUpdate(List<DiscoveredHost> hosts);
+        void onAddressUpdate(List<WorkerHost> hosts);
     }
 }

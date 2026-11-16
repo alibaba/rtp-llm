@@ -3,8 +3,8 @@ package org.flexlb.worker.rpc;
 import org.flexlb.config.service.GroupRoleEndPoint;
 import org.flexlb.config.service.ModelMetaConfig;
 import org.flexlb.config.service.ServiceRoute;
+import org.flexlb.config.service.WorkerDiscoveryEndpoint;
 import org.flexlb.util.discovery.DiscoveredHost;
-import org.flexlb.util.discovery.DiscoveryEndpoint;
 import org.flexlb.util.discovery.ServiceDiscovery;
 import org.flexlb.util.discovery.ServiceHostListener;
 import org.flexlb.util.network.BackendServiceProtocolEnum;
@@ -37,7 +37,7 @@ class EngineAddressResolverTest {
 
     @Test
     void initialDiscoveryExceptionPreventsStartupAndListenerRegistration() {
-        DiscoveryEndpoint endpoint = endpoint("vip-a");
+        WorkerDiscoveryEndpoint endpoint = endpoint("vip-a");
         ServiceDiscovery discovery = mock(ServiceDiscovery.class);
         IllegalStateException discoveryFailure = new IllegalStateException("unreachable");
         when(discovery.getHosts(endpoint)).thenThrow(discoveryFailure);
@@ -49,13 +49,13 @@ class EngineAddressResolverTest {
 
         assertTrue(failure.getMessage().contains("vip-a"));
         assertSame(discoveryFailure, failure.getCause());
-        verify(discovery, never()).listen(any(DiscoveryEndpoint.class), any());
+        verify(discovery, never()).listen(any(WorkerDiscoveryEndpoint.class), any());
     }
 
     @Test
     void anyInitiallyEmptyEndpointPreventsStartupAndListenerRegistration() {
-        DiscoveryEndpoint first = endpoint("vip-a");
-        DiscoveryEndpoint second = endpoint("vip-b");
+        WorkerDiscoveryEndpoint first = endpoint("vip-a");
+        WorkerDiscoveryEndpoint second = endpoint("vip-b");
         ServiceDiscovery discovery = mock(ServiceDiscovery.class);
         when(discovery.getHosts(first)).thenReturn(List.of(workerHost("10.0.0.1", 8080)));
         when(discovery.getHosts(second)).thenReturn(List.of());
@@ -68,12 +68,12 @@ class EngineAddressResolverTest {
         assertTrue(failure.getMessage().contains("vip-b"));
         verify(discovery).getHosts(first);
         verify(discovery).getHosts(second);
-        verify(discovery, never()).listen(any(DiscoveryEndpoint.class), any());
+        verify(discovery, never()).listen(any(WorkerDiscoveryEndpoint.class), any());
     }
 
     @Test
     void initiallyNullHostsPreventStartupAndListenerRegistration() {
-        DiscoveryEndpoint endpoint = endpoint("vip-a");
+        WorkerDiscoveryEndpoint endpoint = endpoint("vip-a");
         ServiceDiscovery discovery = mock(ServiceDiscovery.class);
         when(discovery.getHosts(endpoint)).thenReturn(null);
 
@@ -83,13 +83,13 @@ class EngineAddressResolverTest {
                         () -> new EngineAddressResolver(discovery, modelConfig(endpoint)));
 
         assertTrue(failure.getMessage().contains("vip-a"));
-        verify(discovery, never()).listen(any(DiscoveryEndpoint.class), any());
+        verify(discovery, never()).listen(any(WorkerDiscoveryEndpoint.class), any());
     }
 
     @Test
     void discoversEveryEndpointBeforeRegisteringListenersAndPublishingInitialHosts() {
-        DiscoveryEndpoint first = endpoint("vip-a");
-        DiscoveryEndpoint second = endpoint("vip-b");
+        WorkerDiscoveryEndpoint first = endpoint("vip-a");
+        WorkerDiscoveryEndpoint second = endpoint("vip-b");
         ServiceDiscovery discovery = mock(ServiceDiscovery.class);
         DiscoveredHost a = workerHost("10.0.0.1", 8080);
         DiscoveredHost b = workerHost("10.0.0.2", 8080);
@@ -108,13 +108,24 @@ class EngineAddressResolverTest {
         resolver.subscribe(listener);
         verify(listener)
                 .onAddressUpdate(
-                        argThat(hosts -> hosts.size() == 2 && hosts.containsAll(List.of(a, b))));
+                        argThat(
+                                hosts ->
+                                        hosts.size() == 2
+                                                && hosts.stream()
+                                                        .map(
+                                                                org.flexlb.worker.status.WorkerHost
+                                                                        ::getIpPort)
+                                                        .toList()
+                                                        .containsAll(
+                                                                List.of(
+                                                                        a.getIpPort(),
+                                                                        b.getIpPort()))));
     }
 
     @Test
     void periodicDiscoveryFailurePreservesHostsContinuesOtherEndpointsAndRecovers() {
-        DiscoveryEndpoint first = endpoint("vip-a");
-        DiscoveryEndpoint second = endpoint("vip-b");
+        WorkerDiscoveryEndpoint first = endpoint("vip-a");
+        WorkerDiscoveryEndpoint second = endpoint("vip-b");
         ServiceDiscovery discovery = mock(ServiceDiscovery.class);
         DiscoveredHost a = workerHost("10.0.0.1", 8080);
         DiscoveredHost b = workerHost("10.0.0.2", 8080);
@@ -133,7 +144,18 @@ class EngineAddressResolverTest {
         resolver.subscribe(failedSnapshot);
         verify(failedSnapshot)
                 .onAddressUpdate(
-                        argThat(hosts -> hosts.size() == 2 && hosts.containsAll(List.of(a, d))));
+                        argThat(
+                                hosts ->
+                                        hosts.size() == 2
+                                                && hosts.stream()
+                                                        .map(
+                                                                org.flexlb.worker.status.WorkerHost
+                                                                        ::getIpPort)
+                                                        .toList()
+                                                        .containsAll(
+                                                                List.of(
+                                                                        a.getIpPort(),
+                                                                        d.getIpPort()))));
 
         assertDoesNotThrow(resolver::periodicHostUpdate);
         EngineAddressResolver.Listener recoveredSnapshot =
@@ -141,7 +163,18 @@ class EngineAddressResolverTest {
         resolver.subscribe(recoveredSnapshot);
         verify(recoveredSnapshot)
                 .onAddressUpdate(
-                        argThat(hosts -> hosts.size() == 2 && hosts.containsAll(List.of(c, d))));
+                        argThat(
+                                hosts ->
+                                        hosts.size() == 2
+                                                && hosts.stream()
+                                                        .map(
+                                                                org.flexlb.worker.status.WorkerHost
+                                                                        ::getIpPort)
+                                                        .toList()
+                                                        .containsAll(
+                                                                List.of(
+                                                                        c.getIpPort(),
+                                                                        d.getIpPort()))));
         verify(discovery, times(3)).getHosts(first);
         verify(discovery, times(3)).getHosts(second);
     }
@@ -149,9 +182,10 @@ class EngineAddressResolverTest {
     @Test
     @SuppressWarnings("unchecked")
     void notifiesEveryRegisteredListener() {
-        DiscoveryEndpoint endpoint = new DiscoveryEndpoint();
+        WorkerDiscoveryEndpoint endpoint = new WorkerDiscoveryEndpoint();
         endpoint.setAddress("worker-service");
-        endpoint.setProtocol(BackendServiceProtocolEnum.GRPC.getName());
+        endpoint.setProtocol(BackendServiceProtocolEnum.HTTP.getName());
+        endpoint.setWorkerStatusPort(18002);
 
         GroupRoleEndPoint roleEndpoint = new GroupRoleEndPoint();
         roleEndpoint.setGroup("default");
@@ -179,8 +213,10 @@ class EngineAddressResolverTest {
         resolver.subscribe(cacheListener);
         resolver.subscribe(grpcListener);
 
-        ArgumentCaptor<List<DiscoveredHost>> grpcHosts = ArgumentCaptor.forClass(List.class);
-        ArgumentCaptor<List<DiscoveredHost>> cacheHosts = ArgumentCaptor.forClass(List.class);
+        ArgumentCaptor<List<org.flexlb.worker.status.WorkerHost>> grpcHosts =
+                ArgumentCaptor.forClass(List.class);
+        ArgumentCaptor<List<org.flexlb.worker.status.WorkerHost>> cacheHosts =
+                ArgumentCaptor.forClass(List.class);
         verify(grpcListener).onAddressUpdate(grpcHosts.capture());
         verify(cacheListener).onAddressUpdate(cacheHosts.capture());
 
@@ -198,9 +234,9 @@ class EngineAddressResolverTest {
 
     @Test
     void emptyPollsAndNullOrEmptyPushesRetainAddressesUntilNonEmptyRecovery() {
-        DiscoveryEndpoint first = new DiscoveryEndpoint();
+        WorkerDiscoveryEndpoint first = new WorkerDiscoveryEndpoint();
         first.setAddress("vip-a");
-        DiscoveryEndpoint second = new DiscoveryEndpoint();
+        WorkerDiscoveryEndpoint second = new WorkerDiscoveryEndpoint();
         second.setAddress("vip-b");
         ServiceRoute route = mock(ServiceRoute.class);
         when(route.getAllEndpoints()).thenReturn(List.of(first, second));
@@ -224,7 +260,18 @@ class EngineAddressResolverTest {
         callback.getValue().onHostsChanged(List.of());
         verify(listener)
                 .onAddressUpdate(
-                        argThat(hosts -> hosts.size() == 2 && hosts.containsAll(List.of(a, b))));
+                        argThat(
+                                hosts ->
+                                        hosts.size() == 2
+                                                && hosts.stream()
+                                                        .map(
+                                                                org.flexlb.worker.status.WorkerHost
+                                                                        ::getIpPort)
+                                                        .toList()
+                                                        .containsAll(
+                                                                List.of(
+                                                                        a.getIpPort(),
+                                                                        b.getIpPort()))));
 
         resolver.periodicHostUpdate();
         resolver.periodicHostUpdate();
@@ -232,27 +279,49 @@ class EngineAddressResolverTest {
         resolver.subscribe(latest);
         verify(latest)
                 .onAddressUpdate(
-                        argThat(hosts -> hosts.size() == 2 && hosts.containsAll(List.of(a, c))));
+                        argThat(
+                                hosts ->
+                                        hosts.size() == 2
+                                                && hosts.stream()
+                                                        .map(
+                                                                org.flexlb.worker.status.WorkerHost
+                                                                        ::getIpPort)
+                                                        .toList()
+                                                        .containsAll(
+                                                                List.of(
+                                                                        a.getIpPort(),
+                                                                        c.getIpPort()))));
 
         callback.getValue().onHostsChanged(List.of(b));
         verify(listener)
                 .onAddressUpdate(
-                        argThat(hosts -> hosts.size() == 2 && hosts.containsAll(List.of(b, c))));
+                        argThat(
+                                hosts ->
+                                        hosts.size() == 2
+                                                && hosts.stream()
+                                                        .map(
+                                                                org.flexlb.worker.status.WorkerHost
+                                                                        ::getIpPort)
+                                                        .toList()
+                                                        .containsAll(
+                                                                List.of(
+                                                                        b.getIpPort(),
+                                                                        c.getIpPort()))));
     }
 
     @Test
     void deduplicatesSharedAddressAcrossGroupsAndPreservesDifferentControlPorts() {
-        DiscoveryEndpoint first = new DiscoveryEndpoint();
+        WorkerDiscoveryEndpoint first = new WorkerDiscoveryEndpoint();
         first.setAddress("shared-service");
         first.setProtocol("grpc");
         first.setGroup("group-a");
         first.setWorkerStatusPort(18002);
-        DiscoveryEndpoint sameAddressInAnotherGroup = new DiscoveryEndpoint();
+        WorkerDiscoveryEndpoint sameAddressInAnotherGroup = new WorkerDiscoveryEndpoint();
         sameAddressInAnotherGroup.setAddress("shared-service");
         sameAddressInAnotherGroup.setProtocol("grpc");
         sameAddressInAnotherGroup.setGroup("group-b");
         sameAddressInAnotherGroup.setWorkerStatusPort(18002);
-        DiscoveryEndpoint differentControlPort = new DiscoveryEndpoint();
+        WorkerDiscoveryEndpoint differentControlPort = new WorkerDiscoveryEndpoint();
         differentControlPort.setAddress("shared-service");
         differentControlPort.setProtocol("grpc");
         differentControlPort.setWorkerStatusPort(19002);
@@ -278,7 +347,7 @@ class EngineAddressResolverTest {
         verify(listener).onAddressUpdate(argThat(hosts -> hosts.size() == 2));
     }
 
-    private ModelMetaConfig modelConfig(DiscoveryEndpoint... endpoints) {
+    private ModelMetaConfig modelConfig(WorkerDiscoveryEndpoint... endpoints) {
         ServiceRoute route = mock(ServiceRoute.class);
         when(route.getAllEndpoints()).thenReturn(List.of(endpoints));
         ModelMetaConfig config = mock(ModelMetaConfig.class);
@@ -286,21 +355,24 @@ class EngineAddressResolverTest {
         return config;
     }
 
-    private DiscoveryEndpoint endpoint(String address) {
-        DiscoveryEndpoint endpoint = new DiscoveryEndpoint();
+    private WorkerDiscoveryEndpoint endpoint(String address) {
+        WorkerDiscoveryEndpoint endpoint = new WorkerDiscoveryEndpoint();
         endpoint.setAddress(address);
         return endpoint;
     }
 
     private void assertWorkerHost(
-            DiscoveredHost host, String ip, int grpcPort, int workerStatusPort) {
-        assertInstanceOf(DiscoveredHost.class, host);
+            org.flexlb.worker.status.WorkerHost host,
+            String ip,
+            int grpcPort,
+            int workerStatusPort) {
+        assertInstanceOf(org.flexlb.worker.status.WorkerHost.class, host);
         assertEquals(ip, host.getIp());
         assertEquals(grpcPort, host.getGrpcPort());
         assertEquals(workerStatusPort, host.getWorkerStatusPort());
     }
 
     private DiscoveredHost workerHost(String ip, int httpPort) {
-        return new DiscoveredHost(ip, httpPort, httpPort + 1, httpPort + 5, 18002, "", "", "");
+        return new DiscoveredHost(ip, httpPort);
     }
 }

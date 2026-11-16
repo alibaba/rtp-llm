@@ -1,7 +1,7 @@
 package org.flexlb.api.server;
 
 import org.flexlb.api.ApplicationLifecycle;
-import org.flexlb.worker.status.ServiceMetricsReporter;
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -33,7 +33,7 @@ class AppStateHookServerTest {
 
     @Mock private ApplicationLifecycle applicationLifecycle;
 
-    @Mock private ServiceMetricsReporter lifecycleReporter;
+    @Mock private ApiMetricsReporter lifecycleReporter;
 
     @Mock private ServerRequest serverRequest;
 

@@ -3,6 +3,7 @@ package org.flexlb.api.server;
 import io.grpc.Status;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.api.ServerScheduleLatencyRecorder;
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.flexlb.api.protocol.FlexlbScheduleProtocol;
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
@@ -11,7 +12,6 @@ import org.flexlb.balance.schedule.CancelReason;
 import org.flexlb.balance.schedule.RequestState;
 import org.flexlb.config.ConfigService;
 import org.flexlb.master.MasterStatusService;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -53,7 +53,7 @@ class FlexlbServiceCancelTest {
                         requestScheduler,
                         org.flexlb.balance.schedule.SchedulerTestSupport.repository(requestState),
                         consistencyService,
-                        mock(ServiceMetricsReporter.class),
+                        mock(ApiMetricsReporter.class),
                         forwarder,
                         mock(ConfigService.class),
                         mock(DeliveryMetricsReporter.class),

@@ -4,12 +4,12 @@ import com.google.protobuf.ByteString;
 import io.grpc.Server;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.flexlb.api.protocol.FlexlbScheduleProtocol;
 import org.flexlb.config.ConfigService;
 import org.flexlb.master.MasterStatusService;
 import org.flexlb.mock.TestFlexlbConfigs;
 import org.flexlb.util.metrics.NoOpFlexMonitor;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.springframework.core.env.Environment;
@@ -80,7 +80,7 @@ class FlexlbGrpcPayloadTest {
                 new FlexlbGrpcForwarder(
                         election,
                         config,
-                        mock(ServiceMetricsReporter.class),
+                        mock(ApiMetricsReporter.class),
                         clientGroup,
                         Runnable::run);
         try {

@@ -1,7 +1,6 @@
 package org.flexlb.worker.status;
 
 import org.flexlb.config.service.RoleType;
-import org.flexlb.master.ZkMasterEvent;
 import org.flexlb.util.metrics.FlexMetricTags;
 import org.flexlb.util.metrics.FlexMetricType;
 import org.flexlb.util.metrics.FlexMonitor;
@@ -18,7 +17,6 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
-import java.util.Locale;
 import java.util.Objects;
 import java.util.OptionalLong;
 
@@ -44,10 +42,6 @@ import static org.flexlb.util.metrics.MetricConstant.CACHE_USED_KV_CACHE_TOKENS;
 import static org.flexlb.util.metrics.MetricConstant.ENCODER_PENDING_REQUEST_COUNT;
 import static org.flexlb.util.metrics.MetricConstant.ENCODER_SELECTION_LOAD;
 import static org.flexlb.util.metrics.MetricConstant.ENCODER_UNCACHED_TOKEN_LOAD;
-import static org.flexlb.util.metrics.MetricConstant.ENGINE_BALANCING_MASTER_ALL_QPS;
-import static org.flexlb.util.metrics.MetricConstant.ENGINE_BALANCING_MASTER_ALL_RT;
-import static org.flexlb.util.metrics.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL;
-import static org.flexlb.util.metrics.MetricConstant.ENGINE_BALANCING_MASTER_WORKER_SELECT_DETAIL;
 import static org.flexlb.util.metrics.MetricConstant.ENGINE_BALANCING_THREAD_POOL_INFO;
 import static org.flexlb.util.metrics.MetricConstant.ENGINE_DECODE_WORKER_NUMBER;
 import static org.flexlb.util.metrics.MetricConstant.ENGINE_ENCODER_WORKER_NUMBER;
@@ -83,22 +77,12 @@ import static org.flexlb.util.metrics.MetricConstant.ENGINE_WORKER_STEP_PREFILL_
 import static org.flexlb.util.metrics.MetricConstant.ENGINE_WORKER_STEP_PREFILL_TOKENS;
 import static org.flexlb.util.metrics.MetricConstant.ENGINE_WORKER_STEP_TOKEN_BUDGET;
 import static org.flexlb.util.metrics.MetricConstant.ENGINE_WORKER_STEP_TOTAL_SCHEDULED_TOKENS;
-import static org.flexlb.util.metrics.MetricConstant.FORWARD_TO_MASTER_RESULT;
-import static org.flexlb.util.metrics.MetricConstant.GRACEFUL_LIFECYCLE_EVENT;
-import static org.flexlb.util.metrics.MetricConstant.GRPC_SERVER_PROCESS_MS;
-import static org.flexlb.util.metrics.MetricConstant.REQUEST_BLOCK_SIZE;
-import static org.flexlb.util.metrics.MetricConstant.REQUEST_MESSAGE_BYTES;
-import static org.flexlb.util.metrics.MetricConstant.REQUEST_NETWORK_DELAY_MS;
-import static org.flexlb.util.metrics.MetricConstant.REQUEST_SEQ_LEN;
-import static org.flexlb.util.metrics.MetricConstant.ZK_MASTER_EVENT;
-import static org.flexlb.util.metrics.MetricConstant.ZK_MASTER_EVENT_TIME_MS;
-import static org.flexlb.util.metrics.MetricConstant.ZK_MASTER_NODE;
 
 /**
- * Registers service metrics and reports worker status, cache statistics, requests and lifecycle events.
+ * Reports worker discovery, health, execution and observed cache statistics.
  */
 @Component
-public class ServiceMetricsReporter implements org.flexlb.master.MasterMetrics {
+public class ServiceMetricsReporter {
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final FlexMonitor monitor;
@@ -108,8 +92,6 @@ public class ServiceMetricsReporter implements org.flexlb.master.MasterMetrics {
     public ServiceMetricsReporter(FlexMonitor monitor, EndpointStats endpointStats) {
         this.monitor = SafeFlexMonitor.wrap(monitor);
         this.endpointStats = endpointStats;
-        this.monitor.register(
-                GRACEFUL_LIFECYCLE_EVENT, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
     }
 
     @PostConstruct
@@ -118,7 +100,6 @@ public class ServiceMetricsReporter implements org.flexlb.master.MasterMetrics {
                 new String[] {
                     ENGINE_ENCODER_WORKER_NUMBER,
                     ENGINE_SERVICE_DISCOVERY_RAW_HOST_COUNT,
-                    REQUEST_BLOCK_SIZE,
                     ENGINE_STATUS_CHECK_SUCCESS_PERIOD,
                     ENGINE_WORKER_NUMBER,
                     ENGINE_PREFILL_WORKER_NUMBER,
@@ -159,13 +140,8 @@ public class ServiceMetricsReporter implements org.flexlb.master.MasterMetrics {
                     ENGINE_RUNNING_TASK_INFO_SIZE,
                     CACHE_KEY_SIZE,
                     ENGINE_RUNNING_QUEUE_TIME,
-                    ZK_MASTER_NODE,
-                    ZK_MASTER_EVENT,
-                    ZK_MASTER_EVENT_TIME_MS,
                     CACHE_USED_KV_CACHE_TOKENS,
                     CACHE_USED_KV_CACHE_RATIO,
-                    REQUEST_NETWORK_DELAY_MS,
-                    GRPC_SERVER_PROCESS_MS,
                 }) {
             monitor.register(metric, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         }
@@ -186,8 +162,6 @@ public class ServiceMetricsReporter implements org.flexlb.master.MasterMetrics {
                     ENGINE_WORKER_STATUS_HBM_LOCAL_MATCH_TOKENS,
                     ENGINE_WORKER_STATUS_REMOTE_KV_ADDED_MATCH_TOKENS,
                     ENGINE_WORKER_STATUS_PREFILL_STEP_COUNT,
-                    REQUEST_SEQ_LEN,
-                    REQUEST_MESSAGE_BYTES,
                     ENGINE_WORKER_INFO_STEP_LATENCY_VAR,
                     ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR,
                 }) {
@@ -202,24 +176,16 @@ public class ServiceMetricsReporter implements org.flexlb.master.MasterMetrics {
         }
         for (String metric :
                 new String[] {
-                    ENGINE_STATUS_VISITOR_SUCCESS_QPS,
-                    ENGINE_STATUS_CHECK_FAIL,
-                    ENGINE_BALANCING_MASTER_SELECT_DETAIL,
-                    ENGINE_BALANCING_MASTER_WORKER_SELECT_DETAIL,
-                    FORWARD_TO_MASTER_RESULT,
+                    ENGINE_STATUS_VISITOR_SUCCESS_QPS, ENGINE_STATUS_CHECK_FAIL,
                 }) {
             monitor.register(metric, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         }
         for (String metric :
                 new String[] {
-                    ENGINE_BALANCING_MASTER_ALL_QPS,
-                    CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS,
-                    CACHE_STATUS_CHECK_FAIL,
+                    CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS, CACHE_STATUS_CHECK_FAIL,
                 }) {
             monitor.register(metric, FlexMetricType.QPS);
         }
-        monitor.register(
-                ENGINE_BALANCING_MASTER_ALL_RT, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
     }
 
     public void reportRawServiceDiscoveryHostCount(String model, RoleType role, int count) {
@@ -238,98 +204,6 @@ public class ServiceMetricsReporter implements org.flexlb.master.MasterMetrics {
         FlexMetricTags metricTags = statusCheckFailureTags(errorEnum, engineIp, role);
         monitor.report(ENGINE_STATUS_CHECK_FAIL, metricTags, 1.0);
         monitor.report(ENGINE_STATUS_CHECK_FAIL_TOTAL, metricTags, 1.0);
-    }
-
-    public void reportBalancingService(int code, long elapsedMs) {
-        FlexMetricTags metricTags = FlexMetricTags.of("code", String.valueOf(code));
-        monitor.report(ENGINE_BALANCING_MASTER_ALL_QPS, metricTags, 1.0);
-        monitor.report(ENGINE_BALANCING_MASTER_ALL_RT, metricTags, elapsedMs);
-    }
-
-    public void reportSelectionResult(RoleType role, boolean success, int code) {
-        FlexMetricTags tags =
-                FlexMetricTags.of(
-                        "role",
-                        role.name(),
-                        "success",
-                        String.valueOf(success),
-                        "code",
-                        String.valueOf(code));
-        monitor.report(ENGINE_BALANCING_MASTER_SELECT_DETAIL, tags, 1.0);
-    }
-
-    public void reportSelectedWorker(
-            RoleType role, String reason, String address, boolean success, int code) {
-        monitor.report(
-                ENGINE_BALANCING_MASTER_WORKER_SELECT_DETAIL,
-                FlexMetricTags.of(
-                        "role",
-                        role.name(),
-                        "reason",
-                        reason == null ? "UNKNOWN" : reason,
-                        "engineIp",
-                        address,
-                        "success",
-                        String.valueOf(success),
-                        "code",
-                        String.valueOf(code)),
-                1);
-    }
-
-    public void reportMasterNode(String master) {
-        monitor.report(ZK_MASTER_NODE, FlexMetricTags.of("masterNode", master), 1.0);
-    }
-
-    public void reportPrefillBalanceMasterEvent(ZkMasterEvent event) {
-        monitor.report(ZK_MASTER_EVENT, FlexMetricTags.of("event", event.name()), 1.0);
-        monitor.report(
-                ZK_MASTER_EVENT_TIME_MS,
-                FlexMetricTags.of("event", event.name()),
-                System.currentTimeMillis());
-    }
-
-    public void reportArriveDelayTime(long requestTimeMs, long grpcEntryTime, long startTimeMs) {
-        if (requestTimeMs == 0) {
-            return;
-        }
-        if (grpcEntryTime > 0) {
-            long networkDelayMs = grpcEntryTime - requestTimeMs;
-            long grpcProcessMs = startTimeMs - grpcEntryTime;
-            monitor.report(REQUEST_NETWORK_DELAY_MS, FlexMetricTags.of(), networkDelayMs);
-            monitor.report(GRPC_SERVER_PROCESS_MS, FlexMetricTags.of(), grpcProcessMs);
-        } else {
-            // Fallback: if grpcEntryTime not set, report total delay as network delay
-            long arrivalDelayMs = startTimeMs - requestTimeMs;
-            monitor.report(REQUEST_NETWORK_DELAY_MS, FlexMetricTags.of(), arrivalDelayMs);
-        }
-    }
-
-    public void reportForwardToMasterResult(String type, String code) {
-        monitor.report(
-                FORWARD_TO_MASTER_RESULT, FlexMetricTags.of("type", type, "code", code), 1.0);
-    }
-
-    public void reportProcessOk() {
-        monitor.report(GRACEFUL_LIFECYCLE_EVENT, FlexMetricTags.of("type", "process_ok"), 1);
-    }
-
-    public void reportDuration(Event event, long durationMs) {
-        monitor.report(
-                GRACEFUL_LIFECYCLE_EVENT,
-                FlexMetricTags.of(
-                        "type",
-                        event.name().toLowerCase(Locale.ROOT),
-                        "duration_ms",
-                        String.valueOf(durationMs)),
-                1);
-    }
-
-    public void reportRequestPayload(
-            boolean success, long inputTokens, long blockSize, Long messageBytes) {
-        var tags = FlexMetricTags.of("success", String.valueOf(success));
-        if (inputTokens >= 0) monitor.report(REQUEST_SEQ_LEN, tags, inputTokens);
-        if (blockSize >= 0) monitor.report(REQUEST_BLOCK_SIZE, tags, blockSize);
-        if (messageBytes != null) monitor.report(REQUEST_MESSAGE_BYTES, tags, messageBytes);
     }
 
     void reportStepLatencyVariance(String modelName, String role, double variance) {
@@ -686,14 +560,5 @@ public class ServiceMetricsReporter implements org.flexlb.master.MasterMetrics {
         long durationMs = Math.max(0L, endTimeMs - startTimeMs);
         monitor.report(metric, tags, durationMs);
         return durationMs;
-    }
-
-    public enum Event {
-        HEALTH_CHECK_OFFLINE,
-        ZK_NODE_OFFLINE,
-        SHUTDOWN_COMPLETE,
-        ZK_NODE_ONLINE,
-        WARMER_COMPLETE,
-        ONLINE_COMPLETE
     }
 }

@@ -7,6 +7,7 @@ import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.api.ServerScheduleLatencyRecorder;
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.flexlb.api.protocol.FlexlbScheduleProtocol;
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
@@ -15,7 +16,6 @@ import org.flexlb.balance.schedule.AbstractRequestScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.master.MasterStatusService;
 import org.flexlb.worker.endpoint.StrategyErrorType;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -94,7 +94,7 @@ class ScheduleForwardMatrixTest {
     private final AbstractRequestScheduler requestState = mock(AbstractRequestScheduler.class);
 
     private MasterStatusService consistency;
-    private ServiceMetricsReporter serviceMetricsReporter;
+    private ApiMetricsReporter serviceMetricsReporter;
     private FlexlbGrpcForwarder grpcForwarder;
     private FlexlbServiceImpl service;
     private ch.qos.logback.classic.Logger pvLogger;
@@ -107,7 +107,7 @@ class ScheduleForwardMatrixTest {
     void setUp() {
         requestScheduler = mock(AbstractRequestScheduler.class);
         consistency = mock(MasterStatusService.class);
-        serviceMetricsReporter = mock(ServiceMetricsReporter.class);
+        serviceMetricsReporter = mock(ApiMetricsReporter.class);
         grpcForwarder = mock(FlexlbGrpcForwarder.class);
 
         ConfigService configService = mock(ConfigService.class);
@@ -428,7 +428,7 @@ class ScheduleForwardMatrixTest {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig())
                 .thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
-        ServiceMetricsReporter healthReporter = mock(ServiceMetricsReporter.class);
+        ApiMetricsReporter healthReporter = mock(ApiMetricsReporter.class);
 
         channelEventLoop = new NioEventLoopGroup(1);
         channelExecutor = Executors.newFixedThreadPool(2);
@@ -490,10 +490,10 @@ class ScheduleForwardMatrixTest {
      */
     private final class RealForwarderFixture implements AutoCloseable {
         final FlexlbGrpcForwarder forwarder;
-        final ServiceMetricsReporter serviceMetricsReporter;
+        final ApiMetricsReporter serviceMetricsReporter;
 
         private RealForwarderFixture(
-                ServiceMetricsReporter serviceMetricsReporter, FlexlbGrpcForwarder forwarder) {
+                ApiMetricsReporter serviceMetricsReporter, FlexlbGrpcForwarder forwarder) {
             this.serviceMetricsReporter = serviceMetricsReporter;
             this.forwarder = forwarder;
         }

@@ -9,12 +9,13 @@ import org.flexlb.balance.schedule.SchedulingTestConfig;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.service.ModelMetaConfig;
 import org.flexlb.config.service.RoleType;
+import org.flexlb.config.service.WorkerDiscoveryEndpoint;
 import org.flexlb.util.discovery.DiscoveredHost;
-import org.flexlb.util.discovery.DiscoveryEndpoint;
 import org.flexlb.util.discovery.ServiceDiscovery;
 import org.flexlb.worker.status.BalanceStatusEnum;
 import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.flexlb.worker.status.WorkerAddressService;
+import org.flexlb.worker.status.WorkerHost;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -64,7 +65,7 @@ class WorkerAddressDiscoveryFallbackTest {
 
     @Test
     void firstDiscoveryDistinguishesEmptyResultFromFailureWithoutCache() {
-        DiscoveryEndpoint endpoint = endpoint("vip");
+        WorkerDiscoveryEndpoint endpoint = endpoint("vip");
         configure(endpoint);
         when(serviceDiscovery.getHosts(endpoint))
                 .thenReturn(List.of())
@@ -75,32 +76,32 @@ class WorkerAddressDiscoveryFallbackTest {
 
     @Test
     void emptyResultsRetainSnapshotAndNonEmptyRecoveryReplacesIt() {
-        DiscoveryEndpoint endpoint = endpoint("vip");
+        WorkerDiscoveryEndpoint endpoint = endpoint("vip");
         configure(endpoint);
         DiscoveredHost first = DiscoveredHost.of("10.0.0.1", 8080);
         DiscoveredHost second = DiscoveredHost.of("10.0.0.2", 8080);
         when(serviceDiscovery.getHosts(endpoint)).thenReturn(List.of(first, second), List.of());
 
-        assertEquals(List.of(first, second), refresh());
+        assertAddresses(List.of(first, second), refresh());
         for (int i = 0; i < 100; i++) {
-            assertEquals(List.of(first, second), refresh());
+            assertAddresses(List.of(first, second), refresh());
         }
         when(serviceDiscovery.getHosts(endpoint)).thenReturn(List.of(second), List.of());
-        assertEquals(List.of(second), refresh());
-        assertEquals(List.of(second), refresh());
+        assertAddresses(List.of(second), refresh());
+        assertAddresses(List.of(second), refresh());
     }
 
     @Test
     void exceptionRetainsCachedWorkersAndReportsFailureOnce() {
-        DiscoveryEndpoint endpoint = endpoint("vip");
+        WorkerDiscoveryEndpoint endpoint = endpoint("vip");
         configure(endpoint);
         List<DiscoveredHost> hosts = List.of(DiscoveredHost.of("10.0.0.1", 8080));
         when(serviceDiscovery.getHosts(endpoint))
                 .thenReturn(hosts)
                 .thenThrow(new IllegalStateException("unreachable"));
 
-        assertEquals(hosts, refresh());
-        assertEquals(hosts, refresh());
+        assertAddresses(hosts, refresh());
+        assertAddresses(hosts, refresh());
         verify(serviceMetricsReporter)
                 .reportStatusCheckerFail(BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
         verify(serviceMetricsReporter)
@@ -111,13 +112,13 @@ class WorkerAddressDiscoveryFallbackTest {
 
     @Test
     void reportsRawEmptyDiscoveryEvenWhenCachedHostsRemainAvailable() {
-        DiscoveryEndpoint endpoint = endpoint("vip");
+        WorkerDiscoveryEndpoint endpoint = endpoint("vip");
         configure(endpoint);
         List<DiscoveredHost> hosts = List.of(DiscoveredHost.of("10.0.0.1", 8080));
         when(serviceDiscovery.getHosts(endpoint)).thenReturn(hosts, List.of());
 
-        assertEquals(hosts, refresh());
-        assertEquals(hosts, refresh());
+        assertAddresses(hosts, refresh());
+        assertAddresses(hosts, refresh());
 
         verify(serviceMetricsReporter)
                 .reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 1);
@@ -127,13 +128,13 @@ class WorkerAddressDiscoveryFallbackTest {
 
     @Test
     void timeoutRetainsCacheAndLateResultCannotOverwriteRecovery() throws Exception {
-        DiscoveryEndpoint endpoint = endpoint("vip");
+        WorkerDiscoveryEndpoint endpoint = endpoint("vip");
         configure(endpoint);
         List<DiscoveredHost> oldHosts = List.of(DiscoveredHost.of("10.0.0.1", 8080));
         List<DiscoveredHost> lateHosts = List.of(DiscoveredHost.of("10.0.0.2", 8080));
         List<DiscoveredHost> recoveredHosts = List.of(DiscoveredHost.of("10.0.0.3", 8080));
         when(serviceDiscovery.getHosts(endpoint)).thenReturn(oldHosts);
-        assertEquals(oldHosts, refresh());
+        assertAddresses(oldHosts, refresh());
         CountDownLatch release = new CountDownLatch(1);
         CountDownLatch interrupted = new CountDownLatch(1);
         when(serviceDiscovery.getHosts(endpoint))
@@ -148,12 +149,12 @@ class WorkerAddressDiscoveryFallbackTest {
                             return lateHosts;
                         });
         try {
-            assertEquals(oldHosts, refresh());
+            assertAddresses(oldHosts, refresh());
             assertTrue(interrupted.await(5, TimeUnit.SECONDS));
             verify(serviceMetricsReporter)
                     .reportStatusCheckerFail(BalanceStatusEnum.SERVICE_DISCOVERY_TIMEOUT, null);
             doReturn(recoveredHosts).when(serviceDiscovery).getHosts(endpoint);
-            assertEquals(recoveredHosts, refresh());
+            assertAddresses(recoveredHosts, refresh());
         } finally {
             release.countDown();
             workerAddressService.destroy();
@@ -164,16 +165,16 @@ class WorkerAddressDiscoveryFallbackTest {
             assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
         }
         // A rejected query reads the cache after the late task has finished.
-        assertEquals(recoveredHosts, refresh());
+        assertAddresses(recoveredHosts, refresh());
     }
 
     @Test
     void saturatedExecutorRetainsCacheWithoutRunningDiscoveryOnCaller() throws Exception {
-        DiscoveryEndpoint endpoint = endpoint("vip");
+        WorkerDiscoveryEndpoint endpoint = endpoint("vip");
         configure(endpoint);
         List<DiscoveredHost> hosts = List.of(DiscoveredHost.of("10.0.0.1", 8080));
         when(serviceDiscovery.getHosts(endpoint)).thenReturn(hosts);
-        assertEquals(hosts, refresh());
+        assertAddresses(hosts, refresh());
         ThreadPoolExecutor executor =
                 (ThreadPoolExecutor)
                         ReflectionTestUtils.getField(
@@ -193,7 +194,7 @@ class WorkerAddressDiscoveryFallbackTest {
             while (executor.getQueue().offer(() -> {})) {
                 // Fill the bounded queue while its only worker is occupied.
             }
-            assertEquals(hosts, refresh());
+            assertAddresses(hosts, refresh());
             verify(serviceDiscovery).getHosts(endpoint);
             verify(serviceMetricsReporter)
                     .reportStatusCheckerFail(BalanceStatusEnum.SERVICE_DISCOVERY_ERROR, null);
@@ -205,11 +206,11 @@ class WorkerAddressDiscoveryFallbackTest {
 
     @Test
     void interruptedQueryRetainsCacheAndInterruptFlag() {
-        DiscoveryEndpoint endpoint = endpoint("vip");
+        WorkerDiscoveryEndpoint endpoint = endpoint("vip");
         configure(endpoint);
         List<DiscoveredHost> hosts = List.of(DiscoveredHost.of("10.0.0.1", 8080));
         when(serviceDiscovery.getHosts(endpoint)).thenReturn(hosts);
-        assertEquals(hosts, refresh());
+        assertAddresses(hosts, refresh());
         Thread refreshThread = Thread.currentThread();
         when(serviceDiscovery.getHosts(endpoint))
                 .thenAnswer(
@@ -219,7 +220,7 @@ class WorkerAddressDiscoveryFallbackTest {
                             return List.of();
                         });
         try {
-            assertEquals(hosts, refresh());
+            assertAddresses(hosts, refresh());
             assertTrue(Thread.currentThread().isInterrupted());
         } finally {
             Thread.interrupted();
@@ -228,8 +229,8 @@ class WorkerAddressDiscoveryFallbackTest {
 
     @Test
     void oneEmptyEndpointRetainsItsWorkersWhileAnotherUpdates() {
-        DiscoveryEndpoint first = endpoint("vip-a");
-        DiscoveryEndpoint second = endpoint("vip-b");
+        WorkerDiscoveryEndpoint first = endpoint("vip-a");
+        WorkerDiscoveryEndpoint second = endpoint("vip-b");
         configure(first, second);
         DiscoveredHost a = DiscoveredHost.of("10.0.0.1", 8080);
         DiscoveredHost b = DiscoveredHost.of("10.0.0.2", 8080);
@@ -237,8 +238,8 @@ class WorkerAddressDiscoveryFallbackTest {
         when(serviceDiscovery.getHosts(first)).thenReturn(List.of(a), List.of());
         when(serviceDiscovery.getHosts(second)).thenReturn(List.of(b), List.of(c));
 
-        assertEquals(List.of(a, b), refresh());
-        assertEquals(List.of(a, c), refresh());
+        assertAddresses(List.of(a, b), refresh());
+        assertAddresses(List.of(a, c), refresh());
         verify(serviceMetricsReporter)
                 .reportRawServiceDiscoveryHostCount("model", RoleType.PREFILL, 2);
         verify(serviceMetricsReporter)
@@ -247,33 +248,36 @@ class WorkerAddressDiscoveryFallbackTest {
 
     @Test
     void sameAddressWithDifferentEndpointConfigurationHasSeparateCache() {
-        DiscoveryEndpoint first = endpoint("shared-vip");
+        WorkerDiscoveryEndpoint first = endpoint("shared-vip");
         first.setGroup("group-a");
-        DiscoveryEndpoint second = endpoint("shared-vip");
+        WorkerDiscoveryEndpoint second = endpoint("shared-vip");
         second.setGroup("group-b");
         second.setWorkerStatusPort(18002);
         configure(first, second);
-        DiscoveredHost a = new DiscoveredHost("10.0.0.1", 8080, 8081, 8085, "site", "group-a");
-        DiscoveredHost b =
-                new DiscoveredHost("10.0.0.1", 8080, 8081, 8085, 18002, "site", "group-b", "");
+        DiscoveredHost a = new DiscoveredHost("10.0.0.1", 8080, "site");
+        DiscoveredHost b = new DiscoveredHost("10.0.0.1", 8080, "site");
         when(serviceDiscovery.getHosts(first)).thenReturn(List.of(a), List.of());
         when(serviceDiscovery.getHosts(second)).thenReturn(List.of(b), List.of());
 
-        assertEquals(List.of(a, b), refresh());
-        assertEquals(List.of(a, b), refresh());
+        var initial = refresh();
+        assertEquals(
+                List.of("group-a", "group-b"), initial.stream().map(WorkerHost::getGroup).toList());
+        assertEquals(
+                List.of(8081, 18002),
+                initial.stream().map(WorkerHost::getWorkerStatusPort).toList());
+        assertEquals(initial, refresh());
     }
 
     @Test
     void sameAddressWithDifferentEndpointConfigurationHasSeparateAvailabilityWarnings() {
-        DiscoveryEndpoint first = endpoint("shared-vip");
+        WorkerDiscoveryEndpoint first = endpoint("shared-vip");
         first.setGroup("group-a");
-        DiscoveryEndpoint second = endpoint("shared-vip");
+        WorkerDiscoveryEndpoint second = endpoint("shared-vip");
         second.setGroup("group-b");
         second.setWorkerStatusPort(18002);
         configure(first, second);
-        DiscoveredHost a = new DiscoveredHost("10.0.0.1", 8080, 8081, 8085, "site", "group-a");
-        DiscoveredHost b =
-                new DiscoveredHost("10.0.0.1", 8080, 8081, 8085, 18002, "site", "group-b", "");
+        DiscoveredHost a = new DiscoveredHost("10.0.0.1", 8080, "site");
+        DiscoveredHost b = new DiscoveredHost("10.0.0.1", 8080, "site");
         when(serviceDiscovery.getHosts(first))
                 .thenReturn(List.of(), List.of(), List.of(), List.of(a));
         when(serviceDiscovery.getHosts(second)).thenReturn(List.of(), List.of(b));
@@ -293,8 +297,8 @@ class WorkerAddressDiscoveryFallbackTest {
                             .map(event -> event.getArgumentArray()[2])
                             .toList());
 
-            assertEquals(List.of(b), refresh());
-            assertEquals(List.of(b), refresh());
+            assertAddresses(List.of(b), refresh());
+            assertAddresses(List.of(b), refresh());
             assertEquals(
                     2L,
                     events.list.stream().filter(event -> event.getLevel() == Level.WARN).count(),
@@ -309,7 +313,7 @@ class WorkerAddressDiscoveryFallbackTest {
                             .map(event -> event.getArgumentArray()[2])
                             .toList());
 
-            assertEquals(List.of(a, b), refresh());
+            assertAddresses(List.of(a, b), refresh());
             assertEquals(
                     List.of("group-b", "group-a"),
                     events.list.stream()
@@ -328,19 +332,19 @@ class WorkerAddressDiscoveryFallbackTest {
 
     @Test
     void callerCannotModifyCachedWorkerList() {
-        DiscoveryEndpoint endpoint = endpoint("vip");
+        WorkerDiscoveryEndpoint endpoint = endpoint("vip");
         configure(endpoint);
         DiscoveredHost host = DiscoveredHost.of("10.0.0.1", 8080);
         when(serviceDiscovery.getHosts(endpoint)).thenReturn(List.of(host), List.of());
-        List<DiscoveredHost> returnedHosts = refresh();
+        List<WorkerHost> returnedHosts = refresh();
         returnedHosts.clear();
 
-        assertEquals(List.of(host), refresh());
+        assertAddresses(List.of(host), refresh());
     }
 
     @Test
     void explicitlyRemovedEndpointDoesNotReuseDiscoveryCache() {
-        DiscoveryEndpoint endpoint = endpoint("vip");
+        WorkerDiscoveryEndpoint endpoint = endpoint("vip");
         configure(endpoint);
         when(serviceDiscovery.getHosts(endpoint))
                 .thenReturn(List.of(DiscoveredHost.of("10.0.0.1", 8080)));
@@ -349,7 +353,7 @@ class WorkerAddressDiscoveryFallbackTest {
         assertTrue(refresh().isEmpty());
     }
 
-    private void configure(DiscoveryEndpoint... endpoints) {
+    private void configure(WorkerDiscoveryEndpoint... endpoints) {
         when(modelMetaConfig.endpointsWithGroup("model", RoleType.PREFILL))
                 .thenReturn(
                         Arrays.stream(endpoints)
@@ -357,12 +361,18 @@ class WorkerAddressDiscoveryFallbackTest {
                                 .toList());
     }
 
-    private List<DiscoveredHost> refresh() {
+    private static void assertAddresses(List<DiscoveredHost> expected, List<WorkerHost> actual) {
+        assertEquals(
+                expected.stream().map(DiscoveredHost::getIpPort).toList(),
+                actual.stream().map(WorkerHost::getIpPort).toList());
+    }
+
+    private List<WorkerHost> refresh() {
         return workerAddressService.getEngineWorkerList("model", RoleType.PREFILL);
     }
 
-    private static DiscoveryEndpoint endpoint(String address) {
-        DiscoveryEndpoint endpoint = new DiscoveryEndpoint();
+    private static WorkerDiscoveryEndpoint endpoint(String address) {
+        WorkerDiscoveryEndpoint endpoint = new WorkerDiscoveryEndpoint();
         endpoint.setAddress(address);
         return endpoint;
     }

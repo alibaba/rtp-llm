@@ -2,6 +2,7 @@ package org.flexlb.api.server;
 
 import io.grpc.stub.StreamObserver;
 import org.flexlb.api.ServerScheduleLatencyRecorder;
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.flexlb.api.protocol.FlexlbScheduleProtocol;
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
@@ -20,7 +21,6 @@ import org.flexlb.config.cache.LocalStandbyConfig;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.master.MasterStatusService;
 import org.flexlb.worker.status.ServerStatus;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.flexlb.worker.status.WorkerStatus;
 import org.flexlb.worker.status.WorkerStatusProvider;
 import org.junit.jupiter.api.Test;
@@ -161,7 +161,7 @@ class FlexlbScheduleLocalStandbyTest {
                         router,
                         mock(org.flexlb.balance.schedule.RequestRepository.class),
                         mock(MasterStatusService.class),
-                        mock(ServiceMetricsReporter.class),
+                        mock(ApiMetricsReporter.class),
                         mock(FlexlbGrpcForwarder.class),
                         config,
                         mock(DeliveryMetricsReporter.class),
@@ -169,7 +169,8 @@ class FlexlbScheduleLocalStandbyTest {
                         mock(RequestSchedulerReporter.class));
         var model = mock(org.flexlb.config.service.ModelMetaConfig.class);
         when(model.requiredRoles()).thenReturn(List.of(RoleType.PREFILL, RoleType.PDFUSION));
-        service.configureCache(cache, model);
+        FlexlbServiceTestSupport.configureCache(service, cache);
+        service.configureModel(model);
         return service;
     }
 

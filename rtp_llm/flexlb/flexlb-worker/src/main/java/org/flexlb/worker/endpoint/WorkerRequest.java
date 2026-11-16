@@ -6,10 +6,6 @@ package org.flexlb.worker.endpoint;
 public interface WorkerRequest {
     String getRequestId();
 
-    DecodeEndpoint.ResourceWait currentResourceWait();
-
-    boolean isResponseDone();
-
     long getPlacementSequence();
 
     WorkerRequestSnapshot snapshot();

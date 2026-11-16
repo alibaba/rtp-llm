@@ -132,7 +132,7 @@ class WorkerSyncContractTest {
     void discoveryFailureAndBlockedGenerationLockStillAllowCachedWorkerPolling() throws Exception {
         var discoverySource = mock(org.flexlb.util.discovery.ServiceDiscovery.class);
         var metadata = mock(org.flexlb.config.service.ModelMetaConfig.class);
-        var endpoint = new org.flexlb.util.discovery.DiscoveryEndpoint();
+        var endpoint = new org.flexlb.config.service.WorkerDiscoveryEndpoint();
         endpoint.setAddress("workers");
         endpoint.setProtocol("http");
         when(metadata.endpointsWithGroup("model", status.getRole()))

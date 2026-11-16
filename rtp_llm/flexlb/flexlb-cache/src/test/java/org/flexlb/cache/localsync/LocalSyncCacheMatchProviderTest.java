@@ -5,7 +5,6 @@ import org.flexlb.config.cache.KvcmConfig;
 import org.flexlb.config.service.ModelMetaConfig;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.config.service.ServiceRoute;
-import org.flexlb.util.discovery.DiscoveredHost;
 import org.flexlb.worker.cache.CacheStatus;
 import org.flexlb.worker.cache.WorkerCacheUpdateResult;
 import org.flexlb.worker.rpc.EngineAddressResolver;
@@ -47,7 +46,10 @@ class LocalSyncCacheMatchProviderTest {
                         localSync(modelMetaConfig(false)));
         verify(addressResolver).subscribe(provider);
 
-        provider.onAddressUpdate(List.of(new DiscoveredHost("10.0.0.1", 8080)));
+        provider.onAddressUpdate(
+                List.of(
+                        new org.flexlb.worker.status.WorkerHost(
+                                "10.0.0.1", 8080, 8081, 8085, "", "")));
 
         verify(kvCacheManager).removeStaleEngineCaches(List.of("10.0.0.1:8080"));
     }

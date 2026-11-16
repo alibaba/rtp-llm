@@ -9,6 +9,7 @@ import io.grpc.stub.StreamObserver;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.api.ServerScheduleLatencyRecorder;
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.flexlb.api.protocol.FlexlbScheduleProtocol;
 import org.flexlb.api.protocol.FlexlbServiceGrpc;
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
@@ -16,7 +17,6 @@ import org.flexlb.balance.metrics.RequestSchedulerReporter;
 import org.flexlb.balance.schedule.AbstractRequestScheduler;
 import org.flexlb.config.ConfigService;
 import org.flexlb.master.MasterStatusService;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -547,7 +547,7 @@ class FollowerAsyncForwardingNettyTest {
             ConfigService configService = mock(ConfigService.class);
             when(configService.loadBalanceConfig())
                     .thenReturn(org.flexlb.mock.TestFlexlbConfigs.create());
-            ServiceMetricsReporter healthReporter = mock(ServiceMetricsReporter.class);
+            ApiMetricsReporter healthReporter = mock(ApiMetricsReporter.class);
             channelEventLoop = new NioEventLoopGroup(1);
             // Match the production forwarder callback executor width so this
             // benchmark isolates the follower's inbound request executor.

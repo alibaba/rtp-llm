@@ -64,6 +64,11 @@ Engine 的生成、取消、结果拉取和 KV 传输协议仍使用现有 int64
     一个在途状态检查**；
   - **仅当 `!kvcmEnabled`** 时提交 `GrpcCacheStatusCheckRunner`（`cacheCheckInProgress` CAS）。
 
+`RoutingServiceDiscovery` 只选择 Provider 并返回原始 `DiscoveredHost`，不推导 Worker 端口。
+`WorkerAddressService.expandWorkerHosts` 按 `WorkerDiscoveryEndpoint` 推导 HTTP/gRPC、状态端口和多 Engine 地址，
+产生 `WorkerHost`；Worker 状态拉取和 `EngineAddressResolver` 的初始查询、轮询、订阅均复用这处转换。
+KVCM 使用原始发现地址，不经过 Worker 展开。
+
 `WorkerAddressService` 按 Endpoint 保存最近一次成功的非空发现快照。查询异常、超过 500ms、
 线程池拒绝任务或返回空列表时保留该快照，已有 worker 继续接受状态探测；首次发现尚无缓存时
 返回空列表。发现线程池使用 AbortPolicy，饱和时不在同步线程执行网络查询。超时查询即使稍后
@@ -219,7 +224,7 @@ global}`；`global` 是 local、P2P 与远端 pool 来源联合后的前缀命�
 ### LOCAL_STANDBY（兜底索引）
 
 - 近似索引，**只由已路由请求写入**（write-on-route）：PREFILL/PDFUSION 路由成功后
-  `FlexlbServiceImpl` 在本地调度成功后调 `updateFromRoutedRequest`，由独立线程池异步落库，
+  `RequestRoutingService` 在本地调度成功后调 `updateFromRoutedRequest`，由独立线程池异步落库，
   不等待索引写入完成；更新失败不影响调度响应。转发成功的 follower 不写入，
   follower 在本地兜底调度成功时写入自己的索引。master/follower 之间不复制。
 - `LocalStandbyCacheIndex`：`ConcurrentHashMap<Long blockHash, ConcurrentHashMap<worker,

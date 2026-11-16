@@ -1,6 +1,7 @@
 package org.flexlb.balance.metrics;
 
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.config.service.RoleType;
 import org.flexlb.util.PriorityNormalizer;
 import org.flexlb.util.metrics.FlexMetricTags;
 import org.flexlb.util.metrics.FlexMetricType;
@@ -33,12 +34,12 @@ import static org.flexlb.util.metrics.MetricConstant.AUTO_TPM_SCHEDULE_LATENCY_M
 import static org.flexlb.util.metrics.MetricConstant.AUTO_TPM_TTFT_MS;
 import static org.flexlb.util.metrics.MetricConstant.AUTO_TPM_VICTIM_COUNT;
 import static org.flexlb.util.metrics.MetricConstant.AUTO_TPM_VICTIM_KV_TOKENS;
+import static org.flexlb.util.metrics.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL;
+import static org.flexlb.util.metrics.MetricConstant.ENGINE_BALANCING_MASTER_WORKER_SELECT_DETAIL;
 
 /**
- * Auto-TPM priority scheduling metrics reporter.
- *
- * <p>Observability for per-priority request volume, schedule latency,
- * placement, preemption, cancellation, and resource ownership.
+ * Reports selected Workers, selection results and per-priority scheduling metrics,
+ * including request volume, latency, preemption, cancellation and resource usage.
  */
 @Slf4j
 @Component
@@ -58,6 +59,14 @@ public class RequestSchedulerReporter {
 
     @PostConstruct
     public void init() {
+        monitor.register(
+                ENGINE_BALANCING_MASTER_SELECT_DETAIL,
+                FlexMetricType.QPS,
+                FlexPriorityType.PRECISE);
+        monitor.register(
+                ENGINE_BALANCING_MASTER_WORKER_SELECT_DETAIL,
+                FlexMetricType.QPS,
+                FlexPriorityType.PRECISE);
         for (String metric :
                 new String[] {
                     AUTO_TPM_REQUEST_COUNT,
@@ -171,6 +180,36 @@ public class RequestSchedulerReporter {
         details.put("priorityCounts", priorityCounts(counts));
         if (decision != null) details.put("decision", decision);
         return Collections.unmodifiableMap(details);
+    }
+
+    public void reportSelectionResult(RoleType role, boolean success, int code) {
+        FlexMetricTags tags =
+                FlexMetricTags.of(
+                        "role",
+                        role.name(),
+                        "success",
+                        String.valueOf(success),
+                        "code",
+                        String.valueOf(code));
+        monitor.report(ENGINE_BALANCING_MASTER_SELECT_DETAIL, tags, 1.0);
+    }
+
+    public void reportSelectedWorker(
+            RoleType role, String reason, String address, boolean success, int code) {
+        monitor.report(
+                ENGINE_BALANCING_MASTER_WORKER_SELECT_DETAIL,
+                FlexMetricTags.of(
+                        "role",
+                        role.name(),
+                        "reason",
+                        reason == null ? "UNKNOWN" : reason,
+                        "engineIp",
+                        address,
+                        "success",
+                        String.valueOf(success),
+                        "code",
+                        String.valueOf(code)),
+                1);
     }
 
     private static FlexMetricTags[] buildPriorityTags() {

@@ -2,7 +2,6 @@ package org.flexlb.worker.status;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import org.flexlb.config.service.RoleType;
-import org.flexlb.util.discovery.DiscoveredHost;
 import org.flexlb.worker.WorkerIdentity;
 import org.flexlb.worker.cache.CacheStatus;
 import org.flexlb.worker.cache.KvCacheGroupMode;
@@ -177,7 +176,7 @@ public class WorkerStatus {
                         role, null, 0L, 0L, Map.of(), 0.0, 0L, 0L, 0L, 0L, 0L, 0L, 0L, 0L));
     }
 
-    public static WorkerStatus createDiscovered(RoleType role, DiscoveredHost host) {
+    public static WorkerStatus createDiscovered(RoleType role, WorkerHost host) {
         return new WorkerStatus(
                 new TopologySnapshot(
                         host.getGroup(),

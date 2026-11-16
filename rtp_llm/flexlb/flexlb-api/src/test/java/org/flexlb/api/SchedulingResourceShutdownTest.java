@@ -158,7 +158,7 @@ class SchedulingResourceShutdownTest {
                     new ApplicationLifecycle(
                             mock(org.flexlb.master.MasterStatusService.class),
                             mock(org.flexlb.api.server.FlexlbGrpcServer.class),
-                            mock(org.flexlb.worker.status.ServiceMetricsReporter.class),
+                            mock(org.flexlb.api.metrics.ApiMetricsReporter.class),
                             new org.springframework.mock.env.MockEnvironment(),
                             new org.flexlb.util.ApplicationWarmupState(),
                             scheduler,

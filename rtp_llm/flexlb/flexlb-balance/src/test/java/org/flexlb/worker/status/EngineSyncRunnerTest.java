@@ -3,7 +3,6 @@ package org.flexlb.worker.status;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.service.RoleType;
-import org.flexlb.util.discovery.DiscoveredHost;
 import org.flexlb.worker.cache.DynamicCacheIntervalService;
 import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.WorkerEndpoint;
@@ -122,7 +121,7 @@ class EngineSyncRunnerTest {
     void should_initialize_poll_health_at_discovery_time() {
         String ipPort = "127.0.0.1:8080@0";
         Mockito.when(workerAddressService.getEngineWorkerList(modelName, RoleType.VIT))
-                .thenReturn(List.of(DiscoveredHost.of("127.0.0.1", 8080)));
+                .thenReturn(List.of(host("127.0.0.1", 8080)));
         Runnable runner =
                 org.flexlb.worker.status.WorkerSyncTestSupport.runner(
                         modelName,
@@ -155,8 +154,7 @@ class EngineSyncRunnerTest {
     @Test
     void malformedDiscoveryAddressDoesNotStarveLaterWorkers() {
         when(workerAddressService.getEngineWorkerList(modelName, roleType))
-                .thenReturn(
-                        List.of(DiscoveredHost.of("", 8080), DiscoveredHost.of("127.0.0.1", 8080)));
+                .thenReturn(List.of(host("", 8080), host("127.0.0.1", 8080)));
 
         engineSyncRunner.run();
 
@@ -168,7 +166,7 @@ class EngineSyncRunnerTest {
     void executorRejectionReturnsBothExactPollLeases() {
         String ipPort = "127.0.0.1:8080@0";
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
-                .thenReturn(List.of(DiscoveredHost.of("127.0.0.1", 8080)));
+                .thenReturn(List.of(host("127.0.0.1", 8080)));
         when(statusCheckExecutor.submit(any(Runnable.class)))
                 .thenThrow(new RejectedExecutionException("full"));
         Runnable runner =
@@ -272,7 +270,7 @@ class EngineSyncRunnerTest {
                         statusCheckExecutor,
                         statusCheckExecutor);
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
-                .thenReturn(List.of(new DiscoveredHost("127.0.0.1", 61000)));
+                .thenReturn(List.of(host("127.0.0.1", 61000)));
 
         try {
             runner.run();
@@ -335,8 +333,8 @@ class EngineSyncRunnerTest {
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
                 .thenReturn(
                         List.of(
-                                DiscoveredHost.of(first.getIp(), first.getPort()),
-                                DiscoveredHost.of(second.getIp(), second.getPort())));
+                                host(first.getIp(), first.getPort()),
+                                host(second.getIp(), second.getPort())));
         Mockito.doReturn(firstEndpoint)
                 .when(registry)
                 .getEndpoint(RoleType.PREFILL, first.getLogicalIpPort());
@@ -376,8 +374,8 @@ class EngineSyncRunnerTest {
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
                 .thenReturn(
                         List.of(
-                                DiscoveredHost.of(first.getIp(), first.getPort()),
-                                DiscoveredHost.of(second.getIp(), second.getPort())));
+                                host(first.getIp(), first.getPort()),
+                                host(second.getIp(), second.getPort())));
         Mockito.doReturn(firstEndpoint)
                 .when(registry)
                 .getEndpoint(RoleType.PREFILL, first.getLogicalIpPort());
@@ -427,8 +425,8 @@ class EngineSyncRunnerTest {
         assertNotNull(oldStatus.tryBeginStatusPoll());
         discover(directory, oldStatus);
         RunnerTestSupport.publishEndpoint(registry, RoleType.PREFILL, ipPort, oldStatus);
-        DiscoveredHost replacement =
-                new DiscoveredHost("127.0.0.1", 61000, 61001, 61005, "site-b", newGroup);
+        WorkerHost replacement =
+                new WorkerHost("127.0.0.1", 61000, 61001, 61005, "site-b", newGroup);
         when(workerAddressService.getEngineWorkerList(modelName, RoleType.PREFILL))
                 .thenReturn(List.of(replacement));
 
@@ -494,5 +492,9 @@ class EngineSyncRunnerTest {
         assertNotNull(status.tryBeginStatusPoll());
         assertNotNull(status.tryBeginCachePoll());
         return status;
+    }
+
+    private static WorkerHost host(String ip, int port) {
+        return new WorkerHost(ip, port, port + 1, port + 5, "", "");
     }
 }

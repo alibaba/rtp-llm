@@ -8,6 +8,7 @@ import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.api.ServerScheduleLatencyRecorder;
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.flexlb.api.protocol.FlexlbScheduleProtocol;
 import org.flexlb.api.protocol.FlexlbServiceGrpc;
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
@@ -34,7 +35,6 @@ import org.flexlb.util.metrics.NoOpFlexMonitor;
 import org.flexlb.worker.cache.WorkerCacheUpdateResult;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.rpc.protocol.EngineRpcService;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -210,11 +210,17 @@ abstract class AbstractRoutePerformanceTest extends FlexLBMockTestBase {
                 };
         var service =
                 new FlexlbServiceImpl(
-                        scheduler,
+                        new org.flexlb.balance.request.RequestRoutingService(
+                                scheduler,
+                                requestRegistry(),
+                                (org.flexlb.balance.strategy.RequestRouteSelector)
+                                        org.springframework.test.util.ReflectionTestUtils.getField(
+                                                scheduler, "router"),
+                                mock(org.flexlb.cache.match.CacheAwareService.class)),
                         config,
                         requestRegistry(),
                         standalone,
-                        new ServiceMetricsReporter(new NoOpFlexMonitor(), endpointRegistry),
+                        new ApiMetricsReporter(new NoOpFlexMonitor()),
                         mock(FlexlbGrpcForwarder.class),
                         reporter,
                         recorder,

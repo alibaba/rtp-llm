@@ -1,10 +1,10 @@
 package org.flexlb.api;
 
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.flexlb.api.server.FlexlbGrpcServer;
 import org.flexlb.balance.schedule.AbstractRequestScheduler;
 import org.flexlb.master.MasterStatusService;
 import org.flexlb.util.ApplicationWarmupState;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.env.MockEnvironment;
 
@@ -65,7 +65,7 @@ class SchedulingShutdownTest {
         return new ApplicationLifecycle(
                 mock(MasterStatusService.class),
                 grpc,
-                mock(ServiceMetricsReporter.class),
+                mock(ApiMetricsReporter.class),
                 new MockEnvironment(),
                 new ApplicationWarmupState(),
                 scheduling,

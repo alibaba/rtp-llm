@@ -6,8 +6,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.service.ModelMetaConfig;
 import org.flexlb.config.service.RoleType;
-import org.flexlb.util.discovery.DiscoveredHost;
-import org.flexlb.util.discovery.DiscoveryEndpoint;
+import org.flexlb.config.service.WorkerDiscoveryEndpoint;
 import org.flexlb.util.discovery.ServiceDiscovery;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -45,9 +44,9 @@ public class WorkerAddressService {
     private final ServiceDiscovery serviceDiscovery;
     // Cache the last non-empty worker list per endpoint; its key fields stay unchanged after
     // initialization.
-    private final ConcurrentMap<DiscoveryEndpoint, List<DiscoveredHost>>
+    private final ConcurrentMap<WorkerDiscoveryEndpoint, List<WorkerHost>>
             lastNonEmptyHostsByEndpoint = new ConcurrentHashMap<>();
-    private final ConcurrentMap<DiscoveryEndpoint, WorkerAvailabilityLogState>
+    private final ConcurrentMap<WorkerDiscoveryEndpoint, WorkerAvailabilityLogState>
             workerAvailabilityByEndpoint = new ConcurrentHashMap<>();
 
     /**
@@ -81,9 +80,9 @@ public class WorkerAddressService {
         serviceDiscoveryExecutor.shutdown();
     }
 
-    public List<DiscoveredHost> getEngineWorkerList(String modelName, RoleType modelEndpointType) {
-        List<DiscoveredHost> workerHosts = new ArrayList<>();
-        List<Pair<String, DiscoveryEndpoint>> endpoints =
+    public List<WorkerHost> getEngineWorkerList(String modelName, RoleType modelEndpointType) {
+        List<WorkerHost> workerHosts = new ArrayList<>();
+        List<Pair<String, WorkerDiscoveryEndpoint>> endpoints =
                 modelMetaConfig.endpointsWithGroup(modelName, modelEndpointType);
         if (endpoints.isEmpty()) {
             logger.info(
@@ -97,8 +96,8 @@ public class WorkerAddressService {
         }
         int discoveredHostCount = 0;
         boolean allEndpointsSucceeded = true;
-        for (Pair<String, DiscoveryEndpoint> endpointTuple : endpoints) {
-            DiscoveryEndpoint endpoint = endpointTuple.getRight();
+        for (Pair<String, WorkerDiscoveryEndpoint> endpointTuple : endpoints) {
+            WorkerDiscoveryEndpoint endpoint = endpointTuple.getRight();
             if (endpoint == null) {
                 logger.info(
                         "modelName={} endpoint is null, endpointType={}",
@@ -130,6 +129,51 @@ public class WorkerAddressService {
         return workerHosts;
     }
 
+    public static List<WorkerHost> expandWorkerHosts(
+            List<org.flexlb.util.discovery.DiscoveredHost> discoveredHosts,
+            WorkerDiscoveryEndpoint endpoint) {
+        if (discoveredHosts == null || discoveredHosts.isEmpty()) {
+            return List.of();
+        }
+
+        boolean grpcEndpoint =
+                org.flexlb.util.network.BackendServiceProtocolEnum.GRPC
+                        .getName()
+                        .equals(endpoint.getProtocol());
+        int multiEngineNum = endpoint.getMultiEngineNum();
+        List<WorkerHost> normalizedHosts = new ArrayList<>(discoveredHosts.size() * multiEngineNum);
+        for (org.flexlb.util.discovery.DiscoveredHost host : discoveredHosts) {
+            int discoveredPort = host.getPort();
+            int httpPort = grpcEndpoint ? discoveredPort - 1 : discoveredPort;
+            int grpcPort = grpcEndpoint ? discoveredPort : discoveredPort + 1;
+            int workerStatusBasePort =
+                    endpoint.getWorkerStatusPort() == null
+                            ? grpcPort
+                            : endpoint.getWorkerStatusPort();
+            requireValidPort(httpPort, "httpPort");
+            requireValidPort(grpcPort, "grpcPort");
+            requireValidPort(httpPort + 5, "httpServerPort");
+            requireValidPort(workerStatusBasePort, "workerStatusPort");
+            requireValidPort(
+                    (long) workerStatusBasePort + multiEngineNum - 1, "lastWorkerStatusPort");
+            for (int engineIndex = 0; engineIndex < multiEngineNum; engineIndex++) {
+                normalizedHosts.add(
+                        new WorkerHost(
+                                host.getIp(),
+                                httpPort,
+                                grpcPort,
+                                httpPort + 5,
+                                workerStatusBasePort + engineIndex,
+                                host.getSite(),
+                                endpoint.getGroup(),
+                                host.getDeploymentName(),
+                                engineIndex,
+                                multiEngineNum));
+            }
+        }
+        return normalizedHosts;
+    }
+
     @Scheduled(fixedRate = 2000)
     private void reportExecutorMetrics() {
         try {
@@ -149,16 +193,18 @@ public class WorkerAddressService {
      * Failed and empty discovery results retain the endpoint's last non-empty snapshot.
      * Cached workers continue through the regular worker health checks.
      */
-    private ServiceHosts getServiceHosts(String modelName, DiscoveryEndpoint endpoint) {
+    private ServiceHosts getServiceHosts(String modelName, WorkerDiscoveryEndpoint endpoint) {
         String address = endpoint.getAddress();
-        Future<List<DiscoveredHost>> future;
+        Future<List<WorkerHost>> future;
         try {
             future =
                     serviceDiscoveryExecutor.submit(
                             () ->
-                                    java.util.Objects.requireNonNull(
-                                            serviceDiscovery.getHosts(endpoint),
-                                            "discovery hosts"));
+                                    expandWorkerHosts(
+                                            java.util.Objects.requireNonNull(
+                                                    serviceDiscovery.getHosts(endpoint),
+                                                    "discovery hosts"),
+                                            endpoint));
         } catch (RejectedExecutionException e) {
             logger.error(
                     "query service discovery rejected, model={}, address={}, msg:{}",
@@ -174,7 +220,7 @@ public class WorkerAddressService {
                     lastNonEmptyHostsByEndpoint.getOrDefault(endpoint, List.of()), null);
         }
         try {
-            List<DiscoveredHost> hosts = future.get(500, TimeUnit.MILLISECONDS);
+            List<WorkerHost> hosts = future.get(500, TimeUnit.MILLISECONDS);
             reportWorkerAvailability(modelName, endpoint, hosts);
             if (!hosts.isEmpty()) {
                 // Update the cache only after a successful wait;
@@ -221,7 +267,7 @@ public class WorkerAddressService {
     }
 
     private void reportWorkerAvailability(
-            String modelName, DiscoveryEndpoint endpoint, List<DiscoveredHost> hosts) {
+            String modelName, WorkerDiscoveryEndpoint endpoint, List<WorkerHost> hosts) {
         WorkerAvailabilityLogState state =
                 workerAvailabilityByEndpoint.computeIfAbsent(
                         endpoint, ignored -> new WorkerAvailabilityLogState());
@@ -247,9 +293,14 @@ public class WorkerAddressService {
         }
     }
 
+    private static void requireValidPort(long port, String name) {
+        if (port <= 0 || port > 65535) {
+            throw new IllegalArgumentException(name + " must be in [1, 65535], received " + port);
+        }
+    }
+
     private record ServiceHosts(
-            List<DiscoveredHost> discoveredOrCachedHostsForStatusCheck,
-            Integer discoveredHostCount) {}
+            List<WorkerHost> discoveredOrCachedHostsForStatusCheck, Integer discoveredHostCount) {}
 
     /**
      * Limits repeated empty-Worker warnings and resets the deadline when Workers return.

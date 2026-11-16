@@ -297,6 +297,10 @@ Top5 展示 `shortestTtftDecisions` 的 token-work 估计。预测耗时与 Engi
 
 ## 指标
 
+`ApiMetricsReporter` 负责请求到达、Master 转发和应用生命周期，并实现 Master 事件上报接口。
+`RequestSchedulerReporter` 负责选择结果及选中 Worker 的指标；Worker 的 `ServiceMetricsReporter`
+只报告 Worker、状态同步与缓存观测。三者复用 `FlexMonitor`，指标名、类型及标签保持一致。
+
 `FlexMonitor` 提供 GAUGE、COUNTER、QPS 与优先级窗口抽象。opensource 默认使用
 `NoOpFlexMonitor`；internal profile 可启用 KMonitor/Prometheus provider。
 

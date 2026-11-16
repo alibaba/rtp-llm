@@ -2,6 +2,7 @@ package org.flexlb.api.server;
 
 import io.grpc.stub.StreamObserver;
 import org.flexlb.api.ServerScheduleLatencyRecorder;
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.flexlb.api.protocol.FlexlbScheduleProtocol;
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
@@ -14,7 +15,6 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.master.MasterStatusService;
 import org.flexlb.worker.status.ServerStatus;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -54,7 +54,7 @@ class FlexlbScheduleEngineIndexTest {
                         routeService,
                         mock(org.flexlb.balance.schedule.RequestRepository.class),
                         consistencyService,
-                        mock(ServiceMetricsReporter.class),
+                        mock(ApiMetricsReporter.class),
                         mock(FlexlbGrpcForwarder.class),
                         configService,
                         mock(DeliveryMetricsReporter.class),

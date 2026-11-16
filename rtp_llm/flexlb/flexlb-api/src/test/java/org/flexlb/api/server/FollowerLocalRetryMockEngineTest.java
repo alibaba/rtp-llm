@@ -6,13 +6,13 @@ import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.netty.NettyServerBuilder;
 import io.netty.channel.nio.NioEventLoopGroup;
 import org.flexlb.api.ServerScheduleLatencyRecorder;
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.flexlb.api.protocol.FlexlbScheduleProtocol;
 import org.flexlb.api.protocol.FlexlbServiceGrpc;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
 import org.flexlb.balance.schedule.AbstractRequestScheduler;
 import org.flexlb.master.MasterStatusService;
 import org.flexlb.mock.FlexLBMockTestBase;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -116,7 +116,7 @@ class FollowerLocalRetryMockEngineTest extends FlexLBMockTestBase {
             when(leadership.isNeedConsistency()).thenReturn(true);
             when(leadership.isMaster()).thenReturn(false);
             when(leadership.getLocalHostIp()).thenReturn(identity);
-            var health = mock(ServiceMetricsReporter.class);
+            var health = mock(ApiMetricsReporter.class);
             forwarder =
                     new FlexlbGrpcForwarder(
                             leadership, configService, health, channelLoop, Runnable::run);

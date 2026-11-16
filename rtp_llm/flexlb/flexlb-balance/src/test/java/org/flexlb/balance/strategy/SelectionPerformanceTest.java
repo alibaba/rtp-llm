@@ -149,8 +149,8 @@ class SelectionPerformanceTest {
                 };
         var model = new ModelMetaConfig();
         var group = new org.flexlb.config.service.GroupRoleEndPoint();
-        group.setPrefillEndpoint(new org.flexlb.util.discovery.DiscoveryEndpoint());
-        group.setDecodeEndpoint(new org.flexlb.util.discovery.DiscoveryEndpoint());
+        group.setPrefillEndpoint(new org.flexlb.config.service.WorkerDiscoveryEndpoint());
+        group.setDecodeEndpoint(new org.flexlb.config.service.WorkerDiscoveryEndpoint());
         var route = new org.flexlb.config.service.ServiceRoute();
         route.setServiceId("test");
         route.setRoleEndpoints(List.of(group));

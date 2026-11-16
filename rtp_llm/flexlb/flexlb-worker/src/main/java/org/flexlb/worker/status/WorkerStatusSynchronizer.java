@@ -7,7 +7,6 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.service.ModelMetaConfig;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.util.Failures;
-import org.flexlb.util.discovery.DiscoveredHost;
 import org.flexlb.worker.cache.DynamicCacheIntervalService;
 import org.flexlb.worker.cache.WorkerCaches;
 import org.flexlb.worker.endpoint.EndpointRegistry;
@@ -149,7 +148,7 @@ public final class WorkerStatusSynchronizer {
         try {
             Map<String, WorkerStatus> cachedWorkerStatuses =
                     endpointRegistry.statusSnapshot(roleType);
-            List<DiscoveredHost> discovered;
+            List<WorkerHost> discovered;
             try {
                 discovered =
                         Objects.requireNonNull(
@@ -166,14 +165,14 @@ public final class WorkerStatusSynchronizer {
                 }
                 return;
             }
-            List<DiscoveredHost> latestEngineWorkerList = discovered;
+            List<WorkerHost> latestEngineWorkerList = discovered;
             reportTelemetry(
                     () ->
                             serviceMetricsReporter.reportServiceDiscoveryResult(
                                     modelName, latestEngineWorkerList.size(), roleType.toString()));
             Set<String> latestValidIpPorts =
                     latestEngineWorkerList.stream()
-                            .map(DiscoveredHost::getLogicalIpPort)
+                            .map(WorkerHost::getLogicalIpPort)
                             .collect(Collectors.toSet());
             for (var entry : cachedWorkerStatuses.entrySet()) {
                 if (!latestValidIpPorts.contains(entry.getKey())) {
@@ -185,7 +184,7 @@ public final class WorkerStatusSynchronizer {
 
             logger.debug(
                     "Submitting status check tasks for {} workers", latestEngineWorkerList.size());
-            for (DiscoveredHost host : latestEngineWorkerList) {
+            for (WorkerHost host : latestEngineWorkerList) {
                 try {
                     WorkerStatus workerStatus = getOrCreateWorkerStatus(roleType, host);
                     if (workerStatus != null) {
@@ -401,7 +400,7 @@ public final class WorkerStatusSynchronizer {
         }
     }
 
-    private WorkerStatus getOrCreateWorkerStatus(RoleType roleType, DiscoveredHost host) {
+    private WorkerStatus getOrCreateWorkerStatus(RoleType roleType, WorkerHost host) {
         if (host.getIp() == null || host.getIp().isBlank()) {
             throw new IllegalArgumentException("Worker address must have a nonempty host");
         }

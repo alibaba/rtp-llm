@@ -7,7 +7,6 @@ import org.apache.curator.retry.ExponentialBackoffRetry;
 import org.apache.curator.test.TestingServer;
 import org.apache.curator.utils.CloseableUtils;
 import org.flexlb.util.network.GeneralHttpNettyService;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -252,7 +251,7 @@ class ZkLeaderElectionTest {
     private ZookeeperMasterElectService newElectService(String localIp) {
         GeneralHttpNettyService httpService = mock(GeneralHttpNettyService.class);
         when(httpService.request(any(), any(), anyString(), any())).thenReturn(Mono.empty());
-        ServiceMetricsReporter healthReporter = mock(ServiceMetricsReporter.class);
+        MasterMetrics healthReporter = mock(MasterMetrics.class);
         Environment environment = mock(Environment.class);
 
         ZookeeperMasterElectService service =

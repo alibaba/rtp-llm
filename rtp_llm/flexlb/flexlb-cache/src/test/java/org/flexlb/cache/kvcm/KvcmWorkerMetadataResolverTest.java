@@ -9,7 +9,7 @@ import org.flexlb.config.service.GroupRoleEndPoint;
 import org.flexlb.config.service.ModelMetaConfig;
 import org.flexlb.config.service.RoleType;
 import org.flexlb.config.service.ServiceRoute;
-import org.flexlb.util.discovery.DiscoveryEndpoint;
+import org.flexlb.config.service.WorkerDiscoveryEndpoint;
 import org.flexlb.worker.cache.KvCacheGroupMode;
 import org.flexlb.worker.status.WorkerStatus;
 import org.flexlb.worker.status.WorkerStatusProvider;
@@ -133,7 +133,7 @@ class KvcmWorkerMetadataResolverTest {
     }
 
     private ModelMetaConfig modelMetaConfig(String namespace) {
-        DiscoveryEndpoint endpoint = new DiscoveryEndpoint();
+        WorkerDiscoveryEndpoint endpoint = new WorkerDiscoveryEndpoint();
         endpoint.setAddress("v-prefill");
 
         GroupRoleEndPoint group = new GroupRoleEndPoint();

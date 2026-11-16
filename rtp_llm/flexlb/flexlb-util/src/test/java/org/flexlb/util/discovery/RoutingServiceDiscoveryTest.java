@@ -7,13 +7,25 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertIterableEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * Checks routing discovery across provider results and configured groups.
+ * Checks provider selection and preserves provider addresses for queries and subscriptions.
  */
 class RoutingServiceDiscoveryTest {
+
+    @Test
+    void discoveryPreservesProviderPortWithoutWorkerPortRules() {
+        var host = DiscoveredHost.of("127.0.0.1", 65535);
+        var discovery = new RoutingServiceDiscovery(List.of(new RecordingProvider(List.of(host))));
+        var endpoint = endpoint();
+        endpoint.setProtocol("grpc");
+        org.junit.jupiter.api.Assertions.assertSame(host, discovery.getHosts(endpoint).getFirst());
+        assertEquals(1, discovery.getHosts(endpoint).size());
+        discovery.listen(
+                endpoint,
+                hosts -> org.junit.jupiter.api.Assertions.assertSame(host, hosts.getFirst()));
+    }
 
     @Test
     void rejectsInvalidDiscoveryConfigurationOnQueriesAndSubscriptions() {
@@ -48,48 +60,6 @@ class RoutingServiceDiscoveryTest {
     }
 
     @Test
-    void normalizesDiscoveredHostsWithEndpointProtocolAndGroup() {
-        DiscoveredHost discoveredHost =
-                DiscoveredHost.of("10.0.0.1", 8081, "site-a", "deployment-a");
-        RecordingProvider provider = new RecordingProvider(List.of(discoveredHost));
-        RoutingServiceDiscovery discovery = new RoutingServiceDiscovery(List.of(provider));
-        DiscoveryEndpoint endpoint = endpoint();
-        endpoint.setProtocol("grpc");
-        endpoint.setGroup("group-a");
-
-        DiscoveredHost normalizedHost = discovery.getHosts(endpoint).getFirst();
-
-        assertEquals("10.0.0.1", normalizedHost.getIp());
-        assertEquals(8080, normalizedHost.getHttpPort());
-        assertEquals(8081, normalizedHost.getGrpcPort());
-        assertEquals(8081, normalizedHost.getWorkerStatusPort());
-        assertEquals(8085, normalizedHost.getHttpServerPort());
-        assertEquals("site-a", normalizedHost.getSite());
-        assertEquals("group-a", normalizedHost.getGroup());
-        assertEquals("deployment-a", normalizedHost.getDeploymentName());
-        assertEquals(0, normalizedHost.getEngineIndex());
-        assertEquals(1, normalizedHost.getMultiEngineNum());
-        assertEquals("10.0.0.1:8080", normalizedHost.getPhysicalIpPort());
-        assertEquals("10.0.0.1:8080@0", normalizedHost.getLogicalIpPort());
-    }
-
-    @Test
-    void usesWorkerStatusPortConfiguredOnEndpoint() {
-        DiscoveredHost discoveredHost = DiscoveredHost.of("10.0.0.1", 8080);
-        RecordingProvider provider = new RecordingProvider(List.of(discoveredHost));
-        RoutingServiceDiscovery discovery = new RoutingServiceDiscovery(List.of(provider));
-        DiscoveryEndpoint endpoint = endpoint();
-        endpoint.setProtocol("http");
-        endpoint.setWorkerStatusPort(18002);
-
-        DiscoveredHost normalizedHost = discovery.getHosts(endpoint).getFirst();
-
-        assertEquals(8080, normalizedHost.getHttpPort());
-        assertEquals(8081, normalizedHost.getGrpcPort());
-        assertEquals(18002, normalizedHost.getWorkerStatusPort());
-    }
-
-    @Test
     void exposesCurrentFlexlbRuntimePolicyToDiscoveryProviders() {
         AtomicReference<DiscoveryClientSettings> current =
                 new AtomicReference<>(runtimeConfig(700));
@@ -103,60 +73,6 @@ class RoutingServiceDiscoveryTest {
 
         current.set(runtimeConfig(900));
         assertEquals(900, endpoint.getDiscovery().getConnectTimeoutMs());
-    }
-
-    @Test
-    void expandsDiscoveredHostIntoIndexedLogicalWorkers() {
-        DiscoveredHost discoveredHost = DiscoveredHost.of("10.0.0.1", 8080);
-        RecordingProvider provider = new RecordingProvider(List.of(discoveredHost));
-        RoutingServiceDiscovery discovery = new RoutingServiceDiscovery(List.of(provider));
-        DiscoveryEndpoint endpoint = endpoint();
-        endpoint.setProtocol("http");
-        endpoint.setWorkerStatusPort(18002);
-        endpoint.setMultiEngineNum(2);
-
-        List<DiscoveredHost> hosts = discovery.getHosts(endpoint);
-
-        assertEquals(2, hosts.size());
-        assertIterableEquals(
-                List.of(0, 1), hosts.stream().map(DiscoveredHost::getEngineIndex).toList());
-        assertIterableEquals(
-                List.of(18002, 18003),
-                hosts.stream().map(DiscoveredHost::getWorkerStatusPort).toList());
-        assertIterableEquals(
-                List.of("10.0.0.1:8080@0", "10.0.0.1:8080@1"),
-                hosts.stream().map(DiscoveredHost::getLogicalIpPort).toList());
-        assertIterableEquals(
-                List.of("10.0.0.1:8080", "10.0.0.1:8080"),
-                hosts.stream().map(DiscoveredHost::getPhysicalIpPort).toList());
-        assertIterableEquals(
-                List.of(2, 2), hosts.stream().map(DiscoveredHost::getMultiEngineNum).toList());
-    }
-
-    @Test
-    void rejectsInvalidDerivedPortsBeforePublishingHosts() {
-        DiscoveryEndpoint endpoint = endpoint();
-        endpoint.setProtocol("grpc");
-        for (int discoveredPort : List.of(0, 1, 65535, Integer.MAX_VALUE)) {
-            RoutingServiceDiscovery discovery =
-                    new RoutingServiceDiscovery(
-                            List.of(
-                                    new RecordingProvider(
-                                            List.of(
-                                                    DiscoveredHost.of(
-                                                            "10.0.0.1", discoveredPort)))));
-            assertThrows(IllegalArgumentException.class, () -> discovery.getHosts(endpoint));
-        }
-        RoutingServiceDiscovery discovery =
-                new RoutingServiceDiscovery(
-                        List.of(
-                                new RecordingProvider(
-                                        List.of(DiscoveredHost.of("10.0.0.1", 8081)))));
-        endpoint.setWorkerStatusPort(65535);
-        endpoint.setMultiEngineNum(2);
-        assertThrows(IllegalArgumentException.class, () -> discovery.getHosts(endpoint));
-        endpoint.setWorkerStatusPort(Integer.MAX_VALUE);
-        assertThrows(IllegalArgumentException.class, () -> discovery.getHosts(endpoint));
     }
 
     private DiscoveryEndpoint endpoint() {

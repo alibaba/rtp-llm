@@ -5,7 +5,10 @@ Endpoint 不接收完整调度请求，也不构造调度响应：Decode 容量�
 优先级和容量限制，返回同一次持锁检查的快照、缺口及容量原因；DecodeStrategy 将原因映射为
 调度错误。Cache 的选路后更新只接收请求 ID、block size、缓存键和选中的 Worker。
 
-核心入口是 `RequestRouteSelector`，协调 Prefill/PDFusion、Decode、VIT、Encoder 的角色策略。
+`RequestRoutingService` 接收本地请求，负责 VIT 单独选址、已有 VIT 选择复核和成功后的缓存反馈；
+普通请求交给 Scheduler。API 负责协议转换和响应交付。
+
+角色选址入口是 `RequestRouteSelector`，协调 Prefill/PDFusion、Decode、VIT、Encoder 的角色策略。
 Scheduler 决定何时调度请求、失败后等待还是重试；各角色 Strategy 负责捕获候选、评分和登记。
 P/D/V/E 策略继承 `AbstractWorkerSelectionStrategy`，共用有界登记重试循环；`RequestRouteSelector` 只组合角色结果并负责跨角色回滚。
 

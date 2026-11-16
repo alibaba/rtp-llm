@@ -6,21 +6,21 @@ import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 import io.opentelemetry.api.trace.Span;
 import org.flexlb.api.ServerScheduleLatencyRecorder;
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.flexlb.api.protocol.FlexlbScheduleProtocol;
 import org.flexlb.api.protocol.FlexlbServiceGrpc;
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
 import org.flexlb.balance.request.Request;
+import org.flexlb.balance.request.RequestRoutingService;
 import org.flexlb.balance.request.Response;
 import org.flexlb.balance.requestlog.PvLogData;
-import org.flexlb.balance.schedule.AbstractRequestScheduler;
 import org.flexlb.balance.schedule.CancelReason;
 import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.balance.schedule.RequestPhase;
 import org.flexlb.balance.schedule.RequestRepository;
 import org.flexlb.balance.schedule.RequestState;
 import org.flexlb.balance.schedule.SchedulingMetadata;
-import org.flexlb.balance.strategy.RequestRouteSelector;
 import org.flexlb.balance.trace.FlexlbTrace;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -32,7 +32,6 @@ import org.flexlb.util.Logger;
 import org.flexlb.worker.endpoint.AdmissionRejectReason;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.status.ServerStatus;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
@@ -58,27 +57,25 @@ import java.util.concurrent.atomic.AtomicReference;
 public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private static final org.slf4j.Logger pvLogger = LoggerFactory.getLogger("pvLogger");
 
-    private final AbstractRequestScheduler requestEntry;
+    private final RequestRoutingService requestEntry;
     private final FlexlbConfig config;
     private final RequestRepository requestState;
     private final MasterStatusView masterStatusView;
-    private final ServiceMetricsReporter serviceMetricsReporter;
+    private final ApiMetricsReporter serviceMetricsReporter;
     private final FlexlbGrpcForwarder grpcForwarder;
     private final DeliveryMetricsReporter deliveryMetricsReporter;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
     private final RequestSchedulerReporter requestSchedulerReporter;
 
-    private RequestRouteSelector selector;
     private List<RoleType> modelRoles = List.of();
-    private org.flexlb.cache.match.CacheAwareService cacheService;
 
     @Autowired
     public FlexlbServiceImpl(
-            @Lazy AbstractRequestScheduler requestEntry,
+            @Lazy RequestRoutingService requestEntry,
             ConfigService configService,
             RequestRepository requestState,
             MasterStatusService masterStatusService,
-            ServiceMetricsReporter serviceMetricsReporter,
+            ApiMetricsReporter serviceMetricsReporter,
             FlexlbGrpcForwarder grpcForwarder,
             DeliveryMetricsReporter deliveryMetricsReporter,
             ServerScheduleLatencyRecorder serverLatencyRecorder,
@@ -96,11 +93,11 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     FlexlbServiceImpl(
-            AbstractRequestScheduler requestEntry,
+            RequestRoutingService requestEntry,
             FlexlbConfig config,
             RequestRepository requestState,
             MasterStatusView masterStatusView,
-            ServiceMetricsReporter serviceMetricsReporter,
+            ApiMetricsReporter serviceMetricsReporter,
             FlexlbGrpcForwarder grpcForwarder,
             DeliveryMetricsReporter deliveryMetricsReporter,
             ServerScheduleLatencyRecorder serverLatencyRecorder,
@@ -117,16 +114,8 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     @Autowired
-    public void configureCache(
-            org.flexlb.cache.match.CacheAwareService cacheService,
-            org.flexlb.config.service.ModelMetaConfig model) {
-        this.cacheService = cacheService;
+    public void configureModel(org.flexlb.config.service.ModelMetaConfig model) {
         this.modelRoles = model.requiredRoles();
-    }
-
-    @Autowired
-    public void configureRouting(RequestRouteSelector selector) {
-        this.selector = java.util.Objects.requireNonNull(selector);
     }
 
     @Override
@@ -584,52 +573,22 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
 
     private CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeLocally(
             RequestContext ctx, Runnable onRegistered) {
-        var request = ctx.getRequest();
-        CompletableFuture<Response> result;
-        try {
-            if (request.isVitRouteOnly()) {
-                result = CompletableFuture.completedFuture(selector.routeVit(ctx));
-                ctx.setFuture(result);
-            } else if (request.getSelectedVit() != null
-                    && requestState.getRequestState(ctx.getRequestId(), ctx.getPhase()) == null
-                    && !selector.selectedVitIsValid(ctx)) {
-                result =
-                        CompletableFuture.completedFuture(
-                                Response.error(StrategyErrorType.VIT_ROUTE_STALE));
-            } else {
-                result = requestEntry.submit(ctx, onRegistered);
-            }
-        } catch (RuntimeException failure) {
-            result =
-                    CompletableFuture.completedFuture(
-                            Response.buildErrorResponse(
-                                    StrategyErrorType.DISPATCH_FAILED, failure.getMessage()));
-        }
-        return result.thenApply(
-                response -> {
-                    if (response.isSuccess() && cacheService != null) {
-                        try {
-                            cacheService.updateFromRoutedRequest(
-                                    request.getRequestId(),
-                                    request.getBlockSize(),
-                                    request.getBlockCacheKeys(),
-                                    response.getServerStatus());
-                        } catch (RuntimeException failure) {
-                            Logger.warn("Routed cache metadata update failed", failure);
-                        }
-                    }
-                    FlexlbScheduleProtocol.FlexlbScheduleResponsePB.Builder builder =
-                            toProtoResponse(response).toBuilder();
-                    RequestState lifecycle =
-                            isAdmissionRequest(ctx)
-                                    ? requestState.getRequestState(
-                                            ctx.getRequestId(), ctx.getPhase())
-                                    : null;
-                    if (lifecycle != null) {
-                        builder.setLifecycle(toLifecycleProto(lifecycle));
-                    }
-                    return builder.build();
-                });
+        return requestEntry
+                .submit(ctx, onRegistered)
+                .thenApply(
+                        response -> {
+                            FlexlbScheduleProtocol.FlexlbScheduleResponsePB.Builder builder =
+                                    toProtoResponse(response).toBuilder();
+                            RequestState lifecycle =
+                                    isAdmissionRequest(ctx)
+                                            ? requestState.getRequestState(
+                                                    ctx.getRequestId(), ctx.getPhase())
+                                            : null;
+                            if (lifecycle != null) {
+                                builder.setLifecycle(toLifecycleProto(lifecycle));
+                            }
+                            return builder.build();
+                        });
     }
 
     private FlexlbScheduleProtocol.FlexlbScheduleResponsePB toProtoResponse(Response response) {
@@ -780,9 +739,9 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
                 if (outcome.getServerStatus() != null) {
                     for (var server : outcome.getServerStatus()) {
                         if (server != null && server.getRole() != null) {
-                            serviceMetricsReporter.reportSelectionResult(
+                            requestSchedulerReporter.reportSelectionResult(
                                     server.getRole(), outcome.isSuccess(), outcome.getCode());
-                            serviceMetricsReporter.reportSelectedWorker(
+                            requestSchedulerReporter.reportSelectedWorker(
                                     server.getRole(),
                                     null,
                                     server.getMetricIpPort(),

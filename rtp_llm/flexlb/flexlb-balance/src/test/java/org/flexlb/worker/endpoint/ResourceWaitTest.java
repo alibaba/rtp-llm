@@ -4,8 +4,6 @@ import org.flexlb.config.service.RoleType;
 import org.flexlb.worker.status.WorkerStatusResponse;
 import org.junit.jupiter.api.Test;
 
-import java.util.concurrent.atomic.AtomicReference;
-
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -33,11 +31,11 @@ class ResourceWaitTest {
     }
 
     @Test
-    void clearingRequestAssociationImmediatelyRemovesRestrictionEvenIfIndexCleanupWasMissed() {
+    void revocationImmediatelyRemovesRestrictionEvenIfIndexCleanupWasMissed() {
         try (var fixture = new Fixture()) {
             var a = fixture.waiter(60, Long.MAX_VALUE);
             fixture.endpoint.registerResourceWait(a.resourceWait);
-            a.current.set(null);
+            a.resourceWait.revoke();
             assertNotNull(fixture.register("b", 20));
             fixture.endpoint.tryAcquire(a.resourceWait);
             assertNull(a.resourceWait.result().toCompletableFuture().join());
@@ -52,22 +50,23 @@ class ResourceWaitTest {
             fixture.endpoint.registerResourceWait(a.resourceWait);
             fixture.endpoint.registerResourceWait(c.resourceWait);
             assertNull(fixture.register("middle", 70));
-            c.current.set(null);
+            c.resourceWait.revoke();
             var middle = fixture.register("middle", 70);
             assertNotNull(middle);
             fixture.endpoint.rollbackSelection(middle);
             assertNull(fixture.register("low", 20));
-            a.current.set(null);
+            a.resourceWait.revoke();
             assertNotNull(fixture.register("low", 20));
         }
     }
 
     @Test
-    void responseCompletionMakesStaleWaitIneffective() {
+    void revocationRemovesProtectionWithoutCompletingTheResult() {
         try (var fixture = new Fixture()) {
             var a = fixture.waiter(60, Long.MAX_VALUE);
             fixture.endpoint.registerResourceWait(a.resourceWait);
-            when(a.request.isResponseDone()).thenReturn(true);
+            a.resourceWait.revoke();
+            assertFalse(a.resourceWait.isDone());
             assertNotNull(fixture.register("b", 20));
         }
     }
@@ -92,10 +91,7 @@ class ResourceWaitTest {
         }
     }
 
-    private record Waiter(
-            WorkerRequest request,
-            AtomicReference<DecodeEndpoint.ResourceWait> current,
-            DecodeEndpoint.ResourceWait resourceWait) {}
+    private record Waiter(WorkerRequest request, DecodeEndpoint.ResourceWait resourceWait) {}
 
     /**
      * Creates a Decode endpoint with controlled capacity and closes it after resource-wait checks.
@@ -125,13 +121,10 @@ class ResourceWaitTest {
         private Waiter waiter(int priority, long deadline) {
             var request = mock(WorkerRequest.class);
             when(request.getRequestId()).thenReturn("a-" + ++sequence);
-            var current = new AtomicReference<DecodeEndpoint.ResourceWait>();
-            when(request.currentResourceWait()).thenAnswer(call -> current.get());
             var wait =
                     endpoint.createResourceWait(
                             request, sequence, priority, deadline, 10, 10, capacity);
-            current.set(wait);
-            return new Waiter(request, current, wait);
+            return new Waiter(request, wait);
         }
 
         private DecodeEndpoint.RequestRegistration register(String id, int priority) {

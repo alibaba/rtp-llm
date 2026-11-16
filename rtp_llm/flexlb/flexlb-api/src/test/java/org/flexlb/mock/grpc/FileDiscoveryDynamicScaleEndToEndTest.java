@@ -9,10 +9,10 @@ import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.service.ModelMetaConfig;
 import org.flexlb.config.service.RoleType;
+import org.flexlb.config.service.WorkerDiscoveryEndpoint;
 import org.flexlb.mock.FlexLBMockTestBase;
 import org.flexlb.mock.MockPrefillWorker;
 import org.flexlb.mock.MockWorkerBehavior;
-import org.flexlb.util.discovery.DiscoveryEndpoint;
 import org.flexlb.worker.cache.DynamicCacheIntervalService;
 import org.flexlb.worker.rpc.WorkerStatusRpcClient;
 import org.flexlb.worker.status.ServerStatus;
@@ -174,10 +174,10 @@ class FileDiscoveryDynamicScaleEndToEndTest extends FlexLBMockTestBase {
         // Model topology: upstream builds ModelMetaConfig from the
         // MODEL_SERVICE_CONFIG env; mocking it keeps this test hermetic while
         // still resolving the domain → address mapping the sync loop consumes.
-        DiscoveryEndpoint prefillEndpoint = new DiscoveryEndpoint();
+        WorkerDiscoveryEndpoint prefillEndpoint = new WorkerDiscoveryEndpoint();
         prefillEndpoint.setAddress(PREFILL_DOMAIN);
         prefillEndpoint.setProtocol("http");
-        DiscoveryEndpoint decodeEndpoint = new DiscoveryEndpoint();
+        WorkerDiscoveryEndpoint decodeEndpoint = new WorkerDiscoveryEndpoint();
         decodeEndpoint.setAddress(DECODE_DOMAIN);
         decodeEndpoint.setProtocol("http");
         ModelMetaConfig modelMetaConfig = mock(ModelMetaConfig.class);

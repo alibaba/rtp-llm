@@ -1,6 +1,7 @@
 package org.flexlb.api.server;
 
 import org.flexlb.api.ServerScheduleLatencyRecorder;
+import org.flexlb.api.metrics.ApiMetricsReporter;
 import org.flexlb.balance.metrics.DeliveryMetricsReporter;
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
 import org.flexlb.balance.schedule.AbstractRequestScheduler;
@@ -8,7 +9,6 @@ import org.flexlb.balance.schedule.RequestContext;
 import org.flexlb.balance.schedule.RequestRepository;
 import org.flexlb.config.ConfigService;
 import org.flexlb.master.MasterStatusView;
-import org.flexlb.worker.status.ServiceMetricsReporter;
 
 /**
  * Assembles API fixtures through the same scheduler and configuration as production.
@@ -18,7 +18,7 @@ public final class FlexlbServiceTestSupport {
             AbstractRequestScheduler scheduler,
             RequestRepository requests,
             MasterStatusView leadership,
-            ServiceMetricsReporter health,
+            ApiMetricsReporter health,
             FlexlbGrpcForwarder forwarder,
             ConfigService config,
             DeliveryMetricsReporter batches,
@@ -44,7 +44,12 @@ public final class FlexlbServiceTestSupport {
         }
         var service =
                 new FlexlbServiceImpl(
-                        scheduler,
+                        new org.flexlb.balance.request.RequestRoutingService(
+                                scheduler,
+                                requests,
+                                selector(scheduler),
+                                org.mockito.Mockito.mock(
+                                        org.flexlb.cache.match.CacheAwareService.class)),
                         config.loadBalanceConfig(),
                         requests,
                         leadership,
@@ -53,13 +58,29 @@ public final class FlexlbServiceTestSupport {
                         batches,
                         latency,
                         reporter);
-        if (scheduler instanceof org.flexlb.balance.schedule.DirectRequestScheduler
-                || scheduler instanceof org.flexlb.balance.schedule.QueuedRequestScheduler) {
-            service.configureRouting(
-                    (org.flexlb.balance.strategy.RequestRouteSelector)
-                            org.springframework.test.util.ReflectionTestUtils.getField(
-                                    scheduler, "router"));
-        }
         return service;
+    }
+
+    static void configureRouting(
+            FlexlbServiceImpl service, org.flexlb.balance.strategy.RequestRouteSelector selector) {
+        Object entry =
+                org.springframework.test.util.ReflectionTestUtils.getField(service, "requestEntry");
+        org.springframework.test.util.ReflectionTestUtils.setField(entry, "selector", selector);
+    }
+
+    static void configureCache(
+            FlexlbServiceImpl service, org.flexlb.cache.match.CacheAwareService cache) {
+        Object entry =
+                org.springframework.test.util.ReflectionTestUtils.getField(service, "requestEntry");
+        org.springframework.test.util.ReflectionTestUtils.setField(entry, "cacheService", cache);
+    }
+
+    private static org.flexlb.balance.strategy.RequestRouteSelector selector(
+            AbstractRequestScheduler scheduler) {
+        if (scheduler instanceof org.flexlb.balance.schedule.DirectRequestScheduler
+                || scheduler instanceof org.flexlb.balance.schedule.QueuedRequestScheduler)
+            return (org.flexlb.balance.strategy.RequestRouteSelector)
+                    org.springframework.test.util.ReflectionTestUtils.getField(scheduler, "router");
+        return org.mockito.Mockito.mock(org.flexlb.balance.strategy.RequestRouteSelector.class);
     }
 }

@@ -52,10 +52,15 @@ class ServiceMetricsReporterTest {
     private final EndpointStats workerDirectory = mock(EndpointStats.class);
 
     private ServiceMetricsReporter reporter;
+    private org.flexlb.api.metrics.ApiMetricsReporter apiReporter;
+    private org.flexlb.balance.metrics.RequestSchedulerReporter schedulerReporter;
 
     @BeforeEach
     void setUp() {
         reporter = new ServiceMetricsReporter(monitor, workerDirectory);
+        apiReporter = new org.flexlb.api.metrics.ApiMetricsReporter(monitor);
+        schedulerReporter = new org.flexlb.balance.metrics.RequestSchedulerReporter(monitor);
+        schedulerReporter.init();
     }
 
     @Test
@@ -265,7 +270,7 @@ class ServiceMetricsReporterTest {
         context.setRequest(request);
         context.setRequestMessageBytes(8192L);
 
-        reporter.reportRequestPayload(
+        apiReporter.reportRequestPayload(
                 false,
                 request.getSeqLen(),
                 request.getCacheKeyBlockSize(),
@@ -279,8 +284,8 @@ class ServiceMetricsReporterTest {
 
     @Test
     void shouldReportSelectedEngineWithConfiguredStrategy() {
-        reporter.reportSelectionResult(RoleType.PREFILL, true, 200);
-        reporter.reportSelectedWorker(
+        schedulerReporter.reportSelectionResult(RoleType.PREFILL, true, 200);
+        schedulerReporter.reportSelectedWorker(
                 RoleType.PREFILL, "LEAST_RECENTLY_USED_IN_POOL", "10.0.0.1:8080", true, 200);
 
         verify(monitor)
@@ -334,7 +339,7 @@ class ServiceMetricsReporterTest {
 
     @Test
     void shouldSkipUnknownRequestPayloadMetrics() {
-        reporter.reportRequestPayload(false, -1, -1, null);
+        apiReporter.reportRequestPayload(false, -1, -1, null);
 
         verify(monitor, never())
                 .report(
@@ -487,7 +492,7 @@ class ServiceMetricsReporterTest {
     void shouldReportZkMasterEventTime() {
         long beforeReport = System.currentTimeMillis();
 
-        reporter.reportPrefillBalanceMasterEvent(ZkMasterEvent.MASTER_TAKE_LEADERSHIP);
+        apiReporter.reportPrefillBalanceMasterEvent(ZkMasterEvent.MASTER_TAKE_LEADERSHIP);
 
         long afterReport = System.currentTimeMillis();
         verify(monitor)
@@ -1250,13 +1255,13 @@ class ServiceMetricsReporterTest {
 
     private void reportBalance(RequestContext data) {
         var response = data.getResponse();
-        reporter.reportBalancingService(
+        apiReporter.reportBalancingService(
                 response.getCode(), System.currentTimeMillis() - data.getTiming().startedAtMs());
         for (var selected : response.getServerStatus()) {
             if (selected == null || selected.getRole() == null) continue;
-            reporter.reportSelectionResult(
+            schedulerReporter.reportSelectionResult(
                     selected.getRole(), response.isSuccess(), response.getCode());
-            reporter.reportSelectedWorker(
+            schedulerReporter.reportSelectedWorker(
                     selected.getRole(),
                     null,
                     selected.getServerIp() + ":" + selected.getHttpPort(),
