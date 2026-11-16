@@ -24,6 +24,7 @@
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/RpcTimeoutUtils.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/utils/RpcCompletionQueue.h"
 #include <exception>
 #include <tuple>
 #include <utility>
@@ -95,13 +96,18 @@ void addBatchError(EnqueueBatchResponsePB* response, int64_t request_id, ErrorCo
 }  // namespace
 
 PrefillRpcServer::~PrefillRpcServer() {
-    if (batch_context_cleanup_thread_) {
-        batch_context_cleanup_thread_->stop();
-        batch_context_cleanup_thread_.reset();
+    {
+        std::lock_guard<std::mutex> lock(batch_event_owner_->mutex);
+        batch_event_owner_->server = nullptr;
     }
+    decltype(batch_entries_) remaining;
     {
         std::lock_guard<std::mutex> lock(batch_mutex_);
-        batch_entries_.clear();
+        remaining.swap(batch_entries_);
+    }
+    for (auto& entry : remaining) {
+        if (entry.second.cancel_alarm)
+            entry.second.cancel_alarm();
     }
     if (hang_diag_thread_) {
         hang_diag_thread_->stop();
@@ -208,6 +214,19 @@ std::unique_ptr<GenerateContext> PrefillRpcServer::makeBatchRequestContext(
     return context;
 }
 
+std::function<void()> PrefillRpcServer::scheduleBatchEvent(std::weak_ptr<BatchEventOwner>         owner,
+                                                           int64_t                                delay_ms,
+                                                           std::function<void(PrefillRpcServer&)> callback) {
+    return RpcCompletionQueue::instance().scheduleAfter(delay_ms, [owner, callback = std::move(callback)](bool ok) {
+        auto state = owner.lock();
+        if (!ok || !state)
+            return;
+        std::lock_guard<std::mutex> lock(state->mutex);
+        if (state->server)
+            callback(*state->server);
+    });
+}
+
 void PrefillRpcServer::registerBatchAttach(const std::string&       key,
                                            const GenerateStreamPtr& stream,
                                            int64_t                  timeout_ms,
@@ -215,93 +234,129 @@ void PrefillRpcServer::registerBatchAttach(const std::string&       key,
                                            int64_t                  now_ms) {
     constexpr int64_t kDefaultAttachTimeoutMs = 10 * 60 * 1000;
     const auto        ttl_ms                  = timeout_ms > 0 ? timeout_ms : kDefaultAttachTimeoutMs;
-    // Subtract before adding so arbitrarily large wire values cannot overflow.
-    const auto deadline_ms = now_ms + std::min(ttl_ms, std::max<int64_t>(0, request_deadline_ms - now_ms));
-    std::lock_guard<std::mutex> lock(batch_mutex_);
-    auto&                       entry = batch_entries_[key];
-    entry.stream                      = stream;
-    entry.deadline_ms                 = deadline_ms;
-    entry.request_deadline_ms         = request_deadline_ms;
-    entry.attach_pending              = true;
+    const auto        delay_ms                = std::min(ttl_ms, std::max<int64_t>(0, request_deadline_ms - now_ms));
+    const auto        deadline_ms             = now_ms + delay_ms;
+    uint64_t          generation;
+    {
+        std::lock_guard<std::mutex> lock(batch_mutex_);
+        auto&                       entry = batch_entries_[key];
+        generation = entry.generation = ++batch_generation_;
+        entry.stream                  = stream;
+        entry.deadline_ms             = deadline_ms;
+        entry.request_deadline_ms     = request_deadline_ms;
+        entry.attach_pending          = !entry.attached;
+        if (entry.attach_pending) {
+            entry.cancel_alarm = scheduleBatchEvent(
+                batch_event_owner_, delay_ms, [key, generation, deadline_ms](PrefillRpcServer& server) {
+                    server.expireBatchAttachment(key, generation, std::max(deadline_ms, currentTimeMs()));
+                });
+        }
+    }
+    if (stream) {
+        stream->onLocalCleanupProgress([owner       = std::weak_ptr<BatchEventOwner>(batch_event_owner_),
+                                        weak_stream = std::weak_ptr<GenerateStream>(stream),
+                                        key,
+                                        generation] {
+            if (auto stream = weak_stream.lock(); stream && stream->isFinished()) {
+                scheduleBatchEvent(owner, 0, [key, generation](PrefillRpcServer& server) {
+                    server.finishBatchStream(key, generation);
+                });
+            }
+        });
+    }
 }
 
 bool PrefillRpcServer::attachBatch(const std::string& key, int64_t now_ms) {
     std::lock_guard<std::mutex> lock(batch_mutex_);
     auto                        it = batch_entries_.find(key);
-    if (it == batch_entries_.end() || !it->second.attach_pending)
-        return true;  // Ordinary GenerateStreamCall has no batch attachment deadline.
-    if (it->second.expired || now_ms >= it->second.deadline_ms)
+    if (it == batch_entries_.end())
+        return true;
+    auto& entry = it->second;
+    if (entry.attach_pending && (entry.expired || now_ms >= entry.deadline_ms))
         return false;
-    it->second.attach_pending = false;
-    it->second.stream.reset();
-    if (!it->second.reserved && !it->second.context)
+    entry.attached       = true;
+    entry.attach_pending = false;
+    entry.stream.reset();
+    if (entry.cancel_alarm) {
+        entry.cancel_alarm();
+        entry.cancel_alarm = {};
+    }
+    if (!entry.reserved && !entry.context)
         batch_entries_.erase(it);
     return true;
 }
 
-void PrefillRpcServer::expireBatchAttachments(int64_t now_ms) {
-    struct ExpiredAttachment {
-        std::string                   key;
-        std::weak_ptr<GenerateStream> stream;
-        int64_t                       request_deadline_ms;
-    };
-    std::vector<ExpiredAttachment> expired;
+void PrefillRpcServer::expireBatchAttachment(const std::string& key, uint64_t generation, int64_t now_ms) {
+    GenerateStreamPtr stream;
+    int64_t           request_deadline_ms;
     {
         std::lock_guard<std::mutex> lock(batch_mutex_);
-        for (auto it = batch_entries_.begin(); it != batch_entries_.end();) {
-            auto& state = it->second;
-            if (state.attach_pending && !state.expired && now_ms >= state.deadline_ms) {
-                state.expired = true;
-                expired.push_back({it->first, state.stream, state.request_deadline_ms});
-                state.stream.reset();
-            }
-            // Keep the rejection fence until the overall deadline. The resource
-            // store retains its terminal fence after the control record is removed.
-            if (state.attach_pending && now_ms >= state.request_deadline_ms && !state.reserved && !state.context)
-                it = batch_entries_.erase(it);
-            else
-                ++it;
+        auto                        it = batch_entries_.find(key);
+        if (it == batch_entries_.end() || it->second.generation != generation || !it->second.attach_pending
+            || now_ms < it->second.deadline_ms)
+            return;
+        auto& entry = it->second;
+        if (entry.cancel_alarm)
+            entry.cancel_alarm();
+        entry.cancel_alarm  = {};
+        request_deadline_ms = entry.request_deadline_ms;
+        if (entry.expired) {
+            if (now_ms >= request_deadline_ms && !entry.reserved && !entry.context)
+                batch_entries_.erase(it);
+            return;
         }
+
+        entry.expired = true;
+        stream        = entry.stream.lock();
+        entry.stream.reset();
     }
-    for (const auto& state : expired) {
-        if (auto stream = state.stream.lock())
-            stream->reportError(ErrorCode::GENERATE_TIMEOUT, "PD batch result attachment deadline exceeded");
-        if (engine_ && engine_->getCacheManager())
-            engine_->getCacheManager()->expirePrefillRequest(state.key, state.request_deadline_ms);
+    if (stream) {
+        stream->reportError(ErrorCode::GENERATE_TIMEOUT, "PD batch result attachment deadline exceeded");
+    }
+    if (engine_ && engine_->getCacheManager()) {
+        engine_->getCacheManager()->expirePrefillRequest(key, request_deadline_ms);
+    }
+
+    // Connector now holds the terminal fence. Keep the RPC rejection until
+    // the request deadline, or longer if Engine still owns the batch context.
+    std::lock_guard<std::mutex> lock(batch_mutex_);
+    auto                        it = batch_entries_.find(key);
+    if (it == batch_entries_.end() || it->second.generation != generation)
+        return;
+    if (now_ms < request_deadline_ms) {
+        it->second.cancel_alarm = scheduleBatchEvent(
+            batch_event_owner_,
+            request_deadline_ms - now_ms,
+            [key, generation, request_deadline_ms](PrefillRpcServer& server) {
+                server.expireBatchAttachment(key, generation, std::max(request_deadline_ms, currentTimeMs()));
+            });
+    } else if (!it->second.reserved && !it->second.context) {
+        batch_entries_.erase(it);
     }
 }
 
-void PrefillRpcServer::batchContextCleanupTick() {
-    expireBatchAttachments(currentTimeMs());
-    std::vector<std::unique_ptr<GenerateContext>> completed;
-    std::vector<PDCancelRegistry::Handle>         finished_handles;
+void PrefillRpcServer::finishBatchStream(const std::string& key, uint64_t generation) {
+    std::unique_ptr<GenerateContext> context;
     {
         std::lock_guard<std::mutex> lock(batch_mutex_);
-        for (auto it = batch_entries_.begin(); it != batch_entries_.end();) {
-            auto& entry = it->second;
-            if (entry.context) {
-                auto& stream = entry.context->getStream();
-                if (stream && (stream->hasError() || stream->getStatus() == StreamState::FINISHED)) {
-                    finished_handles.push_back(cancel_registry_->find(entry.context->request_id));
-                    entry.reserved = false;
-                    entry.context->markRpcHandlingCompleted();
-                    completed.push_back(std::move(entry.context));
-                }
-            }
-            if (!entry.reserved && !entry.context
-                && (!entry.attach_pending || currentTimeMs() >= entry.request_deadline_ms)) {
-                it = batch_entries_.erase(it);
-            } else {
-                ++it;
-            }
+        auto                        it = batch_entries_.find(key);
+        if (it == batch_entries_.end() || it->second.generation != generation || !it->second.context)
+            return;
+        auto& entry    = it->second;
+        context        = std::move(entry.context);
+        entry.reserved = false;
+        if (!entry.attach_pending || (entry.expired && currentTimeMs() >= entry.request_deadline_ms)) {
+            if (entry.cancel_alarm)
+                entry.cancel_alarm();
+            batch_entries_.erase(it);
         }
     }
-    // GenerateContext destruction publishes the final RuntimeMeta snapshot.
-    completed.clear();
-    for (const auto& handle : finished_handles)
-        if (handle)
-            cancel_registry_->finishLocal(handle);
-    cancelCleanupTick();
+    const auto request_id = context->request_id;
+    context->markRpcHandlingCompleted();
+    context.reset();  // Publish the final RuntimeMeta snapshot before finishLocal.
+    if (auto handle = cancel_registry_->find(request_id)) {
+        cancel_registry_->finishLocal(handle);
+    }
 }
 
 grpc::Status PrefillRpcServer::init(const EngineInitParams&                                maga_init_params,
@@ -333,7 +388,7 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
         return grpc::Status(grpc::StatusCode::INTERNAL, "PD requires P2P connector");
     }
 
-    cancel_registry_ = std::make_unique<PDCancelRegistry>(meta_);
+    cancel_registry_ = std::make_shared<PDCancelRegistry>(meta_);
 
     // Start [HANG-DIAG] watchdog: every 30s, scan onflight_trackers_ and WARN
     // about any GenerateStreamCall that has been alive longer than the
@@ -343,12 +398,6 @@ grpc::Status PrefillRpcServer::init(const EngineInitParams&                     
         autil::LoopThread::createLoopThread([this]() { hangDiagTick(); }, 30 * 1000 * 1000, "PrefillRpcServerHangDiag");
     if (!hang_diag_thread_) {
         RTP_LLM_LOG_WARNING("prefill rpc server new2: failed to start hang_diag_thread_, watchdog disabled");
-    }
-    batch_context_cleanup_thread_ =
-        autil::LoopThread::createLoopThread([this]() { batchContextCleanupTick(); }, 10 * 1000, "P2PBatchCleanup");
-    if (!batch_context_cleanup_thread_) {
-        RTP_LLM_LOG_WARNING("prefill rpc server new2: failed to start batch cleanup thread");
-        return grpc::Status(grpc::StatusCode::INTERNAL, "failed to start P2P batch cleanup thread");
     }
     return grpc::Status::OK;
 }
@@ -825,15 +874,15 @@ grpc::Status PrefillRpcServer::EnqueueBatch(grpc::ServerContext*         context
             auto batch_context = std::move(admitted_contexts[i]);
             batch_context->setStream(streams[i]);
             cancel_registry_->attach(cancel_registry_->find(admitted_request_ids[i]), streams[i]);
+            {
+                std::lock_guard<std::mutex> lock(batch_mutex_);
+                batch_entries_.at(inputs[i]->generate_config->unique_key).context = std::move(batch_context);
+            }
             registerBatchAttach(inputs[i]->generate_config->unique_key,
                                 streams[i],
                                 request->fetch_attach_timeout_ms(),
                                 inputs[i]->request_deadline_ms,
                                 currentTimeMs());
-            {
-                std::lock_guard<std::mutex> lock(batch_mutex_);
-                batch_entries_.at(inputs[i]->generate_config->unique_key).context = std::move(batch_context);
-            }
             addBatchSuccess(response, admitted_request_ids[i]);
             continue;
         }
@@ -929,34 +978,23 @@ PrefillRpcServer::Cancel(grpc::ServerContext*, const CancelRequestPB* request, C
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "cancel request missing request_id");
     if (!cancel_registry_)
         return grpc::Status(grpc::StatusCode::UNAVAILABLE, "Prefill is not initialized");
-    auto handle = cancel_registry_->find(request->request_id());
-    if (handle && handle->terminal.load()) {
-        response->set_status(CANCEL_STATUS_NOT_FOUND);
-        return grpc::Status::OK;
-    }
-    // A completed Prefill may still have unconsumed KV in the resource store.
-    if (handle && engine_ && engine_->getCacheManager())
-        engine_->getCacheManager()->cancelPrefillRequest(handle->unique_key, handle->deadline_ms);
     const auto cancellation = cancel_registry_->cancel(
         request->request_id(),
         {request->cancel_error_code() == 0 ? ErrorCode::PRIORITY_PREEMPTED :
                                              static_cast<ErrorCode>(request->cancel_error_code()),
-         request->cancel_error_message().empty() ? "PD request canceled" : request->cancel_error_message()});
+         request->cancel_error_message().empty() ? "PD request canceled" : request->cancel_error_message()},
+        [this](const auto& handle) {
+            // A completed Prefill can still have unconsumed KV. Fence it
+            // before the registry can publish local cleanup.
+            if (engine_ && engine_->getCacheManager()) {
+                engine_->getCacheManager()->cancelPrefillRequest(handle->unique_key, handle->deadline_ms);
+            }
+        });
     if (!cancellation.ok()) {
         return grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, std::string(cancellation.status().message()));
     }
     response->set_status(cancellation.value());
     return grpc::Status::OK;
-}
-
-void PrefillRpcServer::cancelCleanupTick() {
-    if (currentTimeMs() - last_cancel_tick_ms_ < 100)
-        return;
-    last_cancel_tick_ms_ = currentTimeMs();
-    for (const auto& handle : cancel_registry_->pending()) {
-        engine_->getCacheManager()->cancelPrefillRequest(handle->unique_key, handle->deadline_ms);
-        cancel_registry_->complete(handle);
-    }
 }
 
 ::grpc::Status PrefillRpcServer::GetPeerInfo(::grpc::ServerContext*      context,

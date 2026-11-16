@@ -332,6 +332,19 @@ bool StreamCacheResource::p2pReleasePending() const {
     return !p2pLoadSafeToRelease(p2p_load_context_) || !p2pLoadSafeToRelease(released_p2p_load_context_.lock());
 }
 
+void StreamCacheResource::trackReleasedP2PLoad() {
+    released_p2p_load_context_ = p2p_load_context_;
+    auto p2p                   = std::dynamic_pointer_cast<P2PConnectorAsyncReadContext>(p2p_load_context_);
+    p2p_load_context_.reset();
+    if (p2p) {
+        p2p->onTargetSafeToRelease([weak_stream = stream_->weak_from_this()] {
+            if (auto stream = weak_stream.lock()) {
+                stream->notifyLocalCleanupProgress();
+            }
+        });
+    }
+}
+
 void StreamCacheResource::releaseResource() {
     RTP_LLM_PROFILE_FUNCTION();
     if (!resource_context_.cache_manager) {
@@ -367,8 +380,7 @@ void StreamCacheResource::releaseResource() {
     }
     if (p2p_load_context_) {
         resource_context_.cache_manager->cancelP2PLoad(p2p_load_context_);
-        released_p2p_load_context_ = p2p_load_context_;
-        p2p_load_context_.reset();
+        trackReleasedP2PLoad();
     }
     allocator_load_error_ = absl::OkStatus();
     p2p_cancel_requested_ = false;
@@ -823,8 +835,7 @@ bool StreamCacheResource::loadCacheDone() {
             const auto error = p2p_load_context_->errorInfo();
             // The scheduler may still retain the target lease after logical failure.
             // Keep its physical-completion proof visible to cancellation cleanup.
-            released_p2p_load_context_ = p2p_load_context_;
-            p2p_load_context_.reset();
+            trackReleasedP2PLoad();
             RTP_LLM_LOG_WARNING(
                 "P2P cache load failed, stream=%ld error=%s", stream_->streamId(), error.ToString().c_str());
             stream_->reportEventWithoutLock(StreamEvents::Error, error.code(), error.ToString());

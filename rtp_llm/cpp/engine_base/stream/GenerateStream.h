@@ -23,6 +23,7 @@
 #include <memory>
 #include <limits>
 #include <mutex>
+#include <functional>
 #include <optional>
 #include <type_traits>
 #include <utility>
@@ -212,6 +213,8 @@ public:
     bool                 tryCompleteLocalCleanup();
     // Read-only check for outstanding local work during late cancellation.
     bool                 hasPendingLocalCleanup() const;
+    // Callbacks may run on the Engine or transport thread and should only enqueue work.
+    void                 onLocalCleanupProgress(std::function<void()> callback);
     int                  nextNeedBlockNums(int reserve_step) const;
     int                  estimateInitialNeedBlocks() const;
     int                  estimatePeakNeedBlocks(int remaining_tokens) const;
@@ -669,6 +672,7 @@ public:
     bool hasPendingAsyncBookkeeping() const;
     void waitPendingAsyncBookkeeping();
     void markDeferredRelease();
+    bool deferResourceReleaseIfBusy();
     bool isDeferredReleasePending() const;
     bool hasPendingP2PResourceHold() const;
 
@@ -947,6 +951,9 @@ protected:
     bool needsAsyncBookkeepingJoinForKvReservation() const;
 
     bool canReleaseFinishedResources() const;
+    void                               notifyLocalCleanupProgress();
+    std::mutex                         cleanup_observers_mutex_;
+    std::vector<std::function<void()>> cleanup_observers_;
 
     // Consumer-visible state is read and written under mutex_. Public readers
     // acquire the lock; already-locked engine paths use these helpers.

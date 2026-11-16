@@ -4,8 +4,6 @@
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PDCancelRegistry.h"
 #include "rtp_llm/cpp/model_rpc/PrefillServerCaller.h"
-#include "autil/LoopThread.h"
-#include "rtp_llm/cpp/model_rpc/RPCPool.h"
 #include <optional>
 
 namespace rtp_llm {
@@ -35,10 +33,10 @@ public:
                                    BatchGenerateOutputsPB*     response) override;
 
 private:
-    std::unique_ptr<PDCancelRegistry> cancel_registry_;
-    autil::LoopThreadPtr              cancel_cleanup_thread_;
-    Pool<RpcService>                  cancel_pool_;
-    void                              cancelCleanupTick();
+    class CancelClient;
+    std::shared_ptr<PDCancelRegistry> cancel_registry_;
+    std::shared_ptr<CancelClient>     cancel_client_;
+    void                              initCancelRegistry();
     grpc::Status                      preparePDRequest(const GenerateInputPB&          request,
                                                        int64_t                         deadline_ms,
                                                        std::shared_ptr<GenerateInput>& input,

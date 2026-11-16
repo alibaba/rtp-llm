@@ -1,8 +1,56 @@
 #include "rtp_llm/cpp/model_rpc/PDCancelRegistry.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/RpcCompletionQueue.h"
 #include <chrono>
+#include <limits>
 
 namespace rtp_llm {
+
+PDCancelRegistry::~PDCancelRegistry() {
+    if (cancel_expiration_) {
+        cancel_expiration_();
+    }
+}
+
+void PDCancelRegistry::armExpirationLocked() {
+    auto weak = weak_from_this();
+    if (weak.expired()) {
+        return;
+    }
+    const auto now  = currentTimeMs();
+    auto       next = std::numeric_limits<int64_t>::max();
+    if (!entry_expirations_.empty())
+        next = entry_expirations_.begin()->first;
+    if (!fence_expirations_.empty())
+        next = std::min(next, fence_expirations_.begin()->first);
+    if (!overdue_cancels_.empty())
+        next = std::min(next, now + 30 * 1000);
+    if (cancel_expiration_ && expiration_ms_ == next) {
+        return;
+    }
+    if (cancel_expiration_) {
+        cancel_expiration_();
+        cancel_expiration_ = {};
+    }
+    const auto generation = ++expiration_generation_;
+    if (next == std::numeric_limits<int64_t>::max()) {
+        return;
+    }
+    expiration_ms_ = next;
+    cancel_expiration_ =
+        RpcCompletionQueue::instance().scheduleAfter(std::max<int64_t>(0, next - now), [weak, generation](bool ok) {
+            auto registry = weak.lock();
+            if (!ok || !registry)
+                return;
+            std::lock_guard<std::mutex> lock(registry->mutex_);
+            if (generation != registry->expiration_generation_)
+                return;
+            registry->cancel_expiration_ = {};
+            registry->trimLocked(currentTimeMs());
+            registry->reportPressureLocked();
+            registry->armExpirationLocked();
+        });
+}
 
 void PDCancelRegistry::scheduleExpirationLocked(const Handle& handle, int64_t expires_at_ms) {
     const auto current = entries_.find(handle->identity.request_id);
@@ -14,6 +62,7 @@ void PDCancelRegistry::scheduleExpirationLocked(const Handle& handle, int64_t ex
     entry_expirations_.erase({handle->retain_until_ms, handle->identity.request_id});
     handle->retain_until_ms = expires_at_ms;
     entry_expirations_.emplace(expires_at_ms, handle->identity.request_id);
+    armExpirationLocked();
 }
 
 void PDCancelRegistry::trimLocked(int64_t now_ms) {
@@ -67,9 +116,6 @@ void PDCancelRegistry::trimLocked(int64_t now_ms) {
                 canceled_keys_.erase(key);
             }
         }
-        pending_cancels_.erase(request_id);
-        local_pending_cancels_.erase(request_id);
-        pending_stream_releases_.erase(request_id);
         if (e->control_only) {
             --control_record_count_;
         }
@@ -159,10 +205,44 @@ PDCancelRegistry::Handle PDCancelRegistry::find(int64_t request_id) {
 }
 
 void PDCancelRegistry::attach(const Handle& handle, const GenerateStreamPtr& stream) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    handle->stream = stream;
-    if (stream && handle->canceled.load()) {
-        stream->reportError(handle->cancel_reason.code(), handle->cancel_reason.ToString());
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        handle->stream = stream;
+        if (stream && handle->canceled.load()) {
+            stream->reportError(handle->cancel_reason.code(), handle->cancel_reason.ToString());
+        }
+    }
+    auto registry = weak_from_this();
+    if (stream && !registry.expired()) {
+        stream->onLocalCleanupProgress([registry, weak_handle = std::weak_ptr<Entry>(handle)] {
+            auto tracker = registry.lock();
+            auto entry   = weak_handle.lock();
+            if (tracker && entry)
+                tracker->scheduleLocalProgress(entry);
+        });
+    }
+}
+
+void PDCancelRegistry::scheduleLocalProgress(const Handle& handle) {
+    auto weak = weak_from_this();
+    if (weak.expired() || handle->local_event_queued.exchange(true)) {
+        return;
+    }
+    if (!RpcCompletionQueue::instance().scheduleAfter(0, [weak, entry = std::weak_ptr<Entry>(handle)](bool ok) {
+            auto registry = weak.lock();
+            auto handle   = entry.lock();
+            if (!registry || !handle)
+                return;
+            handle->local_event_queued.store(false);
+            if (!ok || !handle->local_done)
+                return;
+            if (handle->canceled.load()) {
+                registry->complete(handle);
+            } else {
+                registry->releaseFinishedStream(handle);
+            }
+        })) {
+        handle->local_event_queued.store(false);
     }
 }
 
@@ -181,6 +261,8 @@ void PDCancelRegistry::finishLocal(const Handle& handle) {
             handle, (handle->downstream_done ? now_ms : std::max(now_ms, handle->deadline_ms)) + kRetentionMs);
     }
     if (handle->canceled.load() || !stream || handle->stream != stream) {
+        if (handle->canceled.load())
+            scheduleLocalProgress(handle);
         return;
     }
     const auto request_id = handle->identity.request_id;
@@ -190,13 +272,15 @@ void PDCancelRegistry::finishLocal(const Handle& handle) {
     }
     if (cleanup_complete) {
         handle->stream.reset();
-        pending_stream_releases_.erase(request_id);
     } else {
-        pending_stream_releases_.emplace(request_id, handle);
+        // A stream event may already have run while RPC teardown was in progress.
+        scheduleLocalProgress(handle);
     }
 }
 
-absl::StatusOr<CancelStatusPB> PDCancelRegistry::cancel(int64_t request_id, const ErrorInfo& reason) {
+absl::StatusOr<CancelStatusPB> PDCancelRegistry::cancel(int64_t                                   request_id,
+                                                        const ErrorInfo&                          reason,
+                                                        const std::function<void(const Handle&)>& fence_local_prefill) {
     std::lock_guard<std::mutex> lock(mutex_);
     trimLocked(currentTimeMs());
     auto found = entries_.find(request_id);
@@ -213,10 +297,17 @@ absl::StatusOr<CancelStatusPB> PDCancelRegistry::cancel(int64_t request_id, cons
         const bool inserted = absent_fences_.emplace(request_id, CancelFence{expires_at_ms, reason}).second;
         if (inserted) {
             fence_expirations_.emplace(expires_at_ms, request_id);
+            armExpirationLocked();
         }
         return CANCEL_STATUS_TOMBSTONED;
     }
     const auto& e = found->second;
+    if (fence_local_prefill) {
+        if (e->terminal.load()) {
+            return CANCEL_STATUS_NOT_FOUND;
+        }
+        fence_local_prefill(e);
+    }
     const auto prior_error = e->stream ? e->stream->firstError().error : ErrorInfo::OkStatus();
     if (reason.code() == ErrorCode::PRIORITY_PREEMPTED
         && ((e->canceled.load() && e->cancel_reason.code() != ErrorCode::PRIORITY_PREEMPTED)
@@ -246,16 +337,13 @@ absl::StatusOr<CancelStatusPB> PDCancelRegistry::cancel(int64_t request_id, cons
     // The first scheduled deadline observes cleanup age. Only complete()
     // can start retirement for a canceled record.
     scheduleExpirationLocked(e, currentTimeMs() + kRetentionMs);
-    pending_stream_releases_.erase(request_id);
     ++canceled_keys_[e->unique_key];
-    pending_cancels_.emplace(request_id, e);
-    local_pending_cancels_.emplace(request_id, e);
-    e->next_cancel_retry_ms.store(
-        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
-            .count(),
-        std::memory_order_release);
     if (e->stream)
         e->stream->reportError(e->cancel_reason.code(), e->cancel_reason.ToString());
+    scheduleLocalProgress(e);
+    if (cancel_started_ && !e->downstream_done) {
+        cancel_started_(e);
+    }
     return CANCEL_STATUS_ACCEPTED;
 }
 
@@ -264,83 +352,28 @@ bool PDCancelRegistry::isCanceled(const std::string& unique_key) {
     return canceled_keys_.count(unique_key) != 0;
 }
 
-void PDCancelRegistry::reapFinishedStreams() {
-    std::vector<Handle> candidates;
+void PDCancelRegistry::releaseFinishedStream(const Handle& handle) {
+    const auto        request_id = handle->identity.request_id;
+    GenerateStreamPtr stream;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        const auto count = std::min(pending_stream_releases_.size(), kPendingBatchSize);
-        candidates.reserve(count);
-        auto it = pending_stream_releases_.upper_bound(stream_release_cursor_);
-        for (size_t i = 0; i < count; ++i) {
-            if (it == pending_stream_releases_.end()) {
-                it = pending_stream_releases_.begin();
-            }
-            stream_release_cursor_ = it->first;
-            candidates.push_back(it++->second);
-        }
-    }
-    for (const auto& handle : candidates) {
-        const auto request_id = handle->identity.request_id;
-        GenerateStreamPtr stream;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            const auto it = pending_stream_releases_.find(request_id);
-            if (it == pending_stream_releases_.end() || it->second != handle) {
-                continue;
-            }
-            stream = handle->stream;
-        }
-        if (!stream || !stream->tryCompleteLocalCleanup()) {
-            continue;
-        }
-        std::lock_guard<std::mutex> lock(mutex_);
-        const auto it = pending_stream_releases_.find(request_id);
-        if (it != pending_stream_releases_.end() && it->second == handle && handle->stream == stream) {
-            // Expiry can pass while stream cleanup is still pending. Restore
-            // its index so retention can retire the record after cleanup.
-            const auto expiration = std::make_pair(handle->retain_until_ms, request_id);
-            if (entry_expirations_.count(expiration) == 0) {
-                entry_expirations_.insert(expiration);
-            }
-            handle->stream.reset();
-            pending_stream_releases_.erase(it);
-        }
-    }
-}
-
-std::vector<PDCancelRegistry::Handle> PDCancelRegistry::pending() {
-    // Both RPC servers call pending() from their cleanup ticks.
-    reapFinishedStreams();
-    std::lock_guard<std::mutex> lock(mutex_);
-    trimLocked(currentTimeMs());
-    reportPressureLocked();
-    std::vector<Handle> result;
-    result.reserve(std::min(pending_cancels_.size(), 2 * kPendingBatchSize));
-    std::set<int64_t> selected;
-    const auto        append_batch = [&](const std::map<int64_t, Handle>& source, int64_t& cursor) {
-        if (source.empty()) {
+        const auto                  it = entries_.find(request_id);
+        if (it == entries_.end() || it->second != handle || !handle->local_done || handle->canceled.load()) {
             return;
         }
-        auto it = source.upper_bound(cursor);
-        if (it == source.end()) {
-            it = source.begin();
-        }
-        const auto count = std::min(source.size(), kPendingBatchSize);
-        for (size_t i = 0; i < count; ++i) {
-            cursor = it->first;
-            if (selected.insert(it->first).second) {
-                result.push_back(it->second);
-            }
-            if (++it == source.end()) {
-                it = source.begin();
-            }
-        }
-    };
-    // Local completion gets its own fair batch; retained remote retry history
-    // cannot push a newly canceled request behind the whole retention window.
-    append_batch(local_pending_cancels_, local_pending_cursor_);
-    append_batch(pending_cancels_, retry_pending_cursor_);
-    return result;
+        stream = handle->stream;
+    }
+    if (!stream || !stream->tryCompleteLocalCleanup()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto                  it = entries_.find(request_id);
+    if (it != entries_.end() && it->second == handle && handle->stream == stream && !handle->canceled.load()) {
+        // Restore the expiry index if retention elapsed while release was pending.
+        entry_expirations_.emplace(handle->retain_until_ms, request_id);
+        handle->stream.reset();
+        armExpirationLocked();
+    }
 }
 
 void PDCancelRegistry::finishDownstream(const Handle& handle) {
@@ -350,12 +383,16 @@ void PDCancelRegistry::finishDownstream(const Handle& handle) {
         return;
     }
     handle->downstream_done = true;
-    if (handle->terminal) {
-        pending_cancels_.erase(handle->identity.request_id);
-    }
     if (handle->local_done && (!handle->canceled.load() || handle->terminal)) {
         scheduleExpirationLocked(handle, currentTimeMs() + kRetentionMs);
     }
+}
+
+bool PDCancelRegistry::needsDownstreamCancel(const Handle& handle) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto                  current = entries_.find(handle->identity.request_id);
+    return current != entries_.end() && current->second == handle && handle->canceled.load()
+           && !handle->downstream_done;
 }
 
 void PDCancelRegistry::beginRead(const std::string& key) {
@@ -366,16 +403,27 @@ void PDCancelRegistry::beginRead(const std::string& key) {
 void PDCancelRegistry::endRead(const std::string& key) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto                        found = active_reads_.find(key);
-    if (found != active_reads_.end() && --found->second == 0)
+    if (found != active_reads_.end() && --found->second == 0) {
         active_reads_.erase(found);
+        auto waiting = waiting_on_reads_.extract(key);
+        if (!waiting.empty()) {
+            for (auto request_id : waiting.mapped()) {
+                auto entry = entries_.find(request_id);
+                if (entry != entries_.end())
+                    scheduleLocalProgress(entry->second);
+            }
+        }
+    }
 }
 
 bool PDCancelRegistry::complete(const Handle& handle) {
     std::unique_lock<std::mutex> lock(mutex_);
     if (handle->terminal || !handle->canceled.load() || !handle->local_done)
         return false;
-    if (active_reads_.count(handle->unique_key))
+    if (active_reads_.count(handle->unique_key)) {
+        waiting_on_reads_[handle->unique_key].insert(handle->identity.request_id);
         return false;
+    }
     auto stream = handle->stream;
     // Resource cleanup may wait for transport callbacks; do not block unrelated
     // admission/Cancel operations under the registry lock.
@@ -383,8 +431,12 @@ bool PDCancelRegistry::complete(const Handle& handle) {
     if (stream && !stream->tryCompleteLocalCleanup())
         return false;
     lock.lock();
-    if (handle->terminal || handle->stream != stream || active_reads_.count(handle->unique_key))
+    if (handle->terminal || handle->stream != stream)
         return false;
+    if (active_reads_.count(handle->unique_key)) {
+        waiting_on_reads_[handle->unique_key].insert(handle->identity.request_id);
+        return false;
+    }
     if (!meta_->markCancellationComplete(handle->identity.request_id,
                                          static_cast<int64_t>(handle->cancel_reason.code()),
                                          handle->cancel_reason.ToString(),
@@ -392,13 +444,9 @@ bool PDCancelRegistry::complete(const Handle& handle) {
         return false;
     handle->terminal = true;
     overdue_cancels_.erase({handle->retain_until_ms, handle->identity.request_id});
-    local_pending_cancels_.erase(handle->identity.request_id);
     // Local terminal is independent of remote control-plane availability. Keep
     // the cancellation fence and bounded retry record independently of Prefill
     // availability. Retention expiry only retires bookkeeping after this local proof.
-    if (handle->downstream_done) {
-        pending_cancels_.erase(handle->identity.request_id);
-    }
     handle->stream.reset();
     scheduleExpirationLocked(handle, currentTimeMs() + kRetentionMs);
     return true;

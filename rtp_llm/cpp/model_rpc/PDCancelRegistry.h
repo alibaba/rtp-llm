@@ -8,6 +8,7 @@
 #include "absl/status/statusor.h"
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <map>
 #include <set>
@@ -22,7 +23,7 @@ namespace rtp_llm {
 // Decode publishes its terminal after local physical cleanup, retaining the
 // control record separately until Prefill cleanup is confirmed or its retention expires.
 // Admission and the cancel latch share a lock, including cancel-before-enqueue.
-class PDCancelRegistry {
+class PDCancelRegistry: public std::enable_shared_from_this<PDCancelRegistry> {
 public:
     struct Entry {
         explicit Entry(TaskIdentity task): identity(task) {}
@@ -37,13 +38,17 @@ public:
         std::atomic<bool> local_done{false};
         bool              downstream_done = false;
         std::atomic<bool> terminal{false};
-        int64_t           retain_until_ms = 0;
-        std::atomic<int64_t> next_cancel_retry_ms{0};
+        int64_t              retain_until_ms = 0;
         std::atomic<int64_t> cancel_retry_delay_ms{50};
+        std::atomic<bool>    local_event_queued{false};
     };
     using Handle = std::shared_ptr<Entry>;
 
     explicit PDCancelRegistry(std::shared_ptr<RpcServerRuntimeMeta> meta): meta_(std::move(meta)) {}
+    ~PDCancelRegistry();
+    void setCancelStarted(std::function<void(const Handle&)> callback) {
+        cancel_started_ = std::move(callback);
+    }
 
     ErrorInfo           admit(const GenerateInputPB& request,
                               const std::string&     key,
@@ -54,10 +59,12 @@ public:
     Handle              find(int64_t request_id);
     void                attach(const Handle& handle, const GenerateStreamPtr& stream);
     void                finishLocal(const Handle& handle);
-    absl::StatusOr<CancelStatusPB> cancel(int64_t request_id, const ErrorInfo& reason);
-    bool                isCanceled(const std::string& unique_key);
-    std::vector<Handle> pending();
+    absl::StatusOr<CancelStatusPB> cancel(int64_t                                   request_id,
+                                          const ErrorInfo&                          reason,
+                                          const std::function<void(const Handle&)>& fence_local_prefill = {});
+    bool                           isCanceled(const std::string& unique_key);
     void                finishDownstream(const Handle& handle);
+    bool                           needsDownstreamCancel(const Handle& handle);
     bool                complete(const Handle& handle);
 
     void beginRead(const std::string& key);
@@ -91,7 +98,9 @@ public:
     };
 
 private:
-    void                                    reapFinishedStreams();
+    void                                    scheduleLocalProgress(const Handle& handle);
+    void                                    releaseFinishedStream(const Handle& handle);
+    void                                    armExpirationLocked();
     void                                    trimLocked(int64_t now_ms);
     void                                    scheduleExpirationLocked(const Handle& handle, int64_t expires_at_ms);
     void                                    reportPressureLocked();
@@ -115,17 +124,15 @@ private:
     std::unordered_map<int64_t, CancelFence> absent_fences_;
     std::multimap<int64_t, int64_t>         fence_expirations_;
     std::set<std::pair<int64_t, int64_t>>   entry_expirations_;
-    std::set<std::pair<int64_t, int64_t>>   overdue_cancels_;
-    static constexpr size_t                  kPendingBatchSize = 128;
-    std::map<int64_t, Handle>                pending_cancels_;
-    std::map<int64_t, Handle>                local_pending_cancels_;
-    std::map<int64_t, Handle>                pending_stream_releases_;
-    int64_t                                  stream_release_cursor_ = 0;
-    int64_t                                  local_pending_cursor_ = 0;
-    int64_t                                  retry_pending_cursor_ = 0;
+    std::set<std::pair<int64_t, int64_t>>              overdue_cancels_;
     std::unordered_map<std::string, size_t> canceled_keys_;
     std::unordered_map<std::string, size_t> active_reads_;
+    std::unordered_map<std::string, std::set<int64_t>> waiting_on_reads_;
     std::shared_ptr<RpcServerRuntimeMeta>   meta_;
+    std::function<void(const Handle&)>                 cancel_started_;
+    std::function<void()>                              cancel_expiration_;
+    int64_t                                            expiration_ms_{0};
+    uint64_t                                           expiration_generation_{0};
 };
 
 }  // namespace rtp_llm
