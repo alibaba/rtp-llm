@@ -1556,17 +1556,17 @@ TEST(P2PRetainedKvTest, ThresholdUsesCapacityBytesAndStrictGreaterThan) {
         checker.retained_kv_over_threshold_since_ms_ -= 31000;
         checker.checkRetainedResources({context});
     }, ::testing::KilledBySignal(SIGABRT), "");
-    checker.kv_leak_exit_threshold_percent_ = 40;
+    checker.kv_leak_exit_threshold_bps_ = 4000;
     checker.checkRetainedResources({context});
     EXPECT_EQ(checker.retained_kv_over_threshold_since_ms_, 0);
-    checker.kv_leak_exit_threshold_percent_ = 39;
+    checker.kv_leak_exit_threshold_bps_ = 3999;
     checker.checkRetainedResources({context});
     EXPECT_EXIT({
         disableRetainedKvCoreDump();
         checker.retained_kv_over_threshold_since_ms_ -= 31000;
         checker.checkRetainedResources({context});
     }, ::testing::KilledBySignal(SIGABRT), "");
-    checker.kv_leak_exit_threshold_percent_ = 0;
+    checker.kv_leak_exit_threshold_bps_ = 0;
     checker.retained_kv_over_threshold_since_ms_ -= 31000;
     checker.checkRetainedResources({context});
     EXPECT_TRUE(context->resourceHoldPending());
@@ -1630,7 +1630,20 @@ TEST(P2PRetainedKvTest, InitDerivesCapacityAndRejectsInvalidThreshold) {
                                  config.topology->blockSizeBytesForGroup(group.tag));
     }
     EXPECT_EQ(checker.total_kv_bytes_, expected_bytes);
-    EXPECT_EQ(checker.kv_leak_exit_threshold_percent_, 45);
+    EXPECT_EQ(checker.kv_leak_exit_threshold_bps_, 4500);
+
+    config.p2p_kv_leak_exit_threshold_percent = 30;
+    P2PConnectorAsyncReadContextChecker default_checker;
+    ASSERT_TRUE(default_checker.init(nullptr, nullptr, pool, config));
+    EXPECT_GE(default_checker.kv_leak_exit_threshold_bps_, 3000);
+    EXPECT_LE(default_checker.kv_leak_exit_threshold_bps_, 7000);
+    default_checker.stop();
+
+    config.p2p_kv_leak_exit_threshold_percent = 0;
+    P2PConnectorAsyncReadContextChecker disabled;
+    ASSERT_TRUE(disabled.init(nullptr, nullptr, pool, config));
+    EXPECT_EQ(disabled.kv_leak_exit_threshold_bps_, 0);
+    disabled.stop();
     pool->stop();
 }
 

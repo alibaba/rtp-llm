@@ -121,7 +121,10 @@ def init_cache_store_group_args(parser, cache_store_config):
         type=_kv_leak_threshold_percent,
         choices=range(101),
         default=30,
-        help="Decode：超时后滞留目标 KV 的进程退出阈值，取值 0~100，默认 30。0 仅关闭阈值退出。",
+        help=(
+            "Decode：滞留目标 KV 的进程退出阈值，取值 0~100。设为默认值 30 时，"
+            "实例启动时从 30%~70% 均匀抽取一次。其他正值为固定百分比，0 仅关闭阈值退出。"
+        ),
     )
 
     cache_store_group.add_argument(
