@@ -552,6 +552,66 @@ TEST(KVCMMockFullLinearTest, FullOnlyRequestReadsPastLinearCheckpointAndReadsFul
     }
 }
 
+TEST(KVCMMockFullLinearTest, FullOnlyReadTruncatesViewToCappedHandleRange) {
+    // onBackendMatch may cap matched_blocks_num below the matched prefix (the
+    // allocator's valid-prefix bound) and shrink keys/handles to that cap. The
+    // re-derived full-only view still spans the whole matched prefix, so read()
+    // must consume only the first remote_blocks rows instead of failing the
+    // shape CHECK.
+    auto environment = makeMultiGroupBackendEnvironment(
+        "kvcm_storage_backend_pd_full_only_capped_prefix", /*full_group_count=*/2, /*linear_group_count=*/2);
+    auto client_wrapper = std::make_shared<MockClientWrapper>();
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
+    EXPECT_CALL(*client_wrapper, loadKvCachesForTag("linear0", _, _, _)).Times(0);
+    EXPECT_CALL(*client_wrapper, loadKvCachesForTag("linear1", _, _, _)).Times(0);
+    auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
+    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+
+    ScopedReferencedBlocks source_blocks(environment, 4);
+    const auto&           block_ids = source_blocks.get();
+    const std::vector<std::vector<std::string>> groups_by_key(4, {"full0", "full1"});
+    const kv_cache_manager::Locations           locations{
+        makeFullLinearLocation(2, 2, 101, false),
+        makeFullLinearLocation(2, 2, 102, false),
+        makeFullLinearLocation(2, 2, 103, false),
+        makeFullLinearLocation(2, 2, 104, false),
+    };
+    EXPECT_CALL(
+        *client_wrapper,
+        match(_, _, kv_cache_manager::QueryType::QT_PREFIX_MATCH, std::vector<int64_t>({101, 102, 103, 104}), _, _))
+        .WillOnce(Return(std::make_pair(true, locations)));
+    auto request = makeGroupedStorageRequest(
+        environment, {101, 102, 103, 104}, /*local_matched_blocks=*/0, block_ids, groups_by_key);
+    auto result = match(*backend.backend, request);
+    ASSERT_TRUE(result.success);
+    ASSERT_EQ(result.matched_blocks_num, 4u);
+    ASSERT_NE(result.match_meta, nullptr);
+
+    // Mirror LoadAsyncContext::onBackendMatch: valid_prefix_ caps the accepted
+    // prefix at three blocks, so keys/handles shrink to that cap while the
+    // match metadata still describes all four matched rows.
+    request.keys  = std::make_shared<CacheKeysType>(request.keys->begin(), request.keys->begin() + 3);
+    request.handles.resize(3);
+
+    const kv_cache_manager::Locations selected_locations{
+        makeFullLinearLocation(2, 2, 101, false),
+        makeFullLinearLocation(2, 2, 102, false),
+        makeFullLinearLocation(2, 2, 103, false),
+    };
+    const std::vector<std::vector<std::string>> selected_groups(groups_by_key.begin(), groups_by_key.begin() + 3);
+    const auto bases = expectedBases(environment, {block_ids[0], block_ids[1], block_ids[2]}, selected_groups);
+    expectTaggedTransfers(*client_wrapper, selected_locations, bases, false);
+    EXPECT_TRUE(read(*backend.backend, std::move(request), std::move(result.match_meta)));
+    // No leaked destination pins beyond the fixture's own references: the
+    // capped key's block was never transferred.
+    for (const auto& [tag, pool] : environment.pools_by_tag) {
+        for (const auto block_id : block_ids) {
+            EXPECT_EQ(pool->refCount(block_id), 1u) << tag;
+        }
+    }
+}
+
 TEST(KVCMMockFullLinearTest, FailedFullOnlyReadReleasesDestinationPins) {
     auto environment = makeMultiGroupBackendEnvironment(
         "kvcm_storage_backend_pd_full_only_read_failure", /*full_group_count=*/1, /*linear_group_count=*/2);

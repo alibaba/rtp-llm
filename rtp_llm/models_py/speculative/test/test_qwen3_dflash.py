@@ -515,6 +515,29 @@ class Qwen3DFlashConfigTest(unittest.TestCase):
                     Qwen3DFlash.speculative_weight_alias_names(target, draft)
                 setattr(draft, name, values[name])
 
+    def test_production_alias_contract_rejects_pruned_target_vocabulary(self) -> None:
+        # A pruned target lm-head no longer covers the full target vocabulary
+        # DFlash samples from, so the share must fail fast at config time.
+        values = {
+            "hidden_size": 5120,
+            "vocab_size": 248320,
+            "data_type": DataType.TYPE_BF16,
+            "enable_fp32_lm_head": True,
+            "normalize_lm_head_weight": False,
+        }
+        for kwargs in (
+            {"enable_output_vocab_pruning": True, "output_vocab_ids": []},
+            {"enable_output_vocab_pruning": True, "output_vocab_ids": [1, 2, 3]},
+            {"enable_output_vocab_pruning": False, "output_vocab_ids": [1, 2, 3]},
+        ):
+            with self.subTest(**kwargs):
+                target = SimpleNamespace(model_config=SimpleNamespace(**{**values, **kwargs}))
+                draft = SimpleNamespace(
+                    **{**values, "enable_output_vocab_pruning": False, "output_vocab_ids": []}
+                )
+                with self.assertRaisesRegex(ValueError, "output vocabulary pruning"):
+                    Qwen3DFlash.speculative_weight_alias_names(target, draft)
+
     def test_propose_input_keeps_mask_valued_anchor_and_masks_only_tail(self) -> None:
         harness = _DFlashProposalInputHarness()
         attention = PyAttentionInputs()
