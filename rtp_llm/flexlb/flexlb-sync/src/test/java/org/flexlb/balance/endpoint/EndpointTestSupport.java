@@ -134,7 +134,12 @@ public final class EndpointTestSupport {
         var lock = state.lock;
         lock.lock();
         PrefillState.StatusReduction reduction;
-        try { reduction = PrefillObservation.prepareLocked(state, observation, true); }
+        try {
+            reduction = PrefillObservation.prepareLocked(state, observation, true);
+            if (reduction.predictionInputs().isEmpty()) {
+                return java.util.Objects.requireNonNull(state.commitStatusLocked(reduction, java.util.Map.of()));
+            }
+        }
         finally { lock.unlock(); }
         var predictions = new java.util.HashMap<Long, Long>();
         reduction.predictionInputs().forEach((batchId, members) -> predictions.put(batchId, predictor.applyAsLong(members)));

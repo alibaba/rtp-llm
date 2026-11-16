@@ -51,7 +51,7 @@ class WorkerBatcherQueueTest {
 
     @BeforeEach
     void setUp() {
-        config = SchedulingTestConfig.newConfig();
+        config = SchedulingTestConfig.batchConfig();
         SchedulingTestConfig.usePriorityQueue(config);
         SchedulingTestConfig.useSingleDecision(config);
         prefillEndpoint = stablePrefillEndpoint();

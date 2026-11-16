@@ -128,7 +128,7 @@ class RequestSchedulerContractTest {
             var request = f.context(901);
             var future = f.requests.register(request, () -> { }, StrategyErrorType.BATCH_SLO_EXPIRED);
             f.requests.runtime.deadlines().update(request, request.snapshot().deadlines());
-            ExpirationTimer.Token deadline = RequestProtocolTestSupport.field(request, "inactivityDeadline");
+            ExpirationTimer.Token deadline = RequestProtocolTestSupport.field(request, "requestDeadline");
             assertNotNull(deadline);
             f.scheduler.cancel(901, 0, CancelReason.CLIENT_CANCELLED);
             future.get(3, TimeUnit.SECONDS);

@@ -25,7 +25,7 @@ class ExpirationTimerTest {
         config.setScheduler(org.flexlb.config.ConfigTestSupport.direct());
         config.setDispatcher(org.flexlb.config.ConfigTestSupport.nonBatch());
         var context = RequestProtocolTestSupport.context(config, 9400L + kind.ordinal());
-        config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
+        config.getInternalRuntime().setRequestInactivityTimeoutMs(60_000L);
         long nowMs = System.currentTimeMillis();
         context.data().setSchedulingMetadata(org.flexlb.dao.SchedulingMetadata.explicit(50,
                 kind == ExpirationTimer.Kind.REQUEST ? nowMs + 20_000L : Long.MAX_VALUE));
@@ -44,13 +44,16 @@ class ExpirationTimerTest {
         ReflectionTestUtils.setField(timer, "clock", (java.util.function.LongSupplier) wallClock::get);
         try {
             var future = RequestProtocolTestSupport.register(owner, context);
-            if (kind == ExpirationTimer.Kind.VISIBILITY) {
+            if (kind != ExpirationTimer.Kind.REQUEST) {
                 var endpoint = mock(org.flexlb.balance.endpoint.PrefillEndpoint.class);
                 var route = SchedulingTestConfig.createRoute(context, new org.flexlb.dao.loadbalance.Response(),
                         null, null, endpoint, null, null, nowMs);
                 RequestProtocolTestSupport.bind(owner, new RequestProtocolTestSupport.Registered(route, future));
-                var claim = owner.claimDelivery(route, DeliveryClaimKind.ROUTE_DECISION, 0L, null);
+                var claim = owner.claimDelivery(route, kind == ExpirationTimer.Kind.INACTIVITY
+                        ? DeliveryClaimKind.BATCH_ENQUEUE : DeliveryClaimKind.ROUTE_DECISION,
+                        kind == ExpirationTimer.Kind.INACTIVITY ? 1L : 0L, null);
                 assertNotNull(claim);
+                if (kind == ExpirationTimer.Kind.INACTIVITY) { assertTrue(owner.tryStartSend(claim)); }
                 owner.onDeliveryEvidence(claim, new ContextResult.Prediction(claim, nowMs + 20_000L, nowMs));
             }
             var before = context.snapshot();
@@ -81,6 +84,11 @@ class ExpirationTimerTest {
             ReflectionTestUtils.invokeMethod(originalHandle, "fire");
             assertSame(replacement, context.snapshot().deadlines().token(kind));
             ReflectionTestUtils.invokeMethod(replacementHandle, "fire");
+            if (kind == ExpirationTimer.Kind.INACTIVITY) {
+                var claim = context.snapshot().delivery().identity();
+                owner.onDeliveryEvidence(claim, new ContextResult.TransportResult(claim,
+                        org.flexlb.balance.delivery.DeliveryResult.notSent(new IllegalStateException("sender exited")), wallClock.get()));
+            }
             SchedulerTestSupport.awaitRequestWork(runtime);
             if (kind == ExpirationTimer.Kind.VISIBILITY) {
                 assertTrue(context.snapshot().engine().visibilityOverdue());

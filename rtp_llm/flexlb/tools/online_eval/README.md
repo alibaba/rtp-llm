@@ -129,7 +129,7 @@ REPLAY_SPEED=20 \
 N_PREFILL=4 \
 N_DECODE=16 \
 SLA_TTFT_MS=800 \
-FLEXLB_CONFIG='{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY","defaultPriority":50},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":200}},"dispatcher":{"type":"BATCH"},"requestLifecycle":{"request":{"timeoutMs":3600000},"decision":{"lifetime":2.0}},"router":{"roles":{"prefill":{},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":64}}}}}' \
+FLEXLB_CONFIG='{"schemaVersion":3,"scheduler":{"type":"QUEUE","ordering":{"type":"PRIORITY","defaultPriority":50},"decision":{"type":"FIXED_WINDOW","maxRequests":32,"maxCollectionWaitMs":200}},"dispatcher":{"type":"BATCH"},"dispatchTimeoutMs": 3600000,"router":{"roles":{"prefill":{},"decode":{"availability":{"maxKvUsagePercent":90,"maxEngineRequests":64}}}}}' \
 rtp_llm/flexlb/tools/online_eval/run_online_eval.sh
 ```
 

@@ -1,7 +1,5 @@
 package org.flexlb.config;
 
-import org.flexlb.config.ConfigTestSupport;
-
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -28,6 +26,14 @@ class FlexlbConfigSchedulingModeTest {
         assertFalse(config.isFixedWindowDecision());
         assertEquals(DispatcherConfig.Type.NON_BATCH,
                 config.getDispatcher().getType());
+    }
+
+    @Test
+    void direct_defaults_to_non_batch_delivery() {
+        FlexlbConfig config = ConfigTestFixtures.parse("{\"scheduler\":{\"type\":\"DIRECT\"}}");
+        assertTrue(config.isDirect());
+        assertEquals(DispatcherConfig.Type.NON_BATCH, config.getDispatcher().getType());
+        assertFalse(config.getDispatcher().requiresGenerateInput());
     }
 
     @Test
@@ -89,7 +95,7 @@ class FlexlbConfigSchedulingModeTest {
         assertEquals(8, batch.decisionPolicy().getMaxRequests());
         assertEquals(300L, batch.decisionPolicy().getMaxCollectionWaitMs());
         assertNull(batch.decisionPolicy().getMaxPredictedExecutionMs());
-        assertEquals(2, batch.getDispatcher().getMaxInflightPerPrefillWorker());
+        assertEquals(128, batch.getDispatcher().getMaxInflightPerPrefillWorker());
 
         FlexlbConfig nonBatchDefault = ConfigTestFixtures.parse("""
                 {
@@ -111,7 +117,7 @@ class FlexlbConfigSchedulingModeTest {
         assertEquals(DecisionPolicyConfig.Type.SINGLE,
                 nonBatchSingle.decisionPolicy().getType());
         DispatcherConfig dispatcher = nonBatchSingle.getDispatcher();
-        assertEquals(2, dispatcher.getMaxInflightPerPrefillWorker());
+        assertEquals(128, dispatcher.getMaxInflightPerPrefillWorker());
     }
 
     @Test
@@ -228,7 +234,7 @@ class FlexlbConfigSchedulingModeTest {
         for (String mode : new String[]{"QUEUE/BATCH", "QUEUE/NON_BATCH", "DIRECT/NON_BATCH"}) {
             String[] parts = mode.split("/");
             FlexlbConfig config = parse(parts[0], parts[1], "");
-            assertEquals(2, config.getDispatcher().getMaxInflightPerPrefillWorker(), mode);
+            assertEquals(128, config.getDispatcher().getMaxInflightPerPrefillWorker(), mode);
             for (int limit : new int[]{1, 7, Integer.MAX_VALUE}) {
                 config = parse(parts[0], parts[1], ",\"maxInflightPerPrefillWorker\":" + limit);
                 assertEquals(limit, config.getDispatcher().getMaxInflightPerPrefillWorker(), mode);
@@ -308,7 +314,7 @@ class FlexlbConfigSchedulingModeTest {
         assertEquals(batchDispatch ? DispatcherConfig.Type.BATCH
                         : DispatcherConfig.Type.NON_BATCH,
                 config.getDispatcher().getType());
-        assertEquals(3_600_000L, config.queueScheduler().getQueueTimeoutMs());
+        assertEquals(60_000L, config.getDispatchTimeoutMs());
     }
 
     private static FlexlbConfig parse(String scheduler, String dispatcher, String fields) {

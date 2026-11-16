@@ -50,8 +50,9 @@ class RequestConfirmationTimeoutTest {
         config.setScheduler(ConfigTestSupport.direct());
         SchedulingTestConfig.useNonBatchDispatcher(config);
         config.getDispatcher().setMaxInflightPerPrefillWorker(1);
-        config.getRequestLifecycle().getRequest().setTimeoutMs(
+        config.getInternalRuntime().setRequestInactivityTimeoutMs(
                 waiting == ConfirmationWait.AUTOMATIC_TIMER ? 300L : TIMEOUT_MS);
+        config.setDispatchTimeoutMs(waiting == ConfirmationWait.AUTOMATIC_TIMER ? 300L : TIMEOUT_MS);
         ConfigService service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         var reporter = mock(DeliveryMetricsReporter.class);
@@ -86,6 +87,7 @@ class RequestConfirmationTimeoutTest {
                         acquired.handle().dispatch().status());
             }
             var context = RequestProtocolTestSupport.context(config, REQUEST_ID);
+            context.data().setSchedulingMetadata(null);
             var future = RequestProtocolTestSupport.register(requests, context);
             RequestContext requestContext = requests.requests.findActive(REQUEST_ID);
             ServerStatus prefillMetadata = new ServerStatus();
@@ -134,7 +136,10 @@ class RequestConfirmationTimeoutTest {
             assertEquals(32L, EndpointTestSupport.expectedReservedKv(decode.resourceSnapshot()));
             assertEquals(1, decode.routingView().engineCapacityUsed());
 
-            if (waiting != ConfirmationWait.AUTOMATIC_TIMER) {
+            if (waiting != ConfirmationWait.AUTOMATIC_TIMER && requestContext.isAwaitingDispatch()) {
+                var deadline = requestContext.snapshot().deadlines().request();
+                requests.onDeadline(deadline, deadline.atMs());
+            } else if (waiting != ConfirmationWait.AUTOMATIC_TIMER) {
                 RequestProtocolTestSupport.expireInactiveRequest(requests, requestContext,
                         RequestProtocolTestSupport.<Long>inspect(requests, requestContext, "inactivityExpiresAtMsLocked"));
             }

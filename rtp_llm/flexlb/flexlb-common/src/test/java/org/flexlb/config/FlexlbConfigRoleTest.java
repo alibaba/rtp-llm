@@ -9,11 +9,11 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 
 class FlexlbConfigRoleTest {
     @Test
-    void request_timeout_is_explicit_and_dispatcher_defaults_are_shared() {
+    void dispatch_timeout_and_dispatcher_defaults_are_shared() {
         FlexlbConfig config = new FlexlbConfig();
-        assertNull(config.getRequestLifecycle().getRequest().getTimeoutMs());
-        assertEquals(2.0, config.getRequestLifecycle().getDecision().getLifetime());
-        assertEquals(2, config.getDispatcher().getMaxInflightPerPrefillWorker());
-        assertEquals(2, ConfigTestSupport.nonBatch().getMaxInflightPerPrefillWorker());
+        assertEquals(60000L, config.getDispatchTimeoutMs());
+        assertEquals(2.0, config.getInternalRuntime().getEngineVisibilityMultiplier());
+        assertEquals(128, config.getDispatcher().getMaxInflightPerPrefillWorker());
+        assertEquals(128, ConfigTestSupport.nonBatch().getMaxInflightPerPrefillWorker());
     }
 }

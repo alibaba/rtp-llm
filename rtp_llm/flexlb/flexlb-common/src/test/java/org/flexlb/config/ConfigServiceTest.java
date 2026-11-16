@@ -1,7 +1,5 @@
 package org.flexlb.config;
 
-import org.flexlb.config.ConfigTestSupport;
-
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
@@ -21,6 +19,48 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ConfigServiceTest {
+    @Test
+    void cacheOrderedSingleDispatchConfigUsesOneTimeout() {
+        var config = ConfigService.parse("""
+                {
+                  "dispatchTimeoutMs": 10000,
+                  "scheduler": {
+                    "decision": {"type": "SINGLE"},
+                    "ordering": {
+                      "type": "PRIORITY", "defaultPriority": 50, "prefillCostOrder": true,
+                      "preemption": {
+                        "allowedVictimStages": ["PREFILL_QUEUED", "DECODE_RESERVED", "DECODE_ENGINE_OWNED"],
+                        "timeoutMs": 1000
+                      }
+                    }
+                  },
+                  "dispatcher": {"maxInflightPerPrefillWorker": 256},
+                  "router": {"roles": {
+                    "prefill": {"tokenBalance": {"engineQueueAdmissionThreshold": 80}},
+                    "decode": {"availability": {"maxEngineRequests": 64}}
+                  }}
+                }
+                """);
+        assertTrue(config.isQueue());
+        assertEquals(DecisionPolicyConfig.Type.SINGLE, config.decisionPolicy().getType());
+        assertTrue(config.getScheduler().getOrdering().isPrefillCostOrder());
+        assertEquals(DispatcherConfig.Type.NON_BATCH, config.getDispatcher().getType());
+        assertEquals(256, config.getDispatcher().getMaxInflightPerPrefillWorker());
+        assertEquals(10000L, config.getDispatchTimeoutMs());
+        assertTrue(config.isPriorityOrdering());
+        assertEquals(50, config.defaultPriority());
+        for (var stage : java.util.List.of(VictimStage.PREFILL_QUEUED, VictimStage.DECODE_RESERVED,
+                VictimStage.DECODE_ENGINE_OWNED)) {
+            assertTrue(config.allowsPreemption(stage));
+        }
+        assertEquals(1000L, config.getScheduler().getOrdering().getPreemption().getTimeoutMs());
+        assertEquals(64, config.getRouter().getRoles().getDecode().getAvailability().getMaxEngineRequests());
+        var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
+        assertEquals(5.0, balance.getMinPrefixHitPercent());
+        assertEquals(80L, balance.getEngineQueueAdmissionThreshold());
+        assertEquals(5000L, balance.getEngineQueueOverloadDurationMs());
+    }
+
     @Test
     void shutdownQuietPeriodUsesConfigDefaultsOverridesAndValidation() {
         assertEquals(5000L, ConfigTestFixtures.parse("{}").getGrpcServer().getShutdownQuietPeriodMs());
@@ -58,41 +98,26 @@ class ConfigServiceTest {
     }
 
     @Test
-    void requires_explicit_request_timeout_and_defaults_decision_lifetime() {
-        assertThrows(ConfigValidationException.class, () -> new ConfigService((String) null));
-        assertThrows(ConfigValidationException.class,
-                () -> new ConfigService("   "));
-        for (String patch : new String[]{
-                "{}",
-                "{\"requestLifecycle\":{\"decision\":{\"lifetime\":1}}}"}) {
-            assertThrows(ConfigValidationException.class, () -> ConfigService.parse(patch));
-        }
-        FlexlbConfig config = new ConfigService(ConfigTestFixtures.REQUIRED).loadBalanceConfig();
-        assertEquals(60000L, config.getRequestLifecycle().getRequest().getTimeoutMs());
-        assertEquals(2.0, config.getRequestLifecycle().getDecision().getLifetime());
-        FlexlbConfig defaults = ConfigService.parse("{\"requestLifecycle\":{\"request\":{\"timeoutMs\":1}}}");
-        assertEquals(2.0, defaults.getRequestLifecycle().getDecision().getLifetime());
-    }
-
-    @Test
     void retained_defaults_have_one_owner() {
         FlexlbConfig config = ConfigTestFixtures.parse("{}");
         assertEquals(3, config.getSchemaVersion());
+        assertEquals(DispatcherConfig.Type.NON_BATCH, config.getDispatcher().getType());
+        assertFalse(config.getDispatcher().requiresGenerateInput());
         assertTrue(config.isQueue());
         assertFalse(config.isPriorityOrdering());
         assertTrue(config.isFixedWindowDecision());
-        assertEquals(3600000L, config.queueScheduler().getQueueTimeoutMs());
+        assertEquals(60000L, config.getDispatchTimeoutMs());
         assertEquals(8, config.decisionPolicy().getMaxRequests());
         assertEquals(300L, config.decisionPolicy().getMaxCollectionWaitMs());
         assertNull(config.decisionPolicy().getMaxPredictedExecutionMs());
-        assertEquals(2, config.getDispatcher().getMaxInflightPerPrefillWorker());
+        assertEquals(128, config.getDispatcher().getMaxInflightPerPrefillWorker());
         var prefill = config.getRouter().getRoles().getPrefill();
         assertEquals(RoutingConfig.EstimatorType.FORMULA, prefill.getExecutionTimeEstimator().getType());
-        assertEquals("sum(computeTokens) + 0.3*sum(hitCacheTokens)",
+        assertEquals("sum(computeTokens) + 0.02*sum(hitCacheTokens)",
                 prefill.getExecutionTimeEstimator().getExpression());
         assertNull(prefill.getCacheAffinity());
         assertNull(config.getRouter().getGroupSelector());
-        assertEquals("kvcache_used_ratio",
+        assertEquals("running_size",
                 config.getRouter().getRoles().getDecode().getCostEstimator().getExpression());
         var decode = config.getRouter().getRoles().getDecode().getAvailability();
         assertEquals(90, decode.getMaxKvUsagePercent());
@@ -143,7 +168,7 @@ class ConfigServiceTest {
                 "FLEXLB_MONITOR_MODE", "all"))
                 .loadBalanceConfig();
         assertEquals(FlexlbConfig.CURRENT_SCHEMA_VERSION, config.getSchemaVersion());
-        assertEquals(60000L, config.getRequestLifecycle().getRequest().getTimeoutMs());
+        assertEquals(60000L, config.getInternalRuntime().getRequestInactivityTimeoutMs());
     }
 
     @Test
@@ -155,7 +180,7 @@ class ConfigServiceTest {
                 .loadBalanceConfig();
 
         assertEquals(FlexlbConfig.CURRENT_SCHEMA_VERSION, config.getSchemaVersion());
-        assertEquals(60000L, config.getRequestLifecycle().getRequest().getTimeoutMs());
+        assertEquals(60000L, config.getInternalRuntime().getRequestInactivityTimeoutMs());
         assertThrows(ConfigValidationException.class, () -> new ConfigService(Map.of()));
         assertThrows(ConfigValidationException.class,
                 () -> new ConfigService(Map.of(ConfigService.FLEXLB_CONFIG_ENV, "   ")));
@@ -275,7 +300,7 @@ class ConfigServiceTest {
         assertSame(original, estimator.compiledFormula());
         FlexlbConfigValidator.validate(config);
         assertSame(original, estimator.compiledFormula());
-        estimator.setExpression("running_size");
+        estimator.setExpression("kvcache_used_ratio");
         var changed = estimator.compiledFormula();
         assertNotSame(original, changed);
         assertSame(changed, estimator.compiledFormula());
@@ -486,11 +511,7 @@ class ConfigServiceTest {
         assertInvalid("{\"router\":{\"roles\":{\"prefill\":{\"executionTimeEstimator\":{\"expression\":\"sum(unknownTokens)\"}}}}}", "expression");
         assertInvalid("{\"router\":{\"roles\":{\"prefill\":{\"cacheAffinity\":{\"maxExtraTtftMs\":-1}}}}}", "maxExtraTtftMs");
         assertInvalid("{\"router\":{\"roles\":{\"prefill\":{\"cacheAffinity\":{\"minPrefixHitPercent\":100.1}}}}}", "minPrefixHitPercent");
-        FlexlbConfig config = ConfigTestFixtures.parse("{}");
-        for (double invalid : new double[]{Double.NaN, Double.POSITIVE_INFINITY, Double.NEGATIVE_INFINITY}) {
-            config.getRequestLifecycle().getDecision().setLifetime(invalid);
-            assertThrows(ConfigValidationException.class, () -> FlexlbConfigValidator.validate(config));
-        }
+
     }
 
     @Test

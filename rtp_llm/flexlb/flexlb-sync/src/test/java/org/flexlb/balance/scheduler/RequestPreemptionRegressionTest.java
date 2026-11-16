@@ -60,7 +60,7 @@ class RequestPreemptionRegressionTest {
     void setUp() {
         var config = SchedulingTestConfig.batchConfig();
         SchedulingTestConfig.usePriorityQueue(config);
-        config.getRequestLifecycle().getRequest().setTimeoutMs(60_000L);
+        config.getInternalRuntime().setRequestInactivityTimeoutMs(60_000L);
         var service = mock(ConfigService.class);
         when(service.loadBalanceConfig()).thenReturn(config);
         scheduler = SchedulerTestSupport.create(service, mock(DeliveryMetricsReporter.class),

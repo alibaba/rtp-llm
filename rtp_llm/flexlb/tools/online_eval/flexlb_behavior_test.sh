@@ -84,10 +84,7 @@ print(json.dumps({
             "decode": {"availability": {"maxEngineRequests": 132}},
         },
     },
-    "requestLifecycle": {
-        "request": {"timeoutMs": stale_ms},
-        "decision": {"lifetime": 2.0},
-    },
+    "dispatchTimeoutMs": stale_ms,
     "workerRegistry": {
         "health": {
             "statusPollIntervalMs": 20,

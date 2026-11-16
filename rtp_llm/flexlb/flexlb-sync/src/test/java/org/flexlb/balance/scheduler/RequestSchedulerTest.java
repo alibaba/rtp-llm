@@ -416,7 +416,8 @@ class RequestSchedulerTest {
         RequestWorkerSelector router = mockRouter();
         AbstractRequestScheduler lifecycle = org.flexlb.balance.scheduler.SchedulerTestSupport.create(service, mock(DeliveryMetricsReporter.class), mock(RequestSchedulerReporter.class),
                 mock(RecentCacheKeyTraceReporter.class));
-        QueuedRequestScheduler coordinator = RequestProtocolTestSupport.queue(service, router, mock(DeliveryMetricsReporter.class), mock(DecodeCapacityAcquirer.class), lifecycle, new PlacementAvailability());
+        // Install spy callbacks before its decision thread can invoke another mocked method.
+        QueuedRequestScheduler coordinator = (QueuedRequestScheduler) lifecycle;
         RequestContext context = context(config, 990002L);
         CompletableFuture<Response> future = RequestProtocolTestSupport.register(lifecycle, context);
         CountDownLatch controlEntered = new CountDownLatch(1);
@@ -428,6 +429,8 @@ class RequestSchedulerTest {
             assertTrue(releaseControl.await(5, TimeUnit.SECONDS));
             return invocation.callRealMethod();
         }).when(coordinator).resolveControl(org.mockito.ArgumentMatchers.eq(context), org.mockito.ArgumentMatchers.eq(false));
+        RequestProtocolTestSupport.queue(service, router, mock(DeliveryMetricsReporter.class),
+                mock(DecodeCapacityAcquirer.class), lifecycle, new PlacementAvailability());
         try {
             if (futureCancellation) {
                 assertTrue(future.cancel(false));

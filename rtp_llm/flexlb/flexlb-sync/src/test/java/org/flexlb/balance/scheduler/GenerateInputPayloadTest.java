@@ -144,6 +144,36 @@ class GenerateInputPayloadTest {
         assertEquals(GenerateInputPB.parseFrom(bytes), GenerateInputPB.parseFrom(prepared.toWireBuilder().build().toByteString()));
     }
 
+    @Test void packedVarintBoundariesMatchProtobufAcrossWordsAndSegments() throws Exception {
+        for (int offset = 0; offset < 24; offset++) {
+            for (int continuations = 0; continuations <= 20; continuations++) {
+                for (boolean terminated : new boolean[] {false, true}) {
+                    byte[] payload = new byte[offset + continuations + (terminated ? 1 : 0)];
+                    Arrays.fill(payload, offset, offset + continuations, (byte) 0xff);
+                    var bytes = ByteString.newOutput();
+                    var output = CodedOutputStream.newInstance(bytes);
+                    output.writeBytes(2, ByteString.copyFrom(payload));
+                    output.flush();
+                    assertEquivalent(bytes.toByteString());
+                }
+            }
+        }
+        var random = new Random(92731L);
+        for (int sample = 0; sample < 1_000; sample++) {
+            byte[] payload = new byte[129 + random.nextInt(512)];
+            random.nextBytes(payload);
+            var bytes = ByteString.newOutput();
+            var output = CodedOutputStream.newInstance(bytes);
+            output.writeBytes(2, ByteString.copyFrom(payload));
+            output.flush();
+            ByteString wire = bytes.toByteString();
+            assertEquivalent(wire);
+            int split = 1 + random.nextInt(wire.size() - 1);
+            assertEquivalent(ByteString.copyFrom(wire.substring(0, split).toByteArray())
+                    .concat(ByteString.copyFrom(wire.substring(split).toByteArray())));
+        }
+    }
+
     private static ByteString packed(int... tokens) throws IOException {
         var bytes = ByteString.newOutput();
         var output = CodedOutputStream.newInstance(bytes);

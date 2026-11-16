@@ -116,7 +116,7 @@ class DeliverySettlementSignalContractTest {
             expectsFailure = persistentFailure;
             failRelease = new AtomicBoolean(persistentFailure);
             var config = SchedulingTestConfig.batchConfig();
-            config.getRequestLifecycle().getRequest().setTimeoutMs(TimeUnit.HOURS.toMillis(1));
+            config.getInternalRuntime().setRequestInactivityTimeoutMs(TimeUnit.HOURS.toMillis(1));
             var service = SchedulingTestConfig.configService(config);
             scheduler = SchedulerTestSupport.create(service, mock(DeliveryMetricsReporter.class),
                     mock(RequestSchedulerReporter.class), mock(RecentCacheKeyTraceReporter.class));

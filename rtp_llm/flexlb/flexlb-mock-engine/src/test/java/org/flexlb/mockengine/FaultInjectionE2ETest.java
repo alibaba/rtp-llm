@@ -286,7 +286,7 @@ class FaultInjectionE2ETest {
             boolean clientCancellation) throws Exception {
         try (AutoTpmE2EHarness h = new AutoTpmE2EHarness(
                 BASE_PORT + 80, 2, 1, "5", 1.0, true, ConfigTestSupport.single())) {
-            h.config.getRequestLifecycle().getRequest().setTimeoutMs(2_000L);
+            h.config.getInternalRuntime().setRequestInactivityTimeoutMs(2_000L);
             arm(h);
             JavaMockEngineCluster.FastRpcService prefill = h.prefillEngines.get(0);
             PrefillEndpoint prefillEndpoint = h.prefillEndpoint(0);

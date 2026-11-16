@@ -203,7 +203,7 @@ class RequestResourceAccountingTest {
                 var claim = f.requests.claimDelivery(f.item, DeliveryClaimKind.ROUTE_DECISION, 0L, member.decode());
                 assertNotNull(claim);
                 f.requests.onDeliveryEvidence(claim, new ContextResult.RouteDelivered(claim, org.flexlb.balance.prediction.PrefillPredictionBoundary.predictedVisibilityDeadlineMs(new org.flexlb.balance.projection.WorkSnapshot(
-                        System.currentTimeMillis(), List.of(), List.of(), 0L), 30_000L, claim.owner().data().getConfig().getRequestLifecycle().getDecision().getLifetime(), System.currentTimeMillis()), System.currentTimeMillis()));
+                        System.currentTimeMillis(), List.of(), List.of(), 0L), 30_000L, claim.owner().data().getConfig().getInternalRuntime().getEngineVisibilityMultiplier(), System.currentTimeMillis()), System.currentTimeMillis()));
             } finally { f.prefillHandoff.close(); }
             f.decodeStatus(Map.of("101", task(ID)), Map.of(), TOTAL_KV - HARD_KV);
             TaskInfo failed = task(ID);
@@ -398,7 +398,7 @@ class RequestResourceAccountingTest {
             var config = SchedulingTestConfig.newConfig();
             config.setScheduler(ConfigTestSupport.direct());
             SchedulingTestConfig.useNonBatchDispatcher(config).setMaxInflightPerPrefillWorker(1);
-            config.getRequestLifecycle().getRequest().setTimeoutMs(TTL);
+            config.getInternalRuntime().setRequestInactivityTimeoutMs(TTL);
             ConfigService service = mock(ConfigService.class);
             when(service.loadBalanceConfig()).thenReturn(config);
             var reporter = mock(DeliveryMetricsReporter.class);
@@ -519,7 +519,17 @@ class RequestResourceAccountingTest {
             requests.runtime.signals().delivery(item.ctx().snapshot().delivery().identity()).toCompletableFuture().get(2, TimeUnit.SECONDS);
             SchedulerTestSupport.awaitRequestWork(requests.runtime);
         }
-        void expire() { RequestProtocolTestSupport.expireInactiveRequest(requests, requests.requests.findActive(ID), System.currentTimeMillis() + TTL + 1); }
+        void expire() {
+            var context = requests.requests.findActive(ID);
+            if (context == null) { return; }
+            if (context.isAwaitingDispatch() && context.snapshot().cancellation() == null) {
+                var deadline = context.snapshot().deadlines().request();
+                requests.onDeadline(deadline, deadline.atMs());
+                SchedulerTestSupport.awaitRequestWork(requests.runtime);
+            } else {
+                RequestProtocolTestSupport.expireInactiveRequest(requests, context, System.currentTimeMillis() + TTL + 1);
+            }
+        }
         void decodeStatus(Map<String, TaskInfo> running, Map<String, TaskInfo> finished, long freeKv) {
             applyStatus(decode, status(RoleType.DECODE, version++, running, finished, freeKv));
         }

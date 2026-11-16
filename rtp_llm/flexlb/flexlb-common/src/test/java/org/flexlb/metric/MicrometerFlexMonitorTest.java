@@ -1,7 +1,7 @@
 package org.flexlb.metric;
 
-import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.Meter;
+import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.config.MeterFilter;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.flexlb.enums.FlexMetricType;
@@ -13,17 +13,30 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.concurrent.TimeUnit;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 class MicrometerFlexMonitorTest {
 
     @AfterEach
     void resetAllowedMetrics() {
         MicrometerFlexMonitor.setAllowedMetrics(null);
+    }
+
+    @Test
+    void enabledQueryUsesCurrentWhitelistThroughSafeWrapper() {
+        var registry = new SimpleMeterRegistry();
+        try {
+            var monitor = SafeFlexMonitor.wrap(new MicrometerFlexMonitor(registry));
+            MicrometerFlexMonitor.setAllowedMetrics(java.util.Set.of("allowed"));
+            org.junit.jupiter.api.Assertions.assertTrue(monitor.isEnabled("allowed"));
+            org.junit.jupiter.api.Assertions.assertFalse(monitor.isEnabled("filtered"));
+            MicrometerFlexMonitor.setAllowedMetrics(null);
+            org.junit.jupiter.api.Assertions.assertTrue(monitor.isEnabled("filtered"));
+        } finally { registry.close(); }
     }
 
     @ParameterizedTest

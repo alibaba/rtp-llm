@@ -172,7 +172,6 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
         endpoint.publishStatus(projection);
     }
 
-
     @Override
     public void close() {
         decodeCapacity.shutdown();
@@ -208,6 +207,9 @@ public final class RequestSchedulerTestRuntime implements AutoCloseable {
             return requireBound().select(context, policyGroup);
         }
 
+        @Override CostBasedPrefillStrategy.TokenEstimate estimateQueuedTokens(RequestContext context, String group) {
+            return requireBound().estimateQueuedTokens(context, group);
+        }
         private synchronized RequestWorkerSelector requireBound() {
             if (delegate == null) {
                 throw new IllegalStateException("test router is not bound");

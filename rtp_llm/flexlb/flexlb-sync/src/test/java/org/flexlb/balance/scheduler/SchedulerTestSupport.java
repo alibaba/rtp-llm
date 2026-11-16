@@ -93,7 +93,7 @@ public final class SchedulerTestSupport {
             } else if (snapshot.key() == null) {
                 long now = System.currentTimeMillis();
                 context.register(route.requestId(), now, route.expiresAtMs(),
-                        context.data().getConfig().getRequestLifecycle().getRequest().getTimeoutMs());
+                        context.data().getConfig().getInternalRuntime().getRequestInactivityTimeoutMs());
                 var placement = (ContextResult.PlacementToken) ((ContextResult.Granted<?>) context.beginPlacement(null)).value();
                 context.bindPlacement(placement, route, ContextResult.PublicationResult.PREPARED);
                 context.bindPlacement(placement, route, ContextResult.PublicationResult.PUBLISHED);

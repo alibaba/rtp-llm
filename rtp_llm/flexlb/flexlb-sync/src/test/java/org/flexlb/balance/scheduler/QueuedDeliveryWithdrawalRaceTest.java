@@ -121,6 +121,7 @@ class QueuedDeliveryWithdrawalRaceTest {
 
     private static final class Fixture implements AutoCloseable {
         final EngineGrpcClient client = mock(EngineGrpcClient.class);
+        final RequestWorkerSelector router = mock(RequestWorkerSelector.class);
         final SchedulerRuntime runtime;
         final QueuedRequestScheduler owner;
         final PrefillEndpoint prefill;
@@ -152,7 +153,7 @@ class QueuedDeliveryWithdrawalRaceTest {
             var directory = new EndpointRegistry(service, repository, reporter, dispatcher, availability);
             runtime = new SchedulerRuntime(repository, directory, reporter,
                     mock(RequestSchedulerReporter.class), dispatcher, service, mock(EngineGrpcClient.class));
-            owner = new QueuedRequestScheduler(config, mock(RequestWorkerSelector.class), reporter,
+            owner = new QueuedRequestScheduler(config, router, reporter,
                     mock(DecodeCapacityAcquirer.class), runtime, availability,
                     new DecodeResources.AdmissionCapacity(64L, 90), mock(RecentCacheKeyTraceReporter.class));
             runtime.registerScheduler(owner);
@@ -168,6 +169,7 @@ class QueuedDeliveryWithdrawalRaceTest {
             applyStatus(prefill, status(RoleType.PREFILL));
             applyStatus(decode, status(RoleType.DECODE));
             var state = new PrefillState(new ReentrantLock(), PrefillActiveIndex.ordered(16, WorkerBatcher.PRIORITY_QUEUE_ORDER), System::currentTimeMillis);
+            ReflectionTestUtils.invokeMethod(state, "enableTokenWorkload");
             ReflectionTestUtils.setField(prefill, "ownership", state);
             batcher = new WorkerBatcher("withdrawal-race", prefill, QueueExecutionSettings.capture(config), dispatcher, state);
             ReflectionTestUtils.setField(prefill, "batcher", batcher);

@@ -13,6 +13,7 @@ import org.flexlb.service.monitor.DeliveryMetricsReporter;
 import org.flexlb.service.monitor.RequestSchedulerReporter;
 import org.junit.jupiter.api.Test;
 
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -105,10 +106,115 @@ class QueueRegistrationCancellationTest {
         }
     }
 
+    @Test
+    void blockedQueueExpiresAtTheSingleDeadlineWithoutNewArrivals() throws Exception {
+        try (Fixture f = new Fixture()) {
+            f.config.setDispatchTimeoutMs(500L);
+            f.config.getInternalRuntime().setRequestInactivityTimeoutMs(1L);
+            when(f.router.select(any(), nullable(String.class))).thenReturn(PlacementResult.blocked(
+                    new PlacementKey(org.flexlb.dao.route.RoleType.PREFILL, null, null)));
+            var context = f.context(906L);
+            context.data().setSchedulingMetadata(null);
+            var result = f.queue.submit(context);
+            assertThrows(java.util.concurrent.TimeoutException.class, () -> result.get(100, TimeUnit.MILLISECONDS));
+            assertFalse(result.get(2, TimeUnit.SECONDS).isSuccess());
+            assertTrue(System.currentTimeMillis() >= context.data().getRequestExpiresAtMs());
+            assertEquals(CancelReason.DEADLINE_EXCEEDED, context.snapshot().cancellation().reason());
+            RequestProtocolTestSupport.awaitCondition(() -> f.runtime.requests().liveRequestCount() == 0);
+            assertEquals(0, RequestProtocolTestSupport.queuedCount(f.queue));
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void slowCostRefreshDoesNotDelayCancellationOrResurrectTheRequest(boolean deadline) throws Exception {
+        var estimating = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        try (Fixture f = new Fixture()) {
+            org.springframework.test.util.ReflectionTestUtils.setField(f.queue, "prefillCostOrder", true);
+            f.config.setDispatchTimeoutMs(deadline ? 500L : 60_000L);
+            when(f.router.estimateQueuedTokens(any(), nullable(String.class))).thenAnswer(call -> {
+                RequestContext context = call.getArgument(0);
+                if (context.data().getRequestId() == 907L) {
+                    estimating.countDown();
+                    assertTrue(release.await(10, TimeUnit.SECONDS));
+                }
+                return new org.flexlb.balance.strategy.CostBasedPrefillStrategy.TokenEstimate(1000L, 0L);
+            });
+            when(f.router.select(any(), nullable(String.class))).thenReturn(
+                    PlacementResult.rejected(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED)));
+            var context = f.context(907L);
+            context.data().setSchedulingMetadata(null);
+            var result = f.queue.submit(context);
+            CompletableFuture<Response> next;
+            try {
+                assertTrue(estimating.await(2, TimeUnit.SECONDS));
+                if (!deadline) { f.queue.cancel(907L, 0L, CancelReason.CLIENT_CANCELLED); }
+                assertFalse(result.get(2, TimeUnit.SECONDS).isSuccess(),
+                        "cancellation must finish without waiting for advisory cache lookup");
+                assertEquals(deadline ? CancelReason.DEADLINE_EXCEEDED : CancelReason.CLIENT_CANCELLED,
+                        context.snapshot().cancellation().reason());
+                RequestProtocolTestSupport.awaitCondition(() -> f.runtime.requests().liveRequestCount() == 0);
+                next = f.queue.submit(f.context(908L));
+                verify(f.router, never()).select(any(), nullable(String.class));
+            } finally { release.countDown(); }
+            assertFalse(next.get(2, TimeUnit.SECONDS).isSuccess());
+            verify(f.router, never()).select(eq(context), nullable(String.class));
+            verify(f.router, times(1)).select(any(), nullable(String.class));
+            RequestProtocolTestSupport.awaitCondition(() -> f.runtime.requests().liveRequestCount() == 0);
+        } finally { release.countDown(); }
+    }
+
+    @Test
+    void shutdownDrainsRequestsWhileCostRefreshIsStillRunning() throws Exception {
+        var estimating = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        try (Fixture f = new Fixture()) {
+            org.springframework.test.util.ReflectionTestUtils.setField(f.queue, "prefillCostOrder", true);
+            when(f.router.estimateQueuedTokens(any(), nullable(String.class))).thenAnswer(call -> {
+                estimating.countDown();
+                assertTrue(release.await(10, TimeUnit.SECONDS));
+                return new org.flexlb.balance.strategy.CostBasedPrefillStrategy.TokenEstimate(1000L, 0L);
+            });
+            var result = f.queue.submit(f.context(909L));
+            Thread closer = new Thread(f.runtime::shutdown, "test-close-during-cost-refresh");
+            try {
+                assertTrue(estimating.await(2, TimeUnit.SECONDS));
+                closer.start();
+                assertFalse(result.get(2, TimeUnit.SECONDS).isSuccess());
+                assertTrue(closer.isAlive(), "shutdown must still join the owned planner task");
+            } finally {
+                release.countDown();
+                closer.join(2000L);
+            }
+            assertFalse(closer.isAlive());
+            assertEquals(0, f.runtime.requests().liveRequestCount());
+            verify(f.router, never()).select(any(), nullable(String.class));
+        } finally { release.countDown(); }
+    }
+
+    @Test
+    void failedCostLookupKeepsFifoFallbackAndAllowsTheNextRefresh() throws Exception {
+        try (Fixture f = new Fixture()) {
+            org.springframework.test.util.ReflectionTestUtils.setField(f.queue, "prefillCostOrder", true);
+            when(f.router.estimateQueuedTokens(any(), nullable(String.class)))
+                    .thenThrow(new IllegalStateException("cache lookup unavailable"));
+            when(f.router.select(any(), nullable(String.class))).thenReturn(
+                    PlacementResult.rejected(Response.error(StrategyErrorType.RESOURCE_EXHAUSTED)));
+            for (long id = 910L; id < 912L; id++) {
+                assertFalse(f.queue.submit(f.context(id)).get(2, TimeUnit.SECONDS).isSuccess());
+            }
+            verify(f.router, times(2)).estimateQueuedTokens(any(), nullable(String.class));
+            verify(f.router, times(2)).select(any(), nullable(String.class));
+            RequestProtocolTestSupport.awaitCondition(() -> f.runtime.requests().liveRequestCount() == 0);
+        }
+    }
+
     private static final class Fixture implements AutoCloseable {
         final FlexlbConfig config = SchedulingTestConfig.batchConfig();
         final RequestWorkerSelector router = mock(RequestWorkerSelector.class);
         final SchedulerRuntime runtime;
+        final PlacementAvailability availability = new PlacementAvailability();
         final QueuedRequestScheduler queue;
 
         Fixture() {
@@ -119,7 +225,7 @@ class QueueRegistrationCancellationTest {
             runtime = new SchedulerRuntime(new RequestRepository(), mock(EndpointRegistry.class), batches,
                     mock(RequestSchedulerReporter.class), SchedulerTestSupport.dispatcher(), service, mock(EngineGrpcClient.class));
             queue = new QueuedRequestScheduler(config, router, batches, mock(DecodeCapacityAcquirer.class),
-                    runtime, new PlacementAvailability(), SchedulingTestConfig.capacity(config), org.mockito.Mockito.mock(org.flexlb.service.RecentCacheKeyTraceReporter.class));
+                    runtime, availability, SchedulingTestConfig.capacity(config), org.mockito.Mockito.mock(org.flexlb.service.RecentCacheKeyTraceReporter.class));
             runtime.registerScheduler(queue);
             queue.start();
         }

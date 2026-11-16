@@ -1,18 +1,16 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.dao.master.WorkerStatusTestSupport;
-
-import org.flexlb.balance.scheduler.SchedulingTestConfig;
-
 import org.flexlb.balance.projection.WorkSnapshot;
 import org.flexlb.balance.scheduler.RequestContext;
 import org.flexlb.balance.scheduler.RequestRoute;
+import org.flexlb.balance.scheduler.SchedulingTestConfig;
 import org.flexlb.config.DispatcherConfig;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.SchedulingMetadata;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatusResponse;
+import org.flexlb.dao.master.WorkerStatusTestSupport;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.TaskPhase;
 import org.junit.jupiter.api.Test;
@@ -35,8 +33,8 @@ import java.util.function.ToLongFunction;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -51,6 +49,327 @@ class PrefillStateSnapshotTest {
             Comparator.comparingLong(RequestRoute::requestId));
     private final PrefillState state = new PrefillState(lock, waiting, clock::get);
     private final EndpointGenerationLifecycle generation = new EndpointGenerationLifecycle(() -> { });
+
+    @ParameterizedTest
+    @CsvSource({"0,256", "6,256", "10,256", "11,0", "1000,0"})
+    void actualWaitingGatePreservesConfiguredInflightLimitUnderConcurrentReservations(long waitingCount, int expected) throws Exception {
+        var pressure = new EngineQueueAdmission(10L, 5_000L);
+        pressure.observe(waitingCount, 0L);
+        state.configureEngineQueueAdmission(pressure::state);
+        state.configureEngineQueueDispatchBlocked(pressure::dispatchBlocked);
+        state.enableTokenWorkload();
+        var accepted = new java.util.concurrent.ConcurrentLinkedQueue<PrefillState.RouteReservation>();
+        var start = new CountDownLatch(1);
+        try (var threads = Executors.newFixedThreadPool(8)) {
+            var futures = new ArrayList<Future<?>>();
+            for (int client = 0; client < 8; client++) {
+                final int offset = client * 160;
+                futures.add(threads.submit(() -> {
+                    assertTrue(start.await(3, TimeUnit.SECONDS));
+                    for (int i = 0; i < 160; i++) {
+                        var lease = state.reserveUnqueuedRoute(item(90_000 + offset + i), 1, 256).reservation();
+                        if (lease != null) { accepted.add(lease); }
+                    }
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (var future : futures) { future.get(20, TimeUnit.SECONDS); }
+        }
+        assertEquals(expected, accepted.size());
+        assertEquals(expected, state.progress().outstandingRequests());
+        // Duplicate low telemetry must not bypass the independently enforced hard limit.
+        pressure.observe(waitingCount, 1L);
+        assertNull(state.reserveUnqueuedRoute(item(99_999), 1, 256).reservation());
+        for (var lease : accepted) { state.release(lease, null); state.release(lease, null); }
+        if (expected > 0) {
+            var replacement = state.reserveUnqueuedRoute(item(99_999), 1, 256).reservation();
+            assertNotNull(replacement);
+            state.release(replacement, null);
+        } else { assertNull(state.reserveUnqueuedRoute(item(99_999), 1, 256).reservation()); }
+        assertEquals(0L, state.progress().outstandingRequests());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"active,-1", "active,0", "finished,-1", "finished,0", "fenced,-1", "fenced,0", "retired,-1", "retired,0"})
+    void unobservedCommittedWorkSurvivesLocalCleanupUntilRemoteProof(String proof, long wireBatchId) {
+        var pressure = new EngineQueueAdmission(0L, 5000L);
+        pressure.observe(0L, 0L);
+        state.configureEngineQueueAdmission(pressure::state);
+        state.configureEngineQueueDispatchBlocked(pressure::dispatchBlocked);
+        state.enableTokenWorkload();
+        var route = item(88);
+        var lease = state.reserveUnqueuedRoute(route, 1, 1).reservation();
+        try (var handoff = EndpointTestSupport.commitRoutes(state, List.of(route), List.of(lease), generation.tryAcquireHandoff())) {
+            assertNotNull(handoff);
+        }
+        state.release(null, route, true);
+        state.release(null, route, true);
+        assertEquals(0, state.stats().locallyOwnedRequests());
+        assertEquals(1, state.progress().outstandingRequests());
+        assertEquals(100, state.tokenWorkload().pendingTokens());
+        // Absence in a poll does not prove that a delayed dispatch cannot still reach the Engine.
+        reconcile(Map.of(), Map.of(), unused -> 0L);
+        assertNull(state.reserveUnqueuedRoute(item(89), 1, 1).reservation());
+        assertEquals(PrefillState.CapacityStatus.REQUEST_ALREADY_RESERVED, state.reserveUnqueuedRoute(item(88), 1, 1).status());
+        assertFalse(state.confirmUnobservedDispatchStopped(88, 99L), "proof must match the exact execution");
+        var task = task(88, TaskPhase.RUNNING, 0, 0);
+        task.setBatchId(wireBatchId);
+        task.setInputLength(100L);
+        switch (proof) {
+            case "active" -> {
+                reconcile(Map.of(), Map.of("88", task), unused -> 0L);
+                assertEquals(1, state.progress().outstandingRequests(), "Engine owns the same stream slot");
+                assertEquals(100, state.tokenWorkload().pendingTokens());
+                reconcile(Map.of(), Map.of(), unused -> 0L);
+            }
+            case "finished" -> reconcile(Map.of("88", task), Map.of("88", task), unused -> 0L);
+            case "fenced" -> {
+                assertTrue(state.confirmUnobservedDispatchStopped(88, wireBatchId));
+                assertFalse(state.confirmUnobservedDispatchStopped(88, wireBatchId));
+            }
+            case "retired" -> state.retireGenerationOwnership();
+            default -> throw new AssertionError("unexpected proof");
+        }
+        assertEquals(0, state.progress().outstandingRequests());
+        assertEquals(0, state.tokenWorkload().pendingTokens());
+        var replacement = state.reserveUnqueuedRoute(item(89), 1, 1).reservation();
+        assertNotNull(replacement);
+        state.release(replacement, null);
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {-1L, 0L})
+    void observedRunningAndUnobservedRequestsShareTheHardInflightLimit(long wireBatchId) {
+        var pressure = new EngineQueueAdmission(0L, 5000L);
+        pressure.observe(0L, 0L);
+        state.configureEngineQueueAdmission(pressure::state);
+        state.configureEngineQueueDispatchBlocked(pressure::dispatchBlocked);
+        state.enableTokenWorkload();
+        var lease = state.reserveUnqueuedRoute(item(87), 1, 2).reservation();
+        assertNotNull(lease);
+        var active = task(87, TaskPhase.RUNNING, 0L, 0L);
+        active.setBatchId(wireBatchId);
+        active.setInputLength(100L);
+        reconcile(Map.of(), Map.of("87", active, "duplicate", active), unused -> 0L);
+        assertEquals(1, state.progress().outstandingRequests());
+        var next = state.reserveUnqueuedRoute(item(88), 1, 2).reservation();
+        assertNotNull(next);
+        reconcile(Map.of(), Map.of("87", active), unused -> 0L);
+        assertNull(state.reserveUnqueuedRoute(item(89), 1, 2).reservation());
+        reconcile(Map.of(), Map.of(), unused -> 0L);
+        assertNull(state.reserveUnqueuedRoute(item(89), 1, 2).reservation());
+        state.release(next, null);
+        reconcile(Map.of(), Map.of("87", active), unused -> 0L);
+        state.release(lease, null);
+        assertEquals(1, state.progress().outstandingRequests(), "local cleanup cannot erase the observed running stream");
+        var replacement = state.reserveUnqueuedRoute(item(89), 1, 2).reservation();
+        assertNotNull(replacement);
+        state.release(replacement, null);
+    }
+
+    @Test
+    void queuedBatchRechecksActualWaitingWithoutLimitingBatchSizeToTheWatermark() {
+        var pressure = new EngineQueueAdmission(0, 5000);
+        pressure.observe(0, 0);
+        state.configureEngineQueueAdmission(pressure::state);
+        state.configureEngineQueueDispatchBlocked(pressure::dispatchBlocked);
+        state.enableTokenWorkload();
+        var first = item(91);
+        var second = item(92);
+        enqueue(first); enqueue(second);
+        var lease = state.reserveBatch(first, 10, 256, generation.tryAcquireHandoff()).reservation();
+        try (var preparation = EndpointTestSupport.preparation(lease)) {
+            pressure.observe(1, 1);
+            assertNull(EndpointTestSupport.commitBatch(state, lease, List.of(first, second), 1),
+                    "actual waiting above the threshold must stop queued dispatch before the overload timer");
+            assertEquals(2, state.progress().queueDepth());
+            pressure.observe(0, 2);
+            try (var committed = EndpointTestSupport.commitBatch(state, lease, List.of(first, second), 1)) {
+                assertNotNull(committed, "an empty Engine queue must accept the configured batch size");
+                assertEquals(0, state.progress().queueDepth());
+                assertEquals(2, state.progress().outstandingRequests());
+            }
+        }
+        state.retireGenerationOwnership();
+        assertEquals(0, state.progress().outstandingRequests());
+    }
+
+    @Test
+    void unconfirmedCleanupRetryIsBoundedAndRotatesAcrossRequests() {
+        state.configureEngineQueueAdmission(() -> EngineQueueAdmission.State.AVAILABLE);
+        state.enableTokenWorkload();
+        for (long id = 200; id < 203; id++) {
+            var route = item(id);
+            var lease = state.reserveUnqueuedRoute(route, 1, 3).reservation();
+            try (var committed = EndpointTestSupport.commitRoutes(state, List.of(route), List.of(lease), generation.tryAcquireHandoff())) {
+                assertNotNull(committed);
+            }
+            state.release(null, route, true);
+        }
+        assertEquals(200L, state.nextUnconfirmedCancellation());
+        assertNull(state.nextUnconfirmedCancellation());
+        clock.addAndGet(1000);
+        assertEquals(201L, state.nextUnconfirmedCancellation());
+        assertTrue(state.confirmUnobservedDispatchStopped(202, 0));
+        clock.addAndGet(1000);
+        assertEquals(200L, state.nextUnconfirmedCancellation());
+        state.retireGenerationOwnership();
+        assertNull(state.nextUnconfirmedCancellation());
+    }
+
+    @Test
+    void orphanTtlCannotEraseADispatchedRequestBeforeItsFirstEngineReport() {
+        state.configureEngineQueueAdmission(() -> EngineQueueAdmission.State.AVAILABLE);
+        state.enableTokenWorkload();
+        var route = item(301);
+        var lease = state.reserveUnqueuedRoute(route, 1, 1).reservation();
+        try (var committed = EndpointTestSupport.commitRoutes(state, List.of(route), List.of(lease), generation.tryAcquireHandoff())) {
+            assertNotNull(committed);
+        }
+        clock.addAndGet(1000L);
+        assertEquals(1, state.evictExpiredInflight(1L, java.util.Set.of(route)));
+        assertEquals(0, state.stats().locallyOwnedRequests());
+        assertEquals(1, state.progress().outstandingRequests());
+        assertNull(state.reserveUnqueuedRoute(item(302), 1, 1).reservation());
+        assertEquals(301L, state.nextUnconfirmedCancellation());
+        assertTrue(state.confirmUnobservedDispatchStopped(301, 0));
+        assertEquals(0, state.progress().outstandingRequests());
+    }
+
+    @Test
+    void tokenReservationsRemainCanonicalWithoutTokenBackpressure() {
+        state.enableTokenWorkload();
+        var first = item(1001);
+        when(first.hitCache()).thenReturn(20L);
+        enqueue(first);
+        assertEquals(80, state.tokenWorkload().pendingTokens());
+        assertNull(state.updateQueue(PrefillState.QueueChange.ENQUEUE, first, 0, 0));
+        assertEquals(80, state.tokenWorkload().pendingTokens());
+        var second = item(1002);
+        enqueue(second);
+        assertEquals(180, state.tokenWorkload().pendingTokens());
+        var third = item(1003);
+        enqueue(third);
+        assertEquals(280, state.tokenWorkload().pendingTokens());
+        state.release(null, third);
+        state.release(null, first); state.release(null, first);
+        assertEquals(100, state.tokenWorkload().pendingTokens());
+        state.release(null, second);
+        assertEquals(0, state.tokenWorkload().score());
+        var big = item(1004);
+        when(big.seqLen()).thenReturn(3_000_000L);
+        var reservation = state.reserveUnqueuedRoute(big, 1, 0).reservation();
+        assertNotNull(reservation);
+        assertEquals(3_000_000, state.tokenWorkload().pendingTokens());
+        var next = state.reserveUnqueuedRoute(item(1005), 1, 0).reservation();
+        assertNotNull(next);
+        state.release(next, null);
+        state.release(reservation, null);
+        assertEquals(0, state.tokenWorkload().score());
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.EnumSource(value = EngineQueueAdmission.State.class,
+            names = {"UNKNOWN", "AVAILABLE"})
+    void tokenVolumeDoesNotGateAdmissionButRequestLimitStillApplies(EngineQueueAdmission.State queueState) {
+        state.configureEngineQueueAdmission(() -> queueState);
+        state.enableTokenWorkload();
+        var large = item(4001);
+        when(large.seqLen()).thenReturn(3_000_000L);
+        var first = state.reserveUnqueuedRoute(large, 1, 2).reservation();
+        assertNotNull(first);
+        assertEquals(3_000_000L, state.tokenWorkload().pendingTokens());
+        var second = state.reserveUnqueuedRoute(item(4002), 1, 2).reservation();
+        assertNotNull(second);
+        assertNull(state.reserveUnqueuedRoute(item(4003), 1, 2).reservation());
+        state.release(first, null); state.release(second, null);
+        assertEquals(0, state.tokenWorkload().score());
+    }
+
+    @Test
+    void engineQueuePolicyPreservesTheRequestLimitAndBlocksCongestion() {
+        var pressure = new java.util.concurrent.atomic.AtomicReference<>(EngineQueueAdmission.State.AVAILABLE);
+        state.configureEngineQueueAdmission(pressure::get);
+        state.enableTokenWorkload();
+        var leases = new java.util.ArrayList<PrefillState.RouteReservation>();
+        for (int i = 0; i < 2; i++) {
+            var lease = state.reserveUnqueuedRoute(item(5000 + i), 1, 2).reservation();
+            assertNotNull(lease);
+            leases.add(lease);
+        }
+        assertNull(state.reserveUnqueuedRoute(item(5999), 1, 2).reservation());
+        var queued = item(6000);
+        assertNull(state.updateQueue(PrefillState.QueueChange.ENQUEUE, queued, 2, 0));
+        state.release(leases.removeLast(), null);
+        assertSame(queued, state.updateQueue(PrefillState.QueueChange.ENQUEUE, queued, 2, 0));
+        pressure.set(EngineQueueAdmission.State.CONGESTED);
+        assertNull(state.reserveUnqueuedRoute(item(6001), 1, 0).reservation());
+        assertNull(state.updateQueue(PrefillState.QueueChange.ENQUEUE, item(6002), 0, 0));
+        for (var lease : leases) { state.release(lease, null); }
+        state.release(null, queued);
+        // Even an empty Master ledger cannot override a congested Engine queue.
+        assertNull(state.reserveUnqueuedRoute(item(6003), 1, 0).reservation());
+        pressure.set(EngineQueueAdmission.State.AVAILABLE);
+        var recovered = state.reserveUnqueuedRoute(item(6004), 1, 1).reservation();
+        assertNotNull(recovered);
+        state.release(recovered, null);
+        assertEquals(0, state.tokenWorkload().pendingTokens());
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"128,0", "256,0", "256,1000"})
+    void concurrentBurstCannotBypassRequestLimitBeforeEngineFeedback(int limit, long waiting) throws Exception {
+        var pressure = new EngineQueueAdmission(10L, 5_000L);
+        pressure.observe(waiting, 0L);
+        assertEquals(EngineQueueAdmission.State.AVAILABLE, pressure.state());
+        state.configureEngineQueueAdmission(pressure::state);
+        state.enableTokenWorkload();
+        var accepted = new java.util.concurrent.ConcurrentLinkedQueue<PrefillState.RouteReservation>();
+        var start = new CountDownLatch(1);
+        try (var threads = Executors.newFixedThreadPool(8)) {
+            var runs = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+            for (int client = 0; client < 8; client++) {
+                int offset = client * 160;
+                runs.add(threads.submit(() -> {
+                    assertTrue(start.await(3, TimeUnit.SECONDS));
+                    for (int i = 0; i < 160; i++) {
+                        var result = state.reserveUnqueuedRoute(item(20_000 + offset + i), 1L, limit);
+                        if (result.reservation() != null) { accepted.add(result.reservation()); }
+                    }
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (var run : runs) { run.get(20, TimeUnit.SECONDS); }
+        }
+        try {
+            assertEquals(limit, accepted.size(), "local reservations must cap a burst without waiting for Engine telemetry");
+            assertEquals(limit, state.progress().outstandingRequests());
+        } finally { for (var lease : accepted) { state.release(lease, null); } }
+        assertEquals(0, state.progress().outstandingRequests());
+    }
+
+    @Test
+    void lowEngineWaitingNeverBypassesBatchSlots() {
+        state.configureEngineQueueAdmission(() -> EngineQueueAdmission.State.AVAILABLE);
+        state.enableTokenWorkload();
+        var first = state.reserveUnqueuedBatch(item(7001), 7001L, 1, generation.tryAcquireHandoff()).reservation();
+        assertNotNull(first);
+        try {
+            assertFalse(state.batchCapacityAvailable(1));
+            var permit = generation.tryAcquireHandoff();
+            try { assertNull(state.reserveUnqueuedBatch(item(7002), 7002L, 1, permit).reservation()); }
+            finally { permit.close(); }
+            var queued = item(7003);
+            enqueue(queued);
+            permit = generation.tryAcquireHandoff();
+            try { assertNull(state.reserveBatch(queued, 7003L, 1, permit).reservation()); }
+            finally { permit.close(); }
+            state.release(null, queued);
+        } finally { state.release(first, null).generationHandoff().close(); }
+        assertTrue(state.batchCapacityAvailable(1));
+    }
 
     @Test
     void stableAdmissionSummaryIsReusedOnlyForTheExactInputs() {
@@ -110,16 +429,14 @@ class PrefillStateSnapshotTest {
         lock.lock();
         try {
             assertSame(failure, assertThrows(IllegalStateException.class, () -> {
-                if (batch) { reservation.owner.commitLocked(new PrefillState.CommitPlan(PrefillState.CommitKind.BATCH, List.of(selected), java.util.List.of(), reservation, new long[]{10L}, failed, clock.get()), null); }
-                else { state.commitLocked(new PrefillState.CommitPlan(PrefillState.CommitKind.QUEUED, List.of(selected), java.util.List.of(), null, new long[]{10L}, failed, clock.get()), pin); }
+                if (batch) { reservation.owner.commitLocked(new PrefillState.CommitPlan(PrefillState.CommitKind.BATCH, List.of(selected), java.util.List.of(), reservation, new long[]{10L}, failed, clock.get()), null); } else { state.commitLocked(new PrefillState.CommitPlan(PrefillState.CommitKind.QUEUED, List.of(selected), java.util.List.of(), null, new long[]{10L}, failed, clock.get()), pin); }
             }));
             assertEquals(List.of(selected, failed), waitingItems());
             assertEquals(2, state.admissionSummary(0, 0L).occupiedRequests());
             assertNoWork(state.committedSnapshot(), 1L, 2L);
         } finally {
             lock.unlock();
-            if (reservation != null) { EndpointTestSupport.preparation(reservation).close(); }
-            else { pin.close(); }
+            if (reservation != null) { EndpointTestSupport.preparation(reservation).close(); } else { pin.close(); }
         }
         assertEquals(0, state.captureQueueCounters().batchSlots());
     }
@@ -1259,8 +1576,38 @@ class PrefillStateSnapshotTest {
         assertEquals(0L, state.admissionSummary(0, 0L).occupiedRequests());
     }
 
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"BATCH,false", "NON_BATCH,false", "BATCH,true", "NON_BATCH,true"})
+    void terminalReleasesOriginalReservationWithoutRetainingHistory(DispatcherConfig.Type mode, boolean cold) {
+        state.enableTokenWorkload();
+        var request = item(71);
+        when(request.coldTokenBalance()).thenReturn(cold);
+        if (mode == DispatcherConfig.Type.BATCH) {
+            commitBatch(List.of(request), 300L);
+        } else {
+            var reservation = state.reserveUnqueuedRoute(request, 300L, Long.MAX_VALUE).reservation();
+            try (var preparation = EndpointTestSupport.preparation(reservation);
+                 var handoff = EndpointTestSupport.commitRoutes(state, List.of(request), List.of(reservation),
+                         generation.tryAcquireHandoff())) {
+                assertEquals(1, state.stats().locallyOwnedRequests());
+            }
+        }
+        assertEquals(100, state.tokenWorkload().pendingTokens());
+        var terminal = task(71, null, 0L, 50L);
+        terminal.setInputLength(100L);
+        terminal.setPrefixLength(90L);
+        reconcile(Map.of("71", terminal), Map.of(), unused -> 0L);
+        assertEquals(0, state.tokenWorkload().pendingTokens());
+        assertEquals(0, state.tokenWorkload().score());
+        enqueue(item(72));
+        assertEquals(100, state.tokenWorkload().score());
+        reconcile(Map.of("71", terminal), Map.of(), unused -> 0L);
+        assertEquals(100, state.tokenWorkload().score(), "duplicate terminal must not release another reservation");
+    }
+
     @Test
     void duplicateTerminalReportsMergeBeforeBatchAggregationAndReleaseOnce() {
+        state.enableTokenWorkload();
         commitBatch(List.of(item(1), item(2)), 300L);
         var finished = Map.of("first-success", task(1, null, 0L, 100L),
                 "first-failure", task(1, null, 500L, 700L),
@@ -1279,7 +1626,10 @@ class PrefillStateSnapshotTest {
         assertFalse(completion.learningEligible());
         assertTrue(result.capacityReleased());
         assertEquals(0L, state.admissionSummary(0, 0L).occupiedRequests());
+        assertEquals(0, state.tokenWorkload().score());
+        assertEquals(0, state.tokenWorkload().pendingTokens());
         var repeated = reconcile(finished, Map.of(), noRepacking);
+        assertEquals(0, state.tokenWorkload().score());
         assertTrue(repeated.batchCompletions().isEmpty());
         assertTrue(repeated.requestStatuses().isEmpty());
         assertFalse(repeated.capacityReleased());
@@ -1416,6 +1766,134 @@ class PrefillStateSnapshotTest {
         assertEquals(80L, after.work().materialize().totalRemainingWorkMsAt(clock.get()).orElseThrow());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void engineAndLocalTokensDeduplicateInEitherArrivalOrderAndSurviveCancellation(boolean localFirst) {
+        state.enableTokenWorkload();
+        var local = item(81);
+        var active = task(81, TaskPhase.RECEIVED, 0L, 0L);
+        active.setBatchId(0L);
+        active.setInputLength(200L);
+        active.setPrefixLength(50L);
+        PrefillState.RouteReservation lease = null;
+        try {
+            if (localFirst) { lease = state.reserveUnqueuedRoute(local, 1, 0).reservation(); }
+            reconcile(Map.of(), Map.of("81", active), unused -> 0L);
+            if (!localFirst) { lease = state.reserveUnqueuedRoute(local, 1, 0).reservation(); }
+            assertEquals(150, state.tokenWorkload().pendingTokens(), "use max(local, Engine) for the same execution");
+            reconcile(Map.of(), Map.of("81", active, "duplicate", active), unused -> 0L);
+            assertEquals(150, state.tokenWorkload().pendingTokens());
+            assertEquals(1, state.progress().outstandingRequests());
+            state.release(lease, null);
+            lease = null;
+            assertEquals(150, state.tokenWorkload().pendingTokens(), "local release does not erase observed Engine work");
+            assertEquals(1, state.progress().outstandingRequests(), "local release must not reopen an occupied stream slot");
+            assertNull(state.reserveUnqueuedRoute(item(8100), 1, 1).reservation());
+            active.setInputLength(0L);
+            reconcile(Map.of(), Map.of("81", active), unused -> 0L);
+            assertEquals(150, state.tokenWorkload().pendingTokens(), "legacy reports retain the last available size");
+            var cleared = reconcile(Map.of("81", active), Map.of("81", active), unused -> 0L);
+            assertTrue(cleared.capacityReleased());
+            assertEquals(0, state.tokenWorkload().pendingTokens());
+            reconcile(Map.of("81", active), Map.of(), unused -> 0L);
+            assertEquals(0, state.progress().outstandingRequests());
+            assertEquals(0, state.tokenWorkload().score());
+        } finally { if (lease != null) { state.release(lease, null); } }
+    }
+
+    @Test
+    void engineTokenChangesWakeCapacityWaitersEvenWhenRequestCountsStayEqual() {
+        state.enableTokenWorkload();
+        var active = task(82, TaskPhase.RECEIVED, 0L, 0L);
+        active.setInputLength(200L);
+        reconcile(Map.of(), Map.of("82", active), unused -> 0L);
+        active.setInputLength(80L);
+        var changed = reconcile(Map.of(), Map.of("82", active), unused -> 0L);
+        assertTrue(changed.schedulingInputsChanged());
+        assertTrue(changed.capacityReleased());
+        assertEquals(80, state.tokenWorkload().pendingTokens());
+        assertFalse(reconcile(Map.of(), Map.of("82", active), unused -> 0L).capacityReleased());
+        reconcile(Map.of(), Map.of(), unused -> 0L);
+        assertEquals(0, state.tokenWorkload().pendingTokens());
+    }
+
+    @Test
+    void engineBatchIdentityFencesCoverageAndPriorityOverlaysDoNotAddWork() {
+        state.enableTokenWorkload();
+        var local = item(83);
+        enqueue(local);
+        var active = task(83, TaskPhase.RECEIVED, 0L, 0L);
+        active.setInputLength(100L);
+        var overlay = task(84, TaskPhase.PENDING, 0L, 0L);
+        overlay.setInputLength(900L);
+        overlay.setPriorityPreemptionProgress(org.flexlb.enums.PriorityPreemptionProgress.CANCELING);
+        reconcile(Map.of(), Map.of("83", active, "84", overlay), unused -> 0L);
+        assertEquals(200, state.tokenWorkload().pendingTokens(), "batch 10 and the unbatched local owner are different executions");
+        var lease = state.reserveBatch(local, 10L, 2, generation.tryAcquireHandoff()).reservation();
+        assertEquals(100, state.tokenWorkload().pendingTokens());
+        state.release(lease, null).generationHandoff().close();
+        assertEquals(200, state.tokenWorkload().pendingTokens(), "rollback restores the unbatched identity");
+        assertSame(local, state.updateQueue(PrefillState.QueueChange.REMOVE, local, 0, clock.get()));
+        assertEquals(100, state.tokenWorkload().pendingTokens());
+        commitBatch(List.of(local), 10L);
+        assertEquals(100, state.tokenWorkload().pendingTokens());
+        active.setBatchId(11L);
+        reconcile(Map.of(), Map.of("83", active), unused -> 0L);
+        assertEquals(200, state.tokenWorkload().pendingTokens());
+        var oldTerminal = task(83, TaskPhase.RUNNING, 0L, 0L);
+        reconcile(Map.of("83", oldTerminal), Map.of("83", active), unused -> 0L);
+        assertEquals(100, state.tokenWorkload().pendingTokens(), "batch 10 completion does not erase batch 11");
+        state.retireGenerationOwnership();
+        assertEquals(0, state.tokenWorkload().score(), "Engine observations belong to their endpoint generation");
+    }
+
+    @ParameterizedTest
+    @ValueSource(longs = {-1L, 0L})
+    void concurrentEngineObservationAndLocalReleaseRetainExactlyOneCopy(long wireBatchId) throws Exception {
+        state.enableTokenWorkload();
+        try (var threads = Executors.newFixedThreadPool(2)) {
+            for (int i = 0; i < 32; i++) {
+                var local = item(9000 + i);
+                var lease = state.reserveUnqueuedRoute(local, 1, 0).reservation();
+                var active = task(local.requestId(), TaskPhase.RECEIVED, 0L, 0L);
+                active.setBatchId(wireBatchId);
+                active.setInputLength(100L);
+                var start = new CountDownLatch(1);
+                var report = threads.submit(() -> {
+                    assertTrue(start.await(2, TimeUnit.SECONDS));
+                    return reconcile(Map.of(), Map.of("active", active), unused -> 0L);
+                });
+                var release = threads.submit(() -> {
+                    assertTrue(start.await(2, TimeUnit.SECONDS));
+                    return state.release(lease, null);
+                });
+                start.countDown();
+                report.get(3, TimeUnit.SECONDS);
+                release.get(3, TimeUnit.SECONDS);
+                assertEquals(100, state.tokenWorkload().pendingTokens());
+                assertEquals(1, state.progress().outstandingRequests());
+                reconcile(Map.of(), Map.of(), unused -> 0L);
+                assertEquals(0, state.tokenWorkload().score());
+            }
+        }
+    }
+
+    @Test
+    void completedObservedWorkLeavesNoRoutingLoad() {
+        state.enableTokenWorkload();
+        var local = item(85);
+        commitBatch(List.of(local), 100L);
+        var task = task(85, TaskPhase.RUNNING, 0L, 10L);
+        task.setInputLength(100L);
+        reconcile(Map.of(), Map.of("85", task), unused -> 0L);
+        assertEquals(100, state.tokenWorkload().score());
+        reconcile(Map.of("85", task), Map.of("85", task), unused -> 0L);
+        assertEquals(0, state.tokenWorkload().pendingTokens());
+        assertEquals(0, state.tokenWorkload().score());
+        reconcile(Map.of("85", task), Map.of(), unused -> 0L);
+        assertEquals(0, state.tokenWorkload().score());
+    }
+
     private PrefillState.StatusReconciliation reconcile(Map<String, TaskInfo> finished, Map<String, TaskInfo> active,
                            ToLongFunction<List<RequestRoute>> repredictor) {
         WorkerStatusResponse response = new WorkerStatusResponse();
@@ -1478,6 +1956,38 @@ class PrefillStateSnapshotTest {
         when(item.requestId()).thenReturn(id);
         when(item.seqLen()).thenReturn(100L);
         return item;
+    }
+
+    @Test
+    void tokenWorkloadUsesUpdatedEnginePrefixFeedback() {
+        var pressure = new EngineQueueAdmission(30L, 5_000L);
+        pressure.observe(2L, 0L);
+        state.configureEngineQueueAdmission(pressure::state);
+        state.configureEngineQueueDispatchBlocked(pressure::dispatchBlocked);
+        state.enableTokenWorkload();
+        var running = new java.util.HashMap<String, TaskInfo>();
+        for (long id = 91; id <= 93; id++) {
+            var hot = item(id);
+            when(hot.seqLen()).thenReturn(100_000L);
+            when(hot.hitCache()).thenReturn(95_000L);
+            assertNotNull(state.reserveUnqueuedRoute(hot, 1, 256).reservation());
+            var report = task(id, TaskPhase.RUNNING, 0L, 0L);
+            report.setBatchId(0L);
+            report.setInputLength(100_000L);
+            report.setPrefixLength(0L);
+            running.put(Long.toString(id), report);
+        }
+        assertEquals(15_000L, state.tokenWorkload().pendingTokens());
+        reconcile(Map.of(), running, unused -> 0L);
+        assertEquals(300_000L, state.tokenWorkload().pendingTokens(),
+                "an enqueue-time zero prefix inflates 95%-cached work by 20x");
+        var cold = item(94);
+        when(cold.seqLen()).thenReturn(100_000L);
+        when(cold.coldTokenBalance()).thenReturn(true);
+        running.values().forEach(report -> report.setPrefixLength(95_000L));
+        reconcile(Map.of(), running, unused -> 0L);
+        assertEquals(15_000L, state.tokenWorkload().pendingTokens());
+        assertNotNull(state.reserveUnqueuedRoute(cold, 1, 256).reservation());
     }
 
     private PrefillState.Snapshot capture() {

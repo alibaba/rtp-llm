@@ -16,6 +16,34 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class WorkerStatusResponseTest {
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"0,0,3,2", "1,1,3,2", "8,9,8,9"})
+    void queueCountsIncludeLiveTaskPhasesWithoutDoubleCounting(
+            int reportedWaiting, int reportedRunning, long expectedWaiting, long expectedRunning) throws Exception {
+        var proto = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRoleType(EngineRpcService.RoleTypePB.ROLE_TYPE_PREFILL)
+                .setWaitingQueryLen(reportedWaiting).setRunningQueryLen(reportedRunning)
+                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder().setRequestId(1).setIsWaiting(true))
+                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder().setRequestId(2)
+                        .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RECEIVED))
+                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder().setRequestId(3)
+                        .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_KV_ALLOCATED))
+                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder().setRequestId(4))
+                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder().setRequestId(5)
+                        .setPhase(EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).setIsWaiting(true))
+                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder().setRequestId(7).setIsWaiting(true)
+                        .setPriorityPreemptionProgress(EngineRpcService.PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_CANCELING))
+                .addRunningTaskInfo(EngineRpcService.TaskInfoPB.newBuilder().setRequestId(8).setIsWaiting(true)
+                        .setPriorityPreemptionProgress(EngineRpcService.PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_CANCELED))
+                .addFinishedTaskList(EngineRpcService.TaskInfoPB.newBuilder().setRequestId(6).setIsWaiting(true))
+                .build();
+        var engine = convert(EngineRpcService.WorkerStatusPB.parseFrom(proto.toByteArray())).engine();
+        assertEquals(expectedWaiting, engine.waitingQueryLen());
+        assertEquals(expectedRunning, engine.runningQueryLen());
+        assertEquals(0, convert(proto.toBuilder().clearRunningTaskInfo().setWaitingQueryLen(0)
+                .setRunningQueryLen(0).build()).engine().waitingQueryLen());
+    }
+
     @Test
     void testConfigLoader() throws Exception {
         String TEST_JSON = "{\"role\":\"PREFILL\",\"available_concurrency\":1637,\"running_task_info\":{},\"finished_task_info\":{},\"step_latency_ms\":36.636,\"iterate_count\":1,\"dp_size\":1,\"tp_size\":1,\"alive\":true,\"version\":1,\"status_version\":1752025357566,\"cache_status\":{\"available_kv_cache\":82944,\"total_kv_cache\":82944,\"block_size\":256,\"version\":-1},\"waiting_query_len\":0,\"running_query_len\":0,\"max_seq_len\":131072,\"max_batch_tokens_size\":262144}";

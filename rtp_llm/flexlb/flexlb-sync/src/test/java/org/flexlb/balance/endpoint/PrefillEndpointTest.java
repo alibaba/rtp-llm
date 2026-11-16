@@ -68,7 +68,7 @@ class PrefillEndpointTest {
         WorkerStatus status = EndpointTestSupport.workerStatus(
                 RoleType.PREFILL, "127.0.0.1", 8080, 8090);
 
-        config = SchedulingTestConfig.newConfig();
+        config = SchedulingTestConfig.batchConfig();
         configureBatch(config, config.decisionPolicy().getMaxRequests(), 300, null);
         setFormula(config, "10 + 0.1*sum(computeTokens) + 5*batchSize");
 
@@ -351,9 +351,9 @@ class PrefillEndpointTest {
                     "membership settlement must not depend on prediction");
             assertTrue(snapshot.containsRequest(1L));
             assertFalse(snapshot.containsRequest(2L));
-            assertEquals(360L, snapshot.totalRemainingWorkMs().orElseThrow());
+            assertEquals(304L, snapshot.totalRemainingWorkMs().orElseThrow());
             assertFalse(snapshot.hasUnknownWork());
-            assertEquals(360L, invalidPredictorEndpoint.getLoadMetric().orElseThrow());
+            assertEquals(304L, invalidPredictorEndpoint.getLoadMetric().orElseThrow());
 
             reportSuccessfulBatchMember(
                     invalidPredictorEndpoint, 1L, 1L, 40L);
@@ -466,7 +466,7 @@ class PrefillEndpointTest {
         field.set(endpoint, failingPredictor);
 
         assertDoesNotThrow(() -> reportRejectedBatchMember(endpoint, 1L, 2L));
-        assertEquals(360L, endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().orElseThrow());
+        assertEquals(304L, endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().orElseThrow());
         assertEquals(1L, endpoint.ownership.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
         assertTrue(endpoint.release(null, survivor));
         assertEquals(0L, endpoint.ownership.admissionSummary(0, endpoint.requestLimit).occupiedRequests());
@@ -1724,7 +1724,7 @@ class PrefillEndpointTest {
         WorkerStatus status = EndpointTestSupport.workerStatus(
                 RoleType.PREFILL, "127.0.0.9", 8089, 8099);
 
-        FlexlbConfig endpointConfig = SchedulingTestConfig.newConfig();
+        FlexlbConfig endpointConfig = SchedulingTestConfig.batchConfig();
         configureBatch(
                 endpointConfig,
                 endpointConfig.decisionPolicy().getMaxRequests(),
@@ -1826,7 +1826,7 @@ class PrefillEndpointTest {
                                              long seqLen,
                                              long hitCacheLen) {
         return createRequestRoute(
-                owner, SchedulingTestConfig.newConfig(), requestId, seqLen, hitCacheLen);
+                owner, SchedulingTestConfig.batchConfig(), requestId, seqLen, hitCacheLen);
     }
 
     private static RequestRoute createRequestRoute(

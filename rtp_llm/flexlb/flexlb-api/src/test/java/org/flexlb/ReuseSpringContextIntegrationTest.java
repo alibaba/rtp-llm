@@ -58,7 +58,7 @@ public class ReuseSpringContextIntegrationTest {
         );
         environmentVariables.set("FLEXLB_CONFIG", """
                 {"schemaVersion":3,
-                 "requestLifecycle":{"request":{"timeoutMs":60000},"decision":{"lifetime":2}}}
+                 "dispatchTimeoutMs": 60000}
                 """);
     }
 }

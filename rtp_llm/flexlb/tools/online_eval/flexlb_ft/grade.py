@@ -151,7 +151,7 @@ GRADE_BANDS: Dict[str, dict] = {
         "bands": {"strict": 0.00, "normal": 0.05, "loose": 0.10},
     },
     # PR8 terminal-deadline ratio: p100 of the low-priority group's
-    # terminal-arrival time / queueTimeoutMs under sustained high-priority
+    # terminal-arrival time / dispatchTimeoutMs under sustained high-priority
     # pressure.  The absolute deadline fires after expiry-check
     # granularity + master settlement latency, so the ratio sits slightly
     # above 1.0; an 8s deadline maps to 10s/12s/16s absolute.  Extrapolated
