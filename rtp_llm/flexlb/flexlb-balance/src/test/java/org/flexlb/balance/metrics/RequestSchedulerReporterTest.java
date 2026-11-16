@@ -1,6 +1,5 @@
 package org.flexlb.balance.metrics;
 
-import org.flexlb.balance.metrics.RequestSchedulerReporter.PreemptionEvent;
 import org.flexlb.util.metrics.FlexMetricTags;
 import org.flexlb.util.metrics.FlexMetricType;
 import org.flexlb.util.metrics.FlexMonitor;
@@ -39,14 +38,11 @@ class RequestSchedulerReporterTest {
 
     @ParameterizedTest
     @CsvSource({
-        "PLAN, auto_tpm.eviction_plan.count, feasible",
-        "PLAN, auto_tpm.eviction_plan.count, infeasible",
-        "COMMIT, auto_tpm.eviction_commit.count, success",
-        "COMMIT, auto_tpm.eviction_commit.count, conflict"
+        "auto_tpm.eviction_plan.count, feasible",
+        "auto_tpm.eviction_plan.count, infeasible"
     })
-    void evictionOutcomesPreserveTheirMetricAndTagSchema(
-            PreemptionEvent event, String metric, String result) {
-        reporter.reportPreemption(event, 70, "decode_kv_full", result);
+    void evictionPlanOutcomesPreserveTheirMetricAndTagSchema(String metric, String result) {
+        reporter.reportPreemptionPlan(70, "decode_kv_full", result);
 
         var ordered = inOrder(monitor);
         ordered.verify(monitor)

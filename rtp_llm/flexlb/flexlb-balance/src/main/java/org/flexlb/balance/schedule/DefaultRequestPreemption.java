@@ -1,7 +1,6 @@
 package org.flexlb.balance.schedule;
 
 import org.flexlb.balance.metrics.RequestSchedulerReporter;
-import org.flexlb.balance.metrics.RequestSchedulerReporter.PreemptionEvent;
 import org.flexlb.balance.request.Request;
 import org.flexlb.balance.schedule.DecodePreemptionPlanner.DecodePreemptionPlan;
 import org.flexlb.balance.strategy.RoleSelection;
@@ -270,8 +269,7 @@ final class DefaultRequestPreemption implements RequestPreemption {
             validateProposal(proposal, selected, request.getRequestId(), metadata.priority());
         }
         if (proposal == null) {
-            reportPreemption(
-                    PreemptionEvent.PLAN,
+            reportPreemptionPlan(
                     metadata.priority(),
                     request.getRequestId(),
                     decision.preemptionReason(),
@@ -285,8 +283,7 @@ final class DefaultRequestPreemption implements RequestPreemption {
                     failures);
             return null;
         }
-        reportPreemption(
-                PreemptionEvent.PLAN,
+        reportPreemptionPlan(
                 metadata.priority(),
                 request.getRequestId(),
                 proposal.preemptionReason(),
@@ -326,18 +323,14 @@ final class DefaultRequestPreemption implements RequestPreemption {
     }
 
     /**
-     * Metrics observe plans and commits without owning the reservation transaction.
+     * Reports plan outcomes without owning the reservation transaction.
      */
-    private void reportPreemption(
-            PreemptionEvent event,
-            int priority,
-            String requestId,
-            String preemptionReason,
-            String outcome) {
+    private void reportPreemptionPlan(
+            int priority, String requestId, String preemptionReason, String outcome) {
         report(
                 requestId,
-                event == PreemptionEvent.PLAN ? "eviction plan" : "eviction commit",
-                () -> reporter.reportPreemption(event, priority, preemptionReason, outcome));
+                "eviction plan",
+                () -> reporter.reportPreemptionPlan(priority, preemptionReason, outcome));
     }
 
     private static void report(String requestId, String operation, Runnable metrics) {

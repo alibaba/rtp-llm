@@ -21,8 +21,6 @@ public final class PreemptionConfig {
      */
     private long timeoutMs = 1000;
 
-    private EngineCancellationConfig engineCancellation = new EngineCancellationConfig();
-
     public boolean allows(PreemptionStage stage) {
         return allowedPreemptionStages != null && allowedPreemptionStages.contains(stage);
     }

@@ -615,17 +615,11 @@ public class MetricConstant {
 
     /**
      * Auto-TPM eviction plan commit count (QPS), tags: priority, case, result.
-     * Under {@code engineCancellation.mode=RETURN} a commit means the
-     * instruction-bearing route was prepared, before it crosses its delivery
-     * boundary and before the requests selected for preemption' releases are proven, so the count is an
-     * upper bound on completed Engine-owned preemptions.
      */
     public static final String AUTO_TPM_EVICTION_COMMIT_COUNT = "auto_tpm.eviction_commit.count";
 
     /**
      * Auto-TPM evicted request selected for preemption count (QPS), tags: victim_priority, incoming_priority, stage, case.
-     * Subject to the same RETURN-mode upper bound as
-     * {@link #AUTO_TPM_EVICTION_COMMIT_COUNT}.
      */
     public static final String AUTO_TPM_VICTIM_COUNT = "auto_tpm.victim.count";
 

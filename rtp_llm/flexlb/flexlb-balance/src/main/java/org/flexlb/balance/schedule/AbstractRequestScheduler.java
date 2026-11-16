@@ -8,6 +8,7 @@ import org.flexlb.balance.schedule.ResponseCompletionExecutor.Registration;
 import org.flexlb.balance.schedule.ResponseCompletionExecutor.RequestFuture;
 import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.balance.trace.FlexlbTrace;
+import org.flexlb.config.service.RoleType;
 import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
 import org.flexlb.worker.endpoint.AdmissionRejectReason;
@@ -68,7 +69,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         var ctx = route.ctx();
         if (ctx.getRequestScheduler() != this) return;
         try {
-            if (ctx.recordWorkerEvent(route, event)) {
+            if (handleWorkerEvent(route, event)) {
                 try {
                     if (ctx.snapshot().phase() == Phase.CLOSED) engineCancellation.forget(route);
                 } finally {
@@ -506,6 +507,58 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     }
 
     /**
+     * Interprets role feedback under the request monitor, then uses the same ending path as local
+     * failures. Endpoint closure before execution invalidates selection until rollback completes.
+     */
+    static boolean handleWorkerEvent(RequestRoute route, WorkerRequestEvent event) {
+        var ctx = route.ctx();
+        synchronized (ctx) {
+            var before = ctx.snapshot();
+            if (!ctx.updateWorkerStatus(route, event)) return false;
+            var role = event.role();
+            boolean finalRole =
+                    role == RoleType.DECODE
+                            || role == RoleType.PDFUSION
+                            || role == RoleType.ENCODER;
+            EndCause cause = null;
+            boolean invalidatedSelection = false;
+            if (before.endState() == null) {
+                switch (event.type()) {
+                    case COMPLETED -> {
+                        if (finalRole) cause = EndCause.WORKER_COMPLETED;
+                    }
+                    case FAILED -> cause = EndCause.WORKER_FAILED;
+                    case PRIORITY_CANCELLED -> cause = EndCause.PRIORITY_PREEMPTED;
+                    case ENDPOINT_CLOSED -> {
+                        if (finalRole
+                                || before.routeCommittedAtMs() < 0 && !before.decodeAccepted()) {
+                            if (before.isSelectingRoute()
+                                    && before.routeCommittedAtMs() < 0
+                                    && !before.decodeAccepted()) {
+                                ctx.invalidateSelection(event.detail());
+                                invalidatedSelection = true;
+                            } else cause = EndCause.ENDPOINT_CLOSED;
+                        }
+                    }
+                    default -> {}
+                }
+            }
+            if (cause != null) {
+                String detail = event.detail();
+                if (cause == EndCause.WORKER_FAILED && (detail == null || detail.isBlank()))
+                    detail = "worker error code " + event.errorCode();
+                ctx.endRequest(
+                        new RequestEndEvent(route, cause, null, detail), event.nowMs(), null);
+            }
+            var after = ctx.snapshot();
+            return before.deadlines() != after.deadlines()
+                    || invalidatedSelection
+                    || cause != null
+                    || after.endState() != null && !before.equals(after);
+        }
+    }
+
+    /**
      * Roll back unpublished resources and finish selection, returning any cleanup or completion failure.
      */
     static Throwable finishUnpublishedRoute(RequestRoute route, SelectionAttempt routingContext) {
@@ -754,9 +807,7 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
     private void scheduleRequestCleanup(RequestContext ctx, Registration publication) {
         var state = ctx.snapshot();
         boolean responseBeforeCleanup =
-                state.endState() != null
-                        && state.workerEndType()
-                                == org.flexlb.worker.endpoint.RequestEventType.ENDPOINT_CLOSED;
+                state.endState() != null && state.endCause() == EndCause.ENDPOINT_CLOSED;
         boolean inactivity =
                 state.endState() != null
                         && state.endCause() != null
@@ -891,7 +942,14 @@ public abstract class AbstractRequestScheduler implements RequestScheduler {
         if (state.phase() != Phase.ENDING || state.notificationsDone()) return null;
         var delivery = state.committedRoute();
         if (delivery != null && state.cancellationReason() != null) {
-            var failure = Failures.run(null, () -> engineCancellation.stop(delivery));
+            var failure =
+                    Failures.run(
+                            null,
+                            () ->
+                                    engineCancellation.stop(
+                                            delivery,
+                                            this::onEngineCancelReply,
+                                            this::recordRequestFailure));
             if (failure != null) return failure;
         }
         return null;

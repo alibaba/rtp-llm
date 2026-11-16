@@ -87,8 +87,7 @@ class RequestCleanupPassTest {
         var context = openContext(7402L);
         reportWorkerEnd(context, type, null);
         var ended = context.snapshot();
-        assertEquals(type, ended.workerEndType());
-        assertNull(ended.endCause());
+        assertEquals(WorkerEventTestSupport.endCause(type), ended.endCause());
         assertEquals(expected, ended.endState());
         if (type == RequestEventType.FAILED) {
             assertEquals(StrategyErrorType.WORKER_EXECUTION_FAILED, ended.endError());
@@ -327,7 +326,7 @@ class RequestCleanupPassTest {
         when(role.endpoint()).thenReturn(endpoint);
         when(route.role(RoleType.DECODE)).thenReturn(role);
         assertTrue(
-                context.recordWorkerEvent(
+                AbstractRequestScheduler.handleWorkerEvent(
                         route,
                         new WorkerRequestEvent(
                                 route.decodeRegistration(),

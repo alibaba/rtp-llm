@@ -67,14 +67,15 @@ RequestContext 统一持有输入、配置、优先级、Future、遥测和生�
 并串行记录本次选址、路由响应、取消、Worker 上报和清理进展。
 只读 Snapshot 在请求锁内按需捕获，只提供关闭、响应及诊断所需的信息。
 Worker 观察细节、取消错误码、过期标记和最后上报时间留在 Context 内部；routingPhase 从选址编号推导。
-pendingLocalEnd 保存本地待结束事件，pendingWorkerEnd 保留原始 WorkerRequestEvent；两者可以同时存在，均不通过 Snapshot 暴露。
-endState、endError、endDetail 保存最终结果；endCause 仅保存本地 EndCause，workerEndType 仅保存 Worker 的 RequestEventType，两者最多一个非空。
-EndCause 包含取消请求、外部响应失败、路由发布失败、请求截止、Worker 上报超时及调度器关闭。
-Worker 完成、失败、抢占及 Endpoint 关闭直接按原始事件类型处理，不再转换成同义 EndCause。
-本地结束通过 processLocalEnd 接收，Worker 结束通过 processWorkerEnd 接收，每次只传一个事件。
-选址退出后由 recordPendingEnd 统一判断最终结果：已提交响应的发布失败优先；否则 Worker 执行完成、失败或抢占取消优先于普通本地失败，本地失败优先于单纯端点关闭。
-不再按两种来源的到达顺序丢弃另一侧信息；已有取消原因仍可决定取消或超时结果。Worker 来源内部保留首个确定结果，完成或失败可以替换端点关闭等较弱观察。
-回滚只丢弃因本次未提交选址而失效的端点关闭事件，本地取消、超时或其他失败继续保留。最终结果确定后统一清除两侧待处理信息。
+pendingEndEvent 只保存一份请求级待结束原因，不保存原始 WorkerRequestEvent。
+endRequest 是请求结果的唯一提交入口，统一处理取消、超时、本地失败及 Scheduler 判断成立的 Worker 请求结束。
+endState、endCause、endError、endDetail 保存结果；EndCause 同时表达本地原因和 Worker 导致的请求完成、失败或抢占取消。
+选址期间保留优先级最高的待结束原因，同级保留先到者：完成或执行失败高于抢占取消，抢占取消高于普通本地失败，端点关闭最低。
+已提交响应的发布失败保留自身结果；其他结束仍结合已记录的取消原因决定取消或超时结果。
+提交前且没有 Decode 执行证据的 Endpoint 关闭只使本次选址失效，selectionEndpointCloseDetail 保留关闭说明并阻止提交。
+选址回滚结束时重新检查执行观察和清理结果；未提交、没有 Decode 执行证据且本地资源全部回滚才允许调度器重试。
+若期间收到 Decode 活动上报，即使资源随后回滚也不能重试；没有更强的请求结束原因时，以 Endpoint 关闭结束请求。
+选址退出清除关闭说明，结果确定清除待结束事件；本地失败不会因关闭事实被撤销而丢失。
 最终 endState 仍结合此前取消原因确定，结束原因不直接代表资源已经释放。
 结束结果确定后立即清除待结束事件；资源释放进展统一保存在 Context，responseForFuture 引用选中的响应执行登记。
 调度截止时间直接读取不可替换的 SchedulingMetadata，不再复制保存。
@@ -109,11 +110,12 @@ PreemptionStatistics 一次保存已提交抢占的诊断成本和请求数量�
 
 WorkerStatus 的活跃、完成和失败上报推进按请求的资源账本。
 Worker 上报与 Endpoint 关闭通过 WorkerRequestEvent 传递精确登记、角色、Endpoint 和事件事实。
-Scheduler 创建的接收入口捕获本次 RequestRoute，调用 Context.recordWorkerEvent；Context 同时核对路由、角色登记和 Endpoint 身份。
+Scheduler 创建的接收入口捕获本次 RequestRoute；handleWorkerEvent 在请求锁内调用 Context.updateWorkerStatus，核对路由、角色登记和 Endpoint 身份并更新执行与资源事实。
+Scheduler 根据上报类型、角色和提交状态决定继续等待、使选址失效或生成 RequestEndEvent；Context 不决定角色完成是否意味着整个请求结束。
 Decode 不再通过 Repository 查当前路由；P/Encoder 不保存完整路由。
 取消 RPC 已持有原路由，直接调用 Context.recordRemoteCleanup，不再重复构造 Worker 事件。
 REMOTE_CLEANED 确认 P/D 远端资源已释放；REMOTE_FENCED 只确认 Prefill，不确认 Decode。取消被接受、请求未找到或 RPC 失败不代表资源释放。
-Context 在请求锁内校验并记录事件，直接返回是否需要更新定时器或推进清理；Scheduler 在锁外执行后续动作，不比较前后快照。
+上报解释与 Context 接受结果在同一次请求持锁期间完成，防止取消或路由变化插入；Scheduler 根据前后状态及结束动作，在锁外更新定时器或推进清理。
 Prefill 完成与整个 P/D 请求完成分开处理。
 Endpoint 退役、失活清理和重复反馈都针对精确请求记录，不能释放新尝试的资源。
 

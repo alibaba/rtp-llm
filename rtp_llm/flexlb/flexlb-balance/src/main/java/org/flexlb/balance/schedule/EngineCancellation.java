@@ -9,11 +9,13 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
+import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 /**
- * Runs bounded cancellation retries and records cleanup replies against the exact published route.
- * Late replies are applied to the request scheduler before shutdown drains the callbacks.
+ * Runs bounded cancellation retries and reports replies and failures through caller-supplied callbacks.
+ * Reply callbacks retain the exact published route and are drained during shutdown, including late replies.
  */
 @org.springframework.stereotype.Component
 public final class EngineCancellation {
@@ -70,16 +72,21 @@ public final class EngineCancellation {
     }
 
     /**
-     * Cancels the committed route with bounded retries and applies cleanup replies to its scheduler.
-     * Completion ends the cancellation attempts; the scheduler separately tracks resource cleanup.
+     * Cancels the committed route with bounded retries using the first submission's callbacks.
+     * Completion ends the cancellation attempts; the caller separately tracks resource cleanup.
      */
-    CompletableFuture<Void> stop(RequestRoute claim) {
+    CompletableFuture<Void> stop(
+            RequestRoute claim,
+            BiConsumer<RequestRoute, EngineGrpcClient.CancelReply> replyHandler,
+            Consumer<Throwable> failureHandler) {
+        Objects.requireNonNull(replyHandler, "replyHandler");
+        Objects.requireNonNull(failureHandler, "failureHandler");
         for (; ; ) {
             var delivery = claim.ctx().snapshot().committedRoute();
             if (delivery == null || delivery != claim) {
                 return CompletableFuture.completedFuture(null);
             }
-            var task = record(claim);
+            var task = record(claim, replyHandler, failureHandler);
             synchronized (task) {
                 if (task.closed) {
                     sessions.remove(claim, task);
@@ -100,12 +107,15 @@ public final class EngineCancellation {
         if (task != null) task.close();
     }
 
-    private StopTask record(RequestRoute claim) {
+    private StopTask record(
+            RequestRoute claim,
+            BiConsumer<RequestRoute, EngineGrpcClient.CancelReply> replyHandler,
+            Consumer<Throwable> failureHandler) {
         var existing = sessions.get(claim);
         if (existing != null) {
             return existing;
         }
-        var created = new StopTask(claim);
+        var created = new StopTask(claim, replyHandler, failureHandler);
         var previous = sessions.putIfAbsent(claim, created);
         if (previous != null) {
             activeStops.remove(created);
@@ -120,7 +130,8 @@ public final class EngineCancellation {
     private final class StopTask implements Runnable {
         private final RequestRoute claim;
         private final RequestContext context;
-        private final AbstractRequestScheduler owner;
+        private final BiConsumer<RequestRoute, EngineGrpcClient.CancelReply> replyHandler;
+        private final Consumer<Throwable> failureHandler;
         private final CompletableFuture<Void> finished = new CompletableFuture<>();
 
         private volatile boolean remoteCleanupConfirmed;
@@ -139,10 +150,14 @@ public final class EngineCancellation {
         private int attempts;
         private long deadline, rpcDeadline;
 
-        StopTask(RequestRoute claim) {
+        StopTask(
+                RequestRoute claim,
+                BiConsumer<RequestRoute, EngineGrpcClient.CancelReply> replyHandler,
+                Consumer<Throwable> failureHandler) {
             this.claim = claim;
             this.context = claim.ctx();
-            this.owner = context.getRequestScheduler();
+            this.replyHandler = replyHandler;
+            this.failureHandler = failureHandler;
             activeStops.add(this);
         }
 
@@ -158,7 +173,7 @@ public final class EngineCancellation {
                 }
             } catch (RuntimeException | Error failure) {
                 finished.completeExceptionally(failure);
-                owner.recordRequestFailure(failure);
+                failureHandler.accept(failure);
             } finally {
                 synchronized (this) {
                     executingStop.remove();
@@ -187,7 +202,7 @@ public final class EngineCancellation {
                 try {
                     finished.completeExceptionally(failure);
                     close();
-                    owner.recordRequestFailure(failure);
+                    failureHandler.accept(failure);
                 } finally {
                     synchronized (this) {
                         taskScheduled = false;
@@ -299,7 +314,7 @@ public final class EngineCancellation {
                 rpc.whenComplete((ignored, failure) -> signal());
             } catch (RuntimeException | Error failed) {
                 if (failed instanceof Error) {
-                    owner.recordRequestFailure(failed);
+                    failureHandler.accept(failed);
                 }
                 rpc =
                         CompletableFuture.completedFuture(
@@ -315,10 +330,10 @@ public final class EngineCancellation {
             executingStop.set(true);
             var evidence = EngineGrpcClient.CancelReply.FAILED;
             try {
-                owner.onEngineCancelReply(claim, reply);
+                replyHandler.accept(claim, reply);
                 evidence = reply;
             } catch (RuntimeException | Error failed) {
-                owner.recordRequestFailure(failed);
+                failureHandler.accept(failed);
             } finally {
                 if (evidence == EngineGrpcClient.CancelReply.REQUEST_CLEANED) {
                     remoteCleanupConfirmed = true;
@@ -336,7 +351,7 @@ public final class EngineCancellation {
 
         private void finishUnresolved() {
             if (finished.complete(null)) {
-                owner.recordRequestFailure(
+                failureHandler.accept(
                         new IllegalStateException(
                                 "delivery stop ended without release proof: request_id="
                                         + context.getRequestId()));

@@ -127,12 +127,11 @@ public class RequestSchedulerReporter {
     }
 
     /**
-     * Planning and commit outcomes share incoming priority, eviction case and result tags.
+     * Reports eviction plan outcomes with incoming priority, eviction case and result tags.
      */
-    public void reportPreemption(
-            PreemptionEvent event, int priority, String evCase, String result) {
+    public void reportPreemptionPlan(int priority, String evCase, String result) {
         monitor.report(
-                event.metric,
+                AUTO_TPM_EVICTION_PLAN_COUNT,
                 FlexMetricTags.of(
                         "priority", String.valueOf(priority), "case", evCase, "result", result),
                 1.0);
@@ -232,19 +231,5 @@ public class RequestSchedulerReporter {
             if (counts[priority] > 0) values.put(priority, counts[priority]);
         }
         return Collections.unmodifiableMap(values);
-    }
-
-    /**
-     * Maps eviction planning and commit events to their exported counters.
-     */
-    public enum PreemptionEvent {
-        PLAN(AUTO_TPM_EVICTION_PLAN_COUNT),
-        COMMIT(AUTO_TPM_EVICTION_COMMIT_COUNT);
-
-        private final String metric;
-
-        PreemptionEvent(String metric) {
-            this.metric = metric;
-        }
     }
 }

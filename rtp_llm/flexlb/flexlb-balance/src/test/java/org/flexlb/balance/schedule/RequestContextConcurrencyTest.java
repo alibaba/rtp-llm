@@ -61,7 +61,62 @@ class RequestContextConcurrencyTest {
         assertNull(context.snapshot().responseForFuture());
         assertNull(
                 org.springframework.test.util.ReflectionTestUtils.getField(
-                        context, "pendingLocalEnd"));
+                        context, "pendingEndEvent"));
+    }
+
+    @Test
+    void requestContextDoesNotRetainRawWorkerEvents() {
+        assertFalse(
+                java.util.Arrays.stream(RequestContext.class.getDeclaredFields())
+                        .anyMatch(
+                                field ->
+                                        field.getType()
+                                                == org.flexlb.worker.endpoint.WorkerRequestEvent
+                                                        .class),
+                "Worker reports must be interpreted before retaining a request ending");
+        assertEquals(
+                1L,
+                java.util.Arrays.stream(RequestContext.class.getDeclaredFields())
+                        .filter(field -> field.getType() == RequestContext.RequestEndEvent.class)
+                        .count(),
+                "All request endings share one pending record");
+    }
+
+    @Test
+    void endpointClosureCannotRetryAfterLateDecodeActivity() {
+        var context = request();
+        var attempt = context.beginRouteSelection();
+        var route = acquiredRouteForEvent(context, attempt, RoleType.DECODE);
+        AbstractRequestScheduler.handleWorkerEvent(
+                route,
+                new org.flexlb.worker.endpoint.WorkerRequestEvent(
+                        route.decodeRegistration(),
+                        RoleType.DECODE,
+                        route.decodeEndpoint(),
+                        RequestEventType.ENDPOINT_CLOSED,
+                        0L,
+                        "decode closed",
+                        1100L));
+        assertNull(context.snapshot().endState());
+        assertFalse(context.canPublishRoute(attempt));
+
+        AbstractRequestScheduler.handleWorkerEvent(
+                route,
+                new org.flexlb.worker.endpoint.WorkerRequestEvent(
+                        route.decodeRegistration(),
+                        RoleType.DECODE,
+                        route.decodeEndpoint(),
+                        RequestEventType.ACTIVE,
+                        0L,
+                        "",
+                        1150L));
+        context.recordCleanupProgress(route, true, true, false, 1200L);
+        var ended = context.finishSelectionWithoutCommit(attempt, null, 1200L);
+
+        assertEquals(RequestState.State.FAILED, ended.endState());
+        assertEquals(RequestContext.EndCause.ENDPOINT_CLOSED, ended.endCause());
+        assertEquals("decode closed", ended.endDetail());
+        assertNull(context.beginRouteSelection());
     }
 
     @Test
@@ -80,7 +135,7 @@ class RequestContextConcurrencyTest {
         assertEquals(RequestState.State.CANCELLED, ended.endState());
         assertNull(
                 org.springframework.test.util.ReflectionTestUtils.getField(
-                        context, "pendingLocalEnd"));
+                        context, "pendingEndEvent"));
     }
 
     @Test
@@ -498,7 +553,7 @@ class RequestContextConcurrencyTest {
         assertTrue(WorkerEventTestSupport.record(context, closed));
         var after = context.snapshot();
         assertEquals(before.inactivityExpiresAtMs(), after.inactivityExpiresAtMs());
-        assertEquals(RequestEventType.ENDPOINT_CLOSED, after.workerEndType());
+        assertEquals(RequestContext.EndCause.ENDPOINT_CLOSED, after.endCause());
         assertFalse(WorkerEventTestSupport.record(context, closed));
         assertEquals(after, context.snapshot());
     }
@@ -742,7 +797,7 @@ class RequestContextConcurrencyTest {
         } else {
             assertEquals(RequestState.State.FAILED, ended.endState());
             assertEquals(StrategyErrorType.WORKER_EXECUTION_FAILED, ended.endError());
-            assertEquals(RequestEventType.FAILED, ended.workerEndType());
+            assertEquals(RequestContext.EndCause.WORKER_FAILED, ended.endCause());
             assertNull(context.beginRouteSelection());
         }
         var beforeDuplicate = context.snapshot();
@@ -757,7 +812,7 @@ class RequestContextConcurrencyTest {
         "PRIORITY_CANCELLED, true, CANCELLED", "PRIORITY_CANCELLED, false, CANCELLED",
         "ENDPOINT_CLOSED, true, FAILED", "ENDPOINT_CLOSED, false, FAILED"
     })
-    void localAndWorkerFactsCoexistAndResolveInEitherArrivalOrder(
+    void requestEndingResolvesBothArrivalOrders(
             RequestEventType type, boolean workerFirst, RequestState.State expected) {
         var context = request();
         var attempt = context.beginRouteSelection();
@@ -782,33 +837,20 @@ class RequestContextConcurrencyTest {
         context.endRequest(local, 1100L, null);
         if (!workerFirst) WorkerEventTestSupport.record(context, worker);
         assertNull(context.snapshot().endState());
-        var retainedLocal =
-                org.springframework.test.util.ReflectionTestUtils.getField(
-                        context, "pendingLocalEnd");
-        var retainedWorker =
-                org.springframework.test.util.ReflectionTestUtils.getField(
-                        context, "pendingWorkerEnd");
-        assertSame(local, retainedLocal);
-        assertTrue(retainedWorker != null);
-        assertEquals(type, ((org.flexlb.worker.endpoint.WorkerRequestEvent) retainedWorker).type());
+        assertFalse(context.canPublishRoute(attempt));
 
         var ended = context.finishSelectionWithoutCommit(attempt, null, 1200L);
         assertEquals(expected, ended.endState());
         if (type == RequestEventType.ENDPOINT_CLOSED) {
             assertEquals(RequestContext.EndCause.ROUTE_PUBLICATION_FAILED, ended.endCause());
-            assertNull(ended.workerEndType());
             assertEquals("local failure", ended.endDetail());
         } else {
-            assertEquals(type, ended.workerEndType());
-            assertNull(ended.endCause());
+            assertEquals(WorkerEventTestSupport.endCause(type), ended.endCause());
             assertEquals("worker ended", ended.endDetail());
         }
         assertNull(
                 org.springframework.test.util.ReflectionTestUtils.getField(
-                        context, "pendingLocalEnd"));
-        assertNull(
-                org.springframework.test.util.ReflectionTestUtils.getField(
-                        context, "pendingWorkerEnd"));
+                        context, "pendingEndEvent"));
     }
 
     @ParameterizedTest
@@ -829,25 +871,18 @@ class RequestContextConcurrencyTest {
                         0L,
                         "worker completed",
                         1100L);
-        if (workerFirst) context.recordWorkerEvent(route, worker);
+        if (workerFirst) AbstractRequestScheduler.handleWorkerEvent(route, worker);
         context.requestCancel(
                 reason, false, 1100L, StrategyErrorType.REQUEST_CANCELLED, "request stopped", null);
-        if (!workerFirst) context.recordWorkerEvent(route, worker);
-        assertTrue(
-                org.springframework.test.util.ReflectionTestUtils.getField(
-                                context, "pendingLocalEnd")
-                        != null);
-        assertSame(
-                worker,
-                org.springframework.test.util.ReflectionTestUtils.getField(
-                        context, "pendingWorkerEnd"));
+        if (!workerFirst) AbstractRequestScheduler.handleWorkerEvent(route, worker);
+        assertFalse(context.canPublishRoute(attempt));
         var ended = context.finishSelectionWithoutCommit(attempt, null, 1200L);
         assertEquals(
                 reason == CancelReason.DEADLINE_EXCEEDED
                         ? RequestState.State.TIMED_OUT
                         : RequestState.State.CANCELLED,
                 ended.endState());
-        assertEquals(RequestEventType.COMPLETED, ended.workerEndType());
+        assertEquals(RequestContext.EndCause.WORKER_COMPLETED, ended.endCause());
         assertEquals("request stopped", ended.endDetail());
     }
 
@@ -864,7 +899,7 @@ class RequestContextConcurrencyTest {
                         "local failure"),
                 1100L,
                 null);
-        context.recordWorkerEvent(
+        AbstractRequestScheduler.handleWorkerEvent(
                 route,
                 new org.flexlb.worker.endpoint.WorkerRequestEvent(
                         route.decodeRegistration(),
@@ -878,7 +913,6 @@ class RequestContextConcurrencyTest {
         var ended = context.finishSelectionWithoutCommit(attempt, null, 1200L);
         assertEquals(RequestState.State.FAILED, ended.endState());
         assertEquals(RequestContext.EndCause.ROUTE_PUBLICATION_FAILED, ended.endCause());
-        assertNull(ended.workerEndType());
         assertEquals("local failure", ended.endDetail());
         assertNull(context.beginRouteSelection());
     }
@@ -908,11 +942,7 @@ class RequestContextConcurrencyTest {
                 ended.endState(),
                 "a committed single-stage request cannot continue after its execution endpoint ends");
         assertEquals(RequestState.State.FAILED, ended.endState());
-        assertEquals(
-                type == org.flexlb.worker.endpoint.RequestEventType.ENDPOINT_CLOSED
-                        ? RequestEventType.ENDPOINT_CLOSED
-                        : RequestEventType.FAILED,
-                ended.workerEndType());
+        assertEquals(WorkerEventTestSupport.endCause(type), ended.endCause());
         assertSame(response, ended.responseForFuture());
         assertTrue(ended.prefillCleanupCompleted());
         assertTrue(ended.decodeCleanupCompleted());
@@ -985,7 +1015,7 @@ class RequestContextConcurrencyTest {
                 mock(org.flexlb.worker.endpoint.WorkerEndpoint.RequestRegistration.class);
         var foreignEndpoint = mock(org.flexlb.worker.endpoint.WorkerEndpoint.class);
         assertFalse(
-                context.recordWorkerEvent(
+                AbstractRequestScheduler.handleWorkerEvent(
                         route,
                         new org.flexlb.worker.endpoint.WorkerRequestEvent(
                                 foreignRegistration,
@@ -996,7 +1026,7 @@ class RequestContextConcurrencyTest {
                                 "old registration",
                                 1100L)));
         assertFalse(
-                context.recordWorkerEvent(
+                AbstractRequestScheduler.handleWorkerEvent(
                         route,
                         new org.flexlb.worker.endpoint.WorkerRequestEvent(
                                 selected.registration(),
@@ -1008,7 +1038,7 @@ class RequestContextConcurrencyTest {
                                 1100L)));
         assertEquals(before, context.snapshot());
         assertTrue(
-                context.recordWorkerEvent(
+                AbstractRequestScheduler.handleWorkerEvent(
                         route,
                         new org.flexlb.worker.endpoint.WorkerRequestEvent(
                                 selected.registration(),

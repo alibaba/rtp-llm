@@ -23,12 +23,20 @@ public final class WorkerEventTestSupport {
                 || event.type() == RequestEventType.REMOTE_FENCED)
             return context.recordRemoteCleanup(
                     event.route(), event.type() == RequestEventType.REMOTE_CLEANED, event.nowMs());
-        return context.recordWorkerEvent(event.route(), event.workerEvent());
+        return event.route() != null
+                && AbstractRequestScheduler.handleWorkerEvent(event.route(), event.workerEvent());
     }
 
-    /**
-     * Builds role feedback from a test route, or a route-wide remote cleanup reply.
-     */
+    static RequestContext.EndCause endCause(RequestEventType type) {
+        return switch (type) {
+            case COMPLETED -> RequestContext.EndCause.WORKER_COMPLETED;
+            case FAILED -> RequestContext.EndCause.WORKER_FAILED;
+            case PRIORITY_CANCELLED -> RequestContext.EndCause.PRIORITY_PREEMPTED;
+            case ENDPOINT_CLOSED -> RequestContext.EndCause.ENDPOINT_CLOSED;
+            default -> throw new IllegalArgumentException("Not a request ending: " + type);
+        };
+    }
+
     public record RequestEvent(
             RequestRoute route,
             DecodeEndpoint.RequestRegistration reservation,

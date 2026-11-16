@@ -197,14 +197,6 @@ public final class FlexlbConfigValidator {
                         "scheduler.ordering.preemption.allowedVictimStages",
                         "must contain at least one stage when preemption is configured");
                 positive(preemption.getTimeoutMs(), "scheduler.ordering.preemption.timeoutMs");
-                require(
-                        preemption.getEngineCancellation() != null,
-                        "scheduler.ordering.preemption.engineCancellation",
-                        "is required");
-                require(
-                        preemption.getEngineCancellation().getMode() != null,
-                        "scheduler.ordering.preemption.engineCancellation.mode",
-                        "is required");
             }
         } else {
             require(

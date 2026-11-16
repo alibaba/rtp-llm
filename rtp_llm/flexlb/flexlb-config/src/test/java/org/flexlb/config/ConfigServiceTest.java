@@ -373,6 +373,8 @@ class ConfigServiceTest {
         Map<String, String> removed =
                 Map.ofEntries(
                         Map.entry("autoTpmEnabled", "true"),
+                        Map.entry(
+                                "scheduler.ordering.preemption.engineCancellation.mode", "\"RPC\""),
                         Map.entry("autoTpmSloLengthBuckets", "\"*:100\""),
                         Map.entry("router.availabilityHysteresisPercent", "15"),
                         Map.entry("router.roles.prefill.availability.maxPendingRequests", "32"),

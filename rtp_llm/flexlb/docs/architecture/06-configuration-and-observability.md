@@ -122,9 +122,8 @@ Java 还可能等待接近 30 秒才发现新内容。因此两段等待叠加�
 ### Decode 抢占交付方式
 
 `scheduler.ordering.preemption.allowedVictimStages` 包含 `DECODE_ENGINE_OWNED` 时，
-`engineCancellation.mode` 可设为 `RPC` 或 `RETURN`，默认 `RPC`。
-`RPC` 使用主动 Cancel 和完成确认；`RETURN` 将待抢占请求的字符串 ID 随目标 Decode
-路由返回，由客户端/Decode 消费。
+使用主动 Cancel RPC，并根据引擎回复和状态上报确认清理。
+不提供取消交付模式配置；旧的 `engineCancellation.mode` 配置应删除，否则配置解析失败。
 抢占整体超时由 `scheduler.ordering.preemption.timeoutMs` 控制。该配置随请求快照绑定，
 外部配置来源与其他调度字段一致。
 

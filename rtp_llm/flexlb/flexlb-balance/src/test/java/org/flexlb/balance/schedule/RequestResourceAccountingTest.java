@@ -87,6 +87,44 @@ class RequestResourceAccountingTest {
     }
 
     @Test
+    @org.junit.jupiter.api.Timeout(10)
+    void cancellationRetriesAfterReplyHandlerFailureAndReportsItToSuppliedCallback()
+            throws Exception {
+        try (Fixture f = new Fixture()) {
+            f.decodeStatus(Map.of("101", task(ID)), Map.of(), TOTAL_KV - HARD_KV);
+            assertTrue(
+                    f.item.ctx()
+                            .requestCancel(
+                                    CancelReason.CLIENT_CANCELLED,
+                                    false,
+                                    System.currentTimeMillis(),
+                                    org.flexlb.worker.endpoint.StrategyErrorType.REQUEST_CANCELLED,
+                                    null,
+                                    null));
+            var replyFailure = new IllegalStateException("reply handling failed");
+            var reportedFailure = new CompletableFuture<Throwable>();
+            var replies = new java.util.concurrent.atomic.AtomicInteger();
+            var stopped =
+                    f.runtime.dispatcher.stop(
+                            f.item,
+                            (route, reply) -> {
+                                assertSame(f.item, route);
+                                if (replies.incrementAndGet() == 1) throw replyFailure;
+                                f.requests.onEngineCancelReply(route, reply);
+                            },
+                            reportedFailure::complete);
+            assertTrue(f.cancelSent.await(5, TimeUnit.SECONDS));
+            f.cleanup.complete(EngineGrpcClient.CancelReply.REQUEST_CLEANED);
+            assertSame(replyFailure, reportedFailure.get(5, TimeUnit.SECONDS));
+            stopped.get(5, TimeUnit.SECONDS);
+            f.runtime.dispatcher.awaitStops();
+            assertEquals(2, replies.get());
+            f.decodeStatus(Map.of(), Map.of(), TOTAL_KV);
+            f.assertEmpty();
+        }
+    }
+
+    @Test
     void partialCleanupFailureStillReleasesDecodeAndPreservesProgressOnRetry() throws Exception {
         try (Fixture f = new Fixture(true)) {
             var releaseFailure = new IllegalStateException("Prefill release failed");

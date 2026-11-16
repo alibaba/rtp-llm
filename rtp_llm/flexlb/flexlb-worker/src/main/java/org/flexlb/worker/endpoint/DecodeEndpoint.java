@@ -743,12 +743,9 @@ public class DecodeEndpoint extends WorkerEndpoint
     }
 
     /**
-     * Tracks an exact Decode registration, KV estimates and the latest worker observation under the
-     * endpoint lock.
-     */
-    /**
-     * Owns Decode capacity and the receiver bound at selection confirmation. Status notifications
-     * capture the receiver under the endpoint lock; removed records are no longer modified.
+     * Tracks an exact Decode registration, KV estimates, worker observations and the receiver bound
+     * at selection confirmation. Updates and notification capture use the endpoint lock;
+     * removed records are no longer modified.
      */
     private static final class RequestRecord {
         private final String requestId;
