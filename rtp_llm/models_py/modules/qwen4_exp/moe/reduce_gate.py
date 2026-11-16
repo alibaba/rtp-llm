@@ -14,6 +14,18 @@ from rtp_llm.models_py.distributed.collective_utils import exchange_group_state
 # Captured graph nodes contain native context addresses. Retain them if model
 # close occurs on only one rank or a graph runner still references the model.
 _PROCESS_LIFETIME_CONTEXTS = []
+_MAX_ROWS = 32
+
+
+def _aligned_buffer_like(value):
+    output = torch.empty_like(value)
+    if output.data_ptr() % 16 == 0:
+        return output
+    # A contiguous view can start at an unaligned BF16 offset. Construct an
+    # aligned slice explicitly if the allocator also returns an unaligned base.
+    storage = value.new_empty(value.numel() + 7)
+    offset = (-storage.data_ptr() % 16) // value.element_size()
+    return storage.narrow(0, offset, value.numel()).view_as(value)
 
 
 def load_library(path, expected_sha256):
@@ -59,7 +71,7 @@ class LsaMoeReduce:
             raise ValueError("Qwen3.8 LSA reduction requires a TP2 group")
         if not (
             type(hidden_size) is int
-            and 0 < hidden_size <= (2**31 - 1) // 32
+            and 0 < hidden_size <= (2**31 - 1) // _MAX_ROWS
             and hidden_size % 8 == 0
         ):
             raise ValueError(
@@ -101,32 +113,34 @@ class LsaMoeReduce:
             raise RuntimeError(self.library.qwen38_lsa_error().decode())
 
     def supports(self, value):
+        # TP consumes the same logical batch shape on both ranks. Local tensor
+        # addresses and strides must never select a different collective.
         return (
-            not self.closed
-            and value.is_cuda
-            and value.device == self.device
-            and value.dtype == torch.bfloat16
-            and value.ndim == 2
-            and 1 <= value.shape[0] <= 32
+            value.ndim == 2
+            and 1 <= value.shape[0] <= _MAX_ROWS
             and value.shape[1] == self.hidden_size
-            and value.is_contiguous()
-            and value.data_ptr() % 16 == 0
         )
 
     def __call__(self, partial, shared, gate):
         if not (
-            self.supports(partial)
-            and self.supports(shared)
+            not self.closed
+            and self.supports(partial)
             and partial.shape == shared.shape
-            and gate.device == self.device
-            and gate.dtype == torch.bfloat16
-            and gate.is_contiguous()
             and gate.shape == (partial.shape[0], 1)
-        ):
-            raise ValueError(
-                "LSA epilogue requires contiguous BF16 [M,H] matching its hidden size and gate [M,1]"
+            and all(
+                value.device == self.device and value.dtype == torch.bfloat16
+                for value in (partial, shared, gate)
             )
-        output = torch.empty_like(partial)
+        ):
+            raise ValueError("LSA epilogue requires local BF16 [M,H] and gate [M,1]")
+        partial = partial.contiguous()  # Native code stages it with a byte copy.
+        shared = shared.contiguous()
+        gate = gate.contiguous()
+        if shared.data_ptr() % 16:
+            aligned = _aligned_buffer_like(shared)
+            aligned.copy_(shared)
+            shared = aligned
+        output = _aligned_buffer_like(partial)
         with torch.cuda.device(self.device):
             stream = torch.cuda.current_stream(self.device)
             self._check(
@@ -151,11 +165,6 @@ class LsaMoeReduce:
 
 def prepare_model_reduce(model, config, parallelism):
     """Agree on the mode and layout before constructing a device communicator."""
-    from rtp_llm.models_py.distributed import collective_torch
-    from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
-        PureTpRouterNvfp4Cutlass,
-    )
-
     role = str(parallelism.role_type).rsplit(".", 1)[-1]
     if getattr(config, "is_mtp", False) or role != "DECODE":
         return None
@@ -168,12 +177,20 @@ def prepare_model_reduce(model, config, parallelism):
         if mode == "0":
             return None
         raise RuntimeError("Initialize distributed execution before LSA setup")
+    from rtp_llm.models_py.distributed import collective_torch
+    from rtp_llm.models_py.distributed.all_reduce import get_moe_reduce_gate_mode
+
     group = collective_torch._get_group(collective_torch.Group.TP)
-    modes = exchange_group_state(group, mode, "qwen38-lsa-mode")
-    if all(value == "0" for value in modes):
+    agreed_mode = get_moe_reduce_gate_mode(group)
+    if agreed_mode == "0" or (agreed_mode is None and mode == "0"):
         return None
-    if modes != ["1", "1"]:
-        raise ValueError("RTP_QWEN4_MOE_REDUCE_GATE_FUSION must agree on TP ranks")
+    if agreed_mode != "1":
+        raise RuntimeError("Initialize the TP AllReduce policy before LSA setup")
+
+    from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
+        PureTpRouterNvfp4Cutlass,
+    )
+
     state = {
         "error": None,
         "host": socket.gethostname(),
@@ -188,7 +205,7 @@ def prepare_model_reduce(model, config, parallelism):
             and parallelism.local_world_size == 2
             and parallelism.get_ffn_tp_size() == 1
             and type(config.hidden_size) is int
-            and 0 < config.hidden_size <= (2**31 - 1) // 32
+            and 0 < config.hidden_size <= (2**31 - 1) // _MAX_ROWS
             and config.hidden_size % 8 == 0
             and getattr(config, "_qwen4_dense_storage", None) == "source_bf16"
             and not config.eplb_config.enable_eplb()

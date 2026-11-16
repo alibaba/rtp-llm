@@ -11,6 +11,8 @@ from unittest.mock import patch
 import torch
 import torch.distributed as dist
 
+from rtp_llm.config.collective_config import CollectiveConfig
+from rtp_llm.models_py.distributed.all_reduce import destroy_all_reduce, init_all_reduce
 from rtp_llm.models_py.modules.qwen4_exp.moe.reduce_gate import (
     load_library,
     prepare_model_reduce,
@@ -78,14 +80,23 @@ def run_hidden_size(library, device, rank, hidden_size):
     )
     with patch.object(collective_torch, "_get_group", return_value=dist.group.WORLD):
         with patch.dict(os.environ, {"RTP_QWEN4_MOE_REDUCE_GATE_FUSION": "0"}):
+            init_all_reduce(
+                dist.group.WORLD, device, parallelism, CollectiveConfig("nccl")
+            )
             assert prepare_model_reduce(model, config, parallelism) is None
+            destroy_all_reduce()
         with patch.dict(os.environ, {"RTP_QWEN4_MOE_REDUCE_GATE_FUSION": str(rank)}):
             try:
-                prepare_model_reduce(model, config, parallelism)
+                init_all_reduce(
+                    dist.group.WORLD, device, parallelism, CollectiveConfig("nccl")
+                )
                 raise AssertionError("Mismatched rank modes accepted")
             except ValueError:
                 pass
         with patch.dict(os.environ, {"RTP_QWEN4_MOE_REDUCE_GATE_FUSION": "1"}):
+            init_all_reduce(
+                dist.group.WORLD, device, parallelism, CollectiveConfig("nccl")
+            )
             parallelism.ep_size = 4
             try:
                 prepare_model_reduce(model, config, parallelism)
@@ -110,9 +121,6 @@ def run_hidden_size(library, device, rank, hidden_size):
     assert mlp._reduce_shared_gate is owner
     assert not owner.supports(
         torch.empty(33, hidden_size, device=device, dtype=torch.bfloat16)
-    )
-    assert not owner.supports(
-        torch.empty(2, hidden_size, device=device, dtype=torch.float32)
     )
     assert not owner.supports(
         torch.empty(1, hidden_size + 8, device=device, dtype=torch.bfloat16)
@@ -171,10 +179,45 @@ def run_hidden_size(library, device, rank, hidden_size):
                     torch.cuda.current_stream().cuda_stream,
                 )
             )
-            return sigmoid_gate_scale_add_triton(gate, shared, output)
+            reference_shared = shared if shared.data_ptr() % 16 == 0 else shared.clone()
+            return sigmoid_gate_scale_add_triton(gate, reference_shared, output)
 
         def fused():
             return layer(hidden)
+
+        if rows == 2:
+            aligned_partial, aligned_shared, aligned_hidden = partial, shared, hidden
+            if rank == 1:
+                partial, shared, hidden = (
+                    torch.empty(
+                        rows * hidden_size + 1, device=device, dtype=torch.bfloat16
+                    )[1:].view(rows, hidden_size)
+                    for _ in range(3)
+                )
+                assert all(value.data_ptr() % 16 for value in (partial, shared, hidden))
+            for value in (partial, shared, gate):
+                value.normal_()
+            assert owner.supports(hidden)
+            expected = baseline()
+            actual = fused()
+            torch.cuda.synchronize()
+            assert torch.equal(actual, expected), (rank, hidden_size, "offset eager")
+            offset_graph = torch.cuda.CUDAGraph()
+            dist.barrier()
+            with torch.cuda.graph(offset_graph):
+                captured_offset = fused()
+            for value in (partial, shared, gate):
+                value.normal_()
+            expected = baseline()
+            offset_graph.replay()
+            torch.cuda.synchronize()
+            assert torch.equal(captured_offset, expected), (
+                rank,
+                hidden_size,
+                "offset graph",
+            )
+            offset_graph.reset()
+            partial, shared, hidden = aligned_partial, aligned_shared, aligned_hidden
 
         for pattern in range(12):
             partial.normal_(mean=pattern / 10)
@@ -234,6 +277,7 @@ def run_hidden_size(library, device, rank, hidden_size):
     owner.library.qwen38_lsa_destroy(owner.handle)
     owner.handle = None
     owner.close()
+    destroy_all_reduce()
     return results
 
 
