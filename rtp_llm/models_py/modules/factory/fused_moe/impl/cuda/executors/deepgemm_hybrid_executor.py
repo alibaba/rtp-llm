@@ -56,6 +56,9 @@ from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
 from rtp_llm.models_py.triton_kernels.moe.fused_moe_kernel import (
     moe_align_block_size_compiled,
 )
+from rtp_llm.models_py.triton_kernels.moe.sm90_prefill_silu_fp8 import (
+    silu_mul_native_fp8,
+)
 from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm
 from rtp_llm.models_py.utils.math import align, ceil_div
 from rtp_llm.models_py.utils.memory import dispose_tensor
@@ -300,6 +303,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             and self.ep_size == 2
             and not is_deep_gemm_e8m0_used()
         )
+        self._sm90_prefill_silu_fp8 = self._sm90_mn_major_scales
 
     def execute(
         self,
@@ -902,38 +906,49 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
             )
         del input_tensor
-        down_input = torch.empty(
-            (
-                all_tokens,
-                N // 2,
-            ),
-            device=gateup_output.device,
-            dtype=torch.bfloat16,
-        )
-        gateup_output = gateup_output.view(-1, N)
-        silu_and_mul(down_input, gateup_output)
-        del gateup_output
-        down_output = torch.empty(
-            (all_tokens, K),
-            device=hidden_states_fp8_device,
-            dtype=torch.bfloat16,
-        )
-        if is_deep_gemm_e8m0_used():
-            down_input_fp8, down_input_scale = sgl_per_token_group_quant_fp8(
-                down_input,
-                group_size=self.BLOCK_SIZE,
-                column_major_scales=True,
-                scale_tma_aligned=True,
-                scale_ue8m0=is_deep_gemm_e8m0_used(),
+        if mn_major_scales and self._sm90_prefill_silu_fp8:
+            down_input_fp8, down_input_scale = silu_mul_native_fp8(
+                gateup_output.view(-1, N)
+            )
+            del gateup_output
+            down_output = torch.empty(
+                (all_tokens, K),
+                device=hidden_states_fp8_device,
+                dtype=torch.bfloat16,
             )
         else:
-            down_input_fp8, down_input_scale = trt_fp8_quantize_128(
-                down_input, mn_major_scales
+            down_input = torch.empty(
+                (
+                    all_tokens,
+                    N // 2,
+                ),
+                device=gateup_output.device,
+                dtype=torch.bfloat16,
             )
-            if mn_major_scales:
-                # Native col_major_scale returns [groups, padded_rows].
-                down_input_scale = down_input_scale.t()
-        del down_input
+            gateup_output = gateup_output.view(-1, N)
+            silu_and_mul(down_input, gateup_output)
+            del gateup_output
+            down_output = torch.empty(
+                (all_tokens, K),
+                device=hidden_states_fp8_device,
+                dtype=torch.bfloat16,
+            )
+            if is_deep_gemm_e8m0_used():
+                down_input_fp8, down_input_scale = sgl_per_token_group_quant_fp8(
+                    down_input,
+                    group_size=self.BLOCK_SIZE,
+                    column_major_scales=True,
+                    scale_tma_aligned=True,
+                    scale_ue8m0=is_deep_gemm_e8m0_used(),
+                )
+            else:
+                down_input_fp8, down_input_scale = trt_fp8_quantize_128(
+                    down_input, mn_major_scales
+                )
+                if mn_major_scales:
+                    # Native col_major_scale returns [groups, padded_rows].
+                    down_input_scale = down_input_scale.t()
+            del down_input
         if not is_deep_gemm_e8m0_used() and not mn_major_scales:
             down_input_scale = tma_align_input_scale(down_input_scale)
         if self.is_sm120:
