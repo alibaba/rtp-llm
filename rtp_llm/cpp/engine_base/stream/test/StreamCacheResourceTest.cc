@@ -2683,21 +2683,32 @@ TEST_F(StreamCacheResourceTest, PollAllocatorLoadCompletesOnlyAfterTransfersSett
 
 namespace rtp_llm {
 
-TEST_F(StreamCacheResourceTest, testCancelCompletionRetainsP2PLeaseProofAfterStreamRelease) {
+TEST_F(StreamCacheResourceTest, testLocalCleanupWaitsForStreamWorkersAndP2PLease) {
     prepareResource(/*reuse_cache=*/false);
     auto context = std::make_shared<P2PConnectorAsyncReadContext>(
         std::make_shared<KVCacheResource>(), "cancel-cleanup-lease", nullptr, /*lease_query_timeout_ms=*/1000);
     context->cancel(nullptr);
     ASSERT_TRUE(context->done());
     context->lease_hold_pending_.store(true);
-    stream_->streamCacheResource().p2p_load_context_ = context;
-    EXPECT_TRUE(stream_->hasPendingP2PResourceHold());
-    stream_->releaseResource();
-    EXPECT_EQ(stream_->streamCacheResource().p2p_load_context_, nullptr);
+    auto& resource = stream_->streamCacheResource();
+    resource.p2p_load_context_ = context;
+    EXPECT_FALSE(stream_->tryCompleteLocalCleanup());
+    EXPECT_EQ(resource.p2p_load_context_, context);
+
+    stream_->generate_status_->status = StreamState::FINISHED;
+    stream_->incPendingAsyncBookkeeping();
+    EXPECT_FALSE(stream_->tryCompleteLocalCleanup());
+    EXPECT_EQ(resource.p2p_load_context_, context);
+    stream_->decPendingAsyncBookkeepingAndMaybeRelease();
+
+    EXPECT_FALSE(stream_->tryCompleteLocalCleanup());
+    EXPECT_TRUE(resource.isResourceReleased());
+    EXPECT_EQ(resource.p2p_load_context_, nullptr);
     // Clearing the stream's load pointer must not turn an in-flight lease into a release proof.
-    EXPECT_TRUE(stream_->hasPendingP2PResourceHold());
+    EXPECT_TRUE(stream_->hasPendingLocalCleanup());
     context->lease_hold_pending_.store(false);
-    EXPECT_FALSE(stream_->hasPendingP2PResourceHold());
+    EXPECT_FALSE(stream_->hasPendingLocalCleanup());
+    EXPECT_TRUE(stream_->tryCompleteLocalCleanup());
 }
 
 TEST_F(StreamCacheResourceTest, testFailedP2PLoadRetainsPhysicalLeaseProof) {
