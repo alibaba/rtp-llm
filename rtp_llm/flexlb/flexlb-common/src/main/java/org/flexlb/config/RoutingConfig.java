@@ -52,7 +52,7 @@ public final class RoutingConfig {
     public static final class ExecutionTimeEstimatorConfig {
         private EstimatorType type = EstimatorType.FORMULA;
         private String expression =
-                "sum(computeTokens) + 0.3*sum(hitCacheTokens)";
+                "sum(computeTokens) + 0.02*sum(hitCacheTokens)";
     }
 
     public enum EstimatorType {

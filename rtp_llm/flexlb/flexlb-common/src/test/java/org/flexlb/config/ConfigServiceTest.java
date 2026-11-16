@@ -114,7 +114,7 @@ class ConfigServiceTest {
         assertEquals(128, config.getDispatcher().getMaxInflightPerPrefillWorker());
         var prefill = config.getRouter().getRoles().getPrefill();
         assertEquals(RoutingConfig.EstimatorType.FORMULA, prefill.getExecutionTimeEstimator().getType());
-        assertEquals("sum(computeTokens) + 0.3*sum(hitCacheTokens)",
+        assertEquals("sum(computeTokens) + 0.02*sum(hitCacheTokens)",
                 prefill.getExecutionTimeEstimator().getExpression());
         assertNull(prefill.getCacheAffinity());
         assertNull(config.getRouter().getGroupSelector());
