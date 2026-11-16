@@ -62,6 +62,12 @@ def fused_mix_reduce(
             block = 2048
         elif rows == 12288:
             block, warps = 256, 2
+    elif (
+        hidden == 8192
+        and 32 <= rows <= 65536
+        and torch.cuda.get_device_capability(logits.device) in ((10, 0), (10, 3))
+    ):
+        block, warps = (256, 4) if rows < 64 else (512, 2)
     _mix_reduce_kernel[(rows, triton.cdiv(hidden, block))](
         logits,
         normed,

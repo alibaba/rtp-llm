@@ -98,7 +98,13 @@ def separate_down_inject_epilogue(down, injection=None):
         and down.dtype == torch.bfloat16
         and down.is_contiguous()
         and down.ndim >= 2
-        and down.shape[-1] == 320
+        and (
+            down.shape[-1] == 320
+            or (
+                down.shape[-1] == 1024
+                and torch.cuda.get_device_capability(down.device) in ((10, 0), (10, 3))
+            )
+        )
         and (
             injection is None
             or (
@@ -123,16 +129,17 @@ def separate_down_inject_epilogue(down, injection=None):
         if injection is not None
         else None
     )
-    rows = down.numel() // 320
+    rank = down.shape[-1]
+    rows = down.numel() // rank
     if rows:
         _separate_down_inject_epilogue[(rows,)](
             down,
             injection if injection is not None else down,
             mix,
             gate if gate is not None else mix,
-            RANK=320,
+            RANK=rank,
             HAS_INJECT=injection is not None,
-            BLOCK=512,
+            BLOCK=triton.next_power_of_2(rank),
             I_STRIDE=injection.stride(-2) if injection is not None else 4,
             enable_fp_fusion=False,
         )

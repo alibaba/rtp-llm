@@ -32,6 +32,23 @@ def _inject_kernel(
     tl.store(output_ptr + offset, hyper + injection, mask=valid)
 
 
+@triton.jit
+def _inject_group_tile(
+    hyper_ptr, sublayer_ptr, gate_ptr, output_ptr, HIDDEN: tl.constexpr, BLOCK: tl.constexpr
+):
+    tile = tl.program_id(0)
+    tiles_per_branch: tl.constexpr = HIDDEN // BLOCK
+    row = (tile // (4 * tiles_per_branch)).to(tl.int64)
+    group = (tile // tiles_per_branch) % 4
+    column = tile % tiles_per_branch * BLOCK + tl.arange(0, BLOCK)
+    offset = row * (4 * HIDDEN) + group * HIDDEN + column
+    hyper = tl.load(hyper_ptr + offset).to(tl.float32)
+    sublayer = tl.load(sublayer_ptr + row * HIDDEN + column).to(tl.float32)
+    gate = tl.load(gate_ptr + row * 4 + group).to(tl.float32)
+    injection = (sublayer * gate).to(tl.bfloat16).to(tl.float32)
+    tl.store(output_ptr + offset, hyper + injection)
+
+
 def is_supported(
     hyper_input: torch.Tensor,
     sublayer_out: torch.Tensor,
@@ -72,13 +89,31 @@ def fused_inject(
     output = torch.empty_like(hyper_input)
     total = hyper_input.numel()
     if total:
+        hidden = sublayer_out.shape[-1]
+        if (
+            hidden == 8192
+            and torch.cuda.get_device_capability(hyper_input.device) in ((10, 0), (10, 3))
+        ):
+            # One CTA reads a scalar gate and contiguous columns from its branch.
+            block = 2048 if total >= 64 * 4 * hidden else 1024
+            _inject_group_tile[(total // block,)](
+                hyper_input,
+                sublayer_out,
+                inject_weights,
+                output,
+                HIDDEN=hidden,
+                BLOCK=block,
+                num_warps=4,
+                enable_fp_fusion=False,
+            )
+            return output
         _inject_kernel[(triton.cdiv(total, 256),)](
             hyper_input,
             sublayer_out,
             inject_weights,
             output,
             TOTAL=total,
-            HIDDEN=int(sublayer_out.shape[-1]),
+            HIDDEN=hidden,
             BRANCHES=4,
             BLOCK=256,
             num_warps=4,

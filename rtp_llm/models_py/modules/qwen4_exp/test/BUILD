@@ -255,6 +255,16 @@ models_py_test(
     testlib = "//rtp_llm/models_py/standalone:auto_model",
 )
 
+py_test(
+    name = "gated_residual_bf16_sm103_test",
+    srcs = ["parity/gated_residual_bf16_test.py"],
+    main = "parity/gated_residual_bf16_test.py",
+    deps = ["//rtp_llm/models_py/standalone:auto_model"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["SM103_CU13"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
 models_py_test(
     name = "hc_prefill_mix_test",
     src = "parity/hc_prefill_mix_test.py",
