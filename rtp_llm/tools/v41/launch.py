@@ -33,6 +33,25 @@ def bounded_prefill_wait_timeout_ms(value):
     return result
 
 
+def positive_integer(value):
+    if type(value) not in (int, str):
+        raise ValueError("serving budget must be a positive integer")
+    result = int(value)
+    if result <= 0:
+        raise ValueError("serving budget must be a positive integer")
+    return result
+
+
+def decode_capture_batches(value):
+    try:
+        batches = tuple(positive_integer(item) for item in value.split(","))
+    except (AttributeError, ValueError) as error:
+        raise ValueError("capture batches must be positive comma-separated integers") from error
+    if batches[0] != 1 or batches != tuple(sorted(set(batches))):
+        raise ValueError("capture batches must be distinct and ascending, starting at 1")
+    return ",".join(map(str, batches))
+
+
 def preset_env(
     role,
     checkpoint,
@@ -67,6 +86,16 @@ def preset_env(
     eplb_stats_window_size=100,
     eplb_rearrange_after_prefill=False,
     eplb_rearrange_p2p_groups=1,
+    kv_cache_mem_mb=8192,
+    load_cache_timeout_ms=600000,
+    concurrency_limit=None,
+    max_batch_tokens=None,
+    max_inited_kv_cache_streams=None,
+    reuse_cache=None,
+    capture_batches=None,
+    enable_device_cache=None,
+    enable_memory_cache=None,
+    memory_cache_size_mb=None,
 ):
     if role not in ("prefill", "decode"):
         raise ValueError("role must be prefill or decode")
@@ -85,6 +114,26 @@ def preset_env(
         raise ValueError("ced_mode must be off, exact or bounded")
     if encoder_swa_replay and ced_mode != "bounded":
         raise ValueError("encoder SWA recovery requires --ced-mode bounded")
+    if reuse_cache is not None and type(reuse_cache) is not bool:
+        raise ValueError("reuse_cache must be an explicit boolean")
+    if encoder_swa_replay and reuse_cache is False:
+        raise ValueError("encoder SWA recovery requires cache reuse")
+    kv_cache_mem_mb = positive_integer(kv_cache_mem_mb)
+    load_cache_timeout_ms = positive_integer(load_cache_timeout_ms)
+    budgets = {
+        "CONCURRENCY_LIMIT": concurrency_limit,
+        "MAX_BATCH_TOKENS_SIZE": max_batch_tokens,
+        "MAX_BATCH_TOKENS_WITHOUT_CACHE": max_batch_tokens,
+        "MAX_INITED_KV_CACHE_STREAMS": max_inited_kv_cache_streams,
+        "MEMORY_CACHE_SIZE_MB": memory_cache_size_mb,
+    }
+    budgets = {key: str(positive_integer(value)) for key, value in budgets.items() if value is not None}
+    if capture_batches is not None:
+        capture_batches = decode_capture_batches(capture_batches)
+        if role != "decode" or not (shared_decode_graph or shared_grouped_graph):
+            raise ValueError("capture batches require an explicit shared Decode Graph")
+        if concurrency_limit is not None and int(capture_batches.split(",")[-1]) < int(budgets["CONCURRENCY_LIMIT"]):
+            raise ValueError("capture batches must cover the per-DP concurrency limit")
     if dspark_gamma < 0:
         raise ValueError("DSpark gamma must be nonnegative (zero disables it)")
     if type(dspark_sample_from_anchor) is not bool or (not dspark_gamma and not dspark_sample_from_anchor):
@@ -183,7 +232,7 @@ def preset_env(
             "EPLB_STATS_WINDOW_SIZE": str(eplb_stats_window_size),
             "EPLB_REARRANGE_AFTER_PREFILL": str(int(eplb_rearrange_after_prefill)),
             "EPLB_REARRANGE_P2P_GROUPS": str(eplb_rearrange_p2p_groups),
-            "REUSE_CACHE": "1" if encoder_swa_replay else "0",
+            "REUSE_CACHE": str(int(encoder_swa_replay or bool(reuse_cache))),
             "DSV41_CED": "0" if ced_mode == "off" else "1",
             "DSV41_SWA_BOUNDED_REPLAY": "1" if ced_mode == "bounded" else "0",
             "DSV41_ENCODER_SWA_REPLAY": "1" if encoder_swa_replay else "0",
@@ -205,10 +254,10 @@ def preset_env(
             "WARM_UP": "0",
             "MODEL_WARM_UP": "0",
             "FRONTEND_SERVER_COUNT": "1",
-            "KV_CACHE_MEM_MB": "8192",
+            "KV_CACHE_MEM_MB": str(kv_cache_mem_mb),
             "MAX_CONTEXT_BATCH_SIZE": "1",
             "PREFILL_CHUNK_SIZE": "0",
-            "LOAD_CACHE_TIMEOUT_MS": "600000",
+            "LOAD_CACHE_TIMEOUT_MS": str(load_cache_timeout_ms),
             "PREFILL_MAX_WAIT_TIMEOUT_MS": str(prefill_wait_timeout_ms),
             "DIST_COMM_TIMEOUT": "1800",
             "DECODE_RETRY_TIMES": "0",
@@ -331,6 +380,24 @@ def preset_env(
         # The public string parser has no DISABLED spelling. Omitting the
         # variable selects its typed DISABLED default on both DP8 roles.
         env.pop("CP_ROTATE_METHOD", None)
+    # Apply explicit serving budgets after the fixed topology/Graph preset.
+    # This preserves old defaults while making CLI overrides reviewable.
+    env.update(budgets)
+    for key, value in (("ENABLE_DEVICE_CACHE", enable_device_cache),
+                       ("ENABLE_MEMORY_CACHE", enable_memory_cache)):
+        if value is not None:
+            if type(value) is not bool:
+                raise ValueError(f"{key} must be an explicit boolean")
+            env[key] = str(int(value))
+    if env_bool(env, "ENABLE_MEMORY_CACHE"):
+        positive_integer(env.get("MEMORY_CACHE_SIZE_MB", "0"))
+    if capture_batches is not None:
+        env["DECODE_CAPTURE_CONFIG"] = capture_batches
+    if (role == "decode" and (shared_decode_graph or shared_grouped_graph)
+            and (concurrency_limit is not None or capture_batches is not None)
+            and "CONCURRENCY_LIMIT" in env
+            and int(env["DECODE_CAPTURE_CONFIG"].split(",")[-1]) < positive_integer(env["CONCURRENCY_LIMIT"])):
+        raise ValueError("capture batches must cover the per-DP concurrency limit")
     V41RuntimeConfig.from_env(env)
     return env
 
@@ -346,6 +413,23 @@ def main():
         "--decode-address", help="D HTTP endpoint, e.g. 192.0.2.20:19090"
     )
     parser.add_argument("--start-port", type=int)
+    parser.add_argument("--kv-cache-mem-mb", type=positive_integer, default=8192,
+                        help="KV cache budget per device in MB; default8192")
+    parser.add_argument("--load-cache-timeout-ms", type=positive_integer, default=600000,
+                        help="Cross-role KV wait in ms; cold JIT can exceed60 seconds")
+    parser.add_argument("--concurrency-limit", type=positive_integer,
+                        help="P admission limit or D requests per DP rank")
+    parser.add_argument("--max-batch-tokens", type=positive_integer,
+                        help="Set both cached and uncached batch token budgets")
+    parser.add_argument("--max-inited-kv-cache-streams", type=positive_integer)
+    parser.add_argument("--reuse-cache", action=argparse.BooleanOptionalAction, default=None,
+                        help="Explicit prefix reuse; encoder SWA replay requires it")
+    parser.add_argument("--decode-capture-batches", type=decode_capture_batches,
+                        help="Shared Decode Graph buckets, e.g.1,2,4,8; cover per-DP concurrency")
+    parser.add_argument("--enable-device-cache", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--enable-memory-cache", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--memory-cache-size-mb", type=positive_integer,
+                        help="Host L2 cache per rank in MB, not a machine-wide budget")
     parser.add_argument(
         "--prefill-wait-timeout-ms",
         type=bounded_prefill_wait_timeout_ms,
@@ -429,6 +513,16 @@ def main():
         prefill_address=args.prefill_address,
         decode_address=args.decode_address,
         start_port=args.start_port,
+        kv_cache_mem_mb=args.kv_cache_mem_mb,
+        load_cache_timeout_ms=args.load_cache_timeout_ms,
+        concurrency_limit=args.concurrency_limit,
+        max_batch_tokens=args.max_batch_tokens,
+        max_inited_kv_cache_streams=args.max_inited_kv_cache_streams,
+        reuse_cache=args.reuse_cache,
+        capture_batches=args.decode_capture_batches,
+        enable_device_cache=args.enable_device_cache,
+        enable_memory_cache=args.enable_memory_cache,
+        memory_cache_size_mb=args.memory_cache_size_mb,
         prefill_parallel=args.prefill_parallel,
         ced_mode=args.ced_mode,
         encoder_swa_replay=args.encoder_swa_replay,
@@ -467,7 +561,8 @@ def main():
             parent={
                 name: env[name]
                 for name in ("RTP_V41_PPU_MOE_BACKEND", "RTP_V41_PPU_MOE_PRECISION",
-                             "RTP_V41_PPU_QUANT_MODE", "RTP_V41_PPU_WEIGHT_AUDIT_DIR")
+                             "RTP_V41_PPU_QUANT_MODE", "RTP_V41_PPU_WEIGHT_AUDIT_DIR",
+                             "ENABLE_DEVICE_CACHE", "ENABLE_MEMORY_CACHE", "MEMORY_CACHE_SIZE_MB")
                 if name in env
             },
             **{**options, "fake_balance_expert": env_bool(env, "FAKE_BALANCE_EXPERT")},

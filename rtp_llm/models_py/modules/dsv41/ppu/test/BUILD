@@ -1,5 +1,21 @@
 package(default_visibility = ["//visibility:public"])
 
+py_test(
+    name = "ptpc_warmup_test",
+    srcs = ["test_ptpc_warmup.py"],
+    data = ["//rtp_llm/models_py:v41_ppu_shared_sources"],
+    deps = [
+        "//rtp_llm:torch",
+        "//rtp_llm/models_py:v41_ppu_moe",
+    ],
+    env = {"GPU_COUNT": "0"},
+    tags = ["manual", "cpu"],
+    target_compatible_with = select({
+        "@//:using_ppu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
 [
     py_test(
         name = "moe_routing_" + mode + "_test",

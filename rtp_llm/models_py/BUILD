@@ -81,6 +81,7 @@ _DSV41_PPU_SHARED_MODULES = [
     "modules/dsv41/ppu/optimization_config.py",
     "modules/dsv41/ppu/grouped_projection.py",
     "modules/dsv41/ppu/model.py",
+    "modules/dsv41/ppu/ptpc_warmup.py",
     "modules/dsv41/ppu/model_weights.py",
     "modules/dsv41/ppu/eplb.py",
     "modules/dsv41/ppu/transformer.py",

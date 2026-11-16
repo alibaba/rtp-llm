@@ -25,12 +25,128 @@ from rtp_llm.tools.v41.preflight import (
     WHEELS,
     checkpoint_metadata,
     compare_reports,
+    host_memory_budget,
+    local_cache_policy,
     rdma_inventory,
     service_ports,
 )
 
 
 class IntegrationTest(unittest.TestCase):
+    def test_host_budget_admits_all_eight_l2_pools(self):
+        gib = 1024**3
+        metadata = {"engram_table_bytes": 189 * gib}
+        env = {"WORLD_SIZE": "8", "ENABLE_MEMORY_CACHE": "1", "MEMORY_CACHE_SIZE_MB": "65536"}
+        # The old ENP-only check admitted 442 GiB, omitting 512 GiB of L2.
+        with self.assertRaisesRegex(ValueError, "ENP\\+staging\\+L2"):
+            host_memory_budget(env, metadata, 442 * gib)
+        budget = host_memory_budget(env, metadata, 954 * gib)
+        self.assertEqual(budget["host_l2_per_rank_bytes"], 64 * gib)
+        self.assertEqual(budget["host_l2_total_bytes"], 512 * gib)
+        self.assertEqual(budget["required_bytes"], 954 * gib)
+        with self.assertRaises(ValueError):
+            host_memory_budget(env, metadata, 954 * gib - 1)
+        # Pool creation is independent of reuse; disabling REUSE alone does
+        # not authorize excluding the configured host backing from admission.
+        env["REUSE_CACHE"] = "0"
+        self.assertEqual(host_memory_budget(env, metadata)["required_bytes"], 954 * gib)
+        env["ENABLE_MEMORY_CACHE"] = "0"
+        self.assertEqual(host_memory_budget(env, metadata, 442 * gib)["required_bytes"], 442 * gib)
+
+    def test_host_budget_rejects_missing_and_invalid_l2_sizes(self):
+        metadata = {"engram_table_bytes": 0}
+        for value in (None, "0", "-1", "1.5", "bad"):
+            env = {"ENABLE_MEMORY_CACHE": "1"}
+            if value is not None:
+                env["MEMORY_CACHE_SIZE_MB"] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                host_memory_budget(env, metadata)
+        with self.assertRaisesRegex(ValueError, "eight local"):
+            host_memory_budget({"WORLD_SIZE": "16"}, metadata)
+
+    def test_cache_policy_explains_decode_lookup_and_request_switch(self):
+        env = {"ROLE_TYPE": "DECODE", "REUSE_CACHE": "1", "ENABLE_DEVICE_CACHE": "1",
+               "ENABLE_MEMORY_CACHE": "1"}
+        policy = local_cache_policy(env)
+        self.assertEqual(policy["initial_prefix_lookup"], "disabled_for_opaque_decode")
+        self.assertFalse(policy["pd_handoff_counts_as_historical_hit"])
+        self.assertTrue(policy["request_reuse_cache_required"])
+        env["RTP_LLM_IGNORE_REQUEST_CACHE_SWITCHES"] = "1"
+        self.assertFalse(local_cache_policy(env)["request_reuse_cache_required"])
+        env["ROLE_TYPE"] = "PREFILL"
+        self.assertEqual(local_cache_policy(env)["initial_prefix_lookup"], "request_policy")
+        env["REUSE_CACHE"] = "0"
+        self.assertEqual(local_cache_policy(env)["initial_prefix_lookup"], "disabled")
+
+    def test_serving_budgets_override_preset_and_cover_decode_capacity(self):
+        env = preset_env(
+            "decode", "/weights", parent={
+                "RTP_V41_PPU_MODEL_PATH": "shared",
+                "RTP_V41_PPU_MOE_BACKEND": "megamoe",
+                "RTP_V41_PPU_MOE_PRECISION": "w4a4",
+            }, shared_decode_graph=True, kv_cache_mem_mb=26000,
+            load_cache_timeout_ms=600000, concurrency_limit=8,
+            max_batch_tokens=32768, max_inited_kv_cache_streams=8,
+            reuse_cache=True, capture_batches="1,2,4,8",
+            enable_device_cache=True, enable_memory_cache=True, memory_cache_size_mb=65536,
+        )
+        for key, value in {
+            "KV_CACHE_MEM_MB": "26000", "LOAD_CACHE_TIMEOUT_MS": "600000",
+            "CONCURRENCY_LIMIT": "8", "MAX_BATCH_TOKENS_SIZE": "32768",
+            "MAX_BATCH_TOKENS_WITHOUT_CACHE": "32768",
+            "MAX_INITED_KV_CACHE_STREAMS": "8", "REUSE_CACHE": "1",
+            "DECODE_CAPTURE_CONFIG": "1,2,4,8", "ENABLE_CUDA_GRAPH": "1",
+            "ENABLE_DEVICE_CACHE": "1", "ENABLE_MEMORY_CACHE": "1", "MEMORY_CACHE_SIZE_MB": "65536",
+        }.items():
+            self.assertEqual(env[key], value)
+
+    def test_serving_budgets_reject_invalid_or_incompatible_options(self):
+        for name in ("kv_cache_mem_mb", "load_cache_timeout_ms", "concurrency_limit",
+                     "max_batch_tokens", "max_inited_kv_cache_streams", "memory_cache_size_mb"):
+            for value in (0, -1, True, 1.5):
+                with self.subTest(name=name, value=value), self.assertRaises(ValueError):
+                    preset_env("decode", "/weights", parent={}, **{name: value})
+        with self.assertRaisesRegex(ValueError, "requires cache reuse"):
+            preset_env("prefill", "/weights", parent={}, ced_mode="bounded",
+                       encoder_swa_replay=True, reuse_cache=False)
+        with self.assertRaisesRegex(ValueError, "positive integer"):
+            preset_env("decode", "/weights", parent={}, enable_memory_cache=True)
+        for batches in ("", "0,1", "2,4", "1,1,2", "1,4,2", "1,-2", "1,x"):
+            with self.subTest(batches=batches), self.assertRaises(ValueError):
+                preset_env("decode", "/weights", parent={}, shared_decode_graph=True,
+                           capture_batches=batches)
+        with self.assertRaisesRegex(ValueError, "explicit shared Decode Graph"):
+            preset_env("prefill", "/weights", parent={}, capture_batches="1,2")
+        with self.assertRaisesRegex(ValueError, "per-DP concurrency"):
+            preset_env("decode", "/weights", parent={}, shared_decode_graph=True,
+                       concurrency_limit=8, capture_batches="1,2,4")
+        with self.assertRaisesRegex(ValueError, "per-DP concurrency"):
+            preset_env("decode", "/weights", parent={"CONCURRENCY_LIMIT": "8",
+                       "RTP_V41_PPU_MOE_BACKEND": "megamoe"},
+                       shared_decode_graph=True, capture_batches="1,2,4")
+
+    def test_print_command_preserves_explicit_serving_budgets_without_secrets(self):
+        from rtp_llm.tools.v41.launch import main
+
+        output = io.StringIO()
+        argv = ["launch", "decode", "--checkpoint-path", "/weights", "--print-command",
+                "--shared-decode-graph", "--kv-cache-mem-mb", "26000",
+                "--concurrency-limit", "8", "--decode-capture-batches", "1,2,4,8",
+                "--max-batch-tokens", "32768", "--reuse-cache"]
+        with patch.dict(os.environ, {
+            "RTP_V41_PPU_MOE_BACKEND": "megamoe", "RTP_V41_PPU_MOE_PRECISION": "w4a4",
+            "PRIVATE_TEST_SENTINEL": "do-not-print",
+            "ENABLE_DEVICE_CACHE": "1", "ENABLE_MEMORY_CACHE": "1", "MEMORY_CACHE_SIZE_MB": "65536",
+        }), patch.object(sys, "argv", argv), redirect_stdout(output):
+            self.assertEqual(main(), 0)
+        for assignment in ("KV_CACHE_MEM_MB=26000", "CONCURRENCY_LIMIT=8",
+                           "DECODE_CAPTURE_CONFIG=1,2,4,8", "REUSE_CACHE=1",
+                           "MAX_BATCH_TOKENS_WITHOUT_CACHE=32768"):
+            self.assertIn(assignment, output.getvalue())
+        for assignment in ("ENABLE_DEVICE_CACHE=1", "ENABLE_MEMORY_CACHE=1", "MEMORY_CACHE_SIZE_MB=65536"):
+            self.assertIn(assignment, output.getvalue())
+        self.assertNotIn("do-not-print", output.getvalue())
+
     def test_print_command_preserves_effective_fake_balance_without_environment_leak(
         self,
     ):

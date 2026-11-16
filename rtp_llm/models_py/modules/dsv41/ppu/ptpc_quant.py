@@ -37,12 +37,14 @@ def _kernels():
     import triton
     import triton.language as tl
 
-    @triton.jit
+    # Row count changes with genuine request lengths. Keep it out of the JIT
+    # specialization key; only grouped addressing needs it at runtime.
+    @triton.jit(do_not_specialize=["ROWS"])
     def quantize_rows(
         X,
         Q,
         S,
-        ROWS: tl.constexpr,
+        ROWS,
         GROUPS: tl.constexpr,
         WIDTH: tl.constexpr,
         STRIDE_ROW: tl.constexpr,
@@ -52,11 +54,12 @@ def _kernels():
         INV_MAX: tl.constexpr,
         BLOCK: tl.constexpr,
     ):
-        out_row = tl.program_id(0).to(tl.int64)
+        row = tl.program_id(0).to(tl.int64)
+        group = tl.program_id(1).to(tl.int64)
         if GROUP_MAJOR:
-            row, group = out_row % ROWS, out_row // ROWS
+            out_row = group * ROWS + row
         else:
-            row, group = out_row // GROUPS, out_row % GROUPS
+            out_row = row * GROUPS + group
         columns = tl.arange(0, BLOCK)
         values = tl.load(
             X + row * STRIDE_ROW + group * STRIDE_GROUP + columns * STRIDE_COL,
@@ -74,11 +77,11 @@ def _kernels():
         tl.store(Q + out_row * WIDTH + columns, quantized, columns < WIDTH)
         tl.store(S + out_row, scale)
 
-    @triton.jit
+    @triton.jit(do_not_specialize=["ROWS"])
     def pack_grouped_bytes(
         X,
         Y,
-        ROWS: tl.constexpr,
+        ROWS,
         GROUPS: tl.constexpr,
         ROW_BYTES: tl.constexpr,
         BLOCK: tl.constexpr,
@@ -124,7 +127,7 @@ def _quantize_device(x, *, group_major):
     if rows * groups:
         triton, kernel, _ = _kernels()
         block = triton.next_power_of_2(width)
-        kernel[(rows * groups,)](
+        kernel[(rows, groups)](
             x,
             payload,
             scale,

@@ -1,7 +1,9 @@
 """Bitwise PTPC activation/scale and grouped producer contracts."""
 
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import torch
@@ -109,6 +111,34 @@ class PTPCQuantCPU(unittest.TestCase):
     os.environ.get("RTP_V41_TEST_PTPC_DEVICE") == "1", "explicit PPU device test"
 )
 class PTPCQuantDevice(unittest.TestCase):
+    def test_dynamic_rows_reuse_binaries_and_preserve_bytes(self):
+        # A private cache proves varying real row counts do not compile one
+        # binary per M. Width1280 is absent from earlier graph tests, so this
+        # test does not depend on the process's existing in-memory JIT cache.
+        with tempfile.TemporaryDirectory(prefix="ptpc-dynamic-rows-") as cache:
+            with patch.dict(os.environ, {"TRITON_CACHE_DIR": cache}):
+                counts = None
+                for rows in (3, 1, 5, 8, 17, 129, 511, 1023, 4096):
+                    value = torch.randn((rows, 8, 1280), device="cuda", dtype=torch.bfloat16)
+                    dense = torch.randn((rows, 1280), device="cuda", dtype=torch.bfloat16)
+                    assert_quant_equal(self, quantize_ptpc_activation(dense), oracle(dense))
+                    grouped = quantize_ptpc_grouped_activation(value)
+                    for group in range(8):
+                        assert_quant_equal(self, (grouped[0][group], grouped[1][group]), oracle(value[:, group]))
+                    source = value.permute(1, 0, 2).contiguous()
+                    packed = pack_ptpc_grouped_output(source)
+                    self.assertTrue(torch.equal(packed.view(torch.int16), value.view(torch.int16)))
+                    torch.cuda.synchronize()
+                    actual = (
+                        len(list(Path(cache).glob("*/quantize_rows.json"))),
+                        len(list(Path(cache).glob("*/pack_grouped_bytes.json"))),
+                    )
+                    if counts is None:
+                        self.assertEqual(actual, (2, 1))
+                        counts = actual
+                    else:
+                        self.assertEqual(actual, counts, f"new kernel binary for rows={rows}")
+
     def test_production_and_ragged_widths_exact(self):
         for width in (
             1, 127, 128, 257, 512, 1024, 1280, 2304, 4096, 5120, 8192, 9216, 15360

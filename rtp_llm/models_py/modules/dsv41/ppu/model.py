@@ -154,6 +154,13 @@ class DeepSeekV41PPUModel(DeepSeekV41Model):
         self.materialize_modules()
         self._bind_runtime_buffers(self.v4.embed.weight.device)
         self.shared_runtime = SharedNativeRuntime(self)
+        if not self._is_decode_role and os.environ.get("RTP_V41_PPU_PTPC_WARMUP_MAX_ROWS", "0") != "0":
+            from rtp_llm.models_py.modules.dsv41.ppu.ptpc_warmup import warmup_resident_ptpc
+
+            if not dist.is_initialized() or dist.get_rank() == 0:
+                warmup_resident_ptpc(self)
+            if dist.is_initialized():
+                dist.barrier()
         if hasattr(self, "_shared_stop_callbacks"):
             self.shared_runtime.bind_native_stop(*self._shared_stop_callbacks)
         return True

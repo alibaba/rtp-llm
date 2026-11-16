@@ -92,6 +92,53 @@ def checkpoint_metadata(path, expected=None):
     }
 
 
+def host_memory_budget(env, metadata, available_bytes=None):
+    """Admit ENP loading and every local backend's configured L2 allocation."""
+    local_ranks = int(env.get("WORLD_SIZE", "8"))
+    if local_ranks != 8:
+        raise ValueError("V4.1 PPU host budget requires eight local backend ranks")
+    per_rank = 0
+    if env_bool(env, "ENABLE_MEMORY_CACHE"):
+        per_rank_mb = int(env.get("MEMORY_CACHE_SIZE_MB", "0"))
+        if per_rank_mb <= 0:
+            raise ValueError("enabled host L2 requires positive MEMORY_CACHE_SIZE_MB")
+        per_rank = per_rank_mb * 1024**2
+    enp_staging = metadata["engram_table_bytes"] * 2 + 64 * GIB
+    result = {
+        "required_bytes": enp_staging + per_rank * local_ranks,
+        "enp_and_staging_bytes": enp_staging,
+        "local_backend_ranks": local_ranks,
+        "host_l2_per_rank_bytes": per_rank,
+        "host_l2_total_bytes": per_rank * local_ranks,
+        "basis": "2 * ENP table + 64 GiB staging + local ranks * host L2 budget",
+    }
+    if available_bytes is not None and available_bytes < result["required_bytes"]:
+        raise ValueError(
+            f"host/cgroup available memory {available_bytes} below ENP+staging+L2 "
+            f"budget {result['required_bytes']} (L2={result['host_l2_total_bytes']})"
+        )
+    return result
+
+
+def local_cache_policy(env):
+    """Report configured policy, separately from actual runtime cache hits."""
+    reuse = env_bool(env, "REUSE_CACHE")
+    device = env_bool(env, "ENABLE_DEVICE_CACHE", True)
+    memory = env_bool(env, "ENABLE_MEMORY_CACHE")
+    decode = env.get("ROLE_TYPE", "").upper() == "DECODE"
+    return {
+        "reuse_cache": reuse,
+        "enable_device_cache": device,
+        "enable_memory_cache": memory,
+        "request_reuse_cache_required": not env_bool(env, "RTP_LLM_IGNORE_REQUEST_CACHE_SWITCHES"),
+        "initial_prefix_lookup": "disabled_for_opaque_decode" if decode else
+                                 "request_policy" if reuse and (device or memory) else "disabled",
+        "native_basis": "CacheConfigCreator opaque KV/State gate; not a measured hit",
+        "pd_handoff_counts_as_historical_hit": False,
+        "scope": "V4.1 local tiers; remote/disk policy and runtime hits are separate",
+    }
+
+
 def memory_limits(cgroup_root=Path("/sys/fs/cgroup")):
     """Resolve this process's v1/v2 cgroup, including nested container paths."""
     available = None
@@ -254,6 +301,7 @@ def collect_report(env=None, *, probe_allocations=False, require_backend=False):
 
     runtime = check("topology", lambda: V41RuntimeConfig.from_env(env).summary())
     check("native_cache_protocol", native_cache_protocol)
+    check("local_cache_policy", lambda: local_cache_policy(env))
     check(
         "python_abi",
         lambda: require(
@@ -332,24 +380,12 @@ def collect_report(env=None, *, probe_allocations=False, require_backend=False):
         "checkpoint_metadata", lambda: checkpoint_metadata(env["CHECKPOINT_PATH"])
     )
     host = check("host_memory", memory_limits)
-    # Whole role owns one table (~189 GiB), not eight replicated tables.
-    # Reserve a second shard per worker for loading plus 64 GiB control/runtime.
-    required_host = (
-        (metadata["engram_table_bytes"] * 2 + 64 * GIB) if metadata else None
-    )
-    check(
-        "host_budget",
-        lambda: require(
-            host is not None
-            and required_host is not None
-            and host["effective_available_bytes"] >= required_host,
-            f"host/cgroup available memory below ENP+load staging budget {required_host}",
-            {
-                "required_bytes": required_host,
-                "basis": "2 * table + 64 GiB; conservative admission budget",
-            },
-        ),
-    )
+    # One ENP table per role, plus each of the eight backend ranks' L2 pools.
+    def check_host_budget():
+        require(host is not None and metadata is not None, "host/metadata unavailable")
+        return host_memory_budget(env, metadata, host["effective_available_bytes"])
+
+    check("host_budget", check_host_budget)
 
     def ipc():
         usage = shutil.disk_usage("/dev/shm")
