@@ -231,6 +231,8 @@ public:
     int                  reuseBlockSize() const;
     void                 fakeInitKVBlock(size_t reserved_blocks = 0);
     virtual absl::Status initKVBlock();
+    // Prepare the initial allocator transaction without granting execution.
+    CachePrepareResult   prepareCache();
     virtual absl::Status incrKVBlock();
     virtual void         releaseResource();
     // Observe Engine release and Connector lease completion during cancellation.

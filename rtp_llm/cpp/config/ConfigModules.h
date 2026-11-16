@@ -41,8 +41,8 @@ enum class CPAllGatherImpl {
 };
 struct PrefillCPConfig {
     CPAllGatherImpl all_gather_impl  = CPAllGatherImpl::LEGACY;
-    CPRotateMethod method           = CPRotateMethod::DISABLED;
-    size_t         comm_buffer_size = 512 * 1024 * 1024;  // 512MB
+    CPRotateMethod  method           = CPRotateMethod::DISABLED;
+    size_t          comm_buffer_size = 512 * 1024 * 1024;  // 512MB
     // When true + tp_size > 1, KV cache uses page-level round-robin sharding
     // across the CP (== TP) group. Each rank physically holds only owned blocks
     // (block_idx % cp_size == cp_rank); see rtp_llm/cpp/cache/CPSlotMapper.h.
@@ -86,6 +86,15 @@ struct ParallelismConfig {
 
     // Context Parallel configuration
     PrefillCPConfig prefill_cp_config;
+
+    int64_t kvCacheCpSize() const {
+        // Dedicated Prefill can own CP while keeping framework attention CP disabled.
+        // Decode uses CP settings to describe its Prefill peer.
+        const auto& cp      = prefill_cp_config;
+        const bool  sharded = role_type != RoleType::DECODE && tp_size > 1 && cp.kv_cache_sharded
+                             && (role_type == RoleType::PREFILL || cp.is_enabled());
+        return sharded ? tp_size : 1;
+    }
 
     int64_t get_attn_tp_size() const {
         return prefill_cp_config.is_enabled() ? 1 : tp_size;
@@ -152,44 +161,44 @@ struct FMHAConfig {
     std::string to_string() const;
 };
 
-constexpr double kDefaultDeviceLowWatermarkRatio        = 0.82;
-constexpr double kDefaultDeviceHighWatermarkRatio       = 0.90;
-constexpr double kDefaultMemoryLowWatermarkRatio        = 0.90;
-constexpr double kDefaultMemoryHighWatermarkRatio       = 0.94;
-constexpr double kDefaultDiskLowWatermarkRatio          = 0.92;
-constexpr double kDefaultDiskHighWatermarkRatio         = 0.97;
+constexpr double kDefaultDeviceLowWatermarkRatio  = 0.82;
+constexpr double kDefaultDeviceHighWatermarkRatio = 0.90;
+constexpr double kDefaultMemoryLowWatermarkRatio  = 0.90;
+constexpr double kDefaultMemoryHighWatermarkRatio = 0.94;
+constexpr double kDefaultDiskLowWatermarkRatio    = 0.92;
+constexpr double kDefaultDiskHighWatermarkRatio   = 0.97;
 
 struct KVCacheConfig {
     bool                                    reuse_cache           = false;
     std::string                             multi_task_prompt     = "";
     std::string                             multi_task_prompt_str = "";
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
-    int64_t                                 reserve_block_ratio           = 5;
-    int64_t                                 memory_cache_size_mb          = 0;
-    int64_t                                 memory_cache_sync_timeout_ms  = 10000;
-    std::string                             disk_cache_paths              = "";
-    int64_t                                 disk_cache_size_mb            = 0;
-    bool                                    disk_cache_buffered_io        = true;
-    int64_t                                 disk_cache_sync_timeout_ms    = 3000;
+    int64_t                                 reserve_block_ratio          = 5;
+    int64_t                                 memory_cache_size_mb         = 0;
+    int64_t                                 memory_cache_sync_timeout_ms = 10000;
+    std::string                             disk_cache_paths             = "";
+    int64_t                                 disk_cache_size_mb           = 0;
+    bool                                    disk_cache_buffered_io       = true;
+    int64_t                                 disk_cache_sync_timeout_ms   = 3000;
     // Evict/store override; -1 inherits the load timeout above.
-    int64_t disk_cache_evict_timeout_ms                     = 3000;
-    int64_t disk_cache_evict_max_pending_bytes              = 100 * 1024 * 1024;
-    int64_t disk_cache_staging_block_count                  = 128;
-    int64_t memory_cache_max_descriptors_per_transfer_batch = 32;
-    int     block_tree_task_pool_size          = 4;
-    int64_t block_tree_transfer_worker_count   = 2;
-    int64_t block_tree_business_queue_max_size = 10000;
-    int64_t block_tree_transfer_queue_max_size = 10000;
-    int64_t block_tree_frozen_force_release_timeout_ms   = 300000;
-    double  block_tree_device_evict_low_watermark_ratio  = kDefaultDeviceLowWatermarkRatio;
-    double  block_tree_device_evict_high_watermark_ratio = kDefaultDeviceHighWatermarkRatio;
-    double  block_tree_memory_evict_low_watermark_ratio  = kDefaultMemoryLowWatermarkRatio;
-    double  block_tree_memory_evict_high_watermark_ratio = kDefaultMemoryHighWatermarkRatio;
-    double  block_tree_disk_evict_low_watermark_ratio    = kDefaultDiskLowWatermarkRatio;
-    double  block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
-    int      reuse_cache_tail_blocks                           = std::numeric_limits<int>::max();
-    uint32_t linear_pool_blocks                                = 0;
-    uint32_t swa_pool_blocks                                   = 0;
+    int64_t  disk_cache_evict_timeout_ms                     = 3000;
+    int64_t  disk_cache_evict_max_pending_bytes              = 100 * 1024 * 1024;
+    int64_t  disk_cache_staging_block_count                  = 128;
+    int64_t  memory_cache_max_descriptors_per_transfer_batch = 32;
+    int      block_tree_task_pool_size                       = 4;
+    int64_t  block_tree_transfer_worker_count                = 2;
+    int64_t  block_tree_business_queue_max_size              = 10000;
+    int64_t  block_tree_transfer_queue_max_size              = 10000;
+    int64_t  block_tree_frozen_force_release_timeout_ms      = 300000;
+    double   block_tree_device_evict_low_watermark_ratio     = kDefaultDeviceLowWatermarkRatio;
+    double   block_tree_device_evict_high_watermark_ratio    = kDefaultDeviceHighWatermarkRatio;
+    double   block_tree_memory_evict_low_watermark_ratio     = kDefaultMemoryLowWatermarkRatio;
+    double   block_tree_memory_evict_high_watermark_ratio    = kDefaultMemoryHighWatermarkRatio;
+    double   block_tree_disk_evict_low_watermark_ratio       = kDefaultDiskLowWatermarkRatio;
+    double   block_tree_disk_evict_high_watermark_ratio      = kDefaultDiskHighWatermarkRatio;
+    int      reuse_cache_tail_blocks                         = std::numeric_limits<int>::max();
+    uint32_t linear_pool_blocks                              = 0;
+    uint32_t swa_pool_blocks                                 = 0;
     // Opt-in request policy; only models declaring history-state reclaim support may enable it.
     bool enable_linear_cache_reclaim = false;
     // Optional JSON map from cache-group tags to positive pool block-count weights.
@@ -277,6 +286,9 @@ struct KVCacheConfig {
     int         kvcm_get_broadcast_timeout = 15000;
     int         kvcm_put_broadcast_timeout = 15000;
     std::string kvcm_client_config         = "";
+    // Append configuration fields to preserve existing C++ aggregate callers.
+    // -1: model policy; 0: independent pools; 1: require shared hybrid arenas.
+    int         shared_hybrid_cache = -1;
     void        insertMultiTaskPromptTokens(std::string task_id, std::vector<int64_t> tokens_id);
     std::string to_string() const;
 };
@@ -438,23 +450,23 @@ struct CacheStoreConfig {
     int     messager_worker_thread_count        = 32;
     int     rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
     int64_t p2p_transfer_not_done_resource_hold_ms =
-        10 * 1000;  // D 后等待 RDMA 物理完成的时间；到期后 close 相关 connection
+        10 * 1000;                             // D 后等待 RDMA 物理完成的时间；到期后 close 相关 connection
     int64_t p2p_lease_query_timeout_ms = 500;  // 单轮 lease 查询的超时上限，内部最多等待 500ms
 
-    int64_t p2p_cancel_broadcast_timeout_ms              = 1000;
+    int64_t p2p_cancel_broadcast_timeout_ms = 1000;
     // TTL for cancelled_keys_ tombstones; should cover the longest expected
     // decode StartLoad arrival skew so we can tell "request expired" vs
     // "request never seen". Keep ≥ business deadline upper bound.
     int64_t p2p_cancelled_keys_ttl_ms           = 3600 * 1000;
-    int     cache_store_tcp_anet_rpc_thread_num     = 3;
-    int     cache_store_tcp_anet_rpc_queue_num      = 100;
-    int     cache_store_tcp_worker_queue_size        = 500;
-    int     rdma_transfer_worker_thread_count        = 16;
-    int     rdma_transfer_worker_queue_size           = 100;
-    bool    p2p_rdma_enable_h2d_copy                  = false;
-    int64_t p2p_rdma_staging_total_bytes              = 0;
-    int     p2p_prefill_sender_thread_count          = 4;
-    int     p2p_prefill_sender_queue_size            = 10000;
+    int     cache_store_tcp_anet_rpc_thread_num = 3;
+    int     cache_store_tcp_anet_rpc_queue_num  = 100;
+    int     cache_store_tcp_worker_queue_size   = 500;
+    int     rdma_transfer_worker_thread_count   = 16;
+    int     rdma_transfer_worker_queue_size     = 100;
+    bool    p2p_rdma_enable_h2d_copy            = false;
+    int64_t p2p_rdma_staging_total_bytes        = 0;
+    int     p2p_prefill_sender_thread_count     = 4;
+    int     p2p_prefill_sender_queue_size       = 10000;
 
     std::string to_string() const;
 };
@@ -486,19 +498,20 @@ struct FIFOSchedulerConfig {
     //   "N"   -> 1 prefill : N decode (decode-heavy); "1" = strict alternation.
     //   "1/X" -> X prefill : 1 decode (prefill-heavy).
     //   invalid input falls back to "1".
-    std::string decode_prefill_ratio           = "1";
-    bool        cp_force_single_prefill        = true;
+    std::string decode_prefill_ratio    = "1";
+    bool        cp_force_single_prefill = true;
     // Unconditional single-stream prefill rounds: at most one stream per
     // prefill forward regardless of the context-parallel setup. Used by the
     // deterministic batched serving mode to pin the prefill batch-total M to
     // each request's own length.
-    bool        force_single_prefill           = false;
-    int64_t     max_inited_kv_cache_streams    = 0;
-    int64_t     max_batch_tokens_without_cache = 0;
-    int64_t     max_batch_kv_len               = 0;
+    bool    force_single_prefill           = false;
+    int64_t max_inited_kv_cache_streams    = 0;
+    int64_t max_batch_tokens_without_cache = 0;
+    int64_t max_batch_kv_len               = 0;
     // Global real-context token budget per chunked-prefill forward; <=0 disables, >0 enables.
     // Config injection requires at least one seq_size_per_block and floor-aligns larger values.
-    int64_t     prefill_chunk_size = 0;
+    int64_t     prefill_chunk_size  = 0;
+    bool        async_cache_prepare = false;
     std::string to_string() const;
 };
 
@@ -547,19 +560,19 @@ struct RuntimeConfig {
 };
 
 struct PDSepConfig {
-    RoleType role_type                       = RoleType::PDFUSION;
-    bool     cache_store_rdma_mode           = true;
-    int64_t  cache_store_listen_port         = 0;
-    int64_t  cache_store_connect_port        = 0;
-    int64_t  cache_store_rdma_listen_port    = 0;
-    int64_t  cache_store_rdma_connect_port   = 0;
-    int64_t  remote_rpc_server_port          = 0;
-    int64_t  prefill_retry_times             = 0;
-    int64_t  prefill_retry_timeout_ms        = 0;
-    int64_t  load_cache_timeout_ms           = 5000;
-    int64_t  max_rpc_timeout_ms              = 2 * 3600 * 1000;  // 2h default
-    int64_t  worker_port_offset              = 0;
-    bool     decode_linear_tail_only         = false;
+    RoleType role_type                     = RoleType::PDFUSION;
+    bool     cache_store_rdma_mode         = true;
+    int64_t  cache_store_listen_port       = 0;
+    int64_t  cache_store_connect_port      = 0;
+    int64_t  cache_store_rdma_listen_port  = 0;
+    int64_t  cache_store_rdma_connect_port = 0;
+    int64_t  remote_rpc_server_port        = 0;
+    int64_t  prefill_retry_times           = 0;
+    int64_t  prefill_retry_timeout_ms      = 0;
+    int64_t  load_cache_timeout_ms         = 5000;
+    int64_t  max_rpc_timeout_ms            = 2 * 3600 * 1000;  // 2h default
+    int64_t  worker_port_offset            = 0;
+    bool     decode_linear_tail_only       = false;
 
     std::string to_string() const;
 };
@@ -709,13 +722,13 @@ struct DashScGrpcConfig: GrpcMapsConfig {
 };
 
 struct LinearAttentionConfig {
-    int         linear_conv_kernel_dim = 0;
-    int         linear_key_head_dim    = 0;
-    int         linear_num_key_heads   = 0;
-    int         linear_num_value_heads = 0;
-    int         linear_value_head_dim  = 0;
-    DataType    ssm_state_dtype        = DataType::TYPE_BF16;
-    DataType    conv_state_dtype       = DataType::TYPE_BF16;
+    int      linear_conv_kernel_dim = 0;
+    int      linear_key_head_dim    = 0;
+    int      linear_num_key_heads   = 0;
+    int      linear_num_value_heads = 0;
+    int      linear_value_head_dim  = 0;
+    DataType ssm_state_dtype        = DataType::TYPE_BF16;
+    DataType conv_state_dtype       = DataType::TYPE_BF16;
     // Execution accepts null historical checkpoint slots. Active and speculative
     // rollback state slots must still be retained by the cache manager.
     bool        supports_history_state_reclaim = false;

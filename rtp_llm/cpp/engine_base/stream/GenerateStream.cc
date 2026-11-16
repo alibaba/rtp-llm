@@ -257,6 +257,47 @@ absl::Status GenerateStream::initKVBlock() {
     return ret;
 }
 
+CachePrepareResult GenerateStream::prepareCache() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    checkTimeoutWithoutLock();
+    if (hasErrorWithoutLock() || hasEventWithoutLock(StreamEvents::CachePrepared)) {
+        reportEventWithoutLock(StreamEvents::CachePrepared);
+        return CachePrepareResult::DONE;
+    }
+    RTP_LLM_CHECK_WITH_INFO(generate_status_->getStatus() == StreamState::WAITING && !chunkedPrefillEnabled(),
+                            "background cache preparation requires an unadmitted, unchunked stream");
+    if (!hasEventWithoutLock(StreamEvents::LoadInitiated)) {
+        recordWaitLatency();
+        const auto status = stream_cache_resource_->initKVBlock();
+        if (absl::IsUnavailable(status)) {
+            return CachePrepareResult::LACK_MEM;
+        }
+        if (!status.ok()) {
+            reportEventWithoutLock(StreamEvents::Error, ErrorCode::MALLOC_FAILED, std::string(status.message()));
+            reportEventWithoutLock(StreamEvents::CachePrepared);
+            return CachePrepareResult::DONE;
+        }
+        const bool loading = stream_cache_resource_->asyncLoadCache();
+        reportEventWithoutLock(StreamEvents::LoadInitiated);
+        if (loading) {
+            recordLoadingCacheStartTime();
+            return CachePrepareResult::WAIT;
+        }
+    } else {
+        if (!stream_cache_resource_->loadCacheDone()) {
+            return CachePrepareResult::WAIT;
+        }
+        // Main's failed allocator transaction can roll back and clear this
+        // event. Retry allocation later; never publish an aborted load as ready.
+        if (!hasEventWithoutLock(StreamEvents::LoadInitiated) && !hasErrorWithoutLock()) {
+            return CachePrepareResult::LACK_MEM;
+        }
+        recordLoadingCacheDoneTime();
+    }
+    reportEventWithoutLock(StreamEvents::CachePrepared);
+    return CachePrepareResult::DONE;
+}
+
 void GenerateStream::fakeInitKVBlock(size_t reserved_blocks) {
     std::lock_guard<std::mutex> lock(*mutex_);
     stream_cache_resource_->fakeInitKVBlock(reserved_blocks);

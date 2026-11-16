@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <chrono>
 #include <mutex>
+#include <c10/core/DeviceGuard.h>
 
 using namespace std;
 namespace rtp_llm {
@@ -21,15 +22,10 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                              const std::shared_ptr<KVCacheManager>& cache_manager,
                              const kmonitor::MetricsReporterPtr     metrics_reporter,
                              const int                              max_score_len):
-    FIFOSchedulerBase(runtime_config,
-                      model_config,
-                      pd_sep_config,
-                      parallelism_config,
-                      cache_manager,
-                      metrics_reporter),
+    FIFOSchedulerBase(runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager, metrics_reporter),
     max_batch_kv_len_(static_cast<size_t>(std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_kv_len, 0))),
-    max_batch_tokens_without_cache_(static_cast<size_t>(
-        std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
+    max_batch_tokens_without_cache_(
+        static_cast<size_t>(std::max<int64_t>(runtime_config.fifo_scheduler_config.max_batch_tokens_without_cache, 0))),
     prefill_cp_size_(parallelism_config.prefill_cp_config.is_enabled() ?
                          static_cast<size_t>(std::max<int64_t>(parallelism_config.tp_size, 1)) :
                          1) {
@@ -42,11 +38,142 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
                      force_single_prefill_,
                      prefill_cp_size_,
                      max_inited_kv_cache_streams_);
+    // Chunked prefill binds allocation to each scheduler-granted chunk. Keep
+    // that main-native path intact rather than preallocating the whole prompt.
+    const bool glm_prefill = model_config.model_type == "glm5_3_flash" && pd_sep_config_.role_type == RoleType::PREFILL;
+    if ((glm_prefill || runtime_config.fifo_scheduler_config.async_cache_prepare)
+        && pd_sep_config_.role_type != RoleType::DECODE && parallelism_config.tp_rank == 0
+        && prefill_chunk_size_ <= 0) {
+        try {
+            async_cache_prepare_enabled_ = true;
+            cache_prepare_thread_ =
+                std::thread([this, rank = parallelism_config.local_rank]() { cachePrepareLoop(rank); });
+            RTP_LLM_LOG_INFO("async cache prepare enabled");
+        } catch (const std::exception& e) {
+            async_cache_prepare_enabled_ = false;
+            RTP_LLM_LOG_WARNING("cache prepare worker start failed; using scheduler path: %s", e.what());
+        }
+    }
 }
 
 FIFOScheduler::~FIFOScheduler() {
     (void)stop();
     RTP_LLM_LOG_INFO("destory FIFOScheduler");
+}
+
+absl::Status FIFOScheduler::stop() {
+    std::lock_guard<std::mutex> stop_lock(cache_prepare_stop_mutex_);
+    auto                        status = FIFOSchedulerBase::stop();
+    if (cache_prepare_thread_.joinable()) {
+        cache_prepare_thread_.join();
+    }
+    return status;
+}
+
+bool FIFOScheduler::hasUnpreparedCache() const {
+    const auto pending = [](const auto& stream) { return !stream->hasEvent(StreamEvents::CachePrepared); };
+    if (std::any_of(waiting_streams_.begin(), waiting_streams_.end(), pending)) {
+        return true;
+    }
+    return std::any_of(waiting_group_queue_.begin(), waiting_group_queue_.end(), [&](const auto& group) {
+        return std::any_of(group.begin(), group.end(), pending);
+    });
+}
+
+bool FIFOScheduler::prepareWaitingCache() {
+    // Serialize pool metadata with schedule(), while overlapping preparation
+    // with model execution outside this lock. No unsynchronized curBlocksNum
+    // snapshots or legacy connector mutations are introduced.
+    size_t     inited   = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
+    size_t     examined = 0;
+    bool       changed  = false;
+    bool       blocked  = false;
+    const auto prepare  = [&](const auto& streams) {
+        for (const auto& stream : streams) {
+            if (stream->hasEvent(StreamEvents::CachePrepared)) {
+                continue;
+            }
+            if (++examined > 8 || blocked) {
+                break;
+            }
+            const bool already_inited = stream->curBlocksNum() > 0;
+            if (!stream->hasError() && !already_inited && max_inited_kv_cache_streams_ > 0
+                && inited >= max_inited_kv_cache_streams_) {
+                blocked = true;
+                break;
+            }
+            auto result = CachePrepareResult::DONE;
+            try {
+                result = stream->prepareCache();
+            } catch (const std::exception& e) {
+                stream->reportError(ErrorCode::UNKNOWN_ERROR, std::string("cache prepare failed: ") + e.what());
+                stream->reportEvent(StreamEvents::CachePrepared);
+            } catch (...) {
+                stream->reportError(ErrorCode::UNKNOWN_ERROR, "cache prepare failed with unknown exception");
+                stream->reportEvent(StreamEvents::CachePrepared);
+            }
+            if (!already_inited && stream->curBlocksNum() > 0) {
+                ++inited;
+            }
+            changed = changed || result == CachePrepareResult::DONE;
+            if (result == CachePrepareResult::LACK_MEM) {
+                blocked = true;
+                break;
+            }
+        }
+    };
+    prepare(waiting_streams_);
+    for (const auto& group : waiting_group_queue_) {
+        if (blocked || examined >= 8) {
+            break;
+        }
+        prepare(group);
+    }
+    return changed;
+}
+
+void FIFOScheduler::cachePrepareLoop(int local_rank) {
+    try {
+#if USING_CUDA || USING_ROCM
+        c10::DeviceGuard device_guard(c10::Device(c10::kCUDA, static_cast<c10::DeviceIndex>(local_rank)));
+#endif
+        std::unique_lock<std::mutex> lock(lock_);
+        while (!stop_) {
+            cond_.wait(lock, [this] { return stop_ || hasUnpreparedCache(); });
+            if (stop_) {
+                break;
+            }
+            if (prepareWaitingCache()) {
+                schedule_trigger_ = true;
+                cond_.notify_all();
+            }
+            // Pending transactions and memory pressure need bounded retries,
+            // including when PD-held resources are released outside schedule().
+            // Release lock_ so admission/cancellation can always make progress.
+            cond_.wait_for(lock, std::chrono::milliseconds(10));
+        }
+    } catch (const std::exception& e) {
+        std::lock_guard<std::mutex> lock(lock_);
+        // A transaction prepared by this worker has not passed through
+        // LOADING_CACHE. Do not let synchronous fallback bypass its readiness.
+        const auto fail_pending = [](const auto& stream) {
+            if (stream->hasEvent(StreamEvents::LoadInitiated) && !stream->hasEvent(StreamEvents::CachePrepared)) {
+                stream->reportError(ErrorCode::UNKNOWN_ERROR, "cache prepare worker stopped during pending load");
+            }
+        };
+        for (const auto& stream : waiting_streams_) {
+            fail_pending(stream);
+        }
+        for (const auto& group : waiting_group_queue_) {
+            for (const auto& stream : group) {
+                fail_pending(stream);
+            }
+        }
+        async_cache_prepare_enabled_ = false;
+        schedule_trigger_            = true;
+        cond_.notify_all();
+        RTP_LLM_LOG_WARNING("cache prepare worker stopped; using scheduler path: %s", e.what());
+    }
 }
 
 void FIFOScheduler::cancelGroups(StreamGroupQueue& group_queue) {
@@ -210,8 +337,7 @@ bool FIFOScheduler::evaluateRunningBatch(const std::list<GenerateStreamPtr>& str
                                   new_stream);
 }
 
-bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
-                                          const GenerateStreamPtr&       new_stream) {
+bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) {
     // FIFOScheduler's own scheduling loop uses the counter-based evaluateRunningBatch();
     // this list-based FIFOSchedulerBase entry point delegates to the list overload so
     // both paths agree.
@@ -358,13 +484,10 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
     last_admitted_context_token_size_ = 0;
     last_waiting_oldest_age_us_       = 0;
     if (!waiting_streams.empty()) {
-        auto oldest_enqueue_time_us = (*std::min_element(waiting_streams.begin(),
-                                                         waiting_streams.end(),
-                                                         [](const auto& lhs, const auto& rhs) {
-                                                             return lhs->schedulerEnqueueTimeUs()
-                                                                    < rhs->schedulerEnqueueTimeUs();
-                                                         }))
-                                          ->schedulerEnqueueTimeUs();
+        auto oldest_enqueue_time_us =
+            (*std::min_element(waiting_streams.begin(), waiting_streams.end(), [](const auto& lhs, const auto& rhs) {
+                return lhs->schedulerEnqueueTimeUs() < rhs->schedulerEnqueueTimeUs();
+            }))->schedulerEnqueueTimeUs();
         last_waiting_oldest_age_us_ =
             std::max<int64_t>(0, autil::TimeUtility::currentTimeInMicroSeconds() - oldest_enqueue_time_us);
     }
@@ -412,13 +535,17 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
         auto  current = it++;
         auto& stream  = *current;
 
-        if (stream->hasError()) {
+        if (async_cache_prepare_enabled_ ? stream->checkTimeoutAndHasError() : stream->hasError()) {
             auto state     = stream->getStatus();
             auto new_state = stream->moveToNext();
             if (new_state != state) {
                 addStreamToNewState(stream, new_state);
                 waiting_streams.erase(current);
             }
+            continue;
+        }
+
+        if (async_cache_prepare_enabled_ && !stream->hasEvent(StreamEvents::CachePrepared)) {
             continue;
         }
 
@@ -573,7 +700,7 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
     auto&        group         = waiting_group_queue_.front();
     const size_t original_size = group.size();
     for (auto it = group.begin(); it != group.end();) {
-        if ((*it)->hasError()) {
+        if (async_cache_prepare_enabled_ ? (*it)->checkTimeoutAndHasError() : (*it)->hasError()) {
             (*it)->moveToNext();
             it = group.erase(it);
         } else {
@@ -589,8 +716,11 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
     const size_t inited_kv_streams       = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
     size_t       newly_inited_kv_streams = 0;
     for (auto it = group.begin(); it != group.end();) {
-        auto       current           = it++;
-        auto&      stream            = *current;
+        auto  current = it++;
+        auto& stream  = *current;
+        if (async_cache_prepare_enabled_ && !stream->hasEvent(StreamEvents::CachePrepared)) {
+            continue;
+        }
         const bool already_inited_kv = stream->curBlocksNum() > 0;
         if (max_inited_kv_cache_streams_ > 0 && !already_inited_kv
             && inited_kv_streams + newly_inited_kv_streams >= max_inited_kv_cache_streams_) {
