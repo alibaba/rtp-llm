@@ -505,6 +505,14 @@ bool StreamCacheResource::asyncLoadCache() {
     return allocator_load_context_ != nullptr;
 }
 
+std::shared_ptr<AsyncContext> StreamCacheResource::takeLoadCompletionContext() {
+    if (!allocator_load_context_ || notified_load_context_.lock() == allocator_load_context_) {
+        return nullptr;
+    }
+    notified_load_context_ = allocator_load_context_;
+    return allocator_load_context_;
+}
+
 bool StreamCacheResource::loadCacheDone() {
     if (allocator_load_context_) {
         if (!allocator_load_context_->done()) {

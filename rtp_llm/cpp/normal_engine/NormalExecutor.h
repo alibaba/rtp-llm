@@ -50,7 +50,6 @@ public:
     using ModelFactory = std::function<std::unique_ptr<ModelBase>(const GptModelInitParams&)>;
     static ModelFactory test_model_factory;
 
-
 protected:
     // Stream-async dispatch gate. Reuses the same env var as MtpExecutor so a
     // single launcher knob (`RTP_LLM_STREAM_ASYNC=1`) flips both paths.

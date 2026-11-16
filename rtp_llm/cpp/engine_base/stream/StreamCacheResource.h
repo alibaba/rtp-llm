@@ -48,6 +48,8 @@ public:
     void                        releaseResource();
     bool                        asyncLoadCache();
     bool                        loadCacheDone();
+    // Register one scheduler wakeup per allocator load without owning its lifetime.
+    std::shared_ptr<AsyncContext> takeLoadCompletionContext();
 
     // swap all linear groups rhs and lhs
     void swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs);
@@ -157,6 +159,7 @@ private:
     bool                             resource_released_     = false;
     bool                             skip_remote_cache_     = false;
     std::shared_ptr<AsyncContext>    allocator_load_context_;
+    std::weak_ptr<AsyncContext>      notified_load_context_;
     RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
     int64_t                          malloc_begin_time_us_    = 0;
     int64_t                          load_wait_begin_time_us_ = 0;

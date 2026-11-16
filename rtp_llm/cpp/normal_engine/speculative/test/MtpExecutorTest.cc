@@ -1445,13 +1445,13 @@ sys.path = [p for p in sys.path if not os.path.isdir(os.path.join(p, "nvidia"))]
 sys.modules['_hashlib'] = None
 import torch)");
     c10::InferenceMode inference_guard(true);
-    auto                   module = py::module_::import("__main__");
+    auto               module = py::module_::import("__main__");
     py::class_<torch_ext::PyModelInitResources>(module, "TestModelInitResources");
     py::class_<torch_ext::PyModelInputs>(module, "TestModelInputs");
     py::class_<torch_ext::PyModelOutputs>(module, "TestModelOutputs");
-    auto types                  = py::module_::import("types");
-    auto py_model               = types.attr("SimpleNamespace")();
-    py_model.attr("initialize") = py::cpp_function([](py::object) { return true; });
+    auto types                         = py::module_::import("types");
+    auto py_model                      = types.attr("SimpleNamespace")();
+    py_model.attr("initialize")        = py::cpp_function([](py::object) { return true; });
     bool expect_counts                 = false;
     auto forward                       = py::cpp_function([&](const torch_ext::PyModelInputs& inputs, py::object) {
         EXPECT_EQ(inputs.expert_token_counts.defined(), expect_counts);
@@ -1462,14 +1462,14 @@ import torch)");
             torch::zeros({inputs.input_ids.numel(), 1}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA)));
     });
     py_model.attr("prepare_fmha_impl") = py::cpp_function([](py::args) { return py::none(); });
-    py_model.attr("forward")         = forward;
-    py_model.attr("forward_propose") = forward;
-    py_model.attr("forward_commit")  = forward;
-    py_model.attr("get_eplb_layers") = py::cpp_function([]() { return py::list(); });
+    py_model.attr("forward")           = forward;
+    py_model.attr("forward_propose")   = forward;
+    py_model.attr("forward_commit")    = forward;
+    py_model.attr("get_eplb_layers")   = py::cpp_function([]() { return py::list(); });
 
-    int  runtime_initializations                 = 0;
+    int                runtime_initializations = 0;
     std::array<int, 2> runtime_steps{};
-    auto runtime_module                          = types.attr("ModuleType")("rtp_llm.eplb.runtime");
+    auto               runtime_module            = types.attr("ModuleType")("rtp_llm.eplb.runtime");
     runtime_module.attr("RuntimeExpertBalancer") = py::cpp_function([&](py::object,
                                                                         py::object config,
                                                                         size_t     ep_rank,
@@ -1520,7 +1520,7 @@ import torch)");
                     SCOPED_TRACE(::testing::Message()
                                  << "mode=" << static_cast<int>(mode) << " sp_type=" << static_cast<int>(sp_type)
                                  << " role=" << static_cast<int>(role) << " enable_graph=" << enable_graph);
-                    runtime_initializations                   = 0;
+                    runtime_initializations = 0;
                     runtime_steps           = {};
                     params.metrics_reporter =
                         std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
@@ -4555,7 +4555,7 @@ TEST_F(MtpExecutorTest, testDSparkDraftPureExplicitTopKUsesFullAndMixedUsesCap) 
     };
     for (const auto* cap : {"0", "512", "1024", "4096"}) {
         autil::EnvGuard force_topk("RTP_LLM_DSPARK_FORCE_TOPK", cap);
-        const int       width   = std::stoi(cap);
+        const int       width = std::stoi(cap);
         for (float top_p : {0.0f, 0.95f, 1.0f}) {
             auto sampled = run(components, vocab, 16, 0, 0, true, top_p);
             EXPECT_EQ(sampled.all_probs.size(2), width ? width : vocab);

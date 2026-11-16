@@ -55,6 +55,14 @@ class BootstrapError(ValueError):
         super().__init__(message or code)
 
 
+class GangTopologyBootstrapError(BootstrapError):
+    """An invalid C2 topology requires the platform to restart the container."""
+
+    def __init__(self, code, missing_ip_parts=()):
+        self.missing_ip_parts = missing_ip_parts
+        super().__init__(code)
+
+
 def enter_worker_cgroup():
     """Join the ASI-delegated worker leaf before importing torch."""
     path = os.environ.get(WORKER_CGROUP_ENV)
@@ -552,10 +560,12 @@ def _model_manifest_revision(checkpoint):
     return "manifest@" + digest.hexdigest()
 
 
-def _prepare_network_identity(env, directory):
-    """Resolve startup identity once for the Owner and all Worker attempts."""
+def _prepare_c2_topology(env):
+    from rtp_llm.models_py.modules.dsv41.engram_distributed.config import (
+        GangInfoMissingIP,
+        ShardConfigError,
+    )
     from rtp_llm.models_py.modules.dsv41.engram_distributed.resident_network import (
-        STATE_ENV,
         TRANSPORT_ENV,
         c2_topology,
     )
@@ -563,6 +573,25 @@ def _prepare_network_identity(env, directory):
     result = dict(env)
     if "RTP_ENGRAM_RESIDENT_DIR" in result or result.get(TRANSPORT_ENV, "tcp") != "tcp":
         raise BootstrapError("RESIDENT_C2_TCP_REQUIRED")
+    try:
+        generation, peers, _ = c2_topology(result, report_missing_ips=True)
+    except GangInfoMissingIP as error:
+        raise GangTopologyBootstrapError(error.code, error.parts) from None
+    except ShardConfigError as error:
+        raise GangTopologyBootstrapError(error.code) from None
+    if result.setdefault("RTP_ENGRAM_RESIDENT_GENERATION", generation) != generation:
+        raise BootstrapError("RESIDENT_C2_GANG_IDENTITY_MISMATCH")
+    if len(peers) > 1:
+        result.setdefault("RTP_ENGRAM_STORAGE", "host_shared")
+    return result
+
+
+def _prepare_resident_state(env, directory):
+    from rtp_llm.models_py.modules.dsv41.engram_distributed.resident_network import (
+        STATE_ENV,
+    )
+
+    result = dict(env)
     state = Path(result.get(STATE_ENV, str(directory / "owner-state")))
     if not state.is_absolute():
         raise ValueError("resident local state requires an absolute path")
@@ -575,10 +604,6 @@ def _prepare_network_identity(env, directory):
     ):
         raise ValueError("resident local state must be private and owned by this user")
     result[STATE_ENV] = str(state)
-    generation_env = "RTP_ENGRAM_RESIDENT_GENERATION"
-    generation, peers, _ = c2_topology(result)
-    if result.setdefault(generation_env, generation) != generation:
-        raise BootstrapError("RESIDENT_C2_GANG_IDENTITY_MISMATCH")
     if "RTP_ENGRAM_MODEL_REVISION" not in result:
         result["RTP_ENGRAM_MODEL_REVISION"] = _model_manifest_revision(
             result["RTP_ENGRAM_CHECKPOINT"]
@@ -586,11 +611,9 @@ def _prepare_network_identity(env, directory):
     revision = result["RTP_ENGRAM_MODEL_REVISION"]
     if not 0 < len(revision) <= 256:
         raise ValueError("invalid resident model revision")
-    if len(peers) > 1:
-        result.setdefault("RTP_ENGRAM_STORAGE", "host_shared")
     _LOGGER.info(
         "prefill event=resident_identity_ready generation=%s revision=%s identity_source=c2_gang",
-        generation,
+        result["RTP_ENGRAM_RESIDENT_GENERATION"],
         revision,
     )
     return result
@@ -648,8 +671,10 @@ def supervise_prefill(args):
         socket.gethostname(),
         os.getpid(),
     )
+    mounts_started = False
     try:
         try:
+            _prepare_c2_topology(worker_env)
             tmp_root = _supervisor_tmp_root()
             if tmp_root is None:
                 _LOGGER.warning(
@@ -660,9 +685,12 @@ def supervise_prefill(args):
             ) as directory:
                 try:
                     worker_env, remaining = _resolve_worker_args(worker_env, args)
+                    mounts_started = True
                     worker_env = _prepare_model_mounts(worker_env)
                     _validate_worker_preconditions(worker_env)
-                    worker_env = _prepare_network_identity(worker_env, Path(directory))
+                    # C2 may refresh ganginfo while the model paths are mounted.
+                    worker_env = _prepare_c2_topology(worker_env)
+                    worker_env = _prepare_resident_state(worker_env, Path(directory))
                     supervisor.worker_env = worker_env
                     supervisor.worker_cmd = [*worker_cmd[:3], *remaining]
                     if owner_args and not supervisor.stopping:
@@ -675,9 +703,9 @@ def supervise_prefill(args):
                             "prefill event=owner_started pid=%s", supervisor.owner.pid
                         )
                     supervisor.run(Path(directory))
+                except GangTopologyBootstrapError:
+                    raise
                 except Exception as error:
-                    # Keep the entry process alive and unready when bootstrap
-                    # fails. Never log env/secrets; only the safe error code.
                     _hold_after_bootstrap_failure(supervisor, error)
                 finally:
                     if supervisor.owner is not None:
@@ -687,6 +715,13 @@ def supervise_prefill(args):
                             supervisor.owner.pid,
                             supervisor.owner.returncode,
                         )
+        except GangTopologyBootstrapError as error:
+            _LOGGER.error(
+                "prefill event=ganginfo_bootstrap_failed code=%s missing_ip_parts=%s",
+                error.code,
+                json.dumps(error.missing_ip_parts),
+            )
+            raise SystemExit(1) from None
         except Exception as error:
             # Temp-dir validation/creation is part of bootstrap: a failure
             # must not terminate the entry process and trigger a gang recycle.
@@ -695,9 +730,10 @@ def supervise_prefill(args):
         _LOGGER.info(
             "prefill event=supervisor_stopped signal=%s", supervisor.stop_signal
         )
-        from rtp_llm.utils.fuser import umount_all
+        if mounts_started:
+            from rtp_llm.utils.fuser import umount_all
 
-        umount_all()
+            umount_all()
 
 
 if __name__ == "__main__":

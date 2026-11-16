@@ -124,7 +124,7 @@ protected:
                                              const std::vector<int32_t>&         sampled_tokens) {
         StreamGroups stream_groups(streams);
         MergedOutput outputs;
-        outputs.model_output.logits = raw_logits.to(torch::kCUDA);
+        outputs.model_output.logits           = raw_logits.to(torch::kCUDA);
         outputs.sampler_output.sampling_probs = torch::softmax(
             outputs.model_output.logits.narrow(1, 0, streams.front()->vocabSize()).to(torch::kFloat32), -1);
         outputs.sampler_output.token_ids =
@@ -1363,8 +1363,8 @@ TEST_P(OutputDispatchTest, testStatefulProcessorsAdvanceForEveryDispatchedStream
     model_config.max_seq_len = 8;
     model_config.vocab_size  = 2;
     model_config.num_layers  = 1;
-    RuntimeConfig                                     runtime_config;
-    std::list<GenerateStreamPtr>                      streams;
+    RuntimeConfig                                             runtime_config;
+    std::list<GenerateStreamPtr>                              streams;
     std::vector<std::shared_ptr<TestStatefulLogitsProcessor>> processors;
     for (int input_token : {0, 1}) {
         auto query             = make_shared<GenerateInput>();
@@ -2842,11 +2842,11 @@ TEST_F(NormalBatchStreamProcessorTest, testThinkingSkipsLogprobsUntilAfterFirstC
         EXPECT_EQ(sampler_input->return_logprobs, expect_logprobs);
 
         MergedOutput outputs;
-        outputs.model_output                            = model_output;
-        outputs.sampler_output.token_ids                = torch::tensor({{sampled_token}}, torch::kInt32);
-        outputs.sampler_output.sampling_probs           = sampler_input->return_logprobs ?
-                                                              torch::softmax(sampler_input->logits.to(torch::kFloat32), -1) :
-                                                              torch::Tensor();
+        outputs.model_output                  = model_output;
+        outputs.sampler_output.token_ids      = torch::tensor({{sampled_token}}, torch::kInt32);
+        outputs.sampler_output.sampling_probs = sampler_input->return_logprobs ?
+                                                    torch::softmax(sampler_input->logits.to(torch::kFloat32), -1) :
+                                                    torch::Tensor();
         ASSERT_TRUE(processor->dispatch(stream_groups, outputs).ok());
     };
 
@@ -2967,11 +2967,11 @@ TEST_F(NormalBatchStreamProcessorTest, testProcessedLogprobsMixedBatchAndPaddedV
         ASSERT_TRUE(sampler_input->return_logprobs);
 
         MergedOutput outputs;
-        outputs.model_output                            = model_output;
-        outputs.sampler_output.token_ids                = torch::tensor({0, 1}, torch::kInt32).reshape({2, 1});
-        outputs.sampler_output.sampling_probs           = sampler_input->return_logprobs ?
-                                                              torch::softmax(sampler_input->logits.to(torch::kFloat32), -1) :
-                                                              torch::Tensor();
+        outputs.model_output                  = model_output;
+        outputs.sampler_output.token_ids      = torch::tensor({0, 1}, torch::kInt32).reshape({2, 1});
+        outputs.sampler_output.sampling_probs = sampler_input->return_logprobs ?
+                                                    torch::softmax(sampler_input->logits.to(torch::kFloat32), -1) :
+                                                    torch::Tensor();
         ASSERT_TRUE(processor->dispatch(stream_groups, outputs).ok());
 
         auto plain_result   = plain_stream->nextOutput();
@@ -3018,7 +3018,7 @@ TEST_F(NormalBatchStreamProcessorTest, testDispatchLogprobsUsesProcessedProbabil
     auto            processor    = makeLogprobsProcessor(model_config);
     auto            requested    = makeLogprobsStream(model_config, true, 2, 2, true);
     auto            plain        = makeLogprobsStream(model_config, false, 0, 2, true);
-    GptModelInputs model_inputs;
+    GptModelInputs  model_inputs;
     GptModelOutputs model_output;
     model_output.logits = torch::tensor({{1.f, 2.f, 3.f, 4.f, 50.f, 60.f}, {6.f, 7.f, 8.f, 9.f, 70.f, 80.f}},
                                         torch::TensorOptions().device(torch::kCUDA));

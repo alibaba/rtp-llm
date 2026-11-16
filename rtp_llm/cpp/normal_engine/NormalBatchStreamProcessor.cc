@@ -61,7 +61,7 @@ absl::Status NormalBatchStreamProcessor::dispatchPrefillOnly(
     const StreamGroups&                                   stream_groups,
     GenerationPrefillCudaGraphStatus                      generation_prefill_cuda_graph_status) const {
     for (const auto& stream : stream_groups.allStreams()) {
-        auto empty_token_ids = torch::empty({stream->currentBatchSize(), 0}, torch::kInt32);
+        auto             empty_token_ids = torch::empty({stream->currentBatchSize(), 0}, torch::kInt32);
         StreamUpdateInfo update_info{empty_token_ids,
                                      /*num_new_tokens=*/0,
                                      /*hidden_states=*/torch::Tensor(),

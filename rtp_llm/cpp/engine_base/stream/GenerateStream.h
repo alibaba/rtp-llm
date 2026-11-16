@@ -447,13 +447,14 @@ public:
     void          setLastHiddenStates(torch::Tensor hidden_states) {
         last_hidden_states_ = std::move(hidden_states);
     };
-    torch::Tensor        getSoftmaxProbs();
-    torch::Tensor        getTokenLogProbs() const;
-    torch::Tensor        getTopLogprobTokenIds() const;
-    torch::Tensor        getTopLogProbs() const;
-    StreamCacheResource& streamCacheResource();
-    void                 setPerfTest(bool perf_test_);
-    bool                 isPerfTest() const {
+    torch::Tensor                 getSoftmaxProbs();
+    torch::Tensor                 getTokenLogProbs() const;
+    torch::Tensor                 getTopLogprobTokenIds() const;
+    torch::Tensor                 getTopLogProbs() const;
+    StreamCacheResource&          streamCacheResource();
+    std::shared_ptr<AsyncContext> takeLoadCompletionContext();
+    void                          setPerfTest(bool perf_test_);
+    bool                          isPerfTest() const {
         return perf_test_;
     }
 
@@ -661,6 +662,7 @@ public:
     void endDecodePublicationSubmission();
     void retainUnknownDecodePublication(const std::shared_ptr<GenerateStream>& owner);
     void incPendingAsyncBookkeeping();
+    bool tryHoldPrefillResources();
     void decPendingAsyncBookkeepingAndMaybeRelease();
     bool hasPendingAsyncBookkeeping() const;
     void waitPendingAsyncBookkeeping();

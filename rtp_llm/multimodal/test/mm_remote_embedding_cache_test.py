@@ -13,6 +13,9 @@ from rtp_llm.config.py_config_modules import ProfilingDebugLoggingConfig, VitCon
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
+from rtp_llm.multimodal.kvcm.registered_transport import (
+    RegisteredTransportUnavailableError,
+)
 from rtp_llm.multimodal.kvcm.tensor_object import (
     pack_object,
     plan_object,
@@ -35,18 +38,155 @@ from rtp_llm.utils.grpc_util import trans_from_tensor
 
 
 class RemoteCacheTest(unittest.TestCase):
-    def test_error_diagnostics_preserve_code_and_dma_state_without_error_text(self):
-        error = RuntimeError("private provider detail must not be logged here")
+    def test_timed_out_read_reports_late_failure_without_double_counting_qps(self):
+        from rtp_llm.multimodal.kvcm.lookup import KvMetaLookupError
+
+        store = Store({"key": pack_object(plan_object((torch.ones(3), None)))})
+        started, release = threading.Event(), threading.Event()
+
+        def fail_later(*args, **kwargs):
+            started.set()
+            release.wait(2)
+            raise KvMetaLookupError(
+                "metadata connection refused; token=do-not-log", reason="grpc", code=14
+            )
+
+        remote = self.remote(store, read_timeout_ms=20)
+        with patch.object(store, "load_one", side_effect=fail_later), patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
+        ) as report, self.assertLogs(level="ERROR") as logs:
+            try:
+                self.assertIsNone(remote.load("key", trace_id="late-failure"))
+                self.assertTrue(started.is_set())
+                self.assertEqual(remote.stats()["inflight_tasks"], 1)
+            finally:
+                release.set()
+            deadline = time.monotonic() + 2
+            while remote.stats()["inflight_tasks"] and time.monotonic() < deadline:
+                time.sleep(0.005)
+        events = [
+            json.loads(line.split("MM_EMB_REMOTE_JSON ", 1)[1]) for line in logs.output
+        ]
+        self.assertEqual(
+            [e["event"] for e in events], ["read_error", "read_late_error"]
+        )
+        self.assertTrue(events[1]["caller_timed_out"])
+        self.assertEqual(events[1]["stage"], "transfer")
+        self.assertEqual(events[1]["error_code"], 14)
+        self.assertEqual(events[1]["trace_id"], "late-failure")
+        self.assertIn("metadata connection refused", events[1]["error_message"])
+        self.assertNotIn("do-not-log", "\n".join(logs.output))
+        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+        self.assertEqual(remote.stats()["inflight_bytes"], 0)
+        self.assertEqual(
+            self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_READ_QPS_METRIC),
+            [(1, {"status": "timeout"})],
+        )
+
+    def test_lookup_failure_keeps_sanitized_service_or_grpc_cause(self):
+        import grpc
+        from unittest.mock import Mock
+
+        from rtp_llm.multimodal.kvcm.lookup import KvMetaLookup, KvMetaLookupError
+
+        class Unavailable(grpc.RpcError):
+            def code(self):
+                return grpc.StatusCode.UNAVAILABLE
+
+            def details(self):
+                return "metadata connection refused; token=do-not-log"
+
+        direct = MMRemoteEmbeddingCache._error_context(
+            Unavailable("metadata unavailable")
+        )
+        self.assertEqual(direct["error_code"], "UNAVAILABLE")
+        self.assertEqual(direct["error_numeric_code"], 14)
+        self.assertIn("metadata connection refused", direct["error_details"])
+        self.assertNotIn("do-not-log", json.dumps(direct))
+
+        config = SimpleNamespace(
+            addresses=("unused:1",),
+            instance_id="instance",
+            call_timeout_ms=100,
+            max_object_bytes=65536,
+            vipserver_domain="",
+        )
+        for grpc_failure in (False, True):
+            with self.subTest(grpc_failure=grpc_failure):
+                call = Mock()
+                if grpc_failure:
+                    call.side_effect = Unavailable(
+                        "metadata connection refused; token=do-not-log"
+                    )
+                else:
+                    call.return_value = SimpleNamespace(
+                        header=SimpleNamespace(
+                            status=SimpleNamespace(
+                                code=9,
+                                message="metadata leader changed; token=do-not-log",
+                            )
+                        )
+                    )
+                channel = Mock()
+                channel.unary_unary.return_value = call
+                with patch(
+                    "rtp_llm.multimodal.kvcm.lookup.grpc.insecure_channel",
+                    return_value=channel,
+                ):
+                    lookup = KvMetaLookup(config)
+                try:
+                    with self.assertRaises(KvMetaLookupError) as caught:
+                        lookup.size("key")
+                    fields = MMRemoteEmbeddingCache._error_context(caught.exception)
+                    self.assertIn(
+                        (
+                            "metadata connection refused"
+                            if grpc_failure
+                            else "metadata leader changed"
+                        ),
+                        fields["error_causes"][0]["error_message"],
+                    )
+                    self.assertNotIn("do-not-log", json.dumps(fields))
+                    call.assert_called_once()
+                finally:
+                    lookup.close()
+
+    def test_error_details_are_bounded_redacted_and_preserve_suppressed_cause(self):
+        secret = "do-not-log-this-secret"
+        try:
+            raise RuntimeError(
+                'PACE quota exceeded; "password": "' + secret + '"; '
+                "redis://user:" + secret + "@host/44; Authorization: Bearer " + secret
+            )
+        except RuntimeError:
+            try:
+                raise RuntimeError("metadata request failed") from None
+            except RuntimeError as error:
+                fields = MMRemoteEmbeddingCache._error_context(error)
+        self.assertEqual(fields["error_message"], "metadata request failed")
+        cause = fields["error_causes"][0]
+        self.assertIn("PACE quota exceeded", cause["error_message"])
+        self.assertNotIn(secret, json.dumps(fields))
+        self.assertLessEqual(len(cause["error_message"]), 384)
+        long = MMRemoteEmbeddingCache._error_context(RuntimeError("x" * 10000))
+        self.assertEqual(len(long["error_message"]), 384)
+
+    def test_error_diagnostics_preserve_code_message_and_dma_state(self):
+        error = RuntimeError("PACE allocation rejected: capacity exhausted")
         error.code = SimpleNamespace(name="ER_INVALID_GRPCSTATUS")
         error.data_transfer_may_be_inflight = False
         self.assertEqual(
             MMRemoteEmbeddingCache._error_context(error),
             {
                 "error_type": "RuntimeError",
+                "error_message": "PACE allocation rejected: capacity exhausted",
                 "error_code": "ER_INVALID_GRPCSTATUS",
                 "data_transfer_may_be_inflight": False,
             },
         )
+
+        error.reason = "private credential=do-not-log"
+        self.assertNotIn("error_reason", MMRemoteEmbeddingCache._error_context(error))
 
         class BrokenError(RuntimeError):
             @property
@@ -55,8 +195,99 @@ class RemoteCacheTest(unittest.TestCase):
 
         self.assertEqual(
             MMRemoteEmbeddingCache._error_context(BrokenError()),
-            {"error_type": "BrokenError"},
+            {"error_type": "BrokenError", "error_message": "BrokenError"},
         )
+
+    def test_error_logs_preserve_details_and_redact_credentials(self):
+        secret = "private credential=do-not-log"
+        sdk_error = RuntimeError(secret)
+        sdk_error.code = SimpleNamespace(name="ER_SDK_ERROR_BUFFER_SAFE")
+        sdk_error.reason = "sdk_buffer_safe_failure"
+        sdk_error.data_transfer_may_be_inflight = False
+        errors = [
+            (sdk_error, "sdk_buffer_safe_failure"),
+            (
+                RegisteredTransportUnavailableError(
+                    secret,
+                    quarantined=True,
+                    initial_failure={
+                        "error_type": "RuntimeError",
+                        "error_code": "ER_SDK_TIMEOUT",
+                        "error_reason": "sdk_timeout",
+                        "data_transfer_may_be_inflight": True,
+                    },
+                    quarantine_id="abcd1234",
+                ),
+                "gdr_transport_quarantined",
+            ),
+            (
+                RegisteredTransportUnavailableError(secret, quarantined=False),
+                "gdr_transport_closed",
+            ),
+        ]
+        for operation, method, stage in (
+            ("read", "object_size", "metadata"),
+            ("read", "load_one", "transfer"),
+            ("write", "save_one", "transfer"),
+        ):
+            for error, reason in errors:
+                with self.subTest(operation=operation, stage=stage, reason=reason):
+                    store = Store(
+                        {"key": pack_object(plan_object((torch.ones(3), None)))}
+                    )
+                    remote = self.remote(store)
+                    with patch.object(
+                        store, method, side_effect=error
+                    ), self.assertLogs(level="ERROR") as logs:
+                        if operation == "read":
+                            self.assertIsNone(remote.load("key", trace_id="safe-read"))
+                        else:
+                            remote.submit_result(
+                                "key", (torch.ones(3), None), trace_id="safe-write"
+                            )
+                            deadline = time.monotonic() + 2
+                            while (
+                                remote.stats()["inflight_tasks"]
+                                and time.monotonic() < deadline
+                            ):
+                                time.sleep(0.005)
+                            self.assertEqual(remote.stats()["inflight_tasks"], 0)
+                        remote.close()
+                    payloads = [
+                        json.loads(line.split("MM_EMB_REMOTE_JSON ", 1)[1])
+                        for line in logs.output
+                        if "MM_EMB_REMOTE_JSON " in line
+                    ]
+                    failures = [
+                        p for p in payloads if p["event"] == operation + "_error"
+                    ]
+                    self.assertEqual(len(failures), 1)
+                    self.assertEqual(failures[0]["error_reason"], reason)
+                    self.assertEqual(failures[0]["error_type"], type(error).__name__)
+                    self.assertEqual(failures[0]["stage"], stage)
+                    self.assertEqual(failures[0]["operation"], operation)
+                    self.assertIn("<redacted>", failures[0]["error_message"])
+                    self.assertEqual(failures[0]["key"], "key")
+                    self.assertEqual(failures[0]["trace_id"], "safe-" + operation)
+                    if stage == "metadata":
+                        self.assertEqual(failures[0]["nbytes"], 0)
+                    else:
+                        self.assertGreater(failures[0]["nbytes"], 0)
+                    if reason == "gdr_transport_quarantined":
+                        self.assertTrue(failures[0]["restart_required"])
+                        self.assertEqual(failures[0]["quarantine_id"], "abcd1234")
+                        self.assertEqual(
+                            failures[0]["initial_error_code"], "ER_SDK_TIMEOUT"
+                        )
+                        self.assertEqual(
+                            failures[0]["initial_error_reason"], "sdk_timeout"
+                        )
+                    if error is sdk_error:
+                        self.assertEqual(
+                            failures[0]["error_code"], "ER_SDK_ERROR_BUFFER_SAFE"
+                        )
+                        self.assertFalse(failures[0]["data_transfer_may_be_inflight"])
+                    self.assertNotIn(secret, "\n".join(logs.output))
 
     def remote(self, store, **kwargs):
         options = dict(
@@ -226,30 +457,39 @@ class RemoteCacheTest(unittest.TestCase):
         factory.assert_called_once()
         self.assertFalse(store.closed)
 
-    def test_audit_is_opt_in_and_logging_failure_does_not_break_cache(self):
-        from unittest.mock import Mock
-
+    def test_normal_events_are_silent_even_with_audit_enabled(self):
         remote = self.remote(Store())
-        remote._audit_enabled = False
-        buffer = Mock()
-        self.assertEqual(remote._audit_payload(buffer), {})
-        buffer.numpy.assert_not_called()
-        with patch("rtp_llm.multimodal.mm_remote_embedding_cache.logging.info") as log:
-            remote.record("cache_admitted")
-            log.assert_not_called()
-        remote._audit_enabled = True
-        with patch(
-            "rtp_llm.multimodal.mm_remote_embedding_cache.logging.info",
-            side_effect=RuntimeError("sink"),
+        for audit in (False, True):
+            remote._audit_enabled = audit
+            with patch(
+                "rtp_llm.multimodal.mm_remote_embedding_cache.logging.info"
+            ) as info, patch(
+                "rtp_llm.multimodal.mm_remote_embedding_cache.logging.error"
+            ) as error:
+                for event in (
+                    "cache_admitted",
+                    "load_miss",
+                    "load_hit",
+                    "store_success",
+                    "cache_bypass",
+                ):
+                    remote.record(event)
+                info.assert_not_called()
+                error.assert_not_called()
+        for event in (
+            "cache_admitted",
+            "load_miss",
+            "load_hit",
+            "store_success",
+            "cache_bypass",
         ):
-            remote.record("cache_admitted")
-        self.assertEqual(remote.stats()["cache_admitted"], 2)
+            self.assertEqual(remote.stats()[event], 2)
 
-    def test_failures_log_warning_even_when_audit_is_disabled(self):
+    def test_failures_log_error_even_when_audit_is_disabled_and_sink_can_fail(self):
         remote = self.remote(Store())
         remote._audit_enabled = False
         with patch(
-            "rtp_llm.multimodal.mm_remote_embedding_cache.logging.warning"
+            "rtp_llm.multimodal.mm_remote_embedding_cache.logging.error"
         ) as warn:
             remote.record(
                 "write_error", trace_id="trace", error_code="ER_INVALID_GRPCSTATUS"
@@ -259,7 +499,7 @@ class RemoteCacheTest(unittest.TestCase):
             self.assertEqual(payload["trace_id"], "trace")
             self.assertEqual(payload["error_code"], "ER_INVALID_GRPCSTATUS")
         with patch(
-            "rtp_llm.multimodal.mm_remote_embedding_cache.logging.warning",
+            "rtp_llm.multimodal.mm_remote_embedding_cache.logging.error",
             side_effect=RuntimeError("sink"),
         ):
             remote.record("read_error")
@@ -1424,21 +1664,15 @@ class RemoteIdentityAndRecoveryTest(unittest.TestCase):
         key = self.cache.key([self.item()])
         self.assertIsNone(self.cache.load(key, trace_id="writer"))
         self.cache._audit_enabled = True
-        with patch.dict(os.environ, {"MM_EMB_REMOTE_AUDIT": "1"}), self.assertLogs(
-            level="INFO"
+        with patch.dict(os.environ, {"MM_EMB_REMOTE_AUDIT": "1"}), patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.logging.info"
         ) as logs:
             self.save(self.cache, key)
             reader = self.make_cache()
             actual = reader.load(key, trace_id="reader")
-        events = [
-            json.loads(line.split("MM_EMB_REMOTE_JSON ")[1])
-            for line in logs.output
-            if "MM_EMB_REMOTE_JSON " in line
-        ]
-        stored = next(e for e in events if e["event"] == "store_success")
-        loaded = next(e for e in events if e["event"] == "load_hit")
-        self.assertEqual(stored["payload_sha256"], loaded["payload_sha256"])
-        self.assertEqual(stored["write_source"], "encoder_result")
+        logs.assert_not_called()
+        self.assertEqual(self.cache.stats()["store_success"], 1)
+        self.assertEqual(reader.stats()["load_hit"], 1)
         for a, expected in zip(actual, self.value):
             self.assertEqual(a.dtype, expected.dtype)
             self.assertTrue(torch.equal(a, expected))
@@ -1597,7 +1831,8 @@ class RemoteIdentityAndRecoveryTest(unittest.TestCase):
                 raise RuntimeError("diagnostic sink unavailable")
 
         with patch.dict("os.environ", {"MM_EMB_BENCHMARK_TIMING": "1"}), patch(
-            "rtp_llm.multimodal.mm_remote_embedding_cache.logging.info", side_effect=log
+            "rtp_llm.multimodal.mm_remote_embedding_cache.logging.debug",
+            side_effect=log,
         ):
             self.save(self.cache)
             value = self.cache.load("key")
@@ -1639,17 +1874,19 @@ class RemoteIdentityAndRecoveryTest(unittest.TestCase):
             self.cache.key([self.item("data:image/png;base64,AQID")]),
         )
         self.cache._audit_enabled = True
-        with patch.dict(os.environ, {"MM_EMB_REMOTE_AUDIT": "1"}), self.assertLogs(
-            level="INFO"
+        with patch.dict(os.environ, {"MM_EMB_REMOTE_AUDIT": "1"}), patch.object(
+            self.cache, "record", wraps=self.cache.record
+        ) as record, patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.logging.info"
         ) as logs:
             item = self.item()
             item.tensor = torch.empty(1)
             self.assertIsNone(self.cache.key([item], trace_id="reject"))
-        event = json.loads(logs.output[0].split("MM_EMB_REMOTE_JSON ")[1])
+        logs.assert_not_called()
+        event = record.call_args.kwargs
         self.assertEqual(event["reason"], "nonempty_tensor")
         self.assertEqual(event["tensor_shape"], [1])
         self.assertEqual(event["trace_id"], "reject")
-        self.assertNotIn("AQID", logs.output[0])
 
     def test_backend_registration_failure_falls_back(self):
         def fail():
@@ -2272,12 +2509,26 @@ class GdrStartupLifetimeTest(unittest.TestCase):
             "rtp_llm.multimodal.kvcm.registered_transport.RegisteredObjectTransport",
             return_value=client,
         ) as constructor, patch(
+            "rtp_llm.multimodal.kvcm._config.RtpKvMetaObjectClientConfig.from_env",
+            return_value=object(),
+        ) as parse_config, patch(
             "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
         ) as report:
+            from rtp_llm.multimodal.kvcm import RtpKvMetaObjectConfigError
+
             model = SimpleNamespace(
                 model_type="test", compute_dtype="bf16", ckpt_path=directory
             )
+            parse_config.side_effect = RtpKvMetaObjectConfigError(
+                "discovery unavailable"
+            )
+            with self.assertRaises(RtpKvMetaObjectConfigError):
+                MMRemoteEmbeddingCache.from_configs(model, vit, device="cuda:0")
+            constructor.assert_not_called()  # No arena/MR exists on a pure VIP failure.
+            parse_config.side_effect = None
+            report.reset_mock()
             cache = MMRemoteEmbeddingCache.from_configs(model, vit, device="cuda:0")
+            self.assertEqual(parse_config.call_count, 2)
             constructor.assert_called_once()  # Registration precedes any request.
             self.assertIsNone(cache.load("first"))
             self.assertIsNone(cache.load("second"))

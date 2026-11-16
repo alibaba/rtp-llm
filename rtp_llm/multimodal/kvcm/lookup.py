@@ -80,6 +80,7 @@ class KvMetaLookup:
                     self._set_endpoints(addresses)
             calls = list(self._calls)
         last_code, last_reason = None, "deadline"
+        last_error = None
         for index, call in enumerate(calls):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -88,6 +89,7 @@ class KvMetaLookup:
                 response = call(request, timeout=remaining / (len(calls) - index))
             except grpc.RpcError as error:
                 last_reason = "grpc"
+                last_error = error
                 try:
                     last_code = error.code()
                 except Exception:
@@ -96,10 +98,13 @@ class KvMetaLookup:
             status = response.header.status.code
             if status in (4, 9):  # Not ready / not leader: read-only failover.
                 last_code, last_reason = status, "service_status"
+                last_error = KvMetaLookupError(
+                    response.header.status.message, reason=last_reason, code=status
+                )
                 continue
             if status != 1:
                 raise KvMetaLookupError(
-                    f"KVMeta Get failed with status {status}",
+                    f"KVMeta Get failed with status {status}: {response.header.status.message}",
                     reason="service_status",
                     code=status,
                 )
@@ -118,7 +123,7 @@ class KvMetaLookup:
             return size
         raise KvMetaLookupError(
             "KVMeta Get unavailable within deadline", reason=last_reason, code=last_code
-        )
+        ) from last_error
 
     def close(self):
         with self._lock:

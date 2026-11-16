@@ -245,18 +245,29 @@ absl::Status GenerateStream::incrKVBlock() {
 
 void GenerateStream::releaseResource() {
     RTP_LLM_PROFILE_FUNCTION();
-    // Return KV blocks only after all workers that captured this stream finish.
-    // Earlier release could let a worker write into blocks owned by another stream.
-    {
-        std::unique_lock<std::mutex> lock(async_bookkeeping_->mu);
-        // A submitting frame will hand resources to the next worker. Do not
-        // wait for that worker here: its AsyncRunner may still be joining us.
-        async_bookkeeping_->cv.wait(lock, [this] {
-            return async_bookkeeping_->count.load(std::memory_order_acquire) == 0
-                || async_bookkeeping_->submissions.load(std::memory_order_acquire) > 0;
-        });
+    // Join ordinary worker/Prefill leases, but never wait for the next worker
+    // while its Decode submission frame may still be joining this runner.
+    for (;;) {
+        {
+            std::unique_lock<std::mutex> lock(async_bookkeeping_->mu);
+            async_bookkeeping_->cv.wait(lock, [this] {
+                return async_bookkeeping_->count.load(std::memory_order_acquire) == 0
+                    || async_bookkeeping_->submissions.load(std::memory_order_acquire) > 0;
+            });
+        }
+        std::lock_guard<std::mutex> lock(*mutex_);
+        if (async_bookkeeping_->submissions || unknown_decode_publication_) {
+            markDeferredRelease();
+            return;
+        }
+        // Preserve upstream's lease recheck under tryHoldPrefillResources' lock.
+        // A preparer may acquire a new lease after the wait above returns.
+        if (hasPendingAsyncBookkeeping()) continue;
+        if (!stream_cache_resource_->isResourceReleased()) {
+            stream_cache_resource_->releaseResource();
+        }
+        return;
     }
-    tryReleaseResourceAfterBookkeeping();
 }
 
 bool GenerateStream::hasOutstandingResourceUseWithoutLock() const {
@@ -325,6 +336,15 @@ void GenerateStream::endDecodePublicationSubmission() {
             release = async_bookkeeping_->defer_release.exchange(false);
     }
     if (release) tryReleaseResourceAfterBookkeeping();
+}
+
+bool GenerateStream::tryHoldPrefillResources() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (hasErrorWithoutLock() || stream_cache_resource_->isResourceReleased()) {
+        return false;
+    }
+    incPendingAsyncBookkeeping();
+    return true;
 }
 
 void GenerateStream::incPendingAsyncBookkeeping() {
@@ -2163,6 +2183,11 @@ void GenerateStream::setIsContextStream(bool is_context_stream) {
 
 StreamCacheResource& GenerateStream::streamCacheResource() {
     return *stream_cache_resource_;
+}
+
+std::shared_ptr<AsyncContext> GenerateStream::takeLoadCompletionContext() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return stream_cache_resource_->takeLoadCompletionContext();
 }
 
 void GenerateStream::CopyOnWrite(const GenerateStream& other_stream, bool copy_loss, bool share) {

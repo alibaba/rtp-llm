@@ -218,8 +218,9 @@ class SupervisorBootstrapTest(unittest.TestCase):
                 return_value="/mnt/model",
             ),
             patch("rtp_llm.utils.fuser.umount_all", side_effect=unmount),
+            patch.object(prefill_supervisor, "_prepare_c2_topology", side_effect=dict),
             patch.object(
-                prefill_supervisor, "_prepare_network_identity", side_effect=identity
+                prefill_supervisor, "_prepare_resident_state", side_effect=identity
             ),
             patch.object(prefill_supervisor.PrefillSupervisor, "run", run),
             patch.object(
@@ -263,7 +264,8 @@ class SupervisorBootstrapTest(unittest.TestCase):
                 "_prepare_model_mounts",
                 side_effect=RuntimeError("secret-uri"),
             ),
-            patch("rtp_llm.utils.fuser.umount_all"),
+            patch.object(prefill_supervisor, "_prepare_c2_topology", side_effect=dict),
+            patch("rtp_llm.utils.fuser.umount_all") as unmount,
             patch.object(prefill_supervisor.subprocess, "Popen") as spawn,
             patch.object(prefill_supervisor.time, "sleep", side_effect=wait),
             self.assertLogs(prefill_supervisor._LOGGER) as logs,
@@ -271,6 +273,7 @@ class SupervisorBootstrapTest(unittest.TestCase):
             prefill_supervisor.supervise_prefill([])
         self.assertEqual(held, [True])
         spawn.assert_not_called()
+        unmount.assert_called_once_with()
         self.assertIn("bootstrap_failed", "\n".join(logs.output))
         self.assertNotIn("secret-uri", "\n".join(logs.output))
 
@@ -300,11 +303,7 @@ class SupervisorBootstrapTest(unittest.TestCase):
             patch.object(
                 prefill_supervisor, "_prepare_model_mounts", side_effect=lambda e: e
             ),
-            patch.object(
-                prefill_supervisor,
-                "_prepare_network_identity",
-                side_effect=lambda e, _d: e,
-            ),
+            patch.object(prefill_supervisor, "_prepare_c2_topology", side_effect=dict),
             patch("rtp_llm.utils.fuser.umount_all"),
             patch.object(prefill_supervisor.subprocess, "Popen") as spawn,
             patch.object(prefill_supervisor.time, "sleep", side_effect=wait),
@@ -332,6 +331,7 @@ class SupervisorBootstrapTest(unittest.TestCase):
                 clear=True,
             ),
             patch.object(prefill_supervisor, "_enable_subreaper"),
+            patch.object(prefill_supervisor, "_prepare_c2_topology", side_effect=dict),
             patch.object(
                 prefill_supervisor.signal,
                 "signal",
@@ -369,6 +369,7 @@ class SupervisorBootstrapTest(unittest.TestCase):
                 clear=True,
             ),
             patch.object(prefill_supervisor, "_enable_subreaper"),
+            patch.object(prefill_supervisor, "_prepare_c2_topology", side_effect=dict),
             patch.object(
                 prefill_supervisor.signal,
                 "signal",
@@ -398,10 +399,8 @@ class SupervisorDefaultsTest(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         annotations = self.root / "annotations"
-        members = {f"prefill_part{i}": {"ip": f"10.0.0.{i + 1}"} for i in range(4)}
-        annotations.write_text(
-            f"app.c2.io/biz-detail-ganginfo={json.dumps(json.dumps(members))}\n"
-        )
+        self.members = {f"prefill_part{i}": {"ip": f"10.0.0.{i + 1}"} for i in range(4)}
+        self.write_ganginfo(self.members)
         (self.root / "labels").write_text(
             'gang-version-hash="release-one"\napp.c2.io/gang-part-name="prefill-part0"\n'
         )
@@ -415,12 +414,18 @@ class SupervisorDefaultsTest(unittest.TestCase):
             "ENGRAM_SHARD_COUNT": "4",
         }
 
+    def write_ganginfo(self, members):
+        pending = self.root / "next-annotations"
+        pending.write_text(
+            f"app.c2.io/biz-detail-ganginfo={json.dumps(json.dumps(members))}\n"
+        )
+        pending.replace(self.root / "annotations")
+
     def prepare(self, name, **overrides):
         directory = self.root / name
         directory.mkdir(mode=0o700)
-        return prefill_supervisor._prepare_network_identity(
-            {**self.env, **overrides}, directory
-        )
+        env = prefill_supervisor._prepare_c2_topology({**self.env, **overrides})
+        return prefill_supervisor._prepare_resident_state(env, directory)
 
     def test_explicit_revision_and_private_state_are_preserved(self):
         state = self.root / "advanced-state"
@@ -475,7 +480,7 @@ class SupervisorDefaultsTest(unittest.TestCase):
                 {"WORLD_SIZE": "4", "LOCAL_WORLD_SIZE": "2"}
             )
 
-    def _entry(self, env):
+    def _entry(self, env, *, expected_exit=None, expect_unmount=True):
         captured = {}
 
         def run(supervisor, directory):
@@ -487,14 +492,23 @@ class SupervisorDefaultsTest(unittest.TestCase):
             patch.dict(os.environ, env, clear=True),
             patch.object(prefill_supervisor, "_enable_subreaper"),
             patch.object(prefill_supervisor.signal, "signal"),
-            patch("rtp_llm.utils.fuser.umount_all"),
+            patch("rtp_llm.utils.fuser.umount_all") as unmount,
             patch.object(prefill_supervisor.PrefillSupervisor, "run", run),
             patch.object(
                 prefill_supervisor.subprocess, "Popen", return_value=owner
             ) as spawn,
             patch.object(prefill_supervisor, "_stop"),
         ):
-            prefill_supervisor.supervise_prefill([])
+            if expected_exit is None:
+                prefill_supervisor.supervise_prefill([])
+            else:
+                with self.assertRaises(SystemExit) as raised:
+                    prefill_supervisor.supervise_prefill([])
+                self.assertEqual(raised.exception.code, expected_exit)
+            if expect_unmount:
+                unmount.assert_called_once_with()
+            else:
+                unmount.assert_not_called()
         return captured, spawn
 
     def test_c2_entry_starts_owner_without_key(self):
@@ -510,6 +524,57 @@ class SupervisorDefaultsTest(unittest.TestCase):
         self.assertIn("RTP_ENGRAM_RESIDENT_GENERATION", actual)
         self.assertNotIn("RTP_ENGRAM_RESIDENT_KEY_FILE", actual)
         self.assertEqual(spawn.call_args.args[0][-3:], ["--discover", "--device", "0"])
+
+    def test_c2_entry_exits_with_three_ips_and_starts_after_relaunch(self):
+        self.write_ganginfo({**self.members, "prefill_part1": {"name": "prefill_part1"}})
+        with (
+            patch.object(prefill_supervisor, "_hold_after_bootstrap_failure") as hold,
+            patch.object(prefill_supervisor, "_prepare_model_mounts") as mount,
+            self.assertLogs(prefill_supervisor._LOGGER) as logs,
+        ):
+            actual, spawn = self._entry(self.env, expected_exit=1, expect_unmount=False)
+        spawn.assert_not_called()
+        hold.assert_not_called()
+        mount.assert_not_called()
+        self.assertEqual(actual, {})
+        self.assertIn('missing_ip_parts=["prefill_part1"]', "\n".join(logs.output))
+
+        self.write_ganginfo(self.members)
+        actual, spawn = self._entry(self.env)
+        spawn.assert_called_once()
+        self.assertEqual(
+            spawn.call_args.kwargs["env"]["RTP_ENGRAM_RESIDENT_GENERATION"],
+            actual["RTP_ENGRAM_RESIDENT_GENERATION"],
+        )
+
+    def test_c2_entry_exits_when_a_part_is_absent_from_ganginfo(self):
+        self.write_ganginfo(
+            {name: part for name, part in self.members.items() if name != "prefill_part3"}
+        )
+        with (
+            patch.object(prefill_supervisor, "_hold_after_bootstrap_failure") as hold,
+            self.assertLogs(prefill_supervisor._LOGGER) as logs,
+        ):
+            actual, spawn = self._entry(self.env, expected_exit=1, expect_unmount=False)
+        spawn.assert_not_called()
+        hold.assert_not_called()
+        self.assertEqual(actual, {})
+        self.assertIn("code=RESIDENT_ENDPOINT_COUNT_MISMATCH", "\n".join(logs.output))
+
+    def test_c2_entry_exits_if_ganginfo_loses_an_ip_during_mount(self):
+        def mount(env):
+            self.write_ganginfo({**self.members, "prefill_part1": {}})
+            return env
+
+        with (
+            patch.object(prefill_supervisor, "_hold_after_bootstrap_failure") as hold,
+            patch.object(prefill_supervisor, "_prepare_model_mounts", side_effect=mount),
+            self.assertLogs(prefill_supervisor._LOGGER) as logs,
+        ):
+            _, spawn = self._entry(self.env, expected_exit=1)
+        spawn.assert_not_called()
+        hold.assert_not_called()
+        self.assertIn('missing_ip_parts=["prefill_part1"]', "\n".join(logs.output))
 
     def test_explicit_empty_owner_args_keeps_consumer_only_mode(self):
         actual, spawn = self._entry({**self.env, prefill_supervisor.OWNER_ARGS_ENV: ""})
