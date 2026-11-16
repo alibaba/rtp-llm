@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
+from unittest.mock import AsyncMock
 
 import pytest
 import yaml
@@ -727,38 +728,27 @@ def test_phase_waits_for_background_to_finish(setup, tmp_path):
     )
 
 
-def test_engine_allocation_excludes_master_ports_before_master_listeners_start(
-    tmp_path, monkeypatch
-):
+def test_master_ports_reserved_before_engines_start(tmp_path):
     from types import SimpleNamespace
 
-    from mock_framework.execution.environment import RunEnvironment
-    from mock_framework.execution.roles import master
-
-    monkeypatch.setattr(master, "master_port", lambda count: 26133)
-    (tmp_path / "zookeeper").mkdir()
-
     async def check():
-        case = SimpleNamespace(
-            environment={"master": {"config": {}, "deployment": {"replicas": 2}}}
-        )
         runtime = RunEnvironment(
-            case, {"components": {"master": {}}}, SimpleNamespace(directory=tmp_path)
+            SimpleNamespace(environment={}),
+            {"components": {}},
+            SimpleNamespace(directory=tmp_path),
         )
 
-        async def zookeeper_start():
-            return "127.0.0.1:2181"
+        def configure_election(_connect):
+            runtime.masters.election_env["MOCK_MASTER_PORT"] = "26133"
 
-        async def engines_start():
+        async def start_engines():
             assert {26133, 26135} <= runtime.engines.used_ports
 
-        async def nothing():
-            pass
-
-        runtime.zookeeper.start = zookeeper_start
-        runtime.engines.start = engines_start
-        runtime.masters.start = nothing
-        runtime.clients.start = nothing
+        runtime.zookeeper.start = AsyncMock(return_value="127.0.0.1:2181")
+        runtime.masters.configure_election = configure_election
+        runtime.engines.start = start_engines
+        runtime.masters.start = AsyncMock()
+        runtime.clients.start = AsyncMock()
         await runtime.start()
 
     asyncio.run(check())
