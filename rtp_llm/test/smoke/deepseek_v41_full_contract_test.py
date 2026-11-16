@@ -49,4 +49,29 @@ class DeepSeekV41FullContractTest(
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    unittest.main()
+    arm_live_observer = None
+    if os.environ.get("RTP_BTC_ARM_LIVE_STACKS") == "1":
+        try:
+            from rtp_llm.test.smoke.arm_live_diagnostics import start_observer
+
+            arm_live_observer = start_observer(
+                "deepseek_v41_flash_ced_dspark_pd_cp2_dp2_sm100_arm"
+            )
+        except Exception:
+            try:
+                logging.exception("opt-in ARM diagnostics could not start")
+            except Exception:
+                pass
+    try:
+        unittest.main()
+    finally:
+        if arm_live_observer is not None:
+            try:
+                arm_live_observer.stop()
+            except Exception:
+                # Diagnostic cleanup must preserve the original test outcome
+                # and permit the pre-existing finally cleanup to continue.
+                try:
+                    logging.exception("opt-in ARM observer cleanup failed")
+                except Exception:
+                    pass
