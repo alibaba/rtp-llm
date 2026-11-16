@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <torch/torch.h>
+#include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
@@ -314,6 +315,15 @@ static KeyBlockInfoMap makeKvBlocks(int64_t cache_key, void* dst_addr, size_t si
     return result;
 }
 
+// The receive service copies on its own stream after raw pointers are published.
+// Finish only the test producer stream: B5 deliberately blocks the copy stream.
+static torch::Tensor makeReadyCudaZeros(size_t bytes) {
+    auto tensor =
+        torch::zeros({static_cast<int64_t>(bytes)}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    at::cuda::getCurrentCUDAStream(tensor.get_device()).synchronize();
+    return tensor;
+}
+
 static KeyBlockInfoMap makeCudaKvBlocks(int64_t cache_key, const torch::Tensor& tensor) {
     auto kbi = std::make_shared<KeyBlockInfo>();
     kbi->cache_key = cache_key;
@@ -457,8 +467,7 @@ TEST_F(RdmaTransferServiceTest, A3_RdmaReadToPinnedStagingThenH2d_Success) {
     constexpr size_t size = 64;
     char src[size];
     std::memset(src, 'C', size);
-    auto dst =
-        torch::zeros({static_cast<int64_t>(size)}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    auto dst  = makeReadyCudaZeros(size);
     auto task = task_store_->addTask("k_a3", makeCudaKvBlocks(1, dst), currentTimeMs() + 5000);
     ASSERT_NE(task, nullptr);
 
@@ -497,10 +506,8 @@ TEST_F(RdmaTransferServiceTest, A4_TotalBytesAllowTransferToSpanDerivedStagingBl
     char src1[size];
     std::memset(src0, 'D', size);
     std::memset(src1, 'E', size);
-    auto dst0 =
-        torch::zeros({static_cast<int64_t>(size)}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
-    auto dst1 =
-        torch::zeros({static_cast<int64_t>(size)}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    auto dst0 = makeReadyCudaZeros(size);
+    auto dst1 = makeReadyCudaZeros(size);
 
     auto blocks = makeCudaKvBlocks(1, dst0);
     blocks.emplace(2, makeCudaKvBlocks(2, dst1).at(2));
@@ -631,8 +638,7 @@ TEST_F(RdmaTransferServiceTest, B5_BlockedStagingH2d_KeepsTaskInflightAfterDeadl
     ASSERT_EQ(stream_primed_future.get(), cudaSuccess);
 
     std::memset(src, 'J', size);
-    dst =
-        torch::zeros({static_cast<int64_t>(size)}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+    dst                       = makeReadyCudaZeros(size);
     const int64_t deadline_ms = currentTimeMs() + 100;
     auto task = task_store_->addTask("k_b5", makeCudaKvBlocks(1, dst), deadline_ms);
     ASSERT_NE(task, nullptr);
