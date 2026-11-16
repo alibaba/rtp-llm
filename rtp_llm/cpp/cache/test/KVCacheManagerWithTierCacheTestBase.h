@@ -457,7 +457,7 @@ inline PoolSnapshot snapshotPool(const std::shared_ptr<IBlockPool>& pool) {
         pool->usedBlocksNum(),
         0,
         pool->referencedBlocksNum(BlockTreeRefType::CACHE),
-        pool->referencedBlocksNum(BlockTreeRefType::EVICTION),
+        pool->referencedBlocksNum(BlockTreeRefType::EVICT),
     };
 }
 
@@ -802,7 +802,7 @@ inline void expectFullTierPathUnchanged(const BlockTreeCache&                   
         EXPECT_EQ(pool->freeBlocksNum(), 0u) << pool->poolName();
         EXPECT_EQ(pool->usedBlocksNum(), capacity) << pool->poolName();
         EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), capacity) << pool->poolName();
-        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u) << pool->poolName();
+        EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::EVICT), 0u) << pool->poolName();
     }
 }
 
@@ -1485,11 +1485,11 @@ protected:
                 size_t target_used = 0;
                 for (const std::shared_ptr<IBlockPool>& pool : current_source_pools) {
                     source_used += pool->usedBlocksNum();
-                    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u) << "round=" << round;
+                    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::EVICT), 0u) << "round=" << round;
                 }
                 for (const std::shared_ptr<IBlockPool>& pool : current_target_pools) {
                     target_used += pool->usedBlocksNum();
-                    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u) << "round=" << round;
+                    EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::EVICT), 0u) << "round=" << round;
                 }
                 EXPECT_LE(source_used, source_used_before[group_set_id]) << "round=" << round;
                 EXPECT_GE(target_used, target_used_before[group_set_id]) << "round=" << round;

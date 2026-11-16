@@ -356,7 +356,7 @@ TEST_F(FrozenExecutionTest, EvictUnknownFreezesHostAndDiskTargets) {
     groups_           = {makeTestGroupSet(0, makeTestTopology({makeTestGroupBase()}), {"group0"}, {}, host_, disk)};
     for (const auto tier : {Tier::HOST, Tier::DISK}) {
         SCOPED_TRACE(tierName(tier));
-        const auto target = groups_[0]->allocateSingleBlock(tier, BlockTreeRefType::EVICTION);
+        const auto target = groups_[0]->allocateSingleBlock(tier, BlockTreeRefType::EVICT);
         ASSERT_NE(target, NULL_BLOCK_IDX);
         std::shared_ptr<IBlockPool> pool     = tier == Tier::HOST ? std::static_pointer_cast<IBlockPool>(host_) :
                                                                     std::static_pointer_cast<IBlockPool>(disk);
@@ -372,7 +372,7 @@ TEST_F(FrozenExecutionTest, EvictUnknownFreezesHostAndDiskTargets) {
                 ++completions;
                 EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
                 EXPECT_TRUE(pool->isFrozen(target));
-                pool->decTreeRef(target, BlockTreeRefType::EVICTION);
+                pool->decTreeRef(target, BlockTreeRefType::EVICT);
             },
             "evict");
         context->deliver(unknownExecution());

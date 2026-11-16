@@ -358,8 +358,8 @@ BlockIdxType poolMalloc(IBlockPool& pool) {
 }
 
 void releasePoolBlock(IBlockPool& pool, BlockIdxType block) {
-    pool.incTreeRef(block, BlockTreeRefType::EVICTION);
-    pool.decTreeRef(block, BlockTreeRefType::EVICTION);
+    pool.incTreeRef(block, BlockTreeRefType::EVICT);
+    pool.decTreeRef(block, BlockTreeRefType::EVICT);
 }
 
 TransferDescriptor makeDescriptor(Tier                             source_tier,

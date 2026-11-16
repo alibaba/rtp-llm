@@ -2120,7 +2120,7 @@ protected:
                     // FULL eviction starts at the leaf; its completion makes
                     // the parent eligible for the next watermark pass.
                     const auto expected = req->pattern_id <= 2 ? GroupSetTransferState::LOADING :
-                                          block == 1           ? GroupSetTransferState::DEMOTING :
+                                          block == 1           ? GroupSetTransferState::EVICTING :
                                                                  GroupSetTransferState::IDLE;
                     EXPECT_EQ(path[block]->group_set_resources[0].transfer_state, expected);
                 }
@@ -2420,7 +2420,7 @@ TEST_F(KVCacheManagerTest, FrozenTransferRecoveryObservesLateProofWithoutRepeati
     ASSERT_NE(pool, nullptr);
     const auto block = pool->malloc();
     ASSERT_TRUE(block.has_value());
-    pool->incTreeRef(*block, BlockTreeRefType::EVICTION);
+    pool->incTreeRef(*block, BlockTreeRefType::EVICT);
     size_t settlements = 0;
     manager->block_tree_cache_->transfer_dispatcher_->runTransfer(
         TransferTask({TransferDescriptor::deviceToHost(0, {1}, *block)}, std::chrono::seconds(30)),
@@ -2428,7 +2428,7 @@ TEST_F(KVCacheManagerTest, FrozenTransferRecoveryObservesLateProofWithoutRepeati
             ++settlements;
             EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
             EXPECT_TRUE(pool->isFrozen(*block));
-            pool->decTreeRef(*block, BlockTreeRefType::EVICTION);
+            pool->decTreeRef(*block, BlockTreeRefType::EVICT);
         },
         "evict");
     ASSERT_EQ(settlements, 1u);
@@ -2491,7 +2491,7 @@ TEST_F(KVCacheManagerTest, BackgroundRecoveryReclaimsLocalTargetsAndPublishesCap
     ASSERT_NE(pool, nullptr);
     const auto block = pool->malloc();
     ASSERT_TRUE(block.has_value());
-    pool->incTreeRef(*block, BlockTreeRefType::EVICTION);
+    pool->incTreeRef(*block, BlockTreeRefType::EVICT);
     auto released = std::make_shared<std::promise<void>>();
     auto ready    = released->get_future();
     // FrozenTask prepares its release callback before acquiring the hold.
@@ -2502,7 +2502,7 @@ TEST_F(KVCacheManagerTest, BackgroundRecoveryReclaimsLocalTargetsAndPublishesCap
         [&](TransferResult result) {
             ++settlements;
             EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
-            pool->decTreeRef(*block, BlockTreeRefType::EVICTION);
+            pool->decTreeRef(*block, BlockTreeRefType::EVICT);
         },
         "evict");
     auto records = manager->frozenTasks();
@@ -2584,7 +2584,7 @@ TEST_F(KVCacheManagerTest, CompletionCleanupHandlesSuccessAndLateSafeFailureAndH
         const auto pool  = groups.front()->hostPool();
         const auto block = pool->malloc();
         ASSERT_TRUE(block.has_value());
-        pool->incTreeRef(*block, BlockTreeRefType::EVICTION);
+        pool->incTreeRef(*block, BlockTreeRefType::EVICT);
         size_t settlements = 0;
         manager->block_tree_cache_->transfer_dispatcher_->runTransfer(
             TransferTask({TransferDescriptor::deviceToHost(0, {1}, *block)}, std::chrono::seconds(30)),
@@ -2592,7 +2592,7 @@ TEST_F(KVCacheManagerTest, CompletionCleanupHandlesSuccessAndLateSafeFailureAndH
                 ++settlements;
                 EXPECT_EQ(result.status.ok(), !failed);
                 EXPECT_FALSE(pool->isFrozen(*block));
-                pool->decTreeRef(*block, BlockTreeRefType::EVICTION);
+                pool->decTreeRef(*block, BlockTreeRefType::EVICT);
             },
             "evict");
         ASSERT_EQ(settlements, 1u);

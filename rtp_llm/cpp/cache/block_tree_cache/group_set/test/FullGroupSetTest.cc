@@ -195,18 +195,19 @@ TEST_F(FullGroupSetTest, MatchValidatorEmptyInvalid) {
     delete node;
 }
 
-TEST_F(FullGroupSetTest, MatchValidatorBusyResourceBreaksPrefixLikeHole) {
-    for (GroupSetTransferState state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOAD_PENDING}) {
+TEST_F(FullGroupSetTest, MatchValidatorDetachedResourceBreaksPrefixLikeHole) {
+    for (GroupSetTransferState state : {GroupSetTransferState::LOAD_PENDING}) {
         auto validator = group_->createMatchValidator();
 
         auto* busy_node = makeNode(100);
         setDeviceBlock(busy_node, 0);
         busy_node->group_set_resources[0].transfer_state = state;
+        busy_node->group_set_resources[0].transfer_detached = true;
 
         auto* usable_node = makeNode(200);
         setDeviceBlock(usable_node, 0);
 
-        // Busy resource is unusable, and the FULL prefix latch keeps later usable
+        // Detached resource is unusable, and the FULL prefix latch keeps later usable
         // nodes invalid so device reuse stays contiguous from the root.
         EXPECT_FALSE(validator->validate(busy_node->group_set_resources[0]));
         EXPECT_FALSE(validator->validate(usable_node->group_set_resources[0]));
@@ -269,4 +270,39 @@ TEST_F(FullGroupSetTest, CompleteDeviceValueRequiresDeviceTierAndNoNullBlocks) {
 }
 
 }  // namespace
+
+TEST_F(FullGroupSetTest, MatchUsabilityDependsOnServingDataAndInvalidation) {
+    for (auto state : {GroupSetTransferState::IDLE,
+                       GroupSetTransferState::LOAD_PENDING,
+                       GroupSetTransferState::LOADING,
+                       GroupSetTransferState::EVICTING}) {
+        for (int value = 0; value < 5; ++value) {
+            GroupSetResource resource;
+            resource.transfer_state = state;
+            if (value == 1)
+                resource.device_blocks = {10, NULL_BLOCK_IDX};
+            if (value == 2)
+                resource.device_blocks = {10, 11};
+            if (value == 3)
+                resource.host_block = 10;
+            if (value == 4)
+                resource.disk_block = 10;
+            EXPECT_EQ(group_->createMatchValidator()->validate(resource), value >= 2);
+            resource.transfer_detached = true;
+            EXPECT_FALSE(group_->createMatchValidator()->validate(resource));
+        }
+    }
+}
+
+TEST_F(FullGroupSetTest, EvictingSourcesRemainMatchable) {
+    for (Tier tier : {Tier::DEVICE, Tier::HOST}) {
+        GroupSetResource resource;
+        resource.setBlocks(tier, {15});
+        resource.transfer_state = GroupSetTransferState::EVICTING;
+        EXPECT_TRUE(group_->createMatchValidator()->validate(resource));
+        resource.transfer_detached = true;
+        EXPECT_FALSE(group_->createMatchValidator()->validate(resource));
+    }
+}
+
 }  // namespace rtp_llm

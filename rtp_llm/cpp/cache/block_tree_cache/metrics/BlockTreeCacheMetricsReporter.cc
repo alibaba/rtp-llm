@@ -20,7 +20,7 @@ constexpr std::array<Tier, 3>           kMetricTiers      = {Tier::DEVICE, Tier:
 constexpr std::array<CacheGroupType, 3> kMetricGroupTypes = {
     CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::LINEAR};
 
-size_t transferOperationIndex(CacheTransferOperation operation) {
+size_t transferOperationIndex(TransferOperation operation) {
     return static_cast<size_t>(operation);
 }
 
@@ -49,7 +49,7 @@ CachePoolMetrics makePoolMetrics(Tier tier, const IBlockPool& pool) {
     metrics_data.available_blocks           = pool.availableBlocksNum();
     metrics_data.block_cache_ref_blocks     = pool.referencedBlocksNum(BlockTreeRefType::CACHE);
     metrics_data.load_ref_blocks            = pool.referencedBlocksNum(BlockTreeRefType::LOAD);
-    metrics_data.eviction_target_ref_blocks = pool.referencedBlocksNum(BlockTreeRefType::EVICTION);
+    metrics_data.eviction_ref_blocks        = pool.referencedBlocksNum(BlockTreeRefType::EVICT);
     metrics_data.frozen_ref_blocks          = pool.referencedBlocksNum(BlockTreeRefType::FROZEN);
     return metrics_data;
 }
@@ -308,18 +308,21 @@ void BlockTreeCacheMetricsReporter::reportCacheReuseTimeMetrics(
 void BlockTreeCacheMetricsReporter::reportEvictionFinished(const EvictionTransferTask&     task,
                                                            const std::vector<GroupSetPtr>& group_sets,
                                                            bool                            success,
-                                                           const std::vector<bool>&        detached) const {
+                                                           const std::vector<bool>&        skip_eviction_metrics,
+                                                           size_t                          cancelled_blocks) const {
     if (metrics_reporter_ == nullptr || task.descriptors().empty()) {
         return;
     }
     RtpLLMCacheEvictionMetricsCollector collector;
-    collector.eviction_success = success;
+    collector.eviction_success                    = success;
+    collector.eviction_cancelled_blocks           = cancelled_blocks;
+    collector.eviction_blocks                     = cancelled_blocks;
     std::vector<std::pair<int64_t, int64_t>> block_times_ms;
     if (success) {
         block_times_ms.reserve(task.descriptors().size());
     }
     for (size_t i = 0; i < task.descriptors().size(); ++i) {
-        if (!detached.empty() && detached[i]) {
+        if (!skip_eviction_metrics.empty() && skip_eviction_metrics[i]) {
             continue;
         }
         ++collector.eviction_blocks;
@@ -396,21 +399,13 @@ void BlockTreeCacheMetricsReporter::reportEvictionMetrics(const TransferDescript
     metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(nullptr, &collector);
 }
 
-void BlockTreeCacheMetricsReporter::reportInsertHardStop(const BlockTreeInsertHardStopInfo& hard_stop) const {
+void BlockTreeCacheMetricsReporter::reportInsertHardStop() const {
     if (metrics_reporter_ == nullptr) {
         return;
     }
-    RtpLLMCacheInsertMetricsCollector collector;
-    collector.tier = tierName(hard_stop.existing_tier);
-    if (hard_stop.transfer_state == GroupSetTransferState::DEMOTING) {
-        collector.operation = cacheTransferOperationName(CacheTransferOperation::EVICT);
-    } else if (hard_stop.transfer_state == GroupSetTransferState::LOAD_PENDING
-               || hard_stop.transfer_state == GroupSetTransferState::LOADING) {
-        collector.operation = cacheTransferOperationName(CacheTransferOperation::LOAD);
-    } else {
-        collector.operation = "idle";
+    if (auto* metrics = metrics_reporter_->getMetricsGroup<RtpLLMCacheInsertMetrics>()) {
+        metrics->report(&metrics_reporter_->getTags());
     }
-    metrics_reporter_->report<RtpLLMCacheInsertMetrics, RtpLLMCacheInsertMetricsCollector>(nullptr, &collector);
 }
 
 void BlockTreeCacheMetricsReporter::reportLoadJoin(size_t dependency_count) const {
@@ -530,7 +525,7 @@ void BlockTreeCacheMetricsReporter::maybeReportCopyError(Tier                  s
     metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheCopyErrorMetricsCollector>(nullptr, &collector);
 }
 
-int64_t BlockTreeCacheMetricsReporter::reportTransferStarted(CacheTransferOperation operation,
+int64_t BlockTreeCacheMetricsReporter::reportTransferStarted(TransferOperation      operation,
                                                              Tier                   source_tier,
                                                              Tier                   target_tier) {
     if (metrics_reporter_ == nullptr) {
@@ -546,7 +541,7 @@ int64_t BlockTreeCacheMetricsReporter::reportTransferStarted(CacheTransferOperat
     const int64_t in_flight       = transfer_in_flight_[operation_index][direction].fetch_add(1) + 1;
 
     RtpLLMCacheTransferMetricsCollector collector;
-    collector.operation          = cacheTransferOperationName(operation);
+    collector.operation          = transferOperationName(operation);
     collector.source_tier        = tierName(source_tier);
     collector.target_tier        = tierName(target_tier);
     collector.in_flight          = in_flight;
@@ -562,7 +557,7 @@ int64_t BlockTreeCacheMetricsReporter::reportTransferStarted(CacheTransferOperat
 }
 
 void BlockTreeCacheMetricsReporter::reportTransferFinished(
-    CacheTransferOperation                 operation,
+    TransferOperation                      operation,
     Tier                                   source_tier,
     Tier                                   target_tier,
     size_t                                 descriptors_per_transfer,
@@ -584,7 +579,7 @@ void BlockTreeCacheMetricsReporter::reportTransferFinished(
     accumulateTransferBytes(successful_descriptors, group_sets, transfer_bytes);
 
     RtpLLMCacheTransferMetricsCollector collector;
-    collector.operation                = cacheTransferOperationName(operation);
+    collector.operation                = transferOperationName(operation);
     collector.source_tier              = tierName(source_tier);
     collector.target_tier              = tierName(target_tier);
     collector.descriptors_per_transfer = static_cast<int64_t>(descriptors_per_transfer);
@@ -600,16 +595,6 @@ void BlockTreeCacheMetricsReporter::reportTransferFinished(
         collector.transfer_bytes.push_back(std::move(entry));
     }
     metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(nullptr, &collector);
-}
-
-const char* cacheTransferOperationName(CacheTransferOperation operation) {
-    switch (operation) {
-        case CacheTransferOperation::LOAD:
-            return "load";
-        case CacheTransferOperation::EVICT:
-            return "evict";
-    }
-    return "unknown";
 }
 
 void BlockTreeCacheMetricsReporter::accumulateTransferBytes(const TransferDescriptor& desc,

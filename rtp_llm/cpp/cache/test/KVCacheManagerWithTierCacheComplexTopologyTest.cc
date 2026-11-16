@@ -97,7 +97,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         host_sources[group_set_id] = resource.host_block;
         EXPECT_EQ(group_set->hostPool()->treeRefCount(resource.host_block), 1u);
         EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
-        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
+        EXPECT_EQ(group_set->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICT), 0u);
         EXPECT_EQ(group_set->diskPool()->usedBlocksNum(), 0u);
     }
 
@@ -148,7 +148,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         EXPECT_FALSE(group_set->hostPool()->isAllocated(host_sources[group_set_id]));
         EXPECT_EQ(group_set->diskPool()->treeRefCount(resource.disk_block), 1u);
         EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockTreeRefType::CACHE), 1u);
-        EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
+        EXPECT_EQ(group_set->diskPool()->referencedBlocksNum(BlockTreeRefType::EVICT), 0u);
     }
 
     descriptors = pausable_engine->descriptors();

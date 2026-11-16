@@ -12,9 +12,7 @@ size_t FullGroupSet::computeReuseBlockCount(size_t matched_block_count) const {
 
 // FullMatchValidator
 bool FullMatchValidator::validate(const GroupSetResource& resource) {
-    // A busy resource (DEMOTING/LOAD_PENDING) is as unusable as a hole; the prefix
-    // latch keeps FULL reuse contiguous from the root.
-    prefix_valid_ = prefix_valid_ && resource.isMatchUsable() && !resource.is_empty();
+    prefix_valid_ = prefix_valid_ && resource.isMatchUsable();
     return prefix_valid_;
 }
 

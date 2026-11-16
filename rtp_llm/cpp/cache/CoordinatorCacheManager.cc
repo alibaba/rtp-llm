@@ -472,7 +472,7 @@ std::vector<CachePoolMetrics> CoordinatorCacheManager::poolMetrics() const {
         metrics_data.pd_connector_ref_blocks     = pool->referencedBlocksNum(DeviceBlockRefType::PD_CONNECTOR);
         metrics_data.block_cache_ref_blocks      = pool->referencedBlocksNum(BlockTreeRefType::CACHE);
         metrics_data.load_ref_blocks             = pool->referencedBlocksNum(BlockTreeRefType::LOAD);
-        metrics_data.eviction_target_ref_blocks  = pool->referencedBlocksNum(BlockTreeRefType::EVICTION);
+        metrics_data.eviction_ref_blocks         = pool->referencedBlocksNum(BlockTreeRefType::EVICT);
         metrics_data.frozen_ref_blocks           = pool->referencedBlocksNum(BlockTreeRefType::FROZEN);
         metrics_data.used_ratio =
             metrics_data.total_blocks == 0 ?

@@ -130,7 +130,7 @@ public:
         size_t      submit_index = 0;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            if (!pause_enabled_) {
+            if (!pause_enabled_ || (allow_loads_ && descriptors.front().target_tier == Tier::DEVICE)) {
                 lock.unlock();
                 return PerRankBlockTransferEngine::executeBatch(std::move(task));
             }
@@ -149,6 +149,11 @@ public:
                 ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
         }
         return PerRankBlockTransferEngine::executeBatch(std::move(task));
+    }
+
+    void allowLoads() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        allow_loads_ = true;
     }
 
     void enablePause() {
@@ -200,6 +205,7 @@ private:
     mutable std::mutex              mutex_;
     std::condition_variable         cv_;
     bool                            pause_enabled_{true};
+    bool                            allow_loads_{false};
     size_t                          throw_on_submit_{0};
     bool                            entered_{false};
     bool                            released_{false};
@@ -1138,7 +1144,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightDemotionAndDisca
 
     auto path = cache->tree()->findNode({100, 200});
     ASSERT_EQ(path.size(), 2u);
-    EXPECT_EQ(path[1]->group_set_resources[0].transfer_state, GroupSetTransferState::DEMOTING);
+    EXPECT_EQ(path[1]->group_set_resources[0].transfer_state, GroupSetTransferState::EVICTING);
     const auto before_drop = cache->getKeySnapshot();
     EXPECT_EQ(cache->evictForGroup("group0", /*num_blocks=*/1), 1);
     EXPECT_TRUE(cache->tree()->findNode({100, 200}).empty());
@@ -1484,76 +1490,81 @@ INSTANTIATE_TEST_SUITE_P(DemotionFailure,
                          ::testing::Values(DemotionFailureStage::D2H, DemotionFailureStage::H2DISK),
                          demotionFailureParamName);
 
-TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) {
+TEST_F(BlockTreeCacheIntegrationTest, MatchDuringDemotionRetainsSourceAndJoinsLoad) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
 
-    // --- D2H demotion: a match racing the paused DEMOTING copy returns nothing;
-    //     Host residency becomes visible only after the copy commits. ---
-    {
+    for (Tier source : {Tier::DEVICE, Tier::HOST}) {
         FullSWAEnvironmentOptions options;
         options.path_length = 1;
-        options.enable_disk = false;
+        options.enable_disk = true;
         auto environment    = FullSWAEnvironment::create(options);
         ASSERT_NE(environment, nullptr);
-        auto pausable_copy = std::make_shared<PausablePerRankBlockTransferEngine>(
-            environment->groups, environment->cache->isDiskCacheEnabled(), /*succeed=*/true);
+        auto pausable_copy =
+            std::make_shared<PausablePerRankBlockTransferEngine>(environment->groups, true, true, false);
+        pausable_copy->allowLoads();
         PausableTransferReleaseGuard release_guard(pausable_copy);
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache, pausable_copy);
         environment->insertRequestPath();
         environment->releaseRequestRefs();
-
-        std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> device_sources;
-        for (size_t pool_id = 0; pool_id < environment->device_pools.size(); ++pool_id) {
-            const auto blocks = environment->blocksForDevicePool(pool_id);
-            ASSERT_EQ(blocks.size(), 1u);
-            device_sources.emplace_back(environment->device_pools[pool_id], blocks.front());
+        if (source == Tier::HOST) {
+            demoteTo(*environment, Tier::HOST);
         }
-
-        BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment->cache, Tier::DEVICE, 0.01);
-        BlockTreeCacheTestPeer::runMaintenanceForTest(*environment->cache);
-        BlockTreeCacheTestPeer::setTierWatermarkForTest(*environment->cache, Tier::DEVICE, 0.0);
-        const bool d2h_copy_entered = pausable_copy->waitUntilEnteredFor(kRaceWaitTimeout);
-        if (!d2h_copy_entered) {
-            pausable_copy->release();  // never leave a paused engine blocking teardown
+        pausable_copy->enablePause();
+        for (size_t group_id = 0; group_id < environment->groups.size(); ++group_id) {
+            ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, group_id, source));
         }
-        ASSERT_TRUE(d2h_copy_entered);
-        const std::vector<GroupSetResource> demoting_resources = environment->resourcesForPathNode(0);
-        ASSERT_EQ(demoting_resources.size(), environment->groups.size());
-        for (const GroupSetResource& resource : demoting_resources) {
-            EXPECT_EQ(resource.transfer_state, GroupSetTransferState::DEMOTING);
+        ASSERT_TRUE(pausable_copy->waitUntilEnteredFor(kRaceWaitTimeout));
+        auto during = environment->cache->match(environment->keys);
+        EXPECT_EQ(during.matched_device_host_blocks, 1u);
+        EXPECT_EQ(during.matched_device_blocks, source == Tier::DEVICE ? 1u : 0u);
+        auto                                                     context = takeLoadContext(during);
+        std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> targets;
+        if (source == Tier::HOST) {
+            ASSERT_NE(context, nullptr);
+            for (auto& desc : context->load_descs_) {
+                EXPECT_NE(desc.node, nullptr);
+                EXPECT_FALSE(desc.initial_owner);
+                EXPECT_GT(desc.node->non_owner_transfer_ref_count, 0u);
+                EXPECT_EQ(desc.source_tier, Tier::HOST);
+                for (const auto& pool : environment->groups.at(desc.group_set_id)->devicePools()) {
+                    auto block = pool->malloc();
+                    ASSERT_TRUE(block.has_value());
+                    pool->incRef(*block);
+                    desc.target_blocks.push_back(*block);
+                    targets.emplace_back(pool, *block);
+                }
+            }
+            ASSERT_TRUE(context->commit());
+            const auto deadline = std::chrono::steady_clock::now() + kRaceWaitTimeout;
+            while (!context->done() && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            EXPECT_TRUE(context->done()) << "HOST load must finish before the disk write is released";
+            if (context->done()) {
+                EXPECT_TRUE(context->success());
+            }
         }
-
-        // Racing match while the node is DEMOTING returns no reusable prefix or context.
-        BlockTreeMatchResult during = environment->cache->match(environment->keys);
-        EXPECT_EQ(during.matched_device_blocks, 0u);
-        EXPECT_EQ(during.async_context, nullptr);
-        EXPECT_TRUE(during.matched_device_resources.empty());
-        for (const auto& [pool, block] : device_sources) {
-            EXPECT_TRUE(pool->isAllocated(block));
-            EXPECT_EQ(pool->refCount(block), 1u);
+        for (const auto& resource : environment->resourcesForPathNode(0)) {
+            EXPECT_EQ(resource.transfer_state, GroupSetTransferState::EVICTING);
         }
-
         pausable_copy->release();
-        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
-        EXPECT_TRUE(environment->allResourcesAtTier(Tier::HOST));
-        for (const auto& [pool, block] : device_sources) {
-            EXPECT_FALSE(pool->isAllocated(block));  // source freed exactly once on commit
+        BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
+        if (context) {
+            context->waitDone();
+            EXPECT_TRUE(context->success());
         }
-
-        // The node is now Host-resident: a fresh match surfaces it only as a Host
-        // load source (no device-ready prefix yet).
-        BlockTreeMatchResult after = environment->cache->match(environment->keys);
-        EXPECT_EQ(after.matched_device_blocks, 0u);
-        std::shared_ptr<LoadAsyncContext> after_context = takeLoadContext(after);
-        ASSERT_NE(after_context, nullptr);
-        for (const TransferDescriptor& desc : after_context->loadDescs()) {
-            EXPECT_EQ(desc.source_tier, Tier::HOST);
+        EXPECT_TRUE(environment->allResourcesAtTier(source));
+        for (const auto& group : environment->groups) {
+            EXPECT_EQ(group->hostPool()->referencedBlocksNum(BlockTreeRefType::EVICT), 0u);
+            EXPECT_EQ(group->diskPool()->usedBlocksNum(), 0u);
         }
-        after_context.reset();
-        block_tree_cache_test::releaseRequestRefsForTest(*environment->cache, after.matched_device_resources);
-
+        context.reset();
+        for (const auto& target : targets) {
+            target.first->decRef(target.second);
+        }
+        block_tree_cache_test::releaseRequestRefsForTest(*environment->cache, during.matched_device_resources);
         environment->reclaimAll();
         environment->expectFullyReclaimed();
     }
