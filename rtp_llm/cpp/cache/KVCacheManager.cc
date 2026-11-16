@@ -297,6 +297,11 @@ bool KVCacheManager::init() {
     RTP_LLM_CHECK_WITH_INFO(!coordinator_manager_ && !block_tree_cache_ && !metrics_reporter_thread_.joinable(),
                             "KVCacheManager::init called more than once");
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "cache specs must not be empty");
+    if (kv_cache_config_.enable_remote_cache && parallelism_config_.pp_size > 1) {
+        RTP_LLM_LOG_ERROR("KVCM remote cache does not support pipeline parallelism (pp_size=%ld)",
+                          parallelism_config_.pp_size);
+        return false;
+    }
     if (kv_cache_config_.enable_remote_cache && kv_cache_config_.kvcm_asyncwrapper_thread_num == 0) {
         RTP_LLM_LOG_ERROR("remote cache executor thread count must be positive");
         return false;
@@ -781,9 +786,13 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
         memory_response->add_block_errors(MemoryOperationResponsePB::INVALID_REQUEST);
     }
     std::vector<TransferDescriptor> descriptors;
+    std::vector<size_t>             wire_item_indices;
     const bool                      allow_absent_group_sets = parallelism_config_.pp_size > 1;
-    if (!BlockTransferRequestConverter::decodeTransfer(
-            request.mem_request(), descriptors, block_tree_cache_->groupSets(), allow_absent_group_sets)) {
+    if (!BlockTransferRequestConverter::decodeTransfer(request.mem_request(),
+                                                       descriptors,
+                                                       block_tree_cache_->groupSets(),
+                                                       allow_absent_group_sets,
+                                                       allow_absent_group_sets ? &wire_item_indices : nullptr)) {
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: invalid grouped transfer request");
         return true;
     }
@@ -809,7 +818,23 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
                                    std::nullopt);
     transfer_task.setTraceId(request.mem_request().transfer_trace_id());
     transfer_task.setWorkflow(request.mem_request().transfer_workflow_id(), request.mem_request().transfer_parent_id());
-    const auto status = block_tree_cache_->executeTransfer(std::move(transfer_task));
+    auto         status          = block_tree_cache_->executeTransfer(std::move(transfer_task));
+    const size_t wire_item_count = static_cast<size_t>(request.mem_request().copy_items_size());
+    if (allow_absent_group_sets && wire_item_indices.size() != wire_item_count) {
+        // A PP stage can omit whole group sets. Restore the original wire order
+        // so skipped items remain no-ops without shifting another item's error.
+        status.expandBlockErrors(wire_item_indices.size());
+        if (status.block_errors.size() != wire_item_indices.size()) {
+            status = {ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "invalid local block transfer result"),
+                      CacheCopyError::RPC_FAILED};
+            status.expandBlockErrors(wire_item_indices.size());
+        }
+        std::vector<CacheCopyError> wire_errors(wire_item_count, CacheCopyError::NONE);
+        for (size_t index = 0; index < wire_item_indices.size(); ++index) {
+            wire_errors[wire_item_indices[index]] = status.blockError(index);
+        }
+        status.block_errors = std::move(wire_errors);
+    }
     BlockTransferRequestConverter::encodeTransferResult(*memory_response, status);
     if (!status.ok()) {
         RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: grouped transfer failed");

@@ -172,14 +172,20 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
 bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestPB&  request,
                                                    std::vector<TransferDescriptor>& descriptors,
                                                    const std::vector<GroupSetPtr>&  group_sets,
-                                                   bool                             allow_absent_group_sets) {
+                                                   bool                             allow_absent_group_sets,
+                                                   std::vector<size_t>*             wire_item_indices) {
     if (request.copy_items_size() == 0) {
         return false;
     }
 
     std::vector<TransferDescriptor> decoded;
+    std::vector<size_t>             decoded_item_indices;
     decoded.reserve(static_cast<size_t>(request.copy_items_size()));
-    for (const CopyItem& item : request.copy_items()) {
+    if (wire_item_indices) {
+        decoded_item_indices.reserve(static_cast<size_t>(request.copy_items_size()));
+    }
+    for (int item_index = 0; item_index < request.copy_items_size(); ++item_index) {
+        const CopyItem&          item          = request.copy_items(item_index);
         const GroupSet*          group_set_ptr = nullptr;
         const GroupSetResolution resolution    = resolveGroupSet(item, group_sets, group_set_ptr);
         if (resolution == GroupSetResolution::INVALID) {
@@ -238,9 +244,18 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
                 return false;
         }
         decoded.push_back(std::move(descriptor));
+        if (wire_item_indices) {
+            decoded_item_indices.push_back(static_cast<size_t>(item_index));
+        }
+    }
+    if (wire_item_indices) {
+        wire_item_indices->reserve(wire_item_indices->size() + decoded_item_indices.size());
     }
     descriptors.insert(
         descriptors.end(), std::make_move_iterator(decoded.begin()), std::make_move_iterator(decoded.end()));
+    if (wire_item_indices) {
+        wire_item_indices->insert(wire_item_indices->end(), decoded_item_indices.begin(), decoded_item_indices.end());
+    }
     return true;
 }
 
