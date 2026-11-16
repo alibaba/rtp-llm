@@ -69,6 +69,9 @@ public:
     bool captureCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end, bool finished = true) const;
 
     size_t decodePublicationUnit() const;
+    // No writer last-use proof: keep ownership and charge the existing frozen
+    // pool guard rather than silently accumulating invisible request holds.
+    void freezeUnknownDecodeWriter(const BatchKVCacheResource& resource) const noexcept;
     // writer_already_fenced is only for later captures in the same caller-thread
     // round, with no intervening writer submission and request pages still held.
     std::shared_ptr<const DecodeEndpoint> retainDecodeEndpoint(const torch::Tensor& physical_ids,

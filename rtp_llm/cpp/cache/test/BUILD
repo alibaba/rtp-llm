@@ -343,12 +343,14 @@ cc_test(
 
 cc_test(
     name = "hybrid_kv_cache_allocator_test",
+    testonly = True,
     srcs = [
         "HybridTypeCoordinatorCacheManagerTest.cc",
     ],
     data = [],
     copts = test_copts,
     deps = test_deps + [
+        "//rtp_llm/cpp/utils:decode_publication_test_support",
         ":block_pool_test_helper",
         ":block_tree_cache_allocator_test_helper",
         "//rtp_llm/cpp/cache/block_tree_cache",

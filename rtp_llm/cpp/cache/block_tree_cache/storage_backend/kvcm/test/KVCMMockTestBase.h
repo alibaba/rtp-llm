@@ -237,6 +237,7 @@ public:
             *completion = sdkResultCompletion(ec);
         return ec;
     }
+    std::function<bool()> reject_save_before_handoff;
     std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec>
     saveKvCachesForTagWithStatus(const std::string&                                          tag,
                                  const kv_cache_manager::UriStrVec&                          uris,
@@ -246,6 +247,8 @@ public:
                                  std::optional<std::chrono::steady_clock::time_point> = std::nullopt) override {
         if (completion)
             *completion = TransferCompletion::NOT_STARTED;
+        if (reject_save_before_handoff && reject_save_before_handoff())
+            return {kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS, {}};
         if (save_status.has_value()) {
             if (completion)
                 *completion = sdkResultCompletion(*save_status);

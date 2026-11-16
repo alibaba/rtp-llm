@@ -66,6 +66,8 @@ int MtpExecutor::selectMtpPreviousSeqLenUpperBound(bool pending, int previous_ne
 void MtpExecutor::retainDecodePublicationPages(const StreamGroups& streams, const GptModelInputs& target,
     const GptModelInputs& draft, const speculative::SpeculativeSamplerOutput& sampled) {
     if (!remoteCacheDecodePublicationEnabled() || role_type_ != RoleType::DECODE || !isTpRank0() || !cache_manager_) return;
+    // Idle DP ranks have no sampled CPU metadata or recorded transfer event.
+    if (target.is_fake_stream || draft.is_fake_stream || !sampled.accept_len_cpu.defined()) return;
     const size_t unit = cache_manager_->decodePublicationUnit();
     if (!unit) return;
     bool crossing = false;
@@ -1817,7 +1819,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& schedul
                 return;
             }
         }
-        for (const auto& stream : frame->streams) stream->endDecodePublicationSubmission();
+        for (const auto& stream : frame->streams) {
+            try { stream->endDecodePublicationSubmission(); }
+            catch (...) {
+                // Writer work is drained or owned by bookkeeping already.
+                // A release failure is not a new UNKNOWN writer obligation.
+                try { RTP_LLM_LOG_ERROR("Decode submission cleanup failed after writer handoff/drain"); }
+                catch (...) {}
+            }
+        }
     }) : std::shared_ptr<void>{};
     std::list<GenerateStreamPtr> publication_streams;
     const auto& streams = publication_frame ? publication_streams : scheduled_streams;
@@ -4116,7 +4126,10 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
                 }
             } catch (...) { safe = false; }
             for (const auto& stream : streams) {
-                if (!safe) stream->retainUnknownDecodePublication(stream);
+                if (!safe) {
+                    try { stream->retainUnknownDecodePublication(stream); }
+                    catch (...) {} // The UNKNOWN self-hold is installed before fallible notification.
+                }
                 stream->decPendingAsyncBookkeepingAndMaybeRelease();
             }
         }

@@ -492,6 +492,51 @@ TEST_F(KVCMSubmissionBoundaryTest, TargetProtectionPreservesExceptionalSdkUnknow
     }
 }
 
+TEST_F(KVCMSubmissionBoundaryTest, WrapperPreflightClosesOnlyWhollyUnstartedProjectedWrites) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        for (const bool partial : {false, true}) for (const bool throws : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "partial=" << partial << " throws=" << throws);
+            Fixture s(true); // One worker: a successful first peer precedes the second rejection.
+            size_t entries = 0;
+            s.client->reject_save_before_handoff = [&] {
+                if (partial && entries++ == 0) return false;
+                if (throws) throw std::runtime_error("wrapper rejected before SDK handoff");
+                return true;
+            };
+            block_tree_cache_detail::ScopeRollback drain([&] {
+                s.backend->proveMockQuiescence();
+                s.backend->shutdown();
+            }); // Drain before callback-captured locals disappear, including fatal assertions.
+            ASSERT_TRUE(s.submit(s.request(true)));
+            ASSERT_NO_FATAL_FAILURE(s.expectSettled(partial, false));
+            EXPECT_EQ(s.saves.load(), partial ? 1 : 0);
+            EXPECT_EQ(s.backend->impl_->completion_resources_->unresolved.load(), 0u);
+        }
+    });
+}
+
+TEST_F(KVCMSubmissionBoundaryTest, PrefillReadNormalizesUnclassifiedPostHandoffFailures) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        Fixture s(false, std::make_shared<BoundaryBroadcastManager>(
+            std::vector<std::string>{"unused-read-peer0", "unused-read-peer1"}));
+        ASSERT_TRUE(s.backend->initialized_);
+        for (const bool touched : {false, true}) {
+            try {
+                try { throw std::bad_alloc(); }
+                catch (...) { s.backend->impl_->rethrowReadPayloadFailure(touched, nullptr); }
+            } catch (const StorageOperationCompletionUnknown&) {
+                EXPECT_TRUE(touched);
+            } catch (const StorageOperationBufferSafeFailure&) {
+                EXPECT_FALSE(touched);
+            } catch (...) {
+                FAIL() << "read failure escaped without buffer-safety classification";
+            }
+        }
+    });
+}
+
 TEST_F(KVCMSubmissionBoundaryTest, LocalPeerLatchWaitsForDriverAfterEveryInlineTerminal) {
     // Actual production latch: peers can finish inline, but cannot notify until
     // the driver drops +1. No copy of the old window/proof model is tested here.

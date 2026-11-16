@@ -595,11 +595,30 @@ std::function<void()> KVCacheManager::allocationChangeCallback() const {
     };
 }
 
+void KVCacheManager::freezeUnknownDecodeWriter(const BatchKVCacheResource& resource) const noexcept {
+    if (!isAllocatorOwner() || !coordinator_manager_) return;
+    const auto& pools = coordinator_manager_->groupBlockPools();
+    const auto& tags = config_.groupTags();
+    for (size_t group = 0; group < tags.size() && group < pools.size(); ++group) {
+        const auto& pool = pools[group];
+        if (!pool) continue;
+        for (int batch = 0; batch < resource.batchSize(); ++batch) {
+            for (auto block : resource.blocks(batch, tags[group])) {
+                // Own a frozen reference even if another operation already
+                // froze this page: its later recovery must not hide our hold.
+                if (pool->isAllocated(block))
+                    pool->freezeBlock(block, "Decode writer completion unknown; request owner retained");
+            }
+        }
+    }
+}
+
 size_t KVCacheManager::decodePublicationUnit() const {
     const auto& cp = parallelism_config_.prefill_cp_config;
     size_t unit = config_.seq_size_per_block * (cp.kv_cache_sharded ? cp.prefill_cp_size : 1);
     for (const auto& group : config_.topology().groups()) {
         if (!group.policy.enable_prefix_reuse || group.policy.group_type == CacheGroupType::FULL) continue;
+        if (group.policy.group_type == CacheGroupType::LINEAR) return 0;
         const auto span = group.seqSizePerBlock();
         const auto multiplier = span / std::gcd(unit, span);
         if (!unit || multiplier > std::numeric_limits<size_t>::max() / unit) return 0;

@@ -141,7 +141,9 @@ TEST_F(SystemPromptConstructorTest, testMultiTaskPromptConstruct) {
 
 TEST_F(SystemPromptConstructorTest, NativeDecodeKeepsResidentSystemPromptInsertion) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    for (const bool use_opaque : {false, true}) for (const int prompt_len : {511, 512}) {
     test::withDecodePublicationStartup([&] {
+        SCOPED_TRACE(::testing::Message() << "opaque=" << use_opaque << " prompt_len=" << prompt_len);
         CustomConfig config;
         config.reuse_cache = true;
         config.role_type = RoleType::DECODE;
@@ -152,6 +154,7 @@ TEST_F(SystemPromptConstructorTest, NativeDecodeKeepsResidentSystemPromptInserti
         auto params = createEngineInitParams(config, model, runtime, settings);
         params.model_config_.max_seq_len = 600;
         params.parallelism_config.role_type = RoleType::DECODE;
+        if (use_opaque) {
         KVCacheSpecDesc opaque{"full", KVCacheSpecType::OpaqueKV};
         opaque.dtype = DataType::TYPE_UINT8;
         opaque.entry_dtype = DataType::TYPE_UINT8;
@@ -160,6 +163,10 @@ TEST_F(SystemPromptConstructorTest, NativeDecodeKeepsResidentSystemPromptInserti
         opaque.compression_ratio = 1;
         opaque.block_stride_bytes_alignment = 4608;
         params.model_config_.kv_cache_spec_descs.assign(params.model_config_.num_layers, {opaque});
+        } else {
+            for (auto& layer : params.model_config_.kv_cache_spec_descs)
+                for (auto& spec : layer) spec.tag = "full";
+        }
         NormalExecutor::test_model_factory = [vocab = model.vocab_size](const GptModelInitParams&) {
             return std::unique_ptr<ModelBase>(new MockModel(vocab));
         };
@@ -168,29 +175,32 @@ TEST_F(SystemPromptConstructorTest, NativeDecodeKeepsResidentSystemPromptInserti
         auto manager = engine->resourceContext().cache_manager;
         // Exercise real opaque policy construction with the existing mock
         // forward; this is not a DSV4.1 kernel/content test.
-        ASSERT_TRUE(manager->cacheConfig().use_opaque_kv_cache_store);
-        ASSERT_TRUE(manager->cacheConfig().disable_decode_first_malloc_device_reuse);
+        ASSERT_EQ(manager->cacheConfig().use_opaque_kv_cache_store, use_opaque);
+        ASSERT_EQ(manager->cacheConfig().disable_decode_first_malloc_device_reuse, use_opaque);
         ASSERT_EQ(manager->coordinator_manager_->role_type_, RoleType::DECODE);
         auto input = std::make_shared<GenerateInput>();
-        input->input_ids = torch::ones({511}, torch::kInt32);
+        input->input_ids = torch::ones({prompt_len}, torch::kInt32);
         input->generate_config = std::make_shared<GenerateConfig>();
         input->generate_config->max_new_tokens = 1;
         auto prepared = engine->preRun(input, preRunMode::build_system_prompt);
         ASSERT_TRUE(prepared.ok()) << prepared.status();
         auto stream = prepared.value();
-        ASSERT_EQ(stream->seqLength(), 512);
+        ASSERT_EQ(stream->seqLength(), prompt_len + 1);
         ASSERT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
         ASSERT_EQ(stream->kvCache().cacheKeys(0).size(), 2u);
         stream->releaseResource(); // Non-resident path skips the unused tree.
         EXPECT_TRUE(manager->blockTreeCache()->getKeySnapshot().keys.empty());
         KVCacheConfig prompts;
-        prompts.multi_task_prompt_tokens = {{"aligned", std::vector<int>(511, 1)}};
+        prompts.multi_task_prompt_tokens = {{"aligned", std::vector<int>(prompt_len, 1)}};
         const auto result = SystemPromptConstructor::construct(prompts, engine.get(), manager.get(), true);
         ASSERT_TRUE(result.ok()) << result.status();
-        EXPECT_EQ(result->at("aligned").prompt_tokens.size(), 511u);
+        EXPECT_EQ(result->at("aligned").prompt_tokens.size(), static_cast<size_t>(prompt_len));
         EXPECT_FALSE(result->at("aligned").group_block_ids.at("full").empty());
-        EXPECT_EQ(manager->blockTreeCache()->getKeySnapshot().keys.size(), 2u);
+        // Resident insertion drops the uncomputed partial block. The sampled
+        // token does not supply KV: 511 inputs yield one block, 512 yield two.
+        EXPECT_EQ(manager->blockTreeCache()->getKeySnapshot().keys.size(), static_cast<size_t>(prompt_len / 256));
     }, [&] { NormalExecutor::test_model_factory = nullptr; TearDown(); });
+    }
 }
 
 TEST_F(SystemPromptConstructorTest, testMultiGroupPromptPreservesEveryTaggedRow) {

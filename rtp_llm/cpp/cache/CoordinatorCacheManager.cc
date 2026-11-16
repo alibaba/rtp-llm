@@ -924,14 +924,19 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
         return;
     }
 
-    const bool native_decode = remoteCacheDecodePublicationEnabled() && role_type_ == RoleType::DECODE;
+    // Unsupported reusable LINEAR models retain their existing local-cache
+    // insertion policy even when this process-level DSV4.1 switch is set.
+    const bool native_decode = remoteCacheDecodePublicationEnabled() && role_type_ == RoleType::DECODE
+        && std::none_of(config_.topology().groups().begin(), config_.topology().groups().end(), [](const auto& group) {
+            return group.policy.enable_prefix_reuse && group.policy.group_type == CacheGroupType::LINEAR;
+        });
     const bool unused_decode_tree = native_decode && config_.use_opaque_kv_cache_store
                                     && config_.disable_decode_first_malloc_device_reuse;
     // Native publication already prepared its own source pins before release.
     // This D policy never looks up request entries, so avoid retaining/copying
     // them. Resident system prompts still require the original insertion count.
     if (unused_decode_tree && !insert_info.is_resident) return;
-    const bool native_insert = native_decode && !(unused_decode_tree && insert_info.is_resident);
+    const bool native_insert = native_decode && !insert_info.is_resident;
     const auto endpoint = native_insert ? kv_cache_resource->decode_endpoint : nullptr;
     if (native_insert && !config_.mtp_sub_configs.empty() && !endpoint) return;
     const auto& cp_mapper = cp_slot_mapper_;
