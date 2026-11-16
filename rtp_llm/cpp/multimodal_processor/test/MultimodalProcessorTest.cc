@@ -415,6 +415,10 @@ TEST_F(MultimodalProcessorTest, testExpandedLayoutDoesNotScanHashValuesAsTags) {
     EXPECT_TRUE(torch::equal(input.input_ids, torch::tensor({1, 99, -2, 3, 99, 4}, torch::kInt32)));
     EXPECT_TRUE(torch::equal(refreshed.value().locs, result.value().locs));
     EXPECT_TRUE(torch::equal(refreshed.value().text_tokens_mask, result.value().text_tokens_mask));
+    input.generate_config = std::make_shared<GenerateConfig>();
+    input.generate_config->pd_separation = true;
+    EXPECT_EQ(processor.useExpandedTokenLayout(input, features, hashes).status().code(), ErrorCode::MM_PROCESS_ERROR);
+    input.generate_config->pd_separation = false;
     hashes[0] = torch::tensor({42}, torch::kInt32);
     EXPECT_FALSE(processor.useExpandedTokenLayout(input, features, hashes).ok());
 }
