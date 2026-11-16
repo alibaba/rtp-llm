@@ -152,15 +152,15 @@ TEST(GroupSetTest, ReleasesLowerTierTreeReferencesInBatch) {
     const auto device_pool = makeTestDevicePool({{64, 16}}, 2, "group_set_batch_release_device");
     const auto host_pool   = makeHostPool(/*payload_bytes=*/80, /*usable_count=*/2);
     const auto group       = makeTestGroupSet(0, topology, {"group0"}, {device_pool}, host_pool);
-    const auto blocks      = group->allocateBlocks(2, Tier::HOST, BlockTreeRefType::EVICTION);
+    const auto blocks      = group->allocateBlocks(2, Tier::HOST, BlockTreeRefType::EVICT);
     ASSERT_TRUE(blocks.has_value());
     ASSERT_EQ(blocks->size(), 2u);
-    ASSERT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 2u);
+    ASSERT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::EVICT), 2u);
 
-    group->releaseBlocks(Tier::HOST, *blocks, BlockTreeRefType::EVICTION);
+    group->releaseBlocks(Tier::HOST, *blocks, BlockTreeRefType::EVICT);
 
     EXPECT_EQ(host_pool->freeBlocksNum(), 2u);
-    EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
+    EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::EVICT), 0u);
 }
 
 TEST(GroupSetTest, BatchOuterReferenceRejectsInvalidTailWithoutMutatingPrefix) {

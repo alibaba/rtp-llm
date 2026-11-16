@@ -116,7 +116,7 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
                          "reserve=%zu request_ref_blocks=%zu "
                          "remote_connector_ref_blocks=%zu pd_connector_ref_blocks=%zu "
                          "block_cache_ref_blocks=%zu "
-                         "load_ref_blocks=%zu eviction_target_ref_blocks=%zu used_ratio=%.4f%%",
+                         "load_ref_blocks=%zu eviction_ref_blocks=%zu used_ratio=%.4f%%",
                          tierName(pool_metrics.tier),
                          pool_metrics.pool_name.c_str(),
                          pool_metrics.block_size_bytes,
@@ -131,7 +131,7 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
                          pool_metrics.pd_connector_ref_blocks,
                          pool_metrics.block_cache_ref_blocks,
                          pool_metrics.load_ref_blocks,
-                         pool_metrics.eviction_target_ref_blocks,
+                         pool_metrics.eviction_ref_blocks,
                          pool_metrics.used_ratio);
     }
 
@@ -148,8 +148,7 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
     pool_collector.pd_connector_ref_blocks           = static_cast<int64_t>(pool_metrics.pd_connector_ref_blocks);
     pool_collector.block_cache_ref_blocks            = static_cast<int64_t>(pool_metrics.block_cache_ref_blocks);
     pool_collector.load_ref_blocks                   = static_cast<int64_t>(pool_metrics.load_ref_blocks);
-    pool_collector.eviction_target_ref_blocks        = static_cast<int64_t>(pool_metrics.eviction_target_ref_blocks);
-    pool_collector.report_eviction_target_ref_blocks = pool_metrics.tier != Tier::DEVICE;
+    pool_collector.eviction_ref_blocks               = static_cast<int64_t>(pool_metrics.eviction_ref_blocks);
     pool_collector.frozen_ref_blocks                 = static_cast<int64_t>(pool_metrics.frozen_ref_blocks);
     pool_collector.report_frozen_ref_blocks          = report_frozen_ref_blocks;
     pool_collector.used_ratio                        = pool_metrics.used_ratio;

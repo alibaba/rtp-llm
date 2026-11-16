@@ -444,7 +444,7 @@ TEST(DeviceBlockPoolTest, HasRequestRefDistinguishesRequestAndTreeReferences) {
     ASSERT_TRUE(block.has_value());
     EXPECT_FALSE(pool.hasRequestRef(*block));
     pool.incTreeRef(*block, BlockTreeRefType::CACHE);
-    pool.incTreeRef(*block, BlockTreeRefType::EVICTION);
+    pool.incTreeRef(*block, BlockTreeRefType::EVICT);
     EXPECT_EQ(pool.refCount(*block), 1u);
     EXPECT_FALSE(pool.hasRequestRef(*block));
     pool.incRef(*block);
@@ -454,7 +454,7 @@ TEST(DeviceBlockPoolTest, HasRequestRefDistinguishesRequestAndTreeReferences) {
     EXPECT_TRUE(pool.hasRequestRef(*block));
     pool.decRef(*block);
     EXPECT_FALSE(pool.hasRequestRef(*block));
-    pool.decTreeRef(*block, BlockTreeRefType::EVICTION);
+    pool.decTreeRef(*block, BlockTreeRefType::EVICT);
     pool.decTreeRef(*block, BlockTreeRefType::CACHE);
     EXPECT_FALSE(pool.isAllocated(*block));
 }
@@ -477,7 +477,7 @@ TEST(DeviceBlockPoolTest, ReclaimCacheBlockRequiresOneCacheRefAndNoOtherHolders)
     EXPECT_TRUE(pool.canReclaimCacheBlock(*block));
 
     for (const BlockTreeRefType type :
-         {BlockTreeRefType::CACHE, BlockTreeRefType::LOAD, BlockTreeRefType::EVICTION, BlockTreeRefType::FROZEN}) {
+         {BlockTreeRefType::CACHE, BlockTreeRefType::LOAD, BlockTreeRefType::EVICT, BlockTreeRefType::FROZEN}) {
         pool.incTreeRef(*block, type);
         EXPECT_FALSE(pool.canReclaimCacheBlock(*block));
         pool.decTreeRef(*block, type);

@@ -724,8 +724,7 @@ bool RtpLLMCachePoolMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(pd_connector_ref_blocks_metric, "rtp_llm_kv_cache_pd_connector_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(block_cache_ref_blocks_metric, "rtp_llm_kv_cache_block_cache_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(load_ref_blocks_metric, "rtp_llm_kv_cache_load_ref_blocks");
-    REGISTER_GAUGE_MUTABLE_METRIC(eviction_target_ref_blocks_metric, "rtp_llm_kv_cache_eviction_target_ref_blocks");
-    REGISTER_GAUGE_MUTABLE_METRIC(eviction_ref_blocks_compat_metric, "rtp_llm_kv_cache_eviction_ref_blocks");
+    REGISTER_GAUGE_MUTABLE_METRIC(eviction_ref_blocks_metric, "rtp_llm_kv_cache_eviction_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(frozen_ref_blocks_metric, "rtp_llm_kv_cache_frozen_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(used_ratio_metric, "rtp_llm_kv_cache_used_ratio");
     REGISTER_GAUGE_MUTABLE_METRIC(read_bytes_metric, "rtp_llm_kv_cache_disk_cache_read_bytes");
@@ -750,10 +749,7 @@ void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCac
     REPORT_MUTABLE_METRIC(pd_connector_ref_blocks_metric, collector->pd_connector_ref_blocks);
     REPORT_MUTABLE_METRIC(block_cache_ref_blocks_metric, collector->block_cache_ref_blocks);
     REPORT_MUTABLE_METRIC(load_ref_blocks_metric, collector->load_ref_blocks);
-    if (collector->report_eviction_target_ref_blocks) {
-        REPORT_MUTABLE_METRIC(eviction_target_ref_blocks_metric, collector->eviction_target_ref_blocks);
-        REPORT_MUTABLE_METRIC(eviction_ref_blocks_compat_metric, collector->eviction_target_ref_blocks);
-    }
+    REPORT_MUTABLE_METRIC(eviction_ref_blocks_metric, collector->eviction_ref_blocks);
     if (collector->report_frozen_ref_blocks) {
         REPORT_MUTABLE_METRIC(frozen_ref_blocks_metric, collector->frozen_ref_blocks);
     }
@@ -890,7 +886,6 @@ bool RtpLLMCacheEvictionMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(eviction_trigger_qps_metric, "rtp_llm_kv_cache_eviction_trigger_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(eviction_blocks_count_metric, "rtp_llm_kv_cache_eviction_blocks_count");
     REGISTER_QPS_MUTABLE_METRIC(eviction_blocks_qps_metric, "rtp_llm_kv_cache_eviction_blocks_qps");
-    REGISTER_QPS_MUTABLE_METRIC(eviction_blocks_fail_qps_metric, "rtp_llm_kv_cache_eviction_blocks_fail_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(evicted_block_lifetime_ms_metric, "rtp_llm_kv_cache_evicted_block_lifetime_ms");
     REGISTER_GAUGE_MUTABLE_METRIC(evicted_block_idletime_ms_metric, "rtp_llm_kv_cache_evicted_block_idletime_ms");
     REGISTER_QPS_MUTABLE_METRIC(choose_victim_qps_metric, "rtp_llm_kv_cache_choose_victim_qps");
@@ -931,9 +926,16 @@ void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*         tag
         kmonitor::MetricsTags eviction_tags("tier", collector->source_tier);
         eviction_tags.AddTag("trigger_type", collector->trigger_type);
         eviction_tags.AddTag("group_type", collector->group_type);
-        eviction_blocks_qps_metric->Report(&eviction_tags, collector->eviction_blocks);
-        eviction_blocks_fail_qps_metric->Report(&eviction_tags,
-                                                collector->eviction_success ? 0 : collector->eviction_blocks);
+        const auto report_blocks = [&](const char* type, int64_t count) {
+            auto block_tags = eviction_tags;
+            block_tags.AddTag("type", type);
+            eviction_blocks_qps_metric->Report(&block_tags, count);
+        };
+        const int64_t non_cancelled_blocks = collector->eviction_blocks - collector->eviction_cancelled_blocks;
+        report_blocks("total", collector->eviction_blocks);
+        report_blocks("success", collector->eviction_success ? non_cancelled_blocks : 0);
+        report_blocks("fail", collector->eviction_success ? 0 : non_cancelled_blocks);
+        report_blocks("cancel", collector->eviction_cancelled_blocks);
         for (size_t i = 0; i < collector->block_times_count; ++i) {
             const auto& [lifetime_ms, idletime_ms] = collector->block_times_ms[i];
             evicted_block_lifetime_ms_metric->Report(&eviction_tags, lifetime_ms);
@@ -983,11 +985,8 @@ bool RtpLLMCacheInsertMetrics::init(kmonitor::MetricsGroupManager* manager) {
     return true;
 }
 
-void RtpLLMCacheInsertMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheInsertMetricsCollector* collector) {
-    kmonitor::MetricsTags hard_stop_tags = tags ? *tags : kmonitor::MetricsTags{};
-    hard_stop_tags.AddTag("tier", collector->tier);
-    hard_stop_tags.AddTag("operation", collector->operation);
-    insert_hard_stop_qps_metric->Report(&hard_stop_tags, 1);
+void RtpLLMCacheInsertMetrics::report(const kmonitor::MetricsTags* tags) {
+    insert_hard_stop_qps_metric->Report(tags, 1);
 }
 
 bool RtpLLMDecodePublicationMetrics::init(kmonitor::MetricsGroupManager* manager) {

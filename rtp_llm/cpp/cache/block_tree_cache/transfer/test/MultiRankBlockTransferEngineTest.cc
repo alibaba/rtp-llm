@@ -409,7 +409,7 @@ TEST(MultiRankDiskBytesTest, EvictionUsesEachRanksPhysicalStrideAndIndependentFi
         auto group = makeTestGroupSet(0, topology, topology->groupTags(), {}, host, disk, true, payloads[rank]);
         for (size_t index = 0; index < block_count; ++index) {
             const auto source = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
-            const auto target = group->allocateSingleBlock(Tier::DISK, BlockTreeRefType::EVICTION);
+            const auto target = group->allocateSingleBlock(Tier::DISK, BlockTreeRefType::EVICT);
             ASSERT_FALSE(isNullBlockIdx(source));
             ASSERT_FALSE(isNullBlockIdx(target));
             auto* data = static_cast<uint8_t*>(host->blockBuffer(source).addr);
@@ -477,7 +477,7 @@ TEST(MultiRankDiskBytesTest, EvictionUsesEachRanksPhysicalStrideAndIndependentFi
             EXPECT_TRUE(std::all_of(
                 buffer, buffer + payloads[rank], [rank, index](uint8_t byte) { return byte == 40 + rank + index; }));
             group->releaseBlocks(Tier::HOST, {source}, BlockTreeRefType::CACHE);
-            group->releaseBlocks(Tier::DISK, {target}, BlockTreeRefType::EVICTION);
+            group->releaseBlocks(Tier::DISK, {target}, BlockTreeRefType::EVICT);
         }
     }
     EXPECT_GT(total_write_bytes, groups.front()->diskPool()->writeBytes());
@@ -754,7 +754,7 @@ TEST_F(MultiRankBlockTransferEngineTest, FrozenExecutionKeepsWireTraceAndSeparat
     auto cache = makeBroadcastCache(manager);
     auto group = cache->groupSets().front();
     auto pool = group->hostPool();
-    const auto target = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICTION);
+    const auto target = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICT);
     ASSERT_NE(target, NULL_BLOCK_IDX);
     TransferTask task({TransferDescriptor::deviceToHost(0, {1}, target)}, std::chrono::seconds(5), 42);
     const auto parent_trace = task.traceId();
@@ -765,7 +765,7 @@ TEST_F(MultiRankBlockTransferEngineTest, FrozenExecutionKeepsWireTraceAndSeparat
     dispatcher->runTransfer(std::move(task), [&](TransferResult result) {
         EXPECT_TRUE(pool->isFrozen(target));
         EXPECT_EQ(dispatcher->frozenTasks().size(), 1u);
-        pool->decTreeRef(target, BlockTreeRefType::EVICTION);
+        pool->decTreeRef(target, BlockTreeRefType::EVICT);
         completion.set_value(std::move(result));
     }, "evict");
     ASSERT_EQ(done.wait_for(std::chrono::seconds(5)), std::future_status::ready);
@@ -826,7 +826,7 @@ TEST_F(MultiRankBlockTransferEngineTest, SubscriptionFailureFreezesBeforeLateRpc
     auto cache = makeBroadcastCache(manager);
     auto group = cache->groupSets().front();
     auto pool = group->hostPool();
-    const auto target = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICTION);
+    const auto target = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICT);
     ASSERT_NE(target, NULL_BLOCK_IDX);
     auto* dispatcher = cache->transfer_dispatcher_.get();
     block_tree_cache_detail::ScopeRollback cleanup([&] {
@@ -841,7 +841,7 @@ TEST_F(MultiRankBlockTransferEngineTest, SubscriptionFailureFreezesBeforeLateRpc
             EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
             EXPECT_TRUE(pool->isFrozen(target));
             ++callbacks;
-            pool->decTreeRef(target, BlockTreeRefType::EVICTION);
+            pool->decTreeRef(target, BlockTreeRefType::EVICT);
         }, "evict");
     EXPECT_EQ(callbacks, 1u);
     auto records = dispatcher->frozenTasks();
@@ -1623,8 +1623,8 @@ TEST_F(MultiRankBlockTransferEngineTest, EvictionRpcFailureFreezesOnlyTargetAndR
     EXPECT_EQ(device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
     EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
     EXPECT_EQ(host_pool->freeBlocksNum(), 7u);
-    EXPECT_EQ(device_pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
-    EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::EVICTION), 0u);
+    EXPECT_EQ(device_pool->referencedBlocksNum(BlockTreeRefType::EVICT), 0u);
+    EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::EVICT), 0u);
     // The retained source may be retried, but the unknown target must not be reused.
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
@@ -2238,8 +2238,8 @@ static void mixedBroadcastLosesCompletion(bool through_dispatcher) {
     if (through_dispatcher) {
         // The coordinator now owns real target references on UNKNOWN. Use
         // allocated HOST destinations while the RPC service mocks the copies.
-        const auto first = groups[0]->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICTION);
-        const auto second = groups[1]->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICTION);
+        const auto first = groups[0]->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICT);
+        const auto second = groups[1]->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICT);
         ASSERT_NE(first, NULL_BLOCK_IDX);
         ASSERT_NE(second, NULL_BLOCK_IDX);
         task = TransferTask({TransferDescriptor::deviceToHost(0, {2}, first),
@@ -2253,8 +2253,8 @@ static void mixedBroadcastLosesCompletion(bool through_dispatcher) {
         dispatcher.waitForTransfers();
         ASSERT_EQ(dispatcher.frozenTasks().size(), 1u);
         EXPECT_EQ(dispatcher.frozenTasks().front()->snapshot().target_block_count, 2u);
-        groups[0]->hostPool()->decTreeRef(first, BlockTreeRefType::EVICTION);
-        groups[1]->hostPool()->decTreeRef(second, BlockTreeRefType::EVICTION);
+        groups[0]->hostPool()->decTreeRef(first, BlockTreeRefType::EVICT);
+        groups[1]->hostPool()->decTreeRef(second, BlockTreeRefType::EVICT);
         dispatcher.frozenTasks().front()->unfreeze();
     } else {
         auto context = engine->execute(std::move(task));

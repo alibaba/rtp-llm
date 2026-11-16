@@ -24,7 +24,7 @@ struct CandidateMeta {
 // Real data-transfer state; a resource is excluded from all heaps while != IDLE.
 enum class GroupSetTransferState : uint8_t {
     IDLE,
-    DEMOTING,      // Device -> Host, or Host -> Disk
+    EVICTING,      // Device -> Host, or Host -> Disk
     LOAD_PENDING,  // Host/Disk source reserved by a deferred load ticket
     LOADING        // Host/Disk -> Device
 };
@@ -33,8 +33,8 @@ inline const char* transferStateName(GroupSetTransferState state) {
     switch (state) {
         case GroupSetTransferState::IDLE:
             return "IDLE";
-        case GroupSetTransferState::DEMOTING:
-            return "DEMOTING";
+        case GroupSetTransferState::EVICTING:
+            return "EVICTING";
         case GroupSetTransferState::LOAD_PENDING:
             return "LOAD_PENDING";
         case GroupSetTransferState::LOADING:
@@ -58,6 +58,8 @@ struct GroupSetResource {
     // The source remains owned by the in-flight operation, but its target must no longer be installed.
     bool          transfer_detached{false};
     CandidateMeta candidate_meta;
+    uint64_t      eviction_access_seq{0};
+    uint64_t      generation{0};
 
     bool hasTier(Tier tier) const {
         switch (tier) {
@@ -87,8 +89,7 @@ struct GroupSetResource {
         return transfer_state == GroupSetTransferState::IDLE && is_empty();
     }
     bool isMatchUsable() const {
-        return !transfer_detached
-               && (transfer_state == GroupSetTransferState::IDLE || transfer_state == GroupSetTransferState::LOADING);
+        return !transfer_detached && (hasCompleteDeviceValue() || hasTier(Tier::HOST) || hasTier(Tier::DISK));
     }
     bool hasCompleteDeviceValue() const {
         return !device_blocks.empty()

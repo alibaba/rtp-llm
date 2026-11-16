@@ -209,6 +209,32 @@ TEST(TransferDescriptorTest, FactoriesBuildExecutableDescriptors) {
     EXPECT_TRUE(TransferDescriptor::diskToDevice(0, 3, {1, 2}).isExecutable());
 }
 
+TEST(TransferDescriptorTest, OwnershipTracksGenerationForLoadEvictAndDrop) {
+    for (const auto& direction : {std::make_pair(Tier::HOST, Tier::DEVICE),
+                                  std::make_pair(Tier::DISK, Tier::DEVICE),
+                                  std::make_pair(Tier::DEVICE, Tier::HOST),
+                                  std::make_pair(Tier::HOST, Tier::DISK),
+                                  std::make_pair(Tier::DEVICE, Tier::NONE)}) {
+        SCOPED_TRACE(tierName(direction.first));
+        SCOPED_TRACE(tierName(direction.second));
+        TreeNode node;
+        node.group_set_resources.resize(2);
+        TransferDescriptor owner(&node, 1, 0, direction.first, direction.second, {1}, /*initial_owner=*/true);
+        TransferDescriptor non_owner(&node, 1, 0, direction.first, direction.second, {1}, /*initial_owner=*/false);
+        EXPECT_TRUE(owner.isCurrentOwner());
+        EXPECT_FALSE(non_owner.isCurrentOwner());
+
+        ++node.group_set_resources[0].generation;
+        EXPECT_TRUE(owner.isCurrentOwner());
+        ++node.group_set_resources[1].generation;
+        EXPECT_TRUE(owner.initial_owner);
+        EXPECT_FALSE(owner.isCurrentOwner());
+        TransferDescriptor next_owner(&node, 1, 0, direction.first, direction.second, {1}, /*initial_owner=*/true);
+        EXPECT_TRUE(next_owner.isCurrentOwner());
+    }
+    EXPECT_FALSE(TransferDescriptor{}.isCurrentOwner());
+}
+
 TEST(TransferDescriptorTest, IsExecutableRequiresResolvedLocalEndpoints) {
     EXPECT_FALSE(TransferDescriptor{}.isExecutable());
     EXPECT_FALSE(TransferDescriptor::deviceToHost(0, {}, 3).isExecutable());

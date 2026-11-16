@@ -25,7 +25,7 @@ namespace rtp_llm {
 
 class DiskIOExecutor;
 
-// One direction owner. Disk workers fill their Entry's result and publish its
+// One operation owner. Disk workers fill their Entry's result and publish its
 // completion queue under mutex_; CRC stage callbacks run in this owner's stack.
 // Business references stay upstream. The borrowed disk executor, when needed,
 // outlives this owner's shutdown/join; pass nullptr only for routes without Disk.
@@ -36,7 +36,7 @@ public:
     TransferWorkLoop(std::vector<GroupSetPtr>                       groups,
                      std::unique_ptr<CrcCopyExecutor>               crc,
                      DiskIOExecutor*                                disk_io_executor,
-                     TransferDirection                              direction,
+                     TransferOperation                              operation,
                      size_t                                         batch_limit,
                      size_t                                         queue_capacity,
                      std::shared_ptr<HostStagingBlockPool>          staging,
@@ -56,7 +56,7 @@ public:
     // returns a completed failure and records one rejected observation.
     std::shared_ptr<TransferAsyncContext>
     execute(TransferTask&& task, BeforeCompleteCallback&& before_complete = {}, bool* retryable = nullptr);
-    // Fixed limit supplied by PerRank for both direction owners.
+    // Fixed limit supplied by PerRank for both operation owners.
     size_t batchLimit() const noexcept {
         return batch_limit_;
     }
@@ -177,14 +177,14 @@ private:
     std::vector<GroupSetPtr>                       groups_;
     std::unique_ptr<CrcCopyExecutor>               crc_;
     DiskIOExecutor* const                          disk_io_executor_;  // Owned by the engine through shutdown/join.
-    TransferDirection                              direction_;
+    TransferOperation                              operation_;
     size_t                                         batch_limit_, capacity_;
     std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter_;
     int64_t                                        world_rank_;
     std::string                                    thread_name_;
 
     // ==================== Owner-thread-only state: no lock ====================
-    // One private pool per direction owner, shared by all cache group types.
+    // One private pool per operation owner, shared by all cache group types.
     // Declared before entries_ so the pool outlives all Entry leases.
     StagingResource                staging_;
     std::map<int, Queue>           crc_waiting_;

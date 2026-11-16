@@ -29,7 +29,7 @@ enum class BlockPoolType {
 enum class BlockTreeRefType : uint8_t {
     CACHE = 0,
     LOAD,
-    EVICTION,
+    EVICT,
     FROZEN,
     COUNT,
 };

@@ -231,6 +231,39 @@ TEST(LoadTaskRunnerTest, CreateTaskPartitionsHostAndDiskDescriptors) {
     EXPECT_EQ(task->disk_to_device_task.descriptors().front().source_tier, Tier::DISK);
 }
 
+TEST(LoadTaskRunnerTest, ReleaseTaskResourcesBatchesGroupsAndPreservesInstalledTargets) {
+    const std::vector<GroupSetPtr>  groups{makeTaskRunnerTestGroupSet(0, false, 3),
+                                          makeTaskRunnerTestGroupSet(1, false, 3)};
+    LoadTaskRunner                  runner(groups, 30'000, 30'000);
+    std::vector<TransferDescriptor> descriptors;
+    std::vector<BlockIdList>        targets;
+    for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
+        const auto& pool   = groups[group_id]->devicePools().front();
+        const auto  blocks = pool->malloc(3);
+        ASSERT_TRUE(blocks.has_value());
+        pool->incTreeRef(*blocks, BlockTreeRefType::LOAD);
+        targets.push_back(*blocks);
+        descriptors.push_back(TransferDescriptor::hostToDevice(group_id, 1, {(*blocks)[0]}));
+        descriptors.push_back(TransferDescriptor::diskToDevice(group_id, 2, {(*blocks)[1]}));
+        descriptors.push_back(TransferDescriptor::hostToDevice(group_id, 3, {(*blocks)[2]}));
+        pool->incTreeRef((*blocks)[2], BlockTreeRefType::CACHE);
+        pool->decTreeRef((*blocks)[2], BlockTreeRefType::LOAD);
+    }
+    auto task                 = makeLoadTask(std::move(descriptors));
+    task->target_installed[2] = true;
+    task->target_installed[5] = true;
+
+    runner.releaseTaskResources(*task);
+
+    for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
+        const auto& pool = groups[group_id]->devicePools().front();
+        EXPECT_FALSE(pool->isAllocated(targets[group_id][0]));
+        EXPECT_FALSE(pool->isAllocated(targets[group_id][1]));
+        EXPECT_TRUE(pool->isAllocated(targets[group_id][2]));
+        pool->decTreeRef(targets[group_id][2], BlockTreeRefType::CACHE);
+    }
+}
+
 TEST(LoadTaskRunnerTest, CreateTaskAssignsIndependentHostAndDiskTimeouts) {
     GroupSetPtr                                   group = makeTaskRunnerTestGroupSet();
     const std::vector<GroupSetPtr>                group_sets{group};

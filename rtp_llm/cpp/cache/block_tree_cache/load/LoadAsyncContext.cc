@@ -431,6 +431,7 @@ bool LoadAsyncContext::settle(bool success, bool host_success) {
 }
 
 bool LoadAsyncContext::onTaskFail() {
+    SettlementReadyCallback discarded_callback;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const State                 state = state_.load();
@@ -445,6 +446,7 @@ bool LoadAsyncContext::onTaskFail() {
             error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load task failed");
         }
         completion_time_us_.store(autil::TimeUtility::currentTimeInMicroSeconds());
+        discarded_callback = std::move(settlement_ready_callback_);
         state_.store(State::FAILED);
     }
     notifyCompletion();

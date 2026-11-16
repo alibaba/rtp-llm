@@ -79,7 +79,7 @@ bool TransferWorkLoop::isCrc(Step step) {
 TransferWorkLoop::TransferWorkLoop(std::vector<GroupSetPtr>                       groups,
                                    std::unique_ptr<CrcCopyExecutor>               crc,
                                    DiskIOExecutor*                                disk_io_executor,
-                                   TransferDirection                              direction,
+                                   TransferOperation                              operation,
                                    size_t                                         batch_limit,
                                    size_t                                         queue_capacity,
                                    std::shared_ptr<HostStagingBlockPool>          staging,
@@ -89,12 +89,12 @@ TransferWorkLoop::TransferWorkLoop(std::vector<GroupSetPtr>                     
     groups_(std::move(groups)),
     crc_(std::move(crc)),
     disk_io_executor_(disk_io_executor),
-    direction_(direction),
+    operation_(operation),
     batch_limit_(batch_limit),
     capacity_(queue_capacity),
     metrics_reporter_(std::move(metrics_reporter)),
     world_rank_(world_rank),
-    thread_name_((direction == TransferDirection::LOAD ? "btc_load_" : "btc_evict_") + std::to_string(worker_index)) {
+    thread_name_((operation == TransferOperation::LOAD ? "btc_load_" : "btc_evict_") + std::to_string(worker_index)) {
     abortOnOom([&] {
         if (!batch_limit_ || !capacity_)
             throw std::invalid_argument("async transfer requires positive M/Q");
@@ -642,7 +642,7 @@ void TransferWorkLoop::run() {
             while (auto* entry = work.pop())
                 tryStep(*entry);
         };
-        if (direction_ == TransferDirection::LOAD) {
+        if (operation_ == TransferOperation::LOAD) {
             submit(disk_work);
             submit(cuda_work);
         } else {

@@ -26,7 +26,6 @@ class MetricsReporter;
 
 namespace rtp_llm {
 
-struct BlockTreeInsertHardStopInfo;
 struct BlockTreeQueueSizes;
 class CacheStageMetrics;
 class RtpLLMCacheEvictionMetricsCollector;
@@ -71,7 +70,8 @@ public:
     void reportEvictionFinished(const EvictionTransferTask&     task,
                                 const std::vector<GroupSetPtr>& group_sets,
                                 bool                            success,
-                                const std::vector<bool>&        detached = {}) const;
+                                const std::vector<bool>&        skip_eviction_metrics,
+                                size_t                          cancelled_blocks) const;
     void reportEvictionFinished(const EvictionDropTask&         task,
                                 const std::vector<GroupSetPtr>& group_sets,
                                 const char*                     trigger_type) const;
@@ -89,12 +89,12 @@ public:
 
     void reportLoadJoin(size_t dependency_count) const;
     void reportLoadJoinWait(int64_t join_wait_latency_us) const;
-    void reportInsertHardStop(const BlockTreeInsertHardStopInfo& hard_stop) const;
+    void reportInsertHardStop() const;
 
-    int64_t reportTransferStarted(CacheTransferOperation operation, Tier source_tier, Tier target_tier);
+    int64_t reportTransferStarted(TransferOperation operation, Tier source_tier, Tier target_tier);
     // Report once after all batches/ranks of a logical copy have completed.
     void maybeReportCopyError(Tier source_tier, Tier target_tier, const TransferResult& result) const;
-    void reportTransferFinished(CacheTransferOperation                 operation,
+    void reportTransferFinished(TransferOperation                      operation,
                                 Tier                                   source_tier,
                                 Tier                                   target_tier,
                                 size_t                                 descriptors_per_transfer,

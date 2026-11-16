@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
@@ -133,7 +134,7 @@ private:
         std::unique_ptr<EvictionHeap>                         disk;
         std::array<bool, 3>                                   watermark_triggered{};
         std::array<WatermarkEvictionRound, 3>                 watermark_rounds{};
-        std::unordered_map<TreeNode*, EvictionTimingMetrics>  pending_timings;
+        std::map<std::pair<TreeNode*, uint64_t>, EvictionTimingMetrics> pending_timings;
         std::vector<std::chrono::steady_clock::time_point>    next_device_reclaim_log;
     };
 
@@ -186,7 +187,7 @@ private:
                                                      EvictionDropTask&                          task,
                                                      std::vector<std::pair<TreeNode*, size_t>>& detached_resources) const;
     void                            reserveSource(const std::vector<TransferDescriptor>& eviction_descs);
-    std::vector<TransferDescriptor> restoreSource(const std::vector<TransferDescriptor>& eviction_descs);
+    void                            restoreSource(const std::vector<TransferDescriptor>& eviction_descs);
     void                            releaseTargetBlocks(const std::vector<TransferDescriptor>& descs);
     void                            completeDrop(const TransferDescriptor& desc);
     void                            completeEvict(const std::vector<TransferDescriptor>& descs);
@@ -194,6 +195,7 @@ private:
     void                            settleSingleEviction(TreeNode* node);
     void                            eraseNodeFromAllHeaps(TreeNode* node);
     void                            updatePendingRelease(const std::vector<TransferDescriptor>& descs, bool reserve);
+    void updatePendingReleaseBlocks(const std::vector<TransferDescriptor>& descs, bool reserve, bool revoked);
 
     BlockTree*                          tree_;
     BlockTreeTaskPool*                  task_pool_{nullptr};

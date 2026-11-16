@@ -8,15 +8,9 @@
 
 #include "rtp_llm/cpp/cache/CacheTier.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
-
-enum class CacheTransferOperation : uint8_t {
-    LOAD,
-    EVICT,
-};
-
-const char* cacheTransferOperationName(CacheTransferOperation operation);
 
 struct BlockTreeTransferBytesKey {
     std::string    pool_name;

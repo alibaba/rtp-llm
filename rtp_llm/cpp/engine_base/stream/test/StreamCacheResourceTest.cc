@@ -108,8 +108,13 @@ makeAllocatorLoadContext(size_t matched_blocks, const std::vector<Tier>& source_
     std::vector<TransferDescriptor> descriptors;
     descriptors.reserve(source_tiers.size());
     for (size_t path_index = 0; path_index < source_tiers.size(); ++path_index) {
-        descriptors.emplace_back(
-            nullptr, /*group_set_id=*/0, path_index, source_tiers[path_index], Tier::DEVICE, BlockIndicesType{1});
+        descriptors.emplace_back(nullptr,
+                                 /*group_set_id=*/0,
+                                 path_index,
+                                 source_tiers[path_index],
+                                 Tier::DEVICE,
+                                 BlockIndicesType{1},
+                                 /*initial_owner=*/false);
     }
     auto context =
         coordinator->create(std::move(descriptors), std::vector<bool>(source_tiers.size(), false), matched_blocks);

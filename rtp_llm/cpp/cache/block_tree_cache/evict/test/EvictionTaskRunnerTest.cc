@@ -145,7 +145,7 @@ protected:
     }
 
     int64_t evictionInFlight(Tier source_tier, Tier target_tier) const {
-        const size_t operation_index = static_cast<size_t>(CacheTransferOperation::EVICT);
+        const size_t operation_index = static_cast<size_t>(TransferOperation::EVICT);
         const size_t direction_index =
             static_cast<size_t>(BlockTreeCacheMetricsReporter::transferDirectionIndex(source_tier, target_tier));
         return metrics_reporter_.transfer_in_flight_[operation_index][direction_index].load();

@@ -3,7 +3,6 @@
 #include <deque>
 #include <functional>
 #include <memory>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -14,6 +13,7 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 
 namespace rtp_llm {
@@ -27,11 +27,6 @@ struct ReusableGroupLocation {
 
 using ReusableGroupLocations = std::unordered_map<std::string, ReusableGroupLocation>;
 
-struct BlockTreeInsertHardStopInfo {
-    Tier                  existing_tier;
-    GroupSetTransferState transfer_state;
-};
-
 struct BlockTreeReplacedCandidate {
     TreeNode* node;
     size_t    group_set_id;
@@ -44,12 +39,13 @@ struct BlockTreeInsertResult {
     std::vector<std::pair<TreeNode*, std::vector<size_t>>> adopted_nodes;
     // Replaced FULL resources; old-tier heap erasure tolerates absent entries. Consumed under the cache mutex.
     std::vector<BlockTreeReplacedCandidate> replaced_candidates;
+    std::vector<TransferDescriptor> revoked_evictions;
     // Borrowed from the tree; consumed under the BlockTreeCache mutex.
     std::vector<TreeNode*> newly_resident_nodes;
     // Number of logical GroupSetResources the tree took BLOCK_CACHE ownership of.
     size_t accepted_resource_count{0};
     size_t resident_prefix_length{0};
-    std::optional<BlockTreeInsertHardStopInfo> hard_stop;
+    bool hard_stop{false};
 };
 
 struct BlockTreeNodeRangeResult {
@@ -73,8 +69,9 @@ public:
                                      bool                                              collect_path,
                                      bool                                              is_resident);
 
+    void      referenceNodeForNonOwnerTransfer(TreeNode* node);
     bool      isRemovable(TreeNode* node) const;
-    void      removePendingNodes(const std::unordered_set<TreeNode*>& nodes);
+    void      removePendingNodes(const std::unordered_map<TreeNode*, size_t>& nodes);
     TreeNode* removeNodeAndEmptyAncestors(TreeNode* node);
 
     TreeNode* root() const {
@@ -122,6 +119,7 @@ private:
                                          bool                                              collect_path,
                                          bool                                              is_resident);
 
+    bool      canReleaseNode(TreeNode* node) const;
     void      removeNode(TreeNode* node);
     TreeNode* createNode(CacheKeyType key, TreeNode* parent);
     void      releaseNode(TreeNode* node);

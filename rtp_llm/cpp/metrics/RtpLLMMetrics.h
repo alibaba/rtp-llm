@@ -1087,10 +1087,9 @@ public:
     int64_t pd_connector_ref_blocks           = 0;
     int64_t block_cache_ref_blocks            = 0;
     int64_t load_ref_blocks                   = 0;
-    int64_t eviction_target_ref_blocks        = 0;
+    int64_t eviction_ref_blocks               = 0;
     int64_t frozen_ref_blocks                 = 0;
     float   used_ratio                        = 0;
-    bool    report_eviction_target_ref_blocks = false;
     bool    report_frozen_ref_blocks          = false;
 
     std::optional<int64_t> read_bytes;
@@ -1117,9 +1116,7 @@ public:
     kmonitor::MutableMetric* pd_connector_ref_blocks_metric     = nullptr;
     kmonitor::MutableMetric* block_cache_ref_blocks_metric      = nullptr;
     kmonitor::MutableMetric* load_ref_blocks_metric             = nullptr;
-    kmonitor::MutableMetric* eviction_target_ref_blocks_metric  = nullptr;
-    // Compatibility alias retained while dashboards migrate to the clarified name.
-    kmonitor::MutableMetric* eviction_ref_blocks_compat_metric = nullptr;
+    kmonitor::MutableMetric* eviction_ref_blocks_metric         = nullptr;
     kmonitor::MutableMetric* frozen_ref_blocks_metric          = nullptr;
     kmonitor::MutableMetric* used_ratio_metric                 = nullptr;
 
@@ -1197,7 +1194,6 @@ private:
     kmonitor::MutableMetric* transfer_failed_qps_metric       = nullptr;
     kmonitor::MutableMetric* host_cache_copy_error_qps_metric = nullptr;
     kmonitor::MutableMetric* descriptors_per_transfer_metric  = nullptr;
-    // Compatibility alias retained while dashboards migrate to the clarified name.
     kmonitor::MutableMetric* transfer_descriptor_count_compat_metric    = nullptr;
     kmonitor::MutableMetric* transfer_latency_us_metric                 = nullptr;
     kmonitor::MutableMetric* transfer_task_queue_wait_latency_us_metric = nullptr;
@@ -1226,6 +1222,7 @@ public:
     int64_t     eviction_required_blocks  = 0;
     int64_t     eviction_scheduled_blocks = 0;
     int64_t     eviction_blocks           = 0;
+    int64_t     eviction_cancelled_blocks = 0;
     // Samples are borrowed for the synchronous report call.
     const std::pair<int64_t, int64_t>* block_times_ms{nullptr};
     size_t                             block_times_count{0};
@@ -1258,7 +1255,6 @@ public:
     kmonitor::MutableMetric* eviction_trigger_qps_metric      = nullptr;
     kmonitor::MutableMetric* eviction_blocks_count_metric     = nullptr;
     kmonitor::MutableMetric* eviction_blocks_qps_metric       = nullptr;
-    kmonitor::MutableMetric* eviction_blocks_fail_qps_metric  = nullptr;
     kmonitor::MutableMetric* evicted_block_lifetime_ms_metric = nullptr;
     kmonitor::MutableMetric* evicted_block_idletime_ms_metric = nullptr;
 
@@ -1290,16 +1286,10 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
-class RtpLLMCacheInsertMetricsCollector final {
-public:
-    std::string tier;
-    std::string operation;
-};
-
 class RtpLLMCacheInsertMetrics: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
-    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheInsertMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags);
 
 private:
     kmonitor::MutableMetric* insert_hard_stop_qps_metric = nullptr;
