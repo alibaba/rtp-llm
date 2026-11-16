@@ -174,6 +174,26 @@ def test_qps_reuses_metric_aggregation_and_measures_issued_not_finished(monkeypa
     assert asyncio.run(query_qps(context(), metrics.MetricArgs())) == 123.0
 
 
+def test_stop_playback_waits_for_client_scrape_after_draining():
+    ctx = context()
+    result = {"c:1": state(), "c:2": state()}
+    calls = []
+
+    async def stop(timeout):
+        calls.append(("stop", timeout))
+        return result
+
+    async def scrape(nodes):
+        calls.append(("scrape", nodes))
+
+    ctx.runtime.clients.stop_playback = stop
+    ctx.runtime.clients.monitoring = SimpleNamespace(wait_for_final_scrape=scrape)
+
+    step = StepRegistry.standard().get("client/stop/playback")
+    assert asyncio.run(step.run_with_raw_args(ctx, {})) == result
+    assert calls == [("stop", ctx.timeout), ("scrape", ["client-0", "client-1"])]
+
+
 @pytest.mark.parametrize("failed", [False, True])
 def test_teardown_collects_unstopped_playback_before_final_scrape(failed, tmp_path):
     from mock_framework.execution.environment import RunEnvironment
