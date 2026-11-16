@@ -18,7 +18,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import static org.flexlb.balance.schedule.RequestContext.EndKind;
+import static org.flexlb.balance.schedule.RequestContext.EndCause;
 import static org.flexlb.balance.schedule.RequestContext.Phase;
 import static org.flexlb.balance.schedule.RequestContext.RequestEndEvent;
 import static org.flexlb.balance.schedule.RequestContext.ResponseKind;
@@ -67,7 +67,7 @@ class RequestPublicationFailureOwnershipTest {
             context.endRequest(
                     RequestEndEvent.failure(
                             route,
-                            EndKind.FAILURE,
+                            EndCause.ROUTE_PUBLICATION_FAILED,
                             StrategyErrorType.DISPATCH_FAILED,
                             "execution failed"),
                     System.currentTimeMillis(),
@@ -123,7 +123,7 @@ class RequestPublicationFailureOwnershipTest {
                                         context,
                                         RequestEndEvent.failure(
                                                 null,
-                                                EndKind.FAILURE,
+                                                EndCause.ROUTE_PUBLICATION_FAILED,
                                                 StrategyErrorType.DISPATCH_FAILED,
                                                 "execution failed")));
                 assertEquals(Phase.ENDING, context.snapshot().phase());
@@ -194,7 +194,7 @@ class RequestPublicationFailureOwnershipTest {
                                             context,
                                             RequestEndEvent.failure(
                                                     route,
-                                                    EndKind.FAILURE,
+                                                    EndCause.ROUTE_PUBLICATION_FAILED,
                                                     StrategyErrorType.DISPATCH_FAILED,
                                                     "test")));
             java.util.concurrent.Future<?> settlement = null;
@@ -323,7 +323,7 @@ class RequestPublicationFailureOwnershipTest {
                 var end =
                         RequestEndEvent.failure(
                                 route,
-                                EndKind.INACTIVITY,
+                                EndCause.WORKER_REPORT_TIMEOUT,
                                 StrategyErrorType.SCHEDULING_DEADLINE_EXCEEDED,
                                 "request inactive");
                 assertSame(
@@ -354,7 +354,7 @@ class RequestPublicationFailureOwnershipTest {
                 }
                 f.runtime.tasks.awaitIdle();
                 RequestProtocolTestSupport.awaitCondition(() -> registrations(f.runtime) == 0);
-                assertEquals(EndKind.INACTIVITY, context.snapshot().endKind());
+                assertEquals(EndCause.WORKER_REPORT_TIMEOUT, context.snapshot().endCause());
                 assertEquals(Phase.CLOSED, context.snapshot().phase());
                 assertEquals(0, f.runtime.requests().liveRequestCount());
                 verify(endpoint, times(1)).releaseRequest(route.prefillRegistration());

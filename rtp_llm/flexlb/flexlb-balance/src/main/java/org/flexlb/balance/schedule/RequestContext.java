@@ -92,7 +92,7 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
     private StrategyErrorType cancellationError;
     private String cancellationDetail;
     private RequestState.State endState;
-    private EndKind endKind;
+    private EndCause endCause;
     private StrategyErrorType endError;
     private String endDetail;
     private RequestEndEvent pendingEndEvent;
@@ -140,7 +140,7 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
                 cancellationReason,
                 cancellationDetail,
                 endState,
-                endKind,
+                endCause,
                 endError,
                 endDetail,
                 responseForFuture,
@@ -324,8 +324,8 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
                             && !decodeAccepted;
             boolean failedAdmission =
                     failure != null && endState == null && cancellationReason == null;
-            if (rolledBackBeforePublication && pendingEndEvent.kind() == EndKind.ENDPOINT_CLOSED
-                    || failedAdmission && pendingEndEvent.kind() == EndKind.SHUTDOWN)
+            if (rolledBackBeforePublication && pendingEndEvent.cause() == EndCause.ENDPOINT_CLOSED
+                    || failedAdmission && pendingEndEvent.cause() == EndCause.SCHEDULER_SHUTDOWN)
                 pendingEndEvent = null;
         }
         if (failure != null && pendingEndEvent == null)
@@ -405,7 +405,10 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
                 detail == null ? reason.getMessage() : detail);
         retainEnd(
                 RequestEndEvent.failure(
-                        route, EndKind.FRONTEND, cancellationError, cancellationDetail));
+                        route,
+                        EndCause.CANCELLATION_REQUESTED,
+                        cancellationError,
+                        cancellationDetail));
         selectResponse(responseCandidate);
         refreshState(nowMs);
         return true;
@@ -447,7 +450,12 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
                 if (inactive || activeSelectionId != 0 || routeCommittedAtMs < 0 && !decodeAccepted)
                     retainEnd(
                             RequestEndEvent.failure(
-                                    route, EndKind.INACTIVITY, timeoutError, detail));
+                                    route,
+                                    inactive
+                                            ? EndCause.WORKER_REPORT_TIMEOUT
+                                            : EndCause.REQUEST_DEADLINE_EXCEEDED,
+                                    timeoutError,
+                                    detail));
             }
         }
         refreshState(nowMs);
@@ -503,7 +511,12 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
                     "request expired before route commit");
             retainEnd(
                     RequestEndEvent.failure(
-                            route, EndKind.INACTIVITY, timeoutError, cancellationDetail));
+                            route,
+                            nowMs >= inactivityExpiresAtMs()
+                                    ? EndCause.WORKER_REPORT_TIMEOUT
+                                    : EndCause.REQUEST_DEADLINE_EXCEEDED,
+                            timeoutError,
+                            cancellationDetail));
             refreshState(nowMs);
             return false;
         }
@@ -666,16 +679,17 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
     private boolean retainEnd(RequestEndEvent evidence) {
         currentResourceWait = null;
         if (endState != null) {
-            boolean newlyExpired = !expired && evidence.kind() == EndKind.INACTIVITY;
+            boolean newlyExpired = !expired && evidence.cause().isTimeout();
             expired |= newlyExpired;
             return newlyExpired;
         }
         if (activeSelectionId != 0) {
             if (pendingEndEvent == null
-                    || pendingEndEvent.kind() == EndKind.ENDPOINT_CLOSED
-                    || evidence.kind() == EndKind.WORKER && pendingEndEvent.kind() != EndKind.WORKER
-                    || evidence.kind() == EndKind.ENDPOINT_CLOSED
-                            && pendingEndEvent.kind() != EndKind.WORKER) {
+                    || pendingEndEvent.cause() == EndCause.ENDPOINT_CLOSED
+                    || evidence.cause().isWorkerResult()
+                            && !pendingEndEvent.cause().isWorkerResult()
+                    || evidence.cause() == EndCause.ENDPOINT_CLOSED
+                            && !pendingEndEvent.cause().isWorkerResult()) {
                 boolean changed = !Objects.equals(pendingEndEvent, evidence);
                 pendingEndEvent = evidence;
                 return changed;
@@ -683,20 +697,20 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
             return false;
         }
         if (pendingEndEvent == null
-                || evidence.kind() == EndKind.WORKER && pendingEndEvent.kind() != EndKind.WORKER)
+                || evidence.cause().isWorkerResult() && !pendingEndEvent.cause().isWorkerResult())
             pendingEndEvent = evidence;
         recordEnd(pendingEndEvent);
-        expired |= pendingEndEvent.kind() == EndKind.INACTIVITY;
+        expired |= pendingEndEvent.cause().isTimeout();
         pendingEndEvent = null;
         return true;
     }
 
     private void recordEnd(RequestEndEvent evidence) {
-        endKind = evidence.kind();
-        // Preserve the first cancellation cause, except when a committed route reports FAILURE.
+        endCause = evidence.cause();
+        // Preserve the first cancellation cause, except when a committed route response fails.
         // That failure keeps its own result instead of being replaced by the cancellation.
         boolean failureAfterRouteCommitted =
-                evidence.kind() == EndKind.FAILURE && routeCommittedAtMs >= 0L;
+                evidence.cause() == EndCause.ROUTE_PUBLICATION_FAILED && routeCommittedAtMs >= 0L;
         if (cancellationReason != null && !failureAfterRouteCommitted) {
             var state = RequestState.State.CANCELLED;
             if (cancellationReason == CancelReason.DEADLINE_EXCEEDED) {
@@ -708,18 +722,15 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
             return;
         }
 
-        // Inactivity without an earlier cancellation ends the request as TIMED_OUT.
-        if (evidence.kind() == EndKind.INACTIVITY) {
+        // Either timeout ends the request as TIMED_OUT when no earlier cancellation applies.
+        if (evidence.cause().isTimeout()) {
             endState = RequestState.State.TIMED_OUT;
             endError = timeoutError;
             endDetail = evidence.detail();
             return;
         }
 
-        // Worker/frontend success produces COMPLETED when no overriding cancellation applies.
-        boolean completionReported =
-                evidence.kind() == EndKind.WORKER || evidence.kind() == EndKind.FRONTEND;
-        if (completionReported && evidence.success()) {
+        if (evidence.cause() == EndCause.WORKER_COMPLETED) {
             String detail =
                     evidence.detail() == null || evidence.detail().isBlank()
                             ? "request completed"
@@ -731,24 +742,24 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
         }
         // Worker-reported preemption produces CANCELLED; other unsuccessful endings produce FAILED.
         var state = RequestState.State.FAILED;
-        if (evidence.kind() == EndKind.PRIORITY) {
+        if (evidence.cause() == EndCause.PRIORITY_PREEMPTED) {
             state = RequestState.State.CANCELLED;
         }
         var error = evidence.errorType();
         if (error == null) {
             error =
-                    switch (evidence.kind()) {
-                        case PRIORITY -> StrategyErrorType.PRIORITY_PREEMPTED;
-                        case WORKER -> StrategyErrorType.WORKER_EXECUTION_FAILED;
+                    switch (evidence.cause()) {
+                        case PRIORITY_PREEMPTED -> StrategyErrorType.PRIORITY_PREEMPTED;
+                        case WORKER_FAILED -> StrategyErrorType.WORKER_EXECUTION_FAILED;
                         default -> StrategyErrorType.DISPATCH_FAILED;
                     };
         }
         String detail = evidence.detail();
         if (detail == null || detail.isBlank()) {
             detail =
-                    switch (evidence.kind()) {
-                        case WORKER -> "worker error code " + evidence.errorCode();
-                        case PRIORITY -> "priority victim canceled by worker";
+                    switch (evidence.cause()) {
+                        case WORKER_FAILED -> "worker error code " + evidence.errorCode();
+                        case PRIORITY_PREEMPTED -> "priority victim canceled by worker";
                         default -> "request ended";
                     };
         }
@@ -852,14 +863,28 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
         CANCELLATION
     }
 
-    public enum EndKind {
-        FAILURE,
-        WORKER,
+    /**
+     * Identifies the event that ended the request; the final state also accounts for prior cancellation.
+     */
+    public enum EndCause {
+        ROUTE_PUBLICATION_FAILED,
+        WORKER_COMPLETED,
+        WORKER_FAILED,
         ENDPOINT_CLOSED,
-        PRIORITY,
-        INACTIVITY,
-        SHUTDOWN,
-        FRONTEND
+        PRIORITY_PREEMPTED,
+        WORKER_REPORT_TIMEOUT,
+        REQUEST_DEADLINE_EXCEEDED,
+        SCHEDULER_SHUTDOWN,
+        CANCELLATION_REQUESTED,
+        EXTERNAL_RESPONSE_FAILED;
+
+        boolean isTimeout() {
+            return this == WORKER_REPORT_TIMEOUT || this == REQUEST_DEADLINE_EXCEEDED;
+        }
+
+        private boolean isWorkerResult() {
+            return this == WORKER_COMPLETED || this == WORKER_FAILED;
+        }
     }
 
     /**
@@ -867,8 +892,7 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
      */
     public record RequestEndEvent(
             RequestRoute route,
-            EndKind kind,
-            boolean success,
+            EndCause cause,
             long errorCode,
             StrategyErrorType errorType,
             String detail) {
@@ -884,7 +908,7 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
             }
             return failure(
                     route,
-                    EndKind.FAILURE,
+                    EndCause.ROUTE_PUBLICATION_FAILED,
                     error,
                     response == null
                             ? "route publication did not commit"
@@ -892,8 +916,10 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
         }
 
         public static RequestEndEvent failure(
-                RequestRoute route, EndKind kind, StrategyErrorType errorType, String detail) {
-            return new RequestEndEvent(route, kind, false, 0L, errorType, detail);
+                RequestRoute route, EndCause cause, StrategyErrorType errorType, String detail) {
+            if (cause == EndCause.WORKER_COMPLETED)
+                throw new IllegalArgumentException("Worker completion is not a failure");
+            return new RequestEndEvent(route, cause, 0L, errorType, detail);
         }
 
         public static RequestEndEvent externalFailure(
@@ -904,7 +930,11 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
                             : response != null && response.getErrorMessage() != null
                                     ? response.getErrorMessage()
                                     : "external future completion";
-            return failure(route, EndKind.FRONTEND, StrategyErrorType.DISPATCH_FAILED, detail);
+            return failure(
+                    route,
+                    EndCause.EXTERNAL_RESPONSE_FAILED,
+                    StrategyErrorType.DISPATCH_FAILED,
+                    detail);
         }
     }
 
@@ -929,20 +959,23 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
         }
 
         RequestEndEvent end() {
-            EndKind end =
+            EndCause end =
                     switch (type) {
-                        case PRIORITY_CANCELLED -> EndKind.PRIORITY;
-                        case ENDPOINT_CLOSED -> EndKind.ENDPOINT_CLOSED;
-                        default -> EndKind.WORKER;
+                        case PRIORITY_CANCELLED -> EndCause.PRIORITY_PREEMPTED;
+                        case ENDPOINT_CLOSED -> EndCause.ENDPOINT_CLOSED;
+                        case COMPLETED -> EndCause.WORKER_COMPLETED;
+                        case FAILED -> EndCause.WORKER_FAILED;
+                        default ->
+                                throw new IllegalArgumentException("Not a worker ending: " + type);
                     };
             StrategyErrorType error =
                     switch (end) {
-                        case PRIORITY -> StrategyErrorType.PRIORITY_PREEMPTED;
+                        case WORKER_COMPLETED -> null;
+                        case PRIORITY_PREEMPTED -> StrategyErrorType.PRIORITY_PREEMPTED;
                         case ENDPOINT_CLOSED -> StrategyErrorType.DISPATCH_FAILED;
                         default -> StrategyErrorType.WORKER_EXECUTION_FAILED;
                     };
-            return new RequestEndEvent(
-                    route, end, type == RequestEventType.COMPLETED, errorCode, error, detail);
+            return new RequestEndEvent(route, end, errorCode, error, detail);
         }
     }
 
@@ -966,7 +999,7 @@ public final class RequestContext implements org.flexlb.worker.endpoint.WorkerRe
             CancelReason cancellationReason,
             String cancellationDetail,
             RequestState.State endState,
-            EndKind endKind,
+            EndCause endCause,
             StrategyErrorType endError,
             String endDetail,
             ResponseCompletionExecutor.Registration responseForFuture,

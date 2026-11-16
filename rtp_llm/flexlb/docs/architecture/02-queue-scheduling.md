@@ -68,7 +68,10 @@ RequestContext 统一持有输入、配置、优先级、Future、遥测和生�
 只读 Snapshot 在请求锁内按需捕获，只提供关闭、响应及诊断所需的信息。
 Worker 观察细节、取消错误码、过期标记和最后上报时间留在 Context 内部；routingPhase 从选址编号推导。
 pendingEndEvent 在 Context 内部保存待处理的结束事件，不通过 Snapshot 暴露；
-endState、endKind、endError、endDetail 保存已确定的结束信息；responseForFuture 引用选中的响应执行登记。
+endState、endCause、endError、endDetail 保存已确定的结束信息；responseForFuture 引用选中的响应执行登记。
+EndCause 描述具体结束事件，区分 Worker 完成或失败、取消请求、外部响应失败、路由发布失败、
+抢占、请求截止、Worker 上报超时以及调度器或 Endpoint 关闭；不再另存 success。
+最终 endState 仍结合此前取消原因确定，结束原因不直接代表资源已经释放。
 结束结果确定后立即清除 pendingEndEvent；结束事件只携带原因，资源释放进展统一保存在 Context。
 调度截止时间直接读取不可替换的 SchedulingMetadata，不再复制保存。
 WorkerReleaseConfirmed 表示远端释放已确认，CleanupCompleted 表示本地清理已完成；两者不互相替代。

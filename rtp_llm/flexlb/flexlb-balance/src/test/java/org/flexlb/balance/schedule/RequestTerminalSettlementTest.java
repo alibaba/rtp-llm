@@ -13,7 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
-import static org.flexlb.balance.schedule.RequestContext.EndKind;
+import static org.flexlb.balance.schedule.RequestContext.EndCause;
 import static org.flexlb.balance.schedule.RequestContext.Phase;
 import static org.flexlb.balance.schedule.RequestContext.RequestEndEvent;
 import static org.flexlb.balance.schedule.RequestContext.RequestEvent;
@@ -251,8 +251,7 @@ class RequestTerminalSettlementTest {
                                                 context,
                                                 new RequestEndEvent(
                                                         f.item(),
-                                                        EndKind.FAILURE,
-                                                        false,
+                                                        EndCause.ROUTE_PUBLICATION_FAILED,
                                                         0L,
                                                         org.flexlb.worker.endpoint.StrategyErrorType
                                                                 .DISPATCH_FAILED,

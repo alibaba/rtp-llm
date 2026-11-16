@@ -21,7 +21,7 @@ import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
 import static com.google.common.base.Preconditions.checkState;
-import static org.flexlb.balance.schedule.RequestContext.EndKind;
+import static org.flexlb.balance.schedule.RequestContext.EndCause;
 import static org.flexlb.balance.schedule.RequestContext.Phase;
 import static org.flexlb.balance.schedule.RequestContext.RequestEndEvent;
 import static org.flexlb.balance.schedule.RequestContext.ResponseKind;
@@ -354,7 +354,7 @@ public abstract class AbstractRequestScheduler
                                             ctx,
                                             RequestEndEvent.failure(
                                                     ctx.snapshot().route(),
-                                                    EndKind.SHUTDOWN,
+                                                    EndCause.SCHEDULER_SHUTDOWN,
                                                     StrategyErrorType.DISPATCH_FAILED,
                                                     "request scheduler is shutting down")));
         }
@@ -822,8 +822,8 @@ public abstract class AbstractRequestScheduler
     private void scheduleRequestCleanup(RequestContext ctx, Registration publication) {
         var state = ctx.snapshot();
         boolean responseBeforeCleanup =
-                state.endState() != null && state.endKind() == EndKind.ENDPOINT_CLOSED;
-        boolean inactivity = state.endState() != null && state.endKind() == EndKind.INACTIVITY;
+                state.endState() != null && state.endCause() == EndCause.ENDPOINT_CLOSED;
+        boolean inactivity = state.endState() != null && state.endCause().isTimeout();
         Throwable queueFailure = !inactivity ? Failures.run(null, () -> removeRequest(ctx)) : null;
         if (publication != null && responseBeforeCleanup && !inactivity) {
             var ready = publication;
@@ -978,7 +978,7 @@ public abstract class AbstractRequestScheduler
                                                 ctx,
                                                 RequestEndEvent.failure(
                                                         route,
-                                                        EndKind.FAILURE,
+                                                        EndCause.ROUTE_PUBLICATION_FAILED,
                                                         StrategyErrorType.DISPATCH_FAILED,
                                                         "route response failed")));
                 if (cleanupFailure != null) recordRequestFailure(cleanupFailure);

@@ -126,7 +126,7 @@ class RequestRouteStateTest {
         context.endRequest(
                 RequestContext.RequestEndEvent.failure(
                         null,
-                        RequestContext.EndKind.FAILURE,
+                        RequestContext.EndCause.ROUTE_PUBLICATION_FAILED,
                         org.flexlb.worker.endpoint.StrategyErrorType.DISPATCH_FAILED,
                         "failed"),
                 1001L,

@@ -246,7 +246,7 @@ class RequestContextConcurrencyTest {
         context.endRequest(
                 RequestContext.RequestEndEvent.failure(
                         route,
-                        RequestContext.EndKind.FAILURE,
+                        RequestContext.EndCause.ROUTE_PUBLICATION_FAILED,
                         StrategyErrorType.DISPATCH_FAILED,
                         "rollback failed"),
                 1201L,
@@ -492,7 +492,7 @@ class RequestContextConcurrencyTest {
         assertTrue(context.recordEvent(closed));
         var after = context.snapshot();
         assertEquals(before.inactivityExpiresAtMs(), after.inactivityExpiresAtMs());
-        assertEquals(RequestContext.EndKind.ENDPOINT_CLOSED, after.endKind());
+        assertEquals(RequestContext.EndCause.ENDPOINT_CLOSED, after.endCause());
         assertFalse(context.recordEvent(closed));
         assertEquals(after, context.snapshot());
     }
@@ -732,7 +732,7 @@ class RequestContextConcurrencyTest {
         } else {
             assertEquals(RequestState.State.FAILED, ended.endState());
             assertEquals(StrategyErrorType.WORKER_EXECUTION_FAILED, ended.endError());
-            assertEquals(RequestContext.EndKind.WORKER, ended.endKind());
+            assertEquals(RequestContext.EndCause.WORKER_FAILED, ended.endCause());
             assertNull(context.beginRouteSelection());
         }
         var beforeDuplicate = context.snapshot();
@@ -766,9 +766,9 @@ class RequestContextConcurrencyTest {
         assertEquals(RequestState.State.FAILED, ended.endState());
         assertEquals(
                 type == org.flexlb.worker.endpoint.RequestEventType.ENDPOINT_CLOSED
-                        ? RequestContext.EndKind.ENDPOINT_CLOSED
-                        : RequestContext.EndKind.WORKER,
-                ended.endKind());
+                        ? RequestContext.EndCause.ENDPOINT_CLOSED
+                        : RequestContext.EndCause.WORKER_FAILED,
+                ended.endCause());
         assertSame(response, ended.responseForFuture());
         assertTrue(ended.prefillCleanupCompleted());
         assertTrue(ended.decodeCleanupCompleted());

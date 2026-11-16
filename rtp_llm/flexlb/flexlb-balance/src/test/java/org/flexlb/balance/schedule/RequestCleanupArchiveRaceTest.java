@@ -8,7 +8,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-import static org.flexlb.balance.schedule.RequestContext.EndKind;
+import static org.flexlb.balance.schedule.RequestContext.EndCause;
 import static org.flexlb.balance.schedule.RequestContext.Phase;
 import static org.flexlb.balance.schedule.RequestContext.RequestEndEvent;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -29,8 +29,7 @@ class RequestCleanupArchiveRaceTest {
                 context.endRequest(
                         new RequestEndEvent(
                                 context.snapshot().route(),
-                                EndKind.FAILURE,
-                                false,
+                                EndCause.ROUTE_PUBLICATION_FAILED,
                                 0L,
                                 StrategyErrorType.DISPATCH_FAILED,
                                 "cleanup required"),

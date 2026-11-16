@@ -483,8 +483,7 @@ class RequestContextLifecycleTest {
                 context,
                 new RequestContext.RequestEndEvent(
                         context.snapshot().route(),
-                        RequestContext.EndKind.SHUTDOWN,
-                        false,
+                        RequestContext.EndCause.SCHEDULER_SHUTDOWN,
                         0L,
                         StrategyErrorType.DISPATCH_FAILED,
                         "shutdown"));
@@ -963,8 +962,7 @@ class RequestContextLifecycleTest {
                     requestContext.endRequest(
                             new RequestContext.RequestEndEvent(
                                     null,
-                                    RequestContext.EndKind.SHUTDOWN,
-                                    false,
+                                    RequestContext.EndCause.SCHEDULER_SHUTDOWN,
                                     0L,
                                     StrategyErrorType.DISPATCH_FAILED,
                                     "request scheduler is shutting down"),

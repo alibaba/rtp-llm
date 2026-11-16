@@ -24,7 +24,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BooleanSupplier;
 
-import static org.flexlb.balance.schedule.RequestContext.EndKind;
+import static org.flexlb.balance.schedule.RequestContext.EndCause;
 import static org.flexlb.balance.schedule.RequestContext.RequestEndEvent;
 import static org.flexlb.balance.schedule.RequestContext.RequestEvent;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -562,7 +562,7 @@ final class RequestProtocolTestSupport {
                 org.flexlb.balance.schedule.SchedulerTestSupport.runtime(scheduler));
     }
 
-    static RequestState.State endFixture(RequestContext context, EndKind kind, String detail) {
+    static RequestState.State endFixture(RequestContext context, EndCause kind, String detail) {
         return context.endRequest(
                         RequestEndEvent.failure(
                                 context.snapshot().route(),
@@ -598,7 +598,7 @@ final class RequestProtocolTestSupport {
         ctx.endRequest(
                 RequestContext.RequestEndEvent.failure(
                         route,
-                        RequestContext.EndKind.FAILURE,
+                        RequestContext.EndCause.ROUTE_PUBLICATION_FAILED,
                         org.flexlb.worker.endpoint.StrategyErrorType.DISPATCH_FAILED,
                         "test failure"),
                 now,
