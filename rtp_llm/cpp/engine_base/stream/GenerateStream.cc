@@ -264,6 +264,24 @@ void GenerateStream::releaseResource() {
     }
 }
 
+bool GenerateStream::canReleaseFinishedResources() const {
+    return isFinished() && !isDeferredReleasePending() && !hasPendingAsyncBookkeeping();
+}
+
+bool GenerateStream::tryCompleteLocalCleanup() {
+    if (!canReleaseFinishedResources()) {
+        return false;
+    }
+    // FINISHED can precede resource release. Reuse the idempotent release path
+    // before checking for a surviving Connector lease.
+    releaseResource();
+    return !hasPendingLocalCleanup();
+}
+
+bool GenerateStream::hasPendingLocalCleanup() const {
+    return !canReleaseFinishedResources() || hasPendingP2PResourceHold();
+}
+
 void GenerateStream::incPendingAsyncBookkeeping() {
     async_bookkeeping_->count.fetch_add(1, std::memory_order_acq_rel);
 }
