@@ -686,8 +686,10 @@ CacheConfigCreator::sizingSignature(const CacheConfig& config, uint32_t baseline
         }
     }
     SizingSignature result{};
-    // FFN disaggregation shares DP_AND_TP/WORLD with attention ranks, but its
-    // existing baseline is one. Compare capacities only within each role.
+    // Legacy FFN disaggregation once shared the collective scope with attention
+    // ranks while holding a baseline of one, so the signature still encodes the
+    // role slot; attention ranks always fill 0. Keep the slot for signature
+    // stability across versions.
     result[0] = is_ffn_service ? 1 : 0;
     // Encode into fixed-width int32 tensor words without signed narrowing.
     const std::array<uint32_t, 4> words{static_cast<uint32_t>(first),
@@ -724,11 +726,15 @@ void CacheConfigCreator::validateSizingSignatures(const int32_t* signatures, siz
 uint32_t CacheConfigCreator::synchronizeBlockNum(uint32_t                 candidate_block_num,
                                                  const ParallelismConfig& parallelism_config,
                                                  const CacheConfig&       config) {
-    const size_t world_size = parallelism_config.tp_size * parallelism_config.dp_size;
-    if (world_size <= 1) {
+    // Main retired the DP_AND_TP collective scope: the sizing agreement runs
+    // over the same stage-scoped lane as the block-num confirmation below
+    // (all TP/DP ranks of the current PP stage).
+    const auto layout     = RankLayout::fromParallelismConfig(parallelism_config);
+    const auto group_size = static_cast<size_t>(layout.laneStride());
+    if (group_size <= 1) {
         return candidate_block_num;
     }
-    const size_t     local_rank = parallelism_config.tp_size * parallelism_config.dp_rank + parallelism_config.tp_rank;
+    const size_t     local_rank = static_cast<size_t>(layout.stageRank());
     constexpr size_t width      = std::tuple_size<SizingSignature>::value;
     const auto       agree      = [&](uint32_t baseline) {
         // Main retired the FFN-disaggregation role; the sizing agreement
@@ -736,13 +742,13 @@ uint32_t CacheConfigCreator::synchronizeBlockNum(uint32_t                 candid
         const auto signature = sizingSignature(config, baseline, /*is_ffn_service=*/false);
         // Shape never depends on local pool count or the JSON configuration.
         // Even inconsistent topologies therefore reach the same collective.
-        auto  tensor = torch::empty({static_cast<int64_t>(world_size * width)}, torch::kInt32).pin_memory();
+        auto  tensor = torch::empty({static_cast<int64_t>(group_size * width)}, torch::kInt32).pin_memory();
         auto* data   = tensor.data_ptr<int32_t>();
         std::copy(signature.begin(), signature.end(), data + local_rank * width);
-        execAllGather({{tensor}, ParallelMode::DP_AND_TP});
+        execAllGather({{tensor}, ParallelMode::STAGE});
         execSyncCommunication(false);
         cudaSyncAndCheck();
-        validateSizingSignatures(data, world_size);
+        validateSizingSignatures(data, group_size);
     };
     agree(0);
     const auto confirmed = synchronizeBlockNum(candidate_block_num, parallelism_config);
