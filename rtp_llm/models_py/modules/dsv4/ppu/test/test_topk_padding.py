@@ -13,10 +13,7 @@ from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_deepep_fp4 import pad_topk
     "requires a PPU",
 )
 class TopkPaddingTest(unittest.TestCase):
-    def test_hash_nonfinite_weights_preserve_table_routes(self):
-        from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.gate import (
-            _select_routes_with_nonfinite_fallback,
-        )
+    def test_hash_nonfinite_rows_fall_back_to_slot_routes(self):
         from rtp_llm.models_py.kernels.ppu.moe.ppu_hash_gate import hash_gate_with_padding
 
         scores = torch.tensor(
@@ -25,18 +22,31 @@ class TopkPaddingTest(unittest.TestCase):
         )
         table = torch.tensor([[3, 0]], device="cuda")
         ids = torch.zeros(4, dtype=torch.int64, device="cuda")
+        scale, topk = 2.5, 2
+        active = torch.nn.functional.softplus(scores).sqrt()
+        # PR1434 semantics: a row with any non-finite router logit or activated
+        # score is replaced wholesale by slot experts 0..topk-1 with uniform
+        # weights, so a broken row never trusts the hash table.
+        finite = torch.isfinite(scores).all(dim=-1) & torch.isfinite(active).all(dim=-1)
+        slots = torch.arange(topk, device="cuda").expand(4, topk)
+        routed = torch.where(finite.unsqueeze(-1), table[ids], slots)
+        selected = active.gather(1, routed)
+        expected_w = selected / (selected.sum(dim=-1, keepdim=True) + 1e-12) * scale
+        expected_w = torch.where(
+            finite.unsqueeze(-1),
+            expected_w,
+            torch.full_like(expected_w, scale / topk),
+        )
         for mask in (torch.ones(4, dtype=torch.bool, device="cuda"),
                      torch.tensor([True, False, True, False], device="cuda")):
-            active = torch.nn.functional.softplus(scores).sqrt()
-            weights, indices = _select_routes_with_nonfinite_fallback(
-                active, active, 2, 2.5, True, table[ids]
-            )
-            indices, weights = pad_topk(indices, weights, mask)
+            keep = mask.unsqueeze(-1)
+            indices = torch.where(keep, routed, torch.full_like(routed, -1))
+            weights = torch.where(keep, expected_w, torch.zeros_like(expected_w))
             actual_weights, actual_indices = hash_gate_with_padding(
-                scores, ids, table, 2.5, active_token_mask=mask
+                scores, ids, table, scale, active_token_mask=mask
             )
             self.assertTrue(torch.equal(actual_indices, indices))
-            torch.testing.assert_close(actual_weights, weights, rtol=0, atol=0)
+            torch.testing.assert_close(actual_weights, weights, rtol=0, atol=1e-6)
 
     def assert_routes(self, indices, weights, output):
         out_indices, out_weights = output

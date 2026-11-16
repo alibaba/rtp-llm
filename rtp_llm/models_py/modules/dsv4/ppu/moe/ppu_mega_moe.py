@@ -1,6 +1,8 @@
 """V4 Flash MXFP4 MegaMoE with model-owned symmetric workspace."""
 
+import logging
 import os
+
 import torch
 
 from rtp_llm.models_py.modules.dsv4.ppu.moe.ppu_deepep_fp4 import PpuDeepEPFP4Strategy, take_raw_routed_mxfp4_weights
@@ -92,7 +94,7 @@ class PpuMegaMoEFP4Strategy(PpuDeepEPFP4Strategy):
         ) == (4096, 2048, 256, 6)
 
     def __init__(
-        self, cfg, *, resources, module_name="deep_gemm_mega", **kwargs
+        self, cfg, *, resources, module_name="deep_gemm_mega", streamed=False, **kwargs
     ):
         kwargs.setdefault("output_dtype", torch.bfloat16)
         if kwargs["output_dtype"] != torch.bfloat16:
@@ -115,6 +117,11 @@ class PpuMegaMoEFP4Strategy(PpuDeepEPFP4Strategy):
                 "PPU MegaMoE requires a DeepGEMM build with the MegaMoE API"
             )
         self._mega = deep_gemm
+        self._streamed = bool(streamed)
+        if self._streamed and not callable(
+            getattr(deep_gemm, "fp4_fp4_mega_moe_streamed", None)
+        ):
+            raise RuntimeError("Streamed MegaMoE requires the DeepGEMM streamed API")
         self._resources = resources
         self._sym = None
 
@@ -126,9 +133,22 @@ class PpuMegaMoEFP4Strategy(PpuDeepEPFP4Strategy):
         for name, value in zip(("_w13", "_s13", "_w2", "_s2"), (*pair13, *pair2)):
             self.register_buffer(name, value, persistent=False)
 
-    def forward(self, x, weights, indices, *, active_token_mask=None):
+    def require_staged_shared(self):
+        import inspect
+
+        if (
+            "after_gemm1"
+            not in inspect.signature(self._mega.fp4_fp4_mega_moe).parameters
+        ):
+            raise RuntimeError(
+                "Staged shared execution requires DeepGEMM's after_gemm1 API"
+            )
+
+    def forward(self, x, weights, indices, *, active_token_mask=None, after_gemm1=None):
         from rtp_llm.models_py.kernels.ppu.attention.ppu_topk_padding import pad_inactive_routes
 
+        if self._streamed and after_gemm1 is not None:
+            raise ValueError("Streamed MegaMoE does not support after_gemm1")
         if self._sym is None:
             wrapper = self._bind_wrapper()
             self._sym = self._resources.bind(self.cfg, wrapper, self._mega)
@@ -139,6 +159,10 @@ class PpuMegaMoEFP4Strategy(PpuDeepEPFP4Strategy):
         token_count = x.shape[0]
         hierarchy = self._resources.hierarchy if self.cfg.ep_size > 8 else None
         if hierarchy is not None:
+            if self._streamed or after_gemm1 is not None:
+                raise ValueError(
+                    "Hierarchical MegaMoE supports neither streamed nor staged execution"
+                )
             x, route_weights, route_ids = hierarchy.dispatch(
                 x, route_weights, route_ids, active_token_mask
             )
@@ -158,16 +182,37 @@ class PpuMegaMoEFP4Strategy(PpuDeepEPFP4Strategy):
             scheduling["expected_m"] = max(
                 1, token_count * self.cfg.n_activated_experts // self.cfg.n_local_experts + 1
             )
-        self._mega.fp4_fp4_mega_moe(
-            y,
-            (self._w13, self._s13),
-            (self._w2, self._s2),
-            self._sym,
+        self._launch_routed_gemm(y, scheduling, after_gemm1)
+        return hierarchy.combine(y, token_count) if hierarchy is not None else y
+
+    # The packaged streamed kernel accepts one decode tile shape only and the
+    # binding reports a mismatch through a plain RuntimeError message.
+    _STREAMED_TILE_ERROR = "streamed MegaMoE requires"
+
+    def _launch_routed_gemm(self, y, scheduling, after_gemm1):
+        weights = ((self._w13, self._s13), (self._w2, self._s2), self._sym)
+        extra = dict(
             activation_clamp=(
                 self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None
             ),
             preserve_bf16=True,
-            fuse_reduce=False,
-            **scheduling,
         )
-        return hierarchy.combine(y, token_count) if hierarchy is not None else y
+        if self._streamed:
+            try:
+                self._mega.fp4_fp4_mega_moe_streamed(y, *weights, **extra, **scheduling)
+                return
+            except RuntimeError as err:
+                if self._STREAMED_TILE_ERROR not in str(err):
+                    raise
+                # A decode tile the streamed kernel does not cover must degrade
+                # to the plain kernel instead of aborting engine startup.
+                logging.warning(
+                    "[ppu-megamoe] streamed kernel rejected the decode tile shape, "
+                    "falling back to fp4_fp4_mega_moe: %s",
+                    err,
+                )
+                self._streamed = False
+        fallback = dict(scheduling, fuse_reduce=False)
+        if after_gemm1 is not None:
+            fallback["after_gemm1"] = after_gemm1
+        self._mega.fp4_fp4_mega_moe(y, *weights, **extra, **fallback)
