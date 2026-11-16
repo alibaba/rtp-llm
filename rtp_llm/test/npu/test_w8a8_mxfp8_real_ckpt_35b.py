@@ -46,8 +46,14 @@ from test_w8a8_common import (
     make_load_config,
 )
 
-CKPT = "/mnt/docker/weights/Qwen3.5-35B-A3B-W8A8-MXFP8"
-BF16_DIR = "/mnt/docker/weights/Qwen3.5-35B-A3B"
+CKPT = os.environ.get("W8A8_MXFP8_35B_CKPT", "")
+BF16_DIR = os.environ.get("QWEN35_35B_BF16_DIR", "")
+
+pytestmark = pytest.mark.skipif(
+    not (CKPT and BF16_DIR and os.path.isdir(CKPT) and os.path.isdir(BF16_DIR)),
+    reason="requires env W8A8_MXFP8_35B_CKPT / QWEN35_35B_BF16_DIR pointing to "
+    "the Qwen3.5-35B-A3B-W8A8-MXFP8 ckpt and the bf16 Qwen3.5-35B-A3B dir",
+)
 
 # Qwen3.5-35B-A3B: hybrid layout, every 4th layer is full attention; the
 # ckpt uses the "model.language_model." prefix and split (per-expert) MoE.
