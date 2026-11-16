@@ -421,6 +421,17 @@ class DeepSeekV4Model(GptModelBase):
         else:
             args.moe_inter_dim = _resolve_dsv4_moe_inter_dim(model_config)
 
+        if args.moe_strategy == "sm120_graph_decode":
+            from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.sm120_graph_decode import (
+                require_sm120_decode_graph_providers,
+            )
+
+            if not args.fp8_kv_cache:
+                raise ValueError("sm120_graph_decode requires FP8 KV cache")
+            if args.n_physical_experts != args.n_routed_experts:
+                raise ValueError("sm120_graph_decode requires fixed expert ownership")
+            require_sm120_decode_graph_providers()
+
         # S7 scaffold: thread the framework's parallelism config into V4Args.
         # No behavior change at TP=1; the fields are read by future patches
         # (see docs/dsv4/parallel_design.md) when sharding lands per-module.
@@ -495,6 +506,11 @@ class DeepSeekV4Model(GptModelBase):
             args.swiglu_limit,
         )
         self._v4_args = args
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.sm120.workspace import (
+            Sm120MoeWorkspace,
+        )
+
+        self._sm120_moe_workspace = Sm120MoeWorkspace()
         # Surface FP8 KV-cache flag at the Model level so
         # ``prepare_fmha_impl`` can dispatch BF16 / FP8 decode FMHA impls
         # without re-reading attn_config.
@@ -611,7 +627,11 @@ class DeepSeekV4Model(GptModelBase):
         torch.set_default_dtype(torch.bfloat16)
         try:
             with torch.device("meta"):
-                self.v4 = V4Transformer(self._v4_args, mw=self.weight)
+                self.v4 = V4Transformer(
+                    self._v4_args,
+                    mw=self.weight,
+                    sm120_workspace=self._sm120_moe_workspace,
+                )
         finally:
             torch.set_default_dtype(prev_dtype)
 
@@ -768,7 +788,11 @@ class DeepSeekV4Model(GptModelBase):
         torch.set_default_dtype(torch.bfloat16)
         try:
             with torch.device("meta"):
-                self.v4 = V4Transformer(self._v4_args, mw=self.weight)
+                self.v4 = V4Transformer(
+                    self._v4_args,
+                    mw=self.weight,
+                    sm120_workspace=self._sm120_moe_workspace,
+                )
         finally:
             torch.set_default_dtype(prev_dtype)
         if self._captures_aux_hidden:
@@ -1158,6 +1182,30 @@ class DeepSeekV4Model(GptModelBase):
 
         return True
 
+    def reserve_sm120_decode_workspace(self, buckets, widths, device_id: int) -> int:
+        """Allocate stable EP scratch before the engine assigns the KV budget."""
+        from rtp_llm.models_py.modules.factory.fused_moe.utils.sm120.graph_decode import (
+            decode_workspace_geometry,
+        )
+
+        args = self._v4_args
+        if not widths or any(not 0 < width <= args.max_seq_len for width in widths):
+            raise ValueError(
+                "SM120 decode graph phase width must fit the model context"
+            )
+        geometry = decode_workspace_geometry(
+            buckets,
+            widths,
+            args.ep_size,
+            args.dim,
+            args.moe_inter_dim,
+            args.n_routed_experts,
+            args.n_activated_experts,
+        )
+        return self._sm120_moe_workspace.reserve_decode_graph_workspace(
+            geometry, torch.device("cuda", device_id)
+        )
+
     def _should_capture_cuda_graph(self, attn: Any, is_target_verify: bool) -> bool:
         """Default: capture decode + verify, skip plain prefill.  MTP
         overrides to capture all cudagraph requests because the draft's
@@ -1418,7 +1466,11 @@ class DeepSeekV4Model(GptModelBase):
             else None
         )
 
-        if _is_decode_fmha(fmha_impl) or bool(getattr(attn, "is_target_verify", False)):
+        if (
+            _is_decode_fmha(fmha_impl)
+            or bool(getattr(attn, "is_target_verify", False))
+            or getattr(inputs, "decode_execution", None) is not None
+        ):
             if bool(getattr(attn, "is_target_verify", False)):
                 assert bool(
                     getattr(self.v4, "fp8_kv_cache", False)

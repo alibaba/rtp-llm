@@ -129,7 +129,7 @@
     "source": "deep_gemm_sm120/vendor/csrc/jit_kernels/impls/sm120_fp8_fp4_gemm_1d1d.hpp",
     "source_sha256": "46b36b043678f883ffe571d3ba40958a8e16edf844f6d7110fde4f55fef421db",
     "snapshot": "deep_gemm_sm120/vendor/csrc/jit_kernels/impls/sm120_fp8_fp4_gemm_1d1d.hpp",
-    "sha256": "51fb5c98b0dfa8c56c0dde965563e0d7a071cfb5ee4d365a92994758cc1d839f",
+    "sha256": "65287231dbbc0e492247426b8bca275f07a7c6a30682d86ba84c70b83860e107",
     "unchanged": false
   },
   {
@@ -143,7 +143,7 @@
     "source": "deep_gemm_sm120/adapter/apis/gemm.hpp",
     "source_sha256": "3b2335c398719536bb7d693a2db8e74105300fc7e6b5ffe153a4763bb1ed1c0f",
     "snapshot": "deep_gemm_sm120/adapter/apis/gemm.hpp",
-    "sha256": "b0a22b70c140f7c156a70eeffcf2dbab6ace07a06c56549eff679b35ad8c90cd",
+    "sha256": "16a7f3fcb78aa333c015b41a51fdcfe4effa837db4f4a6efb8ec92668c077239",
     "unchanged": false
   },
   {

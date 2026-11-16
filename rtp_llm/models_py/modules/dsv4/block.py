@@ -19,6 +19,7 @@ from rtp_llm.models_py.modules.dsv4.fp8.attention import (
     CommitOnlyAttentionFP8,
 )
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
+from rtp_llm.models_py.modules.factory.fused_moe.defs.decode_plan import DecodeMoePlan
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     ChunkedFp8Fp4MoeLayer,
 )
@@ -392,6 +393,8 @@ class Block(nn.Module):
         input_ids: torch.Tensor,  # [B, 1]
         kv_cache=None,
         attn_fn=None,
+        *,
+        decode_plan: Optional[DecodeMoePlan] = None,
     ) -> torch.Tensor:
         """Decode-only block forward — mirrors prefill ``forward`` but
         delegates attention to ``Attention.forward_decode``. Prefill
@@ -436,7 +439,12 @@ class Block(nn.Module):
         x_pre, post, comb = self.ffn_hc.pre(x)
         bsz, q_len, dim_ = x_pre.shape
         x_pre = self.ffn_norm(x_pre.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
-        ffn_out = self.ffn(x_pre, input_ids, is_decode_forward=True)
+        ffn_out = self.ffn(
+            x_pre,
+            input_ids,
+            is_decode_forward=True,
+            **({"decode_plan": decode_plan} if decode_plan is not None else {}),
+        )
         x = self.ffn_hc.post(ffn_out, residual, post, comb)
         return x
 

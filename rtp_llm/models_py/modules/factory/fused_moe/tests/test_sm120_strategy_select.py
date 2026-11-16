@@ -22,6 +22,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.strategy.fp8_fp4 impo
     CudaMegaMoeStrategy,
     CudaSm120DecodeStrategy,
     CudaSm120FusedMoeStrategy,
+    CudaSm120GraphDecodeStrategy,
     CudaSm120GroupedFp4Strategy,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.strategy_registry import (
@@ -77,6 +78,7 @@ def _registry():
         CudaLocalLoopStrategy(),
         CudaSm120FusedMoeStrategy(),
         CudaSm120DecodeStrategy(),
+        CudaSm120GraphDecodeStrategy(),
         CudaSm120GroupedFp4Strategy(),
     ):
         registry.register(strategy)
@@ -258,11 +260,118 @@ class Sm120StrategySelectionTest(unittest.TestCase):
                 )
             )
 
+    def test_sm120_graph_decode_requires_supported_topology(self):
+        with (
+            _Sm120Runtime(),
+            patch(
+                f"{_EXECUTORS}.sm120_graph_decode.require_sm120_decode_graph_providers"
+            ),
+        ):
+            for world in (4, 8):
+                config = _config(
+                    ep_size=world,
+                    is_decode_role=True,
+                    model_type="deepseek_v4",
+                    strategy="sm120_graph_decode",
+                )
+                self.assertIsInstance(
+                    _registry().get_strategy(config), CudaSm120GraphDecodeStrategy
+                )
+                config.moe_strategy = "auto"
+                config.enable_cuda_graph = True
+                self.assertFalse(CudaSm120GraphDecodeStrategy().can_handle(config))
+            for kwargs in (
+                {"ep_size": 2},
+                {"ep_size": 8, "is_decode_role": False},
+                {"ep_size": 8, "attn_tp_size": 2},
+                {"ep_size": 8, "moe_cp_enabled": True},
+                {"ep_size": 8, "model_type": "other_model"},
+            ):
+                topology = dict(model_type="deepseek_v4", is_decode_role=True)
+                topology.update(kwargs)
+                config = _config(strategy="sm120_graph_decode", **topology)
+                self.assertFalse(CudaSm120GraphDecodeStrategy().can_handle(config))
+
+    def test_sm120_graph_decode_rejects_missing_provider(self):
+        with (
+            _Sm120Runtime(),
+            patch(
+                f"{_EXECUTORS}.sm120_graph_decode.require_sm120_decode_graph_providers",
+                side_effect=RuntimeError("missing"),
+            ),
+        ):
+            config = _config(
+                ep_size=8,
+                is_decode_role=True,
+                model_type="deepseek_v4",
+                strategy="sm120_graph_decode",
+            )
+            self.assertFalse(CudaSm120GraphDecodeStrategy().can_handle(config))
+
+    def test_sm120_graph_decode_composes_eager_with_one_expert_module(self):
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.decode_plan import (
+            DecodeMoePlan,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+            FusedMoEQuantConfig,
+        )
+        from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors import (
+            sm120_decode,
+            sm120_graph_decode,
+        )
+        from rtp_llm.ops.compute_ops import DecodeExecutionMode, DecodeExecutionPhase
+
+        config = _config(ep_size=8, strategy="sm120_graph_decode")
+        layer_weights = {"expert_weight": torch.empty((1,))}
+        prepared = nn.Linear(1, 1, bias=False)
+        with (
+            patch.object(sm120_graph_decode, "require_sm120_decode_graph_providers"),
+            patch.object(
+                sm120_graph_decode, "Sm120GraphDecodeExperts", return_value=prepared
+            ) as prepare,
+            patch.object(sm120_decode, "Sm120DecodeExperts") as prepare_eager,
+        ):
+            executor = sm120_graph_decode.Sm120GraphDecodeExecutor(
+                config, FusedMoEQuantConfig(), layer_weights
+            )
+        prepare.assert_called_once()
+        self.assertIs(prepare.call_args.args[1], layer_weights)
+        prepare_eager.assert_not_called()
+        self.assertNotIsInstance(executor, sm120_decode.Sm120DecodeExecutor)
+        self.assertIsInstance(executor._eager, sm120_decode.Sm120DecodeExecutor)
+        self.assertIs(executor._eager.experts, prepared)
+        self.assertEqual(
+            [
+                name
+                for name, module in executor.named_modules(remove_duplicate=False)
+                if module is prepared
+            ],
+            ["_eager._experts"],
+        )
+
+        x = torch.ones(2, 1, dtype=torch.bfloat16)
+        weights = torch.ones(2, 1)
+        ids = torch.zeros(2, 1, dtype=torch.int64)
+        plan = DecodeMoePlan(
+            DecodeExecutionMode.EAGER,
+            DecodeExecutionPhase.TARGET,
+            0,
+            1,
+            torch.tensor([True, False]),
+        )
+        expected = torch.zeros(2, 1)
+        with patch.object(executor._eager, "forward", return_value=expected) as eager:
+            self.assertIs(executor(x, weights, ids, plan=plan), expected)
+        self.assertIs(eager.call_args.args[0], x)
+        self.assertEqual(eager.call_args.args[1].tolist(), [[1.0], [0.0]])
+        self.assertEqual(eager.call_args.args[2].tolist(), [[0], [-1]])
+
     def test_sm120_strategies_do_not_use_mega_gate_pack(self):
         for strategy in (
             CudaSm120GroupedFp4Strategy(),
             CudaSm120FusedMoeStrategy(),
             CudaSm120DecodeStrategy(),
+            CudaSm120GraphDecodeStrategy(),
         ):
             router = strategy.get_attributes().get_router_class()
             self.assertEqual(router.__name__, "Fp8Fp4Router")
@@ -587,12 +696,14 @@ class Sm120ExecutorContractTest(unittest.TestCase):
         )
 
         def setup_chunk_tokens(env):
-            executor = SimpleNamespace(cfg=SimpleNamespace(n_local_experts=1))
             with (
                 patch.dict(os.environ, env, clear=True),
                 patch(f"{_EXECUTORS}.sm120_decode.Sm120DecodeExperts"),
             ):
-                Sm120DecodeExecutor.setup_weights(executor, {})
+                attributes = CudaSm120DecodeStrategy().get_attributes()
+                executor = Sm120DecodeExecutor(
+                    _config(ep_size=4), attributes.quant_config, {}
+                )
             return executor._chunk_tokens
 
         # The decode chunk bound is a fixed constant; the shared chunk env

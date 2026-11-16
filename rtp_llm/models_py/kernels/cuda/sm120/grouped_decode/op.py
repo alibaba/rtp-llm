@@ -1,4 +1,4 @@
-"""Bind the private SM120 grouped GEMM to the RTP contiguous decode contract."""
+"""Bind the private SM120 grouped GEMM to the RTP decode contracts."""
 
 import importlib.util
 import threading
@@ -39,6 +39,16 @@ def _binding():
     return rtp_dg120_grouped
 
 
+def _check_operands(device, a, b) -> None:
+    if a[0].device != device:
+        raise ValueError(f"SM120 grouped FP8×FP4 decode is bound to {device}")
+    if a[1].dtype != torch.int32 or b[1].dtype != torch.int32:
+        raise RuntimeError(
+            "SM120 grouped FP8×FP4 decode requires prepacked int32 scales; "
+            f"got a_scale={a[1].dtype}, b_scale={b[1].dtype}"
+        )
+
+
 def _run_grouped(
     implementation,
     device: torch.device,
@@ -57,13 +67,7 @@ def _run_grouped(
 ) -> None:
     if use_psum_layout or expected_m_for_psum_layout is not None:
         raise ValueError("SM120 grouped FP8×FP4 decode does not support psum layout")
-    if a[0].device != device:
-        raise ValueError(f"SM120 grouped FP8×FP4 decode is bound to {device}")
-    if a[1].dtype != torch.int32 or b[1].dtype != torch.int32:
-        raise RuntimeError(
-            "SM120 grouped FP8×FP4 decode requires prepacked int32 scales; "
-            f"got a_scale={a[1].dtype}, b_scale={b[1].dtype}"
-        )
+    _check_operands(device, a, b)
     implementation(
         a,
         b,
@@ -81,27 +85,53 @@ def _run_grouped(
     )
 
 
+def _run_masked_grouped(
+    implementation,
+    device: torch.device,
+    /,
+    a: tuple[torch.Tensor, torch.Tensor],
+    b: tuple[torch.Tensor, torch.Tensor],
+    output: torch.Tensor,
+    masked_m: torch.Tensor,
+    expected_m: int,
+    *,
+    recipe_a: tuple[int, int],
+    recipe_b: tuple[int, int],
+) -> None:
+    _check_operands(device, a, b)
+    implementation(
+        a,
+        b,
+        output,
+        masked_m,
+        expected_m,
+        recipe_a=recipe_a,
+        recipe_b=recipe_b,
+    )
+
+
 @cache
-def _grouped_op_for_device(index: int):
+def _grouped_op_for_device(index: int, masked: bool):
     if torch.cuda.get_device_capability(index) != (12, 0):
         raise RuntimeError("The private grouped FP8×FP4 GEMM requires SM120")
     binding = _binding()
     binding.warmup_device(index)
-    return partial(
-        _run_grouped,
-        binding.m_grouped_fp8_fp4_gemm_nt_contiguous,
-        torch.device("cuda", index),
-    )
+    device = torch.device("cuda", index)
+    if masked:
+        return partial(
+            _run_masked_grouped, binding.m_grouped_fp8_fp4_gemm_nt_masked, device
+        )
+    return partial(_run_grouped, binding.m_grouped_fp8_fp4_gemm_nt_contiguous, device)
 
 
-def grouped_op(device: torch.device | str):
+def grouped_op(device: torch.device | str, *, masked: bool = False):
     """Return the prepared RTP callable for a concrete SM120 device."""
     device = torch.device(device)
     if device.type != "cuda" or not torch.cuda.is_available():
         raise RuntimeError("The private grouped FP8×FP4 GEMM requires SM120")
     index = torch.cuda.current_device() if device.index is None else device.index
     with _INIT_LOCK:
-        return _grouped_op_for_device(index)
+        return _grouped_op_for_device(index, masked)
 
 
 def is_available(device: torch.device) -> bool:

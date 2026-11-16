@@ -42,6 +42,7 @@ from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
     group_tags as _kv_cache_group_tags,
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import primary_attention_inputs
+from rtp_llm.models_py.modules.factory.fused_moe.defs.decode_plan import DecodeMoePlan
 
 # DSV4 paged (FULL) + fixed/state pool tags, in the probe order the metadata
 # allocator expects. SWA_KV lives on every layer; CSA/HCA/INDEXER only on the
@@ -188,6 +189,7 @@ def build_metadata_eager(
     paged_pool_specs: Dict[str, Tuple[int, int, int]],
     kv_cache: Optional[Any] = None,
     fp8_kv_cache: bool = False,
+    decode_plan: Optional[DecodeMoePlan] = None,
 ) -> Optional[Any]:  # DSv4DecodeAttnMetadata | None
     """Build ``DSv4DecodeAttnMetadata`` inline from framework attn inputs.
 
@@ -222,7 +224,27 @@ def build_metadata_eager(
     if attn is None:
         return None
     is_target_verify = bool(getattr(attn, "is_target_verify", False))
-    if is_target_verify:
+    fp8_position_source = attn
+    if decode_plan is not None:
+        from rtp_llm.ops.compute_ops import DecodeExecutionPhase
+
+        q_len = decode_plan.token_width
+        # MTP commit retains dense request lanes even when the common plan
+        # falls back to eager. Its positions come from the commit prefix, as
+        # they do on the request-lane graph.
+        name = (
+            "prefix_lengths"
+            if is_target_verify or decode_plan.phase == DecodeExecutionPhase.MTP_COMMIT
+            else "sequence_lengths"
+        )
+        positions = getattr(attn, f"{name}_device", None)
+        if positions is None or positions.numel() == 0:
+            positions = getattr(attn, name)
+        bs = int(positions.numel())
+        # The FP8 builder accepts a direct vector of first-token positions.
+        # Keep the tagged descriptor intact for the block tables below.
+        fp8_position_source = positions
+    elif is_target_verify:
         input_lengths_d = attn.input_lengths
         q_len = int(input_lengths_d[0]) if input_lengths_d.numel() > 0 else 1
         bs = int(attn.prefix_lengths.shape[0])
@@ -258,7 +280,7 @@ def build_metadata_eager(
         )
 
         return build_decode_metadata_fp8(
-            attention_inputs=attn,
+            attention_inputs=fp8_position_source,
             q_len=q_len,
             window_size=int(v4_args.window_size),
             head_dim=int(v4_args.head_dim),
@@ -306,6 +328,7 @@ def forward_layers(
     input_ids: torch.Tensor,  # [T_total]
     attn_metadata: Any,  # DSv4DecodeAttnMetadata
     prepare_hidden_fn: Optional[Any] = None,
+    decode_plan: Optional[DecodeMoePlan] = None,
 ) -> torch.Tensor:
     """qwen3-style decode per-layer loop. Same body shape as the prefill
     helper (:func:`rtp_llm.models_py.modules.dsv4.prefill.forward.forward_layers`)
@@ -334,9 +357,12 @@ def forward_layers(
         begin_decode(attn_metadata)
     capture_ids = frozenset(v4.capture_aux_hidden_layer_ids)
     layer_forward_range = _profiler.make_layer_forward_range()
+    moe_kwargs = {"decode_plan": decode_plan} if decode_plan is not None else {}
     for layer_idx, layer in enumerate(v4.layers):
         with layer_forward_range(layer_idx):
-            h = layer.forward_decode(h, attn_metadata, input_ids, kv_cache=kv_cache)
+            h = layer.forward_decode(
+                h, attn_metadata, input_ids, kv_cache=kv_cache, **moe_kwargs
+            )
             if layer_idx in capture_ids:
                 v4.capture_aux_hidden(layer_idx, h)
     if v4._mtp_hidden_buffer is not None:
@@ -356,6 +382,14 @@ def forward_layers(
     bsz, q_len, dim_ = h.shape
     h = v4.norm(h.reshape(bsz * q_len, dim_)).view(bsz, q_len, dim_)
     return h
+
+
+def mask_decode_cache_writes(meta, valid_rows: torch.Tensor) -> None:
+    """Suppress padded and unaccepted row writes into every paged FP8 pool."""
+    invalid = ~valid_rows
+    for tables in (meta.pool_write_slot_mappings, meta.compressor_state_slot_mappings):
+        for slots in tables.values():
+            slots[: valid_rows.numel()].masked_fill_(invalid, -1)
 
 
 def forward_decode(
@@ -420,6 +454,7 @@ def forward_decode(
         input_ids = input_ids.to(param_dev)
     input_ids = input_ids.reshape(-1)
 
+    decode_plan = DecodeMoePlan.from_inputs(inputs)
     if isinstance(fmha_impl, _graph_impl_types):
         meta = fmha_impl.metadata
     else:
@@ -433,6 +468,7 @@ def forward_decode(
             paged_specs,
             kv_cache=kv_cache,
             fp8_kv_cache=bool(getattr(v4, "fp8_kv_cache", False)),
+            decode_plan=decode_plan,
         )
         if meta is None:
             # Empty batch (B == 0) — short-circuit with zero-row hidden.
@@ -443,12 +479,16 @@ def forward_decode(
     B = meta.batch_size
     q_len = meta.q_len_per_req
 
+    if decode_plan is not None:
+        decode_plan.validate_rows(input_ids)
+        mask_decode_cache_writes(meta, decode_plan.valid_rows)
     h = forward_layers(
         v4,
         kv_cache,
         input_ids,
         meta,
         prepare_hidden_fn=prepare_hidden_fn,
+        decode_plan=decode_plan,
     )  # [B, q_len, dim]
     hidden = h.reshape(B * q_len, v4_args.dim)  # packed [T_total, dim]
     return PyModelOutputs(hidden)

@@ -242,4 +242,101 @@ static void sm120_m_grouped_fp8_fp4_gemm_contiguous_1d1d(const torch::Tensor& a,
                                   heuristics_runtime->get_mk_alignment_for_contiguous_layout());
 }
 
+static void sm120_m_grouped_fp8_fp4_gemm_masked_1d1d(const torch::Tensor& a, const torch::Tensor& sfa,
+                                                     const torch::Tensor& b, const torch::Tensor& sfb,
+                                                     const torch::Tensor& d,
+                                                     const torch::Tensor& masked_m,
+                                                     const int& num_groups, const int& m, const int& n, const int& k,
+                                                     const int& expected_m,
+                                                     const int& gran_k_a, const int& gran_k_b,
+                                                     const cute::UMMA::Major& major_a, const cute::UMMA::Major& major_b,
+                                                     const std::string& compiled_dims) {
+    DG_HOST_ASSERT(major_a == cute::UMMA::Major::K and major_b == cute::UMMA::Major::K);
+
+    const bool a_dt_fp4 = (a.scalar_type() == kPackedFP4);
+    const bool b_dt_fp4 = (b.scalar_type() == kPackedFP4);
+    const bool is_fp4 = a_dt_fp4 && b_dt_fp4;       // symmetric FP4xFP4 (k64)
+    const bool b_is_fp4 = (!a_dt_fp4) && b_dt_fp4;  // FP8_A x FP4_B (k32 mixed)
+    const bool a_is_fp4 = a_dt_fp4 && (!b_dt_fp4);  // FP4_A x FP8_B (k32 mixed, swapAB)
+
+    const auto desc = SM120GemmDesc {
+        .gemm_type = GemmType::MGroupedMasked,
+        .kernel_type = KernelType::Kernel1D1D,
+        .m = m, .n = n, .k = k, .num_groups = num_groups,
+        .a_dtype = a.scalar_type(), .b_dtype = b.scalar_type(),
+        .cd_dtype = d.scalar_type(),
+        .major_a = major_a, .major_b = major_b,
+        .with_accumulation = false,
+        .num_sms = deep_gemm::runtime->get_num_sms(),
+        .tc_util = deep_gemm::runtime->get_tc_util(),
+        .compiled_dims = compiled_dims,
+        .max_gran_k = std::max(gran_k_a, gran_k_b),
+        .expected_m = expected_m, .expected_n = n, .expected_k = k, .expected_num_groups = num_groups
+    };
+    auto config = get_best_sm120_config<SM120ArchSpec>(desc);
+    if (not SM120ArchSpec::uses_grouped_tma_output(desc) and m % config.layout.block_m != 0)
+        config.storage_config.swizzle_cd_mode = 0;
+
+    const bool fp4_unpacked = !is_fp4;
+    const auto tensor_map_a = make_tma_a_desc(major_a, a, m, k,
+                                              config.storage_config.load_block_m,
+                                              config.layout.block_k,
+                                              static_cast<int>(a.stride(get_non_contiguous_dim(major_a))), num_groups,
+                                              config.storage_config.swizzle_a_mode, 0, false, fp4_unpacked);
+    const auto tensor_map_b = make_tma_b_desc(major_b, b, n, k,
+                                              config.storage_config.load_block_n,
+                                              config.layout.block_k,
+                                              static_cast<int>(b.stride(get_non_contiguous_dim(major_b))), num_groups,
+                                              config.storage_config.swizzle_b_mode, 0, false,
+                                              b_is_fp4 ? true : fp4_unpacked);
+    const auto tensor_map_sfa = make_tma_sf_desc(cute::UMMA::Major::MN, sfa, m, k,
+                                                 config.layout.block_m, gran_k_a, num_groups, 0);
+    const auto tensor_map_sfb = make_tma_sf_desc(cute::UMMA::Major::MN, sfb, n, k,
+                                                 config.layout.block_n, gran_k_b, num_groups, 0);
+    const int cd_store_m = config.storage_config.store_block_m > 0
+        ? config.storage_config.store_block_m : config.layout.block_m;
+    const auto output = SM120ArchSpec::uses_grouped_tma_output(desc)
+        ? sm120_grouped_tma_output(d, config.layout.block_m, true) : d;
+    const auto tensor_map_cd = make_tma_cd_desc(output, static_cast<int>(output.size(-2)), static_cast<int>(output.size(-1)),
+                                                cd_store_m, config.layout.block_n,
+                                                static_cast<int>(output.stride(-2)), num_groups,
+                                                config.storage_config.swizzle_cd_mode);
+
+    const SM120FP8FP4Gemm1D1DRuntime::Args args = {
+        .gemm_desc = desc,
+        .gemm_config = config,
+        .launch_args = SM120LaunchArgs(config.launch_config.num_sms, config.launch_config.num_threads,
+                                  config.pipeline_config.smem_size,
+                                  1),
+        .epilogue_type = std::nullopt,
+        .gran_k_a = gran_k_a,
+        .gran_k_b = gran_k_b,
+        .is_fp4 = is_fp4,
+        .b_is_fp4 = b_is_fp4,
+        .a_is_fp4 = a_is_fp4,
+        .k_grouped_constant_stride = false,
+        .stride_cd_m = static_cast<int>(output.stride(-2)),
+        .stride_cd_n = 0,
+        .stride_cd_batch = 0,
+        .shape_cd_m = static_cast<int>(output.size(-2)),
+        .gmem_d = output.data_ptr(),
+        .gmem_c = nullptr,
+        .gmem_a_ptr = a.data_ptr(),
+        .gmem_b_ptr = nullptr,
+        .gmem_workspace = nullptr,
+        .grouped_layout = masked_m.data_ptr(),
+        .tensor_map_buffer = nullptr,
+        .tensor_map_a = tensor_map_a,
+        .tensor_map_b = tensor_map_b,
+        .tensor_map_sfa = tensor_map_sfa,
+        .tensor_map_sfb = tensor_map_sfb,
+        .tensor_map_cd = tensor_map_cd,
+    };
+    const auto code = SM120FP8FP4Gemm1D1DRuntime::generate(args);
+    const auto runtime = jit->compile("sm120_m_grouped_fp8_fp4_gemm_masked_1d1d", code);
+    SM120FP8FP4Gemm1D1DRuntime::launch(runtime, args);
+    if (output.data_ptr() != d.data_ptr())
+        sm120_copy_grouped_output(output, d, masked_m, m, n, num_groups, true, false, 1);
+}
+
 } // namespace deep_gemm

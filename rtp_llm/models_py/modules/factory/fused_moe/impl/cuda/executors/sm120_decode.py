@@ -27,11 +27,20 @@ from rtp_llm.models_py.kernels.cuda.quant_layouts import (
     FP8_BLOCK,
     prepare_fp4_weight_scale_for_deepgemm,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
+    MoEConfigAdapter,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
+    FusedMoEQuantConfig,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
     cuda_graph_warmup_forward_enabled,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.sm120.ep_combine import (
     fp32_peer_sum,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.utils.sm120.graph_decode import (
+    decode_payload_offsets,
 )
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     recompute_topk_ids_sum_expert_count,
@@ -125,6 +134,13 @@ def _uses_replicated_tp_tokens(config, world: int) -> bool:
     return attn_tp_size > 1 and attn_tp_size == config.ep_size == world
 
 
+def validate_decode_group(config) -> None:
+    dist = torch.distributed
+    if not dist.is_initialized():
+        raise RuntimeError("SM120 decode requires an initialized EP group")
+    validate_world_ep_topology(config, dist, dist.group.WORLD)
+
+
 class Sm120DecodeExperts(torch.nn.Module):
     """Gate-first DeepGEMM FP8 x FP4 experts in a local expert-id space."""
 
@@ -156,14 +172,9 @@ class Sm120DecodeExperts(torch.nn.Module):
         del s13_raw, s2_raw
         torch.cuda.empty_cache()
 
-    def forward_contiguous(
-        self, x, weights, indices, input_scale: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        cfg = self.cfg
+    @staticmethod
+    def quantize_grouped_input(x, input_scale: Optional[torch.Tensor]):
         N, D = x.shape
-        E, inter = cfg.n_routed_experts, cfg.moe_inter_dim
-        device = x.device
-        routed_ids = torch.where(weights != 0, indices, torch.full_like(indices, -1))
         if input_scale is not None:
             # MXFP8 dispatch payload: dequantize block-32 to BF16 before the
             # block-128 DeepGEMM requant.
@@ -180,7 +191,7 @@ class Sm120DecodeExperts(torch.nn.Module):
                 .view(N, D)
                 .contiguous()
             )
-        a_fp8, a_scale = sgl_per_token_group_quant_fp8(
+        return sgl_per_token_group_quant_fp8(
             x.contiguous(),
             group_size=FP8_BLOCK,
             eps=0.0001,
@@ -189,6 +200,16 @@ class Sm120DecodeExperts(torch.nn.Module):
             scale_ue8m0=True,
             enable_v2=True,
         )
+
+    def forward_contiguous(
+        self, x, weights, indices, input_scale: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        cfg = self.cfg
+        N, D = x.shape
+        E, inter = cfg.n_routed_experts, cfg.moe_inter_dim
+        device = x.device
+        routed_ids = torch.where(weights != 0, indices, torch.full_like(indices, -1))
+        a_fp8, a_scale = self.quantize_grouped_input(x, input_scale)
         adjusted_topk_ids, num_recv = recompute_topk_ids_sum_expert_count(
             routed_ids, current_expert_start_id=0, num_local_experts=E
         )
@@ -271,6 +292,19 @@ class Sm120DecodeExecutor(Fp8Fp4ExecutorBase):
     # Oversized eager batches coordinate their rounds inside the executor.
     single_round_dispatch = True
 
+    def __init__(
+        self,
+        config: MoEConfigAdapter,
+        quant_config: FusedMoEQuantConfig,
+        weights: Dict[str, torch.Tensor],
+        *,
+        expert_class: Optional[type[Sm120DecodeExperts]] = None,
+    ) -> None:
+        # The graph executor supplies experts that also implement the masked
+        # layout. The default eager strategy needs only the contiguous provider.
+        self._expert_class = expert_class or Sm120DecodeExperts
+        super().__init__(config, quant_config, weights)
+
     @classmethod
     def check_conditions(cls, checker: Any, config) -> None:
         super().check_conditions(checker, config)
@@ -289,13 +323,14 @@ class Sm120DecodeExecutor(Fp8Fp4ExecutorBase):
 
     def setup_weights(self, layer_weights: Dict) -> None:
         self._chunk_tokens = _DECODE_CHUNK_TOKENS
-        self._experts = Sm120DecodeExperts(local_expert_config(self.cfg), layer_weights)
+        self._experts = self._expert_class(local_expert_config(self.cfg), layer_weights)
+
+    @property
+    def experts(self) -> Sm120DecodeExperts:
+        return self._experts
 
     def _validate_group(self):
-        dist = torch.distributed
-        if not dist.is_initialized():
-            raise RuntimeError("SM120 decode requires an initialized EP group")
-        validate_world_ep_topology(self.cfg, dist, dist.group.WORLD)
+        validate_decode_group(self.cfg)
 
     def forward(self, x, weights, indices):
         self._validate_group()
@@ -381,7 +416,11 @@ class Sm120DecodeExecutor(Fp8Fp4ExecutorBase):
                     x[begin:end], weights[begin:end], indices[begin:end], chunk_counts
                 )
             return output
-        scale_cols = int(x.size(1)) // 32
+        x_end = int(x.size(1))
+        scale_end, weight_end, payload_cols = decode_payload_offsets(
+            x_end, weights.size(1)
+        )
+        scale_cols = scale_end - x_end
         if x.size(0):
             x_fp8, x_scale = mxfp8_quantize(x.contiguous(), is_sf_swizzled_layout=False)
             if x_scale.dtype != torch.uint8:
@@ -392,11 +431,6 @@ class Sm120DecodeExecutor(Fp8Fp4ExecutorBase):
             # zero-row quantizer launch is invalid on the current provider.
             x_fp8 = torch.empty_like(x, dtype=torch.float8_e4m3fn)
             x_scale = torch.empty((0, scale_cols), dtype=torch.uint8, device=x.device)
-        topk = weights.size(1)
-        x_end = int(x.size(1))
-        scale_end = x_end + scale_cols
-        weight_end = scale_end + topk * 4
-        payload_cols = int(weight_end + topk * 4)
         indices_i32 = indices.to(torch.int32)
         destination = torch.div(
             indices, experts_per_rank, rounding_mode="floor"
