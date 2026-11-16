@@ -98,7 +98,7 @@ class RequestSchedulerTest {
         } finally {
             RequestProtocolTestSupport.close(scheduler);
             if (RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(lifecycle)) {
-                lifecycle.closeOutstandingAndTerminalize();
+                lifecycle.finishRequestCleanup();
                 SchedulerTestSupport.timer(
                                 org.flexlb.balance.schedule.SchedulerTestSupport.runtime(lifecycle))
                         .close();
@@ -196,7 +196,7 @@ class RequestSchedulerTest {
                 assertFalse(secondCloser.isAlive());
             }
             if (RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(lifecycle)) {
-                lifecycle.closeOutstandingAndTerminalize();
+                lifecycle.finishRequestCleanup();
                 SchedulerTestSupport.timer(
                                 org.flexlb.balance.schedule.SchedulerTestSupport.runtime(lifecycle))
                         .close();
@@ -299,7 +299,7 @@ class RequestSchedulerTest {
             releasePlan.countDown();
             coordinator.close();
             if (RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(lifecycle)) {
-                lifecycle.closeOutstandingAndTerminalize();
+                lifecycle.finishRequestCleanup();
                 SchedulerTestSupport.timer(
                                 org.flexlb.balance.schedule.SchedulerTestSupport.runtime(lifecycle))
                         .close();

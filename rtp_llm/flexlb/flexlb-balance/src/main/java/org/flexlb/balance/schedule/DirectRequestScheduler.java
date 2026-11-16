@@ -7,7 +7,6 @@ import org.flexlb.balance.strategy.RequestRouteSelector;
 import org.flexlb.balance.strategy.SelectionResult;
 import org.flexlb.util.Logger;
 import org.flexlb.worker.endpoint.CapacityKey;
-import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 
 import java.util.Objects;
@@ -36,8 +35,7 @@ public class DirectRequestScheduler extends AbstractRequestScheduler {
             EngineCancellation engineCancellation,
             ResponseCompletionExecutor responseCompletions,
             DeliveryMetricsReporter deliveryReporter,
-            TheoryCacheHitReporter cacheTrace,
-            EndpointRegistry endpoints) {
+            TheoryCacheHitReporter cacheTrace) {
         super(
                 requests,
                 tasks,
@@ -45,8 +43,7 @@ public class DirectRequestScheduler extends AbstractRequestScheduler {
                 engineCancellation,
                 responseCompletions,
                 deliveryReporter,
-                cacheTrace,
-                endpoints);
+                cacheTrace);
         this.router = Objects.requireNonNull(router, "router");
     }
 

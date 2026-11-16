@@ -1,0 +1,174 @@
+package org.flexlb.api;
+
+import org.flexlb.balance.schedule.AbstractRequestScheduler;
+import org.flexlb.balance.schedule.EngineCancellation;
+import org.flexlb.balance.schedule.ExpirationTimer;
+import org.flexlb.balance.schedule.RequestRepository;
+import org.flexlb.balance.schedule.RequestTaskPool;
+import org.flexlb.balance.schedule.ResponseCompletionExecutor;
+import org.flexlb.balance.schedule.SchedulerTestServices;
+import org.flexlb.worker.endpoint.EndpointRegistry;
+import org.junit.jupiter.api.Test;
+
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+
+/**
+ * Verifies shared scheduling shutdown, including cleanup failures and real in-flight work.
+ */
+class SchedulingResourceShutdownTest {
+    @Test
+    void stopsSchedulingBeforeSettlementAndClosesAllExecutorsAfterSettlement() {
+        var f = new Fixture(mock(RequestTaskPool.class));
+        f.lifecycle.offline();
+        assertTrue(f.requests.isClosed());
+        var order =
+                inOrder(
+                        f.scheduler,
+                        f.endpoints,
+                        f.deadlines,
+                        f.tasks,
+                        f.dispatcher,
+                        f.completions);
+        order.verify(f.scheduler).close();
+        order.verify(f.dispatcher).awaitStops();
+        order.verify(f.tasks).awaitIdle();
+        order.verify(f.endpoints).close();
+        order.verify(f.deadlines).close();
+        order.verify(f.tasks).awaitIdle();
+        order.verify(f.scheduler).finishRequestCleanup();
+        order.verify(f.dispatcher).awaitStops();
+        order.verify(f.tasks).close();
+        order.verify(f.completions).close();
+        order.verify(f.scheduler).throwIfRequestFailed();
+        f.lifecycle.offline();
+        verify(f.scheduler).close();
+    }
+
+    @Test
+    void cleanupFailureStillClosesExecutorsAndIsReported() {
+        var f = new Fixture(mock(RequestTaskPool.class));
+        var first = new IllegalStateException("endpoint release failed");
+        var second = new IllegalArgumentException("completion close failed");
+        doThrow(first).when(f.endpoints).close();
+        doThrow(second).when(f.completions).close();
+        assertSame(first, assertThrows(IllegalStateException.class, () -> f.lifecycle.offline()));
+        assertArrayEquals(new Throwable[] {second}, first.getSuppressed());
+        verify(f.tasks).close();
+        verify(f.scheduler).throwIfRequestFailed();
+    }
+
+    @Test
+    void waitsForRealRequestWorkBeforeClosingEndpoints() throws Exception {
+        var tasks = new RequestTaskPool();
+        var f = new Fixture(tasks);
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        tasks.execute(
+                () -> {
+                    entered.countDown();
+                    try {
+                        release.await();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                });
+        assertTrue(entered.await(2, TimeUnit.SECONDS));
+        var shutdown = CompletableFuture.runAsync(() -> f.lifecycle.offline());
+        try {
+            assertThrows(TimeoutException.class, () -> shutdown.get(100, TimeUnit.MILLISECONDS));
+            verify(f.endpoints, never()).close();
+            verify(f.scheduler, never()).finishRequestCleanup();
+            verify(f.completions, never()).close();
+        } finally {
+            release.countDown();
+            shutdown.get(3, TimeUnit.SECONDS);
+            tasks.close();
+        }
+        verify(f.scheduler).finishRequestCleanup();
+        verify(f.completions).close();
+    }
+
+    @Test
+    void rejectsShutdownFromAnOwnedTaskBeforeClosingAdmission() throws Exception {
+        var tasks = new RequestTaskPool();
+        var f = new Fixture(tasks);
+        var result = new CompletableFuture<Throwable>();
+        try {
+            tasks.execute(
+                    () -> {
+                        try {
+                            f.lifecycle.offline();
+                            result.complete(null);
+                        } catch (Throwable failure) {
+                            result.complete(failure);
+                        }
+                    });
+            assertInstanceOf(IllegalStateException.class, result.get(2, TimeUnit.SECONDS));
+            assertFalse(f.requests.isClosed());
+            verify(f.scheduler, never()).close();
+            f.lifecycle.offline();
+        } finally {
+            tasks.close();
+        }
+    }
+
+    /**
+     * Combines a real request task pool with observed shutdown collaborators to check ordering and failure cleanup.
+     */
+    private static class Fixture {
+        final RequestRepository requests = new RequestRepository();
+        AbstractRequestScheduler scheduler;
+        final EndpointRegistry endpoints = mock(EndpointRegistry.class);
+        final RequestTaskPool tasks;
+        final ExpirationTimer deadlines = mock(ExpirationTimer.class);
+        final ResponseCompletionExecutor completions = mock(ResponseCompletionExecutor.class);
+        final EngineCancellation dispatcher = mock(EngineCancellation.class);
+        final ApplicationLifecycle lifecycle;
+
+        Fixture(RequestTaskPool tasks) {
+            this.tasks = tasks;
+            scheduler =
+                    org.mockito.Mockito.spy(
+                            new SchedulerTestServices.PassiveScheduler(
+                                    requests,
+                                    tasks,
+                                    deadlines,
+                                    dispatcher,
+                                    completions,
+                                    mock(org.flexlb.balance.metrics.DeliveryMetricsReporter.class),
+                                    mock(
+                                            org.flexlb.balance.requestlog.TheoryCacheHitReporter
+                                                    .class)));
+            lifecycle =
+                    new ApplicationLifecycle(
+                            mock(org.flexlb.master.MasterStatusService.class),
+                            mock(org.flexlb.api.server.FlexlbGrpcServer.class),
+                            mock(org.flexlb.worker.status.ServiceMetricsReporter.class),
+                            new org.springframework.mock.env.MockEnvironment(),
+                            new org.flexlb.util.ApplicationWarmupState(),
+                            scheduler,
+                            requests,
+                            tasks,
+                            deadlines,
+                            dispatcher,
+                            completions,
+                            endpoints,
+                            0L);
+        }
+    }
+}

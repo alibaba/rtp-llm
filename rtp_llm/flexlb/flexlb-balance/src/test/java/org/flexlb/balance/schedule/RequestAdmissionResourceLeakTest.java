@@ -56,7 +56,7 @@ class RequestAdmissionResourceLeakTest {
     @AfterEach
     void tearDown() {
         if (RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(lifecycle)) {
-            lifecycle.closeOutstandingAndTerminalize();
+            lifecycle.finishRequestCleanup();
             SchedulerTestSupport.timer(
                             org.flexlb.balance.schedule.SchedulerTestSupport.runtime(lifecycle))
                     .close();
@@ -232,10 +232,10 @@ class RequestAdmissionResourceLeakTest {
                                 null,
                                 System.currentTimeMillis()));
         assertTrue(RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(lifecycle));
-        lifecycle.closeOutstandingAndTerminalize();
+        lifecycle.finishRequestCleanup();
         verify(registered.item().decodeEndpoint(), times(1))
                 .releaseRequest(registered.item().decodeRegistration());
-        lifecycle.closeOutstandingAndTerminalize();
+        lifecycle.finishRequestCleanup();
         verify(registered.item().decodeEndpoint(), times(1))
                 .releaseRequest(registered.item().decodeRegistration());
         SchedulerTestSupport.timer(

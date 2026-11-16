@@ -337,8 +337,7 @@ class CustomRequestSchedulerContractTest {
                     runtime.dispatcher,
                     runtime.responseCompletions(),
                     runtime.deliveryReporter,
-                    mock(TheoryCacheHitReporter.class),
-                    endpoints);
+                    mock(TheoryCacheHitReporter.class));
             this.config = config;
             this.runtime = runtime;
             queue = alternative ? new ListSchedulingQueue() : new OrderedRequestQueue(false);

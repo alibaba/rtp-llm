@@ -57,7 +57,7 @@ class EndpointCleanupOwnershipTest {
     @AfterEach
     void close() {
         if (RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(registry)) {
-            registry.closeOutstandingAndTerminalize();
+            registry.finishRequestCleanup();
             SchedulerTestSupport.timer(
                             org.flexlb.balance.schedule.SchedulerTestSupport.runtime(registry))
                     .close();

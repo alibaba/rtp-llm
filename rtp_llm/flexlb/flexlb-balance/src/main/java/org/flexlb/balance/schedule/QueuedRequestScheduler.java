@@ -14,7 +14,6 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.util.Failures;
 import org.flexlb.worker.endpoint.CapacityKey;
 import org.flexlb.worker.endpoint.CapacityNotifier;
-import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 
 import java.util.ArrayList;
@@ -69,8 +68,7 @@ public class QueuedRequestScheduler extends AbstractRequestScheduler {
             DeliveryMetricsReporter deliveryReporter,
             TheoryCacheHitReporter cacheTrace,
             CapacityNotifier capacityNotifier,
-            SchedulingQueue queue,
-            EndpointRegistry endpoints) {
+            SchedulingQueue queue) {
         super(
                 requests,
                 tasks,
@@ -78,8 +76,7 @@ public class QueuedRequestScheduler extends AbstractRequestScheduler {
                 engineCancellation,
                 responseCompletions,
                 deliveryReporter,
-                cacheTrace,
-                endpoints);
+                cacheTrace);
         this.router = router;
         this.preemption = preemption;
         this.orderedQueue = queue;

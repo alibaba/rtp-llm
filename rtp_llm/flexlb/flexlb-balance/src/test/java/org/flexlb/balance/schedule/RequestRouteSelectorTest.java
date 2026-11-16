@@ -388,7 +388,7 @@ class RequestRouteSelectorTest {
                     .releaseRequest(any(PrefillEndpoint.RequestRegistration.class));
         } finally {
             RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(requests);
-            requests.closeOutstandingAndTerminalize();
+            requests.finishRequestCleanup();
             SchedulerTestSupport.timer(SchedulerTestSupport.runtime(requests)).close();
             SchedulerTestSupport.closeRequestExecutors(SchedulerTestSupport.runtime(requests));
         }
@@ -440,7 +440,7 @@ class RequestRouteSelectorTest {
             verifyNoInteractions(decodeStrategy, vitStrategy);
         } finally {
             RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(requests);
-            requests.closeOutstandingAndTerminalize();
+            requests.finishRequestCleanup();
             SchedulerTestSupport.timer(SchedulerTestSupport.runtime(requests)).close();
             SchedulerTestSupport.closeRequestExecutors(SchedulerTestSupport.runtime(requests));
         }

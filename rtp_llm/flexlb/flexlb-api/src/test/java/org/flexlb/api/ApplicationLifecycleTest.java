@@ -56,6 +56,12 @@ class ApplicationLifecycleTest {
                         context.getEnvironment(),
                         new org.flexlb.util.ApplicationWarmupState(),
                         mock(AbstractRequestScheduler.class),
+                        mock(org.flexlb.balance.schedule.RequestRepository.class),
+                        mock(org.flexlb.balance.schedule.RequestTaskPool.class),
+                        mock(org.flexlb.balance.schedule.ExpirationTimer.class),
+                        mock(org.flexlb.balance.schedule.EngineCancellation.class),
+                        mock(org.flexlb.balance.schedule.ResponseCompletionExecutor.class),
+                        mock(org.flexlb.worker.endpoint.EndpointRegistry.class),
                         0L);
         context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
         context.registerBean(
@@ -88,6 +94,12 @@ class ApplicationLifecycleTest {
                             context.getEnvironment(),
                             new org.flexlb.util.ApplicationWarmupState(),
                             mock(AbstractRequestScheduler.class),
+                            mock(org.flexlb.balance.schedule.RequestRepository.class),
+                            mock(org.flexlb.balance.schedule.RequestTaskPool.class),
+                            mock(org.flexlb.balance.schedule.ExpirationTimer.class),
+                            mock(org.flexlb.balance.schedule.EngineCancellation.class),
+                            mock(org.flexlb.balance.schedule.ResponseCompletionExecutor.class),
+                            mock(org.flexlb.worker.endpoint.EndpointRegistry.class),
                             0L);
             context.registerBean(ApplicationLifecycle.class, () -> lifecycle);
             context.refresh();
@@ -106,6 +118,24 @@ class ApplicationLifecycleTest {
             context.registerBean(
                     ServiceMetricsReporter.class, () -> mock(ServiceMetricsReporter.class));
             context.registerBean(org.flexlb.util.ApplicationWarmupState.class);
+            context.registerBean(
+                    org.flexlb.balance.schedule.RequestRepository.class,
+                    () -> mock(org.flexlb.balance.schedule.RequestRepository.class));
+            context.registerBean(
+                    org.flexlb.balance.schedule.RequestTaskPool.class,
+                    () -> mock(org.flexlb.balance.schedule.RequestTaskPool.class));
+            context.registerBean(
+                    org.flexlb.balance.schedule.ExpirationTimer.class,
+                    () -> mock(org.flexlb.balance.schedule.ExpirationTimer.class));
+            context.registerBean(
+                    org.flexlb.balance.schedule.EngineCancellation.class,
+                    () -> mock(org.flexlb.balance.schedule.EngineCancellation.class));
+            context.registerBean(
+                    org.flexlb.balance.schedule.ResponseCompletionExecutor.class,
+                    () -> mock(org.flexlb.balance.schedule.ResponseCompletionExecutor.class));
+            context.registerBean(
+                    org.flexlb.worker.endpoint.EndpointRegistry.class,
+                    () -> mock(org.flexlb.worker.endpoint.EndpointRegistry.class));
             context.register(ApplicationLifecycle.class);
             context.getBeanFactory()
                     .registerSingleton("scheduler", mock(AbstractRequestScheduler.class));
@@ -129,6 +159,12 @@ class ApplicationLifecycleTest {
                         environment,
                         new org.flexlb.util.ApplicationWarmupState(),
                         mock(AbstractRequestScheduler.class),
+                        mock(org.flexlb.balance.schedule.RequestRepository.class),
+                        mock(org.flexlb.balance.schedule.RequestTaskPool.class),
+                        mock(org.flexlb.balance.schedule.ExpirationTimer.class),
+                        mock(org.flexlb.balance.schedule.EngineCancellation.class),
+                        mock(org.flexlb.balance.schedule.ResponseCompletionExecutor.class),
+                        mock(org.flexlb.worker.endpoint.EndpointRegistry.class),
                         0L);
         lifecycle.online();
         assertTrue(lifecycle.isHealthy());

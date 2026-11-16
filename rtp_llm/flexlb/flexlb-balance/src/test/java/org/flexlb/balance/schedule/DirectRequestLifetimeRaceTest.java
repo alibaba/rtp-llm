@@ -184,7 +184,7 @@ class DirectRequestLifetimeRaceTest {
                     verify(selectedEndpoint, org.mockito.Mockito.never()));
         } finally {
             RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(requests);
-            requests.closeOutstandingAndTerminalize();
+            requests.finishRequestCleanup();
             SchedulerTestSupport.timer(
                             org.flexlb.balance.schedule.SchedulerTestSupport.runtime(requests))
                     .close();

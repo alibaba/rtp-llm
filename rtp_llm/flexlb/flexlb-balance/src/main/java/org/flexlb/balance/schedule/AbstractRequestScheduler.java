@@ -13,11 +13,9 @@ import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
 import org.flexlb.worker.endpoint.AdmissionRejectReason;
 import org.flexlb.worker.endpoint.CapacityKey;
-import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.endpoint.StrategyErrorType;
 import org.flexlb.worker.rpc.EngineGrpcClient;
 
-import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
@@ -34,7 +32,7 @@ import static org.flexlb.util.Failures.recover;
 /**
  * Registers requests and coordinates cancellation, deadlines, responses and resource cleanup.
  * Runs shared route selection, publication and cleanup; subclasses supply waiting and rejection policies.
- * Cleanup drains accepted work before the shared endpoints and executors close.
+ * Stops and cleans up its own requests; the application closes shared resources.
  */
 public abstract class AbstractRequestScheduler
         implements RequestScheduler, org.flexlb.worker.endpoint.WorkerEventSink {
@@ -44,8 +42,6 @@ public abstract class AbstractRequestScheduler
     private final EngineCancellation engineCancellation;
     private final ResponseCompletionExecutor responseCompletions;
     private final TheoryCacheHitReporter cacheTrace;
-    private final EndpointRegistry endpoints;
-    private final Object shutdownLock = new Object();
     private final RequestCloseQueue closeQueue = new RequestCloseQueue();
 
     private Throwable requestProcessingFailure;
@@ -57,8 +53,7 @@ public abstract class AbstractRequestScheduler
             EngineCancellation engineCancellation,
             ResponseCompletionExecutor responseCompletions,
             DeliveryMetricsReporter deliveryReporter,
-            TheoryCacheHitReporter cacheTrace,
-            EndpointRegistry endpoints) {
+            TheoryCacheHitReporter cacheTrace) {
         this.repository = Objects.requireNonNull(repository);
         this.taskPool = Objects.requireNonNull(taskPool);
         this.expirationTimer = Objects.requireNonNull(deadlines);
@@ -66,7 +61,6 @@ public abstract class AbstractRequestScheduler
         this.engineCancellation = Objects.requireNonNull(engineCancellation);
         this.responseCompletions = Objects.requireNonNull(responseCompletions);
         this.cacheTrace = Objects.requireNonNull(cacheTrace);
-        this.endpoints = Objects.requireNonNull(endpoints);
     }
 
     @Override
@@ -325,55 +319,20 @@ public abstract class AbstractRequestScheduler
     }
 
     /**
-     * Drain accepted responses until the caller's absolute nanoTime deadline, then close scheduling.
+     * Stops this scheduler and cancels only requests registered with it.
+     * Shared admission and execution resources remain owned by the application.
      */
-    public final boolean shutdown(long deadlineNanos) {
-        checkShutdownThread();
-        synchronized (shutdownLock) {
-            if (repository.isClosed()) return repository.liveRequestCount() == 0;
-            repository.stopAccepting();
-            boolean drained = false;
-            Throwable failure = null;
-            try {
-                drained = repository.awaitResponses(deadlineNanos);
-            } catch (Throwable cause) {
-                failure = cause;
-            }
-            if (!repository.closeRegistration()) return drained;
-            failure = Failures.run(failure, this::close);
-            var owners = new LinkedHashSet<AbstractRequestScheduler>();
-            owners.add(this);
-            var active = repository.snapshotActive();
-            for (var context : active) {
-                owners.add(context.getRequestScheduler());
-                failure =
-                        Failures.run(
-                                failure,
-                                () ->
-                                        context.getRequestScheduler()
-                                                .cancel(context, CancelReason.SHUTDOWN));
-            }
-            failure = Failures.run(failure, () -> engineCancellation.awaitStops());
-            failure = Failures.run(failure, taskPool::awaitIdle);
-            for (var owner : owners) failure = Failures.run(failure, owner.closeQueue::awaitIdle);
-            failure = Failures.run(failure, endpoints::close);
-            failure = Failures.run(failure, () -> engineCancellation.awaitStops());
-            failure = Failures.run(failure, expirationTimer::close);
-            failure = Failures.run(failure, taskPool::awaitIdle);
-            for (var owner : owners)
-                failure = Failures.run(failure, owner::closeOutstandingAndTerminalize);
-            failure = Failures.run(failure, this::closeExecutors);
-            for (var owner : owners) failure = Failures.run(failure, owner::throwIfRequestFailed);
-            if (repository.liveRequestCount() != 0)
-                failure =
-                        Failures.append(
-                                failure,
-                                new IllegalStateException(
-                                        "unsettled requests at shutdown: "
-                                                + repository.liveRequestCount()));
-            Failures.rethrow(failure, "scheduling shutdown failed");
-            return drained;
+    public final void stopAndCancelRequests() {
+        Throwable failure = Failures.run(null, this::close);
+        for (var context :
+                repository.snapshotActive(request -> request.getRequestScheduler() == this)) {
+            failure = Failures.run(failure, () -> cancel(context, CancelReason.SHUTDOWN));
         }
+        Failures.rethrow(failure, "scheduler request cancellation failed");
+    }
+
+    public final void awaitRequestCleanup() {
+        closeQueue.awaitIdle();
     }
 
     /**
@@ -386,6 +345,32 @@ public abstract class AbstractRequestScheduler
                         && !closeQueue.isExecutingOnCurrentThread()
                         && !responseCompletions.isCompletingOnCurrentThread(),
                 "scheduler shutdown cannot wait for its own request work or response callback");
+    }
+
+    public synchronized void throwIfRequestFailed() {
+        Failures.rethrow(requestProcessingFailure, "request processing failed");
+    }
+
+    /**
+     * Archives this scheduler's remaining requests after endpoints have released their records.
+     */
+    public final void finishRequestCleanup() {
+        Throwable failure = null;
+        for (var ctx :
+                repository.snapshotActive(request -> request.getRequestScheduler() == this)) {
+            failure =
+                    Failures.run(
+                            failure,
+                            () ->
+                                    closeRequest(
+                                            ctx,
+                                            RequestEndEvent.failure(
+                                                    ctx.snapshot().route(),
+                                                    EndKind.SHUTDOWN,
+                                                    StrategyErrorType.DISPATCH_FAILED,
+                                                    "request scheduler is shutting down")));
+        }
+        Failures.rethrow(failure, "request shutdown finalization failed");
     }
 
     /**
@@ -551,10 +536,6 @@ public abstract class AbstractRequestScheduler
 
     boolean isCurrentRequest(RequestContext ctx) {
         return ctx.getRequestScheduler() == this && repository.isCurrent(ctx);
-    }
-
-    synchronized void throwIfRequestFailed() {
-        Failures.rethrow(requestProcessingFailure, "request processing failed");
     }
 
     /**
@@ -778,34 +759,6 @@ public abstract class AbstractRequestScheduler
             throw failure;
         }
         scheduleRequestCleanup(request, publication);
-    }
-
-    void closeOutstandingAndTerminalize() {
-        Throwable failure = null;
-        for (var ctx :
-                repository.snapshotActive(request -> request.getRequestScheduler() == this)) {
-            failure =
-                    Failures.run(
-                            failure,
-                            () ->
-                                    closeRequest(
-                                            ctx,
-                                            RequestEndEvent.failure(
-                                                    ctx.snapshot().route(),
-                                                    EndKind.SHUTDOWN,
-                                                    StrategyErrorType.DISPATCH_FAILED,
-                                                    "request scheduler is shutting down")));
-        }
-        Failures.rethrow(failure, "request shutdown finalization failed");
-    }
-
-    void closeExecutors() {
-        Throwable failure = Failures.run(null, closeQueue::awaitIdle);
-        failure = Failures.run(failure, taskPool::awaitIdle);
-        failure = Failures.run(failure, engineCancellation::awaitStops);
-        failure = Failures.run(failure, taskPool::close);
-        failure = Failures.run(failure, responseCompletions::close);
-        Failures.rethrow(failure, "request executors failed to close");
     }
 
     /**

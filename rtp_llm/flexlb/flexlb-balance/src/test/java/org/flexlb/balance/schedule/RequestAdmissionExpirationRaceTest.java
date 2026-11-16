@@ -82,8 +82,7 @@ class RequestAdmissionExpirationRaceTest {
             assertTrue(RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(registry));
             assertSame(
                     cleanupFailure,
-                    assertThrows(
-                            IllegalStateException.class, registry::closeOutstandingAndTerminalize));
+                    assertThrows(IllegalStateException.class, registry::finishRequestCleanup));
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.schedule.SchedulerTestSupport.runtime(registry));
             assertSame(cleanupFailure, SchedulerTestSupport.failure(registry));

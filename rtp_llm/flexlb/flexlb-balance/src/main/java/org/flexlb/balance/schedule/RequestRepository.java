@@ -116,22 +116,7 @@ public final class RequestRepository implements org.flexlb.worker.endpoint.Worke
         return state;
     }
 
-    RequestState findTerminal(String requestId) {
-        return findTerminal(requestId, RequestPhase.GENERATION);
-    }
-
-    RequestState findTerminal(String requestId, RequestPhase phase) {
-        var archived = terminalByPhase.get(phase).get(requestId);
-        return archived == null ? null : archived.state();
-    }
-
-    RequestState findTerminal(
-            String requestId, RequestPhase phase, AbstractRequestScheduler owner) {
-        var archived = terminalByPhase.get(phase).get(requestId);
-        return archived != null && archived.owner() == owner ? archived.state() : null;
-    }
-
-    boolean closeRegistration() {
+    public boolean closeRegistration() {
         synchronized (registrationLock) {
             if (closed) {
                 return false;
@@ -141,7 +126,7 @@ public final class RequestRepository implements org.flexlb.worker.endpoint.Worke
         }
     }
 
-    void stopAccepting() {
+    public void stopAccepting() {
         synchronized (registrationLock) {
             stopping = true;
         }
@@ -150,7 +135,7 @@ public final class RequestRepository implements org.flexlb.worker.endpoint.Worke
     /**
      * Wait only for accepted response futures; resource settlement follows separately.
      */
-    boolean awaitResponses(long deadlineNanos) {
+    public boolean awaitResponses(long deadlineNanos) {
         if (!stopping) throw new IllegalStateException("stop accepting requests before draining");
         for (var context : snapshotActive(request -> !request.getFuture().isDone())) {
             var response = context.getFuture();
@@ -174,6 +159,21 @@ public final class RequestRepository implements org.flexlb.worker.endpoint.Worke
             }
         }
         return true;
+    }
+
+    RequestState findTerminal(String requestId) {
+        return findTerminal(requestId, RequestPhase.GENERATION);
+    }
+
+    RequestState findTerminal(String requestId, RequestPhase phase) {
+        var archived = terminalByPhase.get(phase).get(requestId);
+        return archived == null ? null : archived.state();
+    }
+
+    RequestState findTerminal(
+            String requestId, RequestPhase phase, AbstractRequestScheduler owner) {
+        var archived = terminalByPhase.get(phase).get(requestId);
+        return archived != null && archived.owner() == owner ? archived.state() : null;
     }
 
     List<RequestContext> snapshotActive() {

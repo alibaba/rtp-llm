@@ -143,7 +143,7 @@ class RequestResourceAccountingTest {
                     assertTrue(
                             RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(
                                     f.requests));
-                    f.requests.closeOutstandingAndTerminalize();
+                    f.requests.finishRequestCleanup();
                 }
             }
             f.admission

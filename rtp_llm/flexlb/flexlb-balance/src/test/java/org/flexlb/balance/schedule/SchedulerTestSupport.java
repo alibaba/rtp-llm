@@ -323,20 +323,24 @@ public final class SchedulerTestSupport {
                 ReflectionTestUtils.getField(runtime.tasks(), "requestWorkers");
     }
 
-    static ResponseCompletionExecutor responseCompletions(SchedulerTestServices runtime) {
-        return (ResponseCompletionExecutor)
-                ReflectionTestUtils.getField(runtime, "responseCompletions");
-    }
-
     static ExpirationTimer timer(SchedulerTestServices runtime) {
         return (ExpirationTimer) ReflectionTestUtils.getField(runtime, "timer");
     }
 
     static void closeRequestExecutors(SchedulerTestServices runtime) {
         Throwable failure =
-                org.flexlb.util.Failures.run(null, runtime.scheduling()::closeExecutors);
+                org.flexlb.util.Failures.run(null, runtime.scheduling()::awaitRequestCleanup);
+        failure = org.flexlb.util.Failures.run(failure, runtime.tasks::awaitIdle);
+        failure = org.flexlb.util.Failures.run(failure, runtime.dispatcher::awaitStops);
+        failure = org.flexlb.util.Failures.run(failure, runtime.tasks::close);
+        failure = org.flexlb.util.Failures.run(failure, responseCompletions(runtime)::close);
         failure = org.flexlb.util.Failures.run(failure, runtime::closeTimers);
         org.flexlb.util.Failures.rethrow(failure, "fixture execution resources failed to close");
+    }
+
+    static ResponseCompletionExecutor responseCompletions(SchedulerTestServices runtime) {
+        return (ResponseCompletionExecutor)
+                ReflectionTestUtils.getField(runtime, "responseCompletions");
     }
 
     static Stage stage(RequestContext context) {

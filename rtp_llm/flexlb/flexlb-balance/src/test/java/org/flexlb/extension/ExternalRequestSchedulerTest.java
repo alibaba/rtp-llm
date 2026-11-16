@@ -120,8 +120,7 @@ class ExternalRequestSchedulerTest {
                     fixture.dispatcher,
                     fixture.responses,
                     reporter,
-                    mock(TheoryCacheHitReporter.class),
-                    fixture.endpoints);
+                    mock(TheoryCacheHitReporter.class));
             selector = fixture.selector;
         }
 
@@ -169,8 +168,7 @@ class ExternalRequestSchedulerTest {
                     reporter,
                     mock(TheoryCacheHitReporter.class),
                     new org.flexlb.worker.endpoint.CapacityNotifier(),
-                    new OrderedRequestQueue(false),
-                    fixture.endpoints);
+                    new OrderedRequestQueue(false));
             selector = fixture.selector;
         }
 
@@ -324,7 +322,19 @@ class ExternalRequestSchedulerTest {
                     .when(endpoints)
                     .close();
             Throwable failure =
-                    org.flexlb.util.Failures.run(null, () -> scheduler.shutdown(System.nanoTime()));
+                    org.flexlb.util.Failures.run(
+                            null,
+                            () ->
+                                    org.flexlb.balance.schedule.SchedulerTestServices
+                                            .shutdownScheduling(
+                                                    scheduler,
+                                                    requests,
+                                                    tasks,
+                                                    expiration,
+                                                    dispatcher,
+                                                    responses,
+                                                    endpoints,
+                                                    System.nanoTime()));
             failure = org.flexlb.util.Failures.run(failure, deadlinePool::close);
             failure = org.flexlb.util.Failures.run(failure, cleanupPool::close);
             org.flexlb.util.Failures.rethrow(failure, "extension fixture failed to close");

@@ -141,8 +141,7 @@ public class SchedulerConfiguration {
             DeliveryMetricsReporter deliveryReporter,
             TheoryCacheHitReporter cacheTrace,
             ConfigService configService,
-            @Lazy SchedulingQueue queue,
-            EndpointRegistry endpoints) {
+            @Lazy SchedulingQueue queue) {
         FlexlbConfig config = configService.loadBalanceConfig();
         if (config.isQueue()) {
             return new QueuedRequestScheduler(
@@ -157,8 +156,7 @@ public class SchedulerConfiguration {
                     deliveryReporter,
                     cacheTrace,
                     availability,
-                    queue,
-                    endpoints);
+                    queue);
         }
         return new DirectRequestScheduler(
                 router,
@@ -168,8 +166,7 @@ public class SchedulerConfiguration {
                 engineCancellation,
                 responseCompletions,
                 deliveryReporter,
-                cacheTrace,
-                endpoints);
+                cacheTrace);
     }
 
     @Bean

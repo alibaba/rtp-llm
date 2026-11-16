@@ -865,7 +865,7 @@ class RequestSchedulerContractTest {
             SchedulerTestSupport.timer(SchedulerTestSupport.runtime(requests)).close();
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.schedule.SchedulerTestSupport.runtime(requests));
-            requests.closeOutstandingAndTerminalize();
+            requests.finishRequestCleanup();
             SchedulerTestSupport.closeRequestExecutors(SchedulerTestSupport.runtime(requests));
         }
 

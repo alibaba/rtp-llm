@@ -35,11 +35,7 @@ public final class EngineCancellation {
         this.grpcClient = grpcClient;
     }
 
-    boolean isStoppingOnCurrentThread() {
-        return Boolean.TRUE.equals(executingStop.get());
-    }
-
-    void awaitStops() {
+    public void awaitStops() {
         Throwable problem = null;
         long deadline =
                 System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(CLEANUP_TIMEOUT_MS + 1_000L);
@@ -67,6 +63,10 @@ public final class EngineCancellation {
             }
         }
         Failures.rethrow(problem, "delivery stop callbacks did not drain");
+    }
+
+    boolean isStoppingOnCurrentThread() {
+        return Boolean.TRUE.equals(executingStop.get());
     }
 
     /**

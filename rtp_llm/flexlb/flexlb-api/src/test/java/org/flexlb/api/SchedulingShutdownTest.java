@@ -17,7 +17,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
 /**
- * The application drains its ingress before delegating shutdown to the scheduling module.
+ * The application drains ingress before stopping scheduling and shared resources.
  */
 class SchedulingShutdownTest {
     @Test
@@ -30,15 +30,15 @@ class SchedulingShutdownTest {
         var order = inOrder(grpc, scheduling);
         order.verify(scheduling).checkShutdownThread();
         order.verify(grpc).drain();
-        order.verify(scheduling).shutdown(org.mockito.Mockito.anyLong());
-        verify(scheduling).shutdown(org.mockito.Mockito.anyLong());
+        order.verify(scheduling).stopAndCancelRequests();
+        verify(scheduling).stopAndCancelRequests();
     }
 
     @Test
     void reportsSchedulingShutdownFailure() {
         var scheduling = mock(AbstractRequestScheduler.class);
         var failure = new IllegalStateException("scheduling cleanup failed");
-        doThrow(failure).when(scheduling).shutdown(org.mockito.Mockito.anyLong());
+        doThrow(failure).when(scheduling).stopAndCancelRequests();
         assertSame(
                 failure,
                 assertThrows(
@@ -69,6 +69,12 @@ class SchedulingShutdownTest {
                 new MockEnvironment(),
                 new ApplicationWarmupState(),
                 scheduling,
+                mock(org.flexlb.balance.schedule.RequestRepository.class),
+                mock(org.flexlb.balance.schedule.RequestTaskPool.class),
+                mock(org.flexlb.balance.schedule.ExpirationTimer.class),
+                mock(org.flexlb.balance.schedule.EngineCancellation.class),
+                mock(org.flexlb.balance.schedule.ResponseCompletionExecutor.class),
+                mock(org.flexlb.worker.endpoint.EndpointRegistry.class),
                 0L);
     }
 }

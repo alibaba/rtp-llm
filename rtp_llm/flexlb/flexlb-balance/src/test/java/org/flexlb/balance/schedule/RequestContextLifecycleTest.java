@@ -69,7 +69,7 @@ class RequestContextLifecycleTest {
     @AfterEach
     void tearDown() {
         if (RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(lifecycle)) {
-            lifecycle.closeOutstandingAndTerminalize();
+            lifecycle.finishRequestCleanup();
             SchedulerTestSupport.timer(
                             org.flexlb.balance.schedule.SchedulerTestSupport.runtime(lifecycle))
                     .close();
@@ -721,7 +721,7 @@ class RequestContextLifecycleTest {
                 Long.MAX_VALUE);
         try {
             assertTrue(RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(lifecycle));
-            lifecycle.closeOutstandingAndTerminalize();
+            lifecycle.finishRequestCleanup();
             SchedulerTestSupport.awaitRequestWork(
                     org.flexlb.balance.schedule.SchedulerTestSupport.runtime(lifecycle));
             assertEquals(Stage.FINISHED, SchedulerTestSupport.stage(requestContext));

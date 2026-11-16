@@ -3,9 +3,16 @@ package org.flexlb.api;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.api.server.FlexlbGrpcServer;
 import org.flexlb.balance.schedule.AbstractRequestScheduler;
+import org.flexlb.balance.schedule.EngineCancellation;
+import org.flexlb.balance.schedule.ExpirationTimer;
+import org.flexlb.balance.schedule.RequestRepository;
+import org.flexlb.balance.schedule.RequestTaskPool;
+import org.flexlb.balance.schedule.ResponseCompletionExecutor;
 import org.flexlb.master.MasterStatusService;
 import org.flexlb.util.ApplicationWarmupState;
+import org.flexlb.util.Failures;
 import org.flexlb.util.Logger;
+import org.flexlb.worker.endpoint.EndpointRegistry;
 import org.flexlb.worker.status.ServiceMetricsReporter;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.ApplicationContext;
@@ -29,6 +36,13 @@ public class ApplicationLifecycle implements ApplicationContextAware {
     private static final long DEFAULT_WARM_UP_WAIT_MS = 3_000L;
 
     private final AbstractRequestScheduler scheduling;
+    private final RequestRepository requests;
+    private final RequestTaskPool tasks;
+    private final ExpirationTimer deadlines;
+    private final EngineCancellation engineCancellation;
+    private final ResponseCompletionExecutor responses;
+    private final EndpointRegistry endpoints;
+
     private final MasterStatusService consistency;
     private final FlexlbGrpcServer grpcServer;
     private final ServiceMetricsReporter reporter;
@@ -49,7 +63,13 @@ public class ApplicationLifecycle implements ApplicationContextAware {
             ServiceMetricsReporter reporter,
             Environment environment,
             ApplicationWarmupState warmupState,
-            AbstractRequestScheduler scheduling) {
+            AbstractRequestScheduler scheduling,
+            RequestRepository requests,
+            RequestTaskPool tasks,
+            ExpirationTimer deadlines,
+            EngineCancellation engineCancellation,
+            ResponseCompletionExecutor responses,
+            EndpointRegistry endpoints) {
         this(
                 consistency,
                 grpcServer,
@@ -57,6 +77,12 @@ public class ApplicationLifecycle implements ApplicationContextAware {
                 environment,
                 warmupState,
                 scheduling,
+                requests,
+                tasks,
+                deadlines,
+                engineCancellation,
+                responses,
+                endpoints,
                 DEFAULT_WARM_UP_WAIT_MS);
     }
 
@@ -67,8 +93,21 @@ public class ApplicationLifecycle implements ApplicationContextAware {
             Environment environment,
             ApplicationWarmupState warmupState,
             AbstractRequestScheduler scheduling,
+            RequestRepository requests,
+            RequestTaskPool tasks,
+            ExpirationTimer deadlines,
+            EngineCancellation engineCancellation,
+            ResponseCompletionExecutor responses,
+            EndpointRegistry endpoints,
             long warmUpWaitMs) {
         this.scheduling = java.util.Objects.requireNonNull(scheduling);
+        this.requests = requests;
+        this.tasks = tasks;
+        this.deadlines = deadlines;
+        this.engineCancellation = engineCancellation;
+        this.responses = responses;
+        this.endpoints = endpoints;
+
         this.consistency = consistency;
         this.grpcServer = grpcServer;
         this.reporter = reporter;
@@ -157,11 +196,40 @@ public class ApplicationLifecycle implements ApplicationContextAware {
         // Keep scheduler, forwarder and transport dependencies alive until all
         // accepted RPCs finish. The platform owns the forced-kill deadline.
         grpcServer.drain();
-        scheduling.shutdown(System.nanoTime() + TimeUnit.SECONDS.toNanos(30));
+        closeScheduling(System.nanoTime() + TimeUnit.SECONDS.toNanos(30));
         shutdownCompletedSuccessfully = true;
         reporter.reportDuration(
                 ServiceMetricsReporter.Event.SHUTDOWN_COMPLETE,
                 TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - drainStartedAt));
         return true;
+    }
+
+    private void closeScheduling(long deadlineNanos) {
+        requests.stopAccepting();
+        Throwable failure = Failures.run(null, () -> requests.awaitResponses(deadlineNanos));
+        requests.closeRegistration();
+        failure = Failures.run(failure, scheduling::stopAndCancelRequests);
+        failure = Failures.run(failure, engineCancellation::awaitStops);
+        failure = Failures.run(failure, tasks::awaitIdle);
+        failure = Failures.run(failure, scheduling::awaitRequestCleanup);
+        failure = Failures.run(failure, endpoints::close);
+        failure = Failures.run(failure, engineCancellation::awaitStops);
+        failure = Failures.run(failure, deadlines::close);
+        failure = Failures.run(failure, tasks::awaitIdle);
+        failure = Failures.run(failure, scheduling::finishRequestCleanup);
+        failure = Failures.run(failure, scheduling::awaitRequestCleanup);
+        failure = Failures.run(failure, tasks::awaitIdle);
+        failure = Failures.run(failure, engineCancellation::awaitStops);
+        failure = Failures.run(failure, tasks::close);
+        failure = Failures.run(failure, responses::close);
+        failure = Failures.run(failure, scheduling::throwIfRequestFailed);
+        if (requests.liveRequestCount() != 0)
+            failure =
+                    Failures.append(
+                            failure,
+                            new IllegalStateException(
+                                    "unsettled requests at shutdown: "
+                                            + requests.liveRequestCount()));
+        Failures.rethrow(failure, "application scheduling shutdown failed");
     }
 }

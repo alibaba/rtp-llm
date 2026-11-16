@@ -287,8 +287,7 @@ public final class SchedulerTestServices {
                         dispatcher,
                         responseCompletions(),
                         deliveryReporter,
-                        trace,
-                        endpoints) {
+                        trace) {
 
                     @Override
                     protected org.flexlb.worker.endpoint.StrategyErrorType
@@ -344,7 +343,7 @@ public final class SchedulerTestServices {
             Throwable shutdownFailure = null;
             try {
                 drained =
-                        scheduling.shutdown(
+                        shutdownScheduling(scheduling, requests, tasks, timer, dispatcher, responseCompletions, endpoints,
                                 requestedMode == ShutdownMode.DRAIN
                                         ? com.google.common.math.LongMath.saturatedAdd(
                                                 System.nanoTime(), timeout.toNanos())
@@ -364,6 +363,41 @@ public final class SchedulerTestServices {
                             : ShutdownMode.IMMEDIATE,
                     requestedMode == ShutdownMode.DRAIN && drained);
         }
+    }
+
+    public static boolean shutdownScheduling(
+            AbstractRequestScheduler scheduling, RequestRepository requests, RequestTaskPool tasks,
+            ExpirationTimer timer, EngineCancellation dispatcher,
+            ResponseCompletionExecutor responses, EndpointRegistry endpoints, long deadlineNanos) {
+        scheduling.checkShutdownThread();
+        requests.stopAccepting();
+        boolean drained = false;
+        Throwable failure = null;
+        try { drained = requests.awaitResponses(deadlineNanos); }
+        catch (Throwable cause) { failure = cause; }
+        requests.closeRegistration();
+        var schedulers = new java.util.LinkedHashSet<AbstractRequestScheduler>();
+        schedulers.add(scheduling);
+        for (var request : requests.snapshotActive()) schedulers.add(request.getRequestScheduler());
+        for (var owner : schedulers) failure = Failures.run(failure, owner::stopAndCancelRequests);
+        failure = Failures.run(failure, dispatcher::awaitStops);
+        failure = Failures.run(failure, tasks::awaitIdle);
+        for (var owner : schedulers) failure = Failures.run(failure, owner::awaitRequestCleanup);
+        failure = Failures.run(failure, endpoints::close);
+        failure = Failures.run(failure, dispatcher::awaitStops);
+        failure = Failures.run(failure, timer::close);
+        failure = Failures.run(failure, tasks::awaitIdle);
+        for (var owner : schedulers) failure = Failures.run(failure, owner::finishRequestCleanup);
+        for (var owner : schedulers) failure = Failures.run(failure, owner::awaitRequestCleanup);
+        failure = Failures.run(failure, tasks::awaitIdle);
+        failure = Failures.run(failure, dispatcher::awaitStops);
+        failure = Failures.run(failure, tasks::close);
+        failure = Failures.run(failure, responses::close);
+        for (var owner : schedulers) failure = Failures.run(failure, owner::throwIfRequestFailed);
+        if (requests.liveRequestCount() != 0) failure = Failures.append(failure,
+                new IllegalStateException("unsettled requests at shutdown: " + requests.liveRequestCount()));
+        Failures.rethrow(failure, "fixture shutdown failed");
+        return drained;
     }
 
     public static Throwable failure(SchedulerTestServices fixture) {
@@ -411,8 +445,7 @@ public final class SchedulerTestServices {
                 forOwner(dependencies).deliveryReporter,
                 dependency(dependencies, "cacheTrace"),
                 availability,
-                queue,
-                dependency(dependencies, "endpoints"));
+                queue);
     }
 
     public static SchedulerTestServices forOwner(Object value) {
@@ -448,8 +481,7 @@ public final class SchedulerTestServices {
                 dependency(dependencies, "engineCancellation"),
                 dependency(dependencies, "responseCompletions"),
                 forOwner(dependencies).deliveryReporter,
-                dependency(dependencies, "cacheTrace"),
-                dependency(dependencies, "endpoints"));
+                dependency(dependencies, "cacheTrace"));
     }
 
     public static Object[] constructorArguments(
@@ -462,8 +494,7 @@ public final class SchedulerTestServices {
             dependency(d, "engineCancellation"),
             dependency(d, "responseCompletions"),
             forOwner(d).deliveryReporter,
-            dependency(d, "cacheTrace"),
-            dependency(d, "endpoints")
+            dependency(d, "cacheTrace")
         };
     }
 
@@ -486,8 +517,7 @@ public final class SchedulerTestServices {
             forOwner(d).deliveryReporter,
             dependency(d, "cacheTrace"),
             availability,
-            queue,
-            dependency(d, "endpoints")
+            queue
         };
     }
 
@@ -579,8 +609,7 @@ public final class SchedulerTestServices {
                                     deliveryReporter,
                                     org.mockito.Mockito.mock(
                                             org.flexlb.balance.requestlog.TheoryCacheHitReporter
-                                                    .class),
-                                    endpoints)
+                                                    .class))
                             : lifecycle(scheduler);
         }
         return owner;
@@ -652,9 +681,8 @@ public final class SchedulerTestServices {
                 EngineCancellation dispatcher,
                 ResponseCompletionExecutor responses,
                 DeliveryMetricsReporter reporter,
-                org.flexlb.balance.requestlog.TheoryCacheHitReporter trace,
-                EndpointRegistry endpoints) {
-            super(requests, tasks, deadlines, dispatcher, responses, reporter, trace, endpoints);
+                org.flexlb.balance.requestlog.TheoryCacheHitReporter trace) {
+            super(requests, tasks, deadlines, dispatcher, responses, reporter, trace);
         }
 
         public void start() {}

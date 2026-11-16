@@ -151,7 +151,7 @@ class RequestCompletionPublicationRaceTest {
                             .state());
         } finally {
             if (RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(registry)) {
-                registry.closeOutstandingAndTerminalize();
+                registry.finishRequestCleanup();
                 SchedulerTestSupport.timer(
                                 org.flexlb.balance.schedule.SchedulerTestSupport.runtime(registry))
                         .close();
@@ -230,7 +230,7 @@ class RequestCompletionPublicationRaceTest {
                             .liveRequestCount());
         } finally {
             RequestProtocolTestSupport.closeRegistrationAndAwaitScheduling(scheduler);
-            scheduler.closeOutstandingAndTerminalize();
+            scheduler.finishRequestCleanup();
             SchedulerTestSupport.timer(
                             org.flexlb.balance.schedule.SchedulerTestSupport.runtime(scheduler))
                     .close();
