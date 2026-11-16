@@ -7,8 +7,8 @@ This file provides guidance to agents when working with code in this repository.
 FlexLB 的开发技能统一维护在本目录下的 `skills/`，以仓库中的版本为准：
 
 - 开发、修复、重构和审核时，读取 [flexlb-development](skills/flexlb-development/SKILL.md)。
-- 跨组件流程与职责设计按需读取 [workflow-first-design](skills/workflow-first-design/SKILL.md)。
-- 具体类和方法实现按需读取 [evidence-first-implementation](skills/evidence-first-implementation/SKILL.md)。
+- 跨组件流程设计、职责划分与架构审核按需读取 [workflow-first-design](skills/workflow-first-design/SKILL.md)。
+- 具体类和方法实现、巨类、重复状态与代码审核按需读取 [class-implementation](skills/class-implementation/SKILL.md)。
 
 不依赖开发者个人技能目录中的副本；后续新增的 FlexLB 技能也放在这里。
 
