@@ -575,6 +575,16 @@ def _latency_history_fingerprint(
     return json.dumps(values, separators=(",", ":"), sort_keys=True)
 
 
+def _native_pp_unified_latency_enabled(vllm_config, native_ingress: bool) -> bool:
+    parallel = getattr(vllm_config, "parallel_config", None)
+    if not native_ingress or int(getattr(parallel, "pipeline_parallel_size", 1)) <= 1:
+        return False
+    mode = os.environ.get("VLLM_NAVI_SCHED_PP_LATENCY_MODE", "split")
+    if mode not in ("split", "unified"):
+        raise ValueError("VLLM_NAVI_SCHED_PP_LATENCY_MODE must be split or unified")
+    return mode == "unified"
+
+
 def _native_pd_latency_model_fingerprint(
     formula_fingerprint: str,
     cache_policy: VLLMCachePolicy,
@@ -582,6 +592,7 @@ def _native_pd_latency_model_fingerprint(
     execution_geometry_enabled: bool = False,
     projected_execution_geometry_enabled: bool = False,
     execution_cache_source_enabled: bool = False,
+    unified_latency_prediction: bool = False,
 ) -> str:
     """Separate TPU PD training state when vLLM's effective cache geometry changes."""
     values = json.loads(formula_fingerprint)
@@ -611,9 +622,15 @@ def _native_pd_latency_model_fingerprint(
             values["observed_execution_window_training_version"] = 1
             values["dispatch_geometry_origin"] = "all_cache_resolved_forecast"
         values["execution_cache_source_feature_protocol"] = 1
+    if unified_latency_prediction:
+        if execution_geometry_enabled or execution_cache_source_enabled:
+            raise ValueError("unified prefill does not use execution geometry")
+        values["navi_latency_mode"] = "unified_native_prefill_admission_v1"
     values["cache_prediction_version"] = 1
     values["execution_completion_boundary"] = "scheduler_update_complete_v1"
-    values["execution_start_boundary"] = "native_start_call_v1"
+    values["execution_start_boundary"] = (
+        "agent_batch_ready_v1" if unified_latency_prediction else "native_start_call_v1"
+    )
     if execution_geometry_enabled and execution_policy is not None:
         values["runtime_prefill_execution_policy"] = execution_policy
     values["effective_cache_policy"] = {
@@ -1654,11 +1671,19 @@ class VLLMEngineObserver:
         scheduler_config = vllm_config.scheduler_config
         config = _AgentConfig.from_env()
         self._engine_stage_audit_enabled = config.engine_stage_audit_enabled
+        self._pp_unified_latency = _native_pp_unified_latency_enabled(
+            vllm_config, self._native_ingress
+        )
         self._execution_geometry_enabled = (
-            self._native_ingress and config.execution_geometry_enabled
+            self._native_ingress
+            and config.execution_geometry_enabled
+            and not self._pp_unified_latency
+        )
+        execution_cache_source_enabled = (
+            config.execution_cache_source_enabled and not self._pp_unified_latency
         )
         if (
-            config.execution_cache_source_enabled
+            execution_cache_source_enabled
             and not self._execution_geometry_enabled
         ):
             raise ValueError(
@@ -1671,6 +1696,7 @@ class VLLMEngineObserver:
                 latency_model_fingerprint,
                 self._cache_policy,
                 execution_geometry_enabled=self._execution_geometry_enabled,
+                unified_latency_prediction=self._pp_unified_latency,
             )
         latency_history_fingerprint = _latency_history_fingerprint(
             vllm_config, latency_model_fingerprint
@@ -1778,7 +1804,11 @@ class VLLMEngineObserver:
                 is None
                 else int(cache_config.prefix_cache_retention_interval)
             ),
-            latency_prediction_mode=("split" if self._native_ingress else "unified"),
+            latency_prediction_mode=(
+                "unified"
+                if self._pp_unified_latency or not self._native_ingress
+                else "split"
+            ),
             latency_model_fingerprint=latency_model_fingerprint,
             latency_history_fingerprint=latency_history_fingerprint,
             latency_history_binary_fingerprint=_vllm_binary_fingerprint(),
@@ -1806,7 +1836,7 @@ class VLLMEngineObserver:
             latency_persist_interval_ms=config.latency_persist_interval_ms,
             latency_warmup_sample_count=config.latency_warmup_sample_count,
             latency_validation_enabled=config.latency_validation_enabled,
-            execution_cache_source_enabled=config.execution_cache_source_enabled,
+            execution_cache_source_enabled=execution_cache_source_enabled,
             latency_model_state_file=config.latency_model_state_file,
             residual_learning_rate=config.residual_learning_rate,
             residual_update_error_floor_ms=config.residual_update_error_floor_ms,
@@ -1814,7 +1844,7 @@ class VLLMEngineObserver:
             residual_idle_decay_start_ms=config.residual_idle_decay_start_ms,
             residual_idle_decay_end_ms=config.residual_idle_decay_end_ms,
         )
-        if not self._execution_geometry_enabled:
+        if not self._execution_geometry_enabled and not self._pp_unified_latency:
             self._initialize_agent()
         logger.info(
             "enabled NaviSched VLLM adapter: biz_name=%s server=%s:%d "
@@ -1839,7 +1869,7 @@ class VLLMEngineObserver:
             str(self._cache_policy.hybrid_tail_required).lower(),
             ",".join(self._cache_policy.spec_names),
             str(self._native_ingress).lower(),
-            "split" if self._native_ingress else "unified",
+            self._agent_options["latency_prediction_mode"],
             max_concurrent_batches,
             config.batch_timeout_ms,
             config.latency_fit_batch_size,
