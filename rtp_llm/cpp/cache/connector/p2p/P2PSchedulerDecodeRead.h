@@ -65,7 +65,7 @@ private:
                         int64_t                                              request_deadline_ms,
                         int64_t                                              transfer_deadline_ms,
                         const std::shared_ptr<P2PConnectorMetricsCollector>& collector,
-                        ErrorInfo&                                           out_error,
+                        P2PConnectorAsyncReadContext&                        context,
                         int                                                  prefill_tp_size  = 0,
                         bool                                                 no_transfer      = false,
                         P2PBroadcastClient::RankRoutes                       rank_routes      = {},

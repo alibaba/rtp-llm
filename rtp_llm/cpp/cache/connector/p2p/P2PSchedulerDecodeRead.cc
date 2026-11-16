@@ -71,8 +71,8 @@ bool P2PSchedulerDecodeRead::init(const std::string& process_id) {
     }
     async_read_pool_ = std::move(async_read_pool);
 
-    // The checker has at most one control job in flight. Isolate that job
-    // from kickoff threads which may be stalled in channel creation or D2H.
+    // A read has at most one control job in flight. Control RPCs can progress
+    // while kickoff threads are stalled in channel creation or D2H.
     control_pool_ = std::make_shared<autil::LockFreeThreadPool>(4, 16, nullptr, "P2PReadControl");
     if (!control_pool_->start()) {
         RTP_LLM_LOG_ERROR("P2PSchedulerDecodeRead init failed: control pool start failed");
@@ -417,27 +417,25 @@ P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
          no_transfer,
          enqueue_time_us]() mutable {
             collector->decode_schedule_kickoff_queue_time_us = currentTimeUs() - enqueue_time_us;
-            if (!async_context->beginKickoff()) {
+            if (async_context->expireTransferDeadlineIfNeeded() || !async_context->beginKickoff()) {
                 return;
             }
 
             try {
-                ErrorInfo start_error;
-                auto      async_calls = startAsyncReadCalls(request_id,
-                                                       prefill_ip,
-                                                       prefill_port,
-                                                       unique_key,
-                                                       request_deadline_ms,
-                                                       transfer_deadline_ms,
-                                                       collector,
-                                                       start_error,
-                                                       prefill_tp_size,
-                                                       no_transfer,
-                                                       std::move(rank_routes),
-                                                       std::move(active_route_ids),
-                                                       plan_digest);
+                auto async_calls = startAsyncReadCalls(request_id,
+                                                      prefill_ip,
+                                                      prefill_port,
+                                                      unique_key,
+                                                      request_deadline_ms,
+                                                      transfer_deadline_ms,
+                                                      collector,
+                                                      *async_context,
+                                                      prefill_tp_size,
+                                                      no_transfer,
+                                                      std::move(rank_routes),
+                                                      std::move(active_route_ids),
+                                                      plan_digest);
                 if (!async_calls) {
-                    async_context->markStartFailed(start_error);
                     return;
                 }
 
@@ -445,8 +443,7 @@ P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
                     async_context->setCallResults(async_calls->tp_sync_result, async_calls->server_call_result);
                 if (cancel_requested) {
                     // cancel() can rethrow an RPC-creation failure; contain it here so it
-                    // cannot escape the pool thread. Retry state is already armed inside
-                    // cancel() and the checker keeps driving the cancellation.
+                    // cannot escape the pool thread. The CQ will schedule any needed retry.
                     try {
                         async_context->cancel(tp_broadcast_client_);
                     } catch (const std::exception& e) {
@@ -496,7 +493,7 @@ P2PSchedulerDecodeRead::startAsyncReadCalls(int64_t            request_id,
                                                  int64_t            request_deadline_ms,
                                                  int64_t            transfer_deadline_ms,
                                                  const std::shared_ptr<P2PConnectorMetricsCollector>& collector,
-                                                 ErrorInfo&                                           out_error,
+                                                 P2PConnectorAsyncReadContext&                        context,
                                                  int                                                  prefill_tp_size,
                                                  bool                                                 no_transfer,
                                                  P2PBroadcastClient::RankRoutes                       rank_routes,
@@ -538,14 +535,17 @@ P2PSchedulerDecodeRead::startAsyncReadCalls(int64_t            request_id,
     if (!server_call_result) {
         RTP_LLM_LOG_WARNING("asyncRead: server_caller load failed, unique_key: %s", unique_key.c_str());
         collector->decode_schedule_success = false;
-        out_error                          = ErrorInfo(ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED,
-                              "server_caller load failed: failed to start async StartLoad RPC to prefill");
+        context.markStartFailed({ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED,
+                                 "server_caller load failed: failed to start async StartLoad RPC to prefill"});
         return std::nullopt;
     }
 
     const int64_t broadcast_start_us = currentTimeUs();
     std::shared_ptr<P2PBroadcastClient::Result> tp_sync_result;
-    if (no_transfer) {
+    // A Prefill channel may have stalled past the local deadline. Bind its
+    // result for cancellation, but skip the Decode READ dispatch.
+    const bool skip_read = context.expireTransferDeadlineIfNeeded() || context.cancelRequested() || no_transfer;
+    if (skip_read) {
         tp_sync_result = std::make_shared<P2PBroadcastClient::Result>(unique_key);
     } else {
         P2PBroadcastClient::BroadcastParams params;
@@ -559,7 +559,7 @@ P2PSchedulerDecodeRead::startAsyncReadCalls(int64_t            request_id,
         tp_sync_result             = tp_broadcast_client_->broadcast(std::move(params));
     }
     const int64_t broadcast_cost_us = currentTimeUs() - broadcast_start_us;
-    if (!no_transfer) {
+    if (!skip_read) {
         collector->decode_schedule_broadcast_submit_time_us = broadcast_cost_us;
     }
     if (broadcast_cost_us >= 100000) {
@@ -571,8 +571,9 @@ P2PSchedulerDecodeRead::startAsyncReadCalls(int64_t            request_id,
     if (!tp_sync_result) {
         collector->decode_schedule_success = false;
         RTP_LLM_LOG_WARNING("asyncRead: broadcast failed");
-        out_error = ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "broadcast failed");
         server_call_result->cancel();
+        context.markKickoffUnconfirmed({ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+                                        "failed to submit Decode READ broadcast"});
         return std::nullopt;
     }
 

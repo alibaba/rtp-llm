@@ -1680,10 +1680,10 @@ TEST(P2PReadNotificationTest, GenerationRetainsNotificationBeforeWait) {
 TEST(P2PReadNotificationTest, CheckerWakesForBothRegistrationOrderings) {
     auto pool = std::make_shared<autil::LockFreeThreadPool>(1, 16, nullptr, "P2PEventTest");
     ASSERT_TRUE(pool->start());
-    P2PConnectorAsyncReadContextChecker checker;
+    auto checker = std::make_shared<P2PConnectorAsyncReadContextChecker>();
     P2PConnectorSchedulerConfig config;
     config.topology = test::makeTestCacheTopology(1, 1, {{0}});
-    ASSERT_TRUE(checker.init(nullptr, nullptr, pool, config));
+    ASSERT_TRUE(checker->init(nullptr, nullptr, pool, config));
     for (const bool complete_before_add : {false, true}) {
         const auto deadline = currentTimeMs() + 5000;
         auto       context  = std::make_shared<P2PConnectorAsyncReadContext>(
@@ -1695,9 +1695,9 @@ TEST(P2PReadNotificationTest, CheckerWakesForBothRegistrationOrderings) {
         if (complete_before_add) {
             server->complete(true);
             context->setCallResults(broadcast, server);
-            checker.addContext(context);
+            checker->addContext(context);
         } else {
-            checker.addContext(context);
+            checker->addContext(context);
             context->setCallResults(broadcast, server);
             server->complete(true);
         }
@@ -1709,21 +1709,21 @@ TEST(P2PReadNotificationTest, CheckerWakesForBothRegistrationOrderings) {
         done.get();
         EXPECT_TRUE(context->success());
     }
-    checker.stop();
+    checker->stop();
     pool->stop();
 }
 
 TEST(P2PReadNotificationTest, DeadlineWakesWithoutAnyCompletion) {
     auto pool = std::make_shared<autil::LockFreeThreadPool>(1, 16, nullptr, "P2PDeadlineTest");
     ASSERT_TRUE(pool->start());
-    P2PConnectorAsyncReadContextChecker checker;
+    auto checker = std::make_shared<P2PConnectorAsyncReadContextChecker>();
     P2PConnectorSchedulerConfig config;
     config.topology = test::makeTestCacheTopology(1, 1, {{0}});
-    ASSERT_TRUE(checker.init(nullptr, nullptr, pool, config));
+    ASSERT_TRUE(checker->init(nullptr, nullptr, pool, config));
     const auto deadline = currentTimeMs() + 50;
     auto       context  = std::make_shared<P2PConnectorAsyncReadContext>(
         nullptr, "deadline", std::make_shared<P2PConnectorMetricsCollector>(), 1000, false, deadline, deadline);
-    checker.addContext(context);  // Still queued: timeout must not create a lease hold.
+    checker->addContext(context);  // Still queued: timeout must not create a lease hold.
     auto done = std::async(std::launch::async, [context] { context->waitDone(); });
     EXPECT_EQ(done.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     if (!context->done()) {
@@ -1732,22 +1732,22 @@ TEST(P2PReadNotificationTest, DeadlineWakesWithoutAnyCompletion) {
     done.get();
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::GENERATE_TIMEOUT);
     EXPECT_FALSE(context->resourceHoldPending());
-    checker.stop();
+    checker->stop();
     pool->stop();
 }
 
 TEST(P2PReadNotificationTest, BusyControlJobDoesNotDelayDeadline) {
     auto pool = std::make_shared<autil::LockFreeThreadPool>(1, 16, nullptr, "P2PBusyControlTest");
     ASSERT_TRUE(pool->start());
-    P2PConnectorAsyncReadContextChecker checker;
+    auto checker = std::make_shared<P2PConnectorAsyncReadContextChecker>();
     P2PConnectorSchedulerConfig config;
     config.topology = test::makeTestCacheTopology(1, 1, {{0}});
-    ASSERT_TRUE(checker.init(nullptr, nullptr, pool, config));
+    ASSERT_TRUE(checker->init(nullptr, nullptr, pool, config));
     auto entered        = std::make_shared<std::promise<void>>();
     auto entered_future = entered->get_future();
     auto release        = std::make_shared<std::promise<void>>();
     auto gate           = release->get_future().share();
-    checker.control_inflight_->store(1);
+    checker->control_inflight_->store(1);
     ASSERT_EQ(pool->pushTask(
                   [entered, gate] {
                       entered->set_value();
@@ -1759,7 +1759,7 @@ TEST(P2PReadNotificationTest, BusyControlJobDoesNotDelayDeadline) {
     const auto deadline = currentTimeMs() + 50;
     auto       context  = std::make_shared<P2PConnectorAsyncReadContext>(
         nullptr, "busy-control", std::make_shared<P2PConnectorMetricsCollector>(), 1000, false, deadline, deadline);
-    checker.addContext(context);
+    checker->addContext(context);
     auto done = std::async(std::launch::async, [context] { context->waitDone(); });
     EXPECT_EQ(done.wait_for(std::chrono::seconds(1)), std::future_status::ready);
     release->set_value();
@@ -1768,7 +1768,7 @@ TEST(P2PReadNotificationTest, BusyControlJobDoesNotDelayDeadline) {
     }
     done.get();
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::GENERATE_TIMEOUT);
-    checker.stop();
+    checker->stop();
     pool->stop();
 }
 
@@ -1787,11 +1787,11 @@ TEST(P2PReadNotificationTest, MetricsWaitForAllBroadcastRanksAndKeepStartLoadInd
         auto context      = std::make_shared<P2PConnectorAsyncReadContext>(nullptr, "metrics", collector, 1000);
         auto notification = std::make_shared<P2PNotification>();
         if (notification_first) {
-            context->setNotification(notification);
+            context->setWakeupCallback([notification] { notification->notify(); });
         }
         context->setCallResults(broadcast, server);
         if (!notification_first) {
-            context->setNotification(notification);
+            context->setWakeupCallback([notification] { notification->notify(); });
         }
 
         EXPECT_EQ(collector->decode_schedule_tp_sync_cost_time_us.load(), -1);
@@ -1816,7 +1816,7 @@ TEST(P2PReadNotificationTest, MetricsWaitForAllBroadcastRanksAndKeepStartLoadInd
         const auto server_cost       = collector->decode_schedule_server_call_cost_time_us.load();
         const auto read_cost         = collector->decode_schedule_tp_sync_cost_time_us.load();
         auto late_notification = std::make_shared<P2PNotification>();
-        context->setNotification(late_notification);
+        context->setWakeupCallback([late_notification] { late_notification->notify(); });
         EXPECT_GT(late_notification->generation(), 0u);
         EXPECT_EQ(collector->decode_schedule_server_call_cost_time_us.load(), server_cost);
         EXPECT_EQ(collector->decode_schedule_tp_sync_cost_time_us.load(), read_cost);
@@ -1837,12 +1837,12 @@ TEST(P2PReadNotificationTest, FatalBroadcastBeforeRegistrationStillPublishesCall
         auto context = std::make_shared<P2PConnectorAsyncReadContext>(nullptr, "fatal-registration", collector, 0);
         auto notification = std::make_shared<P2PNotification>();
         if (notification_first) {
-            EXPECT_NO_THROW(context->setNotification(notification));
+            EXPECT_NO_THROW(context->setWakeupCallback([notification] { notification->notify(); }));
         }
         ASSERT_TRUE(context->beginKickoff());
         EXPECT_NO_THROW(context->setCallResults(broadcast, server));
         if (!notification_first) {
-            EXPECT_NO_THROW(context->setNotification(notification));
+            EXPECT_NO_THROW(context->setWakeupCallback([notification] { notification->notify(); }));
         }
         EXPECT_TRUE(context->calls_ready_.load());
         EXPECT_GT(notification->generation(), 0u);
@@ -1871,8 +1871,9 @@ TEST(P2PReadNotificationTest, LateCompletionAfterCheckerDestructionIsSafe) {
     server->response.mutable_payload()->set_has_first_generate_token(true);
     context->setCallResults(std::make_shared<P2PBroadcastClient::Result>("late"), server);
     {
-        P2PConnectorAsyncReadContextChecker checker;
-        checker.addContext(context);
+        auto checker = std::make_shared<P2PConnectorAsyncReadContextChecker>();
+        checker->addContext(context);
+        checker->stop();
     }
     std::weak_ptr<P2PConnectorAsyncReadContext> weak = context;
     context.reset();

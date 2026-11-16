@@ -186,6 +186,24 @@ TEST_F(P2PQueueSaturationTest, QueuedDeadlineNeverStartsRpcAfterCapacityReturns)
     ASSERT_NO_FATAL_FAILURE(queuedTermination(false));
 }
 
+TEST_F(P2PQueueSaturationTest, KickoffRejectsAnExpiredReadWithoutDeadlineEvents) {
+    const auto request = meta("expired-kickoff", 300);
+    auto result = scheduler_->asyncRead(resource(), request, {0, 2});
+    ASSERT_TRUE(result.ok());
+    ASSERT_NE(result.context, nullptr);
+
+    // Disable CQ deadline delivery to exercise the kickoff check alone.
+    scheduler_->checker_->stop();
+    ASSERT_FALSE(result.context->done());
+    ASSERT_TRUE(waitFor([&] { return currentTimeMs() >= request->p2pRouting()->deadline_ms; }));
+    gate_->release();
+
+    ASSERT_TRUE(waitFor([&] { return result.context->done(); }));
+    EXPECT_EQ(result.context->errorInfo().code(), ErrorCode::GENERATE_TIMEOUT);
+    EXPECT_FALSE(result.context->resourceHoldPending());
+    ASSERT_NO_FATAL_FAILURE(expectNoRpc());
+}
+
 TEST_F(P2PQueueSaturationTest, SaturatedControlPoolStillExpiresAndEventuallyDrainsEveryKey) {
     ASSERT_NO_FATAL_FAILURE(fillQueue());
     std::vector<std::weak_ptr<P2PConnectorAsyncReadContext>> pending;

@@ -4,7 +4,9 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
+#include <chrono>
 #include <limits>
+#include <system_error>
 
 namespace rtp_llm {
 namespace transfer {
@@ -23,8 +25,14 @@ RdmaTransferService::RdmaTransferService(const std::shared_ptr<TransferTaskStore
     rdma_disconnect_after_deadline_ms_(std::max<int64_t>(0, rdma_disconnect_after_deadline_ms)) {}
 
 RdmaTransferService::~RdmaTransferService() {
-    if (wait_check_loop_thread_) {
-        wait_check_loop_thread_->stop();
+    if (match_thread_.joinable()) {
+        task_store_->setTaskAddedCallback({});
+        {
+            std::lock_guard<std::mutex> lock(match_wakeup_->mutex);
+            match_wakeup_->stopping = true;
+        }
+        match_wakeup_->cv.notify_one();
+        match_thread_.join();
     }
     if (transfer_deadline_loop_thread_) {
         transfer_deadline_loop_thread_->stop();
@@ -46,20 +54,11 @@ RdmaTransferService::~RdmaTransferService() {
     }
 }
 
-bool RdmaTransferService::init(int64_t wait_check_interval_us,
+bool RdmaTransferService::init(int64_t /*wait_check_interval_us*/,
                                int worker_thread_count,
                                uint64_t per_connection_block_count,
                                int worker_queue_size) {
     per_connection_block_count_ = per_connection_block_count;
-
-    wait_check_loop_thread_ =
-        autil::LoopThread::createLoopThread(std::bind(&RdmaTransferService::waitCheckProc, this),
-                                            wait_check_interval_us,
-                                            "RdmaTransferServiceWaitCheck");
-    if (!wait_check_loop_thread_) {
-        RTP_LLM_LOG_ERROR("create wait check loop thread failed");
-        return false;
-    }
 
     worker_thread_pool_ = std::make_shared<autil::LockFreeThreadPool>(
         worker_thread_count, worker_queue_size, nullptr, "RdmaTransferServiceWorker", false);
@@ -77,6 +76,19 @@ bool RdmaTransferService::init(int64_t wait_check_interval_us,
         return false;
     }
 
+    std::weak_ptr<MatchWakeup> wakeup = match_wakeup_;
+    task_store_->setTaskAddedCallback([wakeup] {
+        if (auto signal = wakeup.lock()) {
+            signal->notify();
+        }
+    });
+    try {
+        match_thread_ = std::thread(&RdmaTransferService::waitForTasks, this);
+    } catch (const std::system_error& error) {
+        task_store_->setTaskAddedCallback({});
+        RTP_LLM_LOG_ERROR("start RDMA matcher failed: %s", error.what());
+        return false;
+    }
     return true;
 }
 
@@ -84,7 +96,7 @@ void RdmaTransferService::transfer(::google::protobuf::RpcController*           
                                     const ::rdma_transfer::RdmaLayerBlockTransferRequest* request,
                                     ::rdma_transfer::RdmaLayerBlockTransferResponse*      response,
                                     ::google::protobuf::Closure*                          done) {
-    if (!wait_check_loop_thread_ || !worker_thread_pool_) {
+    if (!match_thread_.joinable() || !worker_thread_pool_) {
         response->set_error_code(::rdma_transfer::RDMA_TRANSFER_NOT_INITIALIZED);
         response->set_error_message("RdmaTransferService not initialized");
         done->Run();
@@ -92,11 +104,41 @@ void RdmaTransferService::transfer(::google::protobuf::RpcController*           
     }
 
     auto ctx = std::make_shared<RdmaTaskContext>(controller, request, response, done, metrics_reporter_);
-    std::lock_guard<std::mutex> lock(wait_tasks_mutex_);
-    wait_tasks_.push_back(ctx);
+    {
+        std::lock_guard<std::mutex> lock(wait_tasks_mutex_);
+        wait_tasks_.push_back(ctx);
+    }
+    match_wakeup_->notify();
 }
 
-void RdmaTransferService::waitCheckProc() {
+void RdmaTransferService::MatchWakeup::notify() {
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        changed = true;
+    }
+    cv.notify_one();
+}
+
+void RdmaTransferService::waitForTasks() {
+    auto& signal = *match_wakeup_;
+    std::unique_lock<std::mutex> lock(signal.mutex);
+    const auto ready = [&] { return signal.stopping || signal.changed; };
+    while (!signal.stopping) {
+        signal.changed = false;
+        lock.unlock();
+        const auto deadline_ms = matchWaitingTasks();
+        lock.lock();
+        if (deadline_ms == UINT64_MAX) {
+            signal.cv.wait(lock, ready);
+        } else {
+            const auto deadline = std::chrono::system_clock::time_point(std::chrono::milliseconds(deadline_ms));
+            signal.cv.wait_until(lock, deadline, ready);
+        }
+    }
+}
+
+uint64_t RdmaTransferService::matchWaitingTasks() {
+    uint64_t next_deadline_ms = UINT64_MAX;
     using DoneEntry = std::pair<std::shared_ptr<RdmaTaskContext>, std::shared_ptr<TransferTask>>;
     std::vector<std::shared_ptr<RdmaTaskContext>> ready_ctxs;
     std::vector<std::shared_ptr<RdmaTaskContext>> timeout_ctxs;
@@ -117,6 +159,7 @@ void RdmaTransferService::waitCheckProc() {
                     ready_ctxs.push_back(ctx);
                 }
             } else {
+                next_deadline_ms = std::min(next_deadline_ms, ctx->getDeadlineMs());
                 ++iter;
             }
         }
@@ -139,9 +182,14 @@ void RdmaTransferService::waitCheckProc() {
             ctx->run(false, TransferErrorCode::QUEUE_REJECTED, "push rdma task to thread pool failed");
         }
     }
+    return next_deadline_ms;
 }
 
 void RdmaTransferService::transferViaRdma(const std::shared_ptr<RdmaTaskContext>& ctx) {
+    if (ctx->isTimeout()) {
+        ctx->run(false, TransferErrorCode::TIMEOUT, "RDMA transfer expired in the Decode worker queue");
+        return;
+    }
     if (!rdma_client_) {
         ctx->run(false, TransferErrorCode::NOT_INITIALIZED, "rdma client is null");
         return;
