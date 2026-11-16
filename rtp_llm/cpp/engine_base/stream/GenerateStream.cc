@@ -1105,7 +1105,12 @@ bool GenerateStream::needsAsyncBookkeepingJoinForKvReservation() const {
         {
             std::lock_guard<std::mutex> lock(*mutex_);
             if (!stream_cache_resource_->canReclaimLinearHistory(maxBatchSize())) {
-                return false;
+                // Reclaim-ineligible streams keep the base KEEP_HISTORY growth
+                // semantics: allocation reads seqLength() exactly like base, so
+                // they must keep the base "join when no published length"
+                // guard. Eligibility only relaxes the join policy for eligible
+                // streams below.
+                return getNormalAsyncDeviceState().next_real_seq_len <= 0;
             }
         }
         const auto& normal_state = getNormalAsyncDeviceState();

@@ -14,11 +14,9 @@ public:
     LinearCacheManager(GroupBase          cache_group,
                        DeviceBlockPoolPtr block_pool,
                        int                group_id,
-                       int                tail_blocks = std::numeric_limits<int>::max(),
-                       bool               enable_linear_cache_reclaim = false):
+                       int                tail_blocks = std::numeric_limits<int>::max()):
         SingleTypeCacheManager(std::move(cache_group), std::move(block_pool), group_id),
-        tail_blocks_(tail_blocks),
-        enable_linear_cache_reclaim_(enable_linear_cache_reclaim) {
+        tail_blocks_(tail_blocks) {
         RTP_LLM_CHECK_WITH_INFO(tail_blocks > 0, "linear cache tail blocks must be positive");
     }
 
@@ -73,7 +71,7 @@ public:
     bool           shouldMaterializeBlock(int pos, int seq_len, int reserve_step, bool enable_reuse_cache) const;
 
 private:
-    // History-reclaim estimation (opt-in via enable_linear_cache_reclaim):
+    // History-reclaim estimation (request-level RECLAIM_COMMITTED policy):
     // simulates committed-slot retirement to bound the physical-block peak.
     int  estimateHistoryReclaimPeak(std::vector<int> block_costs,
                                     int              seq_len,
@@ -95,7 +93,6 @@ private:
 
 private:
     int  tail_blocks_;
-    bool enable_linear_cache_reclaim_ = false;
 };
 
 using LinearCacheManagerPtr = std::shared_ptr<LinearCacheManager>;

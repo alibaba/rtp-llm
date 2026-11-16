@@ -205,6 +205,33 @@ TEST(PPStageCacheConfigTest, TransferPolicySurvivesSingletonStagesAndWarmup) {
     }
 }
 
+TEST(PPStageCacheConfigTest, PoolBlockWeightsAcceptTagsOwnedByOtherStages) {
+    const auto model = makeHybridModelConfig(8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.kv_cache_pool_block_weights = R"({"full":8,"linear":1})";
+    // {4,3,1}: stage 1 owns only LINEAR layers, stage 2 only a FULL layer.
+    // The weights JSON is broadcast verbatim to every rank, so each stage must
+    // accept the tags owned by the other stages instead of failing on
+    // "unknown pool", and the weights stay readable on every stage.
+    for (int64_t rank = 0; rank < 3; ++rank) {
+        SCOPED_TRACE(rank);
+        auto layout                  = makePpConfig(8, 3, rank);
+        layout.pp_stage_layer_counts = {4, 3, 1};
+        const auto config            = CacheConfigCreator::createConfig(model, layout, kv_cache_config);
+        EXPECT_EQ(config.blockWeight("full"), 8u);
+        EXPECT_EQ(config.blockWeight("linear"), 1u);
+    }
+}
+
+TEST(PPStageCacheConfigTest, PoolBlockWeightsRejectUnknownTagOnSingleStage) {
+    const auto  model = makeHybridModelConfig(8);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.kv_cache_pool_block_weights = R"({"full":8,"swa":1})";
+    // Without PP slicing the local topology is the whole model, so a tag no
+    // stage owns stays a hard configuration error.
+    EXPECT_THROW(CacheConfigCreator::createConfig(model, ParallelismConfig{}, kv_cache_config), std::exception);
+}
+
 TEST(PPStageCacheConfigTest, DraftInheritsWholeModelTransferPolicyOnLastStage) {
     auto layout                      = makePpConfig(8, 2, 1);
     layout.pp_stage_layer_counts     = {7, 1};

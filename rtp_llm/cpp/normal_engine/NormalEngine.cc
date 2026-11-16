@@ -1418,11 +1418,11 @@ void NormalEngine::startTimelineProfiling(const std::string& trace_name, int sta
 }
 
 bool NormalEngine::isMTPEagle() {
-    if (propose_params_) {
-        return propose_params_->sp_type == SP_TYPE_MTP || propose_params_->sp_type == SP_TYPE_EAGLE
-               || isBlockDraftType(propose_params_->sp_type);
-    }
-    return false;
+    // These queries describe the configured algorithm, independently of local
+    // draft ownership (EngineBase contract): a PP decode instance admits
+    // requests on its first stage, where no local draft model exists, so they
+    // must read the global sp_config instead of propose_params_.
+    return sp_config.type == SP_TYPE_MTP || sp_config.type == SP_TYPE_EAGLE || isBlockDraftType(sp_config.type);
 }
 
 bool NormalEngine::isEagle() {
@@ -1430,7 +1430,7 @@ bool NormalEngine::isEagle() {
 }
 
 bool NormalEngine::isDSpark() {
-    return propose_params_ && isBlockDraftType(propose_params_->sp_type);
+    return isBlockDraftType(sp_config.type);
 }
 
 size_t NormalEngine::reserveStepForStream(bool is_prefill_only) const {

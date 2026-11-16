@@ -119,7 +119,7 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     return budget;
 }
 
-void resolvePoolBlockWeights(CacheConfig& config, const std::string& json) {
+void resolvePoolBlockWeights(CacheConfig& config, const std::string& json, int64_t pp_size) {
     if (json.empty()) {
         return;
     }
@@ -140,9 +140,18 @@ void resolvePoolBlockWeights(CacheConfig& config, const std::string& json) {
         const auto group = std::find_if(config.groups().begin(),
                                         config.groups().end(),
                                         [&](const GroupBase& candidate) { return candidate.tag == tag; });
-        RTP_LLM_CHECK_WITH_INFO(group != config.groups().end(),
-                                "KV_CACHE_POOL_BLOCK_WEIGHTS has unknown pool '%s' in merged target/draft topology",
-                                tag.c_str());
+        if (group == config.groups().end()) {
+            // PP stages slice the merged topology down to their own layer
+            // range, while the weights JSON is broadcast verbatim to every
+            // rank. A tag missing from the local topology is still a legal
+            // global pool owned by another stage; finalizeBlockNums consumes
+            // the PP joint override table only through locally owned groups,
+            // so keep the weight and skip the local-only checks below.
+            RTP_LLM_CHECK_WITH_INFO(pp_size > 1,
+                                    "KV_CACHE_POOL_BLOCK_WEIGHTS has unknown pool '%s' in merged target/draft topology",
+                                    tag.c_str());
+            continue;
+        }
         RTP_LLM_CHECK_WITH_INFO(group->policy.memory_placement == CacheMemoryPlacement::DEVICE,
                                 "KV_CACHE_POOL_BLOCK_WEIGHTS pool '%s' must be DEVICE resident",
                                 tag.c_str());
@@ -567,7 +576,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
             config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, module, config.layer_num));
         }
     }
-    resolvePoolBlockWeights(config, kv_cache_config.kv_cache_pool_block_weights);
+    resolvePoolBlockWeights(config, kv_cache_config.kv_cache_pool_block_weights, parallelism_config.pp_size);
     return config;
 }
 

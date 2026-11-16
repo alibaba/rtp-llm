@@ -461,6 +461,9 @@ absl::Status StreamCacheResource::incrKVBlock(int seq_len_override) {
     malloc_info.enable_remove_skipped_blocks = !stream_->isContextStream();
     malloc_info.incr_seq_len_override        = seq_len_override;
     malloc_info.pd_decode_linear_tail_only   = pd_decode_linear_tail_only_;
+    // One predicate with the estimators: only a request that actually owns the
+    // committed-watermark retirement keeps its linear history across decode.
+    malloc_info.linear_cache_policy = linearCachePolicy(std::max(1, batch_kv_cache_resource_->batchSize()));
 
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {

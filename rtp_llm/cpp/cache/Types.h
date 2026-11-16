@@ -93,6 +93,14 @@ struct MallocInfo {
     // the legacy aggregate fields above for positional initialization safety.
     bool pd_decode_linear_tail_only = false;
 
+    // Request-level linear history policy, mirroring
+    // StreamCacheResource::linearCachePolicy: only RECLAIM_COMMITTED requests
+    // keep their whole linear history across decode steps (the
+    // committed-watermark path owns retirement); every other policy folds to
+    // the retained decode tail exactly like base.  Passed through MallocInfo
+    // so the allocator cleanup and the estimators share one predicate.
+    LinearCachePolicy linear_cache_policy = LinearCachePolicy::KEEP_HISTORY;
+
     // Initial chunk admission reserves fixed sparse banks for this maximum grant.
     int max_chunk_tokens = 0;
 
