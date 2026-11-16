@@ -48,6 +48,10 @@ except Exception:  # pragma: no cover — keep the module importable without Tri
 
 
 if triton is not None:
+    from rtp_llm.models_py.modules.dsv41._sm90_quant_scale_fused import (
+        _decode_exponent,
+        mn_major_scale_output,
+    )
 
     @triton.jit(do_not_specialize=["M"])
     def _silu_mul_split_bf16_kernel(
@@ -108,6 +112,7 @@ if triton is not None:
         CLAMP_LIMIT: tl.constexpr,
         ROUND_TO_BF16: tl.constexpr,
         BLOCK_N: tl.constexpr,
+        FP32_SCALES: tl.constexpr,
     ):
         GROUPS: tl.constexpr = BLOCK_N // 32
         PACKS: tl.constexpr = GROUPS // 4
@@ -149,12 +154,26 @@ if triton is not None:
         ).reshape((BLOCK_N,))
         tl.store(q_ptr + pid_m * N + n_off, q.to(tl.float8e4nv), mask=mask)
         group = pid_n * GROUPS + tl.arange(0, GROUPS)
-        biased = tl.where(group < N // 32, biased, 0).to(tl.uint8).to(tl.uint32)
-        packed = tl.sum(biased.reshape((PACKS, 4)) << (tl.arange(0, 4)[None, :] * 8), 1)
-        pack = pid_n * PACKS + tl.arange(0, PACKS)
-        tl.store(
-            scales_ptr + pack * scale_stride + pid_m, packed, pack < tl.cdiv(N, 128)
-        )
+        if FP32_SCALES:
+            # Decode the stored UE8M0 byte in-kernel and write the FP32
+            # MN-major layout the SM90 DeepGEMM TMA load wants directly.
+            byte = tl.where(group < N // 32, biased, 0).to(tl.uint32) & 255
+            tl.store(
+                scales_ptr + group * scale_stride + pid_m,
+                _decode_exponent(byte),
+                group < N // 32,
+            )
+        else:
+            biased = tl.where(group < N // 32, biased, 0).to(tl.uint8).to(tl.uint32)
+            packed = tl.sum(
+                biased.reshape((PACKS, 4)) << (tl.arange(0, 4)[None, :] * 8), 1
+            )
+            pack = pid_n * PACKS + tl.arange(0, PACKS)
+            tl.store(
+                scales_ptr + pack * scale_stride + pid_m,
+                packed,
+                pack < tl.cdiv(N, 128),
+            )
 
 
 def silu_mul_split_bf16(
@@ -206,14 +225,40 @@ def silu_mul_fp8_g32_quant(
     auto uses the legacy scale policy for every shape. Unused scale-pack bytes
     are unspecified; this entry initializes them to zero, as v2 does.
     """
+    return _silu_mul_fp8_g32_quant(
+        gate_up, clamp_limit, fp32_scales=False, round_to_bf16=round_to_bf16
+    )
+
+
+def silu_mul_fp8_g32_quant_mn_major(
+    gate_up: torch.Tensor, clamp_limit: float = 0.0, *, round_to_bf16: bool = True
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """SwiGLU + group32 quant returning native FP32 MN-major scales.
+
+    Arithmetic, BF16 rounding and quantized bytes are identical to
+    :func:`silu_mul_fp8_g32_quant`; only the scale store differs. The SM90
+    DeepGEMM adapter consumes this layout directly, so the packed UE8M0 words
+    and the unpack launch between the two kernels disappear.
+    """
+    return _silu_mul_fp8_g32_quant(
+        gate_up, clamp_limit, fp32_scales=True, round_to_bf16=round_to_bf16
+    )
+
+
+def _silu_mul_fp8_g32_quant(
+    gate_up: torch.Tensor, clamp_limit: float, *, fp32_scales: bool, round_to_bf16: bool
+) -> Tuple[torch.Tensor, torch.Tensor]:
     m, two_n = gate_up.shape
     n = two_n // 2
     quant = torch.empty((m, n), dtype=torch.float8_e4m3fn, device=gate_up.device)
-    scales = torch.empty(
-        (triton.cdiv(n, 128), triton.cdiv(m, 4) * 4),
-        dtype=torch.int32,
-        device=gate_up.device,
-    ).T[:m]
+    if fp32_scales:
+        scales = mn_major_scale_output(m, n // 32, gate_up.device)
+    else:
+        scales = torch.empty(
+            (triton.cdiv(n, 128), triton.cdiv(m, 4) * 4),
+            dtype=torch.int32,
+            device=gate_up.device,
+        ).T[:m]
     if m * n == 0:
         return quant, scales
     mode = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
@@ -230,6 +275,7 @@ def silu_mul_fp8_g32_quant(
         CLAMP_LIMIT=float(clamp_limit) if apply_clamp else 0.0,
         ROUND_TO_BF16=round_to_bf16,
         BLOCK_N=1024,
+        FP32_SCALES=fp32_scales,
         num_warps=8,
         enable_fp_fusion=False,
     )

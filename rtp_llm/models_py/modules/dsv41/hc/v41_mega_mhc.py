@@ -10,6 +10,10 @@ directly into the following MegaMoE's buffers, retaining BF16 for its gate.
 DeepGEMM initializes persistent split barriers per CUDA stream. Warm up on
 the capture stream before recording a graph; an unwarmed capture stream
 retains the unfused path instead of initializing barriers during capture.
+
+SM90 low-token decode uses the vLLM two-kernel boundary: post mapping and the
+next projection are fused first, followed by coefficient reduction, Sinkhorn,
+delayed readout and RMSNorm in one epilogue kernel.
 """
 
 from __future__ import annotations
@@ -46,6 +50,17 @@ def _get_mega_mhc() -> Callable | None:
     return operation if callable(operation) else None
 
 
+@lru_cache(maxsize=1)
+def _get_sm90_mega_mhc():
+    try:
+        return importlib.import_module(
+            "rtp_llm.models_py.modules.dsv41.hc.mhc_sm90_vllm_two_kernel"
+        )
+    except (ImportError, OSError):
+        # Optional TileLang dependencies are not present in every build.
+        return None
+
+
 def _is_dense_tensor(value, shape, dtype, device) -> bool:
     return (
         isinstance(value, torch.Tensor)
@@ -56,9 +71,27 @@ def _is_dense_tensor(value, shape, dtype, device) -> bool:
     )
 
 
+from rtp_llm.models_py.modules.dsv41.hc.mhc_sm90_vllm_two_kernel import (
+    MAX_TOKENS as _TWO_KERNEL_MAX_TOKENS,
+)
+
+
 def _stream_key(device: torch.device) -> tuple[int, int]:
     stream = torch.cuda.current_stream(device)
     return stream.device.index, stream.cuda_stream
+
+
+def _can_try_sm90_mega_mhc(attn_out: torch.Tensor) -> bool:
+    if (
+        not isinstance(attn_out, torch.Tensor)
+        or attn_out.device.type != "cuda"
+        or attn_out.ndim != 3
+        or attn_out.shape[-1] != 5120
+        # ``numel // dim`` is the token count the fused kernel consumes.
+        or not 0 < attn_out.numel() // attn_out.shape[-1] <= _TWO_KERNEL_MAX_TOKENS
+    ):
+        return False
+    return tuple(torch.cuda.get_device_capability(attn_out.device)) == (9, 0)
 
 
 def _units_supported(previous, next_hc, norm, device) -> bool:
@@ -238,6 +271,7 @@ def try_fused_post_pre(
     reuse_residual: bool = False,
     output_fp8: bool = False,
     moe_inputs: MegaMoEInputs | None = None,
+    combine: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> MHCOutput | MHCQuantizedOutput | None:
     """Return ``(residual, normalized_input, post, comb)`` or use the old path.
 
@@ -246,6 +280,8 @@ def try_fused_post_pre(
     failures propagate to the caller. ``reuse_residual`` overwrites the input
     residual after its corresponding tiles have been loaded, or the padded
     copy when padding is needed.
+    SM90 low-token decode uses an out-of-place residual because the projection
+    CTAs read the old residual while one projection tile writes the new one.
     ``original_tokens`` preserves the installed backend's pre-compaction
     split heuristic using at most 512 execution rows when padding is needed.
     Returned leading-row views retain that bounded padded storage.
@@ -256,11 +292,41 @@ def try_fused_post_pre(
     ``moe_inputs`` instead writes caller-owned MegaMoE activation/scales,
     retaining the four-element return. It excludes QKV scales and compact
     execution padding; the caller may consume it only after a non-None result.
+    ``combine`` carries the deferred ``(routed, shared)`` MoE pair; ``attn_out``
+    is then only its geometry proxy. The SM90 two-kernel backend rebuilds
+    ``bf16(routed + shared)`` inline -- the exact value the standalone add+cast
+    kernel had materialized -- and any other backend returns ``None`` so the
+    caller materializes the pair first.
     """
     if moe_inputs is not None and output_fp8:
         raise ValueError("Choose GEMM scales or MegaMoE scales, not both")
     if moe_inputs is not None and original_tokens is not None:
         return None
+    if combine is not None:
+        if original_tokens is not None or reuse_residual or output_fp8 or moe_inputs is not None:
+            return None
+        if not _can_try_sm90_mega_mhc(attn_out):
+            return None
+        sm90_backend = _get_sm90_mega_mhc()
+        if sm90_backend is None:
+            return None
+        return sm90_backend.try_vllm_two_kernel_post_pre(
+            attn_out, residual, post, comb, previous, next_hc, norm, combine=combine
+        )
+    if (
+        original_tokens is None
+        and not reuse_residual
+        and not output_fp8
+        and moe_inputs is None
+        and _can_try_sm90_mega_mhc(attn_out)
+    ):
+        sm90_backend = _get_sm90_mega_mhc()
+        if sm90_backend is not None:
+            result = sm90_backend.try_vllm_two_kernel_post_pre(
+                attn_out, residual, post, comb, previous, next_hc, norm
+            )
+            if result is not None:
+                return result
     if not is_supported(attn_out, residual, post, comb, previous, next_hc, norm):
         return None
     operation = _get_mega_mhc()
@@ -360,4 +426,8 @@ def try_fused_post_pre(
     return (*result, quantized) if output_fp8 else result
 
 
-__all__ = ["can_preserve_compact_mhc", "is_supported", "try_fused_post_pre"]
+__all__ = [
+    "can_preserve_compact_mhc",
+    "is_supported",
+    "try_fused_post_pre",
+]

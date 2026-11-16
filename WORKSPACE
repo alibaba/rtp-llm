@@ -36,6 +36,12 @@ local_repository(
     path = "deps",
 )
 
+# Keep public lock tooling addressable when rtp_deps uses the internal overlay.
+local_repository(
+    name = "rtp_public_deps",
+    path = "deps",
+)
+
 local_repository(
     name = "arch_config",
     path = "arch_config",
@@ -72,6 +78,16 @@ py_repositories()
 load("@rtp_deps//:pip.bzl", "pip_deps")
 
 pip_deps()
+
+local_repository(
+    name = "flash_mla_sm90_rules",
+    path = "deps/flash_mla_sm90",
+)
+
+load("@flash_mla_sm90_rules//:repositories.bzl", "flash_mla_sm90_repository")
+
+flash_mla_sm90_repository(name = "flash_mla_sm90_sidecar")
+
 
 load("@rules_python//python:pip.bzl", "pip_parse")
 

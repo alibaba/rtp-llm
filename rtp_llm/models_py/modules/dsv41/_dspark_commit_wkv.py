@@ -32,24 +32,44 @@ def _supported(linears: Sequence[torch.nn.Module]) -> bool:
     if len(linears) != 3 or any(type(w) is not V41MXFP8Linear for w in linears):
         return False
     first = linears[0]
-    return all(
-        w.K == first.K
-        and w.N == first.N
-        and w.K > 0
-        and w.N > 0
-        and w.K % 128 == 0
-        and w.N % 128 == 0
-        and w.weight.is_cuda
-        and w.weight.device == first.weight.device
-        and w.weight.dtype == torch.float8_e4m3fn
-        and w.weight.shape == (w.N, w.K)
-        and w.weight.is_contiguous()
-        and w.weight_scales.device == w.weight.device
-        and w.weight_scales.dtype == torch.int32
-        and w.weight_scales.shape == (w.N, w.K // 128)
-        and w.weight_scales.stride() == (1, w.N)
-        for w in linears
-    )
+    for w in linears:
+        if not (
+            w.K == first.K
+            and w.N == first.N
+            and w.K > 0
+            and w.N > 0
+            and w.K % 128 == 0
+            and w.N % 128 == 0
+            and w.weight.is_cuda
+            and w.weight.device == first.weight.device
+            and w.weight.dtype == torch.float8_e4m3fn
+            and w.weight.shape == (w.N, w.K)
+            and w.weight.is_contiguous()
+        ):
+            return False
+        adapter = getattr(w, "_sm90_linear", None)
+        if adapter is not None:
+            if not (
+                adapter.weight is w.weight
+                and adapter.weight_scale.device == w.weight.device
+                and adapter.weight_scale.dtype == torch.float32
+                and adapter.weight_scale.shape == (w.N // 32, w.K // 32)
+                and adapter.weight_scale.is_contiguous()
+            ):
+                return False
+        elif not (
+            w.weight_scales.device == w.weight.device
+            and w.weight_scales.dtype == torch.int32
+            and w.weight_scales.shape == (w.N, w.K // 128)
+            and w.weight_scales.stride() == (1, w.N)
+        ):
+            return False
+    return True
+
+
+def _scale_buffer(linear: V41MXFP8Linear) -> torch.Tensor:
+    adapter = getattr(linear, "_sm90_linear", None)
+    return adapter.weight_scale if adapter is not None else linear.weight_scales
 
 
 class DSparkCommitWKV(torch.nn.Module):
@@ -78,13 +98,24 @@ class DSparkCommitWKV(torch.nn.Module):
         self.merged_linears = tuple(merged_linears or (None,) * len(linears))
         self.stacked = None
         first = linears[0]
-        measured = (
+        self.sm90 = all(getattr(w, "_sm90_linear", None) is not None for w in linears)
+        if mode == "stacked" and self.sm90:
+            raise ValueError("SM90 DSpark WKV supports shared, not stacked, projection")
+        measured_sm103 = (
             first.N == 512
             and first.K == 5120
-            and torch.cuda.get_device_capability(first.weight.device)
-            in ((10, 0), (10, 3))
+            and torch.cuda.get_device_capability(first.weight.device) in ((10, 0), (10, 3))
         )
-        if (mode == "stacked" or (mode == "auto" and measured)) and not sleep_enabled():
+        measured_sm90 = (
+            first.N == 512
+            and first.K == 5120
+            and torch.cuda.get_device_capability(first.weight.device) == (9, 0)
+            and self.sm90
+        )
+        self.auto_enabled = measured_sm103 or measured_sm90
+        if (
+            mode == "stacked" or (mode == "auto" and measured_sm103)
+        ) and not sleep_enabled():
             if torch.cuda.is_current_stream_capturing():
                 raise RuntimeError("DSpark WKV weights must be prepared before capture")
             stacked = V41MXFP8Linear.__new__(V41MXFP8Linear)
@@ -109,7 +140,7 @@ class DSparkCommitWKV(torch.nn.Module):
             self.stacked = stacked
             for linear, view in zip(linears, stacked.weight.split(first.N, dim=0)):
                 linear.weight = view
-        self.sources = tuple((w.weight, w.weight_scales) for w in linears)
+        self.sources = tuple((w.weight, _scale_buffer(w)) for w in linears)
         self.addresses = tuple((a.data_ptr(), b.data_ptr()) for a, b in self.sources)
         if layer_weights is not None:
             # Initial values already came from these dictionaries. Redirect the
@@ -142,7 +173,11 @@ class DSparkCommitWKV(torch.nn.Module):
         ):
             linear.weight.copy_(weights[W.v4_attn_wkv_w])
             weights[W.v4_attn_wkv_w] = linear.weight
-            linear.weight_scales.copy_(linear.pack_scales(weights[W.v4_attn_wkv_s]))
+            adapter = getattr(linear, "_sm90_linear", None)
+            if adapter is not None:
+                adapter.weight_scale.copy_(weights[W.v4_attn_wkv_s].float())
+            else:
+                linear.weight_scales.copy_(linear.pack_scales(weights[W.v4_attn_wkv_s]))
             if self.stacked is not None:
                 begin = index * linear.N
                 self.stacked.weight_scales[begin : begin + linear.N].copy_(
@@ -152,7 +187,13 @@ class DSparkCommitWKV(torch.nn.Module):
             # region is unchanged; update the derived WKV region only.
             if merged is not None:
                 merged.weight[-linear.N :].copy_(linear.weight)
-                merged.weight_scales[-linear.N :].copy_(linear.weight_scales)
+                merged_adapter = getattr(merged, "_sm90_linear", None)
+                if adapter is not None and merged_adapter is not None:
+                    merged_adapter.weight_scale[-linear.N // 32 :].copy_(
+                        adapter.weight_scale
+                    )
+                else:
+                    merged.weight_scales[-linear.N :].copy_(linear.weight_scales)
 
     def matches(self, linears: Sequence[torch.nn.Module]) -> bool:
         return (
@@ -161,8 +202,8 @@ class DSparkCommitWKV(torch.nn.Module):
             and all(
                 w is old
                 and w.weight is source[0]
-                and w.weight_scales is source[1]
-                and (w.weight.data_ptr(), w.weight_scales.data_ptr()) == address
+                and _scale_buffer(w) is source[1]
+                and (w.weight.data_ptr(), _scale_buffer(w).data_ptr()) == address
                 for w, old, source, address in zip(
                     linears, self.linears, self.sources, self.addresses
                 )
@@ -177,14 +218,34 @@ class DSparkCommitWKV(torch.nn.Module):
             or x.device != self.linears[0].weight.device
             or x.shape[1] != self.linears[0].K
             or x.shape[0] == 0
-            or (self.mode == "auto" and (self.stacked is None or x.shape[0] > 3072))
+            or (self.mode == "auto" and (not (self.stacked is not None or (self.sm90 and self.auto_enabled)) or x.shape[0] > 3072))
         ):
             return None
-        quantized = self.linears[0]._quantize_input(x)
+        if self.sm90:
+            from rtp_llm.models_py.modules.dsv41._sm90_quant_scale_fused import (
+                quantize_g32,
+            )
+
+            quantized = quantize_g32(x.contiguous(), mn_major=True)
+        else:
+            quantized = self.linears[0]._quantize_input(x)
         if self.stacked is not None:
             output = self.stacked.forward_quantized(*quantized)
             # fused_rmsnorm_rope consumes the row stride directly.
             return tuple(output.split(self.linears[0].N, dim=-1))
+        if self.sm90:
+            # quantize_g32 intentionally returns the native MN-major FP32 scale
+            # tensor consumed by the SM90 DeepGEMM adapter.  V41MXFP8Linear's
+            # public forward_quantized contract is the cross-architecture
+            # packed-UE8M0 format, so routing these scales through that wrapper
+            # would either unpack them again or reject them on the production
+            # baseline.  Stay inside the adapter's native contract and reuse the
+            # one quantization across all three projections.
+            x_q, x_s = quantized
+            return tuple(
+                w._sm90_linear._forward_with_scales(x_q, x_s)
+                for w in self.linears
+            )
         return tuple(w.forward_quantized(*quantized) for w in self.linears)
 
 
@@ -198,7 +259,14 @@ def prepare_dspark_commit_wkv(
     if not _supported(linears):
         return None
     if mode is None:
-        mode = os.environ.get("DSV4_DSPARK_COMMIT_WKV", "auto").strip().lower()
+        # Measured on SM90 at the production decode regime (batch 1-4, gamma 3):
+        # sharing the input quantization saves 3.1-3.6 us per step, i.e. ~0.03%
+        # of a 9 ms TPOT, which is below run-to-run noise. The shared path also
+        # selects its quantization policy by tensor size (v2 above 4M elements),
+        # so the same cache can be written under two numerical policies across
+        # prefill and decode. Not worth either cost; opt in explicitly.
+        default = "baseline" if getattr(linears[0], "_sm90_linear", None) is not None else "auto"
+        mode = os.environ.get("DSV4_DSPARK_COMMIT_WKV", default).strip().lower()
     if layer_weights is not None and len(layer_weights) != len(linears):
         raise ValueError("DSpark WKV requires one checkpoint dictionary per layer")
     if merged_linears is not None and len(merged_linears) != len(linears):

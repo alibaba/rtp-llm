@@ -110,6 +110,7 @@ cc_library(
 cc_library(
     name = "exec_ops_hdr",
     hdrs = [
+        "CudaProfilerCompat.h",
         "ExecOps.h",
     ],
     deps = [
@@ -130,6 +131,7 @@ cc_library(
 cc_library(
     name = "exec_ops_test_lib",
     hdrs = [
+        "CudaProfilerCompat.h",
         "ExecOps.h",
     ],
     srcs = [
@@ -194,6 +196,7 @@ filegroup(
         "CudaOps.cc",
         "CudaSampleOp.cc",
         "CudaBeamSearchOp.cc",
+        "CudaProfilerCompat.h",
     ],
     visibility = ["//visibility:public"],
 )

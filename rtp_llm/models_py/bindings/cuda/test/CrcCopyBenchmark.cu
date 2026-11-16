@@ -1,13 +1,13 @@
 // Manual end-to-end cache-copy microbenchmark. See crc_copy_benchmark_test.
 #include "rtp_llm/models_py/bindings/CrcBlockCopy.h"
 #include "rtp_llm/models_py/bindings/common/kernels/CopyTileKernel.h"
+#include "rtp_llm/models_py/bindings/core/CudaProfilerCompat.h"
 #include "rtp_llm/models_py/bindings/cuda/test/CrcCopyBenchmarkSupport.h"
 #ifdef RTP_LLM_STAGED_MEMCPY_PROFILE
 #include "rtp_llm/models_py/bindings/cuda/test/StagedMemcpyProfiler.h"
 #endif
 
 #include <cuda_runtime.h>
-#include <cuda_profiler_api.h>
 
 #include <algorithm>
 #include <chrono>

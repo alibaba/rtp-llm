@@ -12,6 +12,10 @@ import triton.language as tl
 from rtp_llm.models_py.modules.dsv41.fp8._trap_utils import (
     trap_invalid_kv_access_enabled,
 )
+from rtp_llm.models_py.modules.dsv41.fp8._v41_sm90_v4_cache import _store_v4_row
+from rtp_llm.models_py.modules.dsv41.fp8._v41_sm90_v4_cache import (
+    is_supported as v4_swa_is_supported,
+)
 from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_kv import (
     norm_rope_bf16,
     quantize_swa_row,
@@ -59,6 +63,7 @@ def _fused_qkv_rope_cache_kernel(
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     USE_PDL: tl.constexpr = False,
     KV_READY: tl.constexpr = False,
+    V4_CACHE: tl.constexpr = False,
 ):
     tl.static_assert(not KV_READY or (not APPLY_Q_ROPE and HEADS == PADDED_HEADS))
     if USE_PDL and not KV_READY:
@@ -105,7 +110,10 @@ def _fused_qkv_rope_cache_kernel(
         values = tl.load(kv_base + columns).to(tl.float32)
         w = tl.load(weight + columns).to(tl.float32)
         rounded = norm_rope_bf16(values, w, cos, sin, EPS)
-        payload, encoded, decoded = quantize_swa_row(rounded)
+        if V4_CACHE:
+            decoded = rounded
+        else:
+            payload, encoded, decoded = quantize_swa_row(rounded)
         if USE_PDL and KV_READY:
             # QA supplied raw KV before QB started; keep stores after QB's wait.
             tl.extra.cuda.gdc_wait()
@@ -124,6 +132,9 @@ def _fused_qkv_rope_cache_kernel(
             return
         position = slot % ENTRIES
         page_base = pool + page * block_stride.to(tl.int64)
+        if V4_CACHE:
+            _store_v4_row(rounded, pool, slot, block_stride, ENTRIES)
+            return
         tl.store(
             page_base + position * 528 + columns,
             payload.to(tl.uint8, bitcast=True),
@@ -178,7 +189,7 @@ def is_supported(
         or not freqs_table.is_contiguous()
         or slots.numel() != positions.numel()
         or not slots.is_contiguous()
-        or not swa_is_supported(pool_3d, slots)
+        or not (swa_is_supported(pool_3d, slots) or v4_swa_is_supported(pool_3d, slots))
     ):
         return False
     if freqs_cis is not None and (
@@ -218,7 +229,7 @@ def try_fused_qkv_rope_cache(
     ``kv_ready`` permits overlap with QB only when raw KV and frequencies were
     completed before QB started. Q rotation/padding retains ordinary ordering.
 
-    Only native V4.1 528-byte cache pages are accepted. Physical slots must be
+    Native V4.1 528-byte or SM90 V4 584-byte pages are accepted. Physical slots must be
     unique within the launch; any negative slot skips its store. Invalid
     positive slots trigger the existing device trap gate. Unsupported shapes
     return None before modifying inputs, and backend errors propagate.
@@ -293,6 +304,7 @@ def try_fused_qkv_rope_cache(
             USE_PDL=use_pdl,
             KV_READY=kv_ready,
             launch_pdl=use_pdl,
+            V4_CACHE=pool_3d.shape[-1] == 584,
             num_warps=4,
             enable_fp_fusion=False,
         )

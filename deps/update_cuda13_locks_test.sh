@@ -13,6 +13,7 @@ fi
 
 x86=$($script x86 --print-command)
 arm=$($script arm --print-command)
+internal=$($script internal-x86 --print-command)
 
 [[ "$x86" == *"requirements_torch_gpu_cuda13.txt"* ]]
 [[ "$x86" == *"requirements_cuda13_overrides.txt"* ]]
@@ -22,3 +23,11 @@ arm=$($script arm --print-command)
 [[ "$arm" == *"requirements_cuda13_overrides.txt"* ]]
 [[ "$arm" == *"aarch64-manylinux_2_28"* ]]
 [[ "$arm" == *"requirements_cuda13_arm.update"* ]]
+[[ "$internal" == *"internal_source/deps/requirements_torch_gpu_cuda13.txt"* ]]
+[[ "$internal" == *"internal_source/deps/requirements_lock_torch_gpu_cuda13.txt"* ]]
+[[ "$internal" == *"requirements_cuda13_overrides.txt"* ]]
+[[ "$internal" == *"@rtp_deps//:requirements_torch_gpu_cuda13.update"* ]]
+
+# Invoking from another directory must not embed machine paths into the lock.
+from_elsewhere=$(cd /tmp && "$script" x86 --print-command)
+[[ "$from_elsewhere" == "$x86" ]]

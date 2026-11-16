@@ -212,6 +212,45 @@ def _launch_tilelang_chain(unit, tokens, device, *, include_norm):
     ops.mhc_post(hidden, residual, post, comb, out=residual)
 
 
+def _launch_sm90_mega(pair, tokens, device):
+    """Compile the vLLM two-kernel MegaMHC boundary before graph capture."""
+    previous, next_hc, norm = pair
+    previous.pre_mix_out = torch.full(
+        (1, tokens, 4), 0.25, dtype=torch.float32, device=device
+    )
+    residual = torch.ones((1, tokens, 4, 5120), dtype=torch.bfloat16, device=device)
+    hidden = torch.zeros((1, tokens, 5120), dtype=torch.bfloat16, device=device)
+    post = torch.full((1, tokens, 4, 1), 0.25, dtype=torch.float32, device=device)
+    comb = (
+        torch.eye(4, dtype=torch.float32, device=device)
+        .expand(1, tokens, 4, 4)
+        .contiguous()
+    )
+    if (
+        v41_mega_mhc.try_fused_post_pre(
+            hidden, residual, post, comb, previous, next_hc, norm
+        )
+        is None
+    ):
+        raise RuntimeError("V4.1 HC warmup SM90 mega_mhc rejected a reachable shape")
+    # The decode seam hands over the deferred routed/shared pair instead of the
+    # materialized bf16(routed + shared); that is a distinct kernel variant.
+    if (
+        v41_mega_mhc.try_fused_post_pre(
+            hidden,
+            residual,
+            post,
+            comb,
+            previous,
+            next_hc,
+            norm,
+            combine=(torch.zeros_like(hidden), torch.zeros_like(hidden)),
+        )
+        is None
+    ):
+        raise RuntimeError("V4.1 HC warmup SM90 combine rejected a reachable shape")
+
+
 def _launch_fused_pre(unit, tokens, device):
     residual = torch.ones((1, tokens, 4, unit.dim), dtype=torch.bfloat16, device=device)
     previous = torch.full((1, tokens, 4), 0.25, dtype=torch.float32, device=device)
@@ -276,20 +315,30 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
     device = torch.device(device)
     if not common._is_cuda_device(device) or int(max_m) <= 0:
         return
-    if (
-        torch.version.hip is not None
-        or torch.cuda.get_device_capability(device)[0] != 10
-    ):
+    if torch.version.hip is not None:
+        return
+    capability = tuple(torch.cuda.get_device_capability(device))
+    arch_major = capability[0]
+    if arch_major not in (9, 10):
         return
     common._assert_not_capturing()
     units, pairs = _collect_v41_hc_configs(v4)
     if not units:
         return
     small_enabled = v41_prenorm._has_prenorm_gemm()
-    mega_enabled = bool(pairs) and v41_mega_mhc._get_mega_mhc() is not None
+    # The installed DG exports mega_mhc on Hopper too, but its kernel is SM100
+    # only. Hopper supports the separate small-token prenorm primitive.
+    mega_enabled = (
+        arch_major == 10 and bool(pairs) and v41_mega_mhc._get_mega_mhc() is not None
+    )
+    sm90_mega_enabled = (
+        capability == (9, 0)
+        and bool(pairs)
+        and v41_mega_mhc._get_sm90_mega_mhc() is not None
+    )
+    mega_num_sms = common._get_deep_gemm_num_sms(device) if mega_enabled else 0
     fused_enabled = can_fuse_big_pre()
     fused_deepgemm = fused_enabled and v41_prenorm.max_supported_tokens() > 64
-    mega_num_sms = common._get_deep_gemm_num_sms(device) if mega_enabled else 0
     small_ms = _small_prenorm_ms(max_m) if small_enabled else ()
     mega_ms = _mega_representative_ms(int(max_m), mega_num_sms) if mega_enabled else ()
     fused_specs = {
@@ -319,6 +368,7 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
         tuple(sorted(fused_specs.items())),
         tuple(sorted(tile_ms.items())),
         fused_enabled,
+        sm90_mega_enabled,
         os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", ""),
     )
     if key in _WARMED_KEYS:
@@ -400,6 +450,23 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
                         "V41 mega_mhc",
                         f"config={config} m={tokens}",
                         partial(_launch_mega, pair, tokens, device),
+                        device=device,
+                    )
+                del pair
+                common._sync_cuda(device)
+                common._release_cuda_cache(device)
+        if sm90_mega_enabled:
+            for config, source in pairs.items():
+                pair = _clone_pair(source, device)
+                # T<16 and T>=16 select different projection tile widths.
+                for tokens in (1, 16):
+                    if tokens > min(int(max_m), 32):
+                        continue
+                    detail = f"config={config} m={tokens} vllm-two-kernel"
+                    common._run_tilelang_warmup_launch_with_retry(
+                        "V41 SM90 mega_mhc",
+                        detail,
+                        partial(_launch_sm90_mega, pair, tokens, device),
                         device=device,
                     )
                 del pair

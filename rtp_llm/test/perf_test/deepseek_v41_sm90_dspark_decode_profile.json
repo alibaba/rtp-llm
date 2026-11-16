@@ -1,0 +1,67 @@
+{
+  "model_type": "deepseek_v41",
+  "architecture": "SM90",
+  "batch_size_semantics": "requests per DP rank",
+  "gamma": [
+    3,
+    4,
+    5
+  ],
+  "batch_sizes": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16
+  ],
+  "baseline": {
+    "decode_capture_config": "1,2,3,4,6,8,16,24,32,64,128"
+  },
+  "optimized": {
+    "decode_capture_config": "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,24,32,64,128"
+  },
+  "target_rows": "batch_size * (gamma + 1)",
+  "draft_rows": "batch_size * gamma",
+  "zero_batch": "idle rank participating alongside nonempty ranks; no per-token latency for all-idle",
+  "performance": {
+    "input_tokens": 8192,
+    "output_tokens": 512,
+    "warmup_output_tokens": 128,
+    "repeats": 3,
+    "force_sp_accept": true,
+    "synthetic_kv": true
+  },
+  "accuracy": {
+    "use_batch_decode_scheduler": 0,
+    "force_sp_accept": false,
+    "real_pd_transfer": true,
+    "offered_batch_sizes": "1..16 on rank 0; other ranks participate empty",
+    "max_output_tokens": 256,
+    "min_output_tokens": 0,
+    "prompt_count": 4,
+    "prompt_rendering": "canonical V4.1 chat recipe, thinking disabled",
+    "long_context": "one prompt uses the 8192-token performance prefix plus a question",
+    "comparison": "bitwise operator checks plus real-generation semantic smoke; quality benchmark is separate"
+  },
+  "deployment_env": {
+    "DECODE_CAPTURE_CONFIG": "1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,18,20,24,28,30,32,36,64,128"
+  },
+  "runtime": {
+    "flash_mla_sm90_planner_budget": 32,
+    "flash_mla_sm90_cuda_sha256": "c33eb8fda638562b469e55c66c930284e316f40b58c97407c69abab133e1ca2e",
+    "mla_accuracy": "split reduction order differs from hardware-SM-count baseline; compare to FP32 reference with output rtol=0.02/atol=0.003 and LSE rtol=atol=0.003",
+    "deployment_note": "Graph buckets are a service setting. Building the code does not override an existing DECODE_CAPTURE_CONFIG."
+  }
+}

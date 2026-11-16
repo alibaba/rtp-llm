@@ -8,7 +8,8 @@ kernel availability).
 Importing this package populates the strategy registry (each
 ``@register_strategy``-decorated class registers itself on import). Order
 of import below = priority for ``select_strategy(forced=None)`` auto-pick.
-EP>1 is special-cased to require Mega and fail fast when it is unavailable.
+NVIDIA SM90 selects FlashInfer before registry priority (DeepEP V2 for EP>1).
+Other devices retain the EP>1 Mega requirement and fail fast if unavailable.
 
 NOTE: ``# isort: skip_file`` above is REQUIRED. The import order here is the
 priority order, and it is load-bearing: ``deepep`` transitively imports
@@ -35,6 +36,8 @@ from .grouped_fp4 import (  # noqa: F401  ep_size==1 + kernel
 )
 from .deepep import DeepEPStrategy  # noqa: F401  targeted tests/experiments
 from .local_loop import LocalLoopStrategy  # noqa: F401  universal fallback
+from .mega_sm90 import SM90MegaMoEStrategy  # noqa: F401  SM90 opt-in fused Mega
+from .mega_sm90_se import SM90MegaMoEFusedSEStrategy  # noqa: F401  SM90 fused shared expert
 
 __all__ = [
     "MoeCfg",

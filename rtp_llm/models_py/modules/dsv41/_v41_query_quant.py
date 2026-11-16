@@ -11,7 +11,16 @@ import torch
 import triton
 import triton.language as tl
 
+# ``_decode_exponent`` is the single source of truth for the UE8M0 byte ->
+# FP32 mapping; sharing it keeps the producer bit-identical to the unpack.
+from rtp_llm.models_py.modules.dsv41._sm90_quant_scale_fused import (
+    _decode_exponent,
+    mn_major_scale_output,
+)
 from rtp_llm.models_py.modules.dsv41._v41_fused_qkv import is_supported
+from rtp_llm.models_py.modules.dsv41.sm90_deepgemm_dense import (
+    native_mn_major_scales,
+)
 from rtp_llm.models_py.modules.dsv41.utils import V41MXFP8Linear
 
 
@@ -166,6 +175,7 @@ def _query_norm_quant_kernel(
     D: tl.constexpr,
     EPS: tl.constexpr,
     BLOCK: tl.constexpr,
+    FP32_SCALES: tl.constexpr,
     PDL: tl.constexpr = False,
 ):
     row = tl.program_id(0).to(tl.int64)
@@ -194,18 +204,45 @@ def _query_norm_quant_kernel(
         tl.extra.cuda.gdc_launch_dependents()
     group_ids = tl.arange(0, BLOCK // 32)
     exponent = tl.where(group_ids < D // 32, exponent, 0)
-    packed = tl.sum(
-        tl.reshape(exponent, (BLOCK // 128, 4)) << (tl.arange(0, 4)[None, :] * 8),
-        1,
-    )
-    packs = tl.arange(0, BLOCK // 128)
-    tl.store(SF + packs * stride_sf + row, packed, packs < triton.cdiv(D, 128))
+    if FP32_SCALES:
+        # Decode the stored UE8M0 byte in-kernel and write the FP32 MN-major
+        # layout the SM90 DeepGEMM TMA load wants: no packed words, no unpack.
+        tl.store(
+            SF + group_ids * stride_sf + row,
+            _decode_exponent(exponent & 255),
+            group_ids < D // 32,
+        )
+    else:
+        packed = tl.sum(
+            tl.reshape(exponent, (BLOCK // 128, 4)) << (tl.arange(0, 4)[None, :] * 8),
+            1,
+        )
+        packs = tl.arange(0, BLOCK // 128)
+        tl.store(SF + packs * stride_sf + row, packed, packs < triton.cdiv(D, 128))
 
 
 def query_norm_quant(
     x: torch.Tensor, weight: torch.Tensor, eps: float, *, pdl: bool = False
 ):
     """Return BF16 Q plus FP8 Q and packed MN-major UE8M0 scales."""
+    return _query_norm_quant(x, weight, eps, fp32_scales=False, pdl=pdl)
+
+
+def query_norm_quant_mn_major(x: torch.Tensor, weight: torch.Tensor, eps: float, *, pdl: bool = False
+):
+    """Return BF16 Q plus FP8 Q and native FP32 MN-major scales.
+
+    Arithmetic is identical to :func:`query_norm_quant` -- same normalization,
+    same UE8M0 exponent, same quantized bytes -- and only the scale store
+    differs. The SM90 DeepGEMM adapter consumes this layout directly, so the
+    pack/unpack round trip and its launch disappear.
+    """
+    return _query_norm_quant(x, weight, eps, fp32_scales=True, pdl=pdl)
+
+
+def _query_norm_quant(
+    x: torch.Tensor, weight: torch.Tensor, eps: float, *, fp32_scales: bool, pdl: bool
+):
     import deep_gemm
 
     pdl = pdl or (
@@ -214,7 +251,8 @@ def query_norm_quant(
     flat = x.view(-1, x.shape[-1])
     rows, width = flat.shape
     if (
-        width == 1280
+        not fp32_scales
+        and width == 1280
         and x.is_cuda
         and x.dtype == torch.bfloat16
         and torch.cuda.get_device_capability(x.device) == (10, 0)
@@ -228,11 +266,14 @@ def query_norm_quant(
             return result
     normalized = torch.empty(x.shape, device=x.device, dtype=x.dtype)
     quantized = torch.empty(x.shape, device=x.device, dtype=torch.float8_e4m3fn)
-    scales = torch.empty(
-        (triton.cdiv(width // 32, 4), triton.cdiv(rows, 4) * 4),
-        device=x.device,
-        dtype=torch.int32,
-    ).T[:rows]
+    if fp32_scales:
+        scales = mn_major_scale_output(rows, width // 32, x.device)
+    else:
+        scales = torch.empty(
+            (triton.cdiv(width // 32, 4), triton.cdiv(rows, 4) * 4),
+            device=x.device,
+            dtype=torch.int32,
+        ).T[:rows]
     if rows:
         _query_norm_quant_kernel[(rows,)](
             flat,
@@ -245,6 +286,7 @@ def query_norm_quant(
             width,
             eps,
             triton.next_power_of_2(width),
+            FP32_SCALES=fp32_scales,
             PDL=pdl,
             launch_pdl=pdl,
             num_warps=8 if width > 1024 else 4,
@@ -278,7 +320,16 @@ def try_project_quantized_qkv(attn, x, quantized_input=None, *, pdl: bool = Fals
         if quantized_input is None
         else linear.forward_quantized(*quantized_input).view(*x.shape[:-1], linear.N)
     )
-    qr, quantized = query_norm_quant(
+    # Every decode consumer of this one quantization must accept the native
+    # FP32 MN-major layout before it can be emitted. ``wq_b`` is the SM90
+    # adapter on SM90; the SM10x merged Q-B linear (which needs packed words)
+    # only exists where ``wq_b`` is not, so the two can never both apply.
+    index_wq = getattr(attn, "index_wq", None)
+    fp32_scales = native_mn_major_scales(attn.wq_b) and (
+        index_wq is None or native_mn_major_scales(index_wq)
+    )
+    quantize = query_norm_quant_mn_major if fp32_scales else query_norm_quant
+    qr, quantized = quantize(
         projected[..., : attn.q_lora_rank], attn.q_norm, attn.eps, pdl=pdl
     )
     return qr, projected[..., attn.q_lora_rank :], quantized
