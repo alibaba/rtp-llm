@@ -35,6 +35,7 @@ def test_vision_playback_through_real_master(tmp_path):
     native["MODEL_SERVICE_CONFIG"] = json.dumps(route)
     native["FLEXLB_CONFIG"] = json.dumps(
         {
+            "schemaVersion": 3,
             "scheduler": {"type": "DIRECT"},
             "dispatcher": {"type": "NON_BATCH", "maxInflightPerPrefillWorker": 16},
             "requestLifecycle": {"request": {"timeoutMs": 5000}},

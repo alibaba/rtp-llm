@@ -73,10 +73,16 @@ The following Maven Wrapper files are included in the project (do not delete):
 
 ### Configuration
 
-`FLEXLB_CONFIG` is a required JSON environment variable. It configures scheduling,
-delivery, routing, worker synchronization, and observability; file paths are not accepted.
-The online loader accepts schema 3 only. Duplicate keys, unknown or inactive fields,
-`null`, scalar coercion, numeric enums, and trailing JSON fail startup.
+FlexLB loads scheduling, delivery, routing, worker synchronization, and observability
+from a JSON document. It selects UniConfig when `FLEXLB_UNICONF_ENABLE=true`, Nacos
+when `FLEXLB_NACOS_SERVER_ADDR` is set, and the `FLEXLB_CONFIG` environment variable otherwise.
+`MODEL_SERVICE_CONFIG` supplies the model topology at startup. The environment
+source reads JSON content directly.
+
+Set `"schemaVersion": 3` in current documents. For a document without this field,
+`FLEXLB_CONFIG_SCHEMA_VERSION` selects the parser and defaults to the legacy version
+(0). Schema 3 rejects duplicate keys, unknown or inactive fields, `null`, scalar
+coercion, numeric enums, and trailing JSON.
 
 Executor and event-loop sizes take effect at process startup; changing them requires a restart.
 
@@ -85,7 +91,7 @@ Executor and event-loop sizes take effect at process startup; changing them requ
 | `dispatcher.maxInflightPerPrefillWorker` | Positive integer, default 2 in every mode. BATCH counts batches; NON_BATCH / DIRECT count requests reserved for delivery or still in flight. QUEUE waiting requests do not consume this limit; full workers remain eligible for cache-affinity selection. |
 | `dispatcher.fetchAttachTimeoutMs` | Positive integer, default 3000 ms. BATCH sends this as Engine `fetch_attach_timeout_ms`, limiting the wait for `FetchResponse` attachment. Engine caps it by the remaining request timeout when present. Once attached, this timer does not limit generation duration. |
 | Prefill ownership | Work remains tracked until authoritative completion, safe rollback or retirement. PDFUSION has no distinct Prefill-completion signal, so its ownership lasts through request termination. |
-| `requestLifecycle.request.timeoutMs` | Required positive integer; maximum request inactivity in milliseconds, renewed by matching Engine request status. No default. |
+| `requestLifecycle.request.timeoutMs` | Positive integer; maximum request inactivity in milliseconds, renewed by matching Engine request status. The source loader defaults to 300000 ms. |
 | `workerRegistry.health.cleanupIntervalMs` | Positive integer, default 3000 ms; interval for completing confirmed worker retirements. |
 | `workerRegistry.executors.cacheStatusThreads` | Positive integer, default 32; Cache response processing. |
 | `workerRegistry.executors.cacheDiffParallelism` | Integer 1–32767, default 8; Cache diff ForkJoin parallelism, capped by available processors. |
@@ -522,7 +528,7 @@ own request. This does not provide cross-node deduplication for frontend retries
 
 ## Configuration reference
 
-- **FlexLB behavior**: one strict JSON document in `FLEXLB_CONFIG`.
+- **FlexLB behavior**: a versioned JSON document loaded from the selected configuration source.
 - **Prefill execution formula**:
   `router.roles.prefill.executionTimeEstimator.expression` when estimator type is
   `FORMULA`. The default expression is

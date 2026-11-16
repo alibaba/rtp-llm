@@ -13,19 +13,21 @@ import org.flexlb.util.PriorityNormalizer;
 /**
  * Validates the structure and supported values of the public FlexLB configuration.
  */
-final class FlexlbConfigValidator {
+public final class FlexlbConfigValidator {
     private FlexlbConfigValidator() {
     }
 
-    static void validateDocumentShape(JsonNode document) {
+    /** Validates supplied fields against the modes selected by the merged document. */
+    public static void validateDocumentShape(JsonNode document, JsonNode effectiveDocument) {
         JsonNode scheduler = document.path("scheduler");
         if (scheduler.isObject()) {
-            String type = scheduler.path("type").asText("QUEUE");
+            JsonNode effectiveScheduler = effectiveDocument.path("scheduler");
+            String type = effectiveScheduler.path("type").asText("QUEUE");
             if ("DIRECT".equals(type)) {
                 rejectFieldsExcept(scheduler, "scheduler", "type", "nettyMemoryReporter");
             } else if ("QUEUE".equals(type)) {
-                validateOrderingShape(scheduler.path("ordering"));
-                validateDecisionShape(scheduler.path("decision"));
+                validateOrderingShape(scheduler.path("ordering"), effectiveScheduler.path("ordering"));
+                validateDecisionShape(scheduler.path("decision"), effectiveScheduler.path("decision"));
             }
         }
 
@@ -48,7 +50,7 @@ final class FlexlbConfigValidator {
         }
     }
 
-    static void validate(FlexlbConfig config) {
+    public static void validate(FlexlbConfig config) {
         require(config.getEngineGrpc() != null, "engineGrpc", "is required");
         require(config.getEngineGrpc().getKvCacheMaxInboundMessageBytes() > 0,
                 "engineGrpc.kvCacheMaxInboundMessageBytes", "must be positive");
@@ -105,6 +107,10 @@ final class FlexlbConfigValidator {
                 "grpcServer.executorMaxSize", "must be at least executorCoreSize");
     }
 
+    static void validateDocumentShape(JsonNode document) {
+        validateDocumentShape(document, document);
+    }
+
     private static void validateEstimatorShape(JsonNode estimator) {
         if (!estimator.isObject()) {
             return;
@@ -131,11 +137,11 @@ final class FlexlbConfigValidator {
         });
     }
 
-    private static void validateOrderingShape(JsonNode ordering) {
+    private static void validateOrderingShape(JsonNode ordering, JsonNode effective) {
         if (!ordering.isObject()) {
             return;
         }
-        String type = ordering.path("type").asText("FIFO");
+        String type = effective.path("type").asText("FIFO");
         if ("FIFO".equals(type)) {
             rejectFieldsExcept(ordering, "scheduler.ordering", "type");
         } else if ("PRIORITY".equals(type)) {
@@ -159,11 +165,11 @@ final class FlexlbConfigValidator {
                 "is supported only when DECODE_ENGINE_OWNED is enabled");
     }
 
-    private static void validateDecisionShape(JsonNode decision) {
+    private static void validateDecisionShape(JsonNode decision, JsonNode effective) {
         if (!decision.isObject()) {
             return;
         }
-        String type = decision.path("type").asText("FIXED_WINDOW");
+        String type = effective.path("type").asText("FIXED_WINDOW");
         if ("SINGLE".equals(type)) {
             rejectFieldsExcept(decision, "scheduler.decision", "type");
         } else if ("FIXED_WINDOW".equals(type)) {

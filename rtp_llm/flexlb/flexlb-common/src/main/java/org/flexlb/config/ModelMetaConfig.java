@@ -6,6 +6,7 @@ import org.flexlb.constant.CommonConstants;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
+import org.flexlb.service.config.parser.ModelServiceConfigParser;
 import org.flexlb.util.IdUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -37,7 +38,7 @@ public class ModelMetaConfig {
     }
 
     public ModelMetaConfig(String document) {
-        this(ConfigService.parseModelServiceConfig(document));
+        this(ModelServiceConfigParser.parse(document));
     }
 
     private ModelMetaConfig(ServiceRoute parsed) {

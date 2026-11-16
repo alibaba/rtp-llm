@@ -2,11 +2,18 @@ package org.flexlb.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.flexlb.service.config.ConfigSource;
+import org.flexlb.service.config.merger.FlexlbConfigMerger;
+import org.flexlb.service.config.parser.ConfigDocumentParserResolver;
+import org.flexlb.service.config.parser.StandardConfigDocumentParser;
+import org.flexlb.service.config.parser.V0ConfigDocumentParser;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -22,6 +29,46 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Verifies parsing, validation, and updates of the FlexLB configuration.
  */
 class ConfigServiceTest {
+    @Test
+    void normalizesLegacyWorkerPollingSettingsBeforeMerging() {
+        new V0ConfigDocumentParser();
+        String document = """
+                {"schemaVersion":0,"syncStatusInterval":450}
+                """;
+        var parser = ConfigDocumentParserResolver.resolve(document);
+        var base = new FlexlbConfig();
+        base.getRequestLifecycle().getRequest().setTimeoutMs(300_000L);
+        var merged = FlexlbConfigMerger.merge(
+                base, parser.parse(document, null).flexlbConfig(), "test");
+        assertTrue(merged.isDirect());
+        assertEquals(450, merged.getWorkerRegistry().getHealth().getStatusPollIntervalMs());
+    }
+
+    @Test
+    void updatesKeepDsvGrpcSettingsAndRejectInvalidMergedConfig() {
+        var source = new TestConfigSource();
+        var service = new ConfigService(List.of(new StandardConfigDocumentParser(),
+                new V0ConfigDocumentParser()), List.of(source));
+        try {
+            assertTrue(service.loadBalanceConfig().isDirect());
+            assertEquals(4096, service.loadBalanceConfig().getGrpcServer().getMaxReceivingRequests());
+            source.update.accept("""
+                    {"schemaVersion":3,"scheduler":{"type":"QUEUE"},
+                     "engineGrpc":{"executorThreads":16}}
+                    """);
+            FlexlbConfig accepted = service.loadBalanceConfig();
+            assertTrue(accepted.isDirect());
+            assertEquals(16, accepted.getEngineGrpc().getExecutorThreads());
+            assertEquals(4096, accepted.getGrpcServer().getMaxReceivingRequests());
+            source.update.accept("""
+                    {"schemaVersion":3,"engineGrpc":{"executorThreads":0}}
+                    """);
+            assertSame(accepted, service.loadBalanceConfig());
+        } finally {
+            service.close();
+        }
+    }
+
     @Test
     void shutdownQuietPeriodUsesConfigDefaultsOverridesAndValidation() {
         assertEquals(5000L, ConfigTestFixtures.parse("{}").getGrpcServer().getShutdownQuietPeriodMs());
@@ -559,5 +606,35 @@ class ConfigServiceTest {
     private static void assertInvalid(String patch, String field) {
         var error = assertThrows(ConfigValidationException.class, () -> ConfigTestFixtures.parse(patch));
         assertTrue(error.getMessage().contains(field), error.getMessage());
+    }
+    /**
+     * Supplies a startup document and lets the test publish later updates.
+     */
+    private static final class TestConfigSource implements ConfigSource {
+        private Consumer<String> update;
+
+        @Override
+        public String name() {
+            return "test";
+        }
+
+        @Override
+        public int priority() {
+            return 1;
+        }
+
+        @Override
+        public void setUpdateListener(Consumer<String> listener) {
+            update = listener;
+        }
+
+        @Override
+        public String load() {
+            return """
+                    {"schemaVersion":3,"scheduler":{"type":"DIRECT"},
+                     "dispatcher":{"type":"NON_BATCH"},
+                     "grpcServer":{"maxReceivingRequests":4096}}
+                    """;
+        }
     }
 }

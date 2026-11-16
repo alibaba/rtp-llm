@@ -18,7 +18,7 @@ from mock_framework.execution.test.helpers.zookeeper import command as zookeeper
 
 def configuration():
     return {
-        "FLEXLB_CONFIG": '{ "requestLifecycle": {"request": {"timeoutMs": 60000}} }',
+        "FLEXLB_CONFIG": '{ "schemaVersion": 3, "requestLifecycle": {"request": {"timeoutMs": 60000}} }',
         "MODEL_SERVICE_CONFIG": json.dumps(
             {
                 "service_id": "aigc.text-generation.generation.mock",
@@ -46,6 +46,8 @@ def test_binds_only_run_owned_discovery_and_preserves_business_document(tmp_path
     config = configuration()
     env = prepare_master_env(config, topology(), tmp_path)
     assert env["FLEXLB_CONFIG"] == config["FLEXLB_CONFIG"]
+    assert env["FLEXLB_UNICONF_ENABLE"] == "false"
+    assert env["FLEXLB_NACOS_SERVER_ADDR"] == ""
     assert "old-host" in config["MODEL_SERVICE_CONFIG"]
     route = json.loads(env["MODEL_SERVICE_CONFIG"])
     assert "hosts" not in route
@@ -147,6 +149,7 @@ def test_real_master_routes_to_isolated_rtp_processes(
         ]
     )
     native = {
+        "schemaVersion": 3,
         "scheduler": {"type": "QUEUE" if batched else "DIRECT"},
         "dispatcher": {"type": "BATCH" if batched else "NON_BATCH"},
         "requestLifecycle": {"request": {"timeoutMs": 60000}},

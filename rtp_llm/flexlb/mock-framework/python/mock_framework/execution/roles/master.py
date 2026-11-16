@@ -88,6 +88,7 @@ def prepare_master_env(config, topology, directory, *, require_engines=True):
     route.pop("hosts", None)
     route["discovery_file"] = str(discovery)
     env["MODEL_SERVICE_CONFIG"] = json.dumps(route, ensure_ascii=False)
+    env.update(FLEXLB_UNICONF_ENABLE="false", FLEXLB_NACOS_SERVER_ADDR="")
     return env
 
 
