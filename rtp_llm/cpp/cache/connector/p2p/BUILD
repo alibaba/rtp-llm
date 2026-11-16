@@ -29,7 +29,6 @@ cc_library(
         "//rtp_llm/cpp/cache:cache_config",
         "//rtp_llm/cpp/cache:cp_slot_mapper",
         "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:time_util",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
