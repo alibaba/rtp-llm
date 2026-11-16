@@ -1,7 +1,5 @@
 """Qwen4 GDN norm admission, fallback and projection dispatch."""
 
-import os
-
 import torch
 
 from rtp_llm.models_py.kernels.cuda.gdn_sm120.norm import (
@@ -110,13 +108,7 @@ class Qwen4PrefillGatedNorm(torch.nn.Module):
             type(consumer) is CudaFp8DeepGEMMLinear
             and consumer.scale_ue8m0
             and consumer.K == x.shape[1]
-            and os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
-            in ("auto", "v2")
-            and (
-                x.numel() >= 4 * 1024 * 1024
-                or os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
-                == "v2"
-            )
+            and x.numel() >= 4 * 1024 * 1024
             and consumer.N == 2560
             and consumer.weight.device == x.device
             and unmodified(self, ("forward",))

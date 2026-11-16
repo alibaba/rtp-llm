@@ -1,6 +1,5 @@
 import json
 import math
-import os
 import unittest
 from unittest.mock import patch
 
@@ -84,7 +83,7 @@ class PleSourceBf16BatchRouteTest(PLESourceBf16Fixture, unittest.TestCase):
         return stage
 
     def old_serial_reference(self, layer, hidden, embeddings, initial, tokens):
-        """Capture the actual feature=0 production page route, not a reimplementation."""
+        """Capture the actual serial production page route as the oracle."""
         stage = {k: [] for k in ("key", "value", "gated", "normed", "conv", "silu")}
         linear, conv1d, silu = F.linear, F.conv1d, F.silu
         gate_call = try_ple_gate
@@ -118,7 +117,7 @@ class PleSourceBf16BatchRouteTest(PLESourceBf16Fixture, unittest.TestCase):
             return actual
 
         with (
-            patch.dict(os.environ, {"RTP_QWEN4_BF16_PLE_BATCH": "0"}),
+            patch.object(layer, "_try_bf16_prefill_page_snapshots", return_value=None),
             patch("torch.nn.functional.linear", side_effect=record_linear),
             patch(
                 "rtp_llm.models_py.kernels.cuda.qwen4_ple.gate.try_ple_gate",
@@ -139,7 +138,7 @@ class PleSourceBf16BatchRouteTest(PLESourceBf16Fixture, unittest.TestCase):
         self.assertEqual(len(stage["gated"]), 64)
         self.assertEqual(len(stage["conv"]), 64)
         self.assertEqual(len(stage["silu"]), 64)
-        with patch.dict(os.environ, {"RTP_QWEN4_BF16_PLE_BATCH": "0"}):
+        with patch.object(layer, "_try_bf16_prefill_page_snapshots", return_value=None):
             outer, outer_states = layer.prefill_page_snapshots(
                 hidden,
                 tokens,
@@ -301,7 +300,6 @@ class PleSourceBf16BatchRouteTest(PLESourceBf16Fixture, unittest.TestCase):
                 return actual
 
             with (
-                patch.dict(os.environ, {"RTP_QWEN4_BF16_PLE_BATCH": "1"}),
                 patch("torch.nn.functional.linear", side_effect=checked_linear),
                 patch(
                     "rtp_llm.models_py.kernels.cuda.qwen4_ple.gate.try_ple_gate",
@@ -339,7 +337,7 @@ class PleSourceBf16BatchRouteTest(PLESourceBf16Fixture, unittest.TestCase):
                         "chunk": chunk,
                         "prefix_tokens": chunk * 8192,
                         "formula_contract": "existing GPU grouped_rms_norm helper + BF16 tensor gate/native conv formula; not CPU/FP64",
-                        "acceptance_oracle": "feature=0 actual OLD serial page route, same fused try_ple_gate and native conv",
+                        "acceptance_oracle": "actual serial page route with batched candidate bypassed, same fused try_ple_gate and native conv",
                         "old_vs_formula": old_diagnostics,
                         "candidate_vs_formula": new_diagnostics,
                         "candidate_vs_old": "BITEXACT all projections/gated/normed/inner/outer/all page states",
@@ -373,52 +371,47 @@ class PleSourceBf16BatchRouteTest(PLESourceBf16Fixture, unittest.TestCase):
             context_ids = tokens[:, -2:].clone()
             del formula, old, candidate, before, output, snapshots, hidden, embeddings
 
-    def test_default_off_tail_and_graph_fallback(self):
+    def test_tail_and_graph_fallback(self):
         layer = self.layer()
         for length in (127, 128, 129, 257, 8191, 8193):
             hidden = torch.randn(1, length, 10240, device="cuda", dtype=torch.bfloat16)
             embedding = torch.randn(
                 1, length, 2560, device="cuda", dtype=torch.bfloat16
             )
-            for value in ("0", "1"):
-                with (
-                    patch.dict(os.environ, {"RTP_QWEN4_BF16_PLE_BATCH": value}),
-                    patch("torch.nn.functional.linear") as linear,
-                ):
-                    self.assertIsNone(
-                        layer._try_bf16_prefill_page_snapshots(
-                            hidden, embedding, 128, None, False
-                        )
-                    )
-                    linear.assert_not_called()
-            if length <= 257:
-                tokens = torch.zeros((1, length + 2), device="cuda", dtype=torch.int64)
-                with patch.dict(os.environ, {"RTP_QWEN4_BF16_PLE_BATCH": "0"}):
-                    expected, expected_states = layer.prefill_page_snapshots(
-                        hidden, tokens, 128, embeddings=embedding, add_residual=True
-                    )
-                with patch.dict(os.environ, {"RTP_QWEN4_BF16_PLE_BATCH": "1"}):
-                    actual, states = layer.prefill_page_snapshots(
-                        hidden, tokens, 128, embeddings=embedding, add_residual=True
-                    )
-                self.assert_exact(actual, expected)
-                self.assertEqual(len(states), len(expected_states))
-                for state, expected_state in zip(states, expected_states):
-                    self.assert_exact(state, expected_state)
-        hidden = torch.empty((1, 8192, 10240), device="cuda", dtype=torch.bfloat16)
-        embedding = torch.empty((1, 8192, 2560), device="cuda", dtype=torch.bfloat16)
-        for enabled, capture in (("0", False), ("1", True)):
-            with (
-                patch.dict(os.environ, {"RTP_QWEN4_BF16_PLE_BATCH": enabled}),
-                patch("torch.cuda.is_current_stream_capturing", return_value=capture),
-                patch("torch.nn.functional.linear") as linear,
-            ):
+            with patch("torch.nn.functional.linear") as linear:
                 self.assertIsNone(
                     layer._try_bf16_prefill_page_snapshots(
                         hidden, embedding, 128, None, False
                     )
                 )
                 linear.assert_not_called()
+            if length <= 257:
+                tokens = torch.zeros((1, length + 2), device="cuda", dtype=torch.int64)
+                with patch.object(
+                    layer, "_try_bf16_prefill_page_snapshots", return_value=None
+                ):
+                    expected, expected_states = layer.prefill_page_snapshots(
+                        hidden, tokens, 128, embeddings=embedding, add_residual=True
+                    )
+                actual, states = layer.prefill_page_snapshots(
+                    hidden, tokens, 128, embeddings=embedding, add_residual=True
+                )
+                self.assert_exact(actual, expected)
+                self.assertEqual(len(states), len(expected_states))
+                for state, expected_state in zip(states, expected_states):
+                    self.assert_exact(state, expected_state)
+        hidden = torch.empty((1, 8192, 10240), device="cuda", dtype=torch.bfloat16)
+        embedding = torch.empty((1, 8192, 2560), device="cuda", dtype=torch.bfloat16)
+        with (
+            patch("torch.cuda.is_current_stream_capturing", return_value=True),
+            patch("torch.nn.functional.linear") as linear,
+        ):
+            self.assertIsNone(
+                layer._try_bf16_prefill_page_snapshots(
+                    hidden, embedding, 128, None, False
+                )
+            )
+            linear.assert_not_called()
 
 
 if __name__ == "__main__":
