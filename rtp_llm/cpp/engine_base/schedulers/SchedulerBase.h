@@ -37,6 +37,10 @@ public:
         return schedule();
     }
     virtual absl::Status stop()             = 0;
+
+    // Complete requests cancelled by stop() after the executor has drained.
+    virtual void finalizeCancelledStreams() {}
+
     virtual bool         empty()            = 0;
     virtual int64_t      lastScheduleTime() = 0;
     virtual int64_t      onflightStreams()  = 0;

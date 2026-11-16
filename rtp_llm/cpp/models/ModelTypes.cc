@@ -198,6 +198,7 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     encode_flag(inputs.skip_run, GptModelInputControlFlag::kControlSkipRun);
     encode_flag(inputs.shutdown, GptModelInputControlFlag::kControlShutdown);
     encode_flag(inputs.is_fake_stream, GptModelInputControlFlag::kControlFakeStream);
+    encode_flag(inputs.is_middle_chunk_only, GptModelInputControlFlag::kControlMiddleChunkOnly);
     encode_flag(inputs.is_target_verify, GptModelInputControlFlag::kControlTargetVerify);
     encode_flag(inputs.pd_separation, GptModelInputControlFlag::kControlPdSeparation);
     encode_flag(inputs.decode_entrance, GptModelInputControlFlag::kControlDecodeEntrance);
@@ -353,6 +354,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.skip_run                  = has_flag(GptModelInputControlFlag::kControlSkipRun);
     inputs.shutdown                  = has_flag(GptModelInputControlFlag::kControlShutdown);
     inputs.is_fake_stream            = has_flag(GptModelInputControlFlag::kControlFakeStream);
+    inputs.is_middle_chunk_only      = has_flag(GptModelInputControlFlag::kControlMiddleChunkOnly);
     inputs.is_target_verify          = has_flag(GptModelInputControlFlag::kControlTargetVerify);
     inputs.pd_separation             = has_flag(GptModelInputControlFlag::kControlPdSeparation);
     inputs.decode_entrance           = has_flag(GptModelInputControlFlag::kControlDecodeEntrance);
