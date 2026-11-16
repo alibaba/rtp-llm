@@ -956,6 +956,8 @@ def causal_conv1d_update(
     pad_slot_id: int = PAD_SLOT_ID,
     metadata=None,
     validate_data=False,
+    *,
+    output_dtype: Optional[torch.dtype] = None,
 ):
     """
     x: Input tensor which can take the following shapes:
@@ -995,6 +997,8 @@ def causal_conv1d_update(
             in this case, the kernel will not process entries at
             indices 0 and 3
     out: (batch, dim) or (batch, dim, seqlen) or (num_tokens, dim), same shape as `x`
+    output_dtype: Optional dtype for the convolution output. The default keeps
+        the existing input-dtype result; cache storage is unchanged.
     """
     if validate_data:
         assert (
@@ -1040,9 +1044,11 @@ def causal_conv1d_update(
         assert cache_seqlens is None  # not needed for vLLM - circular buffer
 
     # adopt the strategy in vLLM that overwrite on 'x' directly, rather than creating a new tensor 'o'
-    out = torch.empty([batch, seqlen, dim], device=x.device, dtype=x.dtype).transpose(
-        1, 2
-    )
+    out = torch.empty(
+        [batch, seqlen, dim],
+        device=x.device,
+        dtype=x.dtype if output_dtype is None else output_dtype,
+    ).transpose(1, 2)
     stride_w_dim, stride_w_width = weight.stride()
 
     # X (batch, dim, seqlen)
@@ -1105,4 +1111,4 @@ def causal_conv1d_update(
     )
     if unsqueeze:
         out = out.squeeze(-1)
-    return out.to(original_x_dtype)
+    return out.to(original_x_dtype if output_dtype is None else output_dtype)

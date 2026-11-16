@@ -17,3 +17,16 @@ py_test(
     tags = ["H20_CU13"],
     visibility = ["//visibility:public"],
 )
+
+py_test(
+    name = "kda_decode_precision_regression_test",
+    srcs = ["kda_decode_precision_regression_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/models_py:modules",
+    ],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+    tags = ["SM103_CU13"],
+    timeout = "long",
+)

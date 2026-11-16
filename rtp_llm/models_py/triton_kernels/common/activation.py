@@ -1873,15 +1873,20 @@ def rmsnorm_sigmoid_gate_per_token_group_quant_fp8(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fuse per-head RMSNorm, sigmoid gate and group128 E4M3 production.
 
-    Inputs are BF16 ``[tokens, heads, 128]``. Scales use the same packed UE8M0
-    layout as ``sigmoid_mul_per_token_group_quant_fp8``.
+    Input is BF16 or FP32 ``[tokens, heads, 128]``; gate and weight are BF16.
+    Scales use the same packed UE8M0 layout as
+    ``sigmoid_mul_per_token_group_quant_fp8``.
     """
     if x.ndim != 3 or gate.shape != x.shape or x.shape[-1] != 128:
         raise ValueError("FP8 gated RMSNorm requires matching [tokens, heads, 128] inputs")
     if weight.shape != (128,):
         raise ValueError("FP8 gated RMSNorm requires a 128-element weight")
-    if x.dtype != torch.bfloat16 or gate.dtype != x.dtype or weight.dtype != x.dtype:
-        raise ValueError("FP8 gated RMSNorm requires BF16 inputs and weight")
+    if (
+        x.dtype not in (torch.bfloat16, torch.float32)
+        or gate.dtype != torch.bfloat16
+        or weight.dtype != torch.bfloat16
+    ):
+        raise ValueError("FP8 gated RMSNorm requires BF16 or FP32 input and BF16 gate/weight")
     if not x.is_cuda or gate.device != x.device or weight.device != x.device:
         raise ValueError("FP8 gated RMSNorm tensors must share a CUDA device")
     rows, heads, _ = x.shape

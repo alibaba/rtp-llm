@@ -114,6 +114,7 @@ def _warmup_replay(model, init_resource) -> None:
                     decoder.alog, decoder.dt_bias, state, conv, replay_cache,
                     inputs, group_id=cache.group_id, vector_gate=True,
                     state_v_first=False, lower_bound=decoder.gate_lower_bound,
+                    output_dtype=torch.float32,
                 )
                 finalize_linear_replay(replay_cache, inputs, steps)
             torch.cuda.synchronize(device)

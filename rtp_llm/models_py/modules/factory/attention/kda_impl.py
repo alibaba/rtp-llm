@@ -560,6 +560,8 @@ class KdaDecode(KdaBase):
 
         origin_shape = mixed_qkv.shape
         mixed_qkv = mixed_qkv.reshape(batch, seq, -1).transpose(1, 2)
+        # Preserve FP32 convolution arithmetic until the final gated norm.
+        # Raw convolution history retains the cache's original dtype.
         out = causal_conv1d_update(
             mixed_qkv,
             conv_states.transpose(1, 2),
@@ -570,6 +572,7 @@ class KdaDecode(KdaBase):
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
+            output_dtype=torch.float32,
         )
         out = out.transpose(1, 2).reshape(origin_shape)
         return out
@@ -637,6 +640,7 @@ class KdaDecode(KdaBase):
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
             sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
+            output_dtype=torch.float32,
         )
 
         res = core_attn_out.reshape(
@@ -675,6 +679,7 @@ class KdaDecode(KdaBase):
                 vector_gate=True,
                 state_v_first=False,
                 lower_bound=self.gate_lower_bound,
+                output_dtype=torch.float32,
             )
             return self._linear_replay(
                 mixed_qkv, forget_gate, beta, attn_inputs.linear_replay

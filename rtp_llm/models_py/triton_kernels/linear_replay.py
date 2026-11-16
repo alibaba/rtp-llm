@@ -516,6 +516,7 @@ class LinearReplay:
         vector_gate: bool,
         state_v_first: bool = True,
         lower_bound: float | None = None,
+        output_dtype: torch.dtype | None = None,
     ):
         if layer_cache is None:
             raise ValueError(
@@ -571,6 +572,7 @@ class LinearReplay:
         self.layer_cache = layer_cache
         self.base: torch.Tensor | None = None
         self.group_id = group_id
+        self.output_dtype = output_dtype
         self.qkv_sizes = (h * k, h * k, hv * v)
         self.projected = partial(
             _linear_serial_replay,
@@ -584,6 +586,7 @@ class LinearReplay:
             vector_gate=vector_gate,
             state_v_first=state_v_first,
             lower_bound=lower_bound,
+            output_dtype=output_dtype,
         )
 
     @classmethod
@@ -600,6 +603,7 @@ class LinearReplay:
             and previous.group_id == kv_cache.group_id
             and kv_cache.linear_replay is not None
             and previous.layer_cache.k is kv_cache.linear_replay.k
+            and getattr(previous, "output_dtype", None) == options.get("output_dtype")
         ):
             return previous
         base = kv_cache.kv_cache_base
@@ -646,6 +650,7 @@ def _linear_serial_replay(
     vector_gate: bool,
     state_v_first: bool = True,
     lower_bound: float | None = None,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """Rebuild the accepted anchor and verify a dense, short token window."""
     # TODO(decode-cache-return): Save additional accepted LINEAR checkpoints
@@ -753,7 +758,8 @@ def _linear_serial_replay(
         state_v_first,
         num_warps=warps,
     )
-    convolved = torch.empty((tokens, channels), device=device, dtype=q_projected.dtype)
+    compute_dtype = q_projected.dtype if output_dtype is None else output_dtype
+    convolved = torch.empty((tokens, channels), device=device, dtype=compute_dtype)
     _replay_conv_kernel[(batch, triton.cdiv(channels, 128))](
         q_projected,
         k_projected,
@@ -781,7 +787,7 @@ def _linear_serial_replay(
         128,
         num_warps=4,
     )
-    output = torch.empty((tokens, hv, v), device=device, dtype=q_projected.dtype)
+    output = torch.empty((tokens, hv, v), device=device, dtype=compute_dtype)
     _serial_verify_kernel[grid](
         convolved,
         raw_gate,
@@ -833,6 +839,7 @@ def linear_serial_replay(
     vector_gate: bool,
     state_v_first: bool = True,
     lower_bound: float | None = None,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     replay = LinearReplay(
         conv_weights,
@@ -845,6 +852,7 @@ def linear_serial_replay(
         vector_gate=vector_gate,
         state_v_first=state_v_first,
         lower_bound=lower_bound,
+        output_dtype=output_dtype,
     )
     return replay.projected(
         q_projected,

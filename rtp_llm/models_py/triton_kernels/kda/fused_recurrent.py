@@ -96,6 +96,8 @@ def fused_recurrent_kda_fwd_kernel(
 
     if IS_CONTINUOUS_BATCHING:
         sequence_length = tl.load(sequence_lengths + i_n).to(tl.int64)
+        if sequence_length <= 0:
+            return
     else:
         sequence_length = 0
 
@@ -269,6 +271,8 @@ def fused_recurrent_kda_fwd(
     lower_bound: Optional[float] = None,
     state_v_first: bool = False,
     transpose_state_layout: bool = True,
+    *,
+    output_dtype: Optional[torch.dtype] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     B, T, H, K, V = *k.shape, v.shape[-1]
     HV = v.shape[2]
@@ -278,7 +282,7 @@ def fused_recurrent_kda_fwd(
     NK, NV = triton.cdiv(K, BK), triton.cdiv(V, BV)
     assert NK == 1, "NK > 1 is not supported yet"
 
-    o = torch.zeros_like(v)
+    o = torch.zeros_like(v, dtype=v.dtype if output_dtype is None else output_dtype)
     if inplace_final_state:
         assert initial_state is not None
         final_state = initial_state
@@ -370,6 +374,8 @@ def fused_recurrent_kda(
     lower_bound: Optional[float] = None,
     state_v_first: bool = False,
     transpose_state_layout: bool = True,
+    *,
+    output_dtype: Optional[torch.dtype] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if scale is None:
         scale = k.shape[-1] ** -0.5
@@ -397,5 +403,6 @@ def fused_recurrent_kda(
         lower_bound=lower_bound,
         state_v_first=state_v_first,
         transpose_state_layout=transpose_state_layout,
+        output_dtype=output_dtype,
     )
     return o, final_state

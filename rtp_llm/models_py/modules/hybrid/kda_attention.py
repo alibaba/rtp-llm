@@ -250,12 +250,13 @@ class KdaAttention(nn.Module):
                 output = self.norm(
                     output.reshape(-1, self.heads, self.dim),
                     gate.reshape(-1, self.heads, self.dim),
+                    output_dtype=gate.dtype,
                     row_indices=(
                         scatter_layout.rankmajor_to_natural if scatter_layout is not None else None
                     ),
                     out=(
                         scatter_layout.reserve(
-                            "output", scatter_layout.physical_rows, self.width, output.dtype
+                            "output", scatter_layout.physical_rows, self.width, gate.dtype
                         ).view(-1, self.heads, self.dim)
                         if scatter_layout is not None
                         else None

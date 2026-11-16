@@ -373,6 +373,7 @@ class FusedRMSNormGated(torch.nn.Module):
         *,
         row_indices: Optional[torch.Tensor] = None,
         out: Optional[torch.Tensor] = None,
+        output_dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
         """Normalize heads, optionally gathering input tokens into padded output rows."""
         if x.ndim not in (2, 3) or x.shape[-1] != 128 or gate.shape != x.shape:
@@ -383,6 +384,7 @@ class FusedRMSNormGated(torch.nn.Module):
             )
         # The native kernel requires packed x, while gate supports row strides.
         shape = x.shape
+        output_dtype = x.dtype if output_dtype is None else output_dtype
         heads = x.shape[1] if x.ndim == 3 else 1
         input_tokens = x.shape[0]
         if row_indices is not None:
@@ -391,17 +393,18 @@ class FusedRMSNormGated(torch.nn.Module):
                 or row_indices.dtype != torch.int64
                 or not row_indices.is_contiguous()
                 or row_indices.device != x.device
-                or x.dtype != torch.bfloat16
-                or gate.dtype != x.dtype
-                or self.weight.dtype != x.dtype
+                or x.dtype not in (torch.bfloat16, torch.float32)
+                or gate.dtype != torch.bfloat16
+                or self.weight.dtype != torch.bfloat16
             ):
                 raise ValueError(
-                    "Mapped gated RMSNorm requires BF16 inputs and a CUDA int64 token map"
+                    "Mapped gated RMSNorm requires BF16 or FP32 input, "
+                    "BF16 gate/weight and a CUDA int64 token map"
                 )
             shape = (row_indices.numel(), *shape[1:])
         if out is not None and (
             out.shape != shape
-            or out.dtype != x.dtype
+            or out.dtype != output_dtype
             or out.device != x.device
             or not out.is_contiguous()
             or out.numel() > 0
@@ -418,7 +421,7 @@ class FusedRMSNormGated(torch.nn.Module):
         x = x.contiguous().view(-1, 128)
         if gate.stride(-1) != 1 or (gate.ndim == 3 and gate.stride(1) != 128):
             gate = gate.contiguous()
-        y = torch.empty(shape, dtype=x.dtype, device=x.device) if out is None else out
+        y = torch.empty(shape, dtype=output_dtype, device=x.device) if out is None else out
         rows = y.numel() // 128
         if rows == 0:
             return y.reshape(shape)
