@@ -7,6 +7,15 @@ package(default_visibility = ["//visibility:public"])
 models_py_test(
     name = "hc_defer_policy_test",
     src = "hc_defer_policy_test.py",
+py_test(
+    name = "fp8_sm90_shared_b64_test",
+    srcs = ["fp8_sm90_shared_b64_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
 )
 
 models_py_test(

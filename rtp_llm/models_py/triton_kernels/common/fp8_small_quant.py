@@ -152,6 +152,24 @@ def _silu_mul_fp8_quant_shared(
         )
 
 
+# B64 is too large for the existing single-CTA SiLU/amax fusion.
+# Reduce while producing BF16 activation, then reuse the small finalizer.
+@tr.jit
+def _silu_mul_fp8_partial_amax(
+    x, activated, partial, N: tl.constexpr, D: tl.constexpr, BLOCK: tl.constexpr
+):
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    row = i // D
+    col = i % D
+    gate = tl.load(x + row * 2 * D + col, i < N, other=0).to(tl.float32)
+    value = tl.load(x + row * 2 * D + D + col, i < N, other=0).to(tl.float32)
+    a = ((gate * tl.sigmoid(gate)) * value).to(tl.bfloat16).to(tl.float32)
+    absolute = tl.abs(a)
+    maximum = tl.max(tl.where(absolute == absolute, absolute, 0), 0)
+    tl.store(activated + i, a, i < N)
+    tl.store(partial + tl.program_id(0), maximum)
+
+
 def try_silu_mul_fp8_quant(gate_up, *, output=None):
     """Fuse BF16 SiLU×Mul and dynamic FP8 quant for the small shared FFN."""
     if not (
@@ -163,6 +181,11 @@ def try_silu_mul_fp8_quant(gate_up, *, output=None):
         and gate_up.is_contiguous()
         and (
             (gate_up.shape[0] in (4, 8, 12, 16) and gate_up.shape[1] == 1280)
+            or (
+                tuple(gate_up.shape) == (64, 640)
+                and torch.cuda.is_current_stream_capturing()
+                and torch.cuda.get_device_capability(gate_up.device) == (9, 0)
+            )
             or (
                 os.environ.get("QWEN_MOE_FP8_SMALL_ROWS_FUSION", "0") == "1"
                 and 1 <= gate_up.shape[0] <= 32
@@ -189,6 +212,35 @@ def try_silu_mul_fp8_quant(gate_up, *, output=None):
         )
     scale = torch.empty((1,), device=gate_up.device, dtype=torch.float32)
     block = tr.next_power_of_2(rows * width)
+    if rows == 64 and width == 320:
+        activated = torch.empty(
+            (rows, width), device=gate_up.device, dtype=torch.bfloat16
+        )
+        parts = tr.cdiv(rows * width, 128)
+        partial = torch.empty((parts,), device=gate_up.device, dtype=torch.float32)
+        _silu_mul_fp8_partial_amax[(parts,)](
+            gate_up,
+            activated,
+            partial,
+            rows * width,
+            width,
+            128,
+            num_warps=1,
+            enable_fp_fusion=False,
+        )
+        _fp8_finish_quant[(tr.cdiv(output.numel(), 4096),)](
+            activated,
+            partial,
+            output,
+            scale,
+            rows * width,
+            output.numel(),
+            parts,
+            tr.next_power_of_2(parts),
+            num_warps=4,
+            enable_fp_fusion=False,
+        )
+        return output, scale
     if width == 320:
         warps = 4 if rows <= 2 else 8 if rows <= 8 or rows > 16 else 32
         _silu_mul_fp8_quant_shared[(1,)](

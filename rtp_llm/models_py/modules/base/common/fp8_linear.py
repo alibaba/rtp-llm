@@ -116,6 +116,12 @@ class Fp8Linear(nn.Module):
                     and self.weight.shape[1] == 640
                 )
                 or (
+                    tuple(gate_up.shape) == (64, 640)
+                    and tuple(self.weight.shape) == (2560, 320)
+                    and torch.cuda.is_current_stream_capturing()
+                    and torch.cuda.get_device_capability(gate_up.device) == (9, 0)
+                )
+                or (
                     os.environ.get("QWEN_MOE_FP8_SMALL_ROWS_FUSION", "0") == "1"
                     and 1 <= gate_up.shape[0] <= 32
                     and gate_up.shape[1] == 640
