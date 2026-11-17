@@ -11,8 +11,9 @@ import torch
 import torch.distributed as dist
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.py_config_modules import KernelTuningConfig
 from rtp_llm.device.device_impl import RocmImpl
-from rtp_llm.models_py.kernel_tuning import ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV
+from rtp_llm.models_py.kernel_tuning import configure_kernel_tuning
 from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
@@ -178,7 +179,11 @@ def _execute(executor, payload) -> torch.Tensor:
 def _tp2_worker(rank: int, port: int) -> None:
     initialized = False
     try:
-        os.environ[ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV] = "1"
+        # Inject the parsed config the way the server startup does; arch is
+        # pinned so the worker never triggers the registered overlay providers.
+        config = KernelTuningConfig()
+        config.rocm_fp8_moe_deterministic_reduce = True
+        configure_kernel_tuning(config, arch="unit-test")
         torch.cuda.set_device(rank)
         device = torch.device(f"cuda:{rank}")
         dist.init_process_group(

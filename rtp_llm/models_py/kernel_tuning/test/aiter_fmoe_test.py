@@ -38,7 +38,9 @@ class _FakeDistribution:
 class AiterFmoeTuningTest(unittest.TestCase):
     def setUp(self):
         self._old_env = os.environ.pop("AITER_CONFIG_FMOE", None)
+        self._old_explicit_paths = fmoe._explicit_config_paths
         fmoe._CONFIG_STATUS = None
+        fmoe._explicit_config_paths = ""
 
     def tearDown(self):
         if self._old_env is not None:
@@ -46,6 +48,7 @@ class AiterFmoeTuningTest(unittest.TestCase):
         else:
             os.environ.pop("AITER_CONFIG_FMOE", None)
         fmoe._CONFIG_STATUS = None
+        fmoe._explicit_config_paths = self._old_explicit_paths
 
     def _write_config(
         self, path: Path, tokens: tuple[int, ...] = (64,), tag: str = ""
@@ -195,7 +198,7 @@ class AiterFmoeTuningTest(unittest.TestCase):
             config_patch, distribution_patch = self._configure(
                 root, default_config, overlay_config
             )
-            os.environ["AITER_CONFIG_FMOE"] = str(default_config)
+            fmoe.set_aiter_fmoe_explicit_config_paths(str(default_config))
             with config_patch, distribution_patch:
                 status = fmoe.configure_aiter_fmoe_overlays()
 
@@ -212,12 +215,16 @@ class AiterFmoeTuningTest(unittest.TestCase):
             explicit = os.pathsep.join(
                 map(str, (default_config, model_config, overlay_config))
             )
-            os.environ["AITER_CONFIG_FMOE"] = explicit
+            fmoe.set_aiter_fmoe_explicit_config_paths(explicit)
             with config_patch, distribution_patch:
                 status = fmoe.configure_aiter_fmoe_overlays()
 
             self.assertTrue(status.applied)
-            self.assertEqual(os.environ["AITER_CONFIG_FMOE"], explicit)
+            # The explicit set is validated but not rewritten: neither the
+            # injected input state nor the third-party environment variable
+            # is touched.
+            self.assertEqual(fmoe._explicit_config_paths, explicit)
+            self.assertNotIn("AITER_CONFIG_FMOE", os.environ)
 
     def test_explicit_config_rejects_missing_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -227,8 +234,8 @@ class AiterFmoeTuningTest(unittest.TestCase):
                 root, default_config, overlay_config
             )
             missing_config = root / "missing.csv"
-            os.environ["AITER_CONFIG_FMOE"] = os.pathsep.join(
-                map(str, (missing_config, overlay_config))
+            fmoe.set_aiter_fmoe_explicit_config_paths(
+                os.pathsep.join(map(str, (missing_config, overlay_config)))
             )
             with config_patch, distribution_patch:
                 status = fmoe.configure_aiter_fmoe_overlays()
@@ -245,8 +252,8 @@ class AiterFmoeTuningTest(unittest.TestCase):
             config_patch, distribution_patch = self._configure(
                 root, default_config, overlay_config
             )
-            os.environ["AITER_CONFIG_FMOE"] = os.pathsep.join(
-                map(str, (unreadable_config, overlay_config))
+            fmoe.set_aiter_fmoe_explicit_config_paths(
+                os.pathsep.join(map(str, (unreadable_config, overlay_config)))
             )
             original_dispatch_keys = fmoe._dispatch_keys
 
@@ -272,8 +279,8 @@ class AiterFmoeTuningTest(unittest.TestCase):
             config_patch, distribution_patch = self._configure(
                 root, default_config, overlay_config
             )
-            os.environ["AITER_CONFIG_FMOE"] = os.pathsep.join(
-                map(str, (default_config, overlay_config, overlay_config))
+            fmoe.set_aiter_fmoe_explicit_config_paths(
+                os.pathsep.join(map(str, (default_config, overlay_config, overlay_config)))
             )
             with config_patch, distribution_patch:
                 status = fmoe.configure_aiter_fmoe_overlays()
@@ -290,8 +297,8 @@ class AiterFmoeTuningTest(unittest.TestCase):
             config_patch, distribution_patch = self._configure(
                 root, default_config, overlay_config
             )
-            os.environ["AITER_CONFIG_FMOE"] = os.pathsep.join(
-                map(str, (colliding_config, overlay_config))
+            fmoe.set_aiter_fmoe_explicit_config_paths(
+                os.pathsep.join(map(str, (colliding_config, overlay_config)))
             )
             with config_patch, distribution_patch:
                 status = fmoe.configure_aiter_fmoe_overlays()

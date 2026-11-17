@@ -24,7 +24,7 @@ try:
 
     from rtp_llm.config.model_config import ModelConfig
     from rtp_llm.device.device_impl import RocmImpl
-    from rtp_llm.models_py.kernel_tuning import ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV
+    from rtp_llm.models_py.kernel_tuning import registry
     from rtp_llm.models_py.kernel_tuning.aiter import is_affected_aiter_fmoe_signature
     from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
         MoEConfigAdapter,
@@ -60,6 +60,32 @@ except ImportError as exc:  # stale librtp_compute_ops.so / missing aiter / etc.
     _IMPORT_ERROR = exc
 
 FP8_E4M3FNUZ_MAX = 240.0  # max representable in float8_e4m3fnuz
+
+
+def _deterministic_reduce_config(enabled: bool):
+    from rtp_llm.config.py_config_modules import KernelTuningConfig
+
+    config = KernelTuningConfig()
+    config.rocm_fp8_moe_deterministic_reduce = enabled
+    return config
+
+
+def _configure_deterministic_reduce(enabled: bool) -> None:
+    """Inject the deterministic-reduce switch the way the server startup does.
+
+    Paired arg/env registration: tests configure the parsed KernelTuningConfig
+    instead of setting the raw process environment. arch="unit-test" keeps
+    the registered overlay providers out of the picture.
+    """
+    if _IMPORT_ERROR is None:
+        registry.configure_kernel_tuning(
+            _deterministic_reduce_config(enabled), arch="unit-test"
+        )
+
+
+def _reset_kernel_tuning_config() -> None:
+    if _IMPORT_ERROR is None:
+        registry._kernel_tuning_config = None
 
 
 class DeterministicFp8MoeConfigTest(unittest.TestCase):
@@ -137,10 +163,11 @@ class DeterministicFp8MoeConfigTest(unittest.TestCase):
         _IMPORT_ERROR is not None, f"ROCm imports unavailable: {_IMPORT_ERROR}"
     )
     def test_cuda_graph_does_not_block_opt_in_path(self):
+        _configure_deterministic_reduce(True)
+        self.addCleanup(_reset_kernel_tuning_config)
         with patch.dict(
             os.environ,
             {
-                ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV: "1",
                 "ENABLE_CUDA_GRAPH": "1",
                 "ENABLE_NATIVE_CUDA_GRAPH": "1",
             },
@@ -159,58 +186,58 @@ class DeterministicFp8MoeConfigTest(unittest.TestCase):
     @unittest.skipIf(
         _IMPORT_ERROR is not None, f"ROCm imports unavailable: {_IMPORT_ERROR}"
     )
-    def test_max_tokens_falls_back_to_default_on_bad_env_value(self):
-        with patch.dict(
-            os.environ,
-            {deterministic_fp8_moe._MAX_TOKENS_ENV: "not-a-number"},
-        ):
-            self.assertEqual(
-                deterministic_fp8_moe._max_tokens(),
-                deterministic_fp8_moe._DEFAULT_MAX_TOKENS,
-            )
+    def test_max_tokens_reads_the_injected_config(self):
+        # The max-tokens bound comes from the parsed server config; a custom
+        # value must gate the shape check exactly like the default did.
+        from rtp_llm.models_py.kernel_tuning import rocm_fp8_moe_deterministic_max_tokens
+
+        _configure_deterministic_reduce(True)
+        self.addCleanup(_reset_kernel_tuning_config)
+        registry._kernel_tuning_config.rocm_fp8_moe_deterministic_max_tokens = 8
+        self.assertEqual(rocm_fp8_moe_deterministic_max_tokens(), 8)
+        registry._kernel_tuning_config.rocm_fp8_moe_deterministic_max_tokens = -3
+        self.assertEqual(rocm_fp8_moe_deterministic_max_tokens(), 1)
 
     @unittest.skipIf(
         _IMPORT_ERROR is not None, f"ROCm imports unavailable: {_IMPORT_ERROR}"
     )
     def test_shape_mismatch_falls_back_but_runtime_mismatch_fails_closed(self):
-        with patch.dict(
-            os.environ,
-            {ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV: "1"},
+        _configure_deterministic_reduce(True)
+        self.addCleanup(_reset_kernel_tuning_config)
+        # Workload shape mismatch keeps the graceful fallback.
+        with patch.object(
+            deterministic_fp8_moe,
+            "_shape_unsupported_reason",
+            return_value="hidden shape 1 is unsupported",
         ):
-            # Workload shape mismatch keeps the graceful fallback.
-            with patch.object(
-                deterministic_fp8_moe,
-                "_shape_unsupported_reason",
-                return_value="hidden shape 1 is unsupported",
-            ):
-                self.assertIsNone(
-                    deterministic_fp8_moe.try_deterministic_fp8_moe(
-                        None, None, None, None, None, None, None, None, None
-                    )
+            self.assertIsNone(
+                deterministic_fp8_moe.try_deterministic_fp8_moe(
+                    None, None, None, None, None, None, None, None, None
                 )
-            # Matching shapes plus an unsupported runtime must fail closed:
-            # silently falling back would lose the requested determinism.
-            with patch.object(
-                deterministic_fp8_moe,
-                "_shape_unsupported_reason",
-                return_value=None,
-            ), patch.object(
-                deterministic_fp8_moe,
-                "_runtime_unsupported_reason",
-                return_value="AITER version future-aiter is unsupported",
-            ):
-                with self.assertRaisesRegex(RuntimeError, "AITER version"):
-                    deterministic_fp8_moe.try_deterministic_fp8_moe(
-                        SimpleNamespace(device="cuda:0"),
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                    )
+            )
+        # Matching shapes plus an unsupported runtime must fail closed:
+        # silently falling back would lose the requested determinism.
+        with patch.object(
+            deterministic_fp8_moe,
+            "_shape_unsupported_reason",
+            return_value=None,
+        ), patch.object(
+            deterministic_fp8_moe,
+            "_runtime_unsupported_reason",
+            return_value="AITER version future-aiter is unsupported",
+        ):
+            with self.assertRaisesRegex(RuntimeError, "AITER version"):
+                deterministic_fp8_moe.try_deterministic_fp8_moe(
+                    SimpleNamespace(device="cuda:0"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
 
 
 def _per_channel_quant_fp8(w: torch.Tensor, fp8_dtype: torch.dtype):
@@ -314,12 +341,8 @@ class _Fp8MoeBaseTest(unittest.TestCase):
         torch.set_default_device(self.device)
         torch.manual_seed(42)
         self.fp8_dtype = get_rocm_fp8_dtype()
-        self._feature_env = patch.dict(
-            os.environ,
-            {ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV: "0"},
-        )
-        self._feature_env.start()
-        self.addCleanup(self._feature_env.stop)
+        _configure_deterministic_reduce(False)
+        self.addCleanup(_reset_kernel_tuning_config)
 
     def _build_payload(self, M, K, E, top_k):
         hidden_states = (
@@ -360,21 +383,18 @@ class RocmExpertsFp8PerChannelTest(_Fp8MoeBaseTest):
             silu_config.activation_type,
             swiglu_config.activation_type,
         )
-        with patch.dict(
-            os.environ,
-            {ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV: "1"},
-        ):
-            for activation in silu_aliases:
-                with self.subTest(activation=activation):
-                    self.assertEqual(
-                        _moe_activation_type(activation), aiter.ActivationType.Silu
-                    )
+        _configure_deterministic_reduce(True)
+        for activation in silu_aliases:
+            with self.subTest(activation=activation):
+                self.assertEqual(
+                    _moe_activation_type(activation), aiter.ActivationType.Silu
+                )
 
-            self.assertEqual(_moe_activation_type("gelu"), aiter.ActivationType.Gelu)
-            with self.assertRaisesRegex(
-                ValueError, "Unsupported AITER FMoE activation"
-            ):
-                _moe_activation_type("unknown")
+        self.assertEqual(_moe_activation_type("gelu"), aiter.ActivationType.Gelu)
+        with self.assertRaisesRegex(
+            ValueError, "Unsupported AITER FMoE activation"
+        ):
+            _moe_activation_type("unknown")
 
     def test_feature_disabled_keeps_legacy_activation_mapping(self):
         self.assertEqual(_moe_activation_type("swiglu"), aiter.ActivationType.Gelu)
@@ -383,18 +403,16 @@ class RocmExpertsFp8PerChannelTest(_Fp8MoeBaseTest):
         # Executors outside the deterministic FP8-per-channel path must keep
         # the legacy mapping even when the deterministic flag is enabled: the
         # flag must not leak into their behavior.
-        with patch.dict(
-            os.environ, {ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV: "1"}
-        ):
-            self.assertEqual(
-                _legacy_moe_activation_type("swiglu"), aiter.ActivationType.Gelu
-            )
-            self.assertEqual(
-                _legacy_moe_activation_type("gated-silu"), aiter.ActivationType.Gelu
-            )
-            self.assertEqual(
-                _legacy_moe_activation_type("SiGLU"), aiter.ActivationType.Silu
-            )
+        _configure_deterministic_reduce(True)
+        self.assertEqual(
+            _legacy_moe_activation_type("swiglu"), aiter.ActivationType.Gelu
+        )
+        self.assertEqual(
+            _legacy_moe_activation_type("gated-silu"), aiter.ActivationType.Gelu
+        )
+        self.assertEqual(
+            _legacy_moe_activation_type("SiGLU"), aiter.ActivationType.Silu
+        )
 
     def _run(self, apply_router_weight_on_input: bool):
         payload = self._build_payload(self.M, self.K, self.E, self.TOP_K)
@@ -473,11 +491,9 @@ class RocmExpertsFp8PerChannelTest(_Fp8MoeBaseTest):
         # PR #882 review #7 specifically called out this newly-enabled path.
         self._run(apply_router_weight_on_input=True)
 
-    @patch.dict(
-        os.environ,
-        {ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV: "1"},
-    )
     def test_small_token_tuned_shape_with_loader_postprocess(self):
+        _configure_deterministic_reduce(True)
+        self.addCleanup(_reset_kernel_tuning_config)
         self.assertTrue(_AITER_TUNING_STATUS.applied, _AITER_TUNING_STATUS)
         hidden, local_inter, experts, top_k = 2048, 128, 256, 8
         runtime_device = RocmImpl.__new__(RocmImpl)
@@ -690,53 +706,51 @@ class RocmExpertsFp8PerChannelTest(_Fp8MoeBaseTest):
                     "AITER stage2 write-suppression contract is broken"
                 )
 
-        with patch.dict(
-            os.environ, {ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV: "1"}
+        _configure_deterministic_reduce(True)
+        executor = RocmExpertsFp8PerChannel(
+            config, FusedMoEQuantConfig(), weights
+        )
+        with patch.object(
+            deterministic_fp8_moe,
+            "_route_local_stage2",
+            side_effect=observed_route_local_stage2,
+        ), patch.object(
+            deterministic_fp8_moe,
+            "fixed_order_fp32_route_reduce",
+            side_effect=observed_fixed_order_reduce,
         ):
-            executor = RocmExpertsFp8PerChannel(
-                config, FusedMoEQuantConfig(), weights
-            )
-            with patch.object(
-                deterministic_fp8_moe,
-                "_route_local_stage2",
-                side_effect=observed_route_local_stage2,
-            ), patch.object(
-                deterministic_fp8_moe,
-                "fixed_order_fp32_route_reduce",
-                side_effect=observed_fixed_order_reduce,
-            ):
-                for token_count in (1, 16):
-                    with self.subTest(token_count=token_count):
-                        payload = self._build_payload(
-                            token_count, hidden, experts, top_k
-                        )
-                        reference = torch_moe_ref(
-                            payload=payload,
-                            activation="silu",
-                            global_num_experts=experts,
-                            expert_map=None,
-                            a2_scale=None,
-                            apply_router_weight_on_input=False,
-                            extra_expert_args=None,
-                            w1=w1_dequant,
-                            w2=w2_dequant,
-                        )
-                        output = executor.execute(
-                            payload=payload,
-                            activation="SiGLU",
-                            expert_map=None,
-                            a2_scale=None,
-                            apply_router_weight_on_input=False,
-                            extra_expert_args=None,
-                        ).fused_expert_output
-                        self.assertEqual(output.shape, (token_count, hidden))
-                        self.assertTrue(torch.isfinite(output).all().item())
-                        cosine = torch.nn.functional.cosine_similarity(
-                            output.float(), reference.float(), dim=-1
-                        ).mean()
-                        self.assertGreater(cosine.item(), 0.99)
-        self.assertGreater(route_local_calls, 0)
-        self.assertGreater(canary_checks, 0)
+            for token_count in (1, 16):
+                with self.subTest(token_count=token_count):
+                    payload = self._build_payload(
+                        token_count, hidden, experts, top_k
+                    )
+                    reference = torch_moe_ref(
+                        payload=payload,
+                        activation="silu",
+                        global_num_experts=experts,
+                        expert_map=None,
+                        a2_scale=None,
+                        apply_router_weight_on_input=False,
+                        extra_expert_args=None,
+                        w1=w1_dequant,
+                        w2=w2_dequant,
+                    )
+                    output = executor.execute(
+                        payload=payload,
+                        activation="SiGLU",
+                        expert_map=None,
+                        a2_scale=None,
+                        apply_router_weight_on_input=False,
+                        extra_expert_args=None,
+                    ).fused_expert_output
+                    self.assertEqual(output.shape, (token_count, hidden))
+                    self.assertTrue(torch.isfinite(output).all().item())
+                    cosine = torch.nn.functional.cosine_similarity(
+                        output.float(), reference.float(), dim=-1
+                    ).mean()
+                    self.assertGreater(cosine.item(), 0.99)
+    self.assertGreater(route_local_calls, 0)
+    self.assertGreater(canary_checks, 0)
 
 
 class RocmExpertsFp8PerBlockTest(_Fp8MoeBaseTest):
