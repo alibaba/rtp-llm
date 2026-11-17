@@ -21,8 +21,8 @@ __global__ void cudaGraphPrepareFillKernel(CudaGraphPrepareFillParams params) {
         if (region.ptr == nullptr || region.count <= 0) {
             continue;
         }
-        const int32_t fill_value = (region.value_ptr != nullptr ? *region.value_ptr : region.value)
-                                 + region.value_offset;
+        const int32_t fill_value =
+            (region.value_ptr != nullptr ? *region.value_ptr : region.value) + region.value_offset;
         for (int64_t i = tid; i < region.count; i += stride) {
             region.ptr[i] = fill_value + region.step * i;
         }
@@ -30,9 +30,7 @@ __global__ void cudaGraphPrepareFillKernel(CudaGraphPrepareFillParams params) {
 }
 
 __global__ void prepareFlashInferDecodeParamsKernel(const int32_t* sequence_lengths_plus_1,
-                                                    const int32_t* block_ids,
                                                     int32_t*       batch_indice,
-                                                    int32_t*       page_indice,
                                                     int32_t*       decode_page_indptr,
                                                     int32_t*       paged_kv_last_page_len,
                                                     int32_t*       qo_indptr,
@@ -41,7 +39,7 @@ __global__ void prepareFlashInferDecodeParamsKernel(const int32_t* sequence_leng
                                                     int32_t        batch_size,
                                                     int32_t        max_blocks_per_batch,
                                                     int32_t        seq_size_per_block) {
-    // Replay path is small-batch metadata; one CUDA block avoids any host prefix-sum.
+    // Only the small per-request prefix sum is serial; page copies run separately.
     if (threadIdx.x != 0 || blockIdx.x != 0) {
         return;
     }
@@ -61,12 +59,21 @@ __global__ void prepareFlashInferDecodeParamsKernel(const int32_t* sequence_leng
         paged_kv_last_page_len[batch] = (seq_len - 1) % safe_page_sz + 1;
 
         const int32_t pages_to_copy = pages < max_blocks_per_batch ? pages : max_blocks_per_batch;
-        for (int32_t page = 0; page < pages_to_copy; ++page) {
-            page_indice[page_offset + page] = block_ids[batch * max_blocks_per_batch + page];
-        }
         page_offset += pages_to_copy;
         decode_page_indptr[batch + 1] = page_offset;
         qo_indptr[batch + 1]          = batch + 1;
+    }
+}
+
+__global__ void copyFlashInferDecodePagesKernel(const int32_t* block_ids,
+                                                const int32_t* decode_page_indptr,
+                                                int32_t*       page_indice,
+                                                int32_t        max_blocks_per_batch) {
+    const int32_t batch       = blockIdx.x;
+    const int32_t page_offset = decode_page_indptr[batch];
+    const int32_t page_count  = decode_page_indptr[batch + 1] - page_offset;
+    for (int32_t page = threadIdx.x; page < page_count; page += blockDim.x) {
+        page_indice[page_offset + page] = block_ids[batch * max_blocks_per_batch + page];
     }
 }
 
@@ -97,18 +104,18 @@ void invokeCudaGraphPrepareFill(CudaGraphPrepareFillParams params, CudaGraphPrep
 #endif
 }
 
-void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
-                                         const int32_t* block_ids,
-                                         int32_t*       batch_indice,
-                                         int32_t*       page_indice,
-                                         int32_t*       decode_page_indptr,
-                                         int32_t*       paged_kv_last_page_len,
-                                         int32_t*       qo_indptr,
-                                         int32_t*       kvlen,
-                                         int32_t*       positions,
-                                         int32_t        batch_size,
-                                         int32_t        max_blocks_per_batch,
-                                         int32_t        seq_size_per_block,
+void invokePrepareFlashInferDecodeParams(const int32_t*         sequence_lengths_plus_1,
+                                         const int32_t*         block_ids,
+                                         int32_t*               batch_indice,
+                                         int32_t*               page_indice,
+                                         int32_t*               decode_page_indptr,
+                                         int32_t*               paged_kv_last_page_len,
+                                         int32_t*               qo_indptr,
+                                         int32_t*               kvlen,
+                                         int32_t*               positions,
+                                         int32_t                batch_size,
+                                         int32_t                max_blocks_per_batch,
+                                         int32_t                seq_size_per_block,
                                          CudaGraphPrepareStream stream) {
     TORCH_CHECK(sequence_lengths_plus_1 != nullptr, "sequence_lengths_plus_1 is null");
     TORCH_CHECK(block_ids != nullptr, "block_ids is null");
@@ -120,9 +127,7 @@ void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
         return;
     }
     prepareFlashInferDecodeParamsKernel<<<1, 1, 0, stream>>>(sequence_lengths_plus_1,
-                                                             block_ids,
                                                              batch_indice,
-                                                             page_indice,
                                                              decode_page_indptr,
                                                              paged_kv_last_page_len,
                                                              qo_indptr,
@@ -131,11 +136,13 @@ void invokePrepareFlashInferDecodeParams(const int32_t* sequence_lengths_plus_1,
                                                              batch_size,
                                                              max_blocks_per_batch,
                                                              seq_size_per_block);
+    // The stream orders prefix generation before the coalesced per-request copies.
+    copyFlashInferDecodePagesKernel<<<batch_size, 256, 0, stream>>>(
+        block_ids, decode_page_indptr, page_indice, max_blocks_per_batch);
 #if USING_ROCM
     const auto result = hipGetLastError();
-    TORCH_CHECK(result == hipSuccess,
-                "FlashInfer decode CUDA graph prepare kernel failed: ",
-                hipGetErrorString(result));
+    TORCH_CHECK(
+        result == hipSuccess, "FlashInfer decode CUDA graph prepare kernel failed: ", hipGetErrorString(result));
 #else
     const auto result = cudaGetLastError();
     TORCH_CHECK(
