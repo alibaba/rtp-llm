@@ -228,7 +228,15 @@ class SM90MegaMoEStrategy(RoutedExpertsStrategy):
             and _get_gate_pack_kernel() is not None
         )
 
-    def _launch(self, y: torch.Tensor, tokens: int) -> None:
+    def _finalize_packed_routing(self, tokens: int, eplb_layer) -> None:
+        if self.fake_balance_expert is not None or eplb_layer is not None:
+            self.finalize_routing(
+                self._mega_buf.topk_idx[:tokens],
+                self._mega_buf.topk_weights[:tokens],
+                eplb_layer,
+            )
+
+    def _launch(self, y: torch.Tensor, tokens: int, expert_load=None) -> None:
         """Launch the Hopper fused kernel over the staged collective buffer."""
         import deep_gemm
 
@@ -251,28 +259,42 @@ class SM90MegaMoEStrategy(RoutedExpertsStrategy):
             # Every EP rank stages the same local row count, so the per-rank
             # count is also the common upper bound the kernel requires.
             num_tokens_bound=tokens,
+            cumulative_local_expert_recv_stats=(
+                expert_load.expert_token_counts if expert_load is not None else None
+            ),
         )
 
     def forward(
-        self, x: torch.Tensor, weights: torch.Tensor, indices: torch.Tensor
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor,
+        indices: torch.Tensor,
+        expert_load=None,
+        eplb_layer=None,
     ) -> torch.Tensor:
         """Run the fused Hopper kernel and return BF16 ``[T, dim]`` routed rows."""
         if self._mega_buf is None or self._mega_y is None:
             self.setup_runtime()
         T = x.size(0)
         self._input_packer.pack(x, weights, indices, self._mega_buf, T)
+        self._finalize_packed_routing(T, eplb_layer)
         y = self._mega_y[:T]
-        self._launch(y, T)
+        self._launch(y, T, expert_load=expert_load)
         return y
 
     def forward_with_gate_pack(
-        self, x: torch.Tensor, gate, input_ids: torch.Tensor | None
+        self,
+        x: torch.Tensor,
+        gate,
+        input_ids: torch.Tensor | None,
+        expert_load=None,
+        eplb_layer=None,
     ) -> torch.Tensor:
         """Router gate + SM90 input staging + MegaMoE in one fewer launch."""
         kernel = _get_gate_pack_kernel()
         if kernel is None or not self._gate_pack_ready(x, gate):
             weights, indices = gate(x, input_ids)
-            return self.forward(x, weights, indices)
+            return self.forward(x, weights, indices, expert_load, eplb_layer)
         if self._mega_buf is None or self._mega_y is None:
             self.setup_runtime()
         T = x.size(0)
@@ -292,8 +314,9 @@ class SM90MegaMoEStrategy(RoutedExpertsStrategy):
                 route_scale=float(gate.route_scale),
                 norm_eps=1e-12,
             )
+        self._finalize_packed_routing(T, eplb_layer)
         y = self._mega_y[:T]
-        self._launch(y, T)
+        self._launch(y, T, expert_load=expert_load)
         return y
 
 
