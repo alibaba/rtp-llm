@@ -220,13 +220,6 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     RTP_LLM_LOG_INFO("normal engine speculative reserve_step is %d", reserve_step_);
 #if !USING_CUDA
 #if USING_ASCEND
-    // Fail-fast (same pattern as the MTP gate): Ascend NPU currently supports
-    // single-card only. Remove together with the launcher-side check when the
-    // Ascend TP feature lands.
-    RTP_LLM_CHECK_WITH_INFO(parallelism_config.world_size <= 1,
-                            "TP>1 / multi-rank (world_size=%lld) is not yet supported on Ascend NPU; "
-                            "run single-card (world_size=1) until Ascend TP support lands.",
-                            static_cast<long long>(parallelism_config.world_size));
     // Fail-fast: the device-input pipeline is CUDA-only (kCUDA tensors).
     // Remove with the launcher-side check once it uses getTorchCudaDevice().
     RTP_LLM_CHECK_WITH_INFO(!deviceInputEnabled(),

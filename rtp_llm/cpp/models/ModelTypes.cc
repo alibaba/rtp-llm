@@ -406,10 +406,16 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             options = options.device(getTorchCudaDevice());
         }
         auto tensor = torch::empty(dims, options);
-        // NCCL broadcast requires pinned memory for CPU buffers
-        // TODO: Ascend - check if this is still true for ascend
+        // NCCL broadcast requires pinned memory for CPU buffers.
+        // On Ascend (HCCL) the Python comm callbacks move CPU buffers to the
+        // NPU before the collective, so pinning is a host-copy optimization
+        // only — fall back to unpinned memory if pinning is unavailable.
         if (atype != rtp_llm::AllocationType::DEVICE) {
-            tensor = tensor.pin_memory();
+            try {
+                tensor = tensor.pin_memory();
+            } catch (const std::exception&) {
+                // keep unpinned tensor
+            }
         }
         return tensor;
     };

@@ -20,6 +20,26 @@ _CPP_PARALLEL_MODE_DP_AND_TP = 2
 _UDS_SUN_PATH_LIMIT = 108
 
 
+def _npu_runtime() -> bool:
+    try:
+        import torch_npu  # noqa: F401
+        return torch.npu.is_available()
+    except ImportError:
+        return False
+
+
+_is_npu = _npu_runtime()
+
+
+def _accel_device_id() -> int:
+    return torch.npu.current_device() if _is_npu else torch.cuda.current_device()
+
+def _accel_device(device_id: int) -> torch.device:
+    return torch.device("npu" if _is_npu else "cuda", device_id)
+
+def _accel_is_device_tensor(t: torch.Tensor) -> bool:
+    return t.is_npu if _is_npu else t.is_cuda
+
 class Group(Enum):
     """Process group types for collective operations"""
 
@@ -78,6 +98,8 @@ def _init_flashinfer_allreduce(
 ) -> None:
     if parallelism_config.tp_size <= 1:
         return
+    if _is_npu:
+        return  # flashinfer is CUDA-only; NPU TP uses the HCCL all-reduce path
     _get_flashinfer_allreduce().init_flashinfer_allreduce(
         _get_group(Group.TP),
         torch.device("cuda", parallelism_config.local_rank),
@@ -192,7 +214,7 @@ def init_distributed_environment(
         parallelism_config, nccl_init_port
     )
 
-    assert backend in ["nccl"], "backend current only supports nccl"
+    assert backend in ["nccl", "hccl"], f"backend current only supports nccl/hccl, got {backend}"
     ip = nccl_comm_config.nccl_ip
     port = nccl_init_port
     world_rank = parallelism_config.world_rank
@@ -340,11 +362,14 @@ def _create_process_groups(
                 # All ranks must wait for group creation to complete
                 torch.distributed.barrier()
     elif tp_size > 1 and world_size == tp_size:
-        # Single TP group: WORLD is the TP group, init symm_mem for it
-        _get_symm_mem().init_symm_mem_communicator(
-            torch.distributed.group.WORLD,
-            disable_custom_all_reduce=disable_custom_all_reduce,
-        )
+        # Single TP group: WORLD is the TP group, init symm_mem for it.
+        # symm_mem is CUDA-only (TorchSymmMemCommunicator hard-requires
+        # torch.cuda); NPU TP uses the HCCL all-reduce path instead.
+        if not _is_npu:
+            _get_symm_mem().init_symm_mem_communicator(
+                torch.distributed.group.WORLD,
+                disable_custom_all_reduce=disable_custom_all_reduce,
+            )
 
 
 def _register_process_groups_to_cpp():
@@ -428,10 +453,10 @@ def _register_process_groups_to_cpp():
     # allocates a new tensor), so we implement the C++ contract directly here.
 
     def _ensure_cuda(t: torch.Tensor, device_id: int):
-        """Move CPU tensor to CUDA if needed (NCCL requires CUDA tensors)."""
-        if t.is_cuda:
+        """Move CPU tensor to the accelerator if needed (collectives require device tensors)."""
+        if _accel_is_device_tensor(t):
             return t, False
-        return t.to(torch.device("cuda", device_id)), True
+        return t.to(_accel_device(device_id)), True
 
     def cpp_broadcast(tensors: List[torch.Tensor], root: int, mode: int) -> None:
         """Broadcast tensors from root rank to all ranks in the group.
@@ -445,7 +470,7 @@ def _register_process_groups_to_cpp():
         if pg is None or pg.size() < 2:
             return
         global_root = torch.distributed.get_global_rank(pg, root)
-        device_id = torch.cuda.current_device()
+        device_id = _accel_device_id()
         for t in tensors:
             gpu_t, was_cpu = _ensure_cuda(t, device_id)
             torch.distributed.broadcast(gpu_t, global_root, group=pg)
@@ -482,7 +507,7 @@ def _register_process_groups_to_cpp():
         target = dest if dest is not None else tensor
         if dest is not None:
             target.copy_(tensor)
-        device_id = torch.cuda.current_device()
+        device_id = _accel_device_id()
         gpu_t, was_cpu = _ensure_cuda(target, device_id)
         torch.distributed.all_reduce(
             gpu_t, op=_REDUCE_OPS.get(op, torch.distributed.ReduceOp.SUM), group=pg
@@ -535,9 +560,9 @@ def _register_process_groups_to_cpp():
                     continue
 
             if device_id is None:
-                device_id = torch.cuda.current_device()
+                device_id = _accel_device_id()
             gpu_recv = (
-                recv_buf.to(torch.device("cuda", device_id))
+                recv_buf.to(_accel_device(device_id))
                 if recv_on_cpu
                 else recv_buf
             )
