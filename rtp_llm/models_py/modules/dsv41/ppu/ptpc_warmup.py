@@ -71,6 +71,18 @@ def warmup_resident_ptpc(model):
                     logger.info("PTPC warmup dense N=%d K=%d complete %.3fs", n, k, time.monotonic() - started)
                     del lhs, scales, out
                 for (groups, n, k), op in sorted(grouped.items()):
+                    if getattr(deep_gemm, "_C", None) is not None:
+                        # New C++ JIT owns configuration selection; enumerate
+                        # M through its public provider as for dense GEMMs.
+                        lhs = torch.zeros((groups, maximum, k), device=op.weight.device, dtype=torch.bfloat16).to(torch.float8_e4m3fn)
+                        scales = torch.ones((groups, maximum, 1), device=op.weight.device, dtype=torch.float32)
+                        out = torch.empty((maximum, groups, n), device=op.weight.device, dtype=torch.bfloat16)
+                        for m in range(1, maximum + 1):
+                            op._group_direct_gemm(lhs[:, :m], scales[:, :m], op._group_weight, op._group_scale, out[:m])
+                        torch.cuda.synchronize(op.weight.device)
+                        del lhs, scales, out
+                        logger.info("PTPC warmup grouped H=%d N=%d K=%d M=1..%d complete", groups, n, k, maximum)
+                        continue
                     # The direct per-channel BMM selects configurations in
                     # Python. Deduplicate its exact vendor keys before any
                     # device calls; M remains the unchanged runtime argument.

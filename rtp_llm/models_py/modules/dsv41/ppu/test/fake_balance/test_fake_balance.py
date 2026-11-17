@@ -2,11 +2,14 @@
 
 import os
 import unittest
-from unittest.mock import patch
+from dataclasses import replace
+from types import SimpleNamespace as NS
+from unittest.mock import Mock, patch
 
 import torch
 
-from rtp_llm.models_py.modules.dsv41.ppu.moe import PPUMoE
+from rtp_llm.models_py.modules.dsv41.ppu import moe
+from rtp_llm.models_py.modules.dsv41.ppu.moe import PPUMoE, _DPForwardMegaBuffer
 
 
 def engine(rank=0, enabled=True, backend="grouped"):
@@ -22,6 +25,42 @@ def routes(rows=8):
     weights = torch.zeros((rows, 8), dtype=torch.float32)
     weights[:, :6] = torch.arange(1, 7).float() / 20
     return ids, weights
+
+
+def prepare_double(value, capacity=128, *, generation=1, epoch=1):
+    value._mega_buffer = NS(destroy=Mock())
+    value._mega_device = torch.device('cpu')
+    value._mega_capacity, value._mega_generation, value._dp_prepare_epoch = capacity, generation, epoch
+    receipt = _DPForwardMegaBuffer(value, value._mega_buffer, capacity, capacity, generation, epoch)
+    value._dp_active_preparation = receipt
+    return receipt
+
+
+class _MaskCPU:
+    """Mask/padding transport double; actual Triton/native parity is in device.py."""
+    def __getitem__(self, grid):
+        def run(ids, pattern, output_ids, output_weights, rows, **kwargs):
+            original = ids[:, :6]
+            output_ids[:, :6].copy_(torch.where(original >= 0, pattern[:rows], original))
+            output_weights[:, :6].copy_((original >= 0).float())
+            output_ids[:, 6:].fill_(-1)
+            output_weights[:, 6:].zero_()
+        return run
+
+
+def native_double(value):
+    reference = engine(value._fake_balance_config[2])
+
+    def run(ids, weights):
+        source = torch.zeros_like(ids)
+        expected = reference._apply_fake_balance(source, torch.zeros_like(weights))
+        ids.copy_(expected[0])
+        weights.copy_(expected[1])
+    return Mock(side_effect=run)
+
+
+def kernel_double():
+    return NS(mask_fake_routes=_MaskCPU(), triton=NS(cdiv=lambda a, b: (a + b - 1) // b))
 
 
 class FakeBalanceTest(unittest.TestCase):
@@ -104,6 +143,130 @@ class FakeBalanceTest(unittest.TestCase):
                 PPUMoE(ep_size=8).configure_fake_balance(
                     enabled, top_k=top_k, dp_rank=rank, dp_size=size
                 )
+
+    @torch.no_grad()
+    def test_prefill_pattern_prefix_masks_padding_and_private_outputs(self):
+        for rank in range(8):
+            value = engine(rank, backend='megamoe')
+            receipt = prepare_double(value)
+            value._fake_balance_op = native_double(value)
+            with patch.object(value, '_prefill_fake_device_eligible', return_value=True), patch.object(
+                moe, '_get_triton_kernels', return_value=kernel_double(),
+            ):
+                for rows in (1, 7, 127, 128, 3):
+                    ids, weights = routes(rows)
+                    ids[::2, 1] = -7
+                    ids[0, 3] = torch.iinfo(torch.int64).min
+                    ids[:, 6:] = 93  # The old chain discards even nonnegative padding.
+                    weights[:, :6] = float('nan')
+                    before = ids.clone(), weights.clone()
+                    actual = value._try_prefill_fake_balance(ids, weights, receipt)
+                    expected = engine(rank)._apply_fake_balance(ids, weights)
+                    for new, old in zip(actual, expected):
+                        self.assertTrue(torch.equal(new.view(torch.uint8), old.view(torch.uint8)))
+                        self.assertFalse(torch._C._is_alias_of(new, ids))
+                        self.assertFalse(torch._C._is_alias_of(new, weights))
+                    self.assertTrue(torch.equal(ids, before[0]))
+                    self.assertTrue(torch.equal(weights.view(torch.uint8), before[1].view(torch.uint8)))
+                self.assertEqual(value._fake_balance_op.call_count, 1)
+                self.assertEqual(value._prefill_fake_pattern_builds, 1)
+                self.assertEqual(value._prefill_fake_pattern_calls, 5)
+                # A new forward reuses only the pattern; input masks are read again.
+                value.finish_dp_prefill_forward(receipt)
+                value._dp_prepare_epoch += 1
+                receipt = replace(receipt, epoch=value._dp_prepare_epoch)
+                value._dp_active_preparation = receipt
+                ids, weights = routes(3)
+                ids.fill_(-9)
+                actual = value._try_prefill_fake_balance(ids, weights, receipt)
+                self.assertTrue(torch.all(actual[0][:, :6] == -9))
+                self.assertTrue(torch.all(actual[1] == 0))
+                self.assertEqual(value._fake_balance_op.call_count, 1)
+
+    @torch.inference_mode()
+    def test_prefill_pattern_versions_growth_close_and_expired_receipt(self):
+        value = engine(backend='megamoe')
+        receipt = prepare_double(value)
+        value._fake_balance_op = native_double(value)
+        ids, weights = routes()
+        with patch.object(value, '_prefill_fake_device_eligible', return_value=True), patch.object(
+            moe, '_get_triton_kernels', return_value=kernel_double(),
+        ):
+            value._try_prefill_fake_balance(ids, weights, receipt)
+            pattern = value._prefill_fake_pattern
+            self.assertFalse(pattern.ids.is_inference())
+            self.assertFalse(pattern.weights.is_inference())
+            pattern.ids.add_(1).sub_(1)
+            self.assertIsNone(value._try_prefill_fake_balance(ids, weights, receipt))
+            self.assertEqual(value._fake_balance_op.call_count, 1, 'a mutated generation must not remint')
+            with patch('torch.cuda.synchronize'):
+                value.close()
+            self.assertIsNone(value._prefill_fake_pattern)
+            receipt = prepare_double(value, 256, generation=2, epoch=2)
+            value._try_prefill_fake_balance(ids, weights, receipt)
+            self.assertIsNot(value._prefill_fake_pattern, pattern)
+            self.assertEqual(value._prefill_fake_pattern_builds, 2)
+            current = value._prefill_fake_pattern
+            value._prefill_fake_pattern = replace(current, ids=current.ids.clone())
+            self.assertIsNone(value._try_prefill_fake_balance(ids, weights, receipt))
+            self.assertEqual(value._prefill_fake_pattern_builds, 2)
+            value._prefill_fake_pattern = None
+            self.assertIsNone(value._try_prefill_fake_balance(ids, weights, receipt))
+            self.assertEqual(value._prefill_fake_pattern_builds, 2)
+            value.finish_dp_prefill_forward(receipt)
+            with self.assertRaisesRegex(ValueError, 'stale or insufficient'):
+                value._try_prefill_fake_balance(ids, weights, receipt)
+
+    @torch.no_grad()
+    def test_prefill_admission_declines_before_native_and_launch_errors_do_not_retry(self):
+        value = engine(backend='megamoe')
+        receipt = prepare_double(value)
+        ids, weights = routes()
+        for variant in ('no-receipt', 'noncontiguous', 'int32', 'empty', 'off', 'device', 'grad'):
+            value._fake_balance_config = (variant != 'off', 6, 0, 8)
+            test_ids, test_weights = (ids[::2], weights[::2]) if variant == 'noncontiguous' else (ids, weights)
+            if variant == 'int32':
+                test_ids = ids.int()
+            elif variant == 'empty':
+                test_ids, test_weights = ids[:0], weights[:0]
+            with self.subTest(variant=variant), patch.object(
+                value, '_prefill_fake_device_eligible', return_value=variant != 'device',
+            ), patch('torch.is_grad_enabled', return_value=variant == 'grad'), patch.object(
+                moe, '_get_triton_kernels', side_effect=AssertionError('unsupported provider lookup'),
+            ):
+                self.assertIsNone(value._try_prefill_fake_balance(
+                    test_ids, test_weights, None if variant == 'no-receipt' else receipt,
+                ))
+        value._fake_balance_config = (True, 6, 0, 8)
+        value._fake_balance_op = native_double(value)
+        kernels = kernel_double()
+        kernels.mask_fake_routes = Mock()
+        kernels.mask_fake_routes.__getitem__ = Mock(return_value=Mock(side_effect=RuntimeError('pack launch failed')))
+        with patch.object(value, '_prefill_fake_device_eligible', return_value=True), patch.object(
+            moe, '_get_triton_kernels', return_value=kernels,
+        ), patch.object(value, '_apply_fake_balance', side_effect=AssertionError('retry after launch')):
+            with self.assertRaisesRegex(RuntimeError, 'pack launch failed'):
+                value.forward(torch.zeros(8, 5120), ids, weights, prepared_buffer=receipt)
+
+    @torch.no_grad()
+    def test_prefill_fused_result_still_precedes_eplb_and_native_dispatch(self):
+        value = engine(backend='megamoe')
+        receipt = prepare_double(value)
+        ids, weights = routes()
+        balanced = engine()._apply_fake_balance(ids, weights)
+        physical = balanced[0] + 384
+        with patch.object(value, '_try_prefill_fake_balance', return_value=balanced), patch.object(
+            value, '_apply_fake_balance', side_effect=AssertionError('duplicate override'),
+        ), patch.object(value, '_map_expert_ids', return_value=physical) as remap, patch.object(
+            value, '_forward_megamoe', return_value='done',
+        ) as dispatch:
+            self.assertEqual(value.forward(torch.zeros(8, 5120), ids, weights, layer_id=3,
+                                           prepared_buffer=receipt), 'done')
+        self.assertIs(remap.call_args.args[0], balanced[0])
+        self.assertIs(remap.call_args.args[1], balanced[1])
+        self.assertIs(dispatch.call_args.args[1], physical)
+        self.assertIs(dispatch.call_args.args[2], balanced[1])
+        self.assertIs(dispatch.call_args.kwargs['prepared_buffer'], receipt.buffer)
 
 
 if __name__ == "__main__":

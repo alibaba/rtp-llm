@@ -47,6 +47,7 @@ from .moe import (
     shared_expert_forward,
     sqrtsoftplus_gate,
 )
+from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import env_value as optimization_env_value
 
 _SWIGLU_LIMIT = 10.0
 _FUSED_KV_ROW_PACK_ENV = "RTP_V41_PPU_FUSED_KV_ROW_PACK"
@@ -234,7 +235,7 @@ class PPUOps(V41BackendOps):
         if (
             pool_tag == "swa_kv"
             and descriptor is None
-            and os.environ.get(_FUSED_KV_ROW_PACK_ENV, "0") == "1"
+            and optimization_env_value(_FUSED_KV_ROW_PACK_ENV, "0") == "1"
         ):
             packed = _quant.try_pack_swa_rows(kv)
             if packed is not None:
@@ -242,7 +243,7 @@ class PPUOps(V41BackendOps):
         return _encode_kv(kv, pool_tag=pool_tag, descriptor=descriptor)
 
     def try_encode_rotary_kv(self, kv, freqs, positions, *, global_pool):
-        if os.environ.get(_FUSED_KV_ROW_PACK_ENV, "0") != "1":
+        if optimization_env_value(_FUSED_KV_ROW_PACK_ENV, "0") != "1":
             return None
         return _quant.try_pack_rotary_fp4_rows(kv, freqs, positions, global_pool=global_pool)
 

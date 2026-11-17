@@ -1,5 +1,26 @@
 package(default_visibility = ["//visibility:public"])
 
+[
+    py_test(
+        name = "mega_gate_" + mode + "_test",
+        srcs = ["test_mega_gate.py"],
+        main = "test_mega_gate.py",
+        deps = ["//rtp_llm/models_py:v41_ppu_moe"],
+        env = {
+            "GPU_COUNT": str(gpus),
+            "RTP_V41_TEST_LOCAL_WORKSPACE_DEVICE": str(gpus),
+            "RTP_V41_TEST_MEGAGATE_PERF": str(gpus),
+        },
+        tags = ["manual", "PPU-ZW890P"],
+        timeout = "long",
+        target_compatible_with = select({
+            "@//:using_ppu": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+    )
+    for mode, gpus in [("contracts", 0), ("device", 1)]
+]
+
 py_test(
     name = "ptpc_warmup_test",
     srcs = ["test_ptpc_warmup.py"],
@@ -182,6 +203,7 @@ py_test(
         data = [
             "test_local_prefill_workspace.py",
             "test_local_prefill_rows.py",
+            "test_local_prefill_metadata.py",
             "test_local_prefill_fused.py",
             "test_local_prefill_mhc.py",
             "test_local_prefill_aiu_mhc.py",

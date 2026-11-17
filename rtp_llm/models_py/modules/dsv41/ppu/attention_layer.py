@@ -38,6 +38,10 @@ from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import (
 )
 from rtp_llm.models_py.modules.dsv41.ppu._quant import _bytes_to_sf, is_ppu
 from rtp_llm.models_py.modules.dsv41.ppu import prefill_token_topk as _token_topk
+from rtp_llm.models_py.modules.dsv41.ppu import ops as _step_ops
+from rtp_llm.models_py.modules.dsv41.ppu import packed_attention as _step_packed
+from rtp_llm.models_py.modules.dsv41.ppu import prefill as _step_prefill
+from rtp_llm.models_py.modules.dsv41.ppu.mega_attention import readonly_prefill_positions
 from rtp_llm.models_py.modules.dsv41.ppu.topk import select_tokens
 from rtp_llm.models_py.modules.dsv41.ppu.attention import flash_mla_sparse_fwd_ppu
 from rtp_llm.models_py.modules.dsv41.ppu.rope import try_rotate_inplace as try_rope_
@@ -47,6 +51,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.grouped_projection import (
 )
 from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
     enabled as optimization_enabled,
+    env_value as optimization_env_value,
 )
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import (
     LOCAL_PREFILL_SWA_SEGMENTS_ENV,
@@ -96,9 +101,13 @@ _OPTIMIZED_LATE_FOCUS_LAYERS = (16, 20, 20, 20, 21, 20, 22, 20)
 
 def _local_prefill_dense_projections_enabled(state, cp, x, geometry, *, diagnostic, packed_plan, parallel):
     """Keep the joined FP8 ABI within the existing local eager Prefill route."""
+    from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import DENSE_PROJECTIONS
+
     return (
-        os.environ.get(LOCAL_PREFILL_DENSE_PROJECTIONS_ENV, "0") == "1"
-        and getattr(state, "local_prefill_sg_align", False)
+        (optimization_enabled(DENSE_PROJECTIONS) or (
+            os.environ.get(LOCAL_PREFILL_DENSE_PROJECTIONS_ENV, "0") == "1"
+            and getattr(state, "local_prefill_sg_align", False)
+        ))
         and state.prefill and not state.idle and not torch.is_grad_enabled()
         and not any(getattr(state, flag, False) for flag in (
             "is_graph", "is_graph_commit", "verify", "proposal",
@@ -209,7 +218,7 @@ def _local_swa_stage_ranges(state, cp, layer, full_pos, full_req, real, position
         cache = getattr(state, "cache", None)
         model = getattr(getattr(state, "runtime", None), "model", None)
         return (
-            os.environ.get(LOCAL_PREFILL_SWA_SEGMENTS_ENV, "0") == "1"
+            optimization_env_value(LOCAL_PREFILL_SWA_SEGMENTS_ENV, "0") == "1"
             and packed_plan is None and retain_rows
             and getattr(state, "prefill", False) and not getattr(state, "idle", True)
             and diagnostic is None and not torch.is_grad_enabled()
@@ -313,6 +322,15 @@ def _indexer_request_slices(lengths, rows, requests):
     return tuple(slice(start, stop) for start, stop in zip(boundaries, boundaries[1:]))
 
 
+def _indexer_lookup_rows(request_ids, request, lookup_slices):
+    if lookup_slices is None:
+        return torch.where(request_ids == request)[0]
+    rows = lookup_slices[request]
+    # Keep the legacy advanced-indexing copy semantics. In particular these
+    # ranges do not enable request_slices' tile-prep/direct-output dispatch.
+    return torch.arange(rows.start, rows.stop, dtype=torch.int64, device=request_ids.device)
+
+
 def optimized_diagnostics_enabled():
     value = os.environ.get(OPTIMIZED_DIAGNOSTICS_ENV, "0")
     if value not in ("0", "1"):
@@ -320,6 +338,48 @@ def optimized_diagnostics_enabled():
     if enabled(OPTIMIZED_LATE_FOCUS_ENV) and value != "1":
         raise ValueError(OPTIMIZED_LATE_FOCUS_ENV + "=1 requires " + OPTIMIZED_DIAGNOSTICS_ENV + "=1")
     return value == "1"
+
+
+def _local_step_context_consumer(attn):
+    # Sharing a context changes internal object identity. Only this closed,
+    # read-only production chain may observe it; custom hooks keep the original
+    # per-layer constructor, including its side effects and exceptions.
+    if (
+        type(attn) is not SharedPPUAttention
+        or os.environ.get(OPTIMIZED_DIAGNOSTICS_ENV, "0") != "0"
+        or os.environ.get(OPTIMIZED_LATE_FOCUS_ENV, "0") != "0"
+        or os.environ.get("RTP_V41_PPU_PACKED_ATTENTION", "0") != "0"
+        or any(name in vars(attn) or vars(SharedPPUAttention).get(name) is not original
+               for name, original in _LOCAL_STEP_ATTENTION_METHODS)
+        or any(vars(owner).get(name, _LOCAL_STEP_ABSENT) is not original
+               for owner, name, original in _LOCAL_STEP_BINDINGS)
+        or any(current is not original for current, original in zip(
+            (build_step_context, build_cp_prefill_workspace, _build_reference_workspace,
+             prepare_packed_attention, _indexer_lookup_rows, optimized_diagnostics_enabled),
+            _LOCAL_STEP_GLOBALS,
+        ))
+    ):
+        return False
+    # Plain instance storage avoids invoking a newly installed descriptor
+    # while deciding whether that unknown consumer needs the original path.
+    if "ops" in vars(SharedPPUAttention):
+        return False
+    ops = vars(attn).get("ops")
+    return type(ops) is _LOCAL_STEP_OPS_CLASS and "index_score" not in vars(ops)
+
+
+def _local_step_context(attn, state, cp, rows):
+    from rtp_llm.models_py.modules.dsv41.ppu.prefill_runtime import SharedForwardState
+
+    if (type(state) is SharedForwardState and state.prefill
+            and not state._local_metadata_invalid):
+        if _local_step_context_consumer(attn):
+            cached = state.local_prefill_step_context(cp, rows, builder=build_step_context)
+            if cached is not None:
+                return cached
+        else:
+            state._local_metadata_invalid = True
+    return build_step_context(rows[0], rows[1], rows[2], valid_mask=rows[3])
 
 
 def _optimized_focus_layers(rank):
@@ -657,6 +717,22 @@ class SharedPPUAttention(PPUAttentionProjections):
         self._prefill_meta_shared = None
         self.runtime = None
         self._shared_attention = None
+        self._ppu_mega_attention = None
+
+    def _get_mega_attention(self, table):
+        from rtp_llm.models_py.modules.dsv41.ppu.mega_attention import enabled, prepare
+
+        if not enabled():
+            return None
+        candidate = self._ppu_mega_attention
+        if candidate is not None and candidate.freqs_cis is table and candidate._current():
+            return candidate
+        # Graph warmup prepares immutable weights and resolves the provider.
+        # A cold capture keeps the ordinary path rather than importing/JITing.
+        if torch.cuda.is_current_stream_capturing():
+            return None
+        self._ppu_mega_attention = prepare(self, table)
+        return self._ppu_mega_attention
 
     def _set_prefill_meta_shared(self, meta):
         self._prefill_meta_shared = meta
@@ -665,6 +741,28 @@ class SharedPPUAttention(PPUAttentionProjections):
         # The common builder owns lifetime/workspace propagation. Actual PPU
         # slot geometry comes from SharedNativeCache and each tag's table.
         return _Meta()
+
+    def _shared_prefill_meta_inputs_required(self, *, builder, v4, input_ids, cp_ctx):
+        """The unchanged local PPU stub consumes no generic query metadata."""
+        from rtp_llm.models_py.modules.dsv41.ppu.prefill_runtime import SharedForwardState
+
+        runtime = self.runtime
+        state = getattr(runtime, "current", None)
+        return not (
+            getattr(builder, "__self__", None) is self
+            and getattr(builder, "__func__", None) is _PPU_SHARED_PREFILL_META_STUB
+            and isinstance(state, SharedForwardState)
+            and state.runtime is runtime
+            and getattr(v4, "_ppu_runtime", None) is runtime
+            and runtime.model.v4 is v4
+            and state.inputs.input_ids is input_ids
+            and optimization_env_value("RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA", "0") == "1"
+            and cp_ctx is None and state.context is None and not state.compacted
+            and getattr(v4, "_cp_info", None) is None
+            and getattr(v4, "_cp_size", 1) == 1
+            and not state.local_prefill_sg_align
+            and state._mega_all_live_phase()
+        )
 
     def _layer_weights(self):
         return SimpleNamespace(
@@ -702,7 +800,7 @@ class SharedPPUAttention(PPUAttentionProjections):
 
     def _select(
         self, x, qr, context, cache, shared, *, prefill=False,
-        request_slices=None, allow_tile_prep=True, yoco_small_ops=False, indexer_inputs=None,
+        request_slices=None, lookup_slices=None, allow_tile_prep=True, yoco_small_ops=False, indexer_inputs=None,
         quantized_input=None, local_token_topk=False, local_sg_align=False,
     ):
         g, source = self.geometry, self.kv_source_layer_id
@@ -795,7 +893,7 @@ class SharedPPUAttention(PPUAttentionProjections):
             dense_start = 0
             for rid, count in enumerate(counts):
                 if request_slices is None:
-                    rows = torch.where(context.request_ids == rid)[0]
+                    rows = _indexer_lookup_rows(context.request_ids, rid, lookup_slices)
                     row_count = rows.numel()
                 else:
                     rows = request_slices[rid]
@@ -1017,7 +1115,7 @@ class SharedPPUAttention(PPUAttentionProjections):
             return torch.zeros_like(x).reshape(shape)
         cp = self._cp_ctx if state.prefill else None
         positions, requests, cu, valid = state.rows(cp)
-        context = build_step_context(positions, requests, cu, valid_mask=valid)
+        context = _local_step_context(self, state, cp, (positions, requests, cu, valid))
         diagnostic = None
         if optimized_diagnostics_enabled():
             diagnostic = getattr(self.runtime, "n5_diagnostics", None)
@@ -1057,9 +1155,21 @@ class SharedPPUAttention(PPUAttentionProjections):
             QKVStreams, is_supported as streams_supported,
         )
         parallel = enabled(STREAMS_ENV) and streams_supported(state, x)
+        from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
+            DENSE_PROJECTIONS, NORM_STORE,
+        )
+
+        joined_projection = optimization_enabled(DENSE_PROJECTIONS)
+        deferred_kv_norm = optimization_enabled(NORM_STORE) and diagnostic is None
+        # These producers share raw projection rows. Keep them on one stream
+        # while retaining the existing CP gather and cache-publication order.
+        parallel = parallel and not (joined_projection or deferred_kv_norm)
         if parallel and self.runtime.qkv_streams is None:
             self.runtime.qkv_streams = QKVStreams(x.device)
         frequency_table = self.runtime.freqs_for(self.layer_id)
+        mega = self._get_mega_attention(frequency_table) if diagnostic is None else None
+        if mega is not None:
+            parallel = False
         sg_rope_positions = (
             _local_sg_rope_positions(state, cp, (positions, requests, cu, valid), frequency_table)
             if diagnostic is None and plan is None else None
@@ -1071,14 +1181,22 @@ class SharedPPUAttention(PPUAttentionProjections):
         query_rows = (
             state.local_l20_query_slice(x.shape[0])
             if dense_projections and self.layer_id == 20 and compact_after_producer is not None
-            and self.is_kv_source and self.is_index_source and sg_rope_positions is not None
+            and self.is_kv_source and self.is_index_source
+            # MegaAttention performs query RoPE after the existing compact
+            # callback, using the retained positions. The ordinary route still
+            # requires its qualified position-indexed RoPE consumer.
+            and (mega is not None or sg_rope_positions is not None)
             else None
         )
-        q_rope_positions = sg_rope_positions[query_rows] if query_rows is not None else sg_rope_positions
+        q_rope_positions = (
+            sg_rope_positions[query_rows]
+            if query_rows is not None and sg_rope_positions is not None else sg_rope_positions
+        )
 
         def query_branch(value):
             latent = self.query_latent(value)
-            return latent, self.wq_b(latent).reshape(-1, g.n_heads, g.head_dim)
+            query = mega.project_q(latent) if mega is not None else self.wq_b(latent)
+            return latent, query.reshape(-1, g.n_heads, g.head_dim)
 
         def kv_branch(value):
             return self.kv_norm(self.wkv(value))
@@ -1087,17 +1205,19 @@ class SharedPPUAttention(PPUAttentionProjections):
         projection_receipt = None
         if parallel:
             (qr, q), kv = self.runtime.qkv_streams.run(x, query_branch, kv_branch)
-        elif state.prefill:
+        elif state.prefill or joined_projection or deferred_kv_norm:
             qr, q, kv, indexer_quantized_input = self.project_query_kv(
                 x, reuse_ptpc=True,
                 fuse_qr_norm=bool(use_cp_workspace and cp.cp_size == 8),
                 prepare_indexer=bool(self.compress_ratio and self.is_index_source),
+                defer_kv_norm=deferred_kv_norm,
+                q_projector=mega.project_q if mega is not None else None,
                 **({"fused_qkv": True, "query_rows": query_rows} if dense_projections else {}),
             )
             projection_receipt = {
                 "layer": self.layer_id, "input_rows": x.shape[0],
                 "query_rows": q.shape[0], "kv_rows": kv.shape[0],
-                "joined": bool(dense_projections and getattr(self, "_last_local_prefill_qkv_joined", False)),
+                "joined": bool(getattr(self, "_last_local_prefill_qkv_joined", False)),
             }
             shared.setdefault("dense_projection_calls", []).append(projection_receipt)
             q = q.reshape(-1, g.n_heads, g.head_dim)
@@ -1113,7 +1233,18 @@ class SharedPPUAttention(PPUAttentionProjections):
         if diagnostic is not None:
             diagnostic_q_before, diagnostic_kv_before = q, kv
         rope_backend = "serial_rope"
-        if fused:
+        if mega is not None:
+            # Q is in the private MegaAttention projection layout and has not
+            # been rotated. Ordinary K publication retains its existing order.
+            if not deferred_kv_norm:
+                kv_freqs = frequency_table[positions] if freqs is None else freqs
+                kv = _rope_tail(kv, kv_freqs)
+            rope_backend = "mega_q_rope"
+        elif deferred_kv_norm:
+            q_freqs = frequency_table[q_rope_positions] if q_rope_positions is not None else freqs
+            q = _rope_tail(q, q_freqs)
+            rope_backend = "fused_k_norm_store"
+        elif fused:
             q, kv = qk_rope(q, kv, freqs)
             rope_backend = "triton_fused_qk_rope"
         elif sg_rope_positions is not None:
@@ -1181,6 +1312,7 @@ class SharedPPUAttention(PPUAttentionProjections):
 
         pack_local_swa = (
             full_cp8 and yoco_small_ops
+            and not deferred_kv_norm
             and os.environ.get("RTP_V41_PPU_CP8_YOCO_PACK_LOCAL_SWA", "0") == "1"
         )
         swa_rows = self.ops.encode_kv(kv, pool_tag="swa_kv") if pack_local_swa else kv
@@ -1204,7 +1336,18 @@ class SharedPPUAttention(PPUAttentionProjections):
             full_kv = gather(swa_rows)
             full_pos, full_req, real = state.full_rows(cp)
         packed = full_kv[real]
-        if not pack_local_swa:
+        if deferred_kv_norm:
+            from rtp_llm.models_py.modules.dsv41.ppu.norm_store import try_norm_rope_pack_swa
+
+            pack_freqs = frequency_table[full_pos[real]]
+            fused_packed = try_norm_rope_pack_swa(
+                packed, self.kv_norm.weight, self.kv_norm.variance_epsilon, pack_freqs,
+            )
+            if fused_packed is None:
+                normalized = self.kv_norm(packed, allow_strided=True)
+                fused_packed = self.ops.encode_kv(_rope_tail(normalized, pack_freqs), pool_tag="swa_kv")
+            packed = fused_packed
+        elif not pack_local_swa:
             packed = self.ops.encode_kv(packed, pool_tag="swa_kv")
         stage_positions, stage_requests = full_pos[real], full_req[real]
         stage_options = dict(
@@ -1283,7 +1426,7 @@ class SharedPPUAttention(PPUAttentionProjections):
             # L20 reads exact SWA from the full writes above. The bounded SWA
             # start from the compact context is for the subsequent layers.
             positions, requests, cu, valid = state.rows(cp)
-            context = build_step_context(positions, requests, cu, valid_mask=valid)
+            context = _local_step_context(self, state, cp, (positions, requests, cu, valid))
             frequency_table = self.runtime.freqs_for(self.layer_id)
             sg_rope_positions = (
                 _local_sg_rope_positions(state, cp, (positions, requests, cu, valid), frequency_table)
@@ -1315,9 +1458,17 @@ class SharedPPUAttention(PPUAttentionProjections):
             request_slices = _indexer_request_slices(
                 cp.chunk_lengths_per_req, x.shape[0], len(cache.lengths),
             )
+        lookup_slices = None
+        lookup_provider = getattr(state, "local_indexer_lookup_slices", None)
+        if (self.compress_ratio and request_slices is None and diagnostic is None and plan is None
+                and self.is_index_source and callable(lookup_provider) and len(cache.lengths) == 1):
+            lookup_slices = lookup_provider(
+                cp, (positions, requests, cu, valid), x.shape[0],
+            )
         selected = self._select(
             x, qr, context, cache, shared, prefill=state.prefill,
-            request_slices=request_slices, allow_tile_prep=not (compact_cp8 or local_sg_align),
+            request_slices=request_slices, lookup_slices=lookup_slices,
+            allow_tile_prep=not (compact_cp8 or local_sg_align),
             yoco_small_ops=yoco_small_ops, indexer_inputs=indexer_inputs,
             quantized_input=indexer_quantized_input,
             **({"local_sg_align": True} if local_sg_align else {}),
@@ -1342,6 +1493,18 @@ class SharedPPUAttention(PPUAttentionProjections):
             native_q_shapes = []
         if plan is not None:
             plan.bind_selection(selected)
+            if mega is not None:
+                phase = "prefill" if state.prefill else "decode"
+                reason = mega.decode_reason(q, plan, positions, phase=phase)
+                if reason is None:
+                    projected = mega.decode(q, plan, positions, packed_q=True, phase=phase)
+                    route["attention_backend"] = "ppu_mega_attention_paged"
+                    result = self.wo_b(projected.flatten(1))
+                    cache.release_swa(self.layer_id)
+                    return result.reshape(shape)
+                route["mega_fallback"] = reason
+                q = _rope_tail(mega.unpack_query(q), frequency_table[positions])
+                mega = None
             if diagnostic is not None:
                 native = plan.native
 
@@ -1393,6 +1556,39 @@ class SharedPPUAttention(PPUAttentionProjections):
                     ops=self.ops, cache=cache, layer_id=self.layer_id, geometry=g, context=context,
                     selected_blocks=selected, window=g.window, swa_starts=swa_starts,
                 )
+            if mega is not None:
+                mega_valid = state.mega_attention_valid_mask(cp, valid, q.shape[0])
+                from rtp_llm.models_py.modules.dsv41.ppu.prefill_runtime import SharedForwardState
+
+                reuse_positions = (
+                    type(state) is SharedForwardState and state.prefill
+                    and not state._local_metadata_invalid
+                    and mega_valid is None and readonly_prefill_positions(mega)
+                    and mega.owner is self
+                )
+                if not reuse_positions and type(state) is SharedForwardState:
+                    state._local_metadata_invalid = True
+                reason = mega.prefill_reason(
+                    q, kv_rows, indices, positions, lengths, valid_mask=mega_valid,
+                )
+                if reason is None:
+                    mega_positions = positions
+                    if reuse_positions:
+                        converted = state.local_prefill_positions32(
+                            cp, (positions, requests, cu, valid),
+                        )
+                        if converted is not None:
+                            mega_positions = converted
+                    projected = mega.prefill(
+                        q, kv_rows, indices, mega_positions, lengths, packed_q=True, valid_mask=mega_valid,
+                    )
+                    route["attention_backend"] = "ppu_mega_attention_prefill"
+                    result = self.wo_b(projected.flatten(1))
+                    cache.release_swa(self.layer_id)
+                    return result.reshape(shape)
+                route["mega_fallback"] = reason
+                q = _rope_tail(mega.unpack_query(q), frequency_table[positions])
+                mega = None
             if q8_attention:
                 from rtp_llm.models_py.modules.dsv41.ppu.packed_attention import load_packed_backend
 
@@ -1485,6 +1681,35 @@ class SharedPPUAttention(PPUAttentionProjections):
 
             return forward_graph_attention(self, x, self.runtime.current)
         return self._body(x)
+
+
+# Retain the original function identity even if a class/instance hook changes.
+_PPU_SHARED_PREFILL_META_STUB = SharedPPUAttention._build_shared_prefill_meta
+
+_LOCAL_STEP_ATTENTION_METHODS = tuple(
+    (name, vars(SharedPPUAttention)[name])
+    for name in ("_body", "_select", "_project_indexer")
+)
+_LOCAL_STEP_OPS_CLASS = _step_ops.PPUOps
+_LOCAL_STEP_ABSENT = object()
+_LOCAL_STEP_BINDINGS = tuple(
+    (owner, name, vars(owner).get(name, _LOCAL_STEP_ABSENT))
+    for owner, names in (
+        (_step_prefill, ("build_step_context", "V41StepContext", "_CPPrefillWorkspace",
+                         "build_cp_prefill_workspace", "_build_reference_workspace",
+                         "_local_prefill_workspace_bounds", "_local_prefill_workspace_fusion_supported")),
+        (_step_prefill.V41StepContext, ("__init__", "__new__")),
+        (_step_prefill._CPPrefillWorkspace, ("__init__", "indices")),
+        (_step_ops, ("PPUOps", "_index_score")),
+        (_step_ops.PPUOps, ("index_score",)),
+        (_step_packed, ("prepare_packed_attention", "enabled", "PACKED_ENV")),
+    )
+    for name in names
+)
+_LOCAL_STEP_GLOBALS = (
+    build_step_context, build_cp_prefill_workspace, _build_reference_workspace,
+    prepare_packed_attention, _indexer_lookup_rows, optimized_diagnostics_enabled,
+)
 
 
 def source_identity(cache, source):

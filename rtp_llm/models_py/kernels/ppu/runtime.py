@@ -61,6 +61,13 @@ def install_deep_gemm_build_lock(compiler=None) -> None:
 
     patch_bound_references = compiler is None
     if patch_bound_references:
+        module = importlib.import_module("deep_gemm")
+        if getattr(module, "_C", None) is not None:
+            # Current DeepGEMM owns its JIT in C++. It publishes complete
+            # UUID temporary directories with an atomic rename, so the old
+            # Python compiler hook is neither available nor needed for cache
+            # integrity. Concurrent first-use compilation can still repeat.
+            return
         compiler = importlib.import_module("deep_gemm.jit.compiler")
     original_build = compiler.build
     if getattr(original_build, _SERIALIZED_BUILD_MARKER, False):

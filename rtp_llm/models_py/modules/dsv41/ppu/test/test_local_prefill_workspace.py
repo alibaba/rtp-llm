@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 import torch
 
-from rtp_llm.models_py.modules.dsv41.ppu import attention_layer
+from rtp_llm.models_py.modules.dsv41.ppu import attention_layer, prefill
 from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import SharedNativeCache
 from rtp_llm.models_py.modules.dsv41.ppu.prefill import (
@@ -256,6 +256,68 @@ class _WorkspaceCases:
 
 class LocalPrefillWorkspaceCPU(_WorkspaceCases, unittest.TestCase):
     device = "cpu"
+
+    @torch.no_grad()
+    def test_local_eager_layout_upload_keeps_exact_rows_without_a_plan_cache(self):
+        fixture = _WorkspaceFixture(
+            "cpu", prefixes=(17, 64), lengths=(7, 3), ratio=0, source=None,
+        )
+        cache = SharedNativeCache.__new__(SharedNativeCache)
+        cache.__dict__.update(vars(fixture.cache))
+        cache._is_prefill = True
+        cache.inputs = {"swa_kv": NS(is_cuda_graph=False, is_target_verify=False)}
+        cache.cp8_row_prep_enabled = lambda: False
+        cp = NS(chunk_lengths_per_req=fixture.chunks, prefix_lengths_host=fixture.prefixes)
+        calls = []
+
+        def upload(values, device, dtype):
+            calls.append((tuple(values), device, dtype))
+            return torch.tensor(values, device=device, dtype=dtype)
+
+        # Qualify only the device boundary on CPU; actual layout construction
+        # and request-index selection are exercised unchanged below it.
+        with patch.object(prefill, "_local_prefill_workspace_fusion_supported", return_value=True), patch(
+            "torch.cuda.is_current_stream_capturing", return_value=False,
+        ), patch(
+            "rtp_llm.models_py.modules.dsv41.fp8._v41_swa_metadata._upload", side_effect=upload,
+        ):
+            workspace = prefill._CPPrefillWorkspace(
+                fixture.ops, cache, fixture.geometry, fixture.context, cp,
+                None, 0, 4, {}, full_local_layout=True,
+            )
+        expected_layout = ((0, 0, 0, 14), (10, 0, 10, 61))
+        self.assertEqual(calls, [(expected_layout, torch.device("cpu"), torch.int64)])
+        expected = torch.tensor(expected_layout).index_select(0, fixture.context.request_ids)
+        assert_bytes(self, workspace.row_meta, expected)
+        self.assertIsNone(getattr(cache, "prefill_plans", None))
+
+    @torch.no_grad()
+    def test_layout_upload_preserves_cpu_graph_verify_and_grad_fallbacks(self):
+        fixture = _WorkspaceFixture("cpu", ratio=0, source=None)
+        cp = NS(chunk_lengths_per_req=fixture.chunks, prefix_lengths_host=fixture.prefixes)
+        for reason in ("cpu", "capture", "graph", "verify", "grad"):
+            with self.subTest(reason=reason):
+                cache = SharedNativeCache.__new__(SharedNativeCache)
+                cache.__dict__.update(vars(fixture.cache))
+                cache._is_prefill = True
+                cache.inputs = {"swa_kv": NS(
+                    is_cuda_graph=reason == "graph", is_target_verify=reason == "verify",
+                )}
+                cache.cp8_row_prep_enabled = lambda: False
+                with patch.object(
+                    prefill, "_local_prefill_workspace_fusion_supported", return_value=reason != "cpu",
+                ), patch("torch.is_grad_enabled", return_value=reason == "grad"), patch(
+                    "torch.cuda.is_current_stream_capturing", return_value=reason == "capture",
+                ), patch(
+                    "rtp_llm.models_py.modules.dsv41.fp8._v41_swa_metadata._upload",
+                    side_effect=AssertionError("unsupported layout used pinned upload"),
+                ):
+                    workspace = prefill._CPPrefillWorkspace(
+                        fixture.ops, cache, fixture.geometry, fixture.context, cp,
+                        None, 0, 4, {}, full_local_layout=True,
+                    )
+                expected = torch.tensor([[0, 0, 0, 14]]).expand(7, -1)
+                assert_bytes(self, workspace.row_meta, expected)
 
     def test_admission_preserves_diagnostics_decode_cp_and_missing_source(self):
         fixture = _WorkspaceFixture("cpu")

@@ -20,7 +20,9 @@ from rtp_llm.models_py.modules.dsv41.ppu.layers import (
 from rtp_llm.models_py.modules.dsv41.ppu.mhc import _prefer_triton
 from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
 from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
+    VERIFY_MEGA_MHC,
     enabled as optimization_enabled,
+    env_value as optimization_env_value,
 )
 from rtp_llm.utils.model_weight import W
 
@@ -31,7 +33,7 @@ LOCAL_PREFILL_ENGRAM_GATE_ENV = "RTP_V41_PPU_LOCAL_PREFILL_ENGRAM_GATE"
 
 def _local_prefill_engram_gate_enabled(state):
     if (
-        os.environ.get(LOCAL_PREFILL_ENGRAM_GATE_ENV, "0") != "1"
+        optimization_env_value(LOCAL_PREFILL_ENGRAM_GATE_ENV, "0") != "1"
         or not getattr(state, "prefill", False) or getattr(state, "idle", True)
         or any(getattr(state, name, False) for name in (
             "is_graph", "is_graph_commit", "verify", "proposal",
@@ -262,32 +264,63 @@ class SharedPPUBlock(Block):
 
     def forward_decode(self, x, attn_metadata, input_ids, expert_load=None, **kwargs):
         state = self.attn.runtime.current
-        if getattr(state, "is_graph", False):
-            self.bind_execution_context(
-                "decode", is_cuda_graph=True,
-                speculative=self.attn.runtime.model._is_speculative,
-            )
+        graph = getattr(state, "is_graph", False)
+        target_verify = (
+            getattr(state, "verify", False)
+            and not getattr(state, "proposal", False)
+            and not getattr(state, "is_graph_commit", False)
+            and not any(name in kwargs for name in ("_prepared_attn", "_defer_ffn_post"))
+            and kwargs.get("routing_metadata") is None
+            and kwargs.get("attn_fn") is None
+            and not (set(kwargs) - {"kv_cache", "routing_metadata", "attn_fn"})
+        )
+        if target_verify and optimization_enabled(VERIFY_MEGA_MHC):
+            from rtp_llm.models_py.modules.dsv41.ppu.attention_layer import optimized_diagnostics_enabled
+
+            target_verify = not optimized_diagnostics_enabled()
+        self.bind_execution_context(
+            "decode", is_cuda_graph=graph,
+            speculative=self.attn.runtime.model._is_speculative,
+            target_verify=target_verify,
+        )
+        if graph:
             if not getattr(state, "bulk_counters", False):
                 state.layer_calls[self.layer_id].add_(1)
-            return super().forward_decode(
-                x, attn_metadata, input_ids, expert_load=expert_load, **kwargs
-            )
-        state.executed_layers.append(self.layer_id)
-        self.bind_execution_context("decode", speculative=state.runtime.model._is_speculative)
-        if self.layer_id in state.v4.capture_aux_hidden_layer_ids:
-            state.v4.capture_aux_hidden(self.layer_id, x)
-        if self.engram is not None:
-            schedule = getattr(state, "engram_round_schedule", None)
-            self.engram.prefetch(self.engram_hashes,
-                                 **({"round_schedule": schedule} if schedule is not None else {}))
-        return super().forward_decode(
-            x, attn_metadata, input_ids, expert_load=expert_load, **kwargs
+        else:
+            state.executed_layers.append(self.layer_id)
+            if self.layer_id in state.v4.capture_aux_hidden_layer_ids:
+                state.v4.capture_aux_hidden(self.layer_id, x)
+            if self.engram is not None:
+                schedule = getattr(state, "engram_round_schedule", None)
+                self.engram.prefetch(self.engram_hashes,
+                                     **({"round_schedule": schedule} if schedule is not None else {}))
+        from rtp_llm.models_py.modules.dsv41.ppu.decode_mhc import (
+            finish_decode_boundary,
+            prepare_decode_boundary,
         )
 
+        prepared, target, scope = prepare_decode_boundary(
+            self, state, x, attn_metadata, input_ids, kwargs,
+        )
+        if prepared is not None:
+            kwargs["_prepared_attn"] = prepared
+        if target is not None:
+            kwargs["_defer_ffn_post"] = True
+        result = super().forward_decode(
+            x, attn_metadata, input_ids, expert_load=expert_load, **kwargs
+        )
+        if target is not None:
+            return finish_decode_boundary(self, state, result, target, scope)
+        return result
+
     def bind_execution_context(
-        self, phase, *, ced=False, speculative=False, is_cuda_graph=False
+        self, phase, *, ced=False, speculative=False, is_cuda_graph=False,
+        target_verify=False,
     ):
         """Report the actual execution phase to the PPU mHC adapter."""
+        if target_verify and optimization_enabled(VERIFY_MEGA_MHC):
+            self._mhc_phase = "graph_verify" if is_cuda_graph else "verify"
+            return
         self._mhc_phase = (
             "dspark" if speculative else
             "graph" if is_cuda_graph else
@@ -322,7 +355,9 @@ class SharedPPUBlock(Block):
         if original_tokens is not None or moe_inputs is not None:
             phase = "unqualified_metadata"
         original_shape = residual.shape
-        decode_view = residual.ndim == 4 and residual.shape[1] == 1
+        decode_view = residual.ndim == 4 and (
+            residual.shape[1] == 1 or phase in ("verify", "graph_verify")
+        )
         native_state = replace(
             state, hidden=None,
             pre_mix=state.pre_mix.reshape(-1, state.pre_mix.shape[-1]),

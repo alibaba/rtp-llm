@@ -51,6 +51,44 @@ def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def flashmla_build_identity(dist, receipt_path):
+    """Admit an explicit private MegaAttention build by installed-file identity.
+
+    This records provenance only; it does not qualify numerical behavior.
+    The historical release version remains the default without this receipt.
+    """
+    if not receipt_path:
+        raise ValueError("new FlashMLA requires RTP_V41_PPU_FLASHMLA_BUILD_RECEIPT")
+    receipt = json.loads(Path(receipt_path).read_text())
+    root = Path(dist.locate_file("")).resolve()
+    if (
+        receipt.get("source_pin") != "a7cc971df379292a603d0c36de10dd0185b0a627"
+        or receipt.get("evidence") != "BUILT_WHEEL_FILE_INSPECTION_ONLY_NO_KERNEL_EXECUTION"
+        or Path(receipt["installed"]).resolve() != root
+    ):
+        raise ValueError("FlashMLA build receipt identity differs")
+    files = receipt["files"]
+    required = {"flash_mla/__init__.py", "flash_mla/fused_norm_rope_attn_rope_cast.py"}
+    native = importlib.import_module("flash_mla_cuda")
+    native_path = Path(native.__file__).resolve()
+    required.add(str(native_path.relative_to(root)))
+    if not required.issubset(files):
+        raise ValueError("FlashMLA build receipt omits required installed files")
+    for name, expected in files.items():
+        relative = Path(name)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("invalid FlashMLA receipt path")
+        if sha256(root / relative) != expected:
+            raise ValueError(f"FlashMLA installed hash differs: {name}")
+    fused = importlib.import_module("flash_mla.fused_norm_rope_attn_rope_cast")
+    if Path(fused.__file__).resolve() != root / "flash_mla/fused_norm_rope_attn_rope_cast.py":
+        raise ValueError("FlashMLA fused module loaded outside the private build")
+    if not all(callable(getattr(fused, name, None)) for name in ("prefill", "decode")):
+        raise ValueError("FlashMLA fused attention entry points are missing")
+    return {"source_pin": receipt["source_pin"], "receipt": str(receipt_path),
+            "evidence": "INSTALLED_BUILD_IDENTITY_ONLY"}
+
+
 def checkpoint_metadata(path, expected=None):
     path = Path(path)
     config_hash = sha256(path / "config.json")
@@ -365,7 +403,12 @@ def collect_report(env=None, *, probe_allocations=False, require_backend=False):
             # W4A8 requires the newer DeepGEMM-for-sail surface. Probe its
             # actual imported symbols below and retain package provenance;
             # the original release wheel is still accepted for W4A4.
-            if name != "deep-gemm":
+            build_identity = None
+            if name == "flash-mla" and dist.version != version:
+                build_identity = flashmla_build_identity(
+                    dist, env.get("RTP_V41_PPU_FLASHMLA_BUILD_RECEIPT")
+                )
+            elif name != "deep-gemm":
                 require(dist.version == version, f"{name}: {dist.version} != {version}")
             return {
                 "version": dist.version,
@@ -373,6 +416,7 @@ def collect_report(env=None, *, probe_allocations=False, require_backend=False):
                 "record_sha256": hashlib.sha256(
                     (dist.read_text("RECORD") or "").encode()
                 ).hexdigest(),
+                **({"build_identity": build_identity} if build_identity else {}),
             }
 
         check(f"wheel:{name}", wheel)

@@ -1,4 +1,4 @@
-"""Drive the native CP8 Prefill and DP8 DSpARK 128K step sweeps."""
+"""Drive the native cached Prefill and DP8 DSpARK 128K step sweeps."""
 
 import argparse
 import asyncio
@@ -20,6 +20,10 @@ from pathlib import Path
 from rtp_llm.test.perf_test import dsv41_ppu_reference_results as result
 
 MODULE = "rtp_llm.test.perf_test.dsv41_ppu_reference"
+PREFILL_PROFILES = ("cp8-compact140", "cp8-yoco-off", "dp8-compact140")
+OWNER_PORT_STRIDE = 9
+DP_PREQUEUE_ENV = "RTP_V41_REFERENCE_DP_PREQUEUE_MS"
+DP_FIRST_PREQUEUE_ENV = "RTP_V41_REFERENCE_DP_FIRST_PREQUEUE_MS"
 SSH = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15"]
 WORDS = "hello world apple tree river blue yellow cat dog time year one two city day street house sky water".split()
 ASYNC_FLAGS = {
@@ -27,7 +31,7 @@ ASYNC_FLAGS = {
     "RTP_LLM_MTP_ASYNC_PREPARE": "enabled",
     "RTP_LLM_DEVICE_INPUT": "enabled",
 }
-HEALTH_PROBE = """
+HEALTH_PROBE = f"""
 import json
 import sys
 from pathlib import Path
@@ -37,10 +41,10 @@ if len(sys.argv) == 4:
     capacity = Path(sys.argv[3]) / 'capacity.json'
     if not capacity.is_file() or not json.loads(capacity.read_text())['admissible']:
         sys.exit(1)
-opener = build_opener(ProxyHandler({}))
+opener = build_opener(ProxyHandler({{}}))
 try:
     for rank in range(size):
-        with opener.open(f'http://127.0.0.1:{port + rank * 9}/health', timeout=2) as response:
+        with opener.open(f'http://127.0.0.1:{{port + rank * {OWNER_PORT_STRIDE}}}/health', timeout=2) as response:
             if response.status != 200:
                 sys.exit(1)
 except OSError:
@@ -58,20 +62,49 @@ def read(path):
     return json.loads(path.read_text())
 
 
-def case_config(phase, point):
+def owner_addresses(address, count):
+    host, port = address.rsplit(":", 1)
+    return [f"{host}:{int(port) + rank * OWNER_PORT_STRIDE}" for rank in range(count)]
+
+
+def case_config(phase, point, prefill_profile=PREFILL_PROFILES[0], *, prefill_sampling="waves"):
     decode = phase == "decode"
-    batch = point if decode else point // result.FRESH
-    return {
+    legacy_prefill = prefill_profile == PREFILL_PROFILES[0]
+    dp_prefill = not decode and prefill_profile == "dp8-compact140"
+    yoco_off = not decode and prefill_profile == "cp8-yoco-off"
+    batch = point if decode else point // result.FRESH * (result.WORLD if yoco_off else 1)
+    case = {
         "phase": phase, "point": point, "batch": batch,
-        "global_requests": batch * result.WORLD if decode else batch,
+        "global_requests": batch * result.WORLD if decode or dp_prefill else batch,
         "context": result.CONTEXT, "cached_prefix": result.PREFIX,
         "prefill_new_per_request": result.FRESH, "max_seq_len": result.MAX_SEQUENCE,
         "warmup_steps": result.WARMUP[phase], "measure_steps": result.MEASURE[phase],
-        "dspark_gamma": 3 if decode else 5,
-        "prefill_cp": 8, "decode_dp": 8, "ep": 8, "enp": 8,
-        "yoco_keep_tokens": 140, "decode_graph": decode,
+        "dspark_gamma": 3 if decode else (5 if legacy_prefill else 0),
+        "prefill_cp": 1 if dp_prefill else 8, "decode_dp": 8, "ep": 8, "enp": 8,
+        "yoco_keep_tokens": 0 if yoco_off else 140, "decode_graph": decode,
         "optimization_profile": "dspark-grouped-graph-async" if decode else "compact140-fp4-megamoe",
     }
+    if not decode:
+        if yoco_off:
+            case["optimization_profile"] = "yoco-off-fp4-megamoe"
+        case.update(
+            prefill_profile=prefill_profile,
+            prefill_dp=result.WORLD if dp_prefill else 1,
+            fresh_tokens_total=case["global_requests"] * result.FRESH,
+            point_unit="fresh_tokens_per_group" if legacy_prefill else "fresh_tokens_per_ppu",
+        )
+    if prefill_sampling == "sglang-gist":
+        if phase != "prefill" or not dp_prefill or point != 4096:
+            raise ValueError("SGLang gist sampling currently requires DP8 Prefill at 4096 tokens/rank")
+        case.update(
+            prefill_sampling=prefill_sampling, warmup_steps=8, measure_steps=496,
+            fake_balance_expert=True, window_fractions=[0.2, 0.9],
+            requests_per_rank=496,
+            sampling_transport="eight balanced RPC batches; native rank receipts verified",
+        )
+    elif prefill_sampling != "waves":
+        raise ValueError(f"unknown Prefill sampling: {prefill_sampling}")
+    return case
 
 
 def role_env(config):
@@ -90,6 +123,7 @@ def role_env(config):
         "RTP_V41_SHARED_EVIDENCE_DIR", "RTP_V41_SHARED_VALIDATE_STATE",
         "RTP_V41_DSPARK_OBSERVE_DIR", "RTP_V41_PERF_EVIDENCE_DIR",
         "RTP_V41_REFERENCE_PERF_DIR", "ACCL_USE_NICS",
+        "RTP_V41_PPU_YOCO_KEEP_TOKENS",
     ):
         parent.pop(key, None)
     backend = "grouped" if decode else "megamoe"
@@ -103,10 +137,14 @@ def role_env(config):
     env = preset_env(
         role, config["checkpoint"], parent=parent,
         start_port=int(node["address"].rsplit(":", 1)[1]),
-        max_seq_len=case["max_seq_len"], ced_mode="bounded", yoco_keep_tokens=140,
+        max_seq_len=case["max_seq_len"],
+        prefill_parallel="cp" if case["prefill_cp"] == result.WORLD else "dp",
+        ced_mode="bounded" if case["yoco_keep_tokens"] else "off",
+        yoco_keep_tokens=case["yoco_keep_tokens"] or None,
         dspark_gamma=case["dspark_gamma"], dspark_confidence="off",
-        dspark_verify_mode="dense", fake_balance_expert=False,
-        kv_cache_sharded=True, shared_grouped_graph=decode, shared_graph_async=decode, **options,
+        dspark_verify_mode="dense", fake_balance_expert=case.get("fake_balance_expert", False),
+        kv_cache_sharded=case["prefill_cp"] == result.WORLD,
+        shared_grouped_graph=decode, shared_graph_async=decode, **options,
     )
     p_batch = min(case["global_requests"], 16) if paired else batch
     kv_budget = node.get("kv_cache_mem_mb_by_batch", {}).get(str(batch), node.get("kv_cache_mem_mb", 8192))
@@ -118,7 +156,9 @@ def role_env(config):
         KV_CACHE_MEM_MB=str(kv_budget), RESERVE_BLOCK_RATIO="5",
         MAX_CONTEXT_BATCH_SIZE=str(1 if decode else p_batch),
         MAX_BATCH_TOKENS_SIZE=str(result.CONTEXT * (1 if decode else p_batch) + 1),
-        CONCURRENCY_LIMIT=str(batch if decode else max(16, case["global_requests"])),
+        CONCURRENCY_LIMIT=str(batch if decode else max(
+            16, case["global_requests"], case.get("requests_per_rank", 0)
+        )),
         **dict.fromkeys(ASYNC_FLAGS, str(int(decode))),
         RTP_V41_PPU_MHC_BACKEND="mega", RTP_V41_PPU_GRAPH_MEGA_MHC="1",
         RTP_V41_PPU_PREFILL_DENSE_FP4_SCORE="1", RTP_V41_PPU_PREFILL_SPARSE_FP4_SCORE="1",
@@ -216,6 +256,10 @@ def serve(config):
         "env": {key: value for key, value in env.items() if key.startswith("RTP_V41_") or key in ASYNC_FLAGS or key in (
             "USE_BATCH_DECODE_SCHEDULER", "REUSE_CACHE", "DECODE_CAPTURE_CONFIG", "CONCURRENCY_LIMIT",
             "KV_CACHE_MEM_MB", "RESERVE_BLOCK_RATIO", "MAX_CONTEXT_BATCH_SIZE", "MAX_BATCH_TOKENS_SIZE",
+            "DSV41_CED", "DSV41_SWA_BOUNDED_REPLAY", "DP_SIZE", "EP_SIZE", "PREFILL_CP_SIZE",
+            "SP_TYPE", "GEN_NUM_PER_CIRCLE", "FAKE_BALANCE_EXPERT",
+            "RTP_LLM_SCHEDULER_POLL_INTERVAL_MS",
+            "DSV4_RECORD_FUNCTION_RANGES", "LOG_LEVEL", "ENGINE_CPU_AFFINITY",
         )},
     })
     with DeviceResource(8) as lease:
@@ -275,6 +319,28 @@ def prompt(index=None):
     return prefix + salt + tail
 
 
+def dp_prefill_prime_steps(tokenizer, prime_tokens):
+    words = prompt().split()
+    # A full4096 seed adds one lookahead row and permanently grows MegaMoE
+    # to8192. Page-aligned3840 increments keep setup below the measured4096
+    # capacity, matching the reference's fixed workspace. The final256-row
+    # remainder still creates exactly PREFIX cached tokens before timing.
+    previous = 0
+    for boundary in (*range(3840, result.PREFIX, 3840), result.PREFIX):
+        # The trailing space is one lookahead token. It leaves a full cache
+        # page at the boundary without matching the next stage's first token.
+        text = " ".join(words[:boundary]) + " "
+        tokens = tokenizer.encode(text).ids
+        if (
+            len(tokens) != boundary + 1
+            or tokens[:boundary] != prime_tokens[:boundary]
+            or (boundary < result.PREFIX and tokens[boundary] == prime_tokens[boundary])
+        ):
+            raise ValueError(f"DP Prefill seed has invalid token geometry at {boundary} tokens")
+        yield text, boundary + 1, previous
+        previous = boundary
+
+
 def generation_config(tokens, *, paired):
     return {
         "max_new_tokens": tokens, "min_new_tokens": tokens, "ignore_eos": True,
@@ -300,6 +366,20 @@ def validate_http(response, length, output, *, paired, prefix=None):
     ) if key in aux}
 
 
+def dp_prequeue_ms(case, environment, *, first_wave=False):
+    if case.get("prefill_profile") != "dp8-compact140":
+        return 0
+    milliseconds = int(environment.get(DP_PREQUEUE_ENV, "0"))
+    if not 0 <= milliseconds <= 10000:
+        raise ValueError(f"{DP_PREQUEUE_ENV} must be between 0 and 10000 milliseconds")
+    if first_wave:
+        first = int(environment.get(DP_FIRST_PREQUEUE_ENV, str(milliseconds)))
+        if not milliseconds <= first <= 10000:
+            raise ValueError(f"{DP_FIRST_PREQUEUE_ENV} must be between the normal gate and 10000 milliseconds")
+        return first
+    return milliseconds
+
+
 async def load(config):
     import httpx
     from tokenizers import Tokenizer
@@ -307,10 +387,19 @@ async def load(config):
     case = config["case"]
     paired = case["phase"] == "decode"
     batch, count = case["batch"], case["global_requests"]
-    prefill = "http://" + config["prefill_address"]
+    prequeue_ms = dp_prequeue_ms(case, os.environ)
+    first_prequeue_ms = dp_prequeue_ms(case, os.environ, first_wave=True)
+    experiment = {"dp_prequeue_ms": prequeue_ms} if prequeue_ms else {}
+    if prequeue_ms:
+        experiment["dp_first_prequeue_ms"] = first_prequeue_ms
+    if case.get("prefill_profile") == "dp8-compact140":
+        experiment["dp_prime_chunk_tokens"] = 3840
+    prefill_owners = ["http://" + address for address in owner_addresses(
+        config["prefill_address"], case.get("prefill_dp", 1)
+    )]
+    prefill = prefill_owners[0]
     decode = f"http://{config['decode_address']}"
     output = Path(config["output"]) / "http.json"
-    waves = []
     tokenizer = Tokenizer.from_file(str(Path(config["checkpoint"]) / "tokenizer.json"))
     prime = tokenizer.encode(prompt()).ids
     for index in (0, count - 1, 239):
@@ -319,57 +408,164 @@ async def load(config):
                 or target[:result.PREFIX] != prime[:-1] or target[result.PREFIX] == prime[-1]):
             raise ValueError("benchmark prompts differ from exact checkpoint token geometry")
     timeout = config["timeout"]
-    limits = httpx.Limits(max_connections=count, max_keepalive_connections=min(count, 32))
+    limits = httpx.Limits(max_connections=count + int(bool(prequeue_ms)), max_keepalive_connections=min(count, 32))
     async with httpx.AsyncClient(limits=limits, timeout=timeout, trust_env=False) as client:
-        async def post(url, payload):
-            response = await client.post(url, json=payload)
+        async def post(url, **kwargs):
+            response = await client.post(url, **kwargs)
             if response.status_code != 200:
                 raise RuntimeError(f"{url} HTTP {response.status_code}: {response.text[:300]}")
             return response.json()
 
         async def set_batch(url, size, mode):
-            receipt = await post(url + "/update_scheduler_info", {"batch_size": size, "mode": mode})
-            if receipt.get("status", "ok") != "ok" or receipt.get("error_code"):
+            receipt = await post(url + "/update_scheduler_info", json={"batch_size": size, "mode": mode})
+            if receipt.get("status", "ok") != "ok" or receipt.get("error_code") or receipt.get("error"):
                 raise RuntimeError(f"batch scheduler rejected {mode} {size}: {receipt}")
 
-        async def generate(text, tokens, length):
-            response = await post(prefill + "/", {
+        async def generate(url, text, tokens, length, *, prefix=None):
+            response = await post(url + "/", json={
                 "prompt": text, "generate_config": generation_config(tokens, paired=paired),
             })
-            return validate_http(response, length, tokens, paired=paired)
+            return validate_http(response, length, tokens, paired=paired, prefix=prefix)
 
-        for _ in range(result.WORLD if paired else 1):
-            waves.append(await generate(prompt(), 2 if paired else 1, result.PREFIX + 1))
-        save(output, {"priming": waves})
         if paired:
+            priming = [await generate(prefill, prompt(), 2, result.PREFIX + 1) for _ in range(result.WORLD)]
+            save(output, {"priming": priming})
             await set_batch(decode, batch, "decode")
             measured = await asyncio.gather(*(
-                generate(prompt(index), result.OUTPUT, result.CONTEXT) for index in range(count)
+                generate(prefill, prompt(index), result.OUTPUT, result.CONTEXT) for index in range(count)
             ))
         else:
-            await set_batch(prefill, batch, "prefill")
+            if case.get("prefill_profile") == "dp8-compact140":
+                priming = []
+                for text, length, prefix in dp_prefill_prime_steps(tokenizer, prime):
+                    receipts = await asyncio.gather(*(
+                        generate(url, text, 1, length, prefix=prefix) for url in prefill_owners
+                    ))
+                    priming.extend(dict(receipt, **(
+                        {"frontend_owner": rank} if case.get("prefill_sampling") == "sglang-gist"
+                        else {"rank": rank}
+                    )) for rank, receipt in enumerate(receipts))
+                    save(output, {"priming": priming})
+            else:
+                priming = [await generate(prefill, prompt(), 1, result.PREFIX + 1)]
+            save(output, dict(experiment, priming=priming))
+            # This endpoint broadcasts the batch size to every DP owner.
+            if not prequeue_ms:
+                await set_batch(prefill, batch, "prefill")
             measured = []
-            for wave in range(case["warmup_steps"] + case["measure_steps"]):
-                prompts = [prompt(wave * batch + index) for index in range(batch)]
-                response = await post(prefill + "/batch_infer", {
-                    "prompt_batch": prompts, "generate_config": generation_config(1, paired=False),
-                })
-                rows = response["response_batch"]
-                if len(rows) != batch:
-                    raise ValueError(f"incomplete prefill wave {wave}")
-                measured.extend(validate_http(row, result.CONTEXT, 1, paired=False, prefix=result.PREFIX) for row in rows)
-                save(output, {"priming": waves, "requests": measured})
-        save(output, {"priming": waves, "requests": measured})
+            gist_sampling = case.get("prefill_sampling") == "sglang-gist"
+            waves = case["warmup_steps"] + (0 if gist_sampling else case["measure_steps"])
+            for wave in range(waves):
+                # Serialize before dispatch so rank-local request preparation
+                # does not stagger the batch across owners in the event loop.
+                payloads = []
+                for rank in range(len(prefill_owners)):
+                    first = wave * count + rank * batch
+                    payloads.append(json.dumps({
+                        "prompt_batch": [prompt(first + index) for index in range(batch)],
+                        "generate_config": generation_config(1, paired=False),
+                    }).encode())
+                if prequeue_ms:
+                    await set_batch(prefill, batch + 1, "prefill")
+                requests = [
+                    post(url + "/batch_infer", content=payload, headers={"Content-Type": "application/json"})
+                    for url, payload in zip(prefill_owners, payloads)
+                ]
+                if prequeue_ms:
+                    pending = [asyncio.create_task(request) for request in requests]
+                    try:
+                        # Cold batch-infer tokenization can skew the very
+                        # first warmup's owner arrival. This gate is outside
+                        # native timing; all later waves retain the same delay.
+                        delay = first_prequeue_ms if wave == 0 else prequeue_ms
+                        await asyncio.sleep(delay / 1000)
+                        for task in pending:
+                            if task.done():
+                                task.result()
+                                raise RuntimeError(f"Prefill wave {wave} finished before the DP admission gate opened")
+                        await set_batch(prefill, batch, "prefill")
+                        responses = await asyncio.gather(*pending)
+                    finally:
+                        for task in pending:
+                            task.cancel()
+                        await asyncio.gather(*pending, return_exceptions=True)
+                else:
+                    responses = await asyncio.gather(*requests)
+                for rank, response in enumerate(responses):
+                    rows = response["response_batch"]
+                    if len(rows) != batch:
+                        raise ValueError(f"incomplete prefill wave {wave} on rank {rank}")
+                    measured.extend(
+                        dict(validate_http(row, result.CONTEXT, 1, paired=False, prefix=result.PREFIX),
+                             **({"frontend_owner": rank} if gist_sampling else {"rank": rank}), wave=wave)
+                        for row in rows
+                    )
+                save(output, dict(experiment, priming=priming, requests=measured))
+            if gist_sampling:
+                # Queue eight whole measurement batches. Frontend owner IDs
+                # need not equal backend ranks; native receipts validate all
+                # eight ranks received the same number of complete steps. The native
+                # scheduler remains fixed at one request/4096 fresh tokens per
+                # rank, so the central window contains no client wave gates.
+                # Eight warmup requests + 496 measured requests on eight ranks
+                # fit the existing 12-bit suffix salt without any repetition.
+                queued = case["requests_per_rank"]
+                payloads = [json.dumps({
+                    "prompt_batch": [prompt(case["warmup_steps"] * count + rank * queued + index)
+                                     for index in range(queued)],
+                    "generate_config": generation_config(1, paired=False),
+                }).encode() for rank in range(len(prefill_owners))]
+                responses = await asyncio.gather(*(
+                    post(url + "/batch_infer", content=payload,
+                         headers={"Content-Type": "application/json"})
+                    for url, payload in zip(prefill_owners, payloads)
+                ))
+                for rank, response in enumerate(responses):
+                    rows = response["response_batch"]
+                    if len(rows) != queued:
+                        raise ValueError(f"incomplete queued Prefill on rank {rank}: {len(rows)}/{queued}")
+                    measured.extend(
+                        dict(validate_http(row, result.CONTEXT, 1, paired=False, prefix=result.PREFIX),
+                             frontend_owner=rank, wave=case["warmup_steps"] + index)
+                        for index, row in enumerate(rows)
+                    )
+        save(output, dict(experiment, priming=priming, requests=measured))
+
+
+def prefill_case_result(path, case):
+    local_chunk = case["batch"] * result.FRESH
+    if case.get("prefill_sampling") == "sglang-gist":
+        result.qualify_prefill_optimizations(
+            path, local_chunk, yoco=bool(case["yoco_keep_tokens"]),
+            expected_steps=case["warmup_steps"] + case["measure_steps"],
+        )
+        return result.gist_prefill_result(path, local_chunk, case)
+    result.qualify_prefill_optimizations(path, local_chunk, yoco=bool(case["yoco_keep_tokens"]))
+    metrics = result.prefill_result(path, local_chunk, owners=case["prefill_dp"])
+    if case.get("prefill_profile") == "dp8-compact140":
+        http = read(path / "http.json")
+        prequeue_ms = http.get("dp_prequeue_ms", 0)
+        if prequeue_ms:
+            for wave, steps in enumerate(zip(*metrics["sample_steps_by_rank"])):
+                if len(set(steps)) != 1:
+                    raise ValueError(f"prequeued DP Prefill measured wave {wave} has different owner steps: {steps}")
+            metrics.update(dp_prequeue_ms=prequeue_ms,
+                           dp_first_prequeue_ms=http.get("dp_first_prequeue_ms", prequeue_ms),
+                           dp_prequeue_same_native_step=True)
+    return metrics
 
 
 def command(node, action, config):
     runtime = node["runtime"]
     python = node.get("python", "/opt/conda312/bin/python")
+    acquire_timeout = node.get("gpu_acquire_timeout_seconds", 180)
+    if type(acquire_timeout) is not int or not 1 <= acquire_timeout <= 3600:
+        raise ValueError("gpu_acquire_timeout_seconds must be an integer from 1 to 3600")
     environment = {
         **node.get("environment", {}), "RTP_V41_TEST_RUNTIME": runtime,
         "PYTHONPATH": ":".join([runtime, *node.get("pythonpath", [])]),
         "CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7", "GPU_COUNT": "8",
-        "PYTHONDONTWRITEBYTECODE": "1", "RTP_GPU_ACQUIRE_TIMEOUT": "180",
+        "PYTHONDONTWRITEBYTECODE": "1", "RTP_GPU_ACQUIRE_TIMEOUT": str(acquire_timeout),
     }
     child = ["env", *(f"{key}={value}" for key, value in environment.items()),
              python, "-B", "-m", MODULE, action, json.dumps(config)]
@@ -381,9 +577,10 @@ def command(node, action, config):
 def wait_ready(process, config, timeout):
     node, role = config["node"], config["role"]
     port = node["address"].rsplit(":", 1)[1]
+    owners = result.WORLD if role == "decode" else config["case"].get("prefill_dp", 1)
     remote = ["pouch", "exec", "--user", "0", node["container"],
               node.get("python", "/opt/conda312/bin/python"), "-B", "-c", HEALTH_PROBE,
-              port, "8" if role == "decode" else "1"]
+              port, str(owners)]
     if role == "decode":
         remote.append(config["output"])
     probe = [*SSH, node["ssh"], shlex.join(remote)]
@@ -469,8 +666,7 @@ def run_case(args, deployment, case, directory):
         if failures:
             raise RuntimeError("; ".join(failures))
         if case["phase"] == "prefill":
-            result.qualify_prefill_optimizations(directory / "prefill", case["point"])
-            row.update(result.prefill_result(directory / "prefill", case["point"]))
+            row.update(prefill_case_result(directory / "prefill", case))
         else:
             flags = read(directory / "decode" / "async-flags.json")
             if not all(set(flags[key]) == set(map(str, range(result.WORLD))) for key in ASYNC_FLAGS):
@@ -508,7 +704,12 @@ def main(argv=None):
     parser.add_argument("--protocol", choices=("reference-128k",), required=True)
     parser.add_argument("--deployment", type=Path, help="JSON with checked runtimes and SSH endpoints")
     parser.add_argument("--result-dir", type=Path)
+    parser.add_argument(
+        "--prefill-profile", choices=PREFILL_PROFILES, default=PREFILL_PROFILES[0],
+        help="The legacy CP8 profile labels whole-group chunks; comparison profiles use fresh tokens per PPU.",
+    )
     parser.add_argument("--points", type=lambda value: tuple(map(int, value.split(","))))
+    parser.add_argument("--prefill-sampling", choices=("waves", "sglang-gist"), default="waves")
     parser.add_argument("--timeout", type=int, default=7200)
     actions = parser.add_mutually_exclusive_group()
     actions.add_argument("--dry-run", action="store_true")
@@ -518,7 +719,12 @@ def main(argv=None):
     if args.points is not None and (args.phase == "all" or len(set(args.points)) != len(args.points)
                                     or not set(args.points) <= set(result.POINTS[args.phase])):
         parser.error("--points selects a unique subset of the chosen single-phase sweep")
-    cases = [case_config(phase, point) for phase in phases for point in result.POINTS[phase]
+    if args.prefill_sampling == "sglang-gist" and (
+        args.phase != "prefill" or args.prefill_profile != "dp8-compact140" or args.points != (4096,)
+    ):
+        parser.error("--prefill-sampling sglang-gist requires prefill --prefill-profile dp8-compact140 --points 4096")
+    cases = [case_config(phase, point, args.prefill_profile, prefill_sampling=args.prefill_sampling)
+             for phase in phases for point in result.POINTS[phase]
              if args.points is None or point in args.points]
     if args.dry_run:
         print(json.dumps(cases, indent=2))

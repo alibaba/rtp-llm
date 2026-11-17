@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import json
 import os
 from collections import Counter
 from dataclasses import dataclass
@@ -20,12 +21,15 @@ import torch
 from rtp_llm.config.v41_runtime import env_bool
 
 from .mhc import MHCConfig
+from .optimization_config import CROSS_LAYER_MHC, VERIFY_MEGA_MHC, enabled
 
 MHC_BACKEND_ENV = "RTP_V41_PPU_MHC_BACKEND"
 GRAPH_MEGA_MHC_ENV = "RTP_V41_PPU_GRAPH_MEGA_MHC"
 QUALIFIED_EXTENSION_SHA256 = (
     "816ff22272d7636c8ee57b960189ada869910af74016f35d53638248fcdc3942"
 )
+BUILD_RECEIPT_ENV = "RTP_V41_PPU_DEEPGEMM_BUILD_RECEIPT"
+REVIEWED_NATIVE_SOURCE = "4effb76f083b739f549b69d6b6210e6f4daf3ad7"
 
 
 @dataclass(frozen=True)
@@ -38,15 +42,48 @@ class PPUMegaMHCTransition:
 
 
 @lru_cache(maxsize=1)
-def _qualified_operation():
+def _extension_identity():
     # Identity is checked once before any native launch, not inferred from a
     # package version. A selected but incompatible installation fails loudly.
     module = importlib.import_module("deep_gemm")
-    extension = importlib.import_module("deep_gemm.deep_gemm_cpp")
+    native = getattr(module, "_C", None)
+    extension = native or importlib.import_module("deep_gemm.deep_gemm_cpp")
     with Path(extension.__file__).open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
-    if digest != QUALIFIED_EXTENSION_SHA256:
+    if native is not None:
+        # Explicit benchmark admission binds the reviewed ABI to the private
+        # built package. This is provenance, not numerical qualification.
+        receipt_path = os.environ.get(BUILD_RECEIPT_ENV)
+        if not receipt_path:
+            raise RuntimeError(f"native Mega-mHC requires {BUILD_RECEIPT_ENV}")
+        receipt = json.loads(Path(receipt_path).read_text())
+        root = Path(module.__file__).resolve().parent.parent
+        if (
+            receipt.get("source_pin") != REVIEWED_NATIVE_SOURCE
+            or Path(receipt["installed"]).resolve() != root
+            or receipt.get("evidence") != "BUILT_WHEEL_FILE_INSPECTION_ONLY_NO_KERNEL_EXECUTION"
+        ):
+            raise RuntimeError("native Mega-mHC build receipt identity differs")
+        for name, expected in receipt["files"].items():
+            relative = Path(name)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError("invalid DeepGEMM receipt path")
+            with (root / relative).open("rb") as stream:
+                actual = hashlib.file_digest(stream, "sha256").hexdigest()
+            if actual != expected:
+                raise RuntimeError("native Mega-mHC package hash differs")
+        key = "deep_gemm/" + Path(extension.__file__).name
+        if receipt["files"].get(key) != digest:
+            raise RuntimeError("native Mega-mHC extension is absent from receipt")
+    elif digest != QUALIFIED_EXTENSION_SHA256:
         raise RuntimeError("Mega-mHC requires the qualified PPU extension")
+    return digest
+
+
+@lru_cache(maxsize=1)
+def _qualified_operation():
+    _extension_identity()
+    module = importlib.import_module("deep_gemm")
     operation = getattr(module, "mega_mhc", None)
     if not callable(operation):
         raise RuntimeError("qualified deep_gemm.mega_mhc is unavailable")
@@ -74,6 +111,7 @@ class PPUMegaMHC:
         self.graph_capture_calls = 0
         self.calls = Counter()
         self.fallbacks = Counter()
+        self._new_graph_warmed = set()
 
     def execution_stats(self):
         return {
@@ -81,15 +119,24 @@ class PPUMegaMHC:
             "calls": dict(self.calls),
             "fallbacks": dict(self.fallbacks),
             "graph_capture_calls": self.graph_capture_calls,
-            "extension_sha256": QUALIFIED_EXTENSION_SHA256 if self.calls else None,
+            "extension_sha256": _extension_identity() if self.calls else None,
         }
 
     def _reason(self, branch, residual, state, parameters, norm, eps, config, phase):
         if self.backend != "mega":
             return "legacy_selected"
-        graph = phase == "graph" and self.graph_enabled
-        if not graph and phase not in ("prefill", "decode"):
+        cross = phase.endswith("_cross")
+        base_phase = phase.removesuffix("_cross")
+        verify = base_phase in ("verify", "graph_verify")
+        if cross and not enabled(CROSS_LAYER_MHC):
+            return "cross_layer_disabled"
+        if verify and not enabled(VERIFY_MEGA_MHC):
+            return "verify_disabled"
+        graph = base_phase in ("graph", "graph_verify") and self.graph_enabled
+        if not graph and base_phase not in ("prefill", "decode", "verify"):
             return "unqualified_phase"
+        if cross and base_phase not in ("decode", "graph", "verify", "graph_verify"):
+            return "unqualified_cross_phase"
         if (
             config.hc_mult != 4
             or config.sinkhorn_iters != 20
@@ -152,8 +199,19 @@ class PPUMegaMHC:
         if reason is not None:
             self.fallbacks[f"{phase}:{reason}"] += 1
             return None
-        operation = _qualified_operation()
         rows = residual.shape[0]
+        graph = phase.removesuffix("_cross") in ("graph", "graph_verify")
+        new_graph = graph and phase != "graph"
+        with torch.cuda.device(residual.device):
+            capturing = graph and torch.cuda.is_current_stream_capturing()
+            warm_key = (
+                residual.device, rows, phase, torch.cuda.current_stream().cuda_stream,
+                config.rms_eps, eps,
+            )
+        if new_graph and capturing and warm_key not in self._new_graph_warmed:
+            self.fallbacks[f"{phase}:cold_capture_stream"] += 1
+            return None
+        operation = _qualified_operation()
         updated = torch.empty_like(residual)
         pre = torch.empty((rows, 4, 1), device=residual.device, dtype=torch.float32)
         post = torch.empty_like(pre)
@@ -165,7 +223,6 @@ class PPUMegaMHC:
         with torch.cuda.device(residual.device):
             # The runner warms this bucket on the capture stream. The native
             # operator allocates capture-private workspace from the graph pool.
-            capturing = phase == "graph" and torch.cuda.is_current_stream_capturing()
             operation(
                 x=branch,
                 residual=residual,
@@ -192,4 +249,6 @@ class PPUMegaMHC:
             )
         self.calls[phase] += 1
         self.graph_capture_calls += int(capturing)
+        if new_graph and not capturing:
+            self._new_graph_warmed.add(warm_key)
         return PPUMegaMHCTransition(updated, normalized, pre.view(rows, 4), post, comb)

@@ -36,44 +36,133 @@ def matches_context(row):
     return row["input_min"] == row["input_max"] == CONTEXT
 
 
-def prefill_result(path, chunk):
-    rows = read_rows(path / "step-rank0.jsonl")
+def prefill_owner_steps(path, rank, chunk, *, required_steps=None):
+    rows = read_rows(path / f"step-rank{rank}.jsonl")
     validate_steps(rows)
     batch = chunk // FRESH
     selected = [row for row in rows if matches_context(row)]
-    required = WARMUP["prefill"] + MEASURE["prefill"]
+    required = WARMUP["prefill"] + MEASURE["prefill"] if required_steps is None else required_steps
     if len(selected) != required:
-        raise ValueError(f"expected {required} full prefill steps, observed {len(selected)}")
+        raise ValueError(f"rank {rank}: expected {required} full prefill steps, observed {len(selected)}")
     for row in selected:
         if (
             row["batch"] != batch or row["context_batch"] != batch
             or row["prefix_min"] != PREFIX or row["prefix_max"] != PREFIX
             or row["fresh_tokens"] != chunk or row["emitted_tokens"] != batch
         ):
-            raise ValueError(f"prefill step has wrong cache hit or fresh batch: {row}")
-    measured = selected[WARMUP["prefill"]:]
-    seconds = sum(row["end_ns"] - row["start_ns"] for row in measured) / 1e9
-    return {
+            raise ValueError(f"rank {rank}: prefill step has wrong cache hit or fresh batch: {row}")
+    return selected
+
+
+def prefill_result(path, chunk, *, owners=1):
+    ranks = [prefill_owner_steps(path, rank, chunk) for rank in range(owners)]
+    # The client drains one wave across every endpoint before dispatching the
+    # next. Rank-local step counters can differ, so match waves in order and
+    # verify a shared execution interval using the host's monotonic clock.
+    measured = []
+    for wave, rows in enumerate(zip(*ranks)):
+        starts = [row["start_ns"] for row in rows]
+        ends = [row["end_ns"] for row in rows]
+        if max(starts) >= min(ends):
+            raise ValueError(f"prefill wave {wave} has no common interval across {owners} owners")
+        if wave >= WARMUP["prefill"]:
+            measured.append((max(ends) - min(starts), sum(row["fresh_tokens"] for row in rows)))
+    seconds = sum(duration for duration, _ in measured) / 1e9
+    metrics = {
         "steps": len(measured),
         "step_ms": 1000 * seconds / len(measured),
-        "throughput_per_ppu": sum(row["fresh_tokens"] for row in measured) / seconds / WORLD,
-        "sample_steps": [row["step"] for row in measured],
+        "throughput_per_ppu": sum(tokens for _, tokens in measured) / seconds / WORLD,
+        "sample_steps": [row["step"] for row in ranks[0][WARMUP["prefill"]:]],
+    }
+    if owners > 1:
+        metrics["sample_steps_by_rank"] = [
+            [row["step"] for row in selected[WARMUP["prefill"]:]] for selected in ranks
+        ]
+    return metrics
+
+
+def gist_prefill_result(path, chunk, case):
+    """Whole native step-end intervals in the gist's 20–90% completion window.
+
+    Batch enqueue returns all responses together, so HTTP supplies cache/length
+    validation rather than response-arrival stamps. Native host-monotonic step
+    stamps include inter-step scheduler gaps and all model/communication work.
+    The separately reported active-only mean must not replace this wall metric.
+    """
+    warmup, count = case["warmup_steps"], case["measure_steps"]
+    low, high = case["window_fractions"]
+    ranks = [prefill_owner_steps(path, rank, chunk, required_steps=warmup + count)[warmup:]
+             for rank in range(case["prefill_dp"])]
+    all_ends = sorted(row["end_ns"] for rows in ranks for row in rows)
+    gaps = [right - left for left, right in zip(all_ends, all_ends[1:])]
+    large_gaps = sorted(gaps)[-max(1, len(all_ends) // len(ranks) - 1):]
+    cutoff = large_gaps[len(large_gaps) // 2] * 0.5
+    groups, begin = [], 0
+    for index, gap in enumerate(gaps):
+        if gap > cutoff:
+            groups.append((all_ends[index], index + 1 - begin))
+            begin = index + 1
+    groups.append((all_ends[-1], len(all_ends) - begin))
+    cumulative, global_start, global_end = 0, None, None
+    for end, size in groups:
+        cumulative += size
+        if global_start is None and cumulative >= low * len(all_ends):
+            global_start = end
+        if cumulative <= high * len(all_ends):
+            global_end = end
+    if global_start is None or global_end is None or global_start >= global_end:
+        raise ValueError("empty global completion window")
+    anchor_ends = [row["end_ns"] for row in ranks[0]
+                   if global_start <= row["end_ns"] <= global_end]
+    if len(anchor_ends) < 4:
+        raise ValueError("fewer than three whole rank-0 steps in completion window")
+    anchors = anchor_ends[0], anchor_ends[-1]
+    per_rank, active, windows, sample_steps = [], [], [], []
+    for rank, rows in enumerate(ranks):
+        if not rows[0]["end_ns"] <= anchors[0] < anchors[1] <= rows[-1]["end_ns"]:
+            raise ValueError(f"rank {rank} does not cover the common completion window")
+        first, last = (min(range(len(rows)), key=lambda i: abs(rows[i]["end_ns"] - anchor))
+                       for anchor in anchors)
+        start, end = rows[first]["end_ns"], rows[last]["end_ns"]
+        sampled = rows[first + 1:last + 1]
+        elapsed = end - start
+        if elapsed <= 0 or len(sampled) < 3:
+            raise ValueError("insufficient aligned native completion interval")
+        per_rank.append(elapsed / len(sampled) / 1e6)
+        active.append(sum(row["end_ns"] - row["start_ns"] for row in sampled) / len(sampled) / 1e6)
+        windows.append({"rank": rank, "start_ns": start, "end_ns": end})
+        sample_steps.append([row["step"] for row in sampled])
+    if len({len(steps) for steps in sample_steps}) != 1:
+        raise ValueError("DP owners have different whole-step counts in the common window")
+    mean_ms = sum(per_rank) / len(per_rank)
+    return {
+        "steps": len(sample_steps[0]), "step_ms": mean_ms,
+        "throughput_per_ppu": chunk * 1000 / mean_ms,
+        "step_ms_per_rank": per_rank, "active_step_ms_per_rank": active,
+        "sample_steps": sample_steps[0], "sample_steps_by_rank": sample_steps,
+        "completion_windows": windows, "measurement_kind": "native_step_end_wall_time",
+        "global_completion_window": [global_start, global_end], "rank0_anchors": anchors,
+        "http_cache_checked": True, "http_timing_crosscheck": False,
+        "warmup_steps": warmup, "requests_per_rank": count,
+        "window_fractions": [low, high], "fake_balance_expert": True,
     }
 
 
-def qualify_prefill_optimizations(path, chunk):
+def qualify_prefill_optimizations(path, chunk, *, yoco=True, expected_steps=None):
     batch = chunk // FRESH
-    expected = WARMUP["prefill"] + MEASURE["prefill"]
+    expected = WARMUP["prefill"] + MEASURE["prefill"] if expected_steps is None else expected_steps
+    plan = "compact140" if yoco else "ordinary_full_prefill"
     for rank in range(WORLD):
         rows = [row for row in read_rows(path / f"prefill-rank{rank}.jsonl")
                 if row["lengths"] == [FRESH] * batch and row["prefixes"] == [PREFIX] * batch]
         if len(rows) != expected:
             raise ValueError(f"rank {rank}: observed {len(rows)} true suffix forwards, expected {expected}")
         for row in rows:
-            if (row["plan"] != "compact140" or not row["compacted"]
-                    or row["dense_fp4_layers"] != [2, 8, 14, 20]
+            if row["plan"] != plan or row["compacted"] != yoco:
+                raise ValueError(f"rank {rank}: expected {plan}, observed {row}")
+            if (row["dense_fp4_layers"] != [2, 8, 14, 20]
                     or row["sparse_fp4_layers"] != [24, 28, 32, 36]):
-                raise ValueError(f"rank {rank}: missing compact140 or native FP4 execution: {row}")
+                raise ValueError(f"rank {rank}: missing native FP4 execution: {row}")
 
 
 def decode_result(path, batch):
@@ -163,10 +252,14 @@ def plot_results(directory, phases):
         good = [row for row in results if row["status"] == "ok"]
         decode = phase == "decode"
         x = "normalized_user_tps" if decode else "step_ms"
-        title = "Decode · DP8 + EP8" if decode else "Prefill · CP8 + EP8"
+        prefill_case = results[0] if results and not decode else {}
+        dp_prefill = prefill_case.get("prefill_dp") == WORLD
+        per_ppu = prefill_case.get("point_unit") == "fresh_tokens_per_ppu"
+        yoco = "YoCo compact140" if prefill_case.get("yoco_keep_tokens", 140) else "YoCo off"
+        title = "Decode · DP8 + EP8" if decode else f"Prefill · {'DP8' if dp_prefill else 'CP8'} + EP8"
         description = (
             "128K initial KV  |  DSpARK γ=3  |  fixed 3.25 tokens per step"
-            if decode else "128K context  |  126,976 cached + 4,096 new tokens per request  |  YoCo compact140"
+            if decode else f"128K context  |  126,976 cached + 4,096 new tokens per request  |  {yoco}"
         )
         fig, ax = plt.subplots(figsize=(12, 7.2))
         fig.subplots_adjust(top=0.82, bottom=0.23, left=0.12, right=0.95)
@@ -208,14 +301,15 @@ def plot_results(directory, phases):
             fig.text(0.12, 0.115, "Missing points: " + ", ".join(missing), fontsize=10, color="#8a4b25")
         note = (
             "B is requests per DP rank. Both axes use the fixed 3.25-token convention."
-            if decode else "Point labels count new tokens across the CP8 group. Throughput is divided by eight PPUs."
+            if decode else "Point labels count new tokens per PPU. Throughput is divided by eight PPUs."
+            if per_ppu else "Point labels count new tokens across the CP8 group. Throughput is divided by eight PPUs."
         )
         fig.text(0.12, 0.067, note, fontsize=10, color="#46566a")
         for extension in ("png", "svg"):
             fig.savefig(directory / f"{phase}.{extension}", dpi=180)
         plt.close(fig)
 
-    columns = sorted({key for row in rows for key in row if key != "sample_steps"})
+    columns = sorted({key for row in rows for key in row if key not in ("sample_steps", "sample_steps_by_rank")})
     with (directory / "summary.csv").open("w", newline="") as output:
         writer = csv.DictWriter(output, fieldnames=columns, extrasaction="ignore")
         writer.writeheader()

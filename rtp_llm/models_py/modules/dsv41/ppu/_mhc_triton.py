@@ -8,6 +8,8 @@ Copied kernels (numerics identical, dispatch plumbing removed):
   the reference sinkhorn eps placement;
 * ``hc_mix_stats`` (+ partial/reduce kernels) -- the batch-invariant
   ``F.linear(x.float(), fn) * rsqrt(mean(x^2) + eps)`` projection;
+* ``hc_mix_stats_sinkhorn`` -- opt-in ordered partial reduction, RMS scaling,
+  coefficient transform and Sinkhorn in one tail, sharing that projection;
 * ``mhc_combine`` (+ ``_mhc_combine_kernel``) -- the FP32 readout collapse
   ``y[m, h] = sum_k pre[m, k] * x_flat[m, k*H + h]``.
 
@@ -16,7 +18,7 @@ Copied kernels (numerics identical, dispatch plumbing removed):
 ``R'[t, i] = post[t, i] * x[t] + sum_j comb[t, j, i] * R[t, j]`` with FP32
 accumulation, matching ``mhc_post_tilelang``'s arithmetic order.
 
-Deliberate deviations from the sglang sources (all numerically neutral):
+Dispatch/layout deviations from the original copied sglang kernels:
 * sglang.srt platform/env dispatch (get_platform, is_hip, envs) removed --
   ``ppu/mhc.py`` selects this path at call time;
 * dot precision for the projection defaults to ``"ieee"`` (FP32-exact, matching
@@ -27,11 +29,17 @@ Deliberate deviations from the sglang sources (all numerically neutral):
 * ``hc_split_sinkhorn`` consumes the flat 2-D ``[n, mix_width]`` layout and
   keeps FP32 outputs (the caller owns dtype policy).
 
+The new fused tail is not device-qualified yet. Its ordered FP32 fold and
+epsilon placement follow the separate kernels; contraction/rounding and
+changed-input graph replay require the deferred correctness validation.
+
 Importing this module requires ``triton``; import it lazily (see
 ``rtp_llm.models_py.modules.dsv41.ppu.mhc._triton_kernels``).
 """
 
 from __future__ import annotations
+
+import math
 
 import torch
 import triton
@@ -39,6 +47,8 @@ import triton.language as tl
 
 __all__ = [
     "hc_mix_stats",
+    "hc_mix_stats_sinkhorn",
+    "hc_mix_stats_sinkhorn_supported",
     "hc_split_sinkhorn",
     "mhc_combine",
     "mhc_post",
@@ -272,6 +282,77 @@ def _hc_mix_stats_reduce_kernel(
     )
 
 
+@triton.jit(do_not_specialize=["M"])
+def _hc_mix_reduce_sinkhorn_kernel(
+    part_mix_ptr,
+    part_sq_ptr,
+    scale_ptr,
+    base_ptr,
+    pre_ptr,
+    post_ptr,
+    comb_ptr,
+    M,
+    inv_k,
+    rms_eps,
+    HC: tl.constexpr,
+    MIX: tl.constexpr,
+    NUM_SLICES: tl.constexpr,
+    ITERS: tl.constexpr,
+    EPS: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """Ordered FP32 partial fold plus the existing scale/base/Sinkhorn tail.
+
+    Adapted from SGLang 631e12a9 hc_mix_reduce_sinkhorn (Apache-2.0).
+    The GEMM producer and split ordering are RTP's unchanged implementation.
+    Masking retains the split kernel's non-power-of-two hc_mult behavior.
+    """
+    row = tl.program_id(0).to(tl.int64)
+    j = tl.arange(0, BLOCK)
+    jj, kk = j[:, None], j[None, :]
+    lane_mask = j < HC
+    matrix_mask = (jj < HC) & (kk < HC)
+    acc_pre = tl.zeros([BLOCK], tl.float32)
+    acc_post = tl.zeros([BLOCK], tl.float32)
+    acc_comb = tl.zeros([BLOCK, BLOCK], tl.float32)
+    sq = tl.full((), 0.0, tl.float32)
+    # Promote the runtime scalar through a tensor: both supported PPU Triton
+    # frontends handle this, including the one binding M as a Python integer.
+    m64 = row * 0 + M
+    for split in tl.static_range(NUM_SLICES):
+        part_row = split * m64 + row
+        offset = part_row * MIX
+        acc_pre += tl.load(part_mix_ptr + offset + j, lane_mask, 0.0)
+        acc_post += tl.load(part_mix_ptr + offset + HC + j, lane_mask, 0.0)
+        acc_comb += tl.load(
+            part_mix_ptr + offset + 2 * HC + jj * HC + kk, matrix_mask, 0.0
+        )
+        sq += tl.load(part_sq_ptr + part_row)
+    inv_rms = 1.0 / tl.sqrt(sq * inv_k + rms_eps)
+    mix_pre = acc_pre * inv_rms
+    mix_post = acc_post * inv_rms
+    mix_comb = acc_comb * inv_rms
+    scale0, scale1, scale2 = tl.load(scale_ptr), tl.load(scale_ptr + 1), tl.load(scale_ptr + 2)
+    pre = tl.sigmoid(mix_pre * scale0 + tl.load(base_ptr + j, lane_mask, 0.0)) + EPS
+    post = 2.0 * tl.sigmoid(mix_post * scale1 + tl.load(base_ptr + HC + j, lane_mask, 0.0))
+    tl.store(pre_ptr + row * HC + j, pre, lane_mask)
+    tl.store(post_ptr + row * HC + j, post, lane_mask)
+    comb = mix_comb * scale2 + tl.load(base_ptr + 2 * HC + jj * HC + kk, matrix_mask, 0.0)
+    row_max = tl.max(tl.where(matrix_mask, comb, float("-inf")), axis=1)
+    comb = tl.exp(comb - row_max[:, None])
+    comb = tl.where(matrix_mask, comb, 0.0)
+    comb = comb / tl.sum(comb, axis=1)[:, None] + EPS
+    comb = tl.where(matrix_mask, comb, 0.0)
+    comb = comb / (tl.sum(comb, axis=0)[None, :] + EPS)
+    comb = tl.where(matrix_mask, comb, 0.0)
+    for _ in tl.static_range(ITERS - 1):
+        comb = comb / (tl.sum(comb, axis=1)[:, None] + EPS)
+        comb = tl.where(matrix_mask, comb, 0.0)
+        comb = comb / (tl.sum(comb, axis=0)[None, :] + EPS)
+        comb = tl.where(matrix_mask, comb, 0.0)
+    tl.store(comb_ptr + row * HC * HC + jj * HC + kk, comb, matrix_mask)
+
+
 # K slicing, BLOCK_K and dot precision must stay independent of M;
 # a row must produce the same bits alone and in any batch routed to this backend.
 _HC_MIX_SLICE_CHOICES = (80, 64, 40, 32, 16, 8, 4, 2, 1)
@@ -310,16 +391,8 @@ def _num_slices_for(k: int) -> int:
     return 1
 
 
-def hc_mix_stats(
-    x_flat: torch.Tensor, hc_fn: torch.Tensor, eps: float, *,
-    reduce_block_m: int | None = None, aiu_prenorm: bool = False,
-) -> torch.Tensor:
-    """Batch-invariant F.linear(x_flat.float(), hc_fn) * rsqrt(mean(x_flat^2) + eps).
-
-    x_flat is [M, K] in any float dtype; hc_fn is [MIX, K] fp32; returns [M, MIX] fp32.
-    The default path has batch-invariant K slicing. The opt-in AIU projection
-    uses the provider's split-K geometry and FP32 partials.
-    """
+def _hc_mix_stats_partials(x_flat, hc_fn, *, aiu_prenorm=False):
+    """Use the same projection producer for both normalization tails."""
     assert x_flat.dim() == 2 and hc_fn.dim() == 2
     assert x_flat.stride(1) == 1 and hc_fn.stride(1) == 1
     assert hc_fn.dtype == torch.float32
@@ -327,9 +400,6 @@ def hc_mix_stats(
     mix = hc_fn.shape[0]
     assert hc_fn.shape[1] == k
     mix_pad = max(16, triton.next_power_of_2(mix))
-    mixes = torch.empty((m, mix), dtype=torch.float32, device=x_flat.device)
-    if m == 0:
-        return mixes
     block_m = _block_m_for(m)
     grid_m = triton.cdiv(m, block_m)
     if (
@@ -337,13 +407,25 @@ def hc_mix_stats(
         and x_flat.dtype == torch.bfloat16 and x_flat.is_contiguous()
         and hc_fn.is_contiguous() and torch.cuda.get_device_capability(x_flat.device) == (8, 9)
     ):
-        from rtp_llm.models_py.modules.dsv4.ppu.hc import ppu_hc_prenorm
+        import deep_gemm
 
-        # The Flash tile also covers the V4.1 K dimension in whole split-K tiles.
-        geometry = ppu_hc_prenorm.launch_geometry(m, 16384, mix)
-        geometry["K"] = k
-        num_slices = geometry["NUM_SPLITS"]
-        part_mix, part_sq = ppu_hc_prenorm._launch_partials(x_flat, hc_fn, geometry)
+        if getattr(deep_gemm, "_C", None) is not None:
+            # Current DeepGEMM owns the AIU JIT and split-K reduction in C++.
+            # Its public ABI returns one FP32 plane, so both tails consume
+            # exactly one plane rather than importing the removed Python JIT.
+            # The native provider selects its own tiles and reduction order.
+            num_slices = 1
+            part_mix = torch.empty((1, m, mix), dtype=torch.float32, device=x_flat.device)
+            part_sq = torch.empty((1, m), dtype=torch.float32, device=x_flat.device)
+            deep_gemm.tf32_hc_prenorm_gemm(x_flat, hc_fn, part_mix, part_sq)
+        else:
+            from rtp_llm.models_py.modules.dsv4.ppu.hc import ppu_hc_prenorm
+
+            # The Flash tile covers V4.1 K in whole split-K tiles as well.
+            geometry = ppu_hc_prenorm.launch_geometry(m, 16384, mix)
+            geometry["K"] = k
+            num_slices = geometry["NUM_SPLITS"]
+            part_mix, part_sq = ppu_hc_prenorm._launch_partials(x_flat, hc_fn, geometry)
     else:
         num_slices = _num_slices_for(k)
         part_mix = torch.empty(
@@ -368,6 +450,32 @@ def hc_mix_stats(
             num_warps=_HC_MIX_NUM_WARPS,
             num_stages=_HC_MIX_NUM_STAGES,
         )
+    return part_mix, part_sq, num_slices, block_m, mix_pad
+
+
+def hc_mix_stats(
+    x_flat: torch.Tensor, hc_fn: torch.Tensor, eps: float, *,
+    reduce_block_m: int | None = None, aiu_prenorm: bool = False,
+) -> torch.Tensor:
+    """Batch-invariant F.linear(x_flat.float(), hc_fn) * rsqrt(mean(x_flat^2) + eps).
+
+    x_flat is [M, K] in any float dtype; hc_fn is [MIX, K] fp32; returns [M, MIX] fp32.
+    The default path has batch-invariant K slicing. The opt-in AIU projection
+    uses the selected provider's split-K geometry. The legacy Python JIT
+    exposes partials; the native C++ JIT returns one reduced FP32 plane.
+    """
+    assert x_flat.dim() == 2 and hc_fn.dim() == 2
+    assert x_flat.stride(1) == 1 and hc_fn.stride(1) == 1
+    assert hc_fn.dtype == torch.float32
+    m, k = x_flat.shape
+    mix = hc_fn.shape[0]
+    assert hc_fn.shape[1] == k
+    mixes = torch.empty((m, mix), dtype=torch.float32, device=x_flat.device)
+    if m == 0:
+        return mixes
+    part_mix, part_sq, num_slices, block_m, mix_pad = _hc_mix_stats_partials(
+        x_flat, hc_fn, aiu_prenorm=aiu_prenorm
+    )
     # Only the final ordered reduction's row tile changes. Partial GEMM
     # partitioning and the per-row FP32 slice fold stay identical.
     reduce_rows = block_m if reduce_block_m is None else reduce_block_m
@@ -385,6 +493,78 @@ def hc_mix_stats(
         num_warps=4,
     )
     return mixes
+
+
+def hc_mix_stats_sinkhorn_supported(
+    x_flat, hc_fn, hc_scale, hc_base, *, hc_mult, sinkhorn_iters, rms_eps, hc_eps,
+    post_mult=2.0, reduce_block_m=None,
+):
+    """Metadata-only eligibility; unsupported calls retain the original tail."""
+    if (
+        type(hc_mult) is not int or not 1 <= hc_mult <= 16
+        or type(sinkhorn_iters) is not int or sinkhorn_iters < 1
+        or post_mult != 2.0 or reduce_block_m not in (None, 1, 2, 4, 8, 16, 32)
+        or not isinstance(rms_eps, (int, float)) or not math.isfinite(rms_eps) or rms_eps < 0
+        or not isinstance(hc_eps, (int, float)) or not math.isfinite(hc_eps) or hc_eps < 0
+        or torch.is_grad_enabled()
+    ):
+        return False
+    tensors = (x_flat, hc_fn, hc_scale, hc_base)
+    if not all(
+        isinstance(t, torch.Tensor) and t.layout == torch.strided and t.is_cuda
+        and t.device == x_flat.device and not t.requires_grad and not t.is_conj() and not t.is_neg()
+        for t in tensors
+    ):
+        return False
+    return (
+        x_flat.ndim == 2 and hc_fn.ndim == 2 and x_flat.shape[1] > 0
+        and x_flat.shape[1] % _HC_MIX_BLOCK_K == 0
+        and x_flat.dtype in (torch.bfloat16, torch.float16, torch.float32)
+        and hc_fn.dtype == torch.float32 and x_flat.stride(1) == hc_fn.stride(1) == 1
+        and hc_fn.shape == (hc_mult * (hc_mult + 2), x_flat.shape[1])
+        and hc_scale.numel() == 3 and hc_base.numel() == hc_fn.shape[0]
+        and hc_scale.dtype in (torch.bfloat16, torch.float16, torch.float32)
+        and hc_base.dtype in (torch.bfloat16, torch.float16, torch.float32)
+    )
+
+
+def hc_mix_stats_sinkhorn(
+    x_flat, hc_fn, hc_scale, hc_base, *, hc_mult, sinkhorn_iters, rms_eps, hc_eps,
+    reduce_block_m=None, aiu_prenorm=False,
+):
+    """Fuse only the partial reduction, RMS scaling and coefficient/Sinkhorn tail.
+
+    The selected projection producer is shared with hc_mix_stats, including
+    the native AIU provider's already reduced FP32 plane. This tail does not
+    select projection precision, split geometry or shifted-chain readout.
+    reduce_block_m only belongs to the standalone reduction; this fused tail
+    always uses one program per row.
+    """
+    if not hc_mix_stats_sinkhorn_supported(
+        x_flat, hc_fn, hc_scale, hc_base, hc_mult=hc_mult, sinkhorn_iters=sinkhorn_iters,
+        rms_eps=rms_eps, hc_eps=hc_eps, reduce_block_m=reduce_block_m,
+    ):
+        raise ValueError("unsupported mHC fused reduction/Sinkhorn inputs")
+    m, k = x_flat.shape
+    pre = torch.empty((m, hc_mult), device=x_flat.device, dtype=torch.float32)
+    post = torch.empty_like(pre)
+    comb = torch.empty((m, hc_mult, hc_mult), device=x_flat.device, dtype=torch.float32)
+    if m == 0:
+        return pre, post, comb
+    # Normalize parameter layouts before any partial launch; provider failures
+    # after this boundary propagate without re-running through another path.
+    scale = hc_scale.float().reshape(3).contiguous()
+    base = hc_base.float().reshape(hc_mult * (hc_mult + 2)).contiguous()
+    part_mix, part_sq, num_slices, _, _ = _hc_mix_stats_partials(
+        x_flat, hc_fn, aiu_prenorm=aiu_prenorm
+    )
+    _hc_mix_reduce_sinkhorn_kernel[(m,)](
+        part_mix, part_sq, scale, base, pre, post, comb, m, 1.0 / k, rms_eps,
+        HC=hc_mult, MIX=hc_mult * (hc_mult + 2), NUM_SLICES=num_slices,
+        ITERS=sinkhorn_iters, EPS=hc_eps, BLOCK=triton.next_power_of_2(hc_mult),
+        num_warps=4,
+    )
+    return pre, post, comb
 
 
 # ---------------------------------------------------------------------------

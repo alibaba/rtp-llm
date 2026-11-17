@@ -104,11 +104,12 @@ class _CPUWorld:
     def __exit__(self, *args):
         return self.stack.__exit__(*args)
 
-    def prepare(self, *, requested=True, supported=True, epoch=1, **kwargs):
+    def prepare(self, *, requested=True, supported=True, epoch=1, local_flat_rows=24, **kwargs):
         evidence = {}
         schedule = engram.prepare_local_prefill_engram_schedule(
             DEVICE, requested=requested, supported=supported, epoch=epoch,
-            process_group=self.group, evidence=evidence, bindings=self.bindings, **kwargs,
+            process_group=self.group, evidence=evidence, bindings=self.bindings,
+            local_flat_rows=local_flat_rows, **kwargs,
         )
         return schedule, evidence
 
@@ -152,11 +153,12 @@ class LocalPrefillEngramRoundsCPU(unittest.TestCase):
                 self.assertIsNone(schedule)
                 self.assertEqual(evidence["decision"], decision)
                 self.assertEqual(evidence["round_cap"], 98304)
-                self.assertEqual(len(evidence["packet"]), 28)
+                self.assertEqual(len(evidence["packet"]), 29)
             self.assertEqual(len(world.packets), 2)
             schedule, evidence = world.prepare()
             self.assertEqual(schedule.round_cap, 98304)
             self.assertEqual(schedule.layers, (1, 14))
+            self.assertEqual((schedule.local_flat_rows, schedule.group_max_rows), (24, 24))
             self.assertIs(evidence["consumed_layers"], schedule._lease.records)
             with self.assertRaises(FrozenInstanceError):
                 schedule.epoch = 2
@@ -179,6 +181,115 @@ class LocalPrefillEngramRoundsCPU(unittest.TestCase):
             for arguments in ({"round_cap": 98305}, {"layers": (1, 15)}, {"epoch": 0}):
                 with self.assertRaises(RuntimeError):
                     world.prepare(**arguments)
+
+    def test_count_admission_accepts_ragged_empty_and_idle_owners(self):
+        for local_count, maximum in ((0, 0), (0, 98328), (24, 98328), (98328, 98328)):
+            with self.subTest(local_count=local_count, maximum=maximum), _CPUWorld() as world:
+                world.mutate = lambda packet: packet.__setitem__(-1, maximum)
+                schedule, evidence = world.prepare(local_flat_rows=local_count)
+                self.assertEqual(len(world.packets), 1)
+                self.assertEqual(world.packets[0][-1].item(), local_count)
+                self.assertEqual(schedule.local_flat_rows, local_count)
+                self.assertEqual(schedule.group_max_rows, maximum)
+                self.assertEqual(evidence["group_max_rows"], maximum)
+                schedule.close()
+
+    def test_invalid_or_missing_count_uses_same_packet_and_joint_rejection(self):
+        for count in (None, True, -24, 25, 2**62, 24.0):
+            with self.subTest(count=count), _CPUWorld() as world:
+                with self.assertRaisesRegex(RuntimeError, "configuration/lifecycle disagreement"):
+                    world.prepare(local_flat_rows=count)
+                self.assertEqual(len(world.packets), 1)
+                self.assertEqual(world.packets[0].numel(), 29)
+                self.assertEqual(world.packets[0][7].item(), 1)
+        # A peer missing count metadata sets the common fatal bit. There is
+        # no rank-local legacy-count mode that could change layer collectives.
+        with _CPUWorld() as world:
+            world.mutate = lambda packet: packet.__setitem__(7, 1)
+            with self.assertRaisesRegex(RuntimeError, "configuration/lifecycle disagreement"):
+                world.prepare(local_flat_rows=24)
+        for maximum in (0, 25, 2**62):
+            with self.subTest(maximum=maximum), _CPUWorld() as world:
+                world.mutate = lambda packet: packet.__setitem__(-1, maximum)
+                with self.assertRaisesRegex(RuntimeError, "configuration/lifecycle disagreement"):
+                    world.prepare(local_flat_rows=24)
+
+    def test_admitted_lookup_consumes_two_layers_without_per_layer_count_collectives(self):
+        class CudaBranchTensor(torch.Tensor):
+            @property
+            def is_cuda(self):
+                return True
+
+            @property
+            def device(self):
+                return DEVICE
+
+        original_full = torch.full
+        original_zeros = torch.zeros
+
+        def host_full(*args, **kwargs):
+            if torch.device(kwargs.get("device", "cpu")).type == "cuda":
+                kwargs["device"] = "cpu"
+            return original_full(*args, **kwargs)
+
+        def host_zeros(*args, **kwargs):
+            if torch.device(kwargs.get("device", "cpu")).type == "cuda":
+                kwargs["device"] = "cpu"
+            return original_zeros(*args, **kwargs)
+
+        for tokens, maximum, idle in ((0, 0, False), (0, 72, False), (1, 72, True), (3, 72, False)):
+            with self.subTest(tokens=tokens, maximum=maximum, idle=idle), _CPUWorld() as world:
+                world.mutate = lambda packet: packet.__setitem__(-1, maximum)
+                schedule, evidence = world.prepare(local_flat_rows=tokens * 24)
+                for shard, _, _ in world.bindings.values():
+                    shard.pinned = True  # CPU transport double; never native pinning evidence.
+                raw = _ids(tokens, 0, "cpu", idle=idle)
+                rows = raw.as_subclass(CudaBranchTensor)
+                adapter = world.bindings[1][2]
+
+                def contribution(ids, *args):
+                    valid = (ids >= 0) & (ids < 2048)
+                    return torch.where(valid, ids, 0).to(torch.bfloat16)[:, None].expand(-1, 256).clone()
+
+                with patch.object(torch, "full", side_effect=host_full), patch.object(
+                    torch, "zeros", side_effect=host_zeros,
+                ), patch.object(
+                    adapter, "all_max_count", side_effect=AssertionError("admitted lookup must not negotiate counts"),
+                ), patch.object(adapter, "all_gather_ids", side_effect=lambda ids: ids.repeat(8)) as gather, patch.object(
+                    adapter, "reduce_scatter_sum", side_effect=lambda values, length: values[:length],
+                ) as scatter, patch.object(engram, "_lookup_round", side_effect=contribution):
+                    for layer in (1, 14):
+                        shard, layout, _ = world.bindings[layer]
+                        result = engram.engram_lookup(rows, layer_id=layer, shard=shard, layout=layout,
+                                                     group=adapter, round_schedule=schedule)
+                        expected = contribution(raw.reshape(-1)).reshape(tokens, 24, 256)
+                        self.assertTrue(_same_bytes(result, expected))
+                self.assertEqual(gather.call_count, 2 if maximum else 0)
+                self.assertEqual(scatter.call_count, gather.call_count)
+                self.assertEqual(len(world.packets), 1)
+                self.assertEqual([record["group_max_rows"] for record in evidence["consumed_layers"]],
+                                 [maximum, maximum])
+                self.assertTrue(schedule.close())
+                with self.assertRaisesRegex(RuntimeError, "binding/lifecycle"):
+                    schedule.claim(adapter, shard, layout, rows, 1)
+
+    def test_claim_rejects_changed_local_count_before_any_payload_collective(self):
+        with _CPUWorld() as world:
+            world.mutate = lambda packet: packet.__setitem__(-1, 72)
+            schedule, _ = world.prepare(local_flat_rows=24)
+            shard, layout, adapter = world.bindings[1]
+            shard.pinned = True
+            rows = NS(device=DEVICE, is_cuda=True, layout=torch.strided, is_neg=lambda: False,
+                      is_conj=lambda: False, ndim=2, shape=(2, 24), numel=lambda: 48)
+            with self.assertRaisesRegex(RuntimeError, "binding/lifecycle"):
+                schedule.claim(adapter, shard, layout, rows, 1)
+            self.assertEqual(schedule._lease.records, [])
+            # The same accepted row count cannot be consumed by a replaced
+            # schedule, even when all its public metadata looks compatible.
+            forged = replace(schedule, local_flat_rows=48)
+            with self.assertRaisesRegex(RuntimeError, "binding/lifecycle"):
+                forged.claim(adapter, shard, layout, rows, 1)
+            schedule.close()
 
     def test_local_simulator_large_round_preserves_ragged_invalid_and_empty_results(self):
         payload, scale = _table()
@@ -211,11 +322,13 @@ class LocalPrefillEngramRoundsCPU(unittest.TestCase):
                          _engram_incomplete=False, _engram_evidence={})
             for idle in (False, True):
                 state = NS(prefill=not idle, idle=idle, attn=NS(is_cuda_graph=False),
-                           cache=None if idle else NS(sharded=False))
+                           cache=None if idle else NS(sharded=False),
+                           inputs=NS(input_ids=torch.zeros(1 if idle else 4096, dtype=torch.int64)))
                 with patch.object(engram, "prepare_local_prefill_engram_schedule", return_value=None) as agree:
                     SharedNativeRuntime._prepare_engram_rounds(runtime, state)
                     agree.assert_called_once()
                     self.assertFalse(agree.call_args.kwargs["requested"])
+                    self.assertEqual(agree.call_args.kwargs["local_flat_rows"], 24 if idle else 98304)
             for graph_flag in ("is_graph", "is_graph_commit"):
                 setattr(state, graph_flag, True)
                 with patch.object(engram, "prepare_local_prefill_engram_schedule") as agree:
@@ -349,7 +462,7 @@ class LocalPrefillEngramRoundsDevice(unittest.TestCase):
         if not dist.is_initialized():
             with self.assertRaisesRegex(RuntimeError, "WORLD8"):
                 engram.prepare_local_prefill_engram_schedule(torch.device("cuda:0"), requested=True,
-                    supported=True, epoch=1, process_group=None)
+                    supported=True, epoch=1, process_group=None, local_flat_rows=ids.numel())
 
 
 def _distributed_worker(rank, port, directory, pg_timeout):
@@ -397,7 +510,8 @@ def _distributed_worker(rank, port, directory, pg_timeout):
                 epoch += 1
                 evidence = {}
                 schedule = engram.prepare_local_prefill_engram_schedule(device, requested=enabled,
-                    supported=True, epoch=epoch, process_group=dist.group.WORLD, evidence=evidence, bindings=current)
+                    supported=True, epoch=epoch, process_group=dist.group.WORLD, evidence=evidence, bindings=current,
+                    local_flat_rows=ids.numel())
                 observations = dict(native_gather=[], all_reduce=[], reduce_scatter=[])
                 original_gather, original_reduce, original_rs = native.engram_gather, dist.all_reduce, dist.reduce_scatter_tensor
 
@@ -440,8 +554,11 @@ def _distributed_worker(rank, port, directory, pg_timeout):
                     raise AssertionError((name, enabled, observations))
                 if len(observations["reduce_scatter"]) != (expected_rounds if enabled else 0):
                     raise AssertionError("wrong collective backend/count")
-                if len(observations["all_reduce"]) != (2 if enabled else 2 + expected_rounds):
-                    raise AssertionError("MAX-count must remain and old SUM must be replaced only when admitted")
+                if len(observations["all_reduce"]) != (0 if enabled else 2 + expected_rounds):
+                    raise AssertionError("admitted counts must skip layer MAX; old MAX/SUM must remain for fallback")
+                if enabled and (evidence["local_flat_rows"] != ids.numel()
+                                or evidence["group_max_rows"] != group_max):
+                    raise AssertionError("admitted ragged/idle row counts differ from actual lookup geometry")
                 trace = Path(directory) / f"a10-engram-{name}-flag{int(enabled)}-rank{rank}.trace.json"
                 profile.export_chrome_trace(str(trace))
                 events = json.loads(trace.read_text())["traceEvents"]
@@ -468,7 +585,7 @@ def _distributed_worker(rank, port, directory, pg_timeout):
             del outputs, values, old, new
         # All ranks call every proposal, including deliberately unsupported
         # and mismatched owners. No local fallback changes the wire schedule.
-        for name in ("flag", "cap", "epoch", "group", "geometry", "fatal"):
+        for name in ("flag", "cap", "epoch", "group", "geometry", "fatal", "count", "missing_count"):
             epoch += 1
             evidence = {}
             proposal_bindings = _bindings(rank, dist.group.WORLD, native=True, count=4096) if name == "geometry" and rank == 4 else bindings
@@ -478,9 +595,11 @@ def _distributed_worker(rank, port, directory, pg_timeout):
                     epoch=epoch + int(name == "epoch" and rank == 2),
                     process_group=object() if name == "group" and rank == 3 else dist.group.WORLD,
                     round_cap=98305 if name == "cap" and rank == 1 else 98304,
-                    fatal=name == "fatal" and rank == 4, evidence=evidence, bindings=proposal_bindings)
+                    fatal=name == "fatal" and rank == 4, evidence=evidence, bindings=proposal_bindings,
+                    local_flat_rows=(None if name == "missing_count" and rank == 6 else
+                                     25 if name == "count" and rank == 7 else 24))
             except RuntimeError:
-                if evidence.get("decision") != "rejected" or len(evidence.get("packet", ())) != 28:
+                if evidence.get("decision") != "rejected" or len(evidence.get("packet", ())) != 29:
                     raise AssertionError("transport/runtime error is not a coherent protocol rejection")
                 report["rejections"].append(dict(name=name, evidence=evidence))
             else:
@@ -488,7 +607,8 @@ def _distributed_worker(rank, port, directory, pg_timeout):
         epoch += 1
         evidence = {}
         result = engram.prepare_local_prefill_engram_schedule(device, requested=True,
-            supported=rank != 5, epoch=epoch, process_group=dist.group.WORLD, evidence=evidence, bindings=bindings)
+            supported=rank != 5, epoch=epoch, process_group=dist.group.WORLD, evidence=evidence, bindings=bindings,
+            local_flat_rows=72)
         if result is not None or evidence["decision"] != "fallback":
             raise AssertionError("one unsupported owner must make all owners choose the old schedule")
         report["unsupported"] = evidence
@@ -498,11 +618,12 @@ def _distributed_worker(rank, port, directory, pg_timeout):
             engram.engram_lookup(fallback_rows, layer_id=layer, shard=shard, layout=layout, group=adapter)
         # Every owner deliberately invalidates the same lease boundary. The
         # admitted schedule must raise, never silently switch to old SUM.
-        for failure in ("closed", "order", "host_version", "native_exception"):
+        for failure in ("closed", "order", "host_version", "row_count", "native_exception"):
             epoch += 1
             evidence = {}
             schedule = engram.prepare_local_prefill_engram_schedule(device, requested=True,
-                supported=True, epoch=epoch, process_group=dist.group.WORLD, evidence=evidence, bindings=bindings)
+                supported=True, epoch=epoch, process_group=dist.group.WORLD, evidence=evidence, bindings=bindings,
+                local_flat_rows=24)
             if failure == "closed":
                 schedule.close()
             elif failure == "host_version":
@@ -521,11 +642,13 @@ def _distributed_worker(rank, port, directory, pg_timeout):
                     native, "engram_gather", side_effect=RuntimeError("injected native gather failure")
                     if failure == "native_exception" else native.engram_gather,
                 ):
-                    engram.engram_lookup(_ids(1, rank, device), layer_id=14 if failure == "order" else 1,
+                    engram.engram_lookup(_ids(2 if failure == "row_count" else 1, rank, device),
+                                         layer_id=14 if failure == "order" else 1,
                                          shard=shard, layout=layout, group=adapter, round_schedule=schedule)
             except RuntimeError as error:
                 expected = {"closed": "binding/lifecycle", "order": "binding/lifecycle",
-                            "host_version": "host binding", "native_exception": "injected native gather failure"}[failure]
+                            "host_version": "host binding", "row_count": "binding/lifecycle",
+                            "native_exception": "injected native gather failure"}[failure]
                 if expected not in str(error):
                     raise
                 if observed:

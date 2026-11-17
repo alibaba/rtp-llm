@@ -28,6 +28,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.graph_swa_write import (
     try_rotate_q_and_write_swa,
     try_write_csa_state,
     try_write_packed_kv,
+    try_write_rotary_swa,
 )
 from rtp_llm.models_py.modules.dsv41.ppu.prefill import _compress_pairs, _rms_norm as _norm, _rope_tail
 from rtp_llm.models_py.modules.dsv41.ppu.rope import rotate
@@ -138,6 +139,7 @@ def _store_graph_compressed_key(attn, cache, tag, slots, value, rope, *, fused_g
 
 def produce_global(attn, x, state, *, fused_graph=False, verify_rope=False):
     g, cache = attn.geometry, state.cache
+    verify = getattr(state, "verify", False)
     positions, valid = state.metadata.positions, state.metadata.valid_mask
     layer_id, ratio = attn.layer_id, attn.compress_ratio
     freqs = state.freqs[layer_id]
@@ -151,7 +153,6 @@ def produce_global(attn, x, state, *, fused_graph=False, verify_rope=False):
         entry_positions, commit = positions, valid
     elif ratio == 2:
         scores = attn.global_wgate(x)
-        verify = getattr(state, "verify", False)
         if fused_graph and not verify and attn.global_norm is not None:
             compressed = try_compress_csa(
                 values, scores, attn.global_norm, g.norm_eps, freqs, positions, valid,
@@ -213,11 +214,14 @@ def produce_global(attn, x, state, *, fused_graph=False, verify_rope=False):
     elif compressed is None:
         rope = freqs[entry_positions.clamp(min=0, max=freqs.shape[0] - 1)]
     inplace_rope = fused_graph or verify_rope
+    from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import NORM_STORE
+
+    defer_index_norm = optimization_enabled(NORM_STORE)
     if inplace_rope:
         # The Indexer consumes the unrotated latent on this same stream.
-        index = _normalize_graph_value(
-            F.linear(latent, attn.index_wk.weight), attn.index_k_norm, g.norm_eps,
-        )
+        index = F.linear(latent, attn.index_wk.weight)
+        if not defer_index_norm:
+            index = _normalize_graph_value(index, attn.index_k_norm, g.norm_eps)
     tag = "global_kv_2" if ratio == 2 else "global_kv_1"
     if compressed is None:
         raw = (
@@ -229,17 +233,26 @@ def produce_global(attn, x, state, *, fused_graph=False, verify_rope=False):
         attn, cache, tag, main_slots, latent, rope, fused_graph=fused_graph, verify_rope=verify_rope
     )
     if not inplace_rope:
-        index = _normalize_graph_value(
-            F.linear(latent, attn.index_wk.weight),
-            attn.index_k_norm,
-            g.norm_eps,
-        )
+        index = F.linear(latent, attn.index_wk.weight)
+        if not defer_index_norm:
+            index = _normalize_graph_value(index, attn.index_k_norm, g.norm_eps)
     if compressed is None:
         index_slots = cache.slots(layer_id, "indexer_kv", raw)
-    _store_graph_compressed_key(
-        attn, cache, "indexer_kv", index_slots, index, rope,
-        fused_graph=fused_graph, verify_rope=verify_rope,
-    )
+    index_stored = False
+    if defer_index_norm:
+        from rtp_llm.models_py.modules.dsv41.ppu.norm_store import try_norm_rope_store_indexer
+
+        index_stored = try_norm_rope_store_indexer(
+            index, attn.index_k_norm, g.norm_eps, rope, cache, layer_id, index_slots,
+            journal=verify,
+        )
+        if not index_stored:
+            index = _normalize_graph_value(index, attn.index_k_norm, g.norm_eps)
+    if not index_stored:
+        _store_graph_compressed_key(
+            attn, cache, "indexer_kv", index_slots, index, rope,
+            fused_graph=fused_graph, verify_rope=verify_rope,
+        )
 
 
 def select_indices(
@@ -384,6 +397,7 @@ def forward_graph_attention(attn, x, state):
     )
     inplace_rope = native_packed or verify_packed
     table = state.freqs[attn.layer_id]
+    mega = attn._get_mega_attention(table) if type(packed) is GraphPackedAttention else None
     if inplace_rope:
         # The runtime interns tables by RoPE base. Gather each one once
         # from the replay's current positions and reuse across layers.
@@ -393,9 +407,14 @@ def forward_graph_attention(attn, x, state):
         freqs = state.shared[key]
     else:
         freqs = table[positions]
+    from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import NORM_STORE
+
+    deferred_kv_norm = optimization_enabled(NORM_STORE)
     qr, q, kv, qr_quantized = attn.project_query_kv(
         x, prepare_indexer=bool(attn.compress_ratio and attn.is_index_source),
         reuse_ptpc=verify, fuse_qr_norm=verify,
+        defer_kv_norm=deferred_kv_norm,
+        q_projector=mega.project_q if mega is not None else None,
     )
     q = q.reshape(-1, g.n_heads, g.head_dim)
     if native_packed:
@@ -412,13 +431,40 @@ def forward_graph_attention(attn, x, state):
         swa_slots = cache.slots(
             attn.layer_id, "swa_kv", torch.where(valid, positions, -1)
         )
-    q_rotated = (
-        try_rotate_q_and_write_swa(
-            q, kv, freqs, cache, attn.layer_id, swa_slots, journal=verify_packed,
-            live_inputs=(x, qr, positions),
+    norm_stored = False
+    if deferred_kv_norm:
+        from rtp_llm.models_py.modules.dsv41.ppu.norm_store import try_norm_rope_store_swa
+
+        norm_stored = try_norm_rope_store_swa(
+            kv, attn.kv_norm.weight, attn.kv_norm.variance_epsilon,
+            freqs, cache, attn.layer_id, swa_slots, journal=verify_packed,
         )
-        if ordinary_packed or verify_packed else None
-    )
+        if not norm_stored:
+            kv = attn.kv_norm(kv, allow_strided=True)
+    if mega is not None:
+        if not norm_stored and not try_write_rotary_swa(
+            kv, freqs, cache, attn.layer_id, swa_slots, journal=verify_packed,
+        ):
+            kv_rotated = _rope_tail(kv, freqs)
+            cache.write_rows(
+                attn.layer_id, "swa_kv", swa_slots,
+                attn.ops.encode_kv(kv_rotated, pool_tag="swa_kv"),
+            )
+        q_rotated = q  # MegaAttention owns Q RoPE; K is already published.
+    else:
+        q_rotated = (
+            _rotate_graph_value(
+                q, freqs, inplace=verify_packed, preserve_signed_zero=True,
+                live_inputs=(x, qr, kv, positions),
+            )
+            if norm_stored else (
+                try_rotate_q_and_write_swa(
+                    q, kv, freqs, cache, attn.layer_id, swa_slots, journal=verify_packed,
+                    live_inputs=(x, qr, positions),
+                )
+                if ordinary_packed or verify_packed else None
+            )
+        )
     if q_rotated is None:
         q_rotated = _rotate_graph_value(
             q, freqs, inplace=verify_packed, preserve_signed_zero=True,
@@ -429,7 +475,9 @@ def forward_graph_attention(attn, x, state):
             attn.layer_id, "swa_kv", swa_slots, attn.ops.encode_kv(kv, pool_tag="swa_kv")
         )
     else:
-        counter = "direct_swa_journal" if verify_packed else "direct_swa_write"
+        counter = "norm_swa_store" if norm_stored else (
+            "direct_swa_journal" if verify_packed else "direct_swa_write"
+        )
         state.attention_calls[counter] += 1
     q = q_rotated
     if attn.is_kv_source:
@@ -444,6 +492,20 @@ def forward_graph_attention(attn, x, state):
             state.shared[attn.layer_id] = selected
         else:
             selected = state.shared[attn.index_source_layer_id]
+    if mega is not None:
+        projected = packed.forward(
+            attn, q, selected, state.metadata, state.shared,
+            mega=mega, mega_phase="verify" if verify else "decode",
+        )
+        if projected is not None:
+            state.attention_calls["mega_attention"] += 1
+            return attn.wo_b(projected.flatten(1)).reshape(shape)
+        # Metadata rejection occurred before the fused native call. Restore
+        # ordinary head order and apply the Q RoPE omitted above exactly once.
+        q = _rotate_graph_value(
+            mega.unpack_query(q), freqs, preserve_signed_zero=True,
+            live_inputs=(x, qr, kv, positions),
+        )
     if packed is None:
         output = _shared_decode_attention(
             q, selected, cache=cache, layer_id=attn.layer_id,

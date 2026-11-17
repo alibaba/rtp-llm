@@ -1009,6 +1009,15 @@ def _select_verify_compact_topk(
     *, bf16_tail_provenance=False,
 ):
     """Select plain scores, then map compact positions to logical KV IDs."""
+    from rtp_llm.models_py.modules.dsv41.ppu.sparse_selection import try_select_sparse
+
+    fused = try_select_sparse(
+        scored, visible, valid_mask, topk, first=first, tentative=tentative,
+        allowed=allowed, candidate_active=candidate_active,
+        bf16_tail_provenance=bf16_tail_provenance,
+    )
+    if fused is not None:
+        return fused
     native_topk, cooperative_bf16 = _verify_topk_op(
         visible.numel(), visible.device, topk,
         bf16_provenance=bf16_tail_provenance and scored.scores.dtype == torch.bfloat16,
@@ -1095,6 +1104,11 @@ def _select_sparse_candidates(
     )
     if scored is None:
         return None
+    from rtp_llm.models_py.modules.dsv41.ppu.sparse_selection import try_select_sparse
+
+    fused = try_select_sparse(scored, visible, valid_mask, topk)
+    if fused is not None:
+        return fused
     from rtp_llm.ops.compute_ops import rtp_llm_ops
 
     scores, logical_ids, lengths = scored.scores, scored.logical_ids, scored.lengths

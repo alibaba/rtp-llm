@@ -25,6 +25,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.prefill_runtime import (
 from rtp_llm.models_py.modules.dsv41.ppu.weight import _build_freqs_cis
 from rtp_llm.models_py.modules.dsv41.prefill.forward import forward_prefill
 from rtp_llm.ops.compute_ops import PyModelOutputs
+from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import env_value as optimization_env_value
 
 
 DP_PREFILL_FORWARD_MEGA_CAPACITY_ENV = "RTP_V41_PPU_DP_PREFILL_FORWARD_MEGA_CAPACITY"
@@ -118,10 +119,10 @@ class SharedNativeRuntime:
             "enabled": False, "decision": "not_dispatched", "published": 0,
             "consumed": 0, "edges": [], "fallbacks": {}, "complete": False,
         }
-        self.dp_prefill_capacity_enabled = os.environ.get(DP_PREFILL_FORWARD_MEGA_CAPACITY_ENV, "0") == "1"
+        self.dp_prefill_capacity_enabled = optimization_env_value(DP_PREFILL_FORWARD_MEGA_CAPACITY_ENV, "0") == "1"
         from rtp_llm.models_py.modules.dsv41.ppu.engram import LOCAL_PREFILL_ENGRAM_ROUNDS_ENV
 
-        engram_flag = os.environ.get(LOCAL_PREFILL_ENGRAM_ROUNDS_ENV, "0")
+        engram_flag = optimization_env_value(LOCAL_PREFILL_ENGRAM_ROUNDS_ENV, "0")
         self._engram_requested = engram_flag == "1"
         self._engram_flag_valid = engram_flag in ("0", "1")
         self._engram_epoch = 0
@@ -152,6 +153,8 @@ class SharedNativeRuntime:
                 layer.attn_hc.runtime = self
             if getattr(layer, "ffn", None) is not None:
                 layer.ffn.runtime = self
+                if getattr(layer.ffn, "gate", None) is not None:
+                    layer.ffn.gate.runtime = self
                 layer.ffn_hc.runtime = self
 
     @property
@@ -297,6 +300,10 @@ class SharedNativeRuntime:
                    or (self._engram_requested and (native_bad or not topology or not bound))),
             evidence=self._engram_evidence,
             bindings=bindings,
+            # prepare_hashes produces [input rows, 24] for both admitted
+            # Engram layers, before any L20 compaction. Idle owners include
+            # their actual padded rows in the same agreement.
+            local_flat_rows=state.inputs.input_ids.numel() * 24,
         )
 
     def _prepare_dp_prefill_mega_capacity(self, state):
@@ -341,6 +348,23 @@ class SharedNativeRuntime:
         )
 
     def dispatch(self, inputs, fmha_impl=None):
+        directory = os.environ.get("RTP_V41_PPU_PREFILL_HOST_PROFILE_DIR")
+        if directory and int(inputs.input_ids.numel()) == 4096:
+            count = getattr(self, "_prefill_host_profile_calls", 0) + 1
+            self._prefill_host_profile_calls = count
+            if count == 6:
+                import cProfile
+
+                profiler = cProfile.Profile()
+                try:
+                    return profiler.runcall(self._dispatch, inputs, fmha_impl)
+                finally:
+                    Path(directory).mkdir(parents=True, exist_ok=True)
+                    rank = dist.get_rank() if dist.is_initialized() else 0
+                    profiler.dump_stats(str(Path(directory) / f"prefill-host-rank{rank}.prof"))
+        return self._dispatch(inputs, fmha_impl)
+
+    def _dispatch(self, inputs, fmha_impl=None):
         """Metadata/dispatch only; both complete layer loops remain public."""
         if self.current is not None:
             raise RuntimeError("shared PPU forward is not reentrant")
@@ -430,7 +454,15 @@ class SharedNativeRuntime:
         try:
             state.engram_round_schedule = self._prepare_engram_rounds(state)
             self._prepare_dp_prefill_mega_capacity(state)
+            if prefill and cache is not None:
+                # Existing admission/count synchronization has completed.
+                # Verify the small native tables before queuing layer work.
+                cache.prepare_local_table_mirrors()
             model.v4._propagate_cp_ctx(None)
+            # Still inside this timed forward, after the original admission
+            # collectives and before hashes or model layers queue GPU work.
+            # CP1 identity/bounded metadata has no layer-output dependency.
+            state.prepare_local_plan_at_entry()
             self.prepare_hashes(inputs, idle)
             for layer in model.v4.layers:
                 layer.attn._shared_attention = state.shared if self.policy.mode == "exact" else None

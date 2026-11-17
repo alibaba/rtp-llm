@@ -135,6 +135,7 @@ from rtp_llm.ops.compute_ops import (
     PyModelInputs,
     PyModelOutputs,
 )
+from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import env_value as optimization_env_value
 
 if TYPE_CHECKING:
     # Kept behind TYPE_CHECKING to avoid an import cycle — ``transformer``
@@ -334,6 +335,49 @@ def set_cp_info(
         v4.set_cp_info(None, 1, 0)
 
 
+def _shared_prefill_meta_inputs_required(v4, input_ids, cp_ctx):
+    """Generic builders require metadata unless every consumer opts out."""
+    found_consumer = False
+    for layer in v4.layers:
+        attn = getattr(layer, "attn", None)
+        if attn is None:
+            continue
+        found_consumer = True
+        capability = getattr(attn, "_shared_prefill_meta_inputs_required", None)
+        if not callable(capability) or capability(
+            builder=getattr(attn, "_build_shared_prefill_meta", None),
+            v4=v4, input_ids=input_ids, cp_ctx=cp_ctx,
+        ) is not False:
+            return True
+    return not found_consumer
+
+
+def _ppu_local_hc_expand_enabled(v4, hidden, input_ids):
+    """Admit the existing bit-copy kernel for this local PPU embedding."""
+    if (hidden.shape != (4096, 5120) or hidden.requires_grad
+            or hidden.is_neg() or hidden.is_conj()
+            or optimization_env_value("RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA", "0") != "1"):
+        return False
+    from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
+    from rtp_llm.models_py.modules.dsv41.ppu.prefill_runtime import SharedForwardState
+
+    runtime = getattr(v4, "_ppu_runtime", None)
+    state = getattr(runtime, "current", None)
+    return (
+        type(state) is SharedForwardState
+        and state.runtime is runtime and runtime.model.v4 is v4
+        and state.inputs.input_ids is input_ids
+        and hidden.device == input_ids.device
+        and state.context is None and not state.compacted
+        and getattr(v4, "_cp_info", None) is None
+        and getattr(v4, "_cp_size", 1) == 1
+        and not state.local_prefill_sg_align
+        and state._mega_all_live_phase()
+        and is_ppu()
+        and torch.cuda.get_device_capability(hidden.device) == (8, 9)
+    )
+
+
 def forward_layers(
     v4: V4Transformer,
     kv_cache: Optional[KVCache],
@@ -491,10 +535,10 @@ def forward_layers(
                 and h.dtype == torch.bfloat16
                 and h.is_contiguous()
                 and h.ndim == 2
-                and h.shape[0] >= 8192
                 and h.shape[1] == 5120
                 and v4.hc_mult == 4
                 and not torch.cuda.is_current_stream_capturing()
+                and (h.shape[0] >= 8192 or _ppu_local_hc_expand_enabled(v4, h, input_ids))
             ):
                 from rtp_llm.models_py.modules.dsv41.prefill._hc_expand_triton import (
                     expand_hc,
@@ -578,67 +622,62 @@ def forward_layers(
     # own forward.
     with record_range_ctx():
         if v4.fp8_kv_cache:
-            first_position_host = getattr(cp_ctx, "first_position_host", None)
-            sp_int_for_meta = (
-                first_position_host
-                if first_position_host is not None
-                else int(positions[0].item())
+            meta_inputs_required = (
+                _rt_on or _fwd_dbg.enabled() or prepare_hidden_fn is not None
+                or _shared_prefill_meta_inputs_required(v4, input_ids, cp_ctx)
             )
+            sp_int_for_meta = 0
             sp_per_req: Optional[torch.Tensor] = None
             req_id_per_token: Optional[torch.Tensor] = None
-            if cp_ctx is not None:
-                # Under CP, rank-local token order is zigzagged. The first token of
-                # each rank-local request chunk is therefore not necessarily the
-                # request's absolute start position. Use CP metadata instead of
-                # deriving request ids from rank-local cu_seqlens.
-                sp_per_req = cp_ctx.prefix_lengths.to(
-                    device=positions.device, dtype=torch.int64
-                ).contiguous()
-                req_id_per_token = cp_ctx.req_id_per_token.to(
-                    device=positions.device, dtype=torch.int32
-                ).contiguous()
-            elif cu_seqlens is not None and cu_seqlens.numel() >= 2:
-                starts = cu_seqlens[:-1].to(device=positions.device, dtype=torch.int64)
-                sp_per_req = (
-                    positions.index_select(0, starts).to(torch.int64).contiguous()
-                )
-                req_id_per_token = (
-                    torch.searchsorted(
-                        cu_seqlens.to(device=positions.device, dtype=torch.int64),
-                        torch.arange(
-                            positions.numel(),
-                            device=positions.device,
-                            dtype=torch.int64,
-                        ),
-                        right=True,
-                    )
-                    .sub_(1)
-                    .to(torch.int32)
-                    .contiguous()
-                )
             batch_size = 1
             if cu_seqlens is not None and cu_seqlens.numel() >= 2:
                 batch_size = int(cu_seqlens.numel() - 1)
             input_lengths: Optional[torch.Tensor] = None
             prefix_lengths: Optional[torch.Tensor] = None
             max_seqlen_q = 0
-            if attn_inputs is not None:
-                il = device_attention_metadata(attn_inputs, "input_lengths")
-                if il is not None and il.numel() > 0:
-                    input_lengths = il.to(
-                        device=positions.device, dtype=torch.int32, non_blocking=True
+            if meta_inputs_required:
+                first_position_host = getattr(cp_ctx, "first_position_host", None)
+                sp_int_for_meta = (
+                    first_position_host
+                    if first_position_host is not None
+                    else int(positions[0].item())
+                )
+                if cp_ctx is not None:
+                    # CP request chunks use zigzag order, not local cu boundaries.
+                    sp_per_req = cp_ctx.prefix_lengths.to(
+                        device=positions.device, dtype=torch.int64
                     ).contiguous()
-                    max_seqlen_q = (
-                        max(cp_ctx.chunk_lengths_per_req)
-                        if cp_ctx is not None
-                        and cp_ctx.chunk_lengths_per_req is not None
-                        else int(input_lengths.max().item())
+                    req_id_per_token = cp_ctx.req_id_per_token.to(
+                        device=positions.device, dtype=torch.int32
+                    ).contiguous()
+                elif cu_seqlens is not None and cu_seqlens.numel() >= 2:
+                    starts = cu_seqlens[:-1].to(device=positions.device, dtype=torch.int64)
+                    sp_per_req = (
+                        positions.index_select(0, starts).to(torch.int64).contiguous()
                     )
-                pl = device_attention_metadata(attn_inputs, "prefix_lengths")
-                if pl is not None and pl.numel() > 0:
-                    prefix_lengths = pl.to(
-                        device=positions.device, dtype=torch.int32, non_blocking=True
-                    ).contiguous()
+                    req_id_per_token = (
+                        torch.searchsorted(
+                            cu_seqlens.to(device=positions.device, dtype=torch.int64),
+                            torch.arange(positions.numel(), device=positions.device, dtype=torch.int64),
+                            right=True,
+                        ).sub_(1).to(torch.int32).contiguous()
+                    )
+                if attn_inputs is not None:
+                    il = device_attention_metadata(attn_inputs, "input_lengths")
+                    if il is not None and il.numel() > 0:
+                        input_lengths = il.to(
+                            device=positions.device, dtype=torch.int32, non_blocking=True
+                        ).contiguous()
+                        max_seqlen_q = (
+                            max(cp_ctx.chunk_lengths_per_req)
+                            if cp_ctx is not None and cp_ctx.chunk_lengths_per_req is not None
+                            else int(input_lengths.max().item())
+                        )
+                    pl = device_attention_metadata(attn_inputs, "prefix_lengths")
+                    if pl is not None and pl.numel() > 0:
+                        prefix_lengths = pl.to(
+                            device=positions.device, dtype=torch.int32, non_blocking=True
+                        ).contiguous()
             # The workspace was allocated at function entry, before
             # embedding could fragment its cached address range.  It remains a
             # per-forward local so the MTP draft can reuse the block immediately.

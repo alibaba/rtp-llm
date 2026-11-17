@@ -4,7 +4,7 @@ The old FP32 activation is a timing baseline, not this opt-in's byte oracle.
 No device tests run without the explicit PPU qualification environment flag.
 """
 
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 import hashlib
 import json
 import math
@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import statistics
 import time
+from types import SimpleNamespace as NS
 import unittest
 from unittest.mock import Mock, patch
 
@@ -70,11 +71,116 @@ def direct_sg_reference(gateup):
     return payload, scale
 
 
+def hc_public_forward_fixture(source):
+    """Real shared state and public embedding flow, without model weights."""
+    from rtp_llm.models_py.modules.dsv41.ppu.prefill_runtime import SharedForwardState
+
+    rows = source.shape[0]
+    v4 = NS(layers=[], fp8_kv_cache=False, hc_mult=4, _cp_info=None, _cp_size=1,
+            capture_aux_hidden_layer_ids=(), _mtp_hidden_buffer=None,
+            _dsv4_prefill_fast_layer_calls=None, _propagate_cp_ctx=lambda cp: None,
+            embed=lambda ids: source, _hc_head_reduce=lambda value: value, norm=lambda value: value)
+    runtime = NS(model=NS(v4=v4), policy=NS(mode="compact"))
+    inputs = NS(input_ids=torch.arange(rows, device=source.device))
+    attn = NS(cu_seqlens=torch.tensor((0, rows), dtype=torch.int32), is_cuda_graph=False)
+    state = SharedForwardState(runtime, inputs, attn, NS(sharded=False),
+                               prefill=True, idle=False, prefixes=(0,), lengths=(rows,))
+    runtime.current, v4._ppu_runtime = state, runtime
+    return v4, state
+
+
+def hc_public_forward(v4, state):
+    from rtp_llm.models_py.modules.dsv41.prefill.forward import forward_layers
+
+    return forward_layers(v4, None, state.inputs.input_ids, state.inputs.input_ids,
+                          state.attn.cu_seqlens, None, None, attn_inputs=state.attn)
+
+
 class LocalPrefillSGOpsCPU(unittest.TestCase):
     def setUp(self):
         guard = torch.no_grad()
         guard.__enter__()
         self.addCleanup(guard.__exit__, None, None, None)
+
+    def _hc_public_route(self, change=None):
+        from rtp_llm.models_py.modules.dsv41.ppu import _quant
+        from rtp_llm.models_py.modules.dsv41.prefill import forward, _hc_expand_triton
+
+        class EmbeddingSelected(Exception):
+            pass
+
+        rows = 8192 if change == "nvidia_large" else 4097 if change == "rows" else 4096
+        source = (torch.empty((5120, rows), dtype=torch.bfloat16).t() if change == "strided"
+                  else torch.empty((rows, 5120), dtype=torch.float32 if change == "dtype" else torch.bfloat16))
+        v4, state = hc_public_forward_fixture(source)
+        if change == "unknown_state":
+            v4._ppu_runtime.current = NS()
+        elif change == "stale_runtime":
+            v4._ppu_runtime.current = None
+        elif change == "wrong_model":
+            v4._ppu_runtime.model = NS(v4=object())
+        elif change == "cp8":
+            v4._cp_size = 8
+        elif change == "cp_context":
+            state.context = object()
+        elif change == "graph":
+            state.is_graph = True
+        elif change == "verify":
+            state.verify = True
+        elif change == "decode":
+            state.prefill = False
+        elif change == "idle":
+            state.idle = True
+        elif change == "sharded":
+            state.cache.sharded = True
+        elif change == "compacted":
+            state.compacted = True
+        elif change == "sg_align":
+            state.local_prefill_sg_align = True
+        elif change == "hc_mult":
+            v4.hc_mult = 2
+        elif change == "requires_grad":
+            source.requires_grad_(True)
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, {
+                "RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA": "0" if change == "host_off" else "1",
+            }))
+            stack.enter_context(patch.object(torch.Tensor, "is_cuda", new=property(lambda tensor: change != "cpu")))
+            stack.enter_context(patch.object(_quant, "is_ppu", return_value=change not in ("not_ppu", "nvidia_large")))
+            stack.enter_context(patch.object(torch.cuda, "device", new=lambda device: nullcontext()))
+            stack.enter_context(patch.object(torch.cuda, "get_device_capability", return_value=(8, 0) if change == "arch" else (8, 9)))
+            stack.enter_context(patch.object(torch.cuda, "is_current_stream_capturing", return_value=change == "capture"))
+            stack.enter_context(patch.object(torch.cuda, "_lazy_init", side_effect=AssertionError("CPU route must not initialize GPU")))
+            stack.enter_context(patch.object(torch.version, "hip", None))
+            stack.enter_context(patch.object(forward._rt, "ENABLED", change == "recording"))
+            stack.enter_context(patch.object(forward._rt, "begin"))
+            stack.enter_context(patch.object(forward._rt, "_get_buf", return_value=object()))
+            stack.enter_context(patch.object(forward._rt, "record"))
+            expand = stack.enter_context(patch.object(_hc_expand_triton, "expand_hc", side_effect=EmbeddingSelected))
+            sg = stack.enter_context(patch.object(ops, "hc_broadcast", side_effect=EmbeddingSelected))
+            repeat = stack.enter_context(patch.object(torch.Tensor, "repeat", side_effect=EmbeddingSelected))
+            if change == "grad":
+                stack.enter_context(torch.enable_grad())
+            with self.assertRaises(EmbeddingSelected):
+                hc_public_forward(v4, state)
+        expected = "sg" if change == "sg_align" else "expand" if change in (None, "nvidia_large") else "repeat"
+        for name, provider in (("expand", expand), ("sg", sg), ("repeat", repeat)):
+            self.assertEqual(provider.call_count, int(name == expected), name)
+        if expected != "repeat":
+            self.assertIs((sg if expected == "sg" else expand).call_args.args[0], source)
+
+    def test_hc_public_forward_4096_ppu_route_keeps_sg_precedence_and_nvidia_threshold(self):
+        for change in (None, "sg_align", "nvidia_large"):
+            with self.subTest(change=change):
+                self._hc_public_route(change)
+
+    def test_hc_public_forward_ineligible_domains_keep_repeat(self):
+        for change in ("cpu", "not_ppu", "arch", "host_off", "unknown_state", "stale_runtime",
+                       "wrong_model", "cp8", "cp_context", "graph", "verify", "decode", "idle",
+                       "sharded", "compacted", "hc_mult", "rows", "dtype", "strided",
+                       "requires_grad", "grad", "capture", "recording"):
+            with self.subTest(change=change):
+                self._hc_public_route(change)
 
     def test_metadata_declines_before_provider_and_device_checks_are_real(self):
         good = torch.randn(3, 4608, dtype=torch.bfloat16)
@@ -250,6 +356,37 @@ class LocalPrefillSGOpsDevice(unittest.TestCase):
                 actual[:, 0].fill_(123)
                 assert_bits(self, actual[:, 1], other)
                 assert_bits(self, source, before)
+
+    def test_hc_public_forward_changed_input_has_new_storage_and_four_independent_lanes(self):
+        from rtp_llm.models_py.modules.dsv41.prefill import _hc_expand_triton
+
+        source = torch.full((4096, 5120), 0.25, dtype=torch.bfloat16, device="cuda:0")
+        with patch.dict(os.environ, {"RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA": "1",
+                                    "RTP_V41_PPU_LOCAL_PREFILL_SG_ALIGN": "0"}), patch.object(
+            _hc_expand_triton, "expand_hc", wraps=_hc_expand_triton.expand_hc,
+        ) as expand:
+            v4, state = hc_public_forward_fixture(source)
+            first = hc_public_forward(v4, state)
+            first_reference = source[:, None].repeat(1, 4, 1)
+            assert_bits(self, first, first_reference)
+            source.fill_(-0.5)
+            before = source.clone()
+            second_v4, second_state = hc_public_forward_fixture(source)
+            second = hc_public_forward(second_v4, second_state)
+            self.assertEqual(expand.call_count, 2)
+        self.assertEqual(second.shape, (4096, 4, 5120))
+        self.assertEqual(second.stride(), (20480, 5120, 1))
+        self.assertFalse(torch._C._is_alias_of(second, source))
+        self.assertFalse(torch._C._is_alias_of(second, first))
+        assert_bits(self, second, source[:, None].repeat(1, 4, 1))
+        for lane in range(4):
+            second[:, lane].fill_(lane + 1)
+            for other in range(4):
+                if other != lane:
+                    assert_bits(self, second[:, other], before)
+            assert_bits(self, source, before)
+            assert_bits(self, first, first_reference)
+            second[:, lane].copy_(before)
 
     def test_real_fused_and_hc_kernel_profiles_have_no_aten_auxiliary_chain(self):
         records = {}

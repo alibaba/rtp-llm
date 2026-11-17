@@ -919,6 +919,8 @@ class LocalPrefillEngramSchedule:
     device: torch.device
     round_cap: int
     layers: tuple
+    local_flat_rows: int
+    group_max_rows: int
     _bindings: tuple = field(repr=False, compare=False)
     _lease: _LocalEngramLease = field(repr=False, compare=False)
 
@@ -935,6 +937,10 @@ class LocalPrefillEngramSchedule:
             and rows.device == self.device and rows.is_cuda
             and rows.layout == torch.strided and not rows.is_neg() and not rows.is_conj()
             and rows.ndim == 2 and rows.shape[1] == 24
+            and type(self.local_flat_rows) is int and type(self.group_max_rows) is int
+            and 0 <= self.local_flat_rows <= self.group_max_rows < 2**62
+            and self.local_flat_rows % 24 == self.group_max_rows % 24 == 0
+            and rows.numel() == self.local_flat_rows
             and len(self._lease.records) < len(self.layers)
             and layer_id == self.layers[len(self._lease.records)]
         ):
@@ -945,7 +951,7 @@ class LocalPrefillEngramSchedule:
                 or bound[3] is not adapter or bound[4] != fields
                 or bound[5] != tuple(_engram_host_tensor_key(t) for t in (shard.payload, shard.scale))):
             raise RuntimeError("local Prefill Engram host binding changed after admission")
-        record = dict(layer=int(layer_id), local_rows=rows.numel(), group_max_rows=None,
+        record = dict(layer=int(layer_id), local_rows=rows.numel(), group_max_rows=self.group_max_rows,
                       rounds=[], reduce_scatter=True, complete=False, contribution_bytes=0)
         self._lease.records.append(record)
         return record
@@ -963,20 +969,26 @@ class LocalPrefillEngramSchedule:
 def prepare_local_prefill_engram_schedule(
     device, *, requested, supported, epoch, process_group, fatal=False,
     round_cap=LOCAL_PREFILL_ENGRAM_ROUND_CAP, layers=(1, 14), evidence=None, bindings=None,
+    local_flat_rows=None,
 ):
     """All P-role WORLD8 owners enter, even with the rollout flag disabled.
 
     Unsupported owners agree on the old schedule. Flag/cap/epoch, group or
     lifecycle disagreement is a coherent error before any layer collective.
     No caller may turn a rejected, expired or partially used lease into a
-    local fallback after this agreement.
+    local fallback after this agreement. Every owner supplies its exact
+    flattened hash count, including idle and unsupported owners. Missing or
+    invalid counts enter the same packet and reject jointly, rather than
+    raising locally before peers enter their collective.
     """
     import torch.distributed as dist
 
     if (not dist.is_initialized() or dist.get_world_size(dist.group.WORLD) != 8
             or device.type != "cuda" or torch.cuda.is_current_stream_capturing()):
         raise RuntimeError("local Prefill Engram agreement requires eager CUDA/PPU WORLD8")
-    invalid = (type(requested) is not bool or type(supported) is not bool
+    count_valid = (type(local_flat_rows) is int and 0 <= local_flat_rows < 2**62
+                   and local_flat_rows % 24 == 0)
+    invalid = (not count_valid or type(requested) is not bool or type(supported) is not bool
                or type(epoch) is not int or not 1 <= epoch < 2**62
                or type(round_cap) is not int or round_cap != LOCAL_PREFILL_ENGRAM_ROUND_CAP
                or not isinstance(layers, (tuple, list)) or tuple(layers) != (1, 14)
@@ -984,22 +996,27 @@ def prepare_local_prefill_engram_schedule(
     cap = round_cap if type(round_cap) is int and 0 <= round_cap < 2**62 else 0
     generation = epoch if type(epoch) is int and 0 <= epoch < 2**62 else 0
     enabled = int(requested) if type(requested) is bool else 0
+    local_count = local_flat_rows if count_valid else 0
     captured, geometry, binding_bad = _capture_local_engram_bindings(bindings, dist.get_rank(dist.group.WORLD))
     dimensions = [item for value in geometry for item in (value, -value)]
     packet = torch.tensor([enabled, -enabled, cap, -cap, generation, -generation,
                            int(supported is not True), int(bool(fatal or invalid or (enabled and binding_bad))),
-                           *dimensions],
+                           *dimensions, local_count],
                           dtype=torch.int64, device=device)
     # The control group is WORLD even if a local binding is invalid. Peers
     # must reach the same reject decision, not enter different groups.
     dist.all_reduce(packet, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
     values = packet.tolist()
     on, neg_on, maximum, neg_minimum, current, neg_previous, unsupported, rejected = values[:8]
+    group_max_rows = values[-1]
     result = evidence if evidence is not None else {}
     result.clear()
     result.update(decision="rejected", epoch=generation, round_cap=cap, packet=values,
-                  rank=dist.get_rank(dist.group.WORLD), consumed_layers=[])
-    mismatch = any(values[i] != -values[i + 1] for i in range(8, len(values), 2))
+                  rank=dist.get_rank(dist.group.WORLD), local_flat_rows=local_count,
+                  group_max_rows=group_max_rows, consumed_layers=[])
+    # Geometry must agree; the last field deliberately permits ragged ranks.
+    mismatch = any(values[i] != -values[i + 1] for i in range(8, len(values) - 1, 2))
+    mismatch = mismatch or not (local_count <= group_max_rows < 2**62 and group_max_rows % 24 == 0)
     if rejected or on != -neg_on or maximum != -neg_minimum or current != -neg_previous or mismatch:
         raise RuntimeError(f"local Prefill Engram configuration/lifecycle disagreement: {values!r}")
     if not on or unsupported:
@@ -1008,7 +1025,8 @@ def prepare_local_prefill_engram_schedule(
     lease = _LocalEngramLease()
     result.update(decision="adopted", round_cap=maximum, consumed_layers=lease.records)
     schedule = LocalPrefillEngramSchedule(dist.group.WORLD, dist.get_rank(dist.group.WORLD),
-                                         current, device, maximum, tuple(layers), captured, lease)
+                                         current, device, maximum, tuple(layers),
+                                         local_count, group_max_rows, captured, lease)
     lease.schedule = schedule
     return schedule
 
@@ -1164,7 +1182,12 @@ def engram_lookup(
         # Full CP8 has the same padded rows per rank. Only use this proof
         # when the eight participating ENP ranks are the whole CP8 world.
         fixed_rows = adapter.size == dist.get_world_size() == 8
-    group_max = flat.numel() if fixed_rows else adapter.all_max_count(flat.numel(), device)
+    if round_schedule is not None:
+        # claim authenticated this forward's exact local rows and immutable
+        # host binding. Both admitted layers use the same agreed group max.
+        group_max = round_schedule.group_max_rows
+    else:
+        group_max = flat.numel() if fixed_rows else adapter.all_max_count(flat.numel(), device)
     lengths = _round_lengths(group_max, int(max_rows_per_round))
     if record is not None:
         record.update(group_max_rows=group_max, rounds=list(lengths))

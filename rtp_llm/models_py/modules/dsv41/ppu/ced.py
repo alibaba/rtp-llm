@@ -17,6 +17,7 @@ from rtp_llm.models_py.modules.dsv41.prefill.ced import (
     _bounded_replay_selected,
     _query_layout,
 )
+from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import env_value as optimization_env_value
 
 
 class _LocalRowExchange(_RowExchange):
@@ -54,12 +55,15 @@ def bounded_plan(v4, context, attn_inputs, kv_cache, policy):
     # B1/CP1 can directly build the final layout instead of allocating an
     # unconsumed public128 transport before the identical final140 transport.
     single_layout = (
-        os.environ.get("RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA", "0") == "1"
+        optimization_env_value("RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA", "0") == "1"
         and context.cp_size == 1 and policy.keep_tokens == 140
         and len(context.input_lengths_global_host) == 1
         and context.input_lengths_global_host[0] > policy.keep_tokens
     )
-    options = {"bounded_replay_keep_tokens": policy.keep_tokens} if single_layout else {}
+    options = {
+        "bounded_replay_keep_tokens": policy.keep_tokens,
+        "versioned_metadata": True,
+    } if single_layout else {}
     admitted = CEDPlan.create(
         v4, context, attn_inputs, kv_cache, bounded_replay=True, **options
     )

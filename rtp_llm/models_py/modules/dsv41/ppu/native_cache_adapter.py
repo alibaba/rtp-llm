@@ -8,7 +8,9 @@ import hashlib
 import logging
 import math
 import os
-from types import SimpleNamespace
+from functools import lru_cache
+from importlib.machinery import ExtensionFileLoader
+from types import BuiltinFunctionType, MethodDescriptorType, SimpleNamespace
 from typing import Callable, NamedTuple
 
 import torch
@@ -23,6 +25,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.native_cache import (
 )
 from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
     enabled as optimization_enabled,
+    env_value as optimization_env_value,
 )
 from rtp_llm.models_py.modules.dsv41.ppu.replay_policy import PrefillPolicy
 from rtp_llm.models_py.modules.dsv41.ppu.row_metadata import (
@@ -38,6 +41,33 @@ LOCAL_PREFILL_SOURCE_CACHE_ENV = "RTP_V41_PPU_LOCAL_PREFILL_SOURCE_CACHE"
 LOCAL_PREFILL_SWA_SEGMENTS_ENV = "RTP_V41_PPU_LOCAL_PREFILL_SWA_SEGMENTS"
 LOCAL_PREFILL_LAZY_PRODUCER_SLOTS_ENV = "RTP_V41_PPU_LOCAL_PREFILL_LAZY_PRODUCER_SLOTS"
 LOCAL_PREFILL_SG_ALIGN_ENV = "RTP_V41_PPU_LOCAL_PREFILL_SG_ALIGN"
+
+
+@lru_cache(maxsize=1)
+def _native_publication_abi():
+    """Resolve the real pybind ABI; optional/CPU substitutes fail closed.
+
+    OpDefs.cc binds the non-constructible CacheStoreWriter without a Python
+    trampoline. PyWrappedModel's sole production factory installs an
+    AsyncWriter, which records the current-stream event and retains tensors;
+    its worker waits on that event before accessing metadata or KV.
+    """
+    try:
+        import librtp_compute_ops as native
+
+        if not isinstance(getattr(getattr(native, "__spec__", None), "loader", None), ExtensionFileLoader):
+            return None
+        classes = tuple(getattr(native, name) for name in (
+            "CacheStoreWriter", "PyCacheStoreInputs", "LayerKVCache", "PyAttentionInputs",
+        ))
+        if not all(isinstance(value, type) for value in classes):
+            return None
+        write = vars(classes[0]).get("write")
+        if not isinstance(getattr(write, "__func__", write), (BuiltinFunctionType, MethodDescriptorType)):
+            return None
+        return native, classes, write
+    except (ImportError, AttributeError):
+        return None
 
 
 def _source_tensor_key(tensor):
@@ -293,6 +323,89 @@ class SharedNativeCache(NativeCacheBridge):
             self._local_producer_slot_stats["materializations"] += 1
         self._local_producer_slot_stats["deferred"] = self._slots is None
 
+    def _async_publication_calls(self):
+        if (optimization_env_value("RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA", "0") != "1"
+                or not self._local_source_native_read_business() or torch.is_grad_enabled()
+                or torch.device(self.device).type != "cuda"
+                or not self._local_source_native_read_enabled
+                or self._local_source_native_read_stats["closed"]
+                or self._local_source_native_read_nonce is not self._local_source_native_read_birth_nonce):
+            return None
+        abi = _native_publication_abi()
+        if abi is None:
+            return None
+        native, classes, write = abi
+        writer_type, params_type, handle_type, meta_type = classes
+        if (any(getattr(native, name, None) is not expected for name, expected in zip(
+                ("CacheStoreWriter", "PyCacheStoreInputs", "LayerKVCache", "PyAttentionInputs"), classes))
+                or vars(writer_type).get("write") is not write):
+            return None
+        calls = []
+        for pool in self.pools.values():
+            meta = self.inputs[pool.framework_tag]
+            writer = getattr(meta, "cache_store_writer", None)
+            params = getattr(meta, "cache_store_inputs", None)
+            if (type(meta) is not meta_type or type(writer) is not writer_type
+                    or type(params) is not params_type or type(pool.handle) is not handle_type
+                    or any(getattr(meta, flag, False) for flag in (
+                        "is_cuda_graph", "is_target_verify", "is_packed_target_verify", "is_proposal",
+                    ))
+                    or not self._local_source_native_read_device(pool)):
+                return None
+            calls.append((writer, params, pool.handle))
+        return calls or None
+
+    def publish(self):
+        calls = self._async_publication_calls()
+        if calls is None:
+            return super().publish()
+        # Admission completes before the first submission. Native write()
+        # records a readiness event on this same default stream, after every
+        # KV write. C++ still drains the cycle and propagates worker errors.
+        # Never retry via the synchronous path after a partial submission.
+        for writer, params, handle in calls:
+            writer.write(params, handle)
+
+    def prepare_local_table_mirrors(self):
+        """Finish existing table checks before any local Prefill layer work.
+
+        This moves the first D2H/equality check; every consumer still checks
+        the constructor-owned table and mirror before reusing the result.
+        Inference metadata retains its existing read-only-within-forward
+        contract; it does not acquire a version counter from this preparation.
+        """
+        if (not self._local_source_native_read_business() or torch.is_grad_enabled()
+                or not self._local_source_native_read_enabled
+                or self._local_source_native_read_stats["closed"]
+                or self._local_source_native_read_nonce is not self._local_source_native_read_birth_nonce):
+            return
+        swa_enabled = (optimization_env_value(LOCAL_PREFILL_SWA_SEGMENTS_ENV, "0") == "1"
+                       and self._local_swa_read_enabled
+                       and not self._local_swa_native_read_stats["closed"])
+        csa_enabled = (self._local_csa_native_write_enabled
+                       and not self._local_csa_native_write_stats["closed"]
+                       and self._local_csa_native_write_nonce is self._local_csa_native_write_birth_nonce)
+        seen = set()
+        for key, pool in self.pools.items():
+            tag = key[1]
+            kind = "full" if tag in _FULL else tag
+            if (kind not in ("full", "csa_state", "swa_kv")
+                    or (kind == "csa_state" and not csa_enabled)
+                    or (kind == "swa_kv" and not swa_enabled)):
+                continue
+            identity = kind, pool.framework_tag
+            if identity in seen:
+                continue
+            seen.add(identity)
+            if not self._local_source_native_read_device(pool):
+                continue
+            if kind == "full":
+                self._verified_local_source_native_table(key, pool)
+            elif kind == "csa_state":
+                self._verified_local_csa_native_table(key, pool)
+            else:
+                self._verified_local_swa_write_table(pool)
+
     def _local_lazy_producer_slots_enabled(self):
         if (not self._local_producer_slot_stats["enabled"]
                 or not self._local_source_native_read_business() or torch.is_grad_enabled()
@@ -519,7 +632,7 @@ class SharedNativeCache(NativeCacheBridge):
 
     def _local_source_cache_eligible(self):
         return (
-            os.environ.get(LOCAL_PREFILL_SOURCE_CACHE_ENV, "0") == "1"
+            optimization_env_value(LOCAL_PREFILL_SOURCE_CACHE_ENV, "0") == "1"
             and type(self) is SharedNativeCache
             and self._is_prefill and not self.sharded
             and self.cp.get("size", 1) == 1
@@ -1349,7 +1462,7 @@ class SharedNativeCache(NativeCacheBridge):
     def _checked_local_swa_ranges(self, layer, positions, requests, packed, prefixes,
                                   retain_rows, retain_prefix_tail, bounded_starts, ticket):
         if (
-            os.environ.get(LOCAL_PREFILL_SWA_SEGMENTS_ENV, "0") != "1"
+            optimization_env_value(LOCAL_PREFILL_SWA_SEGMENTS_ENV, "0") != "1"
             or type(self) is not SharedNativeCache or not self._is_prefill or self.sharded
             or not retain_rows or not isinstance(ticket, _LocalSwaStageRanges)
             or len(ticket.inputs) != 3 or len(ticket.ranges) != len(self.lengths)
@@ -1528,6 +1641,7 @@ class SharedNativeCache(NativeCacheBridge):
         if not self.lengths:
             return
         local_ticket = local_ranges
+        original_readers = _swa_stage_original_readers(self)
         local_ranges = self._checked_local_swa_ranges(
             layer, positions, requests, packed, prefixes, retain_rows,
             retain_prefix_tail, bounded_starts, local_ranges,
@@ -1542,8 +1656,16 @@ class SharedNativeCache(NativeCacheBridge):
         if (getattr(self, "_local_swa_read_enabled", False) and not self._local_swa_native_read_stats["closed"]
                 and self._local_swa_read_rows is not None):
             owners, keys = self._local_swa_read_rows
+            # The original geometry helpers only read metadata/pointers;
+            # table verification only reads/copies tables and updates mirror
+            # bookkeeping, never the row-proof ancestors. Reuse admission
+            # only within this call. Hooks may mutate/reenter, so they retain
+            # the independent guard, as does every unsuccessful admission.
+            guard_checked = (local_ranges is not None and original_readers
+                             and _swa_stage_original_readers(self))
             if (tuple(_source_tensor_key(value) for value in owners) != keys
-                    or not isinstance(local_ticket, _LocalSwaStageRanges) or not local_ticket.guard()
+                    or not isinstance(local_ticket, _LocalSwaStageRanges)
+                    or (not guard_checked and not local_ticket.guard())
                     or self.pools[layer, "swa_kv"].framework_tag in self._local_swa_write_invalid):
                 self.close_local_swa_native_reads()
         batched = (
@@ -1886,3 +2008,27 @@ class SharedNativeCache(NativeCacheBridge):
         return {"cp_rank": placement.rank, "cp_size": placement.size, "fragments": fragments,
                 "bytes": actual_bytes.numel(), "matches_canonical": True,
                 "sha256": hashlib.sha256(actual_bytes.cpu().numpy().tobytes()).hexdigest()}
+
+
+# Implementation identities, never per-request validation results. Replaced
+# instance/class methods or table/metadata helpers keep both row guards.
+_SWA_STAGE_READONLY_METHODS = tuple(
+    (name, getattr(SharedNativeCache, name)) for name in (
+        "_checked_local_swa_ranges", "_local_swa_native_geometry",
+        "_local_swa_write_payload_eligible", "_verified_local_swa_write_table",
+    )
+)
+_SWA_STAGE_READONLY_FUNCTIONS = (
+    _verified_cache_table, _source_tensor_key, tensor_metadata_key, _local_swa_raw_tensor,
+)
+
+
+def _swa_stage_original_readers(cache):
+    return (
+        all(getattr(getattr(cache, name), "__func__", None) is original
+            for name, original in _SWA_STAGE_READONLY_METHODS)
+        and all(current is original for current, original in zip(
+            (_verified_cache_table, _source_tensor_key, tensor_metadata_key, _local_swa_raw_tensor),
+            _SWA_STAGE_READONLY_FUNCTIONS,
+        ))
+    )

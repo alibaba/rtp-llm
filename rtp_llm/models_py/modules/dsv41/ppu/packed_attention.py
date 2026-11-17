@@ -16,6 +16,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import torch
+from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import env_value as optimization_env_value
 
 PACKED_ENV = "RTP_V41_PPU_PACKED_ATTENTION"
 FUSION_ENV = "RTP_V41_PPU_FUSED_QK_ROPE"
@@ -83,7 +84,7 @@ def load_packed_backend():
 
 
 def enabled(name, *, default=False):
-    value = os.environ.get(name, "1" if default else "0")
+    value = optimization_env_value(name, "1" if default else "0")
     if value not in ("0", "1"):
         raise ValueError(f"{name} must be explicitly 0 or 1")
     return value == "1"

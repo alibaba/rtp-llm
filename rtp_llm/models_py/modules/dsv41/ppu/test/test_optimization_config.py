@@ -6,19 +6,50 @@ from unittest.mock import patch
 
 from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
     ALIASES,
+    DEFAULT_ENABLED,
     VALUE_ALIASES,
     enabled,
+    env_value,
     graph_mhc_options,
     value,
 )
 
 
 class OptimizationConfigTest(unittest.TestCase):
-    def test_unset_keeps_each_callers_default(self):
+    def test_unset_uses_qualified_defaults_and_retains_other_callers_defaults(self):
         for alias in ALIASES:
             for default in (False, True):
                 with self.subTest(alias=alias, default=default):
-                    self.assertEqual(enabled(alias, default=default, env={}), default)
+                    self.assertEqual(
+                        enabled(alias, default=default, env={}),
+                        alias in DEFAULT_ENABLED or default,
+                    )
+
+    def test_qualified_defaults_support_explicit_opt_out(self):
+        for name in DEFAULT_ENABLED:
+            with self.subTest(name=name):
+                self.assertTrue(enabled(name, env={}))
+                self.assertEqual(env_value(name, env={}), "1")
+                self.assertFalse(enabled(name, default=True, env={name: "0"}))
+                self.assertEqual(env_value(name, env={name: "0"}), "0")
+                self.assertTrue(enabled(name, env={name: "1"}))
+
+    def test_workload_precision_and_diagnostic_flags_keep_their_defaults(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.packed_attention import enabled as phase_enabled
+
+        names = (
+            "FAKE_BALANCE_EXPERT", "RTP_V41_PPU_EPLB", "RTP_V41_PPU_LOCAL_PREFILL_SG_ALIGN",
+            "RTP_V41_PPU_CP8_YOCO_Q8_ATTENTION", "RTP_V41_PPU_OPTIMIZED_DIAGNOSTICS",
+            "RTP_V41_PPU_QKV_STREAMS", "RTP_V41_PPU_PACKED_ATTENTION",
+        )
+        with patch.dict(os.environ, {}, clear=True):
+            before = dict(os.environ)
+            for name in names:
+                with self.subTest(name=name):
+                    self.assertEqual(env_value(name), "0")
+                    self.assertFalse(phase_enabled(name))
+                    self.assertTrue(phase_enabled(name, default=True))
+            self.assertEqual(dict(os.environ), before)
 
     def test_each_canonical_switch_controls_all_its_aliases(self):
         for alias, canonical in ALIASES.items():
@@ -40,9 +71,11 @@ class OptimizationConfigTest(unittest.TestCase):
                 if other == alias:
                     continue
                 with self.subTest(alias=alias, other=other):
-                    self.assertFalse(enabled(other, env={alias: "1"}))
+                    self.assertEqual(
+                        enabled(other, env={alias: "1"}), enabled(other, env={})
+                    )
                     self.assertTrue(enabled(other, default=True, env={alias: "0"}))
-            self.assertFalse(enabled(canonical, env={alias: "1"}))
+            self.assertEqual(enabled(canonical, env={alias: "1"}), enabled(canonical, env={}))
 
     def test_legacy_parsers_are_preserved(self):
         for value in ("true", "yes", "on", " 1 ", "garbage", ""):

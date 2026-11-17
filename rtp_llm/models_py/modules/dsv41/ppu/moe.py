@@ -555,6 +555,23 @@ def _get_triton_kernels():
         from triton.language.extra import libdevice
 
         @triton.jit
+        def _mask_fake_routes_kernel(
+            original_ids, pattern_ids, output_ids, output_weights, M,
+            BLOCK: tl.constexpr,
+        ):
+            offset = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+            row, slot = offset // 8, offset % 8
+            real_slot = (row < M) & (slot < 6)
+            original = tl.load(original_ids + offset, real_slot, other=-1)
+            live = real_slot & (original >= 0)
+            balanced = tl.load(pattern_ids + row * 6 + slot, live, other=0)
+            # Preserve every original negative sentinel in the six real
+            # slots. The old compact-then-pad path always replaces the tail.
+            ids = tl.where(live, balanced, original)
+            tl.store(output_ids + offset, ids, row < M)
+            tl.store(output_weights + offset, tl.where(live, 1.0, 0.0), row < M)
+
+        @triton.jit
         def _accumulate_mega_expert_load_kernel(
             counts_ptr,
             current_ptr,
@@ -1131,6 +1148,7 @@ def _get_triton_kernels():
 
         bundle = _Kernels()
         bundle.triton = triton
+        bundle.mask_fake_routes = _mask_fake_routes_kernel
         bundle.accumulate_mega_expert_load = _accumulate_mega_expert_load_kernel
         bundle.router_gate = _router_gate_kernel
         bundle.scatter_m_indices = _ep_scatter_m_indices_kernel
@@ -1490,6 +1508,24 @@ class _DPForwardMegaBuffer:
     epoch: int
 
 
+def _fake_pattern_tensor_key(tensor):
+    # Patterns are allocated outside inference mode so accidental PyTorch
+    # mutation is detectable even when the model runs in inference mode.
+    return (tensor._cdata, tensor.data_ptr(), tensor.shape, tensor.stride(),
+            tensor.storage_offset(), tensor.dtype, tensor.device,
+            None if tensor.is_inference() else tensor._version)
+
+
+@dataclass(frozen=True, eq=False)
+class _PrefillFakePattern:
+    configuration: tuple
+    capacity: int
+    generation: int
+    ids: torch.Tensor
+    weights: torch.Tensor
+    keys: tuple
+
+
 class PPUMoE:
     """Expert-parallel MoE for the PPU V4.1 strategy.
 
@@ -1568,6 +1604,10 @@ class PPUMoE:
         self._dp_capacity_evidence = None
         self._fake_balance_config = None
         self._fake_balance_op = None
+        self._prefill_fake_pattern = None
+        self._prefill_fake_pattern_generation = None
+        self._prefill_fake_pattern_builds = 0
+        self._prefill_fake_pattern_calls = 0
         self.group = group
         if self.num_physical_experts < self.num_routed_experts:
             raise ValueError("physical expert slots must cover logical experts")
@@ -1657,6 +1697,96 @@ class PPUMoE:
         ids = torch.where(valid, ids, original)
         weights = torch.where(valid, weights, torch.zeros_like(weights))
         return pad_topk_for_dispatch(ids, weights, slots=expert_ids.shape[1])
+
+    def _prefill_fake_device_eligible(self, ids, weights):
+        from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
+
+        return (
+            ids.is_cuda and ids.device == weights.device == self._mega_device
+            and is_ppu() and torch.cuda.get_device_capability(ids.device) == (8, 9)
+            and not torch.cuda.is_current_stream_capturing()
+            and torch.cuda.current_stream(ids.device) == torch.cuda.default_stream(ids.device)
+        )
+
+    def _build_prefill_fake_pattern(self, capacity, device):
+        _, top_k, dp_rank, dp_size = self._fake_balance_config
+        if self._fake_balance_op is None:
+            from rtp_llm.models_py.modules.base.cuda.select_topk import FakeBalanceExpert
+
+            self._fake_balance_op = FakeBalanceExpert(
+                self.num_routed_experts, top_k, dp_rank, dp_size, self.ep_size
+            )
+        # Keep native arithmetic, including its float local-offset conversion.
+        # Its flattened index mapping is independent of token count, so every
+        # shorter lookup consumes exactly the same prefix as a fresh native op.
+        with torch.inference_mode(False), torch.no_grad():
+            ids = torch.empty((capacity, top_k), dtype=torch.int64, device=device)
+            weights = torch.empty((capacity, top_k), dtype=torch.float32, device=device)
+            # Once native work starts, an absent/replaced cache cannot silently
+            # authorize another build in this same workspace generation.
+            self._prefill_fake_pattern_generation = self._mega_generation
+            self._fake_balance_op(ids, weights)
+        configuration = self.num_routed_experts, self.ep_size, self._fake_balance_config
+        pattern = _PrefillFakePattern(
+            configuration, capacity, self._mega_generation, ids, weights,
+            tuple(_fake_pattern_tensor_key(value) for value in (ids, weights)),
+        )
+        self._prefill_fake_pattern = pattern
+        self._prefill_fake_pattern_builds += 1
+        return pattern
+
+    def _try_prefill_fake_balance(self, ids, weights, receipt):
+        """One mask/pad launch for an already admitted eager DP Prefill.
+
+        Only the immutable native pattern survives a forward. Validity and
+        outputs remain call-local; neither real routing nor graph paths use it.
+        A declined admission has submitted no work. Native/JIT failures after
+        admission propagate without retrying the legacy route chain.
+        """
+        config = self._fake_balance_config
+        if (config is None or not config[0] or config[1] != 6 or config[3] != 8
+                or not isinstance(receipt, _DPForwardMegaBuffer)
+                or (self.backend, self.precision, self.ep_size, self.num_routed_experts)
+                != ("megamoe", "w4a4", 8, 384)
+                or torch.is_grad_enabled()
+                or ids.ndim != 2 or ids.shape[1] != COMM_SLOTS or ids.shape != weights.shape
+                or ids.dtype != torch.int64 or weights.dtype != torch.float32
+                or not ids.is_contiguous() or not weights.is_contiguous()
+                or ids.is_neg() or ids.is_conj() or weights.is_neg() or weights.is_conj()
+                or ids.shape[0] == 0):
+            return None
+        self._validate_dp_preparation(receipt, ids.shape[0])
+        if (receipt.capacity > (2**31 - 1) // 6
+                or not self._prefill_fake_device_eligible(ids, weights)):
+            return None
+        try:
+            kernels = _get_triton_kernels()
+        except ImportError:
+            return None
+        operation = getattr(kernels, "mask_fake_routes", None)
+        if operation is None:
+            return None
+        configuration = self.num_routed_experts, self.ep_size, config
+        pattern = self._prefill_fake_pattern
+        if pattern is None:
+            if self._prefill_fake_pattern_generation is not None:
+                return None
+            pattern = self._build_prefill_fake_pattern(receipt.capacity, ids.device)
+        elif (pattern.configuration != configuration or pattern.capacity != receipt.capacity
+                or pattern.generation != receipt.generation
+                or self._prefill_fake_pattern_generation != receipt.generation
+                or pattern.ids.device != ids.device
+                or tuple(_fake_pattern_tensor_key(value) for value in (pattern.ids, pattern.weights)) != pattern.keys):
+            # Do not remint a mutated/rebound cache within the same workspace
+            # generation. Capacity growth/close drops it after the native drain.
+            return None
+        output_ids = torch.empty_like(ids)
+        output_weights = torch.empty_like(weights)
+        operation[(kernels.triton.cdiv(ids.numel(), 256),)](
+            ids, pattern.ids, output_ids, output_weights, ids.shape[0], BLOCK=256,
+        )
+        self._prefill_fake_pattern_calls += 1
+        return output_ids, output_weights
 
     # -- weight binding ---------------------------------------------------
 
@@ -1848,12 +1978,15 @@ class PPUMoE:
         plus ``-1`` padding); ``expert_weights`` is the matching fp32
         ``[T, 8]`` slot weights (zero on padding slots).
         """
+        dp_preparation = None
         if isinstance(prepared_buffer, _DPForwardMegaBuffer):
             self._validate_dp_preparation(prepared_buffer, x.shape[0])
+            dp_preparation = prepared_buffer
             prepared_buffer = prepared_buffer.buffer
-        expert_ids, expert_weights = self._apply_fake_balance(
-            expert_ids, expert_weights
-        )
+        fake_routes = (self._try_prefill_fake_balance(expert_ids, expert_weights, dp_preparation)
+                       if dp_preparation is not None else None)
+        expert_ids, expert_weights = (fake_routes if fake_routes is not None else
+                                     self._apply_fake_balance(expert_ids, expert_weights))
         expert_ids = self._map_expert_ids(expert_ids, expert_weights, layer_id)
         if self.backend == "megamoe":
             # Empty owners must still enter MegaMoE's cross-rank protocol.
@@ -2185,9 +2318,18 @@ class PPUMoE:
             else None
         )
         previous_counts = self._mega_recv_stats.clone() if counts is not None else None
-        mega.mega_moe_pre_dispatch(
-            x.contiguous(), ids.contiguous(), weights.contiguous(), buffer
-        )
+        if getattr(mega, "_C", None) is not None:
+            # Current native ABI validates ownership of these exact views.
+            # Do not copy or re-view the symmetric staging tensors.
+            mega.mega_moe_pre_dispatch(
+                x.contiguous(), ids.contiguous(), weights.contiguous(),
+                buffer.x, buffer.x_sf, buffer.topk_idx, buffer.topk_weights,
+                x.shape[0], group_size=32, mma_type="fp4xfp4",
+            )
+        else:
+            mega.mega_moe_pre_dispatch(
+                x.contiguous(), ids.contiguous(), weights.contiguous(), buffer
+            )
         y = torch.empty_like(x, dtype=torch.bfloat16)
         # Complete native pipeline includes dispatch, both GEMMs and weighted
         # combine. Do not run DeepEP or apply split-W4A8's pre-quant weighting.
@@ -2230,6 +2372,10 @@ class PPUMoE:
             self._mega_buffer.destroy()
             self._mega_buffer = None
             self._mega_capacity = 0
+        # The native drain above also completes all default-stream pattern
+        # readers. A new capacity generation must build its own native pattern.
+        self._prefill_fake_pattern = None
+        self._prefill_fake_pattern_generation = None
 
     @classmethod
     def close_mega_resources(cls):

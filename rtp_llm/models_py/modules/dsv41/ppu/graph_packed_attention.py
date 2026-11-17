@@ -280,7 +280,8 @@ class GraphPackedAttention:
             for page, backup in zip(pages, backups):
                 page.copy_(backup)
 
-    def forward(self, attn, q, selected, metadata, shared, *, mask_output=True, share_scheduler=False):
+    def forward(self, attn, q, selected, metadata, shared, *, mask_output=True, share_scheduler=False,
+                mega=None, mega_phase="decode"):
         positions, valid = metadata.positions, metadata.valid_mask
         swa_indices, swa_lengths = self._swa_indices(attn.layer_id, positions, valid, shared)
         keys = [(attn.layer_id, "swa_kv")]
@@ -319,6 +320,14 @@ class GraphPackedAttention:
             global_lengths=global_lengths,
             valid_mask=valid,
         )
+        if mega is not None:
+            if mega.decode_reason(q, plan, positions, phase=mega_phase) is not None:
+                return None
+            with self._stage_verify_tail(keys):
+                return mega.decode(
+                    q, plan, positions, packed_q=True,
+                    mask_output=mask_output, phase=mega_phase,
+                )
         with self._stage_verify_tail(keys):
             return packed_decode(
                 q, plan, softmax_scale=attn.geometry.sm_scale(), attn_sink=attn.attn_sink,

@@ -333,8 +333,26 @@ def _pre_triton(
     flat = residual.reshape(-1, hc * dim)
     if flat.stride(1) != 1:
         flat = flat.contiguous()
+    from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
+        MHC_REDUCE_SINKHORN, enabled,
+    )
+
+    fn_fp32 = fn.float().contiguous()
+    if (
+        enabled(MHC_REDUCE_SINKHORN) and _is_ppu() and not config.strict_bf16_fn
+        and kernels.hc_mix_stats_sinkhorn_supported(
+            flat, fn_fp32, scale, base, hc_mult=hc,
+            sinkhorn_iters=config.sinkhorn_iters, rms_eps=config.rms_eps,
+            hc_eps=config.hc_eps, post_mult=config.post_mult, reduce_block_m=reduce_block_m,
+        )
+    ):
+        return kernels.hc_mix_stats_sinkhorn(
+            flat, fn_fp32, scale, base, hc_mult=hc,
+            sinkhorn_iters=config.sinkhorn_iters, rms_eps=config.rms_eps,
+            hc_eps=config.hc_eps, reduce_block_m=reduce_block_m, aiu_prenorm=aiu_prenorm,
+        )
     mixes = kernels.hc_mix_stats(
-        flat, fn.float().contiguous(), config.rms_eps,
+        flat, fn_fp32, config.rms_eps,
         reduce_block_m=reduce_block_m, aiu_prenorm=aiu_prenorm,
     )
     return kernels.hc_split_sinkhorn(

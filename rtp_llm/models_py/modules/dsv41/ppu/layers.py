@@ -37,6 +37,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.weight import (
 from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
     DIRECT_MOE_ROUTES,
     enabled as optimization_enabled,
+    env_value as optimization_env_value,
 )
 from rtp_llm.models_py.modules.dsv41.ppu.quant_mode import MXFP4_FP8_PTPC, quant_mode
 from rtp_llm.models_py.modules.dsv41.ppu.rmsnorm import rms_norm, try_rms_norm_quant
@@ -99,7 +100,7 @@ def cp8_yoco_operator_eligible(state):
 def cp8_yoco_fast_prefill_enabled(state):
     """Retained framework/communication profile; never an operator selector."""
     return (
-        os.environ.get("RTP_V41_PPU_CP8_YOCO_FAST_PREFILL", "0") == "1"
+        optimization_env_value("RTP_V41_PPU_CP8_YOCO_FAST_PREFILL", "0") == "1"
         and cp8_yoco_operator_eligible(state)
     )
 
@@ -483,7 +484,14 @@ class PPUAttentionProjections(nn.Module):
         self.wq_b = views.linear(layer_id, W.v4_attn_wq_b_w)
         self.wkv = views.linear(layer_id, W.v4_attn_wkv_w)
         self._local_prefill_qkv = None
-        if os.environ.get("RTP_V41_PPU_LOCAL_PREFILL_DENSE_PROJECTIONS", "0") == "1":
+        from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
+            DENSE_PROJECTIONS,
+        )
+
+        if (
+            os.environ.get("RTP_V41_PPU_LOCAL_PREFILL_DENSE_PROJECTIONS", "0") == "1"
+            or optimization_enabled(DENSE_PROJECTIONS)
+        ):
             from rtp_llm.models_py.modules.dsv41.ppu.local_prefill_qkv import PreparedQKV
 
             self._local_prefill_qkv = PreparedQKV.try_prepare(self.wq_a, self.wkv)
@@ -522,7 +530,7 @@ class PPUAttentionProjections(nn.Module):
 
     def project_query_kv(
         self, x, *, prepare_indexer=False, reuse_ptpc=False, fuse_qr_norm=False,
-        fused_qkv=False, query_rows=None,
+        fused_qkv=False, query_rows=None, defer_kv_norm=False, q_projector=None,
     ):
         """Keep projection order while sharing identical PTPC input rows.
 
@@ -536,7 +544,15 @@ class PPUAttentionProjections(nn.Module):
             and x.ndim == 2
         ):
             raise ValueError("query projection requires an admitted contiguous row suffix")
-        prepared = getattr(self, "_local_prefill_qkv", None) if fused_qkv else None
+        from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
+            DENSE_PROJECTIONS,
+        )
+
+        # The general opt-in uses the same immutable packed weights for CP,
+        # Decode and Verify/Graph. PreparedQKV admits input layout before any
+        # launch; the legacy local-Prefill flag retains its caller qualification.
+        joined_enabled = fused_qkv or optimization_enabled(DENSE_PROJECTIONS)
+        prepared = getattr(self, "_local_prefill_qkv", None) if joined_enabled else None
         joined = prepared.project(x) if prepared is not None else None
         x_pair = (
             prepare_shared_ptpc_input(x, (self.wq_a, self.wkv))
@@ -569,11 +585,15 @@ class PPUAttentionProjections(nn.Module):
             qr_pair = None
         if qr_pair is None and reuse_ptpc and prepare_indexer:
             qr_pair = prepare_shared_ptpc_input(qr, qr_consumers)
-        q = self.wq_b(qr) if qr_pair is None else self.wq_b.forward_quantized(*qr_pair)
+        q = (
+            q_projector(qr, quantized_input=qr_pair)
+            if q_projector is not None
+            else self.wq_b(qr) if qr_pair is None else self.wq_b.forward_quantized(*qr_pair)
+        )
         raw_kv = joined[1] if joined is not None else (
             self.wkv(x) if x_pair is None else self.wkv.forward_quantized(*x_pair)
         )
-        kv = (
+        kv = raw_kv if defer_kv_norm else (
             self.kv_norm(raw_kv, allow_strided=True)
             if joined is not None else self.kv_norm(raw_kv)
         )
@@ -607,8 +627,50 @@ class PPUSharedGate(nn.Module):
         self.vocab_size = views.geometry.vocab_size
         self.top_k = views.geometry.n_activated_experts
         self.route_scale = views.geometry.routed_scaling_factor
+        self.runtime = None
+        from rtp_llm.models_py.modules.dsv41.ppu.mega_gate import PPUMegaGate
+        from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
+            MEGA_GATE, MEGA_GATE_FINITE_DOMAIN,
+        )
+
+        self._mega_gate = PPUMegaGate(
+            enabled=optimization_enabled(MEGA_GATE),
+            finite_domain_qualified=optimization_enabled(MEGA_GATE_FINITE_DOMAIN),
+        )
 
     def forward(self, hidden, *, image_rows=None, graph_routes=None, allow_top3_graph_routes=False):
+        state = getattr(self.runtime, "current", None)
+        if (
+            state is not None and not allow_top3_graph_routes
+            and not getattr(state, "proposal", False) and not getattr(state, "idle", False)
+            and self._mega_gate.enabled and self._mega_gate.finite_domain_qualified
+        ):
+            verify = getattr(state, "verify", False) or bool(
+                getattr(getattr(state, "attn", None), "is_target_verify", False)
+            )
+            phase = "verify" if verify else "prefill" if getattr(state, "prefill", False) else "decode"
+            graph = bool(getattr(state, "is_graph", False))
+            # Match MoE's existing post-router masking before native finite
+            # checks, including padded CP rows and eager target Verify rows.
+            valid_mask = None
+            if graph_routes is None:
+                if graph:
+                    valid_mask = state.metadata.valid_mask
+                elif getattr(state, "prefill", False) and getattr(state, "context", None) is not None:
+                    valid_mask = state.context.local_is_real
+                else:
+                    valid_mask = getattr(state, "active_token_mask", None)
+            result = self._mega_gate.forward(
+                hidden, self.weight, self.bias, phase=phase,
+                is_graph=graph,
+                top_k=self.top_k, routed_scaling_factor=self.route_scale,
+                image_rows=image_rows,
+                router_bias_vl=self.bias_vl if image_rows is not None else None,
+                graph_routes=graph_routes,
+                valid_mask=valid_mask,
+            )
+            if result is not None:
+                return result
         return sqrtsoftplus_gate(
             hidden, self.weight, self.bias,
             top_k=self.top_k, routed_scaling_factor=self.route_scale,

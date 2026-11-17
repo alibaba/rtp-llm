@@ -20,9 +20,9 @@ import torch
 
 from rtp_llm.models_py.modules.dsv41 import cp
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_swa_metadata as metadata
-from rtp_llm.models_py.modules.dsv41.ppu import _quant, graph_cache_kernels, prefill, prefill_readback
+from rtp_llm.models_py.modules.dsv41.ppu import _quant, graph_cache_kernels, native_cache_adapter, prefill, prefill_readback
 from rtp_llm.models_py.modules.dsv41.ppu.kv_codec import decode_kv
-from rtp_llm.models_py.modules.dsv41.ppu.native_cache import _WIDTH
+from rtp_llm.models_py.modules.dsv41.ppu.native_cache import NativeCacheBridge, _WIDTH
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache_adapter import (
     LOCAL_PREFILL_SOURCE_CACHE_ENV,
     SharedNativeCache,
@@ -33,6 +33,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_fused import as
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_operator_flags import _trace_events
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_source_cache import _SourceFixture
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_swa_native_write import fixture as swa_fixture
+from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_swa_segments import FLAGS as SWA_FLAGS
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_swa_segments import arguments, compact_plan, stage
 
 # Legacy names only verify that retired selectors no longer affect dispatch.
@@ -450,6 +451,257 @@ class LocalSourceNativeReadCPU(_ReadCases, unittest.TestCase):
         ):
             mocked.start()
             self.addCleanup(mocked.stop)
+
+    def _stage_guard_case(self, *, compact=False):
+        state = swa_fixture('cpu', prefixes=(0,), lengths=(256,), layers=1, seed=False)
+        if compact:
+            compact_plan(state)
+        pos, req, packed, options, ticket = arguments(state, compact=compact)
+        self.assertIsNotNone(ticket)
+        calls, original_guard = [], ticket.guard
+
+        def counted_guard():
+            calls.append(None)
+            return original_guard()
+
+        ticket = ticket._replace(guard=counted_guard)
+        cache = state.cache
+        cache._local_swa_read_enabled = True
+        cache._local_swa_native_read_stats['closed'] = False
+        cache._local_swa_read_rows = ((pos, req), ticket.input_keys[:2])
+        return state, (pos, req, packed, options, ticket), calls
+
+    def _publication_case(self):
+        # Substitute only the opaque native ABI/provider in this CPU contract.
+        # Real extension provenance is checked by _native_publication_abi.
+        events = []
+
+        class Writer:
+            fail_after = 0
+            calls = 0
+
+            def write(self, params, handle):
+                self.calls += 1
+                events.append(('event-write', params, handle))
+                if self.calls == self.fail_after:
+                    raise RuntimeError('publication submission failed')
+
+        class Params:
+            pass
+
+        class Handle(NS):
+            pass
+
+        class Meta(NS):
+            pass
+
+        cache = fixture('cpu', ratios={2: 2})
+        cache.device = 'cuda:0'
+        writer = Writer()
+        for tag, meta in list(cache.inputs.items()):
+            cache.inputs[tag] = Meta(**vars(meta), cache_store_writer=writer, cache_store_inputs=Params())
+        for pool in cache.pools.values():
+            pool.handle = Handle(**vars(pool.handle))
+        native = NS(CacheStoreWriter=Writer, PyCacheStoreInputs=Params,
+                    LayerKVCache=Handle, PyAttentionInputs=Meta)
+        return cache, (native, (Writer, Params, Handle, Meta), vars(Writer)['write']), events, writer
+
+    @torch.no_grad()
+    def test_async_publication_preserves_pool_event_order_and_no_partial_retry(self):
+        cache, abi, events, writer = self._publication_case()
+        expected = [(cache.inputs[p.framework_tag].cache_store_inputs, p.handle)
+                    for p in cache.pools.values()]
+        with patch.dict(os.environ, {'RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA': '1'}), patch.object(
+            native_cache_adapter, '_native_publication_abi', return_value=abi,
+        ), patch.object(torch.cuda, 'synchronize', side_effect=AssertionError('unexpected global sync')), patch.object(
+            NativeCacheBridge, 'publish', side_effect=AssertionError('unexpected retry'),
+        ):
+            cache.publish()
+            self.assertEqual(events, [('event-write', params, handle) for params, handle in expected])
+            events.clear()
+            writer.calls, writer.fail_after = 0, 2
+            with self.assertRaisesRegex(RuntimeError, 'publication submission failed'):
+                cache.publish()
+            self.assertEqual(len(events), 2, 'a submission error must propagate without replaying writers')
+
+    @torch.no_grad()
+    def test_async_publication_unknown_or_ineligible_paths_keep_sync_before_writes(self):
+        for kind in ('writer', 'writer-subclass', 'method', 'side-stream', 'closed', 'nonce', 'graph', 'decode', 'cp', 'flag'):
+            with self.subTest(kind=kind):
+                cache, abi, events, writer = self._publication_case()
+                first = next(iter(cache.inputs.values()))
+                if kind == 'writer':
+                    first.cache_store_writer = NS(write=lambda params, handle: events.append(('custom-write',)))
+                elif kind == 'writer-subclass':
+                    first.cache_store_writer = type('OtherWriter', (type(writer),), {})()
+                elif kind == 'method':
+                    type(writer).write = lambda owner, params, handle: events.append(('replaced-write',))
+                elif kind == 'closed':
+                    cache.close_local_source_native_reads()
+                elif kind == 'nonce':
+                    cache._local_source_native_read_nonce = object()
+                elif kind == 'graph':
+                    first.is_cuda_graph = True
+                elif kind == 'decode':
+                    cache._is_prefill = False
+                elif kind == 'cp':
+                    cache.sharded = True
+                with patch.dict(os.environ, {'RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA': '0' if kind == 'flag' else '1'}), patch.object(
+                    native_cache_adapter, '_native_publication_abi', return_value=abi,
+                ), patch.object(cache, '_local_source_native_read_device', return_value=kind != 'side-stream'), patch.object(
+                    torch.cuda, 'synchronize', side_effect=lambda device: events.append(('sync', device)),
+                ):
+                    cache.publish()
+                self.assertEqual(events[0], ('sync', 'cuda:0'))
+                self.assertEqual(len(events), 1 + len(cache.pools), 'fallback retains every pool submission')
+
+    def _run_stage_admission(self, state, args):
+        # Exercise the actual stage entry/guards, stopping before any writes.
+        # No geometry/table checker is replaced on the successful reuse arm.
+        with patch.object(state.cache, '_batched_swa_enabled',
+                          side_effect=RuntimeError('stop_before_swa_writes')):
+            with self.assertRaisesRegex(RuntimeError, 'stop_before_swa_writes'):
+                stage(state, args)
+
+    @torch.no_grad()
+    def test_stage_swa_reuses_only_same_call_guard_and_rejects_changed_birth(self):
+        with patch.dict(os.environ, SWA_FLAGS):
+            for compact in (False, True):
+                with self.subTest(compact=compact):
+                    state, args, calls = self._stage_guard_case(compact=compact)
+                    self._run_stage_admission(state, args)
+                    self.assertEqual(len(calls), 1)
+                    self._run_stage_admission(state, args)
+                    self.assertEqual(len(calls), 2, 'a new call must revalidate')
+                    self.assertFalse(state.cache._local_swa_native_read_stats['closed'])
+                    # Same values after mutation do not restore the birth.
+                    state.attn.cu_seqlens.add_(1).sub_(1)
+                    self._run_stage_admission(state, args)
+                    self.assertEqual(len(calls), 4, 'declined admission retains the second guard')
+                    self.assertTrue(state._local_swa_invalid)
+                    self.assertTrue(state.cache._local_swa_native_read_stats['closed'])
+                    self.assertIsNone(state.cache._local_swa_read_rows)
+                    self._run_stage_admission(state, args)
+                    self.assertEqual(len(calls), 5)
+                    self.assertTrue(state.cache._local_swa_native_read_stats['closed'])
+
+    @torch.no_grad()
+    def test_stage_swa_checker_hooks_keep_guard_and_invalid_lifecycle(self):
+        with patch.dict(os.environ, SWA_FLAGS):
+            for kind in ('ancestor', 'table-invalid', 'close'):
+                with self.subTest(kind=kind):
+                    state, args, calls = self._stage_guard_case(compact=True)
+                    cache = state.cache
+
+                    def hooked_geometry(pool, packed):
+                        if kind == 'ancestor':
+                            state.attn.cu_seqlens.add_(1).sub_(1)
+                        elif kind == 'table-invalid':
+                            cache._local_swa_write_invalid.add(pool.framework_tag)
+                        else:
+                            cache.close_local_swa_native_reads()
+                        return None
+
+                    with patch.object(cache, '_local_swa_native_geometry', side_effect=hooked_geometry) as hook:
+                        self._run_stage_admission(state, args)
+                    self.assertEqual(hook.call_count, 1)
+                    self.assertEqual(len(calls), 1 if kind == 'close' else 2)
+                    self.assertTrue(cache._local_swa_native_read_stats['closed'])
+                    self.assertIsNone(cache._local_swa_read_rows)
+
+    @torch.no_grad()
+    def test_prepare_tables_deduplicates_existing_proofs_before_all_consumers(self):
+        with patch.dict(os.environ, {'RTP_V41_PPU_LOCAL_PREFILL_SWA_SEGMENTS': '1'}):
+            cache = fixture('cpu', ratios={2: 2, 8: 2, 14: 2, 20: 1})
+            cache.prepare_local_table_mirrors()
+            self.assertEqual(cache._local_source_native_read_stats['mirrors'], 3)
+            self.assertEqual(cache._local_csa_native_write_stats['table_mirrors'], 1)
+            self.assertEqual(cache._local_swa_native_write_stats['mirrors'], 1)
+            mirrors = dict(cache._local_source_native_read_mirrors)
+            with patch.object(cache, '_verified_local_source_native_table', wraps=cache._verified_local_source_native_table) as full:
+                cache.prepare_local_table_mirrors()
+                self.assertEqual(full.call_count, 3, 'shared tags need only one early verification')
+            for source in (2, 8, 14, 20):
+                for new, old in zip(read(cache, source), original(cache, source)):
+                    assert_bytes(self, new, old)
+            self.assertEqual(cache._local_source_native_read_stats['mirrors'], 3)
+            self.assertEqual(cache._local_csa_native_write_stats['table_mirrors'], 1)
+            self.assertEqual(cache._local_swa_native_write_stats['mirrors'], 1)
+            for tag, saved in mirrors.items():
+                self.assertIs(cache._local_source_native_read_mirrors[tag], saved)
+
+    @torch.no_grad()
+    def test_prepared_table_birth_mutations_and_rebind_remain_sticky(self):
+        for kind in ('host', 'device', 'mirror', 'rebind'):
+            with self.subTest(kind=kind):
+                cache = fixture('cpu')
+                cache.prepare_local_table_mirrors()
+                key, tag = (2, 'global_kv_2'), 'csa_kv'
+                pool, meta = cache.pools[key], cache.inputs[tag]
+                if kind == 'rebind':
+                    cache.inputs[tag] = NS(**vars(meta))
+                else:
+                    tensor = (cache._local_source_native_read_mirrors[tag][0] if kind == 'mirror'
+                              else getattr(meta, 'kv_cache_kernel_block_id' + ('_device' if kind == 'device' else '')))
+                    tensor.add_(1).sub_(1)
+                self.assertIsNone(cache._verified_local_source_native_table(key, pool))
+                cache.inputs[tag] = meta
+                cache.prepare_local_table_mirrors()
+                self.assertIsNone(cache._verified_local_source_native_table(key, pool))
+                self.assertEqual(cache._local_source_native_read_stats['mirrors'], 3)
+        # This mismatch exists at construction, so only the original value
+        # equality check (not version/identity alone) can reject it.
+        old = fixture('cpu')
+        old.inputs['csa_kv'].kv_cache_kernel_block_id.add_(1)
+        cache = SharedNativeCache(old.config, old.geometry, old.native, old.inputs, old.lengths,
+                                  device='cpu', prefill=True, defer_producer_slots=True)
+        cache.prepare_local_table_mirrors()
+        self.assertIn('csa_kv', cache._local_source_native_read_invalid)
+        self.assertNotIn('csa_kv', cache._local_source_native_read_mirrors)
+        self.assertEqual(cache._local_source_native_read_stats['mirrors'], 3)
+
+    @torch.no_grad()
+    def test_prepare_tables_declines_ineligible_closed_or_disabled_swa_without_copies(self):
+        for kind in ('decode', 'cp', 'graph', 'device', 'closed', 'nonce', 'grad'):
+            with self.subTest(kind=kind):
+                cache = fixture('cpu')
+                if kind == 'decode':
+                    cache._is_prefill = False
+                elif kind == 'cp':
+                    cache.sharded = True
+                elif kind == 'graph':
+                    cache.inputs['csa_kv'].is_cuda_graph = True
+                elif kind == 'closed':
+                    cache.close_local_source_native_reads()
+                elif kind == 'nonce':
+                    cache._local_source_native_read_nonce = object()
+                with patch.object(cache, '_local_source_native_read_device', return_value=kind != 'device'), patch(
+                    'torch.is_grad_enabled', return_value=kind == 'grad',
+                ), patch.object(cache, '_verified_local_source_native_table', side_effect=AssertionError('unexpected FULL copy')), patch.object(
+                    cache, '_verified_local_csa_native_table', side_effect=AssertionError('unexpected CSA copy'),
+                ), patch.object(cache, '_verified_local_swa_write_table', side_effect=AssertionError('unexpected SWA copy')):
+                    cache.prepare_local_table_mirrors()
+        cache = fixture('cpu')
+        with patch.dict(os.environ, {'RTP_V41_PPU_LOCAL_PREFILL_SWA_SEGMENTS': '0'}), patch.object(
+            cache, '_verified_local_swa_write_table', side_effect=AssertionError('disabled SWA copy'),
+        ):
+            cache.prepare_local_table_mirrors()
+        self.assertEqual(cache._local_source_native_read_stats['mirrors'], 3)
+        self.assertEqual(cache._local_csa_native_write_stats['table_mirrors'], 1)
+
+    @torch.inference_mode()
+    def test_prepare_readonly_inference_tables_does_not_reuse_across_forward(self):
+        first = fixture('cpu')
+        first.prepare_local_table_mirrors()
+        old = first._local_source_native_read_mirrors['csa_kv'][0]
+        newer = SharedNativeCache(first.config, first.geometry, first.native, first.inputs, first.lengths,
+                                  device='cpu', prefill=True, defer_producer_slots=True)
+        newer.prepare_local_table_mirrors()
+        mirror = newer._local_source_native_read_mirrors['csa_kv'][0]
+        self.assertIsNot(old, mirror)
+        self.assertFalse(torch._C._is_alias_of(old, mirror))
+        assert_bytes(self, old, mirror)
+        self.assertEqual(newer._local_source_native_read_stats['mirrors'], 3)
 
     @torch.no_grad()
     def test_replaced_constructor_owners_live_until_close_without_payload_cache(self):

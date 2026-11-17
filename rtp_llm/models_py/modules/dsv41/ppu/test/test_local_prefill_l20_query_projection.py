@@ -3,22 +3,24 @@
 from contextlib import ExitStack
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from types import SimpleNamespace as NS
 
 import torch
 
-from rtp_llm.models_py.modules.dsv41.ppu import attention_layer
+from rtp_llm.models_py.modules.dsv41.ppu import attention_layer, layers
 from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
 from rtp_llm.models_py.modules.dsv41.ppu.linear import PPUPTPCLinear
+from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import DENSE_PROJECTIONS
+from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_rows import public_ced_cpu_scope
 from rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_split_l20 import _component, _state
 
 
 ENV = attention_layer.LOCAL_PREFILL_DENSE_PROJECTIONS_ENV
 
 
-def _stamp(state):
-    state.local_prefill_sg_align = True
+def _stamp(state, *, sg_align=True):
+    state.local_prefill_sg_align = sg_align
     state.plan_reason = "compact140"
     proof = state._local_compact_rows_key(state.plan.context, before_l20=True)
     if proof is None:
@@ -28,8 +30,29 @@ def _stamp(state):
 
 class L20QueryProjectionContracts(unittest.TestCase):
     @torch.no_grad()
+    def test_global_dense_admission_does_not_require_legacy_flag_or_sg_alignment(self):
+        state = NS(local_prefill_sg_align=False, prefill=True, idle=False)
+        x = NS(is_cuda=True, dtype=torch.bfloat16, ndim=2, shape=(4096, 5120),
+               is_contiguous=lambda: True, requires_grad=False)
+        geometry = NS(q_lora_rank=1280, head_dim=512)
+        with patch.dict(os.environ, {ENV: "0", DENSE_PROJECTIONS: "1"}), patch.object(
+            torch.cuda, "is_current_stream_capturing", return_value=False,
+        ):
+            self.assertTrue(attention_layer._local_prefill_dense_projections_enabled(
+                state, None, x, geometry, diagnostic=None, packed_plan=None, parallel=False,
+            ))
+            self.assertFalse(attention_layer._local_prefill_dense_projections_enabled(
+                state, NS(cp_size=8, kv_cache_sharded=True), x, geometry,
+                diagnostic=None, packed_plan=None, parallel=False,
+            ))
+            with patch.dict(os.environ, {DENSE_PROJECTIONS: "0"}):
+                self.assertFalse(attention_layer._local_prefill_dense_projections_enabled(
+                    state, None, x, geometry, diagnostic=None, packed_plan=None, parallel=False,
+                ))
+
+    @torch.no_grad()
     def test_suffix_requires_original_plan_and_unchanged_transport(self):
-        with patch.dict(os.environ, {ENV: "1"}):
+        with patch.dict(os.environ, {ENV: "1", DENSE_PROJECTIONS: "0"}):
             state = _state()
             _stamp(state)
             self.assertEqual(state.local_l20_query_slice(4096), slice(3956, 4096))
@@ -56,11 +79,127 @@ class L20QueryProjectionContracts(unittest.TestCase):
                 with patch.dict(os.environ, {ENV: "0" if change == "off" else "1"}):
                     self.assertIsNone(state.local_l20_query_slice(4095 if change == "rows" else 4096), change)
 
+    @torch.no_grad()
+    def test_global_fusion_uses_versioned_suffix_without_sg_align(self):
+        with patch.dict(os.environ, {ENV: "0", DENSE_PROJECTIONS: "1"}):
+            state = _state()
+            _stamp(state, sg_align=False)
+            self.assertEqual(state.local_l20_query_slice(4096), slice(3956, 4096))
+            for change in ("send_write", "send_replace", "mask_write", "positions_write",
+                           "plan", "host", "graph", "verify", "proposal", "attn_verify",
+                           "decode", "compacted", "cp", "off"):
+                with self.subTest(change=change):
+                    state = _state()
+                    _stamp(state, sg_align=False)
+                    if change == "send_write":
+                        state.plan.exchange.send_indices.add_(0)
+                    elif change == "send_replace":
+                        state.plan.exchange.send_indices = state.plan.exchange.send_indices.clone()
+                    elif change == "mask_write":
+                        state.plan.context.local_is_real.fill_(True)
+                    elif change == "positions_write":
+                        state.plan.context.global_positions.add_(0)
+                    elif change == "plan":
+                        state.plan = type(state.plan)(**vars(state.plan))
+                    elif change == "host":
+                        state.plan.exchange.candidate_rows_host = tuple(range(140))
+                    elif change in ("graph", "verify", "proposal"):
+                        setattr(state, "is_graph" if change == "graph" else change, True)
+                    elif change == "attn_verify":
+                        state.attn.is_target_verify = True
+                    elif change == "decode":
+                        state.prefill = False
+                    elif change == "compacted":
+                        state.compacted = True
+                    elif change == "cp":
+                        state.plan.context.cp_size = 8
+                    with patch.dict(os.environ, {DENSE_PROJECTIONS: "0" if change == "off" else "1"}):
+                        self.assertIsNone(state.local_l20_query_slice(4096))
+            with torch.inference_mode():
+                state = _state()
+                _stamp(state, sg_align=False)
+                self.assertIsNone(state.local_l20_query_slice(4096), "unknown versionless transport")
+
+    @torch.inference_mode()
+    def test_prepare_plan_certifies_global_fusion_transport_at_birth(self):
+        with patch.dict(os.environ, {
+            ENV: "0", DENSE_PROJECTIONS: "1",
+            "RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA": "1",
+        }):
+            state = _state()
+            state.local_prefill_sg_align = False
+            state.plan = None
+            with public_ced_cpu_scope(state):
+                # Exercise CEDPlan.create's real inference decorator and the
+                # HOST_METADATA single-layout branch, which reuses its views.
+                state.prepare_plan()
+            self.assertEqual(state.local_l20_query_slice(4096), slice(3956, 4096))
+            self.assertFalse(state.plan.exchange.send_indices.is_inference())
+            state.plan.exchange.send_indices.add_(0)
+            self.assertIsNone(state.local_l20_query_slice(4096))
+
+    @torch.no_grad()
+    def test_mega_projector_and_indexer_share_retained_quantization_full_kv(self):
+        x = torch.zeros((4096, 8), dtype=torch.bfloat16)
+        joined = torch.zeros((4096, 1792), dtype=torch.bfloat16)
+        raw_qr, raw_kv = joined[:, :1280], joined[:, 1280:]
+        payload = torch.zeros((140, 1280), dtype=torch.float8_e4m3fn)
+        scale = torch.ones((140, 1), dtype=torch.float32)
+        pair = payload, scale
+        q = torch.zeros((140, 8), dtype=torch.bfloat16)
+        prepared = Mock(return_value=(raw_qr, raw_kv))
+        norm = Mock(side_effect=lambda value, **kwargs: value.contiguous())
+        projector = Mock(return_value=q)
+        op = NS(_local_prefill_qkv=NS(project=prepared), q_norm=norm,
+                wq_a=Mock(side_effect=AssertionError("separate full Q projection")),
+                wkv=Mock(side_effect=AssertionError("separate full KV projection")),
+                wq_b=Mock(side_effect=AssertionError("ordinary Q projector")), index_wq=object())
+        with patch.dict(os.environ, {ENV: "0", DENSE_PROJECTIONS: "1"}), patch.object(
+            layers, "prepare_shared_ptpc_input", return_value=pair,
+        ) as quantize:
+            qr, actual_q, kv, indexer_pair = layers.PPUAttentionProjections.project_query_kv(
+                op, x, prepare_indexer=True, reuse_ptpc=True, defer_kv_norm=True,
+                query_rows=slice(3956, 4096), q_projector=projector,
+            )
+        prepared.assert_called_once_with(x)
+        self.assertEqual(norm.call_args.args[0].shape, (140, 1280))
+        self.assertEqual(norm.call_args.args[0].data_ptr(), raw_qr[3956:].data_ptr())
+        self.assertTrue(norm.call_args.kwargs["allow_strided"])
+        quantize.assert_called_once()
+        self.assertIs(quantize.call_args.args[0], qr)
+        self.assertIs(projector.call_args.args[0], qr)
+        self.assertIs(projector.call_args.kwargs["quantized_input"], pair)
+        self.assertIs(indexer_pair, pair)
+        self.assertIs(actual_q, q)
+        self.assertIs(kv, raw_kv)
+        self.assertEqual(kv.shape, (4096, 512))
+
+        index_projector = Mock(return_value=q)
+        table = torch.ones((4096, 4), dtype=torch.complex64)
+        attn = NS(geometry=NS(index_n_heads=1, index_head_dim=8), layer_id=20,
+                  runtime=NS(freqs_for=lambda layer: table),
+                  project_indexer_query=index_projector,
+                  index_wq=Mock(side_effect=AssertionError("indexer requantization")),
+                  index_weights=torch.ones((1, 8), dtype=torch.bfloat16))
+        with patch.object(attention_layer, "_rope_tail", side_effect=lambda value, freq: value), \
+                patch.object(attention_layer.F, "linear", return_value=torch.zeros((4096, 1))) as weights:
+            index_q, index_weights = attention_layer.SharedPPUAttention._project_indexer(
+                attn, x[-140:], qr, torch.arange(3956, 4096), {}, quantized_input=indexer_pair,
+                weight_input=x, weight_rows=slice(3956, 4096),
+            )
+        self.assertIs(index_projector.call_args.args[0], qr)
+        self.assertIs(index_projector.call_args.kwargs["quantized_input"], pair)
+        self.assertEqual(index_q.shape, (140, 1, 8))
+        self.assertEqual(index_weights.shape, (140, 1))
+        weights.assert_called_once()
+        self.assertIs(weights.call_args.args[0], x, "BF16 weights projection retains full M4096 arithmetic")
+
     @torch.inference_mode()
     def test_full_cache_publication_and_selected_outputs_are_unchanged(self):
         results = []
         environment = {
             ENV: "1", "RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE": "1",
+            DENSE_PROJECTIONS: "0",
             "RTP_V41_PPU_LOCAL_PREFILL_AIU_PRENORM": "0",
             "RTP_V41_PPU_QUANT_MODE": "mxfp4_fp8_ptpc",
             attention_layer.FUSION_ENV: "0", attention_layer.STREAMS_ENV: "0",

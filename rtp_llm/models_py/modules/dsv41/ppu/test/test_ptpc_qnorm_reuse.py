@@ -347,7 +347,7 @@ class PTPCQNormReuseDevice(_QNormReuseBase):
     @torch.no_grad()
     def test_real_projections_pair_bytes_and_shared_native_consumers(self):
         op, hidden = real_projection()
-        for rows in ROWS:
+        for rows in (*ROWS, 140, 4096):
             for indexed in (False, True):
                 with self.subTest(rows=rows, indexed=indexed):
                     value = torch.randn(

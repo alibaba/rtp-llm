@@ -40,6 +40,7 @@ import torch
 
 from rtp_llm.models_py.modules.dsv41.backend import V41QuantizedTensor
 from rtp_llm.models_py.modules.dsv41.ppu import _quant
+from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import env_value as optimization_env_value
 
 DEFAULT_CANDIDATE_BLOCK_SIZE = 64
 DEFAULT_ROW_CHUNK = 128
@@ -124,7 +125,7 @@ def dense_fp4_index_score(q, k, head_weights, positions, ratio, *, sg_align=Fals
 
     count = k.values.shape[0]
     bounds = None
-    if os.environ.get("RTP_V41_PPU_CP8_DENSE_INDEX_BOUNDS", "0") == "1":
+    if optimization_env_value("RTP_V41_PPU_CP8_DENSE_INDEX_BOUNDS", "0") == "1":
         from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_metadata import try_score_bounds
 
         bounds = try_score_bounds(positions, count, ratio)

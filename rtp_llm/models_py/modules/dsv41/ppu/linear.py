@@ -57,7 +57,26 @@ def ptpc_woa_direct_enabled():
 
 
 def _load_direct_woa_gemm():
-    """Resolve the existing Python JIT consumer before any activation work."""
+    """Resolve the HBR consumer before any activation work."""
+    try:
+        package = importlib.import_module("deep_gemm")
+    except ImportError:
+        return None
+    if getattr(package, "_C", None) is not None:
+        operation = getattr(package, "fp8_einsum", None)
+        if not callable(operation):
+            return None
+
+        def native_hbr(a, scale, weight, weight_scale, output):
+            # These views are reversed by the public C++ einsum wrapper.
+            # The HBR/HB1 producer layout reaches BMM without a data copy.
+            operation(
+                "bhr,hdr->bhd",
+                (a.permute(1, 0, 2), scale.permute(1, 0, 2)),
+                (weight, weight_scale), output, recipe=(1, 1, a.shape[-1]),
+            )
+
+        return native_hbr
     try:
         module = importlib.import_module("deep_gemm.jit_kernels.einsum")
     except ImportError:

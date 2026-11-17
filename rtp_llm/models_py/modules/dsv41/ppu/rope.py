@@ -11,6 +11,7 @@ import os
 import torch
 
 from rtp_llm.models_py.modules.dsv41.ppu import fused_ops
+from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import env_value as optimization_env_value
 
 
 def can_overwrite(value, *live_inputs):
@@ -197,7 +198,7 @@ def rotate(
             if output is not None:
                 return output
     if allow_fused is None:
-        allow_fused = os.environ.get("RTP_V41_PPU_FUSED_BF16_ROPE", "0") == "1"
+        allow_fused = optimization_env_value("RTP_V41_PPU_FUSED_BF16_ROPE", "0") == "1"
     if allow_fused:
         output = try_rotate_fresh(value, frequencies, inverse, positions=positions)
         if output is not None:

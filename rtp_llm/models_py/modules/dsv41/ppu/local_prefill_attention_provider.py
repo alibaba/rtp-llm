@@ -19,6 +19,7 @@ import torch
 
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
+from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import env_value as optimization_env_value
 
 
 ENV = "RTP_V41_PPU_LOCAL_PREFILL_ATTENTION_PROVIDER"
@@ -146,7 +147,7 @@ class LocalPrefillAttentionProvider:
     """One forward's admission and host evidence, with no retained payload."""
 
     def __init__(self, state):
-        flag = os.environ.get(ENV, "0")
+        flag = optimization_env_value(ENV, "0")
         if flag not in ("0", "1"):
             raise ValueError(ENV + " must be explicitly 0 or 1")
         self.enabled = flag == "1"
@@ -188,7 +189,7 @@ class LocalPrefillAttentionProvider:
         if self._state() is not state or self._cache() is not state.cache:
             self._invalid = "forward_owner_changed"
             return self._invalid
-        if os.environ.get(ENV, "0") != "1":
+        if optimization_env_value(ENV, "0") != "1":
             return "flag_disabled"
         if os.environ.get(RECEIPT_ENV, "") != self._receipt:
             self._invalid = "receipt_changed"

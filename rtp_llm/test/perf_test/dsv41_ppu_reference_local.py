@@ -56,7 +56,7 @@ def main():
     def local_ready(process, config, timeout):
         node, role = config["node"], config["role"]
         port = node["address"].rsplit(":", 1)[1]
-        owners = reference.result.WORLD if role == "decode" else 1
+        owners = reference.result.WORLD if role == "decode" else config["case"].get("prefill_dp", 1)
         probe = [node.get("python", "/opt/conda312/bin/python"), "-B", "-c",
                  reference.HEALTH_PROBE, port, str(owners)]
         if role == "decode":

@@ -36,13 +36,14 @@ if [[ "$v41_role" == local-prefill-sg-align-contracts || "$v41_role" == local-pr
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_sg_integration \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_sg_paged_indexer \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_sg_rope_lookup \
-        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_sg_rope_callers
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_sg_rope_callers "${@:2}"
 fi
 if [[ "$v41_role" == local-prefill-workspace-contracts || "$v41_role" == local-prefill-workspace-device ]]; then
     if [[ "$v41_role" == local-prefill-workspace-device ]]; then export RTP_V41_TEST_LOCAL_WORKSPACE_DEVICE=1; fi
     exec "$v41_python" -B -m unittest -v \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_workspace \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_rows \
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_metadata \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_fused \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_mhc \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_aiu_mhc \
@@ -70,7 +71,7 @@ if [[ "$v41_role" == local-prefill-workspace-contracts || "$v41_role" == local-p
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_attention_provider \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_source_native_write \
         rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_csa_native_write \
-        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_lazy_slots
+        rtp_llm.models_py.modules.dsv41.ppu.test.test_local_prefill_lazy_slots "${@:2}"
 fi
 if [[ "$v41_role" == local-prefill-attention-provider-contracts || "$v41_role" == local-prefill-attention-provider-device ]]; then
     if [[ "$v41_role" == local-prefill-attention-provider-device ]]; then export RTP_V41_TEST_LOCAL_WORKSPACE_DEVICE=1; fi

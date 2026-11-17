@@ -28,6 +28,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.row_metadata import (
 )
 from rtp_llm.models_py.modules.dsv41.prefill.ced import permits_ced
 from rtp_llm.models_py.modules.dsv41.prefill.ced import CEDPlan, _DERIVED_KEYS, _MIN_TOKENS
+from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import env_value as optimization_env_value
 
 
 LOCAL_PREFILL_ROWS_ENV = "RTP_V41_PPU_LOCAL_PREFILL_ROWS"
@@ -202,10 +203,21 @@ class SharedForwardState:
         self._local_cp_rows = None
         self._local_prefill_rows = {}
         self._local_prefill_full_rows = {}
+        self._mega_all_live_masks = {}
+        self._indexer_lookup_stamp = None
+        self._indexer_lookup_compact_birth = None
+        self._indexer_lookup_compact_rows = None
+        self._compact_validation_original = None
+        self._compact_validation_output = None
+        self._indexer_lookup_invalid = False
+        self._local_metadata_entries = {}
+        self._local_metadata_stream = None
+        self._local_metadata_invalid = False
         self._local_compact_row_proof = None
         self._l20_query_projection_proof = None
         self._local_compact_full_rows = None
         self.original_context = self.context = None
+        self._entry_plan_stamp = None
         self.prefill_mega_buffer = None
         self.dp_prefill_mega_buffer = None
         self.plan = None
@@ -224,7 +236,7 @@ class SharedForwardState:
         self.routed_rows = {}
         self._cross_mhc_token = object()
         self._cross_mhc_ticket = self._cross_mhc_block = None
-        requested = os.environ.get(LOCAL_PREFILL_CROSS_LAYER_MHC_ENV, "0") == "1"
+        requested = optimization_env_value(LOCAL_PREFILL_CROSS_LAYER_MHC_ENV, "0") == "1"
         self._cross_mhc_enabled = requested and self.prefill and not self.idle
         self._cross_mhc_invalid = False
         self._cross_mhc_full_stamp = None
@@ -239,7 +251,7 @@ class SharedForwardState:
         self._local_swa_full_stamp = self._local_swa_selected_stamp = None
         self._local_swa_initial = (
             (self._local_swa_full_source(), self.attn.cu_seqlens)
-            if os.environ.get(LOCAL_PREFILL_SWA_SEGMENTS_ENV, "0") == "1"
+            if optimization_env_value(LOCAL_PREFILL_SWA_SEGMENTS_ENV, "0") == "1"
             and self.prefill and not self.idle and isinstance(self.attn.cu_seqlens, torch.Tensor)
             else None
         )
@@ -299,7 +311,7 @@ class SharedForwardState:
 
     def _cross_mhc_phase(self):
         if (not self._cross_mhc_enabled or self._cross_mhc_invalid
-                or os.environ.get(LOCAL_PREFILL_CROSS_LAYER_MHC_ENV, "0") != "1"
+                or optimization_env_value(LOCAL_PREFILL_CROSS_LAYER_MHC_ENV, "0") != "1"
                 or getattr(self.runtime, "current", None) is not self):
             return False
         from rtp_llm.models_py.modules.dsv41.ppu.layers import _local_prefill_business_phase
@@ -341,7 +353,7 @@ class SharedForwardState:
         if (not all(_cross_normal_tensor(t) for t in sources)
                 or not isinstance(ids, torch.Tensor) or not isinstance(cu, torch.Tensor)):
             return None
-        if os.environ.get("RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA", "0") == "1":
+        if optimization_env_value("RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA", "0") == "1":
             current = self._validated_local_compact_rows_key(cp)
             if current is None:
                 return None
@@ -537,7 +549,7 @@ class SharedForwardState:
 
     def _local_row_cache_key(self, context):
         if (
-            os.environ.get(LOCAL_PREFILL_ROWS_ENV, "0") != "1"
+            optimization_env_value(LOCAL_PREFILL_ROWS_ENV, "0") != "1"
             or not self.prefill or self.idle or self.cache is None or self.cache.sharded
             or getattr(self, "is_graph", False) or getattr(self.attn, "is_cuda_graph", False)
             or (context is not None and (
@@ -567,7 +579,7 @@ class SharedForwardState:
 
     def _local_swa_birth_valid(self):
         initial = self._local_swa_initial
-        if os.environ.get(LOCAL_PREFILL_SWA_SEGMENTS_ENV, "0") != "1" or initial is None or self._local_swa_invalid:
+        if optimization_env_value(LOCAL_PREFILL_SWA_SEGMENTS_ENV, "0") != "1" or initial is None or self._local_swa_invalid:
             return False
         if self._local_swa_full_source() != initial[0]:
             self._local_swa_invalid = True
@@ -593,9 +605,10 @@ class SharedForwardState:
         else:
             stamp = self._local_swa_selected_stamp
             if (stamp is None or stamp[0] is not context or stamp[1] is not self.plan
-                    or stamp[2] is not self._local_compact_row_proof
-                    or not self.use_local_compact_rows(context)
-                    or stamp[3] != self._local_compact_rows_key(context)[0]):
+                    or stamp[2] is not self._local_compact_row_proof):
+                return None
+            current = self._validated_local_compact_rows_key(context)
+            if current is None or stamp[3] != current[0]:
                 return None
             keys, owners = stamp[4:]
             if keys != tuple(_row_tensor_key(value) for value in owners):
@@ -706,6 +719,410 @@ class SharedForwardState:
     def rows(self, context=None):
         return self.row_view(context).as_rows()
 
+    def _indexer_lookup_phase(self, context=None):
+        return (
+            self.prefill
+            and optimization_env_value("RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE", "0") == "1"
+            and optimization_env_value("RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA", "0") == "1"
+            and is_plain_tensor(getattr(self.inputs, "input_ids", None))
+            and is_plain_tensor(getattr(self.attn, "cu_seqlens", None))
+            and self._mega_all_live_phase()
+            and not self.local_prefill_sg_align
+            and ((context is None and not self.compacted and self.context is None)
+                 or (isinstance(context, CPContext) and self.compacted and self.context is context))
+            and len(self.lengths) == len(self.query_prefixes) == 1
+            and self.lengths[0] > 0
+            and self._local_row_cache_key(context) is not None
+        )
+
+    def _remember_indexer_lookup_rows(self, rows):
+        # Only the original B1 repeat_interleave construction certifies that
+        # every request id is zero. An all-live mask alone cannot prove this.
+        if (not self._indexer_lookup_phase() or self._indexer_lookup_invalid
+                or self._indexer_lookup_stamp is not None):
+            return
+        count = self.lengths[0]
+        if (any(not is_plain_tensor(value) for value in rows)
+                or tuple(value.shape for value in rows) != ((count,), (count,), (2,), (count,))
+                or rows[1].is_inference() or rows[1].dtype != torch.int64
+                or not rows[1].is_contiguous() or self.inputs.input_ids.numel() != count):
+            return
+        sources = self.inputs.input_ids, self.attn.cu_seqlens
+        self._indexer_lookup_stamp = SimpleNamespace(
+            rows=rows, row_keys=tuple(_row_tensor_key(value) for value in rows),
+            lengths=self.lengths, prefixes=self.query_prefixes,
+            owners=(self.inputs, self.attn, self.cache, self.runtime.model),
+            sources=sources, source_keys=tuple(_row_tensor_key(value) for value in sources),
+            cache_key=self._local_row_cache_key(None)[0],
+        )
+
+    def _indexer_lookup_original_valid(self):
+        stamp = self._indexer_lookup_stamp
+        if stamp is None or self._indexer_lookup_invalid:
+            return False
+        cached = self._local_prefill_rows.get(id(None))
+        sources = self.inputs.input_ids, self.attn.cu_seqlens
+        local = self._local_row_cache_key(None)
+        if (tuple(_row_tensor_key(value) for value in stamp.rows) != stamp.row_keys
+                or self.lengths != stamp.lengths or self.query_prefixes != stamp.prefixes
+                or any(old is not new for old, new in zip(
+                    stamp.owners, (self.inputs, self.attn, self.cache, self.runtime.model)))
+                or tuple(_row_tensor_key(value) for value in sources) != stamp.source_keys
+                or local is None or local[0] != stamp.cache_key
+                or cached is None or cached[1] is not stamp.rows):
+            self._indexer_lookup_invalid = True
+            return False
+        return True
+
+    def _remember_indexer_lookup_compact_plan(self, context, proof):
+        # Only the actual bounded-plan construction may certify B1 request ids.
+        # Activation and later row-cache misses must not mint a new plan birth.
+        if (self._indexer_lookup_compact_birth is not None
+                or not self._indexer_lookup_phase() or not self._indexer_lookup_original_valid()
+                or proof is None or context.chunk_lengths_per_req != (min(self.lengths[0], 140),)
+                or any(not is_plain_tensor(value) or value.is_inference() for value in proof[1])):
+            return
+        self._indexer_lookup_compact_birth = self.plan, context, proof[0], proof[1]
+
+    def _indexer_lookup_compact_valid(self, context):
+        if context is None or not self._indexer_lookup_phase(context) or self._indexer_lookup_invalid:
+            return False
+        birth = self._indexer_lookup_compact_birth
+        if birth is None or not self._indexer_lookup_original_valid():
+            return False
+        current = self._validated_local_compact_rows_key(context)
+        if (birth[0] is not self.plan or birth[1] is not context or current is None
+                or current[0] != birth[2]
+                or any(not is_plain_tensor(value) or value.is_inference() for value in current[1])):
+            self._indexer_lookup_invalid = True
+            return False
+        return True
+
+    def local_indexer_lookup_slices(self, context, rows, query_rows):
+        """Describe legacy B1 lookup indices without enabling slice dispatch.
+
+        The caller still constructs an arange tensor and uses the original
+        advanced-indexing copies, score tiles, precision and TopK path.
+        """
+        if not self._indexer_lookup_phase(context) or not self._indexer_lookup_original_valid():
+            return None
+        if context is None:
+            stamp = self._indexer_lookup_stamp
+            owners, keys, count = stamp.rows, stamp.row_keys, stamp.lengths[0]
+        else:
+            if not self._indexer_lookup_compact_valid(context):
+                return None
+            stamp = self._indexer_lookup_compact_rows
+            if stamp is None or stamp[0] is not context:
+                return None
+            _, owners, keys = stamp
+            count = context.chunk_length
+        cached = self._local_prefill_rows.get(id(context))
+        if (type(query_rows) is not int or query_rows != count
+                or not isinstance(rows, tuple) or len(rows) != 4
+                or any(value is not owner for value, owner in zip(rows, owners))
+                or any(not is_plain_tensor(value) for value in rows)
+                or tuple(_row_tensor_key(value) for value in rows) != keys
+                or cached is None or cached[1] is not owners):
+            self._indexer_lookup_invalid = True
+            return None
+        return (slice(0, query_rows),)
+
+    def _local_metadata_snapshot(self, context, rows):
+        # Callers authenticate the original read-only consumer/builder chain.
+        # Here only the existing full/compact row birth and current state matter.
+        if (type(self) is not SharedForwardState or getattr(self, "_local_metadata_invalid", True)
+                or getattr(self.runtime, "current", None) is not self
+                or self._indexer_lookup_invalid or not self._mega_all_live_phase()
+                or self.local_prefill_sg_align
+                or any(optimization_env_value(name, "0") != "1" for name in (
+                    LOCAL_PREFILL_ROWS_ENV, "RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE",
+                    "RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA"))
+                or type(rows) is not tuple or len(rows) != 4
+                or any(type(value) is not torch.Tensor or value.is_inference()
+                       or not is_plain_tensor(value) or not value.is_contiguous() for value in rows)
+                or not rows[0].is_cuda):
+            return None
+        full = self._indexer_lookup_stamp
+        cached = self._local_prefill_rows.get(id(context))
+        full_cached = self._local_prefill_rows.get(id(None))
+        if (full is None or cached is None
+                or any(value is not owner for value, owner in zip(rows, cached[1]))
+                or full_cached is None
+                or full_cached[1] is not full.rows
+                or len(self.lengths) != 1 or len(self.query_prefixes) != 1):
+            return None
+        sources = rows + (self.inputs.input_ids, self.attn.cu_seqlens)
+        identity_sources = rows
+        owners = (self.runtime, self.inputs, self.attn, self.cache, self.runtime.model,
+                  self.runtime.policy, self.plan, context, full, cached, full_cached,
+                  self.original_context)
+        policy = self.runtime.policy
+        geometry = (self.lengths, self.query_prefixes, self.plan_reason, policy.mode,
+                    getattr(policy, "keep_tokens", None), getattr(policy, "encoder_replay", False),
+                    getattr(policy, "max_rollback_tokens", 0))
+        count = self.lengths[0]
+        if context is None:
+            if self.compacted or self.context is not None or cached[1] is not full.rows:
+                return None
+        else:
+            birth, derived = self._indexer_lookup_compact_birth, self._indexer_lookup_compact_rows
+            if (type(context) is not CPContext or not self.compacted or self.context is not context
+                    or birth is None or derived is None or derived[0] is not context or derived[1] is not cached[1]
+                    or self.plan is not birth[0] or context is not birth[1]
+                    or optimization_env_value(LOCAL_PREFILL_COMPACT_ROWS_ENV, "0") != "1"):
+                return None
+            exchange, policy = self.plan.exchange, self.runtime.policy
+            transport = (context.global_positions, context.req_id_per_token, context.local_is_real,
+                         context.unpad_restore, context.gather_restore_positions,
+                         exchange.send_indices, exchange.receive_positions)
+            if any(type(value) is not torch.Tensor or value.is_inference() for value in (*full.rows, *transport)):
+                return None
+            sources += full.rows + transport
+            identity_sources += full.rows + transport
+            owners += (birth, derived, self._local_compact_row_proof, exchange,
+                       self.plan.context, getattr(self.plan, "original_context", None), exchange.group)
+            geometry += (
+                context.cp_size, context.cp_rank, context.kv_cache_sharded, context.chunk_length,
+                context.padded_seq_len, context.seq_len_full, context.chunk_lengths_per_req,
+                context.input_lengths_global_host, context.prefix_lengths_host,
+                getattr(context, "swa_replay_starts_host", None), getattr(context, "swa_replay_start", None),
+                exchange.original_rows, exchange.compact_rows, exchange.send_sizes, exchange.receive_sizes,
+                exchange.candidate_rows_host, exchange.projection_groups_host,
+            )
+            count = context.chunk_length
+        if any(type(value) not in (int, bool, str, tuple, type(None)) for value in geometry):
+            return None
+        # Host tuples are immutable birth metadata. Pin and compare their
+        # identity instead of traversing the 140-row transport every hit.
+        owners += geometry
+        geometry = tuple((tuple, id(value)) if type(value) is tuple else value for value in geometry)
+        if (tuple(value.shape for value in rows) != ((count,), (count,), (2,), (count,))
+                or tuple(value.dtype for value in rows) != (torch.int64, torch.int64, torch.int32, torch.bool)
+                or any(value.device != rows[0].device for value in rows)):
+            return None
+        stream = torch.cuda.current_stream(rows[0].device)
+        if stream.device != rows[0].device:
+            return None
+        # Native input getters may wrap the same TensorImpl again. Only the
+        # four known row owners/CP tensors require Python object identity.
+        key = (tuple(id(value) for value in (*owners, *identity_sources)), geometry,
+               tuple(_row_tensor_key(value) for value in sources))
+        return key, (*owners, *sources), (rows[0].device, int(stream.cuda_stream)), stream
+
+    @staticmethod
+    def _local_metadata_result_key(value, *, step):
+        if step:
+            fields = vars(value)
+            if fields.get("parallel_context", object()) is not None:
+                return None
+            tensors = tuple(fields.get(name) for name in (
+                "positions", "valid_mask", "request_ids", "owner_ranks", "request_offsets",
+            ))
+        else:
+            tensors = (value,)
+        if any(type(tensor) is not torch.Tensor or tensor.is_inference()
+               or not is_plain_tensor(tensor) for tensor in tensors):
+            return None
+        return (type(value), id(value), tuple((id(tensor), _row_tensor_key(tensor)) for tensor in tensors))
+
+    def _local_metadata_entry(self, context, rows):
+        snapshot = self._local_metadata_snapshot(context, rows)
+        if snapshot is None:
+            self._local_metadata_invalid = True
+            return None
+        key, owners, stream_key, stream = snapshot
+        if self._local_metadata_stream is None:
+            self._local_metadata_stream = stream_key, stream
+        elif self._local_metadata_stream[0] != stream_key:
+            self._local_metadata_invalid = True
+            return None
+        slot = context is not None
+        entry = self._local_metadata_entries.get(slot)
+        if entry is None:
+            # Full qualification occurs only at the first actual consumer of
+            # each epoch. Hits compare the stamped sources/owners directly.
+            if self.local_indexer_lookup_slices(context, rows, rows[0].numel()) is None:
+                self._local_metadata_invalid = True
+                return None
+            entry = SimpleNamespace(key=key, owners=owners, values={}, retained=[], builder=None)
+            self._local_metadata_entries[slot] = entry
+        elif entry.key != key or any(
+            self._local_metadata_result_key(value, step=kind == "step") != saved
+            for kind, (value, saved) in entry.values.items()
+        ):
+            self._local_metadata_invalid = True
+            return None
+        return entry
+
+    def _local_metadata_remember(self, entry, context, rows, kind, value):
+        # A later field rebind must not release an earlier in-flight buffer.
+        entry.retained.extend((value, *vars(value).values()) if kind == "step" else (value,))
+        result_key = self._local_metadata_result_key(value, step=kind == "step")
+        entry.values[kind] = value, result_key
+        current = self._local_metadata_snapshot(context, rows)
+        if (result_key is None or current is None or current[0] != entry.key
+                or current[2] != self._local_metadata_stream[0]):
+            self._local_metadata_invalid = True
+        # A completed first construction is still this call's original result.
+        # Never return None here and make the caller repeat a dispatched cast.
+        return value
+
+    def local_prefill_step_context(self, context, rows, *, builder):
+        """Reuse only a current, same-stream main context from a known row epoch."""
+        entry = self._local_metadata_entry(context, rows)
+        if entry is None:
+            return None
+        if entry.builder is not None and entry.builder is not builder:
+            self._local_metadata_invalid = True
+            return None
+        if "step" in entry.values:
+            return entry.values["step"][0]
+        entry.builder = builder
+        try:
+            with torch.inference_mode(False), torch.no_grad():
+                value = builder(*rows[:3], valid_mask=rows[3])
+        except BaseException:
+            self._local_metadata_invalid = True
+            raise
+        return self._local_metadata_remember(entry, context, rows, "step", value)
+
+    def local_prefill_positions32(self, context, rows):
+        """A private int32 view of the epoch, for the admitted Mega consumer only."""
+        entry = self._local_metadata_entry(context, rows)
+        if entry is None:
+            return None
+        if "positions32" in entry.values:
+            return entry.values["positions32"][0]
+        try:
+            with torch.inference_mode(False), torch.no_grad():
+                value = rows[0].to(torch.int32)
+        except BaseException:
+            self._local_metadata_invalid = True
+            raise
+        return self._local_metadata_remember(entry, context, rows, "positions32", value)
+
+    def _compact_host_geometry(self):
+        """Return the exact B1 compact row geometry only while its birth holds.
+
+        This describes values produced by the original arange/identity and
+        bounded-layout constructors. It does not infer values from tensor
+        shapes or accept versionless transport as immutable.
+        """
+        context = self.context
+        original_birth = self._compact_validation_original
+        birth = self._indexer_lookup_compact_birth
+        if (original_birth is None or birth is None
+                or not self._indexer_lookup_phase(context)
+                or not self._indexer_lookup_original_valid()
+                or original_birth[0] is not self.original_context
+                or original_birth[1] is not self._indexer_lookup_stamp
+                or birth[0] is not self.plan or birth[1] is not context
+                or getattr(self.plan, "original_context", None) is not self.original_context):
+            return None
+        original, full_rows = self.original_context, self._indexer_lookup_stamp.rows
+        count = self.lengths[0]
+        owners = original.global_positions, original.req_id_per_token, original.local_is_real
+        if (any(not is_plain_tensor(value) or value.is_inference() for value in (*full_rows, *owners))
+                or any(value is not owner for value, owner in zip(owners, original_birth[2]))
+                or tuple(_row_tensor_key(value) for value in owners) != original_birth[3]
+                or original.global_positions is not full_rows[0] or original.local_is_real is not full_rows[3]
+                or (original.cp_size, original.cp_rank, original.kv_cache_sharded) != (1, 0, False)
+                or (original.chunk_length, original.padded_seq_len, original.seq_len_full) != (count,) * 3
+                or original.input_lengths_global_host != self.lengths
+                or original.chunk_lengths_per_req != self.lengths
+                or original.prefix_lengths_host != self.query_prefixes):
+            return None
+        current = self._local_compact_rows_key(context)
+        if (current is None or current[0] != birth[2]
+                or any(not is_plain_tensor(value) or value.is_inference() for value in current[1])):
+            return None
+        selected = self.plan.exchange.candidate_rows_host
+        # _local_compact_rows_key authenticated exactly this suffix, including
+        # identity receive order and every selected row's original index.
+        return tuple(self.query_prefixes[0] + row for row in selected), len(selected), count - 1 in selected
+
+    def _compact_host_evidence(self):
+        stamp = self._compact_validation_output
+        if stamp is None or self.valid_output_rows is not stamp[0]:
+            return None
+        value = self.valid_output_rows
+        if (not is_plain_tensor(value) or value.is_inference()
+                or _row_tensor_key(value) != stamp[1]):
+            return None
+        geometry = self._compact_host_geometry()
+        return geometry if geometry is not None and geometry[2] else None
+
+    def _mega_all_live_phase(self):
+        """Only eager, local Prefill may omit the native invalid-row mask."""
+        if (not self.prefill or self.idle or self.cache is None or self.cache.sharded
+                or torch.is_grad_enabled()
+                or getattr(self.runtime.model, "_is_decode_role", False)
+                or getattr(self.runtime.model, "_is_speculative", False)
+                or (self.inputs.input_ids.is_cuda and torch.cuda.is_current_stream_capturing())):
+            return False
+        flags = (
+            "is_graph", "is_graph_commit", "verify", "proposal", "is_proposal",
+            "is_speculative_decode", "is_cuda_graph", "is_target_verify", "is_packed_target_verify",
+        )
+        return not any(getattr(owner, flag, False)
+                       for owner in (self, self.inputs, self.attn) for flag in flags)
+
+    def _remember_mega_all_live_mask(self, context, mask, *, plan=None):
+        # Called only at an all-ones construction or the bounded-plan birth
+        # boundary. A cache hit/consumer must never certify an arbitrary mask.
+        if (not self._mega_all_live_phase() or not is_plain_tensor(mask)
+                or mask.is_inference() or mask.dtype != torch.bool
+                or mask.ndim != 1 or not mask.is_contiguous()):
+            return
+        geometry = None if context is None else (
+            context.cp_size, context.cp_rank, context.kv_cache_sharded,
+            context.chunk_length, context.padded_seq_len, context.chunk_lengths_per_req,
+        )
+        self._mega_all_live_masks[id(context)] = (
+            context, plan, mask, _row_tensor_key(mask), geometry,
+            self.lengths, self.query_prefixes,
+            (self.inputs, self.attn, self.cache, self.runtime.model),
+            tuple(_row_tensor_key(value) for value in (self.inputs.input_ids, self.attn.cu_seqlens)),
+            (self.inputs.input_ids, self.attn.cu_seqlens),
+        )
+
+    def mega_attention_valid_mask(self, context, mask, query_rows):
+        """Return None only for a still-unmodified construction-born all-live mask.
+
+        No device values, host transfers or expanded compact-layout proof are
+        consulted here. Versionless external/inference masks fail closed.
+        """
+        if not self._mega_all_live_phase():
+            return mask
+        stamp = self._mega_all_live_masks.get(id(context))
+        if (stamp is None or stamp[0] is not context or stamp[2] is not mask
+                or mask.is_inference() or mask.shape != (query_rows,)
+                or stamp[3] != _row_tensor_key(mask)
+                or stamp[5:7] != (self.lengths, self.query_prefixes)
+                or any(old is not new for old, new in zip(
+                    stamp[7], (self.inputs, self.attn, self.cache, self.runtime.model)))
+                or stamp[8] != tuple(_row_tensor_key(value) for value in
+                                     (self.inputs.input_ids, self.attn.cu_seqlens))):
+            return mask
+        if context is not None:
+            geometry = (
+                context.cp_size, context.cp_rank, context.kv_cache_sharded,
+                context.chunk_length, context.padded_seq_len, context.chunk_lengths_per_req,
+            )
+            if (geometry != stamp[4] or geometry[:3] != (1, 0, False)
+                    or context.local_is_real is not mask
+                    or context.chunk_length != query_rows):
+                return mask
+            if stamp[1] is not None and (
+                self.plan is not stamp[1] or self.context is not context or not self.compacted
+            ):
+                return mask
+        elif self.context is not None:
+            # A local all-ones tuple cannot authorize an unrelated CP epoch.
+            return mask
+        return None
+
     def _rows_legacy(self, context=None):
         local = self._local_row_cache_key(context)
         slot = id(context)
@@ -727,11 +1144,23 @@ class SharedForwardState:
             )
             if reuse and self._local_cp_rows is not None and self._local_cp_rows[0] is context:
                 return self._local_cp_rows[1]
-            cu = torch.tensor(
-                (0, *accumulate(chunks)), dtype=torch.int64 if reuse else torch.int32,
-                device=self.inputs.input_ids.device,
-            )
-            rows = context.global_positions, context.req_id_per_token.long(), cu, context.local_is_real
+            compact_lookup = self._indexer_lookup_compact_valid(context)
+            with torch.inference_mode(False) if compact_lookup else nullcontext():
+                if compact_lookup and self.inputs.input_ids.is_cuda:
+                    from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_metadata import _upload
+
+                    # Keep the original independent int32 row buffer and its
+                    # normal version counter; only its upload is asynchronous.
+                    cu = _upload((0, *accumulate(chunks)), self.inputs.input_ids.device, torch.int32)
+                else:
+                    cu = torch.tensor(
+                        (0, *accumulate(chunks)), dtype=torch.int64 if reuse else torch.int32,
+                        device=self.inputs.input_ids.device,
+                    )
+                requests = context.req_id_per_token.long()
+            rows = context.global_positions, requests, cu, context.local_is_real
+            if compact_lookup and self._indexer_lookup_compact_rows is None:
+                self._indexer_lookup_compact_rows = context, rows, tuple(_row_tensor_key(value) for value in rows)
             self._remember_sg_rows(context, rows)
             if reuse:
                 self._local_cp_rows = context, rows
@@ -739,18 +1168,34 @@ class SharedForwardState:
                 self._local_prefill_rows[slot] = local[0], rows, local[1], context
             return rows
         device = self.inputs.input_ids.device
+        lookup = False
         if self.prefill:
             cu = self.attn.cu_seqlens.to(device=device, dtype=torch.int64)
-            requests = torch.repeat_interleave(torch.arange(len(self.lengths), device=device), cu[1:] - cu[:-1])
-            positions = torch.cat([torch.arange(p, p + n, device=device) for p, n in zip(self.query_prefixes, self.lengths)])
+            # Preserve the original operation/allocation, but retain a version
+            # counter when its B1 all-zero result will authorize host lookup.
+            lookup = self._indexer_lookup_phase()
+            if lookup:
+                with torch.inference_mode(False), torch.no_grad():
+                    requests = torch.repeat_interleave(torch.arange(len(self.lengths), device=device), cu[1:] - cu[:-1])
+                    positions = torch.cat([torch.arange(p, p + n, device=device) for p, n in zip(self.query_prefixes, self.lengths)])
+            else:
+                requests = torch.repeat_interleave(torch.arange(len(self.lengths), device=device), cu[1:] - cu[:-1])
+                positions = torch.cat([torch.arange(p, p + n, device=device) for p, n in zip(self.query_prefixes, self.lengths)])
         else:
             sizes = torch.tensor(self.lengths, device=device)
             requests = torch.repeat_interleave(torch.arange(len(self.lengths), device=device), sizes)
             positions = torch.cat([torch.arange(p, p + n, device=device) for p, n in zip(self.query_prefixes, self.lengths)])
             cu = torch.cat((sizes.new_zeros(1), sizes.cumsum(0)))
-        rows = positions.long(), requests.long(), cu.int(), torch.ones_like(positions, dtype=torch.bool)
+        # Keep this original allocation versioned even under engine inference
+        # mode, so an in-place mask write revokes all-live eligibility.
+        with torch.inference_mode(False):
+            valid = torch.ones_like(positions, dtype=torch.bool)
+        with torch.inference_mode(False) if lookup else nullcontext():
+            rows = positions.long(), requests.long(), cu.int(), valid
+        self._remember_indexer_lookup_rows(rows)
+        self._remember_mega_all_live_mask(None, valid)
         self._remember_sg_rows(None, rows)
-        if (self._cross_mhc_enabled and os.environ.get(LOCAL_PREFILL_CROSS_LAYER_MHC_ENV, "0") == "1"
+        if (self._cross_mhc_enabled and optimization_env_value(LOCAL_PREFILL_CROSS_LAYER_MHC_ENV, "0") == "1"
                 and local is not None and self._cross_mhc_full_stamp is None
                 and self._cross_mhc_original_valid()):
             # Only the real construction boundary certifies derived row owners.
@@ -798,7 +1243,7 @@ class SharedForwardState:
         keep = getattr(policy, "keep_tokens", None)
         if keep != 140 or starts != tuple(max(n - keep, 0) for n in self.lengths):
             return None
-        use_host_geometry = os.environ.get("RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA", "0") == "1"
+        use_host_geometry = optimization_env_value("RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA", "0") == "1"
         geometry_key = self.lengths, starts
         saved = getattr(self, "_local_compact_host_geometry", None) if use_host_geometry else None
         if saved is not None and saved[0] == geometry_key:
@@ -841,6 +1286,18 @@ class SharedForwardState:
                tuple(_row_tensor_key(tensor) for tensor in sources))
         return key, sources
 
+    def _l20_query_projection_enabled(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
+            DENSE_PROJECTIONS, enabled,
+        )
+
+        return self._mega_all_live_phase() and (
+            enabled(DENSE_PROJECTIONS) or (
+                self.local_prefill_sg_align
+                and os.environ.get("RTP_V41_PPU_LOCAL_PREFILL_DENSE_PROJECTIONS", "0") == "1"
+            )
+        )
+
     def local_l20_query_slice(self, rows):
         """Prove a B1 suffix against the plan's creation-stamped transport.
 
@@ -849,8 +1306,7 @@ class SharedForwardState:
         """
         proof = self._l20_query_projection_proof
         if (
-            os.environ.get("RTP_V41_PPU_LOCAL_PREFILL_DENSE_PROJECTIONS", "0") != "1"
-            or not self.local_prefill_sg_align or proof is None
+            not self._l20_query_projection_enabled() or proof is None
             or self.compacted or len(self.lengths) != 1 or self.lengths != (rows,)
             or rows <= 140 or self.runtime.policy.window != 128
             or proof[0] is not self.plan or proof[1] is not self.plan.context
@@ -859,13 +1315,18 @@ class SharedForwardState:
         current = self._local_compact_rows_key(self.plan.context, before_l20=True)
         if current is None or current[0] != proof[2]:
             return None
+        if not self.local_prefill_sg_align and any(torch.is_inference(value) for value in current[1]):
+            # The general fused route requires the versioned metadata created
+            # by prepare_plan. Unknown inference-only transport cannot prove
+            # that the retained row order has not been mutated.
+            return None
         return slice(rows - 140, rows)
 
     def use_local_compact_rows(self, context):
         return self._validated_local_compact_rows_key(context) is not None
 
     def _validated_local_compact_rows_key(self, context):
-        if os.environ.get(LOCAL_PREFILL_COMPACT_ROWS_ENV, "0") != "1":
+        if optimization_env_value(LOCAL_PREFILL_COMPACT_ROWS_ENV, "0") != "1":
             return None
         proof = self._local_compact_row_proof
         if proof is None or proof[0] is not context or proof[1] is not self.plan:
@@ -922,7 +1383,7 @@ class SharedForwardState:
         if context is None:
             p, r, _, valid = self.rows()
             if (
-                os.environ.get(LOCAL_PREFILL_FULL_ROWS_ENV, "0") == "1"
+                optimization_env_value(LOCAL_PREFILL_FULL_ROWS_ENV, "0") == "1"
                 and self._local_row_cache_key(None) is not None
             ):
                 # rows(None) constructs exactly the real request rows. The
@@ -988,23 +1449,110 @@ class SharedForwardState:
         device = positions.device
         rows = positions.numel()
         indices = torch.arange(rows, device=device)
+        all_live = self.mega_attention_valid_mask(None, valid, rows) is None
         info = SimpleNamespace(
-            prefill_qkv_restore_indice_cpu=indices.cpu(),
-            prefill_qkv_padding_mask_cpu=valid.cpu(),
+            # indices is a just-created arange, with no intervening consumer.
+            prefill_qkv_restore_indice_cpu=torch.arange(rows, dtype=indices.dtype, device="cpu"),
+            prefill_qkv_padding_mask_cpu=(
+                torch.ones(rows, dtype=torch.bool, device="cpu") if all_live else valid.cpu()
+            ),
         )
-        return CPContext(
+        host_geometry = (
+            self._indexer_lookup_phase() and self._indexer_lookup_original_valid()
+            and all(not value.is_inference() for value in self._indexer_lookup_stamp.rows)
+        )
+        # Keep this existing cast versioned at its real construction point.
+        # The host proof must reject a later mutation of the identity request
+        # ids independently of their original int64 source.
+        with torch.inference_mode(False) if host_geometry else nullcontext():
+            identity_requests = requests.int()
+        context = CPContext(
             cp_size=1, cp_rank=0, chunk_length=rows, padded_seq_len=rows,
             seq_len_full=rows, relative_positions=indices, prefix_length=self.query_prefixes[0],
             global_positions=positions, local_is_real=valid, unpad_restore=indices,
             seq_len_total=self.query_prefixes[0] + self.lengths[0], cp_info=info,
-            req_id_per_token=requests.int(), prefix_lengths=torch.tensor(self.query_prefixes, device=device),
+            req_id_per_token=identity_requests, prefix_lengths=torch.tensor(self.query_prefixes, device=device),
             input_lengths_global=torch.tensor(self.lengths, device=device),
             cu_seqlens_global=torch.tensor([0, *torch.tensor(self.lengths).cumsum(0).tolist()], device=device),
             chunk_lengths_per_req=self.lengths, input_lengths_global_host=self.lengths,
             prefix_lengths_host=self.query_prefixes, first_position_host=self.query_prefixes[0],
         )
+        # The identity context aliases the very same freshly certified mask.
+        if all_live:
+            self._remember_mega_all_live_mask(context, valid)
+        if host_geometry and self._compact_validation_original is None:
+            owners = context.global_positions, context.req_id_per_token, context.local_is_real
+            self._compact_validation_original = (
+                context, self._indexer_lookup_stamp, owners,
+                tuple(_row_tensor_key(value) for value in owners),
+            )
+        return context
+
+    def _entry_plan_key(self):
+        original, plan = self.original_context, self.plan
+        compact = getattr(plan, "context", None)
+        exchange = getattr(plan, "exchange", None)
+        info = getattr(original, "cp_info", None)
+        proof = self._local_compact_rows_key(compact, before_l20=True) if plan is not None else None
+        owners = (self.inputs, self.attn, self.cache, self.runtime.model,
+                  original, plan, compact, exchange, info)
+        tensors = (self.inputs.input_ids, self.attn.cu_seqlens) + tuple(
+            getattr(original, field, None) for field in (
+                "global_positions", "req_id_per_token", "local_is_real", "unpad_restore",
+                "prefix_lengths", "input_lengths_global", "cu_seqlens_global",
+            )
+        ) + tuple(getattr(info, field, None) for field in (
+            "prefill_qkv_restore_indice_cpu", "prefill_qkv_padding_mask_cpu",
+        ))
+        policy = self.runtime.policy
+        key = (
+            tuple(id(owner) for owner in owners),
+            tuple(_row_tensor_key(value) for value in tensors),
+            self.lengths, self.query_prefixes, self.plan_reason,
+            tuple(getattr(original, field, None) for field in (
+                "cp_size", "cp_rank", "chunk_length", "padded_seq_len", "seq_len_full",
+                "kv_cache_sharded", "chunk_lengths_per_req", "input_lengths_global_host", "prefix_lengths_host",
+            )),
+            (policy.mode, policy.keep_tokens, policy.window,
+             policy.max_rollback_tokens, policy.encoder_replay),
+            permits_ced(self.inputs), self.local_prefill_sg_align,
+            (getattr(self.v4, "_mtp_hidden_buffer", None) is not None,
+             tuple(getattr(self.v4, "capture_aux_hidden_layer_ids", ()))),
+            None if proof is None else proof[0],
+            self._mega_all_live_phase(), self.context is None, self.compacted,
+        )
+        return key, owners, tensors
+
+    def prepare_local_plan_at_entry(self):
+        """Prepare the same B1/CP1 metadata before any layer work is queued.
+
+        Do not propagate the compact context: L0--L20 still see the original
+        full rows, and the existing publication/compact callback owns L20.
+        """
+        policy, model = self.runtime.policy, self.runtime.model
+        if (
+            self._entry_plan_stamp is not None or self.executed_layers
+            or optimization_env_value("RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA", "0") != "1"
+            or not self._mega_all_live_phase() or self.local_prefill_sg_align
+            or getattr(model, "_prefill_cp_size", None) != 1
+            or getattr(getattr(model, "parallelism_config", None), "tp_size", None) != 1
+            or (policy.mode, policy.keep_tokens, policy.window,
+                policy.max_rollback_tokens, policy.encoder_replay) != ("compact", 140, 128, 0, False)
+            or self.context is not None or self.original_context is not None
+            or len(self.lengths) != 1 or self.lengths[0] <= 140
+            or self.inputs.input_ids.numel() != self.lengths[0]
+        ):
+            return
+        self.prepare_plan()
+        # Retain source owners as well as their keys. L19 may reuse only this
+        # exact creation result, including an unchanged admission rejection.
+        self._entry_plan_stamp = self._entry_plan_key()
 
     def prepare_plan(self):
+        if self._entry_plan_stamp is not None:
+            if self._entry_plan_key()[0] != self._entry_plan_stamp[0]:
+                raise RuntimeError("local Prefill plan metadata changed after entry preparation")
+            return
         policy = self.runtime.policy
         if policy.mode != "compact":
             return
@@ -1021,9 +1569,20 @@ class SharedForwardState:
         self.original_context = context
         if os.environ.get("RTP_V41_SHARED_VALIDATE_STATE", "0") == "1" and context.seq_len_full < _MIN_TOKENS:
             self.exact_short_fallback_observed = CEDPlan.create(self.v4, context, self.attn, self.cache.native, bounded_replay=False) is None
-        self.plan, self.plan_reason = bounded_plan(self.v4, context, self.attn, self.cache.native, policy)
-        if (self.local_prefill_sg_align and self.plan is not None
-                and os.environ.get("RTP_V41_PPU_LOCAL_PREFILL_DENSE_PROJECTIONS", "0") == "1"):
+        # This call constructs metadata only. Preserve its original mask
+        # allocation/reference while retaining version counters for consumers.
+        with torch.inference_mode(False), torch.no_grad():
+            self.plan, self.plan_reason = bounded_plan(self.v4, context, self.attn, self.cache.native, policy)
+        if self.plan is not None:
+            compact = self.plan.context
+            proof = self._local_compact_rows_key(compact, before_l20=True)
+            if (proof is not None and compact.chunk_lengths_per_req
+                    == tuple(min(n, 140) for n in self.lengths)):
+                # The bounded planner creates exactly these real retained rows;
+                # any odd-length padding makes this equality fail.
+                self._remember_mega_all_live_mask(compact, compact.local_is_real, plan=self.plan)
+                self._remember_indexer_lookup_compact_plan(compact, proof)
+        if self.plan is not None and self._l20_query_projection_enabled():
             proof = self._local_compact_rows_key(self.plan.context, before_l20=True)
             self._l20_query_projection_proof = (
                 (self.plan, self.plan.context, proof[0], proof[1]) if proof is not None else None
@@ -1035,7 +1594,16 @@ class SharedForwardState:
         if not self.prefill:
             return hidden, ids, positions, cu
         if layer == 0 and hasattr(self, "window_current_tokens"):
-            real = self.context.local_is_real if self.context is not None else torch.ones_like(ids, dtype=torch.bool)
+            def plain_ids(value):
+                return (type(value) is torch.Tensor and value.layout == torch.strided
+                        and value.ndim == 1 and value.dtype in (torch.int32, torch.int64)
+                        and not value.is_neg() and not value.is_conj())
+
+            unmasked = self.context is None and plain_ids(ids)
+            real = None if unmasked else (
+                self.context.local_is_real if self.context is not None
+                else torch.ones_like(ids, dtype=torch.bool)
+            )
             comparison_ids = ids
             image_rows = getattr(self.v4, "_image_token_mask", None)
             if (
@@ -1043,9 +1611,20 @@ class SharedForwardState:
                 and getattr(self.runtime.model, "_image_plan", None) is not None
             ):
                 comparison_ids = self.runtime.model._engram_input_ids(ids, image_rows)
-            if not torch.equal(
-                self.window_current_tokens[real].long(), comparison_ids[real].long()
+            window = self.window_current_tokens
+            if unmasked and all(
+                plain_ids(value) and value.shape == ids.shape and value.device == ids.device
+                for value in (window, comparison_ids)
             ):
+                # The omitted mask was constructed here as all true. These
+                # temporary aliases reach only the original read-only check.
+                matches = torch.equal(window.long(), comparison_ids.long())
+            else:
+                if unmasked:
+                    real = torch.ones_like(ids, dtype=torch.bool)
+                # Preserve indexing, cast order and exceptions for other layouts.
+                matches = torch.equal(window[real].long(), comparison_ids[real].long())
+            if not matches:
                 raise ValueError("real CP Engram windows disagree with input tokens")
         if layer == 19:
             self.prepare_plan()
@@ -1088,29 +1667,36 @@ class SharedForwardState:
         self.v4._propagate_cp_ctx(self.context)
         self.compacted = True
         exchange = self.plan.exchange
+        host_geometry = self._compact_host_geometry()
         # The local source indices already encode every restored real row.
-        self.valid_output_rows = hidden.new_zeros(exchange.original_rows, dtype=torch.bool)
-        self.valid_output_rows.index_fill_(0, exchange.send_indices, True)
-        original = self.original_context
-        ends_host = [p + n - 1 for p, n in zip(self.query_prefixes, self.lengths)]
-        if original.cp_size == 8 and original.kv_cache_sharded:
-            from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_metadata import _upload
-
-            ends = _upload(ends_host, original.global_positions.device, torch.int64)
+        with torch.inference_mode(False) if host_geometry is not None else nullcontext():
+            self.valid_output_rows = hidden.new_zeros(exchange.original_rows, dtype=torch.bool)
+            self.valid_output_rows.index_fill_(0, exchange.send_indices, True)
+        if host_geometry is not None:
+            if not host_geometry[2]:
+                raise RuntimeError("YOCO removed a framework first-token output row")
+            self._compact_validation_output = self.valid_output_rows, _row_tensor_key(self.valid_output_rows)
         else:
-            ends = torch.tensor(ends_host, device=original.global_positions.device)
-        last = original.local_is_real & (original.global_positions == ends[original.req_id_per_token.long()])
-        if not bool(self.valid_output_rows[last].all()):
-            raise RuntimeError("YOCO removed a framework first-token output row")
+            original = self.original_context
+            ends_host = [p + n - 1 for p, n in zip(self.query_prefixes, self.lengths)]
+            if original.cp_size == 8 and original.kv_cache_sharded:
+                from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_metadata import _upload
+
+                ends = _upload(ends_host, original.global_positions.device, torch.int64)
+            else:
+                ends = torch.tensor(ends_host, device=original.global_positions.device)
+            last = original.local_is_real & (original.global_positions == ends[original.req_id_per_token.long()])
+            if not bool(self.valid_output_rows[last].all()):
+                raise RuntimeError("YOCO removed a framework first-token output row")
         logging.info("PPU shared YOCO compact %s", self.evidence())
-        if os.environ.get(LOCAL_PREFILL_COMPACT_ROWS_ENV, "0") == "1":
+        if optimization_env_value(LOCAL_PREFILL_COMPACT_ROWS_ENV, "0") == "1":
             proof = self._local_compact_rows_key(self.context)
             self._local_compact_row_proof = (
                 (self.context, self.plan, proof[0], proof[1]) if proof is not None else None
             )
             self._local_compact_full_rows = None
         if (self._cross_mhc_enabled and self._cross_mhc_compact_stamp is None
-                and os.environ.get(LOCAL_PREFILL_CROSS_LAYER_MHC_ENV, "0") == "1"
+                and optimization_env_value(LOCAL_PREFILL_CROSS_LAYER_MHC_ENV, "0") == "1"
                 and self._cross_mhc_full_valid()):
             # A compact epoch is born only here, never at a cache consumer.
             self._cross_mhc_compact_stamp = self._cross_mhc_compact_descriptor()
@@ -1137,6 +1723,7 @@ class SharedForwardState:
 
     def evidence(self):
         context = self.plan.context if self.plan is not None else self.exact_context or self.original_context
+        host_geometry = self._compact_host_evidence()
         return {
             "mode": self.runtime.policy.mode, "keep_tokens": self.runtime.policy.keep_tokens,
             "window": self.runtime.policy.window, "max_rollback_tokens": self.runtime.policy.max_rollback_tokens,
@@ -1146,12 +1733,16 @@ class SharedForwardState:
             "cp_padding_rows": int(context.padded_seq_len - context.unpad_restore.numel()) if context is not None else 0,
             "cp_size": int(context.cp_size) if context is not None else 1,
             "cp_rank": int(context.cp_rank) if context is not None else 0,
-            "local_positions": context.global_positions.tolist() if context is not None else self.rows()[0].tolist(),
+            "local_positions": list(host_geometry[0]) if host_geometry is not None else (
+                context.global_positions.tolist() if context is not None else self.rows()[0].tolist()
+            ),
             "executed_layers": list(self.executed_layers),
             "restored": self.head_restored or (self.exact_context is not None and self.public_returned),
             "output_requirements": {"need_all_logits": getattr(self.inputs, "need_all_logits", None), "need_all_hidden_states": getattr(self.inputs, "need_all_hidden_states", None)},
             "exact_short_fallback_observed": self.exact_short_fallback_observed,
             "exact_compacted": self.exact_context is not None,
             "encoder_append_starts": self.append_starts,
-            "local_valid_output_rows": int(self.valid_output_rows.sum()) if self.valid_output_rows is not None else None,
+            "local_valid_output_rows": host_geometry[1] if host_geometry is not None else (
+                int(self.valid_output_rows.sum()) if self.valid_output_rows is not None else None
+            ),
         }

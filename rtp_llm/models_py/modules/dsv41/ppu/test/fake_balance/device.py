@@ -99,6 +99,131 @@ def validate_counts(engine, counts, name, enabled, live_counts):
     }
 
 
+@torch.no_grad()
+def verify_prefill_route_pack(rank, directory):
+    """Real native-pattern/Triton oracle with actual DP preparation ownership.
+
+    No expert weights or model outputs are compared here. The existing cases
+    below retain their independent real communication/Graph coverage.
+    """
+    os.environ['RTP_V41_PPU_MOE_BACKEND'] = 'megamoe'
+    os.environ['RTP_V41_PPU_MOE_PRECISION'] = 'w4a4'
+    value = PPUMoE(ep_size=WORLD, ep_rank=rank, hidden_size=5120,
+                   inter_dim=2304, group=dist.group.WORLD)
+    value.configure_fake_balance(True, top_k=6, dp_rank=rank, dp_size=WORLD)
+    device = torch.device('cuda', rank)
+    cases, timings = [], []
+    receipt = None
+    try:
+        for capacity, row_counts in ((128, (1, 7, 127, 128)), (4096, (140, 4096, 3))):
+            receipt = value.prepare_dp_prefill_forward(device, capacity, supported=True)
+            if receipt is None:
+                raise AssertionError('real DP preparation was not admitted')
+            for rows in row_counts:
+                _, ids, weights = inputs(rows, rows)
+                ids[::2, 1] = -7
+                ids[0, 3] = torch.iinfo(torch.int64).min
+                ids[:, 6:] = 93
+                weights[:, :6] = float('nan')
+                snapshots = ids.clone(), weights.clone()
+                expected = value._apply_fake_balance(ids, weights)
+                actual = value._try_prefill_fake_balance(ids, weights, receipt)
+                if actual is None:
+                    raise AssertionError('eligible PPU route pack did not launch')
+                for new, old in zip(actual, expected):
+                    if not torch.equal(new.contiguous().view(torch.uint8), old.contiguous().view(torch.uint8)):
+                        raise AssertionError('native legacy and cached Triton route bytes differ')
+                    if torch._C._is_alias_of(new, ids) or torch._C._is_alias_of(new, weights):
+                        raise AssertionError('route pack exposed an input alias')
+                if not torch.equal(ids, snapshots[0]) or not torch.equal(
+                    weights.view(torch.uint8), snapshots[1].view(torch.uint8),
+                ):
+                    raise AssertionError('route pack mutated its source')
+                cases.append(dict(capacity=capacity, rows=rows, exact_route_bytes=True))
+            value.finish_dp_prefill_forward(receipt)
+            try:
+                value._try_prefill_fake_balance(ids, weights, receipt)
+            except ValueError as error:
+                if 'stale or insufficient' not in str(error):
+                    raise
+            else:
+                raise AssertionError('an expired forward receipt must be rejected')
+        if value._prefill_fake_pattern_builds != 2:
+            raise AssertionError('native pattern must build once per capacity generation')
+        receipt = value.prepare_dp_prefill_forward(device, 4096, supported=True)
+        pattern = value._prefill_fake_pattern
+        if pattern.ids.is_inference() or pattern.weights.is_inference():
+            raise AssertionError('cached pattern requires mutation-tracked tensors')
+        for live in (0, 17, 140):
+            _, ids, weights = inputs(140, live)
+            expected = value._apply_fake_balance(ids, weights)
+            actual = value._try_prefill_fake_balance(ids, weights, receipt)
+            if actual is None or any(not torch.equal(new.view(torch.uint8), old.view(torch.uint8))
+                                     for new, old in zip(actual, expected)):
+                raise AssertionError('new-epoch validity changes differ from the native oracle')
+        for rows in (140, 4096):
+            _, ids, weights = inputs(rows, rows)
+            legacy = lambda: value._apply_fake_balance(ids, weights)
+            fused = lambda: value._try_prefill_fake_balance(ids, weights, receipt)
+            for _ in range(5):
+                legacy()
+                if fused() is None:
+                    raise AssertionError('route pack declined after warmup')
+            torch.cuda.synchronize(device)
+            observations = dict(rows=rows, iterations=50, legacy_wall_us=[], fused_wall_us=[])
+            for repeat in range(3):
+                arms = (('legacy', legacy), ('fused', fused))
+                for label, operation in arms if repeat % 2 == 0 else reversed(arms):
+                    torch.cuda.synchronize(device)
+                    begin = time.perf_counter_ns()
+                    for _ in range(observations['iterations']):
+                        operation()
+                    torch.cuda.synchronize(device)
+                    elapsed = (time.perf_counter_ns() - begin) / observations['iterations'] / 1000
+                    observations[label + '_wall_us'].append(elapsed)
+            timings.append(observations)
+        # One warmed pair supplies per-chain launch evidence, separate from
+        # the clean wall loops and from the full-model benchmark boundary.
+        _, ids, weights = inputs(140, 140)
+        profile = torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
+                                                     torch.profiler.ProfilerActivity.CUDA])
+        with profile:
+            with torch.profiler.record_function('fake_routes.legacy'):
+                value._apply_fake_balance(ids, weights)
+            with torch.profiler.record_function('fake_routes.cached_mask_pad'):
+                value._try_prefill_fake_balance(ids, weights, receipt)
+            torch.cuda.synchronize(device)
+        trace = directory / f'route-chain-rank-{rank}.trace.json'
+        profile.export_chrome_trace(str(trace))
+        events = json.loads(trace.read_text())['traceEvents']
+        names = [event['name'] for event in events if event.get('cat') == 'kernel']
+        if sum('_mask_fake_routes_kernel' in name for name in names) != 1:
+            raise AssertionError('exactly one cached mask/pad kernel must execute')
+        if sum('fakeBalanceExpertKernel' in name for name in names) != 1:
+            raise AssertionError('legacy oracle must execute the real native fake kernel')
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(side):
+            if value._try_prefill_fake_balance(ids, weights, receipt) is not None:
+                raise AssertionError('a nondefault stream must retain the legacy path')
+        torch.cuda.current_stream(device).wait_stream(side)
+        pattern.ids.add_(1).sub_(1)
+        if value._try_prefill_fake_balance(ids, weights, receipt) is not None:
+            raise AssertionError('a mutated pattern must not be reused or reminted')
+        if value._prefill_fake_pattern_builds != 2:
+            raise AssertionError('same-capacity forwards must reuse the same native pattern')
+        return dict(cases=cases, pattern_builds=value._prefill_fake_pattern_builds,
+                    pack_calls=value._prefill_fake_pattern_calls, timings=timings,
+                    trace=str(trace), kernel_names=names,
+                    scope='discrete route bytes and host/device route-chain time; not model numerics or TPS')
+    finally:
+        value.finish_dp_prefill_forward(receipt)
+        value.close()
+        if value._prefill_fake_pattern is not None:
+            raise AssertionError('close retained the route pattern')
+        dist.barrier()
+
+
 def worker(args):
     rank = int(os.environ["RANK"])
     torch.cuda.set_device(rank)
@@ -111,7 +236,8 @@ def worker(args):
     )
     results = []
     try:
-        for backend in ("grouped", "megamoe"):
+        prefill_route_pack = verify_prefill_route_pack(rank, args.output)
+        for backend in (() if args.route_pack_only else ("grouped", "megamoe")):
             for enabled in (False, True):
                 engine = make_engine(rank, backend, enabled)
                 grouped_counts = torch.zeros(LOCAL, dtype=torch.int64, device="cuda")
@@ -199,6 +325,8 @@ def worker(args):
                 "rank": rank,
                 "status": "PASS",
                 "cases": results,
+                "prefill_route_pack": prefill_route_pack,
+                "scope": "route_pack_only" if args.route_pack_only else "full_fake_balance_device",
                 "torch": torch.__version__,
                 "device": torch.cuda.get_device_name(rank),
             },
@@ -214,6 +342,9 @@ def main():
     parser.add_argument("--worker", action="store_true")
     parser.add_argument("--rendezvous")
     args = parser.parse_args()
+    # Separate discrete route validation from the broader legacy DeepEP and
+    # Graph suite. The default continues to run every existing backend case.
+    args.route_pack_only = os.environ.get("RTP_V41_TEST_FAKE_ROUTE_PACK_ONLY", "0") == "1"
     if args.worker:
         worker(args)
         return
@@ -270,7 +401,12 @@ def main():
                 "ranks": WORLD,
                 "cases": ranks[0]["cases"],
                 "elapsed_seconds": time.time() - started,
-                "workload": "real native EP8 MoE; synthetic small weights, 384 experts/top-6; not full-model performance",
+                "workload": (
+                    "native fake-route/Triton bitwise parity, lifecycle and route-chain time; not MoE output accuracy"
+                    if args.route_pack_only else
+                    "real native EP8 MoE; synthetic small weights, 384 experts/top-6; not full-model performance"
+                ),
+                "scope": "route_pack_only" if args.route_pack_only else "full_fake_balance_device",
             },
         )
         print(

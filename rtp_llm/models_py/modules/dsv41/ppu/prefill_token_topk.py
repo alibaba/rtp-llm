@@ -14,6 +14,7 @@ import torch
 
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_prefill_topk as _topk
 from rtp_llm.models_py.modules.dsv41.ppu import _quant
+from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import env_value as optimization_env_value
 
 
 ENV = "RTP_V41_PPU_LOCAL_PREFILL_TOKEN_TOPK"
@@ -34,7 +35,7 @@ def _device_supported(logits):
 def is_supported(logits, visible, *, bounds=None, out=None, disposable=False):
     """Metadata-only admission. Unsupported calls do not launch or mutate."""
     if not (
-        os.environ.get(ENV, "0") == "1"
+        optimization_env_value(ENV, "0") == "1"
         and disposable is True
         and not torch.is_grad_enabled()
         and isinstance(logits, torch.Tensor)

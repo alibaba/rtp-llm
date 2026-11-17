@@ -17,7 +17,7 @@ indexer projection needed to preserve BF16 head-weight rounding.
 from __future__ import annotations
 
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import Any, Optional, Tuple
@@ -749,6 +749,7 @@ class CEDPlan:
         prepare_hidden_fn=None,
         bounded_replay=False,
         bounded_replay_keep_tokens=128,
+        versioned_metadata=False,
     ):
         # Host metadata and the request gate are broadcast by the engine to all
         # TP ranks. No extra device->host voting in the prefill critical path.
@@ -829,50 +830,56 @@ class CEDPlan:
         ring_entries = (
             pool_entry_count(kv_cache, regions[group_id]) or full_stride // 528
         )
-        if bounded_replay:
-            # Only live decode state is produced. Native cache policy must
-            # exclude these decoder/draft SWA pools from prefix reuse.
-            if type(bounded_replay_keep_tokens) is not int or bounded_replay_keep_tokens < 128:
-                raise ValueError("bounded replay must retain at least the complete 128-row window")
-            starts = tuple(max(n - bounded_replay_keep_tokens, 0) for n in lengths)
-            selected = _bounded_replay_selected(lengths, starts)
-        else:
-            selected = checkpoint_positions(
-                cp_ctx.prefix_length,
-                cp_ctx.seq_len_full,
-                host[0].tolist(),
-                spans[group_id],
-                ring_entries,
-            )
-        # Exact CED avoids transport for dense checkpoints. Approximate replay
-        # uses the same 128-row domain even immediately above that boundary.
-        if selected.numel() == cp_ctx.seq_len_full or (
-            not bounded_replay and selected.numel() * 2 >= cp_ctx.seq_len_full
-        ):
-            return None
-        group = collective_torch._get_group(Group.TP)
-        context, exchange, indexer_groups = _query_layout(
-            cp_ctx, selected, group, keep_candidate_rows=bounded_replay
-        )
-        if bounded_replay:
-            if len(lengths) == 1:
-                context.swa_replay_start = starts[0]
+        # The caller may need mutation-detectable metadata even though this
+        # public entry is inference-decorated. Change only the original
+        # allocation scope: selected rows, upload slab/views and cu retain
+        # their allocation count, aliasing and transport arithmetic.
+        metadata_mode = torch.inference_mode(False) if versioned_metadata else nullcontext()
+        with metadata_mode, torch.no_grad():
+            if bounded_replay:
+                # Only live decode state is produced. Native cache policy must
+                # exclude these decoder/draft SWA pools from prefix reuse.
+                if type(bounded_replay_keep_tokens) is not int or bounded_replay_keep_tokens < 128:
+                    raise ValueError("bounded replay must retain at least the complete 128-row window")
+                starts = tuple(max(n - bounded_replay_keep_tokens, 0) for n in lengths)
+                selected = _bounded_replay_selected(lengths, starts)
             else:
-                context.swa_replay_starts_host = starts
-        cumulative = [0]
-        for chunk in context.chunk_lengths_per_req:
-            cumulative.append(cumulative[-1] + chunk)
-        return cls(
-            cp_ctx,
-            context,
-            torch.tensor(
-                cumulative,
-                dtype=torch.int32,
-            ).to(cp_ctx.global_positions.device, non_blocking=True),
-            exchange,
-            indexer_groups,
-            tuple(v4.capture_aux_hidden_layer_ids),
-        )
+                selected = checkpoint_positions(
+                    cp_ctx.prefix_length,
+                    cp_ctx.seq_len_full,
+                    host[0].tolist(),
+                    spans[group_id],
+                    ring_entries,
+                )
+            # Exact CED avoids transport for dense checkpoints. Approximate replay
+            # uses the same 128-row domain even immediately above that boundary.
+            if selected.numel() == cp_ctx.seq_len_full or (
+                not bounded_replay and selected.numel() * 2 >= cp_ctx.seq_len_full
+            ):
+                return None
+            group = collective_torch._get_group(Group.TP)
+            context, exchange, indexer_groups = _query_layout(
+                cp_ctx, selected, group, keep_candidate_rows=bounded_replay
+            )
+            if bounded_replay:
+                if len(lengths) == 1:
+                    context.swa_replay_start = starts[0]
+                else:
+                    context.swa_replay_starts_host = starts
+            cumulative = [0]
+            for chunk in context.chunk_lengths_per_req:
+                cumulative.append(cumulative[-1] + chunk)
+            return cls(
+                cp_ctx,
+                context,
+                torch.tensor(
+                    cumulative,
+                    dtype=torch.int32,
+                ).to(cp_ctx.global_positions.device, non_blocking=True),
+                exchange,
+                indexer_groups,
+                tuple(v4.capture_aux_hidden_layer_ids),
+            )
 
     @contextmanager
     def candidate_publication(self, shared):

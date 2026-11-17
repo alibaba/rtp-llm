@@ -23,6 +23,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.packed_attention import compact_prefix
 from rtp_llm.models_py.modules.dsv41.ppu.rmsnorm import rms_norm
 from rtp_llm.models_py.modules.dsv41.ppu.rope import rotate
 from rtp_llm.models_py.modules.dsv41.ppu.weight import V41Geometry
+from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import env_value as optimization_env_value
 
 
 def _rms_norm(x: torch.Tensor, weight: Optional[torch.Tensor], eps: float):
@@ -313,7 +314,18 @@ class _CPPrefillWorkspace:
         self.kv8 = None
         plans = getattr(cache, "prefill_plans", None)
         if plans is None:
-            meta = torch.tensor(layout, dtype=torch.int64, device=positions.device).reshape(-1, 4)
+            if (local and type(cache) is SharedNativeCache and not torch.is_grad_enabled()
+                    and not torch.cuda.is_current_stream_capturing()
+                    and not any(getattr(meta, "is_cuda_graph", False)
+                                or getattr(meta, "is_target_verify", False)
+                                for meta in cache.inputs.values())):
+                from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_metadata import _upload
+
+                # Same request layout on the same stream. The pinned allocator
+                # retains the host storage until its asynchronous copy finishes.
+                meta = _upload(layout, positions.device, torch.int64).reshape(-1, 4)
+            else:
+                meta = torch.tensor(layout, dtype=torch.int64, device=positions.device).reshape(-1, 4)
         else:
             from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_metadata import _upload
 
@@ -643,11 +655,25 @@ def _tiled_producer_inputs(
                     torch.mm(rows, weight.T, out=out)
             else:
                 projected = torch.cat([F.linear(rows, weight) for rows in latent.split(counts)])
-            projected = _rms_norm(projected, layer.index_k_norm, eps)
-            packed_index = (
-                pack_rotary(projected, freqs, entry_positions, global_pool=False)
-                if pack_rotary is not None else None
+            from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
+                NORM_STORE, enabled as fusion_enabled,
             )
+
+            packed_index = None
+            if fusion_enabled(NORM_STORE):
+                from rtp_llm.models_py.modules.dsv41.ppu.norm_store import try_norm_rope_pack_indexer
+
+                if rotation is None:
+                    rotation = freqs[entry_positions.clamp_max(freqs.shape[0] - 1)]
+                packed_index = try_norm_rope_pack_indexer(
+                    projected, layer.index_k_norm, eps, rotation,
+                )
+            if packed_index is None:
+                projected = _rms_norm(projected, layer.index_k_norm, eps)
+                packed_index = (
+                    pack_rotary(projected, freqs, entry_positions, global_pool=False)
+                    if pack_rotary is not None else None
+                )
             if packed_index is None:
                 if rotation is None:
                     rotation = freqs[entry_positions.clamp_max(freqs.shape[0] - 1)]
@@ -691,7 +717,7 @@ def _produce_global(
     tag = "global_kv_2" if ratio == 2 else "global_kv_1"
     pack_rotary = (
         getattr(ops, "try_encode_rotary_kv", None)
-        if os.environ.get(LOCAL_PREFILL_ROTARY_PACK_ENV, "0") == "1"
+        if optimization_env_value(LOCAL_PREFILL_ROTARY_PACK_ENV, "0") == "1"
         and ratio in (1, 2) and _valid_local_producer_rotary_proof(
             local_rotary_proof, cache=cache, layer_id=layer_id, prefill_layout=prefill_layout,
             positions=positions, request_ids=request_ids,
@@ -802,11 +828,24 @@ def _produce_global(
                 layer.index_wk(latent) if isinstance(layer.index_wk, PPUPTPCLinear)
                 else F.linear(latent, layer.index_wk.weight)
             )
-            projected = _rms_norm(projected, layer.index_k_norm, geometry.norm_eps)
-            packed_index = (
-                pack_rotary(projected, freqs, entry_positions, global_pool=False)
-                if pack_rotary is not None else None
+            from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
+                NORM_STORE, enabled as fusion_enabled,
             )
+
+            packed_index = None
+            if fusion_enabled(NORM_STORE):
+                from rtp_llm.models_py.modules.dsv41.ppu.norm_store import try_norm_rope_pack_indexer
+
+                safe_positions = entry_positions.clamp_max(freqs.shape[0] - 1)
+                packed_index = try_norm_rope_pack_indexer(
+                    projected, layer.index_k_norm, geometry.norm_eps, freqs[safe_positions],
+                )
+            if packed_index is None:
+                projected = _rms_norm(projected, layer.index_k_norm, geometry.norm_eps)
+                packed_index = (
+                    pack_rotary(projected, freqs, entry_positions, global_pool=False)
+                    if pack_rotary is not None else None
+                )
             if packed_index is None:
                 if safe_positions is None:
                     safe_positions = entry_positions.clamp_max(freqs.shape[0] - 1)

@@ -1,7 +1,7 @@
 """Operator switches shared by qualified PPU execution paths.
 
-A canonical switch overrides its phase-specific aliases. Without it, each
-caller retains its historical default and each alias retains its parser.
+A canonical switch overrides its phase-specific aliases. Qualified fusion
+and local-Prefill switches default on; other callers keep their defaults.
 These switches select implementations; callers still enforce eligibility.
 """
 
@@ -15,6 +15,21 @@ SPLIT_L20 = "RTP_V41_PPU_SPLIT_L20"
 LAZY_PRODUCER_SLOTS = "RTP_V41_PPU_LAZY_PRODUCER_SLOTS"
 MHC_POST = "RTP_V41_PPU_MHC_POST"
 MHC_REDUCE_BLOCK_M = "RTP_V41_PPU_MHC_REDUCE_BLOCK_M"
+
+# These fusion paths keep their existing per-call qualification.
+MEGA_ATTENTION = "RTP_V41_PPU_MEGA_ATTENTION"
+NORM_STORE = "RTP_V41_PPU_NORM_STORE"
+MEGA_GATE = "RTP_V41_PPU_MEGA_GATE"
+MEGA_GATE_FINITE_DOMAIN = "RTP_V41_PPU_MEGA_GATE_FINITE_DOMAIN"
+CROSS_LAYER_MHC = "RTP_V41_PPU_CROSS_LAYER_MHC"
+VERIFY_MEGA_MHC = "RTP_V41_PPU_VERIFY_MEGA_MHC"
+MHC_REDUCE_SINKHORN = "RTP_V41_PPU_MHC_REDUCE_SINKHORN"
+DENSE_PROJECTIONS = "RTP_V41_PPU_DENSE_PROJECTIONS"
+SPARSE_TOPK = "RTP_V41_PPU_SPARSE_TOPK"
+_FUSION_SWITCHES = frozenset((
+    MEGA_ATTENTION, NORM_STORE, MEGA_GATE, MEGA_GATE_FINITE_DOMAIN, CROSS_LAYER_MHC,
+    VERIFY_MEGA_MHC, MHC_REDUCE_SINKHORN, DENSE_PROJECTIONS, SPARSE_TOPK,
+))
 
 ALIASES = {
     "RTP_V41_PPU_CP8_GROUPED_QO_ROPE": GROUPED_QO_ROPE,
@@ -38,7 +53,51 @@ VALUE_ALIASES = {
     "RTP_V41_PPU_VERIFY_MHC_REDUCE_BLOCK_M": MHC_REDUCE_BLOCK_M,
     "RTP_V41_PPU_PROPOSAL_MHC_REDUCE_BLOCK_M": MHC_REDUCE_BLOCK_M,
 }
-_CANONICAL = frozenset(ALIASES.values())
+# Defaults mirror the qualified PPU fusion and cached-Prefill configuration.
+# Eligibility, dependency receipts and explicit opt-outs remain caller-owned.
+DEFAULT_ENABLED = frozenset((
+    "RTP_V41_PPU_AIU_PRENORM",
+    "RTP_V41_PPU_CP8_DENSE_INDEX_BOUNDS",
+    "RTP_V41_PPU_CP8_YOCO_FAST_PREFILL",
+    "RTP_V41_PPU_CROSS_LAYER_MHC",
+    "RTP_V41_PPU_DENSE_PROJECTIONS",
+    "RTP_V41_PPU_DIRECT_MOE_ROUTES",
+    "RTP_V41_PPU_DP_PREFILL_FORWARD_MEGA_CAPACITY",
+    "RTP_V41_PPU_FUSED_BF16_ROPE",
+    "RTP_V41_PPU_FUSED_KV_ROW_PACK",
+    "RTP_V41_PPU_GROUPED_QO_ROPE",
+    "RTP_V41_PPU_LOCAL_PREFILL_AIU_PRENORM",
+    "RTP_V41_PPU_LOCAL_PREFILL_ATTENTION_PROVIDER",
+    "RTP_V41_PPU_LOCAL_PREFILL_COMPACT_ROWS",
+    "RTP_V41_PPU_LOCAL_PREFILL_CROSS_LAYER_MHC",
+    "RTP_V41_PPU_LOCAL_PREFILL_DIRECT_MOE_ROUTES",
+    "RTP_V41_PPU_LOCAL_PREFILL_ENGRAM_GATE",
+    "RTP_V41_PPU_LOCAL_PREFILL_ENGRAM_ROUNDS",
+    "RTP_V41_PPU_LOCAL_PREFILL_FULL_ROWS",
+    "RTP_V41_PPU_LOCAL_PREFILL_GROUPED_QO_ROPE",
+    "RTP_V41_PPU_LOCAL_PREFILL_HOST_METADATA",
+    "RTP_V41_PPU_LOCAL_PREFILL_LAZY_PRODUCER_SLOTS",
+    "RTP_V41_PPU_LOCAL_PREFILL_ROTARY_PACK",
+    "RTP_V41_PPU_LOCAL_PREFILL_ROWS",
+    "RTP_V41_PPU_LOCAL_PREFILL_SOURCE_CACHE",
+    "RTP_V41_PPU_LOCAL_PREFILL_SPLIT_L20",
+    "RTP_V41_PPU_LOCAL_PREFILL_SWA_SEGMENTS",
+    "RTP_V41_PPU_LOCAL_PREFILL_TOKEN_TOPK",
+    "RTP_V41_PPU_LOCAL_PREFILL_WORKSPACE",
+    "RTP_V41_PPU_MEGA_ATTENTION",
+    "RTP_V41_PPU_MEGA_GATE",
+    "RTP_V41_PPU_MEGA_GATE_FINITE_DOMAIN",
+    "RTP_V41_PPU_MHC_REDUCE_SINKHORN",
+    "RTP_V41_PPU_NORM_STORE",
+    "RTP_V41_PPU_PTPC_FUSION",
+    "RTP_V41_PPU_PTPC_WOA_DIRECT",
+    "RTP_V41_PPU_SPARSE_TOPK",
+    "RTP_V41_PPU_SPLIT_L20",
+    "RTP_V41_PPU_SWA_BOUNDED_REPLAY",
+    "RTP_V41_PPU_VERIFY_MEGA_MHC",
+))
+
+_CANONICAL = frozenset(ALIASES.values()) | _FUSION_SWITCHES | DEFAULT_ENABLED
 _STRICT_ALIASES = frozenset(
     (
         "RTP_V41_PPU_CP8_GROUPED_QO_ROPE",
@@ -48,8 +107,17 @@ _STRICT_ALIASES = frozenset(
 )
 
 
+def env_value(name, default="0", *, env=None):
+    """Read a qualified default without mutating the process environment."""
+    env = os.environ if env is None else env
+    canonical = ALIASES.get(name, name)
+    if canonical in env:
+        return env[canonical]
+    return env.get(name, "1" if name in DEFAULT_ENABLED else default)
+
+
 def enabled(name, *, default=False, env=None):
-    """Resolve one operator, preserving unset and legacy-only behavior.
+    """Resolve one operator, retaining explicit and phase-local opt-outs.
 
     Canonical values are explicitly 0/1. They take precedence even when an
     alias is set to the opposite value. Aliases stay phase-local: setting a
@@ -64,7 +132,7 @@ def enabled(name, *, default=False, env=None):
         if value not in ("0", "1"):
             raise ValueError(f"{canonical} must be explicitly 0 or 1")
         return value == "1"
-    value = env.get(name, "1" if default else "0")
+    value = env_value(name, "1" if default else "0", env=env)
     if name in (
         "RTP_V41_PPU_GRAPH_BATCHED_WO_A",
         "RTP_V41_PPU_PROPOSAL_BATCHED_WO_A",
