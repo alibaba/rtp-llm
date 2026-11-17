@@ -33,10 +33,36 @@ _group_map: Dict[Union[Group, str], torch.distributed.ProcessGroup] = {}
 _parallelism_config: Optional[ParallelismConfig] = None
 _initialized: bool = False  # Track if we've initialized (to prevent double init)
 _cpu_tp_broadcaster_base_path: Optional[str] = None
+_mtp_indexer_cpu_world_group: Optional[torch.distributed.ProcessGroup] = None
 _rocm_rccl = None
 _symm_mem = None
 _all_reduce_module = None
 _canonical_p2p = None
+
+
+def _get_or_create_mtp_indexer_cpu_world_group():
+    """Synchronize graph choice without draining the model's CUDA stream."""
+    global _mtp_indexer_cpu_world_group
+    if _mtp_indexer_cpu_world_group is not None:
+        return _mtp_indexer_cpu_world_group
+    if os.environ.get("RTP_LLM_ENABLE_MTP_INDEXER_SHARE") != "1":
+        raise RuntimeError("MTP indexer CPU control group requires explicit opt-in")
+    if (
+        _parallelism_config is None
+        or _parallelism_config.world_size <= 1
+        or _parallelism_config.ep_size != _parallelism_config.world_size
+        or _parallelism_config.pp_size != 1
+    ):
+        raise RuntimeError("MTP indexer graph choice requires EP == WORLD and PP == 1")
+    if not torch.distributed.is_gloo_available():
+        raise RuntimeError("MTP indexer graph choice requires the Gloo backend")
+    _mtp_indexer_cpu_world_group = torch.distributed.new_group(
+        ranks=list(range(_parallelism_config.world_size)),
+        backend="gloo",
+        timeout=timedelta(minutes=5),
+    )
+    logging.info("Initialized MTP indexer CPU world control group")
+    return _mtp_indexer_cpu_world_group
 
 
 def _get_rocm_rccl():
@@ -602,6 +628,20 @@ def _register_process_groups_to_cpp():
         Returns:
             The reduced tensor (dest if provided, otherwise tensor).
         """
+        if (
+            tensor.is_cpu
+            and mode == _CPP_PARALLEL_MODE_WORLD
+            and os.environ.get("RTP_LLM_ENABLE_MTP_INDEXER_SHARE") == "1"
+        ):
+            target = dest if dest is not None else tensor
+            if dest is not None:
+                target.copy_(tensor)
+            torch.distributed.all_reduce(
+                target,
+                op=_REDUCE_OPS.get(op, torch.distributed.ReduceOp.SUM),
+                group=_get_or_create_mtp_indexer_cpu_world_group(),
+            )
+            return target
         pg = mode_to_group.get(mode)
         if pg is None or pg.size() < 2:
             if dest is None:
@@ -817,6 +857,7 @@ def destroy_distributed_environment():
     """
     global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path
     global _canonical_p2p
+    global _mtp_indexer_cpu_world_group
 
     rank = torch.distributed.get_rank()
     logging.info(f"[rank: {rank}] Destroying distributed environment")
@@ -861,6 +902,7 @@ def destroy_distributed_environment():
     logging.info(f"[rank: {rank}] Distributed environment destroyed")
     _parallelism_config = None
     _cpu_tp_broadcaster_base_path = None
+    _mtp_indexer_cpu_world_group = None
     _initialized = False
     gc.collect()
 

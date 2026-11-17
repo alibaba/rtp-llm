@@ -53,14 +53,14 @@ from rtp_llm.models_py.modules.indexer_grouping import (
 from rtp_llm.models_py.triton_kernels.common.strided_slice_copy import (
     strided_slice_copy_,
 )
-from rtp_llm.models_py.triton_kernels.sparse_mla.glm53_block_index_to_global import (
-    triton_convert_req_index_to_global_index,
-)
 from rtp_llm.models_py.triton_kernels.sparse_mla.cache_view import (
     flat_sparse_cache_view,
 )
 from rtp_llm.models_py.triton_kernels.sparse_mla.fused_qk_rope_cat_cache_mla import (
     fused_qk_rope_cat_cache_mla,
+)
+from rtp_llm.models_py.triton_kernels.sparse_mla.glm53_block_index_to_global import (
+    triton_convert_req_index_to_global_index,
 )
 from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
 from rtp_llm.ops import (
@@ -314,15 +314,14 @@ class SparseMlaOp(object):
                 f"got shape={tuple(topk_indices.shape)}"
             )
         topk_2d = _topk_2d(topk_indices)
+        if self.indexer_group_size > 1 and int(topk_2d.shape[1]) == self.top_k:
+            # MTP reuse already contains the frozen, expanded raw-token seed.
+            return topk_2d
         if self.indexer_group_size > 1:
             # The compressed indexer emits [T, 0] before the first complete
             # group (and during pool warmup). Preserve the raw live tail while
             # padding the empty history to the configured selection width.
             topk_2d = pad_empty_indexer_history(topk_2d, self.indexer_top_k)
-        if self.indexer_group_size > 1 and int(topk_2d.shape[1]) == self.top_k:
-            # GLM53 MTP reuse supplies the first step's frozen raw-token seed.
-            # Re-expanding or appending the current tail changes its selection.
-            return topk_2d
         if int(topk_2d.shape[1]) != self.indexer_top_k:
             raise ValueError(
                 f"indexer topk {topk_2d.shape[1]} does not match configured "

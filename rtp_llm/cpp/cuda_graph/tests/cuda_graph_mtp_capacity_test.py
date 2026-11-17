@@ -24,6 +24,7 @@ class PackedDraftCapacityModel:
     def forward(self, inputs, fmha_impl=None):
         rows = inputs.input_ids.numel()
         metadata = get_primary_attention_inputs(inputs)
+        assert metadata.is_draft_extend
         batch = metadata.input_lengths_device.numel()
         self.shapes.add((rows, batch))
         hidden = inputs.input_hiddens.reshape(rows, self.hc_mult, 4).sum(1)
@@ -52,6 +53,86 @@ class DraftCapacityModel(PackedDraftCapacityModel):
 
 
 class MtpGraphCapacityTest(unittest.TestCase):
+    def test_seed_rows_keep_packed_coordinates_after_batch_shrink_and_grow(self):
+        class SeedRowsModel(DraftCapacityModel):
+            def forward(self, inputs, fmha_impl=None):
+                outputs = super().forward(inputs, fmha_impl)
+                metadata = get_primary_attention_inputs(inputs)
+                rows = outputs.hidden_states.shape[0]
+                _, _, _, positions, _ = draft_graph_rows(metadata, rows)
+                selected_positions = positions.index_select(
+                    0, metadata.mtp_indexer_seed_rows.long()
+                )
+                request = (
+                    (
+                        torch.arange(rows, device="cuda")[:, None]
+                        >= metadata.cu_seqlens_device[1:][None, :]
+                    )
+                    .sum(1)
+                    .clamp(max=selected_positions.numel() - 1)
+                )
+                per_token_seed = selected_positions.index_select(0, request)
+                return PyModelOutputs(
+                    outputs.hidden_states
+                    + per_token_seed.to(outputs.hidden_states.dtype)[:, None]
+                )
+
+        torch.cuda.set_device(0)
+        lanes = 3
+        runner = CudaGraphRunner()
+        runner.init_mtp_draft_prefill(SeedRowsModel(lanes, 1), 4, 4, lanes, 1)
+        for lengths in ([3, 1, 2], [1], [1, 3], [2, 2, 1], [3]):
+            with self.subTest(lengths=lengths):
+                inputs = fixtures._build_prefill_inputs(["full"], {"full": 1}, lengths)
+                inputs.attention_inputs = get_primary_attention_inputs(inputs)
+                rows = sum(lengths)
+                inputs.input_hiddens = torch.ones(
+                    (rows, 4), dtype=torch.bfloat16, device="cuda"
+                )
+                metadata = get_primary_attention_inputs(inputs)
+                length_tensor = torch.tensor(lengths, dtype=torch.int32, device="cuda")
+                metadata.mtp_indexer_seed_rows = (
+                    length_tensor.cumsum(0).to(torch.int32) - 1
+                )
+                prefixes = [7 + 11 * index for index in range(len(lengths))]
+                metadata.prefix_lengths.copy_(torch.tensor(prefixes, dtype=torch.int32))
+                metadata.context_total_kv_length = rows + sum(prefixes)
+                kv_boundaries = [0]
+                for length, prefix in zip(lengths, prefixes):
+                    kv_boundaries.append(kv_boundaries[-1] + prefix + length)
+                metadata.cu_kv_seqlens_device.copy_(
+                    torch.tensor(kv_boundaries, dtype=torch.int32, device="cuda")
+                )
+                # Accepted rows must index packed positions, even with fixed
+                # capacity and padding between the graph's logical requests.
+                positions = torch.cat(
+                    [
+                        torch.arange(
+                            prefix, prefix + length, dtype=torch.int32, device="cuda"
+                        )
+                        for length, prefix in zip(lengths, prefixes)
+                    ]
+                )
+                inputs.combo_position_ids = positions
+                accepted_positions = torch.tensor(
+                    [prefix + length - 1 for length, prefix in zip(lengths, prefixes)],
+                    dtype=torch.int32,
+                    device="cuda",
+                )
+                per_token_seed = accepted_positions.repeat_interleave(
+                    length_tensor.long()
+                )
+                expected = (
+                    inputs.input_hiddens
+                    + (inputs.input_ids + positions + per_token_seed).to(
+                        torch.bfloat16
+                    )[:, None]
+                )
+                self.assertTrue(runner.canRun(inputs))
+                actual = runner.forward(inputs).hidden_states.clone()
+                torch.cuda.synchronize()
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     def test_request_capacity_shrink_and_grow_with_variable_acceptance(self):
         # HC width and speculative request lanes are independent dimensions.
         for lanes, hc_mult in ((1, 4), (2, 4), (3, 1), (4, 4)):

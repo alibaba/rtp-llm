@@ -251,8 +251,8 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
 
 torch::Tensor makeModelInputShapeHintsTensor(const GptModelInputs& inputs) {
     const auto shape_hints = getModelInputShapeHints(inputs);
-    auto tensor =
-        torch::empty({static_cast<int64_t>(shape_hints.size())}, torch::TensorOptions(torch::kInt64).pinned_memory(true));
+    auto       tensor      = torch::empty({static_cast<int64_t>(shape_hints.size())},
+                               torch::TensorOptions(torch::kInt64).pinned_memory(true));
     std::copy(shape_hints.begin(), shape_hints.end(), tensor.data_ptr<int64_t>());
     return tensor;
 }
@@ -329,8 +329,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     // skips the init and falls back to NCCL automatically inside execBroadcastCpu.
 
     // first sync stage: shape hints
-    auto shape_hints_t   = makeModelInputShapeHintsTensor(inputs);
-    auto shape_hints_ptr = shape_hints_t.data_ptr<int64_t>();
+    auto shape_hints_t                                     = makeModelInputShapeHintsTensor(inputs);
+    auto shape_hints_ptr                                   = shape_hints_t.data_ptr<int64_t>();
     shape_hints_ptr[GptModelInputIndex::recordExecutionId] = inputs.record_execution_id;
 
     // CPU broadcast: routed through CpuTpBroadcaster (UDS) when intra-node;
@@ -395,8 +395,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     const auto engram_width    = checkedHint(GptModelInputIndex::engramTokenWindowWidth, "engramTokenWindowWidth");
     const auto mm_features_num = checkedHint(GptModelInputIndex::mmFeaturesNum, "mmFeaturesNum");
     if (mm_features_num) {
-        mm_features_shape_t =
-            torch::empty({mm_features_num}, torch::TensorOptions(torch::kInt64).pinned_memory(true));
+        mm_features_shape_t = torch::empty({mm_features_num}, torch::TensorOptions(torch::kInt64).pinned_memory(true));
         mm_features_shape_ptr = mm_features_shape_t.data_ptr<int64_t>();
         for (int64_t i = 0; i < mm_features_num; ++i) {
             mm_features_shape_ptr[i] =

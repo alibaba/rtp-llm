@@ -396,7 +396,6 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     }
     py_attn_inputs.prefix_lengths_device = to_device_i32(py_attn_inputs.prefix_lengths);
     py_attn_inputs.input_lengths_device  = to_device_i32(py_attn_inputs.input_lengths);
-    py_attn_inputs.mtp_indexer_seed_rows = to_device_i32(inputs.lm_output_indexes);
 
     if (inputs.combo_position_ids.defined()) {
         py_attn_inputs.combo_position_ids = tensorHoldHostAndToCuda(inputs.combo_position_ids);
@@ -410,6 +409,9 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.is_prefill       = !decode_batch_size;
     py_attn_inputs.is_target_verify = inputs.is_target_verify;
     py_attn_inputs.is_draft_extend  = inputs.is_draft_extend;
+    if (mtp_indexer_role_ != MtpIndexerRole::NORMAL) {
+        py_attn_inputs.mtp_indexer_seed_rows = to_device_i32(inputs.lm_output_indexes);
+    }
     RTP_LLM_CHECK_WITH_INFO(
         context_batch_size + decode_batch_size == batch_size,
         "batch size check failed context_batch_size[%ld] decode_batch_size[%ld] total_batch_size[%ld]",
@@ -437,21 +439,14 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 
     if (context_batch_size > 0 && py_attn_inputs.input_lengths.is_cuda()) {
         py_attn_inputs.total_tokens = inputs.combo_tokens.defined() ? static_cast<int>(inputs.combo_tokens.numel()) : 0;
-        // Must match cu_kv_seqlens_device's definition (input_lengths +
-        // prefix_lengths): the CUDA graph padding fill copies this scalar into
-        // the cu_kv_seqlens tail, and a prefix-less value makes the array
-        // non-monotonic whenever prefix reuse / target verify is active.
-        // prefix_lengths here is a source tensor (never a deferred H2D copy),
-        // so summing it is safe; item() adds one stream sync on this path.
-        int64_t prefix_sum = 0;
-        if (py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.numel() > 0) {
-            prefix_sum = py_attn_inputs.prefix_lengths.sum().item<int64_t>();
-        }
-        py_attn_inputs.context_total_kv_length = py_attn_inputs.total_tokens + static_cast<int>(prefix_sum);
-        py_attn_inputs.cu_seqlens              = torch::empty({0}, host_i32);
-        py_attn_inputs.cu_seqlens_device       = torch::empty({batch_size + 1}, cuda_i32);
-        py_attn_inputs.cu_kv_seqlens_device    = torch::empty({batch_size + 1}, cuda_i32);
-        py_attn_inputs.padding_offset          = torch::empty({py_attn_inputs.total_tokens}, cuda_i32);
+        py_attn_inputs.cu_seqlens   = torch::empty({0}, host_i32);
+        py_attn_inputs.cu_seqlens_device    = torch::empty({batch_size + 1}, cuda_i32);
+        py_attn_inputs.cu_kv_seqlens_device = torch::empty({batch_size + 1}, cuda_i32);
+        // Preserve the exact prefix-inclusive extent without synchronizing
+        // target verify / draft extend with the preceding GPU forward. CUDA
+        // graph tails already read this cumulative boundary on device.
+        py_attn_inputs.context_total_kv_length_device = py_attn_inputs.cu_kv_seqlens_device.narrow(0, batch_size, 1);
+        py_attn_inputs.padding_offset                 = torch::empty({py_attn_inputs.total_tokens}, cuda_i32);
 #if USING_CUDA
         if (!py_attn_inputs.prefix_lengths.is_cuda()) {
             // A CUDA input length can accompany a host prefix on MTP prefix
@@ -1100,11 +1095,19 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             && generation_prefill_graph_runner_ != nullptr && !is_generation_prefill_runner) {
             generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::MIXED_PREFILL_DECODE_NOT_SUPPORTED;
         }
-        const bool can_run_graph = moe_forward_allows_graph_ && !capture_hidden_states && enable_cuda_graph_
-                                   && graph_runner != nullptr && graph_runner->canRun(py_model_inputs, graph_state);
-        // The eager Python instance retains this wrapper's SEED/REUSE role and
-        // shares its request-local TopK buffer with the graph clones. Batches
-        // outside the captured buckets must use that same role eagerly.
+        bool can_run_graph = moe_forward_allows_graph_ && !capture_hidden_states && enable_cuda_graph_
+                             && graph_runner != nullptr && graph_runner->canRun(py_model_inputs, graph_state);
+        if (synchronize_cuda_graph_choice_) {
+            // The eager forward plans MegaMoE chunks on WORLD. Every rank
+            // must enter that collective before any rank launches MegaMoE.
+            auto graph_ok = torch::full({1}, can_run_graph ? 1 : 0, token_ids.options().dtype(torch::kInt32));
+            can_run_graph =
+                execAllReduce({graph_ok, ReduceOp::Min, ParallelMode::WORLD, {}}).buffer.item<int32_t>() != 0;
+        }
+        const bool graph_required = enable_cuda_graph_ && fixed_graph_indexer_
+                                    && (!py_model_inputs.attention_inputs.is_prefill || inputs.is_draft_extend);
+        RTP_LLM_CHECK_WITH_INFO(!graph_required || can_run_graph,
+                                "MTP indexer sharing requires the fixed-role CUDA graph; eager fallback is disabled");
         if (!capture_hidden_states && is_generation_prefill_runner && !can_run_graph) {
             generation_prefill_cuda_graph_status =
                 graph_state.generation_prefill_status == GenerationPrefillCudaGraphStatus::NOT_REQUESTED ?
