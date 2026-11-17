@@ -3303,6 +3303,48 @@ bool MasterStateR::reportAgent(const NodeStatePtr &state,
                 cacheState._rtpCacheMirrorMismatchCount,
                 cacheState._cacheStateReady.load(std::memory_order_relaxed)};
         }
+        if (cache->cacheKeyType == NaviSchedCacheKeyType::V6D &&
+            (cache->fullSnapshot || !BlockHashUtil::get(cache->removedBlockHashes).empty() ||
+             !BlockHashUtil::get(cache->removedFullReadyBlockHashes).empty() ||
+             !BlockHashUtil::get(cache->removedTailReadyBlockHashes).empty())) {
+            // Bound each sample; counts and checksums identify larger removals.
+            const auto sampleRemoved = [](const NaviSchedBlockHashesConstPtr &hashes) {
+                const auto &values = BlockHashUtil::get(hashes);
+                const auto end = values.begin() + std::min<size_t>(values.size(), 16);
+                return autil::legacy::ToJsonString(
+                    std::vector<uint64_t>(values.begin(), end), true);
+            };
+            const auto fullRemoved = sampleRemoved(cache->removedFullReadyBlockHashes);
+            const auto tailRemoved = sampleRemoved(cache->removedTailReadyBlockHashes);
+            NAVI_KERNEL_LOG(
+                INFO,
+                "[navi-master-v6d-cache-delete] agent=%s receive_time_us=%ld "
+                "apply_time_us=%ld received_revision=%lu applied_revision=%lu "
+                "full_snapshot=%d ignored_stale=%d revision_gap=%d state_mismatch=%d "
+                "cache_ready=%d removed_full_count=%lu removed_tail_count=%lu "
+                "removed_full_sample=%s removed_tail_sample=%s "
+                "agent_full_count=%ld master_full_count=%lu "
+                "agent_full_checksum=%lu master_full_checksum=%lu "
+                "agent_tail_count=%ld master_tail_count=%lu "
+                "agent_tail_checksum=%lu master_tail_checksum=%lu",
+                agentId.c_str(), receiveTimeUs, autil::TimeUtility::currentTime(),
+                cache->revision, cacheSyncStats.agentRevision,
+                static_cast<int>(cache->fullSnapshot),
+                static_cast<int>(staleCacheSnapshotIgnored),
+                static_cast<int>(cacheRevisionGap), static_cast<int>(cacheStateMismatch),
+                static_cast<int>(cacheSyncStats.cacheStateReady),
+                BlockHashUtil::get(cache->removedFullReadyBlockHashes).size(),
+                BlockHashUtil::get(cache->removedTailReadyBlockHashes).size(),
+                fullRemoved.c_str(), tailRemoved.c_str(),
+                cacheSyncStats.agentFullReadyBlockCount,
+                cacheSyncStats.masterFullReadyBlockCount,
+                cacheSyncStats.agentFullReadyHashChecksum,
+                cacheSyncStats.masterFullReadyHashChecksum,
+                cacheSyncStats.agentTailReadyBlockCount,
+                cacheSyncStats.masterTailReadyBlockCount,
+                cacheSyncStats.agentTailReadyHashChecksum,
+                cacheSyncStats.masterTailReadyHashChecksum);
+        }
         if (staleCacheSnapshotIgnored) {
             NAVI_KERNEL_LOG(INFO,
                             "ignore stale agent cache full snapshot, agentId [%s], "
