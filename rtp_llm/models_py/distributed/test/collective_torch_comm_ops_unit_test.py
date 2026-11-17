@@ -160,6 +160,7 @@ class CollectiveTorchCommOpsUnitTest(unittest.TestCase):
             patch.object(torch.distributed, "all_reduce", side_effect=reduce_in_place),
         ):
             flashinfer.return_value.get_all_reduce.return_value = None
+            flashinfer.return_value.batch_invariant_enabled.return_value = False
             symm_mem.return_value.get_symm_mem_communicator.return_value = None
             result = collective.all_reduce(tensor, collective.Group.TP, inplace=False)
 

@@ -197,6 +197,7 @@ class EngineConfig:
         collective_config = CollectiveConfig(
             all_reduce_backend=py_env_configs.all_reduce_backend,
             large_prefill=py_env_configs.all_reduce_large_prefill,
+            batch_invariant=hw_kernel_config.batch_invariant,
         )
         # Also validate single-rank servers, which do not initialize Torch groups.
         collective_config.validate_topology(parallelism_config)
@@ -264,10 +265,16 @@ class EngineConfig:
         return engine_config
 
 
+_BATCH_INVARIANT_QWEN_MODELS = {
+    (40, 2048, 256, 8, 512, 16, 2, 256): ("Qwen3.6-35B-A3B", 1),
+    (60, 4096, 512, 10, 1024, 32, 2, 256): ("Qwen3.5-397B-A17B", 4),
+}
+
+
 def configure_batch_invariant_model(
     engine_config: EngineConfig, model_config: "ModelConfig"
 ) -> None:
-    """Validate the single-GPU CUDA eager configuration before loading weights."""
+    """Validate the supported CUDA eager configuration before loading weights."""
     hw = engine_config.hw_kernel_config
     if not hw.batch_invariant:
         return
@@ -280,28 +287,11 @@ def configure_batch_invariant_model(
     conflicts = []
     if not is_cuda() or torch.cuda.get_device_capability() != (10, 3):
         conflicts.append("requires an SM103 CUDA GPU")
-    if (
-        any(
-            size != 1
-            for size in (
-                parallel.world_size,
-                parallel.tp_size,
-                parallel.dp_size,
-                parallel.ep_size,
-                parallel.pp_size,
-                parallel.ffn_tp_size,
-            )
-        )
-        or parallel.prefill_cp_config.is_enabled()
-    ):
-        conflicts.append(
-            "requires WORLD_SIZE=TP_SIZE=DP_SIZE=EP_SIZE=PP_SIZE=1 and CP disabled"
-        )
     if parallel.role_type != RoleType.PDFUSION or (
         model_config.vit_separation != VitSeparation.VIT_SEPARATION_LOCAL
     ):
         conflicts.append("requires a colocated PDFUSION worker with no separate ViT")
-    if model_config.model_type != "qwen35_moe" or (
+    geometry = (
         model_config.num_layers,
         model_config.hidden_size,
         model_config.expert_num,
@@ -310,8 +300,28 @@ def configure_batch_invariant_model(
         attn.head_num,
         attn.kv_head_num,
         attn.size_per_head,
-    ) != (40, 2048, 256, 8, 512, 16, 2, 256):
-        conflicts.append("requires the Qwen3.6-35B-A3B qwen35_moe architecture")
+    )
+    model = _BATCH_INVARIANT_QWEN_MODELS.get(geometry)
+    if model_config.model_type != "qwen35_moe" or model is None:
+        conflicts.append("requires the Qwen3.6-35B-A3B or Qwen3.5-397B-A17B architecture")
+    else:
+        name, tp = model
+        if (
+            (
+                parallel.world_size,
+                parallel.local_world_size,
+                parallel.tp_size,
+                parallel.ffn_tp_size,
+            )
+            != (tp, tp, tp, tp)
+            or (parallel.dp_size, parallel.ep_size, parallel.pp_size) != (1, 1, 1)
+            or parallel.prefill_cp_config.is_enabled()
+            or parallel.prefill_cp_config.is_prefill_enabled()
+        ):
+            conflicts.append(
+                f"{name} requires WORLD_SIZE=LOCAL_WORLD_SIZE=TP_SIZE={tp}, "
+                "DP_SIZE=EP_SIZE=PP_SIZE=1 and CP disabled"
+            )
     if (
         model_config.data_type != DataType.TYPE_BF16
         or model_config.quant_config is not None

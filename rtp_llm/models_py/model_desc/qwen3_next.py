@@ -411,11 +411,14 @@ class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
         linear_attn_config: LinearAttentionConfig,
         parallelism_config: ParallelismConfig,
         weights: Dict[str, torch.Tensor],
+        *,
+        batch_invariant: bool = False,
     ):
         super().__init__()
         self.linear_attn_config = linear_attn_config
         self.parallelism_config = parallelism_config
         self.weights = weights
+        self.batch_invariant = batch_invariant
         # params
         self.head_k_dim: int = linear_attn_config.linear_key_head_dim
         self.head_v_dim: int = linear_attn_config.linear_value_head_dim
@@ -482,14 +485,6 @@ class Qwen3NextGatedDeltaNetBase(torch.nn.Module):
 
 
 class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
-    def __init__(
-        self,
-        linear_attn_config: LinearAttentionConfig,
-        parallelism_config: ParallelismConfig,
-        weights: Dict[str, torch.Tensor],
-    ):
-        super().__init__(linear_attn_config, parallelism_config, weights)
-
     def _conv1d(
         self,
         mixed_qkv: torch.Tensor,
@@ -663,6 +658,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 output_final_state=True,
                 cu_seqlens=cu_seqlens_without_padding,
                 use_qk_l2norm_in_kernel=True,
+                batch_invariant=self.batch_invariant,
             )
         if ssm_states is not None and not use_flydsl_chunk_gdn:
             store_ssm_state_to_block_map(
@@ -1120,7 +1116,10 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             self.in_proj_fused = None
 
         self.prefill_gdn = Qwen3NextGatedDeltaNetPrefill(
-            linear_attn_config, parallelism_config, weights
+            linear_attn_config,
+            parallelism_config,
+            weights,
+            batch_invariant=getattr(hw_kernel_config, "batch_invariant", False),
         )
         self.decode_gdn = Qwen3NextGatedDeltaNetDecode(
             linear_attn_config, parallelism_config, weights

@@ -134,7 +134,9 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         fast_path.all_reduce_into.side_effect = lambda source, target: target.copy_(
             reduced
         )
-        module = SimpleNamespace(get_all_reduce=lambda: fast_path)
+        module = SimpleNamespace(
+            get_all_reduce=lambda: fast_path, batch_invariant_enabled=lambda: False
+        )
 
         with patch.object(collective, "_get_all_reduce_module", return_value=module):
             result = collective.all_reduce(tensor, collective.Group.TP)
@@ -150,7 +152,9 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         fast_path.should_use.return_value = True
         reduced = torch.full_like(tensor, 2)
         fast_path.all_reduce.return_value = reduced
-        module = SimpleNamespace(get_all_reduce=lambda: fast_path)
+        module = SimpleNamespace(
+            get_all_reduce=lambda: fast_path, batch_invariant_enabled=lambda: False
+        )
 
         with patch.object(collective, "_get_all_reduce_module", return_value=module):
             result = collective.all_reduce(tensor, collective.Group.TP, inplace=False)
@@ -162,7 +166,9 @@ class FlashInferAllReduceUnitTest(unittest.TestCase):
         fast_path = MagicMock()
         fast_path.should_use.return_value = True
         fast_path.all_reduce_into.side_effect = lambda source, target: target.fill_(2)
-        module = SimpleNamespace(get_all_reduce=lambda: fast_path)
+        module = SimpleNamespace(
+            get_all_reduce=lambda: fast_path, batch_invariant_enabled=lambda: False
+        )
 
         with patch.object(collective, "_get_all_reduce_module", return_value=module):
             result = collective.all_reduce(tensor, collective.Group.TP, inplace=True)

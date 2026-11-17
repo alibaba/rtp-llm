@@ -1,4 +1,4 @@
-"""Capability-selected SM120 IPC/P2P behind the generic collective API."""
+"""Fixed-order TP sums and capability-selected CUDA IPC/P2P collectives."""
 
 import logging
 import socket
@@ -205,7 +205,13 @@ def init_all_reduce(group, device, parallelism, options: CollectiveConfig):
         options.validate_topology(parallelism)
     except ValueError as exception:
         error = str(exception)
-    state = [options.all_reduce_backend, options.large_prefill, error, _group is group]
+    state = [
+        options.all_reduce_backend,
+        options.large_prefill,
+        error,
+        _group is group,
+        options.batch_invariant,
+    ]
     peers = exchange_group_state(group, state, "policy")
     if any(peer[2] is not None for peer in peers):
         raise ValueError(f"Invalid AllReduce configuration: {peers}")
@@ -221,7 +227,7 @@ def init_all_reduce(group, device, parallelism, options: CollectiveConfig):
         return _communicator
 
     candidate = options
-    if options.all_reduce_backend == "auto":
+    if options.all_reduce_backend == "auto" and not options.batch_invariant:
         # Only TP2 IPC is automatically admitted. TP8 P2P remains an explicit
         # experiment; unsupported DP/PP/CP topologies keep their current backend.
         candidate = replace(options, all_reduce_backend="sm120_ipc", large_prefill=None)
@@ -234,7 +240,7 @@ def init_all_reduce(group, device, parallelism, options: CollectiveConfig):
     communicator = None
     canonical_p2p = None
     fallback_reason = None
-    if options.all_reduce_backend != "nccl":
+    if options.all_reduce_backend != "nccl" and not options.batch_invariant:
         reason = (
             None
             if candidate.all_reduce_backend == "nccl"
@@ -279,7 +285,7 @@ def init_all_reduce(group, device, parallelism, options: CollectiveConfig):
     _group, _options = group, options
     logging.info(
         "AllReduce policy: requested_backend=%s, effective_backend=%s, "
-        "large_prefill=%s, fallback_reason=%s",
+        "large_prefill=%s, batch_invariant=%s, fallback_reason=%s",
         options.all_reduce_backend,
         (
             candidate.all_reduce_backend
@@ -287,9 +293,34 @@ def init_all_reduce(group, device, parallelism, options: CollectiveConfig):
             else "nccl"
         ),
         options.large_prefill,
+        options.batch_invariant,
         fallback_reason,
     )
     return _communicator
+
+
+def batch_invariant_enabled():
+    return _options is not None and _options.batch_invariant
+
+
+def batch_invariant_all_reduce(tensor, group, out):
+    """Gather TP partials and round once after a fixed rank-order sum."""
+    flat = tensor.contiguous().view(-1)
+    world_size = group.size()
+    if world_size == 1 or flat.numel() == 0:
+        out.copy_(tensor)
+        return out
+
+    # NCCL only moves the partials. Its message-dependent partitioning cannot
+    # change the arithmetic, which follows the same order for each element.
+    contributions = flat.new_empty((world_size, flat.numel()))
+    dist.all_gather_into_tensor(contributions, flat, group=group)
+    first, *rest = contributions.unbind()
+    acc = first if tensor.dtype == torch.float64 else first.float()
+    for partial in rest:
+        acc.add_(partial)
+    out.copy_(acc.view(tensor.shape))
+    return out
 
 
 def begin_graph_capture():
