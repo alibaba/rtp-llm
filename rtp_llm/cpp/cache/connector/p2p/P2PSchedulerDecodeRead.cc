@@ -220,11 +220,15 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&        plan,
                                                                           positions,
                                                                           worker_cp_rank,
                                                                           cp_size,
-                                                                          config_.cache_key_tokens_per_block);
+                                                                          config_.cache_key_tokens_per_block,
+                                                                          config_.decode_transfer_layer_end);
             if (!layer_buffers.ok()) {
                 return ErrorInfo(layer_buffers.status().code(),
                                  "decode route=" + std::to_string(route->route_id) + " worker_rank="
                                      + std::to_string(worker_rank) + ": " + layer_buffers.status().ToString());
+            }
+            if (layer_buffers.value().empty()) {
+                continue;
             }
             TransferRoutePB pb;
             RouteCodec::encodeForDecode(*route, &pb);
