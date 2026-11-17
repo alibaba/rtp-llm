@@ -107,6 +107,7 @@ def empty_workload_report():
         admitted_schedule_batch_id=0, admitted_local_batch_id=0,
         admitted_request_count=0, admitted_pending_cache_tracked=False,
         admitted_request_ids=[], running_elapsed_time_ms=0.0,
+        running_elapsed_request_count=0,
         running_decode_request_count=0, running_decode_generated_token_count=0,
         running_decode_remaining_token_budget=0,
     )
@@ -174,20 +175,32 @@ class VLLMV6DWireIntegrationTest(unittest.TestCase):
                 self.assertIn("running_capacity_slots=0/64", snapshot)
                 active = empty_workload_report()
                 active.update(
-                    batch_count=1, request_count=1, remaining_prefill_request_count=1,
-                    running_request_count=1, remaining_prefill_token_count=128,
-                    remaining_prefill_token_square_sum=16384.0,
-                    running_capacity_slot_count=1,
-                    running_capacity_prefill_request_count=1,
-                    running_capacity_prefill_token_count=128,
-                    running_capacity_prefill_token_square_sum=16384.0,
-                    remaining_total_token_count=128,
-                    remaining_total_token_square_sum=16384.0, total_prompt_token_count=128,
+                    batch_count=1, request_count=32, remaining_prefill_request_count=32,
+                    running_request_count=1, waiting_request_count=31,
+                    running_elapsed_time_ms=125.0, running_elapsed_request_count=1,
+                    remaining_prefill_token_count=4096,
+                    remaining_prefill_token_square_sum=524288.0,
+                    running_capacity_slot_count=32,
+                    running_capacity_prefill_request_count=32,
+                    running_capacity_prefill_token_count=4096,
+                    running_capacity_prefill_token_square_sum=524288.0,
+                    remaining_total_token_count=4096,
+                    remaining_total_token_square_sum=524288.0, total_prompt_token_count=4096,
                 )
+                self.assertFalse(bridge.report_workload(
+                    **dict(active, running_elapsed_request_count=-1)
+                ))
+                self.assertFalse(bridge.report_workload(
+                    **dict(active, running_elapsed_request_count=0)
+                ))
+                missing_clock_count = dict(active)
+                missing_clock_count.pop("running_elapsed_request_count")
+                self.assertFalse(bridge.report_workload(**missing_clock_count))
                 self.assertTrue(bridge.report_workload(**active))
                 notifications.wait(
-                    lambda text: "request_count=1, running_requests=1" in text
-                    and "running_capacity_prefill_requests=1" in text
+                    lambda text: "request_count=32, running_requests=1" in text
+                    and "running_capacity_prefill_requests=32" in text
+                    and "running_elapsed_request_count=1" in text
                 )
             finally:
                 if master is not None:
@@ -213,6 +226,9 @@ class VLLMV6DWireIntegrationTest(unittest.TestCase):
                     ).init()
                     try:
                         bridge = core._VLLMAgentBridge(agent, pd_separated=pd_separated)
+                        unmeasured = empty_workload_report()
+                        unmeasured.pop("running_elapsed_request_count")
+                        self.assertTrue(bridge.report_workload(**unmeasured))
                         self.assertTrue(bridge.report_workload(**empty_workload_report()))
                     finally:
                         agent.stop()
