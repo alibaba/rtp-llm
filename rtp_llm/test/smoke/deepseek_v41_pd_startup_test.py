@@ -1,0 +1,91 @@
+import threading
+import unittest
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from unittest.mock import Mock, patch
+
+from rtp_llm.test.smoke import deepseek_v41_pd_contract_test as pd
+
+
+class DeepSeekV41PDStartupTest(unittest.TestCase):
+    @contextmanager
+    def startup_case(self, managers):
+        case = pd.DeepSeekV41PDContractTest()
+        case.model_path = "/unused/checkpoint"
+        with (
+            patch.object(pd, "get_gpu_ids", return_value=[0, 1, 2, 3]),
+            patch.object(pd, "MagaServerManager", side_effect=managers) as factory,
+            patch.object(case, "server_args", return_value="--world_size 4"),
+        ):
+            factory.get_free_port.side_effect = ["18000", "19000"]
+            try:
+                yield case
+            finally:
+                case.doCleanups()
+
+    def test_failed_role_stops_waiting_sibling_before_startup_join(self):
+        for failed_role in (0, 1):
+            for raises in (False, True):
+                with self.subTest(failed_role=failed_role, raises=raises):
+                    entered = threading.Barrier(2)
+                    release_waiter = threading.Event()
+                    stopped = [threading.Event(), threading.Event()]
+                    managers = [Mock(), Mock()]
+
+                    def failed_start(**kwargs):
+                        entered.wait(timeout=10)
+                        if raises:
+                            raise RuntimeError("role startup failed")
+                        return False
+
+                    def waiting_start(**kwargs):
+                        entered.wait(timeout=10)
+                        if not release_waiter.wait(timeout=20):
+                            raise TimeoutError("waiting role was not stopped")
+                        return False
+
+                    def stop_waiter():
+                        stopped[1 - failed_role].set()
+                        release_waiter.set()
+
+                    managers[failed_role].start_server.side_effect = failed_start
+                    managers[failed_role].stop_server.side_effect = stopped[
+                        failed_role
+                    ].set
+                    managers[1 - failed_role].start_server.side_effect = waiting_start
+                    managers[1 - failed_role].stop_server.side_effect = stop_waiter
+                    with self.startup_case(managers) as case:
+                        with ThreadPoolExecutor(max_workers=1) as runner:
+                            result = runner.submit(case.start_servers)
+                            try:
+                                self.assertTrue(
+                                    stopped[1 - failed_role].wait(timeout=5),
+                                    "failed startup left the sibling waiting for its own timeout",
+                                )
+                            finally:
+                                release_waiter.set()
+                            expected = RuntimeError if raises else AssertionError
+                            with self.assertRaises(expected):
+                                result.result(timeout=10)
+                        self.assertTrue(all(event.is_set() for event in stopped))
+
+    def test_success_keeps_both_concurrently_started_roles_running(self):
+        entered = threading.Barrier(2)
+        stopped = [threading.Event(), threading.Event()]
+        managers = [Mock(), Mock()]
+
+        def ready(**kwargs):
+            entered.wait(timeout=10)
+            return True
+
+        for manager, event in zip(managers, stopped):
+            manager.start_server.side_effect = ready
+            manager.stop_server.side_effect = event.set
+        with self.startup_case(managers) as case:
+            case.start_servers()
+            self.assertFalse(any(event.is_set() for event in stopped))
+        self.assertTrue(all(event.is_set() for event in stopped))
+
+
+if __name__ == "__main__":
+    unittest.main()
