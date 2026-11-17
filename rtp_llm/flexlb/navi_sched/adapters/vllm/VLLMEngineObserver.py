@@ -629,7 +629,7 @@ def _native_pd_latency_model_fingerprint(
         if execution_geometry_enabled or execution_cache_source_enabled:
             raise ValueError("unified prefill does not use execution geometry")
         values["navi_latency_mode"] = (
-            "unified_native_prefill_capacity19_prior_cache_v3"
+            "unified_native_prefill_capacity19_prior_cache_v4"
             if capacity_split_prediction
             else "unified_native_prefill_admission_v1"
         )
@@ -2005,6 +2005,14 @@ class VLLMEngineObserver:
         if options.get("pd_unified_capacity_split", False):
             bridge_options["prefill_capacity_split"] = True
         self._bridge = naviSchedModule()._VLLMAgentBridge(self._agent, **bridge_options)
+        if self._pp_capacity_unified and (
+            getattr(
+                naviSchedModule(), "VLLM_NATIVE_CAPACITY_COMPLETION_FEATURES_VERSION", 0
+            )
+            != 1
+        ):
+            self.shutdown()
+            raise RuntimeError("PP unified19 requires native capacity completion features")
         if self._observed_execution_window_training and (
             getattr(naviSchedModule(), "VLLM_SHARED_EXECUTION_SAMPLES_VERSION", 0) != 1
             or not hasattr(self._bridge, "record_observed_execution_sample")
@@ -6150,7 +6158,11 @@ class VLLMEngineObserver:
                         handle,
                         request_stats,
                         *execution_breakdown,
-                        *execution_finish,
+                        *(
+                            execution_finish + (True,)
+                            if self._pp_capacity_unified
+                            else execution_finish
+                        ),
                     )
                 if not finished:
                     logger.error("failed to finish NaviSched vLLM batch")

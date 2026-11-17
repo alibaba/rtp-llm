@@ -1829,7 +1829,10 @@ py_test(
 
 py_test(
     name = "navi_sched_vllm_execution_window_integration_test",
-    srcs = ["test/vllm/VLLMExecutionWindowIntegrationTest.py"],
+    srcs = [
+        "test/vllm/VLLMExecutionWindowIntegrationTest.py",
+        "test/vllm/VLLMV6DWireIntegrationTest.py",
+    ],
     main = "test/vllm/VLLMExecutionWindowIntegrationTest.py",
     python_version = "PY3",
     deps = [":py_sched_lib"],
