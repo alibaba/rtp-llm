@@ -207,6 +207,89 @@ class GlmMegaMoeContractTest(unittest.TestCase):
             collective.assert_not_called()
             kernel.assert_called_once()
 
+    def test_prefill_constructor_preserves_configured_chunk_budget(self):
+        config = SimpleNamespace(
+            hidden_size=4,
+            expert_num=8,
+            moe_k=1,
+            moe_inter_size=4,
+            max_seq_len=1048576,
+        )
+        parallelism = SimpleNamespace(
+            ep_size=8,
+            ep_rank=0,
+            world_size=8,
+            world_rank=0,
+            tp_size=8,
+            prefill_cp_config=SimpleNamespace(is_enabled=lambda: True),
+        )
+        cases = (
+            ({"DSV4_MOE_CHUNK_TOKENS": "131072"}, 131072),
+            ({"DSV4_MOE_CHUNK_TOKENS": "32768"}, 32768),
+            ({"DSV4_MOE_CHUNK_TOKENS": "131072", "DSV4_CHUNK_TOKENS": "65536"}, 65536),
+            ({"DSV4_MOE_CHUNK_TOKENS": "4096", "DSV4_MOE_CHUNK_PREFILL": "0"}, 131072),
+            ({"DSV4_CHUNK_TOKENS": "0"}, 131072),
+        )
+        for env, expected in cases:
+            weights = {
+                W.moe_w1: torch.empty((1, 8, 4), dtype=torch.int8),
+                W.moe_w2: torch.empty((1, 4, 4), dtype=torch.int8),
+                W.moe_s1: torch.ones(1),
+                W.moe_s2: torch.ones(1),
+            }
+            factory = mock.Mock()
+            with (
+                self.subTest(env=env),
+                mock.patch.dict("os.environ", env, clear=True),
+                mock.patch.object(
+                    MegaMoeWrapper, "_get_mega_moe_cls", return_value=factory
+                ),
+                mock.patch("torch.cuda.empty_cache"),
+            ):
+                MegaMoeWrapper(config, parallelism, weights)
+                self.assertEqual(
+                    factory.from_params.call_args.kwargs["max_tokens_per_rank"],
+                    expected,
+                )
+
+    def test_decode_capacity_is_independent_of_prefill_chunk_override(self):
+        from rtp_llm.ops import RoleType
+
+        config = SimpleNamespace(
+            hidden_size=4,
+            expert_num=8,
+            moe_k=1,
+            moe_inter_size=4,
+            max_seq_len=1048576,
+            gen_num_per_cycle=4,
+        )
+        parallelism = SimpleNamespace(
+            ep_size=8,
+            ep_rank=0,
+            world_size=8,
+            world_rank=0,
+            tp_size=1,
+            role_type=RoleType.DECODE,
+        )
+        weights = {
+            W.moe_w1: torch.empty((1, 8, 4), dtype=torch.int8),
+            W.moe_w2: torch.empty((1, 4, 4), dtype=torch.int8),
+            W.moe_s1: torch.ones(1),
+            W.moe_s2: torch.ones(1),
+        }
+        factory = mock.Mock()
+        with (
+            mock.patch.dict("os.environ", {"DSV4_MOE_CHUNK_TOKENS": "128"}, clear=True),
+            mock.patch.object(
+                MegaMoeWrapper, "_get_mega_moe_cls", return_value=factory
+            ),
+            mock.patch("torch.cuda.empty_cache"),
+        ):
+            MegaMoeWrapper(config, parallelism, weights, max_generate_batch_size=512)
+        self.assertEqual(
+            factory.from_params.call_args.kwargs["max_tokens_per_rank"], 2560
+        )
+
     def test_prefill_cannot_bypass_synchronized_execution_via_prepacking(self):
         wrapper = _wrapper()
         self.assertEqual(wrapper.prepacked_input_views(3), (None,) * 4)
