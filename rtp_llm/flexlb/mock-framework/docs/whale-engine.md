@@ -127,3 +127,12 @@ Mock 的 WorkerStatus 上报 Prefill TP 为 CP size、Decode TP 为 1、DP 为 1
 等待期间到达的请求可以进入下一批。在持续有流量时，增加开销通常会延长轮次间隔，也可能增大 Batch 和 Running。实际影响取决于到达率、缓存命中和每批计算量。Forward 公式与 Forward 耗时指标的口径保持一致，额外等待体现在轮次间隔和 Wall TPS 中。校准时在相近的单 P 负载下同时比较 Batch、轮次间隔、Wall TPS 和 TTFT。
 
 完整 ENV、默认值和公式变量见 [组件配置参考](component-reference.md#engine-配置规则)。
+
+### Mock Prefill 连接 Real ViT
+
+Mock Prefill 使用请求里的 VIT role 地址。目标不提供 Mock 的 `PrepareImages` 时，Prefill 自动改调原生
+`GetMultimodalHashes`，后续请求直接使用原生接口。原始图片 URL 必须能由 Real ViT 下载。
+
+Prefill 使用 `split_size` 和 feature hash 计算输入长度和缓存 key。Real ViT 缓存未命中时会解析图片
+并计算特征。该调用只回传元数据，Real ViT 可以保留已有的 RDMA 配置。实验延迟包含等待视觉结果的时间，
+省去 embedding 搬运。若使用 Mock Frontend，其自身的 ViT 查询仍要求 Mock 专用 RPC。

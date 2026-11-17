@@ -6,8 +6,10 @@ import org.flexlb.mock.protocol.grpc.MockEngineProtocol.DecodeLayout;
 import org.flexlb.mock.protocol.grpc.MockEngineProtocol.ImageSeeds;
 import org.flexlb.mock.protocol.grpc.MockVitServiceGrpc;
 import org.flexlb.mock.protocol.PromptCacheKeys.Span;
+import org.flexlb.mock.protocol.MultimodalProtocol;
 import com.fasterxml.jackson.databind.*;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.google.protobuf.ByteString;
 import io.grpc.*;
 import io.grpc.stub.StreamObserver;
 import java.nio.*;
@@ -18,6 +20,7 @@ import java.util.function.BooleanSupplier;
 import java.util.stream.IntStream;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
+import org.flexlb.engine.grpc.MultimodalRpcServiceGrpc;
 import org.flexlb.mock.engine.config.RtpConfig;
 import org.flexlb.mock.engine.execution.LLMMockEngine;
 import org.flexlb.mock.engine.forward.ComputeModel;
@@ -106,6 +109,52 @@ class PdGenerationTest {
                 }
             }
         } finally { vision.shutdownNow().awaitTermination(3, TimeUnit.SECONDS); }
+    }
+
+    @Test void prefillUsesNativeVisionHashesToExpandInputAndBuildCacheKeys() throws Exception {
+        var query = new CompletableFuture<MultimodalHashRequestPB>();
+        var hashes = ByteString.copyFrom(ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN)
+            .putInt(131).putInt(-92).array());
+        var vision = io.grpc.netty.NettyServerBuilder.forPort(0)
+            .addService(new MultimodalRpcServiceGrpc.MultimodalRpcServiceImplBase() {
+                @Override public void getMultimodalHashes(MultimodalHashRequestPB request,
+                                                          StreamObserver<MultimodalHashResponsePB> response) {
+                    query.complete(request);
+                    response.onNext(MultimodalHashResponsePB.newBuilder()
+                        .addEntries(MultimodalHashEntryPB.newBuilder().setKey(request.getKeys(0))
+                            .setHashHit(true).addSplitSize(2).setFeatureHashes(hashes))
+                        .build());
+                    response.onCompleted();
+                }
+            }).build().start();
+        try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1)) {
+            var request = image(input(d, 201, 3, 1, 3000, true), vision.getPort());
+            var rpc = RpcServiceGrpc.newBlockingStub(p.channel).withDeadlineAfter(4, TimeUnit.SECONDS);
+            var outputs = rpc.generateStreamCall(request);
+            GenerateOutputsPB last = null;
+            while (outputs.hasNext()) last = outputs.next();
+            assertNotNull(last);
+            assertTrue(last.getFlattenOutput().getFinished(0));
+
+            var submitted = query.get(1, TimeUnit.SECONDS);
+            var media = request.getMultimodalInputs(0);
+            assertEquals(List.of(media), submitted.getInputs().getMultimodalInputsList());
+            assertEquals(List.of(MultimodalProtocol.key(media)), submitted.getKeysList());
+            assertEquals(request.getRequestId(), submitted.getInputs().getRequestId());
+            assertFalse(submitted.getInputs().getSupportRdma());
+            assertTrue(submitted.getTimeoutMs() > 0);
+
+            var expanded = request.toBuilder().clearMultimodalInputs().clearTokenIds()
+                .addAllTokenIds(request.getTokenIdsList().subList(0, 2))
+                .addTokenIds(MultimodalProtocol.IMAGE_TOKEN)
+                .addAllTokenIds(request.getTokenIdsList().subList(2, request.getTokenIdsCount())).build();
+            var prepared = new MultimodalProtocol.Prepared(expanded, List.of(new Span(1, List.of(131, -92))));
+            var keys = MultimodalProtocol.computePromptKeys(prepared, 2, 0, 1).keys();
+            var cached = rpc.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).build());
+            assertTrue(cached.getCacheKeyListList().containsAll(keys));
+        } finally {
+            vision.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
+        }
     }
 
     @Test void preparationIsVisibleWithoutInflatingSchedulerLoadAndFailureHasOneTerminal() throws Exception {

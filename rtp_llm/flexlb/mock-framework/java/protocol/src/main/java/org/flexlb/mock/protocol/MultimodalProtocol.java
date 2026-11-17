@@ -109,6 +109,36 @@ public final class MultimodalProtocol {
         return applyRows(input,sizes,payload,imageToken);
     }
 
+    static Prepared applyHashes(GenerateInputPB input, MultimodalHashResponsePB metadata, int imageToken) {
+        var entries = new HashMap<String, MultimodalHashEntryPB>();
+        for (var entry : metadata.getEntriesList()) {
+            if (entries.putIfAbsent(entry.getKey(), entry) != null) {
+                throw Status.DATA_LOSS.withDescription("Duplicate vision hash entry").asRuntimeException();
+            }
+        }
+        var sizes = new ArrayList<Integer>();
+        ByteString payload = ByteString.EMPTY;
+        for (var media : input.getMultimodalInputsList()) {
+            var entry = entries.get(key(media));
+            if (entry == null || !entry.getHashHit() || entry.getSplitSizeCount() == 0) {
+                throw Status.DATA_LOSS.withDescription("Missing or invalid vision hashes for image").asRuntimeException();
+            }
+            long rows = 0;
+            for (int size : entry.getSplitSizeList()) {
+                if (size <= 0) {
+                    throw Status.DATA_LOSS.withDescription("Invalid vision image split size").asRuntimeException();
+                }
+                rows += size;
+            }
+            if (entry.getFeatureHashes().size() != rows * Integer.BYTES) {
+                throw Status.DATA_LOSS.withDescription("Vision feature hashes do not match image length").asRuntimeException();
+            }
+            sizes.add(Math.toIntExact(rows));
+            payload = payload.concat(entry.getFeatureHashes());
+        }
+        return applyRows(input, sizes, payload, imageToken);
+    }
+
     static String address(GenerateInputPB input) {
         var addresses = input.getGenerateConfig().getRoleAddrsList().stream().filter(a -> a.getRole() == RoleAddrPB.RoleType.VIT).toList();
         if (addresses.size() != 1 || addresses.getFirst().getIp().isBlank() || addresses.getFirst().getGrpcPort() < 1 || addresses.getFirst().getGrpcPort() > 65535)
