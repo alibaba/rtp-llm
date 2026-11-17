@@ -181,6 +181,53 @@ def test_dense_attn_qkv_w(qc, load_config, attn_config):
     assert cs > 0.99
 
 
+def test_dense_attn_qkv_w_tp2(qc):
+    """P1 regression guard: attn_qkv_s TP split on row-granularity E8M0
+    scale ([N, kp]); kv heads are gcd-replicated (head_num_kv=1 < tp=2)."""
+    n_q, n_k, n_v = 128, 64, 64
+    q = torch.randn(n_q, HIDDEN, dtype=torch.bfloat16)
+    k = torch.randn(n_k, HIDDEN, dtype=torch.bfloat16)
+    v = torch.randn(n_v, HIDDEN, dtype=torch.bfloat16)
+    qk, qs = mx_quantize(q)
+    kk, ks = mx_quantize(k)
+    vk, vs = mx_quantize(v)
+    tensors = {
+        PREFIX + "layers.0.self_attn.q_proj.weight": qk,
+        PREFIX + "layers.0.self_attn.q_proj.weight_scale": qs,
+        PREFIX + "layers.0.self_attn.k_proj.weight": kk,
+        PREFIX + "layers.0.self_attn.k_proj.weight_scale": ks,
+        PREFIX + "layers.0.self_attn.v_proj.weight": vk,
+        PREFIX + "layers.0.self_attn.v_proj.weight_scale": vs,
+    }
+    attn_config = AttnConfig(hidden_size=HIDDEN, size_per_head=64,
+                             head_num=2, head_num_kv=1)
+    weight = AttnAtomicWeight(
+        W.attn_qkv_w,
+        [
+            CkptWeightInfo(PREFIX + "layers.{i}.self_attn.q_proj.weight"),
+            CkptWeightInfo(PREFIX + "layers.{i}.self_attn.k_proj.weight"),
+            CkptWeightInfo(PREFIX + "layers.{i}.self_attn.v_proj.weight"),
+        ],
+        process_fun=merge_qkv_hf,
+        config=attn_config,
+    )
+    n_local = n_q // 2 + n_k + n_v  # q halved per rank; kv replicated
+    for rank in range(2):
+        lc = make_load_config(HIDDEN, head_num=2, head_num_kv=1,
+                              size_per_head=64, tp_size=2, tp_rank=rank)
+        res = load_and_check(weight, qc, FakeTensorSource(tensors), layer_id=0,
+                             load_config=lc, expected={
+            W.attn_qkv_w: ((HIDDEN, n_local), torch.float8_e4m3fn),
+            W.attn_qkv_s: ((HIDDEN // MXFP8_GROUP // 2, n_local, 2), torch.uint8),
+        })
+        w_rec = e8m0_dequant(res[W.attn_qkv_w], res[W.attn_qkv_s])
+        q_lo, q_hi = (0, n_q // 2) if rank == 0 else (n_q // 2, n_q)
+        ref = torch.cat([q[q_lo:q_hi], k, v], dim=0)
+        cs = cos_sim(w_rec, ref)
+        print(f"[dense attn_qkv_w tp2 rank{rank}] shapes OK, cos_sim={cs:.6f}")
+        assert cs > 0.99
+
+
 def test_linear_attn_qkvz(qc, load_config, lin_config):
     """Linear attn in_proj_qkvz (cat dim0 + .T)."""
     n_qkv, n_z, k_qkvz = 128, 64, HIDDEN

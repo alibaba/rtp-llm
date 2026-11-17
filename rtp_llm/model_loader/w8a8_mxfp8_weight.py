@@ -20,13 +20,15 @@ import torch
 
 from rtp_llm.config.quant_config import AscendW8A8MXFP8Config, QuantizationConfig
 from rtp_llm.model_loader.load_config import LoadConfig
+from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.per_block_fp8_quant_weight import (
     PerBlockFp8Weight,
+    W8A8Fp8PerBlockAttnAtomicWeight,
     create_w8a8_fp8_per_block_weight,
 )
 from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import AtomicWeight, CompositeWeight, WeightModule
-from rtp_llm.utils.model_weight import CkptWeightInfo, W
+from rtp_llm.utils.model_weight import CkptWeightInfo, W, sp_head_s_gemm_a8_channel
 
 # ModelSlim scale suffix (verified against a real ModelSlim export).
 ASCEND_W8A8_MXFP8_SCALE_SUFFIX = ".weight_scale"
@@ -139,6 +141,17 @@ def _template_matches_excludes(name_template: str, excludes: set) -> bool:
     return any(rx.match(ex) for ex in excludes)
 
 
+class AscendW8A8MXFP8AttnScaleAtomicWeight(W8A8Fp8PerBlockAttnAtomicWeight):
+    """MXFP8 attn scale: row-granularity E8M0 ([N, kp] at split time).
+    attn_qkv_s must use the per-channel head split, not the CUDA
+    128-row block split (review P1)."""
+
+    gpt_style_tp_strategy = {
+        **W8A8Fp8PerBlockAttnAtomicWeight.gpt_style_tp_strategy,
+        W.attn_qkv_s: sp_head_s_gemm_a8_channel,
+    }
+
+
 class AscendW8A8MXFP8Weight(PerBlockFp8Weight):
     """ModelSlim pre-quantized (W8A8_MXFP8, 1x32 group along K) weight loader.
 
@@ -224,7 +237,10 @@ class AscendW8A8MXFP8Weight(PerBlockFp8Weight):
             scale_params["process_fun"] = _adapt_scale_align(
                 params.get("process_fun"), self.group_size
             )
-            scale = create_w8a8_fp8_per_block_weight(src_weight_info, **scale_params)
+            if isinstance(src_weight_info, AttnAtomicWeight):
+                scale = AscendW8A8MXFP8AttnScaleAtomicWeight(**scale_params)
+            else:
+                scale = create_w8a8_fp8_per_block_weight(src_weight_info, **scale_params)
             sub_weights[scale.name] = scale
 
         CompositeWeight.__init__(

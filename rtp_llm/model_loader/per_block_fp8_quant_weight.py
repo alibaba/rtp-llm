@@ -875,6 +875,13 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                 scale_weight = processed_res[self.scale.name]
                 # [N, kp] -> [kp//2, N, 2]; [E, N, kp] -> [E, kp//2, N, 2]
                 scale_weight = swizzle_scale_to_npu_layout(scale_weight)
+                # swizzled scale N must pair with the TP-split kernel N
+                if scale_weight.shape[-2] != kernel_weight.shape[-1]:
+                    raise ValueError(
+                        f"MXFP8 scale/kernel N mismatch after TP split: "
+                        f"scale {tuple(scale_weight.shape)} vs "
+                        f"kernel {tuple(kernel_weight.shape)}"
+                    )
                 kernel_weight = (
                     load_config.exported_device.maybe_rewrite_weight_by_key(
                         "weight", kernel_weight

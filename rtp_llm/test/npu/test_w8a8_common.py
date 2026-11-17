@@ -82,11 +82,13 @@ def make_load_config(
     head_num_kv: int,
     size_per_head: int,
     num_experts: Optional[int] = None,
+    tp_size: int = 1,
+    tp_rank: int = 0,
 ):
-    """Single-card LoadConfig stand-in (all parallelism degrees = 1)."""
+    """LoadConfig stand-in (dp/ep/ffn/lm_head degrees = 1; tp configurable)."""
     lc = MagicMock()
-    lc.tp_size = 1
-    lc.tp_rank = 0
+    lc.tp_size = tp_size
+    lc.tp_rank = tp_rank
     lc.dp_size = 1
     lc.dp_rank = 0
     lc.ep_size = 1
