@@ -304,5 +304,60 @@ class AdditionalBoundaryTests(unittest.TestCase):
                     self.assertFalse(reg.scheduler_iteration_metrics_enabled())
 
 
+class CacheTouchCompatibilityTest(unittest.TestCase):
+    def test_two_and_three_field_lookup_keep_touch_free_order(self):
+        import ast
+        import threading
+        from collections import deque
+
+        tree = ast.parse((ADAPTER / "VLLMEngineObserver.py").read_text())
+        method = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_promote_arrived_cache_touches"
+        )
+        namespace = {
+            "time": types.SimpleNamespace(monotonic_ns=lambda: 100),
+            "logger": logging.getLogger(__name__),
+        }
+        exec(
+            compile(ast.Module(body=[method], type_ignores=[]), "cache touch", "exec"),
+            namespace,
+        )
+        for field_count in (2, 3):
+            with self.subTest(field_count=field_count):
+                events = []
+                request = object()
+                blocks = [object(), object()]
+                cached = types.SimpleNamespace(blocks=[[blocks[0]], [blocks[1]]])
+
+                def lookup(actual):
+                    self.assertIs(actual, request)
+                    return (cached,) + (0,) * (field_count - 1)
+
+                pool = types.SimpleNamespace(
+                    touch=lambda value: events.append(("touch", value)),
+                    free_blocks=lambda value: events.append(("free", value)),
+                )
+                observer = types.SimpleNamespace(
+                    _native_ingress=False,
+                    _cache_touch_lock=threading.Lock(),
+                    _cache_touch_queue=deque([(1, request, 1)]),
+                    _cache_touch_count=0,
+                    _cache_touch_promoted_blocks=0,
+                    _cache_touch_last_log_ns=100,
+                )
+                scheduler = types.SimpleNamespace(
+                    kv_cache_manager=types.SimpleNamespace(
+                        get_computed_blocks=lookup, block_pool=pool
+                    )
+                )
+                namespace["_promote_arrived_cache_touches"](observer, scheduler)
+                self.assertEqual(events, [("touch", blocks), ("free", blocks)])
+                self.assertEqual(observer._cache_touch_promoted_blocks, 2)
+                self.assertFalse(observer._cache_touch_queue)
+
+
 if __name__ == "__main__":
     unittest.main()
