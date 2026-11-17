@@ -238,6 +238,22 @@ py_test(
     ]
 ]
 
+# Reproduces the all-rank Qwen4 single-launch Indexer captures. See QWEN4_M11_TIMELINE.md.
+py_test(
+    name = "qwen4_m11_mxfp4_sm10x_timeline",
+    main = "qwen4_m11_timeline.py",
+    srcs = [
+        "qwen4_m11_ple.py",
+        "qwen4_m11_timeline.py",
+    ],
+    timeout = "eternal",
+    deps = [":perf_test_lib"],
+    data = ["//rtp_llm:sdk"],
+    env = {"GPU_COUNT": "8", "RTP_TEST_WATCHDOG_SECONDS": "10800"},
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "8"},
+    tags = ["manual"],
+)
+
 # V4-Flash CP=4 + EP=4 prefill profile sweep from 64k to 1M input.
 # Manual-only — drives batch_size=1 prefill requests through the perf
 # test framework so per-input_len timeline JSONs land in TEST_UNDECLARED_

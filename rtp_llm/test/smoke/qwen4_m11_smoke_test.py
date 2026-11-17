@@ -21,6 +21,7 @@ class Qwen4M11SmokeTest(unittest.TestCase):
         cls.session = requests.Session()
         cls.session.trust_env = False
         cls.addClassCleanup(cls.session.close)
+        from rtp_llm.config.py_config_modules import ServerConfig
         from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
         server = MagaServerManager(
@@ -34,9 +35,20 @@ class Qwen4M11SmokeTest(unittest.TestCase):
         ):
             raise RuntimeError("Qwen4-Max M11 server did not become healthy")
         cls.server_url = f"http://127.0.0.1:{server.port}/"
+        backend = ServerConfig()
+        backend.start_port = (
+            server.port
+        )  # DP rank 0 owns every request in the cache case.
+        cls.cache_role_addrs = [
+            {
+                "role": "PDFUSION",
+                "ip": "127.0.0.1",
+                "http_port": backend.http_port,
+                "grpc_port": backend.rpc_server_port,
+            }
+        ]
 
-    def generate(self, prompt):
-        output_tokens = 12
+    def generate(self, prompt, *, output_tokens=12, reuse_cache=False, role_addrs=None):
         response = self.session.post(
             self.server_url,
             json={
@@ -46,9 +58,11 @@ class Qwen4M11SmokeTest(unittest.TestCase):
                     "ignore_eos": True,
                     "top_k": 1,
                     "random_seed": 42,
-                    "reuse_cache": False,
+                    "reuse_cache": reuse_cache,
+                    "return_input_ids": role_addrs is not None,
                     "return_output_ids": True,
                     "aux_info": True,
+                    **({"role_addrs": role_addrs} if role_addrs is not None else {}),
                 },
             },
             timeout=600,
@@ -92,6 +106,60 @@ class Qwen4M11SmokeTest(unittest.TestCase):
         self.assertEqual(
             self.generate(prompt)["output_ids"], self.generate(prompt)["output_ids"]
         )
+
+    def test_prefix_cache_restore(self):
+        page_size = 128
+        prefix = (
+            "Archive seal register. Copy the five-word seal for the requested route.\n\n"
+            "NORTH: silver lantern by the river\n"
+            "SOUTH: amber compass under the bridge\n"
+            "WEST: copper bell above the gate\n\n"
+        )
+        prefix += "".join(
+            f"Record {index:04d}: the archive stores books, maps, and letters.\n"
+            for index in range(256)
+        )
+        prefix += "\nRequested route: EAST\nSeal: bronze feather over the hill\n\n"
+        route = self.cache_role_addrs
+        seed = self.generate(
+            prefix + "Requested route: WEST\nSeal:",
+            output_tokens=1,
+            reuse_cache=True,
+            role_addrs=route,
+        )
+        self.assertEqual(seed["aux_info"]["reuse_len"], 0)
+        seed_ids = seed["input_ids"][0]
+        for direction, expected in (
+            ("NORTH", "silver lantern by the river"),
+            ("SOUTH", "amber compass under the bridge"),
+        ):
+            with self.subTest(direction=direction):
+                prompt = prefix + f"Requested route: {direction}\nSeal:"
+                reference = self.generate(prompt, output_tokens=5, role_addrs=route)
+                self.assertEqual(reference["aux_info"]["reuse_len"], 0)
+                self.assertEqual(reference["response"].strip(), expected)
+                reference_ids = reference["input_ids"][0]
+                common = next(
+                    (
+                        i
+                        for i, (left, right) in enumerate(zip(seed_ids, reference_ids))
+                        if left != right
+                    ),
+                    min(len(seed_ids), len(reference_ids)),
+                )
+                reuse = common // page_size * page_size
+                self.assertGreater(reuse, self.text_config["indexer_budget"])
+                hit = self.generate(
+                    prompt, output_tokens=5, reuse_cache=True, role_addrs=route
+                )
+                self.assertEqual(hit["aux_info"]["reuse_len"], reuse)
+                self.assertEqual(hit["response"].strip(), expected)
+                self.assertEqual(hit["input_ids"], reference["input_ids"])
+                self.assertEqual(hit["output_ids"], reference["output_ids"])
+                print(
+                    f"{direction}: reused {reuse} tokens, response={expected!r}",
+                    flush=True,
+                )
 
     def test_chinese_answer(self):
         answer, _ = self.chat("北京是哪个国家的首都？请用一个完整的中文句子回答。")
