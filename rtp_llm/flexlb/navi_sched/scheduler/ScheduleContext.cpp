@@ -69,8 +69,10 @@ NaviSchedScheduleNode::NaviSchedScheduleNode(NaviSchedNodeConstPtr node,
             _latencyModel && NonLinearPrefillModelR::usesCapacitySplitParameters(
                                  _latencyModel->parameters);
         if (supportsRunningElapsed && _workload.runningCapacityPrefillRequestCount > 0) {
-            const auto runningElapsedDeltaMs =
-                workloadReportAgeMs * _workload.runningCapacityPrefillRequestCount;
+            const auto elapsedRequestCount = _workload.runningElapsedRequestCount >= 0
+                                                 ? _workload.runningElapsedRequestCount
+                                                 : _workload.runningCapacityPrefillRequestCount;
+            const auto runningElapsedDeltaMs = workloadReportAgeMs * elapsedRequestCount;
             auto reportedFeatures = _reportedWorkloadFeatures;
             auto workloadFeatures = _workloadFeatures;
             if (reportedFeatures.appendRunningElapsedTimeMs(runningElapsedDeltaMs) &&

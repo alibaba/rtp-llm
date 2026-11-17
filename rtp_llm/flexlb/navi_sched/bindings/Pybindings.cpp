@@ -1195,10 +1195,12 @@ public:
         int64_t runningDecodeRemainingTokenBudget,
         const std::vector<int64_t> &coveredNativeBatchIds,
         const std::optional<std::vector<uint64_t>> &waitingRequestIds,
-        bool recordTiming) const
+        bool recordTiming, int32_t runningElapsedRequestCount) const
     {
         const WorkloadReportTimer timer(recordTiming);
-        if (!_agent) {
+        if (runningElapsedRequestCount < -1 ||
+            (_pdSeparated && _prefillCapacitySplit && runningElapsedRequestCount < 0) ||
+            !_agent) {
             return false;
         }
         NaviSchedWorkloadSnapshot snapshot;
@@ -1208,6 +1210,7 @@ public:
         snapshot.remainingPrefillRequestCount = remainingPrefillRequestCount;
         snapshot.runningRequestCount = runningRequestCount;
         snapshot.runningElapsedTimeMs = runningElapsedTimeMs;
+        snapshot.runningElapsedRequestCount = runningElapsedRequestCount;
         snapshot.runningDecodeRequestCount = runningDecodeRequestCount;
         snapshot.runningDecodeGeneratedTokenCount = runningDecodeGeneratedTokenCount;
         snapshot.runningDecodeRemainingTokenBudget = runningDecodeRemainingTokenBudget;
@@ -1617,7 +1620,9 @@ void bindNaviSchedData(py::module_ &m)
              py::arg("running_decode_remaining_token_budget"),
              py::arg("covered_native_batch_ids") = std::vector<int64_t>(),
              py::arg("waiting_request_ids") = py::none(),
-             py::arg("record_timing") = false, py::call_guard<py::gil_scoped_release>())
+             py::arg("record_timing") = false, py::kw_only(),
+             py::arg("running_elapsed_request_count") = -1,
+             py::call_guard<py::gil_scoped_release>())
         .def("last_workload_report_duration_ns",
              [](const VLLMAgentBridge &) { return lastWorkloadReportDurationNs; })
         .def("report_cache_inserted", &VLLMAgentBridge::reportCacheInserted,
