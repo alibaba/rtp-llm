@@ -13,7 +13,9 @@ FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int 
 
     if (top_k == 1) {
         output.token_ids = torch::argmax(logits, -1, true);
-        output.all_probs = torch::zeros_like(logits).scatter_(-1, output.token_ids, 1.0);
+        if (!point_mass_) {
+            output.all_probs = torch::zeros_like(logits).scatter_(-1, output.token_ids, 1.0);
+        }
     } else {
         auto draft_probs = torch::softmax(logits, -1);
         output.token_ids = std::get<1>(torch::topk(draft_probs, top_k, -1));

@@ -710,11 +710,17 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
             /** A PP D verifies the token payload and rebuilds draft inputs locally.
              * A non-PP D restores main's q, hidden and complete GPU proposal mirror. */
             if (!is_pipeline) {
-                auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
+                const bool point_mass = generate_request.propose_token_ids_are_point_mass();
+                RTP_LLM_CHECK_WITH_INFO(!point_mass || maga_init_params_.sp_config.type == SP_TYPE_MTP,
+                                        "point-mass handoff requires ordinary MTP");
+                if (!point_mass) {
+                    auto propose_probs_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
+                    sp_output_buffer->all_probs = propose_probs_t.to(torch::kCUDA);
+                }
+                sp_output_buffer->token_ids_are_point_mass = point_mass;
                 auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
 
                 const auto cuda_i32             = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-                sp_output_buffer->all_probs     = propose_probs_t.to(torch::kCUDA);
                 sp_output_buffer->hidden_states = propose_hidden_t.to(torch::kCUDA);
 
                 auto propose_tokens_gpu = sp_output_buffer->draftTokens().to(cuda_i32, /*non_blocking=*/true);
@@ -736,15 +742,16 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                 };
                 if (env_on("RTP_LLM_STREAM_ASYNC") || env_on("RTP_LLM_MTP_ASYNC_DEVICE_STATE")) {
                     generate_stream->setMtpAsyncDeviceState(GenerateStream::MtpAsyncDeviceState{
-                        .epoch                        = 0,
-                        .accept_len_gpu               = std::move(accept_len),
-                        .accept_tokens_gpu            = std::move(accept_tokens),
-                        .next_seq_len_gpu             = std::move(next_seq_len),
-                        .propose_tokens_gpu           = std::move(propose_tokens_gpu),
-                        .last_hidden_states_gpu       = sp_output_buffer->hidden_states,
-                        .draft_all_probs_gpu          = sp_output_buffer->all_probs,
-                        .previous_seq_len_upper_bound = generate_stream->seqLength(),
-                        .next_seq_len_upper_bound     = generate_stream->seqLength(),
+                        .epoch                          = 0,
+                        .accept_len_gpu                 = std::move(accept_len),
+                        .accept_tokens_gpu              = std::move(accept_tokens),
+                        .next_seq_len_gpu               = std::move(next_seq_len),
+                        .propose_tokens_gpu             = std::move(propose_tokens_gpu),
+                        .last_hidden_states_gpu         = sp_output_buffer->hidden_states,
+                        .draft_all_probs_gpu            = sp_output_buffer->all_probs,
+                        .draft_token_ids_are_point_mass = point_mass,
+                        .previous_seq_len_upper_bound   = generate_stream->seqLength(),
+                        .next_seq_len_upper_bound       = generate_stream->seqLength(),
                     });
                 }
             }
@@ -1282,30 +1289,27 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
         }
         return cpMapperForGroup(cfg, tag).layoutForGroup(cfg, tag).slice != CpBlockSliceMode::NONE;
     };
-    auto shouldLoadGroupFromPeer =
-        [&](const CacheConfig& cfg,
-            CacheGroupType     group_type,
-            const std::string& tag,
-            int                peer_idx,
-            bool               page_level_rr) {
-            if (typed_tp) {
-                const auto& group = cfg.topology().group(tag);
-                return tpCachePeerOwnsPayload(group.spec->tp_transfer.mode,
-                                              group.localKvHeadNum(),
-                                              transfer_topology,
-                                              static_cast<size_t>(peer_idx));
-            }
-            if (!page_level_rr) {
-                return true;
-            }
-            if (group_type == CacheGroupType::FULL) {
-                return true;
-            }
-            // Some specs are CP-sliced inside one logical block on prefill, while
-            // decode still owns the full block. Pull every peer slice and place it
-            // into the destination offset declared by the spec.
-            return groupUsesCpSlice(cfg, tag) || peer_idx == 0;
-        };
+    auto shouldLoadGroupFromPeer = [&](const CacheConfig& cfg,
+                                       CacheGroupType     group_type,
+                                       const std::string& tag,
+                                       int                peer_idx,
+                                       bool               page_level_rr) {
+        if (typed_tp) {
+            const auto& group = cfg.topology().group(tag);
+            return tpCachePeerOwnsPayload(
+                group.spec->tp_transfer.mode, group.localKvHeadNum(), transfer_topology, static_cast<size_t>(peer_idx));
+        }
+        if (!page_level_rr) {
+            return true;
+        }
+        if (group_type == CacheGroupType::FULL) {
+            return true;
+        }
+        // Some specs are CP-sliced inside one logical block on prefill, while
+        // decode still owns the full block. Pull every peer slice and place it
+        // into the destination offset declared by the spec.
+        return groupUsesCpSlice(cfg, tag) || peer_idx == 0;
+    };
     auto shouldLoadBlockFromPeer = [&](CacheGroupType group_type, size_t block_pos, int peer_idx, bool page_level_rr) {
         if (!page_level_rr || group_type != CacheGroupType::FULL) {
             return true;

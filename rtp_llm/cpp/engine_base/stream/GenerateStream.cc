@@ -183,7 +183,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                                                             !resource_context.defer_grammar_to_pp_tail,
                                                                             output_vocab_size_ > 0);
     if (processors_result.ok()) {
-        auto processors = std::move(processors_result.value());
+        auto processors                   = std::move(processors_result.value());
         sampling_state_.logits_processors = std::move(processors);
     } else {
         const auto& err = processors_result.status();
@@ -1361,8 +1361,9 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
         propose_token_.clear();
     }
 
-    sp_output_buffer_->hidden_states = update_info.draft_hidden_states;
-    sp_output_buffer_->all_probs     = update_info.draft_token_probs;
+    sp_output_buffer_->hidden_states            = update_info.draft_hidden_states;
+    sp_output_buffer_->all_probs                = update_info.draft_token_probs;
+    sp_output_buffer_->token_ids_are_point_mass = update_info.draft_token_ids_are_point_mass;
     // Apply the explicit tri-state proposal update. PD partial updates use
     // nullopt to preserve the handoff proposal; GPU/CPU proposal producers use
     // a defined/undefined Tensor respectively to replace or clear the mirror.

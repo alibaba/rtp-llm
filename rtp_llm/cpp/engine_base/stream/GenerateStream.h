@@ -77,8 +77,9 @@ struct StreamSpecUpdateInfo {
 
     // Rejection-sampling result for this speculative decode round. Prefill
     // updates leave speculative_propose_step at zero and are not counted.
-    int speculative_propose_step = 0;
-    int accepted_draft_tokens    = 0;
+    int  speculative_propose_step       = 0;
+    int  accepted_draft_tokens          = 0;
+    bool draft_token_ids_are_point_mass = false;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -117,6 +118,7 @@ public:
 
     // hold tensors from grpc
     std::vector<torch::Tensor> tensors_holder;
+    bool                       token_ids_are_point_mass = false;
 };
 using SpeculativeExecutorStreamOutputPtr = std::shared_ptr<SpeculativeExecutorStreamOutput>;
 
@@ -699,6 +701,7 @@ public:
         torch::Tensor last_hidden_states_gpu;
         torch::Tensor draft_all_probs_gpu;
         torch::Tensor mtp_indexer_topk_gpu;
+        bool          draft_token_ids_are_point_mass = false;
         // Upper bound for the sequence length represented by the previous
         // round. It equals host seqLength when no worker is pending; otherwise
         // it chains from the prior published bound so multiple overlapped
@@ -802,6 +805,15 @@ public:
     torch::Tensor getDraftAllProbsGpu() const {
         std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         return mtp_async_state_.draft_all_probs_gpu;
+    }
+    bool draftTokenIdsArePointMass(bool prefer_device_state) const {
+        if (prefer_device_state) {
+            std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
+            if (mtp_async_state_.epoch > 0) {
+                return mtp_async_state_.draft_token_ids_are_point_mass;
+            }
+        }
+        return sp_output_buffer_ && sp_output_buffer_->token_ids_are_point_mass;
     }
     void clearSpecDecodeDeviceState() {
         // Unconditional legacy/testing escape hatch. Active MTP decode paths

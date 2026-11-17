@@ -34,6 +34,20 @@ TEST(FastTopKSamplerTest, TopKGreaterThanOneReturnsTopKIndices) {
     EXPECT_EQ(out.token_ids[0][1].item<int64_t>(), 3);
 }
 
+TEST(FastTopKSamplerTest, TokenOnlyTopOneMapsCandidatesAndPreservesTopKDistribution) {
+    const auto      f32    = torch::TensorOptions(torch::kFloat32).device(torch::kCUDA);
+    const auto      map    = torch::tensor({3, 1, 0, 2}, torch::TensorOptions(torch::kInt64).device(torch::kCUDA));
+    const auto      logits = torch::tensor({{0.f, 2.f, 4.f, 3.f}, {5.f, 1.f, 0.f, -1.f}}, f32);
+    FastTopKSampler dense(map);
+    FastTopKSampler implicit(map, true);
+    const auto      expected = dense.forward(logits);
+    const auto      actual   = implicit.forward(logits);
+    EXPECT_TRUE(torch::equal(actual.token_ids, expected.token_ids));
+    EXPECT_FALSE(actual.all_probs.defined());
+    const auto topk = implicit.forward(logits, 2);
+    EXPECT_TRUE(torch::equal(topk.all_probs, torch::softmax(logits, -1)));
+}
+
 TEST(ExecRejectionSamplingTest, FixedCandidatesUseTargetAcceptanceAndResidualDistribution) {
     constexpr int64_t batch  = 7;
     constexpr int64_t width  = 4;

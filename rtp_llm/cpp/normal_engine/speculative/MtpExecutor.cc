@@ -67,7 +67,6 @@ namespace {
 speculative::FastTopKSamplerOutput sampleOrdinaryMtpDraft(const GptModelOutputs&        output,
                                                           speculative::FastTopKSampler& sampler) {
     if (output.draft_top1_tokens.defined()) {
-        RTP_LLM_CHECK_WITH_INFO(output.draft_top1_probs.defined(), "MTP top1 output is missing probabilities");
         return {output.draft_top1_probs, output.draft_top1_tokens};
     }
     return sampler.forward(output.logits, 1);
@@ -953,7 +952,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     }
     speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
     if (!is_dspark_) {
-        fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_));
+        const bool point_mass =
+            propose_params->sp_type == SP_TYPE_MTP && readEnvFlag("RTP_LLM_MTP_POINT_MASS", "mtp", "point_mass");
+        fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_, point_mass));
     }
 
     RTP_LLM_LOG_INFO("[speculative decoding] d2t_map size: %ld", d2t_map_.defined() ? d2t_map_.numel() : 0);
@@ -1332,6 +1333,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             fast_topk_sampler_output       = sampleOrdinaryMtpDraft(draft_model_output, *fast_topk_sampler_);
             draft_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
             draft_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
+            draft_sampler_output.token_ids_are_point_mass = !fast_topk_sampler_output.all_probs.defined();
         }
     }
 
@@ -1958,8 +1960,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             // round, so no bookkeeping/PD channel carries it anymore.
         } else {
             auto fast_topk_sampler_output = sampleOrdinaryMtpDraft(draft_prefill_model_output, *fast_topk_sampler_);
-            draft_prefill_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
-            draft_prefill_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
+            draft_prefill_sampler_output.all_probs                = fast_topk_sampler_output.all_probs;
+            draft_prefill_sampler_output.token_ids                = fast_topk_sampler_output.token_ids;
+            draft_prefill_sampler_output.token_ids_are_point_mass = !fast_topk_sampler_output.all_probs.defined();
         }
     }
 
@@ -3215,7 +3218,9 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - loop_start_us;
         for (size_t i = 0; i < decode_steps; ++i) {
             draft_token_columns.push_back(loop_output.draft_token_ids[i]);
-            draft_probs_list.push_back(loop_output.draft_probs[i].reshape({static_cast<int64_t>(batch_size), 1, -1}));
+            const auto& probs = loop_output.draft_probs[i];
+            draft_probs_list.push_back(probs.defined() ? probs.reshape({static_cast<int64_t>(batch_size), 1, -1}) :
+                                                         torch::Tensor());
         }
     }
     // Original single-step graph/eager fallback.
@@ -3234,8 +3239,9 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         // sample
         auto fast_topk_sampler_output = sampleOrdinaryMtpDraft(draft_decode_model_output, *fast_topk_sampler_);
         auto draft_probs              = fast_topk_sampler_output.all_probs;
-        auto draft_probs_reshape      = draft_probs.reshape({(int)batch_size, 1, -1});
-        auto draft_token_ids          = fast_topk_sampler_output.token_ids;
+        auto draft_probs_reshape =
+            draft_probs.defined() ? draft_probs.reshape({(int)batch_size, 1, -1}) : torch::Tensor();
+        auto draft_token_ids = fast_topk_sampler_output.token_ids;
 
         if (model_input.is_fake_stream) {
             draft_token_ids.zero_();
@@ -3470,8 +3476,9 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
     int64_t idx             = 0;
     for (auto& stream : all_streams) {
         GenerateStream::MtpAsyncDeviceState state;
-        state.accept_len_gpu    = accept_len_all.narrow(0, idx, 1);
-        state.accept_tokens_gpu = accept_tokens_all.narrow(0, idx, 1);
+        state.draft_token_ids_are_point_mass = draft_prefill_output.sampler_output.token_ids_are_point_mass;
+        state.accept_len_gpu                 = accept_len_all.narrow(0, idx, 1);
+        state.accept_tokens_gpu              = accept_tokens_all.narrow(0, idx, 1);
         state.propose_tokens_gpu =
             propose_tokens_all.defined() ? propose_tokens_all.narrow(0, idx, 1) : torch::Tensor();
         state.next_seq_len_gpu = next_seq_len_owned.narrow(0, idx, 1);
@@ -3616,8 +3623,9 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     int64_t idx             = 0;
     for (auto& stream : all_streams) {
         GenerateStream::MtpAsyncDeviceState state;
-        state.accept_len_gpu    = accept_len_gpu_all.narrow(0, idx, 1);
-        state.accept_tokens_gpu = accept_tokens_gpu_all.narrow(0, idx, 1);
+        state.draft_token_ids_are_point_mass = draft_prefill_output.sampler_output.token_ids_are_point_mass;
+        state.accept_len_gpu                 = accept_len_gpu_all.narrow(0, idx, 1);
+        state.accept_tokens_gpu              = accept_tokens_gpu_all.narrow(0, idx, 1);
         state.propose_tokens_gpu =
             propose_tokens_gpu_all.defined() ? propose_tokens_gpu_all.narrow(0, idx, 1) : torch::Tensor();
         state.next_seq_len_gpu = next_seq_len_all.narrow(0, idx, 1);

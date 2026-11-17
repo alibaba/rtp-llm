@@ -493,6 +493,9 @@ message GenerateRequestPB {
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
     repeated StagePeerGroupPB stage_peer_groups = 12;
+    // Ordinary MTP top-1 q is a point mass at each mapped proposal token.
+    // When true, propose_probs is omitted.
+    bool propose_token_ids_are_point_mass = 13;
 }
 
 // In the TP case, the decode master broadcasts to decode workers.

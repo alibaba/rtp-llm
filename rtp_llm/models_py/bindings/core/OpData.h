@@ -156,6 +156,7 @@ struct GptModelOutputs {
 
     // Populated only by the optional whole-MTP-draft graph. Each entry owns
     // one step's output; later steps must not overwrite earlier probabilities.
+    // A draft_probs entry may be undefined for an implicit top-1 point mass.
     std::vector<torch::Tensor> draft_token_ids;
     std::vector<torch::Tensor> draft_probs;
 
@@ -167,7 +168,8 @@ struct GptModelOutputs {
     torch::Tensor mtp_target_hidden_states;
 
     // Ordinary MTP may select its greedy proposal directly from TP shards.
-    // Logits are then undefined; probabilities retain draft-vocabulary coordinates.
+    // Logits are then undefined. Probabilities, when materialized, retain
+    // draft-vocabulary coordinates; otherwise q is a point mass at the mapped token.
     torch::Tensor draft_top1_tokens;
     torch::Tensor draft_top1_probs;
 

@@ -212,6 +212,7 @@ private:
     // logits returned to samplers remain FP32. Read once before graph capture.
     bool bf16_logits_{true};
     bool mtp_sharded_top1_{false};
+    bool mtp_point_mass_{false};
     // Only models explicitly declaring the device-length graph contract may
     // defer this host scalar. Eager fallbacks materialize the exact value.
     bool graph_device_kv_length_{false};
@@ -286,6 +287,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         bf16_logits_ = policy == "1";
     }
     RTP_LLM_LOG_INFO("BF16 LM-head output / TP gather enabled: %d (sampler logits remain FP32)", bf16_logits_);
+
+    if (const char* value = std::getenv("RTP_LLM_MTP_POINT_MASS")) {
+        const std::string policy(value);
+        TORCH_CHECK(policy == "0" || policy == "1", "RTP_LLM_MTP_POINT_MASS must be 0 or 1");
+        mtp_point_mass_ = policy == "1" && params.sp_config.type == SP_TYPE_MTP && params.model_id > 0
+                          && dspark_model_role_ == DSparkModelRole::NONE && pp_size_ == 1;
+    }
+    RTP_LLM_LOG_INFO("MTP point-mass draft enabled: %d (model_id=%zu)", mtp_point_mass_, params.model_id);
 
     if (const char* value = std::getenv("RTP_LLM_MTP_SHARDED_TOP1")) {
         const std::string policy(value);
@@ -615,7 +624,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                     // are exact in either logit dtype; assembling the proposals
                     // promotes them with the first proposal's FP32 distribution.
                     auto tokens = torch::argmax(logits, -1, true);
-                    auto probs  = torch::zeros_like(logits).scatter_(-1, tokens, 1.0);
+                    auto probs =
+                        mtp_point_mass_ ? torch::Tensor() : torch::zeros_like(logits).scatter_(-1, tokens, 1.0);
                     execMappingDraft2Target({tokens, weights_.d2t_map, static_cast<int>(tokens.size(0)), 0, 1});
                     return std::make_pair(tokens.to(torch::kInt32).reshape({tokens.size(0)}), probs);
                 });

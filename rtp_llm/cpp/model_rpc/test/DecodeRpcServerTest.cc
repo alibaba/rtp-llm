@@ -448,11 +448,11 @@ TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::string                                   request_key = "request";
-    const std::vector<std::string>                      peer_addrs  = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType>                     cache_keys  = {101, 102};
-    GroupBlockIds                                       group_block_ids;
-    const auto                                          load_context = makeLoadContext(request_key,
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101, 102};
+    GroupBlockIds                   group_block_ids;
+    const auto                      load_context = makeLoadContext(request_key,
                                               peer_addrs,
                                               cache_keys,
                                               std::move(group_block_ids),
@@ -477,11 +477,11 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::string                                   request_key = "request";
-    const std::vector<std::string>                      peer_addrs  = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType>                     cache_keys  = {101};
-    GroupBlockIds                                       group_block_ids;
-    const auto                                          load_context = makeLoadContext(request_key,
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101};
+    GroupBlockIds                   group_block_ids;
+    const auto                      load_context = makeLoadContext(request_key,
                                               peer_addrs,
                                               cache_keys,
                                               std::move(group_block_ids),
@@ -1121,7 +1121,8 @@ TEST_F(DecodeRpcBootstrapTest, InvalidProposalPayloadFailsBeforeEnqueue) {
 
 TEST_F(DecodeRpcBootstrapTest, NonPipelineHandoffRestoresRemoteDraftState) {
     rpc_.maga_init_params_.parallelism_config.pp_size = 1;
-    for (auto type : {SP_TYPE_MTP, SP_TYPE_EAGLE}) {
+    for (const auto& [type, point_mass] : std::vector<std::pair<SpeculativeType, bool>>{
+             {SP_TYPE_MTP, false}, {SP_TYPE_MTP, true}, {SP_TYPE_EAGLE, false}}) {
         rpc_.maga_init_params_.sp_config.type = type;
         for (int64_t count : {1, 3, 4}) {
             rpc_.maga_init_params_.sp_config.gen_num_per_cycle = count;
@@ -1137,6 +1138,10 @@ TEST_F(DecodeRpcBootstrapTest, NonPipelineHandoffRestoresRemoteDraftState) {
                     auto            request = makeRequest();
                     /** Accept both the two-token P payload and longer payloads. */
                     request.mutable_propose_token_ids()->Truncate(wire_count);
+                    request.set_propose_token_ids_are_point_mass(point_mass);
+                    if (point_mass) {
+                        request.clear_propose_probs();
+                    }
                     const std::vector<int> expected_tokens(request.propose_token_ids().begin(),
                                                            request.propose_token_ids().end());
                     ASSERT_TRUE(runHandoff(stream, request).ok());
@@ -1155,11 +1160,14 @@ TEST_F(DecodeRpcBootstrapTest, NonPipelineHandoffRestoresRemoteDraftState) {
                                              torch::tensor(expected_tokens, torch::kInt32).reshape({1, wire_count})));
                     EXPECT_EQ(stream->getProposeToken(), expected_tokens);
                     EXPECT_TRUE(buffer->hidden_states.is_cuda());
-                    EXPECT_TRUE(buffer->all_probs.is_cuda());
+                    EXPECT_EQ(buffer->token_ids_are_point_mass, point_mass);
+                    EXPECT_EQ(buffer->all_probs.defined(), !point_mass);
                     EXPECT_TRUE(torch::equal(buffer->hidden_states.cpu(),
                                              QueryConverter::transTensor(request.propose_hidden())));
-                    EXPECT_TRUE(
-                        torch::equal(buffer->all_probs.cpu(), QueryConverter::transTensor(request.propose_probs())));
+                    if (!point_mass) {
+                        EXPECT_TRUE(torch::equal(buffer->all_probs.cpu(),
+                                                 QueryConverter::transTensor(request.propose_probs())));
+                    }
                     ASSERT_TRUE(buffer->propose_tokens_gpu.defined());
                     EXPECT_TRUE(buffer->propose_tokens_gpu.is_cuda());
                     EXPECT_EQ(buffer->propose_tokens_gpu.scalar_type(), torch::kInt32);
@@ -1172,12 +1180,15 @@ TEST_F(DecodeRpcBootstrapTest, NonPipelineHandoffRestoresRemoteDraftState) {
                     EXPECT_EQ(state.next_seq_len_gpu.defined(), async_enabled);
                     EXPECT_EQ(state.propose_tokens_gpu.defined(), async_enabled);
                     EXPECT_EQ(state.last_hidden_states_gpu.defined(), async_enabled);
-                    EXPECT_EQ(state.draft_all_probs_gpu.defined(), async_enabled);
+                    EXPECT_EQ(state.draft_all_probs_gpu.defined(), async_enabled && !point_mass);
+                    EXPECT_EQ(state.draft_token_ids_are_point_mass, async_enabled && point_mass);
                     if (async_enabled) {
                         EXPECT_GT(state.epoch, 0);
                         EXPECT_TRUE(torch::equal(state.propose_tokens_gpu, buffer->propose_tokens_gpu));
                         EXPECT_TRUE(torch::equal(state.last_hidden_states_gpu, buffer->hidden_states));
-                        EXPECT_TRUE(torch::equal(state.draft_all_probs_gpu, buffer->all_probs));
+                        if (!point_mass) {
+                            EXPECT_TRUE(torch::equal(state.draft_all_probs_gpu, buffer->all_probs));
+                        }
                         EXPECT_EQ(state.accept_len_gpu.item<int32_t>(), 1);
                         EXPECT_EQ(state.accept_tokens_gpu[0][0].item<int32_t>(), 7);
                         EXPECT_EQ(state.next_seq_len_gpu.item<int32_t>(), 4);
@@ -1412,8 +1423,8 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
             resource_released       = stream->stream_cache_resource_->isResourceReleased();
             blocks_after_completion = stream->stream_cache_resource_->curBlocksNum();
             EXPECT_EQ(stream->outputTokenLen(), 0);
-            const auto timing       = stream->getTimeInfo();
-            executed                = timing.running_started || timing.first_token_committed || timing.generation_done;
+            const auto timing = stream->getTimeInfo();
+            executed          = timing.running_started || timing.first_token_committed || timing.generation_done;
             RpcMetricsCollector metrics;
             context.collectBasicMetrics(metrics);
             error_qps = metrics.error_qps;
