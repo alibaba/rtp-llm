@@ -2,7 +2,6 @@
 
 import json
 import os
-import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -32,9 +31,15 @@ MODULE = "rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.nvfp4_
 
 
 def config_for(
-    role="DECODE", ep=2, hidden=2560, intermediate=640, experts=512, top_k=10
+    role="DECODE",
+    ep=2,
+    hidden=2560,
+    intermediate=640,
+    experts=512,
+    top_k=10,
+    **tuning,
 ):
-    quant = ModelOptFp4Config(bits=4, group_size=16, is_quanted=False)
+    quant = ModelOptFp4Config(bits=4, group_size=16, is_quanted=False, **tuning)
     pc = SimpleNamespace(
         role_type=role,
         tp_size=ep,
@@ -76,8 +81,10 @@ class Nvfp4HybridExecutorTest(unittest.TestCase):
         baseline, hybrid = CudaNvfp4CutlassStrategy(), CudaNvfp4HybridStrategy()
         registry.register(baseline)
         registry.register(hybrid)
-        with patch("torch.cuda.is_available", return_value=True), patch(
-            "torch.cuda.get_device_capability", return_value=(12, 0)
+        with (
+            patch("torch.cuda.is_available", return_value=True),
+            patch("torch.cuda.get_device_capability", return_value=(12, 0)),
+            patch(f"{MODULE}.B12xNvfp4MoE.is_available", return_value=True),
         ):
             for enabled, role, expected in [
                 ("1", "DECODE", hybrid),
@@ -89,7 +96,10 @@ class Nvfp4HybridExecutorTest(unittest.TestCase):
                     "os.environ", {"RTP_NVFP4_HYBRID_MOE": enabled}
                 ):
                     self.assertIs(
-                        registry.get_strategy(config_for(role=role)), expected
+                        registry.get_strategy(
+                            config_for(role=role, decode_b12x_max_rows=16)
+                        ),
+                        expected,
                     )
             with patch.dict("os.environ", {"RTP_NVFP4_HYBRID_MOE": "1"}):
                 for ep, k, n, e, top_k in [
@@ -102,16 +112,33 @@ class Nvfp4HybridExecutorTest(unittest.TestCase):
                                 ep=ep, hidden=k, intermediate=n, experts=e, top_k=top_k
                             )
                         ),
-                        hybrid,
+                        baseline,
                     )
                 self.assertIs(
-                    registry.get_strategy(config_for(intermediate=192)), baseline
+                    registry.get_strategy(
+                        config_for(intermediate=192, decode_b12x_max_rows=16)
+                    ),
+                    baseline,
                 )
-                config = config_for()
+                config = config_for(decode_b12x_max_rows=16)
+                self.assertIs(
+                    registry.get_strategy(config_for(ep=8, decode_b12x_max_rows=16)),
+                    baseline,
+                )
                 config.moe_w1_layout = "gate_up"
                 self.assertIs(registry.get_strategy(config), baseline)
                 with patch("torch.cuda.get_device_capability", return_value=(12, 1)):
-                    self.assertIs(registry.get_strategy(config_for()), baseline)
+                    self.assertIs(
+                        registry.get_strategy(config_for(decode_b12x_max_rows=16)),
+                        baseline,
+                    )
+            with patch.dict(os.environ):
+                os.environ.pop("RTP_NVFP4_HYBRID_MOE", None)
+                self.assertIs(registry.get_strategy(config_for()), baseline)
+                config = config_for(model_recipe=QWEN4_FP8_NVFP4_RECIPE)
+                self.assertIs(registry.get_strategy(config), hybrid)
+                with patch(f"{MODULE}.B12xNvfp4MoE.is_available", return_value=False):
+                    self.assertIs(registry.get_strategy(config), baseline)
 
     def test_dispatch_uses_actual_rows_and_configured_boundary(self):
         executor = Nvfp4HybridExecutor.__new__(Nvfp4HybridExecutor)
@@ -186,17 +213,9 @@ class Nvfp4HybridExecutorTest(unittest.TestCase):
             _get_weight_views=weight_views,
             allocate_sm120_moe_workspace=allocate,
         )
-        modules = {
-            "flashinfer.cute_dsl.utils": SimpleNamespace(
-                convert_sf_to_mma_layout=convert
-            ),
-            "flashinfer.fused_moe.cute_dsl.blackwell_sm12x": SimpleNamespace(
-                moe_dispatch=dispatch
-            ),
-        }
         model = object()
         pools = []
-        with patch.dict(sys.modules, modules):
+        with patch.object(B12xNvfp4MoE, "_runtime", return_value=(convert, dispatch)):
             for e, k, n, topk in [(4, 256, 256, 2), (8, 512, 384, 4)]:
                 convert.reset_mock()
                 w1 = torch.zeros(e, 2 * n, k // 16, dtype=torch.int64)
@@ -238,9 +257,9 @@ class Nvfp4HybridExecutorTest(unittest.TestCase):
 
     def test_tuning_defaults_do_not_apply_qwen_tactics_to_other_models(self):
         config = ModelOptFp4Config(bits=4, group_size=16, is_quanted=False)
-        self.assertEqual(decode_tuning(config), (16, None))
+        self.assertEqual(decode_tuning(config), (0, None))
         config.decode_cutlass_profile_ids = [13, 37]
-        self.assertEqual(decode_tuning(config), (16, [13, 37]))
+        self.assertEqual(decode_tuning(config), (0, [13, 37]))
         requested = json.dumps(
             dict(
                 method="modelopt_fp4",
@@ -273,6 +292,28 @@ class Nvfp4HybridExecutorTest(unittest.TestCase):
     "requires SM120 and the pinned FlashInfer b12x runtime",
 )
 class B12xNvfp4GpuTest(unittest.TestCase):
+    @staticmethod
+    def swizzled_scales(experts, rows, cols, offset, device):
+        # Logical block16 scales vary across experts, rows and K tiles.
+        logical = (
+            torch.arange(experts * rows * (cols // 16), device=device)
+            .reshape(experts, rows, cols // 16)
+            .add(offset)
+            .remainder(29)
+            .add(4)
+            .div(128)
+            .to(torch.float8_e4m3fn)
+            .view(torch.uint8)
+        )
+        packed = (
+            logical.reshape(experts, rows // 128, 4, 32, cols // 64, 4)
+            .permute(0, 1, 4, 3, 2, 5)
+            .contiguous()
+            .view(experts, rows, cols // 16)
+            .view(torch.int32)
+        )
+        return logical, packed
+
     @staticmethod
     def packed_weights(experts, hidden, intermediate, device):
         packed = 0x2222222222222222
@@ -309,7 +350,7 @@ class B12xNvfp4GpuTest(unittest.TestCase):
             ],
         )
 
-    def test_remote_routes_overwrite_output_in_eager_and_graph(self):
+    def test_remote_routes_and_workspace_reuse_in_eager_and_graph(self):
         from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.b12x_nvfp4 import (
             B12xNvfp4MoE,
         )
@@ -319,24 +360,44 @@ class B12xNvfp4GpuTest(unittest.TestCase):
         experts, hidden, intermediate, top_k = 4, 256, 256, 2
         rows = 4
         w1, w2, scales = self.packed_weights(experts, hidden, intermediate, device)
-        adapter = B12xNvfp4MoE(
-            w1,
-            w2,
-            scales,
-            1,
-            object(),
-            top_k,
-        )
-        launch = adapter.launch
+        model = object()
+        adapters = []
+        layer_scales = []
+        for offset in (0, 11):
+            logical1, packed1 = self.swizzled_scales(
+                experts, 2 * intermediate, hidden, offset, device
+            )
+            logical2, packed2 = self.swizzled_scales(
+                experts, hidden, intermediate, offset, device
+            )
+            scales[1], scales[4] = packed1, packed2
+            layer = B12xNvfp4MoE(w1, w2, scales, 1, model, top_k)
+            layer_scales.append(list(scales))
+            convert, _ = layer._runtime()
+            for logical, packed in ((logical1, packed1), (logical2, packed2)):
+                view = convert(
+                    packed.view(torch.float8_e4m3fn),
+                    m=logical.shape[1],
+                    k=logical.shape[2] * 16,
+                    num_groups=experts,
+                    sf_vec_size=16,
+                )
+                self.assertEqual(view.data_ptr(), packed.data_ptr())
+                restored = view.view(torch.uint8).permute(5, 2, 1, 0, 4, 3)
+                self.assertTrue(torch.equal(restored.reshape(logical.shape), logical))
+            adapters.append(layer)
+        adapter, second_layer = adapters
+        self.assertIs(adapter.states, second_layer.states)
 
-        def poison_then_launch(**kwargs):
-            output = kwargs["scatter_output"]
-            output.fill_(float("nan"))
-            result = launch(**kwargs)
-            self.assertIs(result, output)
-            return result
+        def poison_output(launch):
+            def wrapper(**kwargs):
+                kwargs["scatter_output"].fill_(float("nan"))
+                launch(**kwargs)
 
-        adapter.launch = poison_then_launch
+            return wrapper
+
+        for layer in adapters:
+            layer.launch = poison_output(layer.launch)
         x = torch.full((rows, hidden), 0.125, dtype=torch.bfloat16, device=device)
         local_ids = torch.tensor([4, 5], dtype=torch.int32, device=device).repeat(
             rows, 1
@@ -347,6 +408,34 @@ class B12xNvfp4GpuTest(unittest.TestCase):
         routes = local_ids.clone()
         routing_weights = torch.full((rows, top_k), 0.5, device=device)
         expected_local = adapter(x, routes, routing_weights)
+        second_expected = second_layer(x, routes, routing_weights)
+        for expected, quant_scales in zip(
+            (expected_local, second_expected), layer_scales
+        ):
+            from flashinfer import ActivationType
+            from flashinfer.fused_moe import cutlass_fused_moe
+
+            reference = cutlass_fused_moe(
+                input=x,
+                input_sf=None,
+                token_selected_experts=routes,
+                token_final_scales=routing_weights,
+                fc1_expert_weights=w1,
+                fc2_expert_weights=w2,
+                output_dtype=torch.bfloat16,
+                quant_scales=quant_scales,
+                tp_size=1,
+                tp_rank=0,
+                ep_size=2,
+                ep_rank=1,
+                activation_type=ActivationType.Swiglu,
+                enable_pdl=False,
+            )
+            if isinstance(reference, list):
+                reference = reference[0]
+            torch.testing.assert_close(expected, reference, atol=0.01, rtol=0.02)
+        self.assertTrue(torch.isfinite(second_expected).all().item())
+        self.assertFalse(torch.equal(expected_local, second_expected))
         self.assertTrue(torch.isfinite(expected_local).all().item())
         self.assertGreater(expected_local.abs().min().item(), 0)
         expected_remote = torch.zeros_like(expected_local)
@@ -365,6 +454,9 @@ class B12xNvfp4GpuTest(unittest.TestCase):
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             output = adapter(x, routes, routing_weights)
+        second_graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(second_graph):
+            second_output = second_layer(x, local_ids, routing_weights)
         for ids, expected in (
             (local_ids, expected_local),
             (remote_ids, expected_remote),
@@ -374,6 +466,8 @@ class B12xNvfp4GpuTest(unittest.TestCase):
             routes.copy_(ids)
             graph.replay()
             torch.testing.assert_close(output, expected, atol=0, rtol=0)
+            second_graph.replay()
+            torch.testing.assert_close(second_output, second_expected, atol=0, rtol=0)
 
     def test_explicit_cutlass_tactics_above_b12x_limit(self):
         self.assertEqual(torch.cuda.get_device_capability(), (12, 0))
