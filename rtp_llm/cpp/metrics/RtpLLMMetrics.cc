@@ -508,23 +508,29 @@ void RtpLLMTokenPSMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMToken
     }
 }
 
+// Report token increments, not precomputed rates. Kmonitor QPS divides their sum by its
+// fixed sampling period. Averaging token/report_window rates biases throughput when
+// long steps make the reporting windows unequal (even with a single priority).
 bool RtpLLMWallClockTokenPSMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_GAUGE_MUTABLE_METRIC(context_wall_tps_metric, "rtp_llm_context_wall_tps");
-    REGISTER_GAUGE_MUTABLE_METRIC(context_wall_tps_with_cache_metric, "rtp_llm_context_wall_tps_with_cache");
+    REGISTER_QPS_MUTABLE_METRIC(context_wall_tps_metric, "rtp_llm_context_wall_tps");
+    REGISTER_QPS_MUTABLE_METRIC(context_wall_tps_with_cache_metric, "rtp_llm_context_wall_tps_with_cache");
     REGISTER_GAUGE_MUTABLE_METRIC(wall_tps_report_interval_us_metric, "rtp_llm_wall_tps_report_interval_us");
     return true;
 }
 
 void RtpLLMWallClockTokenPSMetrics::report(const kmonitor::MetricsTags*   tags,
                                            RtpLLMTokenPSMetricsCollector* collector) {
-    RTP_REPORT_MUTABLE_METRIC(wall_tps_report_interval_us_metric, collector->reportWindowUs());
+    // Active-step heartbeats keep QPS buckets alive but are not completed report windows.
+    if (collector->reportWindowUs() > 0) {
+        RTP_REPORT_MUTABLE_METRIC(wall_tps_report_interval_us_metric, collector->reportWindowUs());
+    }
     if (collector->reportZeroTPS()) {
         RTP_REPORT_MUTABLE_METRIC(context_wall_tps_metric, 0.0);
         RTP_REPORT_MUTABLE_METRIC(context_wall_tps_with_cache_metric, 0.0);
         return;
     }
-    RTP_REPORT_MUTABLE_METRIC(context_wall_tps_metric, collector->contextWallTPS());
-    RTP_REPORT_MUTABLE_METRIC(context_wall_tps_with_cache_metric, collector->contextWallTPSWithCache());
+    RTP_REPORT_MUTABLE_METRIC(context_wall_tps_metric, collector->contextTokens());
+    RTP_REPORT_MUTABLE_METRIC(context_wall_tps_with_cache_metric, collector->contextTokensWithCache());
 }
 
 bool RtpLLMCacheMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -1164,7 +1170,7 @@ namespace {
 bool kmonitorTransportDeferred = false;
 
 bool deferKmonitorTransportForScr() {
-    const auto phase = autil::EnvUtil::getEnv("SCR_PHASE", "");
+    const auto phase   = autil::EnvUtil::getEnv("SCR_PHASE", "");
     const bool enabled = autil::EnvUtil::getEnv("RTPLLM_ENABLE_SCR", false);
     return enabled && (phase == "checkpoint" || phase == "restore");
 }
@@ -1208,7 +1214,7 @@ bool initKmonitorFactory() {
     }
 
     kmonitor::MetricsConfig metricsConfig;
-    const bool deferTransport = deferKmonitorTransportForScr();
+    const bool              deferTransport = deferKmonitorTransportForScr();
     fillKmonitorConfig(metricsConfig, param);
     if (!kmonitor::KMonitorFactory::Init(metricsConfig)) {
         RTP_LLM_LOG_ERROR("init kmonitor factory failed with");
@@ -1238,7 +1244,7 @@ bool resumeKmonitorAfterScr() {
     if (!kmonitorTransportDeferred) {
         return true;
     }
-    auto* worker = kmonitor::KMonitorFactory::GetWorker();
+    auto* worker        = kmonitor::KMonitorFactory::GetWorker();
     auto* factoryConfig = kmonitor::KMonitorFactory::GetConfig();
     if (worker == nullptr || worker->getMetricsSystem() == nullptr || factoryConfig == nullptr) {
         return false;
@@ -1248,11 +1254,17 @@ bool resumeKmonitorAfterScr() {
     kmonitor::MetricsConfig resumedConfig;
     fillKmonitorConfig(resumedConfig, param);
     *factoryConfig = resumedConfig;
-    auto* system = worker->getMetricsSystem();
+    auto* system   = worker->getMetricsSystem();
     // Start refreshes common tags before MetricsSystem::Init creates transport.
     // Only SCR needs to replace identity captured by registered metric handles.
-    system->SetOutputTagKeys({"hippo_slave_ip", "host_ip", "container_ip", "hippo_role", "hippo_app", "hippo_group",
-                             "host", "hippo_cluster"});
+    system->SetOutputTagKeys({"hippo_slave_ip",
+                              "host_ip",
+                              "container_ip",
+                              "hippo_role",
+                              "hippo_app",
+                              "hippo_group",
+                              "host",
+                              "hippo_cluster"});
     kmonitor::KMonitorFactory::Start();
     if (!system->Started()) {
         return false;

@@ -11,6 +11,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <string>
 #include <utility>
 #include <vector>
@@ -49,7 +50,7 @@ protected:
     }
 
     void expectSnapshot(const std::map<std::string, std::vector<double>>& expected_samples,
-                        const std::string&                             priority = "30") {
+                        const std::string&                                priority = "30") {
         kmonitor::MetricsCollector snapshot;
         snapshot_time_ms_ += 10000;
         monitor_->GetMetrics(&snapshot, {kmonitor::NORMAL}, snapshot_time_ms_);
@@ -77,11 +78,11 @@ protected:
     }
 
 private:
-    ScopedTokenMetricsReporting reporting_;
+    ScopedTokenMetricsReporting  reporting_;
     kmonitor::KMonitorPtr        monitor_;
     kmonitor::MetricsReporterPtr reporter_;
-    RtpLLMTokenPSMetrics*         metrics_          = nullptr;
-    int64_t                     snapshot_time_ms_ = 0;
+    RtpLLMTokenPSMetrics*        metrics_          = nullptr;
+    int64_t                      snapshot_time_ms_ = 0;
 };
 
 struct TokenCountReport {
@@ -98,7 +99,7 @@ public:
 
     void report(const kmonitor::MetricsTags* tags, RtpLLMTokenPSMetricsCollector* collector) {
         std::lock_guard<std::mutex> lock(mutex_);
-        TokenCountReport           report{
+        TokenCountReport            report{
             tags->FindTag("priority"), collector->contextTokens(), collector->contextTokensWithCache()};
         last_report_was_idle_ = collector->reportZeroTPS();
         if (last_report_was_idle_) {
@@ -131,17 +132,18 @@ private:
 };
 
 template<typename Reporter>
-void checkReporterResetsTokenCounts() {
+void checkReporterResetsTokenCounts(bool wall_clock = false) {
     ScopedTokenMetricsReporting reporting;
 
-    auto  monitor           = std::make_shared<kmonitor::KMonitor>("token_count_reset_test");
+    auto monitor = std::make_shared<kmonitor::KMonitor>("token_count_reset_test");
+    monitor->SetServiceName("");
     auto  metrics_reporter  = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
     auto* recording_metrics = metrics_reporter->getMetricsGroup<RecordingTokenCountMetrics>();
     ASSERT_NE(recording_metrics, nullptr);
     Reporter reporter(metrics_reporter, 1);
 
     using CountsByPriority = std::map<std::string, std::pair<int64_t, int64_t>>;
-    auto expect_window = [&](const CountsByPriority& expected) {
+    auto expect_window     = [&](const CountsByPriority& expected) {
         std::vector<TokenCountReport> reports;
         TokenCountReport              idle_report;
         ASSERT_TRUE(recording_metrics->waitForIdleAfter(expected.size(), reports, idle_report))
@@ -149,12 +151,14 @@ void checkReporterResetsTokenCounts() {
         ASSERT_EQ(reports.size(), expected.size());
         CountsByPriority actual;
         for (const auto& report : reports) {
-            EXPECT_TRUE(actual.emplace(report.priority,
-                                       std::make_pair(report.context_tokens, report.context_tokens_with_cache))
-                            .second);
+            EXPECT_TRUE(
+                actual.emplace(report.priority, std::make_pair(report.context_tokens, report.context_tokens_with_cache))
+                    .second);
         }
         EXPECT_EQ(actual, expected);
-        EXPECT_EQ(idle_report.priority, "0");
+        if (!wall_clock) {
+            EXPECT_EQ(idle_report.priority, "0");
+        }
         EXPECT_EQ(idle_report.context_tokens, 0);
         EXPECT_EQ(idle_report.context_tokens_with_cache, 0);
     };
@@ -193,10 +197,10 @@ TEST_F(RtpLLMTokenPSMetricsReportTest, DoesNotRepeatContextMetricsAfterUntimedBa
     prefill.addTokenSize(100, 150, 0, 100, 1000000);
     report(prefill);
     ASSERT_NO_FATAL_FAILURE(expectSnapshot({{"rtp_llm_context_tokens", {100}},
-                                           {"rtp_llm_context_tokens_with_cache", {150}},
-                                           {"rtp_llm_context_tps", {100}},
-                                           {"rtp_llm_context_tps_with_cache", {150}},
-                                           {"rtp_llm_total_tps", {100}}}));
+                                            {"rtp_llm_context_tokens_with_cache", {150}},
+                                            {"rtp_llm_context_tps", {100}},
+                                            {"rtp_llm_context_tps_with_cache", {150}},
+                                            {"rtp_llm_total_tps", {100}}}));
 
     for (int64_t execute_time_us : {0, -1}) {
         SCOPED_TRACE(execute_time_us);
@@ -212,12 +216,12 @@ TEST_F(RtpLLMTokenPSMetricsReportTest, DoesNotRepeatContextMetricsAfterUntimedBa
     idle.markIdleWindow();
     report(idle, "0");
     ASSERT_NO_FATAL_FAILURE(expectSnapshot({{"rtp_llm_context_tokens", {0}},
-                                           {"rtp_llm_context_tokens_with_cache", {0}},
-                                           {"rtp_llm_context_tps", {0}},
-                                           {"rtp_llm_context_tps_with_cache", {0}},
-                                           {"rtp_llm_generate_tps", {0}},
-                                           {"rtp_llm_total_tps", {0}}},
-                                          "0"));
+                                            {"rtp_llm_context_tokens_with_cache", {0}},
+                                            {"rtp_llm_context_tps", {0}},
+                                            {"rtp_llm_context_tps_with_cache", {0}},
+                                            {"rtp_llm_generate_tps", {0}},
+                                            {"rtp_llm_total_tps", {0}}},
+                                           "0"));
     ASSERT_NO_FATAL_FAILURE(expectSnapshot({}));
 }
 
@@ -234,8 +238,8 @@ TEST_F(RtpLLMTokenPSMetricsReportTest, ReportsCacheOnlyCountsOnlyWithValidTiming
     timed.addTokenSize(0, 25, 0, 0, 1000000);
     timed.markIdleWindow();
     report(timed);
-    ASSERT_NO_FATAL_FAILURE(expectSnapshot({{"rtp_llm_context_tokens_with_cache", {25}},
-                                           {"rtp_llm_context_tps_with_cache", {25}}}));
+    ASSERT_NO_FATAL_FAILURE(
+        expectSnapshot({{"rtp_llm_context_tokens_with_cache", {25}}, {"rtp_llm_context_tps_with_cache", {25}}}));
     ASSERT_NO_FATAL_FAILURE(expectSnapshot({}));
 }
 
@@ -268,11 +272,11 @@ TEST_F(RtpLLMTokenPSMetricsReportTest, DoesNotAddZeroTpsSamplesWithinSnapshot) {
 
     // Several reports share one snapshot: missing TPS must not dilute its valid samples with zeros.
     ASSERT_NO_FATAL_FAILURE(expectSnapshot({{"rtp_llm_context_tokens", {100}},
-                                           {"rtp_llm_context_tokens_with_cache", {150}},
-                                           {"rtp_llm_context_tps", {100}},
-                                           {"rtp_llm_context_tps_with_cache", {150}},
-                                           {"rtp_llm_generate_tps", {7}},
-                                           {"rtp_llm_total_tps", {100, 7}}}));
+                                            {"rtp_llm_context_tokens_with_cache", {150}},
+                                            {"rtp_llm_context_tps", {100}},
+                                            {"rtp_llm_context_tps_with_cache", {150}},
+                                            {"rtp_llm_generate_tps", {7}},
+                                            {"rtp_llm_total_tps", {100, 7}}}));
     ASSERT_NO_FATAL_FAILURE(expectSnapshot({}));
 }
 
@@ -288,36 +292,36 @@ TEST_F(RtpLLMTokenPSMetricsReportTest, PriorityTokenCountsUseTheSameSamplesAsTps
     ASSERT_EQ(priorities.size(), 3);
     report(priorities.at(30), "30");
     ASSERT_NO_FATAL_FAILURE(expectSnapshot({{"rtp_llm_context_tokens", {400}},
-                                           {"rtp_llm_context_tokens_with_cache", {600}},
-                                           {"rtp_llm_context_tps", {2000}},
-                                           {"rtp_llm_context_tps_with_cache", {3000}},
-                                           {"rtp_llm_total_tps", {2000}}}));
+                                            {"rtp_llm_context_tokens_with_cache", {600}},
+                                            {"rtp_llm_context_tps", {2000}},
+                                            {"rtp_llm_context_tps_with_cache", {3000}},
+                                            {"rtp_llm_total_tps", {2000}}}));
 
     // All priorities share the valid global execution window, including buckets with no valid context work.
     report(priorities.at(50), "50");
     ASSERT_NO_FATAL_FAILURE(expectSnapshot({{"rtp_llm_context_tokens", {0}},
-                                           {"rtp_llm_context_tokens_with_cache", {0}},
-                                           {"rtp_llm_context_tps", {0}},
-                                           {"rtp_llm_context_tps_with_cache", {0}},
-                                           {"rtp_llm_generate_tps", {35}},
-                                           {"rtp_llm_total_tps", {35}}},
-                                          "50"));
+                                            {"rtp_llm_context_tokens_with_cache", {0}},
+                                            {"rtp_llm_context_tps", {0}},
+                                            {"rtp_llm_context_tps_with_cache", {0}},
+                                            {"rtp_llm_generate_tps", {35}},
+                                            {"rtp_llm_total_tps", {35}}},
+                                           "50"));
     report(priorities.at(70), "70");
     ASSERT_NO_FATAL_FAILURE(expectSnapshot({{"rtp_llm_context_tokens", {0}},
-                                           {"rtp_llm_context_tokens_with_cache", {0}},
-                                           {"rtp_llm_context_tps", {0}},
-                                           {"rtp_llm_context_tps_with_cache", {0}},
-                                           {"rtp_llm_total_tps", {500}}},
-                                          "70"));
+                                            {"rtp_llm_context_tokens_with_cache", {0}},
+                                            {"rtp_llm_context_tps", {0}},
+                                            {"rtp_llm_context_tps_with_cache", {0}},
+                                            {"rtp_llm_total_tps", {500}}},
+                                           "70"));
 
     report(collector, "0");
     ASSERT_NO_FATAL_FAILURE(expectSnapshot({{"rtp_llm_context_tokens", {400}},
-                                           {"rtp_llm_context_tokens_with_cache", {600}},
-                                           {"rtp_llm_context_tps", {2000}},
-                                           {"rtp_llm_context_tps_with_cache", {3000}},
-                                           {"rtp_llm_generate_tps", {35}},
-                                           {"rtp_llm_total_tps", {2035}}},
-                                          "0"));
+                                            {"rtp_llm_context_tokens_with_cache", {600}},
+                                            {"rtp_llm_context_tps", {2000}},
+                                            {"rtp_llm_context_tps_with_cache", {3000}},
+                                            {"rtp_llm_generate_tps", {35}},
+                                            {"rtp_llm_total_tps", {2035}}},
+                                           "0"));
 }
 
 TEST(RtpLLMTokenPSMetricsCollectorTest, LoopReporterResetsTokenCountsAfterReport) {
@@ -326,7 +330,7 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, LoopReporterResetsTokenCountsAfterReport
 
 TEST(RtpLLMTokenPSMetricsCollectorTest, WallClockReporterResetsTokenCountsAfterReport) {
     checkReporterResetsTokenCounts<
-        WallClockMetricsLoopReporter<RecordingTokenCountMetrics, RtpLLMTokenPSMetricsCollector>>();
+        WallClockMetricsLoopReporter<RecordingTokenCountMetrics, RtpLLMTokenPSMetricsCollector>>(true);
 }
 
 TEST(GenerateStreamMetricTagsTest, AlwaysCarriesPriority) {
@@ -682,6 +686,474 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, IgnoresNonPositiveContextTokenCounts) {
     EXPECT_FALSE(collector.hasMetrics());
     EXPECT_EQ(collector.priorityCollectorsForReport().at(30).contextTokens(), 0);
     EXPECT_EQ(collector.priorityCollectorsForReport().at(30).contextTokensWithCache(), 0);
+}
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, WallPrioritiesAreZeroFilledAcrossIdleAndUntaggedWindows) {
+    std::set<int32_t>             known;
+    RtpLLMTokenPSMetricsCollector first;
+    first.addTokenSize(100, 150, 0, 100, 1000);
+    first.addPriorityTokenSize(39, 100, 150, 0, 100, 1000);
+    first.setReportWindowUs(1000000);
+    EXPECT_DOUBLE_EQ(first.priorityCollectorsForReport(known).at(39).contextWallTPSWithCache(), 150);
+
+    RtpLLMTokenPSMetricsCollector next;
+    next.addTokenSize(0, 250, 0, 0, 1000);  // Fully cached prefill still contributes to with-cache TPS.
+    next.addPriorityTokenSize(50, 0, 250, 0, 0, 1000);
+    next.setReportWindowUs(2000000);
+    auto buckets = next.priorityCollectorsForReport(known);
+    ASSERT_EQ(buckets.size(), 2);
+    EXPECT_DOUBLE_EQ(buckets.at(39).contextWallTPSWithCache(), 0);
+    EXPECT_EQ(buckets.at(39).reportWindowUs(), 2000000);
+    EXPECT_DOUBLE_EQ(buckets.at(50).contextWallTPSWithCache(), 125);
+
+    RtpLLMTokenPSMetricsCollector idle;
+    idle.markIdleWindow();
+    idle.setReportWindowUs(3000000);
+    buckets = idle.priorityCollectorsForReport(known);
+    ASSERT_EQ(buckets.size(), 2);
+    EXPECT_EQ(buckets.count(0), 0);
+    for (const auto& [priority, bucket] : buckets) {
+        EXPECT_TRUE(bucket.reportZeroTPS());
+        EXPECT_DOUBLE_EQ(bucket.contextWallTPSWithCache(), 0);
+        EXPECT_EQ(bucket.reportWindowUs(), 3000000);
+    }
+    RtpLLMTokenPSMetricsCollector untagged;
+    untagged.addTokenSize(70, 90, 0, 70, 1000);
+    untagged.setReportWindowUs(1000000);
+    buckets = untagged.priorityCollectorsForReport(known);
+    ASSERT_EQ(buckets.size(), 3);
+    EXPECT_DOUBLE_EQ(buckets.at(0).contextWallTPSWithCache(), 90);
+    EXPECT_DOUBLE_EQ(buckets.at(39).contextWallTPSWithCache(), 0);
+    EXPECT_DOUBLE_EQ(buckets.at(50).contextWallTPSWithCache(), 0);
+}
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, OnlineMixedPriorityKmonitorAndDownsampleConserveTokens) {
+    ScopedTokenMetricsReporting reporting;
+    auto                        monitor = std::make_shared<kmonitor::KMonitor>("wall_priority_online_test");
+    monitor->SetServiceName("");
+    auto              reporter     = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
+    auto*             per_priority = reporter->getMetricsGroup<RtpLLMWallClockTokenPSMetrics>();
+    std::set<int32_t> known;
+    using Key = std::pair<std::string, std::string>;
+    std::map<Key, std::vector<double>> expected;
+    // Production public-pool priorities: uneven duty cycles, changing proportions, idle windows,
+    // and multiple batches merged per window. Compare with independent input-token accounting.
+    const std::vector<int32_t>                   priorities{39, 40, 49, 50};
+    std::vector<double>                          total_samples;
+    std::map<int32_t, std::vector<double>>       priority_samples;
+    std::vector<double>                          oracle;
+    double                                       sparse_sum = 0;
+    std::map<int32_t, std::pair<double, size_t>> sparse;
+    for (int tick = 0; tick < 180; ++tick) {
+        SCOPED_TRACE(tick);
+        RtpLLMTokenPSMetricsCollector window;
+        std::map<int32_t, int64_t>    context_counts, cached_counts;
+        int64_t                       all_context = 0, all_cached = 0;
+        for (size_t i = 0; i < priorities.size(); ++i) {
+            int priority = priorities[i];
+            // All series are introduced at tick zero; later windows reproduce sparse reporting.
+            bool active = tick == 0 || (tick % 17 != 0 && tick % (i + 2) == 0);
+            for (int batch = 0; active && batch < 2; ++batch) {
+                int64_t                       context = tick % 11 == 0 ? 0 : (i + 1) * 100 + batch * 13;
+                int64_t                       cached  = context + 500 + tick * 3;
+                RtpLLMTokenPSMetricsCollector step;
+                step.addTokenSize(context, cached, 0, context, 1000);
+                step.addPriorityTokenSize(priority, context, cached, 0, context, 1000);
+                window.merge(&step);
+                context_counts[priority] += context;
+                cached_counts[priority] += cached;
+                all_context += context;
+                all_cached += cached;
+            }
+        }
+        if (!window.hasMetrics()) {
+            window.markIdleWindow();
+        }
+        window.setReportWindowUs(1000000);
+        EXPECT_EQ(window.contextTokens(), all_context);
+        auto buckets = window.priorityCollectorsForReport(known);
+        ASSERT_EQ(buckets.size(), priorities.size());
+        total_samples.push_back(window.contextWallTPSWithCache());
+        oracle.push_back(all_cached);
+        double sum = 0;
+        for (auto& [priority, bucket] : buckets) {
+            const auto            tag = std::to_string(priority);
+            kmonitor::MetricsTags tags("priority", tag);
+            per_priority->report(&tags, &bucket);
+            expected[{tag, "rtp_llm_context_wall_tps"}].push_back(context_counts[priority]);
+            expected[{tag, "rtp_llm_context_wall_tps_with_cache"}].push_back(cached_counts[priority]);
+            expected[{tag, "rtp_llm_wall_tps_report_interval_us"}].push_back(1000000);
+            priority_samples[priority].push_back(bucket.contextWallTPSWithCache());
+            sum += bucket.contextWallTPSWithCache();
+            if (cached_counts[priority]) {
+                sparse[priority].first += cached_counts[priority];
+                ++sparse[priority].second;
+            }
+        }
+        EXPECT_DOUBLE_EQ(sum, all_cached);
+        if ((tick + 1) % 10 == 0) {
+            kmonitor::MetricsCollector snapshot;
+            monitor->GetMetrics(&snapshot, {kmonitor::NORMAL}, (tick + 1) * 1000);
+            std::map<Key, std::string> actual;
+            for (const auto* record : snapshot.GetRecords().getRecords()) {
+                for (const auto* value : record->Values()) {
+                    EXPECT_EQ(record->Tags()->FindTag(KMON_SERVICE_STATUS_TAG), "true");
+                    EXPECT_TRUE(
+                        actual.emplace(Key{record->Tags()->FindTag("priority"), value->Name()}, value->Value()).second);
+                }
+            }
+            ASSERT_EQ(actual.size(), expected.size());
+            for (const auto& [key, calculator] : expected) {
+                ASSERT_EQ(actual.count(key), 1);
+                if (key.second == "rtp_llm_wall_tps_report_interval_us") {
+                    kmonitor::MinMaxCalculator expected_interval;
+                    for (double value : calculator)
+                        expected_interval.Add(value);
+                    EXPECT_EQ(actual.at(key), expected_interval.ToString());
+                } else {
+                    const double expected_tps = std::accumulate(calculator.begin(), calculator.end(), 0.0) / 10.0;
+                    EXPECT_NEAR(std::stod(actual.at(key)), expected_tps, 1e-6) << key.first << ":" << key.second;
+                }
+            }
+            expected.clear();
+        }
+    }
+    // Reproduce sum(avg(priority)) at the dashboard's 10s / 20s / 60s resolutions.
+    for (int width : {10, 20, 60}) {
+        for (int begin = 0; begin < 180; begin += width) {
+            double bucket_sum = 0, total_sum = 0, expected_sum = 0;
+            for (int tick = begin; tick < begin + width; ++tick) {
+                total_sum += total_samples[tick];
+                expected_sum += oracle[tick];
+                for (int priority : priorities) {
+                    bucket_sum += priority_samples.at(priority)[tick];
+                }
+            }
+            EXPECT_DOUBLE_EQ(bucket_sum / width, expected_sum / width);
+            EXPECT_DOUBLE_EQ(total_sum / width, expected_sum / width);
+        }
+    }
+    double actual_mean = 0;
+    for (double count : oracle)
+        actual_mean += count / oracle.size();
+    for (const auto& [priority, samples] : sparse)
+        sparse_sum += samples.first / samples.second;
+    EXPECT_GT(sparse_sum, actual_mean * 1.5) << "Fixture must reproduce the old sparse-priority overcount";
+}
+
+namespace {
+struct WallWindowRecord {
+    std::string priority;
+    int64_t     tokens;
+    int64_t     window_us;
+    double      tps;
+};
+class RecordingWallWindows: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager*) override {
+        return true;
+    }
+    void report(const kmonitor::MetricsTags* tags, RtpLLMTokenPSMetricsCollector* collector) {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (collector->reportZeroTPS() && collector->reportWindowUs() == 0) {
+            ++heartbeats;
+            changed.notify_all();
+            return;
+        }
+        records.push_back({tags->FindTag("priority"),
+                           collector->contextTokensWithCache(),
+                           collector->reportWindowUs(),
+                           collector->contextWallTPSWithCache()});
+        changed.notify_all();
+    }
+    std::mutex                    mutex;
+    std::condition_variable       changed;
+    std::vector<WallWindowRecord> records;
+    size_t                        heartbeats = 0;
+};
+}  // namespace
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, WallLoopZeroFillsPrioritiesAndKeepsFullLongStepWindow) {
+    ScopedTokenMetricsReporting reporting;
+    auto  reporter = std::make_shared<kmonitor::MetricsReporter>(kmonitor::KMonitorPtr{}, "", kmonitor::MetricsTags{});
+    auto* recorded = reporter->getMetricsGroup<RecordingWallWindows>();
+    WallClockMetricsLoopReporter<RecordingWallWindows, RtpLLMTokenPSMetricsCollector> loop(reporter, 5);
+    auto                                                                              guard = loop.makeActiveGuard();
+    // Let any idle report taken before beginActive() finish before inspecting a fully active period.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    {
+        std::lock_guard<std::mutex> lock(recorded->mutex);
+        recorded->records.clear();
+        recorded->heartbeats = 0;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    {
+        std::lock_guard<std::mutex> lock(recorded->mutex);
+        EXPECT_TRUE(recorded->records.empty()) << "An unfinished step must not drain or reset the collector";
+        EXPECT_GT(recorded->heartbeats, 0) << "Active steps must keep QPS series alive without resetting their window";
+    }
+    RtpLLMTokenPSMetricsCollector batch;
+    batch.addTokenSize(100, 150, 0, 100, 1000);
+    batch.addPriorityTokenSize(39, 100, 150, 0, 100, 1000);
+    loop.report(&batch);
+    {
+        std::unique_lock<std::mutex> lock(recorded->mutex);
+        ASSERT_TRUE(
+            recorded->changed.wait_for(lock, std::chrono::seconds(5), [&] { return !recorded->records.empty(); }));
+        ASSERT_EQ(recorded->records.size(), 1);
+        const auto& first = recorded->records[0];
+        EXPECT_EQ(first.priority, "39");
+        EXPECT_EQ(first.tokens, 150);
+        EXPECT_GE(first.window_us, 60000);
+        recorded->records.clear();
+    }
+    // Alternate priorities in distinct real reporting-loop windows.
+    for (int priority : {50, 39}) {
+        RtpLLMTokenPSMetricsCollector next;
+        next.addTokenSize(200, 300, 0, 200, 1000);
+        next.addPriorityTokenSize(priority, 200, 300, 0, 200, 1000);
+        loop.report(&next);
+        std::unique_lock<std::mutex> lock(recorded->mutex);
+        ASSERT_TRUE(
+            recorded->changed.wait_for(lock, std::chrono::seconds(5), [&] { return recorded->records.size() >= 2; }));
+        ASSERT_EQ(recorded->records.size(), 2);
+        int64_t sum = 0;
+        for (size_t i = 0; i < 2; ++i) {
+            const auto& bucket = recorded->records[i];
+            EXPECT_EQ(bucket.priority, i == 0 ? "39" : "50");
+            EXPECT_EQ(bucket.window_us, recorded->records[0].window_us);
+            EXPECT_EQ(bucket.tokens, bucket.priority == std::to_string(priority) ? 300 : 0);
+            sum += bucket.tokens;
+        }
+        EXPECT_EQ(sum, 300);
+        recorded->records.clear();
+    }
+    guard = {};
+    {
+        std::unique_lock<std::mutex> lock(recorded->mutex);
+        ASSERT_TRUE(
+            recorded->changed.wait_for(lock, std::chrono::seconds(5), [&] { return recorded->records.size() >= 2; }));
+        EXPECT_EQ(recorded->records[0].priority, "39");
+        EXPECT_EQ(recorded->records[1].priority, "50");
+        EXPECT_EQ(recorded->records[0].tokens, 0);
+        EXPECT_EQ(recorded->records[1].tokens, 0);
+    }
+}
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, KmonitorRatesConserveTokensWithUnequalWindowsAndLongSteps) {
+    ScopedTokenMetricsReporting reporting;
+    for (bool single_priority : {true, false}) {
+        SCOPED_TRACE(single_priority);
+        auto monitor = std::make_shared<kmonitor::KMonitor>("unequal_wall_windows_test");
+        monitor->SetServiceName("");
+        auto              reporter = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
+        auto*             per_priority = reporter->getMetricsGroup<RtpLLMWallClockTokenPSMetrics>();
+        std::set<int32_t> known;
+        auto              send = [&](int64_t window_us, int64_t tokens, int priority) {
+            RtpLLMTokenPSMetricsCollector window;
+            window.addTokenSize(tokens, tokens * 2, 0, tokens, 1000);
+            window.addPriorityTokenSize(priority, tokens, tokens * 2, 0, tokens, 1000);
+            window.setReportWindowUs(window_us);
+            auto buckets = window.priorityCollectorsForReport(known);
+            for (auto& [p, bucket] : buckets) {
+                kmonitor::MetricsTags tags("priority", std::to_string(p));
+                per_priority->report(&tags, &bucket);
+            }
+        };
+        auto snapshot = [&](int64_t time_ms, double expected_tps) {
+            kmonitor::MetricsCollector snapshot;
+            monitor->GetMetrics(&snapshot, {kmonitor::NORMAL}, time_ms);
+            double priority_sum = 0, priority_cache_sum = 0;
+            int    rate_count = 0;
+            for (const auto* record : snapshot.GetRecords().getRecords()) {
+                for (const auto* value : record->Values()) {
+                    if (value->Name() == "rtp_llm_context_wall_tps") {
+                        priority_sum += std::stod(value->Value());
+                        ++rate_count;
+                    } else if (value->Name() == "rtp_llm_context_wall_tps_with_cache") {
+                        priority_cache_sum += std::stod(value->Value());
+                        ++rate_count;
+                    }
+                }
+            }
+            EXPECT_EQ(rate_count, known.size() * 2);
+            EXPECT_DOUBLE_EQ(priority_sum, expected_tps);
+            EXPECT_DOUBLE_EQ(priority_cache_sum, expected_tps * 2);
+        };
+        // Both zhipu (one priority) and the public pool (multiple priorities):
+        // old avg(900/1s, 900/9s) = 500 TPS; correct (900+900)/10s = 180 TPS.
+        send(1000000, 900, 50);
+        send(9000000, 900, single_priority ? 50 : 39);
+        ASSERT_NO_FATAL_FAILURE(snapshot(10000, 180));
+        // A step spans the next entire SDK period: no completed tokens and no reporter update.
+        ASSERT_NO_FATAL_FAILURE(snapshot(20000, 0));
+        send(20000000, 3600, 50);
+        ASSERT_NO_FATAL_FAILURE(snapshot(30000, 360));
+        // 180*10 + 0*10 + 360*10 = all 5400 completed tokens; no stale rates or duplicates.
+        ASSERT_NO_FATAL_FAILURE(snapshot(40000, 0));
+    }
+}
+
+namespace {
+using WallTokenTotals = std::map<std::pair<std::string, std::string>, double>;
+
+// Integrate actual SDK output, independently of the collector's rate calculations.
+void accumulateWallSnapshot(const kmonitor::KMonitorPtr& monitor, int64_t& time_ms, WallTokenTotals& totals) {
+    time_ms += 10000;
+    kmonitor::MetricsCollector snapshot;
+    monitor->GetMetrics(&snapshot, {kmonitor::NORMAL}, time_ms);
+    for (const auto* record : snapshot.GetRecords().getRecords()) {
+        for (const auto* value : record->Values()) {
+            if (value->Name() == "rtp_llm_context_wall_tps" || value->Name() == "rtp_llm_context_wall_tps_with_cache") {
+                totals[{record->Tags()->FindTag("priority"), value->Name()}] += std::stod(value->Value()) * 10;
+            }
+        }
+    }
+}
+}  // namespace
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, ConcurrentWallLoopAndSdkSnapshotsConserveEveryPriority) {
+    ScopedTokenMetricsReporting reporting;
+    auto                        monitor = std::make_shared<kmonitor::KMonitor>("wall_concurrent_test");
+    monitor->SetServiceName("");
+    auto reporter = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
+    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector> loop(reporter, 1);
+    auto                     guard = loop.makeActiveGuard();
+    WallTokenTotals          expected, actual;
+    int64_t                  time_ms = 0;
+    std::atomic<int>         finished{0};
+    std::vector<std::thread> producers;
+    // Each writer alternates priorities, includes cache-only batches, and merges concurrently
+    // with the real reporting loop and SDK snapshot/reset. The oracle uses input counts only.
+    for (int writer = 0; writer < 4; ++writer) {
+        for (int i = 0; i < 100; ++i) {
+            auto priority = std::to_string(39 + (writer + i) % 4);
+            expected[{priority, "rtp_llm_context_wall_tps"}] += i % 7 ? (writer + 1) * 10 : 0;
+            expected[{priority, "rtp_llm_context_wall_tps_with_cache"}] += (writer + 1) * 30;
+        }
+        producers.emplace_back([&, writer] {
+            for (int i = 0; i < 100; ++i) {
+                const int                     priority = 39 + (writer + i) % 4;
+                const int                     context  = i % 7 ? (writer + 1) * 10 : 0;
+                const int                     cached   = (writer + 1) * 30;
+                RtpLLMTokenPSMetricsCollector batch;
+                batch.addTokenSize(context, cached, 0, context, 1000);
+                batch.addPriorityTokenSize(priority, context, cached, 0, context, 1000);
+                loop.report(&batch);
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            }
+            ++finished;
+        });
+    }
+    while (finished.load() < 4) {
+        accumulateWallSnapshot(monitor, time_ms, actual);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    for (auto& producer : producers)
+        producer.join();
+    guard                  = {};
+    const auto deadline    = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    auto       all_arrived = [&] {
+        for (const auto& [key, count] : expected) {
+            if (actual[key] < count)
+                return false;
+        }
+        return true;
+    };
+    while (!all_arrived() && std::chrono::steady_clock::now() < deadline) {
+        accumulateWallSnapshot(monitor, time_ms, actual);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    // Continue through idle snapshots to catch replay of the last completed batch.
+    for (int i = 0; i < 10; ++i) {
+        accumulateWallSnapshot(monitor, time_ms, actual);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    for (const auto& [key, count] : actual)
+        EXPECT_DOUBLE_EQ(count, expected[key]) << key.first << ':' << key.second;
+    for (const auto& [key, count] : expected)
+        EXPECT_DOUBLE_EQ(actual[key], count) << key.first << ':' << key.second;
+}
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, WallQpsRecoversAfterSdkSeriesRecyclingAndLatePriority) {
+    ScopedTokenMetricsReporting reporting;
+    auto                        monitor = std::make_shared<kmonitor::KMonitor>("wall_recycle_test");
+    monitor->SetServiceName("");
+    auto              reporter = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
+    auto*             metrics  = reporter->getMetricsGroup<RtpLLMWallClockTokenPSMetrics>();
+    std::set<int32_t> known;
+    auto              send = [&](int priority, int64_t tokens, int64_t cached) {
+        RtpLLMTokenPSMetricsCollector window;
+        window.addTokenSize(tokens, cached, 0, tokens, 1000);
+        window.addPriorityTokenSize(priority, tokens, cached, 0, tokens, 1000);
+        for (auto& [p, bucket] : window.priorityCollectorsForReport(known)) {
+            kmonitor::MetricsTags tags("priority", std::to_string(p));
+            metrics->report(&tags, &bucket);
+        }
+    };
+    WallTokenTotals actual;
+    int64_t         time_ms = 0;
+    send(50, 100, 200);
+    // Exceed the SDK's 20 untouched snapshots: a very long active step can let a series expire.
+    for (int i = 0; i < 30; ++i)
+        accumulateWallSnapshot(monitor, time_ms, actual);
+    EXPECT_DOUBLE_EQ((actual[{"50", "rtp_llm_context_wall_tps"}]), 100);
+    EXPECT_DOUBLE_EQ((actual[{"50", "rtp_llm_context_wall_tps_with_cache"}]), 200);
+    send(39, 0, 300);  // A previously unseen, cache-only priority starts after the gap.
+    accumulateWallSnapshot(monitor, time_ms, actual);
+    send(50, 400, 800);  // The recycled priority returns without losing or replaying its tokens.
+    for (int i = 0; i < 30; ++i)
+        accumulateWallSnapshot(monitor, time_ms, actual);
+    EXPECT_DOUBLE_EQ((actual[{"50", "rtp_llm_context_wall_tps"}]), 500);
+    EXPECT_DOUBLE_EQ((actual[{"50", "rtp_llm_context_wall_tps_with_cache"}]), 1000);
+    EXPECT_DOUBLE_EQ((actual[{"39", "rtp_llm_context_wall_tps"}]), 0);
+    EXPECT_DOUBLE_EQ((actual[{"39", "rtp_llm_context_wall_tps_with_cache"}]), 300);
+}
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, ActiveHeartbeatsPreventSdkRecyclingWithoutDilutingOrReplayingTokens) {
+    ScopedTokenMetricsReporting reporting;
+    auto                        monitor = std::make_shared<kmonitor::KMonitor>("wall_heartbeat_test");
+    monitor->SetServiceName("");
+    auto              reporter = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
+    auto*             metrics  = reporter->getMetricsGroup<RtpLLMWallClockTokenPSMetrics>();
+    std::set<int32_t> known;
+    auto              report = [&](RtpLLMTokenPSMetricsCollector& window) {
+        for (auto& [p, bucket] : window.priorityCollectorsForReport(known)) {
+            kmonitor::MetricsTags tags("priority", std::to_string(p));
+            metrics->report(&tags, &bucket);
+        }
+    };
+    RtpLLMTokenPSMetricsCollector first;
+    first.addTokenSize(100, 200, 0, 100, 1000);
+    first.addPriorityTokenSize(50, 100, 200, 0, 100, 1000);
+    first.setReportWindowUs(1000000);
+    report(first);
+    int64_t         time_ms = 0;
+    WallTokenTotals integrated;
+    accumulateWallSnapshot(monitor, time_ms, integrated);
+    for (int i = 0; i < 30; ++i) {
+        RtpLLMTokenPSMetricsCollector heartbeat;
+        heartbeat.markIdleWindow();
+        report(heartbeat);
+        WallTokenTotals sample;
+        accumulateWallSnapshot(monitor, time_ms, sample);
+        ASSERT_EQ(sample.size(), 2) << "Zeros must remain present beyond the SDK recycling threshold";
+        for (const auto& [key, value] : sample)
+            EXPECT_DOUBLE_EQ(value, 0);
+    }
+    RtpLLMTokenPSMetricsCollector finished;
+    finished.addTokenSize(3000, 6000, 0, 3000, 300000000);
+    finished.addPriorityTokenSize(50, 3000, 6000, 0, 3000, 300000000);
+    finished.setReportWindowUs(300000000);
+    report(finished);
+    // Heartbeats in the same SDK period must add zero, not replace/dilute completed tokens.
+    RtpLLMTokenPSMetricsCollector idle;
+    idle.markIdleWindow();
+    report(idle);
+    accumulateWallSnapshot(monitor, time_ms, integrated);
+    accumulateWallSnapshot(monitor, time_ms, integrated);
+    EXPECT_DOUBLE_EQ((integrated[{"50", "rtp_llm_context_wall_tps"}]), 3100);
+    EXPECT_DOUBLE_EQ((integrated[{"50", "rtp_llm_context_wall_tps_with_cache"}]), 6200);
 }
 
 }  // namespace rtp_llm
