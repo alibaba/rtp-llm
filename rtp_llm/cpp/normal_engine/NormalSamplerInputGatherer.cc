@@ -1,4 +1,6 @@
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include "torch/all.h"
@@ -154,8 +156,40 @@ SamplerInputs NormalSamplerInputGatherer::allocateSamplerInputs(const StreamGrou
     // Without pinning, the .to(kCUDA) becomes a blocking pageable memcpy that
     // shows up as Memcpy Pageable→Device on the timeline (~33 MiB/rank/step
     // at bs=128 / step=65552).
-    sampler_inputs.token_ids =
-        torch::empty({(int64_t)total_batch_size_in, (int64_t)(sampler_inputs.step + 1)}, pinned_i32);
+    // Greedy MTP only needs the sampled token from each score row. Preserve
+    // logical lengths and retain full history for every history-aware consumer.
+    bool compact_mtp_history = false;
+#if USING_CUDA
+    static const bool compact_enabled = []() {
+        const char* value = std::getenv("RTP_LLM_MTP_COMPACT_SAMPLER_HISTORY");
+        return value == nullptr || std::string(value) == "1";
+    }();
+    compact_mtp_history =
+        compact_enabled && propose_step > 0 && !stream_groups.empty() && !stream_groups.needReturnCumLogProbs();
+    if (compact_mtp_history) {
+        for (const auto& stream : stream_groups.allStreams()) {
+            const auto& cfg = stream->generateConfig();
+            if (cfg->do_sample || cfg->top_k != 1 || cfg->top_p != 1.0f || cfg->temperature != 1.0f
+                || cfg->repetition_penalty != 1.0f || cfg->presence_penalty != 0.0f || cfg->frequency_penalty != 0.0f
+                || cfg->no_repeat_ngram_size.value_or(0) != 0 || stream->currentNumBeams() != 1
+                || stream->nextNumBeams() != 1 || !stream->getAllLogitsProcessorPtr().empty()) {
+                compact_mtp_history = false;
+                break;
+            }
+        }
+    }
+#endif
+    if (compact_mtp_history) {
+        sampler_inputs.token_ids = torch::empty({(int64_t)total_batch_size_in, 1},
+                                                torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        static std::atomic<bool> logged{false};
+        if (!logged.exchange(true, std::memory_order_relaxed)) {
+            RTP_LLM_LOG_INFO("[mtp-compact-sampler-history] active; model context and logical step unchanged");
+        }
+    } else {
+        sampler_inputs.token_ids =
+            torch::empty({(int64_t)total_batch_size_in, (int64_t)(sampler_inputs.step + 1)}, pinned_i32);
+    }
     sampler_inputs.generator.resize(total_batch_size_in);
     return sampler_inputs;
 }
@@ -194,7 +228,7 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
                    cum_log_probs.numel() * sizeof(float));
         }
         for (int i = 0; i < sampler_batch_size; ++i) {
-            const bool no_sample_chunk = !score_batch && stream->isMiddleChunk();
+            const bool no_sample_chunk    = !score_batch && stream->isMiddleChunk();
             input_lengths[batch_idx]      = stream->inputLength();
             sequence_lengths[batch_idx]   = stream->seqLength() + (score_batch ? i : propose_step);
             num_beams_in[batch_idx]       = stream->currentNumBeams();
@@ -206,7 +240,7 @@ void NormalSamplerInputGatherer::fillSamplerCommonInputs(SamplerInputs&         
             presence_penalty[batch_idx]   = stream->generateConfig()->presence_penalty;
             frequency_penalty[batch_idx]  = stream->generateConfig()->frequency_penalty;
             // Middle chunk output is discarded; avoid advancing the request RNG.
-            do_sample[batch_idx]          = stream->generateConfig()->do_sample && !no_sample_chunk;
+            do_sample[batch_idx] = stream->generateConfig()->do_sample && !no_sample_chunk;
             if (!do_sample[batch_idx]) {
                 top_k[batch_idx]       = 1;
                 top_p[batch_idx]       = 1;
