@@ -200,6 +200,25 @@ py_test(
 )
 
 py_test(
+    name = "backend_restart_test",
+    srcs = ["backend_restart_test.py"],
+    deps = [
+        "//rtp_llm:utils",
+        "//rtp_llm/test/utils:test_util",
+    ],
+)
+
+py_test(
+    name = "backend_restart_process_test",
+    srcs = ["backend_restart_process_test.py"],
+    deps = [
+        "//rtp_llm:utils",
+        "//rtp_llm/test/utils:test_util",
+    ],
+    timeout = "moderate",
+)
+
+py_test(
     name = "process_lifecycle_test",
     srcs = ["process_lifecycle_test.py"],
     deps = ["//rtp_llm:utils"],
