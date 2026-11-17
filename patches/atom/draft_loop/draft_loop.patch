@@ -1,0 +1,40 @@
+--- a/atom/plugin/rtpllm/models/qwen4_exp.py
++++ b/atom/plugin/rtpllm/models/qwen4_exp.py
+@@ -875,6 +875,37 @@
+ class _ATOMQwen4ExpMTPRuntime(_ATOMQwen4ExpRuntime):
+     """Bridge RTP's flat HC hand-off to ATOM's reusable QSA draft layer."""
+ 
++    @property
++    def supports_mtp_draft_loop_graph(self):
++        # The native loop advances and restores both logical lengths and
++        # token-major T/H/W MRoPE positions using captured device operations.
++        return bool(torch.version.hip)
++
++    def prepare_mtp_draft_graph_step(self, inputs, fmha_impl):
++        # The C++ loop advances the canonical device length. ATOM forward
++        # rebuilds positions, RoPE, QSA/PLE slots and context lengths from it
++        # using capture-safe device ops, unlike the native model's RoPE planner.
++        tagged = inputs.attention_inputs
++        groups = tuple(tagged.values()) if isinstance(tagged, dict) else (tagged,)
++        anchor = groups[0]
++        lengths = anchor.sequence_lengths_plus_1_device
++        if (not torch.version.hip or not anchor.is_cuda_graph
++                or anchor.is_prefill or anchor.is_target_verify
++                or not lengths.is_cuda or lengths.numel() != inputs.input_ids.numel()
++                or any(g.sequence_lengths_plus_1_device.data_ptr() != lengths.data_ptr()
++                       for g in groups)):
++            raise RuntimeError("ATOM MTP loop requires shared single-token decode device lengths")
++        positions = inputs.combo_position_ids
++        if bool(getattr(getattr(self._rtp_model_config, "mm_model_config", None),
++                        "is_multimodal", False)):
++            if (positions is None or not positions.is_cuda
++                    or positions.numel() != 3 * inputs.input_ids.numel()
++                    or any(g.combo_position_ids.data_ptr() != positions.data_ptr()
++                           for g in groups)):
++                raise RuntimeError("MTP loop graph requires shared device T/H/W positions")
++        if self._graph_buffers_for_inputs(anchor) is None:
++            raise RuntimeError("ATOM MTP loop requires prewarmed metadata buffers")
++
+     def cuda_graph_draft_prefill_uses_request_lanes(self) -> bool:
+         # RTP captures only active request lanes for each draft-prefill key.
+         return True
