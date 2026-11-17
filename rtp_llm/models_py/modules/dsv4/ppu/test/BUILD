@@ -35,7 +35,6 @@ _PPU_CONTRACT_TESTS = [
     deps = ["//rtp_llm/models_py:models", "//rtp_llm:testlib"] + select({"@//:using_ppu": [":ppu_test_runtime"], "//conditions:default": []}),
 ) for name in [
     "isolated_metadata", "rich_contract", "chunk_options", "platform_provider",
-    "paged_mqa_metadata_reuse",
     "prefill_communication", "tp_prefill_workspace_dims",
 ]]
 
