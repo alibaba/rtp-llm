@@ -40,6 +40,8 @@ struct AgentLatencyInput {
     double latencyMs = 0.0;
     double modelLatencyMs = 0.0;
     bool unifiedLatencySample = false;
+    // Native completion features include resolved cache with arrival progress frozen.
+    bool hasCompletedCapacityFeatures = false;
     bool latencySampleValid = true;
     bool latencyValidationValid = true;
     NaviSchedLatencyFeatures precedingFeatures;

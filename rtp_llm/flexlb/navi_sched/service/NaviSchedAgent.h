@@ -51,7 +51,8 @@ public:
                      int64_t executionStepCount, int64_t prefillTokenCount,
                      int64_t decodeRequestStepCount, int64_t decodeTokenCount,
                      double admissionToFirstExecutionMs, double nativePreparationMs,
-                     int64_t executionFinishTimeUs = 0);
+                     int64_t executionFinishTimeUs = 0,
+                     const NaviSchedLatencyFeatures *completedCapacityFeatures = nullptr);
     bool finishBatchWithUnifiedLatency(
         const std::vector<NaviSchedRequestStats> &requests, double wallTimeMs,
         double executeModelTimeMs, int64_t executionStepCount, int64_t prefillTokenCount,
