@@ -529,8 +529,14 @@ bool AgentLatencyKernel::retireUnifiedBatch(AgentLatencyInput &input,
         return false;
     }
     if (AgentLatencyInputType::BATCH_FINISHED == input.type) {
-        input.precedingFeatures = state.precedingFeatures;
-        if (state.hasCurrentBatchCapacityFeatures) {
+        const bool useCompletedCapacityFeatures =
+            input.hasCompletedCapacityFeatures && input.precedingFeatures.usesCapacitySplit() &&
+            state.hasCurrentBatchCapacityFeatures &&
+            _agentReportR && _agentReportR->usesPdUnifiedCapacitySplit();
+        if (!useCompletedCapacityFeatures) {
+            input.precedingFeatures = state.precedingFeatures;
+        }
+        if (state.hasCurrentBatchCapacityFeatures && !useCompletedCapacityFeatures) {
             NaviSchedLatencyFeatures current;
             if (!refineCurrentBatchCapacityFeatures(
                     state.precedingFeatures, state.currentBatchCapacityFeatures,
