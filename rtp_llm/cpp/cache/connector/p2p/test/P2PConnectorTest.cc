@@ -300,6 +300,13 @@ TEST_F(P2PConnectorTest, StartLoadWaitsForGenerateStreamRegistration) {
     });
     ASSERT_EQ(started.wait_for(std::chrono::seconds(1)), std::future_status::ready);
     EXPECT_EQ(result.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    auto duplicate = request;
+    duplicate.set_timeout_ms(10);
+    P2PConnectorStartLoadResponsePB duplicate_response;
+    connector_->handleRead(duplicate, duplicate_response);
+    EXPECT_NE(duplicate_response.error_code(), ErrorCodePB::NONE_ERROR);
+    EXPECT_EQ(duplicate_response.error_message(), "StartLoad already in progress for this key");
+
     auto stream = createGenerateStream(key, 5020, 5000);
     ASSERT_NE(connector_->asyncRead(createValidKVCacheResource(), createMockMeta(stream.get()), 0, 0), nullptr);
     PrefillResultStore::SideChannelData data;

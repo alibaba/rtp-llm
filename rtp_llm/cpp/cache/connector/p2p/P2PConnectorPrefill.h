@@ -10,7 +10,9 @@
 #include <grpc++/grpc++.h>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <unordered_set>
 
 namespace rtp_llm {
 
@@ -85,6 +87,8 @@ private:
 
 
 private:
+    std::mutex                                     active_loads_mutex_;
+    std::unordered_set<std::string>                active_loads_;
     const P2PConnectorConfig                       config_;
     std::shared_ptr<LayerBlockConverter>           layer_block_converter_;
     kmonitor::MetricsReporterPtr                   metrics_reporter_;
