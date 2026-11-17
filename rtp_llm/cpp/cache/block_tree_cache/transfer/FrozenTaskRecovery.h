@@ -23,7 +23,7 @@ public:
     using TaskSource = std::function<std::vector<std::shared_ptr<FrozenTask>>()>;
     using Query = std::function<TransferCompletionQueryResult(const FrozenTask::ExecutionInfo&, int)>;
     using Cleanup = std::function<TransferCompletionCleanup::Summary(int, const std::function<bool()>&)>;
-    using OnReleased = std::function<void(const FrozenTask::ExecutionInfo&)>;
+    using OnReleased = std::function<void(const FrozenTask::ExecutionInfo&, bool)>;
 
     struct Summary {
         size_t inspected{0};

@@ -101,7 +101,7 @@ public:
         return stage_metrics_ != nullptr;
     }
     void flushStageMetrics() const;
-    void reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution) const;
+    void reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution, bool forced) const;
     void reportUnfreezeZeroMetrics(const std::string& pool_name, const std::string& tier) const;
 
     // Durations are per worker batch, except coordinator multi-rank stages.

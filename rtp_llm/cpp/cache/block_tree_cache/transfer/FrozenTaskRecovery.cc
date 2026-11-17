@@ -268,7 +268,7 @@ FrozenTaskRecovery::runOnce(int query_timeout_ms, const std::function<bool()>& s
                 ++summary.released;
                 try {
                     if (on_released_)
-                        on_released_(task->execution());
+                        on_released_(task->execution(), expired && !safe);
                 } catch (const std::exception& error) {
                     RTP_LLM_LOG_WARNING("FrozenTask release observer failed: %s", error.what());
                 } catch (...) {

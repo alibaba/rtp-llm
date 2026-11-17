@@ -144,7 +144,8 @@ TEST(FrozenTaskRecoveryTest, ReleaseObserverRunsOnceAfterReleaseAndCannotInterru
         [&] { return std::vector<std::shared_ptr<FrozenTask>>{first, second}; },
         [&](const auto& execution, int) { return proof(execution, state); },
         {},
-        [&](const auto& execution) {
+        [&](const auto& execution, bool forced) {
+            EXPECT_FALSE(forced);
             const auto& task = execution.trace_id == first->execution().trace_id ? first : second;
             EXPECT_EQ(task->snapshot().state, FrozenTask::State::RELEASED);
             EXPECT_FALSE(pool->isFrozen(execution.descriptors.front().targets.front().block));
@@ -209,7 +210,10 @@ TEST(FrozenTaskRecoveryTest, TimeoutReleasesRunningUnknownAndFailedQueriesOnlyOn
                     return result;
                 },
                 {},
-                [&](const auto&) { ++notifications; });
+                [&](const auto&, bool forced) {
+                    EXPECT_TRUE(forced);
+                    ++notifications;
+                });
             const auto pending = recovery.runOnce(1000);
             EXPECT_EQ(pending.released, 0u);
             EXPECT_EQ(pending.pending, 1u);
@@ -243,7 +247,7 @@ TEST(FrozenTaskRecoveryTest, ConfiguredTimeoutCanShortenExtendOrDisableForcedRel
         FrozenTaskRecovery recovery(
             [&] { return std::vector<std::shared_ptr<FrozenTask>>{task}; },
             [&](const auto& execution, int) { return proof(execution, state); },
-            {}, {}, timeout_ms);
+            {}, [&](const auto&, bool forced) { EXPECT_EQ(forced, state != State::BUFFER_SAFE); }, timeout_ms);
         EXPECT_EQ(recovery.runOnce(1000).released, timeout_ms == 1000 ? 1u : 0u);
         EXPECT_EQ(pool->isFrozen(block), timeout_ms != 1000);
         task->frozen_at_us_ -= std::chrono::duration_cast<std::chrono::microseconds>(20min).count();
