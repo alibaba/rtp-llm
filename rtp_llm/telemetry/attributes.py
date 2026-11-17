@@ -161,6 +161,7 @@ RTP_LLM_PREFILL_EARLY_BATCH_PREPARE_WALL_US = (
 )
 RTP_LLM_PREFILL_PREVIOUS_BATCH_WAIT_US = "rtp_llm.prefill.previous_batch_wait_us"
 RTP_LLM_PREFILL_FINAL_PREPARE_WALL_US = "rtp_llm.prefill.final_prepare_wall_us"
+RTP_LLM_PREFILL_TIMING_ERROR = "rtp_llm.prefill.timing_error"
 # Frontend-to-prefill handoff delay on the master coalescing path, covering the
 # FlexLB coalescing wait plus both network hops. Written by the C++ prefill node
 # only; it subtracts two machines' wall clocks, so it is an approximation

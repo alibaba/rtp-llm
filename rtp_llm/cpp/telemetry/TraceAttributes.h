@@ -74,7 +74,10 @@ inline constexpr const char* kAttrRtpLlmPrefillAdmissionQueueWaitUs    = "rtp_ll
 inline constexpr const char* kAttrRtpLlmPrefillKvCacheAcquireWallUs    = "rtp_llm.prefill.kv_cache_acquire_wall_us";
 inline constexpr const char* kAttrRtpLlmPrefillEarlyBatchPrepareWallUs = "rtp_llm.prefill.early_batch_prepare_wall_us";
 inline constexpr const char* kAttrRtpLlmPrefillPreviousBatchWaitUs     = "rtp_llm.prefill.previous_batch_wait_us";
-inline constexpr const char* kAttrRtpLlmPrefillFinalPrepareWallUs      = "rtp_llm.prefill.final_prepare_wall_us";
+// Residual wall time after KV readiness and previous execution release; may include batch formation.
+inline constexpr const char* kAttrRtpLlmPrefillFinalPrepareWallUs = "rtp_llm.prefill.final_prepare_wall_us";
+// Low-cardinality reason when a completed request has incomplete pre-forward timing.
+inline constexpr const char* kAttrRtpLlmPrefillTimingError = "rtp_llm.prefill.timing_error";
 // Frontend-to-prefill handoff delay on the master coalescing path: from the
 // frontend wall clock stamped into GenerateInputPB.start_time by trans_input()
 // to the moment the prefill node creates the logical span in buildSlotContexts.
