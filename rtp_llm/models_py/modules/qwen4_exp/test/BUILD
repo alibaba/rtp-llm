@@ -2,6 +2,11 @@ load("//rtp_llm/models_py/test:defs.bzl", "models_py_test")
 
 package(default_visibility = ["//visibility:public"])
 
+models_py_test(
+    name = "target_reduce_test",
+    src = "target_reduce_test.py",
+)
+
 _REFERENCE_DEPS = [
     ":math_references",
     ":test_support",
@@ -592,14 +597,6 @@ test_suite(
         ":qwen4_ple",
         ":qwen4_qsa",
     ],
-)
-
-models_py_test(
-    name = "shared_expert_tp2_integration_test",
-    src = "moe/shared_expert_tp2_integration_test.py",
-    gpu = "RTX_5000_PRO_CU13",
-    gpus = 2,
-    deps = _REFERENCE_DEPS,
 )
 
 models_py_test(

@@ -1,12 +1,12 @@
 """Qwen4-owned reduction dispatch; draft and eager paths keep their contract."""
 
-import os
+import logging
 
 import torch
-import torch.distributed as dist
 
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.all_reduce import get_all_reduce
+from rtp_llm.models_py.distributed.collective_utils import exchange_group_state
 
 # Model close can also run on a single rank after partial initialization.
 # Retain IPC mappings until process exit rather than freeing a peer's input.
@@ -75,10 +75,12 @@ class Qwen4TargetReduce:
 
 
 def prepare_target_reduce(config, parallelism):
+    """Extend an already admitted IPC backend; agree before allocating."""
     role = str(getattr(parallelism, "role_type", "")).rsplit(".", 1)[-1]
     communicator = get_all_reduce()
     if not (
         not getattr(config, "is_mtp", False)
+        and config.hidden_size == 2560
         and role in ("DECODE", "PDFUSION")
         and parallelism.tp_size == 2
         and parallelism.dp_size == 1
@@ -88,16 +90,37 @@ def prepare_target_reduce(config, parallelism):
         and communicator.cpp_small_enabled
     ):
         return None
-    mode = os.getenv("RTP_QWEN4_TARGET_REDUCE", "legacy")
-    peers = [None] * 2
-    dist.all_gather_object(peers, mode, group=communicator.group)
-    if any(peer not in ("legacy", "ipc256") for peer in peers):
-        raise ValueError(
-            "RTP_QWEN4_TARGET_REDUCE must be legacy or ipc256 on every rank"
+    from rtp_llm.models_py.distributed.flashinfer_ipc_all_reduce import (
+        IpcInitializationError,
+    )
+
+    # rank_data plus the exported metadata/staging allocations. Account for
+    # raw CUDA IPC allocations, which are outside Torch's caching allocator.
+    max_bytes = 256 * 2560 * 2
+    required_bytes = 8 * 1024 * 1024 + 2 * max_bytes
+    error = None
+    try:
+        required_bytes += communicator._workspace.ops.meta_size()
+        available_bytes, _ = torch.cuda.mem_get_info(communicator.device)
+        if available_bytes < required_bytes:
+            error = "insufficient free memory for target IPC workspace"
+    except Exception as exc:
+        error = str(exc)
+    peers = exchange_group_state(communicator.group, error, "qwen4_target_memory")
+    if any(peer is not None for peer in peers):
+        logging.warning(
+            "Qwen4 target IPC unavailable; using existing reducer: %s", peers
         )
-    if any(peer != "ipc256" for peer in peers):
         return None
-    return Qwen4TargetReduce(communicator)
+    try:
+        return Qwen4TargetReduce(communicator, max_bytes=max_bytes)
+    except IpcInitializationError:
+        # The workspace constructor has already agreed failure and released
+        # any partial setup on all ranks. Keep the original communicator.
+        logging.warning(
+            "Qwen4 target IPC setup failed; using existing reducer", exc_info=True
+        )
+        return None
 
 
 def all_reduce_target_graph(tensor, group):

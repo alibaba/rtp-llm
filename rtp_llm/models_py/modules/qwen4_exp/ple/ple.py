@@ -1,5 +1,4 @@
 import math
-import os
 from contextlib import contextmanager
 from typing import List, Optional
 
@@ -623,9 +622,7 @@ class Qwen4ExpPLELayer(nn.Module):
     def _try_bf16_prefill_page_snapshots(
         self, hyper_states, embeddings, page_size, conv_buffer, add_residual
     ):
-        """Opt-in eager SM120 route; all source-BF16 page GEMMs stay unchanged."""
-        if os.environ.get("RTP_QWEN4_BF16_PLE_BATCH", "0") != "1":
-            return None
+        """Eager SM120 route; all source-BF16 page GEMMs stay unchanged."""
         if not (
             hyper_states.is_cuda
             and torch.version.hip is None
@@ -726,7 +723,7 @@ class Qwen4ExpPLELayer(nn.Module):
         """Gather once while retaining every page's resumable prefill state.
 
         Projections keep their original page-sized shapes to preserve BF16
-        accumulation and rounding. The opt-in BF16 route batches only the
+        accumulation and rounding. The BF16 route batches only the
         existing row-local gate and convolution consumers. N-gram hashing, shard gather,
         and its TP reduction run once per request, including a partial final
         page and a reused prefix's left context. With ``add_residual``, the
