@@ -247,8 +247,8 @@ void BlockTreeCache::cleanupExpiredMissing() const {
         transfer_dispatcher_->cleanupExpiredMissing();
 }
 
-void BlockTreeCache::reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution) const {
-    metrics_reporter_->reportUnfreezeMetrics(execution);
+void BlockTreeCache::reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution, bool forced) const {
+    metrics_reporter_->reportUnfreezeMetrics(execution, forced);
 }
 
 void BlockTreeCache::reportUnfreezeZeroMetrics(const std::vector<BlockTreePoolMetricsSnapshot>& pools) const {

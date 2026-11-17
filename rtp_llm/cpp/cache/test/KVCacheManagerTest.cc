@@ -61,6 +61,7 @@ double snapshotUnfreezeBlocks(const kmonitor::MetricsReporterPtr& reporter,
     kmonitor::MetricsTags tags("pool_name", pool_name);
     tags.AddTag("tier", tierName(tier));
     tags.AddTag("backend", backend);
+    tags.AddTag("forced", "false");
     auto* metric = reporter->getMetricsGroup<RtpLLMCachePoolMetrics>()->unfreeze_blocks_qps_metric;
     auto* series = metric->DeclareMetric(&tags);
     kmonitor::MetricsRecord record(nullptr, nullptr, 0);
