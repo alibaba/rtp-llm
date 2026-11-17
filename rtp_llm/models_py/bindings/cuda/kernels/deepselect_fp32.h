@@ -4,6 +4,8 @@
 #include <torch/all.h>
 #include <tuple>
 
+#include "rtp_llm/models_py/bindings/cuda/kernels/markov_scaled_logits.h"
+
 namespace torch_ext {
 
 bool deepselect_fp32_available();
@@ -42,11 +44,6 @@ void deepselect_fp32(const torch::Tensor& logits,
                      torch::Tensor&       output,
                      bool                 filter_finite,
                      torch::Tensor*       output_values);
-
-// Materialize the DSpARK logits + native-dtype Markov bias, divided by
-// per-row temperature, as contiguous FP32 input for candidate selection.
-torch::Tensor
-markov_scaled_logits(const torch::Tensor& logits, const torch::Tensor& markov_bias, const torch::Tensor& temperature);
 
 // K<=512, K=1024 and K=4096 use DeepSelect on supported Blackwell inputs; other
 // shapes use ATen topk. Returned indices are int64. K1024 and K4096 return the
