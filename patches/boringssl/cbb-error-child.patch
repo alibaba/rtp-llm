@@ -1,0 +1,14 @@
+--- a/src/crypto/bytestring/cbb.c
++++ b/src/crypto/bytestring/cbb.c
+@@ -511,4 +511,5 @@
+       !CBB_add_bytes(&child, data, data_len) ||
+       !CBB_flush(cbb)) {
++    cbb->child = NULL;
+     return 0;
+   }
+@@ -522,4 +523,5 @@
+       !CBB_add_u8(&child, value != 0 ? 0xff : 0) ||
+       !CBB_flush(cbb)) {
++    cbb->child = NULL;
+     return 0;
+   }
