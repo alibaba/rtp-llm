@@ -189,6 +189,10 @@ struct KVCacheConfig {
     double  block_tree_disk_evict_high_watermark_ratio   = kDefaultDiskHighWatermarkRatio;
     int      reuse_cache_tail_blocks                           = std::numeric_limits<int>::max();
     uint32_t linear_pool_blocks                                = 0;
+    // Opt-in for model-declared D-side chained-MTP state layouts. The linear
+    // pool override counts full SSM slots; conv/replay capacities derive from it.
+    bool     linear_ssm_double_buffer = false;
+    bool     linear_ssm_replay        = false;
     uint32_t swa_pool_blocks                                   = 0;
     // Opt-in request policy; only models declaring history-state reclaim support may enable it.
     bool enable_linear_cache_reclaim = false;

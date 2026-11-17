@@ -10,6 +10,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <list>
+#include <stdexcept>
 
 namespace rtp_llm {
 
@@ -33,9 +34,10 @@ public:
                          int                                    dp_rank = 0) {
         cache_manager_    = cache_manager;
         metrics_reporter_ = metrics_reporter;
-        batch_size_       = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
-        scheduler_type_   = SchedulerType::kBatchDecode;
-        dp_rank_          = dp_rank;
+        validateRequestStateBatchSize(runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size);
+        batch_size_     = runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size;
+        scheduler_type_ = SchedulerType::kBatchDecode;
+        dp_rank_        = dp_rank;
     }
     virtual ~BatchDecodeScheduler() = default;
 
@@ -127,6 +129,9 @@ public:
     void updateSchedulerInfo(const std::string& scheduler_info) override {
         BatchDecodeSchedulerConfigLocal config;
         autil::legacy::FromJsonString(config, scheduler_info);
+        // Validate before publishing either field so a rejected update keeps the
+        // previous batch size and execution mode.
+        validateRequestStateBatchSize(config.batch_size_);
         batch_size_ = config.batch_size_;
         if (config.mode_ == "decode") {
             scheduler_type_ = SchedulerType::kBatchDecode;
@@ -335,6 +340,30 @@ public:
     }
 
 private:
+    void validateRequestStateBatchSize(int64_t batch_size) const {
+        if (!cache_manager_) {
+            return;
+        }
+        for (const auto& group : cache_manager_->cacheConfig().groups()) {
+            if (group.policy.group_type != CacheGroupType::REQUEST_STATE) {
+                continue;
+            }
+            const auto slots = group.policy.request_state_slots;
+            if (slots == 0 || group.block_num == 0) {
+                throw std::invalid_argument("fixed batch scheduler requires a finalized request-state pool: "
+                                            + group.tag);
+            }
+            // Physical block 0 is reserved. Checking every pool is equivalent
+            // to the minimum request capacity across SSM and replay groups.
+            const uint32_t capacity = (group.block_num - 1) / slots;
+            if (batch_size <= 0 || static_cast<uint64_t>(batch_size) > capacity) {
+                throw std::invalid_argument("fixed batch size " + std::to_string(batch_size)
+                                            + " exceeds request-state capacity " + std::to_string(capacity)
+                                            + " for cache group " + group.tag + "; expected a positive batch size");
+            }
+        }
+    }
+
     std::atomic<bool>            stop_requested_{false};
     std::mutex                   lock_;
     std::condition_variable      cond_;
@@ -343,7 +372,7 @@ private:
     std::list<GenerateStreamPtr> running_streams_;
     uint32_t                     batch_size_;
     bool                         reorder_request_;
-    uint32_t                     current_step_ = 0;
+    uint32_t                     current_step_         = 0;
     bool                         draining_mixed_modes_ = false;
 
     std::shared_ptr<KVCacheManager> cache_manager_;

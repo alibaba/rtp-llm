@@ -104,6 +104,14 @@ public:
         return static_cast<int>(grouped_layout_.topology().group(tag).kernelSeqSizePerBlock());
     }
 
+    int getLinearStateLayout(const std::string& tag) const {
+        return static_cast<int>(grouped_layout_.topology().group(tag).policy.linear_state_layout);
+    }
+
+    uint32_t getRequestStateSlots(const std::string& tag) const {
+        return grouped_layout_.topology().group(tag).policy.request_state_slots;
+    }
+
     // Entry count of the exposed layer-cache view; zero for non-opaque specs.
     size_t getEntriesPerBlock(const std::string& tag) const;
 

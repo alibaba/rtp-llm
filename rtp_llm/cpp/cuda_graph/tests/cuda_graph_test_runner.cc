@@ -74,11 +74,12 @@ public:
         runner_ = CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance)));
     }
 
-    void init_mtp_draft_prefill(py::object py_instance,
-                                int64_t    max_requests,
-                                int64_t    hidden_size,
-                                int64_t    num_tokens_per_request,
-                                int64_t    hc_mult) {
+    void init_mtp_draft_prefill(py::object       py_instance,
+                                int64_t          max_requests,
+                                int64_t          hidden_size,
+                                int64_t          num_tokens_per_request,
+                                int64_t          hc_mult,
+                                std::vector<int> decode_capture_batch_sizes) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph        = true;
@@ -143,7 +144,8 @@ public:
                      bool                     is_target_verify,
                      int64_t                  num_tokens_per_bs,
                      int64_t                  position_id_len_factor,
-                     int64_t                  max_context_batch_size) {
+                     int64_t                  max_context_batch_size,
+                     std::vector<int>         state_layouts) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph            = true;
@@ -158,9 +160,12 @@ public:
         params.max_context_batch_size     = static_cast<size_t>(max_context_batch_size);
         params.decode_capture_batch_sizes = std::move(decode_capture_batch_sizes);
         params.kv_cache_group_tags        = std::move(group_tags);
-        params.is_target_verify           = is_target_verify;
-        params.position_id_len_factor     = static_cast<int>(position_id_len_factor);
-        params.kernel_block_table_width   = kernel_block_table_width;
+        for (const int layout : state_layouts) {
+            params.kv_cache_state_layouts.push_back(static_cast<LinearStateLayout>(layout));
+        }
+        params.is_target_verify         = is_target_verify;
+        params.position_id_len_factor   = static_cast<int>(position_id_len_factor);
+        params.kernel_block_table_width = kernel_block_table_width;
 
         runner_ = CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance)));
     }
@@ -284,8 +289,9 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("py_instance"),
              py::arg("max_requests"),
              py::arg("hidden_size"),
-             py::arg("num_tokens_per_request") = 4,
-             py::arg("hc_mult")                = 4)
+             py::arg("num_tokens_per_request")     = 4,
+             py::arg("hc_mult")                    = 4,
+             py::arg("decode_capture_batch_sizes") = std::vector<int>{})
         .def("init_decode",
              &CudaGraphTestRunner::init_decode,
              py::arg("py_instance"),
@@ -297,7 +303,8 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("is_target_verify")       = false,
              py::arg("num_tokens_per_bs")      = 1,
              py::arg("position_id_len_factor") = 0,
-             py::arg("max_context_batch_size") = 128)
+             py::arg("max_context_batch_size") = 128,
+             py::arg("state_layouts")          = std::vector<int>{})
         .def("init_generation_prefill",
              &CudaGraphTestRunner::init_generation_prefill,
              py::arg("py_instance"),

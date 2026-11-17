@@ -120,6 +120,9 @@ GroupSetPtr createGroupSet(const GroupBase&                group,
                            DiskBlockPoolPtr                disk_pool) {
     GroupSetPtr result;
     switch (group.policy.group_type) {
+        case CacheGroupType::REQUEST_STATE:
+            RTP_LLM_CHECK_WITH_INFO(false, "request state must not enter the prefix cache");
+            break;
         case CacheGroupType::FULL:
             result =
                 std::make_shared<FullGroupSet>(std::move(device_pools), std::move(host_pool), std::move(disk_pool));

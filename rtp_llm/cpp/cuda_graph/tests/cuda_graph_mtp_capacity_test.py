@@ -16,6 +16,7 @@ from rtp_llm.ops.compute_ops import PyModelOutputs
 class PackedDraftCapacityModel:
     def __init__(self, hc_mult=4):
         self.shapes = set()
+        self.inputs_by_batch = {}
         self.hc_mult = hc_mult
 
     def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
@@ -26,6 +27,7 @@ class PackedDraftCapacityModel:
         metadata = get_primary_attention_inputs(inputs)
         batch = metadata.input_lengths_device.numel()
         self.shapes.add((rows, batch))
+        self.inputs_by_batch[batch] = inputs
         hidden = inputs.input_hiddens.reshape(rows, self.hc_mult, 4).sum(1)
         return PyModelOutputs(hidden + inputs.input_ids.to(hidden.dtype)[:, None])
 
@@ -56,16 +58,18 @@ class MtpGraphCapacityTest(unittest.TestCase):
         # HC width and speculative request lanes are independent dimensions.
         for lanes, hc_mult in ((1, 4), (2, 4), (3, 1), (4, 4)):
             with self.subTest(lanes=lanes, hc_mult=hc_mult):
-                self._check_request_capacity(lanes, hc_mult)
+                self._check_request_capacity(lanes, hc_mult, [1, 2, 4, 8])
 
-    def _check_request_capacity(self, lanes, hc_mult):
+    def test_default_request_buckets_pad_intermediate_batches(self):
+        self._check_request_capacity(3, 4, [])
+
+    def _check_request_capacity(self, lanes, hc_mult, configured_buckets):
         torch.cuda.set_device(0)
         model = DraftCapacityModel(lanes, hc_mult)
         runner = CudaGraphRunner()
-        runner.init_mtp_draft_prefill(model, 8, 4, lanes, hc_mult)
-        self.assertEqual(
-            model.shapes, {(lanes * batch, batch) for batch in range(1, 9)}
-        )
+        runner.init_mtp_draft_prefill(model, 8, 4, lanes, hc_mult, configured_buckets)
+        buckets = (configured_buckets or [1, 8]) if torch.version.hip else list(range(1, 9))
+        self.assertEqual(model.shapes, {(lanes * batch, batch) for batch in buckets})
 
         # The same graph keys are revisited after both larger and smaller
         # batches. Even one-token requests retain the configured request lanes.
@@ -78,6 +82,8 @@ class MtpGraphCapacityTest(unittest.TestCase):
             [1, 1],
             [min(2, lanes)],
             [max(1, lanes - 1)] * 7,
+            [1] * 5,
+            [lanes] * 6,
             [1],
         ):
             with self.subTest(lengths=lengths):
@@ -112,10 +118,43 @@ class MtpGraphCapacityTest(unittest.TestCase):
                     + (positions + inputs.input_ids).to(expected.dtype)[:, None]
                 )
                 self.assertTrue(runner.canRun(inputs))
-                self.assertEqual(runner.getCurrentRealGraphSize(), lanes * len(lengths))
+                selected_batch = next(
+                    batch for batch in buckets if batch >= len(lengths)
+                )
+                self.assertEqual(
+                    runner.getCurrentRealGraphSize(), lanes * selected_batch
+                )
                 output = runner.forward(inputs).hidden_states.clone()
                 torch.cuda.synchronize()
                 torch.testing.assert_close(output, expected, rtol=0, atol=0)
+                captured = model.inputs_by_batch[selected_batch]
+                captured_metadata = get_primary_attention_inputs(captured)
+                padding = selected_batch - len(lengths)
+                self.assertEqual(
+                    captured_metadata.input_lengths_device.tolist(),
+                    lengths + [0] * padding,
+                )
+                self.assertEqual(
+                    captured_metadata.prefix_lengths_device.tolist(),
+                    [7] * len(lengths) + [0] * padding,
+                )
+                expected_cu = [0]
+                for length in lengths:
+                    expected_cu.append(expected_cu[-1] + length)
+                self.assertEqual(
+                    captured_metadata.cu_seqlens_device.tolist(),
+                    expected_cu + [rows] * padding,
+                )
+                self.assertEqual(
+                    captured_metadata.kv_cache_kernel_block_id_device[len(lengths) :]
+                    .count_nonzero()
+                    .item(),
+                    0,
+                )
+                self.assertEqual(captured.input_ids[rows:].count_nonzero().item(), 0)
+                self.assertEqual(
+                    captured.input_hiddens[rows:].count_nonzero().item(), 0
+                )
 
         overflow = fixtures._build_prefill_inputs(["full"], {"full": 1}, [1] * 9)
         overflow.attention_inputs = get_primary_attention_inputs(overflow)
@@ -125,7 +164,9 @@ class MtpGraphCapacityTest(unittest.TestCase):
         torch.cuda.set_device(0)
         model = PackedDraftCapacityModel(hc_mult=4)
         runner = CudaGraphRunner()
-        runner.init_mtp_draft_prefill(model, 8, 4, 3, 4)
+        # A packed backend has not declared request-lane padding support; a
+        # sparse decode configuration must not change its capture geometry.
+        runner.init_mtp_draft_prefill(model, 8, 4, 3, 4, [1, 4, 8])
         self.assertEqual(model.shapes, {(3 * batch, 8) for batch in range(1, 9)})
         for lengths in ([1] * 8, [3], [3, 1, 2]):
             with self.subTest(lengths=lengths):
@@ -174,6 +215,14 @@ class MtpGraphCapacityTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "int32 token/padding"):
                     CudaGraphRunner().init_mtp_draft_prefill(
                         DraftCapacityModel(), 8, 4, lanes, 4
+                    )
+
+    def test_request_bucket_outside_capacity_rejected_before_capture(self):
+        for buckets in ([0, 8], [1, 9]):
+            with self.subTest(buckets=buckets):
+                with self.assertRaisesRegex(RuntimeError, "request bucket .* must be"):
+                    CudaGraphRunner().init_mtp_draft_prefill(
+                        DraftCapacityModel(3, 4), 8, 4, 3, 4, buckets
                     )
 
 

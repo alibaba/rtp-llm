@@ -27,6 +27,10 @@ public:
 
     void waitDone();
 
+    // Cancellation/deadline ends waitDone(), not the underlying writes. Split
+    // state handoff must drain real transport callbacks before acknowledging a rank.
+    void waitCallbacksDrained();
+
     bool                     success() const;
     const ErrorInfo&         getErrorInfo() const;
     std::string              getErrorInfoString() const;

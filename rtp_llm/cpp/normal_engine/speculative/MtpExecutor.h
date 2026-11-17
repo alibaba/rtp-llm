@@ -120,11 +120,13 @@ protected:
     bool                reduceSpeculativeTargetPrepareStatus(bool local_ok);
     static bool         asyncPrepareAllowed(bool requested, bool target_commit_hooks);
     static absl::Status validateSpeculativeTargetExecutionPolicy(bool target_commit_hooks, bool eplb_enabled);
+    static absl::Status validateSpeculativeTargetCommitCapability(bool required, bool hooks, bool fail_stop);
+    static void         runSpeculativeBookkeeping(bool fail_stop, const std::function<absl::Status()>& work);
     bool                speculativeTargetTransactionsEnabled() const;
     absl::Status        rendezvousSpeculativeTargetPhaseStatus(const absl::Status& local_status, const char* phase);
     absl::Status        rendezvousSpeculativeTargetSamplingStatus(const absl::Status& local_status);
-    absl::Status
-    prepareAndCommitSpeculativeTargetState(torch::Tensor& accept_len, size_t batch_size, bool is_fake_stream = false);
+    absl::Status prepareAndCommitSpeculativeTargetState(
+        torch::Tensor& accept_len, size_t batch_size, bool is_fake_stream = false, const std::function<void()>& before_completion = {});
     void                rollbackSpeculativeTargetStateOrFailStop(const char* phase);
     void                rollbackSpeculativeTargetStateBestEffort(const char* phase) noexcept;
 
@@ -359,6 +361,7 @@ private:
 
     // Test seam for the host transaction control transport.
     std::function<bool(bool)> speculative_target_status_reducer_for_test_;
+    bool                      require_speculative_target_commit_fail_stop_{false};
     std::function<void()>     before_model_forward_;
     std::function<void()>     after_model_forward_;
     bool                      profile_work_started_ = false;

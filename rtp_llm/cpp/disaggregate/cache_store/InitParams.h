@@ -11,6 +11,8 @@ struct MessagerInitParams {
     uint32_t io_thread_count     = 2;
     uint32_t worker_thread_count = 4;
     uint32_t worker_queue_size   = 100;
+    uint32_t rpc_client_queue_size = 1000;
+    bool isolated_rocm_copy_stream = false;
     int      device_id           = -1;
 
     uint32_t rdma_server_port         = 0;
@@ -27,6 +29,8 @@ public:
 
     uint32_t thread_count{2};
     uint32_t queue_size{100};
+    uint32_t rpc_client_queue_size{1000};
+    bool isolated_rocm_copy_stream{false};
 
     // memory util
     void*    stream{nullptr};

@@ -82,7 +82,9 @@ struct KVCacheSpecDesc {
     std::optional<CacheMemoryPolicyDesc>   memory;
     std::optional<CacheTailPolicyDesc>     tail;
     std::optional<CacheCpPolicyDesc>       cp;
-    TpCacheTransferMode                    tp_transfer_mode = TpCacheTransferMode::LEGACY;
+    TpCacheTransferMode                    tp_transfer_mode    = TpCacheTransferMode::LEGACY;
+    LinearStateLayout                      linear_state_layout = LinearStateLayout::LEGACY;
+    uint32_t                               request_state_slots = 0;
 };
 
 struct SpecBuildContext {

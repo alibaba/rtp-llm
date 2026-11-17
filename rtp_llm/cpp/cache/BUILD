@@ -34,6 +34,7 @@ cc_library(
     name = "cache_group_type",
     hdrs = [
         "CacheGroupType.h",
+        "LinearStateCacheTransfer.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
@@ -255,12 +256,14 @@ cc_library(
     name = "single_type_cache_manager",
     srcs = [
         "FullCacheManager.cc",
+        "RequestStateCacheManager.cc",
         "SingleTypeCacheManager.cc",
         "LinearCacheManager.cc",
         "SWACacheManager.cc",
     ],
     hdrs = [
         "FullCacheManager.h",
+        "RequestStateCacheManager.h",
         "SingleTypeCacheManager.h",
         "LinearCacheManager.h",
         "SWACacheManager.h",

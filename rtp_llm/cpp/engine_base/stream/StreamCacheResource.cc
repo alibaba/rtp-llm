@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <algorithm>
 #include <limits>
+#include <numeric>
 #include <thread>
 
 using namespace std;
@@ -232,6 +233,11 @@ absl::Status StreamCacheResource::initKVBlock() {
     // Follow-up allocations (incrKVBlock) use enableCacheLookup().
     if (fake_inited_) {
         return absl::InternalError("fake inited not allow to incr block");
+    }
+    for (const auto& group : resource_context_.cache_manager->cacheConfig().topology().groups()) {
+        if (group.policy.group_type == CacheGroupType::REQUEST_STATE && stream_->maxBatchSize() != 1) {
+            return absl::InvalidArgumentError("linear SSM double buffer supports one sequence per request");
+        }
     }
 
     MallocInfo malloc_info;
@@ -669,6 +675,34 @@ void StreamCacheResource::fakeInitKVBlock(size_t reserved_blocks) {
 
     reserved_blocks = std::max(1ul, reserved_blocks);
     batch_kv_cache_resource_->resizeBlocks(reserved_blocks, 0);
+    for (const auto& group : topology->groups()) {
+        if (group.policy.group_type == CacheGroupType::REQUEST_STATE
+            || group.policy.linear_state_layout == LinearStateLayout::DOUBLE_BUFFER_CONV) {
+            RTP_LLM_CHECK_WITH_INFO(resource_context_.cache_manager && resource_context_.cache_manager->isWarmup(),
+                                    "split request state supports fake streams only in a dedicated warmup pool");
+        }
+        if (group.policy.linear_state_layout == LinearStateLayout::DOUBLE_BUFFER_CONV) {
+            RTP_LLM_CHECK_WITH_INFO(1 + stream_->maxBatchSize() <= group.block_num,
+                                    "warmup convolution pool cannot cover the active batch");
+            for (int batch = 0; batch < batch_kv_cache_resource_->batchSize(); ++batch) {
+                // NormalExecutor warmup performs single-token decode only.
+                batch_kv_cache_resource_->mutableBlockIds(batch, group.tag)
+                    .assign(BlockIndicesType(reserved_blocks, 1 + batch));
+            }
+            continue;
+        }
+        if (group.policy.group_type != CacheGroupType::REQUEST_STATE) {
+            continue;
+        }
+        const size_t slots = group.policy.request_state_slots;
+        RTP_LLM_CHECK_WITH_INFO(1 + slots * stream_->maxBatchSize() <= group.block_num,
+                                "warmup request-state pool cannot cover the active batch");
+        for (int batch = 0; batch < batch_kv_cache_resource_->batchSize(); ++batch) {
+            BlockIndicesType banks(slots);
+            std::iota(banks.begin(), banks.end(), 1 + batch * slots);
+            batch_kv_cache_resource_->mutableBlockIds(batch, group.tag).assign(std::move(banks));
+        }
+    }
 }
 
 int StreamCacheResource::mallocFailedTimes() const {
@@ -739,6 +773,26 @@ void StreamCacheResource::holdKVCacheForPDSep() {
     auto        ref = resource_context_.cache_manager->incrKVCacheRef(resource, cache_keys, /*is_connector=*/true);
     if (ref) {
         pd_kvcache_ref_ = std::move(ref);
+    }
+}
+
+void StreamCacheResource::commitLinearState(int32_t batch_id) {
+    // Fake/warmup streams can carry a topology without owning a cache manager.
+    // They have no persistent state to commit.
+    if (!resource_context_.cache_manager) {
+        return;
+    }
+    for (const auto& group : resource_context_.cache_manager->cacheConfig().topology().groups()) {
+        if (group.policy.linear_state_layout == LinearStateLayout::DOUBLE_BUFFER_SSM) {
+            RTP_LLM_CHECK_WITH_INFO(batch_kv_cache_resource_->blocksNum(batch_id, group.tag) == 2,
+                                    "SSM commit requires a committed/scratch pair");
+            batch_kv_cache_resource_->swapBlocks(batch_id, group.tag, 0, 1);
+        } else if (group.policy.linear_state_layout == LinearStateLayout::SINGLE_SSM) {
+            RTP_LLM_CHECK_WITH_INFO(batch_kv_cache_resource_->blocksNum(batch_id, group.tag) == 1,
+                                    "single SSM commit requires exactly one committed slot");
+            // Replay already committed the accepted prefix in place. Both
+            // host and device tables retain this allocator-owned physical ID.
+        }
     }
 }
 

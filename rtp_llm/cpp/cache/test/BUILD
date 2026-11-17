@@ -278,6 +278,15 @@ cc_library(
 )
 
 cc_test(
+    name = "request_state_cache_manager_test",
+    srcs = ["RequestStateCacheManagerTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [":block_pool_test_helper", ":block_tree_cache_allocator_test_helper"],
+    exec_properties = {"gpu": "H20_CU13"},
+    tags = ["H20_CU13"],
+)
+
+cc_test(
     name = "block_pool_zero_init_test",
     srcs = ["BlockPoolZeroInitTest.cc"],
     copts = copts(),

@@ -896,6 +896,18 @@ TransferCompletionQueryResult KVCacheManager::queryTransferCompletion(const Froz
         .query(execution, timeout_ms);
 }
 
+void KVCacheManager::quarantineCacheLoad(const KVCacheResource& resource,
+                                         const std::string&     request_key,
+                                         const std::string&     reason) {
+    RTP_LLM_CHECK_WITH_INFO(initialized() && isAllocatorOwner(),
+                            "cache load quarantine requires the initialized allocator owner");
+    coordinator_manager_->quarantineCacheLoad(resource, request_key, reason);
+}
+
+bool KVCacheManager::hasQuarantinedCacheLoads() const {
+    return initialized() && coordinator_manager_->quarantinedCacheLoadCount() != 0;
+}
+
 bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
     if (request.has_completion_forget()) {
         auto* forget_response = response.mutable_completion_forget();

@@ -109,6 +109,7 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
         switch (policy.group_type) {
             case CacheGroupType::FULL:
             case CacheGroupType::LINEAR:
+            case CacheGroupType::REQUEST_STATE:
                 addBudgetBytes(budget.paged_block_bytes, group_bytes, config.blockWeight(group.tag));
                 break;
             case CacheGroupType::SWA:
@@ -263,9 +264,9 @@ void validateDescs(const ModelConfig& model_config, uint32_t kernel_tokens_per_b
                                         desc.tag.c_str(),
                                         desc.compression_ratio,
                                         kernel_tokens_per_block);
-                const bool qwen4_atom_indexer = (model_config.model_type == "atom_qwen4_exp"
-                                                 || model_config.model_type == "atom_qwen4_exp_mtp")
-                                                 && desc.tag == "indexer_kv" && desc.compression_ratio == 4;
+                const bool qwen4_atom_indexer =
+                    (model_config.model_type == "atom_qwen4_exp" || model_config.model_type == "atom_qwen4_exp_mtp")
+                    && desc.tag == "indexer_kv" && desc.compression_ratio == 4;
                 if (desc.compression_ratio > 1 && !qwen4_atom_indexer) {
                     RTP_LLM_CHECK_WITH_INFO(
                         kernel_tokens_per_block >= kCompressedKernelSeqSizeAlignment
@@ -355,6 +356,127 @@ void populateGroups(CacheConfig&                 config,
     config.setTopology(std::move(groups), std::move(layers));
 }
 
+LayerKVCacheSpecDescs resolveLinearStateLayout(const ModelConfig&       model,
+                                               const ParallelismConfig& parallel,
+                                               const KVCacheConfig&     options,
+                                               const SpecBuildContext&  ctx) {
+    auto       descs = model.kv_cache_spec_descs;
+    const bool supported_topology =
+        parallel.get_attn_tp_size() == 2 && parallel.pp_size == 1 && !parallel.prefill_cp_config.is_enabled()
+        && !parallel.prefill_cp_config.is_prefill_enabled() && !parallel.prefill_cp_config.kv_cache_sharded
+        && parallel.prefill_cp_config.prefill_cp_size <= 1;
+    RTP_LLM_CHECK_WITH_INFO(!(options.linear_ssm_double_buffer && options.linear_ssm_replay),
+                            "linear_ssm_double_buffer and linear_ssm_replay are mutually exclusive");
+    const bool     split       = options.linear_ssm_double_buffer || options.linear_ssm_replay;
+    const uint32_t state_slots = options.linear_ssm_replay ? 1 : 2;
+    if (split) {
+        RTP_LLM_CHECK_WITH_INFO(parallel.role_type == RoleType::DECODE && supported_topology && parallel.dp_size == 1
+                                    && !parallel.ffn_disaggregate_config.enable_ffn_disaggregate && !options.reuse_cache
+                                    && !options.enable_remote_cache && ctx.gen_num_per_cycle > 0
+                                    && ctx.gen_num_per_cycle <= 3,
+                                "split linear SSM requires D, TP2/CP1/DP1, no FFN disaggregation, "
+                                "reuse off and chained MTP "
+                                "with 1 to 3 draft tokens");
+        RTP_LLM_CHECK_WITH_INFO(options.linear_pool_blocks > state_slots,
+                                "split linear SSM requires linear_pool_blocks > %u "
+                                "(SSM slots per request plus the reserved null slot)",
+                                state_slots);
+        RTP_LLM_CHECK_WITH_INFO(ctx.seq_size_per_block >= ctx.gen_num_per_cycle + 1,
+                                "split linear SSM requires a page span at least as large as the verify width");
+    }
+    bool declared = false;
+    for (auto& layer : descs) {
+        std::vector<KVCacheSpecDesc> resolved;
+        for (auto desc : layer) {
+            if (desc.linear_state_layout != LinearStateLayout::SPLIT_EXPORT) {
+                RTP_LLM_CHECK_WITH_INFO(!split || desc.cache_type != KVCacheSpecType::LinearAttention,
+                                        "model must declare the split linear-state layout on every linear layer");
+                resolved.push_back(std::move(desc));
+                continue;
+            }
+            RTP_LLM_CHECK_WITH_INFO(desc.cache_type == KVCacheSpecType::LinearAttention && desc.tag == "linear",
+                                    "split linear state requires the model's linear attention descriptor");
+            declared = true;
+            if (!split) {
+                if (!supported_topology) {
+                    desc.linear_state_layout = LinearStateLayout::LEGACY;
+                }
+                resolved.push_back(std::move(desc));
+                continue;
+            }
+            const auto  legacy = SpecBuilder::build(desc, ctx);
+            const auto& linear = model.linear_attention_config;
+            RTP_LLM_CHECK_WITH_INFO(linear.ssm_state_dtype == DataType::TYPE_FP32
+                                        && linear.conv_state_dtype == DataType::TYPE_BF16
+                                        && linear.linear_key_head_dim == 128 && linear.linear_value_head_dim == 128,
+                                    "hybrid replay requires FP32 128x128 SSM and BF16 convolution state");
+            const uint64_t requests = (options.linear_pool_blocks - 1) / state_slots;
+            const uint64_t query    = static_cast<uint64_t>(ctx.gen_num_per_cycle) + 1;
+            // Conv keeps two history slots and Q candidates. malloc is serialized
+            // and cleans up each single-sequence request before allocating the
+            // next, so one additional rollover block covers the transient peak.
+            const uint64_t conv_blocks = 2 + requests * (query + 2);
+            RTP_LLM_CHECK_WITH_INFO(conv_blocks <= static_cast<uint64_t>(std::numeric_limits<int>::max()),
+                                    "linear convolution pool capacity overflows int");
+            auto region = [&](const std::string& tag,
+                              LinearStateLayout  layout,
+                              DataType           dtype,
+                              size_t             elems,
+                              uint32_t           entries,
+                              CacheGroupType     type,
+                              uint32_t           slots,
+                              uint32_t           blocks) {
+                RTP_LLM_CHECK_WITH_INFO(elems > 0 && elems <= std::numeric_limits<uint32_t>::max(),
+                                        "linear state entry width is out of range");
+                KVCacheSpecDesc result;
+                result.tag                  = tag;
+                result.cache_type           = KVCacheSpecType::OpaqueState;
+                result.is_state_cache       = true;
+                result.dtype                = dtype;
+                result.entry_dtype          = dtype;
+                result.entry_elems          = static_cast<uint32_t>(elems);
+                result.explicit_entry_count = entries;
+                result.group_type           = type;
+                result.linear_state_layout  = layout;
+                result.request_state_slots  = slots;
+                result.reuse                = CacheReusePolicyDesc{false};
+                result.capacity             = CacheCapacityPolicyDesc{true, blocks, true};
+                return result;
+            };
+            resolved.push_back(region("linear",
+                                      LinearStateLayout::SPLIT_CONV,
+                                      linear.conv_state_dtype,
+                                      legacy->v_block_size_bytes() / getTypeSize(linear.conv_state_dtype),
+                                      1,
+                                      CacheGroupType::LINEAR,
+                                      0,
+                                      static_cast<uint32_t>(conv_blocks)));
+            resolved.push_back(
+                region("linear_ssm",
+                       options.linear_ssm_replay ? LinearStateLayout::SINGLE_SSM : LinearStateLayout::DOUBLE_BUFFER_SSM,
+                       linear.ssm_state_dtype,
+                       legacy->k_block_size_bytes() / getTypeSize(linear.ssm_state_dtype),
+                       1,
+                       CacheGroupType::REQUEST_STATE,
+                       state_slots,
+                       options.linear_pool_blocks));
+            const size_t record_elems =
+                static_cast<size_t>(linear.linear_num_value_heads / 2) * 3 * linear.linear_value_head_dim;
+            resolved.push_back(region("linear_replay",
+                                      LinearStateLayout::SPLIT_REPLAY,
+                                      DataType::TYPE_FP32,
+                                      record_elems,
+                                      static_cast<uint32_t>(query),
+                                      CacheGroupType::REQUEST_STATE,
+                                      1,
+                                      static_cast<uint32_t>(requests + 1)));
+        }
+        layer = std::move(resolved);
+    }
+    RTP_LLM_CHECK_WITH_INFO(!split || declared, "model has not declared support for split linear SSM");
+    return descs;
+}
+
 CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
                                   const ParallelismConfig& parallelism_config,
                                   const KVCacheConfig&     kv_cache_config,
@@ -365,8 +487,8 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     validateAttentionMetadata(model_config);
     const auto ctx =
         makeSpecBuildContext(model_config, parallelism_config, seq_size, kernel_seq_size, gen_num_per_cycle);
-    const auto specs =
-        CacheConfigCreator::buildLayerSpecsFromDescs(model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
+    const auto descs = resolveLinearStateLayout(model_config, parallelism_config, kv_cache_config, ctx);
+    const auto specs = CacheConfigCreator::buildLayerSpecsFromDescs(descs, ctx, model_config.num_layers);
 
     CacheConfig config;
     config.dtype                   = ctx.dtype;
@@ -378,7 +500,7 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     config.seq_size_per_block = seq_size;
     config.use_mla            = model_config.attn_config.use_mla;
     config.is_sparse          = model_config.attn_config.is_sparse;
-    populateGroups(config, model_config.kv_cache_spec_descs, specs, model_config);
+    populateGroups(config, descs, specs, model_config);
     for (const auto& group : config.topology().groups()) {
         const bool opaque =
             group.spec->type == KVCacheSpecType::OpaqueKV || group.spec->type == KVCacheSpecType::OpaqueState;
@@ -530,7 +652,9 @@ CacheConfig CacheConfigCreator::createWarmupConfig(const ModelConfig&       mode
 CacheConfig CacheConfigCreator::createWarmupConfig(const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,
                                                    const KVCacheConfig&     kv_cache_config,
-                                                   int                      gen_num_per_cycle) {
+                                                   int                      gen_num_per_cycle,
+                                                   int                      request_batch_size) {
+    RTP_LLM_CHECK_WITH_INFO(request_batch_size > 0, "warmup batch must be positive");
     const auto stage_model_config = stageScopedModelConfig(model_config, parallelism_config);
     const auto range = stageLayerRange(parallelism_config, parallelism_config.pp_rank, model_config.num_layers);
     auto       config =
@@ -540,6 +664,17 @@ CacheConfig CacheConfigCreator::createWarmupConfig(const ModelConfig&       mode
     auto groups = config.topology().groups();
     for (auto& group : groups) {
         group.block_num = 2;
+        // Unlike paged KV, writable request state cannot alias block 0 across
+        // batch rows. Reserve distinct physical slots for the warmup batch,
+        // without retaining the production-sized explicit pool.
+        if (group.policy.group_type == CacheGroupType::REQUEST_STATE) {
+            const uint64_t count = 1 + static_cast<uint64_t>(request_batch_size) * group.policy.request_state_slots;
+            RTP_LLM_CHECK_WITH_INFO(count <= group.policy.explicit_block_num,
+                                    "warmup batch exceeds the configured request-state capacity");
+            group.block_num = static_cast<uint32_t>(count);
+        } else if (group.policy.linear_state_layout == LinearStateLayout::DOUBLE_BUFFER_CONV) {
+            group.block_num = 1 + static_cast<uint32_t>(request_batch_size);
+        }
     }
     config.setTopology(std::move(groups), config.topology().layers());
     return config;
@@ -558,6 +693,11 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
         draft_model_config == nullptr
             || (sp_config->gen_num_per_cycle >= 0 && sp_config->gen_num_per_cycle <= std::numeric_limits<int>::max()),
         "draft proposal token count must fit a non-negative int");
+    if (kv_cache_config.linear_ssm_double_buffer || kv_cache_config.linear_ssm_replay) {
+        RTP_LLM_CHECK_WITH_INFO(sp_config && sp_config->type == SP_TYPE_MTP && is_mtp && !is_eagle
+                                    && sp_config->tree_decode_config.empty() && draft_model_config != nullptr,
+                                "split linear SSM requires a chained MTP target/draft configuration");
+    }
     const int  gen_num_per_cycle  = draft_model_config != nullptr ? sp_config->gen_num_per_cycle : 0;
     const auto stage_model_config = stageScopedModelConfig(model_config, parallelism_config);
     const auto range = stageLayerRange(parallelism_config, parallelism_config.pp_rank, model_config.num_layers);
@@ -568,16 +708,17 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
         const auto layout = RankLayout::fromParallelismConfig(parallelism_config);
         RTP_LLM_CHECK_WITH_INFO(layout.isLastStage(), "draft cache configuration is only valid on the last PP stage");
         auto draft_model = stageScopedModelConfig(*draft_model_config, parallelism_config, true);
+        auto draft_options                     = kv_cache_config;
+        draft_options.linear_ssm_double_buffer = false;
+        draft_options.linear_ssm_replay        = false;
         auto draft       = createBasicConfig(
-            draft_model, parallelism_config, kv_cache_config, gen_num_per_cycle, /*global_layer_begin=*/0);
-        // DSpARK/DFlash are single multi-layer block-draft models; gamma is
-        // the proposal width, not a count of independent one-layer modules.
-        int num_mtp_modules = is_mtp && !is_eagle && !isBlockDraftType(sp_config->type) ? gen_num_per_cycle : 1;
-        RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0, "draft cache configuration requires at least one module");
-        config.mtp_sub_configs.reserve(static_cast<size_t>(num_mtp_modules));
-        for (int module = 0; module < num_mtp_modules; ++module) {
-            config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, module, config.layer_num));
+            draft_model, parallelism_config, draft_options, gen_num_per_cycle, /*global_layer_begin=*/0);
+        if (is_mtp && !is_eagle && !isBlockDraftType(sp_config->type)) {
+            RTP_LLM_CHECK_WITH_INFO(gen_num_per_cycle > 0, "draft cache configuration requires at least one module");
         }
+        // The executor and PD transfer use only draft module 0. Proposal width
+        // still sizes speculative state; it does not count active draft models.
+        config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, /*module_index=*/0, config.layer_num));
     }
     resolvePoolBlockWeights(config, kv_cache_config.kv_cache_pool_block_weights, parallelism_config.pp_size);
     return config;

@@ -146,7 +146,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::enum_<CacheGroupType>(m, "CacheGroupType")
         .value("LINEAR", CacheGroupType::LINEAR)
         .value("FULL", CacheGroupType::FULL)
-        .value("SWA", CacheGroupType::SWA);
+        .value("SWA", CacheGroupType::SWA)
+        .value("REQUEST_STATE", CacheGroupType::REQUEST_STATE);
+
+    py::enum_<LinearStateLayout>(m, "LinearStateLayout")
+        .value("LEGACY", LinearStateLayout::LEGACY)
+        .value("SPLIT_EXPORT", LinearStateLayout::SPLIT_EXPORT)
+        .value("DOUBLE_BUFFER_CONV", LinearStateLayout::DOUBLE_BUFFER_CONV)
+        .value("DOUBLE_BUFFER_SSM", LinearStateLayout::DOUBLE_BUFFER_SSM)
+        .value("DOUBLE_BUFFER_REPLAY", LinearStateLayout::DOUBLE_BUFFER_REPLAY)
+        .value("SINGLE_SSM", LinearStateLayout::SINGLE_SSM)
+        .value("SPLIT_CONV", LinearStateLayout::SPLIT_CONV)
+        .value("SPLIT_REPLAY", LinearStateLayout::SPLIT_REPLAY);
 
     py::enum_<CacheMemoryPlacement>(m, "CacheMemoryPlacement")
         .value("DEVICE", CacheMemoryPlacement::DEVICE)
@@ -516,6 +527,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                        &KVCacheConfig::block_tree_disk_evict_high_watermark_ratio)
         .def_readwrite("reuse_cache_tail_blocks", &KVCacheConfig::reuse_cache_tail_blocks)
         .def_readwrite("linear_pool_blocks", &KVCacheConfig::linear_pool_blocks)
+        .def_readwrite("linear_ssm_double_buffer", &KVCacheConfig::linear_ssm_double_buffer)
+        .def_readwrite("linear_ssm_replay", &KVCacheConfig::linear_ssm_replay)
         .def_readwrite("swa_pool_blocks", &KVCacheConfig::swa_pool_blocks)
         .def_readwrite("enable_linear_cache_reclaim", &KVCacheConfig::enable_linear_cache_reclaim)
         .def_readwrite("kv_cache_pool_block_weights", &KVCacheConfig::kv_cache_pool_block_weights)
@@ -587,7 +600,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      25,
+                                      26,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -669,7 +682,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       // the per-pool block weights at the tail so indices 0-78
                                       // stay identical to main's v23.
                                       self.enable_linear_cache_reclaim,
-                                      self.kv_cache_pool_block_weights);
+                                      self.kv_cache_pool_block_weights,
+                                      self.linear_ssm_double_buffer,
+                                      self.linear_ssm_replay);
             },
             [](py::tuple t) {
                 // Pickle version ladder after merging main #1643 (dsv41 btc):
@@ -683,6 +698,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 //       (size 81).
                 // Each step strips its tail fields and steps the version down so
                 // both families' older states keep decoding through main's ladder.
+                const py::tuple replay_state = t;
+                const bool has_v26_replay = t.size() == 83 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 26;
+                if (has_v26_replay) {
+                    t = t[py::slice(0, 81, 1)].cast<py::tuple>();
+                    t[1] = py::int_(25);
+                }
                 const py::tuple pool_weights_v25_state = t;
                 const bool      has_v25_pool_weights_field =
                     t.size() == 81 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 25;
@@ -701,7 +722,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
                 const py::tuple merged_pool_state = t;
                 const bool      has_merged_pool_fields =
-                    t.size() == 74 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 11;
+                    t.size() == 74 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 11 && py::isinstance<py::str>(t[71]);
                 if (has_merged_pool_fields) {
                     t    = t[py::slice(0, 72, 1)].cast<py::tuple>();
                     t[1] = py::int_(10);
@@ -715,7 +736,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
                 const py::tuple reclaim_pool_state = t;
                 const bool      has_reclaim_pool_fields =
-                    t.size() == 73 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 10;
+                    t.size() == 73 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 10 && !py::isinstance<py::bool_>(t[72]);
                 if (has_reclaim_pool_fields) {
                     t    = t[py::slice(0, 71, 1)].cast<py::tuple>();
                     t[1] = py::int_(9);
@@ -734,15 +755,19 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 constexpr size_t kPinnedHostFieldCount           = 64;
                 constexpr size_t kReserveRemovedFieldCount       = 63;
                 constexpr size_t kV6FieldCount                   = 62;
-                // Tuple sizes for versions 7 through 23, including the tag and version.
+                // Tuple sizes for versions 7 through 24, including the tag and version.
                 constexpr size_t kExtendedStateSizes[] = {
-                    69, 70, 72, 78, 80, 84, 88, 89, 90, 91, 92, 94, 95, 96, 82, 80, 79};
+                    69, 70, 72, 78, 80, 84, 88, 89, 90, 91, 92, 94, 95, 96, 82, 80, 79, 81};
                 if (t.size() < 2 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])
                     || t[0].cast<std::string>() != "KVCacheConfig") {
                     throw std::runtime_error("invalid KVCacheConfig state");
                 }
 
-                const int  version = t[1].cast<int>();
+                const int stored_version = t[1].cast<int>();
+                // The ROCm branch extended v9 with SSM flags before upstream v10/v11.
+                const bool legacy_ssm_layout = (stored_version == 10 && t.size() == 73)
+                                               || (stored_version == 11 && t.size() == 74);
+                const int version = legacy_ssm_layout ? 9 : stored_version;
                 const bool valid_legacy_state =
                     version == 1 && (t.size() == kLegacyFieldCount + 2 || t.size() == kQueueConfigFieldCount + 2);
                 const bool valid_write_sync_state = version == 2 && t.size() == kWriteSyncFieldCount + 2;
@@ -752,7 +777,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 const bool valid_reserve_removed_state = version == 5 && t.size() == kReserveRemovedFieldCount + 2;
                 const bool valid_v6_state              = version == 6 && t.size() == kV6FieldCount + 2;
                 const bool valid_extended_state =
-                    version >= 7 && version <= 23 && t.size() == kExtendedStateSizes[version - 7];
+                    legacy_ssm_layout || (version >= 7 && version <= 24 && t.size() == kExtendedStateSizes[version - 7]);
                 if (!valid_legacy_state && !valid_write_sync_state && !valid_queue_write_sync_state
                     && !valid_pinned_host_state && !valid_reserve_removed_state && !valid_v6_state
                     && !valid_extended_state) {
@@ -796,6 +821,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                 }
 
+                if (has_v26_replay) {
+                    c.linear_ssm_double_buffer = replay_state[81].cast<bool>();
+                    c.linear_ssm_replay = replay_state[82].cast<bool>();
+                } else if (version == 24) {
+                    c.linear_ssm_double_buffer = t[79].cast<bool>();
+                    c.linear_ssm_replay        = t[80].cast<bool>();
+                } else if (legacy_ssm_layout) {
+                    c.linear_ssm_double_buffer = t[72].cast<bool>();
+                    c.linear_ssm_replay        = t.size() == 74 && t[73].cast<bool>();
+                }
                 // Legacy indices include host pinning (removed in v4) and the absolute reserve (removed in v5).
                 const auto value = [&](size_t index) {
                     return field(index + 2 - (version >= 4 && index > 18 ? 1 : 0)
@@ -2072,8 +2107,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("prefix_checkpoint_stride_blocks", &CacheTailPolicyDesc::prefix_checkpoint_stride_blocks)
         .def(py::pickle(
             [](const CacheTailPolicyDesc& self) {
-                return py::make_tuple(self.active_tail_blocks, self.validate_tail_blocks,
-                                      self.prefix_checkpoint_stride_blocks);
+                return py::make_tuple(
+                    self.active_tail_blocks, self.validate_tail_blocks, self.prefix_checkpoint_stride_blocks);
             },
             [](py::tuple t) {
                 CacheTailPolicyDesc c;
@@ -2118,6 +2153,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("is_state_cache", &KVCacheSpecDesc::is_state_cache)
         .def_readwrite("linear_state_component", &KVCacheSpecDesc::linear_state_component)
         .def_readwrite("tp_transfer_mode", &KVCacheSpecDesc::tp_transfer_mode)
+        .def_readwrite("linear_state_layout", &KVCacheSpecDesc::linear_state_layout)
+        .def_readwrite("request_state_slots", &KVCacheSpecDesc::request_state_slots)
         .def_readwrite("entry_elems", &KVCacheSpecDesc::entry_elems)
         .def_readwrite("entry_dtype", &KVCacheSpecDesc::entry_dtype)
         .def_readwrite("entry_count_mode", &KVCacheSpecDesc::entry_count_mode)
@@ -2157,11 +2194,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.tail,
                                       self.cp,
                                       self.tp_transfer_mode,
+                                      self.linear_state_layout,
+                                      self.request_state_slots,
                                       self.linear_state_component);
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
-                if (t.size() != 20 && t.size() != 21 && t.size() != 22)
+                if (t.size() != 20 && t.size() != 21 && t.size() != 22 && t.size() != 23 && t.size() != 24)
                     throw std::runtime_error("Invalid KVCacheSpecDesc state!");
                 c.tag                                  = t[0].cast<std::string>();
                 c.cache_type                           = t[1].cast<KVCacheSpecType>();
@@ -2186,8 +2225,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 if (t.size() >= 21) {
                     c.tp_transfer_mode = t[20].cast<TpCacheTransferMode>();
                 }
-                if (t.size() == 22) {
-                    c.linear_state_component = t[21].cast<uint32_t>();
+                if (t.size() >= 23) {
+                    c.linear_state_layout = t[21].cast<LinearStateLayout>();
+                    c.request_state_slots = t[22].cast<uint32_t>();
+                }
+                if (t.size() == 22 || t.size() == 24) {
+                    c.linear_state_component = t[t.size() - 1].cast<uint32_t>();
                 }
                 return c;
             }));

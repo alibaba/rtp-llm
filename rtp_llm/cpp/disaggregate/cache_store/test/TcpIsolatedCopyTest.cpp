@@ -46,7 +46,7 @@ protected:
         };
         auto collector = std::make_shared<CacheStoreClientLoadMetricsCollector>(nullptr, 1, 1);
         auto* closure = new TcpCacheStoreLoadServiceClosure(nullptr, buffers, new arpc::ANetRPCController,
-            new CacheLoadRequest, response, callback, collector, 0);
+            new CacheLoadRequest, response, callback, collector, 0, true);
         closure->Run();
         EXPECT_TRUE(called);
     }

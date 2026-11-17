@@ -150,6 +150,8 @@ std::string KVCacheConfig::to_string() const {
         << "block_tree_disk_evict_high_watermark_ratio: " << block_tree_disk_evict_high_watermark_ratio << "\n"
         << "reuse_cache_tail_blocks: " << reuse_cache_tail_blocks << "\n"
         << "linear_pool_blocks: " << linear_pool_blocks << "\n"
+        << "linear_ssm_double_buffer: " << linear_ssm_double_buffer << "\n"
+        << "linear_ssm_replay: " << linear_ssm_replay << "\n"
         << "swa_pool_blocks: " << swa_pool_blocks << "\n"
         << "enable_linear_cache_reclaim: " << enable_linear_cache_reclaim << "\n"
         << "kv_cache_pool_block_weights: " << kv_cache_pool_block_weights << "\n"

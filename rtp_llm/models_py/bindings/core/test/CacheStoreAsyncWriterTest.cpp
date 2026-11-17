@@ -1,6 +1,7 @@
 #include "gtest/gtest.h"
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <mutex>
 #include <optional>
@@ -14,7 +15,9 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
+#include "rtp_llm/cpp/cache/LinearStateCacheTransfer.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
+#include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 
@@ -78,7 +81,7 @@ public:
         }
     }
 
-    ScopedDeviceResetForTest(const ScopedDeviceResetForTest&) = delete;
+    ScopedDeviceResetForTest(const ScopedDeviceResetForTest&)            = delete;
     ScopedDeviceResetForTest& operator=(const ScopedDeviceResetForTest&) = delete;
 
 private:
@@ -133,6 +136,17 @@ public:
     bool hasPendingStore() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return static_cast<bool>(callback_);
+    }
+
+    std::vector<std::string> pendingBlockKeys() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<std::string>    keys;
+        if (buffer_) {
+            for (const auto& block : buffer_->getBlocks()) {
+                keys.push_back(block.first);
+            }
+        }
+        return keys;
     }
 
     bool completeStore(bool success = true) {
@@ -557,6 +571,87 @@ TEST_F(CacheStoreAsyncWriterTest, OrdinaryWriteRetainsAllocatorBlockUntilStoreCa
     ASSERT_TRUE(cache_store->completeStore());
     EXPECT_EQ(cache_manager->freeBlocksNum(), initial_free_blocks);
     EXPECT_EQ(other_pool->freeBlocksNum(), other_free_before);
+}
+
+TEST_F(CacheStoreAsyncWriterTest, SplitLinearAliasesShareLeaseThroughRequestEndAndPublicationTimeout) {
+    LinearAttentionConfig linear;
+    linear.linear_key_head_dim    = 4;
+    linear.linear_value_head_dim  = 4;
+    linear.linear_num_key_heads   = 2;
+    linear.linear_num_value_heads = 4;
+    linear.linear_conv_kernel_dim = 3;
+    linear.ssm_state_dtype        = TYPE_FP32;
+    linear.conv_state_dtype       = TYPE_BF16;
+    ParallelismConfig parallelism;
+    parallelism.tp_size = 2;
+    KVCacheSpecDesc desc;
+    desc.tag        = "linear";
+    desc.cache_type = KVCacheSpecType::LinearAttention;
+    SpecBuildContext context;
+    context.dtype                   = TYPE_BF16;
+    context.seq_size_per_block      = 1;
+    context.kernel_tokens_per_block = 1;
+    context.linear_attention_config = &linear;
+    context.parallelism_config      = &parallelism;
+    const auto spec                 = LinearKVCacheSpec::build(desc, context);
+
+    for (const bool tracked : {false, true}) {
+        SCOPED_TRACE(tracked);
+        auto config                               = makeWriterTestCacheConfig("linear", spec->block_size_bytes(), 3);
+        auto groups                               = config.topology().groups();
+        groups.front().spec                       = spec;
+        groups.front().policy                     = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+        groups.front().policy.linear_state_layout = LinearStateLayout::SPLIT_EXPORT;
+        config.setTopology(std::move(groups), config.topology().layers());
+        auto manager = std::make_shared<KVCacheManager>(config, false);
+        ASSERT_TRUE(manager->init());
+        const auto free_before = manager->freeBlocksNum();
+        auto       pool        = manager->coordinator_manager_->groupBlockPools().front();
+        auto       allocated   = pool->malloc(1);
+        ASSERT_TRUE(allocated.has_value());
+        const auto blocks = *allocated;
+        pool->incRef(blocks);
+        auto store = std::make_shared<DelayedCacheStore>();
+        manager->setCacheStore(store);
+
+        torch_ext::PyCacheStoreInputs inputs;
+        inputs.input_lengths_host    = torch::tensor({1}, torch::kInt32);
+        inputs.prefix_lengths_host   = torch::tensor({0}, torch::kInt32);
+        inputs.publish_start_tokens  = torch::tensor({0}, torch::kInt32);
+        inputs.host_kv_cache_offset  = torch::tensor({blocks.front()}, torch::kInt32).reshape({1, 1});
+        inputs.request_id            = torch::tensor({int64_t{42}}, torch::kInt64);
+        inputs.request_pd_separation = torch::tensor({true}, torch::kBool);
+        inputs.cache_keys            = torch::tensor({int64_t{7001}}, torch::kInt64).reshape({1, 1});
+        torch_ext::LayerKVCache layer;
+        layer.tag                = "linear";
+        layer.layer_id           = 0;
+        layer.seq_size_per_block = 1;
+        layer.kv_cache_base      = manager->getMainModelGroupedCacheLayerLayout().at("linear", 0).kv_addr;
+        CacheStoreAsyncWriter writer(-1, manager, 0, std::nullopt, std::chrono::milliseconds(20));
+        writer.init(tracked);
+        writer.write(inputs, layer);
+        if (tracked) {
+            writer.finishSubmissions();
+        } else {
+            writer.waitAllDone();
+        }
+        pool->decRef(blocks);  // The request ends before any of its aliases has completed.
+        EXPECT_EQ(pool->refCount(blocks.front()), 1u);
+        EXPECT_EQ(manager->freeBlocksNum() + 1, free_before);
+        const auto keys = store->pendingBlockKeys();
+        ASSERT_EQ(keys.size(), 3u);
+        for (const auto& tag : {"linear", "linear.ssm", "linear.conv"}) {
+            EXPECT_NE(std::find(keys.begin(), keys.end(), "kv_" + makeCacheKey(0, "7001", 0, tag)), keys.end());
+        }
+        if (tracked) {
+            EXPECT_THROW(writer.waitStoreCompletions(), std::runtime_error);
+        } else {
+            EXPECT_NO_THROW(writer.waitStoreCompletions());
+        }
+        EXPECT_EQ(manager->freeBlocksNum() + 1, free_before);
+        ASSERT_TRUE(store->completeStore());
+        EXPECT_EQ(manager->freeBlocksNum(), free_before);
+    }
 }
 
 class CacheStoreAsyncWriterTpTest: public ::testing::TestWithParam<std::tuple<int, int, bool, bool>> {};

@@ -1444,6 +1444,7 @@ EvictionDropTask BlockTreeEvictor::planDropTask(TransferDescriptor              
                     should_cascade = group_set->groupType() == CacheGroupType::LINEAR;
                     break;
                 case CacheGroupType::LINEAR:
+                case CacheGroupType::REQUEST_STATE:
                     break;
             }
         }

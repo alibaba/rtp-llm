@@ -22,6 +22,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/cache/LinearTpCacheLayout.h"
+#include "rtp_llm/cpp/cache/LinearStateCacheTransfer.h"
 #include "rtp_llm/cpp/cache/TpCacheTransferPlan.h"
 #include "rtp_llm/cpp/model_rpc/RegisteredCacheStaging.h"
 #include "rtp_llm/cpp/cache/MhaTpCacheLayout.h"
@@ -71,6 +72,134 @@ string makeRequestKey(const string& client_id, size_t request_id) {
 namespace rtp_llm {
 
 namespace {
+
+bool hasSplitLinearState(const CacheConfig& config) {
+    const auto& groups = config.topology().groups();
+    return std::any_of(groups.begin(), groups.end(), [](const auto& group) {
+        return isSplitLinearState(group.policy.linear_state_layout);
+    });
+}
+
+// Own the complete fanout independently of the requesting RPC. In particular,
+// cancelling a frontend request must not destroy gRPC contexts, completion
+// queues or the allocator lease while another TP rank still writes to its IDs.
+struct SplitCacheLoadOperation {
+    struct Worker {
+        std::shared_ptr<RpcService::Stub> stub;
+        BroadcastLoadRequestPB            request;
+        BroadcastLoadResponsePB           response;
+        ClientContext                     context;
+        Status                            status;
+    };
+
+    std::vector<std::unique_ptr<Worker>>                        workers;
+    CompletionQueue                                             queue;
+    KVCacheResourcePtr                                          lease;
+    std::function<void(KVCacheResourcePtr, const std::string&)> quarantine;
+    std::mutex                                                  mutex;
+    std::condition_variable                                     condition;
+    bool                                                        done          = false;
+    bool                                                        queue_drained = false;
+    ErrorInfo                                                   error;
+    size_t                                                      loaded_cache_block_count = 0;
+    size_t                                                      cache_key_count          = 0;
+    int64_t                                                     min_done_time_us = std::numeric_limits<int64_t>::max();
+    int64_t                                                     max_done_time_us = 0;
+
+    ~SplitCacheLoadOperation() {
+        if (!queue_drained) {
+            // Covers pre-submission validation and failure to start the drain
+            // thread, when no RPC owns this queue yet.
+            queue.Shutdown();
+            void* tag = nullptr;
+            bool  ok  = false;
+            while (queue.Next(&tag, &ok)) {}
+        }
+    }
+
+    void run() {
+        size_t submitted          = 0;
+        bool   quarantined        = false;
+        auto   quarantine_failure = [&] {
+            if (!quarantined && error.hasError()) {
+                quarantine(lease, error.ToString());
+                quarantined = true;
+            }
+        };
+        try {
+            for (size_t rank = 0; rank < workers.size(); ++rank) {
+                auto& worker = *workers[rank];
+                auto  reader = worker.stub->AsyncRemoteLoad(&worker.context, worker.request, &queue);
+                reader->Finish(&worker.response, &worker.status, reinterpret_cast<void*>(rank));
+                ++submitted;
+            }
+        } catch (const std::exception& exception) {
+            error = ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                              "split cache fanout submission failed: " + std::string(exception.what()));
+            // A partially submitted fanout has unknown remote ownership. Drain
+            // its CQ even after cancellation, and quarantine the allocator lease.
+            for (size_t rank = 0; rank < submitted; ++rank) {
+                workers[rank]->context.TryCancel();
+            }
+            quarantine_failure();
+        }
+
+        loaded_cache_block_count = cache_key_count;
+        for (size_t finished = 0; finished < submitted; ++finished) {
+            void* tag = nullptr;
+            bool  ok  = false;
+            if (!queue.Next(&tag, &ok)) {
+                error = ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "split cache completion queue closed early");
+                quarantine_failure();
+                break;
+            }
+            const auto rank = reinterpret_cast<uintptr_t>(tag);
+            if (rank >= workers.size() || !ok) {
+                error = ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "split cache completion event failed");
+                quarantine_failure();
+                continue;
+            }
+            const auto& worker   = *workers[rank];
+            const auto& response = worker.response;
+            if (!worker.status.ok()) {
+                error = ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                                  "split cache rank=" + std::to_string(rank)
+                                      + " RPC failed: " + worker.status.error_message());
+            } else if (response.error_info().error_code() != ErrorCodePB::NONE_ERROR) {
+                error = ErrorInfo(transRPCErrorCode(response.error_info().error_code()),
+                                  "split cache rank=" + std::to_string(rank)
+                                      + " load failed: " + response.error_info().error_message());
+            } else if (response.done_time_us() <= 0 || response.loaded_cache_block_count() < 0
+                       || static_cast<size_t>(response.loaded_cache_block_count()) > cache_key_count) {
+                error = ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "split cache returned invalid loaded block count");
+            } else {
+                loaded_cache_block_count =
+                    std::min(loaded_cache_block_count, static_cast<size_t>(response.loaded_cache_block_count()));
+                min_done_time_us = std::min(min_done_time_us, response.done_time_us());
+                max_done_time_us = std::max(max_done_time_us, response.done_time_us());
+            }
+            quarantine_failure();
+        }
+        queue.Shutdown();
+        void* tag = nullptr;
+        bool  ok  = false;
+        while (queue.Next(&tag, &ok)) {}
+        queue_drained = true;
+
+        if (error.hasError()) {
+            quarantine_failure();
+            loaded_cache_block_count = 0;
+        }
+        // Success means every rank's real cache callbacks drained. Failure has
+        // already transferred independent references into allocator quarantine.
+        lease.reset();
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            done = true;
+        }
+        condition.notify_all();
+    }
+};
 
 // gRPC delivers propose probs/hidden as pageable CPU tensors. Pinning them
 // before the H2D copy lets cudaMemcpyAsync run on the DMA engine instead of
@@ -231,6 +360,10 @@ std::vector<CacheStoreBlockPair> DecodeRpcServer::buildGroupLoadPlan(const Cache
                                                                      bool                    use_hybrid,
                                                                      size_t                  group_seq_size_per_block,
                                                                      size_t                  base_seq_size_per_block) {
+    if (isSplitLinearState(policy.linear_state_layout)) {
+        return buildLinearStateLoadPlan(
+            policy, local_block_num, cache_key_count, group_seq_size_per_block, base_seq_size_per_block);
+    }
     std::vector<CacheStoreBlockPair> plan;
     if (local_block_num == 0 || cache_key_count == 0) {
         return plan;
@@ -897,6 +1030,20 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheForAllRank(DecodeGene
     const auto& cache_resource  = generate_stream->kvCachePtr()->cacheResource(0);
     auto        group_block_ids = cache_resource.groupBlockIds();
 
+    const auto& transfer_groups = engine_->resourceContext().cache_manager->cacheConfig().topology().groups();
+    if (std::any_of(transfer_groups.begin(), transfer_groups.end(), [](const auto& group) {
+            return isSplitLinearState(group.policy.linear_state_layout);
+        })) {
+        try {
+            validateSplitLinearGlobalTopology(maga_init_params_.parallelism_config.get_attn_tp_size(),
+                                              resource_.workers.size(),
+                                              decode_context.peer_addrs.size(),
+                                              decode_context.prefill_cp_size);
+        } catch (const std::invalid_argument& error) {
+            return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, error.what()), 0};
+        }
+    }
+
     const bool use_stage_routing =
         maga_init_params_.parallelism_config.pp_size > 1 || !decode_context.remote_stage_peer_groups.empty();
     auto topology_error = ErrorInfo::OkStatus();
@@ -963,6 +1110,9 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheAsyncForTp(DecodeGene
                                                                       LoadKVCacheContext&    load_context) {
     RTP_LLM_PROFILE_FUNCTION();
     validateGroupTags(load_context, engine_->resourceContext().cache_manager->cacheConfig().topology());
+    if (hasSplitLinearState(engine_->resourceContext().cache_manager->cacheConfig())) {
+        return loadCacheAsyncForTpDrained(decode_context, load_context);
+    }
     int64_t load_cache_begin_time_us = currentTimeUs();
 
     struct WorkerRpcContext {
@@ -1148,6 +1298,92 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheAsyncForTp(DecodeGene
     return {ErrorInfo::OkStatus(), minLoadedCacheBlockCount(rank_loaded_cache_block_counts)};
 }
 
+KVCacheResourcePtr DecodeRpcServer::acquireCacheLoadLease(const std::shared_ptr<KVCacheManager>& cache_manager,
+                                                          const LoadKVCacheContext&              load_context) {
+    RTP_LLM_CHECK_WITH_INFO(cache_manager && cache_manager->initialized() && cache_manager->isAllocatorOwner(),
+                            "split cache load lease requires the initialized allocator owner");
+    const auto& config = cache_manager->cacheConfig();
+    validateGroupTags(load_context, config.topology());
+    KVCacheResource snapshot;
+    snapshot.initGroups(config.topologyPtr());
+    snapshot.setCacheKeys(load_context.cache_keys);
+    for (const auto& group : config.topology().groups()) {
+        // Copy values, not shared row holders: stream cancellation can clear or
+        // swap those rows before the last remote write has finished.
+        snapshot.mutableBlockIds(group.tag).assign(load_context.blockIdsForGroup(group.tag).blocks());
+    }
+    auto lease = cache_manager->incrKVCacheRef(snapshot, load_context.cache_keys, /*is_connector=*/true);
+    RTP_LLM_CHECK_WITH_INFO(lease != nullptr, "split cache load could not acquire a physical block lease");
+    return lease;
+}
+
+DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCacheAsyncForTpDrained(DecodeGenerateContext& decode_context,
+                                                                             LoadKVCacheContext&    load_context) {
+    auto cache_manager = engine_->resourceContext().cache_manager;
+    if (cache_manager->hasQuarantinedCacheLoads()) {
+        return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                          "split PD load disabled after uncertain remote completion; restart required"),
+                0};
+    }
+    if (resource_.grpc_workers.size() != 2) {
+        return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "split PD load requires exactly two decode RPC workers"), 0};
+    }
+    const auto begin_us        = currentTimeUs();
+    auto       operation       = std::make_shared<SplitCacheLoadOperation>();
+    operation->cache_key_count = load_context.cache_keys.size();
+    // Resolve all connections and serialize all requests before sending any RPC.
+    // Errors here cannot leave a partial fanout writing into released blocks.
+    for (size_t rank = 0; rank < resource_.grpc_workers.size(); ++rank) {
+        auto connection = resource_.rpc_pool.getConnection(resource_.grpc_workers[rank]);
+        if (!connection.ok()) {
+            return {ErrorInfo(ErrorCode::GET_CONNECTION_FAILED,
+                              "split PD load connection failed: " + resource_.grpc_workers[rank]),
+                    0};
+        }
+        auto worker     = std::make_unique<SplitCacheLoadOperation::Worker>();
+        worker->stub    = connection.value().stub;
+        worker->request = cache_manager->cacheConfig().use_mla ?
+                              constructRemoteLoadRequestForMla(load_context, rank, decode_context.peer_addrs) :
+                              constructRemoteLoadRequest(load_context, rank, decode_context.peer_addrs);
+        operation->workers.push_back(std::move(worker));
+    }
+    operation->lease      = acquireCacheLoadLease(cache_manager, load_context);
+    operation->quarantine = [cache_manager, request_key = load_context.request_key](KVCacheResourcePtr lease,
+                                                                                    const std::string& error) {
+        cache_manager->quarantineCacheLoad(*lease, request_key, error);
+    };
+    // No deadline/cancellation is propagated from the frontend ClientContext.
+    // CacheStore has its own configured transport timeout. A later genuine OK
+    // response can still prove completion after the frontend has timed out.
+    std::thread([operation] { operation->run(); }).detach();
+
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(load_context.timeout_ms + EXTRA_TIMEOUT_MS);
+    std::unique_lock<std::mutex> lock(operation->mutex);
+    while (!operation->done) {
+        if (load_context.server_context && load_context.server_context->IsCancelled()) {
+            RTP_LLM_LOG_INFO("split PD request=%s cancelled; cache lease remains owned by background RPC drain",
+                             load_context.request_key.c_str());
+            return {ErrorInfo(ErrorCode::CANCELLED, "split cache load cancelled; callbacks continue draining"), 0};
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            RTP_LLM_LOG_WARNING("split PD request=%s timed out; cache lease remains owned by background RPC drain",
+                                load_context.request_key.c_str());
+            return {ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, "split cache load timeout; callbacks continue draining"),
+                    0};
+        }
+        operation->condition.wait_until(
+            lock, std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(30)));
+    }
+    if (operation->error.hasError()) {
+        return {operation->error, 0};
+    }
+    decode_context.stat_info.load_cache_min_rt_us       = operation->min_done_time_us - begin_us;
+    decode_context.stat_info.load_cache_max_rt_us       = operation->max_done_time_us - begin_us;
+    decode_context.stat_info.load_cache_polling_cost_us = currentTimeUs() - operation->max_done_time_us;
+    return {ErrorInfo::OkStatus(), operation->loaded_cache_block_count};
+}
+
 DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     RTP_LLM_PROFILE_FUNCTION();
     AtomicGuard request_guard(onflight_load_cache_requests_);
@@ -1170,11 +1406,32 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
     const bool use_hybrid          = cache_config.usesGroupCacheTransferPolicy();
     const bool use_opaque_kv_store = cache_config.use_opaque_kv_cache_store;
 
-    const auto& groups          = cache_config.topology().groups();
-    const bool  declared_layout = std::any_of(groups.begin(), groups.end(), [](const auto& group) {
+    const auto& groups             = cache_config.topology().groups();
+    const bool  split_linear_state = hasSplitLinearState(cache_config);
+    if (split_linear_state) {
+        try {
+            validateSplitLinearTransfer(maga_init_params_.parallelism_config.get_attn_tp_size(),
+                                        peer_cnt,
+                                        load_context.prefill_cp_size,
+                                        load_context.partition_count,
+                                        load_context.partition_id);
+        } catch (const std::invalid_argument& error) {
+            return {ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, error.what()), 0};
+        }
+    }
+    // Only TP0 owns allocator references. Other ranks retain local storage while
+    // the fanout owner's real lease prevents their shared block IDs being reused.
+    using LocalLoadOwner = std::pair<std::shared_ptr<KVCacheManager>, KVCacheResourcePtr>;
+    std::shared_ptr<LocalLoadOwner> local_load_owner;
+    if (split_linear_state) {
+        local_load_owner = std::make_shared<LocalLoadOwner>(
+            cache_manager,
+            cache_manager->isAllocatorOwner() ? acquireCacheLoadLease(cache_manager, load_context) : nullptr);
+    }
+    const bool declared_layout = std::any_of(groups.begin(), groups.end(), [](const auto& group) {
         return group.spec->tp_transfer.mode != TpCacheTransferMode::LEGACY;
     });
-    const bool  typed_tp =
+    const bool typed_tp =
         useTypedTpCacheLayout(declared_layout, use_opaque_kv_store, peer_cnt, load_context.partition_count);
     const TpCacheTransferTopology transfer_topology{
         static_cast<size_t>(maga_init_params_.parallelism_config.get_attn_tp_size()),
@@ -1234,12 +1491,27 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
             // including failure and cancellation of a different peer.
             return std::shared_ptr<void>(owner->second, block.addr);
         }
+        if (local_load_owner) {
+            return std::shared_ptr<void>(local_load_owner, block.addr);
+        }
         return std::shared_ptr<void>(block.addr, [](void*) {});
     };
 
-    auto cancel_check_func  = [&load_context]() -> bool { return load_context.server_context->IsCancelled(); };
-    auto start_load_time_us = currentTimeUs();
+    auto cancel_check_func = [&load_context]() -> bool {
+        return load_context.server_context && load_context.server_context->IsCancelled();
+    };
+    auto                                                              start_load_time_us = currentTimeUs();
     std::vector<std::pair<std::string, std::shared_ptr<LoadContext>>> load_contexts;
+    autil::ScopeGuard                                                 drain_load_callbacks([&] {
+        if (split_linear_state) {
+            // Includes timeout/cancellation, validation errors after an earlier
+            // submission and exceptions. RemoteLoad may not acknowledge this rank
+            // until all known transport callbacks have stopped writing.
+            for (const auto& context : load_contexts) {
+                context.second->waitCallbacksDrained();
+            }
+        }
+    });
     std::vector<size_t> required_cache_key_counts(load_context.cache_keys.size(), 0);
     std::vector<size_t> transferred_cache_key_counts(load_context.cache_keys.size(), 0);
     auto                buffersDebugInfos = [](const std::vector<std::shared_ptr<RequestBlockBuffer>>& buffers) {
@@ -1361,8 +1633,13 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
             std::vector<std::string> layer_tags = layerGroupTags(cache_config, use_hybrid, layer_id);
 
             for (const auto& tag : layer_tags) {
-                auto request_key = makeTaggedRequestKey(load_context.request_id, layer_id, tag);
-                auto load_layer_cache =
+                const auto linear_layout = cache_config.group(tag).policy.linear_state_layout;
+                if (linear_layout == LinearStateLayout::DOUBLE_BUFFER_REPLAY) {
+                    continue;
+                }
+                const auto wire_tag    = linearStateCacheWireTag(linear_layout, tag);
+                auto       request_key = makeTaggedRequestKey(load_context.request_id, layer_id, tag);
+                auto       load_layer_cache =
                     std::make_shared<RequestBlockBuffer>(std::to_string(load_context.request_id), request_key);
 
                 const auto& block_ids = load_context.blockIdsForGroup(tag).blocks();
@@ -1386,13 +1663,15 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                     markCacheKeyRange(
                         required_cache_key_counts, cache_key_index, block_pos, cache_keys_per_physical_block);
                     auto block_id = block_ids[block_pos];
+                    validateLinearStateDestinationBlock(linear_layout, block_id);
                     if (isNullBlockIdx(block_id)) {
                         continue;
                     }
                     auto cache_key = makeCacheKey(
-                        model_id, std::to_string(load_context.cache_keys[cache_key_index]), global_layer, tag);
+                        model_id, std::to_string(load_context.cache_keys[cache_key_index]), global_layer, wire_tag);
 
-                    const bool             use_kv_key_prefix  = use_mla || use_opaque_kv_store || use_hybrid;
+                    const bool use_kv_key_prefix =
+                        use_mla || use_opaque_kv_store || use_hybrid || isSplitLinearState(linear_layout);
                     const bool             use_whole_kv_block = page_level_rr || use_kv_key_prefix;
                     std::vector<BlockInfo> parts;
                     if (use_whole_kv_block) {
@@ -1404,6 +1683,12 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
 
                     parts = sliceCpDestinationForPeer(std::move(parts), cache_config, tag, peer_idx, page_level_rr);
                     parts = stageTpPart(std::move(parts), cache_config, tag, peer_idx);
+                    if (isSplitLinearState(linear_layout)) {
+                        RTP_LLM_CHECK_WITH_INFO(
+                            parts.size() == 1 && parts[0].size_bytes == cache_config.group(tag).kvBlockStrideBytes()
+                                && parts[0].size_bytes <= std::numeric_limits<uint32_t>::max(),
+                            "split linear handoff requires one complete unscaled destination block");
+                    }
                     auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
                         RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "null block addr for key=%s", key.c_str());
                         RTP_LLM_CHECK_WITH_INFO(block.size_bytes > 0, "zero block size for key=%s", key.c_str());
@@ -1495,8 +1780,13 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                                 layer_id);
 
                         for (const auto& tag : mtp_layer_tags) {
-                            auto request_key      = makeTaggedRequestKey(load_context.request_id, layer_id, tag);
-                            auto load_layer_cache = std::make_shared<RequestBlockBuffer>(
+                            const auto linear_layout = mtp_cache_cfg.group(tag).policy.linear_state_layout;
+                            if (linear_layout == LinearStateLayout::DOUBLE_BUFFER_REPLAY) {
+                                continue;
+                            }
+                            const auto wire_tag         = linearStateCacheWireTag(linear_layout, tag);
+                            auto       request_key      = makeTaggedRequestKey(load_context.request_id, layer_id, tag);
+                            auto       load_layer_cache = std::make_shared<RequestBlockBuffer>(
                                 std::to_string(load_context.request_id), request_key);
 
                             const auto& block_ids = load_context.blockIdsForGroup(tag).blocks();
@@ -1523,15 +1813,19 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                                   block_pos,
                                                   cache_keys_per_physical_block);
                                 auto block_id = block_ids[block_pos];
+                                validateLinearStateDestinationBlock(linear_layout, block_id);
                                 if (isNullBlockIdx(block_id)) {
                                     continue;
                                 }
-                                auto cache_key = makeCacheKey(
-                                    model_id, std::to_string(load_context.cache_keys[cache_key_index]), layer_id, tag);
-                                const bool mtp_use_mla = mtp_cache_cfg.use_mla;
-                                const bool mtp_use_kv_key_prefix =
-                                    mtp_use_mla || mtp_use_opaque_kv_store || mtp_use_hybrid;
-                                const bool             mtp_use_whole_kv_block = page_level_rr || mtp_use_kv_key_prefix;
+                                auto       cache_key             = makeCacheKey(model_id,
+                                                              std::to_string(load_context.cache_keys[cache_key_index]),
+                                                              layer_id,
+                                                              wire_tag);
+                                const bool mtp_use_mla           = mtp_cache_cfg.use_mla;
+                                const bool mtp_use_kv_key_prefix = mtp_use_mla || mtp_use_opaque_kv_store
+                                                                   || mtp_use_hybrid
+                                                                   || isSplitLinearState(linear_layout);
+                                const bool mtp_use_whole_kv_block = page_level_rr || mtp_use_kv_key_prefix;
                                 std::vector<BlockInfo> parts;
                                 if (mtp_use_whole_kv_block) {
                                     parts = cache_manager->convertIndexToBuffer(stage_pool_layer_id, tag, block_id);
@@ -1546,6 +1840,13 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
                                 parts = sliceCpDestinationForPeer(
                                     std::move(parts), mtp_cache_cfg, tag, peer_idx, page_level_rr);
                                 parts            = stageTpPart(std::move(parts), mtp_cache_cfg, tag, peer_idx);
+                                if (isSplitLinearState(linear_layout)) {
+                                    RTP_LLM_CHECK_WITH_INFO(
+                                        parts.size() == 1
+                                            && parts[0].size_bytes == mtp_cache_cfg.group(tag).kvBlockStrideBytes()
+                                            && parts[0].size_bytes <= std::numeric_limits<uint32_t>::max(),
+                                        "split linear MTP handoff requires one complete unscaled destination block");
+                                }
                                 auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
                                     RTP_LLM_CHECK_WITH_INFO(
                                         block.addr != nullptr, "null block addr for key=%s", key.c_str());
@@ -1709,7 +2010,15 @@ DecodeRpcServer::LoadCacheResult DecodeRpcServer::loadCache(const LoadKVCacheCon
     }
 
     for (auto& [peer_addr, layer_cache_load_context] : load_contexts) {
-        layer_cache_load_context->waitDone();
+        if (split_linear_state) {
+            // The fanout owner applies the frontend deadline independently.
+            // Only transport callback results establish completion here: a
+            // local wait timeout must not poison a later successful drain and
+            // cause the owner to quarantine already completed writes.
+            layer_cache_load_context->waitCallbacksDrained();
+        } else {
+            layer_cache_load_context->waitDone();
+        }
         if (layer_cache_load_context->success()) {
             RTP_LLM_LOG_DEBUG("request [%s] load kv cache success", request_key.c_str());
         } else {

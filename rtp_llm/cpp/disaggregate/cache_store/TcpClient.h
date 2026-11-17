@@ -12,7 +12,7 @@ public:
     ~TcpClient();
 
 public:
-    bool                                  init(int io_thread_count);
+    bool                                  init(int io_thread_count, size_t queue_size = 1000);
     std::shared_ptr<arpc::RPCChannelBase> getChannel(const std::string& ip, uint32_t port);
     std::shared_ptr<TransferConnection>   getTransferConnection(const std::string& ip, uint32_t port, int device_id);
 
@@ -22,6 +22,7 @@ private:
 
 private:
     // TODO: optimize to mutil channel for same host, one channel may affect performance
+    size_t queue_size_ = 1000;
     std::mutex                                                             channel_map_mutex_;
     std::unordered_map<std::string, std::shared_ptr<arpc::RPCChannelBase>> channel_map_;
 

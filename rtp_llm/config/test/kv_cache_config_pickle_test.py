@@ -85,8 +85,8 @@ class KVCacheConfigPickleTest(TestCase):
         config.reserve_block_ratio = 9
         config.kv_cache_event_instance_group = "weighted-pools"
         state = config.__getstate__()
-        self.assertEqual(state[:2], ("KVCacheConfig", 25))
-        self.assertEqual(len(state), 81)
+        self.assertEqual(state[:2], ("KVCacheConfig", 26))
+        self.assertEqual(len(state), 83)
         self.assertEqual(state[80], config.kv_cache_pool_block_weights)
         self.assertTrue(state[79])
 
@@ -98,6 +98,19 @@ class KVCacheConfigPickleTest(TestCase):
         self.assertTrue(restored.enable_linear_cache_reclaim)
         self.assertEqual(restored.reserve_block_ratio, 9)
         self.assertEqual(restored.kv_cache_event_instance_group, "weighted-pools")
+
+    def test_previous_main_and_replay_states(self):
+        state = KVCacheConfig().__getstate__()
+        for version, tail, expected in (
+            (24, (True,), (True, "", False, False)),
+            (24, (False, True), (False, "", False, True)),
+            (25, (True, '{"full":2}'), (True, '{"full":2}', False, False)),
+        ):
+            with self.subTest(version=version, tail=tail):
+                previous = (state[0], version, *state[2:79], *tail)
+                restored = KVCacheConfig.__new__(KVCacheConfig)
+                restored.__setstate__(previous)
+                self.assertEqual(restored.__getstate__()[79:], expected)
 
     def test_version_nine_state_keeps_reclaim_and_defaults_pool_weights_empty(self):
         config = KVCacheConfig()
@@ -149,8 +162,8 @@ class KVCacheConfigPickleTest(TestCase):
                 config.kv_cache_pool_block_weights = '{"full":7,"linear":2}'
                 state = config.__getstate__()
                 v22_state = _version_twenty_two_state(config)
-                self.assertEqual(len(state), 81)
-                self.assertEqual(state[:2], ("KVCacheConfig", 25))
+                self.assertEqual(len(state), 83)
+                self.assertEqual(state[:2], ("KVCacheConfig", 26))
                 self.assertEqual(state[63:68], tuple(BASE_EVENT_FIELD_VALUES.values()))
                 self.assertIs(state[68], enable_crc)
                 self.assertEqual(state[77], 6)
@@ -341,14 +354,44 @@ class KVCacheConfigPickleTest(TestCase):
         config = KVCacheConfig()
         config.reuse_cache_tail_blocks = 13
         config.linear_pool_blocks = 31
+        config.linear_ssm_double_buffer = True
         config.swa_pool_blocks = 17
         for _ in range(2):
             config = pickle.loads(pickle.dumps(config))
             self.assertEqual(config.reuse_cache_tail_blocks, 13)
             self.assertEqual(config.linear_pool_blocks, 31)
+            self.assertTrue(config.linear_ssm_double_buffer)
             self.assertEqual(config.swa_pool_blocks, 17)
         self.assertFalse(hasattr(config, "linear_step"))
         self.assertFalse(hasattr(config, "linear_cache_tail_blocks"))
+
+    def test_version_nine_leaves_double_buffer_disabled(self):
+        state = list(_version_twenty_two_state(KVCacheConfig())[:72])
+        state[1] = 9
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(tuple(state))
+        self.assertFalse(restored.linear_ssm_double_buffer)
+
+    def test_single_state_survives_workers_without_enabling_double_buffer(self):
+        config = KVCacheConfig()
+        config.linear_ssm_replay = True
+        config.linear_pool_blocks = 193
+        for _ in range(2):
+            config = pickle.loads(pickle.dumps(config))
+            self.assertTrue(config.linear_ssm_replay)
+            self.assertFalse(config.linear_ssm_double_buffer)
+            self.assertEqual(config.linear_pool_blocks, 193)
+        self.assertIn("linear_ssm_replay: 1\n", config.to_string())
+
+    def test_version_ten_preserves_double_buffer_and_disables_single_state(self):
+        source = KVCacheConfig()
+        source.linear_ssm_double_buffer = True
+        state = list(_version_twenty_two_state(source)[:72]) + [True]
+        state[1] = 10
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(tuple(state))
+        self.assertTrue(restored.linear_ssm_double_buffer)
+        self.assertFalse(restored.linear_ssm_replay)
 
     def test_version_eight_uses_new_retention_defaults(self):
         source = KVCacheConfig()
@@ -421,7 +464,7 @@ class KVCacheConfigPickleTest(TestCase):
             ):
                 state = KVCacheConfig().__getstate__()
                 restored = KVCacheConfig.__new__(KVCacheConfig)
-                restored.__setstate__((*state[:78], timeout, state[79], state[80]))
+                restored.__setstate__((*state[:78], timeout, *state[79:]))
 
     def test_previous_versions_use_default_frozen_force_release_timeout(self):
         source = KVCacheConfig()

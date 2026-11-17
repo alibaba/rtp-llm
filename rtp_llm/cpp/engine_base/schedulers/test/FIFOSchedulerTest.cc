@@ -37,6 +37,42 @@ bool enqueueIndividually(SchedulerBase& scheduler, const vector<GenerateStreamPt
         streams.begin(), streams.end(), [&scheduler](const auto& stream) { return scheduler.enqueue(stream).ok(); });
 }
 
+CacheConfig makeRequestStateSchedulerCacheConfig(uint32_t ssm_blocks, uint32_t replay_blocks, bool single = false) {
+    auto config       = test::makeSimpleMhaCacheConfig(1, 1024, 64, DataType::TYPE_BF16, 1, 4);
+    auto groups       = config.topology().groups();
+    auto layers       = config.topology().layers();
+    auto append_state = [&](const std::string& tag, uint32_t slots, uint32_t blocks, LinearStateLayout layout) {
+        KVCacheSpecDesc desc;
+        desc.tag        = tag;
+        desc.cache_type = KVCacheSpecType::OpaqueState;
+        desc.dtype = desc.entry_dtype = DataType::TYPE_FP32;
+        desc.entry_elems = desc.explicit_entry_count = 1;
+        desc.is_state_cache                          = true;
+        desc.group_type                              = CacheGroupType::REQUEST_STATE;
+        desc.request_state_slots                     = slots;
+        desc.linear_state_layout                     = layout;
+        desc.reuse                                   = CacheReusePolicyDesc{false};
+        desc.capacity                                = CacheCapacityPolicyDesc{true, blocks, true};
+        SpecBuildContext context;
+        context.dtype              = DataType::TYPE_FP32;
+        context.seq_size_per_block = 64;
+        GroupBase group;
+        group.tag       = tag;
+        group.spec      = SpecBuilder::build(desc, context);
+        group.policy    = SpecBuilder::groupPolicy(desc);
+        group.block_num = blocks;
+        groups.push_back(std::move(group));
+        layers.front().group_tags.push_back(tag);
+    };
+    append_state("linear_ssm",
+                 single ? 1 : 2,
+                 ssm_blocks,
+                 single ? LinearStateLayout::SINGLE_SSM : LinearStateLayout::DOUBLE_BUFFER_SSM);
+    append_state("linear_replay", 1, replay_blocks, LinearStateLayout::DOUBLE_BUFFER_REPLAY);
+    config.setTopology(std::move(groups), std::move(layers));
+    return config;
+}
+
 }  // namespace
 
 class FIFOSchedulerTest: public DeviceTestBase {
@@ -1670,6 +1706,78 @@ void FIFOSchedulerTest::verifyBatchDecodeSchedulerDrainsMixedModeTail(const std:
     ASSERT_EQ(tail_batch->streams.size(), 1);
     EXPECT_EQ(tail_batch->streams.front().get(), streams[2].get());
     EXPECT_EQ(scheduler.onflightStreams(), 1);
+}
+
+TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerRejectsBatchAboveRequestStateCapacity) {
+    // Exercise the actual 385/193 layout, a spare odd SSM bank, and replay as
+    // the sole bottleneck. None of these checks allocates a production pool.
+    for (const auto& counts : std::vector<std::pair<uint32_t, uint32_t>>{{385, 193}, {386, 385}, {769, 193}}) {
+        SCOPED_TRACE(counts.first);
+        SCOPED_TRACE(counts.second);
+        auto cache_manager =
+            std::make_shared<KVCacheManager>(makeRequestStateSchedulerCacheConfig(counts.first, counts.second));
+        RuntimeConfig runtime;
+        runtime.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 192;
+        BatchDecodeScheduler scheduler(runtime, cache_manager, nullptr);
+        EXPECT_EQ(scheduler.batch_size_, 192u);
+
+        for (const int64_t invalid : {int64_t{0}, int64_t{-1}, int64_t{193}, (int64_t{1} << 32) + 192}) {
+            runtime.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = invalid;
+            EXPECT_THROW((void)BatchDecodeScheduler(runtime, cache_manager, nullptr), std::invalid_argument);
+        }
+
+        EXPECT_NO_THROW(scheduler.updateSchedulerInfo(R"({"batch_size":192,"mode":"prefill"})"));
+        EXPECT_EQ(scheduler.batch_size_, 192u);
+        EXPECT_EQ(scheduler.scheduler_type_, BatchDecodeScheduler::kBatchPrefill);
+        EXPECT_THROW(scheduler.updateSchedulerInfo(R"({"batch_size":193,"mode":"decode"})"), std::invalid_argument);
+        EXPECT_EQ(scheduler.batch_size_, 192u);
+        EXPECT_EQ(scheduler.scheduler_type_, BatchDecodeScheduler::kBatchPrefill);
+        EXPECT_NO_THROW(scheduler.updateSchedulerInfo(R"({"batch_size":128,"mode":"decode"})"));
+        EXPECT_EQ(scheduler.batch_size_, 128u);
+        EXPECT_EQ(scheduler.scheduler_type_, BatchDecodeScheduler::kBatchDecode);
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerSingleStateUsesOneSlotAndReplayCapacity) {
+    // Exercise the actual 193/193 layout and replay as
+    // the sole bottleneck. None of these checks allocates a production pool.
+    for (const auto& counts : std::vector<std::pair<uint32_t, uint32_t>>{{193, 193}, {193, 385}, {385, 193}}) {
+        SCOPED_TRACE(counts.first);
+        SCOPED_TRACE(counts.second);
+        auto cache_manager =
+            std::make_shared<KVCacheManager>(makeRequestStateSchedulerCacheConfig(counts.first, counts.second, true));
+        RuntimeConfig runtime;
+        runtime.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 192;
+        BatchDecodeScheduler scheduler(runtime, cache_manager, nullptr);
+        EXPECT_EQ(scheduler.batch_size_, 192u);
+
+        for (const int64_t invalid : {int64_t{0}, int64_t{-1}, int64_t{193}, (int64_t{1} << 32) + 192}) {
+            runtime.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = invalid;
+            EXPECT_THROW((void)BatchDecodeScheduler(runtime, cache_manager, nullptr), std::invalid_argument);
+        }
+
+        EXPECT_NO_THROW(scheduler.updateSchedulerInfo(R"({"batch_size":192,"mode":"prefill"})"));
+        EXPECT_EQ(scheduler.batch_size_, 192u);
+        EXPECT_EQ(scheduler.scheduler_type_, BatchDecodeScheduler::kBatchPrefill);
+        EXPECT_THROW(scheduler.updateSchedulerInfo(R"({"batch_size":193,"mode":"decode"})"), std::invalid_argument);
+        EXPECT_EQ(scheduler.batch_size_, 192u);
+        EXPECT_EQ(scheduler.scheduler_type_, BatchDecodeScheduler::kBatchPrefill);
+        EXPECT_NO_THROW(scheduler.updateSchedulerInfo(R"({"batch_size":128,"mode":"decode"})"));
+        EXPECT_EQ(scheduler.batch_size_, 128u);
+        EXPECT_EQ(scheduler.scheduler_type_, BatchDecodeScheduler::kBatchDecode);
+    }
+}
+
+TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerLeavesOrdinaryLayoutCapacityUnchanged) {
+    auto cache_manager =
+        std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(1, 16, 64, DataType::TYPE_BF16, 1, 4));
+    RuntimeConfig runtime;
+    runtime.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 193;
+    BatchDecodeScheduler scheduler(runtime, cache_manager, nullptr);
+    EXPECT_EQ(scheduler.batch_size_, 193u);
+    EXPECT_NO_THROW(scheduler.updateSchedulerInfo(R"({"batch_size":256,"mode":"prefill"})"));
+    EXPECT_EQ(scheduler.batch_size_, 256u);
+    EXPECT_EQ(scheduler.scheduler_type_, BatchDecodeScheduler::kBatchPrefill);
 }
 
 TEST_F(FIFOSchedulerTest, testBatchDecodeSchedulerDrainsPositiveTailAfterZeroBatch) {
@@ -6792,9 +6900,9 @@ TEST_F(FIFOSchedulerTest, testChunkedPrefillChecksCacheCompatibility) {
     };
     for (const auto& test_case : cases) {
         SCOPED_TRACE(test_case.name);
-        auto cache_config = test_case.has_linear ?
-                                test::makeSimpleHybridMhaCacheConfig(4, 64, test_case.block_size, DataType::TYPE_FP16) :
-                                test::makeSimpleMhaCacheConfig(1, 64, test_case.block_size, DataType::TYPE_FP16);
+        auto cache_config                    = test_case.has_linear ?
+                                                   test::makeSimpleHybridMhaCacheConfig(4, 64, test_case.block_size, DataType::TYPE_FP16) :
+                                                   test::makeSimpleMhaCacheConfig(1, 64, test_case.block_size, DataType::TYPE_FP16);
         cache_config.reuse_cache_tail_blocks = test_case.tail_blocks;
         if (test_case.group_block_size > 0) {
             auto groups = cache_config.groups();

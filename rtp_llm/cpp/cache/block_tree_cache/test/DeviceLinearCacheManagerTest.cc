@@ -691,7 +691,7 @@ TEST_F(DeviceLinearCacheManagerTest, SmallPrefillTailPreservesActiveBlocksThroug
 TEST_F(DeviceLinearCacheManagerTest, PrefixCheckpointsSurviveDecodeTailCleanup) {
     auto pool = createDeviceBlockPool();
     ASSERT_TRUE(pool->init());
-    auto policy                              = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+    auto policy                            = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
     policy.prefix_checkpoint_stride_blocks = 4;
     DeviceLinearCacheManager group({}, makeLinearSpec(4), pool, 0, 3, policy);
     BlockIds                 blocks;
@@ -710,6 +710,46 @@ TEST_F(DeviceLinearCacheManagerTest, PrefixCheckpointsSurviveDecodeTailCleanup) 
     EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[16]));
     EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[13]));
     group.unreference(blocks.blocks());
+}
+
+TEST_F(DeviceLinearCacheManagerTest, DecodeDoesNotBackfillHistoricalCheckpointHoles) {
+    auto pool = createDeviceBlockPool();
+    ASSERT_TRUE(pool->init());
+    auto policy                            = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+    policy.prefix_checkpoint_stride_blocks = 4;
+    DeviceLinearCacheManager group({}, makeLinearSpec(4), pool, 0, 3, policy);
+    ASSERT_TRUE(group.init());
+    BlockIds blocks;
+    // PD transfer initially materializes only the last state, without the
+    // historical prefix checkpoints that local reusable prefill would create.
+    ASSERT_TRUE(group.malloc(blocks, 64, false));
+    ASSERT_EQ(blocks.blocksNum(), 16u);
+    ASSERT_EQ(pool->freeBlocksNum(), 8u);
+    const auto transferred_state = blocks.blocks()[15];
+    ASSERT_FALSE(isNullBlockIdx(transferred_state));
+
+    std::vector<size_t> backfilled;
+    ASSERT_TRUE(group.mallocForDecode(blocks, 65, true, 2, &backfilled));
+    EXPECT_TRUE(backfilled.empty());
+    ASSERT_EQ(blocks.blocksNum(), 18u);
+    EXPECT_EQ(pool->freeBlocksNum(), 6u);
+    for (int checkpoint : {3, 7, 11}) {
+        EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[checkpoint]));
+    }
+    EXPECT_EQ(blocks.blocks()[15], transferred_state);
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[16]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[17]));
+
+    // New checkpoint positions still receive storage as decode advances.
+    ASSERT_TRUE(group.mallocForDecode(blocks, 77, true, 2));
+    group.removeSkippedBlocks(blocks, true, 2);
+    EXPECT_EQ(blocks.blocks()[15], transferred_state);
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[19]));
+    for (int checkpoint : {3, 7, 11}) {
+        EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[checkpoint]));
+    }
+    group.unreference(blocks.blocks());
+    EXPECT_EQ(pool->freeBlocksNum(), 9u);
 }
 
 }  // namespace test

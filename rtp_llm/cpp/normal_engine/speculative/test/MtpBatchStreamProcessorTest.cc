@@ -1480,11 +1480,10 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
 
-    GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
-    GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
-    GenerateStreamPtr stream3 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 3);
-    GenerateStreamPtr middle_stream =
-        createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 4);
+    GenerateStreamPtr stream1       = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    GenerateStreamPtr stream2       = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
+    GenerateStreamPtr stream3       = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 3);
+    GenerateStreamPtr middle_stream = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 4);
     middle_stream->setChunkSize(2);
     ASSERT_TRUE(middle_stream->isMiddleChunk());
 
@@ -1533,8 +1532,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsCo
     ResourceContext resource_context;
     auto            stream1 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 1);
     auto            stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 2);
-    auto            middle_stream =
-        createContextStream(model_config, runtime_config, resource_context, {1, 2, 3, 0}, 3);
+    auto middle_stream      = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3, 0}, 3);
     stream1->setContextPositionIds(torch::tensor({100, 101, 102, 110, 111, 112}, torch::kInt32));
     stream2->setContextPositionIds(torch::tensor({200, 201, 202, 210, 211, 212, 220, 221, 222}, torch::kInt32));
     middle_stream->setContextPositionIds(
@@ -1543,12 +1541,11 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsCo
     ASSERT_TRUE(middle_stream->isMiddleChunk());
     auto           stream_groups = StreamGroups({stream1, stream2, middle_stream});
     GptModelInputs model_input;
-    model_input.input_lengths = torch::tensor({2, 3, 2}, torch::kInt32);
-    model_input.combo_tokens  = torch::tensor({10, 11, 20, 21, 22, 30, 31}, torch::kInt32);
-    model_input.combo_position_ids =
-        torch::tensor({100, 101, 102, 110, 111, 112, 200, 201, 202, 210, 211, 212,
-                       220, 221, 222, 300, 301, 302, 310, 311, 312},
-                      torch::kInt32);
+    model_input.input_lengths      = torch::tensor({2, 3, 2}, torch::kInt32);
+    model_input.combo_tokens       = torch::tensor({10, 11, 20, 21, 22, 30, 31}, torch::kInt32);
+    model_input.combo_position_ids = torch::tensor(
+        {100, 101, 102, 110, 111, 112, 200, 201, 202, 210, 211, 212, 220, 221, 222, 300, 301, 302, 310, 311, 312},
+        torch::kInt32);
     GptModelOutputs model_output;
     model_output.all_hidden_states = torch::zeros({7, 2}, torch::kFloat32);
     SamplerOutput sampler_output;
@@ -1556,9 +1553,8 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsCo
     TensorHolder holder;
     processor.updatePrefillPostDraftModelInput(stream_groups, model_input, model_output, sampler_output, holder);
     EXPECT_EQ((vector<int>{11, 12, 21, 22, 23, 31, 3}), toVec<int>(model_input.combo_tokens));
-    EXPECT_EQ((vector<int>{110, 111, 112, 112, 112, 112,
-                           210, 211, 212, 220, 221, 222, 222, 222, 222,
-                           310, 311, 312, 320, 321, 322}),
+    EXPECT_EQ((vector<int>{110, 111, 112, 112, 112, 112, 210, 211, 212, 220, 221,
+                           222, 222, 222, 222, 310, 311, 312, 320, 321, 322}),
               toVec<int>(model_input.combo_position_ids));
 }
 
@@ -2515,6 +2511,97 @@ TEST_F(MtpBatchStreamProcessorTest, testSparseSnapshotOverlayDoesNotResurrectHos
     EXPECT_TRUE(torch::equal(model_input.kv_cache_kernel_block_id.select(1, 0).cpu(), kernel.select(1, 0)));
     EXPECT_TRUE(torch::equal(model_input.kv_cache_block_id.select(1, 1).cpu(), fresh_physical));
     EXPECT_TRUE(torch::equal(model_input.kv_cache_kernel_block_id.select(1, 1).cpu(), fresh_kernel));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, DoubleBufferCommitMatchesHostAcrossAllAcceptLengthsAndPageOffsets) {
+    constexpr int        batch = 64 * 4;
+    constexpr int        width = 140;
+    std::vector<int32_t> lengths, accepts;
+    for (int offset = 0; offset < 64; ++offset) {
+        for (int accept = 0; accept <= 3; ++accept) {
+            lengths.push_back(8192 + offset + 1);
+            accepts.push_back(accept);
+        }
+    }
+    auto expected = torch::arange(4 * batch * width, torch::kInt32).reshape({4, batch, width});
+    auto table    = expected.to(torch::kCUDA);
+    auto accepted = torch::tensor(accepts, torch::kInt32).to(torch::kCUDA);
+    for (int iteration = 0; iteration < 4; ++iteration) {
+        table = MtpBatchStreamProcessor::advanceLinearCacheBlockTable(
+            table,
+            torch::tensor(lengths, torch::kInt32).to(torch::kCUDA),
+            accepted,
+            {CacheGroupType::LINEAR,
+             CacheGroupType::FULL,
+             CacheGroupType::REQUEST_STATE,
+             CacheGroupType::REQUEST_STATE},
+            64,
+            {LinearStateLayout::DOUBLE_BUFFER_CONV,
+             LinearStateLayout::LEGACY,
+             LinearStateLayout::DOUBLE_BUFFER_SSM,
+             LinearStateLayout::DOUBLE_BUFFER_REPLAY});
+        for (int row = 0; row < batch; ++row) {
+            const int accept = accepts[row];
+            const int cached = lengths[row] - 1;
+            if (accept > 1) {
+                auto*      conv       = expected.select(0, 0).select(0, row).data_ptr<int32_t>();
+                const auto checkpoint = getCachedTokenBlockSwapIdx(cached, cached + accept, 64);
+                const auto final      = getFinalTokenBlockSwapIdx(cached, cached + accept, 64);
+                std::swap(conv[checkpoint.first], conv[checkpoint.second]);
+                std::swap(conv[final.first], conv[final.second]);
+            }
+            if (accept > 0) {
+                auto* ssm = expected.select(0, 2).select(0, row).data_ptr<int32_t>();
+                std::swap(ssm[0], ssm[1]);
+            }
+            lengths[row] += accept;
+        }
+        EXPECT_TRUE(torch::equal(table.cpu(), expected)) << iteration;
+    }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, SingleSsmCommitPreservesRowAcrossAllAcceptLengthsAndPageOffsets) {
+    constexpr int        batch = 64 * 4;
+    constexpr int        width = 140;
+    std::vector<int32_t> lengths, accepts;
+    for (int offset = 0; offset < 64; ++offset) {
+        for (int accept = 0; accept <= 3; ++accept) {
+            lengths.push_back(8192 + offset + 1);
+            accepts.push_back(accept);
+        }
+    }
+    auto expected = torch::arange(4 * batch * width, torch::kInt32).reshape({4, batch, width});
+    auto table    = expected.to(torch::kCUDA);
+    auto accepted = torch::tensor(accepts, torch::kInt32).to(torch::kCUDA);
+    for (int iteration = 0; iteration < 4; ++iteration) {
+        table = MtpBatchStreamProcessor::advanceLinearCacheBlockTable(
+            table,
+            torch::tensor(lengths, torch::kInt32).to(torch::kCUDA),
+            accepted,
+            {CacheGroupType::LINEAR,
+             CacheGroupType::FULL,
+             CacheGroupType::REQUEST_STATE,
+             CacheGroupType::REQUEST_STATE},
+            64,
+            {LinearStateLayout::DOUBLE_BUFFER_CONV,
+             LinearStateLayout::LEGACY,
+             LinearStateLayout::SINGLE_SSM,
+             LinearStateLayout::DOUBLE_BUFFER_REPLAY});
+        for (int row = 0; row < batch; ++row) {
+            const int accept = accepts[row];
+            const int cached = lengths[row] - 1;
+            if (accept > 1) {
+                auto*      conv       = expected.select(0, 0).select(0, row).data_ptr<int32_t>();
+                const auto checkpoint = getCachedTokenBlockSwapIdx(cached, cached + accept, 64);
+                const auto final      = getFinalTokenBlockSwapIdx(cached, cached + accept, 64);
+                std::swap(conv[checkpoint.first], conv[checkpoint.second]);
+                std::swap(conv[final.first], conv[final.second]);
+            }
+            // Single SSM and replay IDs remain unchanged even when all tokens are accepted.
+            lengths[row] += accept;
+        }
+        EXPECT_TRUE(torch::equal(table.cpu(), expected)) << iteration;
+    }
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testCacheSnapshotOverlayKeepsPhysicalKernelPairAndFreshRows) {
