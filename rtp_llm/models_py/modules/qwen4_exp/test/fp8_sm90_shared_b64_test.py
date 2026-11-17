@@ -57,6 +57,9 @@ class Fp8SM90SharedB64Test(unittest.TestCase):
 
     def test_native_bytes_and_all_bf16_patterns(self):
         x = torch.randn(64, 640, device="cuda", dtype=torch.bfloat16)
+        with patch.dict(os.environ, {"RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD": "1"}):
+            self.assertIsNotNone(quant.try_silu_mul_fp8_quant(x))
+        torch.cuda.synchronize()
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             actual = quant.try_silu_mul_fp8_quant(x)
@@ -97,8 +100,9 @@ class Fp8SM90SharedB64Test(unittest.TestCase):
         for bias in (False, True):
             mlp = make_mlp(bias)
             x = torch.randn(64, 2560, device="cuda", dtype=torch.bfloat16)
-            for _ in range(3):
-                mlp(x, skip_allreduce=True)
+            with patch.dict(os.environ, {"RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD": "1"}):
+                for _ in range(3):
+                    mlp(x, skip_allreduce=True)
             torch.cuda.synchronize()
             baseline = torch.cuda.CUDAGraph()
             candidate = torch.cuda.CUDAGraph()
@@ -121,6 +125,8 @@ class Fp8SM90SharedB64Test(unittest.TestCase):
         mlp = make_mlp()
         self.assertIsNone(quant.try_silu_mul_fp8_quant(x))
         self.assertIsNone(mlp.down_proj.forward_silu_and_mul(x))
+        with patch.dict(os.environ, {"RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD": "1"}):
+            self.assertIsNotNone(mlp.down_proj.forward_silu_and_mul(x))
         with patch.object(torch.cuda, "is_current_stream_capturing", return_value=True):
             for cap in ((8, 0), (10, 0), (12, 0)):
                 with patch.object(
