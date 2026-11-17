@@ -281,6 +281,7 @@ cc_library(
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         "//rtp_llm/models_py/bindings/cuda/kernels:mla_quant_kernel",
+        "//rtp_llm/models_py/bindings/cuda/kernels:glm5_adaptive_budget",
         "//rtp_llm/models_py/bindings/cuda/kernels:dsv4_top_k_per_row_prefill",
         ":cuda_bindings",
     ],

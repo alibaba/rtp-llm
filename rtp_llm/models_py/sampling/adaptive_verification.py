@@ -132,28 +132,18 @@ class AdaptiveBudgetInputError(ValueError):
         super().__init__(f"{field}: {reason}")
 
 
-def select_draft_token_budget(
-    confidence_probs: np.ndarray,
+def _prepare_budget_costs(
     capacities: np.ndarray,
+    num_reqs: int,
+    num_steps: int,
     *,
     draft_cost_ms: np.ndarray,
     verify_cost_ms: np.ndarray,
     num_non_draft_tokens: int,
     num_sampling_requests: int,
-    max_draft_budget: int | None = None,
-) -> int:
-    """Choose the smallest optimal budget using measured per-batch millisecond costs.
-
-    Draft costs are indexed by request count; verify costs by total token count.
-    Confidence rows and capacities are in batch order, including zero capacities.
-    """
-    if confidence_probs.ndim != 2 or confidence_probs.dtype.kind not in "fiu":
-        raise AdaptiveBudgetInputError("confidence_probs", "expected a numeric matrix")
-    if not np.isfinite(confidence_probs).all() or not (
-        (confidence_probs >= 0) & (confidence_probs <= 1)
-    ).all():
-        raise AdaptiveBudgetInputError("confidence_probs", "must be finite in [0, 1]")
-    num_reqs, num_steps = confidence_probs.shape
+    max_draft_budget: int | None,
+) -> tuple[int, np.ndarray]:
+    """Share the exact host cost validation/addition between CPU and CUDA selection."""
     if capacities.shape != (num_reqs,) or capacities.dtype.kind not in "iu":
         raise AdaptiveBudgetInputError("capacities", "expected one integer per request")
     if not ((capacities >= 0) & (capacities <= num_steps)).all():
@@ -197,6 +187,36 @@ def select_draft_token_budget(
         costs = draft_ms + verify_ms
     if not np.isfinite(costs).all() or (costs <= 0).any():
         raise AdaptiveBudgetInputError("total_cost_ms", "must be finite and positive")
+    return limit, costs
+
+
+def select_draft_token_budget(
+    confidence_probs: np.ndarray,
+    capacities: np.ndarray,
+    *,
+    draft_cost_ms: np.ndarray,
+    verify_cost_ms: np.ndarray,
+    num_non_draft_tokens: int,
+    num_sampling_requests: int,
+    max_draft_budget: int | None = None,
+) -> int:
+    """Choose the smallest optimal budget using measured per-batch millisecond costs.
+
+    Draft costs are indexed by request count; verify costs by total token count.
+    Confidence rows and capacities are in batch order, including zero capacities.
+    """
+    if confidence_probs.ndim != 2 or confidence_probs.dtype.kind not in "fiu":
+        raise AdaptiveBudgetInputError("confidence_probs", "expected a numeric matrix")
+    if not np.isfinite(confidence_probs).all() or not (
+        (confidence_probs >= 0) & (confidence_probs <= 1)
+    ).all():
+        raise AdaptiveBudgetInputError("confidence_probs", "must be finite in [0, 1]")
+    num_reqs, num_steps = confidence_probs.shape
+    limit, costs = _prepare_budget_costs(
+        capacities, num_reqs, num_steps, draft_cost_ms=draft_cost_ms,
+        verify_cost_ms=verify_cost_ms, num_non_draft_tokens=num_non_draft_tokens,
+        num_sampling_requests=num_sampling_requests, max_draft_budget=max_draft_budget,
+    )
     survival = np.cumprod(confidence_probs.astype(np.float64), axis=1)
     valid = np.arange(num_steps)[None, :] < capacities[:, None]
     scores = np.sort(survival[valid])[::-1][:limit]
@@ -204,6 +224,47 @@ def select_draft_token_budget(
         ([num_sampling_requests], num_sampling_requests + np.cumsum(scores))
     )
     return int(np.argmax(expected_tokens / costs))
+
+
+def select_draft_token_budget_device(
+    confidence_probs: torch.Tensor,
+    request_slots: torch.Tensor,
+    capacities_device: torch.Tensor,
+    capacities: np.ndarray,
+    *,
+    draft_cost_ms: np.ndarray,
+    verify_cost_ms: np.ndarray,
+    num_non_draft_tokens: int,
+    num_sampling_requests: int,
+    max_draft_budget: int | None = None,
+) -> int:
+    """Read back only the selected budget; keep confidence and ordered FP64 math on CUDA."""
+    if not confidence_probs.is_cuda or torch.version.hip is not None:
+        raise AdaptiveBudgetInputError("confidence_probs", "device selection requires NVIDIA CUDA")
+    from rtp_llm.ops import compute_ops
+
+    num_reqs = request_slots.numel()
+    if confidence_probs.ndim != 2 or confidence_probs.dtype != torch.float32:
+        raise AdaptiveBudgetInputError("confidence_probs", "expected float32 CUDA rows")
+    limit, costs = _prepare_budget_costs(
+        capacities, num_reqs, confidence_probs.shape[1], draft_cost_ms=draft_cost_ms,
+        verify_cost_ms=verify_cost_ms, num_non_draft_tokens=num_non_draft_tokens,
+        num_sampling_requests=num_sampling_requests, max_draft_budget=max_draft_budget,
+    )
+    cost_host = torch.from_numpy(costs).pin_memory()
+    cost_device = cost_host.to(confidence_probs.device, non_blocking=True)
+    selected = compute_ops.glm5_select_draft_token_budget_device(
+        confidence_probs, request_slots, capacities_device, cost_device, limit,
+        num_sampling_requests,
+    )
+    # Host-owned graph bank selection, output allocation and TP geometry still
+    # need this one count. No per-request confidence/score tensor crosses D2H.
+    budget = int(selected.item())
+    if budget == -1:
+        raise AdaptiveBudgetInputError("confidence_probs", "invalid probabilities, request slots or capacities")
+    if budget == -2:
+        raise AdaptiveBudgetInputError("total_cost_ms", "must be finite and positive")
+    return budget
 
 
 def allocate_draft_token_budget(

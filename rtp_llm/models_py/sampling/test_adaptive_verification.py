@@ -10,6 +10,7 @@ from rtp_llm.models_py.sampling.adaptive_verification import (
     allocate_draft_token_budget,
     assign_draft_token_budget,
     select_draft_token_budget,
+    select_draft_token_budget_device,
 )
 
 
@@ -149,6 +150,75 @@ class BudgetSelectionTest(unittest.TestCase):
                 verify_cost_ms=np.full(3, np.finfo(np.float64).max),
                 num_non_draft_tokens=1,
                 num_sampling_requests=1,
+            )
+
+
+class DeviceBudgetSelectionTest(unittest.TestCase):
+    def compare_with_numpy(
+        self, probabilities: np.ndarray, capacities: np.ndarray,
+        verify_costs: np.ndarray, sampling_requests: int, limit: int | None = None,
+    ) -> None:
+        batch, steps = probabilities.shape
+        # Nontrivial slot mapping and poisoned unused slots distinguish request
+        # identity from row position without reading confidence back from CUDA.
+        slots = np.arange(batch, dtype=np.int64)[::-1] + 2
+        storage = np.full((batch + 3, steps), np.nan, dtype=np.float32)
+        storage[slots] = probabilities
+        confidence = torch.tensor(storage, device="cuda")
+        mapping = torch.tensor(slots.copy(), device="cuda")
+        caps = torch.tensor(capacities, device="cuda", dtype=torch.int32)
+        draft_costs = np.zeros(batch + 1)
+        expected = select_draft_token_budget(
+            probabilities, capacities, draft_cost_ms=draft_costs,
+            verify_cost_ms=verify_costs, num_non_draft_tokens=batch,
+            num_sampling_requests=sampling_requests, max_draft_budget=limit,
+        )
+        actual = select_draft_token_budget_device(
+            confidence, mapping, caps, capacities, draft_cost_ms=draft_costs,
+            verify_cost_ms=verify_costs, num_non_draft_tokens=batch,
+            num_sampling_requests=sampling_requests, max_draft_budget=limit,
+        )
+        self.assertEqual(actual, expected)
+
+    def test_mapped_ragged_zero_partial_full_match_numpy(self) -> None:
+        generator = np.random.default_rng(20261117)
+        for batch, steps in ((1, 2), (3, 5), (17, 8), (129, 8)):
+            probabilities = generator.random((batch, steps), dtype=np.float32)
+            capacities = (np.arange(batch) + 1) % (steps + 1)
+            costs = 1.0 + generator.random(batch * (steps + 1) + 1)
+            for limit in (0, int(capacities.sum()) // 2, int(capacities.sum())):
+                with self.subTest(batch=batch, steps=steps, limit=limit):
+                    self.compare_with_numpy(probabilities, capacities, costs, batch, limit)
+
+    def test_exact_and_adjacent_utility_ties_choose_smallest_budget(self) -> None:
+        probabilities = np.ones((1, 4), dtype=np.float32)
+        capacities = np.array([4])
+        costs = np.array([1.0, 1.0, 2.0, 3.0, 4.0, 5.0])
+        self.compare_with_numpy(probabilities, capacities, costs, 1)
+        for direction in (0.0, np.inf):
+            adjacent = costs.copy()
+            adjacent[4] = np.nextafter(adjacent[4], direction)
+            self.compare_with_numpy(probabilities, capacities, adjacent, 1)
+
+    def test_subnormal_inputs_and_underflow_preserve_sequential_products(self) -> None:
+        tiny = np.nextafter(np.float32(0), np.float32(1))
+        probabilities = np.ones((1, 32), dtype=np.float32)
+        probabilities[0, 0] = tiny
+        # No anchor in the objective: flushing tiny to zero changes the winner.
+        self.compare_with_numpy(probabilities, np.array([32]), np.ones(34), 0)
+        probabilities[0, :8] = tiny
+        self.compare_with_numpy(probabilities, np.array([32]), np.linspace(1.0, 3.0, 34), 0)
+        probabilities.fill(0.0)
+        self.compare_with_numpy(probabilities, np.array([32]), np.ones(34), 1)
+
+    def test_invalid_probability_outside_scheduled_prefix_still_rejected(self) -> None:
+        confidence = torch.tensor([[0.5, float("nan")]], device="cuda")
+        with self.assertRaises(AdaptiveBudgetInputError):
+            select_draft_token_budget_device(
+                confidence, torch.tensor([0], device="cuda"),
+                torch.tensor([0], device="cuda", dtype=torch.int32), np.array([0]),
+                draft_cost_ms=np.zeros(2), verify_cost_ms=np.ones(2),
+                num_non_draft_tokens=1, num_sampling_requests=1,
             )
 
 

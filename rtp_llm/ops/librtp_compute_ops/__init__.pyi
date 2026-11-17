@@ -408,3 +408,12 @@ def init_exec_ctx(
 def register_comm_ops(broadcast_fn: typing.Callable, allreduce_fn: typing.Callable, allgather_fn: typing.Callable) -> None: ...
 
 def clear_comm_ops() -> None: ...
+
+def glm5_select_draft_token_budget_device(
+    confidence: torch.Tensor,
+    request_slots: torch.Tensor,
+    capacities: torch.Tensor,
+    total_costs: torch.Tensor,
+    limit: int,
+    sampling_requests: int,
+) -> torch.Tensor: ...

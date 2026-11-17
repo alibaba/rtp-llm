@@ -60,6 +60,29 @@ class AdaptiveControllerTest(unittest.TestCase):
         self.assertEqual((caps.tolist(), total, rows.numel()), ([1, 1], 4, 0))
         controller.observe([10, 20], caps, [False, False])
 
+    def test_device_budget_matches_reference_admission_and_pending_caps(self) -> None:
+        reference = ready_controller([10, 20])
+        device = ready_controller([10, 20])
+        confidence = torch.tensor([[0.9, 0.8, 0.7], [0.5, 0.4, 0.3]], device="cuda")
+        reference.confidence_probs[:2].copy_(confidence)
+        device.confidence_probs[:2].copy_(confidence)
+        costs = dict(draft_cost_ms=np.zeros(3), verify_cost_ms=np.linspace(0.5, 3.0, 9))
+        expected_caps, _, expected_total = reference.plan(
+            [10, 20], [3, 2], graph_token_capacities=[3, 6, 9], **costs,
+        )
+        with patch(
+            "rtp_llm.models_py.sampling.adaptive_controller.select_draft_token_budget",
+            side_effect=AssertionError("device route must not call the CPU selector"),
+        ):
+            caps, rows, total = device.plan(
+                [10, 20], [3, 2], graph_token_capacities=[3, 6, 9],
+                materialize_rows=False, **costs,
+            )
+        torch.testing.assert_close(caps, expected_caps, rtol=0, atol=0)
+        self.assertEqual((total, rows.numel()), (expected_total, 0))
+        device.observe([20, 10], caps.flip(0), [False, True])
+        self.assertIsNone(device._pending)
+
     def test_unfinished_round_is_invalidated_before_retry(self) -> None:
         with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "3"}):
             session = AdaptiveVerificationSession(2, 5, "cuda")

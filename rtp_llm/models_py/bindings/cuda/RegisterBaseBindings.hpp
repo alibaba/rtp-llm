@@ -24,6 +24,7 @@
 #include "rtp_llm/models_py/bindings/cuda/PagedKvCacheCopy.h"
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/glm5_adaptive_budget.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_persistent_topk.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/topk_v3.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/topk_v3_tie_break.h"
@@ -34,6 +35,9 @@ using namespace rtp_llm;
 namespace torch_ext {
 
 void registerBasicCudaOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("glm5_select_draft_token_budget_device", &rtp_llm::glm5SelectDraftTokenBudgetDevice,
+                 py::arg("confidence"), py::arg("request_slots"), py::arg("capacities"),
+                 py::arg("total_costs"), py::arg("limit"), py::arg("sampling_requests"));
     rtp_ops_m.def("copy_paged_kv_cache_async",
                   &copyPagedKvCacheAsync,
                   py::arg("source"),

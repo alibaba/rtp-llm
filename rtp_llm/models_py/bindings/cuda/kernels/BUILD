@@ -319,6 +319,20 @@ cc_library(
 )
 
 cc_library(
+    name = "glm5_adaptive_budget",
+    srcs = ["glm5_adaptive_budget.cu"],
+    hdrs = ["glm5_adaptive_budget.h"],
+    deps = [
+        "//rtp_llm/cpp/utils:core_utils",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    # Preserve FP32 subnormal inputs when converting to ordered FP64 products.
+    copts = cuda_copts() + ["-nvcc_options=ftz=false"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "mha_paged_attn_plan",
     srcs = ["mha_paged_attn_plan.cu"],
     hdrs = ["mha_paged_attn_plan.h"],

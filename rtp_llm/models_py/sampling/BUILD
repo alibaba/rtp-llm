@@ -25,7 +25,7 @@ py_library(
         "vllm_prf_base.py",
         "vllm_fly.py",
     ],
-    deps = [":numpy", ":torch", ":triton"],
+    deps = [":numpy", ":torch", ":triton", "//rtp_llm:ops"],
     visibility = ["//visibility:public"],
 )
 
@@ -33,6 +33,7 @@ py_test(
     name = "test_adaptive_controller",
     srcs = ["test_adaptive_controller.py"],
     deps = [":sampling"],
+    data = ["//:th_transformer_config", "//:rtp_compute_ops"],
     tags = ["SM103_CU13"],
     exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
 )
@@ -46,6 +47,7 @@ py_test(
     name = "test_adaptive_verification",
     srcs = ["test_adaptive_verification.py"],
     deps = [":sampling"],
+    data = ["//:th_transformer_config", "//:rtp_compute_ops"],
     tags = ["SM103_CU13"],
     exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
 )
