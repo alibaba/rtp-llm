@@ -393,9 +393,10 @@ def _prune_expired_engram_tables() -> None:
     """Drop stale /dev/shm Engram tables so persistence stays bounded.
 
     The staged tables survive the process group that created them (the cold
-    staging of ~94 GiB per layer is far too expensive to repeat per run);
-    this TTL prune, taken under the creating digest's lock, bounds the
-    resident set. Tables with live leases are never pruned.
+    staging of ~94 GiB per layer is far too expensive to repeat per run).
+    Lock each target digest while checking expiry and leases so attachment
+    cannot race deletion. Skip busy targets: the caller holds a creator lock,
+    and waiting for another digest could deadlock concurrent creators.
     """
     import time
 
@@ -404,18 +405,16 @@ def _prune_expired_engram_tables() -> None:
         if "." in table.name:  # .partial/.lease artifacts have their own paths
             continue
         try:
-            stat = table.stat()
-            if stat.st_mtime >= cutoff:
-                continue
-            if _live_leases(table):
-                continue
-            if table.stat().st_ino != stat.st_ino:
-                # The name now maps to a freshly created table (a creator
-                # replaced it after our expiry verdict on the old inode);
-                # never let the prune unlink a live generation.
-                continue
-            table.unlink(missing_ok=True)
-            logger.info("Pruned expired Engram shared table %s", table)
+            lock_path = Path("/tmp") / (table.name + ".lock")
+            with open(lock_path, "a+b") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue
+                if table.stat().st_mtime >= cutoff or _live_leases(table):
+                    continue
+                table.unlink(missing_ok=True)
+                logger.info("Pruned expired Engram shared table %s", table)
         except FileNotFoundError:
             continue
 
