@@ -29,7 +29,10 @@ from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fp8_wrapper import (
     MegaMoeFp8Wrapper,
 )
 from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_se_wrapper import MegaMoeSEWrapper
-from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_wrapper import MegaMoeWrapper
+from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_wrapper import (
+    MegaMoeWrapper,
+    glm_prefill_moe_chunk_plan,
+)
 from rtp_llm.utils.model_weight import W
 
 
@@ -89,11 +92,92 @@ def _distributed_chunks(rank, rendezvous):
                     max(min(tokens - i * 4, 4), 0) for i in range(expected_calls)
                 ], (rank, lengths, calls)
                 torch.testing.assert_close(result, x * 3 + weights + ids)
+
+                # Reuse the EP maximum across two real layer calls, including
+                # zero-token ranks. Each layer retains the same empty chunks.
+                layers = [
+                    SimpleNamespace(
+                        mlp=SimpleNamespace(
+                            fused_moe=wrapper,
+                            routed_tp_size=1,
+                            route_local_tokens=False,
+                        )
+                    )
+                ] * 2
+                calls.clear()
+                with (
+                    mock.patch("torch.cuda.is_available", return_value=False),
+                    glm_prefill_moe_chunk_plan(
+                        layers, tokens, torch.device("cpu"), token_sharded=True
+                    ),
+                ):
+                    for _ in layers:
+                        result = wrapper._forward_chunked(x, weights, ids, kernel)
+                        torch.testing.assert_close(result, x * 3 + weights + ids)
+                assert len(calls) == 2 * expected_calls
     finally:
         dist.destroy_process_group()
 
 
 class GlmMegaMoeContractTest(unittest.TestCase):
+    def test_stack_plan_synchronizes_once_after_tp_token_sharding(self):
+        first, second = _wrapper(), _wrapper()
+        layers = [
+            SimpleNamespace(mlp=torch.nn.Identity()),
+            *[
+                SimpleNamespace(
+                    mlp=SimpleNamespace(
+                        fused_moe=wrapper, routed_tp_size=8, route_local_tokens=True
+                    )
+                )
+                for wrapper in (first, second)
+            ],
+        ]
+        module = (
+            "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer"
+        )
+        for token_sharded, expected_tokens in ((False, 3), (True, 17)):
+            with (
+                mock.patch(module + ".dist.is_available", return_value=True),
+                mock.patch(module + ".dist.is_initialized", return_value=True),
+                mock.patch("torch.cuda.is_available", return_value=False),
+                mock.patch(module + ".dist.all_reduce") as all_reduce,
+                glm_prefill_moe_chunk_plan(
+                    layers, 17, torch.device("cpu"), token_sharded=token_sharded
+                ),
+            ):
+                for wrapper in (first, second):
+                    x = torch.zeros(expected_tokens, 2)
+                    wrapper._forward_chunked(x, x, x.long(), lambda chunk, *_: chunk)
+                all_reduce.assert_called_once()
+                self.assertEqual(all_reduce.call_args.args[0].item(), expected_tokens)
+
+    def test_heterogeneous_stack_retains_per_call_synchronization(self):
+        layers = [
+            SimpleNamespace(
+                mlp=SimpleNamespace(
+                    fused_moe=_wrapper(), routed_tp_size=tp, route_local_tokens=True
+                )
+            )
+            for tp in (1, 8)
+        ]
+        module = (
+            "rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer"
+        )
+        with (
+            mock.patch(module + ".dist.is_available", return_value=True),
+            mock.patch(module + ".dist.is_initialized", return_value=True),
+            mock.patch("torch.cuda.is_available", return_value=False),
+            mock.patch(module + ".dist.all_reduce") as all_reduce,
+            glm_prefill_moe_chunk_plan(layers, 3, torch.device("cpu")),
+        ):
+            x = torch.zeros(3, 2)
+            for layer in layers:
+                layer.mlp.fused_moe._forward_chunked(
+                    x, x, x.long(), lambda chunk, *_: chunk
+                )
+            self.assertEqual(all_reduce.call_count, 2)
+
     def test_unequal_ep_tokens_execute_empty_chunks(self):
         with tempfile.TemporaryDirectory() as directory:
             rendezvous = (Path(directory) / "gloo-rendezvous").as_uri()

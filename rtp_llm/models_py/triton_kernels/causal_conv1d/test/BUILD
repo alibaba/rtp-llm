@@ -7,6 +7,19 @@ requirement([
 ])
 
 py_test(
+    name = "test_glm53_metadata_host",
+    srcs = ["test_glm53_metadata_host.py"],
+    deps = [
+        "//rtp_llm/models_py/triton_kernels:causal_conv1d",
+        "//rtp_llm/models_py/triton_kernels:common",
+        ":numpy",
+        ":torch",
+        ":triton",
+    ],
+    tags = ["cpu"],
+)
+
+py_test(
     name = "test_causal_conv1d_int64",
     srcs = ["test_causal_conv1d_int64.py"],
     deps = [
