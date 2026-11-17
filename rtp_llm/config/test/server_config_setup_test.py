@@ -129,6 +129,57 @@ class W8A8OnlineQuantConfigTest(TestCase):
                 model_config, SimpleNamespace(fp8_kv_cache=False), "BF16"
             )
 
+    def test_json_w8a8_request_passes_the_model_gate_for_qwen35_moe(self):
+        model_config = _W8A8ModelConfig(
+            '{"method": "W8A8_INT8_PER_CHANNEL_COMPRESSED", "is_quanted": false}'
+        )
+        with patch(
+            "rtp_llm.config.model_config.QuantizationConfig.load_from_ckpt",
+            return_value=None,
+        ):
+            ModelConfig.init_precision_config(
+                model_config, SimpleNamespace(fp8_kv_cache=False), "BF16"
+            )
+
+        self.assertIsInstance(
+            model_config.quant_config, CompressedW8A8Int8PerChannelQuantConfig
+        )
+        self.assertFalse(model_config.quant_config.is_quanted())
+
+    def test_json_w8a8_request_is_gated_to_qwen35_moe_models(self):
+        # init_quant_config constructs the same online W8A8 config from a
+        # JSON dict, so the JSON spelling must not bypass the model gate:
+        # a stacked-MoE layout (e.g. qwen3_vl_moe) would reach the load-time
+        # W8A8 quantizer with a permute merge it silently drops.
+        model_config = _W8A8ModelConfig(
+            '{"method": "W8A8_INT8_PER_CHANNEL_COMPRESSED", "is_quanted": false}',
+            model_type="qwen3_vl_moe",
+        )
+
+        with patch(
+            "rtp_llm.config.model_config.QuantizationConfig.load_from_ckpt",
+            return_value=None,
+        ), self.assertRaisesRegex(ValueError, "qwen35_moe"):
+            ModelConfig.init_precision_config(
+                model_config, SimpleNamespace(fp8_kv_cache=False), "BF16"
+            )
+
+    def test_json_w8a8_prequest_with_other_method_is_not_gated(self):
+        model_config = _W8A8ModelConfig(
+            '{"method": "FP8_PER_CHANNEL_COMPRESSED", "is_quanted": false}',
+            model_type="qwen3_vl_moe",
+        )
+        with patch(
+            "rtp_llm.config.model_config.QuantizationConfig.load_from_ckpt",
+            return_value=None,
+        ):
+            ModelConfig.init_precision_config(
+                model_config, SimpleNamespace(fp8_kv_cache=False), "BF16"
+            )
+        # Non-W8A8 JSON requests keep their normal request path; only the
+        # W8A8 method spellings are subject to the qwen35_moe gate.
+        self.assertIsNotNone(model_config.quant_config)
+
     def test_legacy_int8_settings_conflict_with_explicit_online_w8a8(self):
         config = PyQuantizationConfig()
         config.quantization = "W8A8_INT8_PER_CHANNEL"
