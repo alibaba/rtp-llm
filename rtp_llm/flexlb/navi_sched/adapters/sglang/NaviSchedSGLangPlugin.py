@@ -5,7 +5,8 @@ import atexit
 import json
 import os
 import time
-from contextlib import aclosing
+from contextlib import aclosing, asynccontextmanager
+from functools import partial
 
 _registered = False
 
@@ -59,6 +60,19 @@ def _manager_init(original, manager, *args, **kwargs):
 
 
 _original_generate = None
+
+
+@asynccontextmanager
+async def _http_lifespan(original, app):
+    from sglang.srt.entrypoints import http_server
+
+    async with original(app) as state:
+        runtime = http_server.get_global_state().tokenizer_manager.navi_sched
+        try:
+            await runtime.start()
+            yield state
+        finally:
+            runtime.close()
 
 
 async def _generate(original, manager, obj, request=None):
@@ -235,6 +249,11 @@ def _register():
         if target not in HookRegistry._patched:
             HookRegistry._apply_target(target, HookRegistry._hooks[target])
             HookRegistry._patched.add(target)
+    from sglang.srt.entrypoints import http_server
+
+    # FastAPI captures the lifespan context when constructing the app.
+    router = http_server.app.router
+    router.lifespan_context = partial(_http_lifespan, router.lifespan_context)
     _registered = True
 
 

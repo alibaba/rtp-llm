@@ -274,13 +274,16 @@ class SGLangRuntime:
         state.released = True
         self._batches.pop(int(state.native.batch_id), None)
 
-    async def generate(self, obj, request):
-        from .SGLangTransport import SGLangTransport
-
+    async def start(self):
         if self._closed:
             raise RuntimeError("SGLang NaviSched runtime is closed")
         self.manager.auto_create_handle_loop()
         await asyncio.wait_for(self.ready.wait(), self.config.request_timeout_ms / 1000)
+
+    async def generate(self, obj, request):
+        from .SGLangTransport import SGLangTransport
+
+        await self.start()
         if self.transport is None:
             self.transport = SGLangTransport(
                 self.manager,

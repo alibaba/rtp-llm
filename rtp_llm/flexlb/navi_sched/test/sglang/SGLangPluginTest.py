@@ -1,10 +1,102 @@
+import asyncio
 import os
 import subprocess
 import sys
 import unittest
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+
+class SGLangLifespanTest(unittest.IsolatedAsyncioTestCase):
+    async def test_http_startup_waits_for_agent_and_cleans_up(self):
+        from navi_sched.adapters.sglang.NaviSchedSGLangPlugin import _http_lifespan
+        from sglang.srt.entrypoints import http_server
+
+        started = asyncio.Event()
+        ready = asyncio.Event()
+        serving = asyncio.Event()
+        events = []
+        state = {"upstream": True}
+
+        async def start():
+            started.set()
+            await ready.wait()
+            events.append("agent_ready")
+
+        runtime = SimpleNamespace(
+            start=start, close=lambda: events.append("agent_closed")
+        )
+
+        @asynccontextmanager
+        async def upstream(app):
+            events.append("upstream_started")
+            try:
+                yield state
+            finally:
+                events.append("upstream_closed")
+
+        async def serve():
+            async with _http_lifespan(upstream, object()) as value:
+                self.assertIs(value, state)
+                serving.set()
+                events.append("serving")
+
+        with patch.object(
+            http_server,
+            "get_global_state",
+            return_value=SimpleNamespace(
+                tokenizer_manager=SimpleNamespace(navi_sched=runtime)
+            ),
+        ):
+            task = asyncio.create_task(serve())
+            await started.wait()
+            self.assertFalse(serving.is_set())
+            ready.set()
+            await task
+        self.assertEqual(
+            events,
+            [
+                "upstream_started",
+                "agent_ready",
+                "serving",
+                "agent_closed",
+                "upstream_closed",
+            ],
+        )
+
+    async def test_agent_start_failure_prevents_http_readiness(self):
+        from navi_sched.adapters.sglang.NaviSchedSGLangPlugin import _http_lifespan
+        from sglang.srt.entrypoints import http_server
+
+        events = []
+
+        async def start():
+            raise RuntimeError("agent failed to initialize")
+
+        runtime = SimpleNamespace(
+            start=start, close=lambda: events.append("agent_closed")
+        )
+
+        @asynccontextmanager
+        async def upstream(app):
+            try:
+                yield
+            finally:
+                events.append("upstream_closed")
+
+        with patch.object(
+            http_server,
+            "get_global_state",
+            return_value=SimpleNamespace(
+                tokenizer_manager=SimpleNamespace(navi_sched=runtime)
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "agent failed to initialize"):
+                async with _http_lifespan(upstream, object()):
+                    self.fail("HTTP startup accepted an uninitialized Agent")
+        self.assertEqual(events, ["agent_closed", "upstream_closed"])
 
 
 class SGLangPluginTest(unittest.TestCase):
@@ -80,9 +172,7 @@ try:
     assert manager.navi_sched.original_generate is not TokenizerManager.generate_request
 finally:
     manager.navi_sched.close()
-""".replace(
-            "ADAPTERS", repr(adapters)
-        ).replace(
+""".replace("ADAPTERS", repr(adapters)).replace(
             "NAVI_PACKAGE", repr(str(Path(adapters).parent / "navi_sched"))
         )
         return subprocess.run(
