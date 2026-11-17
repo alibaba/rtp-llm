@@ -5,12 +5,13 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+# Padded expert counts vary with routing even for a fixed input length.
+@triton.jit(do_not_specialize=["ROWS"])
 def _silu_mul_native_fp8(
     gate_up,
     quantized,
     scales,
-    ROWS: tl.constexpr,
+    ROWS,
     WIDTH: tl.constexpr,
     BLOCK_M: tl.constexpr,
 ):
@@ -37,25 +38,19 @@ def _silu_mul_native_fp8(
     tl.store(scales + group * ROWS + rows, scale, rows < ROWS)
 
 
-def silu_mul_native_fp8(gate_up, *, output=None, output_scale=None, block_m=16):
+def silu_mul_native_fp8(gate_up):
     """Produce FP8 values and MN-major FP32 scales for qualified SM90 MoE."""
     rows, doubled_width = gate_up.shape
     width = doubled_width // 2
     assert gate_up.dtype == torch.bfloat16 and gate_up.is_contiguous()
     assert doubled_width == 1280 and rows % 128 == 0
-    if output is None:
-        output = torch.empty(
-            (rows, width), device=gate_up.device, dtype=torch.float8_e4m3fn
-        )
-    if output_scale is None:
-        output_scale = torch.empty_strided(
-            (rows, width // 128), (1, rows), device=gate_up.device, dtype=torch.float32
-        )
-    assert output.shape == (rows, width) and output.is_contiguous()
-    assert output.dtype == torch.float8_e4m3fn and output.device == gate_up.device
-    assert output_scale.shape == (rows, width // 128)
-    assert output_scale.stride() == (1, rows)
-    assert output_scale.dtype == torch.float32 and output_scale.device == gate_up.device
+    output = torch.empty(
+        (rows, width), device=gate_up.device, dtype=torch.float8_e4m3fn
+    )
+    output_scale = torch.empty_strided(
+        (rows, width // 128), (1, rows), device=gate_up.device, dtype=torch.float32
+    )
+    block_m = 16
     _silu_mul_native_fp8[(triton.cdiv(rows, block_m), width // 128)](
         gate_up,
         output,
