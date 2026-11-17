@@ -627,6 +627,15 @@ class ModelRpcClientTest(TestCase):
         round_tripped_input_pb.ParseFromString(input_pb.SerializeToString())
         return round_tripped_input_pb.generate_config
 
+    def test_trans_input_round_trips_timeline_detail(self):
+        for options, expected in (({}, False), ({"profile_light": True}, True)):
+            with self.subTest(options=options):
+                wire = self._round_trip_generate_config(
+                    GenerateConfig(gen_timeline=True, **options)
+                )
+                self.assertTrue(wire.gen_timeline)
+                self.assertEqual(wire.profile_light, expected)
+
     def test_trans_input_serializes_resolved_positive_default_max_new_tokens(self):
         config = GenerateConfig()
 

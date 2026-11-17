@@ -167,6 +167,7 @@ message GenerateConfigPB {
     bool prefill_only = 76;
     bool return_logprobs = 77;
     uint32 top_logprobs = 78;
+    bool profile_light = 79;
 }
 
 message MMPreprocessConfigPB {
@@ -593,12 +594,14 @@ message StartProfileRequestPB {
     // Notify all world ranks (TP and DP) via the receiving TP leader.
     // start_step is counted locally; this does not synchronize execution steps.
     bool enable_all_rank = 4;
+    bool profile_light = 5;
 }
 
 message StartProfileInternalRequestPB {
     string trace_name = 1;
     int32 start_step = 2;
     int32 num_steps = 3;
+    bool profile_light = 4;
 }
 
 message TorchAllocatorDumpRequestPB {
@@ -715,6 +718,7 @@ message EmbeddingInputPB {
     bool gen_timeline = 7;
     int32 profile_step = 8;
     string profile_trace_name = 9;
+    bool profile_light = 10;
 }
 
 message EmbeddingHealthRequestPB {

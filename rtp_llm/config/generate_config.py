@@ -238,6 +238,7 @@ class GenerateConfig(BaseModel):
     aux_info: bool = True
     can_use_pd_separation: bool = True
     gen_timeline: bool = False
+    profile_light: bool = False
     profile_step: int = 3
     profile_trace_name: str = ""
     out_prefix: str = ""

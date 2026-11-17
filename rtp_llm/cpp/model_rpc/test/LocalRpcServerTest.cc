@@ -154,7 +154,6 @@ class FailingEngine: public EngineBase {
 public:
     explicit FailingEngine(EngineFailureMode mode): EngineBase(EngineInitParams()), mode_(mode) {}
 
-
     std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>&) override {
         if (mode_ == EngineFailureMode::THROW_STD_EXCEPTION) {
             throw std::runtime_error("injected engine enqueue failure");
@@ -214,7 +213,7 @@ class RecordingProfileEngine: public FailingEngine {
 public:
     RecordingProfileEngine(): FailingEngine(EngineFailureMode::REJECT_ALL) {}
 
-    MOCK_METHOD(void, startTimelineProfiling, (const std::string&, int, int), (override));
+    MOCK_METHOD(void, startTimelineProfiling, (const std::string&, int, int, bool), (override));
 };
 
 class RecordingProfileService: public RpcService::Service {
@@ -259,6 +258,7 @@ protected:
         request_.set_trace_name("world_profile");
         request_.set_start_step(7);
         request_.set_num_steps(20);
+        request_.set_profile_light(true);
     }
 
     void TearDown() override {
@@ -278,6 +278,7 @@ protected:
             EXPECT_EQ(requests[0].trace_name(), request_.trace_name());
             EXPECT_EQ(requests[0].start_step(), request_.start_step());
             EXPECT_EQ(requests[0].num_steps(), request_.num_steps());
+            EXPECT_EQ(requests[0].profile_light(), request_.profile_light());
         }
     }
 
@@ -310,6 +311,7 @@ TEST_F(StartProfileFanoutTest, RepeatedRequestsReuseBroadcaster) {
     ASSERT_NE(broadcaster, nullptr);
 
     request_.set_trace_name("second_profile");
+    request_.clear_profile_light();
     ASSERT_TRUE(server_.StartProfile(&context_, &request_, &response_).ok());
     EXPECT_EQ(server_.worldBroadcaster(), broadcaster);
     for (const auto& service : services_) {
@@ -317,6 +319,8 @@ TEST_F(StartProfileFanoutTest, RepeatedRequestsReuseBroadcaster) {
         ASSERT_EQ(requests.size(), 2);
         EXPECT_EQ(requests[0].trace_name(), "world_profile");
         EXPECT_EQ(requests[1].trace_name(), "second_profile");
+        EXPECT_TRUE(requests[0].profile_light());
+        EXPECT_FALSE(requests[1].profile_light());
     }
 }
 
@@ -412,7 +416,7 @@ TEST_F(StartProfileFanoutTest, DisabledFanoutOnlyConfiguresLocalEngine) {
     server_.setEngineForTest(engine);
     server_.configureProfile(/*tp_size=*/2, /*world_size=*/4, /*world_rank=*/3, addresses_);
     request_.set_enable_all_rank(false);
-    EXPECT_CALL(*engine, startTimelineProfiling("world_profile", 7, 20)).Times(1);
+    EXPECT_CALL(*engine, startTimelineProfiling("world_profile", 7, 20, true)).Times(1);
     ASSERT_TRUE(server_.StartProfile(&context_, &request_, &response_).ok());
     EXPECT_EQ(server_.worldBroadcaster(), nullptr);
     for (const auto& service : services_) {
@@ -431,7 +435,7 @@ TEST(StartProfileTest, StandaloneWithoutWorldAddressesConfiguresLocalEngine) {
     request.set_trace_name("standalone");
     request.set_num_steps(3);
     EmptyPB response;
-    EXPECT_CALL(*engine, startTimelineProfiling("standalone", 0, 3)).Times(1);
+    EXPECT_CALL(*engine, startTimelineProfiling("standalone", 0, 3, false)).Times(1);
     EXPECT_TRUE(server.StartProfile(&context, &request, &response).ok());
 }
 
@@ -444,8 +448,9 @@ TEST(StartProfileTest, InternalRequestConfiguresLocalEngine) {
     request.set_trace_name("world_profile");
     request.set_start_step(7);
     request.set_num_steps(20);
+    request.set_profile_light(true);
     EmptyPB response;
-    EXPECT_CALL(*engine, startTimelineProfiling("world_profile", 7, 20)).Times(1);
+    EXPECT_CALL(*engine, startTimelineProfiling("world_profile", 7, 20, true)).Times(1);
     EXPECT_TRUE(server.StartProfileInternal(&context, &request, &response).ok());
 }
 

@@ -530,7 +530,8 @@ def forward_layers(
         from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import try_fused_post_pre
     record_range_ctx = (
         _profiler.disable_record_function_ranges
-        if use_prefill_fast_path and not _profiler._torch_profiler_enabled()
+        if use_prefill_fast_path
+        and (not _profiler._torch_profiler_enabled() or _profiler.is_light_timeline())
         else nullcontext
     )
     # CED rebuilds tail metadata at L21. Its plan is first consumed at L20,

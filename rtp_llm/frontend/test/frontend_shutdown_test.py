@@ -123,6 +123,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
                         "start_step": 2,
                         "num_steps": 4,
                         "all_tp": True,
+                        "profile_light": True,
                     }
                 )
             )
@@ -133,6 +134,7 @@ class FrontendShutdownManagerTest(unittest.TestCase):
                 ("embedding", 2, 4),
             )
             self.assertTrue(request.enable_all_rank)
+            self.assertTrue(request.profile_light)
             endpoint._channel_pool.get.assert_awaited_with(endpoint.address)
             for field in ("enable_all_rank", "all_tp"):
                 for value, expected in (

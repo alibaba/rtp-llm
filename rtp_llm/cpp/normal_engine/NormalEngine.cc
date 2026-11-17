@@ -22,6 +22,7 @@
 #include "autil/TimeUtility.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include <c10/core/InferenceMode.h>
+#include <c10/util/ScopeExit.h>
 #include <algorithm>
 #include <chrono>
 #include <cinttypes>
@@ -765,6 +766,7 @@ void NormalEngine::loop() {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_INFO("loop begin");
     c10::InferenceMode inference_guard(true);
+    auto               stop_profiler = c10::make_scope_exit([this] { step_profiler_.stop(); });
     setCurrentThreadDevice(getDeviceId());
     const bool follow_root = cpu_tp_shutdown_ && parallelism_config.tp_rank != 0;
     // A local signal cannot skip a peer's in-flight step or its next input frame.
@@ -1021,7 +1023,7 @@ absl::Status NormalEngine::step() try {
         for (const auto& stream : streams) {
             if (stream && stream->genTimeline()) {
                 const auto& cfg = stream->generateConfig();
-                step_profiler_.configure(true, cfg->profile_trace_name, 0, cfg->profile_step);
+                step_profiler_.configure(true, cfg->profile_trace_name, 0, cfg->profile_step, cfg->profile_light);
                 break;
             }
         }
@@ -1072,8 +1074,11 @@ absl::Status NormalEngine::step() try {
     throw;
 }
 
-void NormalEngine::startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) {
-    step_profiler_.configure(true, trace_name, start_step, num_steps);
+void NormalEngine::startTimelineProfiling(const std::string& trace_name,
+                                          int                start_step,
+                                          int                num_steps,
+                                          bool               profile_light) {
+    step_profiler_.configure(true, trace_name, start_step, num_steps, profile_light);
 }
 
 bool NormalEngine::isMTPEagle() {
