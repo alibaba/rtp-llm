@@ -61,6 +61,12 @@ class ServerConfig:
             3600  # startup readiness bound (seconds)
         )
         self.monitor_interval: int = 1  # Monitor interval in seconds
+        # Restart a dead backend subtree in place up to this many times; -1 uses the
+        # resident_weights_mode default (prod: 3, others: 0) and 0 disables.
+        self.engine_restart_limit: int = -1
+        # With restart on, a multi-machine row stops when a machine's heartbeat or the
+        # row coordinator has not answered for this long.
+        self.engine_restart_heartbeat_timeout_s: float = 30.0
         self.frontend_pre_stop_drain_seconds: float = 120.0
         self.dash_sc_grpc_pre_stop_drain_seconds: float = 120.0
         self.pre_stop_drain_headroom_seconds: float = -1.0
@@ -149,6 +155,8 @@ class ServerConfig:
             f"worker_info_port_num: {self.worker_info_port_num}\n"
             f"shutdown_timeout: {self.shutdown_timeout}\n"
             f"monitor_interval: {self.monitor_interval}\n"
+            f"engine_restart_limit: {self.engine_restart_limit}\n"
+            f"engine_restart_heartbeat_timeout_s: {self.engine_restart_heartbeat_timeout_s}\n"
             f"frontend_pre_stop_drain_seconds: {self.frontend_pre_stop_drain_seconds}\n"
             f"dash_sc_grpc_pre_stop_drain_seconds: {self.dash_sc_grpc_pre_stop_drain_seconds}\n"
             f"pre_stop_drain_headroom_seconds: {self.pre_stop_drain_headroom_seconds}\n"
@@ -199,6 +207,22 @@ class LoraConfig:
 
     def to_string(self):
         return f"lora_info: {self.lora_info}\n" f"merge_lora: {self.merge_lora}\n"
+
+
+def resolve_engine_restart_limit(py_env_configs: "PyEnvConfigs") -> int:
+    """Resolve ENGINE_RESTART_LIMIT: -1 defaults to 3 in prod mode and 0 otherwise."""
+    limit = py_env_configs.server_config.engine_restart_limit
+    if limit == -1:
+        return (
+            3
+            if py_env_configs.load_config.resident_weights_config.mode == "prod"
+            else 0
+        )
+    if limit < -1:
+        raise ValueError(
+            f"engine_restart_limit must be >= 0 or -1 (mode default), got {limit}"
+        )
+    return limit
 
 
 @dataclass(slots=True)

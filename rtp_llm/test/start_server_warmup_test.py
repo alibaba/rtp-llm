@@ -12,6 +12,8 @@ class ServiceDrainingPropagationTest(unittest.TestCase):
     def test_each_launch_passes_a_fresh_event_to_all_process_groups(self):
         configs = Mock()
         configs.parallelism_config.dp_size = 1
+        # Without in-place restart every process group shares the instance's event.
+        configs.server_config.engine_restart_limit = 0
         with ExitStack() as stack:
             for name in (
                 "init_controller",
