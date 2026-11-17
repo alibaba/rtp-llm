@@ -850,6 +850,7 @@ class MMProcessEngine:
         self._async_queue_size = async_queue_size
         self._async_admission_capacity = async_compute_workers + async_queue_size
         self._async_admission_lock = threading.Lock()
+        self._async_admission_changed = threading.Condition(self._async_admission_lock)
         self._async_admitted = 0
         # Protect task ownership from the gap between cache claim and executor
         # submission. An RLock is required because Future.cancel() invokes done
@@ -1812,7 +1813,8 @@ class MMProcessEngine:
 
         Each input is submitted independently, keyed by its own cache_key.
         Returns the list of cache keys. Inputs already in-progress or complete
-        are not recomputed.
+        are not recomputed. Requests larger than the queue wait for bounded
+        admission windows within the multimodal timeout.
         """
         try:
             self.mm_part.validate_inputs(mm_inputs)
@@ -1991,6 +1993,7 @@ class MMProcessEngine:
                 pending,
                 request_id=request_id,
                 queue_timeout_ms=queue_timeout_ms,
+                cancellation_event=cancellation_event,
                 user_id=user_id,
                 service_name=service_name,
             )
@@ -2116,7 +2119,7 @@ class MMProcessEngine:
     def _release_async_slots(self, count: int = 1) -> None:
         if count <= 0:
             return
-        with self._async_admission_lock:
+        with self._async_admission_changed:
             self._async_admitted -= count
             if self._async_admitted < 0:
                 logging.error(
@@ -2124,6 +2127,7 @@ class MMProcessEngine:
                     self._async_admitted,
                 )
                 self._async_admitted = 0
+            self._async_admission_changed.notify_all()
 
     def _resolve_async_timeout_ms(
         self,
@@ -2234,73 +2238,100 @@ class MMProcessEngine:
         pending: List[Tuple[MultimodalInput, str, MMEmbeddingCacheEntry]],
         request_id: int = 0,
         queue_timeout_ms: Optional[int] = None,
+        cancellation_event: Optional[threading.Event] = None,
         user_id: str = "",
         service_name: str = "",
     ) -> None:
         if not pending:
             return
 
-        # Serialize submission with cancellation so a request cannot create new
-        # queued work after its cancellation callback has already run.
-        with self._async_task_lock:
-            if self._stopped:
-                raise RuntimeError("MMProcessEngine stopped")
-            active_pending = [
-                item
-                for item in pending
-                if item[2] in self._async_tasks
-                and self._async_tasks[item[2]].request_ids
-            ]
-            if not active_pending:
-                return
-
-            accepted, admitted = self._try_reserve_async_slots(len(active_pending))
-            if not accepted:
-                error = FtRuntimeException(
-                    ExceptionType.CONCURRENCY_LIMIT_ERROR,
-                    "ViT queue is full: "
-                    f"admitted={admitted}, capacity={self._async_admission_capacity}, "
-                    f"requested={len(active_pending)}",
+        deadline = (
+            time.monotonic()
+            + self._resolve_async_timeout_ms(pending, queue_timeout_ms) / 1000.0
+        )
+        # A request with more inputs than the entire queue can never pass an
+        # all-or-nothing reservation, even on an idle service. Feed that request
+        # through bounded windows; ordinary overload still fails fast.
+        windowed = len(pending) > self._async_admission_capacity
+        unsubmitted = pending
+        while unsubmitted:
+            self._raise_if_async_request_cancelled(request_id, cancellation_event)
+            if time.monotonic() >= deadline:
+                raise FtRuntimeException(
+                    ExceptionType.GENERATE_TIMEOUT,
+                    "ViT queue wait timed out during submission",
                 )
-                logging.warning(error.message)
-                for _, cache_key, entry in active_pending:
-                    self._forget_async_task_locked(entry)
-                    self._fail_async_compute(cache_key, entry, error)
-                raise error
+            # Serialize each submission with cancellation. Never hold this lock
+            # while waiting: done callbacks need it to release admission slots.
+            with self._async_task_lock:
+                if self._stopped:
+                    raise RuntimeError("MMProcessEngine stopped")
+                active_pending = [
+                    item
+                    for item in unsubmitted
+                    if item[2] in self._async_tasks
+                    and self._async_tasks[item[2]].request_ids
+                ]
+                if not active_pending:
+                    return
 
-            timeout_ms = self._resolve_async_timeout_ms(
-                active_pending, queue_timeout_ms
-            )
-            deadline = time.monotonic() + timeout_ms / 1000.0
-            submitted = 0
-            try:
-                for mm_input, cache_key, entry in active_pending:
-                    future = self._async_compute_executor.submit(
-                        copy_context().run,
-                        self._run_async_compute,
-                        [mm_input],
-                        cache_key,
-                        entry,
-                        request_id,
-                        deadline,
-                        user_id,
-                        service_name,
-                    )
-                    self._async_tasks[entry].future = future
-                    future.add_done_callback(
-                        lambda completed, key=cache_key, cache_entry=entry: self._on_async_compute_done(
-                            key, cache_entry, completed
+                if windowed:
+                    with self._async_admission_lock:
+                        count = min(
+                            len(active_pending),
+                            self._async_admission_capacity - self._async_admitted,
                         )
+                        self._async_admitted += count
+                else:
+                    accepted, admitted = self._try_reserve_async_slots(
+                        len(active_pending)
                     )
-                    submitted += 1
-            except Exception as error:
-                self.report_vit_error(error)
-                unsubmitted = active_pending[submitted:]
-                self._release_async_slots(len(unsubmitted))
-                for _, cache_key, entry in unsubmitted:
-                    self._forget_async_task_locked(entry)
-                    self._fail_async_compute(cache_key, entry, error)
-                raise
+                    if not accepted:
+                        error = FtRuntimeException(
+                            ExceptionType.CONCURRENCY_LIMIT_ERROR,
+                            "ViT queue is full: "
+                            f"admitted={admitted}, capacity={self._async_admission_capacity}, "
+                            f"requested={len(active_pending)}",
+                        )
+                        logging.warning(error.message)
+                        raise error
+                    count = len(active_pending)
+
+                if count:
+                    batch = active_pending[:count]
+                    unsubmitted = active_pending[count:]
+                    submitted = 0
+                    try:
+                        for mm_input, cache_key, entry in batch:
+                            future = self._async_compute_executor.submit(
+                                copy_context().run,
+                                self._run_async_compute,
+                                [mm_input],
+                                cache_key,
+                                entry,
+                                request_id,
+                                deadline,
+                                user_id,
+                                service_name,
+                            )
+                            self._async_tasks[entry].future = future
+                            future.add_done_callback(
+                                lambda completed, key=cache_key, cache_entry=entry: self._on_async_compute_done(
+                                    key, cache_entry, completed
+                                )
+                            )
+                            submitted += 1
+                    except Exception:
+                        self._release_async_slots(len(batch) - submitted)
+                        raise
+                    continue
+
+            with self._async_admission_changed:
+                # The bounded wait also observes caller cancellation and stop.
+                self._async_admission_changed.wait_for(
+                    lambda: self._async_admitted < self._async_admission_capacity,
+                    timeout=min(0.05, max(0.0, deadline - time.monotonic())),
+                )
 
     def _async_compute(
         self,
