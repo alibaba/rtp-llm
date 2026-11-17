@@ -179,7 +179,6 @@ private:
     TransferTaskRegistry::ForgetResult localForgetTransferCompletion(const TransferExecutionTrace& trace_id) const;
     bool                               startFrozenTaskRecovery();
     void                               stopFrozenTaskRecovery() noexcept;
-    void                               reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution);
 
     // 成员变量
     CacheConfig                config_;

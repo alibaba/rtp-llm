@@ -24,6 +24,10 @@ def _frozen_recovery_query_timeout_ms(value):
     return _frozen_recovery_ms(value, 1, "block_tree_frozen_recovery_query_timeout_ms")
 
 
+def _frozen_force_release_timeout_ms(value):
+    return _frozen_recovery_ms(value, 0, "block_tree_frozen_force_release_timeout_ms")
+
+
 def _frozen_abort_ratio(value):
     try:
         ratio = float(value)
@@ -460,7 +464,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=_frozen_recovery_interval_ms,
         default=1000,
         help="冻结任务恢复与完成记录清理的轮询间隔，单位毫秒，默认 1000；0 暂停两者，范围 [0, 2147483647]。"
-        "原参与者均确认 buffer safe 后才释放冻结引用。",
+        "原参与者均确认 buffer safe 或达到强制解冻超时后释放冻结引用。",
     )
     kv_cache_group.add_argument(
         "--block_tree_frozen_recovery_query_timeout_ms",
@@ -469,7 +473,16 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=_frozen_recovery_query_timeout_ms,
         default=1000,
         help="单个冻结任务查询或一批完成记录清理的超时预算，单位毫秒，默认 1000；范围 [1, 2147483647]。"
-        "查询失败或缺少安全证明时保留冻结引用。",
+        "查询失败或缺少安全证明时，在强制解冻超时前保留冻结引用。",
+    )
+    kv_cache_group.add_argument(
+        "--block_tree_frozen_force_release_timeout_ms",
+        env_name="BLOCK_TREE_FROZEN_FORCE_RELEASE_TIMEOUT_MS",
+        bind_to=(kv_cache_config, "block_tree_frozen_force_release_timeout_ms"),
+        type=_frozen_force_release_timeout_ms,
+        default=60000,
+        help="冻结任务强制解冻超时，单位毫秒，默认 60000（1 分钟）；0 关闭超时兜底，范围 [0, 2147483647]。"
+        "启用恢复轮询时生效；超时后即使缺少 buffer safe 证明也释放冻结引用，不会取消底层 I/O。",
     )
     kv_cache_group.add_argument(
         "--block_pool_frozen_abort_upper_ratio",

@@ -221,6 +221,137 @@ TEST(FrozenTaskRecoveryTest, RemoteRecoveryWaitsForEveryRankAndPreservesPendingQ
     EXPECT_EQ(running_snapshot->ranks[1].state, State::RUNNING);
 }
 
+TEST(FrozenTaskRecoveryTest, TimeoutReleasesRunningUnknownAndFailedQueriesOnlyOnce) {
+    for (bool remote : {false, true}) {
+        for (int mode = 0; mode < 5; ++mode) {
+            SCOPED_TRACE(remote);
+            SCOPED_TRACE(mode);
+            auto                         pool  = makePool();
+            const auto                   block = hold(pool);
+            const TransferExecutionTrace trace =
+                remote ? TransferExecutionTrace{std::string("timeout-read")} : TransferExecutionTrace{uint64_t{82}};
+            auto task = makeTask(trace, pool, block, remote);
+            task->freeze();
+            size_t             notifications = 0;
+            FrozenTaskRecovery recovery([&] { return std::vector<std::shared_ptr<FrozenTask>>{task}; },
+                                        [&](const auto& execution, int) {
+                                            if (mode == 3)
+                                                throw std::runtime_error("query unavailable");
+                                            if (mode == 4)
+                                                throw 42;
+                                            auto result = proof(execution, mode == 0 ? State::RUNNING : State::UNKNOWN);
+                                            if (mode == 2)
+                                                result.error = "query deadline exceeded";
+                                            return result;
+                                        },
+                                        {},
+                                        [&](const auto&) { ++notifications; });
+            const auto         pending = recovery.runOnce(1000);
+            EXPECT_EQ(pending.released, 0u);
+            EXPECT_EQ(pending.pending, 1u);
+            EXPECT_TRUE(pool->isFrozen(block));
+            task->frozen_at_us_ -= std::chrono::duration_cast<std::chrono::microseconds>(1min).count();
+            const auto expired = recovery.runOnce(1000);
+            EXPECT_EQ(expired.released, 1u);
+            EXPECT_EQ(expired.pending, 0u);
+            EXPECT_EQ(expired.query_failed, mode >= 2 ? 1u : 0u);
+            EXPECT_EQ(task->snapshot().state, FrozenTask::State::RELEASED);
+            EXPECT_FALSE(pool->isFrozen(block));
+            EXPECT_FALSE(task->failure().buffer_safe);
+            EXPECT_EQ(task->failure().status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+            EXPECT_EQ(recovery.runOnce(1000).queried, 0u);
+            EXPECT_FALSE(task->unfreeze());
+            EXPECT_EQ(pool->treeRefCount(block), 1u);
+            EXPECT_EQ(notifications, 1u);
+        }
+    }
+}
+
+TEST(FrozenTaskRecoveryTest, ConfiguredTimeoutCanShortenExtendOrDisableForcedRelease) {
+    for (int timeout_ms : {0, 1000, 1200000}) {
+        SCOPED_TRACE(timeout_ms);
+        auto       pool  = makePool();
+        const auto block = hold(pool);
+        auto       task  = makeTask(uint64_t{85}, pool, block);
+        task->freeze();
+        task->frozen_at_us_ -= std::chrono::duration_cast<std::chrono::microseconds>(1min).count();
+        State              state = State::RUNNING;
+        FrozenTaskRecovery recovery([&] { return std::vector<std::shared_ptr<FrozenTask>>{task}; },
+                                    [&](const auto& execution, int) { return proof(execution, state); },
+                                    {},
+                                    {},
+                                    timeout_ms);
+        EXPECT_EQ(recovery.runOnce(1000).released, timeout_ms == 1000 ? 1u : 0u);
+        EXPECT_EQ(pool->isFrozen(block), timeout_ms != 1000);
+        task->frozen_at_us_ -= std::chrono::duration_cast<std::chrono::microseconds>(20min).count();
+        EXPECT_EQ(recovery.runOnce(1000).released, timeout_ms == 1200000 ? 1u : 0u);
+        EXPECT_EQ(pool->isFrozen(block), timeout_ms == 0);
+        state = State::BUFFER_SAFE;
+        EXPECT_EQ(recovery.runOnce(1000).released, timeout_ms == 0 ? 1u : 0u);
+        EXPECT_FALSE(pool->isFrozen(block));
+        EXPECT_FALSE(task->unfreeze());
+        EXPECT_EQ(pool->treeRefCount(block), 1u);
+    }
+    EXPECT_THROW((FrozenTaskRecovery({}, {}, {}, {}, -1)), std::invalid_argument);
+}
+
+TEST(FrozenTaskRecoveryTest, TimeoutPreservesOtherFrozenOwnersAndRetriesForgetUntilSafe) {
+    auto       pool     = makePool();
+    const auto block    = hold(pool);
+    auto       other    = makeTask(uint64_t{84}, pool, block);
+    auto       original = makeTask(uint64_t{83}, pool, block);
+    auto       cleanup  = std::make_shared<TransferCompletionCleanup>();
+    auto       task     = std::make_shared<FrozenTask>(FrozenTask::prepare(original->execution()),
+                                             original->failure(),
+                                             cleanup->prepare({false, {{0, "local"}}}, uint64_t{83}));
+    task->freeze();
+    other->freeze();
+    pool->decTreeRef(block, BlockTreeRefType::CACHE);
+    task->frozen_at_us_ -= std::chrono::duration_cast<std::chrono::microseconds>(1min).count();
+    TransferTaskRegistry registry;
+    ASSERT_TRUE(registry.begin(uint64_t{83}));
+    size_t             forget_calls = 0;
+    FrozenTaskRecovery recovery([&] { return std::vector<std::shared_ptr<FrozenTask>>{task, other}; },
+                                [&](const auto& execution, int) { return proof(execution, State::RUNNING); },
+                                [&](int timeout, const auto& stopped) {
+                                    return cleanup->drain(
+                                        [&](const auto&, const auto& traces, int) {
+                                            ++forget_calls;
+                                            EXPECT_EQ(traces, (std::vector<TransferExecutionTrace>{uint64_t{83}}));
+                                            const auto                          status = registry.forget(uint64_t{83});
+                                            TransferCompletionForgetResult      result;
+                                            TransferCompletionForgetEntryResult entry;
+                                            entry.trace_id = uint64_t{83};
+                                            entry.all_done = status == TransferTaskRegistry::ForgetResult::DONE;
+                                            result.entries.push_back(std::move(entry));
+                                            return result;
+                                        },
+                                        timeout,
+                                        stopped);
+                                });
+    EXPECT_EQ(recovery.runOnce(1000).released, 1u);
+    EXPECT_EQ(cleanup->size(), 1u);
+    EXPECT_EQ(forget_calls, 0u);
+    EXPECT_TRUE(pool->isFrozen(block));
+    EXPECT_EQ(pool->treeRefCount(block), 1u);
+    EXPECT_FALSE(task->unfreeze());
+    const auto pending = recovery.runOnce(1000);
+    EXPECT_EQ(pending.released, 0u);
+    EXPECT_EQ(pending.pending, 1u);
+    EXPECT_EQ(forget_calls, 1u);
+    EXPECT_EQ(cleanup->size(), 1u);
+    EXPECT_EQ(registry.queryLocal(std::vector<uint64_t>{83}).front(), State::RUNNING);
+    ASSERT_TRUE(registry.finish(uint64_t{83}, true));
+    EXPECT_EQ(recovery.runOnce(1000).released, 0u);
+    EXPECT_EQ(forget_calls, 2u);
+    EXPECT_EQ(cleanup->size(), 0u);
+    EXPECT_EQ(registry.size(), 0u);
+    EXPECT_TRUE(pool->isFrozen(block));
+    EXPECT_EQ(pool->treeRefCount(block), 1u);
+    EXPECT_TRUE(other->unfreeze());
+    EXPECT_FALSE(pool->isAllocated(block));
+}
+
 TEST(FrozenTaskRecoveryTest, InconsistentOrMismatchedInjectedProofNeverReleasesTargets) {
     auto       pool  = makePool();
     const auto block = hold(pool);

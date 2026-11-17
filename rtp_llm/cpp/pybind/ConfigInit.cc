@@ -507,6 +507,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("block_tree_frozen_recovery_interval_ms", &KVCacheConfig::block_tree_frozen_recovery_interval_ms)
         .def_readwrite("block_tree_frozen_recovery_query_timeout_ms",
                        &KVCacheConfig::block_tree_frozen_recovery_query_timeout_ms)
+        .def_readwrite("block_tree_frozen_force_release_timeout_ms",
+                       &KVCacheConfig::block_tree_frozen_force_release_timeout_ms)
         .def_readwrite("block_pool_frozen_abort_lower_ratio", &KVCacheConfig::block_pool_frozen_abort_lower_ratio)
         .def_readwrite("block_pool_frozen_abort_upper_ratio", &KVCacheConfig::block_pool_frozen_abort_upper_ratio)
         .def_readwrite("block_tree_device_evict_low_watermark_ratio",
@@ -607,7 +609,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      19,
+                                      20,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -700,9 +702,17 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.disk_cache_evict_max_pending_bytes,
                                       self.block_tree_frozen_recovery_interval_ms,
                                       self.block_tree_frozen_recovery_query_timeout_ms,
-                                      self.block_tree_task_pool_size);
+                                      self.block_tree_task_pool_size,
+                                      self.block_tree_frozen_force_release_timeout_ms);
             },
             [](py::tuple t) {
+                const py::tuple force_release_state = t;
+                const bool      has_force_release =
+                    t.size() == 96 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 20;
+                if (has_force_release) {
+                    t    = t[py::slice(0, 95, 1)].cast<py::tuple>();
+                    t[1] = py::int_(19);
+                }
                 const py::tuple task_pool_state = t;
                 const bool has_task_pool = t.size() == 95 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 19;
                 if (has_task_pool) {
@@ -818,12 +828,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.block_tree_frozen_recovery_interval_ms      = recovery_timing_state[92].cast<int64_t>();
                     c.block_tree_frozen_recovery_query_timeout_ms = recovery_timing_state[93].cast<int64_t>();
                 }
+                if (has_force_release) {
+                    c.block_tree_frozen_force_release_timeout_ms = force_release_state[95].cast<int64_t>();
+                }
                 if (c.block_tree_frozen_recovery_interval_ms < 0
                     || c.block_tree_frozen_recovery_interval_ms > std::numeric_limits<int>::max()
                     || c.block_tree_frozen_recovery_query_timeout_ms <= 0
-                    || c.block_tree_frozen_recovery_query_timeout_ms > std::numeric_limits<int>::max()) {
+                    || c.block_tree_frozen_recovery_query_timeout_ms > std::numeric_limits<int>::max()
+                    || c.block_tree_frozen_force_release_timeout_ms < 0
+                    || c.block_tree_frozen_force_release_timeout_ms > std::numeric_limits<int>::max()) {
                     throw std::runtime_error("invalid KVCacheConfig frozen recovery timing: expected interval in "
-                                             "[0, INT_MAX] and query timeout in [1, INT_MAX]");
+                                             "[0, INT_MAX], query timeout in [1, INT_MAX] and force release timeout "
+                                             "in [0, INT_MAX]");
                 }
                 if (has_pending_budget) {
                     c.disk_cache_evict_max_pending_bytes = pending_budget_state[91].cast<int64_t>();

@@ -1,7 +1,9 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTaskRecovery.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <exception>
+#include <stdexcept>
 #include <utility>
 
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -89,29 +91,48 @@ void recordException(const std::shared_ptr<FrozenTask>& task, const char* error)
     } catch (...) {}
 }
 
-void logReleased(const FrozenTask& task) noexcept {
+void logReleased(const FrozenTask& task, bool forced) noexcept {
+    int64_t duration_ms = 0;
     try {
         const auto snapshot    = task.snapshot();
-        const auto duration_ms = std::max<int64_t>(0, snapshot.released_at_us - snapshot.frozen_at_us) / 1000;
-        try {
-            const auto description = task.debugString();
+        duration_ms            = std::max<int64_t>(0, snapshot.released_at_us - snapshot.frozen_at_us) / 1000;
+        const auto description = task.debugString();
+        if (forced) {
+            RTP_LLM_LOG_WARNING("FrozenTask recovery forced release after timeout frozen_duration_ms=%lld %s",
+                                static_cast<long long>(duration_ms),
+                                description.c_str());
+        } else {
             RTP_LLM_LOG_INFO("FrozenTask recovery released frozen_duration_ms=%lld %s",
                              static_cast<long long>(duration_ms),
                              description.c_str());
-        } catch (...) {
-            RTP_LLM_LOG_INFO("FrozenTask recovery released frozen_duration_ms=%lld (diagnostics unavailable)",
-                             static_cast<long long>(duration_ms));
         }
+    } catch (const std::exception& error) {
+        std::fprintf(stderr,
+                     "FrozenTask release logging failed: forced=%d frozen_duration_ms=%lld error=%s\n",
+                     static_cast<int>(forced),
+                     static_cast<long long>(duration_ms),
+                     error.what());
     } catch (...) {
-        // Release and its count are already complete; logging cannot repeat it.
+        std::fprintf(stderr,
+                     "FrozenTask release logging failed: forced=%d frozen_duration_ms=%lld unknown exception\n",
+                     static_cast<int>(forced),
+                     static_cast<long long>(duration_ms));
     }
 }
 
 }  // namespace
 
-FrozenTaskRecovery::FrozenTaskRecovery(TaskSource source, Query query, Cleanup cleanup, OnReleased on_released):
-    source_(std::move(source)), query_(std::move(query)), cleanup_(std::move(cleanup)),
-    on_released_(std::move(on_released)) {}
+FrozenTaskRecovery::FrozenTaskRecovery(
+    TaskSource source, Query query, Cleanup cleanup, OnReleased on_released, int force_release_timeout_ms):
+    source_(std::move(source)),
+    query_(std::move(query)),
+    cleanup_(std::move(cleanup)),
+    on_released_(std::move(on_released)),
+    force_release_timeout_us_(static_cast<int64_t>(force_release_timeout_ms) * 1000) {
+    if (force_release_timeout_ms < 0) {
+        throw std::invalid_argument("frozen force release timeout must be nonnegative");
+    }
+}
 
 FrozenTaskRecovery::~FrozenTaskRecovery() {
     stop();
@@ -246,7 +267,13 @@ FrozenTaskRecovery::Summary FrozenTaskRecovery::runOnce(int                     
         }
         if (stop())
             break;
-        if (safe && task->snapshot().state == FrozenTask::State::FROZEN) {
+        const auto snapshot = task->snapshot();
+        const auto now_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        const bool expired =
+            force_release_timeout_us_ > 0 && now_us - snapshot.frozen_at_us >= force_release_timeout_us_;
+        if ((safe || expired) && snapshot.state == FrozenTask::State::FROZEN) {
             if (stop())
                 break;
             if (task->unfreeze()) {
@@ -255,11 +282,15 @@ FrozenTaskRecovery::Summary FrozenTaskRecovery::runOnce(int                     
                     if (on_released_)
                         on_released_(task->execution());
                 } catch (const std::exception& error) {
-                    RTP_LLM_LOG_WARNING("FrozenTask release observer failed: %s", error.what());
+                    try {
+                        RTP_LLM_LOG_WARNING("FrozenTask release observer failed: %s", error.what());
+                    } catch (...) {}
                 } catch (...) {
-                    RTP_LLM_LOG_WARNING("FrozenTask release observer failed: unknown exception");
+                    try {
+                        RTP_LLM_LOG_WARNING("FrozenTask release observer failed: unknown exception");
+                    } catch (...) {}
                 }
-                logReleased(*task);
+                logReleased(*task, expired && !safe);
             }
         }
         if (task->snapshot().state == FrozenTask::State::FROZEN)

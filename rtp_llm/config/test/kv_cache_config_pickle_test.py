@@ -32,8 +32,8 @@ class KVCacheConfigPickleTest(TestCase):
             with self.subTest(enable_crc=enable_crc):
                 config.enable_crc = enable_crc
                 state = config.__getstate__()
-                self.assertEqual(len(state), 95)
-                self.assertEqual(state[:2], ("KVCacheConfig", 19))
+                self.assertEqual(len(state), 96)
+                self.assertEqual(state[:2], ("KVCacheConfig", 20))
                 self.assertEqual(state[64:69], tuple(BASE_EVENT_FIELD_VALUES.values()))
                 self.assertIs(state[69], enable_crc)
                 self.assertEqual(state[84:88], (3, False, 3, 5))
@@ -172,7 +172,7 @@ class KVCacheConfigPickleTest(TestCase):
         self.assertTrue(restored.btc_transfer_engine_async)
         self.assertEqual(restored.disk_cache_read_thread_count, 16)
         self.assertEqual(restored.disk_cache_write_thread_count, 16)
-        self.assertEqual(restored.__getstate__()[:2], ("KVCacheConfig", 19))
+        self.assertEqual(restored.__getstate__()[:2], ("KVCacheConfig", 20))
 
     def test_disk_timeout_defaults_and_overrides_survive_worker_round_trips(self):
         self.assertEqual(KVCacheConfig().disk_cache_sync_timeout_ms, 30000)
@@ -356,6 +356,26 @@ class KVCacheConfigPickleTest(TestCase):
                         config.block_tree_frozen_recovery_query_timeout_ms, timeout
                     )
 
+    def test_frozen_force_release_timeout_defaults_boundaries_and_validation(self):
+        name = "block_tree_frozen_force_release_timeout_ms"
+        config = KVCacheConfig()
+        self.assertEqual(getattr(config, name), 60000)
+        for timeout in (0, 1, 120000, 1200000, 2**31 - 1):
+            with self.subTest(timeout=timeout):
+                setattr(config, name, timeout)
+                for _ in range(2):
+                    config = pickle.loads(pickle.dumps(config))
+                    self.assertEqual(getattr(config, name), timeout)
+                    self.assertEqual(config.__getstate__()[95], timeout)
+                    self.assertIn(f"{name}: {timeout}\n", config.to_string())
+        for timeout in (-1, 2**31):
+            with self.subTest(timeout=timeout), self.assertRaisesRegex(
+                RuntimeError, "invalid KVCacheConfig frozen recovery timing"
+            ):
+                state = KVCacheConfig().__getstate__()
+                restored = KVCacheConfig.__new__(KVCacheConfig)
+                restored.__setstate__((*state[:95], timeout))
+
     def test_invalid_frozen_recovery_timing_is_rejected_during_restore(self):
         state = KVCacheConfig().__getstate__()
         for interval, timeout in (
@@ -447,6 +467,42 @@ class KVCacheConfigPickleTest(TestCase):
                     restored.block_tree_frozen_recovery_query_timeout_ms,
                     750 if version == 18 else 1000,
                 )
+
+    def test_previous_versions_use_default_frozen_force_release_timeout(self):
+        source = KVCacheConfig()
+        source.block_tree_task_pool_size = 6
+        source.block_tree_transfer_worker_count = 7
+        source.block_tree_frozen_force_release_timeout_ms = 120000
+        state = source.__getstate__()
+        for version, size in (
+            (6, 64),
+            (7, 69),
+            (8, 70),
+            (9, 72),
+            (10, 78),
+            (11, 80),
+            (12, 84),
+            (13, 88),
+            (14, 89),
+            (15, 90),
+            (16, 91),
+            (17, 92),
+            (18, 94),
+            (19, 95),
+        ):
+            with self.subTest(version=version):
+                previous = (state[0], version, *state[2:size])
+                original = tuple(list(previous))
+                restored = KVCacheConfig.__new__(KVCacheConfig)
+                restored.__setstate__(previous)
+                self.assertEqual(previous, original)
+                self.assertEqual(
+                    restored.block_tree_frozen_force_release_timeout_ms, 60000
+                )
+                self.assertEqual(
+                    restored.block_tree_task_pool_size, 6 if version == 19 else 4
+                )
+                self.assertEqual(restored.block_tree_transfer_worker_count, 7)
 
     def test_malformed_event_states_are_rejected(self):
         state = KVCacheConfig().__getstate__()

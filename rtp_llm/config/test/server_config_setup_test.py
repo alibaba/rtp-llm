@@ -596,8 +596,8 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 95)
-        self.assertEqual(state[:2], ("KVCacheConfig", 19))
+        self.assertEqual(len(state), 96)
+        self.assertEqual(state[:2], ("KVCacheConfig", 20))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
@@ -733,6 +733,7 @@ class GenerateConfigTest(TestCase):
             "block_tree_transfer_queue_max_size": "int",
             "block_tree_frozen_recovery_interval_ms": "int",
             "block_tree_frozen_recovery_query_timeout_ms": "int",
+            "block_tree_frozen_force_release_timeout_ms": "int",
             "block_pool_frozen_abort_lower_ratio": "float",
             "block_pool_frozen_abort_upper_ratio": "float",
             "block_tree_device_evict_low_watermark_ratio": "float",
