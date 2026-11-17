@@ -749,8 +749,8 @@ class RocmExpertsFp8PerChannelTest(_Fp8MoeBaseTest):
                         output.float(), reference.float(), dim=-1
                     ).mean()
                     self.assertGreater(cosine.item(), 0.99)
-    self.assertGreater(route_local_calls, 0)
-    self.assertGreater(canary_checks, 0)
+        self.assertGreater(route_local_calls, 0)
+        self.assertGreater(canary_checks, 0)
 
 
 class RocmExpertsFp8PerBlockTest(_Fp8MoeBaseTest):
