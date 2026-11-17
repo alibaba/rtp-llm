@@ -3,6 +3,7 @@
 import ast
 import copy
 import json
+import importlib.util
 import logging
 import queue
 import threading
@@ -144,6 +145,29 @@ class VLLMAbortLoggingTest(unittest.TestCase):
         )
         self.assertIn("batch_id=7 schedule_batch_id=8", logs.output[0])
         self.assertEqual(3, obj._bridge.log_request_lifecycle_audit.call_count)
+
+    def test_ppu_request_without_cached_token_field_still_logs_applied(self):
+        path = SOURCE.with_name("VLLMSchedulerObserver.py")
+        spec = importlib.util.spec_from_file_location("abort_scheduler_callback", path)
+        callbacks = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(callbacks)
+        obj = self.observer()
+        reporter = callbacks.VLLMSchedulerObserver(obj.on_request_lifecycle_event)
+        scheduler = SimpleNamespace(request_observer=reporter, running=[], waiting=[],
+                                    max_num_running_reqs=192)
+        request = SimpleNamespace(
+            request_id="ppu-aborted", arrival_time=0,
+            status=SimpleNamespace(name="FINISHED_ABORTED"), num_prompt_tokens=64,
+            num_computed_tokens=65, num_output_tokens=1, num_output_placeholders=0,
+            max_tokens=1024, priority=0, num_preemptions=0,
+        )
+        with self.assertLogs(LOGGER, level="INFO") as logs:
+            reporter.on_transition(scheduler, "terminal", request)
+        self.assertIn("[navi-vllm-abort-applied] vllm_request_id=ppu-aborted", logs.output[0])
+        audit = json.loads(obj._bridge.log_request_lifecycle_audit.call_args.args[0])
+        self.assertIsNone(audit["cached_tokens"])
+        self.assertEqual("FINISHED_ABORTED", audit["status"])
+        self.assertEqual(0, reporter.errors)
 
     def test_applied_log_survives_audit_sink_failure(self):
         obj = self.observer()

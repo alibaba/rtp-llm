@@ -35,7 +35,7 @@ def emit_request_transition(
                 "computed_tokens_including_scheduled": request.num_computed_tokens,
                 "output_tokens": request.num_output_tokens,
                 "output_placeholders": request.num_output_placeholders,
-                "cached_tokens": request.num_cached_tokens,
+                "cached_tokens": getattr(request, "num_cached_tokens", None),
                 "max_tokens": request.max_tokens,
                 "priority": request.priority,
                 "num_preemptions": request.num_preemptions,
