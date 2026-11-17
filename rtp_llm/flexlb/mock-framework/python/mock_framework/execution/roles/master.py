@@ -158,6 +158,7 @@ class MasterRole:
             behavior = json.loads(env.get("FLEXLB_CONFIG", "{}"))
             if "consistency" in behavior:
                 raise ExecutionError("Local runner assigns FLEXLB_CONFIG.consistency")
+            behavior.setdefault("schemaVersion", 3)
             behavior["consistency"] = self.consistency_config
             env["FLEXLB_CONFIG"] = json.dumps(behavior)
             env.update(self.election_env, FLEXLB_ADVERTISED_IP=host)
