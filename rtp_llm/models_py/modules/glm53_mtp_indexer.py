@@ -4,6 +4,7 @@ import os
 
 import torch
 
+from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
 from rtp_llm.models_py.modules.indexer_grouping import (
     append_incomplete_tail_indices,
     expand_indexer_group_indices,
@@ -61,6 +62,55 @@ class Glm53MtpIndexerSeeds:
             raise ValueError("invalid expanded raw-token MTP indexer seed")
         self.snapshot(indices.shape[0]).copy_(indices)
 
+    def store_prefill_cp(self, pooled_indices, layout, local_ids, prefix_lengths):
+        """Collect only each request's final query from padded CP shards."""
+        batch_size = len(layout.q_lens)
+        self.snapshot(batch_size)
+        device = self.indices.device
+        raw_lengths = prefix_lengths.to(
+            device=device, dtype=torch.int32
+        ) + torch.tensor(layout.q_lens, device=device, dtype=torch.int32)
+        selected = None
+        if pooled_indices is not None:
+            if (
+                pooled_indices.ndim != 2
+                or pooled_indices.dtype != torch.int32
+                or pooled_indices.device != device
+                or pooled_indices.shape[0] != local_ids.numel()
+                or pooled_indices.shape[1] not in (0, self.pooled_topk)
+            ):
+                raise ValueError("invalid CP-local pooled MTP indexer seed output")
+            # The indexer omits padded CP queries. Restore their CP offsets,
+            # then reduce B seed rows rather than gathering the whole prompt.
+            local = torch.full(
+                (layout.local_cp_tokens, pooled_indices.shape[1]),
+                -1,
+                dtype=torch.int32,
+                device=device,
+            )
+            local.index_copy_(
+                0, local_ids.to(device=device, dtype=torch.int64), pooled_indices
+            )
+            selected = torch.zeros(
+                (batch_size, local.shape[1]), dtype=torch.int32, device=device
+            )
+            end = 0
+            for request, length in enumerate(layout.q_lens):
+                end += length
+                for fragment in layout.fragments:
+                    if (
+                        fragment.cp_rank == layout.rank
+                        and fragment.canonical_offset
+                        <= end - 1
+                        < fragment.canonical_offset + fragment.length
+                    ):
+                        row = fragment.cp_offset + end - 1 - fragment.canonical_offset
+                        selected[request].copy_(local[row])
+                        break
+            selected = all_reduce(selected, Group.TP)
+        rows = torch.arange(batch_size, dtype=torch.int32, device=device)
+        self.store(selected, rows, raw_lengths - 1)
+
     def store(self, pooled_indices, seed_rows, positions):
         if (
             seed_rows.ndim != 1
@@ -87,7 +137,11 @@ class Glm53MtpIndexerSeeds:
                 or pooled_indices.shape[0] != positions.numel()
                 or pooled_indices.shape[1] not in (0, self.pooled_topk)
             ):
-                raise ValueError("invalid pooled MTP indexer seed output")
+                raise ValueError(
+                    "invalid pooled MTP indexer seed output: "
+                    f"shape={tuple(pooled_indices.shape)}, dtype={pooled_indices.dtype}, "
+                    f"positions={positions.numel()}, expected_topk={self.pooled_topk}"
+                )
             selected = pad_empty_indexer_history(
                 pooled_indices, self.pooled_topk
             ).index_select(0, rows)
