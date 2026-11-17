@@ -426,7 +426,8 @@ bool KVCacheManager::startFrozenTaskRecovery() {
                         }, timeout_ms, stopped);
                 }
                 return TransferCompletionCleanup::Summary{};
-            });
+            },
+            [this](const FrozenTask::ExecutionInfo& execution) { block_tree_cache_->reportUnfreezeMetrics(execution); });
         if (!recovery->start(static_cast<int>(kv_cache_config_.block_tree_frozen_recovery_interval_ms),
                              static_cast<int>(kv_cache_config_.block_tree_frozen_recovery_query_timeout_ms))) {
             RTP_LLM_LOG_ERROR("failed to start frozen task recovery thread");

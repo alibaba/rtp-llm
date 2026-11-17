@@ -20,6 +20,8 @@
 #include <rapidjson/document.h>
 
 #include "kmonitor/client/MetricsReporter.h"
+#include "kmonitor/client/core/MetricsData.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
@@ -55,6 +57,23 @@ namespace {
 constexpr int                  kDsv4PoolNum = 7;
 const std::vector<std::string> kDsv4Tags    = {
     "swa_kv", "csa_kv", "indexer_kv", "indexer_state", "csa_state", "hca_kv", "hca_state"};
+
+double snapshotUnfreezeBlocks(const kmonitor::MetricsReporterPtr& reporter,
+                              const std::string& pool_name, Tier tier, const char* backend) {
+    kmonitor::MetricsTags tags("pool_name", pool_name);
+    tags.AddTag("tier", tierName(tier));
+    tags.AddTag("backend", backend);
+    auto* metric = reporter->getMetricsGroup<RtpLLMCachePoolMetrics>()->unfreeze_blocks_qps_metric;
+    auto* series = metric->DeclareMetric(&tags);
+    kmonitor::MetricsRecord record(nullptr, nullptr, 0);
+    series->Snapshot(&record, 1000);
+    EXPECT_TRUE(metric->UndeclareMetric(series));
+    EXPECT_EQ(record.Values().size(), 1u);
+    if (record.Values().empty())
+        return -1;
+    EXPECT_NE(record.Values().front()->Name().find("rtp_llm_kv_cache_unfreeze_blocks_qps"), std::string::npos);
+    return std::stod(record.Values().front()->Value());
+}
 
 class ScopedEnvVar {
 public:
@@ -2556,7 +2575,10 @@ TEST_F(KVCacheManagerTest, BackgroundRecoveryReclaimsLocalTargetsAndPublishesCap
     config.enable_memory_cache = true;
     config.memory_cache_size_mb = 1;
     config.block_tree_frozen_recovery_interval_ms = 20;
-    auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, config);
+    auto monitor = std::make_shared<kmonitor::KMonitor>("unfreeze_background_test");
+    monitor->SetServiceName("");
+    auto reporter = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
+    auto manager = std::make_shared<KVCacheManager>(cache_config, false, reporter, config);
     ASSERT_TRUE(manager->init());
     manager->stopFrozenTaskRecovery();
     const auto& groups = manager->blockTreeCache()->groupSets();
@@ -2610,6 +2632,7 @@ TEST_F(KVCacheManagerTest, BackgroundRecoveryReclaimsLocalTargetsAndPublishesCap
     }
     EXPECT_TRUE(weak_record.expired());
     manager->stopFrozenTaskRecovery();
+    EXPECT_DOUBLE_EQ(snapshotUnfreezeBlocks(reporter, pool->poolName(), Tier::HOST, "local"), 1);
     const auto& registry = manager->block_tree_cache_->transfer_dispatcher_->taskRegistry();
     EXPECT_EQ(manager->completion_cleanup_->size(), 0u);
     EXPECT_EQ(registry.size(), 0u);

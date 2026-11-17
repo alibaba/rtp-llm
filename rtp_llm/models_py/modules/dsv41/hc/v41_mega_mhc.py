@@ -368,10 +368,15 @@ def try_fused_post_pre(
         )
         if execution_tokens is None:
             return None
-    attn_out = attn_out.view(tokens, 5120)
-    residual = residual.view(tokens, 4, 5120)
-    post = post.view(tokens, 4, 1)
-    comb = comb.view(tokens, 4, 4)
+    # Packed prefill already has the kernel's row layout. Singleton dimensions
+    # can have arbitrary strides even on contiguous tensors; preserve the
+    # original view normalization when those strides can differ.
+    flat_rows = len(leading) == 1 and tokens > 1 and post.stride(-1) == 1
+    if not flat_rows:
+        attn_out = attn_out.view(tokens, 5120)
+        residual = residual.view(tokens, 4, 5120)
+        post = post.view(tokens, 4, 1)
+        comb = comb.view(tokens, 4, 4)
     previous_pre = previous.pre_mix_out.view(tokens, 4, 1)
     if execution_tokens != tokens:
 
@@ -447,13 +452,20 @@ def try_fused_post_pre(
                 _WARMED_STREAMS.add(_stream_key(attn_out.device))
     if quantized is not None:
         quantized = (q[:tokens].view(*leading, 5120), sf[:tokens])
-    next_hc.pre_mix_out = new_pre[:tokens].view(*leading, 4)
-    result = (
-        new_residual[:tokens].view(*leading, 4, 5120),
-        normalized[:tokens].view(*leading, 5120),
-        new_post[:tokens].view(*leading, 4, 1),
-        new_comb[:tokens].view(*leading, 4, 4),
-    )
+    if flat_rows and execution_tokens == tokens:
+        next_hc.pre_mix_out = new_pre.view(tokens, 4)
+        # Keep the caller's residual metadata independent when sharing storage.
+        if reuse_residual:
+            new_residual = new_residual.view_as(residual)
+        result = (new_residual, normalized, new_post, new_comb)
+    else:
+        next_hc.pre_mix_out = new_pre[:tokens].view(*leading, 4)
+        result = (
+            new_residual[:tokens].view(*leading, 4, 5120),
+            normalized[:tokens].view(*leading, 5120),
+            new_post[:tokens].view(*leading, 4, 1),
+            new_comb[:tokens].view(*leading, 4, 4),
+        )
 
     return (*result, quantized) if output_fp8 else result
 

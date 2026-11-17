@@ -77,6 +77,33 @@ BlockTreeCacheMetricsReporter::BlockTreeCacheMetricsReporter(
 }
 BlockTreeCacheMetricsReporter::~BlockTreeCacheMetricsReporter() = default;
 
+void BlockTreeCacheMetricsReporter::reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution) const {
+    if (!metrics_reporter_) {
+        return;
+    }
+    struct PoolTargets {
+        Tier                             tier = Tier::NONE;
+        std::unordered_set<BlockIdxType> blocks;
+    };
+    std::unordered_map<const IBlockPool*, PoolTargets> targets;
+    for (const auto& descriptor : execution.descriptors) {
+        for (const auto& target : descriptor.targets) {
+            auto& pool_targets = targets[target.pool.get()];
+            pool_targets.tier  = descriptor.target_tier;
+            pool_targets.blocks.insert(target.block);
+        }
+    }
+    const char* backend = std::holds_alternative<std::string>(execution.trace_id) ? "kvcm" : "local";
+    for (const auto& [pool, pool_targets] : targets) {
+        RtpLLMCacheUnfreezeMetricsCollector collector;
+        collector.blocks = static_cast<int64_t>(pool_targets.blocks.size());
+        kmonitor::MetricsTags tags("pool_name", pool->poolName());
+        tags.AddTag("tier", tierName(pool_targets.tier));
+        tags.AddTag("backend", backend);
+        metrics_reporter_->report<RtpLLMCachePoolMetrics, RtpLLMCacheUnfreezeMetricsCollector>(&tags, &collector);
+    }
+}
+
 void BlockTreeCacheMetricsReporter::flushStageMetrics() const {
     if (stage_metrics_)
         stage_metrics_->flush();

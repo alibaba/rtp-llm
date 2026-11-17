@@ -725,6 +725,7 @@ bool RtpLLMCachePoolMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(load_ref_blocks_metric, "rtp_llm_kv_cache_load_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(eviction_ref_blocks_metric, "rtp_llm_kv_cache_eviction_ref_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(frozen_ref_blocks_metric, "rtp_llm_kv_cache_frozen_ref_blocks");
+    REGISTER_QPS_MUTABLE_METRIC(unfreeze_blocks_qps_metric, "rtp_llm_kv_cache_unfreeze_blocks_qps");
     REGISTER_GAUGE_MUTABLE_METRIC(used_ratio_metric, "rtp_llm_kv_cache_used_ratio");
     REGISTER_GAUGE_MUTABLE_METRIC(read_bytes_metric, "rtp_llm_kv_cache_disk_cache_read_bytes");
     REGISTER_GAUGE_MUTABLE_METRIC(write_bytes_metric, "rtp_llm_kv_cache_disk_cache_write_bytes");
@@ -733,6 +734,10 @@ bool RtpLLMCachePoolMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(write_bandwidth_bytes_per_sec_metric,
                                   "rtp_llm_kv_cache_disk_cache_write_bandwidth_bytes_per_sec");
     return true;
+}
+
+void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheUnfreezeMetricsCollector* collector) {
+    unfreeze_blocks_qps_metric->Report(tags, collector->blocks);
 }
 
 void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCachePoolMetricsCollector* collector) {
