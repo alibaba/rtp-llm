@@ -36,6 +36,7 @@ cc_library(
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda/ops:standalone_ops",
             "//rtp_llm/models_py/bindings/cuda/kernels:mtp_target_verify_prepare",
+            "//rtp_llm/models_py/bindings/cuda/kernels:glm5_packed_verify_prepare",
             "//rtp_llm/models_py/bindings/cuda/kernels:mtp_token_gather",
             "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
             "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",

@@ -17,15 +17,23 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
 
     static const auto pinned_i32 = torch::TensorOptions(torch::kInt32).pinned_memory(true);
 
-    // TODO(async): CP planning is CPU-vector based today. Keep explicit host
-    // mirrors here, then publish mutated model inputs back to CUDA.
+    // Eligible GLM5 prefill keeps same-forward host metadata through CP.
+    // Device-derived inputs still require their explicit host readback.
     auto total_input_tokens =
         model_input.combo_tokens.is_cuda() ? model_input.combo_tokens.cpu().pin_memory() : model_input.combo_tokens;
     auto& total_hidden_states      = model_input.last_hidden_states;
     auto input_lengths =
         model_input.input_lengths.is_cuda() ? model_input.input_lengths.cpu().pin_memory() : model_input.input_lengths;
-    auto& sequence_lengths         = model_input.sequence_lengths;
-    auto  input_lengths_cpu_tensor = input_lengths.clone().pin_memory();
+    auto& sequence_lengths = model_input.sequence_lengths;
+    const bool preserve_host = model_input.preserve_host_prefill_metadata && sequence_lengths.numel() == 0;
+    auto input_lengths_cpu_tensor = preserve_host ? input_lengths : input_lengths.clone().pin_memory();
+    if (preserve_host) {
+        // CP mutates local lengths; the original snapshot remains global for
+        // target/draft restoration and CacheStore publication.
+        auto local_lengths = torch::empty(input_lengths.sizes(), pinned_i32);
+        local_lengths.copy_(input_lengths);
+        input_lengths = std::move(local_lengths);
+    }
 
     size_t num_decode_stream  = sequence_lengths.size(0);
     size_t num_prefill_stream = input_lengths.size(0) - num_decode_stream;
@@ -160,8 +168,10 @@ void IContextParallelProcessor::handleInputs(GptModelInputs&                    
         model_input.last_hidden_states = split_hidden;
     }
 
-    model_input.combo_tokens  = cp_split_input_tokens.to(torch::kCUDA, /*non_blocking=*/true);
-    model_input.input_lengths = input_lengths.to(torch::kCUDA, /*non_blocking=*/true);
+    model_input.combo_tokens = preserve_host ? cp_split_input_tokens :
+                                               cp_split_input_tokens.to(torch::kCUDA, /*non_blocking=*/true);
+    model_input.input_lengths = preserve_host ? input_lengths :
+                                                input_lengths.to(torch::kCUDA, /*non_blocking=*/true);
     model_input.sequence_lengths =
         sequence_lengths.is_cuda() ? sequence_lengths : sequence_lengths.to(torch::kCUDA, /*non_blocking=*/true);
 

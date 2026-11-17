@@ -1136,11 +1136,89 @@ TEST_F(MtpExecutorTest, testMtpBatchRowsPrepareAndPublish) {
         EXPECT_TRUE(torch::equal(next_a, next_b));
         EXPECT_TRUE(torch::equal(selected_a, selected_b));
         EXPECT_TRUE(torch::equal(hidden_a, hidden_b));
+        std::vector<int32_t> host_lengths(batch);
+        for (int i = 0; i < batch; ++i) {
+            host_lengths[i] = expected_lengths.data_ptr<int32_t>()[i];
+            if (i % 2 == 0)
+                lengths[i] = nullptr;
+            rows[i].selected_token = selected_a.data_ptr<int32_t>() + i;
+        }
+        ASSERT_TRUE(tryMtpPublishState(accepted, output_tokens, {}, hidden, 4,
+                                      next_b, selected_b, hidden_b, stream, lengths, host_lengths));
+        EXPECT_TRUE(torch::equal(next_a, next_b));
+        EXPECT_TRUE(torch::equal(selected_a, selected_b));
+        EXPECT_TRUE(torch::equal(hidden_a, hidden_b));
+        ASSERT_TRUE(tryMtpPrepareNextInputs(rows, options, packed, stream));
+        EXPECT_EQ(packed.size(0), 5);
+        EXPECT_TRUE(torch::equal(packed.select(0, 4), selected_a));
+        auto previous_next = next_b;
+        EXPECT_FALSE(tryMtpPublishState(accepted, output_tokens, {}, hidden, 4,
+                                       next_b, selected_b, hidden_b, stream, lengths));
+        EXPECT_TRUE(next_b.is_same(previous_next));
         // Invalid descriptor must return before replacing or writing outputs.
         auto previous_output = packed;
         rows.back().token    = nullptr;
         EXPECT_FALSE(tryMtpPrepareNextInputs(rows, options, packed, stream));
         EXPECT_TRUE(packed.is_same(previous_output));
+    }
+}
+
+TEST_F(MtpExecutorTest, testMtpBatchRowsGraphReplay) {
+    const auto options = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto stream = at::cuda::getStreamFromPool();
+    c10::cuda::CUDAStreamGuard guard(stream);
+    constexpr int batch = 129;
+    auto accepted = torch::ones({batch}, options);
+    auto tokens = torch::zeros({batch, 4}, options);
+    auto previous = torch::zeros({batch}, options);
+    auto hidden = torch::zeros({batch * 4, 513}, options.dtype(torch::kBFloat16));
+    for (int capture = 0; capture < 2; ++capture) {
+        std::vector<const int32_t*> lengths(batch);
+        std::vector<int32_t> host_lengths(batch, 19 + capture);
+        for (int i = 0; i < batch; ++i)
+            lengths[i] = i % 2 ? previous.data_ptr<int32_t>() + batch - 1 - i : nullptr;
+        torch::Tensor next, selected, selected_hidden, packed;
+        auto run = [&]() {
+            ASSERT_TRUE(tryMtpPublishState(accepted, tokens, {}, hidden, 4, next, selected, selected_hidden,
+                                          stream.stream(), lengths, host_lengths));
+            std::vector<MtpNextInputRow> rows;
+            for (int i = 0; i < batch; ++i) {
+                const int source = batch - 1 - i;
+                rows.push_back({tokens.data_ptr<int32_t>() + source * 4 + 3,
+                                next.data_ptr<int32_t>() + source, selected.data_ptr<int32_t>() + source});
+            }
+            ASSERT_TRUE(tryMtpPrepareNextInputs(rows, options, packed, stream.stream()));
+        };
+        run();
+        ASSERT_EQ(cudaStreamSynchronize(stream.stream()), cudaSuccess);
+        at::cuda::CUDAGraph graph;
+        graph.capture_begin();
+        run();
+        graph.capture_end();
+        // CUDA owns descriptor values after capture, not these host vectors.
+        host_lengths.assign(batch, -999);
+        lengths.assign(batch, nullptr);
+        for (int replay = 0; replay < 3; ++replay) {
+            accepted.copy_(torch::arange(batch, options).add(replay).remainder(4).add(1));
+            tokens.copy_(torch::arange(batch * 4, options).reshape({batch, 4}).add(replay * 1000));
+            previous.copy_(torch::arange(batch, options).add(replay * 10));
+            hidden.normal_();
+            graph.replay();
+            auto expected_previous = previous.flip({0}).clone();
+            expected_previous.index_put_({torch::arange(batch, options).remainder(2) == 0}, 19 + capture);
+            auto indices = (accepted.to(torch::kInt64) - 1).reshape({batch, 1});
+            auto expected_selected = tokens.gather(1, indices).reshape({batch});
+            auto expected_hidden = hidden.reshape({batch, 4, 513}).gather(
+                1, indices.reshape({batch, 1, 1}).expand({batch, 1, 513})).squeeze(1);
+            EXPECT_TRUE(torch::equal(next, expected_previous + accepted));
+            EXPECT_TRUE(torch::equal(selected, expected_selected));
+            EXPECT_TRUE(torch::equal(selected_hidden, expected_hidden));
+            EXPECT_TRUE(torch::equal(packed.select(0, 0), tokens.select(1, 3).flip({0})));
+            EXPECT_TRUE(torch::equal(packed.select(0, 1), (expected_previous + accepted).flip({0})));
+            EXPECT_TRUE(torch::equal(packed.select(0, 2), (expected_previous + accepted - 1).flip({0})));
+            EXPECT_TRUE(torch::equal(packed.select(0, 3), torch::arange(batch, options)));
+            EXPECT_TRUE(torch::equal(packed.select(0, 4), expected_selected.flip({0})));
+        }
     }
 }
 
@@ -1350,6 +1428,14 @@ TEST_F(MtpExecutorTest, testForwardOverlapMultiStepFusionMatchesBarrierPath) {
                 auto                         target          = std::make_unique<TokenModel>(dtype);
                 target->before_forward                       = [&]() {
                     ++target_forwards;
+                    if (target_forwards == 1) {
+                        // Input preparation has consumed the initial length (1).
+                        // Publish this round with one host-backed fresh row and
+                        // one device-backed row, exercising the real dispatcher.
+                        auto fresh_state = streams[1]->getMtpAsyncDeviceState();
+                        fresh_state.next_seq_len_gpu = torch::Tensor();
+                        streams[1]->setMtpAsyncDeviceState(std::move(fresh_state));
+                    }
                     for (const auto& stream : active) {
                         // A claim increments pending bookkeeping before forward;
                         // the barrier path has drained it. Detect silent fallback.
@@ -1372,7 +1458,7 @@ TEST_F(MtpExecutorTest, testForwardOverlapMultiStepFusionMatchesBarrierPath) {
                     EXPECT_FALSE(stream->hasError());
                     EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
                     const auto& state = stream->getMtpAsyncDeviceState();
-                    EXPECT_EQ(state.draft_all_probs_gpu.defined(), !mtpFusionEnabled());
+                    EXPECT_EQ(state.draft_all_probs_gpu.defined(), !executor.fast_topk_sampler_->compactPointMassEnabled());
                     const int        expected_length = result_row == 0 ? 1 + 3 * (steps + 1) : 2 + steps + 1;
                     std::vector<int> expected_tokens;
                     for (int i = 0; i < expected_length; ++i) {
@@ -1594,7 +1680,7 @@ TEST_F(MtpExecutorTest, testForwardOverlapDynamicRoundsMatchBarrierPath) {
                 ASSERT_TRUE(tensor.defined());
                 result.states.push_back(tensor.cpu().clone());
             }
-            EXPECT_EQ(state.draft_all_probs_gpu.defined(), !mtpFusionEnabled());
+            EXPECT_EQ(state.draft_all_probs_gpu.defined(), !executor.fast_topk_sampler_->compactPointMassEnabled());
             result.states.push_back(state.draft_all_probs_gpu.defined() ? state.draft_all_probs_gpu.cpu().clone() :
                                                                           torch::Tensor());
             stream->releaseResource();

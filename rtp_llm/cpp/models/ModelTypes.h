@@ -95,6 +95,8 @@ enum GptModelInputIndex : size_t {
     skipRun,
     gptModelRequestLength,  // length of request id & pd_separation
     isFakeStream,
+    preserveHostPrefillMetadata,
+    deferCacheStoreDrain,
     // Per-tensor device hint bitmap from root so non-root ranks allocate
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,
@@ -134,6 +136,7 @@ public:
     virtual ~ModelBase()                                          = default;
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
+    virtual void            drainCacheStore() {}
     virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
     virtual bool            cudaGraphEnabled() const {
         return false;

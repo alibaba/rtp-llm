@@ -126,6 +126,10 @@ MtpDecodeDispatchSnapshot makeMtpDecodeDispatchSnapshot(const torch::Tensor& all
 
 class MtpBatchStreamProcessor: public NormalBatchStreamProcessor {
 public:
+    absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups,
+                                                   TensorHolder& host_holder,
+                                                   bool record_lengths = false) const override;
+
     MtpBatchStreamProcessor(const ModelConfig&                 model_config,
                             const PDSepConfig&                 pd_sep_config,
                             const ProfilingDebugLoggingConfig& profiling_debug_logging_config,

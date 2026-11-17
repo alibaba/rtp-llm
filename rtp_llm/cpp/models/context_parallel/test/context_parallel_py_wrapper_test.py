@@ -227,10 +227,11 @@ class TestHandleInputsWithHidden(unittest.TestCase):
         )
 
         for rank in (0, 1):
-            _, _, _, _, output_indices = cp_test.handle_inputs_with_hidden(
-                tokens, input_lengths, sequence_lengths, hidden, rank, 2
-            )
-            self.assertTrue(torch.equal(output_indices, expected))
+            for preserve_host in (False, True):
+                _, _, _, _, output_indices = cp_test.handle_inputs_with_hidden(
+                    tokens, input_lengths, sequence_lengths, hidden, rank, 2, preserve_host
+                )
+                self.assertTrue(torch.equal(output_indices, expected))
 
 
 class TestGenerateQKVRestoreIndices(unittest.TestCase):

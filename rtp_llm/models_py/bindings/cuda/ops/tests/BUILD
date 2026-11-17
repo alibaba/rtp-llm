@@ -136,3 +136,12 @@ cc_test(
     tags = ["manual", "SM103_CU13"],
     exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
 )
+
+cc_test(
+    name = "glm5_packed_verify_prepare_test",
+    srcs = ["Glm5PackedVerifyPrepareTest.cc"],
+    deps = test_deps + ["//rtp_llm/models_py/bindings/cuda/kernels:glm5_packed_verify_prepare"] + cuda13_torch_link_deps,
+    copts = copts(),
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)

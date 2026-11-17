@@ -430,7 +430,15 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             }
         }
 
-        auto storeCallback = [layer_id = param.layer_id, request_id](bool success, CacheStoreErrorCode ec) {
+        std::function<void(bool)> complete;
+        if (request_blocks->getBlocksCount() > 0 && param.register_store_completion) {
+            complete = param.register_store_completion();
+        }
+        auto storeCallback = [layer_id = param.layer_id, request_id, complete,
+                              blocks = request_blocks](bool success, CacheStoreErrorCode ec) {
+            if (complete) {
+                complete(success);
+            }
             if (!success) {
                 RTP_LLM_LOG_WARNING(
                     "query [%ld], layer id [%d], call store kv cache failed, ec is %d, error msg is [%s]",
@@ -441,7 +449,14 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             }
         };
         if (request_blocks->getBlocksCount() > 0) {
-            cache_store->store(request_blocks, storeCallback);
+            try {
+                cache_store->store(request_blocks, storeCallback);
+            } catch (...) {
+                if (complete) {
+                    complete(false);
+                }
+                throw;
+            }
         } else {
             RTP_LLM_LOG_DEBUG("skip cache store because no blocks require publication, request id [%ld], layer id [%d]",
                               request_id,

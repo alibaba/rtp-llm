@@ -452,6 +452,8 @@ TEST_F(MtpBatchStreamProcessorTest, testDecodeForwardDynamicBatchUsesPublishedGp
                 auto batch            = std::make_shared<GenerateStream::MtpBatchDeviceState>();
                 batch->next_lengths   = state.next_seq_len_gpu;
                 batch->propose_tokens = state.propose_tokens_gpu;
+                batch->selected_tokens = torch::full({1}, row_accepted - 1, cuda_i32);
+                batch->hidden_states = state.last_hidden_states_gpu;
                 state.batch           = std::move(batch);
                 state.batch_row       = 0;
                 stream->setMtpAsyncDeviceState(std::move(state));
@@ -482,7 +484,11 @@ TEST_F(MtpBatchStreamProcessorTest, testDecodeForwardDynamicBatchUsesPublishedGp
                 EXPECT_EQ(toVec<int32_t>(actual->combo_tokens), std::vector<int32_t>({4, 5}));
                 EXPECT_EQ(toVec<float>(actual->last_hidden_states), std::vector<float>({10, 10, 11, 11}));
                 if (mtpFusionEnabled()) {
-                    // The four views must come from one fused [4, B] output.
+                    EXPECT_TRUE(actual->mtp_selected_tokens.defined());
+                    EXPECT_EQ(toVec<int32_t>(actual->mtp_selected_tokens),
+                              std::vector<int32_t>({accepted - 1, propose_step + 1 - accepted}));
+                    EXPECT_EQ(actual->mtp_selected_tokens.data_ptr<int32_t>(), actual->combo_tokens.data_ptr<int32_t>() + 8);
+                    // Metadata and target anchor share one fused [5, B] output.
                     // Equality alone would also pass with the unfused cat path.
                     EXPECT_EQ(actual->sequence_lengths.data_ptr<int32_t>(),
                               actual->combo_tokens.data_ptr<int32_t>() + 2);
@@ -502,6 +508,38 @@ TEST_F(MtpBatchStreamProcessorTest, testDecodeForwardDynamicBatchUsesPublishedGp
             auto shrunk = processor.tryGatherDecodeForwardInput({first}, holder);
             ASSERT_TRUE(shrunk.has_value());
             EXPECT_EQ(toVec<int32_t>(shrunk->kv_cache_kernel_block_id), std::vector<int32_t>({7}));
+            if (propose_step > 1) {
+                auto shared = std::make_shared<GenerateStream::MtpBatchDeviceState>();
+                shared->next_lengths = torch::cat({first->getNextSeqLenGpu(), second->getNextSeqLenGpu()}, 0);
+                shared->propose_tokens = torch::cat({first->getProposeTokensGpu(), second->getProposeTokensGpu()}, 0);
+                shared->selected_tokens = torch::tensor({accepted - 1, propose_step + 1 - accepted}, torch::kInt32).to(torch::kCUDA);
+                shared->hidden_states = torch::cat({first->getLastHiddenStatesGpu(), second->getLastHiddenStatesGpu()}, 0);
+                int shared_row = 0;
+                for (const auto& stream : groups.allStreams()) {
+                    auto state = stream->getMtpAsyncDeviceState();
+                    state.batch = shared;
+                    state.batch_row = shared_row;
+                    state.last_hidden_states_gpu = shared->hidden_states.narrow(0, shared_row++, 1);
+                    stream->setMtpAsyncDeviceState(std::move(state));
+                }
+                auto contiguous = processor.tryGatherDecodeForwardInput({first, second}, holder);
+                ASSERT_TRUE(contiguous.has_value());
+                EXPECT_TRUE(torch::equal(contiguous->last_hidden_states, shared->hidden_states));
+                if (mtpFusionEnabled()) {
+                    EXPECT_EQ(contiguous->last_hidden_states.data_ptr(), shared->hidden_states.data_ptr());
+                }
+                auto reverse = processor.tryGatherDecodeForwardInput({second, first}, holder);
+                ASSERT_TRUE(reverse.has_value());
+                EXPECT_TRUE(torch::equal(reverse->last_hidden_states, shared->hidden_states.flip({0})));
+                if (mtpFusionEnabled()) {
+                    EXPECT_TRUE(torch::equal(reverse->mtp_selected_tokens, shared->selected_tokens.flip({0})));
+                }
+                auto suffix = processor.tryGatherDecodeForwardInput({second}, holder);
+                ASSERT_TRUE(suffix.has_value());
+                EXPECT_EQ(suffix->last_hidden_states.data_ptr(), second->getLastHiddenStatesGpu().data_ptr());
+            } else {
+                EXPECT_FALSE(actual->mtp_selected_tokens.defined());
+            }
             // Match the first RPC decode: one accepted target token, one draft
             // token in a 1-D tensor, and no previous decode bookkeeping.
             auto fresh = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 11);
@@ -532,6 +570,8 @@ TEST_F(MtpBatchStreamProcessorTest, testDecodeForwardDynamicBatchUsesPublishedGp
                     processor.prepareOneStepSpecDecodeModelInput(mixed_groups, reference, holder);
                 } else {
                     processor.prepareDecodeDraftModelInput(mixed_groups, reference, holder);
+                    EXPECT_FALSE(mixed->mtp_selected_tokens.defined());
+                    EXPECT_FALSE(reference.mtp_selected_tokens.defined());
                     EXPECT_TRUE(torch::equal(mixed->last_hidden_states, reference.last_hidden_states));
                 }
                 EXPECT_TRUE(torch::equal(mixed->combo_tokens, reference.combo_tokens));

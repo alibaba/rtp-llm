@@ -9,9 +9,10 @@ namespace rtp_llm {
 CacheStoreAsyncWriter::CacheStoreAsyncWriter(int device_id): device_id_(device_id) {}
 
 CacheStoreAsyncWriter::~CacheStoreAsyncWriter() {
-    if (state_ == State::RUNNING) {
-        RTP_LLM_LOG_WARNING("CacheStoreAsyncWriter destroyed while RUNNING — "
-                            "caller should call waitAllDone() before destruction");
+    try {
+        drainIfActive();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("CacheStoreAsyncWriter destruction drain failed: %s", e.what());
     }
     if (thread_pool_) {
         thread_pool_->stop();
@@ -20,7 +21,7 @@ CacheStoreAsyncWriter::~CacheStoreAsyncWriter() {
 
 // IDLE -> RUNNING. Lazily starts the workers on first real use so constructing
 // the model at an SCR checkpoint does not create idle cache-store threads.
-void CacheStoreAsyncWriter::init() {
+void CacheStoreAsyncWriter::init(std::shared_ptr<void> publication_lease) {
     std::lock_guard<std::mutex> lock(state_mutex_);
     RTP_LLM_CHECK_WITH_INFO(state_ == State::IDLE,
                             "CacheStoreAsyncWriter::init() called while already RUNNING. "
@@ -34,6 +35,8 @@ void CacheStoreAsyncWriter::init() {
         thread_pool_ = std::move(pool);
     }
 
+    publications_ = std::make_shared<Publications>();
+    publications_->lease = std::move(publication_lease);
     pending_count_.store(0, std::memory_order_relaxed);
     stored_exception_ = nullptr;
     state_            = State::RUNNING;
@@ -81,18 +84,20 @@ void CacheStoreAsyncWriter::submit(std::function<void()> task) {
 // Re-throws the first stored exception after state transition.
 void CacheStoreAsyncWriter::waitAllDone() {
     RTP_LLM_PROFILE_SCOPE("cache_store_async_writer.waitAllDone");
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        RTP_LLM_CHECK_WITH_INFO(state_ == State::RUNNING,
-                                "CacheStoreAsyncWriter::waitAllDone() called when not RUNNING. "
-                                "Call init() first.");
-    }
+    seal();
 
     {
         std::unique_lock<std::mutex> lock(wait_mutex_);
         wait_cv_.wait(lock, [this]() { return pending_count_.load(std::memory_order_acquire) == 0; });
     }
 
+    bool publication_failed;
+    {
+        std::unique_lock<std::mutex> lock(publications_->mutex);
+        publications_->cv.wait(lock, [this]() { return publications_->pending == 0; });
+        publication_failed = publications_->failed;
+        publications_->lease.reset();
+    }
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         state_ = State::IDLE;
@@ -103,6 +108,46 @@ void CacheStoreAsyncWriter::waitAllDone() {
         stored_exception_ = nullptr;
         std::rethrow_exception(ex);
     }
+    RTP_LLM_CHECK_WITH_INFO(!publication_failed, "cache store publication failed");
+}
+
+void CacheStoreAsyncWriter::seal() {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    RTP_LLM_CHECK_WITH_INFO(state_ != State::IDLE, "cannot seal an idle cache store cycle");
+    state_ = State::SEALED;
+}
+
+void CacheStoreAsyncWriter::drainIfActive() {
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (state_ == State::IDLE) {
+            return;
+        }
+    }
+    waitAllDone();
+}
+
+std::function<void(bool)> CacheStoreAsyncWriter::registerCompletion() {
+    // Workers may register publications after sealing, but before their task
+    // count reaches zero. Drain waits for both boundaries in that order.
+    std::lock_guard<std::mutex> state_lock(state_mutex_);
+    RTP_LLM_CHECK_WITH_INFO(state_ != State::IDLE, "cannot register publication outside a write cycle");
+    auto publications = publications_;
+    auto completed = std::make_shared<std::atomic<bool>>(false);
+    std::function<void(bool)> completion = [publications, completed](bool success) {
+        if (completed->exchange(true)) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(publications->mutex);
+        publications->failed |= !success;
+        --publications->pending;
+        publications->cv.notify_all();
+    };
+    {
+        std::lock_guard<std::mutex> lock(publications->mutex);
+        ++publications->pending;
+    }
+    return completion;
 }
 
 }  // namespace rtp_llm

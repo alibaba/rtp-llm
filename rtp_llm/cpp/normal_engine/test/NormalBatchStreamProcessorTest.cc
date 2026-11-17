@@ -277,6 +277,36 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     }
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testHostPrefillMetadataRequiresPurePrefillOptIn) {
+    const auto model_config = makeLogprobsModelConfig(128);
+    for (bool preserve_host : {false, true}) {
+        for (bool mixed_batch : {false, true}) {
+            auto processor = makeLogprobsProcessor(model_config);
+            auto context = makeLogprobsStream(model_config, false, 0, 8, true);
+            std::list<GenerateStreamPtr> streams{context};
+            if (mixed_batch) {
+                auto decode = makeLogprobsStream(model_config, false, 0, 8, true);
+                decode->setIsContextStream(false);
+                streams.push_back(decode);
+            }
+            StreamGroups groups(streams);
+            TensorHolder holder;
+            auto result = processor->model_input_gatherer_->gather(groups, holder, true, preserve_host);
+            ASSERT_TRUE(result.ok()) << result.status();
+            const bool expected_host = preserve_host && !mixed_batch;
+            EXPECT_EQ(result->preserve_host_prefill_metadata, expected_host);
+            EXPECT_EQ(result->combo_tokens.device().is_cpu(), expected_host);
+            EXPECT_EQ(result->input_lengths.device().is_cpu(), expected_host);
+            EXPECT_EQ(result->prefix_lengths.device().is_cpu(), expected_host);
+            EXPECT_TRUE(result->lm_output_indexes.is_cuda());
+            EXPECT_EQ(toVec<int32_t>(result->input_lengths),
+                      mixed_batch ? (std::vector<int32_t>{1, 1}) : (std::vector<int32_t>{1}));
+            EXPECT_EQ(toVec<int32_t>(result->lm_output_indexes),
+                      mixed_batch ? (std::vector<int32_t>{0, 1}) : (std::vector<int32_t>{0}));
+        }
+    }
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testRecordedDeviceLengthsUseCpuMirror) {
     const auto model_config = makeLogprobsModelConfig(128);
     auto       processor    = makeLogprobsProcessor(model_config);

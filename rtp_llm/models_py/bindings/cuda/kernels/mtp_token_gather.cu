@@ -15,6 +15,8 @@ __global__ void mtpPrepareNextInputsKernel(MtpNextRowsParams input, int32_t* out
         output[batch + dst] = committed;
         output[2 * batch + dst] = committed - 1;
         output[3 * batch + dst] = dst;
+        if (input.rows[row].selected_token)
+            output[4 * batch + dst] = *input.rows[row].selected_token;
     }
 }
 
@@ -60,14 +62,15 @@ bool tryMtpPrepareNextInputs(const std::vector<MtpNextInputRow>& rows,
                               const torch::TensorOptions& options,
                               torch::Tensor& packed,
                               cudaStream_t stream) {
-    if (rows.empty() || rows.size() > INT_MAX / 4 || options.device().type() != torch::kCUDA
+    if (rows.empty() || rows.size() > INT_MAX / 5 || options.device().type() != torch::kCUDA
         || options.dtype() != torch::TensorOptions().dtype(torch::kInt32).dtype())
         return false;
+    const bool has_selected = rows.front().selected_token != nullptr;
     for (const auto& row : rows)
-        if (!row.token || !row.committed_length)
+        if (!row.token || !row.committed_length || (row.selected_token != nullptr) != has_selected)
             return false;
     const int32_t batch = static_cast<int32_t>(rows.size());
-    packed = torch::empty({4, batch}, options);
+    packed = torch::empty({has_selected ? 5 : 4, batch}, options);
     for (int32_t offset = 0; offset < batch; offset += 128) {
         const int32_t count = std::min(batch - offset, 128);
         MtpNextRowsParams params{};

@@ -53,6 +53,8 @@ public:
                          std::function<void()>                          profile_step_start = {},
                          std::function<void()>                          profile_step_finish = {});
 
+    ~MtpExecutor() override;
+
     absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
     void         notifyStop() override;
@@ -227,6 +229,7 @@ protected:
                                    const MergedOutput&                          draft_prefill_output);
 
     void releaseAllModelBuffers();
+    void fenceFakeModelBufferRelease();
 
 private:
     std::unique_ptr<ModelBase>                                               model_;
@@ -268,6 +271,7 @@ private:
 
     // Keeps async copy source tensors alive across release points.
     TensorHolder buffer_holder_;
+    std::shared_ptr<torch::Event> buffer_release_event_;
 
     bool                               warm_up_;
     RoleType                           role_type_;

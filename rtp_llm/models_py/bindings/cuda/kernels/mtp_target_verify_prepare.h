@@ -9,7 +9,8 @@ namespace rtp_llm {
 
 // Publish MTP next sequence length, selected token and BF16 hidden row without
 // materializing int64 gather indices. Undefined previous_lengths keeps an
-// already prepared next_lengths tensor unchanged.
+// already prepared next_lengths tensor unchanged. With previous_rows, null
+// pointers select the corresponding by-value previous_host_lengths entry.
 bool tryMtpPublishState(const torch::Tensor& accept_lengths,
                         const torch::Tensor& accepted_tokens,
                         const torch::Tensor& previous_lengths,
@@ -19,7 +20,8 @@ bool tryMtpPublishState(const torch::Tensor& accept_lengths,
                         torch::Tensor&       selected_tokens,
                         torch::Tensor&       selected_hidden,
                         cudaStream_t         stream,
-                        const std::vector<const int32_t*>& previous_rows = {});
+                        const std::vector<const int32_t*>& previous_rows = {},
+                        const std::vector<int32_t>& previous_host_lengths = {});
 
 // Keep asynchronous metric snapshots independent of mutable acceptance storage.
 // Greedy point-mass MTP only. Returns false without launching for unsupported layouts.

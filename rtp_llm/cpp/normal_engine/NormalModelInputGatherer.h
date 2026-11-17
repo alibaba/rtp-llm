@@ -44,7 +44,10 @@ public:
     explicit NormalModelInputGatherer(const NormalModelInputGathererConfig& config);
 
     absl::StatusOr<GptModelInputs>
-    gather(const StreamGroups& stream_groups, TensorHolder& host_holder, bool record_lengths = false) const;
+    gather(const StreamGroups& stream_groups,
+           TensorHolder& host_holder,
+           bool record_lengths = false,
+           bool preserve_host_prefill_metadata = false) const;
 
     // Build only the CUDA kv_cache_kernel_block_id tensor in 3-D layout.
     // Read-only over streams: no step(), no sibling kv_cache_block_id, no

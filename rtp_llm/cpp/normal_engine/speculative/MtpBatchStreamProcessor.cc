@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/MtpFusion.h"
 #if USING_CUDA
+#include <c10/cuda/CUDACachingAllocator.h>
 #include "rtp_llm/models_py/bindings/cuda/kernels/mtp_token_gather.h"
 #endif
 #include <algorithm>
@@ -23,6 +24,11 @@
 #include <limits>
 
 namespace rtp_llm {
+absl::StatusOr<GptModelInputs> MtpBatchStreamProcessor::gatherModelInput(
+    const StreamGroups& groups, TensorHolder& holder, bool record_lengths) const {
+    return model_input_gatherer_->gather(groups, holder, record_lengths, glm5_target_ && propose_step_ > 1);
+}
+
 namespace {
 
 torch::Tensor cloneHiddenSlice(const torch::Tensor& hidden_states, int64_t start, int64_t length) {
@@ -913,8 +919,14 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
             copy_ready.record(copy_stream);
         }
         copy_ready.block(main_stream);
-        history_gpu.record_stream(main_stream);
-        base_lengths_gpu.record_stream(main_stream);
+        if (glm5_target_ && propose_step_ > 1) {
+            const auto stream = at::cuda::getCurrentCUDAStream(history_gpu.get_device());
+            c10::cuda::CUDACachingAllocator::recordStream(history_gpu.storage().data_ptr(), stream);
+            c10::cuda::CUDACachingAllocator::recordStream(base_lengths_gpu.storage().data_ptr(), stream);
+        } else {
+            history_gpu.record_stream(main_stream);
+            base_lengths_gpu.record_stream(main_stream);
+        }
         auto draft_gpu = draft_token_ids.to(model_output.logits.device(), torch::kInt32, true).contiguous();
         const auto batch = static_cast<int64_t>(stream_groups.size());
         const auto rows  = static_cast<int64_t>(score_len);
@@ -1054,6 +1066,7 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
                                                            GptModelInputs&     model_input,
                                                            TensorHolder&       host_holder) const {
     const size_t batch_size = stream_groups.size();
+    model_input.mtp_selected_tokens = torch::Tensor();
     if (batch_size == 0) {
         model_input.combo_tokens      = emptyInt32OnCuda({0});
         model_input.input_lengths     = emptyInt32OnCuda({0});
@@ -1087,8 +1100,23 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
                 break;
             }
             options = lengths.options();
+            c10::cuda::CUDACachingAllocator::recordStream(lengths.storage().data_ptr(), at::cuda::getCurrentCUDAStream());
+            c10::cuda::CUDACachingAllocator::recordStream(proposals.storage().data_ptr(), at::cuda::getCurrentCUDAStream());
+            const auto& selected = batch->selected_tokens;
+            const bool selected_valid = propose_step_ > 1 && selected.defined() && selected.device() == lengths.device()
+                                        && selected.scalar_type() == torch::kInt32 && selected.dim() == 1
+                                        && selected.is_contiguous() && state.batch_row < selected.numel();
+            if (selected_valid)
+                c10::cuda::CUDACachingAllocator::recordStream(selected.storage().data_ptr(), at::cuda::getCurrentCUDAStream());
             rows.push_back({proposals.data_ptr<int32_t>() + (state.batch_row + 1) * proposals.size(1) - 1,
-                            lengths.data_ptr<int32_t>() + state.batch_row});
+                            lengths.data_ptr<int32_t>() + state.batch_row,
+                            selected_valid ? selected.data_ptr<int32_t>() + state.batch_row : nullptr});
+        }
+        // A fresh request may not have a published anchor yet. Keep the four
+        // metadata rows fused and let the existing accepted-token path fill it.
+        if (std::any_of(rows.begin(), rows.end(), [](const auto& row) { return row.selected_token == nullptr; })) {
+            for (auto& row : rows)
+                row.selected_token = nullptr;
         }
         torch::Tensor packed;
         if (supported && tryMtpPrepareNextInputs(rows, options, packed, cuda_graph::graphGetCurrentStream().stream())) {
@@ -1096,6 +1124,8 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
             model_input.sequence_lengths  = packed.select(0, 1);
             model_input.prefix_lengths    = packed.select(0, 2);
             model_input.lm_output_indexes = packed.select(0, 3);
+            if (packed.size(0) == 5)
+                model_input.mtp_selected_tokens = packed.select(0, 4);
             // Preserve input_lengths from the scheduler; do not assume every
             // caller uses the same empty/decode convention.
             model_input.input_lengths = toCudaInt32(model_input.input_lengths, host_holder);
@@ -1342,7 +1372,9 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&  
     RTP_LLM_CHECK_WITH_INFO(false, "updatePrefillPostDraftModelInput requires CUDA");
 #endif
 
-    model_input.input_lengths = input_lengths_d;
+    if (!model_input.preserve_host_prefill_metadata) {
+        model_input.input_lengths = input_lengths_d;
+    }
     model_input.combo_tokens  = combo_tokens_out;
     (void)batch_size;  // batch_size verified inside kernel via input_lengths.numel()
 }
@@ -1770,6 +1802,35 @@ void MtpBatchStreamProcessor::gatherHiddenStates(const StreamGroups& stream_grou
             RTP_LLM_CHECK(hidden_size == (size_t)hidden_states.size(1));
         }
         all_hidden_tokens_num += hidden_states.size(0);
+    }
+
+    if (propose_step_ > 1 && mtpFusionEnabled() && hidden_size > 0 && !all_streams.empty()) {
+        const auto& first = all_streams.front()->getMtpAsyncDeviceState();
+        const auto& owner = first.batch;
+        if (owner && first.batch_row >= 0 && owner->hidden_states.defined()
+            && owner->hidden_states.is_cuda() && owner->hidden_states.is_contiguous()
+            && owner->hidden_states.dim() == 2 && owner->hidden_states.size(1) == static_cast<int64_t>(hidden_size)
+            && first.batch_row + static_cast<int64_t>(all_streams.size()) <= owner->hidden_states.size(0)) {
+            int64_t row = first.batch_row;
+            bool consecutive = true;
+            for (const auto& stream : all_streams) {
+                const auto& state = stream->getMtpAsyncDeviceState();
+                const auto& hidden = pick_hidden_states(stream);
+                if (state.batch != owner || state.batch_row != row || hidden.size(0) != 1
+                    || !hidden.is_contiguous() || hidden.device() != owner->hidden_states.device()
+                    || hidden.scalar_type() != owner->hidden_states.scalar_type()
+                    || hidden.data_ptr() != static_cast<const char*>(owner->hidden_states.data_ptr())
+                                                + row * hidden_size * hidden.element_size()) {
+                    consecutive = false;
+                    break;
+                }
+                ++row;
+            }
+            if (consecutive) {
+                model_input.last_hidden_states = owner->hidden_states.narrow(0, first.batch_row, all_streams.size());
+                return;
+            }
+        }
     }
 
     // copy hidden

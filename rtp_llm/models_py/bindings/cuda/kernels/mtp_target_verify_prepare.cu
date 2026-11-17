@@ -79,7 +79,10 @@ __global__ void mtpPublishStateKernel(const int32_t*       lengths,
     }
 }
 
-struct MtpPreviousRows { const int32_t* rows[128]; };
+struct MtpPreviousRows {
+    const int32_t* rows[128];
+    int32_t host_lengths[128];
+};
 __global__ void mtpPublishStateRowsKernel(const int32_t*       lengths,
                                       const int32_t*       tokens,
                                       MtpPreviousRows       previous,
@@ -94,7 +97,7 @@ __global__ void mtpPublishStateRowsKernel(const int32_t*       lengths,
     const int32_t accepted = lengths[row];
     if (col == 0) {
         selected[row] = tokens[row * stride + accepted - 1];
-        next[row] = *previous.rows[blockIdx.y] + accepted;
+        next[row] = (previous.rows[blockIdx.y] ? *previous.rows[blockIdx.y] : previous.host_lengths[blockIdx.y]) + accepted;
     }
     if (col < width) {
         output_hidden[row * width + col] = hidden[(row * stride + accepted - 1) * width + col];
@@ -374,7 +377,8 @@ bool tryMtpPublishState(const torch::Tensor& accept_lengths,
                         torch::Tensor&       selected_tokens,
                         torch::Tensor&       selected_hidden,
                         cudaStream_t         stream,
-                        const std::vector<const int32_t*>& previous_rows) {
+                        const std::vector<const int32_t*>& previous_rows,
+                        const std::vector<int32_t>& previous_host_lengths) {
     if (!accept_lengths.defined() || !accepted_tokens.defined() || !accept_lengths.is_cuda()
         || accept_lengths.scalar_type() != torch::kInt32 || !accept_lengths.is_contiguous()
         || accepted_tokens.device() != accept_lengths.device() || accepted_tokens.scalar_type() != torch::kInt32
@@ -393,10 +397,11 @@ bool tryMtpPublishState(const torch::Tensor& accept_lengths,
                 || hidden_states.size(0) != batch * tokens_per_batch || hidden_states.numel() > INT_MAX)))
         return false;
     if (!previous_rows.empty()) {
-        if (previous_rows.size() != static_cast<size_t>(batch))
+        if (previous_rows.size() != static_cast<size_t>(batch)
+            || (!previous_host_lengths.empty() && previous_host_lengths.size() != static_cast<size_t>(batch)))
             return false;
         for (auto ptr : previous_rows)
-            if (!ptr)
+            if (!ptr && previous_host_lengths.empty())
                 return false;
     }
     const int32_t width = has_hidden ? static_cast<int32_t>(hidden_states.size(1)) : 0;
@@ -412,6 +417,8 @@ bool tryMtpPublishState(const torch::Tensor& accept_lengths,
             const int32_t count = std::min<int64_t>(batch - offset, 128);
             MtpPreviousRows previous{};
             std::copy_n(previous_rows.begin() + offset, count, previous.rows);
+            if (!previous_host_lengths.empty())
+                std::copy_n(previous_host_lengths.begin() + offset, count, previous.host_lengths);
             mtpPublishStateRowsKernel<<<dim3(std::max((width + 255) / 256, 1), count), 256, 0, stream>>>(
                 accept_lengths.data_ptr<int32_t>(), accepted_tokens.data_ptr<int32_t>(), previous,
                 has_hidden ? reinterpret_cast<const __nv_bfloat16*>(hidden_states.data_ptr<at::BFloat16>()) : nullptr,

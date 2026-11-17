@@ -74,7 +74,8 @@ cc_import(
             "RTP_LLM_DEVICE_INPUT": "1",
             "RTP_LLM_MTP_ASYNC_PREPARE": "0",
         },
-        exec_properties = {"gpu": "H20"},
+        tags = ["H20_CU13"],
+        exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
     )
     for fusion in ["0", "1"]
 ]
@@ -99,7 +100,8 @@ cc_test(
     ] + torch_deps() + cuda13_torch_link_deps,
     args = ["--gtest_filter=*DecodeForwardDynamicBatch*:*DispatchSnapshot*"],
     env = {"TEST_USING_DEVICE": "CUDA", "RTP_LLM_MTP_OPTIMIZE": "1"},
-    exec_properties = {"gpu": "H20"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
 )
 
 cc_test(
@@ -126,7 +128,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
 )
 
 cc_test(
@@ -155,7 +158,8 @@ cc_test(
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
-    exec_properties = {'gpu':'H20'},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
 )
 
 cc_test(

@@ -281,6 +281,7 @@ struct PyCacheStoreInputs {
     int cp_size = 1;
     int cp_rank = 0;
     torch::Tensor publish_start_tokens;
+    bool track_publication_completion = false;
 };
 
 struct PyPrefillCudaGaphCopyParams {

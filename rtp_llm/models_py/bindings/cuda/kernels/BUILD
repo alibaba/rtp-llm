@@ -306,6 +306,19 @@ cc_library(
 )
 
 cc_library(
+    name = "glm5_packed_verify_prepare",
+    srcs = ["glm5_packed_verify_prepare.cu"],
+    hdrs = ["glm5_packed_verify_prepare.h"],
+    deps = [
+        "//rtp_llm/cpp/utils:core_utils",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ] + torch_deps(),
+    copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "mha_paged_attn_plan",
     srcs = ["mha_paged_attn_plan.cu"],
     hdrs = ["mha_paged_attn_plan.h"],

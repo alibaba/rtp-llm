@@ -221,4 +221,42 @@ TEST_F(CacheStoreAsyncWriterTest, PostProcessingPropagatesBackgroundFailure) {
     writer.waitAllDone();
 }
 
+
+TEST_F(CacheStoreAsyncWriterTest, SealedCycleRetainsLeaseUntilPublicationCallback) {
+    CacheStoreAsyncWriter writer;
+    auto lease = std::make_shared<int>(17);
+    std::weak_ptr<int> weak = lease;
+    writer.init(lease);
+    lease.reset();
+    auto complete = writer.registerCompletion();
+    writer.seal();
+    EXPECT_FALSE(weak.expired());
+    EXPECT_ANY_THROW(writer.submit([] {}));
+    complete(true);
+    complete(false);  // Duplicate completion must not poison the cycle.
+    writer.waitAllDone();
+    EXPECT_TRUE(weak.expired());
+    writer.drainIfActive();
+    writer.init();
+    complete(false);  // A retained old callback cannot alter the new cycle.
+    EXPECT_NO_THROW(writer.waitAllDone());
+}
+
+TEST_F(CacheStoreAsyncWriterTest, SealedWorkerCanRegisterPublicationAndReportFailure) {
+    CacheStoreAsyncWriter writer;
+    writer.init();
+    std::atomic<bool> sealed{false};
+    writer.submit([&] {
+        while (!sealed.load()) std::this_thread::yield();
+        auto complete = writer.registerCompletion();
+        complete(false);
+    });
+    writer.seal();
+    sealed.store(true);
+    EXPECT_ANY_THROW(writer.waitAllDone());
+    EXPECT_EQ(writer.state_, CacheStoreAsyncWriter::State::IDLE);
+    writer.init();
+    EXPECT_NO_THROW(writer.waitAllDone());
+}
+
 }  // namespace rtp_llm

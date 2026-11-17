@@ -245,7 +245,9 @@ void addCacheUpdateCopy(GatherModelInputContext& ctx, const std::vector<BlockIdP
     ctx.kv_cache_update_mapping += update_copy_num;
 }
 
-torch::Tensor buildLmOutputIndexesOnCuda(const GptModelInputs& model_input, const StreamGroups& stream_groups) {
+torch::Tensor buildLmOutputIndexesOnCuda(const GptModelInputs& model_input,
+                                          const StreamGroups& stream_groups,
+                                          TensorHolder& host_holder) {
     const auto total_batch_size         = static_cast<int64_t>(stream_groups.totalModelBatchSize());
     const auto total_decode_batch_size  = static_cast<int64_t>(stream_groups.totalDecodeBatchSize());
     const auto total_context_batch_size = total_batch_size - total_decode_batch_size;
@@ -253,6 +255,20 @@ torch::Tensor buildLmOutputIndexesOnCuda(const GptModelInputs& model_input, cons
 
     if (total_batch_size == 0) {
         return torch::empty({0}, cuda_i32);
+    }
+
+    if (model_input.preserve_host_prefill_metadata) {
+        auto host_indexes = torch::empty({total_batch_size},
+                                         torch::TensorOptions(torch::kInt32).pinned_memory(true));
+        const auto* lengths = model_input.input_lengths.data_ptr<int32_t>();
+        auto* indexes = host_indexes.data_ptr<int32_t>();
+        int64_t end = 0;
+        for (int64_t i = 0; i < total_batch_size; ++i) {
+            end += lengths[i];
+            indexes[i] = static_cast<int32_t>(end - 1);
+        }
+        host_holder.hold_host(host_indexes);
+        return host_indexes.to(cuda_i32, /*non_blocking=*/true);
     }
 
     std::vector<torch::Tensor> parts;
@@ -297,13 +313,15 @@ torch::Tensor publishInt32ToCuda(const torch::Tensor& tensor, TensorHolder& host
 }
 
 void publishModelInputCoreTensorsToCuda(GptModelInputs& model_input, TensorHolder& host_holder) {
-    // TODO(async): stream state is still gathered through CPU pointers above.
-    // Publish only device tensors at the model boundary.
+    // Preserve eligible same-forward host metadata until CP and microbatch
+    // planning finish; PyWrappedModel creates the eventual device mirrors.
     RTP_LLM_PROFILE_SCOPE("normal_engine.model_input_gatherer.publish_core_tensors_to_cuda");
-    model_input.combo_tokens     = publishInt32ToCuda(model_input.combo_tokens, host_holder);
-    model_input.input_lengths    = publishInt32ToCuda(model_input.input_lengths, host_holder);
+    if (!model_input.preserve_host_prefill_metadata) {
+        model_input.combo_tokens   = publishInt32ToCuda(model_input.combo_tokens, host_holder);
+        model_input.input_lengths  = publishInt32ToCuda(model_input.input_lengths, host_holder);
+        model_input.prefix_lengths = publishInt32ToCuda(model_input.prefix_lengths, host_holder);
+    }
     model_input.sequence_lengths = publishInt32ToCuda(model_input.sequence_lengths, host_holder);
-    model_input.prefix_lengths   = publishInt32ToCuda(model_input.prefix_lengths, host_holder);
     // Migrate the 3-D KV kernel block id tensor with one H2D, replacing the
     // former per-group tensorHoldHostAndToCuda copies in PyWrappedModel.
     model_input.kv_cache_kernel_block_id = publishInt32ToCuda(model_input.kv_cache_kernel_block_id, host_holder);
@@ -608,7 +626,8 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     if (config_.is_multimodal && !gathered_mm_features.empty()) {
         model_input.multimodal_features = std::move(gathered_mm_features);
     }
-    model_input.prefix_lengths = publishInt32ToCuda(prefix_lengths_host, host_holder);
+    model_input.prefix_lengths = model_input.preserve_host_prefill_metadata ?
+                                    prefix_lengths_host : publishInt32ToCuda(prefix_lengths_host, host_holder);
     return absl::OkStatus();
 }
 
@@ -657,12 +676,16 @@ absl::StatusOr<torch::Tensor> NormalModelInputGatherer::gatherKvCacheKernelBlock
 
 absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGroups& stream_groups,
                                                                 TensorHolder&       host_holder,
-                                                                bool                record_lengths) const {
+                                                                bool                record_lengths,
+                                                                bool                preserve_host_prefill_metadata) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_LOG_DEBUG("context_streams size = %d, decode_streams size = %d",
                       stream_groups.contextStreams().size(),
                       stream_groups.decodeStreams().size());
     auto model_input = allocateModelInputBuffers(stream_groups);
+    model_input.preserve_host_prefill_metadata = preserve_host_prefill_metadata
+                                                && stream_groups.totalDecodeBatchSize() == 0
+                                                && stream_groups.totalContextBatchSize() > 0;
     if (record_lengths) {
         model_input.record_lengths.emplace();
         model_input.record_lengths->q_tokens.resize(stream_groups.totalModelBatchSize(), -1);
@@ -672,7 +695,7 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
     RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));
     publishModelInputCoreTensorsToCuda(model_input, host_holder);
-    model_input.lm_output_indexes = buildLmOutputIndexesOnCuda(model_input, stream_groups);
+    model_input.lm_output_indexes = buildLmOutputIndexesOnCuda(model_input, stream_groups, host_holder);
     return model_input;
 }
 

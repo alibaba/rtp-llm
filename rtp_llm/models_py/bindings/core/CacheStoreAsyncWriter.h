@@ -20,9 +20,12 @@ public:
     explicit CacheStoreAsyncWriter(int device_id = -1);
     ~CacheStoreAsyncWriter();
 
-    void init();
+    void init(std::shared_ptr<void> publication_lease = {});
     void submit(std::function<void()> task);
     void waitAllDone();
+    void seal();
+    void drainIfActive();
+    std::function<void(bool)> registerCompletion();
 
     // Submit independent GPU post-processing before draining this step's writes.
     // An early return from submit still passes through the drain. On a submit
@@ -53,9 +56,18 @@ public:
 private:
     enum class State {
         IDLE,
-        RUNNING
+        RUNNING,
+        SEALED
     };
 
+    struct Publications {
+        std::mutex mutex;
+        std::condition_variable cv;
+        int64_t pending = 0;
+        bool failed = false;
+        std::shared_ptr<void> lease;
+    };
+    std::shared_ptr<Publications> publications_ = std::make_shared<Publications>();
     autil::ThreadPoolBasePtr thread_pool_;
     std::atomic<int64_t>     pending_count_{0};
     std::mutex               state_mutex_;

@@ -78,6 +78,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
+    shape_hints_ptr[GptModelInputIndex::preserveHostPrefillMetadata] = inputs.preserve_host_prefill_metadata;
+    shape_hints_ptr[GptModelInputIndex::deferCacheStoreDrain] = inputs.defer_cache_store_drain;
     {
         // encode root-side tensor device for fields that may live on
         // GPU on the PDFUSION fast path, so non-root ranks can allocate matching
@@ -113,6 +115,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.need_all_hidden_states       = shape_hints_ptr[GptModelInputIndex::needAllHiddenStates];
     inputs.skip_run                     = shape_hints_ptr[GptModelInputIndex::skipRun];
     inputs.is_fake_stream               = shape_hints_ptr[GptModelInputIndex::isFakeStream];
+    inputs.preserve_host_prefill_metadata = shape_hints_ptr[GptModelInputIndex::preserveHostPrefillMetadata];
+    inputs.defer_cache_store_drain = shape_hints_ptr[GptModelInputIndex::deferCacheStoreDrain];
     inputs.record_execution_id          = shape_hints_ptr[GptModelInputIndex::recordExecutionId];
     if (inputs.skip_run) {
         return;

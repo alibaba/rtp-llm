@@ -8,8 +8,10 @@ namespace rtp_llm {
 struct MtpNextInputRow {
     const int32_t* token;
     const int32_t* committed_length;
+    const int32_t* selected_token = nullptr;
 };
-// One packed output allocation; 128 descriptors per launch, no metadata H2D.
+// One packed [4, B] output, or [5, B] when all rows supply selected_token.
+// 128 descriptors per launch, no metadata H2D.
 // Sources are owned by request batch states until submission completes.
 bool tryMtpPrepareNextInputs(const std::vector<MtpNextInputRow>& rows,
                               const torch::TensorOptions& options,

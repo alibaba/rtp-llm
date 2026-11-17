@@ -74,12 +74,14 @@ public:
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
     void            releaseBuffers() override;
+    void            drainCacheStore() override;
     torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
     torch::Tensor   getPythonDebugTensor(const std::string& name, int64_t num_rows);
     torch::Tensor   getPythonDebugKvCache(int64_t layer_idx, int64_t max_blocks);
     void            prepareAttentionInputs(const GptModelInputs& inputs) override;
-    void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
+    void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync,
+                                           const GptModelInputs* publication_inputs = nullptr);
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
     bool            cudaGraphEnabled() const override {
         return enable_cuda_graph_;

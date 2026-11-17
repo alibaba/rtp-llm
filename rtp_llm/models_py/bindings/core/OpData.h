@@ -9,6 +9,7 @@
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
 #include <cstddef>
+#include <functional>
 #include <optional>
 #include <memory>
 #include <torch/extension.h>
@@ -31,6 +32,9 @@ enum class ParallelMode {
 // context batch is request for initial word, decoder batch is request for incremental word.
 // ids and lengths are int32_t
 struct GptModelInputs {
+    bool preserve_host_prefill_metadata = false;
+    bool defer_cache_store_drain = false;
+    std::shared_ptr<void> cache_store_lease;
     // Input-owner-only snapshot captured while assembling this exact batch.
     // Not broadcast to TP peers and never read back from CUDA for recording.
     struct RecordedLengths {
@@ -56,6 +60,8 @@ struct GptModelInputs {
 
     // for mtp model
     torch::Tensor last_hidden_states;
+    // Input-owner-only target anchor prepared with multi-step MTP metadata.
+    torch::Tensor mtp_selected_tokens;
 
     torch::Tensor attention_mask;  // [batch_size, seq_len, seq_len]
 
@@ -231,6 +237,7 @@ struct CacheStoreInputs {
     // create an event on the spot (single-threaded / C++ path).
     std::shared_ptr<torch::Event> pre_created_event = nullptr;
     torch::Tensor                 publish_start_tokens;
+    std::function<std::function<void(bool)>()> register_store_completion;
 };
 
 struct AttentionCommonInputs {

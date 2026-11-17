@@ -69,7 +69,8 @@ zigzagHandleInputsWithHidden(const torch::Tensor& total_input_tokens,
                              const torch::Tensor& sequence_lengths,
                              const torch::Tensor& hidden_states,
                              int                  cp_rank,
-                             int                  cp_size) {
+                             int                  cp_size,
+                             bool                 preserve_host_prefill_metadata) {
     ParallelismConfig parallelism_config;
     parallelism_config.tp_rank = cp_rank;
     parallelism_config.tp_size = cp_size;
@@ -80,9 +81,18 @@ zigzagHandleInputsWithHidden(const torch::Tensor& total_input_tokens,
     model_input.input_lengths      = input_lengths.contiguous().clone();
     model_input.sequence_lengths   = sequence_lengths.contiguous().clone();
     model_input.last_hidden_states = hidden_states.contiguous().clone();
+    model_input.preserve_host_prefill_metadata = preserve_host_prefill_metadata;
+    const auto original_lengths = model_input.input_lengths;
 
     torch_ext::PyContextParallelParams cp_params;
     processor.handleInputs(model_input, cp_params);
+    if (preserve_host_prefill_metadata && sequence_lengths.numel() == 0) {
+        TORCH_CHECK(model_input.combo_tokens.device().is_cpu() && model_input.input_lengths.device().is_cpu(),
+                    "eligible CP prefill must retain host metadata");
+        TORCH_CHECK(torch::equal(original_lengths, input_lengths)
+                        && torch::equal(cp_params.prefill_actual_input_lengths_cpu, input_lengths),
+                    "CP local lengths must not mutate the global host snapshot");
+    }
 
     return std::make_tuple(model_input.combo_tokens.cpu().clone(),
                            model_input.input_lengths.cpu().clone(),
@@ -153,6 +163,7 @@ PYBIND11_MODULE(libth_context_parallel_py_wrapper_test, m) {
           py::arg("hidden_states"),
           py::arg("cp_rank"),
           py::arg("cp_size"),
+          py::arg("preserve_host_prefill_metadata") = false,
           "Run CP handleInputs and return split input tokens, lengths, hidden states, and shuffle indices");
 
     m.def("compute_local_last_hidden",

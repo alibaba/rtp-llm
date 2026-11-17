@@ -183,7 +183,18 @@ torch::Tensor PyWrappedModel::getPythonDebugKvCache(int64_t layer_idx, int64_t m
     return result.cast<torch::Tensor>();
 }
 
+void PyWrappedModel::drainCacheStore() {
+    cache_store_async_writer_->drainIfActive();
+}
+
 PyWrappedModel::~PyWrappedModel() {
+    try {
+        drainCacheStore();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("Cache store drain during model destruction failed: %s", e.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("Cache store drain during model destruction failed");
+    }
     try {
         py::gil_scoped_acquire gil;
         held_attn_pyobj_ = py::object();
@@ -639,6 +650,7 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_size) : 1,
             device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_rank) : 0};
         cache_store_inputs.publish_start_tokens = inputs.cache_store_publish_start_tokens;
+        cache_store_inputs.track_publication_completion = inputs.defer_cache_store_drain;
         params = std::move(cache_store_inputs);
     }
     return params;
@@ -692,7 +704,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     }
 
     if (!inputs.warmup && inputs.pd_separation) {
-        cache_store_async_writer_->init();
+        cache_store_async_writer_->init(inputs.cache_store_lease);
     }
 
     auto submit_forward_and_post = [&]() -> GptModelOutputs {
@@ -750,6 +762,17 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         return callForwardPostLayers(hidden_states, inputs, false);
     };
     if (prefillOptimizationsEnabled() && !inputs.warmup && inputs.pd_separation) {
+        if (inputs.defer_cache_store_drain) {
+            try {
+                auto result = submit_forward_and_post();
+                cache_store_async_writer_->seal();
+                return result;
+            } catch (...) {
+                const auto original = std::current_exception();
+                try { drainCacheStore(); } catch (...) {}
+                std::rethrow_exception(original);
+            }
+        }
         return cache_store_async_writer_->completeAfter(submit_forward_and_post);
     }
     return submit_forward_and_post();
@@ -759,7 +782,8 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs) {
     prepareAttentionInputs(inputs, false);
 }
 
-void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync) {
+void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync,
+                                             const GptModelInputs* publication_inputs) {
     c10::InferenceMode inference_mode(true);
     RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs");
     c10::DeviceGuard runtime_device_guard(getTorchCudaDevice());
@@ -775,8 +799,8 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
         attention_inputs = buildPyAttentionInputs(inputs);
     }
     if (!inputs.warmup && inputs.pd_separation) {
-        attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
-        cache_store_async_writer_->init();
+        attention_inputs.cache_store_inputs = prepareWriteCacheParams(publication_inputs ? *publication_inputs : inputs);
+        cache_store_async_writer_->init(inputs.cache_store_lease);
     }
     {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(setup_kv_cache)");
@@ -916,6 +940,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         if (int(device_props_.enable_layer_micro_batch)) {
             return forwardMicroBatched(inputs);
         }
+        std::optional<GptModelInputs> publication_inputs;
+        if (inputs.preserve_host_prefill_metadata && inputs.pd_separation) {
+            publication_inputs = inputs;
+        }
         PyContextParallelParams cp_params;
         if (device_props_.enable_prefill_cp) {
             context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
@@ -940,7 +968,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         auto bert_embedding_inputs = buildBertEmbeddingInputs(inputs);
 
         if (!prepared_attention_inputs_.load(std::memory_order_acquire)) {
-            prepareAttentionInputs(inputs, /*skip_forward_event_sync=*/true);
+            prepareAttentionInputs(inputs, /*skip_forward_event_sync=*/true,
+                                   publication_inputs ? &*publication_inputs : nullptr);
         }
 
         if (device_props_.enable_prefill_cp) {
@@ -1057,6 +1086,17 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             return callForwardPostLayers(hidden_states, inputs, true);
         };
         if (prefillOptimizationsEnabled() && !inputs.warmup && inputs.pd_separation) {
+            if (inputs.defer_cache_store_drain) {
+                try {
+                    auto result = submit_forward_and_post();
+                    cache_store_async_writer_->seal();
+                    return result;
+                } catch (...) {
+                    const auto original = std::current_exception();
+                    try { drainCacheStore(); } catch (...) {}
+                    std::rethrow_exception(original);
+                }
+            }
             return cache_store_async_writer_->completeAfter(submit_forward_and_post);
         }
         return submit_forward_and_post();
