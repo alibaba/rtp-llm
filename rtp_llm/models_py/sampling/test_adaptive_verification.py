@@ -7,6 +7,7 @@ import torch
 
 from rtp_llm.models_py.sampling.adaptive_verification import (
     AdaptiveBudgetInputError,
+    BudgetCostBufferPool,
     allocate_draft_token_budget,
     assign_draft_token_budget,
     select_draft_token_budget,
@@ -153,7 +154,80 @@ class BudgetSelectionTest(unittest.TestCase):
             )
 
 
+class BudgetCostBufferPoolTest(unittest.TestCase):
+    def setUp(self) -> None:
+        if not torch.cuda.is_available():
+            self.skipTest("requires CUDA")
+
+    def test_reuse_refresh_growth_and_exception(self) -> None:
+        pool = BudgetCostBufferPool(1)
+        device = torch.device("cuda", torch.cuda.current_device())
+        for length in (4, 4, 2, 9, 3):
+            costs = np.arange(length, dtype=np.float64) + length * 0.125
+            with pool.upload(costs, device) as value:
+                self.assertEqual(value.dtype, torch.float64)
+                np.testing.assert_array_equal(value.cpu().numpy(), costs)
+                pointer = value.data_ptr()
+            torch.cuda.synchronize(device)
+            with pool.upload(costs + 17, device) as value:
+                self.assertEqual(value.data_ptr(), pointer)
+                np.testing.assert_array_equal(value.cpu().numpy(), costs + 17)
+            torch.cuda.synchronize(device)
+        with self.assertRaisesRegex(RuntimeError, "consumer failed"):
+            with pool.upload(np.ones(3), device):
+                raise RuntimeError("consumer failed")
+        torch.cuda.synchronize(device)
+        with pool.upload(np.full(3, 29.0), device) as value:
+            self.assertEqual(value.data_ptr(), pointer)
+            np.testing.assert_array_equal(value.cpu().numpy(), np.full(3, 29.0))
+        self.assertEqual(len(pool._slots), 1)
+
+    def test_busy_slot_uses_temporary_storage_on_another_stream(self) -> None:
+        pool = BudgetCostBufferPool(1)
+        device = torch.device("cuda", torch.cuda.current_device())
+        first, second = torch.cuda.Stream(device), torch.cuda.Stream(device)
+        with torch.cuda.stream(first):
+            with pool.upload(np.arange(4, dtype=np.float64), device) as original:
+                with torch.cuda.stream(second):
+                    with pool.upload(np.full(4, 13.0), device) as temporary:
+                        self.assertNotEqual(original.data_ptr(), temporary.data_ptr())
+                        np.testing.assert_array_equal(temporary.cpu().numpy(), np.full(4, 13.0))
+                np.testing.assert_array_equal(original.cpu().numpy(), np.arange(4))
+        self.assertEqual(len(pool._slots), 1)
+
+    def test_device_change_rebinds_event(self) -> None:
+        if torch.cuda.device_count() < 2:
+            self.skipTest("requires two CUDA devices")
+        pool = BudgetCostBufferPool(1)
+        for index in (0, 1, 0):
+            device = torch.device("cuda", index)
+            with pool.upload(np.full(4, float(index)), device) as value:
+                self.assertEqual(value.device, device)
+                np.testing.assert_array_equal(value.cpu().numpy(), np.full(4, float(index)))
+            torch.cuda.synchronize(device)
+        self.assertEqual(len(pool._slots), 1)
+
+
 class DeviceBudgetSelectionTest(unittest.TestCase):
+    def test_reused_cost_storage_changes_same_batch_budget(self) -> None:
+        if not torch.cuda.is_available() or torch.version.hip is not None:
+            self.skipTest("requires NVIDIA CUDA")
+        pool = BudgetCostBufferPool(1)
+        probabilities = torch.ones((1, 2), device="cuda")
+        slots = torch.zeros(1, dtype=torch.int64, device="cuda")
+        capacities = np.array([2], dtype=np.int32)
+        capacities_device = torch.tensor(capacities, device="cuda")
+        for verify, expected in (([1, 1, 1, 1], 2), ([1, 1, 10, 100], 0)):
+            actual = select_draft_token_budget_device(
+                probabilities, slots, capacities_device, capacities,
+                draft_cost_ms=np.zeros(2), verify_cost_ms=np.array(verify, dtype=np.float64),
+                num_non_draft_tokens=1, num_sampling_requests=1,
+                cost_buffer_pool=pool,
+            )
+            self.assertEqual(actual, expected)
+            torch.cuda.synchronize(probabilities.device)
+        self.assertEqual(len(pool._slots), 1)
+
     def compare_with_numpy(
         self, probabilities: np.ndarray, capacities: np.ndarray,
         verify_costs: np.ndarray, sampling_requests: int, limit: int | None = None,

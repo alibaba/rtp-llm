@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from numbers import Integral
 
 import numpy as np
@@ -226,6 +229,59 @@ def select_draft_token_budget(
     return int(np.argmax(expected_tokens / costs))
 
 
+@dataclass
+class _BudgetCostSlot:
+    host: torch.Tensor
+    value: torch.Tensor
+    ready: torch.cuda.Event
+    busy: bool = False
+
+
+class BudgetCostBufferPool:
+    """Bounded per-controller transfer storage; every lease uploads fresh costs."""
+
+    def __init__(self, slots: int = 3) -> None:
+        self._limit = slots
+        self._slots: list[_BudgetCostSlot] = []
+
+    @contextmanager
+    def upload(self, costs: np.ndarray, device: torch.device) -> Iterator[torch.Tensor]:
+        stream = torch.cuda.current_stream(device)
+        device = stream.device
+        slot = next((s for s in self._slots if not s.busy and s.ready.query()), None)
+        if slot is None and len(self._slots) < self._limit:
+            slot = _BudgetCostSlot(
+                torch.empty(len(costs), dtype=torch.float64, pin_memory=True),
+                torch.empty(len(costs), dtype=torch.float64, device=device),
+                torch.cuda.Event(),
+            )
+            self._slots.append(slot)
+        if slot is None:
+            host = torch.from_numpy(costs).pin_memory()
+            yield host.to(device, non_blocking=True)
+            return
+        if slot.ready.device is not None and slot.ready.device != device:
+            slot.ready = torch.cuda.Event()
+        slot.busy = True
+        try:
+            if slot.host.numel() < len(costs) or slot.value.device != device:
+                host = torch.empty(len(costs), dtype=torch.float64, pin_memory=True)
+                value = torch.empty(len(costs), dtype=torch.float64, device=device)
+                # Commit both allocations together; events belong to one device.
+                slot.host, slot.value = host, value
+            host = slot.host[:len(costs)]
+            value = slot.value[:len(costs)]
+            host.copy_(torch.from_numpy(costs))
+            value.copy_(host, non_blocking=True)
+            value.record_stream(stream)
+            yield value
+        finally:
+            # Failure to record leaves the slot quarantined rather than allowing
+            # the next round to overwrite potentially in-flight pinned storage.
+            slot.ready.record(stream)
+            slot.busy = False
+
+
 def select_draft_token_budget_device(
     confidence_probs: torch.Tensor,
     request_slots: torch.Tensor,
@@ -237,6 +293,7 @@ def select_draft_token_budget_device(
     num_non_draft_tokens: int,
     num_sampling_requests: int,
     max_draft_budget: int | None = None,
+    cost_buffer_pool: BudgetCostBufferPool | None = None,
 ) -> int:
     """Read back only the selected budget; keep confidence and ordered FP64 math on CUDA."""
     if not confidence_probs.is_cuda or torch.version.hip is not None:
@@ -251,15 +308,14 @@ def select_draft_token_budget_device(
         verify_cost_ms=verify_cost_ms, num_non_draft_tokens=num_non_draft_tokens,
         num_sampling_requests=num_sampling_requests, max_draft_budget=max_draft_budget,
     )
-    cost_host = torch.from_numpy(costs).pin_memory()
-    cost_device = cost_host.to(confidence_probs.device, non_blocking=True)
-    selected = compute_ops.glm5_select_draft_token_budget_device(
-        confidence_probs, request_slots, capacities_device, cost_device, limit,
-        num_sampling_requests,
-    )
-    # Host-owned graph bank selection, output allocation and TP geometry still
-    # need this one count. No per-request confidence/score tensor crosses D2H.
-    budget = int(selected.item())
+    pool = cost_buffer_pool if cost_buffer_pool is not None else BudgetCostBufferPool(0)
+    with pool.upload(costs, confidence_probs.device) as cost_device:
+        selected = compute_ops.glm5_select_draft_token_budget_device(
+            confidence_probs, request_slots, capacities_device, cost_device, limit,
+            num_sampling_requests,
+        )
+        # Host graph selection, allocation and TP geometry need this one count.
+        budget = int(selected.item())
     if budget == -1:
         raise AdaptiveBudgetInputError("confidence_probs", "invalid probabilities, request slots or capacities")
     if budget == -2:
