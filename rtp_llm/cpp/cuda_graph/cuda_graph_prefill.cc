@@ -151,7 +151,35 @@ void CudaGraphRunner::capturePrefill() {
 }
 
 std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
-    // MTP draft prefill: capture at multiples of num_tokens_per_bs_
+#if USING_ROCM
+    // Fixed request-lane draft graphs use the same rounded request buckets as
+    // decode. Replay selects the next bucket and clears unused request/token
+    // rows, so one graph per possible batch is unnecessary and retains large
+    // graph metadata/workspaces at high concurrency.
+    if (usesFixedCapacityMtpDraftPrefillCudaGraph()) {
+        const auto       batches = getDecodeBatchSizesToCapture();
+        std::vector<int> result;
+        result.reserve(batches.size());
+        for (int batch : batches) {
+            RTP_LLM_CHECK_WITH_INFO(batch > 0 && static_cast<size_t>(batch) <= max_bs_,
+                                    "MTP draft graph request bucket %d must be in [1, %zu]",
+                                    batch,
+                                    max_bs_);
+            const int tokens = batch * num_tokens_per_bs_;
+            if (result.empty() || result.back() != tokens) {
+                result.push_back(tokens);
+            }
+        }
+        RTP_LLM_LOG_INFO("Fixed-lane draft prefill: capture %zu request buckets (max_bs=%zu, tokens_per_request=%d)",
+                         result.size(),
+                         max_bs_,
+                         num_tokens_per_bs_);
+        return result;
+    }
+
+#endif
+
+    // Undeclared/packed draft backends retain their existing token buckets.
     if (isMtpDraftPrefillCudaGraph()) {
         std::vector<int> result;
         for (int i = 1; i <= max_bs_; ++i) {

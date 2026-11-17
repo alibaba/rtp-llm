@@ -29,7 +29,8 @@ std::string cacheGroupPolicySummary(const CacheGroupPolicy& policy) {
        << ", active_tail_blocks=" << policy.active_tail_blocks << ", shared_chunk_state=" << policy.shared_chunk_state
        << ", validate_tail_blocks=" << policy.validate_tail_blocks
        << ", cp_mapping=" << static_cast<int>(policy.cp_mapping) << ", cp_slice=" << static_cast<int>(policy.cp_slice)
-       << '}';
+       << ", linear_state_layout=" << static_cast<int>(policy.linear_state_layout)
+       << ", request_state_slots=" << policy.request_state_slots << '}';
     return os.str();
 }
 
@@ -131,7 +132,8 @@ bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy
            && lhs.charge_to_paged_budget == rhs.charge_to_paged_budget && lhs.memory_placement == rhs.memory_placement
            && lhs.active_tail_blocks == rhs.active_tail_blocks && lhs.validate_tail_blocks == rhs.validate_tail_blocks
            && lhs.cp_mapping == rhs.cp_mapping && lhs.cp_slice == rhs.cp_slice
-           && lhs.sliding_window_size == rhs.sliding_window_size && lhs.shared_chunk_state == rhs.shared_chunk_state;
+           && lhs.sliding_window_size == rhs.sliding_window_size && lhs.shared_chunk_state == rhs.shared_chunk_state
+           && lhs.linear_state_layout == rhs.linear_state_layout && lhs.request_state_slots == rhs.request_state_slots;
 }
 
 void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers) {
@@ -381,8 +383,7 @@ const GroupBase& CacheConfig::physicalGroupForLayer(int layer_id, const std::str
             sub_config != nullptr, "CacheConfig has null MTP configuration at module=%zu", module_index);
         const auto first_layer_id =
             mtpGlobalLayerId(layer_num, static_cast<int>(module_index), sub_config->layer_num, 0);
-        if (first_layer_id != std::numeric_limits<uint32_t>::max()
-            && static_cast<uint64_t>(layer_id) >= first_layer_id
+        if (first_layer_id != std::numeric_limits<uint32_t>::max() && static_cast<uint64_t>(layer_id) >= first_layer_id
             && static_cast<uint64_t>(layer_id) - first_layer_id < sub_config->layer_num) {
             return sub_config->topology().groupForLayer(layer_id - static_cast<int>(first_layer_id), tag);
         }

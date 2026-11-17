@@ -1,5 +1,7 @@
 load("@arch_config//:arch_select.bzl", "requirement")
 
+exports_files(["modules/qwen4_exp/linear_double_buffer.py"])
+
 py_library(
     name = "utils",
     srcs = glob([

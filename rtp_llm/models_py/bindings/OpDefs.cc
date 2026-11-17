@@ -34,6 +34,7 @@ void registerCacheGroupType(pybind11::module& m) {
         .value("LINEAR", rtp_llm::CacheGroupType::LINEAR)
         .value("FULL", rtp_llm::CacheGroupType::FULL)
         .value("SWA", rtp_llm::CacheGroupType::SWA)
+        .value("REQUEST_STATE", rtp_llm::CacheGroupType::REQUEST_STATE)
         .export_values();
 }
 
@@ -70,6 +71,8 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<KVCache>(m, "KVCache")
         .def_property_readonly("group_tags", &KVCache::groupTags, "Cache group tags in topology publication order")
         .def_property_readonly("layer_count", &KVCache::layerCount, "Number of model-local cache layers")
+        .def("get_linear_state_layout", &KVCache::getLinearStateLayout, "Resolved allocator state layout for a tag")
+        .def("get_request_state_slots", &KVCache::getRequestStateSlots, "Allocator-owned slots per request for a tag")
         .def("get_layer_cache",
              static_cast<LayerKVCache (KVCache::*)(int) const>(&KVCache::getLayerCache),
              "Return a per-layer LayerKVCache for the given global layer id")

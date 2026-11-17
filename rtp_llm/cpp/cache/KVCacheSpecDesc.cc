@@ -82,7 +82,9 @@ uint32_t SpecBuilder::kernelSeqSizePerBlock(const KVCacheSpecDesc&  desc,
 }
 
 CacheGroupPolicy SpecBuilder::groupPolicy(const KVCacheSpecDesc& desc) {
-    CacheGroupPolicy policy = defaultCacheGroupPolicy(groupType(desc));
+    CacheGroupPolicy policy    = defaultCacheGroupPolicy(groupType(desc));
+    policy.linear_state_layout = desc.linear_state_layout;
+    policy.request_state_slots = desc.request_state_slots;
     if (desc.is_state_cache) {
         policy.enable_prefix_reuse = true;
     }
@@ -128,6 +130,24 @@ CacheGroupPolicy SpecBuilder::groupPolicy(const KVCacheSpecDesc& desc) {
         policy.group_type == CacheGroupType::SWA && desc.cache_type == KVCacheSpecType::OpaqueState
         && desc.entry_count_mode == OpaqueBlockEntryCountMode::STATE_RING && desc.state_ring_overlap == 0
         && !policy.enable_prefix_reuse && policy.active_tail_blocks == 1;
+    RTP_LLM_CHECK_WITH_INFO((policy.group_type == CacheGroupType::REQUEST_STATE) == (policy.request_state_slots > 0),
+                            "tag=%s request-state policy must declare its slot count",
+                            desc.tag.c_str());
+    if (policy.linear_state_layout == LinearStateLayout::SINGLE_SSM
+        || policy.linear_state_layout == LinearStateLayout::DOUBLE_BUFFER_SSM
+        || policy.linear_state_layout == LinearStateLayout::SPLIT_REPLAY) {
+        const uint32_t expected = policy.linear_state_layout == LinearStateLayout::DOUBLE_BUFFER_SSM ? 2 : 1;
+        RTP_LLM_CHECK_WITH_INFO(policy.group_type == CacheGroupType::REQUEST_STATE
+                                    && policy.request_state_slots == expected,
+                                "tag=%s linear state layout requires exactly %u request slots",
+                                desc.tag.c_str(),
+                                expected);
+    }
+    if (policy.group_type == CacheGroupType::REQUEST_STATE) {
+        RTP_LLM_CHECK_WITH_INFO(!policy.enable_prefix_reuse && policy.active_tail_blocks == 0
+                                    && policy.cp_mapping == CpBlockMappingMode::NONE,
+                                "request state cannot reuse prefixes or use token-page projection");
+    }
     return policy;
 }
 

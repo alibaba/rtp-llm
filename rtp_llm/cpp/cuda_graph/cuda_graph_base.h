@@ -1,5 +1,6 @@
 #pragma once
 #include "rtp_llm/models_py/bindings/OpDefs.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -38,12 +39,12 @@ struct CudaGraphState {
 };
 
 struct GraphParams {
-    bool             enable_cuda_graph                  = false;
-    bool             enable_cuda_graph_debug_mode       = false;
-    bool             is_prefill_cuda_graph_mode         = false;
-    bool             is_target_verify                   = false;
-    CudaGraphRole    role                               = CudaGraphRole::AUTO;
-    int              max_seq_len                        = 0;
+    bool             enable_cuda_graph            = false;
+    bool             enable_cuda_graph_debug_mode = false;
+    bool             is_prefill_cuda_graph_mode   = false;
+    bool             is_target_verify             = false;
+    CudaGraphRole    role                         = CudaGraphRole::AUTO;
+    int              max_seq_len                  = 0;
     int              num_tokens_per_bs      = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
     size_t           max_context_batch_size = 128;
     std::size_t      hidden_size            = 0;
@@ -56,7 +57,8 @@ struct GraphParams {
     // Golden cache-group identity for CUDA graph capture/replay. A one-group
     // topology keeps the direct AttentionInputs fast path; multiple groups
     // require an exact tag -> AttentionInputs mapping at replay time.
-    std::vector<std::string> kv_cache_group_tags;
+    std::vector<std::string>       kv_cache_group_tags;
+    std::vector<LinearStateLayout> kv_cache_state_layouts;
     // Final kernel block-table width, in kernel block IDs per row. Callers
     // compute it from model topology and actual reserve/fake bounds before
     // constructing the graph; this struct never re-derives page geometry.
@@ -74,7 +76,6 @@ struct GraphParams {
     // setting them after capture leaves the graph bound to undefined tensors.
     torch::Tensor position_encoding;
     torch::Tensor token_type_embedding;
-
 };
 
 struct MtpDraftGraphOutputs {

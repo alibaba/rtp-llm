@@ -756,6 +756,8 @@ class KVCacheConfig:
     kv_cache_mem_mb: int
     reuse_cache_tail_blocks: int
     linear_pool_blocks: int
+    linear_ssm_double_buffer: bool
+    linear_ssm_replay: bool
     swa_pool_blocks: int
     max_block_size_per_item: int
     memory_cache_size_mb: int
@@ -1015,6 +1017,7 @@ class KVCacheSpecType:
     def value(self) -> int: ...
 
 class CacheGroupType:
+    REQUEST_STATE: typing.ClassVar[CacheGroupType]
     LINEAR: typing.ClassVar[CacheGroupType]
     FULL: typing.ClassVar[CacheGroupType]
     SWA: typing.ClassVar[CacheGroupType]
@@ -1077,7 +1080,19 @@ class CacheCpPolicyDesc:
     prefill_slice_layout: typing.Any
     def __init__(self) -> None: ...
 
+class LinearStateLayout:
+    LEGACY: typing.ClassVar[LinearStateLayout]
+    SPLIT_EXPORT: typing.ClassVar[LinearStateLayout]
+    DOUBLE_BUFFER_CONV: typing.ClassVar[LinearStateLayout]
+    DOUBLE_BUFFER_SSM: typing.ClassVar[LinearStateLayout]
+    DOUBLE_BUFFER_REPLAY: typing.ClassVar[LinearStateLayout]
+    SINGLE_SSM: typing.ClassVar[LinearStateLayout]
+    SPLIT_CONV: typing.ClassVar[LinearStateLayout]
+    SPLIT_REPLAY: typing.ClassVar[LinearStateLayout]
+
 class KVCacheSpecDesc:
+    linear_state_layout: LinearStateLayout
+    request_state_slots: int
     tp_transfer_mode: TpCacheTransferMode
     tag: str
     cache_type: KVCacheSpecType

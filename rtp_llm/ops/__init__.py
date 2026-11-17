@@ -153,6 +153,7 @@ try:
         KVCacheSpecDesc,
         KVCacheSpecType,
         LinearAttentionConfig,
+        LinearStateLayout,
         MiscellaneousConfig,
         MlaOpsType,
         ModelConfig,

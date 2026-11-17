@@ -6,6 +6,7 @@ import weakref
 from typing import Optional
 
 import torch
+
 from rtp_llm.cpp.cuda_graph.tests.libtest_cuda_graph_runner import (
     CudaGraphRunner,
     DirtyCudaGraphCaptureError,
@@ -71,6 +72,75 @@ class TaggedPhysicalBlockTableModel(TaggedBlockTableModel):
         aux_id = attention_inputs["aux"].kv_cache_block_id_device[0, 0]
         signature = (full_id + 16 * aux_id).to(inputs.input_hiddens.dtype)
         return PyModelOutputs(inputs.input_hiddens + signature)
+
+
+class SplitRequestStateBlockTableModel:
+    """Expose real graph reads of physical, device-kernel and host-kernel IDs."""
+
+    tags = ["full", "linear", "linear_ssm", "linear_replay"]
+    hidden_size = 10
+
+    def __init__(self) -> None:
+        self.probe_tables: dict[str, dict[str, torch.Tensor]] = {}
+        self.probe_lengths: dict[str, dict[str, torch.Tensor]] = {}
+        self.forward_calls = 0
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        self.forward_calls += 1
+        attention = inputs.attention_inputs
+        if not self.probe_tables:
+            # Only the first eager datatype probe copies to CPU. Graph capture
+            # and replay below contain no Python tensor-value inspection.
+            for tag, value in attention.items():
+                self.probe_tables[tag] = {
+                    name: getattr(value, name).detach().cpu().clone()
+                    for name in (
+                        "kv_cache_block_id_device",
+                        "kv_cache_kernel_block_id_device",
+                        "kv_cache_kernel_block_id",
+                    )
+                }
+                self.probe_lengths[tag] = {
+                    name: getattr(value, name).clone()
+                    for name in (
+                        "input_lengths",
+                        "sequence_lengths",
+                        "prefix_lengths",
+                    )
+                }
+
+        ssm = attention["linear_ssm"]
+        replay = attention["linear_replay"]
+        # Captured non-blocking H2D copies consume the mutable, pinned host
+        # mirrors, as native attention implementations do on ROCm.
+        host_ssm = ssm.kv_cache_kernel_block_id.to(
+            device=inputs.input_hiddens.device, non_blocking=True
+        )
+        host_replay = replay.kv_cache_kernel_block_id.to(
+            device=inputs.input_hiddens.device, non_blocking=True
+        )
+        signature = torch.stack(
+            (
+                ssm.kv_cache_block_id_device[:, 0],
+                ssm.kv_cache_block_id_device[:, 1],
+                replay.kv_cache_block_id_device[:, 0],
+                ssm.kv_cache_kernel_block_id_device[:, 0],
+                ssm.kv_cache_kernel_block_id_device[:, 1],
+                replay.kv_cache_kernel_block_id_device[:, 0],
+                host_ssm[:, 0] + 16 * host_ssm[:, 1],
+                host_replay[:, 0],
+                attention["full"].kv_cache_block_id_device[:, 0],
+                attention["linear"].kv_cache_block_id_device[:, 0],
+            ),
+            dim=1,
+        ).to(inputs.input_hiddens.dtype)
+        query_len = inputs.input_hiddens.shape[0] // signature.shape[0]
+        return PyModelOutputs(
+            inputs.input_hiddens + signature.repeat_interleave(query_len, dim=0)
+        )
 
 
 class TaggedSequenceLengthModel:
@@ -846,6 +916,169 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
         torch.testing.assert_close(
             output.hidden_states, torch.full_like(output.hidden_states, 100)
         )
+
+    def test_split_request_state_dummy_probe_and_live_bank_replay(self) -> None:
+        self._check_split_request_state_graph(2)
+
+    def test_single_ssm_dummy_probe_and_live_row_replay(self) -> None:
+        self._check_split_request_state_graph(1)
+
+    def _check_split_request_state_graph(self, ssm_slots: int) -> None:
+        for target_verify in (False, True):
+            with self.subTest(target_verify=target_verify):
+                model = SplitRequestStateBlockTableModel()
+                runner = CudaGraphRunner()
+                query_len = 3 if target_verify else 1
+                # LinearStateLayout: LEGACY=0, DOUBLE_BUFFER_CONV=2,
+                # DOUBLE_BUFFER_SSM=3, DOUBLE_BUFFER_REPLAY=4.
+                runner.init_decode(
+                    model,
+                    model.hidden_size,
+                    64,
+                    KERNEL_BLOCK_TABLE_WIDTH,
+                    [4],
+                    model.tags,
+                    target_verify,
+                    query_len,
+                    state_layouts=[0, 2, 5 if ssm_slots == 1 else 3, 4],
+                )
+                forward_calls_after_capture = model.forward_calls
+                self.assertGreater(forward_calls_after_capture, 1)
+                self.assertEqual(set(model.probe_tables), set(model.tags))
+                for tag, tables in model.probe_tables.items():
+                    slots = {"linear_ssm": ssm_slots, "linear_replay": 1}.get(tag, 0)
+                    for name, table in tables.items():
+                        with self.subTest(tag=tag, table=name):
+                            self.assertEqual(table.shape[1], KERNEL_BLOCK_TABLE_WIDTH)
+                            expected = torch.zeros_like(table)
+                            expected[:, :slots] = -2
+                            torch.testing.assert_close(table, expected)
+                    lengths = model.probe_lengths[tag]
+                    torch.testing.assert_close(
+                        lengths["input_lengths"],
+                        torch.full_like(lengths["input_lengths"], query_len),
+                    )
+                    torch.testing.assert_close(
+                        lengths["sequence_lengths"],
+                        torch.full_like(
+                            lengths["sequence_lengths"], 64 - query_len - 1
+                        ),
+                    )
+                    if target_verify:
+                        torch.testing.assert_close(
+                            lengths["prefix_lengths"],
+                            torch.full_like(lengths["prefix_lengths"], 64 - query_len),
+                        )
+                    else:
+                        self.assertEqual(lengths["prefix_lengths"].numel(), 0)
+
+                def build_inputs(banks, replay_ids, full_ids, conv_ids):
+                    batch_size = len(banks)
+                    values = dict.fromkeys(model.tags, 0)
+                    inputs = (
+                        _build_target_verify_inputs(
+                            model.tags,
+                            values,
+                            batch_size=batch_size,
+                            query_len=query_len,
+                            prefix_len=11,
+                        )
+                        if target_verify
+                        else _build_decode_inputs(
+                            model.tags, values, batch_size=batch_size
+                        )
+                    )
+                    inputs.input_hiddens = torch.zeros(
+                        (batch_size * query_len, model.hidden_size),
+                        dtype=torch.bfloat16,
+                        device="cuda",
+                    )
+                    rows_by_tag = {
+                        "full": [[value] * 3 for value in full_ids],
+                        "linear": [[value] * 3 for value in conv_ids],
+                        "linear_ssm": [bank[:ssm_slots] for bank in banks],
+                        "linear_replay": [[value] for value in replay_ids],
+                    }
+                    tagged = inputs.attention_inputs
+                    for tag, rows in rows_by_tag.items():
+                        host = torch.tensor(rows, dtype=torch.int32).pin_memory()
+                        tagged[tag].kv_cache_kernel_block_id = host
+                        tagged[tag].kv_cache_block_id = host
+                        tagged[tag].kv_cache_kernel_block_id_device = host.cuda()
+                        tagged[tag].kv_cache_block_id_device = host.cuda()
+                    inputs.attention_inputs = tagged
+                    return inputs
+
+                def assert_replay(
+                    inputs, banks, replay_ids, full_ids, conv_ids, host_banks=None
+                ):
+                    host_banks = banks if host_banks is None else host_banks
+                    expected_rows = [
+                        [
+                            bank[0],
+                            bank[1],
+                            replay_id,
+                            bank[0],
+                            bank[1],
+                            replay_id,
+                            host_bank[0] + 16 * host_bank[1],
+                            replay_id,
+                            full_id,
+                            conv_id,
+                        ]
+                        for bank, host_bank, replay_id, full_id, conv_id in zip(
+                            banks, host_banks, replay_ids, full_ids, conv_ids
+                        )
+                    ]
+                    output = runner.forward(inputs)
+                    torch.cuda.synchronize()
+                    expected = torch.tensor(
+                        expected_rows, dtype=output.hidden_states.dtype, device="cuda"
+                    ).repeat_interleave(query_len, dim=0)
+                    torch.testing.assert_close(output.hidden_states, expected)
+                    self.assertEqual(model.forward_calls, forward_calls_after_capture)
+
+                banks = [[1, 2], [3, 4], [5, 6], [7, 8]]
+                if ssm_slots == 1:
+                    banks = [[bank[0], 0] for bank in banks]
+                replay_ids = [1, 2, 3, 4]
+                full_ids, conv_ids = [4, 5, 6, 7], [9, 10, 11, 12]
+                inputs = build_inputs(banks, replay_ids, full_ids, conv_ids)
+                self.assertTrue(runner.canRun(inputs))
+                assert_replay(inputs, banks, replay_ids, full_ids, conv_ids)
+
+                # Model the async MTP path: prepare host metadata first, then
+                # change device bank roles without rerunning attention prepare.
+                self.assertTrue(runner.prepare(inputs))
+                swapped = (
+                    [[committed + 1, 0] for committed, _ in banks]
+                    if ssm_slots == 1
+                    else [[scratch, committed] for committed, scratch in banks]
+                )
+                swapped_device = torch.tensor(
+                    [bank[:ssm_slots] for bank in swapped],
+                    dtype=torch.int32,
+                    device="cuda",
+                )
+                ssm = inputs.attention_inputs["linear_ssm"]
+                ssm.kv_cache_block_id_device.copy_(swapped_device)
+                ssm.kv_cache_kernel_block_id_device.copy_(swapped_device)
+                runner.updateBlockTables(inputs)
+                assert_replay(
+                    inputs, swapped, replay_ids, full_ids, conv_ids, host_banks=banks
+                )
+
+                # Reuse the same four-request graph with three different live
+                # rows and one padded row. Full prepare refreshes all mirrors.
+                banks = [[8, 7], [2, 1], [6, 5]]
+                if ssm_slots == 1:
+                    banks = [[bank[0], 0] for bank in banks]
+                replay_ids = [4, 1, 3]
+                full_ids, conv_ids = [13, 14, 15], [16, 17, 18]
+                inputs = build_inputs(banks, replay_ids, full_ids, conv_ids)
+                self.assertTrue(runner.canRun(inputs))
+                self.assertEqual(runner.getCurrentRealGraphSize(), 4)
+                assert_replay(inputs, banks, replay_ids, full_ids, conv_ids)
 
     def test_prepare_sync_policy_is_role_scoped(self) -> None:
         # Run in a fresh process for each async environment: the production

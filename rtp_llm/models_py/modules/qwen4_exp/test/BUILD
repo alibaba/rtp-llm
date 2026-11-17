@@ -1,3 +1,5 @@
+exports_files(["linear_double_buffer_test.py"])
+
 py_library(
     name = "math_references",
     srcs = glob(["reference/*.py"]),
@@ -638,4 +640,12 @@ py_test(
     env = {"GPU_COUNT": "1"},
     tags = ["RTX_5000_PRO_CU13"],
     exec_properties = {"gpu": "RTX_5000_PRO_CU13"},
+)
+
+py_test(
+    name = "linear_double_buffer_test",
+    srcs = ["linear_double_buffer_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
 )

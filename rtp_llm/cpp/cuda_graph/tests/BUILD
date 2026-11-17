@@ -328,3 +328,18 @@ py_test(
     tags = ["H20_CU13"],
     exec_properties = {"gpu": "H20_CU13"},
 )
+
+py_test(
+    name = "cuda_graph_mtp_capacity_test_rocm",
+    main = "cuda_graph_mtp_capacity_test.py",
+    srcs = ["cuda_graph_mtp_capacity_test.py", "cuda_graph_tagged_cache_test.py"],
+    data = [":test_cuda_graph_runner", "//:th_transformer"],
+    deps = [":cuda_graph_test_utils", "//rtp_llm/models_py:modules", "//rtp_llm/test/model_test/test_util:test_util"],
+    env = {"TEST_USING_DEVICE": "ROCM", "LOAD_METHOD": "scratch"},
+    tags = ["rocm"],
+    target_compatible_with = select({
+        "//:using_rocm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)

@@ -65,6 +65,8 @@ bool NormalCacheStore::init(const CacheStoreInitParams& params) {
     messager_init_params.worker_thread_count          = params.messager_worker_thread_count;
     messager_init_params.worker_queue_size            = params.queue_size;
     messager_init_params.device_id                    = params.device_id;
+    messager_init_params.rpc_client_queue_size        = params.rpc_client_queue_size;
+    messager_init_params.isolated_rocm_copy_stream    = params.isolated_rocm_copy_stream;
 
     if (!messager_->init(messager_init_params)) {
         RTP_LLM_LOG_ERROR("normal cache store init failed : init messager failed");

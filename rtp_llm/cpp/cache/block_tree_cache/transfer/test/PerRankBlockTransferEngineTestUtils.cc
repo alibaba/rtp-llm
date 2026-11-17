@@ -102,6 +102,9 @@ GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
 
     GroupSetPtr group_set;
     switch (first.policy.group_type) {
+        case CacheGroupType::REQUEST_STATE:
+            RTP_LLM_CHECK_WITH_INFO(false, "request state has no prefix group set");
+            break;
         case CacheGroupType::FULL:
             group_set = std::make_shared<FullGroupSet>(device_pools, host_pool, disk_pool);
             break;

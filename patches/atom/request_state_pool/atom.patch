@@ -1,0 +1,446 @@
+diff --git a/atom/model_ops/attention_gdn.py b/atom/model_ops/attention_gdn.py
+--- a/atom/model_ops/attention_gdn.py
++++ b/atom/model_ops/attention_gdn.py
+@@ -346,6 +346,12 @@
+                 1, num_tokens_nonspec, -1, self.head_v_dim
+             )
+ 
++        # Convolution and split SSM have independent physical pool indices.
++        # Override only after convolution consumed the original metadata.
++        ssm_non_spec = getattr(gdn_metadata, "rtp_ssm_non_spec_indices", None)
++        if ssm_non_spec is not None:
++            non_spec_state_indices_tensor = ssm_non_spec
++            non_spec_state_indices_in_tensor = ssm_non_spec
+         use_flydsl_mtp = bool(getattr(gdn_metadata, "rtp_flydsl_mtp", False))
+         if use_flydsl_mtp and use_replayssm:
+             raise ValueError("FlyDSL GDN MTP cannot run ReplaySSM")
+@@ -417,8 +423,11 @@
+                         a.reshape(batch,width,-1), b.reshape(batch,width,-1),
+                         self.dt_bias,self.A_log,ssm_state.transpose(-1,-2),
+                         output.reshape(batch,width,*value_spec.shape[-2:]),
+-                        gdn_metadata.rtp_flydsl_read_indices,spec_state_indices_tensor,
+-                        hybrid_records[self.layer_num])
++                        gdn_metadata.rtp_flydsl_read_indices,
++                        getattr(gdn_metadata, "rtp_flydsl_ssm_write_indices", spec_state_indices_tensor),
++                        hybrid_records[self.layer_num],
++                        record_indices=getattr(gdn_metadata, "rtp_hybrid_record_indices", None),
++                        record_only=getattr(gdn_metadata, "rtp_hybrid_record_only", False))
+                     core_attn_out_spec, last_recurrent_state = output.unsqueeze(0), None
+                 else:
+                     core_attn_out_spec, last_recurrent_state = mtp_rtp(
+diff --git a/atom/plugin/rtpllm/models/qwen4_exp.py b/atom/plugin/rtpllm/models/qwen4_exp.py
+--- a/atom/plugin/rtpllm/models/qwen4_exp.py
++++ b/atom/plugin/rtpllm/models/qwen4_exp.py
+@@ -22,6 +22,7 @@
+     CacheTailPolicyDesc,
+     DataType,
+     HybridAttentionType,
++    LinearStateLayout,
+     KVCacheSpecType,
+     TpCacheTransferMode,
+ )
+@@ -65,8 +66,6 @@
+             self, model_config, *args, **kwargs
+         )
+         max_batch = bound.arguments.get("max_generate_batch_size")
+-        from atom.plugin.rtpllm.utils.split_ssm_storage import configure_request_capacity
+-        configure_request_capacity(model_config, max_batch)
+         self._rtp_forward_context_cls = RTPQwen4ExpContext
+         super().__init__(model_config, *args, **kwargs)
+         self._rtp_model_config = model_config
+@@ -90,6 +89,13 @@
+         install_runtime(self)
+         from atom.plugin.rtpllm.utils.replay_hybrid import install_runtime as install_hybrid
+         install_hybrid(self)
++
++    def initialize(self, init_resource) -> bool:
++        initialized = super().initialize(init_resource)
++        if initialized and self.kv_cache is not None:
++            from atom.plugin.rtpllm.utils.linear_double_buffer import initialize_runtime
++            initialize_runtime(self)
++        return initialized
+ 
+     def copy_plugin_cache_blocks(self, mapping: torch.Tensor, tags: list[str]) -> None:
+         """Move ReplaySSM records with RTP linear blocks when enabled."""
+@@ -761,11 +767,16 @@
+             for desc in layer:
+                 if desc.cache_type == KVCacheSpecType.LINEAR:
+                     desc.dtype = DataType.TYPE_BF16
++                    if (
++                        torch.version.hip
++                        and not model_config.is_mtp
++                        and os.getenv("ROLE_TYPE") in ("PREFILL", "DECODE")
++                    ):
++                        desc.linear_state_layout = LinearStateLayout.SPLIT_EXPORT
+                     tail = desc.tail or CacheTailPolicyDesc()
+                     tail.prefix_checkpoint_stride_blocks = GDN_PREFIX_CHECKPOINT_STRIDE_BLOCKS
+                     desc.tail = tail
+-        from atom.plugin.rtpllm.utils.split_ssm_storage import split_descs
+-        model_config.kv_cache_spec_descs = split_descs(descs)
++        model_config.kv_cache_spec_descs = descs
+ 
+     @classmethod
+ 
+diff --git a/atom/plugin/rtpllm/utils/linear_double_buffer.py b/atom/plugin/rtpllm/utils/linear_double_buffer.py
+new file mode 100644
+--- /dev/null
++++ b/atom/plugin/rtpllm/utils/linear_double_buffer.py
+@@ -0,0 +1,304 @@
++"""RTP-only adapter for cache-manager-owned GDN state and replay records.
++
++Installed as atom.plugin.rtpllm.utils.linear_double_buffer by atom.patch.
++The public helper owns the transaction and kernels; this file only connects
++ATOM's cache/context/runtime hooks to that contract.
++"""
++
++from types import MethodType
++
++import torch
++import triton
++from atom.config import KVCacheTensor
++
++from rtp_llm.models_py.modules.qwen4_exp.linear_double_buffer import (
++    LinearDoubleBufferStage,
++    LinearDoubleBufferTransaction,
++    resolve_pool_indices,
++    split_pool_views,
++)
++
++
++def enabled(runtime):
++    cache = runtime.kv_cache
++    cached = getattr(runtime, "_linear_db_layout_cache", None)
++    if cached is not None and cached[0] is cache:
++        return cached[1]
++    # MTP compatibility topologies include unbound target groups. Only actual
++    # GDN layers may enable this adapter; the full-attention-only draft has none.
++    # Published topology is immutable, so recheck only when the cache is rebound.
++    layers = runtime._rtp_layer_maps[0]
++    if not layers:
++        runtime._linear_db_layout_cache = (cache, False)
++        return False
++    tags = set(getattr(cache, "group_tags", ()))
++    present = tags.intersection(("linear_ssm", "linear_replay"))
++    if present and present != {"linear_ssm", "linear_replay"}:
++        raise ValueError("Incomplete linear SSM/replay split cache layout")
++    if present:
++        required = {"linear", "linear_ssm", "linear_replay"}
++        for layer in layers:
++            bound = {str(view.tag) for view in cache.get_layer_cache_groups(layer)}
++            if not required.issubset(bound):
++                raise ValueError(
++                    f"Incomplete linear SSM/replay split bindings for layer {layer}"
++                )
++        # Graph tables can be padded to a common width. Read the immutable
++        # published topology instead of inferring the number of state slots.
++        layout = cache.get_linear_state_layout("linear_ssm")
++        slots = cache.get_request_state_slots("linear_ssm")
++        if (layout, slots) not in ((3, 2), (5, 1)):
++            raise ValueError("Unsupported linear SSM layout/slot contract")
++        if cache.get_request_state_slots("linear_replay") != 1:
++            raise ValueError("Linear replay requires one request-owned record row")
++        runtime._linear_db_state_slots = slots
++    runtime._linear_db_layout_cache = (cache, bool(present))
++    return bool(present)
++
++
++def initialize_runtime(runtime):
++    # Native checks irreversible-commit capability before the first target
++    # forward. Graph warmup must not be required to install this contract.
++    if enabled(runtime):
++        _install(runtime)
++
++
++def pool_signature(runtime, layers):
++    if not enabled(runtime):
++        return ()
++    return tuple(
++        (layer, tag, raw.data_ptr(), raw.shape, raw.stride(), raw.dtype)
++        for layer in sorted(layers)
++        for tag in ("linear_ssm", "linear_replay")
++        for raw in (runtime.kv_cache.get_layer_cache(layer, tag).kv_cache_base,)
++    )
++
++
++def _clear(self):
++    self._linear_db_transaction.clear()
++
++
++def _save(self, key):
++    self._linear_db_transaction.save(key)
++
++
++def _activate(self, key):
++    self._linear_db_transaction.activate(key)
++
++
++def _prepare(self, accept):
++    self._linear_db_transaction.prepare(accept)
++
++
++def _finish(self, commit):
++    self._linear_db_transaction.finish(commit)
++
++
++def _finalize(self):
++    self._linear_db_transaction.finalize()
++
++
++def _requires_fail_stop(self):
++    return self._linear_db_transaction.in_place
++
++
++def _install(runtime):
++    in_place = runtime._linear_db_state_slots == 1
++    if hasattr(runtime, "_linear_db_transaction"):
++        if runtime._linear_db_transaction.in_place is not in_place:
++            raise RuntimeError("Cannot change an initialized split-state commit mode")
++        return
++    config = runtime._rtp_model_config
++    role = str(getattr(runtime.parallelism_config, "role_type", "")).rsplit(".", 1)[-1]
++    if (
++        role != "DECODE"
++        or not getattr(config, "atom_qwen4_exp_mtp_target", False)
++        or getattr(config, "is_mtp", False)
++        or getattr(config, "atom_qwen4_exp_prefix_cache_enabled", False)
++        or not torch.version.hip
++        or not getattr(runtime, "_hybrid_enabled", False)
++        or getattr(runtime, "_hybrid_reducer", None) is None
++    ):
++        raise ValueError(
++            "Split GDN state requires D-only chain MTP, no reuse, and FP32 hybrid/TP consensus"
++        )
++    runtime._hybrid_enabled = False
++    runtime._linear_db_transaction = LinearDoubleBufferTransaction(in_place=in_place)
++    runtime._linear_db_indices = {}
++    for name, function in (
++        ("clear_speculative_target_graph_capture", _clear),
++        ("save_speculative_target_graph_capture", _save),
++        ("activate_speculative_target_graph_replay", _activate),
++        ("prepare_speculative_target_commit", _prepare),
++        ("finish_speculative_target_commit", _finish),
++        ("finalize_speculative_target_commit", _finalize),
++        ("requires_speculative_target_commit_fail_stop", _requires_fail_stop),
++    ):
++        setattr(runtime, name, MethodType(function, runtime))
++
++
++def build_cache_views(runtime, layer_maps, base_builder):
++    _install(runtime)
++    if torch.cuda.is_current_stream_capturing():
++        raise RuntimeError(
++            "Split cache views and pointer tables must be warmed before capture"
++        )
++    transaction = runtime._linear_db_transaction
++    if transaction.pending is not None or transaction.graphs:
++        raise RuntimeError(
++            "Cannot rebind SSM pools with a pending transaction or captured graph"
++        )
++    # The parent's LINEAR parser assumes combined conv+SSM rows. Exclude GDN
++    # layers from it, while retaining the unmodified full-attention bridge.
++    gdn, full, mla = layer_maps
++    caches = base_builder(runtime, ({}, full, mla))
++    query = int(runtime._rtp_model_config.gen_num_per_cycle) + 1
++    states, records, keys = [], [], tuple(sorted(gdn))
++    for number in keys:
++        layer = gdn[number]
++        conv, state, record = split_pool_views(
++            runtime.kv_cache.get_layer_cache(number, "linear").kv_cache_base,
++            runtime.kv_cache.get_layer_cache(number, "linear_ssm").kv_cache_base,
++            runtime.kv_cache.get_layer_cache(number, "linear_replay").kv_cache_base,
++            heads=int(layer.dt_bias.numel()),
++            key_dim=int(layer.head_k_dim),
++            value_dim=int(layer.head_v_dim),
++            conv_dim=int(layer.conv1d.weight.size(0)),
++            conv_length=int(layer.conv1d.weight.size(2)) - 1,
++            query=query,
++        )
++        if states and (
++            state.shape != states[0].shape or record.shape != records[0].shape
++        ):
++            raise ValueError(
++                "Split hybrid layers require identical SSM/replay geometry"
++            )
++        caches[f"layer_{number}"] = KVCacheTensor(
++            layer_num=number,
++            k_cache=conv,
++            v_cache=state,
++            k_scale=None,
++            v_scale=None,
++            per_request_state=True,
++        )
++        states.append(state)
++        records.append(record)
++    if not keys:
++        raise ValueError("Split hybrid layout has no GDN layers")
++    # Only small pointer/index tables are runtime allocations. All large
++    # FP32 state and record storage above is a view of manager-owned pools.
++    runtime._linear_db_pools = (
++        tuple(states),
++        tuple(records),
++        torch.tensor(
++            [state.data_ptr() for state in states],
++            dtype=torch.int64,
++            device=states[0].device,
++        ),
++        torch.tensor(
++            [record.data_ptr() for record in records],
++            dtype=torch.int64,
++            device=states[0].device,
++        ),
++    )
++    runtime._linear_db_records = dict(zip(keys, records))
++    return caches
++
++
++def prepare_metadata(runtime, metadata, inputs):
++    if metadata is None:
++        raise ValueError("Split SSM layout requires GDN metadata")
++    if metadata.num_prefills:
++        raise ValueError(
++            "Split SSM D layout rejects prefill/chunk-prefill; warm up with decode or target verify"
++        )
++    spec = metadata.num_spec_decodes > 0
++    if spec and (
++        metadata.num_decodes or not getattr(metadata, "rtp_flydsl_mtp", False)
++    ):
++        raise ValueError("Split SSM layout requires pure FlyDSL chain verification")
++    if spec and getattr(metadata, "rtp_target_verify_block_map", None) is None:
++        raise ValueError("Split SSM layout requires RTP chain target-verify metadata")
++    count = metadata.num_spec_decodes if spec else metadata.num_decodes
++    query = metadata.spec_state_indices_tensor.shape[1] if spec else 1
++    if count <= 0 or metadata.num_actual_tokens != count * query:
++        raise ValueError("Split SSM metadata batch/token shape is inconsistent")
++    states, records, state_ptrs, record_ptrs = runtime._linear_db_pools
++    if spec and query != records[0].shape[1]:
++        raise ValueError("Verify width differs from the allocated replay-row width")
++    tagged = getattr(inputs, "attention_inputs_by_tag", None)
++    if not tagged or not {"linear_ssm", "linear_replay"}.issubset(tagged):
++        raise ValueError("Split SSM/replay device block tables are missing")
++    tables = [
++        getattr(tagged[tag], "kv_cache_block_id_device", None)
++        for tag in ("linear_ssm", "linear_replay")
++    ]
++    if any(table is None for table in tables):
++        raise ValueError("Split SSM/replay requires refreshed device block tables")
++    columns_by_group = (runtime._linear_db_state_slots, 1)
++    if any(
++        table.ndim != 2 or table.shape[1] < columns
++        for table, columns in zip(tables, columns_by_group)
++    ):
++        raise ValueError(
++            "Split SSM/replay block table is narrower than its fixed slots"
++        )
++    # Framework graph buffers may pad every group to a common page width.
++    # These are zero-copy views, retaining the original per-row stride.
++    tables = [table[:, :columns] for table, columns in zip(tables, columns_by_group)]
++    primary = inputs.attention_inputs
++    # Plain decode deliberately has no prefix_lengths tensor. Its padded
++    # sequence length is zero, hence sequence_lengths_plus_1 == 1. Target
++    # verify instead uses prefix == 0 as its padding marker.
++    length_field = "prefix_lengths_device" if spec else "sequence_lengths_plus_1_device"
++    prefix = getattr(primary, length_field, None)
++    if prefix is None:
++        raise ValueError(f"Split SSM requires {length_field} to identify graph padding")
++    key = (count, query)
++    if key not in runtime._linear_db_indices:
++        if torch.cuda.is_current_stream_capturing():
++            raise RuntimeError(
++                "Double-buffer index metadata was not warmed for this graph bucket"
++            )
++        device = states[0].device
++        runtime._linear_db_indices[key] = (
++            torch.empty(count, device=device, dtype=torch.int32),
++            torch.empty((count, query), device=device, dtype=torch.int32),
++            torch.empty(count, device=device, dtype=torch.int32),
++            torch.empty(triton.cdiv(count, 128), device=device, dtype=torch.int32),
++        )
++    buffers = runtime._linear_db_indices[key]
++    resolve_pool_indices(
++        *tables,
++        prefix,
++        buffers,
++        states[0].shape[0],
++        records[0].shape[0],
++        minimum_length=0 if spec else 1,
++        state_slots=runtime._linear_db_state_slots,
++    )
++    reads, writes, record_ids, _ = buffers
++    if spec:
++        metadata.rtp_flydsl_read_indices = reads
++        metadata.rtp_flydsl_ssm_write_indices = writes
++        metadata.rtp_hybrid_records = runtime._linear_db_records
++        metadata.rtp_hybrid_record_indices = record_ids
++        metadata.rtp_hybrid_record_only = runtime._linear_db_transaction.in_place
++        runtime._linear_db_transaction.bind(
++            LinearDoubleBufferStage(
++                states,
++                records,
++                state_ptrs,
++                record_ptrs,
++                reads,
++                writes,
++                record_ids,
++                in_place=runtime._linear_db_transaction.in_place,
++            )
++        )
++    else:
++        # A non-speculative single-token decode is immediately accepted. Use
++        # committed in-place after conv has consumed its independent indices.
++        # Never use this route for speculative candidates or prefill.
++        metadata.rtp_ssm_non_spec_indices = reads
++        runtime._linear_db_transaction.clear()
+diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
+--- a/atom/plugin/rtpllm/utils/qwen4_exp_context.py
++++ b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
+@@ -362,7 +362,15 @@
+         return gdn, full, mla
+ 
+     @staticmethod
++    def _kv_cache_signature(runtime, layer_maps):
++        from atom.plugin.rtpllm.utils.linear_double_buffer import pool_signature
++        return RTPForwardQwen35HybridContext._kv_cache_signature(runtime, layer_maps) + pool_signature(runtime, layer_maps[0])
++
++    @staticmethod
+     def _build_kv_cache_tensors(runtime: Any, layer_maps: Any) -> dict[str, Any]:
++        from atom.plugin.rtpllm.utils.linear_double_buffer import enabled as request_pool_enabled, build_cache_views
++        if request_pool_enabled(runtime):
++            return build_cache_views(runtime, layer_maps, RTPForwardQwen35HybridContext._build_kv_cache_tensors)
+         from atom.plugin.rtpllm.utils.split_ssm_storage import enabled, build_caches
+         caches = (build_caches(runtime, layer_maps, RTPForwardQwen35HybridContext._build_kv_cache_tensors)
+                   if enabled() else RTPForwardQwen35HybridContext._build_kv_cache_tensors(runtime, layer_maps))
+@@ -775,10 +783,14 @@
+                 gdn_metadata.rtp_flydsl_read_indices = gdn_metadata.spec_state_indices_in_tensor[:, 0].contiguous()
+             from atom.plugin.rtpllm.utils.split_ssm_storage import bind_conv
+             bind_conv(cls, runtime, inputs, positions, gdn_metadata, cg_bufs)
+-            from atom.plugin.rtpllm.utils.replay_hybrid import prepare_metadata as prepare_hybrid
+-            prepare_hybrid(runtime, gdn_metadata, forward_context.kv_cache_data, resolved_layer_maps[0])
+-            from atom.plugin.rtpllm.utils.replayssm_rtp import prepare_metadata
+-            prepare_metadata(runtime, gdn_metadata)
++            from atom.plugin.rtpllm.utils.linear_double_buffer import enabled as request_pool_enabled, prepare_metadata as prepare_request_pool
++            if request_pool_enabled(runtime):
++                prepare_request_pool(runtime, gdn_metadata, inputs)
++            else:
++                from atom.plugin.rtpllm.utils.replay_hybrid import prepare_metadata as prepare_hybrid
++                prepare_hybrid(runtime, gdn_metadata, forward_context.kv_cache_data, resolved_layer_maps[0])
++                from atom.plugin.rtpllm.utils.replayssm_rtp import prepare_metadata
++                prepare_metadata(runtime, gdn_metadata)
+             cls._configure_gdn_backends(
+                 metadata.gdn_metadata,
+                 resolved_layer_maps[0],
+diff --git a/atom/plugin/rtpllm/utils/split_ssm_storage.py b/atom/plugin/rtpllm/utils/split_ssm_storage.py
+--- a/atom/plugin/rtpllm/utils/split_ssm_storage.py
++++ b/atom/plugin/rtpllm/utils/split_ssm_storage.py
+@@ -5,10 +5,8 @@
+ 
+ 
+ def enabled():
+-    requested = os.getenv("ATOM_RTP_SPLIT_SSM_STORAGE", "0") == "1"
+-    if requested and not torch.version.hip:
+-        raise RuntimeError("Split SSM storage requires ROCm")
+-    return requested
++    # The request-owned cache topology replaces token-page SSM aliases.
++    return False
+ 
+ 
+ def configure_request_capacity(model_config, max_batch):
