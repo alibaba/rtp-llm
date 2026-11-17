@@ -111,6 +111,9 @@ class Qwen4Exp(Qwen35Moe):
         config.config_dtype = text_config.get("dtype") or text_config.get(
             "torch_dtype", ""
         )
+        if not source_quant and config.config_dtype == "bfloat16":
+            # Keep BF16 head weights and continue to produce FP32 logits.
+            config.enable_fp32_lm_head = False
         from rtp_llm.models.qwen4_exp.moe_nvfp4 import is_qwen4_nvfp4_checkpoint
 
         config._qwen4_nvfp4_mixed_source = is_qwen4_nvfp4_checkpoint(config_json)
