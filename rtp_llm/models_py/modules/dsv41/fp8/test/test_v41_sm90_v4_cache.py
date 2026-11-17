@@ -271,6 +271,7 @@ class SM90V4CacheTest(unittest.TestCase):
         from rtp_llm.models_py.modules.dsv41.fp8._v41_qkv_rope_cache_triton import (
             try_fused_qkv_rope_cache,
         )
+        from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_kv import swa_kv_norm_rope
         from rtp_llm.models_py.modules.dsv41.fp8.test.test_v41_qkv_rope_cache import (
             make_case,
         )
@@ -288,6 +289,13 @@ class SM90V4CacheTest(unittest.TestCase):
                     case["kv"], case["kv_norm"], frequencies, 64
                 )
                 v4_writer(expected_kv.reshape(-1, 512), reference_pool, case["slots"])
+                fallback_raw, fallback_pool = _pool(3, 128)
+                fallback_kv = swa_kv_norm_rope(
+                    case["kv"], case["kv_norm"], frequencies, 64
+                )
+                v4_writer(fallback_kv.reshape(-1, 512), fallback_pool, case["slots"])
+                torch.testing.assert_close(fallback_kv, expected_kv, rtol=0, atol=0)
+                torch.testing.assert_close(fallback_raw, reference_raw, rtol=0, atol=0)
                 output = try_fused_qkv_rope_cache(**case)
                 self.assertIsNotNone(output)
                 torch.testing.assert_close(output.q, expected_q, rtol=0, atol=0)

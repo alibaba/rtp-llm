@@ -1,16 +1,15 @@
-"""V4.1 SWA KV numerical boundaries shared by fresh and cached attention.
-
-RMSNorm and RoPE each materialize BF16 before group-32 MXFP8. Fresh
-attention consumes the same decoded values as the SWA cache, including
-rows that do not own a cache slot. The operation is independent of request
-batching, prefix reuse, CP partitioning, and DSpark query/commit roles.
-"""
+"""SWA KV numerical boundaries for the native V4.1 and SM90 V4 caches."""
 
 from __future__ import annotations
 
 import torch
 import triton
 import triton.language as tl
+
+from rtp_llm.models_py.modules.dsv41._fused_rmsnorm_rope_triton import (
+    fused_rmsnorm_rope,
+)
+from rtp_llm.models_py.modules.dsv41.kv_cache_layout import use_v4_kv_cache
 
 
 @triton.jit
@@ -78,12 +77,19 @@ def swa_kv_norm_rope(
     rope_head_dim: int,
     *,
     eps: float = 1e-6,
+    v4_layout: bool | None = None,
 ) -> torch.Tensor:
-    """Normalize, rotate, and MXFP8-roundtrip all fresh V4.1 SWA rows.
+    """Prepare SWA rows using the numerical boundaries of the active cache.
 
-    Frequencies are already selected by actual absolute position. Strided
-    views from merged Q/KV projection are accepted without copying the input.
+    The SM90 V4 writer quantizes its first 448 channels and stores the RoPE
+    tail in BF16. Native V4.1 instead roundtrips all 512 channels in MXFP8
+    before fresh attention so fresh and cached rows use the same values.
     """
+    if v4_layout is None:
+        v4_layout = use_v4_kv_cache(raw.device)
+    if v4_layout:
+        return fused_rmsnorm_rope(raw, weight, freqs_cis, rope_head_dim, eps=eps)
+
     assert raw.is_cuda and raw.dtype == torch.bfloat16
     assert raw.shape[-1] == 512 and raw.stride(-1) == 1 and rope_head_dim == 64
     assert weight.shape == (512,) and weight.device == raw.device
