@@ -1160,19 +1160,20 @@ torch::Tensor PyWrappedModel::computeLogits(const torch::Tensor& hidden) {
                         "FP8 LM head requires its FP32 weight scale on the hidden device");
             auto rows = hidden.to(torch::kBFloat16).contiguous();
             if (rows.size(0) == 0) {
-                logits = torch::empty({0, kernel.size(0)}, rows.options().dtype(torch::kFloat32));
+                logits = torch::empty({0, kernel.size(0)}, rows.options());
             } else if (kernel.size(0) % 16 != 0 || kernel.size(1) % 16 != 0) {
                 auto weight = (kernel.to(torch::kFloat32) * head.scales).to(torch::kBFloat16);
-                logits      = torch::mm(rows, weight.t()).to(torch::kFloat32);
+                logits      = torch::mm(rows, weight.t());
             } else {
                 // Quantize only live rows; zero padding must not change their amax domain.
                 const auto padded_rows = ((rows.size(0) + 15) / 16) * 16;
                 auto       quantized   = torch::empty({padded_rows, rows.size(1)}, kernel.options());
                 auto       scale       = torch::zeros({1}, rows.options().dtype(torch::kFloat32));
                 per_tensor_quant_fp8(rows, quantized, scale, false);
+                // The projection already returns BF16. Keep that format through TP
+                // collection, then widen the public logits without losing any bits.
                 logits = at::_scaled_mm(quantized, kernel.t(), scale, head.scales, {}, {}, torch::kBFloat16)
-                             .narrow(0, 0, rows.size(0))
-                             .to(torch::kFloat32);
+                             .narrow(0, 0, rows.size(0));
             }
 #else
             TORCH_CHECK(false, "FP8 LM head requires a CUDA build with FP8 support");
@@ -1312,6 +1313,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                                     logits.dim() > 1 ? logits.size(1) : -1);
             logits = logits.narrow(1, 0, description_.output_vocab_size).contiguous();
         }
+        logits = logits.to(torch::kFloat32);
         if (check_nan_) {
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
@@ -1358,6 +1360,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(tp_sync_logits)");
         logits = tpSyncEmbeddingOrLogits(logits);
     }
+    logits = logits.to(torch::kFloat32);
     if (check_nan_) {
         RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
         RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
