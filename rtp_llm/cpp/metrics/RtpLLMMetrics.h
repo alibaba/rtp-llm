@@ -1127,10 +1127,16 @@ public:
     std::optional<double>  write_bandwidth_bytes_per_sec;
 };
 
+class RtpLLMCacheUnfreezeMetricsCollector final {
+public:
+    int64_t blocks = 0;
+};
+
 class RtpLLMCachePoolMetrics: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;
     void report(const kmonitor::MetricsTags* tags, RtpLLMCachePoolMetricsCollector* collector);
+    void report(const kmonitor::MetricsTags* tags, RtpLLMCacheUnfreezeMetricsCollector* collector);
 
 public:
     kmonitor::MutableMetric* block_size_bytes_metric           = nullptr;
@@ -1147,6 +1153,7 @@ public:
     kmonitor::MutableMetric* load_ref_blocks_metric             = nullptr;
     kmonitor::MutableMetric* eviction_ref_blocks_metric         = nullptr;
     kmonitor::MutableMetric* frozen_ref_blocks_metric          = nullptr;
+    kmonitor::MutableMetric* unfreeze_blocks_qps_metric         = nullptr;
     kmonitor::MutableMetric* used_ratio_metric                 = nullptr;
 
     kmonitor::MutableMetric* read_bytes_metric                    = nullptr;

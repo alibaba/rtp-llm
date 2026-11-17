@@ -167,6 +167,38 @@ TEST(FrozenTaskRecoveryTest, LocalNumericAndStringProofsRecoverNonRpcFailuresWit
     EXPECT_EQ(kvcm.size(), 1u);
 }
 
+TEST(FrozenTaskRecoveryTest, ReleaseObserverRunsOnceAfterReleaseAndCannotInterruptRecovery) {
+    auto pool = makePool();
+    const auto first_block = hold(pool);
+    const auto second_block = hold(pool);
+    auto first = makeTask(uint64_t{75}, pool, first_block);
+    auto second = makeTask(std::string("kvcm-75"), pool, second_block);
+    first->freeze();
+    second->freeze();
+    State state = State::RUNNING;
+    std::vector<TransferExecutionTrace> released;
+    FrozenTaskRecovery recovery(
+        [&] { return std::vector<std::shared_ptr<FrozenTask>>{first, second}; },
+        [&](const auto& execution, int) { return proof(execution, state); },
+        {},
+        [&](const auto& execution) {
+            const auto& task = execution.trace_id == first->execution().trace_id ? first : second;
+            EXPECT_EQ(task->snapshot().state, FrozenTask::State::RELEASED);
+            EXPECT_FALSE(pool->isFrozen(execution.descriptors.front().targets.front().block));
+            released.push_back(execution.trace_id);
+            if (std::holds_alternative<uint64_t>(execution.trace_id))
+                throw std::runtime_error("metrics unavailable");
+            throw 42;
+        });
+    EXPECT_EQ(recovery.runOnce(1000).released, 0u);
+    EXPECT_TRUE(released.empty());
+    state = State::BUFFER_SAFE;
+    EXPECT_EQ(recovery.runOnce(1000).released, 2u);
+    EXPECT_EQ(released, (std::vector<TransferExecutionTrace>{uint64_t{75}, std::string("kvcm-75")}));
+    EXPECT_EQ(recovery.runOnce(1000).released, 0u);
+    EXPECT_EQ(released.size(), 2u);
+}
+
 TEST(FrozenTaskRecoveryTest, RemoteRecoveryWaitsForEveryRankAndPreservesPendingQuerySnapshots) {
     auto       pool  = makePool();
     const auto block = hold(pool);

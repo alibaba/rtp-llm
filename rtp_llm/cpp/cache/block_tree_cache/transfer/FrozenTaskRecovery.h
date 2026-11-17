@@ -23,6 +23,7 @@ public:
     using TaskSource = std::function<std::vector<std::shared_ptr<FrozenTask>>()>;
     using Query      = std::function<TransferCompletionQueryResult(const FrozenTask::ExecutionInfo&, int)>;
     using Cleanup    = std::function<TransferCompletionCleanup::Summary(int, const std::function<bool()>&)>;
+    using OnReleased = std::function<void(const FrozenTask::ExecutionInfo&)>;
 
     struct Summary {
         size_t inspected{0};
@@ -37,7 +38,7 @@ public:
         bool   cleanup_failed{false};
     };
 
-    FrozenTaskRecovery(TaskSource source, Query query, Cleanup cleanup = {});
+    FrozenTaskRecovery(TaskSource source, Query query, Cleanup cleanup = {}, OnReleased on_released = {});
     ~FrozenTaskRecovery();
 
     // The owner serializes start/stop/destruction outside the recovery thread.
@@ -64,6 +65,7 @@ private:
     TaskSource        source_;
     Query             query_;
     Cleanup           cleanup_;
+    OnReleased        on_released_;
     std::atomic<bool> running_{false};
     // Accessed only by the successful running_ claimant.
     std::chrono::steady_clock::time_point next_pending_log_{};
