@@ -69,6 +69,7 @@ class MMRemoteEmbeddingCache:
         namespace="",
         model_identity=None,
         gdr_enabled=None,
+        gdr_pool=None,
         audit_enabled=None,
         request_scoped_inspection=False,
     ):
@@ -81,6 +82,7 @@ class MMRemoteEmbeddingCache:
                 "MM_REMOTE_CACHE_NAMESPACE must identify immutable model/preprocess revisions"
             )
         self._client = client
+        self._gdr_pool = gdr_pool
         self._factory = client_factory
         self._client_lock = threading.Lock()
         self._client_users = {}
@@ -100,6 +102,9 @@ class MMRemoteEmbeddingCache:
         self._transport_mode = "gdr" if gdr_enabled else "staging"
         self._executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="mm-remote-cache"
+        )
+        self._write_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="mm-remote-write"
         )
         self._lock = threading.Lock()
         self._stats_lock = threading.Lock()
@@ -175,7 +180,7 @@ class MMRemoteEmbeddingCache:
             if gdr_enabled:
                 from rtp_llm.multimodal.kvcm._config import RtpKvMetaObjectClientConfig
                 from rtp_llm.multimodal.kvcm.registered_transport import (
-                    RegisteredObjectTransport,
+                    RegisteredTransportPool,
                 )
 
                 # Resolve discovery before allocating an arena or registering
@@ -193,7 +198,7 @@ class MMRemoteEmbeddingCache:
                         prepared_config, **registration
                     )
 
-                return RegisteredObjectTransport(
+                return RegisteredTransportPool(
                     registered_factory,
                     max_object_bytes=vit_config.mm_remote_cache_max_object_bytes,
                     device=device,
@@ -220,6 +225,7 @@ class MMRemoteEmbeddingCache:
             read_timeout_ms=vit_config.mm_remote_cache_read_timeout_ms,
             cuda_device=device,
             gdr_enabled=gdr_enabled,
+            gdr_pool=client if gdr_enabled else None,
             audit_enabled=vit_config.mm_remote_cache_audit,
             request_scoped_inspection=request_scoped_inspection,
         )
@@ -588,6 +594,18 @@ class MMRemoteEmbeddingCache:
             {"operation": operation, "reason": reason},
         )
 
+    def _gdr_pool_quarantined(self):
+        client = self._client
+        return (
+            self._transport_mode == "gdr" and client is not None and client.quarantined
+        )
+
+    def _skip_quarantined(self, operation):
+        if self._gdr_pool_quarantined():
+            self._report_skip(operation, "gdr_quarantined")
+            return True
+        return False
+
     def _get_client(self):
         with self._client_lock:
             if self._closed:
@@ -668,16 +686,46 @@ class MMRemoteEmbeddingCache:
         if entry is not None and key is not None:
             entry.remote_cache_context = dict(key=key, trace_id=trace_id)
 
-    def submit_result(
-        self, key, result, *, trace_id=None, producer_events=(), entry=None
-    ):
-        """Snapshot an accepted encoder result, then upload owned bytes.
+    @staticmethod
+    def _snapshot(plan, producer_streams):
+        """Detach from reusable encoder output before returning it to the caller."""
+        streams = {stream.device: stream for stream in producer_streams}
+        cuda_indices = {}
+        for i, tensor in enumerate(plan.tensors):
+            if tensor.is_cuda:
+                cuda_indices.setdefault(tensor.device, []).append(i)
+            else:
+                plan.tensors[i] = tensor.detach().clone(
+                    memory_format=torch.contiguous_format
+                )
 
-        Admission precedes allocation. Snapshotting happens on the caller while
-        it owns the tensors; queued IO never retains model buffers or cache pool
-        slots. CPU residency and eviction are unrelated to remote writeback.
-        """
-        if key is None:
+        events = []
+        for device, indices in cuda_indices.items():
+            with cuda_graph_gate.operation():
+                caller = torch.cuda.current_stream(device)
+                producer = streams.get(device, caller)
+                # Inspection can finish on a different stream. Order later
+                # reuse on either stream after the copies, without a host wait.
+                if producer != caller:
+                    producer.wait_stream(caller)
+                with torch.cuda.stream(producer):
+                    for i in indices:
+                        tensor = plan.tensors[i]
+                        plan.tensors[i] = tensor.detach().clone(
+                            memory_format=torch.contiguous_format
+                        )
+                        tensor.record_stream(producer)
+                    ready = producer.record_event()
+                if producer != caller:
+                    caller.wait_event(ready)
+                events.append(ready)
+        return events
+
+    def submit_result(
+        self, key, result, *, trace_id=None, producer_streams=(), entry=None
+    ):
+        """Admit an encoder result and enqueue its owned snapshot for upload."""
+        if key is None or self._skip_quarantined("write"):
             return
         try:
             inspection = None
@@ -729,14 +777,7 @@ class MMRemoteEmbeddingCache:
             self._release(cost)
 
         try:
-            with self._observe_stage("write", "pack"):
-                # Host event synchronization is also forbidden during global
-                # CUDA Graph capture, even for a different producer stream.
-                with self._observe_stage("write", "producer_wait"):
-                    with cuda_graph_gate.operation():
-                        for event in producer_events or ():
-                            event.synchronize()
-                buffer = pack_object(plan, observe_stage=self._observe_stage)
+            ready_events = self._snapshot(plan, producer_streams)
         except Exception as error:
             self.record(
                 "write_error",
@@ -750,24 +791,58 @@ class MMRemoteEmbeddingCache:
             self._report_operation("write", started, "error", plan.nbytes)
             done(None)
             return
-        # The worker owns only the snapshot and small metadata, not tensors.
         nbytes, tensors = plan.nbytes, plan.header["tensors"]
 
         def write():
             client = None
-            queue_ms = (time.perf_counter() - queued_at) * 1000
-            self._report_queue_wait("write", queued_at)
-            api_ms = None
+            slot = None
+            queue_ms = api_ms = None
             outcome = "error"
             failure_stage = "client_acquire"
             try:
+                if self._gdr_pool is not None:
+                    slot = self._gdr_pool.acquire(wait=True)
+                queue_ms = (time.perf_counter() - queued_at) * 1000
+                self._report_queue_wait("write", queued_at)
+                if self._gdr_pool is not None and slot is None:
+                    outcome = "skipped"
+                    if not self._skip_quarantined("write"):
+                        self._report_skip("write", "executor_closed")
+                    return
+                if ready_events and not self._gdr_pool_quarantined():
+                    failure_stage = "producer_wait"
+                    with self._observe_stage(
+                        "write", "producer_wait"
+                    ), cuda_graph_gate.operation():
+                        for event in ready_events:
+                            event.synchronize()
+                if self._skip_quarantined("write"):
+                    outcome = "skipped"
+                    self.record(
+                        "write_skipped",
+                        key=key,
+                        trace_id=trace_id,
+                        reason="gdr_quarantined",
+                    )
+                    return
+                failure_stage = "pack"
+                with self._observe_stage("write", "pack"):
+                    buffer = (
+                        slot.pack(plan)
+                        if slot is not None
+                        else pack_object(plan, observe_stage=self._observe_stage)
+                    )
+                # No embedding storage needs to stay live during network IO.
+                plan.tensors.clear()
+                failure_stage = "client_acquire"
                 with self._observe_stage("write", "client_acquire"):
                     client = self._get_client()
                 api_started = time.perf_counter()
                 failure_stage = "transfer"
                 with self._observe_stage("write", "transfer", buffer.numel()):
                     try:
-                        client.save_one(key, buffer, trace_id=trace_id)
+                        target = slot if slot is not None else client
+                        target.save_one(key, buffer, trace_id=trace_id)
                     except Exception as error:
                         self._retire_client(client, error)
                         raise
@@ -801,7 +876,12 @@ class MMRemoteEmbeddingCache:
                         **self._error_context(error),
                     )
             finally:
-                self._report_operation("write", started, outcome, nbytes)
+                if slot is not None:
+                    self._gdr_pool.release(slot)
+                # Pre-transfer skips have already reported their outcome. A
+                # rejected SDK save still counts as a completed write attempt.
+                if outcome != "skipped" or failure_stage == "transfer":
+                    self._report_operation("write", started, outcome, nbytes)
                 self._benchmark(
                     "remote_store_timing",
                     key,
@@ -817,7 +897,7 @@ class MMRemoteEmbeddingCache:
 
         queued_at = time.perf_counter()
         try:
-            future = self._executor.submit(write)
+            future = self._write_executor.submit(write)
         except RuntimeError:
             self._report_skip("write", "executor_closed")
             done(None)
@@ -865,13 +945,37 @@ class MMRemoteEmbeddingCache:
     ):
         if key is None:
             return None
+        if self._skip_quarantined("read"):
+            self._count("miss")
+            self.record(
+                "load_miss", key=key, trace_id=trace_id, reason="gdr_quarantined"
+            )
+            return None
         timeout_ms = min(self.read_timeout_ms, timeout_ms or self.read_timeout_ms)
         deadline = time.monotonic() + timeout_ms / 1000
         started = time.perf_counter()
         timing = {"stage": "queue", "nbytes": 0}
         payload_nbytes = 0
         outcome = "error"
+        # Lease before queuing metadata so busy or timed-out transfers cause
+        # an immediate miss, even if all read executor threads are occupied.
+        slot = None
+        if self._gdr_pool is not None:
+            slot = self._gdr_pool.acquire()
+            if slot is None:
+                self._report_skip("read", "gdr_slot_unavailable", report_outcome=False)
+                self._report_operation("read", started, "skipped")
+                self._count("miss")
+                self.record(
+                    "load_miss",
+                    key=key,
+                    trace_id=trace_id,
+                    reason="gdr_slot_unavailable",
+                )
+                return None
         if not self._reserve(0):
+            if slot is not None:
+                self._gdr_pool.release(slot)
             self._report_skip("read", "admission")
             return None
         cost = 0
@@ -893,7 +997,8 @@ class MMRemoteEmbeddingCache:
                     raise TimeoutError("remote embedding lookup deadline expired")
                 api_started = time.perf_counter()
                 timing["stage"] = "metadata"
-                size = self._lookup_object_size(client, key, trace_id, remaining_ms)
+                source = slot if slot is not None else client
+                size = self._lookup_object_size(source, key, trace_id, remaining_ms)
                 if size is None:
                     timing["outcome"] = "miss"
                     timing["sdk_api_ms"] = (time.perf_counter() - api_started) * 1000
@@ -912,10 +1017,12 @@ class MMRemoteEmbeddingCache:
                 if time.monotonic() >= deadline:
                     raise TimeoutError("remote embedding transfer deadline expired")
                 timing["stage"] = "transfer"
+                # unpack_object can return CPU views. Keep the result independent
+                # of the pinned slot, even when the caller times out during IO.
                 buffer = torch.empty(size, dtype=torch.uint8)
                 with self._observe_stage("read", "transfer", size):
                     try:
-                        client.load_one(key, buffer, trace_id=trace_id)
+                        source.load_one(key, buffer, trace_id=trace_id)
                     except Exception as error:
                         self._retire_client(client, error)
                         raise
@@ -931,6 +1038,11 @@ class MMRemoteEmbeddingCache:
         queued_at = time.perf_counter()
         try:
             future = self._executor.submit(read)
+            if slot is not None:
+                # The caller can time out before IO returns. Completion (or
+                # cancellation before execution) ends this exclusive lease;
+                # an SDK-unsafe slot stays quarantined by the transport.
+                future.add_done_callback(lambda _: self._gdr_pool.release(slot))
             buffer = future.result(timeout=max(0, deadline - time.monotonic()))
             if buffer is None:
                 outcome = timing["outcome"]
@@ -1030,6 +1142,8 @@ class MMRemoteEmbeddingCache:
                 finally:
                     self._release(cost)
 
+            if future is None and slot is not None:
+                self._gdr_pool.release(slot)
             if future is None or (future.done() and not caller_timed_out):
                 self._release(cost)
             else:
@@ -1046,6 +1160,9 @@ class MMRemoteEmbeddingCache:
             if self._closed:
                 return
             self._closed = True
+        if self._gdr_pool is not None:
+            self._gdr_pool.stop_acquiring()
+        self._write_executor.shutdown(wait=True, cancel_futures=True)
         self._executor.shutdown(wait=True, cancel_futures=True)
         with self._client_lock:
             client, self._client = self._client, None

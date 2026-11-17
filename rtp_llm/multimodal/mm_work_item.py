@@ -188,7 +188,7 @@ class MMWorkItem:
         self.remote_cache_key = None
         self.remote_trace_id = None
         self._remote_write_attempted = False
-        self._remote_producer_events = None
+        self._remote_producer_streams = None
         self._cache_failed = False
         self.defer_cache_complete = defer_cache_complete
         # Only cache-free async producers defer hashes to get_embedding_result.
@@ -259,15 +259,10 @@ class MMWorkItem:
                 self.embedding_producer_streams = _current_cuda_streams(result)
         elif self.feature_hashes is None:
             self.feature_hashes = _feature_hashes_from_result(result)
-        if self.remote_cache is not None and self._remote_producer_events is None:
-            # Capture completion on the producing thread, before inspection may
-            # defer publication to a different thread/stream.
-            self._remote_producer_events = []
-            with cuda_graph_gate.operation():
-                for stream in _current_cuda_streams(result):
-                    event = torch.cuda.Event()
-                    event.record(stream)
-                    self._remote_producer_events.append(event)
+        if self.remote_cache is not None and self._remote_producer_streams is None:
+            # Inspection may publish from another thread. Snapshot on the
+            # stream that owns the encoder output before that storage is reused.
+            self._remote_producer_streams = _current_cuda_streams(result)
         if self.defer_cache_complete and not force:
             return
         if (
@@ -284,7 +279,7 @@ class MMWorkItem:
                 self.remote_cache_key,
                 result,
                 trace_id=self.remote_trace_id,
-                producer_events=self._remote_producer_events,
+                producer_streams=self._remote_producer_streams,
                 entry=self.cache_entry,
             )
         if (

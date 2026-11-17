@@ -317,7 +317,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
                 native.side_effect = RuntimeError(
                     "metadata RPC failed without pending DMA"
                 )
-                transport._client.is_transfer_quiescent.return_value = True
+                transport._client.buffer_safe_after_failure.return_value = True
                 buffer = torch.zeros(16, dtype=torch.uint8)
                 with self.assertRaisesRegex(RuntimeError, "metadata RPC failed"):
                     getattr(transport, operation)("key", buffer)
@@ -353,7 +353,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         transport._client.save_one.side_effect = TimeoutError(
             "original transfer failure"
         )
-        transport._client.is_transfer_quiescent.side_effect = RuntimeError("bad proof")
+        transport._client.buffer_safe_after_failure.side_effect = RuntimeError("bad proof")
         with self.assertLogs(level="ERROR"):
             with self.assertRaisesRegex(TimeoutError, "original transfer failure"):
                 transport.save_one("key", torch.zeros(16, dtype=torch.uint8))

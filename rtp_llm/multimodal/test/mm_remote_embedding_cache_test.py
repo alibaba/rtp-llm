@@ -5,6 +5,7 @@ import os
 import threading
 import time
 import unittest
+import weakref
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -15,6 +16,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.greennet_hook import GreenNetVerdict
 from rtp_llm.multimodal.kvcm.registered_transport import (
+    RegisteredTransportPool,
     RegisteredTransportUnavailableError,
 )
 from rtp_llm.multimodal.kvcm.tensor_object import (
@@ -334,6 +336,196 @@ class RemoteCacheTest(unittest.TestCase):
                 fresh = MMEmbeddingCacheEntry()
                 self.assertIsNone(remote.load("invalid", entry=fresh))
                 self.assertFalse(fresh.greennet_passed)
+
+    def test_quarantined_gdr_skips_reads_and_write_snapshots(self):
+        store = Store()
+        store.quarantined = True
+        remote = self.remote(store, gdr_enabled=True)
+        with patch.object(remote._write_executor, "submit") as submit, patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.plan_object"
+        ) as plan:
+            self.assertIsNone(remote.load("key"))
+            remote.submit_result("key", (torch.ones(1), None))
+            plan.assert_not_called()
+            submit.assert_not_called()
+        self.assertEqual(remote.stats()["miss"], 1)
+
+    def test_quarantine_during_producer_wait_releases_write_admission(self):
+        store = Store()
+        store.quarantined = False
+        remote = self.remote(store, gdr_enabled=True)
+        event = SimpleNamespace(synchronize=lambda: setattr(store, "quarantined", True))
+        with patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.pack_object"
+        ) as pack, patch.object(remote, "_snapshot", return_value=[event]):
+            remote.submit_result("key", (torch.ones(1), None))
+            remote._write_executor.shutdown(wait=True)
+            pack.assert_not_called()
+        self.assertFalse(remote._pending_writes)
+        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+        self.assertEqual(remote.stats()["inflight_bytes"], 0)
+
+    def slot_cache(self, count=2, **kwargs):
+        shared = {}
+        slots = [Store(shared) for _ in range(count)]
+        for slot in slots:
+            slot.device_failed = slot.quarantined = False
+            slot.pack = pack_object
+        with patch(
+            "rtp_llm.multimodal.kvcm.registered_transport.RegisteredObjectTransport",
+            side_effect=slots,
+        ):
+            pool = RegisteredTransportPool(
+                None, max_object_bytes=65536, device="cpu", slots=count
+            )
+        return (
+            self.remote(
+                pool, gdr_enabled=True, gdr_pool=pool, read_timeout_ms=5000, **kwargs
+            ),
+            slots,
+        )
+
+    def test_two_slow_writes_preserve_distinct_results_without_blocking_callers(self):
+        remote, slots = self.slot_cache()
+        results = [(torch.arange(8) + i, None) for i in range(2)]
+        slots[0].objects["hit"] = pack_object(plan_object(results[0]))
+        packed = threading.Barrier(3)
+        resume = threading.Event()
+
+        def slow_pack(plan):
+            packed.wait(5)
+            if not resume.wait(5):
+                raise TimeoutError("pack did not resume")
+            return pack_object(plan)
+
+        with patch.object(slots[0], "pack", side_effect=slow_pack), patch.object(
+            slots[1], "pack", side_effect=slow_pack
+        ), concurrent.futures.ThreadPoolExecutor(1) as caller:
+            try:
+                for i, result in enumerate(results):
+                    caller.submit(remote.submit_result, str(i), result).result(
+                        timeout=1
+                    )
+                packed.wait(5)  # Both background writers hold independent slots.
+                for value, _ in results:
+                    value.zero_()
+                self.assertIsNone(remote.load("hit"))
+                self.assertIsNone(remote.load("hit"))
+                self.assertEqual(remote.stats()["inflight_tasks"], 2)
+            finally:
+                resume.set()
+            for slot in slots:
+                self.assertTrue(slot.saved.wait(2))
+            remote._write_executor.shutdown(wait=True)
+            for i in range(2):
+                torch.testing.assert_close(remote.load(str(i))[0], torch.arange(8) + i)
+        self.assertEqual(remote.stats()["miss"], 2)
+
+    def test_caller_timeout_keeps_only_the_active_read_slot(self):
+        remote, slots = self.slot_cache()
+        result = (torch.arange(8), None)
+        slots[0].objects["hit"] = pack_object(plan_object(result))
+        busy = slots[0]
+        busy.read_gate.clear()
+        try:
+            with concurrent.futures.ThreadPoolExecutor(1) as caller:
+                read = caller.submit(remote.load, "hit", timeout_ms=200)
+                self.assertTrue(busy.read_started.wait(1))
+                self.assertIsNone(read.result(timeout=1))
+            other = remote._gdr_pool.acquire()
+            self.assertIs(other, slots[1])
+            try:
+                self.assertIsNone(remote._gdr_pool.acquire())
+            finally:
+                remote._gdr_pool.release(other)
+            torch.testing.assert_close(remote.load("hit")[0], result[0])
+        finally:
+            busy.read_gate.set()
+        remote.close()
+        self.assertEqual(remote.stats()["inflight_bytes"], 0)
+        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+
+    def test_late_gdr_read_wakes_bounded_writes_and_busy_reads_skip_metadata(self):
+        remote, (slot,) = self.slot_cache(1, max_pending=3)
+        value = torch.arange(8)
+        slot.objects["hit"] = pack_object(plan_object((value, None)))
+        slot.read_gate.clear()
+        try:
+            with concurrent.futures.ThreadPoolExecutor(1) as caller:
+                first = caller.submit(remote.load, "hit", timeout_ms=150)
+                self.assertTrue(slot.read_started.wait(1))
+                self.assertIsNone(first.result(timeout=1))
+            with patch.object(
+                slot, "object_size", wraps=slot.object_size
+            ) as metadata, patch.object(
+                remote._executor, "submit", wraps=remote._executor.submit
+            ) as submit, patch.object(remote, "_report_outcome") as outcome:
+                self.assertIsNone(remote.load("busy"))
+                metadata.assert_not_called()
+                submit.assert_not_called()
+                outcome.assert_called_once_with("read", "skipped")
+            for i in range(2):
+                remote.submit_result(str(i), (value + i, None))
+            with patch.object(remote, "_snapshot") as snapshot:
+                remote.submit_result("full", (value, None))
+                snapshot.assert_not_called()
+            self.assertEqual(remote.stats()["inflight_tasks"], 3)
+            self.assertFalse(slot.saved.is_set())
+        finally:
+            slot.read_gate.set()
+            remote._write_executor.shutdown(wait=True)
+        self.assertEqual(remote.stats()["write_success"], 2)
+        self.assertNotIn("full", slot.objects)
+        for i in range(2):
+            torch.testing.assert_close(remote.load(str(i))[0], value + i)
+        self.assertEqual(remote.stats()["read_timeout"], 1)
+        self.assertEqual(remote.stats()["inflight_bytes"], 0)
+        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+
+    def test_read_timeout_before_io_returns_lease_and_skips_sdk(self):
+        remote, (slot,) = self.slot_cache(1)
+        gate = threading.Event()
+        blockers = [remote._executor.submit(gate.wait, 3) for _ in range(2)]
+        try:
+            with patch.object(slot, "object_size", wraps=slot.object_size) as lookup:
+                self.assertIsNone(remote.load("queued", timeout_ms=30))
+                lookup.assert_not_called()
+            recovered = remote._gdr_pool.acquire()
+            self.assertIs(recovered, slot)
+            remote._gdr_pool.release(recovered)
+            self.assertEqual(remote.stats()["inflight_tasks"], 0)
+        finally:
+            gate.set()
+            for blocker in blockers:
+                blocker.result(timeout=1)
+
+    def test_quarantined_last_slot_wakes_queued_writer_without_packing(self):
+        remote, (slot,) = self.slot_cache(1)
+        started, finish = threading.Event(), threading.Event()
+
+        def uncertain_transfer(*args, **kwargs):
+            started.set()
+            if not finish.wait(3):
+                raise AssertionError("test did not release write")
+            slot.quarantined = True
+            raise TimeoutError("DMA completion unknown")
+
+        with patch.object(
+            slot, "save_one", side_effect=uncertain_transfer
+        ), patch.object(slot, "pack", wraps=slot.pack) as pack:
+            try:
+                remote.submit_result("one", (torch.arange(8), None))
+                self.assertTrue(started.wait(2))
+                remote.submit_result("two", (torch.arange(8), None))
+                self.assertEqual(remote.stats()["inflight_tasks"], 2)
+            finally:
+                finish.set()
+                remote._write_executor.shutdown(wait=True)
+            self.assertEqual(pack.call_count, 1)
+            self.assertTrue(remote._gdr_pool.quarantined)
+            self.assertIsNone(remote.load("one"))
+            self.assertEqual(remote.stats()["inflight_tasks"], 0)
+            self.assertEqual(remote.stats()["inflight_bytes"], 0)
 
     def test_repeated_acquisition_creates_one_client(self):
         store = Store()
@@ -734,7 +926,9 @@ class RemoteCacheTest(unittest.TestCase):
                 store.fail_write = failed
                 remote = self.remote(store)
                 gate = threading.Event()
-                blockers = [remote._executor.submit(gate.wait, 3) for _ in range(2)]
+                blockers = [
+                    remote._write_executor.submit(gate.wait, 3) for _ in range(2)
+                ]
                 entry = SimpleNamespace(
                     pool_owners=[],
                     result=(torch.ones(3, 4), None),
@@ -857,8 +1051,8 @@ class RemoteCacheTest(unittest.TestCase):
                         time.sleep(0.005)
                     self.assertEqual(remote.stats()["inflight_tasks"], 0)
                 skipped = not inflight and not unknown
-                self.assertEqual(remote.stats()["write_skipped"], int(skipped))
-                self.assertEqual(remote.stats()["write_error"], int(not skipped))
+                self.assertEqual(remote.stats().get("write_skipped", 0), int(skipped))
+                self.assertEqual(remote.stats().get("write_error", 0), int(not skipped))
                 self.assertEqual(error_log.call_count, int(not skipped))
                 self.assertEqual(
                     self.metric_values(
@@ -1291,43 +1485,71 @@ class RemoteCacheTest(unittest.TestCase):
             side_effect=RuntimeError("copy failed"),
         ):
             other.submit_result("failed", (value, None))
+            other._write_executor.shutdown(wait=True)
+        self.assertEqual(other.stats()["write_error"], 1)
         self.assertEqual(other.stats()["inflight_bytes"], 0)
         self.assertEqual(other.stats()["inflight_tasks"], 0)
         self.assertFalse(other._pending_writes)
+
+    def test_slow_upload_drops_snapshot_and_keeps_budget_until_done(self):
+        store = Store()
+        remote = self.remote(store, max_pending=1)
+        started, finish = threading.Event(), threading.Event()
+        snapshots = []
+
+        def observe_pack(plan, **kwargs):
+            snapshots.append(weakref.ref(plan.tensors[0]))
+            return pack_object(plan, **kwargs)
+
+        def slow_save(*args, **kwargs):
+            started.set()
+            if not finish.wait(5):
+                raise TimeoutError()
+
+        with patch.object(store, "save_one", side_effect=slow_save), patch(
+            "rtp_llm.multimodal.mm_remote_embedding_cache.pack_object",
+            side_effect=observe_pack,
+        ):
+            try:
+                remote.submit_result("first", (torch.ones(8), None))
+                self.assertTrue(started.wait(2))
+                self.assertIsNone(snapshots[0]())
+                remote.submit_result("second", (torch.zeros(8), None))
+                self.assertEqual(remote.stats()["inflight_tasks"], 1)
+                self.assertEqual(remote.stats()["admission_skip"], 1)
+            finally:
+                finish.set()
+                remote._write_executor.shutdown(wait=True)
+        self.assertEqual(remote.stats()["write_success"], 1)
+        self.assertEqual(remote.stats()["inflight_bytes"], 0)
+        self.assertFalse(remote._pending_writes)
 
     def test_producer_wait_cannot_run_during_global_graph_capture(self):
         store = Store()
         remote = self.remote(store)
         entered, waited = threading.Event(), threading.Event()
-        errors = []
 
         class ProducerEvent:
             def synchronize(self):
                 waited.set()
 
-        def submit():
+        # The mocked event stands in for a CUDA snapshot. Its host wait must
+        # run behind the graph gate, without keeping the caller there too.
+        def snapshot(plan, streams):
             entered.set()
-            try:
-                remote.submit_result(
-                    "capture-safe-snapshot",
-                    (torch.arange(12).reshape(3, 4), None),
-                    producer_events=(ProducerEvent(),),
-                )
-            except BaseException as error:
-                errors.append(error)
+            return [ProducerEvent()]
 
-        with cuda_graph_gate.capture():
-            worker = threading.Thread(target=submit)
-            worker.start()
-            self.assertTrue(entered.wait(2))
-            # CUDA event.synchronize itself must wait for capture to finish;
-            # guarding only the later tensor copy is too late.
-            self.assertFalse(waited.wait(0.1))
-        worker.join(2)
-        self.assertFalse(worker.is_alive())
-        self.assertFalse(errors)
-        self.assertTrue(waited.is_set())
-        self.assertTrue(store.saved.wait(2))
+        with patch.object(
+            remote, "_snapshot", side_effect=snapshot
+        ), concurrent.futures.ThreadPoolExecutor(1) as caller:
+            with cuda_graph_gate.capture():
+                caller.submit(
+                    remote.submit_result, "key", (torch.arange(12), None)
+                ).result(timeout=1)
+                self.assertTrue(entered.is_set())
+                self.assertFalse(waited.is_set())
+            self.assertTrue(store.saved.wait(2))
+            self.assertTrue(waited.is_set())
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_deferred_gpu_snapshot_waits_for_producer_and_is_submitted_once(self):
@@ -2577,7 +2799,9 @@ class GdrStartupLifetimeTest(unittest.TestCase):
         from types import SimpleNamespace
         from unittest.mock import Mock, patch
 
-        client = Mock(instance_id="registered-serving", instance_group="test")
+        client = Mock(
+            instance_id="registered-serving", instance_group="test", quarantined=False
+        )
         client.object_size.side_effect = [TimeoutError("metadata timeout"), None]
         vit = SimpleNamespace(
             mm_remote_cache_gdr_enable=None,
