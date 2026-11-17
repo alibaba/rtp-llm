@@ -1,6 +1,8 @@
 package org.flexlb.cache.service;
 
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
+import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.EndpointTrace;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -15,7 +17,7 @@ import java.util.Map;
  * @author FlexLB
  */
 public interface CacheAwareService {
-    
+
     /**
      * Find matching engines
      *
@@ -29,6 +31,9 @@ public interface CacheAwareService {
             List<Long> blockCacheKeys,
             RoleType roleType,
             List<String> candidateEngineIpPorts, long blockSize);
+
+    /** Records a successful route for standby cache prediction. */
+    void recordRoutedRequest(Request request, List<ServerStatus> selected);
 
     /**
      * Update engine block KV cache status

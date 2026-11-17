@@ -67,6 +67,22 @@ public final class FlexlbConfigValidator {
                     "cacheMatching", "globalKvsHostCount must be 0 and enableP2p false without remote KV loading");
             positive(kvcm.getRequestTimeoutMs(), "cacheMatching.requestTimeoutMs");
             positive(kvcm.getLeaderRefreshIntervalMs(), "cacheMatching.leaderRefreshIntervalMs");
+            positive(kvcm.getHeartbeatFailureThreshold(), "cacheMatching.heartbeatFailureThreshold");
+            positive(kvcm.getQueryFailureThreshold(), "cacheMatching.queryFailureThreshold");
+            positive(kvcm.getRecoverySuccessThreshold(), "cacheMatching.recoverySuccessThreshold");
+            require(kvcm.getMaxQueryRetryCount() >= 0, "cacheMatching.maxQueryRetryCount", "must be non-negative");
+            var standby = kvcm.getLocalStandby();
+            require(standby != null, "cacheMatching.localStandby", "is required");
+            positive(standby.getTtlMs(), "cacheMatching.localStandby.ttlMs");
+            positive(standby.getMinimumTtlMs(), "cacheMatching.localStandby.minimumTtlMs");
+            require(standby.getMinimumTtlMs() <= standby.getTtlMs(),
+                    "cacheMatching.localStandby.minimumTtlMs", "must not exceed ttlMs");
+            require(standby.getTtlReductionStartRatio() >= 0 && standby.getTtlReductionStartRatio() <= 1,
+                    "cacheMatching.localStandby.ttlReductionStartRatio", "must be in [0, 1]");
+            positive(standby.getMaximumEntries(), "cacheMatching.localStandby.maximumEntries");
+            require(Double.isFinite(standby.getCapacityMultiplier()) && standby.getCapacityMultiplier() > 0,
+                    "cacheMatching.localStandby.capacityMultiplier", "must be finite and positive");
+            positive(standby.getAsyncQueueCapacity(), "cacheMatching.localStandby.asyncQueueCapacity");
             require(kvcm.getMedium() != null && !kvcm.getMedium().isEmpty() && kvcm.getMedium().stream().allMatch("hbm"::equals),
                     "cacheMatching.medium", "only local hbm residency is supported");
         }

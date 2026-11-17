@@ -3,8 +3,11 @@ package org.flexlb.cache.service.impl;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.core.KvCacheManager;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
+import org.flexlb.cache.match.localstandby.LocalStandbyCacheManager;
 import org.flexlb.cache.monitor.CacheMetricsReporter;
 import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.EndpointTrace;
 import org.flexlb.dao.master.WorkerStatus;
@@ -12,7 +15,6 @@ import org.flexlb.dao.route.RoleType;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -27,26 +29,27 @@ import java.util.concurrent.TimeUnit;
 @Slf4j
 @Service
 public class DefaultCacheAwareService implements CacheAwareService {
-
     private static final String FIND_METRIC_SUCCESS = "0";
     private static final String FIND_METRIC_FAILURE = "1";
 
     private final KvCacheManager kvCacheManager;
     private final CacheMetricsReporter cacheMetricsReporter;
-
     private final org.flexlb.engine.grpc.KvcmGrpcClient kvcm;
+    private final LocalStandbyCacheManager standby;
     private final java.util.concurrent.atomic.AtomicLong nextKvcmWarning = new java.util.concurrent.atomic.AtomicLong();
 
     public DefaultCacheAwareService(KvCacheManager manager, CacheMetricsReporter reporter) {
-        this(manager, reporter, null);
+        this(manager, reporter, null, null);
     }
 
     @Autowired
     public DefaultCacheAwareService(
             KvCacheManager kvCacheManager,
             CacheMetricsReporter cacheMetricsReporter,
-            org.flexlb.engine.grpc.KvcmGrpcClient kvcm) {
+            org.flexlb.engine.grpc.KvcmGrpcClient kvcm,
+            LocalStandbyCacheManager standby) {
         this.kvcm = kvcm;
+        this.standby = standby;
         this.kvCacheManager = java.util.Objects.requireNonNull(
                 kvCacheManager, "kvCacheManager");
         this.cacheMetricsReporter = java.util.Objects.requireNonNull(
@@ -59,6 +62,9 @@ public class DefaultCacheAwareService implements CacheAwareService {
         if (keys == null || keys.isEmpty() || candidates.isEmpty()) return Map.of();
         long started = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
         if (kvcm != null && kvcm.enabled()) {
+            if (kvcm.useStandby() && standby.autoSwitch()) {
+                return standby.findMatchingEngines(keys, role, candidates, blockSize);
+            }
             try {
                 var result = kvcm.findMatchingEngines(keys, blockSize, candidates);
                 reportFindLatency(role, started, FIND_METRIC_SUCCESS);
@@ -67,7 +73,8 @@ public class DefaultCacheAwareService implements CacheAwareService {
                 reportFindLatency(role, started, FIND_METRIC_FAILURE);
                 long now = System.nanoTime(), next = nextKvcmWarning.get();
                 if (now >= next && nextKvcmWarning.compareAndSet(next, now + TimeUnit.SECONDS.toNanos(30)))
-                    log.warn("KVCM lookup failed; using synchronized Engine cache index: {}", failure.toString());
+                    log.warn("KVCM lookup failed; using the local standby index: {}", failure.toString());
+                return standby.findMatchingEngines(keys, role, candidates, blockSize);
             }
         }
         try {
@@ -80,14 +87,10 @@ public class DefaultCacheAwareService implements CacheAwareService {
         }
     }
 
-    private void reportFindLatency(
-            RoleType roleType, long startTime, String result) {
-        try {
-            cacheMetricsReporter.reportFindMatchingEnginesRT(
-                    roleType, startTime, result);
-        } catch (RuntimeException metricFailure) {
-            log.warn("Failed to report cache lookup latency for role: {}",
-                    roleType, metricFailure);
+    @Override
+    public void recordRoutedRequest(Request request, List<ServerStatus> selected) {
+        if (standby != null) {
+            standby.recordRoutedRequest(request, selected);
         }
     }
 
@@ -95,6 +98,9 @@ public class DefaultCacheAwareService implements CacheAwareService {
     public WorkerCacheUpdateResult updateEngineBlockCache(
             WorkerStatus workerStatus, EndpointTrace.Poll pollTrace) {
         requireCacheMutationLock(workerStatus);
+        if (standby != null) {
+            standby.observe(workerStatus);
+        }
         long startTime = TimeUnit.NANOSECONDS.toMicros(System.nanoTime());
         String engineIpPort = workerStatus.getIpPort();
         String role = workerStatus.getRole().getCode();
@@ -140,7 +146,21 @@ public class DefaultCacheAwareService implements CacheAwareService {
     public void removeEngineBlockCache(
             WorkerStatus workerStatus, EndpointTrace trace) {
         requireCacheMutationLock(workerStatus);
+        if (standby != null) {
+            standby.remove(workerStatus);
+        }
         kvCacheManager.removeEngineCache(workerStatus.getIpPort(), trace);
+    }
+
+    private void reportFindLatency(
+            RoleType roleType, long startTime, String result) {
+        try {
+            cacheMetricsReporter.reportFindMatchingEnginesRT(
+                    roleType, startTime, result);
+        } catch (RuntimeException metricFailure) {
+            log.warn("Failed to report cache lookup latency for role: {}",
+                    roleType, metricFailure);
+        }
     }
 
     private static void requireCacheMutationLock(WorkerStatus workerStatus) {

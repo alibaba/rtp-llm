@@ -70,6 +70,8 @@ P/D/V 的资源候选绑定同一个 CI 镜像，按实际节点架构选择资�
 - **纯文本 + `LOCAL_SYNC`。** 只测缓存路由和容量时，Frontend 可保留 `64 × CP8`，Mock Prefill 可设 `SEQ_SIZE_PER_BLOCK=512`、`PREFILL_CP_SIZE=1`。使用相同 token 和 hash seed 时，两边每 512 token 产生相同的路由 key。Mock 的 `CacheStatus.block_size` 仍为 512，块数相同时上报的 Device 总 token 容量也相同。WorkerStatus 的 `tp_size` 会从 8 变为 1，CP 相关的 Prefill 调度和耗时公式也会随之变化。
 - **多模态或 KVCM。** Frontend 配 `64 × CP8` 时，Mock Prefill 也配 `64 × CP8`。多模态 hash 按基础块边界混入媒体标识，KVCM 注册则分别上报基础块大小和 CP。
 
+启用 Master 的 KVCM 匹配时，设置 `FLEXLB_CONFIG.cacheMatching.type` 为 `KVCM`，并通过 `MODEL_SERVICE_CONFIG.kvcm` 指定 MetaService 地址、端口和 namespace。Master 后台刷新 leader，使用请求的逻辑块大小选择 `<namespace>_<blockSize>`。查询失败时使用本地备用索引，条目来自已路由请求的预测，受 TTL、容量和 worker generation 约束。
+
 Mock 的基础块默认 64，Prefill CP 默认 1。CP 大于 1 时，`CP_FORCE_SINGLE_PREFILL` 默认开启，设为 `0` 可同轮接纳多个 Prefill。Mock Decode 固定 CP1，基础块按目标 Decode 填写。
 
 Mock 的 WorkerStatus 上报 Prefill TP 为 CP size、Decode TP 为 1、DP 为 1。Whale 资源规格按单 JVM 实际需求配置。

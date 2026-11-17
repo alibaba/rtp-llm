@@ -33,9 +33,11 @@ import java.util.BitSet;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * Selects an eligible Prefill worker using cache affinity and projected first-token latency.
+ */
 @Component
 public class CostBasedPrefillStrategy {
-
     private static final ThreadLocal<PrefillCandidateSet> CANDIDATES =
             ThreadLocal.withInitial(PrefillCandidateSet::new);
 
@@ -159,22 +161,6 @@ public class CostBasedPrefillStrategy {
         }
     }
 
-    private static Response admissionFailure(PrefillEndpoint endpoint, int priority) {
-        AdmissionRejectReason reason = endpoint.admissionRejectReason(priority);
-        return switch (reason) {
-            case HIGHER_PRIORITY_AHEAD, SAME_PRIORITY_AHEAD ->
-                    Response.error(StrategyErrorType.PRIORITY_ADMISSION_REJECTED, reason);
-            case RESOURCE_EXHAUSTED -> Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
-            case UNSPECIFIED -> Response.error(StrategyErrorType.ADMISSION_UNAVAILABLE);
-        };
-    }
-
-    private static PlacementResult<SelectedRole, PlacementKey> blockedWithDiagnostics(
-            Response failure, PlacementKey key, int workerCount, Map<String, ?> details) {
-        return PlacementResult.blocked(key, failure, Map.of("role", key.role().name(), "workers", workerCount,
-                "observedAtMs", System.currentTimeMillis(), "details", Map.copyOf(details)));
-    }
-
     /** Rank modeled work and cache hits before checking the selected endpoint admission. */
     int selectBestCandidate(PrefillCandidateSet survivors,
                             long minProjectedTtftMs,
@@ -264,6 +250,22 @@ public class CostBasedPrefillStrategy {
         return selectedIndex;
     }
 
+    private static Response admissionFailure(PrefillEndpoint endpoint, int priority) {
+        AdmissionRejectReason reason = endpoint.admissionRejectReason(priority);
+        return switch (reason) {
+            case HIGHER_PRIORITY_AHEAD, SAME_PRIORITY_AHEAD ->
+                    Response.error(StrategyErrorType.PRIORITY_ADMISSION_REJECTED, reason);
+            case RESOURCE_EXHAUSTED -> Response.error(StrategyErrorType.RESOURCE_EXHAUSTED);
+            case UNSPECIFIED -> Response.error(StrategyErrorType.ADMISSION_UNAVAILABLE);
+        };
+    }
+
+    private static PlacementResult<SelectedRole, PlacementKey> blockedWithDiagnostics(
+            Response failure, PlacementKey key, int workerCount, Map<String, ?> details) {
+        return PlacementResult.blocked(key, failure, Map.of("role", key.role().name(), "workers", workerCount,
+                "observedAtMs", System.currentTimeMillis(), "details", Map.copyOf(details)));
+    }
+
     private static double normalizedHitRate(double configuredRate) {
         if (Double.isNaN(configuredRate)
                 || configuredRate == Double.POSITIVE_INFINITY) {
@@ -331,31 +333,6 @@ public class CostBasedPrefillStrategy {
 
     private static boolean contains(BitSet candidates, int index) {
         return candidates.get(index);
-    }
-
-    private record EndpointDiscovery(
-            List<EndpointRegistry.PrefillRoutingEntry> directory,
-            List<EndpointRegistry.PrefillRoutingEntry> candidates) {
-
-        private EndpointDiscovery {
-            candidates = java.util.Objects.requireNonNull(
-                    candidates, "candidates");
-        }
-
-        /** All live endpoints participate in cache matching, including other routing groups. */
-        private List<String> addresses() {
-            return new AbstractList<>() {
-                @Override
-                public String get(int index) {
-                    return directory.get(index).address();
-                }
-
-                @Override
-                public int size() {
-                    return directory.size();
-                }
-            };
-        }
     }
 
     private PrefillCandidateSet evaluateCandidates(
@@ -439,38 +416,6 @@ public class CostBasedPrefillStrategy {
         return candidates;
     }
 
-    private EndpointDiscovery discoverEndpoints(
-            RoleType roleType,
-            String group) {
-        List<EndpointRegistry.PrefillRoutingEntry> directory =
-                workerDirectory.prefillRoutingSnapshot(roleType);
-        List<EndpointRegistry.PrefillRoutingEntry> matching = new ArrayList<>();
-        for (EndpointRegistry.PrefillRoutingEntry entry : directory) {
-            PrefillEndpoint endpoint = entry.endpoint();
-            if (group != null && !group.equals(endpoint.getStatus().topologySnapshot().group())) {
-                continue;
-            }
-            matching.add(entry);
-        }
-        return new EndpointDiscovery(directory, matching);
-    }
-
-    private Map<String, Integer> getCacheMatchResults(
-            BalanceContext balanceContext,
-            RoleType roleType,
-            EndpointDiscovery discovery) {
-        List<Long> blockCacheKeys = balanceContext.getRequest().getBlockCacheKeys();
-        return cacheAwareService.findMatchingEngines(
-                blockCacheKeys, roleType, discovery.addresses(), balanceContext.getRequest().getCacheKeyBlockSize());
-    }
-
-    private record CacheTokenMatch(
-            long effectiveHitTokens,
-            long routingHitTokens) {
-        private static final CacheTokenMatch NONE =
-                new CacheTokenMatch(0L, 0L);
-    }
-
     private CacheTokenMatch calculateCacheMatch(
             PrefillEndpoint ep,
             String endpointAddress,
@@ -508,6 +453,31 @@ public class CostBasedPrefillStrategy {
                 ? Math.max(0L, seqLen - blockSize)
                 : routingHit;
         return new CacheTokenMatch(effectiveHit, routingHit);
+    }
+
+    private EndpointDiscovery discoverEndpoints(
+            RoleType roleType,
+            String group) {
+        List<EndpointRegistry.PrefillRoutingEntry> directory =
+                workerDirectory.prefillRoutingSnapshot(roleType);
+        List<EndpointRegistry.PrefillRoutingEntry> matching = new ArrayList<>();
+        for (EndpointRegistry.PrefillRoutingEntry entry : directory) {
+            PrefillEndpoint endpoint = entry.endpoint();
+            if (group != null && !group.equals(endpoint.getStatus().topologySnapshot().group())) {
+                continue;
+            }
+            matching.add(entry);
+        }
+        return new EndpointDiscovery(directory, matching);
+    }
+
+    private Map<String, Integer> getCacheMatchResults(
+            BalanceContext balanceContext,
+            RoleType roleType,
+            EndpointDiscovery discovery) {
+        List<Long> blockCacheKeys = balanceContext.getRequest().getBlockCacheKeys();
+        return cacheAwareService.findMatchingEngines(
+                blockCacheKeys, roleType, discovery.addresses(), balanceContext.getRequest().getCacheKeyBlockSize());
     }
 
     private void reportCacheHitMetrics(RoleType roleType, long hitCacheTokens, long seqLen) {
@@ -578,6 +548,7 @@ public class CostBasedPrefillStrategy {
             result.setHttpPort(topology.port());
             result.setGrpcPort(CommonUtils.toGrpcPort(topology.port()));
             result.setDpRank(status.dpRank());
+            result.setWorkerGeneration(workerStatus.getGenerationId());
             result.setDebugInfo(debugInfo);
             result.setSuccess(true);
             WorkerEndpoint.GenerationPin ownedPin = selectedPin;
@@ -604,6 +575,44 @@ public class CostBasedPrefillStrategy {
             return Long.MIN_VALUE;
         }
         return left + right;
+    }
+
+    /**
+     * Distinguishes all live routing endpoints from candidates eligible for this request.
+     */
+    private record EndpointDiscovery(
+            List<EndpointRegistry.PrefillRoutingEntry> directory,
+            List<EndpointRegistry.PrefillRoutingEntry> candidates) {
+
+        private EndpointDiscovery {
+            candidates = java.util.Objects.requireNonNull(
+                    candidates, "candidates");
+        }
+
+        /** All live endpoints participate in cache matching, including other routing groups. */
+        private List<String> addresses() {
+            return new AbstractList<>() {
+                @Override
+                public String get(int index) {
+                    return directory.get(index).address();
+                }
+
+                @Override
+                public int size() {
+                    return directory.size();
+                }
+            };
+        }
+    }
+
+    /**
+     * Holds cache hit lengths for capacity estimation and route scoring.
+     */
+    private record CacheTokenMatch(
+            long effectiveHitTokens,
+            long routingHitTokens) {
+        private static final CacheTokenMatch NONE =
+                new CacheTokenMatch(0L, 0L);
     }
 
 }
