@@ -1,6 +1,12 @@
 # ROCm attention tests run on the MI308X runner.
 
 py_test(
+    name = "test_paged_prefill_metadata",
+    srcs = ["test_paged_prefill_metadata.py"],
+    deps = ["//rtp_llm/models_py:models", "//rtp_llm:torch"],
+)
+
+py_test(
     name = "test_beam_search_cascade",
     srcs = ["test_beam_search_cascade.py"],
     deps = [

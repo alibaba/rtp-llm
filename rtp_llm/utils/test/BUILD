@@ -7,6 +7,12 @@ requirement([
     "triton",
 ])
 
+py_test(
+    name = "rocm_startup_warmup_test",
+    srcs = ["rocm_startup_warmup_test.py"],
+    deps = ["//rtp_llm:utils"],
+)
+
 filegroup(
     name = "testdata",
     srcs = glob([

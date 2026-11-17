@@ -12,6 +12,12 @@ from rtp_llm.models_py.modules.factory.attention.rocm_impl._attn_utils import (
     split_raw_qkv,
     unpad_kv_vectorized,
 )
+from rtp_llm.models_py.modules.factory.attention.rocm_impl.paged_prefill_metadata import (
+    prepare_paged_prefill_metadata,
+)
+from rtp_llm.models_py.modules.factory.attention.rocm_impl.paged_prefill_metadata import (
+    sanitize_and_pad_block_table as _sanitize_and_pad_block_table,
+)
 from rtp_llm.ops import (
     AttentionConfigs,
     FMHAConfig,
@@ -709,74 +715,6 @@ class AiterPrefillAttnOp:
         return self._forward_varlen(qkv, fmha_params)
 
 
-def _sanitize_and_pad_block_table(
-    block_table: Optional[torch.Tensor],
-    seqlen_k: Optional[torch.Tensor],
-    tokens_per_block: int,
-    max_seqlen_k: int,
-    block_positions_cache: Optional[torch.Tensor] = None,
-):
-    """Shared helper: sanitize padding columns + pad for CK speculative prefetch.
-
-    Only padding/speculative columns (beyond valid blocks per sequence) are
-    filled with the last valid block id. Valid-mask entries are left untouched
-    so that truly invalid block ids fail fast.
-
-    Returns (sanitized_and_padded_block_table, updated_block_positions_cache).
-    """
-    if block_table is None:
-        return None, block_positions_cache
-
-    if seqlen_k is None or block_table.dim() != 2:
-        return block_table, block_positions_cache
-
-    if seqlen_k.device != block_table.device:
-        seqlen_k = seqlen_k.to(block_table.device, non_blocking=True)
-
-    max_blocks_per_seq = block_table.shape[1]
-    if seqlen_k.numel() != block_table.shape[0]:
-        return block_table, block_positions_cache
-
-    # Sanitize: fill padding columns with last-valid-block-id
-    if (
-        block_positions_cache is None
-        or block_positions_cache.numel() < max_blocks_per_seq
-        or block_positions_cache.device != block_table.device
-    ):
-        block_positions_cache = torch.arange(
-            max(max_blocks_per_seq, 1024),
-            dtype=torch.int32,
-            device=block_table.device,
-        )
-
-    valid_blocks = torch.div(
-        seqlen_k + tokens_per_block - 1,
-        tokens_per_block,
-        rounding_mode="floor",
-    ).to(torch.int32)
-    positions = block_positions_cache[:max_blocks_per_seq].unsqueeze(0)
-    valid_mask = positions < valid_blocks.unsqueeze(1)
-
-    last_valid_col = (valid_blocks - 1).clamp(min=0).unsqueeze(1)
-    last_valid_block_id = block_table.gather(1, last_valid_col.to(torch.int64))
-    fill_value = last_valid_block_id.expand_as(block_table)
-    block_table = torch.where(valid_mask, block_table, fill_value)
-
-    # Pad: CK kernel speculatively prefetches V tiles beyond valid page entries.
-    # Use kN0=128 (conservative upper bound for all head_dim configs).
-    _CK_KN0 = 128
-    extra_pages = (_CK_KN0 + tokens_per_block - 1) // tokens_per_block
-    required_cols = (
-        max_seqlen_k + tokens_per_block - 1
-    ) // tokens_per_block + extra_pages
-    if block_table.shape[1] < required_cols:
-        pad_cols = required_cols - block_table.shape[1]
-        last_col = block_table[:, -1:].expand(-1, pad_cols)
-        block_table = torch.cat([block_table, last_col], dim=1)
-
-    return block_table, block_positions_cache
-
-
 def _infer_cuda_graph_device(
     attn_inputs: PyAttentionInputs,
     fmha_params: FMHAParams,
@@ -809,6 +747,7 @@ class AiterPrefillAttnOpPaged:
         self.head_dim = attn_configs.size_per_head
         self.head_num_kv = attn_configs.kv_head_num
         self.tokens_per_block = attn_configs.kernel_tokens_per_block
+        self.fp8_kv_cache = attn_configs.kv_cache_dtype == KvCacheDataType.FP8
         self.enable_cuda_graph = False
         self.cuda_graph_prepared = False
         self.graph_device: Optional[torch.device] = None
@@ -836,7 +775,23 @@ class AiterPrefillAttnOpPaged:
         self.cuda_graph_prepared = False
         if self.enable_cuda_graph:
             self.prepare_cuda_graph(fmha_params, attn_inputs)
+        else:
+            self._prepare_eager_metadata(fmha_params)
         return fmha_params
+
+    def _prepare_eager_metadata(self, fmha_params):
+        # FMHAParams belongs to one batch/cache group, and is shared by all
+        # layers. Keeping the snapshot here avoids both per-layer GPU launches
+        # and stale cross-request block tables on the operator instance.
+        fmha_params.paged_prefill_metadata = prepare_paged_prefill_metadata(
+            fmha_params.cu_seqlens_k,
+            fmha_params.kv_cache_block_id_device,
+            self.tokens_per_block,
+            fmha_params.max_seqlen_k,
+            fp8=self.fp8_kv_cache,
+            seqlen_k=getattr(fmha_params, "prefill_seqlen_k_int32", None),
+        )
+        return fmha_params.paged_prefill_metadata
 
     def prepare_cuda_graph(
         self, fmha_params: FMHAParams, attn_inputs: PyAttentionInputs
@@ -902,12 +857,8 @@ class AiterPrefillAttnOpPaged:
         self.cuda_graph_prepared = True
 
     def forward(self, qkv, kv_cache, fmha_params) -> torch.Tensor:
-        # NOTE: This is a *prefill*-stage operator (handles prefix-cache prefill).
-        # The graph_ready branches below are interface-compatible scaffolding for
-        # potential future CUDA-graph-captured prefill; in production, CUDA graph
-        # capture only happens in the decode stage (AiterDecodeAttnOp), so the
-        # graph_ready path here is never triggered and does not require dedicated
-        # regression tests.
+        # Eager metadata is immutable per batch. Graph metadata must continue
+        # to refresh on replay; do not reuse an eager sanitized table there.
         q_tensor = qkv[0][: fmha_params.token_q_num]
         device = q_tensor.device
 
@@ -936,42 +887,41 @@ class AiterPrefillAttnOpPaged:
             torch.sub(cu_seqlens_k[1:], cu_seqlens_k[:-1], out=self.seqlen_k_buf)
             seqlen_k = self.seqlen_k_buf
         else:
-            seqlen_k = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).to(torch.int32)
+            metadata = getattr(fmha_params, "paged_prefill_metadata", None)
+            if metadata is None:
+                # Standalone operator callers may bypass prepare().
+                metadata = self._prepare_eager_metadata(fmha_params)
+            seqlen_k = metadata.seqlen_k
 
         if graph_ready:
             block_table = fmha_params.kv_cache_block_id_device
         else:
-            block_table = fmha_params.kv_cache_block_id_device.to(
-                dtype=torch.int32, device=device
-            )
+            block_table = metadata.block_table
 
         max_seqlen_q = fmha_params.max_seqlen_q
         max_seqlen_k = fmha_params.max_seqlen_k
 
         # Apply sanitize + pad to prevent CK speculative prefetch OOB.
-        sanitized_bt, self._block_positions = _sanitize_and_pad_block_table(
-            block_table,
-            seqlen_k,
-            self.tokens_per_block,
-            max_seqlen_k,
-            self._block_positions,
-        )
         if graph_ready:
+            sanitized_bt, self._block_positions = _sanitize_and_pad_block_table(
+                block_table,
+                seqlen_k,
+                self.tokens_per_block,
+                max_seqlen_k,
+                self._block_positions,
+            )
             # CUDA graph replay requires stable tensor addresses. Copy the
             # sanitized result into the pre-allocated fixed-address buffer.
             cols = sanitized_bt.shape[1]
             self.sanitized_bt_buf[:, :cols] = sanitized_bt
             block_table = self.sanitized_bt_buf[:, :cols]
-        else:
-            block_table = sanitized_bt
-
         if graph_ready:
             self.kv_indptr_buf.zero_()
             kv_indptr = self.kv_indptr_buf
             kv_page_indices = self.kv_page_indices_buf
         else:
-            kv_indptr = torch.zeros(batch_size + 1, dtype=torch.int32, device=device)
-            kv_page_indices = torch.zeros(1, dtype=torch.int32, device=device)
+            kv_indptr = metadata.kv_indptr
+            kv_page_indices = metadata.kv_page_indices
 
         q_descale = None
         k_descale = None
@@ -982,9 +932,9 @@ class AiterPrefillAttnOpPaged:
                 k_descale = self.descale_buf
                 v_descale = self.descale_buf
             else:
-                q_descale = torch.ones(1, dtype=torch.float32, device=device)
-                k_descale = torch.ones(1, dtype=torch.float32, device=device)
-                v_descale = torch.ones(1, dtype=torch.float32, device=device)
+                q_descale = metadata.descale
+                k_descale = metadata.descale
+                v_descale = metadata.descale
 
         res = aiter.mha_batch_prefill_func(
             q_tensor,

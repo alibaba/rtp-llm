@@ -576,6 +576,19 @@ def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
     if not runtime_config.warm_up or not runtime_config.model_warm_up:
         return False
 
+    if _rocm_startup_warmup_requested():
+        if torch.version.hip is None:
+            raise ValueError("RTP_LLM_ROCM_STARTUP_WARMUP requires a ROCm build")
+        if py_env_configs.role_config.role_type != RoleType.PDFUSION:
+            raise ValueError("ROCm startup warmup currently supports PDFUSION only")
+        if int(py_env_configs.parallelism_config.world_size) != 1:
+            raise ValueError(
+                "ROCm startup warmup currently supports single-rank deployments only"
+            )
+        if not py_env_configs.kv_cache_config.reuse_cache:
+            raise ValueError("ROCm startup warmup requires REUSE_CACHE=1")
+        return _is_startup_real_warmup_entry_rank(py_env_configs)
+
     role_is_prefill = _role_is_prefill(py_env_configs)
     if not role_is_prefill:
         return False
@@ -592,6 +605,12 @@ def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
         return False
 
     return getattr(py_env_configs.model_args, "model_type", "") == "deepseek_v4"
+
+
+def _rocm_startup_warmup_requested() -> bool:
+    # Opt in per deployment. Existing DSV4 warmup and other services retain
+    # their current behavior, including the WARM_UP/MODEL_WARM_UP switches.
+    return str_to_bool(os.environ.get("RTP_LLM_ROCM_STARTUP_WARMUP", "0") or "0")
 
 
 def _setup_startup_warmup_health_gate(py_env_configs: PyEnvConfigs):
@@ -1045,22 +1064,108 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
     )
 
 
+async def _run_rocm_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
+    from rtp_llm.config.generate_config import GenerateConfig
+    from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
+    from rtp_llm.utils.base_model_datatypes import GenerateInput
+    from rtp_llm.utils.rocm_startup_warmup import (
+        rocm_warmup_cases,
+        run_rocm_warmup_cases,
+    )
+
+    if _get_startup_real_warmup_speculative_reserve_step(py_env_configs):
+        raise ValueError(
+            "ROCm startup warmup currently requires non-speculative decoding"
+        )
+    cases = rocm_warmup_cases(int(py_env_configs.model_args.max_seq_len))
+    addresses = _get_startup_real_warmup_grpc_addresses(py_env_configs)
+    timeout_s = float(os.environ.get("RTP_LLM_ROCM_STARTUP_WARMUP_TIMEOUT_S", "600"))
+    if not 0 < timeout_s < float("inf"):
+        raise ValueError(
+            "RTP_LLM_ROCM_STARTUP_WARMUP_TIMEOUT_S must be finite and positive"
+        )
+    timeout_ms = max(1, int(timeout_s * 1000))
+    client_config = (
+        py_env_configs.grpc_config.get_client_config()
+        if py_env_configs.grpc_config
+        else {}
+    )
+    for address in addresses:
+        client = ModelRpcClient(
+            addresses=[address],
+            client_config=client_config,
+            max_rpc_timeout_ms=timeout_ms,
+        )
+
+        async def run_request(case):
+            config = GenerateConfig(
+                max_new_tokens=case.max_new_tokens,
+                min_new_tokens=case.max_new_tokens,
+                top_k=1,
+                top_p=1.0,
+                temperature=0.0,
+                do_sample=False,
+                can_use_pd_separation=False,
+                reuse_cache=case.reuse_cache,
+                enable_device_cache=case.reuse_cache,
+                enable_memory_cache=False,
+                enable_disk_cache=False,
+                enable_remote_cache=False,
+                aux_info=True,
+                timeout_ms=timeout_ms,
+            )
+            request = GenerateInput(
+                request_id=_new_startup_real_warmup_request_id(0),
+                token_ids=torch.tensor(case.token_ids, dtype=torch.int32),
+                mm_inputs=[],
+                generate_config=config,
+            )
+            begin = time.monotonic()
+            last_aux = None
+            logging.info(
+                "ROCm startup warmup begin: case=%s, address=%s", case.name, address
+            )
+            async for outputs in client.enqueue(request):
+                if outputs.generate_outputs:
+                    last_aux = outputs.generate_outputs[0].aux_info
+            if last_aux is None:
+                raise RuntimeError(f"ROCm warmup {case.name} returned no aux_info")
+            logging.info(
+                "ROCm startup warmup finished: case=%s, output_len=%s, reuse_len=%s, cost=%.2fs",
+                case.name,
+                last_aux.output_len,
+                last_aux.reuse_len,
+                time.monotonic() - begin,
+            )
+            return last_aux.output_len, last_aux.reuse_len
+
+        try:
+            await run_rocm_warmup_cases(cases, run_request)
+        finally:
+            await client.close()
+
+
 def _maybe_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
     if not _should_run_startup_real_warmup(py_env_configs):
         return False
 
     try:
-        _run_startup_real_warmup_async(_run_startup_real_warmup_grpc(py_env_configs))
+        warmup = (
+            _run_rocm_startup_real_warmup_grpc
+            if _rocm_startup_warmup_requested()
+            else _run_startup_real_warmup_grpc
+        )
+        _run_startup_real_warmup_async(warmup(py_env_configs))
         return True
     except StartupRealWarmupAddressResolutionError:
         logging.error(
-            "DSV4 startup real warmup address resolution failed, trace: %s",
+            "startup real warmup address resolution failed, trace: %s",
             traceback.format_exc(),
         )
         raise
     except Exception:
         logging.error(
-            "DSV4 startup real warmup failed, trace: %s",
+            "startup real warmup failed, trace: %s",
             traceback.format_exc(),
         )
         # This warmup owns the startup health gate. Propagate the failure so

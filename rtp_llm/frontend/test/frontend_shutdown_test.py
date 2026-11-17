@@ -215,6 +215,34 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         self.assertEqual(embedding_response.status_code, 503)
         self.assertEqual(embedding_response.headers.get("retry-after"), "1")
 
+    def test_startup_warmup_blocks_readiness_but_not_liveness(self):
+        owner = FrontendApp.__new__(FrontendApp)
+        owner.frontend_server = FakeFrontendServer()
+        owner.shutdown_manager = FrontendShutdownManager()
+        owner.separated_frontend = True
+        owner.server_config = SimpleNamespace(http_port=0)
+        owner.grpc_client = None
+        client = TestClient(owner.create_app())
+        with tempfile.TemporaryDirectory() as directory:
+            gate = Path(directory) / "ready"
+            with patch.dict(
+                "os.environ", {"RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE": str(gate)}
+            ):
+                routes = (
+                    "/",
+                    "/health",
+                    "/status",
+                    "/GraphService/cm2_status",
+                    "/SearchService/cm2_status",
+                )
+                for route in routes:
+                    self.assertEqual(client.get(route).status_code, 503, route)
+                self.assertEqual(client.get("/liveness").status_code, 200)
+                self.assertEqual(client.get("/frontend_health").status_code, 200)
+                gate.write_text("ready\n")
+                for route in routes:
+                    self.assertEqual(client.get(route).status_code, 200, route)
+
     def test_pre_stop_unavailable_rejects_new_business(self):
         app_owner = FrontendApp.__new__(FrontendApp)
         app_owner.frontend_server = FakeFrontendServer()

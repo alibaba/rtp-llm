@@ -252,10 +252,25 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
     }
     attn_params->padding_offset = attn_inputs.padding_offset;
 
-    // 处理 prefix_lengths：确保在 CUDA 上且连续
+    // Read the launch scalar from the original host metadata, not from a GPU
+    // copy. PyWrappedModel already owns a stream-safe device copy of the same
+    // lengths; retain it instead of performing a second blocking H2D followed
+    // by max().item() (D2H synchronization) on every prefill batch.
+    int max_prefix_length = 0;
     if (has_prefix) {
         torch::Tensor prefix_lengths = attn_inputs.prefix_lengths;
-        if (!prefix_lengths.is_cuda()) {
+        max_prefix_length = prefix_lengths.max().item<int32_t>();
+        const auto& device_prefix_lengths = attn_inputs.prefix_lengths_device;
+        if (device_prefix_lengths.defined() && device_prefix_lengths.numel() > 0) {
+            TORCH_CHECK(device_prefix_lengths.is_cuda()
+                            && device_prefix_lengths.scalar_type() == prefix_lengths.scalar_type()
+                            && device_prefix_lengths.sizes() == prefix_lengths.sizes(),
+                        "prefix_lengths_device must match prefix_lengths shape/dtype on CUDA/HIP");
+            prefix_lengths = device_prefix_lengths;
+        } else if (!prefix_lengths.is_cuda()) {
+            // Compatibility for standalone callers without runner-owned
+            // device metadata. Keep the blocking copy: their host storage may
+            // be pageable and is not retained by PyWrappedModel's holder.
             prefix_lengths = prefix_lengths.to(torch::kCUDA, /*non_blocking=*/false, /*copy=*/true);
         }
         attn_params->prefix_lengths = prefix_lengths.contiguous();
@@ -275,10 +290,6 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
             attn_params->position_ids.to(torch::kCUDA, /*non_blocking=*/false, /*copy=*/true).contiguous();
     }
 
-    int max_prefix_length = 0;
-    if (has_prefix && attn_params->prefix_lengths.defined() && attn_params->prefix_lengths.numel() > 0) {
-        max_prefix_length = attn_params->prefix_lengths.max().item<int32_t>();
-    }
     attn_params->prefill_runtime_max_seq_len         = attn_params->max_seq_len;
     attn_params->prefill_runtime_max_prefix_len      = max_prefix_length;
     attn_params->prefill_runtime_seq_len_with_prefix = attn_params->max_seq_len + max_prefix_length;

@@ -1592,18 +1592,14 @@ class TestAiterPrefillAttnOpPagedCudaGraphWorkspace(unittest.TestCase):
         device = torch.device("cuda")
         block_table = torch.zeros(3, 4, dtype=torch.int32, device=device)
         fmha_params = SimpleNamespace(
-            cu_seqlens_q=torch.tensor(
-                [0, 8, 16, 24], dtype=torch.int32, device=device
-            ),
+            cu_seqlens_q=torch.tensor([0, 8, 16, 24], dtype=torch.int32, device=device),
             cu_seqlens_k=torch.tensor(
                 [0, 40, 80, 120], dtype=torch.int32, device=device
             ),
             kv_cache_block_id_device=block_table,
         )
         attn_inputs = SimpleNamespace(
-            input_lengths_device=torch.full(
-                (3,), 8, dtype=torch.int32, device=device
-            ),
+            input_lengths_device=torch.full((3,), 8, dtype=torch.int32, device=device),
             prefix_lengths_device=torch.full(
                 (3,), 32, dtype=torch.int32, device=device
             ),
@@ -2676,7 +2672,15 @@ class TestPagedPrefillKernelE2E(unittest.TestCase):
 
         # Run AiterPrefillAttnOpPaged.forward
         qkv = (q_flat,)
-        actual = op.forward(qkv, kv_cache, params)
+        # The same batch metadata is reused across model layers. Exercise the
+        # actual CK kernel repeatedly and ensure setup is not repeated.
+        with patch.object(
+            op, "_prepare_eager_metadata", wraps=op._prepare_eager_metadata
+        ) as prepare:
+            actual = op.forward(qkv, kv_cache, params)
+            repeated = op.forward(qkv, kv_cache, params)
+            self.assertEqual(prepare.call_count, 1)
+            torch.testing.assert_close(repeated, actual)
 
         # Compute prefix-causal SDPA reference from the original flat K/V.
         k_all = torch.cat(all_k_flat, dim=0)

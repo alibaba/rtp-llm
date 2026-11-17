@@ -7,6 +7,55 @@ from rtp_llm.ops import RoleType, SpeculativeType
 
 
 class StartupRealWarmupTest(unittest.TestCase):
+    def test_rocm_warmup_is_opt_in_and_uses_the_readiness_gate(self):
+        config = SimpleNamespace(
+            parallelism_config=SimpleNamespace(world_size=1, world_rank=0, tp_size=1),
+            runtime_config=SimpleNamespace(warm_up=True, model_warm_up=True),
+            role_config=SimpleNamespace(role_type=RoleType.PDFUSION),
+            model_args=SimpleNamespace(model_type="qwen_3"),
+            kv_cache_config=SimpleNamespace(reuse_cache=True),
+        )
+        with patch.dict("os.environ", {"RTP_LLM_ROCM_STARTUP_WARMUP": "0"}):
+            self.assertFalse(start_server._should_run_startup_real_warmup(config))
+        with patch.dict(
+            "os.environ", {"RTP_LLM_ROCM_STARTUP_WARMUP": "1"}
+        ), patch.object(start_server.torch.version, "hip", "test-rocm"):
+            self.assertTrue(start_server._should_run_startup_real_warmup(config))
+            config.runtime_config.model_warm_up = False
+            self.assertFalse(start_server._should_run_startup_real_warmup(config))
+            config.runtime_config.model_warm_up = True
+            config.kv_cache_config.reuse_cache = False
+            with self.assertRaisesRegex(ValueError, "REUSE_CACHE"):
+                start_server._should_run_startup_real_warmup(config)
+            config.kv_cache_config.reuse_cache = True
+            config.parallelism_config.world_size = 2
+            with self.assertRaisesRegex(ValueError, "single-rank"):
+                start_server._should_run_startup_real_warmup(config)
+            config.parallelism_config.world_size = 1
+            config.role_config.role_type = RoleType.DECODE
+            with self.assertRaisesRegex(ValueError, "PDFUSION"):
+                start_server._should_run_startup_real_warmup(config)
+            config.role_config.role_type = RoleType.PDFUSION
+            with patch.object(start_server.torch.version, "hip", None):
+                with self.assertRaisesRegex(ValueError, "ROCm build"):
+                    start_server._should_run_startup_real_warmup(config)
+
+    def test_rocm_warmup_failure_propagates_before_marking_ready(self):
+        config = SimpleNamespace()
+        with patch.object(
+            start_server, "_should_run_startup_real_warmup", return_value=True
+        ), patch.object(
+            start_server, "_rocm_startup_warmup_requested", return_value=True
+        ), patch.object(
+            start_server, "_run_rocm_startup_real_warmup_grpc", return_value=None
+        ), patch.object(
+            start_server,
+            "_run_startup_real_warmup_async",
+            side_effect=RuntimeError("JIT failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "JIT failed"):
+                start_server._maybe_run_startup_real_warmup(config)
+
     def test_single_stage_dp_ranks_pass_startup_warmup_gate(self):
         for world_size in (2, 3, 4):
             for world_rank in range(world_size):

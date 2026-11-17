@@ -694,6 +694,7 @@ class FrontendApp(object):
         @app.get("/")
         async def health(request: Request):
             check_not_draining(request)
+            check_startup_warmup_ready(request)
             if self.shutdown_manager.is_unavailable():
                 return draining_response()
             if self.separated_frontend:
