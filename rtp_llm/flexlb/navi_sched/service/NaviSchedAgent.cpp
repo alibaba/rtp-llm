@@ -777,8 +777,12 @@ bool NaviSchedBatchFinishReporter::finishBatch(
     double executeModelTimeMs, int64_t executionStepCount, int64_t prefillTokenCount,
     int64_t decodeRequestStepCount, int64_t decodeTokenCount,
     double admissionToFirstExecutionMs, double nativePreparationMs,
-    int64_t executionFinishTimeUs)
+    int64_t executionFinishTimeUs,
+    const NaviSchedLatencyFeatures *completedCapacityFeatures)
 {
+    if (completedCapacityFeatures && !completedCapacityFeatures->usesCapacitySplit()) {
+        return false;
+    }
     if (!std::isfinite(admissionToFirstExecutionMs) ||
         admissionToFirstExecutionMs < -1.0) {
         return false;
@@ -798,7 +802,7 @@ bool NaviSchedBatchFinishReporter::finishBatch(
             static_cast<int64_t>(admissionToFirstExecutionMs * 1000.0);
     }
     return _state &&
-           _state->finish(requests, &sample, nullptr, -1.0, nativePreparationMs);
+           _state->finish(requests, &sample, completedCapacityFeatures, -1.0, nativePreparationMs);
 }
 
 bool NaviSchedBatchFinishReporter::finishBatch(
