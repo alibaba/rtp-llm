@@ -323,8 +323,8 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
                                 py_model_inputs_.input_hiddens.numel());
         RTP_LLM_CHECK_WITH_INFO(inputs.input_hiddens.dtype() == py_model_inputs_.input_hiddens.dtype(),
                                 "input_hiddens dtype mismatch: %s != %s",
-                                inputs.input_hiddens.dtype().name(),
-                                py_model_inputs_.input_hiddens.dtype().name());
+                                std::string(inputs.input_hiddens.dtype().name()).c_str(),
+                                std::string(py_model_inputs_.input_hiddens.dtype().name()).c_str());
 
         optimizedCopyAsync(inputs.input_hiddens,
                            py_model_inputs_.input_hiddens,

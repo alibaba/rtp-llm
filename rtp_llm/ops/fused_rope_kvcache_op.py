@@ -187,6 +187,7 @@ class FusedRopeKVCacheDecodeOp:
         assert params.sequence_lengths.is_cuda, "sequence_lengths must be a CUDA tensor"
         return _get_fused_rope_kvcache().decode_fused_rope_kvcache(
             qkv,
+            None,
             params.sequence_lengths,
             params.sequence_lengths.size(0),
             self.attn_configs.head_num,

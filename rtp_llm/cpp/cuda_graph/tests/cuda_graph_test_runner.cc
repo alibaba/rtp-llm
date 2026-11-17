@@ -3,6 +3,7 @@
 
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
+#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
 namespace py = pybind11;
@@ -46,7 +47,8 @@ public:
                      int64_t          kernel_tokens_per_block,
                      std::vector<int> decode_capture_batch_sizes,
                      int              tokens_per_request    = 1,
-                     bool             adaptive_verification = false) {
+                     bool             adaptive_verification = false,
+                     bool             use_bfloat16          = false) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph_debug_mode = false;
@@ -58,7 +60,7 @@ public:
         params.is_target_verify             = tokens_per_request > 1;
         params.adaptive_verification        = adaptive_verification;
         params.hidden_size                  = static_cast<size_t>(hidden_size);
-        params.model_data_type              = c10::ScalarType::Half;
+        params.model_data_type              = use_bfloat16 ? c10::ScalarType::BFloat16 : c10::ScalarType::Half;
         params.max_context_batch_size       = 128;
         params.decode_capture_batch_sizes   = std::move(decode_capture_batch_sizes);
         params.kv_cache_layer_to_group      = {};  // test: no hybrid kv cache
@@ -72,6 +74,11 @@ public:
     }
 
     torch_ext::PyModelOutputs forward(torch_ext::PyModelInputs& inputs) {
+        struct ThrowOnFailure {
+            bool saved = StaticConfig::user_ft_core_dump_on_exception;
+            ThrowOnFailure() { StaticConfig::user_ft_core_dump_on_exception = false; }
+            ~ThrowOnFailure() { StaticConfig::user_ft_core_dump_on_exception = saved; }
+        } guard;
         return runner_->forward(inputs, state_);
     }
 
@@ -123,7 +130,8 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("kernel_tokens_per_block"),
              py::arg("decode_capture_batch_sizes"),
              py::arg("tokens_per_request")    = 1,
-             py::arg("adaptive_verification") = false)
+             py::arg("adaptive_verification") = false,
+             py::arg("use_bfloat16")          = false)
         .def("adaptiveTokenCapacities", &CudaGraphTestRunner::adaptiveTokenCapacities)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)

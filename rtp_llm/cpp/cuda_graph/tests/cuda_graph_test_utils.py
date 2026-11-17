@@ -212,7 +212,7 @@ class CudaGraphTestModelBuilder:
             kv_shape, dtype=result.compute_dtype, device=self.config.device
         )
 
-        result.kv_cache.layer_attn_types = [
+        result.kv_cache.layer_group_types = [
             CacheGroupType.FULL for _ in range(result.layer_num)
         ]
         result.kv_cache.kv_cache_base_by_layer = [

@@ -69,6 +69,7 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
             self.tokens_per_block,
             self.kernel_tokens_per_block,
             self.decode_capture_batch_sizes,
+            use_bfloat16=self.compute_dtype == torch.bfloat16,
         )
         print(f"CUDA Graph initialized with batch sizes: 1 to {self.max_batch_size}")
 
@@ -137,7 +138,7 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
 
         # Set attention parameters
         attention_inputs.is_prefill = False
-        attention_inputs.dtype = get_typemeta(torch.zeros(1, dtype=torch.float16))
+        attention_inputs.dtype = get_typemeta(torch.zeros(1, dtype=self.compute_dtype))
 
         # cu_seqlens
         cu_len = batch_size + 1
@@ -172,6 +173,9 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
 
         outputs1 = self.op.forward(inputs)
         torch.cuda.synchronize()
+        inputs2.attention_inputs.sequence_lengths = (
+            inputs2.attention_inputs.sequence_lengths.cuda()
+        )
         outputs2 = self.normal_model.forward(inputs2)
         torch.cuda.synchronize()
 
@@ -203,6 +207,12 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         ), f"Only {pass_ratio*100:.2f}% elements pass, expected >= 99.9%"
 
     def test_batch_decode(self):
+        mismatched = self.build_inputs(
+            1, self.max_seq_len, self.kernel_tokens_per_block
+        )
+        mismatched.input_hiddens = mismatched.input_hiddens.float()
+        with self.assertRaisesRegex(RuntimeError, "input_hiddens dtype mismatch"):
+            self.op.forward(mismatched)
         batch_range = [
             1,
             2,
