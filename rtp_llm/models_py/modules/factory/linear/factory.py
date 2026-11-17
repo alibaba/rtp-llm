@@ -101,6 +101,15 @@ class LinearFactory:
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ):
+        if getattr(hw_kernel_config, "batch_invariant", False):
+            from .impl.cuda.f16_linear import BatchInvariantLinear
+
+            if quant_config is not None or weight_scales is not None:
+                raise ValueError(
+                    "batch-invariant linear requires unquantized BF16 weights"
+                )
+            return BatchInvariantLinear(weight, bias=bias)
+
         candidates = [
             strategy_class
             for strategy_class in cls._strategies

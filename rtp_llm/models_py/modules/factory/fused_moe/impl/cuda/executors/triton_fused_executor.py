@@ -29,6 +29,18 @@ from rtp_llm.utils.model_weight import W
 from .decode_capabilities import decode_capabilities
 
 
+# Fixed BF16 tile for both Qwen3.6 expert GEMMs on SM103. As in vLLM's
+# batch-invariant MoE selection, each CTA reduces K once in the same order.
+_BATCH_INVARIANT_CONFIG = {
+    "BLOCK_SIZE_M": 16,
+    "BLOCK_SIZE_N": 128,
+    "BLOCK_SIZE_K": 64,
+    "GROUP_SIZE_M": 1,
+    "num_warps": 8,
+    "num_stages": 4,
+}
+
+
 class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
     @classmethod
     def executor_type(cls):
@@ -63,15 +75,16 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         self.N = self.w1.size(1)  # 2 * inter_size
         self.K = self.w1.size(2)  # hidden_size
         self.inter_size = self.N // 2
+        self._batch_invariant = config.batch_invariant
         capabilities = decode_capabilities(
             self.w1,
             self.top_k,
             self.ep_size,
             getattr(getattr(config, "model_config", None), "model_type", ""),
         )
-        self._decode_alignment = capabilities.alignment
-        self._decode_tiles = capabilities.tuned_tiles
-        self._small_moe_gemv = capabilities.small_gemv
+        self._decode_alignment = capabilities.alignment and not self._batch_invariant
+        self._decode_tiles = capabilities.tuned_tiles and not self._batch_invariant
+        self._small_moe_gemv = capabilities.small_gemv and not self._batch_invariant
 
     @property
     def topk_ids_dtype(self) -> torch.dtype:
@@ -124,8 +137,11 @@ class TritonFusedMoeExecutor(FusedMoeExpertExecutor):
         compute_type = tl.bfloat16 if dtype == torch.bfloat16 else tl.float16
 
         # Config selection for both GEMMs
-        config1 = get_default_config(M, self.E, self.N, K, top_k)
-        config2 = get_default_config(M, self.E, K, self.inter_size, top_k)
+        if self._batch_invariant:
+            config1 = config2 = _BATCH_INVARIANT_CONFIG
+        else:
+            config1 = get_default_config(M, self.E, self.N, K, top_k)
+            config2 = get_default_config(M, self.E, K, self.inter_size, top_k)
         if self._decode_tiles:
             from rtp_llm.models_py.triton_kernels.moe.decode_alignment import (
                 sm120_decode_gemm_configs,

@@ -128,6 +128,7 @@ class GptModelBase(nn.Module):
         cuda_graph_selection_mode: Optional[str] = None,
     ) -> AttentionImpl | dict[str, AttentionImpl]:
         attention_inputs = get_attention_inputs_value(inputs)
+        batch_invariant = getattr(self.py_hw_kernel_config, "batch_invariant", False)
         if isinstance(attention_inputs, Mapping):
             fmha_group_tags = self._get_fmha_group_tags()
             selected_group_inputs = (
@@ -150,6 +151,7 @@ class GptModelBase(nn.Module):
                     decode_cascade_max_requests=getattr(
                         self, "decode_cascade_max_requests", 0
                     ),
+                    batch_invariant=batch_invariant,
                 )
                 for tag, group_inputs in selected_group_inputs
             }
@@ -162,6 +164,7 @@ class GptModelBase(nn.Module):
             is_cuda_graph=is_cuda_graph,
             cuda_graph_selection_mode=cuda_graph_selection_mode,
             decode_cascade_max_requests=getattr(self, "decode_cascade_max_requests", 0),
+            batch_invariant=batch_invariant,
         )
 
     def _get_fmha_group_tags(self) -> Optional[list[str]]:

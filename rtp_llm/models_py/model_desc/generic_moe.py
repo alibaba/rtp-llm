@@ -67,6 +67,7 @@ class GenericMoeLayer(nn.Module):
         self.ffn_dim = config.inter_size
         self.num_experts = config.eplb_config.phy_exp_num(config.expert_num)
         self.top_k = config.moe_k
+        batch_invariant = getattr(hw_kernel_config, "batch_invariant", False)
 
         # Get quant_config from model_config
         quant_config = config.quant_config
@@ -90,6 +91,7 @@ class GenericMoeLayer(nn.Module):
             moe_config=moe_config,
             quant_config=quant_config,
             enable_cuda_graph=enable_cuda_graph,
+            batch_invariant=batch_invariant,
         )
         config_adapter.has_shared_expert_gate = W.shared_expert_gate in weights
         self.fused_moe = FusedMoeFactory().create_fused_moe(config_adapter, weights)
@@ -121,7 +123,7 @@ class GenericMoeLayer(nn.Module):
                 # For ROCm devices shared_expert_gate is not pre-swizzled during weight
                 # loading and its single output column does not satisfy the SwizzleA
                 # layout. Keep this scalar projection on the no-swizzle backend.
-                hw_kernel_config=None,
+                hw_kernel_config=hw_kernel_config if batch_invariant else None,
             )
             self.sigmoid_gate_scale_add = SigmoidGateScaleAdd()
         else:

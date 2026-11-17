@@ -109,9 +109,14 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
 
-    p_q = q + bos * stride_qs + i_h * stride_qh + o_k
-    p_k = k + bos * stride_ks + i_h * stride_kh + o_k
-    p_v = v + bos * stride_vs + i_hv * stride_vh + o_v
+    # A one-token strided view can have an arbitrary stride in the token axis.
+    # In batched decode the next sequence starts at the batch stride.
+    q_offset = bos * stride_qs if IS_VARLEN else i_n * stride_qb
+    k_offset = bos * stride_ks if IS_VARLEN else i_n * stride_kb
+    v_offset = bos * stride_vs if IS_VARLEN else i_n * stride_vb
+    p_q = q + q_offset + i_h * stride_qh + o_k
+    p_k = k + k_offset + i_h * stride_kh + o_k
+    p_v = v + v_offset + i_hv * stride_vh + o_v
     if IS_BETA_HEADWISE:
         p_beta = beta + (bos * HV + i_hv) * V + o_v
     else:

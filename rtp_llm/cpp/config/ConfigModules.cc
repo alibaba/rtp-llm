@@ -216,6 +216,7 @@ std::string HybridAttentionConfig::to_string() const {
 std::string HWKernelConfig::to_string() const {
     std::ostringstream oss;
     oss << "use_swizzleA: " << use_swizzleA << "\n"
+        << "batch_invariant: " << batch_invariant << "\n"
         << "enable_cuda_graph: " << enable_cuda_graph << "\n"
         << "enable_cuda_graph_debug_mode: " << enable_cuda_graph_debug_mode << "\n"
         << "generation_prefill_cuda_graph_max_requests: " << generation_prefill_cuda_graph_max_requests << "\n"

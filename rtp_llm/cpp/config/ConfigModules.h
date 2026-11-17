@@ -295,6 +295,7 @@ struct HWKernelConfig {
     static constexpr int kGenerationPrefillCudaGraphMaxRequests = 1023;
 
     bool        use_swizzleA                 = false;
+    bool        batch_invariant              = false;
     bool        enable_cuda_graph            = false;
     bool        enable_cuda_graph_debug_mode = false;
     // Generation-prefill graph is enabled only when the CUDA graph master
