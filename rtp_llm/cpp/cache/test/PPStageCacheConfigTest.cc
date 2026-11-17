@@ -349,6 +349,27 @@ TEST(SharedCacheConfigTest, UnsupportedExplicitPoliciesFailBeforeAllocation) {
     EXPECT_FALSE(CacheConfigCreator::useSharedBlockPool(independent, model, parallel, options));
 }
 
+TEST(SharedCacheConfigTest, ModelManagedPrefillKvShardingRetainsSharedHybridPolicy) {
+    auto model                 = makeHybridModelConfig(8);
+    model.model_type           = "glm5_3_flash";
+    model.attn_config.head_num = model.attn_config.kv_head_num = 8;
+    model.linear_attention_config.linear_num_key_heads = model.linear_attention_config.linear_num_value_heads = 8;
+    ParallelismConfig parallel;
+    parallel.role_type = RoleType::PREFILL;
+    parallel.tp_size = parallel.ep_size = parallel.world_size = parallel.local_world_size = 8;
+    parallel.prefill_cp_config.kv_cache_sharded                                           = true;
+    ASSERT_FALSE(parallel.prefill_cp_config.is_enabled());
+    KVCacheConfig options;
+    const auto    config = CacheConfigCreator::createConfig(model, parallel, options);
+    EXPECT_TRUE(CacheConfigCreator::useSharedBlockPool(config, model, parallel, options));
+    options.shared_hybrid_cache = 1;
+    EXPECT_TRUE(CacheConfigCreator::useSharedBlockPool(config, model, parallel, options));
+    parallel.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
+    EXPECT_THROW(CacheConfigCreator::useSharedBlockPool(config, model, parallel, options), std::exception);
+    options.shared_hybrid_cache = -1;
+    EXPECT_FALSE(CacheConfigCreator::useSharedBlockPool(config, model, parallel, options));
+}
+
 TEST(SharedCacheConfigTest, ByteBudgetAgreementRetainsMoreThanInt32Bytes) {
     constexpr int64_t gib          = int64_t{1} << 30;
     const int64_t     candidates[] = {80 * gib + 256, 52 * gib, 64 * gib};

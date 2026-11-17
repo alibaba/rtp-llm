@@ -1148,6 +1148,70 @@ TEST_F(BlockTreeCacheFactoryTest, SharedHybridPoolsUseOneBackingWithHeterogeneou
     EXPECT_EQ(arena_reports, 1u);
 }
 
+TEST_F(BlockTreeCacheFactoryTest, SharedHybridPoolsPreserveModelManagedCpSlotMapping) {
+    constexpr int cp_size         = 8;
+    constexpr int block_tokens    = 4;
+    constexpr int sequence_length = 3 * cp_size * block_tokens + 1;
+    for (int rank = 0; rank < cp_size; ++rank) {
+        SCOPED_TRACE(rank);
+        auto config = makeHybridConfig(false, 8);
+        DeviceBlockPoolConfigHelper::finalizeSharedConfig(config, 65536, RuntimeConfig{});
+        auto allocator = initAllocator<CoordinatorCacheManager>(config);
+        allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(rank, cp_size, block_tokens));
+        const auto& pools = allocator->groupBlockPools();
+        ASSERT_EQ(pools.size(), 2u);
+        ASSERT_NE(pools[0]->sharedBacking(), nullptr);
+        ASSERT_EQ(pools[0]->sharedBacking(), pools[1]->sharedBacking());
+        const auto arena      = pools[0]->sharedBacking()->arena();
+        const auto free_bytes = arena->freeBytes();
+        MallocInfo info;
+        info.reuse_cache                  = false;
+        info.enable_cache_lookup          = false;
+        info.enable_remove_skipped_blocks = false;
+        info.batch_kv_cache_resource      = std::make_shared<BatchKVCacheResource>();
+        info.batch_kv_cache_resource->resetBatchSize(1);
+        info.batch_kv_cache_resource->initGroups(config.topologyPtr());
+        info.complete_token_ids = std::make_shared<CompleteTokenIds>(1, 1, sequence_length + 64, block_tokens);
+        auto input              = std::make_shared<GenerateInput>();
+        input->input_ids        = torch::arange(1, sequence_length + 1, torch::kInt32);
+        input->generate_config  = std::make_shared<GenerateConfig>();
+        info.complete_token_ids->init(input);
+        ASSERT_TRUE(allocator->malloc(info).success);
+        // Four local FULL slots cover the partial fourth 8-rank stripe.
+        EXPECT_EQ(info.batch_kv_cache_resource->blocksNum(0, "group1"), 4u);
+        EXPECT_LT(arena->freeBytes(), free_bytes);
+        for (const auto& group : config.groups()) {
+            for (const int layer : config.layerIdsForGroup(group.tag)) {
+                for (const auto block : info.batch_kv_cache_resource->blocks(0, group.tag)) {
+                    if (block == NULL_BLOCK_IDX) {
+                        EXPECT_EQ(group.policy.group_type, CacheGroupType::LINEAR);
+                        continue;  // Unmaterialized recurrent checkpoints have no storage.
+                    }
+                    ASSERT_GT(block, 0);
+                    writeDevicePattern(allocator->convertIndexToAddr(layer, group.tag, block).kv_addr,
+                                       group.kvBlockStrideBytes(),
+                                       static_cast<uint8_t>(0x20 + layer));
+                }
+            }
+        }
+        for (const auto& group : config.groups()) {
+            for (const int layer : config.layerIdsForGroup(group.tag)) {
+                for (const auto block : info.batch_kv_cache_resource->blocks(0, group.tag)) {
+                    if (block == NULL_BLOCK_IDX) {
+                        EXPECT_EQ(group.policy.group_type, CacheGroupType::LINEAR);
+                        continue;
+                    }
+                    expectDevicePattern(allocator->convertIndexToAddr(layer, group.tag, block).kv_addr,
+                                        group.kvBlockStrideBytes(),
+                                        static_cast<uint8_t>(0x20 + layer));
+                }
+            }
+        }
+        allocator->free(FreeInfo{info.batch_kv_cache_resource, info.complete_token_ids});
+        EXPECT_EQ(arena->freeBytes(), free_bytes);
+    }
+}
+
 TEST_F(BlockTreeCacheFactoryTest, SharedHybridHostPoolsPreservePackedTransferAcrossGroupSets) {
     auto config = makeHybridConfig(false, 8);
     DeviceBlockPoolConfigHelper::finalizeSharedConfig(config, 16384, RuntimeConfig{});
