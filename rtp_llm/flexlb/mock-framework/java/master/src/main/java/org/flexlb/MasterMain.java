@@ -57,6 +57,9 @@ public final class MasterMain {
                 || !ipv4.isLoopbackAddress()) {
             throw new IllegalArgumentException("Local Mock Master requires an IPv4 loopback address");
         }
+        var election = json.readTree(required("FLEXLB_CONFIG")).path("consistency");
+        if (!"ZOOKEEPER".equals(election.path("type").asText()))
+            throw new IllegalArgumentException("Master requires ZooKeeper election");
         SpringProperties.setFlag(AbstractEnvironment.IGNORE_GETENV_PROPERTY_NAME);
         org.flexlb.OpenTelemetryBootstrap.configureFromEnvironment();
         var application = new SpringApplication(Application.class);
@@ -81,14 +84,14 @@ public final class MasterMain {
         var context =
                 application.run(
                         "--server.address=" + host,
+                        "--flexlb.monitor.provider=micrometer",
+                        "--flexlb.monitor.metric-whitelist=flexlb_",
                         "--server.port=" + port,
                         "--management.server.port=" + port,
                         "--flexlb.log.path=" + directory.resolve("logs"));
         try {
             var lifecycle = context.getBean(ApplicationLifecycle.class);
             var consistency = context.getBean(LBStatusConsistencyService.class);
-            if (!consistency.isNeedConsistency())
-                throw new IllegalArgumentException("Master requires ZooKeeper election");
             var deploymentId = context.getBean(DeploymentIdentity.class).getDeploymentId();
             var workers = context.getBean(WorkerDirectory.class);
             lifecycle.online();

@@ -463,10 +463,13 @@ def test_real_master_routes_to_isolated_rtp_processes(
     )
     behavior = json.loads(effective["FLEXLB_CONFIG"])
     election = behavior.pop("consistency")
-    assert behavior == json.loads(master_config["FLEXLB_CONFIG"])
+    expected_behavior = json.loads(master_config["FLEXLB_CONFIG"])
+    expected_behavior.setdefault("schemaVersion", 3)
+    assert behavior == expected_behavior
     assert election["type"] == "ZOOKEEPER"
     assert election["connectString"]
-    assert effective["deployment_id"].startswith("spectrum:mock:flexlb:")
+    assert effective["deployment_id"].startswith("mock:mock-")
+    assert effective["deployment_id"].endswith(":local")
     assert not (output / "components/master-0/native-environment.json").exists()
     assert not (output / "zookeeper/master-environment.json").exists()
     events = [

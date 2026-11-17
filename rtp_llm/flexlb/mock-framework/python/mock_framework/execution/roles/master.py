@@ -127,6 +127,7 @@ class MasterRole:
         self._lock = asyncio.Lock()
 
     def configure_election(self, connect):
+        deployment = "mock-" + uuid.uuid4().hex
         self.consistency_config = {
             "type": "ZOOKEEPER",
             "connectString": connect,
@@ -134,9 +135,14 @@ class MasterRole:
             "connectionTimeoutMs": 6000,
         }
         self.election_env = {
-            "SPECTRUM_WORKSPACE_ID": "mock",
-            "SPECTRUM_APPLICATION_NAME": "flexlb",
-            "SPECTRUM_DEPLOYMENT_NAME": uuid.uuid4().hex,
+            "HIPPO_ROLE": deployment,
+            "BIZ_NAME": "mock",
+            "DEPLOYMENT_NAME": deployment,
+            "ZONE_NAME": "local",
+            # Local election uses runtime identity even when the shell has Spectrum variables.
+            "SPECTRUM_WORKSPACE_ID": "",
+            "SPECTRUM_APPLICATION_NAME": "",
+            "SPECTRUM_DEPLOYMENT_NAME": "",
             "MOCK_MASTER_PORT": str(
                 master_port(self.role_config["deployment"]["replicas"])
             ),
