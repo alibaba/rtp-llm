@@ -1,0 +1,514 @@
+[
+  {
+    "source": "LICENSE",
+    "source_sha256": "6c73a30c14a2938abaa6afe98ebb19e6d81dac5bd4ace0cb05c61c20afa37b85",
+    "snapshot": "LICENSE",
+    "sha256": "6c73a30c14a2938abaa6afe98ebb19e6d81dac5bd4ace0cb05c61c20afa37b85",
+    "unchanged": true
+  },
+  {
+    "source": "csrc/runtime/jit.hpp",
+    "source_sha256": "6669e2d6867429727a139f9eee27e72e760ac735d6ab38cc79921434925d3d14",
+    "snapshot": "csrc/runtime/jit.hpp",
+    "sha256": "77bd0b281114e9135bb5e754d65b2b04767be9a956abd69a1e3ecd63d8c3173b",
+    "unchanged": false
+  },
+  {
+    "source": "csrc/runtime/runtime.hpp",
+    "source_sha256": "ec2bec12ed6e3b0777e9cd9eeb219e2177eae276ed45326d0f298aae43d3396a",
+    "snapshot": "csrc/runtime/runtime.hpp",
+    "sha256": "2112ec48669c65918d31feef9251bc21228e45425e624acee45e59c8e90658cb",
+    "unchanged": false
+  },
+  {
+    "source": "csrc/utils/compatibility.hpp",
+    "source_sha256": "dedda83af6e4c4adc3a821cd85bc5a0113fd09abded917f5f0f940f3b12813a6",
+    "snapshot": "csrc/utils/compatibility.hpp",
+    "sha256": "dedda83af6e4c4adc3a821cd85bc5a0113fd09abded917f5f0f940f3b12813a6",
+    "unchanged": true
+  },
+  {
+    "source": "csrc/utils/exception.hpp",
+    "source_sha256": "162f410d0493aad576e54bf65667cef60347161e9318ab6532562bf9007c9b08",
+    "snapshot": "csrc/utils/exception.hpp",
+    "sha256": "162f410d0493aad576e54bf65667cef60347161e9318ab6532562bf9007c9b08",
+    "unchanged": true
+  },
+  {
+    "source": "csrc/utils/math.hpp",
+    "source_sha256": "fb3992c2e36d8a0d199011be013e14c2422d78e426933fb041bf42e42af850d1",
+    "snapshot": "csrc/utils/math.hpp",
+    "sha256": "fb3992c2e36d8a0d199011be013e14c2422d78e426933fb041bf42e42af850d1",
+    "unchanged": true
+  },
+  {
+    "source": "csrc/utils/layout.hpp",
+    "source_sha256": "922a21445f03d291e99d00838b78ebe8a6ce484402db23ce846acd888d363061",
+    "snapshot": "csrc/utils/layout.hpp",
+    "sha256": "0dc42fd84d6ec90ca310982555c7c8f14b94b1f5dea2e9eea01f75a48f2ee699",
+    "unchanged": false
+  },
+  {
+    "source": "csrc/jit_kernels/heuristics/common.hpp",
+    "source_sha256": "c629883eef88c332ae11bc21fc696ccd91999ed0f2b137c1d3249ed7a0b10f14",
+    "snapshot": "csrc/jit_kernels/heuristics/common.hpp",
+    "sha256": "c629883eef88c332ae11bc21fc696ccd91999ed0f2b137c1d3249ed7a0b10f14",
+    "unchanged": true
+  },
+  {
+    "source": "csrc/jit_kernels/heuristics/config.hpp",
+    "source_sha256": "3e8173e4dd49a3dd3f7d305fa663741b16f32f7ff5c11efa702d09448bf3ca98",
+    "snapshot": "csrc/jit_kernels/heuristics/config.hpp",
+    "sha256": "18e0083caba8ea1163d957b69aea0962d9bc8890399e2909cacf459f98cca99c",
+    "unchanged": false
+  },
+  {
+    "source": "csrc/jit_kernels/heuristics/runtime.hpp",
+    "source_sha256": "5c2733f5f720a45492d756ce6292dff867022d2f09bc4a2d8af3b59b53803efa",
+    "snapshot": "csrc/jit_kernels/heuristics/runtime.hpp",
+    "sha256": "5c2733f5f720a45492d756ce6292dff867022d2f09bc4a2d8af3b59b53803efa",
+    "unchanged": true
+  },
+  {
+    "source": "csrc/jit_kernels/heuristics/utils.hpp",
+    "source_sha256": "bfdbe43398c3bf72d9a32b60a832a39924eeddf65fe34de3c4989b6303b9a1c7",
+    "snapshot": "csrc/jit_kernels/heuristics/utils.hpp",
+    "sha256": "bfdbe43398c3bf72d9a32b60a832a39924eeddf65fe34de3c4989b6303b9a1c7",
+    "unchanged": true
+  },
+  {
+    "source": "csrc/jit_kernels/impls/runtime_utils.hpp",
+    "source_sha256": "4bf8ef8948ec8249656331da7de7fcfb917f009e89eee0d45bce2d8155c96a4a",
+    "snapshot": "csrc/jit_kernels/impls/runtime_utils.hpp",
+    "sha256": "4eb2f469339e7104ceb79bb7f487209a445ae2af529634d3a5cbc53bbbe704d8",
+    "unchanged": false
+  },
+  {
+    "source": "csrc/jit_kernels/impls/smxx_layout.hpp",
+    "source_sha256": "0ddb8c9db71a922fcfb78f8e149cf0ca9332969b38f38fd6df6dc0f63dbfae65",
+    "snapshot": "csrc/jit_kernels/impls/smxx_layout.hpp",
+    "sha256": "d55a873c2e75c0bc5b2e732659822d6263163d7fd6fdb2d607ef10485b174a30",
+    "unchanged": false
+  },
+  {
+    "source": "deep_gemm_sm120/shim/csrc/jit_kernels/impls/epilogue.hpp",
+    "source_sha256": "f9962071599e4a9aea5eb1ff362b7aa5dc17fc20be4c083965c6fbba25ea99de",
+    "snapshot": "deep_gemm_sm120/shim/csrc/jit_kernels/impls/epilogue.hpp",
+    "sha256": "f9962071599e4a9aea5eb1ff362b7aa5dc17fc20be4c083965c6fbba25ea99de",
+    "unchanged": true
+  },
+  {
+    "source": "deep_gemm_sm120/vendor/csrc/jit_kernels/heuristics/sm120.hpp",
+    "source_sha256": "a0558bc49996db0910fdc0e79cfe086ea406ffe4ac9a082657676e4d7c05b0b5",
+    "snapshot": "deep_gemm_sm120/vendor/csrc/jit_kernels/heuristics/sm120.hpp",
+    "sha256": "a0558bc49996db0910fdc0e79cfe086ea406ffe4ac9a082657676e4d7c05b0b5",
+    "unchanged": true
+  },
+  {
+    "source": "deep_gemm_sm120/vendor/csrc/jit_kernels/heuristics/sm120_config.hpp",
+    "source_sha256": "1c4f46ba4a9c7ceac92bbbcb87d53787807ca91eb3dbe8bf3efc187911adbc4c",
+    "snapshot": "deep_gemm_sm120/vendor/csrc/jit_kernels/heuristics/sm120_config.hpp",
+    "sha256": "1c4f46ba4a9c7ceac92bbbcb87d53787807ca91eb3dbe8bf3efc187911adbc4c",
+    "unchanged": true
+  },
+  {
+    "source": "deep_gemm_sm120/vendor/csrc/jit_kernels/impls/sm120_runtime.hpp",
+    "source_sha256": "177208f4ed47b46d12517d8d0c68bf966e87c3595e236547fd5ade52bfa12aa3",
+    "snapshot": "deep_gemm_sm120/vendor/csrc/jit_kernels/impls/sm120_runtime.hpp",
+    "sha256": "d7376dcb0528c77d02f09c604f3287b8222680345f0707eee6fc46012fda283c",
+    "unchanged": false
+  },
+  {
+    "source": "deep_gemm_sm120/vendor/csrc/jit_kernels/impls/sm120_padding.hpp",
+    "source_sha256": "76bcf52cf8c624f3cb932c471cccff2da895e8abb8e4d11b461240b059984800",
+    "snapshot": "deep_gemm_sm120/vendor/csrc/jit_kernels/impls/sm120_padding.hpp",
+    "sha256": "c241e50959fecd6d4c36febcbd0668c3355fa9d637c13bdd4a68052b6435eb13",
+    "unchanged": false
+  },
+  {
+    "source": "deep_gemm_sm120/vendor/csrc/jit_kernels/impls/sm120_fp8_fp4_gemm_1d1d.hpp",
+    "source_sha256": "46b36b043678f883ffe571d3ba40958a8e16edf844f6d7110fde4f55fef421db",
+    "snapshot": "deep_gemm_sm120/vendor/csrc/jit_kernels/impls/sm120_fp8_fp4_gemm_1d1d.hpp",
+    "sha256": "51fb5c98b0dfa8c56c0dde965563e0d7a071cfb5ee4d365a92994758cc1d839f",
+    "unchanged": false
+  },
+  {
+    "source": "deep_gemm_sm120/adapter/utils.hpp",
+    "source_sha256": "e226f7ab79ad3a8ffbd7f8794b198cb8a6b8adfa1269bc6953c474e3e2b1c778",
+    "snapshot": "deep_gemm_sm120/adapter/utils.hpp",
+    "sha256": "e226f7ab79ad3a8ffbd7f8794b198cb8a6b8adfa1269bc6953c474e3e2b1c778",
+    "unchanged": true
+  },
+  {
+    "source": "deep_gemm_sm120/adapter/apis/gemm.hpp",
+    "source_sha256": "3b2335c398719536bb7d693a2db8e74105300fc7e6b5ffe153a4763bb1ed1c0f",
+    "snapshot": "deep_gemm_sm120/adapter/apis/gemm.hpp",
+    "sha256": "b0a22b70c140f7c156a70eeffcf2dbab6ace07a06c56549eff679b35ad8c90cd",
+    "unchanged": false
+  },
+  {
+    "source": "deep_gemm_sm120/adapter/apis/layout.hpp",
+    "source_sha256": "e2bee614bbd749272352dc0f20aecdd131f646960fa8d2209a669ce1af90d706",
+    "snapshot": "deep_gemm_sm120/adapter/apis/layout.hpp",
+    "sha256": "7263fb59a1364ba027d67f3d8772579b812c3e4797637a754e3cd82554762ee7",
+    "unchanged": false
+  },
+  {
+    "symlink": "deep_gemm_sm120/vendor/csrc/runtime",
+    "target": "../../../csrc/runtime"
+  },
+  {
+    "symlink": "deep_gemm_sm120/vendor/csrc/utils",
+    "target": "../../../csrc/utils"
+  },
+  {
+    "source": "deep_gemm_sm120/vendor/deep_gemm/include/deep_gemm/impls/sm120_fp8_fp4_gemm_1d1d.cuh",
+    "source_sha256": "9969531b0f2f91703d0ebb111756a76c28aa5ee0d447db74276123fbdb0402cc",
+    "snapshot": "deep_gemm_sm120/vendor/deep_gemm/include/deep_gemm/impls/sm120_fp8_fp4_gemm_1d1d.cuh",
+    "sha256": "9969531b0f2f91703d0ebb111756a76c28aa5ee0d447db74276123fbdb0402cc",
+    "unchanged": true
+  },
+  {
+    "source": "deep_gemm_sm120/vendor/deep_gemm/include/deep_gemm/scheduler/sm120_gemm.cuh",
+    "source_sha256": "3d186b16abece603c148f299de0a6e8c975f463284421bbce99621537d7a5763",
+    "snapshot": "deep_gemm_sm120/vendor/deep_gemm/include/deep_gemm/scheduler/sm120_gemm.cuh",
+    "sha256": "3d186b16abece603c148f299de0a6e8c975f463284421bbce99621537d7a5763",
+    "unchanged": true
+  },
+  {
+    "source": "deep_gemm/include/deep_gemm/common/types.cuh",
+    "source_sha256": "0382bf27efb6deea5dc21a4f8ae21296494e513166c2682c63e498c70cefa6b2",
+    "snapshot": "deep_gemm/include/deep_gemm/common/types.cuh",
+    "sha256": "0382bf27efb6deea5dc21a4f8ae21296494e513166c2682c63e498c70cefa6b2",
+    "unchanged": true
+  },
+  {
+    "source": "deep_gemm/include/deep_gemm/common/math.cuh",
+    "source_sha256": "a28f4dfe0340b62dbdb3e9c1286d5e7332d81bd5936ef7cbec13e8e447a2e51a",
+    "snapshot": "deep_gemm/include/deep_gemm/common/math.cuh",
+    "sha256": "a28f4dfe0340b62dbdb3e9c1286d5e7332d81bd5936ef7cbec13e8e447a2e51a",
+    "unchanged": true
+  },
+  {
+    "source": "deep_gemm/include/deep_gemm/ptx/utils.cuh",
+    "source_sha256": "dee246e2da2b52958e787ec0aeed474d74e384d7a8281714be901d66a8009fd3",
+    "snapshot": "deep_gemm/include/deep_gemm/ptx/utils.cuh",
+    "sha256": "dee246e2da2b52958e787ec0aeed474d74e384d7a8281714be901d66a8009fd3",
+    "unchanged": true
+  },
+  {
+    "source": "deep_gemm/include/deep_gemm/common/exception.cuh",
+    "source_sha256": "ab6b2bd75c06c054fbbe97d5897efa7909d380ad531620770c031b3debdf2123",
+    "snapshot": "deep_gemm/include/deep_gemm/common/exception.cuh",
+    "sha256": "ab6b2bd75c06c054fbbe97d5897efa7909d380ad531620770c031b3debdf2123",
+    "unchanged": true
+  },
+  {
+    "source": "deep_gemm/include/deep_gemm/common/compile.cuh",
+    "source_sha256": "a13373053608b286c1ac39ce771cdd6ab133f44ec4f016bd6fcbc5032132a1a9",
+    "snapshot": "deep_gemm/include/deep_gemm/common/compile.cuh",
+    "sha256": "a13373053608b286c1ac39ce771cdd6ab133f44ec4f016bd6fcbc5032132a1a9",
+    "unchanged": true
+  },
+  {
+    "source": "deep_gemm/include/deep_gemm/ptx/tma.cuh",
+    "source_sha256": "519bf2f4c26ef7368e6cd239027061ee2725fbb3efc89b7574233037de228d4a",
+    "snapshot": "deep_gemm/include/deep_gemm/ptx/tma.cuh",
+    "sha256": "519bf2f4c26ef7368e6cd239027061ee2725fbb3efc89b7574233037de228d4a",
+    "unchanged": true
+  },
+  {
+    "source": "deep_gemm/include/deep_gemm/ptx/ld_st.cuh",
+    "source_sha256": "262aebd11a4a7552abcd7e21dca906c72708e5ef00a1712ca7b7bb391e1e857b",
+    "snapshot": "deep_gemm/include/deep_gemm/ptx/ld_st.cuh",
+    "sha256": "262aebd11a4a7552abcd7e21dca906c72708e5ef00a1712ca7b7bb391e1e857b",
+    "unchanged": true
+  },
+  {
+    "source": "deep_gemm_sm120/vendor/deep_gemm/include/deep_gemm/mma/sm120.cuh",
+    "source_sha256": "5199232b50c8b9518a60f377cb3b1286c8fb14e6129369e2e1c2415073b3217c",
+    "snapshot": "deep_gemm_sm120/vendor/deep_gemm/include/deep_gemm/mma/sm120.cuh",
+    "sha256": "5199232b50c8b9518a60f377cb3b1286c8fb14e6129369e2e1c2415073b3217c",
+    "unchanged": true
+  },
+  {
+    "source": "deep_gemm_sm120/shim/include/deep_gemm/epilogue/transform.cuh",
+    "source_sha256": "e775336a3df9e325e4437dab3726ef47512f6960b0960c3038b758ee3ee83c0d",
+    "snapshot": "deep_gemm_sm120/shim/include/deep_gemm/epilogue/transform.cuh",
+    "sha256": "e775336a3df9e325e4437dab3726ef47512f6960b0960c3038b758ee3ee83c0d",
+    "unchanged": true
+  },
+  {
+    "source": "deep_gemm/include/deep_gemm/common/utils.cuh",
+    "source_sha256": "9fd0fdb872bb1d037370cab53918535c5e049b2936dd5e8b8af51648dfb843f2",
+    "snapshot": "deep_gemm/include/deep_gemm/common/utils.cuh",
+    "sha256": "9fd0fdb872bb1d037370cab53918535c5e049b2936dd5e8b8af51648dfb843f2",
+    "unchanged": true
+  },
+  {
+    "source": "deep_gemm/include/deep_gemm/common/tma_copy.cuh",
+    "source_sha256": "fc70f7a6548720e9e3f04355f1c54184658685297a20270f3ff559fff9ece5d9",
+    "snapshot": "deep_gemm/include/deep_gemm/common/tma_copy.cuh",
+    "sha256": "fc70f7a6548720e9e3f04355f1c54184658685297a20270f3ff559fff9ece5d9",
+    "unchanged": true
+  },
+  {
+    "source": "deep_gemm/include/deep_gemm/common/packing.cuh",
+    "source_sha256": "7b216c4a4f94e6691e2f553b204f697257eac1312b71fd7d24e7b420815c67b8",
+    "snapshot": "deep_gemm/include/deep_gemm/common/packing.cuh",
+    "sha256": "7b216c4a4f94e6691e2f553b204f697257eac1312b71fd7d24e7b420815c67b8",
+    "unchanged": true
+  },
+  {
+    "source": "deep_gemm_sm120/vendor/deep_gemm/include/deep_gemm/common/sm120_utils.cuh",
+    "source_sha256": "18b8f99f38bb53f145b3861417e68511e77b31daad68599c1fa151223f08c45a",
+    "snapshot": "deep_gemm_sm120/vendor/deep_gemm/include/deep_gemm/common/sm120_utils.cuh",
+    "sha256": "18b8f99f38bb53f145b3861417e68511e77b31daad68599c1fa151223f08c45a",
+    "unchanged": true
+  },
+  {
+    "source": "deep_gemm/include/deep_gemm/common/cute_tie.cuh",
+    "source_sha256": "872af0b873a9b367c01eaf68c321ddcd9d0f3c26ce7b8d3abfc8a66d89b8ad65",
+    "snapshot": "deep_gemm/include/deep_gemm/common/cute_tie.cuh",
+    "sha256": "872af0b873a9b367c01eaf68c321ddcd9d0f3c26ce7b8d3abfc8a66d89b8ad65",
+    "unchanged": true
+  },
+  {
+    "source": "deep_gemm_sm120/vendor/deep_gemm/include/deep_gemm/impls/sm120_padding.cuh",
+    "source_sha256": "3c1c00fc798861d7012c73d997f7720ab1074f0451804063022247d932d526e6",
+    "snapshot": "deep_gemm_sm120/vendor/deep_gemm/include/deep_gemm/impls/sm120_padding.cuh",
+    "sha256": "3c1c00fc798861d7012c73d997f7720ab1074f0451804063022247d932d526e6",
+    "unchanged": true
+  },
+  {
+    "source": "deep_gemm/include/deep_gemm/impls/smxx_layout.cuh",
+    "source_sha256": "cb72206057f00bd25cdc2d502997535948aaf18d2c678f97447548e317ca1ea3",
+    "snapshot": "deep_gemm/include/deep_gemm/impls/smxx_layout.cuh",
+    "sha256": "cb72206057f00bd25cdc2d502997535948aaf18d2c678f97447548e317ca1ea3",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "LICENSE",
+    "source_sha256": "ebb4f09972aee8608be255debaf78451a68e95c290f55c240dec2ecfa16ea6be",
+    "snapshot": "third-party/deep_jit/LICENSE",
+    "sha256": "ebb4f09972aee8608be255debaf78451a68e95c290f55c240dec2ecfa16ea6be",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/backend/ascend/backend.hpp",
+    "source_sha256": "0b991603ef83d7d220c3cf18e7ce38d026ea2a40dbcf463512ba71e5ccdf349d",
+    "snapshot": "third-party/deep_jit/include/deep_jit/backend/ascend/backend.hpp",
+    "sha256": "0b991603ef83d7d220c3cf18e7ce38d026ea2a40dbcf463512ba71e5ccdf349d",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/backend/ascend/device.hpp",
+    "source_sha256": "7d0345b6ea6e631c9ae0af6e4e5e5bad4aa7bee5cd4c116f0491ea72df001145",
+    "snapshot": "third-party/deep_jit/include/deep_jit/backend/ascend/device.hpp",
+    "sha256": "7d0345b6ea6e631c9ae0af6e4e5e5bad4aa7bee5cd4c116f0491ea72df001145",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/backend/ascend/driver.hpp",
+    "source_sha256": "d0c707e96a78cc01e7f0376bdab9877cfc845649db2845ab2e8480d3b30e359f",
+    "snapshot": "third-party/deep_jit/include/deep_jit/backend/ascend/driver.hpp",
+    "sha256": "d0c707e96a78cc01e7f0376bdab9877cfc845649db2845ab2e8480d3b30e359f",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/backend/ascend/kernel.hpp",
+    "source_sha256": "5f9702aafd696671874fa5805900552c26df8fbc5bea6e4167e8aadfbec32e86",
+    "snapshot": "third-party/deep_jit/include/deep_jit/backend/ascend/kernel.hpp",
+    "sha256": "5f9702aafd696671874fa5805900552c26df8fbc5bea6e4167e8aadfbec32e86",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/backend/ascend/options.hpp",
+    "source_sha256": "68ce2112434a6acb2bafdd1125d127ca8d60861b5524954feabb530831c3c473",
+    "snapshot": "third-party/deep_jit/include/deep_jit/backend/ascend/options.hpp",
+    "sha256": "68ce2112434a6acb2bafdd1125d127ca8d60861b5524954feabb530831c3c473",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/backend/cuda/backend.hpp",
+    "source_sha256": "4d595b86c4d4c861c59684844232014150632b4c3028682f86ba301cf519275b",
+    "snapshot": "third-party/deep_jit/include/deep_jit/backend/cuda/backend.hpp",
+    "sha256": "4d595b86c4d4c861c59684844232014150632b4c3028682f86ba301cf519275b",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/backend/cuda/device.hpp",
+    "source_sha256": "401ceb5217fa275de99a949406221cd44f007e32dc4a3ce0550e0c6ac8435b94",
+    "snapshot": "third-party/deep_jit/include/deep_jit/backend/cuda/device.hpp",
+    "sha256": "401ceb5217fa275de99a949406221cd44f007e32dc4a3ce0550e0c6ac8435b94",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/backend/cuda/driver.hpp",
+    "source_sha256": "aee07474dd6b6dfe404f912597beb118989871523447a1ffad21ce2dd01350e0",
+    "snapshot": "third-party/deep_jit/include/deep_jit/backend/cuda/driver.hpp",
+    "sha256": "aee07474dd6b6dfe404f912597beb118989871523447a1ffad21ce2dd01350e0",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/backend/cuda/kernel.hpp",
+    "source_sha256": "26bc9622969f1dc79201ec8876371cefb6dffb4648495365947dc7b192c229e4",
+    "snapshot": "third-party/deep_jit/include/deep_jit/backend/cuda/kernel.hpp",
+    "sha256": "f3f15c3ea3925d9dcd7b900bbc96fc719d98ee445a98e06cbd2a9f7c7f0c207a",
+    "unchanged": false
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/backend/cuda/options.hpp",
+    "source_sha256": "98dd2d36be2238367c712ea005449ca8271bbb13757a5b9ca8c54f9327408d83",
+    "snapshot": "third-party/deep_jit/include/deep_jit/backend/cuda/options.hpp",
+    "sha256": "03a004d7bf6bcb59549c9b9294362cdb6fe058d401cf0716ef9451e5a65c9f02",
+    "unchanged": false
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/cache/disk.hpp",
+    "source_sha256": "b2dcc7d8124a60e1b6199f3a2c5e34067921685f2fdd5684901ccb1940ade887",
+    "snapshot": "third-party/deep_jit/include/deep_jit/cache/disk.hpp",
+    "sha256": "6378e40f6c2ab74184c2d3bbba2778cba8827bb97ae8feacbd70bedc14347da6",
+    "unchanged": false
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/cache/memory.hpp",
+    "source_sha256": "54060462e785ddaba391e38f70f1b3544e23c3c43b8a08a4b01bd49a525ba169",
+    "snapshot": "third-party/deep_jit/include/deep_jit/cache/memory.hpp",
+    "sha256": "54060462e785ddaba391e38f70f1b3544e23c3c43b8a08a4b01bd49a525ba169",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/python_api.hpp",
+    "source_sha256": "09c08482bf85677149335d857fedd610b3d0f790f4169ce3efdc12542e32c498",
+    "snapshot": "third-party/deep_jit/include/deep_jit/python_api.hpp",
+    "sha256": "09c08482bf85677149335d857fedd610b3d0f790f4169ce3efdc12542e32c498",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/runtime/config.hpp",
+    "source_sha256": "f0a334e00f9def1c85a8f194a7e0a522c0d76c9604a93e00ddc711d1a7ee6b9b",
+    "snapshot": "third-party/deep_jit/include/deep_jit/runtime/config.hpp",
+    "sha256": "f0a334e00f9def1c85a8f194a7e0a522c0d76c9604a93e00ddc711d1a7ee6b9b",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/runtime/runtime.hpp",
+    "source_sha256": "4d811ebb64b2b394a84d206e65df7fd5d74055cd327d8d8e4d2aeb2cd97e2706",
+    "snapshot": "third-party/deep_jit/include/deep_jit/runtime/runtime.hpp",
+    "sha256": "4d811ebb64b2b394a84d206e65df7fd5d74055cd327d8d8e4d2aeb2cd97e2706",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/utils/command.hpp",
+    "source_sha256": "7fde3af103340960c8b22aaf73c35f7d971618bace929705db7e9dedd3fa80a0",
+    "snapshot": "third-party/deep_jit/include/deep_jit/utils/command.hpp",
+    "sha256": "7fde3af103340960c8b22aaf73c35f7d971618bace929705db7e9dedd3fa80a0",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/utils/env.hpp",
+    "source_sha256": "4d079c7f958e4f179d0ed8107a4d0e70eae6131c1079442b567eb3ed4fea7503",
+    "snapshot": "third-party/deep_jit/include/deep_jit/utils/env.hpp",
+    "sha256": "4d079c7f958e4f179d0ed8107a4d0e70eae6131c1079442b567eb3ed4fea7503",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/utils/exception.hpp",
+    "source_sha256": "d30116ff5dd526e542d8649dc79a42fde2c4e5ad47ed6aa3e5d3dec29f759a4f",
+    "snapshot": "third-party/deep_jit/include/deep_jit/utils/exception.hpp",
+    "sha256": "bed67fd6d862b73eee6c6649b7695b4331f2d65c7eda0cfdc4ddc752ca49533f",
+    "unchanged": false
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/utils/filesystem.hpp",
+    "source_sha256": "e55bc574d3ae1016f7ad83c850ec3f9a067e2bdc673dcdb57ac5388da2c4fe2d",
+    "snapshot": "third-party/deep_jit/include/deep_jit/utils/filesystem.hpp",
+    "sha256": "e55bc574d3ae1016f7ad83c850ec3f9a067e2bdc673dcdb57ac5388da2c4fe2d",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/utils/gil.hpp",
+    "source_sha256": "1429d4b4a789d3ab781a58b6693afc316f7f8809a579268a06f8daa358ab9ab2",
+    "snapshot": "third-party/deep_jit/include/deep_jit/utils/gil.hpp",
+    "sha256": "1429d4b4a789d3ab781a58b6693afc316f7f8809a579268a06f8daa358ab9ab2",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/utils/hash.hpp",
+    "source_sha256": "fa8f29c875ccce3c4308ffb1cc8617e17e41bf2b09d9a3d8f73a142e538caf4d",
+    "snapshot": "third-party/deep_jit/include/deep_jit/utils/hash.hpp",
+    "sha256": "abbb1e213722eb2ef153184c0c450f537cdb4b59f3ed96024e848813dc6c8596",
+    "unchanged": false
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/utils/json.hpp",
+    "source_sha256": "93ab8203302324388f02a91e77dea0d33a8483572f8fe13482a7298871dba328",
+    "snapshot": "third-party/deep_jit/include/deep_jit/utils/json.hpp",
+    "sha256": "93ab8203302324388f02a91e77dea0d33a8483572f8fe13482a7298871dba328",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/utils/lazy.hpp",
+    "source_sha256": "030f64121fdcc9d58c12de0bcd1320dbc8810b1c9bffaccb681e4a67567b0aa5",
+    "snapshot": "third-party/deep_jit/include/deep_jit/utils/lazy.hpp",
+    "sha256": "030f64121fdcc9d58c12de0bcd1320dbc8810b1c9bffaccb681e4a67567b0aa5",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/utils/no_ref_ptr.hpp",
+    "source_sha256": "49e43c9708565e0b16dad38afe7531cb148ca7ad3b5e72656107e7a13a405c55",
+    "snapshot": "third-party/deep_jit/include/deep_jit/utils/no_ref_ptr.hpp",
+    "sha256": "49e43c9708565e0b16dad38afe7531cb148ca7ad3b5e72656107e7a13a405c55",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/utils/parser.hpp",
+    "source_sha256": "a8a17886da5fb93931872e262f5ccb0c7b0ac8fd173e772067d482d1cf8947ec",
+    "snapshot": "third-party/deep_jit/include/deep_jit/utils/parser.hpp",
+    "sha256": "a8a17886da5fb93931872e262f5ccb0c7b0ac8fd173e772067d482d1cf8947ec",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/utils/str.hpp",
+    "source_sha256": "4d87fa25d6ccd3efa125279d42afbc857fc2a4083c0dbc0bd4f7b1b74f455436",
+    "snapshot": "third-party/deep_jit/include/deep_jit/utils/str.hpp",
+    "sha256": "4d87fa25d6ccd3efa125279d42afbc857fc2a4083c0dbc0bd4f7b1b74f455436",
+    "unchanged": true
+  },
+  {
+    "repository": "DeepJIT",
+    "source": "include/deep_jit/utils/uuid.hpp",
+    "source_sha256": "5fff8c1a7f77be5ec12ebb38fc8e14877fe6793804379ca2121a3216111898be",
+    "snapshot": "third-party/deep_jit/include/deep_jit/utils/uuid.hpp",
+    "sha256": "0c498cf1731e57fa8f1d7ebed4bc1cf4d15e949635b5db56addcf94b7f900a63",
+    "unchanged": false
+  }
+]

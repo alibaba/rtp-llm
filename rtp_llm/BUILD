@@ -193,6 +193,11 @@ py_library(
 )
 
 py_library(
+    name = "package_initializer",
+    srcs = ["__init__.py"],
+)
+
+py_library(
     name = "jit_cache_env",
     srcs = _JIT_CACHE_ENV_SRCS,
     visibility = ["//visibility:public"],
@@ -251,6 +256,12 @@ py_library(
     srcs = glob([
         "pipeline/**/*.py",
     ]),
+)
+
+filegroup(
+    name = "device_type_source",
+    srcs = ["device/device_type.py"],
+    visibility = ["//visibility:public"],
 )
 
 py_library(

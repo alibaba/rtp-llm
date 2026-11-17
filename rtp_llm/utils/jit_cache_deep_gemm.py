@@ -8,6 +8,8 @@ import os
 import re
 from pathlib import Path
 
+DEEPJIT_COMPONENTS = ("deep_gemm", "sm120_grouped")
+
 SNAPSHOT_MANIFEST = ".jit_deep_gemm_checksums.json"
 _ENTRY_FILES = ("kernel.cu", "kernel.cubin", "meta.json", ".committed")
 _COMPILER_ENV = (
@@ -83,9 +85,11 @@ def deepjit_entry_files(entry: Path) -> tuple[Path, ...]:
     return files
 
 
-def deepjit_snapshot_files(root: Path, *, strict: bool = False) -> dict[str, Path]:
+def deepjit_snapshot_files(
+    root: Path, *, strict: bool = False, component_name: str = "deep_gemm"
+) -> dict[str, Path]:
     result = {}
-    component = root / "deep_gemm"
+    component = root / component_name
     cache = component / "cache"
     try:
         if not component.exists():
@@ -114,7 +118,10 @@ def deepjit_snapshot_files(root: Path, *, strict: bool = False) -> dict[str, Pat
 def deepjit_checksums(root: Path) -> dict[str, str]:
     return {
         name: hashlib.sha256(path.read_bytes()).hexdigest()
-        for name, path in deepjit_snapshot_files(root, strict=True).items()
+        for component in DEEPJIT_COMPONENTS
+        for name, path in deepjit_snapshot_files(
+            root, strict=True, component_name=component
+        ).items()
     }
 
 

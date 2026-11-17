@@ -1,5 +1,6 @@
 """Cache-directory configuration shared by test launchers and the runtime."""
 
+import hashlib
 import json
 import logging
 import os
@@ -8,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, MutableMapping
 from urllib.parse import urlparse
+
+SM120_GROUPED_CACHE_ENV = "RTP_DG120_JIT_CACHE_DIR"
 
 _AUTOMATIC_CACHE_ENVS = "_RTP_LLM_AUTOMATIC_JIT_CACHE_ENVS"
 
@@ -178,3 +181,16 @@ def configure_writable_cache_env(
         if directory is None:
             raise OSError(f"no writable {fallback_name} cache directory")
         configure_cache_env(env_name, directory, automatic=True)
+
+
+def native_source_fingerprint(root: Path) -> str:
+    """Fingerprint the owned compiler inputs, including headers in installed wheels."""
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*")):
+        if (
+            path.suffix in {".cc", ".cpp", ".cu", ".cuh", ".h", ".hpp", ".so"}
+            and path.is_file()
+        ):
+            digest.update(path.relative_to(root).as_posix().encode())
+            digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()

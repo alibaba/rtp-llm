@@ -1,0 +1,190 @@
+{
+  "custom_flashinfer_revision": "399dffd680314e8072260b9eef697b1f7b500243",
+  "default_flashinfer_revision": "8c4f4dcf76744c450a183e3b1be5141041dfa239",
+  "vendored_originals": {
+    "LICENSE": {
+      "sha256": "d76ef6f903c7545978e93f91d8a4c7c7574c3f9e80fc5bfba7412f60ad730184",
+      "bytes": 12384,
+      "lines": 230
+    },
+    "csrc/sparse_mla_sm120.cu": {
+      "sha256": "ac73c91138cc4cdec820ccecc65c4de27180398eb1afcf43ca85fae9a9b69431",
+      "bytes": 13275,
+      "lines": 276
+    },
+    "csrc/sparse_mla_sm120_decode_dsv4.cu": {
+      "sha256": "58b1263e7590624617332a700c988d8805f3fce92fb7356807a3b911d74b9020",
+      "bytes": 10475,
+      "lines": 189
+    },
+    "csrc/sparse_mla_sm120_jit_binding.cu": {
+      "sha256": "c5f0b225f0c5391c9f11fd25d8883c644c4de46a8db2a60ea9c71ff70c799b1f",
+      "bytes": 11648,
+      "lines": 212
+    },
+    "csrc/sparse_mla_sm120_prefill.cu": {
+      "sha256": "7bf1d0b3531c4b0406ed2cc4dc75558a70200faa75cb81a048be1d7397ab161a",
+      "bytes": 23038,
+      "lines": 447
+    },
+    "csrc/tvm_ffi_utils.h": {
+      "sha256": "4fe41227dc3bd833b492f6b04bb94eb497b78be85847598eb19bd08c016de787",
+      "bytes": 19266,
+      "lines": 391
+    },
+    "flashinfer/autotuner/__init__.py": {
+      "sha256": "25e3a5a9a17164c319a8300400dfe67ee9c1b1fd3e7ceac7ece3395946ed4ca0",
+      "bytes": 1574,
+      "lines": 65
+    },
+    "flashinfer/autotuner/autotuner.py": {
+      "sha256": "d1e9ebc15f3f55e81167a7d1be3fcee7be8122d901a00acaa635e6fbde2900f3",
+      "bytes": 107903,
+      "lines": 2456
+    },
+    "flashinfer/autotuner/initializers.py": {
+      "sha256": "2dabd3db48fcd71b0ab34e6c43b829836a3b54ceab33852d0c38dca4c7570748",
+      "bytes": 2348,
+      "lines": 81
+    },
+    "flashinfer/jit/mla.py": {
+      "sha256": "c5262e152a05fdf13ba0d57224adced8c1b38bf35bc43216ba22252ad7d47eb5",
+      "bytes": 1946,
+      "lines": 55
+    },
+    "flashinfer/mla/_core.py": {
+      "sha256": "823ff960aab3e659745a6ac993a25ce76a223469087071fb9ec62d38c6b8a53a",
+      "bytes": 144441,
+      "lines": 3641
+    },
+    "flashinfer/mla/_sparse_mla_sm120.py": {
+      "sha256": "0dbffd6cfb04dcdc5311d06bea860a8f2a3e561717c9871629c51f9487720118",
+      "bytes": 48109,
+      "lines": 1354
+    },
+    "flashinfer/tactics_blocklist.py": {
+      "sha256": "6f652b3d93a8311fa09392e4ccf24af0cbdd5bab57f1fdba8fb4fc1d6eb7e3b0",
+      "bytes": 7727,
+      "lines": 219
+    },
+    "flashinfer/utils.py": {
+      "sha256": "912466a826fec0f0bdc15e7dd8caa02edb304374d2aade147f112ff09d058136",
+      "bytes": 54329,
+      "lines": 1529
+    },
+    "include/flashinfer/attention/sparse_mla_sm120/arch/barrier.cuh": {
+      "sha256": "ee7a09bcca526d626c91db5fd3765847ec76c1b52801835cff2a5ae9ef5b2c96",
+      "bytes": 3570,
+      "lines": 84
+    },
+    "include/flashinfer/attention/sparse_mla_sm120/arch/common.cuh": {
+      "sha256": "bdd9f13c1d6a89cf4f6291f8f9b337f209d1f3fee622f56f3a3a5e053334b681",
+      "bytes": 3964,
+      "lines": 96
+    },
+    "include/flashinfer/attention/sparse_mla_sm120/arch/cp_async.cuh": {
+      "sha256": "ec2e59216add7516db4eadcfc6d9246d4f82468d2382acae10d3580f753305c7",
+      "bytes": 5219,
+      "lines": 102
+    },
+    "include/flashinfer/attention/sparse_mla_sm120/arch/ldmatrix_sm120.cuh": {
+      "sha256": "4081b48f37695947fae9f719d0c4c1f607da6b741848ede4efe9c40708536f5d",
+      "bytes": 5111,
+      "lines": 104
+    },
+    "include/flashinfer/attention/sparse_mla_sm120/arch/mma_sm120.cuh": {
+      "sha256": "ab0e9962c610845f39b5bc97eba2e2264ad041b63d2971e55fcc9d20055bb486",
+      "bytes": 4306,
+      "lines": 89
+    },
+    "include/flashinfer/attention/sparse_mla_sm120/common/d2_load_b.cuh": {
+      "sha256": "bcb8dec92916bc802853268a431f5ec53f8ea771fa6dab6b0f647912993a2d20",
+      "bytes": 4552,
+      "lines": 90
+    },
+    "include/flashinfer/attention/sparse_mla_sm120/common/fp8_quant.cuh": {
+      "sha256": "c4c503f6139d8e80ea9d0be7e876178f5af1c0b94a225975f91e49266b6c14b4",
+      "bytes": 5400,
+      "lines": 118
+    },
+    "include/flashinfer/attention/sparse_mla_sm120/common/kv_cache_io.cuh": {
+      "sha256": "f4c589ef931e311349f259e4e98f23093d71f2eae1f59485c02b8acd5931d365",
+      "bytes": 5449,
+      "lines": 118
+    },
+    "include/flashinfer/attention/sparse_mla_sm120/common/online_softmax.cuh": {
+      "sha256": "4b7110122e9576d72f4f40ab9b999e4f95f33738d69cf21f8f8a5448c382c459",
+      "bytes": 3217,
+      "lines": 67
+    },
+    "include/flashinfer/attention/sparse_mla_sm120/common/q_rope.cuh": {
+      "sha256": "2e7ae3932636052273574b87fab8f1dd09b9246fd7f34b1446a227b52b2c885e",
+      "bytes": 3611,
+      "lines": 89
+    },
+    "include/flashinfer/attention/sparse_mla_sm120/common/scale_mma.cuh": {
+      "sha256": "cbeaa1c19d1f2aae3cb593a8f41b3308f23fd13348515189d60c3efbc6957b99",
+      "bytes": 4567,
+      "lines": 119
+    },
+    "include/flashinfer/attention/sparse_mla_sm120/common/smem_layout.cuh": {
+      "sha256": "87b3b212dea1d6e112226c2b8fa58e92d14474026f641bace2ebaef2ceab8506",
+      "bytes": 11588,
+      "lines": 258
+    },
+    "include/flashinfer/attention/sparse_mla_sm120/common/xv_rope_mma.cuh": {
+      "sha256": "4107bc481f98c3dc1d60cd02b30cbff5f8142a0ab9fcc0f5f96d247c151356df",
+      "bytes": 8644,
+      "lines": 196
+    },
+    "include/flashinfer/attention/sparse_mla_sm120/decode_dsv3_2_kernel.cuh": {
+      "sha256": "b7860563129fbbfcf1faaab0a12195e5be1d2ce6ba64054413d7a1b2bc999ad1",
+      "bytes": 30935,
+      "lines": 662
+    },
+    "include/flashinfer/attention/sparse_mla_sm120/decode_dsv4_kernel.cuh": {
+      "sha256": "0a589610c387a60394ef1a7102b61da163a506905fac88f97a731ad360a935ef",
+      "bytes": 53513,
+      "lines": 1109
+    },
+    "include/flashinfer/attention/sparse_mla_sm120/model/kv_cache_traits.cuh": {
+      "sha256": "95499904538b2f708f596887ea1128ba45d24bdb1f491502d541d08e4439d559",
+      "bytes": 10448,
+      "lines": 223
+    },
+    "include/flashinfer/attention/sparse_mla_sm120/model/model_type.h": {
+      "sha256": "d8eb2cfdc3eb228f1671f37c50233ff2a0c07908799cc9dcb8848d74a33cf0e9",
+      "bytes": 2498,
+      "lines": 46
+    },
+    "include/flashinfer/attention/sparse_mla_sm120/model/scale_convert.cuh": {
+      "sha256": "d431d62d1c400f74bf4b1f9986ec7d5ff47f2669f0aac0248fd481ffb07cd82a",
+      "bytes": 3005,
+      "lines": 78
+    },
+    "include/flashinfer/attention/sparse_mla_sm120/prefill_kernel.cuh": {
+      "sha256": "d7c4ccce18cf5cf6a5b1f7138e0896a36da88dff2839b804d114acfddf28a99e",
+      "bytes": 80376,
+      "lines": 1737
+    },
+    "tests/attention/test_sparse_mla_sm120.py": {
+      "sha256": "43a5dc854b9d5229795ecf322856477b42e98fc15257f6f3f0d51b113b37d67d",
+      "bytes": 66425,
+      "lines": 1942
+    }
+  },
+  "rtp_llm_derivatives": {
+    "csrc/sparse_mla_sm120.cu": {
+      "sha256": "8a913a529083c13f17692aa702e511baa8a768eb4220a25c07890f290b19ee95",
+      "bytes": 13440,
+      "lines": 279,
+      "change": "Reject secondary index widths that do not cover complete prefill tiles before launch."
+    },
+    "csrc/sparse_mla_sm120_prefill.cu": {
+      "sha256": "6ad88405cdc957d1cabbf01293b3442c4f8f3a03ca9cfd42ec9473ad9966f94f",
+      "bytes": 20637,
+      "lines": 396,
+      "change": "Reject unsupported primary page sizes before launching prefill."
+    }
+  }
+}
