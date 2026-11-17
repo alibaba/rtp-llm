@@ -25,7 +25,7 @@ class DataBuffer;
 
 namespace navi_sched {
 
-static const int32_t NAVI_SCHED_DATA_VERSION = 18;
+static const int32_t NAVI_SCHED_DATA_VERSION = 19;
 static const int32_t NAVI_SCHED_LATENCY_RESIDUAL_VERSION = 2;
 static const size_t NAVI_SCHED_LATENCY_RESIDUAL_PARAMETER_COUNT = 19;
 NAVI_SCHED_API int64_t getNaviSchedRpcTimeoutMs(int64_t entryTimeoutMs);
@@ -210,6 +210,9 @@ struct NaviSchedWorkloadSnapshot {
     int32_t remainingPrefillRequestCount = 0;
     int32_t runningRequestCount = 0;
     double runningElapsedTimeMs = 0.0;
+    // Native PD capacity reports measure active prefill clocks. Other producers
+    // leave this unobserved and retain their existing capacity-based projection.
+    int32_t runningElapsedRequestCount = -1;
     int32_t runningDecodeRequestCount = 0;
     int64_t runningDecodeGeneratedTokenCount = 0;
     int64_t runningDecodeRemainingTokenBudget = 0;

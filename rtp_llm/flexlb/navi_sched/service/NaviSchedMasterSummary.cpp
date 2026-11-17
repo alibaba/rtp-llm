@@ -85,6 +85,7 @@ void NaviSchedMasterNodeSummary::Jsonize(JsonWrapper &json)
                  workload.remainingPrefillRequestCount);
     json.Jsonize("workload_running_request_count", workload.runningRequestCount);
     json.Jsonize("workload_running_elapsed_time_ms", workload.runningElapsedTimeMs);
+    json.Jsonize("workload_running_elapsed_request_count", workload.runningElapsedRequestCount);
     json.Jsonize("workload_running_decode_request_count",
                  workload.runningDecodeRequestCount);
     json.Jsonize("workload_running_decode_generated_tokens",
@@ -311,6 +312,7 @@ std::string NaviSchedMasterNodeSummary::format() const
         << ", waiting_requests=" << workload.waitingRequestCount
         << ", remaining_prefill_requests=" << workload.remainingPrefillRequestCount
         << ", running_elapsed_time_ms=" << workload.runningElapsedTimeMs
+        << ", running_elapsed_request_count=" << workload.runningElapsedRequestCount
         << ", running_decode_requests=" << workload.runningDecodeRequestCount
         << ", running_decode_generated_tokens="
         << workload.runningDecodeGeneratedTokenCount
