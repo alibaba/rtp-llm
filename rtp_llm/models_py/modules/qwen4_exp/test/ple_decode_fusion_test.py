@@ -328,45 +328,80 @@ class PLEDecodeFusionTest(unittest.TestCase):
                 )
                 self.assertEqual(bool((mode != 1).any().item()), staged)
 
-    def test_inline_bf16_hash_gather_graph_matches_separate_kernels(self):
+    def test_inline_hash_gather_graph_matches_separate_kernels(self):
         eos = 151643
         shard_size = 256
-        shards = [
-            torch.randn(shard_size, 160, dtype=torch.bfloat16).pin_memory()
-            for _ in range(4)
-        ]
-        embedding = Qwen4ExpNGramEmbedding(
-            shards,
-            torch.full((16,), 127, device="cuda", dtype=torch.int64),
-            torch.arange(16, device="cuda", dtype=torch.int64) * 128,
-            torch.tensor(
-                [8895235927375, -6951273546288326311, 1753814622540031003],
-                device="cuda", dtype=torch.int64,
-            ),
-            ngram_size=3, eos_token_id=eos, shard_indices=[0, 2, 5, 7],
-            total_shards=8, distributed_reduce=True, inline_cpu_uva_graph=True,
-        )
-        with patch.object(embedding, "_reduce_rows", side_effect=lambda x: x.flatten(-2)):
-            for batch in (16, 64, 128):
-                with self.subTest(batch=batch), embedding.lookup_context(True):
-                    history = torch.randint(eos, (batch, 3), device="cuda")
-                    embedding(history, 1)
-                    torch.cuda.synchronize()
-                    graph = torch.cuda.CUDAGraph()
-                    with patch.object(embedding, "_gather_local", side_effect=AssertionError):
-                        with torch.cuda.graph(graph):
-                            actual = embedding(history, 1)
-                    for column in range(3):
-                        history.random_(0, eos)
-                        history[0, column] = eos
+        cases = ((1, 1), (16, 1), (64, 1), (128, 1), (2, 2), (16, 4))
+        for dtype in (torch.bfloat16, torch.float8_e4m3fn):
+            shards = [
+                torch.randn(shard_size, 160, dtype=torch.bfloat16).to(dtype).pin_memory()
+                for _ in range(4)
+            ]
+            embedding = Qwen4ExpNGramEmbedding(
+                shards,
+                torch.full((16,), 127, device="cuda", dtype=torch.int64),
+                torch.arange(16, device="cuda", dtype=torch.int64) * 128,
+                torch.tensor(
+                    [8895235927375, -6951273546288326311, 1753814622540031003],
+                    device="cuda", dtype=torch.int64,
+                ),
+                ngram_size=3, eos_token_id=eos, shard_indices=[0, 2, 5, 7],
+                total_shards=8, distributed_reduce=True, inline_cpu_uva_graph=True,
+                weight_scale=torch.tensor(0.37) if dtype == torch.float8_e4m3fn else None,
+            )
+            with patch.object(
+                embedding, "_reduce_rows", side_effect=lambda x: x.flatten(-2)
+            ), embedding.lookup_context(True):
+                for batch, seq_len in cases:
+                    with self.subTest(dtype=dtype, batch=batch, seq_len=seq_len):
+                        history = torch.randint(eos, (batch, seq_len + 2), device="cuda")
+                        embedding(history, seq_len)
+                        torch.cuda.synchronize()
+                        graph = torch.cuda.CUDAGraph()
                         with patch.object(
-                            ple_gather_triton, "try_gather_hashed_decode", return_value=None,
-                        ):
-                            expected = embedding(history, 1)
-                        graph.replay()
-                        self.assert_exact((actual,), (expected,))
-                    del graph
-        embedding.close()
+                            embedding, "_gather_local", side_effect=AssertionError
+                        ), torch.cuda.graph(graph):
+                            actual = embedding(history, seq_len)
+                        for column in range(seq_len + 2):
+                            history.random_(0, eos)
+                            history[0, column] = eos
+                            with patch.object(
+                                ple_gather_triton,
+                                "try_gather_hashed_decode",
+                                return_value=None,
+                            ):
+                                expected = embedding(history, seq_len)
+                            graph.replay()
+                            self.assert_exact((actual,), (expected,))
+                        del graph
+            embedding.close()
+
+    def test_speculative_residual_uses_triton_without_mutating_history(self):
+        fixture = TailFixture(2)
+        fixture.ple_embedding = SimpleNamespace(context_len=2)
+        fixture.short_conv_state_len = fixture.initial.shape[1]
+        sequence = 4
+        hidden = torch.randn(2, sequence, 10240, device="cuda", dtype=torch.bfloat16)
+        history = torch.zeros(2, sequence + 2, device="cuda", dtype=torch.long)
+        fixture.gated = torch.randn_like(hidden)
+        fixture.normed = torch.randn_like(hidden)
+        fixture._gated_values = lambda *args, **kwargs: (fixture.gated, fixture.normed)
+        initial = fixture.initial.clone()
+        decode = Qwen4ExpPLELayer.decode_chunk
+        with patch.object(ple_conv_triton, "try_ple_conv", return_value=None):
+            expected, committed_inputs = decode(fixture, hidden, history, fixture.initial)
+        direct = ple_conv_triton.try_ple_conv(
+            fixture.gated, fixture.normed, fixture.initial,
+            fixture.conv_weight, fixture.conv_dilation, residual=hidden,
+        )
+        self.assertIsNotNone(direct)
+        actual, candidate_inputs = decode(
+            fixture, hidden, history, fixture.initial, add_residual=True
+        )
+        self.assert_exact(
+            (actual, direct, candidate_inputs, fixture.initial),
+            (hidden + expected, hidden + expected, committed_inputs, initial),
+        )
 
     def test_cache_plan_cross_page_independent_tables(self):
         lengths = torch.tensor([63, 64, 65, 128], device="cuda", dtype=torch.int32)

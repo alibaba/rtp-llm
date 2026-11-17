@@ -177,6 +177,7 @@ class PLETransactionCoordinator:
             hyper_states.reshape(batch_size, query_len, -1),
             history,
             initial_state,
+            add_residual=True,
             **({"embeddings": embeddings} if embeddings is not None else {}),
         )
 
@@ -232,7 +233,7 @@ class PLETransactionCoordinator:
                 f"qwen4_exp PLE target layer {layer_idx} was staged twice"
             )
         transaction.stages[layer_idx] = stage
-        return hyper_states + output.reshape_as(hyper_states)
+        return output.reshape_as(hyper_states)
 
     @staticmethod
     def _synchronize_ple_transaction(transaction: _PLETargetTransaction) -> None:
