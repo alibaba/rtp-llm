@@ -594,11 +594,31 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         }
         if (src.is_cuda()) {
             RTP_LLM_PROFILE_SCOPE("stridedCopyHost(D2H)");
-            if (src.dim() < 2) {
+            // Avoid TensorIterator/view construction on every cache group in
+            // every draft step. Preserve the current-stream D2H/event contract.
+            void* stream = reinterpret_cast<void*>(cuda_graph::graphGetCurrentStream().stream());
+            if (src.dim() < 2 && src.is_contiguous() && dst.is_contiguous()) {
+                cuda_graph::graphMemcpyAsync(dst.data_ptr(),
+                                             src.data_ptr(),
+                                             geometry.cols * src.element_size(),
+                                             cuda_graph::GraphMemcpyKind::D2H,
+                                             stream);
+            } else if (src.dim() == 2 && src.stride(1) == 1 && dst.stride(1) == 1 && src.stride(0) >= geometry.cols
+                       && dst.stride(0) >= geometry.cols) {
+                cuda_graph::graphMemcpy2DAsync(dst.data_ptr(),
+                                               dst.stride(0) * dst.element_size(),
+                                               src.data_ptr(),
+                                               src.stride(0) * src.element_size(),
+                                               geometry.cols * src.element_size(),
+                                               geometry.rows,
+                                               cuda_graph::GraphMemcpyKind::D2H,
+                                               stream);
+            } else if (src.dim() < 2) {
                 dst.view({-1})
                     .narrow(0, 0, geometry.cols)
                     .copy_(src.view({-1}).narrow(0, 0, geometry.cols), /*non_blocking=*/true);
             } else {
+                // General column-strided tensors retain Torch's copy semantics.
                 dst.narrow(0, 0, geometry.rows)
                     .narrow(1, 0, geometry.cols)
                     .copy_(src.narrow(0, 0, geometry.rows).narrow(1, 0, geometry.cols), /*non_blocking=*/true);
