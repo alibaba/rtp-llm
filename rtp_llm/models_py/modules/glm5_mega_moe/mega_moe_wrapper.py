@@ -12,8 +12,10 @@ from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
+
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     resolve_moe_max_tokens_per_rank,
+    synchronized_moe_chunk_tokens,
 )
 
 from .mega_moe import GLM5MegaMoE
@@ -72,11 +74,22 @@ class MegaMoeWrapper(nn.Module):
 
         ep_size = parallelism_config.ep_size
         ep_rank = parallelism_config.ep_rank
+        if (
+            ep_size <= 1
+            or parallelism_config.world_size != ep_size
+            or parallelism_config.world_rank != ep_rank
+        ):
+            raise ValueError(
+                "GLM5 MegaMoE requires EP == WORLD with ep_size > 1: "
+                f"WORLD rank {parallelism_config.world_rank}/"
+                f"{parallelism_config.world_size}, EP rank {ep_rank}/{ep_size}"
+            )
 
         dim = config.hidden_size
         n_routed_experts = config.expert_num
         n_activated_experts = config.moe_k
-        swiglu_limit = float(getattr(config, "swiglu_limit", 10.0) or 10.0)
+        limit = getattr(config, "swiglu_limit", None)
+        swiglu_limit = 10.0 if limit is None else float(limit)
 
         moe_inter_dim_raw = getattr(config, "moe_inter_size", None) or None
         if moe_inter_dim_raw is None or moe_inter_dim_raw == 0:
@@ -103,6 +116,7 @@ class MegaMoeWrapper(nn.Module):
                 is_decode_role = role_type == RoleType.DECODE
         except Exception:
             pass
+        self._is_decode_role = is_decode_role
 
         # Resolve CP: when prefill_cp_config is enabled, per-rank tokens
         # are bounded by max_seq_len / cp_size (same logic as DSv4).
@@ -228,7 +242,23 @@ class MegaMoeWrapper(nn.Module):
         # must not enlarge the logical execution budget (including FP8's
         # validated specialization limit).
         capacity = min(capacity, self.mega_moe.cfg.max_tokens_per_rank)
-        if capacity <= 0 or tokens <= capacity:
+        if capacity <= 0:
+            raise ValueError(f"MegaMoE token capacity must be positive, got {capacity}")
+        capturing = (
+            torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
+        )
+        if self._is_decode_role or capturing:
+            if tokens > capacity:
+                raise ValueError(
+                    f"Decode/CUDA graph MegaMoE input tokens={tokens} "
+                    f"exceeds capacity={capacity}"
+                )
+            return forward_fn(hidden_states, topk_weights, topk_ids)
+
+        chunk_tokens = synchronized_moe_chunk_tokens(
+            tokens, hidden_states.device, group=self.mega_moe._mega_group
+        )
+        if chunk_tokens <= capacity:
             return forward_fn(hidden_states, topk_weights, topk_ids)
 
         global _CHUNKED_GLM5_MOE_LOGGED
@@ -239,14 +269,16 @@ class MegaMoeWrapper(nn.Module):
                 "chunk_tokens=%d chunks=%d hidden=%s device=%s",
                 tokens,
                 capacity,
-                (tokens + capacity - 1) // capacity,
+                (chunk_tokens + capacity - 1) // capacity,
                 tuple(hidden_states.shape),
                 hidden_states.device,
             )
 
         output = torch.empty_like(hidden_states)
-        for token_start in range(0, tokens, capacity):
-            token_end = min(token_start + capacity, tokens)
+        for chunk_start in range(0, chunk_tokens, capacity):
+            # Empty ranks must still enter every EP kernel invocation.
+            token_start = min(chunk_start, tokens)
+            token_end = min(chunk_start + capacity, tokens)
             output[token_start:token_end].copy_(
                 forward_fn(
                     hidden_states[token_start:token_end],
@@ -261,18 +293,22 @@ class MegaMoeWrapper(nn.Module):
         nn.Module.__init__(clone)
         clone.mega_moe = self.mega_moe.clone_for_cuda_graph()
         clone.expert_num = self.expert_num
+        clone._is_decode_role = self._is_decode_role
         return clone
 
     @property
     def topk_ids_dtype(self) -> torch.dtype:
         return torch.int64
 
-    def prepacked_input_views(
-        self, tokens: int
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def prepacked_input_views(self, tokens: int) -> tuple[Optional[torch.Tensor], ...]:
+        # Prefill must use the synchronized chunk path on every EP rank.
+        if not self._is_decode_role:
+            return None, None, None, None
         return self.mega_moe.prepacked_input_views(tokens)
 
     def forward_prepacked(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if not self._is_decode_role:
+            raise ValueError("Prepacked MegaMoE inputs are supported only for decode")
         return self.mega_moe.forward_prepacked(hidden_states)
 
     def forward(

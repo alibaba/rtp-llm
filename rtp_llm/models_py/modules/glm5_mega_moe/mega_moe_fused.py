@@ -13,6 +13,10 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.parallelism import (
+    get_world_ep_group,
+)
+
 from .input_packer import get_mega_moe_input_packer
 from .jit_warmup import format_token_counts, mega_moe_jit_warmup_enabled
 from .mega_buf import get_or_create_mega_output
@@ -101,10 +105,7 @@ class GLM5MegaMoEFused(GLM5MegaMoE):
         cfg = self.cfg
         device = self._mega_l1_w.device
 
-        assert (
-            dist.is_initialized()
-        ), "GLM5 MegaMoE Fused requires torch.distributed initialised"
-        group = dist.group.WORLD
+        group = get_world_ep_group(cfg, dist)
         self._mega_group = group
 
         self._mega_buf = get_or_create_mega_buf_fused(

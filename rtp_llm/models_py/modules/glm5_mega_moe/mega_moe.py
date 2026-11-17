@@ -23,6 +23,10 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.parallelism import (
+    get_world_ep_group,
+)
+
 try:
     from rtp_llm.ops.compute_ops import cuda_graph_warmup_forward_enabled
 except ImportError:
@@ -563,10 +567,7 @@ class GLM5MegaMoE(nn.Module):
         cfg = self.cfg
         device = self._mega_l1_w.device
 
-        assert (
-            dist.is_initialized()
-        ), "GLM5 MegaMoE requires torch.distributed initialised"
-        group = dist.group.WORLD
+        group = get_world_ep_group(cfg, dist)
         self._mega_group = group
 
         self._mega_buf = get_or_create_mega_buf(

@@ -8,6 +8,10 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.parallelism import (
+    get_world_ep_group,
+)
+
 from .input_packer import get_mega_moe_input_packer
 from .mega_buf import get_or_create_mega_output
 from .mega_fp8_buf import get_or_create_mega_buf_fp8
@@ -61,15 +65,12 @@ class GLM5MegaMoEFP8SE(GLM5MegaMoEFP8):
 
         cfg = self.cfg
         device = self._mega_l1_w.device
-        assert (
-            dist.is_initialized()
-        ), "GLM5 MegaMoE FP8 SE requires torch.distributed initialised"
         if cfg.n_activated_experts > 31:
             raise ValueError(
                 "mega_moe_fp8_se requires topk <= 31 because the shared expert "
                 f"uses one of 32 combine slots, got topk={cfg.n_activated_experts}"
             )
-        group = dist.group.WORLD
+        group = get_world_ep_group(cfg, dist)
         self._mega_group = group
         self._mega_buf = get_or_create_mega_buf_fp8(
             group=group,
