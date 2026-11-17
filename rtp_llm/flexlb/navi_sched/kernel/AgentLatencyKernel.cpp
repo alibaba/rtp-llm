@@ -543,7 +543,10 @@ bool AgentLatencyKernel::retireUnifiedBatch(AgentLatencyInput &input,
                     input.queries, state.readyRunningRequestIds,
                     input.precedingFeatures, current)) return false;
         }
-        input.unifiedLatencySample = true;
+        input.unifiedLatencySample =
+            !_agentReportR || !_agentReportR->usesPdUnifiedCapacitySplit() ||
+            useCompletedCapacityFeatures;
+        input.latencySampleValid = input.latencySampleValid && input.unifiedLatencySample;
         input.modelLatencyMs =
             std::max<int64_t>(0, input.eventTimeUs - state.readyTimeUs) / 1000.0 *
             _timeCompression;

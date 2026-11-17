@@ -633,6 +633,8 @@ def _native_pd_latency_model_fingerprint(
             if capacity_split_prediction
             else "unified_native_prefill_admission_v1"
         )
+        if capacity_split_prediction:
+            values["unified_capacity_training_scope"] = "forwarded_batch_completion_v1"
     values["cache_prediction_version"] = 1
     values["execution_completion_boundary"] = "scheduler_update_complete_v1"
     values["execution_start_boundary"] = (
