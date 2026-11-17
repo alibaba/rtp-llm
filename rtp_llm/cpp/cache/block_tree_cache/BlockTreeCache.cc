@@ -272,6 +272,10 @@ void BlockTreeCache::reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& exec
     metrics_reporter_->reportUnfreezeMetrics(execution);
 }
 
+void BlockTreeCache::reportUnfreezeZeroMetrics(const std::vector<CachePoolMetrics>& pools) const {
+    metrics_reporter_->reportUnfreezeZeroMetrics(pools);
+}
+
 void BlockTreeCache::reportMetrics() const {
     EvictionVictimMetrics metrics_data;
     {
