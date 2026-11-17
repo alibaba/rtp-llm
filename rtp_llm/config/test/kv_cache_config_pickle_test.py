@@ -1,4 +1,5 @@
 import pickle
+from itertools import product
 from unittest import TestCase, main
 
 from rtp_llm.config.test.kv_cache_event_test_values import KV_CACHE_EVENT_FIELD_VALUES
@@ -85,8 +86,8 @@ class KVCacheConfigPickleTest(TestCase):
         config.reserve_block_ratio = 9
         config.kv_cache_event_instance_group = "weighted-pools"
         state = config.__getstate__()
-        self.assertEqual(state[:2], ("KVCacheConfig", 25))
-        self.assertEqual(len(state), 81)
+        self.assertEqual(state[:2], ("KVCacheConfig", 26))
+        self.assertEqual(len(state), 82)
         self.assertEqual(state[80], config.kv_cache_pool_block_weights)
         self.assertTrue(state[79])
 
@@ -142,15 +143,16 @@ class KVCacheConfigPickleTest(TestCase):
         config.disk_cache_paths = "/tmp/cache"
         for name, value in BASE_EVENT_FIELD_VALUES.items():
             setattr(config, name, value)
-        for enable_crc in (False, True):
-            with self.subTest(enable_crc=enable_crc):
+        for enable_crc, shared_policy in product((False, True), (-1, 0, 1)):
+            with self.subTest(enable_crc=enable_crc, shared_policy=shared_policy):
                 config.enable_crc = enable_crc
+                config.shared_hybrid_cache = shared_policy
                 config.enable_linear_cache_reclaim = True
                 config.kv_cache_pool_block_weights = '{"full":7,"linear":2}'
                 state = config.__getstate__()
                 v22_state = _version_twenty_two_state(config)
-                self.assertEqual(len(state), 81)
-                self.assertEqual(state[:2], ("KVCacheConfig", 25))
+                self.assertEqual(len(state), 82)
+                self.assertEqual(state[:2], ("KVCacheConfig", 26))
                 self.assertEqual(state[63:68], tuple(BASE_EVENT_FIELD_VALUES.values()))
                 self.assertIs(state[68], enable_crc)
                 self.assertEqual(state[77], 6)
@@ -158,6 +160,7 @@ class KVCacheConfigPickleTest(TestCase):
                 # main's v23 fields.
                 self.assertTrue(state[79])
                 self.assertEqual(state[80], '{"full":7,"linear":2}')
+                self.assertEqual(state[81], shared_policy)
                 # Restoring fields must not mutate the supplied tuple.
                 original_state = tuple(list(state))
                 direct = KVCacheConfig.__new__(KVCacheConfig)
@@ -166,9 +169,12 @@ class KVCacheConfigPickleTest(TestCase):
                 self.assertEqual(direct.__getstate__(), original_state)
                 restored = pickle.loads(pickle.dumps(config))
                 self.assertIs(restored.enable_crc, enable_crc)
+                self.assertEqual(restored.shared_hybrid_cache, shared_policy)
                 self.assertEqual(restored.block_tree_task_pool_size, 6)
                 self.assertTrue(restored.enable_linear_cache_reclaim)
-                self.assertEqual(restored.kv_cache_pool_block_weights, '{"full":7,"linear":2}')
+                self.assertEqual(
+                    restored.kv_cache_pool_block_weights, '{"full":7,"linear":2}'
+                )
                 self.assertEqual(restored.block_tree_transfer_worker_count, 7)
                 self.assertEqual(
                     restored.disk_cache_evict_max_pending_bytes, 80 * 1024 * 1024
@@ -216,6 +222,38 @@ class KVCacheConfigPickleTest(TestCase):
                     restored.disk_cache_evict_max_pending_bytes, 100 * 1024 * 1024
                 )
                 self.assertFalse(restored.enable_linear_cache_reclaim)
+
+    def test_legacy_glm_states_retain_pool_budgets_and_shared_policy(self):
+        source = KVCacheConfig()
+        source.reuse_cache_tail_blocks = 13
+        source.linear_pool_blocks = 31
+        source.swa_pool_blocks = 17
+        source.enable_crc = False
+        state = _version_twenty_two_state(source)
+        prefix = state[2:72]
+        for previous, shared_policy in (
+            ((state[0], 9, *prefix), 0),
+            ((state[0], 10, *prefix, 1), 1),
+        ):
+            with self.subTest(version=previous[1]):
+                original = tuple(list(previous))
+                restored = KVCacheConfig.__new__(KVCacheConfig)
+                restored.__setstate__(previous)
+                self.assertEqual(previous, original)
+                self.assertEqual(restored.shared_hybrid_cache, shared_policy)
+                self.assertEqual(restored.reuse_cache_tail_blocks, 13)
+                self.assertEqual(restored.linear_pool_blocks, 31)
+                self.assertEqual(restored.swa_pool_blocks, 17)
+                self.assertFalse(restored.enable_crc)
+
+    def test_invalid_shared_policies_are_rejected(self):
+        state = KVCacheConfig().__getstate__()
+        for policy in (-2, 2):
+            with self.subTest(policy=policy), self.assertRaisesRegex(
+                RuntimeError, "invalid shared hybrid cache policy"
+            ):
+                restored = KVCacheConfig.__new__(KVCacheConfig)
+                restored.__setstate__((*state[:-1], policy))
 
     def test_version_seven_preserves_events_and_enables_crc_by_default(self):
         source = KVCacheConfig()
@@ -285,7 +323,7 @@ class KVCacheConfigPickleTest(TestCase):
                 restored = KVCacheConfig.__new__(KVCacheConfig)
                 restored.__setstate__(previous)
                 self.assertEqual(previous, original)
-                self.assertEqual(restored.__getstate__(), state)
+                self.assertEqual(restored.__getstate__(), (*state[:-1], 0))
                 self.assertFalse(
                     hasattr(restored, "block_pool_frozen_abort_lower_ratio")
                 )
@@ -303,7 +341,7 @@ class KVCacheConfigPickleTest(TestCase):
 
         restored = KVCacheConfig.__new__(KVCacheConfig)
         restored.__setstate__(_version_twenty_two_state(config))
-        self.assertEqual(restored.__getstate__(), config.__getstate__())
+        self.assertEqual(restored.__getstate__(), (*config.__getstate__()[:-1], 0))
 
     def test_disk_timeout_defaults_and_overrides_survive_worker_round_trips(self):
         self.assertEqual(KVCacheConfig().disk_cache_sync_timeout_ms, 3000)
@@ -411,8 +449,7 @@ class KVCacheConfigPickleTest(TestCase):
                 for _ in range(2):
                     config = pickle.loads(pickle.dumps(config))
                     self.assertEqual(getattr(config, name), timeout)
-                    # v25 keeps frozen timeout at index 78; the v24/v25 tail
-                    # flags follow it.
+                    # Newer versions append their fields after the frozen timeout.
                     self.assertEqual(config.__getstate__()[78], timeout)
                     self.assertIn(f"{name}: {timeout}\n", config.to_string())
         for timeout in (-1, 2**31):
@@ -421,7 +458,7 @@ class KVCacheConfigPickleTest(TestCase):
             ):
                 state = KVCacheConfig().__getstate__()
                 restored = KVCacheConfig.__new__(KVCacheConfig)
-                restored.__setstate__((*state[:78], timeout, state[79], state[80]))
+                restored.__setstate__((*state[:78], timeout, *state[79:]))
 
     def test_previous_versions_use_default_frozen_force_release_timeout(self):
         source = KVCacheConfig()
