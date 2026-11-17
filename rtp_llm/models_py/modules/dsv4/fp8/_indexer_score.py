@@ -29,6 +29,9 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_cache_view import (
+    paged_indexer_cache_view,
+)
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
@@ -152,15 +155,7 @@ def fp8_paged_indexer_score(
     assert kv_pool_uint8.shape[-1] == INDEXER_ENTRY_BYTES
     assert block_table.dtype == torch.int32 and block_table.dim() == 2
     assert context_lens.dtype == torch.int32 and context_lens.dim() == 2
-    # DeepGEMM kv_cache shape: [num_blocks, block_size, 1, D+4] uint8.
-    # Our pool is a flat [total_slots, 132] view; reshape into the 4D
-    # layout (no copy — just a metadata change).
-    total_slots = kv_pool_uint8.shape[0]
-    assert (
-        total_slots % block_size == 0
-    ), f"total_slots={total_slots} not divisible by block_size={block_size}"
-    num_blocks = total_slots // block_size
-    kv_4d = kv_pool_uint8.view(num_blocks, block_size, 1, INDEXER_ENTRY_BYTES)
+    kv_4d = paged_indexer_cache_view(kv_pool_uint8, block_size)
 
     if not supports_paged_mqa_logits(q_fp8.device, block_size):
         from rtp_llm.models_py.triton_kernels.legacy_fp8_indexer_score import (
