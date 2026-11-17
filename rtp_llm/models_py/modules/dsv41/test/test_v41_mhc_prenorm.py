@@ -262,7 +262,10 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
     @torch.no_grad()
     @patch.dict(os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "deepgemm"})
     def test_token_boundaries_and_3d_4d_layouts(self):
-        for tokens in (1, 6, 24, 31, 64, 65, 128, 384, 512):
+        supported = (1, 6, 24, 31, 64)
+        if is_sm90():
+            supported += (65, 128, 256)
+        for tokens in supported:
             residual, fn, base, scale = self._inputs(tokens)
             batch = 4 if tokens in (24, 64) else 1
             for layout in (residual, residual.reshape(batch, -1, 4, 5120)):
@@ -270,6 +273,11 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
                     self.assertTrue(is_supported(layout, fn))
                     actual = self._check_mixes_and_coefficients(layout, fn, base, scale)
                     self.assertEqual(actual.shape, (*layout.shape[:-2], 24))
+        for tokens in (supported[-1] + 1, 384, 512):
+            with self.subTest(tokens=tokens):
+                residual, fn, _, _ = self._inputs(tokens)
+                self.assertFalse(is_supported(residual, fn))
+                self.assertIsNone(prenorm(residual, fn, _EPS))
 
     @torch.no_grad()
     def test_explicit_tilelang_backends_keep_large_token_fallback(self):
