@@ -513,13 +513,6 @@ torch::Tensor sampleFromProbs(const torch::Tensor& probabilities) {
     return token_ids;
 }
 
-void prepareDSparkLogits(const torch::Tensor& base_logits,
-                         const torch::Tensor& markov_bias,
-                         const torch::Tensor& temperature,
-                         torch::Tensor&       output) {
-    prepare_dspark_logits(base_logits, markov_bias, temperature, output);
-}
-
 void rejectionSampling(const RejectionSamplingParams& params) {
     auto config = validateRejectionSamplingParams(params);
     auto stream = at::cuda::getCurrentCUDAStream().stream();

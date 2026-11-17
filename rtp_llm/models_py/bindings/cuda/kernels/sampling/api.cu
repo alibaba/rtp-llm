@@ -3,7 +3,6 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAException.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -20,35 +19,6 @@
 
 namespace rtp_llm {
 namespace {
-
-template<typename BiasType>
-__device__ __forceinline__ float dspark_bias_to_float(BiasType value) {
-    return static_cast<float>(value);
-}
-
-template<>
-__device__ __forceinline__ float dspark_bias_to_float<__nv_bfloat16>(__nv_bfloat16 value) {
-    return __bfloat162float(value);
-}
-
-template<typename BiasType>
-__global__ void prepare_dspark_logits_kernel(const float* __restrict__ base_logits,
-                                             const BiasType* __restrict__ markov_bias,
-                                             const float* __restrict__ temperature,
-                                             float* __restrict__ output,
-                                             int64_t numel,
-                                             int64_t vocab_size,
-                                             int64_t base_row_stride) {
-    for (int64_t index = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < numel;
-         index += static_cast<int64_t>(blockDim.x) * gridDim.x) {
-        const int64_t row        = index / vocab_size;
-        const int64_t column     = index - row * vocab_size;
-        const float   base_value = base_logits[row * base_row_stride + column];
-        // Preserve the two materialized FP32 roundings from eager add then divide.
-        const float   sum        = __fadd_rn(base_value, dspark_bias_to_float(markov_bias[index]));
-        output[index]            = __fdiv_rn(sum, temperature[row]);
-    }
-}
 
 void check_renorm_inputs(const torch::Tensor& probs, const torch::Tensor& renorm_probs) {
     TORCH_CHECK(probs.is_cuda(), "probs must be a CUDA tensor");
@@ -433,59 +403,6 @@ void top_k_renorm_probs(torch::Tensor                probs,
             TORCH_CHECK(false, "unsupported dtype for top_k_renorm_probs");
     }
     check_cuda_status(status, "RadixTopKRenormProbMultiCTA");
-}
-
-void prepare_dspark_logits(const torch::Tensor& base_logits,
-                           const torch::Tensor& markov_bias,
-                           const torch::Tensor& temperature,
-                           torch::Tensor&       output,
-                           int64_t              cuda_stream) {
-    TORCH_CHECK(base_logits.is_cuda() && base_logits.scalar_type() == at::kFloat && base_logits.dim() == 2
-                    && base_logits.stride(1) == 1,
-                "DSpARK base_logits must be CUDA FP32 [batch,vocab] with contiguous vocab rows");
-    TORCH_CHECK(markov_bias.is_cuda()
-                    && (markov_bias.scalar_type() == at::kBFloat16 || markov_bias.scalar_type() == at::kFloat)
-                    && markov_bias.dim() == 2 && markov_bias.is_contiguous(),
-                "DSpARK markov_bias must be contiguous CUDA BF16/FP32 [batch,vocab]");
-    TORCH_CHECK(temperature.is_cuda() && temperature.scalar_type() == at::kFloat && temperature.dim() == 1
-                    && temperature.is_contiguous(),
-                "DSpARK temperature must be contiguous CUDA FP32 [batch]");
-    TORCH_CHECK(output.is_cuda() && output.scalar_type() == at::kFloat && output.dim() == 2 && output.is_contiguous(),
-                "DSpARK output must be contiguous CUDA FP32 [batch,vocab]");
-    TORCH_CHECK(markov_bias.sizes() == base_logits.sizes(), "DSpARK markov_bias shape must match base_logits");
-    TORCH_CHECK(output.sizes() == base_logits.sizes(), "DSpARK output shape must match base_logits");
-    TORCH_CHECK(temperature.numel() == base_logits.size(0), "DSpARK temperature length must match batch size");
-    TORCH_CHECK(markov_bias.device() == base_logits.device() && temperature.device() == base_logits.device()
-                    && output.device() == base_logits.device(),
-                "DSpARK prepare logits tensors must be on the same device");
-
-    if (base_logits.numel() == 0) {
-        return;
-    }
-
-    at::cuda::CUDAGuard device_guard(base_logits.device());
-    constexpr int      threads = 256;
-    const int64_t      blocks  = std::min<int64_t>((base_logits.numel() + threads - 1) / threads, 4096);
-    auto               stream  = resolve_stream(cuda_stream);
-    if (markov_bias.scalar_type() == at::kBFloat16) {
-        prepare_dspark_logits_kernel<<<blocks, threads, 0, stream>>>(base_logits.data_ptr<float>(),
-                                                                    reinterpret_cast<const __nv_bfloat16*>(
-                                                                        markov_bias.data_ptr<at::BFloat16>()),
-                                                                    temperature.data_ptr<float>(),
-                                                                    output.data_ptr<float>(),
-                                                                    base_logits.numel(),
-                                                                    base_logits.size(1),
-                                                                    base_logits.stride(0));
-    } else {
-        prepare_dspark_logits_kernel<<<blocks, threads, 0, stream>>>(base_logits.data_ptr<float>(),
-                                                                    markov_bias.data_ptr<float>(),
-                                                                    temperature.data_ptr<float>(),
-                                                                    output.data_ptr<float>(),
-                                                                    base_logits.numel(),
-                                                                    base_logits.size(1),
-                                                                    base_logits.stride(0));
-    }
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 }  // namespace rtp_llm
