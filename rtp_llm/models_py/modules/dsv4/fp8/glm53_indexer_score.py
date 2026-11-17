@@ -26,8 +26,12 @@ Caller is responsible for FP8 quantizing Q via
 from __future__ import annotations
 
 import torch
+
 from rtp_llm.models_py.kernels.cuda import fp8_mqa
 from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_score
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_cache_view import (
+    paged_indexer_cache_view,
+)
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_quant_triton import (
     INDEXER_ENTRY_BYTES,
     INDEXER_HEAD_DIM,
@@ -70,7 +74,13 @@ def fp8_paged_indexer_score(
 
     if not _HAS_NATIVE_MQA:
         return _indexer_score.fp8_paged_indexer_score(
-            q_fp8, w_fold, kv_pool_uint8, block_table, context_lens, block_size, max_ctx_len
+            q_fp8,
+            w_fold,
+            kv_pool_uint8,
+            block_table,
+            context_lens,
+            block_size,
+            max_ctx_len,
         )
     assert q_fp8.dtype == torch.float8_e4m3fn, f"q_fp8 dtype={q_fp8.dtype}"
     assert q_fp8.dim() == 4 and q_fp8.shape[-1] == INDEXER_HEAD_DIM
@@ -79,20 +89,10 @@ def fp8_paged_indexer_score(
     assert kv_pool_uint8.shape[-1] == INDEXER_ENTRY_BYTES
     assert block_table.dtype == torch.int32 and block_table.dim() == 2
     assert context_lens.dtype == torch.int32 and context_lens.dim() == 2
-    # DeepGEMM kv_cache shape: [num_blocks, block_size, 1, D+4] uint8.
-    # Our pool is a flat [total_slots, 132] view; reshape into the 4D
-    # layout (no copy — just a metadata change).
-    total_slots = kv_pool_uint8.shape[0]
-    assert (
-        total_slots % block_size == 0
-    ), f"total_slots={total_slots} not divisible by block_size={block_size}"
-    num_blocks = total_slots // block_size
-    kv_4d = kv_pool_uint8.view(num_blocks, block_size, 1, INDEXER_ENTRY_BYTES)
+    kv_4d = paged_indexer_cache_view(kv_pool_uint8, block_size)
 
     num_sms = fp8_mqa.get_num_sms()
-    schedule = fp8_mqa.get_paged_mqa_logits_metadata(
-        context_lens, block_size, num_sms
-    )
+    schedule = fp8_mqa.get_paged_mqa_logits_metadata(context_lens, block_size, num_sms)
     return fp8_mqa.fp8_paged_mqa_logits(
         q_fp8.contiguous(),
         kv_4d,

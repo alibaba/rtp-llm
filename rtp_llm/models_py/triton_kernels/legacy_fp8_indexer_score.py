@@ -67,10 +67,9 @@ def _score(
         )
         # DeepGEMM's fused 132-byte pool is block-planar: each page holds
         # PAGE*128 K bytes followed by PAGE*4 scale bytes. Slot (page, off)
-        # therefore reads K at page*PAGE*132 + off*128 and its FP32 scale
-        # at page*PAGE*132 + PAGE*128 + off*4; both are naturally aligned
-        # for the page sizes DeepGEMM accepts.
-        block = physical_page.to(tl.int64) * (PAGE * 132)
+        # K_ROW is the physical byte pitch of a paged cache block. Shared
+        # arenas may place other groups' payloads in the gap after this page.
+        block = physical_page.to(tl.int64) * K_ROW
         off = n % PAGE
         raw = tl.load(
             K + block[None, :] + off[None, :] * 128 + d[:, None],
@@ -177,9 +176,16 @@ def legacy_fp8_paged_mqa_logits(
         or context_lens.numel() != batch * next_n
     ):
         raise ValueError("legacy paged MQA weights or context lengths mismatch")
-    q, kv_cache, block_table = (
+    if (
+        kv_cache.stride(3) != 1
+        or kv_cache.stride(1) != 132
+        or kv_cache.stride(0) < kv_cache.shape[1] * 132
+    ):
+        raise ValueError(
+            "legacy paged MQA requires packed, nonoverlapping page payloads"
+        )
+    q, block_table = (
         q.contiguous(),
-        kv_cache.contiguous(),
         block_table.contiguous(),
     )
     context_lens = context_lens.reshape(-1).contiguous()
@@ -254,7 +260,7 @@ def legacy_fp8_paged_mqa_logits(
         heads,
         q.stride(1),
         q.stride(2),
-        132,
+        kv_cache.stride(0),
         1,
         weights.stride(0),
         weights.stride(1),

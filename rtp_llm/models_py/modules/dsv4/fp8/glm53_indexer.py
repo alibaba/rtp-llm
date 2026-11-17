@@ -23,6 +23,7 @@ from typing import Any, Callable, Dict, NamedTuple, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.cp import (
@@ -773,7 +774,9 @@ class IndexerFP8(PoolBackedModule):
             )
             return
 
-        from rtp_llm.models_py.modules.dsv4.fp8 import _glm53_indexer_cp_assembler as asm
+        from rtp_llm.models_py.modules.dsv4.fp8 import (
+            _glm53_indexer_cp_assembler as asm,
+        )
 
         plan = attention_inputs.indexer_cp_plan
         actual_cu = attention_inputs.indexer_cp_local_cu
@@ -985,19 +988,12 @@ class IndexerFP8(PoolBackedModule):
                 )
             ctx_lens_2d = compressed_len.view(bsz, q_len)
             bt_i32 = self._kv_block_table[:bsz].to(torch.int32).contiguous()
-            # ``_kv_pool_view`` is 3D ``[num_blocks, eb, 132]`` from production
-            # (set by ``Attention._set_compressor_pool_context``); standalone
-            # tests still pass flat 2D. Flatten to ``[total_slots, 132]``
-            # (no copy — INDEXER pool is contiguous, no padding) for DeepGEMM.
-            pool_2d = (
-                self._kv_pool_view.flatten(0, 1)
-                if self._kv_pool_view.dim() == 3
-                else self._kv_pool_view
-            )
+            # Shared arenas leave gaps between blocks. Pass the block view
+            # through to the scorer so it preserves that pitch without copying.
             logits = fp8_paged_indexer_score(
                 q_fp8,
                 w_fold.view(bsz * q_len, self.n_heads),
-                pool_2d,
+                self._kv_pool_view,
                 bt_i32,
                 ctx_lens_2d,
                 block_size=self._kv_eb,
@@ -1273,7 +1269,9 @@ class IndexerFP8(PoolBackedModule):
             and kv_eb > 0
             and T > 0
         ):
-            from rtp_llm.models_py.modules.dsv4.fp8 import _glm53_indexer_cp_assembler as asm
+            from rtp_llm.models_py.modules.dsv4.fp8 import (
+                _glm53_indexer_cp_assembler as asm,
+            )
 
             with record_function_range("dsv4.fp8.indexer.prepare.cp_gather_plan"):
                 cu = cu_kv_seqlens.to(torch.int64)

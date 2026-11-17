@@ -4,6 +4,10 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv4.fp8._indexer_cache_view import (
+    paged_indexer_cache_view,
+)
+
 
 @triton.jit
 def _score(
@@ -17,6 +21,7 @@ def _score(
     HEADS: tl.constexpr,
     HEAD_TILE: tl.constexpr,
     PAGE: tl.constexpr,
+    PAGE_STRIDE: tl.constexpr,
     TABLE_STRIDE: tl.constexpr,
     WIDTH: tl.constexpr,
     QUERY_TILE: tl.constexpr,
@@ -50,12 +55,12 @@ def _score(
         other=0,
     ).to(tl.float8e4nv, bitcast=True)
     k = tl.load(
-        Cache + page[:, None] * (PAGE * 132) + offsets[:, None] * 128 + dim[None, :],
+        Cache + page[:, None] * PAGE_STRIDE + offsets[:, None] * 128 + dim[None, :],
         valid_keys[:, None],
         other=0,
     ).to(tl.float8e4nv, bitcast=True)
     scales = tl.load(
-        (Cache + page * (PAGE * 132) + PAGE * 128 + offsets * 4).to(
+        (Cache + page * PAGE_STRIDE + PAGE * 128 + offsets * 4).to(
             tl.pointer_type(tl.float32)
         ),
         valid_keys,
@@ -101,7 +106,7 @@ def small_page_indexer_score(q, weights, cache, table, lengths, block_size, widt
     assert weights.shape == (batch * next_n, heads) and weights.dtype == torch.float32
     assert lengths.shape == (batch, next_n) and lengths.dtype == torch.int32
     assert table.shape[0] == batch and table.dtype == torch.int32
-    assert cache.dtype == torch.uint8 and cache.is_contiguous()
+    cache = paged_indexer_cache_view(cache, block_size)
     out = torch.empty((batch * next_n, width), dtype=torch.float32, device=q.device)
     if out.numel():
         head_tile = max(16, triton.next_power_of_2(heads))
@@ -120,6 +125,7 @@ def small_page_indexer_score(q, weights, cache, table, lengths, block_size, widt
             heads,
             head_tile,
             block_size,
+            cache.stride(0),
             table.shape[1],
             width,
             query_tile,
