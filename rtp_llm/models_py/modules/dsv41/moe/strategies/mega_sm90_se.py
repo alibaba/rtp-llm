@@ -134,7 +134,7 @@ class SM90MegaMoEFusedSEStrategy(SM90MegaMoEStrategy):
                 "num_shared_experts=1; check the native G32 DeepGEMM wheel"
             )
 
-    def _launch(self, y: torch.Tensor, tokens: int) -> None:
+    def _launch(self, y: torch.Tensor, tokens: int, expert_load=None) -> None:
         import deep_gemm
 
         if y.device.index != torch.cuda.current_device():
@@ -154,6 +154,9 @@ class SM90MegaMoEFusedSEStrategy(SM90MegaMoEStrategy):
             ),
             fast_math=True,
             num_tokens_bound=tokens,
+            cumulative_local_expert_recv_stats=(
+                expert_load.expert_token_counts if expert_load is not None else None
+            ),
             shared_l1_weights=self._shared_l1,
             shared_l2_weights=self._shared_l2,
         )

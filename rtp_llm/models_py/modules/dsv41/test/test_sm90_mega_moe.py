@@ -64,6 +64,50 @@ class Sm90MegaMoEGateTest(unittest.TestCase):
 
 
 class Sm90MegaMoEStrategyTest(unittest.TestCase):
+    def test_forward_and_gate_pack_accept_routing_metadata(self):
+        from rtp_llm.models_py.modules.dsv41.moe.strategies.mega_sm90_se import (
+            SM90MegaMoEFusedSEStrategy,
+        )
+
+        module = "rtp_llm.models_py.modules.dsv41.moe.strategies.mega_sm90"
+        for strategy_class in (SM90MegaMoEStrategy, SM90MegaMoEFusedSEStrategy):
+            with self.subTest(strategy=strategy_class.name):
+                strategy = strategy_class(mock.Mock(fake_balance_expert=False))
+                x = torch.zeros(2, 8, dtype=torch.bfloat16)
+                weights = torch.ones(2, 1)
+                indices = torch.tensor([[0], [1]])
+                buf = mock.Mock(
+                    x=x,
+                    x_sf=torch.empty(2, 1),
+                    topk_weights=weights.clone(),
+                    topk_idx=indices.clone(),
+                )
+                eplb_layer = mock.Mock()
+                eplb_layer.map_ids.side_effect = lambda ids: ids + 2
+                expert_load = mock.Mock()
+                strategy._mega_buf = buf
+                strategy._mega_y = torch.zeros_like(x)
+                strategy._input_packer = mock.Mock()
+                with mock.patch.object(strategy, "_launch") as launch:
+                    strategy(
+                        x, weights, indices, expert_load=expert_load, eplb_layer=eplb_layer
+                    )
+                    torch.testing.assert_close(buf.topk_idx, indices + 2)
+                    self.assertIs(launch.call_args.kwargs["expert_load"], expert_load)
+                    buf.topk_idx.copy_(indices)
+                    gate = mock.Mock(bias=torch.zeros(1), topk=1, route_scale=1.0)
+                    gate._project_scores.return_value = weights
+                    with (
+                        mock.patch(f"{module}._get_gate_pack_kernel") as pack_kernel,
+                        mock.patch.object(strategy, "_gate_pack_ready", return_value=True),
+                    ):
+                        strategy.forward_with_gate_pack(
+                            x, gate, None, expert_load=expert_load, eplb_layer=eplb_layer
+                        )
+                    pack_kernel.return_value.assert_called_once()
+                    torch.testing.assert_close(buf.topk_idx, indices + 2)
+                    self.assertIs(launch.call_args.kwargs["expert_load"], expert_load)
+
     def test_sm90_auto_selects_native_without_legacy_opt_in(self):
         from rtp_llm.models_py.modules.dsv41.moe.strategies.base import select_strategy
 
