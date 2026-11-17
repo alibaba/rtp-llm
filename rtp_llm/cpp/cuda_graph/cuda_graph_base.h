@@ -46,11 +46,11 @@ struct GraphParams {
     int           max_seq_len                  = 0;
     // Generation prefill may capture a longer discarded scratch sequence.
     // Zero keeps the existing per-request bound equal to max_seq_len.
-    int    request_max_seq_len    = 0;
-    int    num_tokens_per_bs      = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
-    size_t max_context_batch_size = 128;
-    std::size_t      hidden_size           = 0;
-    c10::ScalarType  model_data_type       = c10::ScalarType::Float;
+    int              request_max_seq_len    = 0;
+    int              num_tokens_per_bs      = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
+    size_t           max_context_batch_size = 128;
+    std::size_t      hidden_size            = 0;
+    c10::ScalarType  model_data_type        = c10::ScalarType::Float;
     std::vector<int> prefill_capture_seq_lens;
     std::vector<int> decode_capture_batch_sizes;
     int              generation_prefill_cuda_graph_max_requests = 0;
@@ -78,6 +78,11 @@ struct GraphParams {
     torch::Tensor token_type_embedding;
 };
 
+struct MtpDraftGraphOutputs {
+    std::vector<torch::Tensor> draft_token_ids;
+    std::vector<torch::Tensor> draft_probs;
+};
+
 class GraphBase {
 public:
     GraphBase(py::object py_instance): py_instance_(std::move(py_instance)) {}
@@ -91,9 +96,15 @@ public:
                                   CudaGraphState&      state,
                                   CudaGraphCheckMode   mode = CudaGraphCheckMode::FORWARD) = 0;
     virtual bool           captureSessionMayBeDirty() const                              = 0;
-    virtual void           prepareAttentionInputs(const PyModelInputs& inputs,
-                                                  CudaGraphState&      state,
-                                                  bool                 skip_forward_event_sync = false)  = 0;
+    virtual int            mtpDraftSteps() const {
+        return 0;
+    }
+    virtual MtpDraftGraphOutputs mtpDraftOutputs(const CudaGraphState& state) const {
+        return {};
+    }
+    virtual void prepareAttentionInputs(const PyModelInputs& inputs,
+                                        CudaGraphState&      state,
+                                        bool                 skip_forward_event_sync = false) = 0;
 
     // Refresh only captured kv_cache_kernel_block_id state and FlashInfer plan
     // buffers after page-table changes. Other captured fields stay untouched.

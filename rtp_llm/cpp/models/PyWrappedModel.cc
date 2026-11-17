@@ -315,6 +315,7 @@ std::optional<std::string> PyWrappedModel::takeDeferredHiddenStateCaptureError()
 torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs");
     torch_ext::PyAttentionInputs py_attn_inputs;
+    context_total_kv_length_pending_ = false;
 
     auto normalize_i32 = [this](const torch::Tensor& tensor) -> torch::Tensor {
         if (!tensor.defined()) {
@@ -404,15 +405,21 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 
     if (context_batch_size > 0 && py_attn_inputs.input_lengths.is_cuda()) {
         py_attn_inputs.total_tokens = inputs.combo_tokens.defined() ? static_cast<int>(inputs.combo_tokens.numel()) : 0;
-        // Must match cu_kv_seqlens_device's definition (input_lengths +
-        // prefix_lengths): the CUDA graph padding fill copies this scalar into
-        // the cu_kv_seqlens tail, and a prefix-less value makes the array
-        // non-monotonic whenever prefix reuse / target verify is active.
-        // prefix_lengths here is a source tensor (never a deferred H2D copy),
-        // so summing it is safe; item() adds one stream sync on this path.
+        // Eager consumers need the exact sum(input_lengths + prefix_lengths).
+        // Device-length graph consumers use cu_kv_seqlens_device instead and
+        // resolve this host scalar only if they fall back to an eager backend.
         int64_t prefix_sum = 0;
         if (py_attn_inputs.prefix_lengths.defined() && py_attn_inputs.prefix_lengths.numel() > 0) {
-            prefix_sum = py_attn_inputs.prefix_lengths.sum().item<int64_t>();
+            // Qwen QSA replay consumes the live cu_kv_seqlens_device tail,
+            // including graph padding. Do not drain the preceding draft just
+            // to populate an unused host scalar. Resolve it if graph selection
+            // fails, before any eager backend can read it.
+            context_total_kv_length_pending_ =
+                graph_device_kv_length_ && graph_runner_ != nullptr && py_attn_inputs.prefix_lengths.is_cuda()
+                && !inputs.warmup && !inputs.is_fake_stream && (inputs.is_target_verify || is_prefill_cuda_graph_mode_);
+            if (!context_total_kv_length_pending_) {
+                prefix_sum = py_attn_inputs.prefix_lengths.sum().item<int64_t>();
+            }
         }
         py_attn_inputs.context_total_kv_length = py_attn_inputs.total_tokens + static_cast<int>(prefix_sum);
         py_attn_inputs.cu_seqlens              = torch::empty({0}, host_i32);
@@ -486,6 +493,20 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     }
 
     return py_attn_inputs;
+}
+
+void PyWrappedModel::materializeContextTotalKvLength() {
+    if (!context_total_kv_length_pending_) {
+        return;
+    }
+    RTP_LLM_PROFILE_SCOPE("py_model.materialize_context_kv_length");
+    const auto prefix_sum                     = attention_inputs_.prefix_lengths.sum().item<int64_t>();
+    attention_inputs_.context_total_kv_length = attention_inputs_.total_tokens + prefix_sum;
+    for (auto& [tag, inputs] : attention_inputs_by_tag_) {
+        (void)tag;
+        inputs.context_total_kv_length = attention_inputs_.context_total_kv_length;
+    }
+    context_total_kv_length_pending_ = false;
 }
 
 static void calculatePaddingOffsetDeviceAware(torch_ext::PyAttentionInputs& py_attn_inputs) {
@@ -858,6 +879,8 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
         && runner->canRun(py_model_inputs, state, CudaGraphCheckMode::PREPARE)) {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(cuda_graph_prepare)");
         runner->prepareAttentionInputs(py_model_inputs, state, skip_forward_event_sync);
+    } else {
+        materializeContextTotalKvLength();
     }
     prepared_guard.commit();
 }
@@ -891,6 +914,18 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
+    return forwardImpl(inputs, false);
+}
+
+GptModelOutputs PyWrappedModel::forwardMtpDraft(const GptModelInputs& inputs, int steps) {
+    if (!supportsMtpDraftGraph(steps) || inputs.is_fake_stream || inputs.warmup || inputs.skip_lm_head
+        || inputs.capture_hidden_states) {
+        return {};
+    }
+    return forwardImpl(inputs, true);
+}
+
+GptModelOutputs PyWrappedModel::forwardImpl(const GptModelInputs& inputs, bool whole_mtp_draft) {
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
 
     // Establish the cleanup guard before touching inputs: both the performance
@@ -1002,8 +1037,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             && generation_prefill_graph_runner_ != nullptr && !is_generation_prefill_runner) {
             generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::MIXED_PREFILL_DECODE_NOT_SUPPORTED;
         }
-        const bool can_run_graph = !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr
-                                   && graph_runner->canRun(py_model_inputs, graph_state);
+        const bool graph_matches_call =
+            graph_runner != nullptr && ((graph_runner->mtpDraftSteps() > 0) == whole_mtp_draft);
+        const bool can_run_graph = graph_matches_call && !capture_hidden_states && enable_cuda_graph_
+                                   && graph_runner != nullptr && graph_runner->canRun(py_model_inputs, graph_state);
+        if (whole_mtp_draft && !can_run_graph) {
+            return {};  // no forward or KV-cache mutation; executor uses its original loop
+        }
         if (!capture_hidden_states && is_generation_prefill_runner && !can_run_graph) {
             generation_prefill_cuda_graph_status =
                 graph_state.generation_prefill_status == GenerationPrefillCudaGraphStatus::NOT_REQUESTED ?
@@ -1020,11 +1060,23 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 graph_state.current_real_graph_bs);
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner->forward(py_model_inputs, graph_state);
+            if (whole_mtp_draft) {
+                auto            draft = graph_runner->mtpDraftOutputs(graph_state);
+                GptModelOutputs result;
+                result.draft_token_ids = std::move(draft.draft_token_ids);
+                result.draft_probs     = std::move(draft.draft_probs);
+                return result;
+            }
             if (is_generation_prefill_runner) {
                 generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
             }
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
         } else {
+            // PREPARE and FORWARD eligibility may differ (e.g. hidden-state
+            // capture). Never publish the deferred scalar to an eager backend.
+            materializeContextTotalKvLength();
+            py_model_inputs.attention_inputs        = attention_inputs_;
+            py_model_inputs.attention_inputs_by_tag = attention_inputs_by_tag_;
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] using normal forward, is_target_verify=%d, is_prefill=%d",
@@ -1183,7 +1235,11 @@ torch::Tensor PyWrappedModel::computeLogits(const torch::Tensor& hidden) {
                         "native LM head requires floating-point weights");
 #if USING_CUDA
             if (kernel.scalar_type() == torch::kBFloat16) {
-                logits = torch_ext::cublas_gemm_bf16_bf16_fp32(hidden.to(torch::kBFloat16), kernel);
+                if (bf16_logits_) {
+                    logits = torch::mm(hidden.to(torch::kBFloat16), kernel.t());
+                } else {
+                    logits = torch_ext::cublas_gemm_bf16_bf16_fp32(hidden.to(torch::kBFloat16), kernel);
+                }
             } else
 #endif
             {
@@ -1312,6 +1368,9 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                                     logits.dim() > 1 ? logits.size(1) : -1);
             logits = logits.narrow(1, 0, description_.output_vocab_size).contiguous();
         }
+        // Promote after TP gather so the collective transfers half as many
+        // bytes, while preserving the sampler's existing FP32 interface.
+        logits = logits.to(torch::kFloat32);
         if (check_nan_) {
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
@@ -1358,6 +1417,7 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(tp_sync_logits)");
         logits = tpSyncEmbeddingOrLogits(logits);
     }
+    logits = logits.to(torch::kFloat32);
     if (check_nan_) {
         RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
         RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");

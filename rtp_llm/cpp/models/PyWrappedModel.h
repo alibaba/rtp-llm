@@ -15,6 +15,7 @@
 #include <string>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <unordered_set>
@@ -87,8 +88,12 @@ public:
                    bool                      track_cache_store_completion = false);
     ~PyWrappedModel();
 
-    GptModelOutputs            forward(const GptModelInputs& inputs) override;
-    PPIntermediateTensors      makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) override;
+    GptModelOutputs       forward(const GptModelInputs& inputs) override;
+    PPIntermediateTensors makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp) override;
+    bool                  supportsMtpDraftGraph(int steps) const override {
+        return steps > 0 && graph_runner_ && graph_runner_->mtpDraftSteps() == steps;
+    }
+    GptModelOutputs            forwardMtpDraft(const GptModelInputs& inputs, int steps) override;
     void                       releaseBuffers() override;
     torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
@@ -107,6 +112,8 @@ public:
 
 private:
     friend struct test::PyWrappedModelTestPeer;
+
+    GptModelOutputs forwardImpl(const GptModelInputs& inputs, bool whole_mtp_draft);
 
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
 
@@ -152,6 +159,7 @@ private:
     GraphBase*      selectGraphRunner(const torch_ext::PyAttentionInputs& attention_inputs) const;
     CudaGraphState& selectGraphState(const torch_ext::PyAttentionInputs& attention_inputs);
     void            cleanupAfterConstructionFailure() noexcept;
+    void            materializeContextTotalKvLength();
 
     // Member variables (formerly inherited from GptModel)
     const rtp_llm::ExecProperties                   device_props_;
@@ -185,6 +193,13 @@ private:
     bool has_speculative_target_commit_hooks_{false};
     bool has_speculative_target_status_reducer_{false};
     bool check_nan_{false};
+    // Keep BF16 LM-head outputs in BF16 through TP communication. The public
+    // logits returned to samplers remain FP32. Read once before graph capture.
+    bool bf16_logits_{true};
+    // Only models explicitly declaring the device-length graph contract may
+    // defer this host scalar. Eager fallbacks materialize the exact value.
+    bool graph_device_kv_length_{false};
+    bool context_total_kv_length_pending_{false};
 
     std::unique_ptr<HiddenStateCapturePublisher> hidden_state_capture_publisher_;
 
@@ -244,6 +259,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     check_nan_(params.profile_debug_logging_config.check_nan) {
 
     c10::InferenceMode inference_guard(true);
+
+    if (const char* value = std::getenv("RTP_LLM_BF16_LOGITS")) {
+        const std::string policy(value);
+        TORCH_CHECK(policy == "0" || policy == "1", "RTP_LLM_BF16_LOGITS must be 0 or 1");
+        bf16_logits_ = policy == "1";
+    }
+    RTP_LLM_LOG_INFO("BF16 LM-head output / TP gather enabled: %d (sampler logits remain FP32)", bf16_logits_);
 
     const auto& generation_prefill_cuda_graph_buckets =
         params.hw_kernel_config.generation_prefill_capture_token_buckets;
@@ -359,7 +381,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
-    py_model_             = py_instance;
+    py_model_ = py_instance;
+#if USING_CUDA
+    graph_device_kv_length_ = enable_cuda_graph_ && py::hasattr(py_model_, "cuda_graph_uses_device_kv_length")
+                              && py_model_.attr("cuda_graph_uses_device_kv_length")().cast<bool>();
+    RTP_LLM_LOG_INFO("[graph-device-kv-length] enabled=%d", static_cast<int>(graph_device_kv_length_));
+#endif
     // MtpExecutor passes use_spec_decoding only to its target wrapper. The
     // normal and draft wrappers may share the same Python class, but must not
     // activate target transactions.
@@ -449,8 +476,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             RTP_LLM_CHECK_WITH_INFO(width > 0, "DSpARK CUDA graph input hidden width must be positive, got %ld", width);
             graph_params.input_hidden_size = static_cast<size_t>(width);
         }
-        graph_params.model_data_type        = dtype;
-        graph_params.max_context_batch_size = params.concurrency_config.concurrency_limit;
+        graph_params.model_data_type            = dtype;
+        graph_params.max_context_batch_size     = params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens   = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
         if (params.kv_cache_layer_layout.has_value()) {
@@ -522,6 +549,28 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
         auto graph_runner =
             std::make_unique<CudaGraphRunner>(graph_params, py_instance, forward_method, params.metrics_reporter);
+        const char* mtp_loop_env = std::getenv("RTP_LLM_MTP_DRAFT_LOOP_GRAPH");
+        if (mtp_loop_env && std::string(mtp_loop_env) == "1" && params.model_id == 1
+            && graph_params.role == CudaGraphRole::DECODE && params.sp_config.gen_num_per_cycle > 1 && !check_nan_
+            && py::hasattr(py_instance, "prepare_mtp_draft_graph_step")) {
+            graph_runner->configureMtpDraftLoop(
+                params.sp_config.gen_num_per_cycle - 1, [this](const torch::Tensor& hidden) {
+                    auto logits = computeLogits(hidden);
+                    if (device_props_.tp_size > 1) {
+                        logits = tpSyncEmbeddingOrLogits(logits);
+                    }
+                    if (description_.output_vocab_size > 0) {
+                        logits = logits.narrow(1, 0, description_.output_vocab_size).contiguous();
+                    }
+                    // Match FastTopKSampler::forward(top_k=1). One-hot values
+                    // are exact in either logit dtype; assembling the proposals
+                    // promotes them with the first proposal's FP32 distribution.
+                    auto tokens = torch::argmax(logits, -1, true);
+                    auto probs  = torch::zeros_like(logits).scatter_(-1, tokens, 1.0);
+                    execMappingDraft2Target({tokens, weights_.d2t_map, static_cast<int>(tokens.size(0)), 0, 1});
+                    return std::make_pair(tokens.to(torch::kInt32).reshape({tokens.size(0)}), probs);
+                });
+        }
         {
             void* nccl_comm = cuda_graph::getGraphCaptureTpNcclComm();
             cuda_graph::register_graph_capture_nccl_comm(nccl_comm,

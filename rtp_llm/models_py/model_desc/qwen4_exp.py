@@ -1090,6 +1090,16 @@ class Qwen4ExpModel(Qwen35Model):
         if hook is not None:
             hook(phase, int(self.parallelism_config.get_attn_tp_rank()))
 
+    def cuda_graph_uses_device_kv_length(self) -> bool:
+        """QSA replay uses fixed storage and device cumulative KV lengths.
+
+        Eager/prefill backends retain their exact host total. The native wrapper
+        restores it on fallback, before constructing an eager attention impl.
+        """
+        return torch.version.hip is None and bool(
+            getattr(self.config, "enable_qwen4_qsa", False)
+        )
+
     def on_cuda_graph_warmup(self, inputs: PyModelInputs) -> None:
         """Release eager-only state after each graph warmup forward."""
         if get_primary_attention_inputs(inputs).is_target_verify:

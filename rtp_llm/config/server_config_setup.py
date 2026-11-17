@@ -10,12 +10,7 @@ import torch
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.model_factory_register import ModelDict
 from rtp_llm.models_py.distributed.rank_layout import Group, RankLayout
-from rtp_llm.ops import (
-    ParallelismConfig,
-    PrefillCPConfig,
-    RoleType,
-    SpeculativeType,
-)
+from rtp_llm.ops import ParallelismConfig, PrefillCPConfig, RoleType, SpeculativeType
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 
 RUN_AFFINITY_TIMEOUT_SEC = 10
@@ -218,8 +213,7 @@ def _apply_auto_deepep_config(
         is_multi_gpu = stage_size > 1
         stage_group = layout.group_of(Group.STAGE, parallelism_config.world_rank)
         is_multi_node = (
-            min(stage_group) // local_world_size
-            != max(stage_group) // local_world_size
+            min(stage_group) // local_world_size != max(stage_group) // local_world_size
         )
     else:
         is_single_gpu = world_size == 1
@@ -395,6 +389,24 @@ def _infer_model_type(ckpt_path: str) -> Optional[str]:
         return None
 
 
+def _rtx_blackwell_has_peer_access() -> bool:
+    """Admit Blackwell RTX P2P only when every visible pair supports it."""
+    try:
+        count = torch.cuda.device_count()
+        return (
+            count > 1
+            and all(torch.cuda.get_device_capability(i)[0] == 12 for i in range(count))
+            and all(
+                i == j or torch.cuda.can_device_access_peer(i, j)
+                for i in range(count)
+                for j in range(count)
+            )
+        )
+    except Exception:
+        # Preserve the existing RTX fallback if the capability probe fails.
+        return False
+
+
 def setup_default_args(py_env_configs):
     set_parallelism_config(
         py_env_configs.parallelism_config,
@@ -434,13 +446,15 @@ def setup_default_args(py_env_configs):
     if py_env_configs.kv_cache_config.seq_size_per_block == 0:
         py_env_configs.kv_cache_config.seq_size_per_block = 64
 
-    # Set NCCL_P2P_DISABLE for RTX GPUs or when CUDA is not available
-    # Frontend doesn't need this setting
+    # Older RTX devices retain their compatibility fallback. Blackwell RTX
+    # with direct peer access can use NCCL's native P2P transport; an explicit
+    # NCCL_P2P_DISABLE always takes precedence. Frontends need neither policy.
     if py_env_configs.role_config.role_type != RoleType.FRONTEND:
         if torch.cuda.is_available():
             if (
                 "NCCL_P2P_DISABLE" not in os.environ
                 and "RTX" in torch.cuda.get_device_name(0)
+                and not _rtx_blackwell_has_peer_access()
             ):
                 os.environ["NCCL_P2P_DISABLE"] = "1"
                 logging.info("set NCCL_P2P_DISABLE to 1")

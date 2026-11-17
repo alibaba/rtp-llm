@@ -54,7 +54,21 @@ class CutlassNvfp4Executor(FusedMoeExpertExecutor):
             )
         )
         quant_config = config.model_config.quant_config
-        checker.check(quant_config is not None and not quant_config.is_quanted())
+        # Qwen4's validated ModelOpt export uses the same prepared packed
+        # weights/scales as the online path. Keep other prequantized formats
+        # excluded: their layout and scale contracts have not been validated.
+        checker.check(
+            quant_config is not None
+            and (
+                not quant_config.is_quanted()
+                or (
+                    config.model_config.model_type in ("qwen4_exp", "qwen4_exp_mtp")
+                    and getattr(config.model_config, "_qwen4_nvfp4_source", False)
+                    and quant_config.bits == 4
+                    and quant_config.group_size() == 16
+                )
+            )
+        )
         checker.check(not config.has_redundant_experts)
         checker.check(not config.model_config.eplb_config.enable_eplb())
         checker.check(config.tp_size == config.ep_size or tensor_parallel)

@@ -148,6 +148,68 @@ class Qwen4ExpQSADecodeGraphTest(TestCase):
     def test_draft_graph_cached_frequency_preserves_selected_and_cache_bytes(self):
         self._check_draft_graph_replay(True)
 
+    def test_two_draft_steps_share_live_lengths_and_preserve_side_cache(self):
+        self.rope = SimpleNamespace(
+            style=RopeStyle.Base, index_factor=3, dim=64, base=10000, scale=1.0
+        )
+        initial_kv, initial_state = self.kv.clone(), self.state.clone()
+        # Match the engine: capture-time host mirrors advertise the maximum
+        # static score capacity, while live CUDA lengths select actual rows.
+        self.lengths.fill_(255)
+
+        def run_two():
+            selected = []
+            for step in range(2):
+                if step:
+                    self.lengths_device.add_(1)
+                self.positions.copy_((self.lengths_device - 1).repeat_interleave(3))
+                context = self._context(True, draft=True)
+                selected.append(
+                    context.select_decode_tokens(
+                        self.q * (1 - step * 0.25),
+                        self.raw * (1 - step * 0.125),
+                        indexer=self.indexer,
+                        rope_config=self.rope,
+                    )
+                )
+                context.finalize_side_cache()
+            self.lengths_device.sub_(1)
+            return selected
+
+        for _ in range(2):
+            run_two()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = run_two()
+        table = self.kv_table.clone()
+        for generation, position in enumerate((3, 7, 126, 127, 128, 253)):
+            self.kv.copy_(initial_kv)
+            self.state.copy_(initial_state)
+            self.kv_table.copy_(table.flip(1) if generation % 2 else table)
+            self.state_table.copy_(self.kv_table)
+            self.q.mul_(0.875)
+            self.raw.mul_(0.75)
+            self.lengths_device.fill_(position + 1)
+            graph.replay()
+            graph_positions = self.positions.clone()
+            reference_kv, reference_state = initial_kv.clone(), initial_state.clone()
+            for step in range(2):
+                self.lengths.fill_(position + step)
+                self.positions.fill_(position + step)
+                eager = self._context(False, reference_kv, reference_state, draft=True)
+                expected = eager.select_decode_tokens(
+                    self.q * (1 - step * 0.25),
+                    self.raw * (1 - step * 0.125),
+                    indexer=self.indexer,
+                    rope_config=self.rope,
+                )
+                eager.finalize_side_cache()
+                torch.testing.assert_close(actual[step], expected, rtol=0, atol=0)
+            torch.testing.assert_close(self.kv, reference_kv, rtol=0, atol=0)
+            torch.testing.assert_close(self.state, reference_state, rtol=0, atol=0)
+            torch.testing.assert_close(self.positions, graph_positions, rtol=0, atol=0)
+            self.assertEqual(self.lengths_device.item(), position + 1)
+
     def test_target_padding_replay_matches_live_batch_and_rollback(self):
         from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import (
             restore_indexer_cache,

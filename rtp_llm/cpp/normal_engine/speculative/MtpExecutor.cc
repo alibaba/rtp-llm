@@ -1431,8 +1431,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         return target_execution_status;
     }
 
-    mtp::DSparkRoundState                     dspark_round_state;
-    size_t                                    batch_size = 0;
+    mtp::DSparkRoundState dspark_round_state;
+    size_t                batch_size = 0;
 
     if (is_dspark_) {
         // Proposal and target verification are two model phases with different
@@ -1844,6 +1844,21 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
+        if (!isTpRank0() && !warm_up_ && !model_input.warmup && !model_input.is_fake_stream && !is_dspark_
+            && useStreamAsync() && sp_prefill_draft_model_ != nullptr) {
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(defer_nonroot_tail)");
+            RTP_LLM_CHECK_WITH_INFO(!deferred_decode_tail_, "previous MTP decode tail was not drained before reuse");
+            auto tail           = std::make_unique<DeferredDecodeTail>();
+            tail->inputs        = model_input;
+            tail->target_output = std::move(model_output);
+            tail->draft_output  = std::move(draft_prefill_model_output);
+            // The prepare workers were joined above; their GPU dependencies
+            // are already on this stream. Record after forward post-layers,
+            // not the graph runner's earlier replay-only forward_event_.
+            tail->done.record(cuda_graph::graphGetCurrentStream());
+            deferred_decode_tail_ = std::move(tail);
+            return absl::OkStatus();
+        }
         cudaSyncAndCheck();
         releaseAllModelBuffers();
         return absl::OkStatus();
@@ -2149,7 +2164,6 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
     model_input.is_target_verify = false;
     return model_output;
 }
-
 
 bool MtpExecutor::asyncPrepareAllowed(bool requested, bool target_commit_hooks) {
     return requested && !target_commit_hooks;
@@ -2676,7 +2690,28 @@ absl::Status MtpExecutor::dispatchDecodeOutput(const StreamGroups&              
     return result;
 }
 
+MtpExecutor::~MtpExecutor() {
+    try {
+        waitDeferredDecodeTail();
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_ERROR("failed to drain deferred MTP decode tail at shutdown: %s", e.what());
+        // On a failed drain, do not free staging owners still in use by CUDA.
+        (void)deferred_decode_tail_.release();
+    }
+}
+
+void MtpExecutor::waitDeferredDecodeTail() {
+    if (deferred_decode_tail_) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.wait_deferred_tail_before_reuse");
+        deferred_decode_tail_->done.synchronize();
+        deferred_decode_tail_.reset();
+    }
+}
+
 void MtpExecutor::releaseAllModelBuffers() {
+    // Next-round input gathering/TP synchronization uses fresh storage. Reuse
+    // model staging only after the preceding non-root forward has completed.
+    waitDeferredDecodeTail();
     // TensorHolder release point (MtpExecutor phase boundary): after the current
     // TP sync/model-input preparation has consumed staged H2D sources, advance
     // the hold window for executor-owned model/sampler staging tensors.
@@ -2990,9 +3025,29 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     draft_token_columns.push_back(to_cuda_i32_flat(pre_target_token_t));
     draft_token_columns.push_back(pre_propose_token_t_raw);
 
-    // n-1 steps draft model decode
     const size_t decode_steps = propose_step_ - 1;
-    for (size_t i = 0; i < decode_steps; ++i) {
+    // The optional graph expands the fixed n-1 forwards, native LM heads,
+    // logits collectives, greedy samplers and recurrent updates at startup.
+    const auto      loop_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    GptModelOutputs loop_output;
+    if (!model_input.is_fake_stream && !model_input.warmup
+        && draft_model_->supportsMtpDraftGraph(static_cast<int>(decode_steps))) {
+        ensureModelInputsOnCuda(model_input, "draft_decode.loop_graph");
+        loop_output = draft_model_->forwardMtpDraft(model_input, static_cast<int>(decode_steps));
+    }
+    const bool used_loop_graph = !loop_output.draft_token_ids.empty();
+    if (used_loop_graph) {
+        RTP_LLM_CHECK_WITH_INFO(loop_output.draft_token_ids.size() == decode_steps
+                                    && loop_output.draft_probs.size() == decode_steps,
+                                "whole MTP draft graph returned the wrong number of steps");
+        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - loop_start_us;
+        for (size_t i = 0; i < decode_steps; ++i) {
+            draft_token_columns.push_back(loop_output.draft_token_ids[i]);
+            draft_probs_list.push_back(loop_output.draft_probs[i].reshape({static_cast<int64_t>(batch_size), 1, -1}));
+        }
+    }
+    // Original single-step graph/eager fallback.
+    for (size_t i = 0; !used_loop_graph && i < decode_steps; i++) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(loop_iter=%zu)", i);
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %zu/%zu start, batch_size %zu", i, decode_steps, batch_size);
         ensureModelInputsOnCuda(model_input, "draft_decode.loop_forward");

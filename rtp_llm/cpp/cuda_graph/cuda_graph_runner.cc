@@ -2028,6 +2028,65 @@ void CudaGraphRunner::replayGraph(int key) {
     }
 }
 
+void CudaGraphRunner::configureMtpDraftLoop(
+    int steps, std::function<std::pair<torch::Tensor, torch::Tensor>(const torch::Tensor&)> sample) {
+    RTP_LLM_CHECK_WITH_INFO(role_ == CudaGraphRole::DECODE && num_tokens_per_bs_ == 1 && steps > 0,
+                            "whole MTP draft graph requires single-token decode geometry");
+    RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_instance_, "prepare_mtp_draft_graph_step"),
+                            "whole MTP draft graph requires a device-only metadata hook");
+    mtp_draft_steps_          = steps;
+    mtp_draft_sample_         = std::move(sample);
+    py_mtp_draft_step_method_ = py_instance_.attr("prepare_mtp_draft_graph_step");
+    RTP_LLM_LOG_INFO("Whole MTP draft CUDA graph enabled: %d forward/head/sample steps", steps);
+}
+
+PyModelOutputs CudaGraphRunner::runCaptureForward(int key) {
+    auto& hold   = graph_instances_[key].mem_hold_;
+    auto  inputs = hold.py_model_inputs_;
+    if (mtp_draft_steps_ == 0) {
+        return py_forward_method_(inputs, hold.attn_pyobj_).cast<PyModelOutputs>();
+    }
+    hold.draft_token_ids_.clear();
+    hold.draft_probs_.clear();
+    PyModelOutputs outputs;
+    // The same device length storage is read by QSA and all tagged groups.
+    // Restore it at the tail so warmups/capture/check replays do not accumulate
+    // lengths, and every real replay starts from runtime-prepared metadata.
+    auto lengths = inputs.attention_inputs.sequence_lengths_plus_1_device;
+    for (int step = 0; step < mtp_draft_steps_; ++step) {
+        if (step != 0) {
+            lengths.add_(1);
+        }
+        py_mtp_draft_step_method_(inputs, hold.attn_pyobj_);
+        outputs      = py_forward_method_(inputs, hold.attn_pyobj_).cast<PyModelOutputs>();
+        auto sampled = mtp_draft_sample_(outputs.hidden_states);
+        hold.draft_token_ids_.push_back(sampled.first);
+        hold.draft_probs_.push_back(sampled.second);
+        inputs.input_ids = sampled.first;
+        // Qwen4's recurrent features precede HC collapse and have a different
+        // width from the normalized hidden rows passed to the LM head.
+        RTP_LLM_CHECK_WITH_INFO(outputs.mtp_target_hidden_states.defined(),
+                                "whole MTP draft graph requires explicit recurrent hidden output");
+        inputs.input_hiddens = outputs.mtp_target_hidden_states;
+    }
+    if (mtp_draft_steps_ > 1) {
+        lengths.sub_(mtp_draft_steps_ - 1);
+    }
+    return outputs;
+}
+
+MtpDraftGraphOutputs CudaGraphRunner::mtpDraftOutputs(const CudaGraphState& state) const {
+    const auto&          hold = graph_instances_.at(state.current_real_graph_bs).mem_hold_;
+    MtpDraftGraphOutputs outputs;
+    for (const auto& tokens : hold.draft_token_ids_) {
+        outputs.draft_token_ids.push_back(tokens.narrow(0, 0, state.current_batch_size));
+    }
+    for (const auto& probs : hold.draft_probs_) {
+        outputs.draft_probs.push_back(probs.narrow(0, 0, state.current_batch_size));
+    }
+    return outputs;
+}
+
 void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
     auto inputs = graph_instances_[key].mem_hold_.py_model_inputs_;
 
@@ -2041,11 +2100,11 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
         // particular, static torch.compile/Triton specializations must be
         // materialized before graphCaptureBegin rather than during capture.
         ScopedEnvFlag cuda_graph_warmup("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD", "1");
-        py_forward_method_(inputs, attn_pyobj);
+        runCaptureForward(key);
         if (!py_after_warmup_method_.is_none()) {
             py_after_warmup_method_(inputs);
         }
-        py_forward_method_(inputs, attn_pyobj);
+        runCaptureForward(key);
         if (!py_after_warmup_method_.is_none()) {
             py_after_warmup_method_(inputs);
         }
@@ -2084,8 +2143,7 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             cuda_graph::GraphNcclCaptureContext capture_ctx;
             CudaGraphCaptureGuard               capture_guard(&capture_ctx);
             try {
-                auto py_outputs_obj = py_forward_method_(inputs, attn_pyobj);
-                outputs             = py_outputs_obj.cast<PyModelOutputs>();
+                outputs = runCaptureForward(key);
             } catch (const py::error_already_set& e) {
                 RTP_LLM_LOG_ERROR("Capture forward failed for %s %d: %s", key_type, key, e.what());
                 throw;
