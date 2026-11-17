@@ -236,6 +236,14 @@ public class BatchEndpointSpec {
                     .splitRequiresStringItems(true)
                     .build(),
             BatchEndpointSpec.builder()
+                    .path("/v1/systemone")
+                    .requestArrayField("requests").responseArrayField("responses")
+                    .failedItemFactory(FailedItemFactory.NULL)
+                    .requestValidator(SystemOneBatch::validate)
+                    .fanoutWriteNulls(true)
+                    .failOnPartialFailure(true)
+                    .build(),
+            BatchEndpointSpec.builder()
                     .path("/v1/reranker")
                     .requestArrayField("documents").responseArrayField("results")
                     // Partial results are never served for reranking, so this placeholder only

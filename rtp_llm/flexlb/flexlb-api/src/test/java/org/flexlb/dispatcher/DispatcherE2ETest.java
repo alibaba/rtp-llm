@@ -10,6 +10,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.springframework.http.MediaType;
 import org.springframework.http.server.reactive.ReactorHttpHandlerAdapter;
 import org.springframework.test.web.reactive.server.WebTestClient;
@@ -75,6 +76,126 @@ class DispatcherE2ETest {
         fe1.shutdown();
         fe2.shutdown();
         fe3.shutdown();
+    }
+
+    @Test
+    @EnabledIfSystemProperty(named = "systemone.engine.url", matches = ".+")
+    void systemOneRealEngineHttpBatchMatchesTenSingleRequests() throws Exception {
+        String engineUrl = System.getProperty("systemone.engine.url");
+        WebTestClient engine = WebTestClient.bindToServer().baseUrl(engineUrl)
+                .responseTimeout(Duration.ofSeconds(10)).build();
+        WebTestClient master = buildClient(3, false, List.of(), false, List.of(engineUrl));
+        ObjectNode body = mapper.createObjectNode();
+        var requests = body.putArray("requests");
+        List<JsonNode> expected = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            ObjectNode item = requests.addObject();
+            item.put("model", "kev-test");
+            item.put("state", ("independent-doc-" + i + " ").repeat(8));
+            ObjectNode questions = item.putObject("questions");
+            for (int q = 0; q < 4; q++) {
+                questions.putObject("q" + q).put("type", "noul").put("instructions", "question " + q);
+            }
+            expected.add(engine.post().uri("/v1/systemone")
+                    .contentType(MediaType.APPLICATION_JSON).bodyValue(item).exchange()
+                    .expectStatus().isOk().expectBody(JsonNode.class).returnResult().getResponseBody());
+        }
+        JsonNode result = master.post().uri("/dispatcher/v1/systemone")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(body).exchange()
+                .expectStatus().isOk().expectBody(JsonNode.class).returnResult().getResponseBody();
+        assertNotNull(result);
+        assertEquals(10, result.get("responses").size());
+        for (int i = 0; i < 10; i++) {
+            JsonNode actual = result.get("responses").get(i);
+            for (String field : List.of("model", "answers", "usage")) {
+                assertEquals(expected.get(i).get(field), actual.get(field), "request " + i + " " + field);
+            }
+        }
+    }
+
+    /** Run the cross-language HTTP contract check against a separately started RTP-LLM FE. */
+    public static void main(String[] args) throws Exception {
+        System.setProperty("systemone.engine.url", args[0]);
+        DispatcherE2ETest test = new DispatcherE2ETest();
+        try {
+            test.up();
+            test.systemOneRealEngineHttpBatchMatchesTenSingleRequests();
+            System.out.println("SYSTEMONE_HTTP_CONTRACT_OK: 10 requests, 40 questions, chunks 3+3+3+1");
+        } finally {
+            test.down();
+        }
+    }
+
+    @Test
+    void systemOneSplitsIndependentStatesAndPreservesAnswersAndNulls() throws Exception {
+        fe1.enqueue(jsonResponse(200, "{\"responses\":["
+                + "{\"answers\":{\"q\":{\"noul\":0.1}},\"latency_ms\":7},"
+                + "{\"answers\":{\"q\":{\"noul\":0.2}},\"latency_ms\":8}]}"));
+        fe2.enqueue(jsonResponse(200, "{\"responses\":["
+                + "{\"answers\":{\"q\":{\"noul\":0.3}},\"latency_ms\":9}]}"));
+        WebTestClient client = buildClient(2);
+        JsonNode request = mapper.readTree("{\"model\":\"kev\",\"requests\":["
+                + "{\"state\":\"doc-a\",\"questions\":{\"q\":{\"type\":\"noul\"}}},"
+                + "{\"state\":null,\"questions\":{\"q\":{\"type\":\"noul\"}}},"
+                + "{\"state\":\"doc-c\",\"questions\":{\"q\":{\"type\":\"noul\"}}}]}");
+        JsonNode response = client.post().uri("/dispatcher/v1/systemone")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(request).exchange()
+                .expectStatus().isOk().expectBody(JsonNode.class).returnResult().getResponseBody();
+        assertNotNull(response);
+        assertEquals(3, response.get("responses").size());
+        for (int i = 0; i < 3; i++) {
+            assertEquals((i + 1) / 10.0, response.at("/responses/" + i + "/answers/q/noul").asDouble());
+            assertEquals(7 + i, response.at("/responses/" + i + "/latency_ms").asInt());
+        }
+        JsonNode first = assertChunkRequest(fe1.takeRequest(), "/v1/systemone", "requests", 2);
+        JsonNode second = assertChunkRequest(fe2.takeRequest(), "/v1/systemone", "requests", 1);
+        assertEquals(request.get("requests").get(0), first.get("requests").get(0));
+        assertEquals(request.get("requests").get(1), first.get("requests").get(1));
+        assertEquals(request.get("requests").get(2), second.get("requests").get(0));
+        assertEquals("kev", second.get("model").asText());
+        assertFalse(first.has("generate_config"));
+        assertEquals(0, fe3.getRequestCount());
+    }
+
+    @Test
+    void systemOneSingleRequestPassesThrough() throws Exception {
+        fe1.enqueue(jsonResponse(200, "{\"answers\":{\"q\":{\"noul\":0.8}}}"));
+        WebTestClient client = buildClient(2);
+        String body = "{\"state\":\"doc\",\"questions\":{\"q\":{\"type\":\"noul\"}}}";
+        client.post().uri("/dispatcher/v1/systemone")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue(body).exchange()
+                .expectStatus().isOk().expectBody().jsonPath("$.answers.q.noul").isEqualTo(0.8);
+        RecordedRequest request = fe1.takeRequest();
+        assertEquals("/v1/systemone", request.getPath());
+        assertEquals(body, request.getBody().readUtf8());
+    }
+
+    @Test
+    void systemOneFailedChunkDoesNotReturnIncompleteAnswersAsSuccess() {
+        fe1.enqueue(jsonResponse(200, "{\"responses\":[{\"answers\":{}}]}"));
+        fe2.enqueue(jsonResponse(422, "{\"detail\":\"invalid question\"}"));
+        WebTestClient client = buildClient(1);
+        client.post().uri("/dispatcher/v1/systemone")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue("{\"requests\":["
+                        + "{\"state\":\"a\",\"questions\":{\"q\":{\"type\":\"noul\"}}},"
+                        + "{\"state\":\"b\",\"questions\":{\"q\":{\"type\":\"invalid\"}}}]}")
+                .exchange().expectStatus().is5xxServerError();
+    }
+
+    @Test
+    void systemOneEmptyBatchAndMalformedItemsNeverContactFe() {
+        WebTestClient client = buildClient(2);
+        client.post().uri("/dispatcher/v1/systemone")
+                .contentType(MediaType.APPLICATION_JSON).bodyValue("{\"requests\":[]}")
+                .exchange().expectStatus().isOk().expectBody().json("{\"responses\":[]}");
+        for (String body : List.of("{\"requests\":[null]}", "{\"requests\":[{}]}",
+                "{\"requests\":[],\"state\":\"ambiguous\"}", "{\"requests\":[],\"model\":null}")) {
+            client.post().uri("/dispatcher/v1/systemone")
+                    .contentType(MediaType.APPLICATION_JSON).bodyValue(body)
+                    .exchange().expectStatus().isBadRequest();
+        }
+        assertEquals(0, fe1.getRequestCount() + fe2.getRequestCount() + fe3.getRequestCount());
     }
 
     @Test
@@ -733,7 +854,15 @@ class DispatcherE2ETest {
                                       boolean preAssignBe,
                                       List<org.flexlb.dao.loadbalance.BatchScheduleTarget> targets,
                                       boolean masterReturnsNoTargets) {
-        List<String> urls = List.of(baseUrl(fe1), baseUrl(fe2), baseUrl(fe3));
+        return buildClient(subBatchSize, preAssignBe, targets, masterReturnsNoTargets,
+                List.of(baseUrl(fe1), baseUrl(fe2), baseUrl(fe3)));
+    }
+
+    private WebTestClient buildClient(int subBatchSize,
+                                      boolean preAssignBe,
+                                      List<org.flexlb.dao.loadbalance.BatchScheduleTarget> targets,
+                                      boolean masterReturnsNoTargets,
+                                      List<String> urls) {
         FePool pool = DispatcherTestSupport.fePool(urls);
 
         DispatchConfig cfg = new DispatchConfig();

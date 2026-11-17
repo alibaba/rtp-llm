@@ -49,6 +49,9 @@ class BatchEndpointSpecTest {
         assertRow("/v1/reranker", "documents", "results",
                 BatchEndpointSpec.FailedItemFactory.NULL,
                 true, true, true, true, true, false, true);
+        assertRow("/v1/systemone", "requests", "responses",
+                BatchEndpointSpec.FailedItemFactory.NULL,
+                false, false, true, true, false, false, true);
     }
 
     private static void assertRow(String path, String reqField, String respField,
