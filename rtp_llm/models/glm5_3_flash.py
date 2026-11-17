@@ -1,6 +1,7 @@
 """GLM-5.3-Flash configuration and model integration."""
 
 import json
+import logging
 import os
 from typing import Any, Dict, List, Optional
 
@@ -24,6 +25,7 @@ from rtp_llm.model_loader.weight_module import (
 )
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.deepseek_v2 import DeepSeekV2Weight
+from rtp_llm.models.glm53_cache_policy import configure_decode_request_state_pool
 from rtp_llm.models.glm53_prefill_parallel import (
     mla_cp_enabled,
     shared_expert_local_enabled,
@@ -592,6 +594,18 @@ class Glm53FlashWeight(DeepSeekV2Weight):
 
 
 class Glm53Flash(BaseModel):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        blocks = configure_decode_request_state_pool(
+            self.kv_cache_config,
+            self.parallelism_config.role_type,
+            self.max_generate_batch_size,
+            self.model_config.gen_num_per_cycle,
+            enabled=os.environ.get("ENABLE_LINEAR_ATTN_REQUEST_CACHE", "0") == "1",
+        )
+        if blocks is not None:
+            logging.info("GLM53 Decode request-state pool: %d physical blocks", blocks)
+
     def create_model_loader(self) -> ModelLoader:
         loader = super().create_model_loader()
         load_config = loader.get_load_config()

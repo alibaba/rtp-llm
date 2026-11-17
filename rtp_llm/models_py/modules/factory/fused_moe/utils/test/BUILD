@@ -40,6 +40,17 @@ py_test(
     target_compatible_with = _CUDA13_ONLY,
 )
 
+py_test(
+    name = "glm_decode_cache_policy_test",
+    srcs = ["glm_decode_cache_policy_test.py"],
+    tags = ["glm53_contract"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    target_compatible_with = _CUDA13_ONLY,
+)
+
 dsv4_sm100_py_test(
     name = "glm_indexer_cache_gpu_test",
     src = "glm_indexer_cache_contract_test.py",
