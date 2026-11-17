@@ -23,6 +23,7 @@ class MoEConfigAdapter:
         moe_config: Optional[MoeConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         enable_cuda_graph: bool = False,
+        batch_invariant: bool = False,
     ):
         self.model_config = model_config
         self.parallelism_config = parallelism_config
@@ -127,6 +128,7 @@ class MoEConfigAdapter:
         self.use_mori_ep = moe_config.use_mori_ep
         self.use_deepep_moe = moe_config.use_deepep_moe
         self.enable_cuda_graph = enable_cuda_graph
+        self.batch_invariant = batch_invariant
 
     @property
     def activation_type(self):

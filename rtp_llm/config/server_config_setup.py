@@ -418,6 +418,12 @@ def setup_default_args(py_env_configs):
         )
 
     if (
+        py_env_configs.py_hw_kernel_config.batch_invariant
+        and py_env_configs.model_args.act_type is None
+    ):
+        py_env_configs.model_args.act_type = "bf16"
+
+    if (
         os.path.exists("/dev/kfd")
         and py_env_configs.kv_cache_config.seq_size_per_block == 0
     ):

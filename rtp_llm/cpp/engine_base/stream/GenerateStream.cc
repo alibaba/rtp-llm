@@ -137,9 +137,10 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     if (!input->fake_query && chunk_size > 0
         && (resource_context.role_type == RoleType::PREFILL || resource_context.role_type == RoleType::PDFUSION)) {
         const auto& config = *generateConfig();
+        const bool unsupported_logits = returnLogits() && !resource_context.batch_invariant;
         const char* reason = isGroup()                                       ? "force_batch" :
                              hasNumBeams()                                   ? "num_beams" :
-                             returnLogits()                                  ? "return_logits" :
+                             unsupported_logits                             ? "return_logits" :
                              returnPromptLogits()                            ? "return_prompt_logits" :
                              calculateLoss()                                 ? "calculate_loss" :
                              config.return_hidden_states                     ? "return_hidden_states" :

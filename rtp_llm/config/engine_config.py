@@ -2,7 +2,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
 
@@ -14,15 +14,18 @@ from rtp_llm.config.py_config_modules import (
     PyEnvConfigs,
     ServerConfig,
 )
+from rtp_llm.device.device_type import is_cuda
 from rtp_llm.ops import (
     ArpcConfig,
     CacheStoreConfig,
     ConcurrencyConfig,
     DashScGrpcConfig,
+    DataType,
     FMHAConfig,
     GrammarConfig,
     GrpcConfig,
     HWKernelConfig,
+    KvCacheDataType,
     MiscellaneousConfig,
     MoeConfig,
     NcclCommConfig,
@@ -32,8 +35,14 @@ from rtp_llm.ops import (
     RoleType,
     RuntimeConfig,
     SpeculativeExecutionConfig,
+    SpeculativeType,
+    TaskType,
     VitSeparation,
 )
+from rtp_llm.utils.util import get_config_from_path
+
+if TYPE_CHECKING:
+    from rtp_llm.config.model_config import ModelConfig
 
 
 @dataclass
@@ -253,6 +262,119 @@ class EngineConfig:
         )
 
         return engine_config
+
+
+def configure_batch_invariant_model(
+    engine_config: EngineConfig, model_config: "ModelConfig"
+) -> None:
+    """Validate the single-GPU CUDA eager configuration before loading weights."""
+    hw = engine_config.hw_kernel_config
+    if not hw.batch_invariant:
+        return
+
+    parallel = engine_config.parallelism_config
+    cache = engine_config.kv_cache_config
+    moe = engine_config.moe_config
+    attn = model_config.attn_config
+    linear_attn = model_config.linear_attention_config
+    conflicts = []
+    if not is_cuda() or torch.cuda.get_device_capability() != (10, 3):
+        conflicts.append("requires an SM103 CUDA GPU")
+    if (
+        any(
+            size != 1
+            for size in (
+                parallel.world_size,
+                parallel.tp_size,
+                parallel.dp_size,
+                parallel.ep_size,
+                parallel.pp_size,
+                parallel.ffn_tp_size,
+            )
+        )
+        or parallel.prefill_cp_config.is_enabled()
+    ):
+        conflicts.append(
+            "requires WORLD_SIZE=TP_SIZE=DP_SIZE=EP_SIZE=PP_SIZE=1 and CP disabled"
+        )
+    if parallel.role_type != RoleType.PDFUSION or (
+        model_config.vit_separation != VitSeparation.VIT_SEPARATION_LOCAL
+    ):
+        conflicts.append("requires a colocated PDFUSION worker with no separate ViT")
+    if model_config.model_type != "qwen35_moe" or (
+        model_config.num_layers,
+        model_config.hidden_size,
+        model_config.expert_num,
+        model_config.moe_k,
+        model_config.moe_inter_size,
+        attn.head_num,
+        attn.kv_head_num,
+        attn.size_per_head,
+    ) != (40, 2048, 256, 8, 512, 16, 2, 256):
+        conflicts.append("requires the Qwen3.6-35B-A3B qwen35_moe architecture")
+    if (
+        model_config.data_type != DataType.TYPE_BF16
+        or model_config.quant_config is not None
+    ):
+        conflicts.append(
+            "requires unquantized BF16 weights and BF16 activations (ACT_TYPE=bf16)"
+        )
+    if model_config.model_type == "qwen35_moe":
+        checkpoint_config = get_config_from_path(model_config.ckpt_path) or {}
+        text_config = checkpoint_config.get("text_config", {})
+        checkpoint_dtype = text_config.get("dtype") or text_config.get("torch_dtype")
+        if checkpoint_dtype not in ("bfloat16", "bf16"):
+            conflicts.append(
+                f"requires a BF16 checkpoint (text_config.dtype is {checkpoint_dtype!r})"
+            )
+    if model_config.task_type != TaskType.LANGUAGE_MODEL:
+        conflicts.append("requires a text generation task")
+    if model_config.lora_infos:
+        conflicts.append("LoRA adapters are unsupported")
+    if hw.enable_cuda_graph or hw.enable_decode_cascade_attention:
+        conflicts.append(
+            "ENABLE_CUDA_GRAPH and ENABLE_DECODE_CASCADE_ATTENTION must be disabled"
+        )
+    if engine_config.sp_config.type != SpeculativeType.NONE:
+        conflicts.append("speculative decoding and MTP must be disabled")
+    if engine_config.runtime_config.use_batch_decode_scheduler:
+        conflicts.append("USE_BATCH_DECODE_SCHEDULER must be disabled")
+    if moe.moe_strategy not in ("auto", "no_quant_cpp") or (
+        moe.use_deepep_moe
+        or moe.use_mori_ep
+        or moe.fake_balance_expert
+        or model_config.eplb_config.phy_exp_num(model_config.expert_num)
+        != model_config.expert_num
+    ):
+        conflicts.append(
+            "requires the local Triton MoE strategy and no expert remapping"
+        )
+    if attn.kv_cache_dtype != KvCacheDataType.BASE:
+        conflicts.append("requires BF16 KV cache with FP8_KV_CACHE disabled")
+    if linear_attn.ssm_state_dtype != DataType.TYPE_FP32:
+        conflicts.append("requires FP32 SSM state (SSM_STATE_DTYPE=auto or fp32)")
+    if attn.tokens_per_block != 64 or attn.kernel_tokens_per_block != 64:
+        conflicts.append("requires 64-token KV and SSM pages")
+    if (
+        cache.reuse_cache
+        or cache.enable_remote_cache
+        or cache.enable_disk_cache
+        or cache.enable_memory_cache
+        or cache.multi_task_prompt
+        or cache.multi_task_prompt_str
+        or cache.multi_task_prompt_tokens
+    ):
+        # A checkpoint produced by decode must never be restored as a prefill prefix.
+        conflicts.append(
+            "prefix reuse, task prompts and external KV caches must be disabled"
+        )
+    if conflicts:
+        raise ValueError("RTP_BATCH_INVARIANT=1:\n" + "\n".join(conflicts))
+
+    # Keep the official text weights, with its partial MRoPE parameters.
+    model_config.mm_model_config.is_multimodal = False
+    # Keep the checkpoint's BF16 LM head and accumulate its products in FP32.
+    model_config.enable_fp32_lm_head = False
 
 
 # ============================================================================
