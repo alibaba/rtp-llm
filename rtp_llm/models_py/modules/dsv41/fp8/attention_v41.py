@@ -2996,11 +2996,20 @@ class AttentionV41FP8(AttentionFP8):
                 initialize_zero_page(pages)
                 self._fp8_zero_page_marker = zero_page_marker
             dg_table = dg_block_table(table, index_pool)
-            if capacity > dg_table.shape[1] * 64:
-                raise ValueError("FP8 indexer capacity exceeds DeepGEMM page table")
+            table_capacity = dg_table.shape[1] * pages.shape[1]
+            if table_capacity == 0:
+                raise ValueError("FP8 indexer requires a nonempty DeepGEMM page table")
+            # Eager batches carry only their allocated pages. Graph buckets
+            # generally provide a table padded to the configured model limit.
+            if table_capacity < capacity:
+                torch._assert_async(
+                    torch.all((positions + 1) // self.compress_ratio <= table_capacity),
+                    "FP8 indexer visible context exceeds DeepGEMM page table",
+                )
+                capacity = table_capacity
             self._shared_attention["global"] = {
                 self.layer_id: decode_indexer.DecodeIndexerKeys(
-                    pages, dg_table, capacity, 64
+                    pages, dg_table, capacity, pages.shape[1]
                 )
             }
             return
@@ -3180,6 +3189,22 @@ class AttentionV41FP8(AttentionFP8):
         paged = isinstance(keys, decode_indexer.DecodeIndexerKeys)
         fp8_score_bundle = None
         capacity = keys.capacity if paged else keys.shape[1]
+        if paged and self._indexer_mode == "fp8_dg" and capacity < self.index_topk:
+            # The batched scorer requires at least K columns. The existing
+            # short-row contract publishes every visible logical index in
+            # order, even when some pages are not allocated.
+            visible = ((positions.reshape(T) + 1) // self.compress_ratio).clamp(
+                0, capacity
+            )
+            columns = torch.arange(self.index_topk, dtype=torch.int32, device=x.device)
+            output = torch.where(columns < visible[:, None], columns, -1)
+            if self.layer_id == int(
+                self.v41_config.get("candidate_source_layer_id", -1)
+            ):
+                shared["candidates"] = None
+                shared.pop("candidate_mask", None)
+            shared["topk"] = {self.layer_id: output}
+            return output
         if prepared_query is None:
             prepared_query = AttentionV41FP8._prepare_indexer_query_decode(
                 self,

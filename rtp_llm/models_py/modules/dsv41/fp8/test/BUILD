@@ -340,6 +340,22 @@ py_test(
 )
 
 py_test(
+    name = "test_v41_sm90_fp8_dg_contract_gpu",
+    srcs = ["test_v41_sm90_fp8_dg_contract.py", "//rtp_llm/test/pytest:pytest_main.py"],
+    main = "//rtp_llm/test/pytest:pytest_main.py",
+    args = ["--cuda-devices", "1", "--cuda-major", "9", "$(location :test_v41_sm90_fp8_dg_contract.py)", "-k", "FP8DeepGEMMDecodeTest"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules", "//rtp_llm:jit_cache_env", test_requirement("pytest")],
+    tags = ["dsv41_cuda13", "H20_CU13"],
+    env = {"GPU_COUNT": "1"},
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    legacy_create_init = 0,
+)
+
+py_test(
     name = "test_v41_sm90_prepare_meta",
     srcs = ["test_v41_sm90_prepare_meta.py", "//rtp_llm/test/pytest:pytest_main.py"],
     main = "//rtp_llm/test/pytest:pytest_main.py",
