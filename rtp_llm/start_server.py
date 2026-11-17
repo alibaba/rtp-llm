@@ -168,6 +168,7 @@ def start_backend_server_impl(
                         f"Backend server started successfully: {status_msg.get('message', '')}"
                     )
                     startup_status["ready"] = True
+                    startup_status["max_seq_len"] = status_msg.get("max_seq_len")
                     pipe_reader.close()
                     return True
                 else:
@@ -198,7 +199,7 @@ def start_backend_server_impl(
             retry_interval_seconds=1,
         )
 
-    return backend_process
+    return startup_status
 
 
 def _iter_serving_world_ranks(py_env_configs: PyEnvConfigs) -> Iterator[int]:
@@ -585,6 +586,7 @@ def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
     return getattr(py_env_configs.model_args, "model_type", "") in (
         "deepseek_v4",
         "kimi_k3",
+        "kimi_k31",
     )
 
 
@@ -692,6 +694,7 @@ def start_server(py_env_configs: PyEnvConfigs):
 
     # Impls register spawned processes right after start, so later failures still reach them in the finally cleanup.
     startup_warmup_gate_file = _setup_startup_warmup_health_gate(py_env_configs)
+    backend_startup_status = {}
 
     try:
         if py_env_configs.role_config.role_type == RoleType.VIT:
@@ -704,7 +707,7 @@ def start_server(py_env_configs: PyEnvConfigs):
         ):
             # For backend server, vit_process_engine is None when vit is separated
             logging.info("start backend server")
-            start_backend_server_impl(
+            backend_startup_status = start_backend_server_impl(
                 global_controller, py_env_configs, process_manager
             )
 
@@ -734,7 +737,9 @@ def start_server(py_env_configs: PyEnvConfigs):
             logging.error("[START_SERVER] Health checks failed")
             raise Exception("Health checks failed")
 
-        _maybe_run_startup_real_warmup(py_env_configs)
+        _maybe_run_startup_real_warmup(
+            py_env_configs, backend_startup_status.get("max_seq_len")
+        )
         _mark_startup_warmup_health_gate_ready(startup_warmup_gate_file)
 
         logging.info(
@@ -758,7 +763,7 @@ def start_server(py_env_configs: PyEnvConfigs):
 def _get_startup_real_warmup_pow2_lens(max_len: int):
     if max_len < STARTUP_REAL_WARMUP_MIN_TOKEN_LEN:
         raise ValueError(
-            "model_args.max_seq_len should be at least "
+            "model max_seq_len should be at least "
             f"{STARTUP_REAL_WARMUP_MIN_TOKEN_LEN}, got {max_len}"
         )
     lens = []
@@ -769,33 +774,6 @@ def _get_startup_real_warmup_pow2_lens(max_len: int):
     if lens[-1] != max_len:
         lens.append(max_len)
     return lens
-
-
-def _get_startup_real_warmup_max_len(py_env_configs: PyEnvConfigs):
-    from rtp_llm.model_factory import ModelFactory
-
-    model_config = ModelFactory.create_model_config(
-        model_args=py_env_configs.model_args,
-        lora_config=py_env_configs.lora_config,
-        kv_cache_config=py_env_configs.kv_cache_config,
-        profiling_debug_logging_config=py_env_configs.profiling_debug_logging_config,
-        generate_env_config=py_env_configs.generate_env_config,
-        embedding_config=py_env_configs.embedding_config,
-        quantization_config=py_env_configs.quantization_config,
-        render_config=py_env_configs.render_config,
-        eplb_config=py_env_configs.eplb_config,
-        vit_config=py_env_configs.vit_config,
-    )
-    model_max_len = int(model_config.max_seq_len)
-    if model_max_len <= 0:
-        raise ValueError(
-            f"model_config.max_seq_len should be positive, got {model_max_len}"
-        )
-    logging.info(
-        "startup real warmup max len = model max_seq_len = %d",
-        model_max_len,
-    )
-    return model_max_len
 
 
 def _get_startup_real_warmup_token_lens(max_len: int):
@@ -873,7 +851,7 @@ def _get_startup_real_warmup_request_token_len(
     if reserve_step > 0:
         if max_len <= reserve_step:
             raise ValueError(
-                "model_args.max_seq_len should be greater than speculative "
+                "model max_seq_len should be greater than speculative "
                 f"reserve_step, got max_seq_len={max_len}, reserve_step={reserve_step}"
             )
         max_request_token_len = min(
@@ -915,14 +893,13 @@ def _run_startup_real_warmup_async(coroutine):
     return loop.run_until_complete(coroutine)
 
 
-async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
+async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs, max_len: int):
     import torch
 
     from rtp_llm.config.generate_config import GenerateConfig
     from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
     from rtp_llm.utils.base_model_datatypes import GenerateInput
 
-    max_len = _get_startup_real_warmup_max_len(py_env_configs)
     token_lens = _get_startup_real_warmup_token_lens(max_len)
     reserve_step = _get_startup_real_warmup_speculative_reserve_step(py_env_configs)
     addresses = _get_startup_real_warmup_grpc_addresses(py_env_configs)
@@ -1056,12 +1033,14 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
     )
 
 
-def _maybe_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
+def _maybe_run_startup_real_warmup(py_env_configs: PyEnvConfigs, max_seq_len) -> bool:
     if not _should_run_startup_real_warmup(py_env_configs):
         return False
 
     try:
-        _run_startup_real_warmup_async(_run_startup_real_warmup_grpc(py_env_configs))
+        _run_startup_real_warmup_async(
+            _run_startup_real_warmup_grpc(py_env_configs, int(max_seq_len))
+        )
         return True
     except StartupRealWarmupAddressResolutionError:
         logging.error(

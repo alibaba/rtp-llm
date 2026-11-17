@@ -1929,6 +1929,9 @@ class BackendTest(JitCacheTestBase):
             def __init__(self, _configs):
                 self.request_shutdown = mock.Mock()
                 self.serve_forever = mock.Mock()
+                self.engine = types.SimpleNamespace(
+                    config=types.SimpleNamespace(max_seq_len=4096)
+                )
                 FakeBackendManager.instance = self
 
             def start(self):
@@ -1962,6 +1965,7 @@ class BackendTest(JitCacheTestBase):
             stack.enter_context(mock.patch.object(backend, "_send_pipe_status", status))
             backend.local_rank_start(None, configs, pipe_writer=object())
         self.assertEqual(status.call_args[0][1], "success")
+        self.assertEqual(status.call_args.kwargs["max_seq_len"], 4096)
         handlers[backend.signal.SIGTERM](backend.signal.SIGTERM, None)
         FakeBackendManager.instance.request_shutdown.assert_called_once_with()
         FakeBackendManager.instance.serve_forever.assert_called_once_with()

@@ -1,67 +1,76 @@
+import multiprocessing
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from rtp_llm import start_server
+from rtp_llm import start_backend_server, start_server
 from rtp_llm.ops import RoleType, SpeculativeType
 
 
 class StartupRealWarmupTest(unittest.TestCase):
+    def test_backend_ranks_report_resolved_model_length(self):
+        from unittest.mock import Mock
+
+        readers = []
+        for _ in range(2):
+            reader, writer = multiprocessing.Pipe(duplex=False)
+            self.addCleanup(reader.close)
+            readers.append(reader)
+            start_backend_server._send_pipe_status(
+                writer, "success", "ready", max_seq_len=4096
+            )
+        process = Mock(exitcode=None)
+        process.is_alive.return_value = True
+        self.assertEqual(
+            start_backend_server._wait_for_ranks_startup(
+                [process, process], readers, 2
+            ),
+            4096,
+        )
+
     def test_warmup_uses_resolved_model_length(self):
         config = SimpleNamespace(
             model_args=SimpleNamespace(max_seq_len=None),
-            **{
-                name: object()
-                for name in (
-                    "lora_config",
-                    "kv_cache_config",
-                    "profiling_debug_logging_config",
-                    "generate_env_config",
-                    "embedding_config",
-                    "quantization_config",
-                    "render_config",
-                    "eplb_config",
-                    "vit_config",
-                )
-            },
+            sp_config=SimpleNamespace(type=SpeculativeType.NONE, gen_num_per_cycle=0),
+            grpc_config=None,
         )
+        requests = []
+
+        async def enqueue(request):
+            requests.append(request)
+            yield SimpleNamespace(generate_outputs=[])
+
+        client = SimpleNamespace(enqueue=enqueue, close=AsyncMock())
         with patch(
             "rtp_llm.model_factory.ModelFactory.create_model_config",
-            return_value=SimpleNamespace(max_seq_len=4096),
-        ) as create_config:
+            side_effect=AssertionError("warmup must reuse the backend model length"),
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.ModelRpcClient", return_value=client
+        ), patch.object(
+            start_server,
+            "_get_startup_real_warmup_grpc_addresses",
+            return_value=["localhost:12345"],
+        ):
             for cli_length in (None, 8192):
                 with self.subTest(cli_length=cli_length):
                     config.model_args.max_seq_len = cli_length
-                    self.assertEqual(
-                        start_server._get_startup_real_warmup_max_len(config), 4096
+                    requests.clear()
+                    start_server._run_startup_real_warmup_async(
+                        start_server._run_startup_real_warmup_grpc(config, 4096)
                     )
-                    self.assertEqual(create_config.call_args.kwargs, vars(config))
+                    self.assertEqual(
+                        [request.token_ids.numel() for request in requests],
+                        [2**power for power in range(1, 12)] + [4095],
+                    )
+        self.assertEqual(client.close.await_count, 2)
 
     def test_warmup_rejects_invalid_resolved_length(self):
-        config = SimpleNamespace(
-            **{
-                name: None
-                for name in (
-                    "model_args",
-                    "lora_config",
-                    "kv_cache_config",
-                    "profiling_debug_logging_config",
-                    "generate_env_config",
-                    "embedding_config",
-                    "quantization_config",
-                    "render_config",
-                    "eplb_config",
-                    "vit_config",
-                )
-            }
-        )
         for length in (0, -1):
-            with self.subTest(length=length), patch(
-                "rtp_llm.model_factory.ModelFactory.create_model_config",
-                return_value=SimpleNamespace(max_seq_len=length),
-            ):
-                with self.assertRaisesRegex(ValueError, "should be positive"):
-                    start_server._get_startup_real_warmup_max_len(config)
+            with self.subTest(length=length):
+                with self.assertRaisesRegex(ValueError, "should be at least"):
+                    start_server._run_startup_real_warmup_async(
+                        start_server._run_startup_real_warmup_grpc(None, length)
+                    )
 
     def test_single_stage_dp_ranks_pass_startup_warmup_gate(self):
         for world_size in (2, 3, 4):
@@ -181,7 +190,7 @@ class StartupRealWarmupTest(unittest.TestCase):
         config.runtime_config.model_warm_up = False
         self.assertFalse(start_server._should_run_startup_real_warmup(config))
 
-    def test_real_warmup_only_enables_dsv4_and_k3_targets(self):
+    def test_real_warmup_only_enables_dsv4_and_k3_family_targets(self):
         config = SimpleNamespace(
             runtime_config=SimpleNamespace(warm_up=True, model_warm_up=True),
             role_config=SimpleNamespace(role_type=RoleType.PREFILL),
@@ -191,8 +200,10 @@ class StartupRealWarmupTest(unittest.TestCase):
         for model_type, expected in (
             ("deepseek_v4", True),
             ("kimi_k3", True),
+            ("kimi_k31", True),
             ("deepseek_v4_mtp", False),
             ("kimi_k3_mtp", False),
+            ("kimi_k31_mtp", False),
             ("custom_model", False),
             ("", False),
         ):
