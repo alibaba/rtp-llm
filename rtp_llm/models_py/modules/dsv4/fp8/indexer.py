@@ -28,7 +28,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from rtp_llm.device.device_type import is_ppu
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.cp import (
@@ -532,13 +531,6 @@ class IndexerFP8(PoolBackedModule):
             rope_view = q[..., -self.rope_head_dim :]
             if not rope_view.is_cuda:
                 raise RuntimeError("IndexerFP8._compute_indexer_q expects CUDA tensors")
-            if is_ppu():
-                from rtp_llm.models_py.kernels.ppu.jit.ppu_fp4_indexer import (
-                    rope_only_exact_inplace,
-                )
-
-                if rope_only_exact_inplace(rope_view, freqs_cis):
-                    return q
             from rtp_llm.models_py.modules.dsv4._rope_only_triton import (
                 rope_only_inplace,
             )

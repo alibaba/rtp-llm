@@ -73,7 +73,6 @@
     }
   },
   "sources": {
-    "compat/rope_exact.cuh": "9f6c337fd9db0889cb9082f35bbdf8757a109dfad68a983771984584eb234da7",
     "compat/c4_decode_v2.cuh": "e7f00b9572eebf789a2b5aa5b43436fb7d4a07f7c5f33656bfe306e9304ad7ca",
     "compat/fused_norm_rope_v2.cuh": "5fa270749e01cae394a7731565ee97c90a2b5d344a5bdccaa6007d0fca6e6722",
     "compat/sgl_kernel/tensor.h": "f971fbc9e6740f4d066764e8c88a4d8bacada5a4c607dc1170bc847517f1fcb0",
