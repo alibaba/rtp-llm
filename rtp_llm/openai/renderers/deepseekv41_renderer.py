@@ -7,7 +7,7 @@ import sys
 import uuid
 from collections.abc import Mapping
 
-from rtp_llm.config.dsv41_config import V41Config
+from rtp_llm.config.dsv41_config import V41Config, v41_image_detail_size
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.openai.api_datatype import (
     DeltaMessage,
@@ -33,6 +33,7 @@ from rtp_llm.openai.renderers.v41_recipe import (
     resolve_thinking,
 )
 from rtp_llm.openai.renderers.v41_stream import V41StreamParser
+from rtp_llm.ops import MMPreprocessConfig
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 IMAGE_PLACEHOLDER = "<\uff5cdeepseek_image\uff5c>"
@@ -179,9 +180,12 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
         prompt, media = self._encode_request(request)
         try:
             input_ids = self.prompt_tokenizer.encode(prompt)
-            urls = _image_records_to_urls(
-                input_ids, media["images"], self.image_token_id
-            )
+            images = media["images"]
+            urls = _image_records_to_urls(input_ids, images, self.image_token_id)
+            configs = [
+                MMPreprocessConfig(*v41_image_detail_size(image.get("detail")))
+                for image in images
+            ]
         except (TypeError, ValueError) as error:
             raise FtRuntimeException(
                 ExceptionType.INVALID_PARAMS, str(error)
@@ -189,6 +193,7 @@ class DeepseekV41Renderer(DeepseekV4Renderer):
         return RenderedInputs(
             input_ids=input_ids,
             rendered_prompt=prompt.text,
+            preprocess_configs=configs,
             input_urls=urls,
             input_urls_type=[MMUrlType.IMAGE] * len(urls),
         )

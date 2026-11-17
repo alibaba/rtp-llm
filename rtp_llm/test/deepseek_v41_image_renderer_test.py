@@ -201,6 +201,45 @@ class V41ImageRendererTest(TestCase):
         self.assertEqual(actual.multimodal_inputs[0].mm_type, MMUrlType.IMAGE)
         self.assertEqual(request.model_dump(), original)
 
+    def test_image_detail_is_preserved_per_image_on_the_wire(self):
+        url = "https://example.com/image.png"
+        parts = [
+            {"type": "image_url", "image_url": {"url": url, **detail}}
+            for detail in (
+                {},
+                {"detail": "low"},
+                {"detail": "original"},
+                {"detail": "high"},
+                {"detail": "auto"},
+            )
+        ]
+        request = ChatCompletionRequest.model_validate(
+            {"messages": [{"role": "user", "content": parts}]}
+        )
+        rendered = self.renderer.render_chat(request)
+        media = rendered.multimodal_inputs
+        wire = trans_input(
+            GenerateInput(
+                request_id=1,
+                token_ids=torch.tensor(rendered.input_ids, dtype=torch.int32),
+                mm_inputs=media,
+                generate_config=GenerateConfig(),
+            )
+        )
+        self.assertEqual(
+            [
+                (m.mm_preprocess_config.width, m.mm_preprocess_config.height)
+                for m in wire.multimodal_inputs
+            ],
+            [(-1, -1), (512, 512), (-1, -1), (-1, -1), (-1, -1)],
+        )
+        keys = [item.cache_key() for item in media]
+        self.assertEqual(len(set(keys)), 2)
+        self.assertNotEqual(keys[0], keys[1])
+        request.messages[0].content[1].image_url.detail = "medium"
+        with self.assertRaisesRegex(FtRuntimeException, "image detail"):
+            self.renderer.render_chat(request)
+
     def test_normal_render_does_not_decode_pixels(self):
         url = data_url((17, 23, 42))
         request = ChatCompletionRequest.model_validate(

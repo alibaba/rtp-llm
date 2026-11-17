@@ -536,6 +536,33 @@ class V41BackendPreprocessContractTest(unittest.TestCase):
             torch.testing.assert_close(item.patches, original.patches, rtol=0, atol=0)
         self.assertFalse(hasattr(original, "inspection_sources"))
 
+    def test_low_detail_matches_resized_source_in_both_preprocess_paths(self):
+        source = image_data(900, 630)
+        with Image.open(io.BytesIO(source)) as image:
+            resized = io.BytesIO()
+            image.resize((512, 512), Image.Resampling.BICUBIC).save(resized, "PNG")
+        media = [self.media(source), self.media(source)]
+        media[1].mm_preprocess_config.width = media[1].mm_preprocess_config.height = 512
+        for gpu_preprocess in (False, True):
+            with self.subTest(gpu_preprocess=gpu_preprocess):
+                result = vision_module.DeepSeekV41VisionEmbedding.preprocess_input(
+                    media,
+                    self.vit_config,
+                    processor_config=self.config,
+                    gpu_preprocess=gpu_preprocess,
+                    capture_inspection_sources=True,
+                )
+                self.assertEqual(result.inspection_sources, [source, source])
+                field = "rgb" if gpu_preprocess else "patches"
+                for actual, raw in zip(result.data, [source, resized.getvalue()]):
+                    reference = self.prepare(raw, gpu_preprocess=gpu_preprocess)
+                    torch.testing.assert_close(
+                        getattr(actual, field),
+                        getattr(reference, field),
+                        rtol=0,
+                        atol=0,
+                    )
+
     def test_media_hints_leave_model_preprocessing_unchanged(self):
         data = [image_data(3, 5), image_data(5, 3)]
         media = [self.media(item) for item in data]

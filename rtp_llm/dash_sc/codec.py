@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Iterator, NamedTuple
 
 import torch
 
+from rtp_llm.config.dsv41_config import v41_image_detail_size
 from rtp_llm.config.response_format import parse_response_format
 from rtp_llm.config.thinking_mode import INT32_MAX
 from rtp_llm.dash_sc.proto import predict_v2_pb2
@@ -1574,6 +1575,8 @@ class MultimodalPart:
     fps: int = -1
     max_frames: int = -1
     min_frames: int = -1
+    width: int = -1
+    height: int = -1
 
 
 def _extract_openai_url(part: dict[str, Any], inner_field: str) -> str | None:
@@ -1584,7 +1587,9 @@ def _extract_openai_url(part: dict[str, Any], inner_field: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _extract_per_part_config(part: dict[str, Any]) -> dict[str, int]:
+def _extract_per_part_config(
+    part: dict[str, Any], mm_type: MMUrlType, model_type: str | None
+) -> dict[str, int]:
     """Read nested preprocess_config first, then apply inline overrides."""
     out: dict[str, int] = {}
     nested = part.get("preprocess_config")
@@ -1605,10 +1610,21 @@ def _extract_per_part_config(part: dict[str, Any]) -> dict[str, int]:
             and value > 0
         ):
             out[key] = int(value)
+    if model_type == "deepseek_v41" and mm_type == MMUrlType.IMAGE:
+        source = part.get("image_url")
+        detail = part.get("detail")
+        if isinstance(source, dict):
+            detail = source.get("detail", detail)
+        try:
+            out["width"], out["height"] = v41_image_detail_size(detail)
+        except ValueError as error:
+            raise DashScParameterError(str(error)) from error
     return out
 
 
-def _parts_from_openai_content(part: dict[str, Any]) -> Iterator[MultimodalPart]:
+def _parts_from_openai_content(
+    part: dict[str, Any], model_type: str | None
+) -> Iterator[MultimodalPart]:
     openai_part_types, _ = _multimodal_type_maps()
     mapping = openai_part_types.get(part.get("type"))
     if mapping is None:
@@ -1622,12 +1638,13 @@ def _parts_from_openai_content(part: dict[str, Any]) -> Iterator[MultimodalPart]
     yield MultimodalPart(
         url=url,
         mm_type=mm_type,
-        **_extract_per_part_config(part),
+        **_extract_per_part_config(part, mm_type, model_type),
     )
 
 
-def _parts_from_dashscope_native(part: dict[str, Any]) -> Iterator[MultimodalPart]:
-    config = _extract_per_part_config(part)
+def _parts_from_dashscope_native(
+    part: dict[str, Any], model_type: str | None
+) -> Iterator[MultimodalPart]:
     _, native_part_types = _multimodal_type_maps()
     for key, mm_type in native_part_types.items():
         if key not in part:
@@ -1639,7 +1656,11 @@ def _parts_from_dashscope_native(part: dict[str, Any]) -> Iterator[MultimodalPar
             )
         if not isinstance(value, str) or not value:
             raise DashScParameterError(f"{key} requires a non-empty URL string")
-        yield MultimodalPart(url=value, mm_type=mm_type, **config)
+        yield MultimodalPart(
+            url=value,
+            mm_type=mm_type,
+            **_extract_per_part_config(part, mm_type, model_type),
+        )
 
 
 def _iter_messages_from_payload(obj: Any) -> Iterator[Any]:
@@ -1686,6 +1707,7 @@ def _load_multimodal_payload(
 
 def parse_multimodal_parts_from_request(
     request: predict_v2_pb2.ModelInferRequest,
+    model_type: str | None = None,
 ) -> list[MultimodalPart]:
     """Extract image, video, and audio parts without changing text-only requests."""
     payload = _load_multimodal_payload(request)
@@ -1704,9 +1726,9 @@ def parse_multimodal_parts_from_request(
             if not isinstance(part, dict):
                 continue
             if part.get("type") in openai_part_types:
-                result.extend(_parts_from_openai_content(part))
+                result.extend(_parts_from_openai_content(part, model_type))
             else:
-                result.extend(_parts_from_dashscope_native(part))
+                result.extend(_parts_from_dashscope_native(part, model_type))
     return result
 
 

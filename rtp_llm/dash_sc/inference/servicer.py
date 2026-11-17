@@ -173,9 +173,10 @@ _DASH_SERVER_ATTRIBUTES = {
 @traced_stage("dash_sc.multimodal_parse")
 def _build_mm_inputs_from_request(
     request: predict_v2_pb2.ModelInferRequest,
+    model_type: str | None = None,
 ) -> list:
     """Convert DashSc message parts to the engine's generic multimodal inputs."""
-    parts = parse_multimodal_parts_from_request(request)
+    parts = parse_multimodal_parts_from_request(request, model_type)
     if not parts:
         return []
 
@@ -187,6 +188,8 @@ def _build_mm_inputs_from_request(
             part.mm_type,
             torch.empty(0),
             MMPreprocessConfig(
+                width=part.width,
+                height=part.height,
                 min_pixels=part.min_pixels,
                 max_pixels=part.max_pixels,
                 fps=part.fps,
@@ -2402,19 +2405,18 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 body_headers = extract_body_trace_headers(request)
                 _ensure_span(body_headers)
                 try:
+                    model_type = (
+                        "deepseek_v41" if self._v41_image_token_id is not None else None
+                    )
                     with stage("dash_sc.parameters_parse"):
                         parsed_input_ids, sampling, request_controls = (
                             parse_dash_sc_grpc_request(
                                 request,
                                 invocation_metadata=invocation_metadata or (),
-                                model_type=(
-                                    "deepseek_v41"
-                                    if self._v41_image_token_id is not None
-                                    else None
-                                ),
+                                model_type=model_type,
                             )
                         )
-                    mm_inputs = _build_mm_inputs_from_request(request)
+                    mm_inputs = _build_mm_inputs_from_request(request, model_type)
                     traceparent_new = _lookup_ds_request_control(
                         parse_ds_header_attributes(request), "traceparent_new"
                     )

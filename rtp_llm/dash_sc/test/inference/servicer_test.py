@@ -1394,6 +1394,38 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(visitor.last_generate_input.mm_inputs, [mm_input])
 
+    def test_v41_parses_per_image_detail_from_dashsc_json(self) -> None:
+        url = "https://example.com/image.png"
+        parts = [
+            {"image": url, "detail": "low", "min_pixels": 128},
+            {"image": url, "detail": "original"},
+            {"type": "image_url", "image_url": {"url": url, "detail": "low"}},
+            {"image": url, "video": url, "detail": "high"},
+            {"image": url},
+        ]
+        req = self._minimal_request()
+        for key in ("payload", "__messages__"):
+            with self.subTest(key=key):
+                req.parameters.clear()
+                req.parameters[key].string_param = json.dumps(
+                    {"input": {"messages": [{"role": "user", "content": parts}]}}
+                )
+                media = _build_mm_inputs_from_request(req, "deepseek_v41")
+                configs = [item.mm_preprocess_config for item in media]
+                self.assertEqual(
+                    [(c.width, c.height) for c in configs],
+                    [(512, 512), (-1, -1), (512, 512), (-1, -1), (-1, -1), (-1, -1)],
+                )
+                self.assertEqual(configs[0].min_pixels, 128)
+                self.assertEqual(
+                    _build_mm_inputs_from_request(req)[0].mm_preprocess_config.width, -1
+                )
+        req.parameters["__messages__"].string_param = json.dumps(
+            [{"content": [{"image": url, "detail": "medium"}]}]
+        )
+        with self.assertRaisesRegex(DashScParameterError, "image detail"):
+            _build_mm_inputs_from_request(req, "deepseek_v41")
+
     def test_builds_generic_multimodal_inputs_from_payload(self) -> None:
         req = self._minimal_request()
         req.parameters["payload"].string_param = json.dumps(

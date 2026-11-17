@@ -13,6 +13,7 @@ import torch
 from PIL import Image
 from torch import nn
 
+from rtp_llm.config.dsv41_config import V41_LOW_DETAIL_SIZE
 from rtp_llm.metrics import GaugeMetrics
 from rtp_llm.models_py.modules.dsv41.vision_preprocess_tables import (
     ResizeTables,
@@ -574,7 +575,6 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
             media.mm_type != MMUrlType.IMAGE for media in mm_inputs
         ):
             raise ValueError("V4.1 preprocessing requires non-empty IMAGE inputs")
-        # Legacy image hints are ignored; the model config owns preprocessing.
         results = []
         inspection_sources = []
         source_identity = None
@@ -603,6 +603,15 @@ class DeepSeekV41VisionEmbedding(nn.Module, MultiModalEmbeddingInterface):
                         source_identity = ImageSourceIdentity.from_bytes(source)
                 try:
                     with Image.open(payload) as image:
+                        config = media.mm_preprocess_config
+                        if (
+                            (config.width, config.height) == V41_LOW_DETAIL_SIZE
+                            and image.size != V41_LOW_DETAIL_SIZE
+                        ):
+                            # Detail is applied before the checkpoint's normal grid/resize.
+                            image = image.convert("RGB").resize(
+                                V41_LOW_DETAIL_SIZE, Image.Resampling.BICUBIC
+                            )
                         if gpu_preprocess:
                             rgb = _rgb_tensor(image)
                             _, _, target_h, target_w = plan_image_grid(
