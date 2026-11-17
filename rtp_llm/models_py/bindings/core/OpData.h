@@ -19,6 +19,9 @@
 
 namespace rtp_llm {
 
+class DeferredSamplingRngPool;
+class DeferredSamplingRngLease;
+
 enum class ParallelMode {
     TP        = 0,
     DP        = 1,
@@ -361,6 +364,7 @@ struct GreedyParams {
     bool                         token_history_not_materialized = false;
     torch::Tensor                sampling_rng_state_host = {};
     torch::Tensor                sampling_rng_state_device = {};
+    std::shared_ptr<DeferredSamplingRngPool> deferred_rng_pool = {};
 };
 
 struct GreedyOutput {
@@ -372,6 +376,7 @@ struct GreedyOutput {
     torch::Tensor deferred_fallback_rows  = {};
     torch::Tensor prepared_rejection_rng  = {};
     torch::Tensor deferred_log_normalizer = {};
+    std::shared_ptr<DeferredSamplingRngLease> deferred_rng_lease = {};
 };
 
 struct BeamSearchParams {
@@ -462,6 +467,8 @@ struct RejectionSamplingParams {
     torch::Tensor prepared_rejection_rng = {};
     torch::Tensor target_log_normalizer_d = {};
     bool allow_glm5_multistep_sampling_optimizations = false;
+    std::shared_ptr<DeferredSamplingRngPool> deferred_rng_pool = {};
+    std::shared_ptr<DeferredSamplingRngLease> deferred_rng_lease = {};
 };
 
 struct MappingDraft2TargetParams {

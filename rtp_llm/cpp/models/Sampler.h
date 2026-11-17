@@ -37,6 +37,7 @@ private:
     // Like buffer_holder_, these slots are per-instance and forward is non-reentrant.
     std::array<RngSlot, 3> rng_slots_;
 #endif
+    std::shared_ptr<DeferredSamplingRngPool> deferred_rng_pool_;
     TensorHolder            buffer_holder_;
     cuda_graph::GraphStream copy_stream_;
     int                     force_topk_ = 0;

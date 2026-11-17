@@ -76,6 +76,7 @@ cc_library(
 cc_library(
     name = "op_data",
     hdrs = [
+        "DeferredSamplingRngPool.h",
         "OpData.h",
     ],
     srcs = [

@@ -15,6 +15,7 @@
 #include <c10/core/InferenceMode.h>
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
+#include "rtp_llm/models_py/bindings/core/DeferredSamplingRngPool.h"
 #include <c10/cuda/CUDACachingAllocator.h>
 #endif
 
@@ -44,6 +45,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("sampler.forward");
     torch::Tensor rng_state_host;
     torch::Tensor rng_state_device;
+    std::shared_ptr<DeferredSamplingRngPool> deferred_rng_pool;
 #if USING_CUDA
     struct CompleteRngSlot {
         RngSlot* slot = nullptr;
@@ -93,6 +95,10 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
             // All three slots may still be in flight. Undefined buffers select the
             // original independently owned packet without blocking serving.
         }
+    }
+    if (inputs.allow_glm5_multistep_sampling_optimizations && inputs.defer_token_sampling) {
+        if (!deferred_rng_pool_) deferred_rng_pool_ = std::make_shared<DeferredSamplingRngPool>();
+        deferred_rng_pool = deferred_rng_pool_;
     }
 #endif
 
@@ -194,6 +200,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     size_t from_batch_idx_out = 0;
     bool   deferred_token_sampling = false;
     torch::Tensor compact_logits, compact_ids, dense_fallback, fallback_rows, prepared_rejection_rng, log_normalizer;
+    std::shared_ptr<DeferredSamplingRngLease> deferred_rng_lease;
 
     while (from_batch_idx_in < inputs.batch_size) {
         auto cur_num_beams_in  = num_beams_in[from_batch_idx_in];
@@ -282,7 +289,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  rng_state_host.defined() ? rng_state_host.narrow(0, 2 * from_batch_idx_in, 2 * batch_size_in)
                                                     .view({2, static_cast<int64_t>(batch_size_in)}) : torch::Tensor(),
                  rng_state_device.defined() ? rng_state_device.narrow(0, 2 * from_batch_idx_in, 2 * batch_size_in)
-                                                      .view({2, static_cast<int64_t>(batch_size_in)}) : torch::Tensor()});
+                                                      .view({2, static_cast<int64_t>(batch_size_in)}) : torch::Tensor(),
+                 deferred_rng_pool});
             deferred_token_sampling = greedy_output.deferred_token_sampling;
             if (greedy_output.deferred_logits.defined()) {
                 compact_logits         = greedy_output.deferred_logits;
@@ -291,6 +299,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                 fallback_rows          = greedy_output.deferred_fallback_rows;
                 log_normalizer         = greedy_output.deferred_log_normalizer;
                 prepared_rejection_rng = greedy_output.prepared_rejection_rng;
+                deferred_rng_lease     = greedy_output.deferred_rng_lease;
             }
             if (greedy_output.success.defined()) {
                 success.copy_(greedy_output.success);
@@ -385,7 +394,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
          prepared_rejection_rng,
          deferred_token_sampling ? verify_do_sample : torch::Tensor(),
          log_normalizer,
-         inputs.allow_glm5_multistep_sampling_optimizations});
+         inputs.allow_glm5_multistep_sampling_optimizations,
+         deferred_rng_lease});
 }
 
 void Sampler::preprocessLogits(const SamplerInputs& inputs) {

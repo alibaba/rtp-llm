@@ -2,6 +2,7 @@
 #include <algorithm>
 #include "rtp_llm/cpp/utils/MtpFusion.h"
 #if USING_CUDA
+#include "rtp_llm/models_py/bindings/core/DeferredSamplingRngPool.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/mtp_target_verify_prepare.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/sampling.h"
 #endif
@@ -272,6 +273,11 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                 }
                 force_accept.push_back(stream->forceSpAccept());
             }
+#if USING_CUDA
+            if (target_sampler_output.allow_glm5_multistep_sampling_optimizations && !deferred_rng_pool_) {
+                deferred_rng_pool_ = std::make_shared<DeferredSamplingRngPool>();
+            }
+#endif
             execRejectionSampling({draft_token_probs_d_t,
                                    draft_token_ids_d_t,
                                    uniform_samples_d,
@@ -293,7 +299,13 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                                    target_sampler_output.verify_fallback_rows,
                                    target_sampler_output.prepared_rejection_rng,
                                    target_sampler_output.verify_log_normalizer,
-                                   target_sampler_output.allow_glm5_multistep_sampling_optimizations});
+                                   target_sampler_output.allow_glm5_multistep_sampling_optimizations,
+                                   deferred_rng_pool_,
+                                   target_sampler_output.deferred_rng_lease});
+            if (target_sampler_output.deferred_rng_lease) {
+                target_sampler_output.prepared_rejection_rng = {};
+                target_sampler_output.deferred_rng_lease.reset();
+            }
         } else if (mtpFusionEnabled() && draft_sampler_output.draft_point_mass && all_greedy && !has_forced_accept) {
             greedy_finalized = tryMtpGreedyFinalize(draft_token_ids_d_t, target_token_ids_d_t,
                                                    output_token_ids_d, output_accepted_token_num_d,

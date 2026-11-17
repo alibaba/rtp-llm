@@ -83,6 +83,7 @@ protected:
     torch::Tensor        d2t_map_;
     size_t               propose_step_;
     mutable TensorHolder buffer_holder_;
+    mutable std::shared_ptr<DeferredSamplingRngPool> deferred_rng_pool_;
 
     // Reusable buffer for draft_probs vocab-padding when draft/target vocab sizes differ.
     // Grow-only; reused across batchSample calls to avoid per-forward GPU allocation in hot path.

@@ -1,4 +1,5 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/models_py/bindings/core/DeferredSamplingRngPool.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/sampling/sampling.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/deepselect_fp32.h"
 #include <ATen/cuda/CUDAGraph.h>
@@ -929,6 +930,7 @@ TEST_F(CudaSamplerTest, testCompactPreparedRejectionRng) {
             generator.set_state(state);
         }
     } restore{default_generator, default_generator.get_state()};
+    auto rng_pool = std::make_shared<DeferredSamplingRngPool>();
     for (int mode = 0; mode < 3; ++mode) {
         SCOPED_TRACE(mode);
         std::vector<at::Generator> generators;
@@ -967,6 +969,8 @@ TEST_F(CudaSamplerTest, testCompactPreparedRejectionRng) {
             params.allow_compact_deferred_output = true;
             params.deferred_rejection_generators = generators;
             params.deferred_rejection_rows       = prepare ? rows : 0;
+            params.allow_glm5_multistep_sampling_optimizations = prepare;
+            if (prepare) params.deferred_rng_pool = rng_pool;
             return execSampleGreedy(params);
         };
         auto rejection = [&](const GreedyOutput& prepared) {
@@ -984,6 +988,8 @@ TEST_F(CudaSamplerTest, testCompactPreparedRejectionRng) {
             params.deferred_token_sampling     = true;
             params.draft_point_mass            = true;
             params.prepared_rejection_rng      = prepared.prepared_rejection_rng;
+            params.deferred_rng_lease          = prepared.deferred_rng_lease;
+            params.allow_glm5_multistep_sampling_optimizations = bool(prepared.deferred_rng_lease);
             return params;
         };
         reset();
@@ -995,6 +1001,7 @@ TEST_F(CudaSamplerTest, testCompactPreparedRejectionRng) {
         reset();
         auto prepared_output = producer(true);
         ASSERT_TRUE(prepared_output.prepared_rejection_rng.defined());
+        ASSERT_TRUE(prepared_output.deferred_rng_lease);
         EXPECT_EQ(offsets(), expected_offsets);
         auto prepared = rejection(prepared_output);
         execRejectionSampling(prepared);
@@ -3528,4 +3535,174 @@ TEST_F(CudaSamplerTest, BatchedPhiloxRejectsCaptureWithoutAdvancingGenerator) {
     EXPECT_EQ(seeds[0], -1);
     EXPECT_EQ(offsets[0], -1);
     EXPECT_TRUE(torch::equal(original_state, generator.get_state()));
+}
+
+TEST_F(CudaSamplerTest, DeferredRngPoolRetainsLeasesAcrossThreadsAndOwnerDestruction) {
+    const int device = at::cuda::current_device();
+    auto pool = std::make_shared<DeferredSamplingRngPool>();
+    auto lease = pool->acquire(4, 8, device);
+    ASSERT_TRUE(lease);
+    auto host = lease->hostState();
+    host.fill_(37);
+    auto first_pointer = host.data_ptr();
+    auto second = pool->acquire(4, 8, device);
+    ASSERT_NE(second->hostState().data_ptr(), first_pointer);
+    second.reset();
+    pool.reset();  // In-flight leases, not the pool container, own packet storage.
+    auto result = std::async(std::launch::async, [lease, device]() {
+        c10::cuda::CUDAGuard device_guard(device);
+        auto stream = at::cuda::getStreamFromPool();
+        c10::cuda::CUDAStreamGuard stream_guard(stream);
+        lease->begin(stream);
+        auto snapshot = lease->fallbackDeviceState().clone();
+        lease->finish();
+        stream.synchronize();
+        return snapshot;
+    }).get();
+    EXPECT_TRUE(torch::equal(result.cpu(), host));
+    EXPECT_THROW(lease->begin(at::cuda::getCurrentCUDAStream()), c10::Error);
+}
+
+TEST_F(CudaSamplerTest, DeferredRngPoolReusesCompletedHostAndFallbackDevice) {
+    auto pool = std::make_shared<DeferredSamplingRngPool>();
+    auto stream = at::cuda::getCurrentCUDAStream();
+    const int device = stream.device_index();
+    void* host_address = nullptr;
+    void* device_address = nullptr;
+    for (int iteration = 0; iteration < 4; ++iteration) {
+        auto lease = pool->acquire(4, 8, device);
+        auto state = lease->hostState();
+        state.fill_(iteration + 10);
+        lease->begin(stream);
+        auto gpu = lease->fallbackDeviceState();
+        if (iteration == 0) {
+            host_address = state.data_ptr();
+            device_address = gpu.data_ptr();
+        } else {
+            EXPECT_EQ(state.data_ptr(), host_address);
+            EXPECT_EQ(gpu.data_ptr(), device_address);
+        }
+        auto snapshot = gpu.clone();
+        lease->finish();
+        stream.synchronize();
+        EXPECT_TRUE(torch::equal(snapshot.cpu(), state));
+    }
+    // Multiple outstanding producer handoffs must never alias even before submission.
+    std::vector<std::shared_ptr<DeferredSamplingRngLease>> live;
+    for (int i = 0; i < 5; ++i) {
+        auto lease = pool->acquire(4, 8, device);
+        for (const auto& previous : live) EXPECT_NE(previous->hostState().data_ptr(), lease->hostState().data_ptr());
+        live.push_back(lease);
+    }
+}
+
+TEST_F(CudaSamplerTest, DeferredRngPoolExceptionAndCaptureContracts) {
+    auto pool = std::make_shared<DeferredSamplingRngPool>();
+    auto stream = at::cuda::getStreamFromPool();
+    c10::cuda::CUDAStreamGuard guard(stream);
+    auto lease = pool->acquire(4, 8, stream.device_index());
+    lease->hostState().fill_(17);
+    auto dummy = torch::zeros({1}, torch::TensorOptions().device(torch::kCUDA));
+    stream.synchronize();
+    at::cuda::CUDAGraph graph;
+    graph.capture_begin();
+    EXPECT_FALSE(pool->acquire(4, 8, stream.device_index()));
+    EXPECT_THROW(lease->begin(stream), c10::Error);
+    dummy.add_(1);
+    graph.capture_end();
+    // An exception after H2D but before a caller's explicit finish uses destructor fencing.
+    auto address = lease->hostState().data_ptr();
+    try {
+        lease->begin(stream);
+        auto gpu = lease->fallbackDeviceState();
+        gpu.add_(1);
+        throw std::runtime_error("test interruption after GPU submission");
+    } catch (const std::runtime_error&) {
+        lease.reset();
+    }
+    stream.synchronize();
+    auto next = pool->acquire(4, 8, stream.device_index());
+    EXPECT_EQ(next->hostState().data_ptr(), address);
+}
+
+TEST_F(CudaSamplerTest, DeferredRngPoolDoubleMissFallbackMatchesIndependentPacket) {
+    initializeSamplerPython();
+    // batch<8 rejects deferredSamplingLayout for BOTH native and registered Graph.
+    constexpr int batch = 4, rows = 3, vocab = 32;
+    auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto logits = torch::randn({batch, rows, vocab}, options);
+    auto pool = std::make_shared<DeferredSamplingRngPool>();
+    for (bool prepared : {false, true}) {
+        for (int iteration = 0; iteration < 3; ++iteration) {
+            auto make_params = [&](bool pooled) {
+                RejectionSamplingParams params;
+                params.target_logits_d = logits;
+                params.draft_token_ids_d = torch::zeros({batch, rows - 1}, options.dtype(torch::kInt32));
+                params.do_sample_d = torch::ones({batch}, options.dtype(torch::kBool));
+                params.output_token_ids_d = torch::empty({batch, rows}, options.dtype(torch::kInt32));
+                params.output_accepted_token_num_d = torch::empty({batch}, options.dtype(torch::kInt32));
+                params.deferred_token_sampling = true;
+                params.draft_point_mass = true;
+                // Also exercises the cumulative-probability Python fallback consumer.
+                params.cum_log_probs = torch::zeros({batch}, options);
+                params.allow_glm5_multistep_sampling_optimizations = pooled;
+                if (pooled) params.deferred_rng_pool = pool;
+                for (int row = 0; row < batch; ++row) {
+                    params.generator.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+                    params.generator.back().set_current_seed(1234 + row);
+                    params.generator.back().set_offset(iteration * 32);
+                }
+                if (pooled && prepared) {
+                    params.deferred_rng_lease = pool->acquire(batch, 8, logits.get_device());
+                    params.prepared_rejection_rng = params.deferred_rng_lease->hostState();
+                    auto data = params.prepared_rejection_rng.data_ptr<int64_t>();
+                    get_sampling_seed_offsets(params.generator, batch, 32, data, data + batch);
+                }
+                return params;
+            };
+            auto baseline = make_params(false);
+            auto actual = make_params(true);
+            execRejectionSampling(baseline);
+            execRejectionSampling(actual);
+            EXPECT_TRUE(torch::equal(actual.output_token_ids_d, baseline.output_token_ids_d));
+            EXPECT_TRUE(torch::equal(actual.output_accepted_token_num_d, baseline.output_accepted_token_num_d));
+            EXPECT_TRUE(torch::equal(actual.cum_log_probs, baseline.cum_log_probs));
+            for (int row = 0; row < batch; ++row) {
+                EXPECT_TRUE(torch::equal(actual.generator[row].get_state(), baseline.generator[row].get_state()));
+            }
+            if (prepared) EXPECT_THROW(execRejectionSampling(actual), c10::Error);
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, DeferredRngPoolEarlyProducerDropReleasesUnsubmittedPacket) {
+    auto pool = std::make_shared<DeferredSamplingRngPool>();
+    const auto device = at::cuda::current_device();
+    void* original;
+    {
+        auto dropped = pool->acquire(4, 12, device);
+        original = dropped->hostState().data_ptr();
+        dropped->hostState().fill_(123);
+        // No rejection consumes this target output: no GPU use and no event wait.
+    }
+    auto next = pool->acquire(4, 12, device);
+    EXPECT_EQ(next->hostState().data_ptr(), original);
+    next->hostState().fill_(456);
+    EXPECT_EQ(next->hostState().data_ptr<int64_t>()[0], 456);
+}
+
+TEST_F(CudaSamplerTest, DeferredRngDisabledLeaseCannotReenterPoolAfterFence) {
+    auto pool = std::make_shared<DeferredSamplingRngPool>();
+    auto stream = at::cuda::getCurrentCUDAStream();
+    void* address;
+    {
+        auto lease = pool->acquire(4, 8, stream.device_index());
+        address = lease->hostState().data_ptr();
+        lease->begin(stream);
+        lease->disableReuse();  // Python fallback failed; side-stream join may also have failed.
+        lease->finish();
+    }
+    stream.synchronize();
+    auto next = pool->acquire(4, 8, stream.device_index());
+    EXPECT_NE(next->hostState().data_ptr(), address);
 }

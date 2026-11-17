@@ -5,7 +5,7 @@ import statistics
 import unittest
 from collections.abc import Callable
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 from rtp_llm.models_py.sampling import adapter
@@ -1052,6 +1052,81 @@ class DraftLogProfileTest(unittest.TestCase):
                             reject=reject,
                         ):
                             self.benchmark_case(batch, random, full_support, reject)
+
+
+class ColdGraphJoinTest(unittest.TestCase):
+    def test_failed_wait_synchronizes_capture_and_preserves_error(self):
+        from rtp_llm.models_py.sampling.rejection_graph import _join_cold_stream
+
+        caller, capture = Mock(), Mock()
+        caller.wait_stream.side_effect = RuntimeError("join failed")
+        with self.assertRaisesRegex(RuntimeError, "join failed"):
+            _join_cold_stream(caller, capture)
+        capture.synchronize.assert_called_once_with()
+
+    def test_failed_synchronization_remains_an_error(self):
+        from rtp_llm.models_py.sampling.rejection_graph import _join_cold_stream
+
+        caller, capture = Mock(), Mock()
+        caller.wait_stream.side_effect = RuntimeError("join failed")
+        capture.synchronize.side_effect = RuntimeError("sync failed")
+        with self.assertRaisesRegex(RuntimeError, "sync failed"):
+            _join_cold_stream(caller, capture)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_cold_run_exception_joins_source_reads_before_caller_overwrite(self):
+        from rtp_llm.models_py.sampling.rejection_graph import _Entry
+
+        caller = torch.cuda.current_stream()
+        inputs = [
+            torch.zeros((4, 3, 32), device="cuda"),
+            torch.zeros((4, 2), dtype=torch.int32, device="cuda"),
+            torch.full((4,), 73, dtype=torch.int64, device="cuda"),
+            torch.zeros((4,), dtype=torch.int64, device="cuda"),
+            torch.ones((4,), dtype=torch.bool, device="cuda"),
+        ]
+        snapshot = torch.empty_like(inputs[2])
+
+        def fail_after_source_read(*args, **kwargs):
+            torch.cuda._sleep(2_000_000)
+            # Mirrors graph_input_addresses reading the caller-owned packet.
+            snapshot.copy_(inputs[2])
+            raise RuntimeError("injected cold kernel setup failure")
+
+        with self.assertRaisesRegex(RuntimeError, "injected cold"):
+            _Entry(inputs, False, fail_after_source_read, caller, (0,) * 7)
+        inputs[2].zero_()
+        caller.synchronize()
+        self.assertEqual(snapshot.cpu().tolist(), [73] * 4)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_capture_run_exception_ends_capture_and_restores_caller(self):
+        from rtp_llm.models_py.sampling.rejection_graph import _Entry
+
+        caller = torch.cuda.current_stream()
+        inputs = [
+            torch.zeros((4, 3, 32), device="cuda"),
+            torch.zeros((4, 2), dtype=torch.int32, device="cuda"),
+            torch.zeros((4,), dtype=torch.int64, device="cuda"),
+            torch.zeros((4,), dtype=torch.int64, device="cuda"),
+            torch.ones((4,), dtype=torch.bool, device="cuda"),
+        ]
+        calls = 0
+
+        def fail_in_capture(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            kwargs["output_ids"].zero_()
+            if calls == 2:
+                raise RuntimeError("injected capture failure")
+
+        with self.assertRaisesRegex(RuntimeError, "injected capture"):
+            _Entry(inputs, False, fail_in_capture, caller, (0,) * 7)
+        self.assertEqual(torch.cuda.current_stream(), caller)
+        self.assertFalse(torch.cuda.is_current_stream_capturing())
+        inputs[2].add_(1)
+        caller.synchronize()
+        self.assertEqual(inputs[2].cpu().tolist(), [1] * 4)
 
 
 if __name__ == "__main__":

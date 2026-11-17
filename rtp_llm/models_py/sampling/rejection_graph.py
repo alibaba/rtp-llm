@@ -17,6 +17,16 @@ _try_native_guard: Callable | None = None
 _release_native_guard: Callable | None = None
 
 
+def _join_cold_stream(caller, capture):
+    try:
+        caller.wait_stream(capture)
+    except Exception:
+        # Only a failed cold-init join may block the host. If synchronization
+        # also fails, the C++ fallback marks its RNG lease permanently unusable.
+        capture.synchronize()
+        raise
+
+
 class _Entry:
     def __init__(self, inputs, forced, compute, stream, key):
         from rtp_llm.models_py.sampling.adapter import _rejection_sample_logits_eager
@@ -26,68 +36,76 @@ class _Entry:
         self.native_eligible = compute is _rejection_sample_logits_eager
         self.native_plan = None
         capture_stream = torch.cuda.Stream(device=stream.device)
-        capture_stream.wait_stream(stream)
-        with torch.cuda.stream(capture_stream):
-            # Keep the initial tensor for shape/stride metadata and a bounded
-            # lifetime, but read each replay's logits through a device address.
-            self.inputs = [inputs[0], *[tensor.clone() for tensor in inputs[1:]]]
-            logits, ids, seeds, positions, sample = self.inputs[:5]
-            cap = self.inputs[5] if len(self.inputs) == 6 else None
-            batch, rows, _ = logits.shape
-            self.tokens = torch.empty(
-                (batch, rows), device=logits.device, dtype=torch.int32
-            )
-            self.lengths = torch.empty(batch, device=logits.device, dtype=torch.int32)
-            self.input_addresses = torch.tensor(
-                [t.data_ptr() for t in inputs]
-                + ([0] if len(inputs) == 5 else [])
-                + [self.tokens.data_ptr(), self.lengths.data_ptr()]
-                + [0] * (2 * batch),
-                dtype=torch.int64,
-                device=logits.device,
-            )[:8]
-
-            def run():
-                compute(
-                    logits,
-                    None,
-                    ids,
-                    seeds,
-                    positions,
-                    sample,
-                    [forced] * batch,
-                    cap,
-                    output_ids=self.tokens,
-                    output_lengths=self.lengths,
-                    clean_output=True,
-                    graph_input_addresses=self.input_addresses,
+        try:
+            capture_stream.wait_stream(stream)
+            with torch.cuda.stream(capture_stream):
+                # Inputs may be owned by a reusable rejection packet. Protect allocator
+                # lifetime even when a clone/JIT/capture failure prevents construction.
+                for tensor in inputs:
+                    if tensor.is_cuda:
+                        tensor.record_stream(capture_stream)
+                # Keep the initial tensor for shape/stride metadata and a bounded
+                # lifetime, but read each replay's logits through a device address.
+                self.inputs = [inputs[0], *[tensor.clone() for tensor in inputs[1:]]]
+                logits, ids, seeds, positions, sample = self.inputs[:5]
+                cap = self.inputs[5] if len(self.inputs) == 6 else None
+                batch, rows, _ = logits.shape
+                self.tokens = torch.empty(
+                    (batch, rows), device=logits.device, dtype=torch.int32
                 )
+                self.lengths = torch.empty(batch, device=logits.device, dtype=torch.int32)
+                self.input_addresses = torch.tensor(
+                    [t.data_ptr() for t in inputs]
+                    + ([0] if len(inputs) == 5 else [])
+                    + [self.tokens.data_ptr(), self.lengths.data_ptr()]
+                    + [0] * (2 * batch),
+                    dtype=torch.int64,
+                    device=logits.device,
+                )[:8]
 
-            # JIT and allocator warmup must finish before capture. Only this
-            # cold entry waits; steady-state replay has no host synchronization.
-            run()
-            capture_stream.synchronize()
-            self.graph = torch.cuda.CUDAGraph()
-            self.graph.capture_begin(capture_error_mode="thread_local")
-            try:
+                def run():
+                    compute(
+                        logits,
+                        None,
+                        ids,
+                        seeds,
+                        positions,
+                        sample,
+                        [forced] * batch,
+                        cap,
+                        output_ids=self.tokens,
+                        output_lengths=self.lengths,
+                        clean_output=True,
+                        graph_input_addresses=self.input_addresses,
+                    )
+
+                # JIT and allocator warmup must finish before capture. Only this
+                # cold entry waits; steady-state replay has no host synchronization.
                 run()
-            finally:
-                self.graph.capture_end()
-        self.ready = torch.cuda.Event()
-        self.ready.record(capture_stream)
-        # This graph contains only Triton kernels with explicit seed inputs,
-        # so replay does not require PyTorch generator-state prologues.
-        self.graph_exec = (
-            self.graph.raw_cuda_graph_exec()
-            if hasattr(self.graph, "raw_cuda_graph_exec")
-            else None
-        )
-        self.ready_event = self.ready.cuda_event
-        self.bytes = (
-            self.inputs[0].untyped_storage().nbytes()
-            + sum(t.numel() * t.element_size() for t in self.inputs[1:])
-            + (8 << 20)
-        )
+                capture_stream.synchronize()
+                self.graph = torch.cuda.CUDAGraph()
+                self.graph.capture_begin(capture_error_mode="thread_local")
+                try:
+                    run()
+                finally:
+                    self.graph.capture_end()
+            self.ready = torch.cuda.Event()
+            self.ready.record(capture_stream)
+            # This graph contains only Triton kernels with explicit seed inputs,
+            # so replay does not require PyTorch generator-state prologues.
+            self.graph_exec = (
+                self.graph.raw_cuda_graph_exec()
+                if hasattr(self.graph, "raw_cuda_graph_exec")
+                else None
+            )
+            self.ready_event = self.ready.cuda_event
+            self.bytes = (
+                self.inputs[0].untyped_storage().nbytes()
+                + sum(t.numel() * t.element_size() for t in self.inputs[1:])
+                + (8 << 20)
+            )
+        finally:
+            _join_cold_stream(stream, capture_stream)
 
     def replay(self, inputs, tokens, lengths):
         if (

@@ -4,6 +4,7 @@
 
 #if USING_CUDA
 #include <ATen/cuda/CUDAContext.h>
+#include "rtp_llm/models_py/bindings/core/DeferredSamplingRngPool.h"
 #include <ATen/cuda/CUDAGeneratorImpl.h>
 #include <ATen/cuda/CachingHostAllocator.h>
 #include <torch/version.h>
@@ -607,10 +608,16 @@ torch::Tensor reserveSamplingSeedOffsets(const std::vector<at::Generator>& gener
                                          int64_t                           batch_size,
                                          int                               increment,
                                          int64_t                           prefix = 0,
-                                         bool                              batch_reservations = false) {
-    auto options  = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
-    auto state_h =
-        torch::empty({prefix + 2 * batch_size}, options).narrow(0, prefix, 2 * batch_size).view({2, batch_size});
+                                         bool                              batch_reservations = false,
+                                         const torch::Tensor&              reusable_host = {}) {
+    auto state_h = reusable_host;
+    if (!state_h.defined()) {
+        auto options = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
+        state_h = torch::empty({prefix + 2 * batch_size}, options).narrow(0, prefix, 2 * batch_size).view({2, batch_size});
+    }
+    TORCH_CHECK(state_h.device().is_cpu() && state_h.is_pinned() && state_h.is_contiguous()
+                    && state_h.scalar_type() == torch::kInt64 && state_h.sizes() == c10::IntArrayRef({2, batch_size})
+                    && state_h.storage_offset() == prefix, "invalid reusable deferred RNG host packet");
     auto seed_ptr = state_h.data_ptr<int64_t>();
     auto off_ptr  = seed_ptr + batch_size;
 
@@ -815,6 +822,7 @@ static GreedyOutput tryCompactDeferredSampling(const GreedyParams& params, float
             params.logits, 1024, compact_p, temperature, &log_normalizer, requested_k[0]);
         if (std::get<0>(compact).defined()) {
             torch::Tensor prepared_rng;
+            std::shared_ptr<DeferredSamplingRngLease> prepared_lease;
             if (params.deferred_rejection_rows > 0) {
                 const int64_t rows = params.deferred_rejection_rows;
                 TORCH_CHECK(batch_size % rows == 0, "deferred rejection rows must divide target rows");
@@ -823,11 +831,16 @@ static GreedyOutput tryCompactDeferredSampling(const GreedyParams& params, float
                             "too many deferred rejection generators");
                 // The GPU can filter while the CPU reserves the exact same
                 // per-request counters that rejection would reserve later.
+                if (params.allow_glm5_multistep_sampling_optimizations && params.deferred_rng_pool) {
+                    prepared_lease = params.deferred_rng_pool->acquire(
+                        requests, log_normalizer.defined() ? 12 : 11, params.logits.get_device());
+                }
                 prepared_rng = reserveSamplingSeedOffsets(params.deferred_rejection_generators,
                                                           requests,
                                                           std::max<int64_t>(32, ((rows + 3) / 4) * 4),
                                                           log_normalizer.defined() ? 12 : 11,
-                                                          params.allow_glm5_multistep_sampling_optimizations);
+                                                          params.allow_glm5_multistep_sampling_optimizations,
+                                                          prepared_lease ? prepared_lease->hostState() : torch::Tensor());
             }
             return GreedyOutput{torch::Tensor(),
                                 true,
@@ -836,7 +849,8 @@ static GreedyOutput tryCompactDeferredSampling(const GreedyParams& params, float
                                 params.logits,
                                 std::get<2>(compact),
                                 prepared_rng,
-                                log_normalizer};
+                                log_normalizer,
+                                prepared_lease};
         }
     }
     return {};
@@ -1360,6 +1374,12 @@ void rejectionSampling(const RejectionSamplingParams& params) {
         // ran on the GPU. Native and fallback dispatch consume the same packet.
         const int64_t prefix  = params.target_candidate_ids_d.defined() ? (params.target_log_normalizer_d.defined() ? 12 : 11) : 8;
         auto          state_h = params.prepared_rejection_rng;
+        TORCH_CHECK(!params.deferred_rng_lease || params.allow_glm5_multistep_sampling_optimizations,
+                    "deferred RNG lease requires its producer eligibility");
+        auto lease = params.allow_glm5_multistep_sampling_optimizations ? params.deferred_rng_lease : nullptr;
+        if (!state_h.defined() && params.allow_glm5_multistep_sampling_optimizations && params.deferred_rng_pool) {
+            lease = params.deferred_rng_pool->acquire(batch_size, prefix, params.target_logits_d.get_device());
+        }
         if (state_h.defined()) {
             TORCH_CHECK(state_h.device().is_cpu() && state_h.scalar_type() == torch::kInt64 && state_h.dim() == 2
                             && state_h.size(0) == 2 && state_h.size(1) == batch_size && state_h.is_contiguous()
@@ -1368,15 +1388,29 @@ void rejectionSampling(const RejectionSamplingParams& params) {
         } else {
             state_h = reserveSamplingSeedOffsets(
                 params.generator, batch_size, std::max<int64_t>(32, ((rows + 3) / 4) * 4), prefix,
-                params.allow_glm5_multistep_sampling_optimizations);
+                params.allow_glm5_multistep_sampling_optimizations,
+                lease ? lease->hostState() : torch::Tensor());
+        }
+        struct FinishLease {
+            std::shared_ptr<DeferredSamplingRngLease> lease;
+            ~FinishLease() { if (lease) lease->finishNoThrow(); }
+        } finish_lease;
+        if (lease) {
+            TORCH_CHECK(lease->hostState().data_ptr() == state_h.data_ptr()
+                            && lease->hostState().sizes() == state_h.sizes()
+                            && lease->hostState().storage_offset() == state_h.storage_offset(),
+                        "deferred RNG lease/packet mismatch");
+            lease->begin(at::cuda::getCurrentCUDAStream(params.target_logits_d.get_device()));
+            finish_lease.lease = lease;
         }
         pybind11::gil_scoped_acquire gil;
         if (trySubmitDeferredKernels(params, state_h.select(0, 0), state_h.select(0, 1))
             || tryReplayDeferredGraph(params, state_h.select(0, 0), state_h.select(0, 1))) {
+            if (lease) lease->finish();
             check_cuda_error();
             return;
         }
-        auto state_d = state_h.to(torch::kCUDA, /*non_blocking=*/true);
+        auto state_d = lease ? lease->fallbackDeviceState() : state_h.to(torch::kCUDA, /*non_blocking=*/true);
         if (params.buffer_holder != nullptr) {
             params.buffer_holder->hold_host(state_h);
         }
@@ -1396,18 +1430,27 @@ void rejectionSampling(const RejectionSamplingParams& params) {
                                                        params.target_fallback_rows_d)
                                   .cast<torch::Tensor>();
         }
-        pyDeferredRejectionFn()(fallback_logits,
-                                draft,
-                                params.draft_token_ids_d,
-                                seeds,
-                                positions,
-                                params.do_sample_d,
-                                params.force_accept,
-                                cap,
-                                cumulative,
-                                params.output_token_ids_d,
-                                params.output_accepted_token_num_d,
-                                true);
+        try {
+            pyDeferredRejectionFn()(fallback_logits,
+                                    draft,
+                                    params.draft_token_ids_d,
+                                    seeds,
+                                    positions,
+                                    params.do_sample_d,
+                                    params.force_accept,
+                                    cap,
+                                    cumulative,
+                                    params.output_token_ids_d,
+                                    params.output_accepted_token_num_d,
+                                    true);
+        } catch (...) {
+            // A cold Python Graph build can fork a capture stream. Its finally
+            // joins back, but a failed join/sync must never authorize pool reuse.
+            // Source record_stream registration protects eventual deallocation.
+            if (lease) lease->disableReuse();
+            throw;
+        }
+        if (lease) lease->finish();
         check_cuda_error();
         return;
     }

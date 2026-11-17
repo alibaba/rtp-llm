@@ -118,6 +118,7 @@ public:
     torch::Tensor verify_do_sample        = {};
     torch::Tensor verify_log_normalizer   = {};
     bool allow_glm5_multistep_sampling_optimizations = false;
+    std::shared_ptr<DeferredSamplingRngLease> deferred_rng_lease = {};
 };
 
 struct MergedOutput {
