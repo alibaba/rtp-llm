@@ -1199,6 +1199,7 @@ bool KVCacheManager::initP2PConnector() {
     p2p_config.scheduler_config.use_group_cache_transfer_policy = config_.usesGroupCacheTransferPolicy();
     p2p_config.scheduler_config.use_mla                         = config_.use_mla;
     p2p_config.worker_config.topology    = config_.topologyPtr();
+    p2p_config.worker_config.global_layer_begin = config_.global_layer_begin;
     if (pd_sep_config_.role_type == RoleType::DECODE) {
         for (const auto& group : config_.topology().groups()) {
             p2p_config.scheduler_config.physical_block_bytes_by_group.emplace(

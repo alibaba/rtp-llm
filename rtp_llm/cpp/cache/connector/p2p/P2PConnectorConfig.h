@@ -72,6 +72,7 @@ struct P2PConnectorWorkerConfig {
     int64_t  tp_size       = 1;
     int64_t  tp_rank       = 0;
     uint32_t layer_all_num = 0;
+    uint32_t global_layer_begin = 0;
 
     std::shared_ptr<const CacheTopology> topology;
     size_t                               cache_key_tokens_per_block = 1;

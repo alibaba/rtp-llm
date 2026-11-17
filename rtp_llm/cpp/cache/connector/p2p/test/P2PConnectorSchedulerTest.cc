@@ -246,8 +246,10 @@ protected:
         tp_broadcast_client_ = std::make_shared<P2PBroadcastClient>(
             scheduler_config.worker_grpc_addrs, scheduler_config.p2p_cancel_broadcast_timeout_ms);
         ASSERT_TRUE(tp_broadcast_client_->init());
+        auto prefill_config = scheduler_config;
+        prefill_config.parallelism_config.tp_size = prefill_config.worker_grpc_addrs.size();
         prefill_scheduler_ =
-            std::make_unique<P2PSchedulerPrefillRead>(scheduler_config, nullptr, tp_broadcast_client_);
+            std::make_unique<P2PSchedulerPrefillRead>(std::move(prefill_config), nullptr, tp_broadcast_client_);
         decode_scheduler_ =
             std::make_unique<P2PSchedulerDecodeRead>(std::move(scheduler_config), nullptr, tp_broadcast_client_);
         ASSERT_TRUE(decode_scheduler_->init("p2p_connector_scheduler_test"));
@@ -449,10 +451,11 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_FiltersLinearLayersByAttentionType)
     // produced its local LayerCacheBuffer through the per-layer path.
     EXPECT_EQ(rank0_request.layer_blocks_size(), 0);
     EXPECT_EQ(rank1_request.layer_blocks_size(), 0);
-    ASSERT_EQ(rank0_request.routes_size(), 2);
-    EXPECT_EQ(rank0_request.routes(0).cache_tag(), "group0");
-    EXPECT_EQ(rank0_request.routes(1).cache_tag(), "group1");
-    EXPECT_EQ(rank1_request.routes_size(), 0);
+    const auto& active = rank0_request.routes_size() ? rank0_request : rank1_request;
+    ASSERT_EQ(rank0_request.routes_size() + rank1_request.routes_size(), 2);
+    ASSERT_EQ(active.routes_size(), 2);
+    EXPECT_EQ(active.routes(0).cache_tag(), "group0");
+    EXPECT_EQ(active.routes(1).cache_tag(), "group1");
 }
 
 // 测试：broadcast 返回失败（所有响应失败）

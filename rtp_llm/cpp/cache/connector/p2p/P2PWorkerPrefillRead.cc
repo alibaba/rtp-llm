@@ -508,8 +508,11 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
             return count;
         }
 
+        // Keep stage-local indices for buffer lookup. On the wire, main layers
+        // and the draft layers on the last stage follow the full model's order.
+        const auto wire_layer_id = static_cast<int>(config_.global_layer_begin + layer_id);
         std::string route_layer_key = P2PKeyUtil::makeRouteLayerKey(
-            unique_key, layer_id, layer_cache_buffer->cacheTag(), route.route_id, worker_plan.plan_digest);
+            unique_key, wire_layer_id, layer_cache_buffer->cacheTag(), route.route_id, worker_plan.plan_digest);
 
         transfer::SendRequest send_req;
         send_req.ip          = route.dst_ip;
