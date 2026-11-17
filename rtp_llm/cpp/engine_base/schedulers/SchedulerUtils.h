@@ -29,6 +29,66 @@ struct ModelExecutionCapacity {
     bool    target_only_runs_draft   = false;
 };
 
+struct ExecutionCost {
+    int64_t prefill_tokens       = 0;
+    int64_t prefill_draft_tokens = 0;
+    int64_t decode_sequences     = 0;
+};
+
+struct ExecutionCapacityResult {
+    bool prefill_fits = true;
+    bool draft_fits   = true;
+    bool decode_fits  = true;
+
+    bool fits() const {
+        return prefill_fits && draft_fits && decode_fits;
+    }
+};
+
+// Account in physical target rows, natural draft rows and Decode sequences.
+// Callers retain their own stream selection and overflow handling policies.
+// execution_tp_size must already be normalized to a positive value.
+class ExecutionCapacityLedger {
+public:
+    ExecutionCapacityLedger(ExecutionCost capacity, int64_t max_execution_tokens, int64_t execution_tp_size):
+        capacity_(capacity) {
+        if (max_execution_tokens > 0) {
+            const auto aligned = max_execution_tokens / execution_tp_size * execution_tp_size;
+            capacity_.prefill_tokens =
+                capacity_.prefill_tokens > 0 ? std::min(capacity_.prefill_tokens, aligned) : aligned;
+        }
+        remaining_ = capacity_;
+    }
+
+    bool enabled() const {
+        return capacity_.prefill_tokens > 0 || capacity_.prefill_draft_tokens > 0 || capacity_.decode_sequences > 0;
+    }
+
+    const ExecutionCost& capacity() const {
+        return capacity_;
+    }
+
+    ExecutionCapacityResult consume(const ExecutionCost& cost) {
+        return {consumeDimension(cost.prefill_tokens, capacity_.prefill_tokens, remaining_.prefill_tokens),
+                consumeDimension(
+                    cost.prefill_draft_tokens, capacity_.prefill_draft_tokens, remaining_.prefill_draft_tokens),
+                consumeDimension(cost.decode_sequences, capacity_.decode_sequences, remaining_.decode_sequences)};
+    }
+
+private:
+    static bool consumeDimension(int64_t cost, int64_t capacity, int64_t& remaining) {
+        if (capacity <= 0) {
+            return true;
+        }
+        const bool fits = cost <= remaining;
+        remaining       = fits ? remaining - cost : 0;
+        return fits;
+    }
+
+    ExecutionCost capacity_;
+    ExecutionCost remaining_;
+};
+
 // Convert a model's physical rows into a count of complete, SP-padded requests.
 // Zero is an absent contract, not a request-count tuning limit.
 inline int64_t decodeSequenceCapacity(int64_t tokens, int64_t tp, const std::vector<int64_t>& query_widths) {
@@ -67,13 +127,18 @@ inline int64_t decodeSequenceReservation(const GenerateStreamPtr& stream, RoleTy
     return reservesExecution(stream) && !finishes_in_prefill && !offloaded_prefill ? stream->maxBatchSize() : 0;
 }
 
-inline size_t prefillTokenCostWithoutCache(const GenerateStreamPtr& stream, size_t prefill_cp_size) {
-    // Match CP's independently padded rows for every expanded sequence.
-    auto token_count = static_cast<size_t>(std::max(stream->contextLength(), 0));
+inline size_t paddedPrefillTokens(int length, size_t prefill_cp_size) {
+    auto token_count = static_cast<size_t>(std::max(length, 0));
     if (prefill_cp_size > 1) {
         token_count = makeZigzagTokenLayout(token_count, prefill_cp_size).padded_token_count;
     }
-    return token_count * static_cast<size_t>(stream->currentBatchSize());
+    return token_count;
+}
+
+inline size_t prefillTokenCostWithoutCache(const GenerateStreamPtr& stream, size_t prefill_cp_size) {
+    // Pad each expanded sequence independently, before multiplying by fanout.
+    return paddedPrefillTokens(stream->contextLength(), prefill_cp_size)
+           * static_cast<size_t>(stream->currentBatchSize());
 }
 
 inline int64_t prefillReservationTokens(const GenerateStreamPtr& stream, size_t cp_size) {
@@ -82,11 +147,8 @@ inline int64_t prefillReservationTokens(const GenerateStreamPtr& stream, size_t 
     }
     // An unfinished allocator load may lose its tentative prefix on failure.
     // Keep a no-cache upper bound until RUNNING publishes finalized reuse.
-    const auto length = stream->getStatus() == StreamState::RUNNING ? stream->contextLength() : stream->seqLength();
-    auto       tokens = static_cast<size_t>(std::max(length, 0));
-    if (cp_size > 1) {
-        tokens = makeZigzagTokenLayout(tokens, cp_size).padded_token_count;
-    }
+    const auto length    = stream->getStatus() == StreamState::RUNNING ? stream->contextLength() : stream->seqLength();
+    const auto tokens    = paddedPrefillTokens(length, cp_size);
     const auto sequences = static_cast<size_t>(std::max(stream->currentBatchSize(), 0));
     if (sequences && tokens > static_cast<size_t>(std::numeric_limits<int64_t>::max()) / sequences) {
         return std::numeric_limits<int64_t>::max();

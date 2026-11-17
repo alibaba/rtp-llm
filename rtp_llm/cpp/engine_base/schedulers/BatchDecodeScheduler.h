@@ -270,30 +270,23 @@ public:
                 ++it;
             }
         }
-        if (max_prefill_tokens_ <= 0 && max_execution_tokens_ <= 0 && max_decode_sequences_ <= 0
-            && max_prefill_draft_tokens_ <= 0) {
+        ExecutionCapacityLedger ledger({max_prefill_tokens_, max_prefill_draft_tokens_, max_decode_sequences_},
+                                       max_execution_tokens_,
+                                       execution_tp_size_);
+        if (!ledger.enabled()) {
             return;
         }
-        int64_t prefill_capacity = max_prefill_tokens_;
-        if (max_execution_tokens_ > 0) {
-            const auto capacity = max_execution_tokens_ / execution_tp_size_ * execution_tp_size_;
-            prefill_capacity    = prefill_capacity > 0 ? std::min(prefill_capacity, capacity) : capacity;
-        }
-        int64_t remaining = prefill_capacity;
-        int64_t decode_remaining = max_decode_sequences_;
-        int64_t draft_remaining  = max_prefill_draft_tokens_;
         for (const auto& stream : running_streams_) {
-            const auto    sequences       = stream->isContextStream() ? 0 : decodeSequenceReservation(stream, role_);
-            const bool    decode_overflow = max_decode_sequences_ > 0 && sequences > decode_remaining;
-            const int64_t rows = stream->isContextStream() ?
-                                     static_cast<int64_t>(prefillTokenCostWithoutCache(stream, prefill_cp_size_)) :
-                                                0;
-            const int64_t natural_rows =
+            ExecutionCost cost;
+            cost.decode_sequences = stream->isContextStream() ? 0 : decodeSequenceReservation(stream, role_);
+            cost.prefill_tokens   = stream->isContextStream() ?
+                                        static_cast<int64_t>(prefillTokenCostWithoutCache(stream, prefill_cp_size_)) :
+                                        0;
+            cost.prefill_draft_tokens =
                 stream->isContextStream() && (!isPrefillOnly(stream) || target_only_runs_draft_) ?
                     static_cast<int64_t>(prefillTokenCostWithoutCache(stream, 1)) :
                     0;
-            const bool draft_overflow = max_prefill_draft_tokens_ > 0 && natural_rows > draft_remaining;
-            if (decode_overflow || draft_overflow || (prefill_capacity > 0 && rows > remaining)) {
+            if (!ledger.consume(cost).fits()) {
                 for (const auto& rejected : running_streams_) {
                     rejected->reportError(ErrorCode::INVALID_PARAMS,
                                           "fixed batch exceeds initialized model execution capacity");
@@ -301,15 +294,6 @@ public:
                 }
                 running_streams_.clear();
                 return;
-            }
-            if (prefill_capacity > 0) {
-                remaining -= rows;
-            }
-            if (max_prefill_draft_tokens_ > 0) {
-                draft_remaining -= natural_rows;
-            }
-            if (max_decode_sequences_ > 0) {
-                decode_remaining -= sequences;
             }
         }
     }

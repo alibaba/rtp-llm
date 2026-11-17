@@ -573,56 +573,41 @@ std::vector<GenerateStreamPtr> FIFOSchedulerBase::executionReservations() const 
 
 bool FIFOSchedulerBase::canAdmitExecution(const GenerateStreamPtr&            candidate,
                                           const std::list<GenerateStreamPtr>& admitted) const {
-    if (max_decode_sequences_ <= 0 && max_prefill_tokens_ <= 0 && max_execution_tokens_ <= 0
-        && max_prefill_draft_tokens_ <= 0) {
+    ExecutionCapacityLedger ledger({max_prefill_tokens_, max_prefill_draft_tokens_, max_decode_sequences_},
+                                   max_execution_tokens_,
+                                   execution_tp_size_);
+    if (!ledger.enabled()) {
         return true;
     }
     auto streams = executionReservations();
     streams.insert(streams.end(), admitted.begin(), admitted.end());
     streams.push_back(candidate);
     std::unordered_set<const GenerateStream*> seen;
-    int64_t                                   decode_left      = max_decode_sequences_;
-    int64_t                                   prefill_capacity = max_prefill_tokens_;
-    if (max_execution_tokens_ > 0) {
-        const int64_t aligned = max_execution_tokens_ / execution_tp_size_ * execution_tp_size_;
-        prefill_capacity      = prefill_capacity > 0 ? std::min(prefill_capacity, aligned) : aligned;
-    }
-    int64_t      prefill_left    = prefill_capacity;
-    int64_t      draft_left      = max_prefill_draft_tokens_;
-    size_t       prefill_streams = 0;
-    bool         prefill_fits    = true;
-    const size_t cp              = prefill_token_alignment_ > 1 ? prefill_token_alignment_ / 2 : 1;
+    const auto&                               capacity        = ledger.capacity();
+    size_t                                    prefill_streams = 0;
+    bool                                      prefill_fits    = true;
+    const size_t                              cp = prefill_token_alignment_ > 1 ? prefill_token_alignment_ / 2 : 1;
     for (const auto& stream : streams) {
         if (!seen.insert(stream.get()).second || !reservesExecution(stream)) {
             continue;
         }
-        if (max_decode_sequences_ > 0) {
-            const auto sequences = decodeSequenceReservation(stream, pd_sep_config_.role_type);
-            if (sequences > decode_left) {
-                return false;
-            }
-            decode_left -= sequences;
+        ExecutionCost cost;
+        if (capacity.decode_sequences > 0) {
+            cost.decode_sequences = decodeSequenceReservation(stream, pd_sep_config_.role_type);
         }
-        if ((prefill_capacity > 0 || max_prefill_draft_tokens_ > 0) && stream->isContextStream()
+        if ((capacity.prefill_tokens > 0 || capacity.prefill_draft_tokens > 0) && stream->isContextStream()
             && !stream->chunkedPrefillEnabled()) {
             ++prefill_streams;
-            const auto rows = prefillReservationTokens(stream, cp);
-            if (prefill_capacity > 0 && rows > prefill_left) {
-                prefill_fits = false;
-                prefill_left = 0;
-            } else {
-                prefill_left -= rows;
-            }
-            if (max_prefill_draft_tokens_ > 0 && (!isPrefillOnly(stream) || target_only_runs_draft_)) {
-                const auto natural_rows = prefillReservationTokens(stream, 1);
-                if (natural_rows > draft_left) {
-                    prefill_fits = false;
-                    draft_left   = 0;
-                } else {
-                    draft_left -= natural_rows;
-                }
+            cost.prefill_tokens = prefillReservationTokens(stream, cp);
+            if (capacity.prefill_draft_tokens > 0 && (!isPrefillOnly(stream) || target_only_runs_draft_)) {
+                cost.prefill_draft_tokens = prefillReservationTokens(stream, 1);
             }
         }
+        const auto result = ledger.consume(cost);
+        if (!result.decode_fits) {
+            return false;
+        }
+        prefill_fits = prefill_fits && result.prefill_fits && result.draft_fits;
     }
     // One oversized prompt may become a valid cache-hit request. Match it in
     // isolation, then validate finalized rows on the RUNNING transition.
