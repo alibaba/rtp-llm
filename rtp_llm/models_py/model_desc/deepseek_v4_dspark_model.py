@@ -676,9 +676,10 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         layer_idx: int,
         x: torch.Tensor,
         query_positions: torch.Tensor,
-        prefix_lengths: torch.Tensor,
+        prefix_lengths_long: torch.Tensor,
         active_requests: torch.Tensor,
         block_table: Optional[torch.Tensor],
+        block_table_long: Optional[torch.Tensor],
         tokens_per_block: int,
         graph_metadata: Any,
     ) -> torch.Tensor:
@@ -691,7 +692,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         batch_size, gamma, _ = x.shape
         if batch_size == 0:
             return torch.empty_like(x)
-        if block_table is None:
+        if block_table is None or block_table_long is None:
             raise RuntimeError("DSpark attention requires an SWA block table")
 
         with self._swa_cache_bound(layer_idx, block_table) as (
@@ -711,7 +712,7 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                 batch_size, device=x.device, dtype=torch.long
             ).repeat_interleave(gamma)
             query_slots = self._global_pool_slots(
-                block_table,
+                block_table_long,
                 query_req_ids,
                 query_positions.reshape(-1),
                 entries_per_block,
@@ -727,9 +728,9 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
             )
 
             global_indices, topk_length = self._build_noncausal_indices(
-                prefix_lengths,
+                prefix_lengths_long,
                 active_requests,
-                block_table,
+                block_table_long,
                 entries_per_block,
                 tokens_per_block,
             )
@@ -804,7 +805,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         self,
         query_ids: torch.Tensor,
         query_positions: torch.Tensor,
-        prefix_lengths: torch.Tensor,
         active_requests: torch.Tensor,
         block_table: Optional[torch.Tensor],
         tokens_per_block: int,
@@ -812,6 +812,19 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
     ) -> torch.Tensor:
         hidden = self.v4.embed(query_ids)
         hidden = hidden.unsqueeze(2).repeat(1, 1, self.v4.hc_mult, 1)
+
+        # The three draft layers share the same per-forward metadata.  Keep
+        # the original INT32 table for cache binding / attention ABIs, and
+        # materialize INT64 views once for the pure slot/index arithmetic.
+        # During graph capture these two casts become one live node each;
+        # every layer then consumes the same graph-owned outputs.
+        # ``run_propose_step`` constructs query_positions as
+        # prefix_lengths.long() + arange(width), so column zero is the exact
+        # INT64 prefix vector already owned by this forward.
+        prefix_lengths_long = query_positions[:, 0].to(torch.long)
+        block_table_long = (
+            block_table.to(torch.long) if block_table is not None else None
+        )
 
         # The hyper-connection choreography lives in Block.forward_decode;
         # only the attention call is substituted with the non-causal
@@ -827,9 +840,10 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
                         layer_idx,
                         x_pre,
                         query_positions,
-                        prefix_lengths,
+                        prefix_lengths_long,
                         active_requests,
                         block_table,
+                        block_table_long,
                         tokens_per_block,
                         graph_metadata,
                     ),
@@ -869,7 +883,6 @@ class DeepSeekV4DSparkModel(DSparkProposerMixin, DeepSeekV4Model):
         return self._forward_layers(
             query_ids,
             query_positions,
-            prefix_lengths,
             active_requests,
             block_table,
             tokens_per_block,

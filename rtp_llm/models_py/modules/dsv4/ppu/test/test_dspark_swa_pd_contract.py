@@ -237,6 +237,27 @@ class DsparkPdHandoffContractTest(unittest.TestCase):
         self.assertIn("_build_noncausal_indices", body)
         self.assertLess(body.index("decode_write_swa_fp8("), body.index("_build_noncausal_indices"))
 
+    def test_int64_slot_metadata_is_hoisted_without_changing_attention_abi(self):
+        layers = self._method("_forward_layers")
+        attention = self._method("_forward_dspark_attention")
+
+        # One forward-owned cast feeds every draft layer.  The INT64 prefix
+        # reuses query_positions[:, 0], which run_propose_step already built
+        # from the same live INT32 prefix tensor.
+        self.assertLess(
+            layers.index("block_table_long ="),
+            layers.index("layer_forward_range ="),
+        )
+        self.assertIn("query_positions[:, 0].to(torch.long)", layers)
+        self.assertIn("block_table.to(torch.long)", layers)
+
+        # Only pure slot/index arithmetic receives the INT64 table.  Cache
+        # binding, KV writes and the attention consumer retain the INT32 ABI.
+        self.assertIn("self._swa_cache_bound(layer_idx, block_table)", attention)
+        self.assertIn("self._global_pool_slots(block_table_long", attention)
+        self.assertIn("self._build_noncausal_indices(prefix_lengths_long", attention)
+        self.assertIn("topk_length, block_table, batch_size", attention)
+
 
 if __name__ == "__main__":
     unittest.main()
