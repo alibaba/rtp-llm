@@ -87,7 +87,10 @@ P2PSchedulerPrefillRead::buildPrefillRankRoutes(const TransferPlan&  plan,
                                                      const std::set<int>& active_route_ids) const {
     P2PBroadcastClient::RankRoutes rank_routes(worker_num);
     for (size_t worker_rank = 0; worker_rank < worker_num; ++worker_rank) {
-        for (const auto* route : plan.forPrefillRank(static_cast<int>(worker_rank))) {
+        // Worker addresses are ordered by PP stage, then by TP rank.
+        // Each stage publishes only its own layers, so it reuses the same TP plan.
+        const auto tp_rank = static_cast<int>(worker_rank % config_.parallelism_config.tp_size);
+        for (const auto* route : plan.forPrefillRank(tp_rank)) {
             if (!active_route_ids.empty() && active_route_ids.count(route->route_id) == 0) {
                 continue;
             }
@@ -139,9 +142,12 @@ P2PSchedulerPrefillRead::sendKVCache(const std::string&                         
     P2PBroadcastClient::RankRoutes rank_routes;
     uint64_t                       plan_digest = 0;
     if (!no_transfer) {
-        if (worker_num == 0) {
+        const auto& parallelism = config_.parallelism_config;
+        if (parallelism.tp_size <= 0 || parallelism.pp_size <= 0
+            || worker_num != static_cast<size_t>(parallelism.tp_size) * parallelism.pp_size) {
             report_metric_func(false);
-            return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "worker list is empty");
+            return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                             "Prefill worker list does not match PP and TP sizes");
         }
         const auto plan_start_us     = currentTimeUs();
         const auto peer_tp_size = decode_tp_size == 0 ? static_cast<int>(decode_transfer_servers.size()) : decode_tp_size;
