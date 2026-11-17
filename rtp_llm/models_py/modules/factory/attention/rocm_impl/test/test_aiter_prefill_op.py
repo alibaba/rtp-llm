@@ -1281,6 +1281,39 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
 class TestAiterPrefillAttnOpTritonCudaGraphWorkspace(unittest.TestCase):
     """Unit tests for CUDA graph workspace ownership."""
 
+    def test_uniform_eager_batch_skips_unused_compaction_kernels(self):
+        from types import SimpleNamespace
+
+        module = "rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter"
+        for q in (1, 2, 3, 4):
+            for batch in (1, 3):
+                op = AiterPrefillAttnOpTriton(_make_attn_configs(8, 1, 128))
+                params = SimpleNamespace(
+                    token_q_num=batch * q,
+                    max_seqlen_q=q,
+                    cu_seqlens_q=torch.arange(batch + 1) * q,
+                )
+                with patch(f"{module}.FMHAParams", return_value=params), patch.object(
+                    op,
+                    "_calc_compact_indices",
+                    side_effect=AssertionError("unused compact index"),
+                ):
+                    self.assertIs(
+                        op.prepare(SimpleNamespace(is_cuda_graph=False)), params
+                    )
+
+    def test_ragged_eager_batch_retains_compaction(self):
+        from types import SimpleNamespace
+
+        module = "rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter"
+        op = AiterPrefillAttnOpTriton(_make_attn_configs(8, 1, 128))
+        params = SimpleNamespace(
+            token_q_num=5, max_seqlen_q=4, cu_seqlens_q=torch.tensor([0, 1, 5])
+        )
+        with patch(f"{module}.FMHAParams", return_value=params):
+            actual = op.prepare(SimpleNamespace(is_cuda_graph=False))
+        self.assertEqual(actual.compact_indices.tolist(), [3, 4, 5, 6, 7])
+
     def test_compact_indices_keep_capture_query_stride_during_replay(self):
         """Replay gathers from the fixed-width layout recorded at capture time."""
         from types import SimpleNamespace
@@ -2659,7 +2692,9 @@ class TestPagedPrefillKernelE2E(unittest.TestCase):
         params.cu_seqlens_q = cu_seqlens_q
         params.cu_seqlens_k = cu_seqlens_k
         params.max_seqlen_q = max(input_lengths)
-        params.max_seqlen_k = max_kv_len
+        # Match FMHAParams' conservative bound even when the longest query
+        # and longest prefix belong to different rows.
+        params.max_seqlen_k = max(input_lengths) + max(prefix_lengths)
         params.token_q_num = total_q_tokens
         params.kv_cache_block_id_device = block_table
 
@@ -2681,6 +2716,28 @@ class TestPagedPrefillKernelE2E(unittest.TestCase):
             repeated = op.forward(qkv, kv_cache, params)
             self.assertEqual(prepare.call_count, 1)
             torch.testing.assert_close(repeated, actual)
+
+        # Exercise the production host-metadata fast path, not just its helper.
+        host_inputs = _make_prefill_inputs(input_lengths, torch.device("cpu"))
+        host_inputs.prefix_lengths = torch.tensor(prefix_lengths, dtype=torch.int32)
+        host_inputs.cu_seqlens_device = cu_seqlens_q
+        host_inputs.cu_kv_seqlens_device = cu_seqlens_k
+        host_inputs.kv_cache_kernel_block_id = block_table.cpu()
+        host_inputs.kv_cache_kernel_block_id_device = block_table
+        host_inputs.is_cuda_graph = False
+        fast_params = op.prepare(host_inputs)
+        self.assertEqual(fast_params.cu_seqlens_q.data_ptr(), cu_seqlens_q.data_ptr())
+        self.assertEqual(fast_params.cu_seqlens_k.data_ptr(), cu_seqlens_k.data_ptr())
+        self.assertTrue(fast_params.paged_prefill_metadata.host_staging.is_pinned())
+        with patch.object(
+            op,
+            "_prepare_eager_metadata",
+            side_effect=AssertionError("repeated GPU setup"),
+        ):
+            fast_actual = op.forward(qkv, kv_cache, fast_params)
+            fast_repeated = op.forward(qkv, kv_cache, fast_params)
+        torch.testing.assert_close(fast_actual, actual, atol=0, rtol=0)
+        torch.testing.assert_close(fast_repeated, actual, atol=0, rtol=0)
 
         # Compute prefix-causal SDPA reference from the original flat K/V.
         k_all = torch.cat(all_k_flat, dim=0)
@@ -2713,6 +2770,20 @@ class TestPagedPrefillKernelE2E(unittest.TestCase):
             head_dim=64,
             tokens_per_block=16,
         )
+
+    def test_navi_cached_prefill_shapes_bf16(self):
+        self.dtype = torch.bfloat16
+        for q in (1, 4, 14, 15, 16, 17, 32):
+            with self.subTest(q=q):
+                self._run_paged_prefill_e2e(
+                    batch_size=1,
+                    input_lengths=[q],
+                    prefix_lengths=[816],
+                    head_num=32,
+                    head_num_kv=8,
+                    head_dim=128,
+                    tokens_per_block=16,
+                )
 
     def test_multi_batch_varied_lengths(self):
         """Multiple sequences with different prefix/input lengths."""

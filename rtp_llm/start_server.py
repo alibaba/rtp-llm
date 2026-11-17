@@ -576,17 +576,7 @@ def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
     if not runtime_config.warm_up or not runtime_config.model_warm_up:
         return False
 
-    if _rocm_startup_warmup_requested():
-        if torch.version.hip is None:
-            raise ValueError("RTP_LLM_ROCM_STARTUP_WARMUP requires a ROCm build")
-        if py_env_configs.role_config.role_type != RoleType.PDFUSION:
-            raise ValueError("ROCm startup warmup currently supports PDFUSION only")
-        if int(py_env_configs.parallelism_config.world_size) != 1:
-            raise ValueError(
-                "ROCm startup warmup currently supports single-rank deployments only"
-            )
-        if not py_env_configs.kv_cache_config.reuse_cache:
-            raise ValueError("ROCm startup warmup requires REUSE_CACHE=1")
+    if _rocm_startup_warmup_requested(py_env_configs):
         return _is_startup_real_warmup_entry_rank(py_env_configs)
 
     role_is_prefill = _role_is_prefill(py_env_configs)
@@ -607,10 +597,25 @@ def _should_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
     return getattr(py_env_configs.model_args, "model_type", "") == "deepseek_v4"
 
 
-def _rocm_startup_warmup_requested() -> bool:
-    # Opt in per deployment. Existing DSV4 warmup and other services retain
-    # their current behavior, including the WARM_UP/MODEL_WARM_UP switches.
-    return str_to_bool(os.environ.get("RTP_LLM_ROCM_STARTUP_WARMUP", "0") or "0")
+def _rocm_startup_warmup_requested(py_env_configs: PyEnvConfigs) -> bool:
+    from rtp_llm.utils.rocm_startup_warmup import rocm_startup_warmup_enabled
+
+    sp_type = getattr(
+        getattr(py_env_configs, "sp_config", None), "type", SpeculativeType.NONE
+    )
+    return rocm_startup_warmup_enabled(
+        os.environ.get("RTP_LLM_ROCM_STARTUP_WARMUP", "auto"),
+        is_rocm=torch.version.hip is not None,
+        model_type=getattr(py_env_configs.model_args, "model_type", ""),
+        is_pdfusion=py_env_configs.role_config.role_type == RoleType.PDFUSION,
+        world_size=int(py_env_configs.parallelism_config.world_size),
+        reuse_cache=bool(
+            getattr(
+                getattr(py_env_configs, "kv_cache_config", None), "reuse_cache", False
+            )
+        ),
+        speculative=sp_type not in (None, "", SpeculativeType.NONE),
+    )
 
 
 def _setup_startup_warmup_health_gate(py_env_configs: PyEnvConfigs):
@@ -1140,7 +1145,7 @@ async def _run_rocm_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
             return last_aux.output_len, last_aux.reuse_len
 
         try:
-            await run_rocm_warmup_cases(cases, run_request)
+            await run_rocm_warmup_cases(cases, run_request, timeout_s=timeout_s)
         finally:
             await client.close()
 
@@ -1152,7 +1157,7 @@ def _maybe_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
     try:
         warmup = (
             _run_rocm_startup_real_warmup_grpc
-            if _rocm_startup_warmup_requested()
+            if _rocm_startup_warmup_requested(py_env_configs)
             else _run_startup_real_warmup_grpc
         )
         _run_startup_real_warmup_async(warmup(py_env_configs))

@@ -7,7 +7,7 @@ from rtp_llm.ops import RoleType, SpeculativeType
 
 
 class StartupRealWarmupTest(unittest.TestCase):
-    def test_rocm_warmup_is_opt_in_and_uses_the_readiness_gate(self):
+    def test_rocm_warmup_auto_default_and_override_use_the_readiness_gate(self):
         config = SimpleNamespace(
             parallelism_config=SimpleNamespace(world_size=1, world_rank=0, tp_size=1),
             runtime_config=SimpleNamespace(warm_up=True, model_warm_up=True),
@@ -17,6 +17,10 @@ class StartupRealWarmupTest(unittest.TestCase):
         )
         with patch.dict("os.environ", {"RTP_LLM_ROCM_STARTUP_WARMUP": "0"}):
             self.assertFalse(start_server._should_run_startup_real_warmup(config))
+        with patch.dict("os.environ", {}, clear=True), patch.object(
+            start_server.torch.version, "hip", "test-rocm"
+        ):
+            self.assertTrue(start_server._should_run_startup_real_warmup(config))
         with patch.dict(
             "os.environ", {"RTP_LLM_ROCM_STARTUP_WARMUP": "1"}
         ), patch.object(start_server.torch.version, "hip", "test-rocm"):

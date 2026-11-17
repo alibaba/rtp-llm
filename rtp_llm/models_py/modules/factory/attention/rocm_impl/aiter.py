@@ -13,6 +13,8 @@ from rtp_llm.models_py.modules.factory.attention.rocm_impl._attn_utils import (
     unpad_kv_vectorized,
 )
 from rtp_llm.models_py.modules.factory.attention.rocm_impl.paged_prefill_metadata import (
+    borrow_prefill_cumulative_lengths,
+    prepare_host_paged_prefill_metadata,
     prepare_paged_prefill_metadata,
 )
 from rtp_llm.models_py.modules.factory.attention.rocm_impl.paged_prefill_metadata import (
@@ -161,45 +163,51 @@ class FMHAParams(ParamsBase):
             self.max_seq_len = input_lengths.max().item()
             batch_size = input_lengths.size(0)
 
-            # Create cu_seqlens on GPU directly to avoid per-layer .to(device) copies.
-            # On ROCm each hipMemcpyWithStream costs ~1-8ms, so keeping these on GPU
-            # from the start eliminates 28-layer × ~3ms/layer = ~84ms of sync overhead.
-            # NOTE: input_lengths is CPU pinned memory in production; we must
-            # explicitly target CUDA so cumsum and cu_seqlens live on GPU.
-            gpu_device = torch.device("cuda")
-            input_lengths_gpu = input_lengths.to(gpu_device, non_blocking=True)
-
-            # Create cu_seqlens_q for query (based on input_lengths only)
-            self.cu_seqlens_q = torch.zeros(
-                batch_size + 1, dtype=torch.int32, device=gpu_device
-            )
-            self.cu_seqlens_q[1:] = torch.cumsum(input_lengths_gpu, 0)
-
-            # Create cu_seqlens_k for key/value (includes prefix_lengths)
-            if prefix_lengths is not None and prefix_lengths.numel() > 0:
-                prefix_lengths_gpu = prefix_lengths.to(gpu_device, non_blocking=True)
-                kv_lengths_gpu = input_lengths_gpu + prefix_lengths_gpu
-                self.cu_seqlens_k = torch.zeros(
+            # Production already provides stream-ordered cumulative lengths.
+            # Reuse them for eager execution; standalone and graph callers keep
+            # their own device buffers. Lengths never migrate back to the CPU.
+            gpu_device = torch.device("cuda", torch.cuda.current_device())
+            has_prefix = prefix_lengths is not None and prefix_lengths.numel() > 0
+            kv_lengths = input_lengths + prefix_lengths if has_prefix else input_lengths
+            borrowed = borrow_prefill_cumulative_lengths(attn_inputs, gpu_device)
+            if borrowed is not None and kv_lengths.device.type == "cpu":
+                self.cu_seqlens_q, self.cu_seqlens_k = borrowed
+                # Batch-owned pinned source: one H2D instead of repeated zero,
+                # cumsum, slice-copy and add kernels on the TTFT critical path.
+                self.prefill_lengths_host = kv_lengths.to(
+                    dtype=torch.int32
+                ).pin_memory()
+                self.prefill_seqlen_k_int32 = self.prefill_lengths_host.to(
+                    gpu_device, non_blocking=True
+                )
+            else:
+                input_lengths_gpu = input_lengths.to(gpu_device, non_blocking=True)
+                self.cu_seqlens_q = torch.zeros(
                     batch_size + 1, dtype=torch.int32, device=gpu_device
                 )
-                self.cu_seqlens_k[1:] = torch.cumsum(kv_lengths_gpu, 0)
+                self.cu_seqlens_q[1:] = torch.cumsum(input_lengths_gpu, 0)
+                if has_prefix:
+                    prefix_lengths_gpu = prefix_lengths.to(
+                        gpu_device, non_blocking=True
+                    )
+                    kv_lengths_gpu = input_lengths_gpu + prefix_lengths_gpu
+                    self.cu_seqlens_k = torch.zeros(
+                        batch_size + 1, dtype=torch.int32, device=gpu_device
+                    )
+                    self.cu_seqlens_k[1:] = torch.cumsum(kv_lengths_gpu, 0)
+                    self.prefill_seqlen_k_int32 = kv_lengths_gpu.to(torch.int32)
+                else:
+                    self.cu_seqlens_k = self.cu_seqlens_q.clone()
+                    self.prefill_seqlen_k_int32 = input_lengths_gpu.to(torch.int32)
+
+            if has_prefix:
                 # Calculate max sequence length including prefix
                 max_prefix_length = (
                     prefix_lengths.max().item() if prefix_lengths.numel() > 0 else 0
                 )
                 self.max_seqlen_k = self.max_seq_len + max_prefix_length
-                kv_lengths = input_lengths + prefix_lengths
-                # Hoist FMHA-setup tensor out of the per-layer hot path: with prefix,
-                # seqlen_k = input_lengths + prefix_lengths (int32, on GPU).
-                self.prefill_seqlen_k_int32 = kv_lengths_gpu.to(torch.int32)
             else:
-                # No prefix, kv_lengths equals input_lengths
-                kv_lengths = input_lengths
-                self.cu_seqlens_k = self.cu_seqlens_q.clone()
                 self.max_seqlen_k = self.max_seq_len
-                # Hoist FMHA-setup tensor: with no prefix, seqlen_k == input_lengths
-                # (int32 on GPU). Saves a per-layer alloc + add + dtype-cast trio.
-                self.prefill_seqlen_k_int32 = input_lengths_gpu.to(torch.int32)
 
             self.max_seqlen_q = self.max_seq_len
             self.seq_lens = None
@@ -776,6 +784,44 @@ class AiterPrefillAttnOpPaged:
         if self.enable_cuda_graph:
             self.prepare_cuda_graph(fmha_params, attn_inputs)
         else:
+            # Only eager, host-owned metadata can use this path. The snapshot
+            # belongs to FMHAParams (one batch/cache group), not the operator.
+            host_table = getattr(attn_inputs, "kv_cache_kernel_block_id", None)
+            host_lengths = attn_inputs.input_lengths
+            host_prefix = attn_inputs.prefix_lengths
+            if (
+                host_table is not None
+                and host_table.device.type == "cpu"
+                and host_table.dtype == torch.int32
+                and host_lengths.device.type == "cpu"
+                and host_lengths.dtype == torch.int32
+                and fmha_params.kv_cache_block_id_device is not None
+                and (
+                    host_prefix is None
+                    or host_prefix.numel() == 0
+                    or (
+                        host_prefix.device.type == "cpu"
+                        and host_prefix.dtype == torch.int32
+                    )
+                )
+                and host_table.shape == fmha_params.kv_cache_block_id_device.shape
+            ):
+                lengths = (
+                    host_lengths
+                    if host_prefix is None or host_prefix.numel() == 0
+                    else host_lengths + host_prefix
+                )
+                fmha_params.paged_prefill_metadata = (
+                    prepare_host_paged_prefill_metadata(
+                        host_table,
+                        lengths,
+                        self.tokens_per_block,
+                        fmha_params.max_seqlen_k,
+                        fmha_params.cu_seqlens_k.device,
+                        fp8=self.fp8_kv_cache,
+                    )
+                )
+                return fmha_params
             self._prepare_eager_metadata(fmha_params)
         return fmha_params
 
@@ -1151,7 +1197,12 @@ class AiterPrefillAttnOpTriton:
             )
             if self.enable_cuda_graph:
                 self.prepare_cuda_graph(fmha_params, attn_inputs)
-        else:
+        elif fmha_params.token_q_num != (
+            (fmha_params.cu_seqlens_q.numel() - 1) * fmha_params.max_seqlen_q
+        ):
+            # Uniform eager batches already have packed output. In particular
+            # B=1,q=1..4 must not launch arange/repeat_interleave/gather kernels
+            # for an identity index that forward() never consumes.
             fmha_params.compact_indices = self._calc_compact_indices(fmha_params)
 
         return fmha_params

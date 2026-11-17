@@ -237,11 +237,16 @@ class FrontendShutdownManagerTest(unittest.TestCase):
                 )
                 for route in routes:
                     self.assertEqual(client.get(route).status_code, 503, route)
+                for route in (*routes[1:], "/health_check"):
+                    self.assertEqual(client.post(route).status_code, 503, route)
                 self.assertEqual(client.get("/liveness").status_code, 200)
+                self.assertEqual(client.post("/liveness").status_code, 200)
                 self.assertEqual(client.get("/frontend_health").status_code, 200)
                 gate.write_text("ready\n")
                 for route in routes:
                     self.assertEqual(client.get(route).status_code, 200, route)
+                for route in (*routes[1:], "/health_check"):
+                    self.assertEqual(client.post(route).status_code, 200, route)
 
     def test_pre_stop_unavailable_rejects_new_business(self):
         app_owner = FrontendApp.__new__(FrontendApp)

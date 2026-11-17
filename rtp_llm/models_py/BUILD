@@ -198,6 +198,7 @@ py_library(
         ":utils",
         ":kernels",
         ":tile_kernels_mhc",
+        "//rtp_llm:numpy",
         "//rtp_llm:warmup",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
