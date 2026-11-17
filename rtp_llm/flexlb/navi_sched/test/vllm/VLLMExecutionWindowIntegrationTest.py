@@ -19,6 +19,65 @@ from navi_sched import NaviSchedAgent
 from navi_sched import _navi_sched_core as core
 
 
+def finish_capacity_batch_through_observer(
+    bridge, handle, request_id, prior_id, finish_us
+):
+    from types import SimpleNamespace
+    from navi_sched.adapters.vllm.VLLMEngineObserver import (
+        VLLMEngineObserver,
+        _ForwardBatchState,
+        _AdmissionState,
+        _ObservedWorkload,
+        _PrefillWorkloadSlice,
+        _AdmissionPriorCacheForecast,
+        _RequestCacheLookup,
+        _ResolvedCacheHit,
+    )
+
+    end = time.perf_counter_ns()
+    lookup = _RequestCacheLookup(prior_id, _ResolvedCacheHit(80, end - 1))
+    prior = _AdmissionPriorCacheForecast(True, 96, 0, 96, 0, lookup)
+    admission = _AdmissionState(
+        preceding_workload=_ObservedWorkload(
+            batch_count=1,
+            request_count=1,
+            running_capacity_prefill=_PrefillWorkloadSlice(1, 0, 96, 9216.0, 0.0),
+            prior_cache_forecasts=(prior,),
+        ),
+        incoming_running_capacity_request_ids=frozenset((request_id,)),
+    )
+    observer = VLLMEngineObserver.__new__(VLLMEngineObserver)
+    observer._native_ingress = True
+    observer._pp_capacity_unified = True
+    observer._execution_geometry_enabled = False
+    observer._pp_workload_timing_enabled = False
+    observer._bridge = bridge
+    events = []
+    observer.on_request_lifecycle_event = events.append
+    # No actual engine is present: omit only lifecycle cleanup, not feature or reporting code.
+    observer._cleanup_released_forward_batch = lambda state: None
+    state = _ForwardBatchState(
+        batch_id=1000 + request_id,
+        schedule_batch_id=1000 + request_id,
+        schedule_batch_size=1,
+        pending_cache_tracked=False,
+        native_batch=None,
+        request_ids=(request_id,),
+        external_request_ids={request_id: str(request_id)},
+        requests={request_id: SimpleNamespace(num_prompt_tokens=96)},
+        handle=handle,
+        initial_cache_hits={request_id: 0},
+        admission_state=admission,
+        admission_started_ns=end - 10000000,
+        execution_started_ns=end - 10000000,
+        execution_step_count=1,
+        execution_prefill_tokens=96,
+    )
+    observer._finish_batch(state, completed_ns=end, completed_time_us=finish_us)
+    assert state.released
+    assert any(e["event"] == "prior_cache_training_correction" for e in events)
+
+
 def native_capacity_completion_probe():
     """Check actual pybind -> reporter -> kernel samples in an isolated process."""
     from VLLMV6DWireIntegrationTest import empty_workload_report
@@ -61,7 +120,11 @@ def native_capacity_completion_probe():
             )
             assert core.VLLM_NATIVE_CAPACITY_COMPLETION_FEATURES_VERSION == 1
             finishes = {}
-            for enabled, prior_id, current_id in ((False, 1, 2), (True, 3, 4)):
+            for enabled, prior_id, current_id in (
+                (False, 1, 2),
+                (True, 3, 4),
+                ("observer", 5, 6),
+            ):
                 assert bridge.report_workload(**empty_workload_report())
                 handles = {}
                 for request_id in (prior_id, current_id):
@@ -111,7 +174,12 @@ def native_capacity_completion_probe():
                 )
                 if enabled:
                     arguments["use_completed_capacity_features"] = True
-                assert bridge.finish_batch_with_execution(**arguments)
+                if enabled == "observer":
+                    finish_capacity_batch_through_observer(
+                        bridge, handles[current_id], current_id, prior_id, finish_us
+                    )
+                else:
+                    assert bridge.finish_batch_with_execution(**arguments)
                 finishes[current_id] = finish_us
                 arguments.update(
                     reporter=handles[prior_id],
@@ -146,15 +214,16 @@ def native_capacity_completion_probe():
                 for line in text.splitlines():
                     if "[navi-latency-training-sample]" not in line:
                         continue
-                    for identity in (2, 4):
+                    for identity in (2, 4, 6):
                         if "request_ids=[" + str(identity) + "]" in line:
                             records[identity] = dict(
                                 re.findall(r"(\w+)=([^\s]+)", line)
                             )
-                if len(records) == 2:
+                if len(records) == 3:
                     for identity, expected in (
                         (2, (0, 192, 18432.0, 0.0)),
                         (4, (80, 112, 9472.0, 1280.0)),
+                        (6, (80, 112, 9472.0, 1280.0)),
                     ):
                         record = records[identity]
                         actual = tuple(
