@@ -48,6 +48,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("active_block_ids", &rtp_llm::LinearReplayInputs::active_block_ids)
         .def_readwrite("prev_accept_lengths", &rtp_llm::LinearReplayInputs::prev_accept_lengths)
         .def_readwrite("history_valid_lengths", &rtp_llm::LinearReplayInputs::history_valid_lengths)
+        .def_readwrite("history_log_banks", &rtp_llm::LinearReplayInputs::history_log_banks)
         .def_readwrite("init_kinds", &rtp_llm::LinearReplayInputs::init_kinds)
         .def_readwrite("state_read_block_ids", &rtp_llm::LinearReplayInputs::state_read_block_ids)
         .def_readwrite("anchor_processed_lengths", &rtp_llm::LinearReplayInputs::anchor_processed_lengths);

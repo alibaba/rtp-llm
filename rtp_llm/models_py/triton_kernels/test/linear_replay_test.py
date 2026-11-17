@@ -40,6 +40,7 @@ class LinearReplayInputContractTest(unittest.TestCase):
                 slot_ids=empty((batch,), torch.int32),
                 prev_accept_lengths=empty((batch,), torch.int32),
                 history_valid_lengths=empty((batch,), torch.int32),
+                history_log_banks=empty((batch,), torch.int32),
                 init_kinds=empty((batch,), torch.int32),
                 state_read_block_ids=empty((3, batch + 2), torch.int32)[:, :batch],
                 active_block_ids=empty((3, batch + 2), torch.int32)[:, :batch],
@@ -126,7 +127,9 @@ class LinearReplayTest(unittest.TestCase):
             self.skipTest("CUDA is required")
         torch.manual_seed(1234)
 
-    def _case(self, vector_gate, steps=4, width=4, key_dim=128, value_dim=128):
+    def _case(
+        self, vector_gate, steps=4, width=4, key_dim=128, value_dim=128, *, banked=False
+    ):
         batch, heads, value_heads = 5, 2, 2 if vector_gate else 4
         channels = 2 * heads * key_dim + value_heads * value_dim
         gate_dim = key_dim if vector_gate else 1
@@ -137,15 +140,16 @@ class LinearReplayTest(unittest.TestCase):
 
         cache = SimpleNamespace(
             group_id=1,
-            k=zeros((slots, steps, heads, key_dim)),
+            k=zeros((slots * (2 if banked else 1), steps, heads, key_dim)),
             u=zeros((slots, steps, value_heads, value_dim)),
-            g=zeros((slots, steps, value_heads, gate_dim)),
+            g=zeros((slots * (2 if banked else 1), steps, value_heads, gate_dim)),
             conv_inputs=zeros((slots, steps, channels), torch.bfloat16),
         )
         inputs = SimpleNamespace(
             slot_ids=torch.tensor([4, 1, 3, 2, -1], device="cuda", dtype=torch.int32),
             prev_accept_lengths=zeros((batch,), torch.int32),
             history_valid_lengths=zeros((batch,), torch.int32),
+            history_log_banks=zeros((batch,), torch.int32),
             init_kinds=torch.ones(batch, device="cuda", dtype=torch.int32),
             state_read_block_ids=zeros((2, batch + 3), torch.int32)[:, :batch],
             active_block_ids=zeros((2, batch + 3), torch.int32)[:, :batch],
@@ -240,7 +244,15 @@ class LinearReplayTest(unittest.TestCase):
         return torch.stack(outputs, 1), states, histories
 
     def _run_rounds(
-        self, vector_gate, steps, width, key_dim, value_dim, *, use_cuda_graph=False
+        self,
+        vector_gate,
+        steps,
+        width,
+        key_dim,
+        value_dim,
+        *,
+        use_cuda_graph=False,
+        banked=False,
     ):
         # The K3 checkpoint uses -5.0; Qwen's scalar gate has no lower bound.
         lower_bound = -5.0 if vector_gate else None
@@ -256,7 +268,7 @@ class LinearReplayTest(unittest.TestCase):
             weights,
             alog,
             bias,
-        ) = self._case(vector_gate, steps, width, key_dim, value_dim)
+        ) = self._case(vector_gate, steps, width, key_dim, value_dim, banked=banked)
         replay = LinearReplay(
             weights,
             alog,
@@ -283,7 +295,8 @@ class LinearReplayTest(unittest.TestCase):
         graph = graph_output = None
         graph_raw = graph_a = graph_b = None
         graph_addresses = None
-        for round_id in range(4):
+        # The banked path also consumes the mixed-bank cold-start outputs.
+        for round_id in range(5 if banked else 4):
             if round_id == 2:
                 order = torch.tensor([2, 0, 3, 1, 4], device="cuda")
                 previous_states = [state[order] for state in previous_states]
@@ -291,7 +304,10 @@ class LinearReplayTest(unittest.TestCase):
                 replay_state = replay_state[order]
                 inputs.slot_ids.copy_(inputs.slot_ids[order])
                 inputs.active_block_ids.copy_(inputs.active_block_ids[:, order])
+                inputs.history_log_banks.copy_(inputs.history_log_banks[order])
             if round_id:
+                if banked:
+                    inputs.history_log_banks.bitwise_xor_(1)
                 accepted = [
                     min(i + 1, steps) if round_id == 1 else max(1, steps - i)
                     for i in range(batch)
@@ -318,6 +334,7 @@ class LinearReplayTest(unittest.TestCase):
                     )
                     inputs.prev_accept_lengths[:2].zero_()
                     inputs.history_valid_lengths[:2].zero_()
+                    inputs.history_log_banks[:2].zero_()
                     inputs.state_read_block_ids[1, 0] = -1
                     inputs.state_read_block_ids[1, 1] = 1
                     reference_state[0].zero_()
@@ -330,7 +347,12 @@ class LinearReplayTest(unittest.TestCase):
                 # checkpoint oracle independent of the Torch verify reference,
                 # whose SiLU/BF16 rounding may differ from the producer.
                 slots = inputs.slot_ids.clamp_min(0).long()
-                old_k, old_u, old_g = (records[slots] for records in previous_records)
+                kg_rows = slots + (
+                    inputs.history_log_banks * cache.u.shape[0] if banked else 0
+                )
+                old_k = previous_records[0][kg_rows]
+                old_u = previous_records[1][slots]
+                old_g = previous_records[2][kg_rows]
                 for t in range(steps):
                     key = old_k[:, t].repeat_interleave(value_heads // heads, dim=1)
                     updated = replay_state * torch.exp(old_g[:, t]).unsqueeze(-2)
@@ -403,6 +425,14 @@ class LinearReplayTest(unittest.TestCase):
                 )
                 return output
 
+            if banked:
+                read_rows = (
+                    inputs.slot_ids[:-1].long()
+                    + inputs.history_log_banks[:-1] * cache.u.shape[0]
+                )
+                preserved_k = cache.k[read_rows].clone()
+                preserved_g = cache.g[read_rows].clone()
+
             if use_cuda_graph:
                 if graph is None:
                     # Warmup/capture must not consume the first real window.
@@ -440,13 +470,24 @@ class LinearReplayTest(unittest.TestCase):
             torch.testing.assert_close(
                 conv[destination], reference_conv[:-1], rtol=0, atol=0
             )
+            if banked:
+                torch.testing.assert_close(
+                    cache.k[read_rows], preserved_k, rtol=0, atol=0
+                )
+                torch.testing.assert_close(
+                    cache.g[read_rows], preserved_g, rtol=0, atol=0
+                )
+                for tensor in (cache.k, cache.g):
+                    self.assertEqual(
+                        torch.count_nonzero(tensor[[0, cache.u.shape[0]]]).item(), 0
+                    )
             # The next verify overwrites these slots; snapshot before that use.
             previous_records = tuple(
                 getattr(cache, name).clone() for name in ("k", "u", "g")
             )
 
     def test_kda_all_accept_lengths_cross_page_and_in_place(self):
-        self._run_rounds(True, 4, 4, 128, 128)
+        self._run_rounds(True, 4, 4, 128, 128, banked=True)
 
     def test_qwen_verify_matches_production_decode_operators(self):
         steps = 5
@@ -607,7 +648,7 @@ class LinearReplayTest(unittest.TestCase):
             weights,
             alog,
             bias,
-        ) = self._case(True, steps=4)
+        ) = self._case(True, steps=4, banked=True)
         inputs.slot_ids[-1] = 5
         source = inputs.state_read_block_ids[1].long()
         destination = inputs.active_block_ids[1].long()
@@ -718,6 +759,12 @@ class LinearReplayTest(unittest.TestCase):
         self._run_rounds(False, 4, 4, 128, 128)
 
     def test_kda_cuda_graph_multiround_accept_and_slot_reordering(self):
+        self._run_rounds(True, 4, 4, 128, 128, use_cuda_graph=True, banked=True)
+
+    def test_kda_unbanked_fallback_multiround(self):
+        self._run_rounds(True, 4, 4, 128, 128)
+
+    def test_kda_unbanked_fallback_cuda_graph(self):
         self._run_rounds(True, 4, 4, 128, 128, use_cuda_graph=True)
 
     def test_qwen_cuda_graph_multiround_accept_and_slot_reordering(self):

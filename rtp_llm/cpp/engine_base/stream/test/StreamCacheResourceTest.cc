@@ -485,6 +485,42 @@ TEST_F(StreamCacheResourceTest, ReplayWindowRequiresTheCurrentRequestLease) {
     EXPECT_EQ(round->previous_window, window);
 }
 
+TEST_F(StreamCacheResourceTest, ReplayBankAdvancesOnlyWithPublishedWindows) {
+    auto config          = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
+    config.linear_replay = LinearReplayPlan::create({0}, 1, 4, {1, 1}, {1, 1}, true, DataType::TYPE_FP16, 1);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6}, false, RoleType::DECODE);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->setSeqLength(7);
+    stream_->setIsContextStream(false);
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+
+    auto first = stream_->prepareLinearReplayRound();
+    ASSERT_TRUE(first.ok()) << first.status();
+    EXPECT_EQ(first->historyLogBank(), 0);
+    auto unpublished = stream_->prepareLinearReplayRound();
+    ASSERT_TRUE(unpublished.ok()) << unpublished.status();
+    EXPECT_EQ(unpublished->historyLogBank(), 0);
+
+    auto window               = std::make_shared<GenerateStream::LinearReplayWindow>();
+    window->lease             = first->lease;
+    window->produced_log_bank = 1 - first->historyLogBank();
+    stream_->publishLinearReplayWindow(std::move(window));
+    auto second = stream_->prepareLinearReplayRound();
+    ASSERT_TRUE(second.ok()) << second.status();
+    EXPECT_EQ(second->historyLogBank(), 1);
+    auto next_window               = std::make_shared<GenerateStream::LinearReplayWindow>();
+    next_window->lease             = second->lease;
+    next_window->produced_log_bank = 1 - second->historyLogBank();
+    stream_->publishLinearReplayWindow(std::move(next_window));
+
+    // An in-flight round retains its immutable window after a later publication.
+    EXPECT_EQ(second->historyLogBank(), 1);
+    auto third = stream_->prepareLinearReplayRound();
+    ASSERT_TRUE(third.ok()) << third.status();
+    EXPECT_EQ(third->historyLogBank(), 0);
+}
+
 TEST_F(StreamCacheResourceTest, PendingReplayBookkeepingRetainsFutureDestinationPages) {
     auto config                      = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
     config.linear_replay = LinearReplayPlan::create({0}, 2, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);

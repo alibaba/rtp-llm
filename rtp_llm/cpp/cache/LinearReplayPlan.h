@@ -31,10 +31,10 @@ struct LinearReplayPlan {
     }
 
     int64_t slotCount() const {
-        return k_shape[0];
+        return u_shape[0];
     }
     int64_t maxSteps() const {
-        return k_shape[1];
+        return u_shape[1];
     }
 
     static LinearReplayPlan create(std::vector<int>       groups,
@@ -52,11 +52,17 @@ struct LinearReplayPlan {
         if (channels > static_cast<size_t>(std::numeric_limits<int64_t>::max())) {
             throw std::overflow_error("LINEAR replay channel count overflows int64");
         }
+        if (vector_gate && slots > std::numeric_limits<int64_t>::max() / 2) {
+            throw std::overflow_error("LINEAR replay banked slot count overflows int64");
+        }
+        // Fused KDA CTAs share K/G logs across tiles. Preserve their read bank
+        // while they write the next verify window to the other bank.
+        const int64_t    kg_slots = vector_gate ? 2 * slots : slots;
         LinearReplayPlan plan;
         plan.group_ids        = std::move(groups);
-        plan.k_shape          = {slots, steps, key_dims[0], key_dims[1]};
+        plan.k_shape          = {kg_slots, steps, key_dims[0], key_dims[1]};
         plan.u_shape          = {slots, steps, value_dims[0], value_dims[1]};
-        plan.g_shape          = {slots, steps, value_dims[0], vector_gate ? key_dims[1] : 1};
+        plan.g_shape          = {kg_slots, steps, value_dims[0], vector_gate ? key_dims[1] : 1};
         plan.conv_input_shape = {slots, steps, static_cast<int64_t>(channels)};
         plan.conv_dtype       = conv_type;
         plan.reserve_bytes    = checkedMultiply(plan.layerLogBytes(), layer_count);

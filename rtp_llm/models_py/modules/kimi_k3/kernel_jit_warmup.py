@@ -30,6 +30,7 @@ def _inactive_replay_inputs(
         active_block_ids=blocks,
         prev_accept_lengths=i32(0),
         history_valid_lengths=i32(0),
+        history_log_banks=i32(0),
         init_kinds=i32(0),
     )
 
@@ -150,7 +151,7 @@ def _warmup_replay(model, init_resource) -> None:
                 layer.index,
                 cache.group_id,
                 max_steps,
-                replay_cache.k.shape[0],
+                replay_cache.u.shape[0],
                 state.shape[0],
                 replay_cache.k.shape[1],
                 state.stride(0),

@@ -1346,11 +1346,13 @@ TEST_F(MtpExecutorTest, LinearReplayGatherPreservesCancelledBatchRows) {
     EXPECT_EQ(slots[0].item<int32_t>(), rounds[0].lease->slot_id);
     EXPECT_EQ(slots[1].item<int32_t>(), rounds[1].lease->slot_id);
     EXPECT_NE(rounds[0].lease->slot_id, rounds[1].lease->slot_id);
+    EXPECT_EQ(input.linear_replay->history_log_banks.count_nonzero().item<int64_t>(), 0);
 
     executor->publishLinearReplayWindows(streams, *input.linear_replay, rounds, torch::ones({2}, cuda_i32));
     EXPECT_EQ(cancelled->streamCacheResource().linear_replay_.window, nullptr);
     ASSERT_NE(active->streamCacheResource().linear_replay_.window, nullptr);
     EXPECT_EQ(active->streamCacheResource().linear_replay_.window->lease, rounds[1].lease);
+    EXPECT_EQ(active->streamCacheResource().linear_replay_.window->produced_log_bank, 1);
 
     const auto                 previous_length = active->seqLength();
     const StreamSpecUpdateInfo update{
@@ -1458,6 +1460,7 @@ TEST_F(MtpExecutorTest, LinearReplayAsyncDispatchPreservesAcceptedWindowAndPageT
     ASSERT_TRUE(next_round.ok());
     ASSERT_NE(next_round->previous_window, nullptr);
     EXPECT_NE(next_round->previous_window->accept_len_gpu.data_ptr(), accepted.accept_len.data_ptr());
+    EXPECT_EQ(next_round->historyLogBank(), 1);
     const char* async_prepare = std::getenv("RTP_LLM_MTP_ASYNC_PREPARE");
     EXPECT_EQ(executor->useAsyncPrepare(), async_prepare != nullptr && std::string(async_prepare) == "1");
     if (executor->useAsyncPrepare()) {
@@ -1507,6 +1510,7 @@ TEST_F(MtpExecutorTest, LinearReplayAsyncDispatchPreservesAcceptedWindowAndPageT
         executor->batch_stream_processor_->gatherLinearReplayInputs(streams, config, next_input, holder, next_rounds)
             .ok());
     EXPECT_EQ(next_input.linear_replay->prev_accept_lengths.cpu().item<int32_t>(), 3);
+    EXPECT_EQ(next_input.linear_replay->history_log_banks.cpu().item<int32_t>(), 1);
     EXPECT_EQ(next_input.linear_replay->anchor_processed_lengths.cpu().item<int32_t>(), 5);
     EXPECT_EQ(next_input.linear_replay->state_read_block_ids.cpu()[linear_group_id][0].item<int32_t>(),
               ids.at(linear_group_id));

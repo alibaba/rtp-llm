@@ -960,6 +960,7 @@ MtpBatchStreamProcessor::gatherLinearReplayInputs(const StreamGroups&           
         }
         auto round                                     = std::move(round_status.value());
         host.slot_ids.data_ptr<int32_t>()[row]         = round.lease->slot_id;
+        host.history_log_banks.data_ptr<int32_t>()[row] = round.historyLogBank();
         if (round.previous_window) {
             const auto& previous = *round.previous_window;
             if (previous.device_ready) {

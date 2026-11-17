@@ -37,9 +37,9 @@ class KimiK3JitWarmupTest(unittest.TestCase):
         state = torch.ones((blocks, 1, dim, dim), device=device)
         conv = torch.ones((blocks, 3, channels), device=device, dtype=torch.bfloat16)
         replay = SimpleNamespace(
-            k=zeros((slots, capacity, 1, dim)),
+            k=zeros((2 * slots, capacity, 1, dim)),
             u=zeros((slots, capacity, 1, dim)),
-            g=zeros((slots, capacity, 1, dim)),
+            g=zeros((2 * slots, capacity, 1, dim)),
             conv_inputs=zeros((slots, capacity, channels), torch.bfloat16),
         )
         # Bind the production attention through its shared KDA constructor so
@@ -118,6 +118,7 @@ class KimiK3JitWarmupTest(unittest.TestCase):
                     ),
                     prev_accept_lengths=zeros((batch,), torch.int32),
                     history_valid_lengths=zeros((batch,), torch.int32),
+                    history_log_banks=zeros((batch,), torch.int32),
                     init_kinds=torch.ones(batch, device=device, dtype=torch.int32),
                 )
                 inputs.active_block_ids[2] = torch.arange(
@@ -165,9 +166,9 @@ class KimiK3JitWarmupTest(unittest.TestCase):
             return torch.ones(shape, device=device, dtype=dtype)
 
         cache = SimpleNamespace(
-            k=tensor((slots, capacity, 1, dim)),
+            k=tensor((2 * slots, capacity, 1, dim)),
             u=tensor((slots, capacity, 1, dim)),
-            g=tensor((slots, capacity, 1, dim)),
+            g=tensor((2 * slots, capacity, 1, dim)),
             conv_inputs=tensor((slots, capacity, channels), torch.bfloat16),
         )
         state = tensor((blocks, 1, dim, dim))

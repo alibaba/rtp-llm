@@ -127,6 +127,7 @@ class LinearReplayInputs:
     active_block_ids: torch.Tensor
     prev_accept_lengths: torch.Tensor
     history_valid_lengths: torch.Tensor
+    history_log_banks: torch.Tensor
     init_kinds: torch.Tensor
     state_read_block_ids: torch.Tensor
     anchor_processed_lengths: torch.Tensor

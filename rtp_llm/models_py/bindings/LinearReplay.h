@@ -11,25 +11,28 @@ struct LinearReplayInputs {
     torch::Tensor active_block_ids;
     torch::Tensor prev_accept_lengths;
     torch::Tensor history_valid_lengths;
+    torch::Tensor history_log_banks;
     torch::Tensor init_kinds;
     torch::Tensor state_read_block_ids;
     torch::Tensor anchor_processed_lengths;
 
-    std::array<torch::Tensor*, 7> tensors() {
+    std::array<torch::Tensor*, 8> tensors() {
         return {&slot_ids,
                 &active_block_ids,
                 &prev_accept_lengths,
                 &history_valid_lengths,
+                &history_log_banks,
                 &init_kinds,
                 &state_read_block_ids,
                 &anchor_processed_lengths};
     }
 
-    std::array<const torch::Tensor*, 7> tensors() const {
+    std::array<const torch::Tensor*, 8> tensors() const {
         return {&slot_ids,
                 &active_block_ids,
                 &prev_accept_lengths,
                 &history_valid_lengths,
+                &history_log_banks,
                 &init_kinds,
                 &state_read_block_ids,
                 &anchor_processed_lengths};
@@ -55,6 +58,7 @@ struct LinearReplayInputs {
         result.active_block_ids         = torch::empty({groups, batch}, i32);
         result.prev_accept_lengths      = torch::empty({batch}, i32);
         result.history_valid_lengths    = torch::empty({batch}, i32);
+        result.history_log_banks        = torch::empty({batch}, i32);
         result.init_kinds               = torch::empty({batch}, i32);
         result.state_read_block_ids     = torch::empty({groups, batch}, i32);
         result.anchor_processed_lengths = torch::empty({batch}, i32);

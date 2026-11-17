@@ -22,6 +22,7 @@ struct MallocResult;
 
 struct LinearReplayWindow {
     int32_t                                produced_steps = 0;
+    int32_t                                produced_log_bank = 0;
     torch::Tensor                          accept_len_gpu;
     torch::Tensor                          anchor_block_ids_gpu;
     torch::Tensor                          anchor_processed_len_gpu;
@@ -36,6 +37,10 @@ struct LinearReplayRound {
     std::shared_ptr<LinearReplayBlockHold>    state_block_hold;
     std::vector<int32_t>                      initial_block_ids;
     std::shared_ptr<LinearReplayBlockHold>    initial_state_hold;
+
+    int32_t historyLogBank() const {
+        return previous_window ? previous_window->produced_log_bank : 0;
+    }
 };
 
 class StreamCacheResource {

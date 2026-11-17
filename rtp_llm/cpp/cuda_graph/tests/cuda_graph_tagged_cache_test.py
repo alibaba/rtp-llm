@@ -237,6 +237,7 @@ class LinearReplayMetadataModel:
             torch.where(valid, replay.slot_ids, 0).sum()
             + 10 * torch.where(valid, replay.active_block_ids[1], 0).sum()
             + 100 * torch.where(valid, replay.history_valid_lengths, 0).sum()
+            + 1000 * torch.where(valid, replay.history_log_banks, 0).sum()
             + torch.where(valid, replay.prev_accept_lengths, 0).sum()
         )
         return PyModelOutputs(inputs.input_hiddens + signature.to(torch.bfloat16))
@@ -1180,6 +1181,9 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 replay.history_valid_lengths = torch.full(
                     (batch,), history_length, dtype=torch.int32, device=device
                 )
+                replay.history_log_banks = torch.full(
+                    (batch,), history_length % 2, dtype=torch.int32, device=device
+                )
                 replay.init_kinds = torch.zeros(batch, dtype=torch.int32, device=device)
                 replay.state_read_block_ids = torch.zeros(
                     (2, batch), dtype=torch.int32, device=device
@@ -1198,6 +1202,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                     batch * (batch + 1) // 2
                     + 10 * (batch * first_block + batch * (batch - 1) // 2)
                     + 100 * batch * history_length
+                    + 1000 * batch * (history_length % 2)
                     + batch
                 )
                 torch.cuda.synchronize()

@@ -1,9 +1,9 @@
 """Measure the complete replay path, optionally against a previous source file.
 
-The default protocol mode includes rebuild, convolution, verify, and the old
-header finalize when --baseline-source is provided. Precision mode retains the
-convolution/FMA comparison. Synthetic local-head workloads do not measure TPOT
-or distributed communication.
+Protocol mode measures KDA convolution/fused replay-verify or the GDN three-kernel
+path, including old header finalize when --baseline-source is provided. Every
+sample restores producer history before a single step. Precision mode retains
+the unfused convolution/FMA comparison. These workloads do not measure TPOT.
 """
 
 import argparse
@@ -13,6 +13,7 @@ import hashlib
 import importlib.util
 import inspect
 import json
+import math
 import os
 import platform
 import re
@@ -69,13 +70,17 @@ def variants(output):
     parts = [
         "import triton\nimport triton.language as tl\n"
         "from rtp_llm.models_py.triton_kernels.linear_replay "
-        "import _replay_row, exp, softplus\n"
+        "import _replay_row, _replay_trap, _load_conv_replay_history, exp, softplus\n"
     ]
-    for name in KERNELS:
+    for name in ("_rebuild_state_tile", *KERNELS):
         tree = ast.parse(inspect.getsource(getattr(replay, name).fn))
         rewrite = BeforeFix()
         tree = rewrite.visit(tree)
-        expected = (2, 0) if name == "_replay_conv_kernel" else (0, 1)
+        expected = (
+            (2, 0)
+            if name == "_replay_conv_kernel"
+            else (0, 0) if name == "_rebuild_state_kernel" else (0, 1)
+        )
         assert (rewrite.casts, rewrite.fmas) == expected, name
         parts.append(ast.unparse(ast.fix_missing_locations(tree)))
     source = "\n\n".join(parts)
@@ -120,6 +125,7 @@ def make_case(family, batch, steps, accepted, weight_dtype):
         history_valid_lengths=torch.full(
             (batch,), steps, device="cuda", dtype=torch.int32
         ),
+        history_log_banks=zeros((batch,), torch.int32),
         init_kinds=zeros((batch,), torch.int32),
         state_read_block_ids=torch.arange(
             1, batch + 1, device="cuda", dtype=torch.int32
@@ -224,7 +230,8 @@ def capture_launches(
             state_v_first=case.family == "gdn",
             lower_bound=-5.0 if case.family == "kda" else None,
         )
-    assert len(calls) == 3
+    banked = case.family == "kda" and case.cache.k.shape[0] == 2 * case.cache.u.shape[0]
+    assert len(calls) == (2 if banked else 3)
     if finalize:
         with patch.object(
             module, "_finalize_kernel", Recorder(module._finalize_kernel, calls)
@@ -247,122 +254,293 @@ def protocol_modules(baseline_source):
     return modules
 
 
+def legacy_headers(case):
+    batch = case.batch
+    for obj, names in (
+        (case.cache, ("slot_generations", "log_epochs")),
+        (case.inputs, ("slot_generations", "history_epochs", "verify_epochs")),
+    ):
+        for name in names:
+            setattr(obj, name, torch.ones(batch, device="cuda", dtype=torch.int64))
+    case.cache.valid_counts = torch.full(
+        (batch,), case.steps, device="cuda", dtype=torch.int32
+    )
+    case.cache.error_flags = torch.zeros(batch, device="cuda", dtype=torch.int32)
+
+
 def protocol_case(module, family, batch, steps, accepted):
     case = make_case(family, batch, steps, accepted, torch.bfloat16)
+    if module is replay and family == "kda":
+        # Allocate the second bank without consuming RNG: both variants receive
+        # the same logical old history, activations, weights and checkpoint.
+        for name in ("k", "g"):
+            old = getattr(case.cache, name)
+            setattr(case.cache, name, torch.cat((old, torch.zeros_like(old))))
     if hasattr(module, "finalize_linear_replay"):
-        # Fixed windows make repeated launches identical. Baseline finalize
-        # republishes the same version rather than advancing the workload.
-        for obj, names in (
-            (case.cache, ("slot_generations", "log_epochs")),
-            (case.inputs, ("slot_generations", "history_epochs", "verify_epochs")),
-        ):
-            for name in names:
-                setattr(obj, name, torch.ones(batch, device="cuda", dtype=torch.int64))
-        case.cache.valid_counts = torch.full(
-            (batch,), steps, device="cuda", dtype=torch.int32
-        )
-        case.cache.error_flags = torch.zeros(batch, device="cuda", dtype=torch.int32)
+        legacy_headers(case)
     return case
 
 
-def measure_protocol(modules, family, batch, steps, accepted, args):
-    launches, outputs, graphs = {}, {}, {}
-    correctness, samples = {}, {}
-    for name, module in modules.items():
-        case = protocol_case(module, family, batch, steps, accepted)
-        kernels = tuple(getattr(module, kernel) for kernel in KERNELS)
-        finalize = hasattr(module, "finalize_linear_replay")
-        calls, output = capture_launches(
-            case, kernels, module=module, finalize=finalize
+def produced_records(case):
+    banked = case.cache.k.shape[0] == 2 * case.batch
+    offset = case.batch if banked else 0
+    return {
+        "k": case.cache.k[offset : offset + case.batch],
+        "u": case.cache.u,
+        "g": case.cache.g[offset : offset + case.batch],
+        "conv_inputs": case.cache.conv_inputs,
+    }
+
+
+def protocol_launches(
+    module, case, *, frozen=False, scratch=None, fused_verify_warps=None
+):
+    calls, output = capture_launches(
+        case,
+        tuple(getattr(module, kernel) for kernel in KERNELS),
+        module=module,
+        finalize=hasattr(module, "finalize_linear_replay"),
+        frozen=frozen,
+        scratch=scratch,
+    )
+    banked = case.family == "kda" and case.cache.k.shape[0] == 2 * case.batch
+    stages = ["convolution", "fused_replay_verify"] if banked else list(STAGES[:3])
+    if hasattr(module, "finalize_linear_replay"):
+        stages.append("finalize")
+    if banked:
+        parameters = dict(
+            zip(inspect.signature(calls[1].kernel.fn).parameters, calls[1].args)
         )
+        assert parameters["FUSE_REBUILD"] is True, "benchmark must use fused KDA"
+        calls[1].production_num_warps = calls[1].kwargs["num_warps"]
+        if module is replay and fused_verify_warps is not None:
+            calls[1].kwargs["num_warps"] = fused_verify_warps
+    return calls, output, stages
+
+
+def single_step_graph(calls, prepare):
+    # A fused verify overwrites U after consuming it. Capture one step only;
+    # every warmup and measured invocation needs a fresh producer history.
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        prepare()
         for call in calls:
             call()
-        torch.cuda.synchronize()
-        outputs[name] = (output.clone(), case)
-        samples[name] = {
+        prepare()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        for call in calls:
+            call()
+    torch.cuda.current_stream().wait_stream(stream)
+    torch.cuda.synchronize()
+    return graph
+
+
+def measure_protocol(modules, family, batch, steps, accepted, args):
+    outputs, correctness_configs = {}, {}
+    for name, module in modules.items():
+        case = protocol_case(module, family, batch, steps, accepted)
+        calls, output, _ = protocol_launches(
+            module, case, fused_verify_warps=args.fused_verify_warps
+        )
+        correctness_configs[name] = launch_configuration(calls)
+        for call in calls:
+            call()
+        outputs[name] = {
+            "output": output.clone(),
+            "ssm": case.ssm,
+            "conv": case.conv,
+            **produced_records(case),
+        }
+    reference = outputs["candidate"]
+    correctness = protocol_check(
+        outputs,
+        reference,
+        args,
+        family,
+        batch,
+        steps,
+        accepted,
+        "independent",
+        correctness_configs,
+    )
+
+    common = protocol_case(replay, family, batch, steps, accepted)
+    banked = family == "kda"
+    produced = produced_records(common)
+    common.sink = [produced["k"], common.cache.u, produced["g"]]
+    if not banked:
+        common.sink = [
+            torch.empty_like(common.cache.k),
+            common.cache.u,
+            torch.empty_like(common.cache.g),
+        ]
+    scratch = (
+        torch.empty_like(common.raw.flatten(0, 1)),
+        common.raw.new_empty((batch * steps, common.hv, common.dim)),
+    )
+    mutable = [
+        common.ssm,
+        common.conv,
+        common.cache.k,
+        common.cache.u,
+        common.cache.g,
+        common.cache.conv_inputs,
+    ]
+    snapshots = [tensor.clone() for tensor in mutable]
+
+    def reset():
+        for tensor, snapshot in zip(mutable, snapshots):
+            tensor.copy_(snapshot)
+
+    launches, stages, graphs, bindings = {}, {}, {}, {}
+    samples = {
+        name: {
             mode: {"cuda_us": [], "host_enqueue_us": []} for mode in ("eager", "graph")
         }
-    reference, reference_case = outputs["candidate"]
-    for name, (output, case) in outputs.items():
-        checks = [("output", output, reference), ("ssm", case.ssm, reference_case.ssm)]
-        checks += [("conv", case.conv, reference_case.conv)]
-        checks += [
-            (key, getattr(case.cache, key), getattr(reference_case.cache, key))
-            for key in ("k", "u", "g", "conv_inputs")
-        ]
-        correctness[name] = {}
-        for key, actual, expected in checks:
-            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-            correctness[name][key] = difference(actual, expected)
-    shared_case = protocol_case(
-        modules.get("baseline", replay), family, batch, steps, accepted
-    )
-    scratch = (
-        torch.empty_like(shared_case.raw.flatten(0, 1)),
-        shared_case.raw.new_empty((batch * steps, shared_case.hv, shared_case.dim)),
-    )
-    bindings = {}
+        for name in modules
+    }
+    stage_samples, codegen, stage_graphs = {}, {}, {}
     for name, module in modules.items():
-        launches[name], _ = capture_launches(
-            shared_case,
-            tuple(getattr(module, kernel) for kernel in KERNELS),
-            frozen=True,
-            module=module,
-            finalize=hasattr(module, "finalize_linear_replay"),
+        case = SimpleNamespace(**vars(common))
+        case.cache = SimpleNamespace(**vars(common.cache))
+        case.inputs = SimpleNamespace(**vars(common.inputs))
+        if name != "candidate" and banked:
+            case.cache.k, case.cache.g = common.cache.k[:batch], common.cache.g[:batch]
+        if hasattr(module, "finalize_linear_replay"):
+            legacy_headers(case)
+        launches[name], _, stages[name] = protocol_launches(
+            module,
+            case,
+            frozen=not (name == "candidate" and banked),
             scratch=scratch,
+            fused_verify_warps=args.fused_verify_warps,
         )
-        bindings[name] = shared_tensor_bindings(launches[name])
-        # Older verify kernels also receive replay-only metadata. Require every
-        # candidate binding to alias, while ignoring those unused old arguments.
-        expected_bindings = bindings["candidate"]
-        assert expected_bindings.keys() <= bindings[name].keys()
-        assert all(
-            bindings[name][parameter] == pointer
-            for parameter, pointer in expected_bindings.items()
-        ), "timing buffers must alias"
-        graphs[name] = graph_for(launches[name], args.inner_repeats)
-        torch.testing.assert_close(scratch[1], reference, rtol=0, atol=0)
-        for key in ("ssm", "conv"):
-            torch.testing.assert_close(
-                getattr(shared_case, key), getattr(reference_case, key), rtol=0, atol=0
-            )
-        for key, sink in zip(("k", "u", "g"), shared_case.sink):
-            torch.testing.assert_close(
-                sink, getattr(reference_case.cache, key), rtol=0, atol=0
-            )
+        # Logical old/new views alias even though fused KDA receives both KG
+        # banks through one pointer and the baseline writes through sink views.
+        bindings[name] = {
+            key: tensor.data_ptr()
+            for key, tensor in {
+                "raw": case.raw,
+                "gate": case.gate,
+                "beta": case.beta,
+                "weights": case.weights,
+                "ssm": case.ssm,
+                "conv": case.conv,
+                "old_k": case.cache.k[:batch],
+                "old_u": case.cache.u,
+                "old_g": case.cache.g[:batch],
+                "conv_inputs": case.cache.conv_inputs,
+                "new_k": common.sink[0],
+                "new_u": common.sink[1],
+                "new_g": common.sink[2],
+                "convolved": scratch[0],
+                "output": scratch[1],
+                **vars(common.inputs),
+            }.items()
+        }
+        assert (
+            bindings[name] == bindings["candidate"]
+        ), "logical timing buffers must alias"
+        graphs[name] = single_step_graph(launches[name], reset)
+        reset()
+        graphs[name].replay()
+        protocol_check(
+            {
+                name: {
+                    "output": scratch[1],
+                    "ssm": common.ssm,
+                    "conv": common.conv,
+                    "k": common.sink[0],
+                    "u": common.sink[1],
+                    "g": common.sink[2],
+                    "conv_inputs": common.cache.conv_inputs,
+                }
+            },
+            reference,
+            args,
+            family,
+            batch,
+            steps,
+            accepted,
+            f"shared_{name}",
+            {name: launch_configuration(launches[name])},
+        )
+        if args.profile_stages:
+            stage_samples[name], codegen[name] = {}, {}
+            for index, (stage, call) in enumerate(zip(stages[name], launches[name])):
+
+                def prepare_prefix(index=index, name=name):
+                    reset()
+                    for prefix_call in launches[name][:index]:
+                        prefix_call()
+
+                stage_graphs[name, stage] = single_step_graph([call], prepare_prefix)
+                codegen[name][stage] = kernel_codegen(
+                    call,
+                    args.output
+                    / f"protocol_{family}_bs{batch}_steps{steps}_accept{accepted}_{name}_{stage}.ptx",
+                )
+                stage_samples[name][stage] = []
 
     for repeat in range(args.rounds):
         occupancy()
         order = list(modules) if repeat % 2 == 0 else list(reversed(modules))
         for name in modules:
             for mode in samples[name].values():
-                for raw in mode.values():
-                    raw.append([])
+                for values in mode.values():
+                    values.append([])
+            if args.profile_stages:
+                for values in stage_samples[name].values():
+                    values.append([])
         for _ in range(args.samples):
             for name in order:
                 for mode in ("eager", "graph"):
-                    start = torch.cuda.Event(enable_timing=True)
-                    end = torch.cuda.Event(enable_timing=True)
+                    reset()
+                    start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
+                        enable_timing=True
+                    )
                     start.record()
                     begin = time.perf_counter_ns()
                     if mode == "graph":
                         graphs[name].replay()
-                        divisor = args.inner_repeats
                     else:
                         for call in launches[name]:
                             call()
-                        divisor = 1
-                    host_us = (time.perf_counter_ns() - begin) / 1000 / divisor
+                    host_us = (time.perf_counter_ns() - begin) / 1000
                     end.record()
                     end.synchronize()
-                    raw = samples[name][mode]
-                    raw["cuda_us"][-1].append(start.elapsed_time(end) * 1000 / divisor)
-                    raw["host_enqueue_us"][-1].append(host_us)
+                    samples[name][mode]["cuda_us"][-1].append(
+                        start.elapsed_time(end) * 1000
+                    )
+                    samples[name][mode]["host_enqueue_us"][-1].append(host_us)
+                if args.profile_stages:
+                    for index, stage in enumerate(stages[name]):
+                        reset()
+                        for prefix_call in launches[name][:index]:
+                            prefix_call()
+                        start, end = torch.cuda.Event(
+                            enable_timing=True
+                        ), torch.cuda.Event(enable_timing=True)
+                        start.record()
+                        stage_graphs[name, stage].replay()
+                        end.record()
+                        end.synchronize()
+                        stage_samples[name][stage][-1].append(
+                            start.elapsed_time(end) * 1000
+                        )
     result = {
         "family": family,
         "batch": batch,
         "steps": steps,
         "accepted": accepted,
+        "banked_kda": banked,
+        "capture_steps": 1,
+        "fused_verify_warps_override": args.fused_verify_warps,
+        "launch_config": {
+            name: launch_configuration(calls) for name, calls in launches.items()
+        },
         "correctness": correctness,
         "timing_buffer_alias_verified": True,
         "timing_tensor_addresses": bindings,
@@ -370,6 +548,7 @@ def measure_protocol(modules, family, batch, steps, accepted, args):
             name: [call.kernel.fn.__name__ for call in calls]
             for name, calls in launches.items()
         },
+        "stages": stages,
         "samples_us": samples,
         "p50_us": {
             name: {
@@ -383,32 +562,19 @@ def measure_protocol(modules, family, batch, steps, accepted, args):
         },
     }
     if args.profile_stages:
-        result["profile_stages"] = profile_protocol_stages(
-            launches,
-            graphs,
-            args,
-            f"protocol_{family}_bs{batch}_steps{steps}_accept{accepted}",
-        )
+        result["profile_stages"] = {
+            "samples_us": stage_samples,
+            "codegen": codegen,
+            "p50_us": {
+                name: {
+                    stage: statistics.median(x for row in rounds for x in row)
+                    for stage, rounds in values.items()
+                }
+                for name, values in stage_samples.items()
+            },
+            "pipeline": "measured separately in samples_us; never sum stage times",
+        }
     return result
-
-
-def shared_tensor_bindings(calls):
-    headers = {
-        "Generation",
-        "HistoryEpoch",
-        "PoolGeneration",
-        "PoolEpoch",
-        "PoolCount",
-        "Error",
-    }
-    return {
-        f"{stage}:{parameter}": tensor.data_ptr()
-        for stage, call in zip(STAGES[:3], calls)
-        for parameter, tensor in zip(
-            inspect.signature(call.kernel.fn).parameters, call.args
-        )
-        if isinstance(tensor, torch.Tensor) and parameter not in headers
-    }
 
 
 def kernel_codegen(call, path):
@@ -426,61 +592,95 @@ def kernel_codegen(call, path):
     }
 
 
-def profile_protocol_stages(launches, pipelines, args, prefix):
-    graphs, codegen, samples = {}, {}, {}
-    for name, calls in launches.items():
-        codegen[name], samples[name] = {}, {}
-        for stage, call in zip((*STAGES[:3], "finalize"), calls):
-            graphs[name, stage] = graph_for([call], args.inner_repeats)
-            codegen[name][stage] = kernel_codegen(
-                call, args.output / f"{prefix}_{name}_{stage}.ptx"
-            )
-            samples[name][stage] = []
-        graphs[name, "pipeline"] = pipelines[name]
-        samples[name]["pipeline"] = []
-    for repeat in range(args.rounds):
-        occupancy()
-        order = list(launches) if repeat % 2 == 0 else list(reversed(launches))
-        for stages in samples.values():
-            for rounds in stages.values():
-                rounds.append([])
-        for _ in range(args.samples):
-            for stage in (*STAGES[:3], "finalize", "pipeline"):
-                for name in order:
-                    if (name, stage) not in graphs:
-                        continue
-                    start = torch.cuda.Event(enable_timing=True)
-                    end = torch.cuda.Event(enable_timing=True)
-                    start.record()
-                    graphs[name, stage].replay()
-                    end.record()
-                    end.synchronize()
-                    samples[name][stage][-1].append(
-                        start.elapsed_time(end) * 1000 / args.inner_repeats
-                    )
-    occupancy()
-    return {
-        "timing": "CUDA events around each stage graph or the unchanged full pipeline graph; microseconds",
-        "samples_us": samples,
-        "p50_us": {
-            name: {
-                stage: statistics.median(x for row in rounds for x in row)
-                for stage, rounds in stages.items()
-            }
-            for name, stages in samples.items()
-        },
-        "codegen": codegen,
-    }
-
-
-def difference(actual, expected):
+def difference(actual, expected, *, require_finite=True):
     delta = (actual.float() - expected.float()).abs()
-    assert torch.isfinite(actual).all() and torch.isfinite(expected).all()
+    actual_finite, expected_finite = bool(torch.isfinite(actual).all()), bool(
+        torch.isfinite(expected).all()
+    )
+    if require_finite:
+        assert actual_finite and expected_finite
+    relative = delta.double() / expected.double().abs()
+    relative = torch.where(delta == 0, 0, relative)
+    max_abs, max_rel = float(delta.max()), float(relative.max())
     return {
+        "dtype": str(actual.dtype),
+        "shape": list(actual.shape),
+        "expected_dtype": str(expected.dtype),
+        "finite": actual_finite and expected_finite,
+        "actual_finite": actual_finite,
+        "expected_finite": expected_finite,
         "different": int((actual != expected).sum()),
         "elements": actual.numel(),
-        "max_abs": float(delta.max()),
+        "max_abs": max_abs if math.isfinite(max_abs) else str(max_abs),
+        "max_rel": max_rel if math.isfinite(max_rel) else str(max_rel),
     }
+
+
+def launch_configuration(calls):
+    return [
+        {
+            "kernel": call.kernel.fn.__name__,
+            "num_warps": call.kwargs.get("num_warps"),
+            "production_num_warps": getattr(
+                call, "production_num_warps", call.kwargs.get("num_warps")
+            ),
+        }
+        for call in calls
+    ]
+
+
+def protocol_check(
+    outputs, reference, args, family, batch, steps, accepted, phase, launch_config
+):
+    # Finish every comparison before enforcing the strict gate, so a failure
+    # leaves the other fields available for numerical diagnosis.
+    checks = {
+        name: {
+            key: difference(actual, reference[key], require_finite=False)
+            for key, actual in values.items()
+        }
+        for name, values in outputs.items()
+    }
+    path = (
+        args.output
+        / f"correctness_{family}_bs{batch}_steps{steps}_accept{accepted}_{phase}.json"
+    )
+    path.write_text(
+        json.dumps(
+            {
+                "family": family,
+                "batch": batch,
+                "steps": steps,
+                "accepted": accepted,
+                "phase": phase,
+                "fused_verify_warps_override": args.fused_verify_warps,
+                "configuration": (
+                    "production"
+                    if args.fused_verify_warps is None
+                    else "counterfactual override"
+                ),
+                "gate": {"rtol": 0, "atol": 0},
+                "launch_config": launch_config,
+                "fields": checks,
+            },
+            indent=2,
+        )
+        + "\n"
+    )
+    for name, values in outputs.items():
+        for key, actual in values.items():
+            assert (
+                checks[name][key]["actual_finite"]
+                and checks[name][key]["expected_finite"]
+            ), f"{phase}: nonfinite {name}.{key}; complete differences: {path}"
+            torch.testing.assert_close(
+                actual,
+                reference[key],
+                rtol=0,
+                atol=0,
+                msg=f"{phase}: {name}.{key}; complete differences: {path}",
+            )
+    return checks
 
 
 @lru_cache(None)
@@ -752,12 +952,24 @@ def main():
     parser.add_argument("--mode", choices=("protocol", "precision"), default="protocol")
     parser.add_argument("--baseline-source", type=Path)
     parser.add_argument("--profile-stages", action="store_true")
+    parser.add_argument(
+        "--fused-verify-warps",
+        type=int,
+        choices=(2, 4),
+        default=None,
+        help="counterfactual candidate fused-verify override; default uses production",
+    )
     parser.add_argument("--batches", default="1,16,128")
     parser.add_argument("--accept-lengths", default="1,5")
     parser.add_argument("--steps", type=int, default=5)
     parser.add_argument("--rounds", type=int, default=2)
     parser.add_argument("--samples", type=int, default=20)
-    parser.add_argument("--inner-repeats", type=int, default=32)
+    parser.add_argument(
+        "--inner-repeats",
+        type=int,
+        default=32,
+        help="precision mode only; protocol captures one step",
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -770,6 +982,8 @@ def main():
     args = parser.parse_args()
     if args.profile_stages and args.mode != "protocol":
         parser.error("--profile-stages requires --mode=protocol")
+    if args.fused_verify_warps is not None and args.mode != "protocol":
+        parser.error("--fused-verify-warps requires --mode=protocol")
     assert args.rounds >= 2 and args.samples > 0 and args.inner_repeats > 0
     batches = [int(x) for x in args.batches.split(",")]
     accepts = [int(x) for x in args.accept_lengths.split(",")]
@@ -827,20 +1041,28 @@ def main():
             "ssm_log_dtype": "float32",
             "conv_width": 4,
             "mode": args.mode,
+            "precision_scope": "unbanked three-kernel path with generic convolution; excludes fused KDA",
             "profile_stages": args.profile_stages,
+            "fused_verify_warps_override": args.fused_verify_warps,
+            "fused_verify_configuration": (
+                "production"
+                if args.fused_verify_warps is None
+                else "counterfactual override"
+            ),
             "timing": "CUDA events and host enqueue wall time; graph time / inner_repeats; microseconds",
             "excluded": [
                 "allocation",
                 "compilation",
                 "capture",
                 "host wrapper",
+                "protocol state/record restoration",
             ],
             "baseline_finalize": "included in protocol mode when present",
-            "frozen_logs": "verify writes separate sinks; inputs do not advance between repeats",
+            "frozen_logs": "protocol restores state and producer records outside events before every one-step sample; fused U may be overwritten",
             "protocol_timing_buffers": "baseline/candidate share all common inputs, state, records, sinks and scratch outputs; correctness uses independent buffers",
             "rounds": args.rounds,
             "samples": args.samples,
-            "inner_repeats": args.inner_repeats,
+            "inner_repeats": args.inner_repeats if args.mode == "precision" else 1,
         },
         "correctness": [],
         "cases": [],
