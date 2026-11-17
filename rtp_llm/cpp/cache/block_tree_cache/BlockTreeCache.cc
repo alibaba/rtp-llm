@@ -250,6 +250,10 @@ void BlockTreeCache::cleanupExpiredMissing() const {
         transfer_dispatcher_->cleanupExpiredMissing();
 }
 
+void BlockTreeCache::reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution) const {
+    metrics_reporter_->reportUnfreezeMetrics(execution);
+}
+
 void BlockTreeCache::reportMetrics() const {
     EvictionVictimMetrics metrics_data;
     {

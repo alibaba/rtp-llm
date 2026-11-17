@@ -2569,47 +2569,6 @@ TEST_F(KVCacheManagerTest, FrozenTransferRecoveryObservesLateProofWithoutRepeati
     EXPECT_EQ(settlements, 1u);
 }
 
-TEST_F(KVCacheManagerTest, UnfreezeMetricsCountUniqueTargetsPerPoolAndBackend) {
-    const auto cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
-    auto monitor = std::make_shared<kmonitor::KMonitor>("unfreeze_pool_test");
-    monitor->SetServiceName("");
-    auto reporter = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
-    KVCacheManager manager(cache_config, false, reporter);
-    auto first_config = std::make_shared<HostBlockPoolConfig>();
-    first_config->pool_name = "first";
-    first_config->physical_block_count = 4;
-    first_config->pool_type = BlockPoolType::HOST;
-    auto second_config = std::make_shared<HostBlockPoolConfig>();
-    second_config->pool_name = "second";
-    second_config->physical_block_count = 4;
-    second_config->pool_type = BlockPoolType::HOST;
-    auto source_config = std::make_shared<HostBlockPoolConfig>();
-    source_config->pool_name = "source";
-    source_config->physical_block_count = 4;
-    source_config->pool_type = BlockPoolType::HOST;
-    auto first = std::make_shared<HostBlockPool>(first_config);
-    auto second = std::make_shared<HostBlockPool>(second_config);
-    auto source = std::make_shared<HostBlockPool>(source_config);
-    FrozenTask::ExecutionInfo execution;
-    execution.trace_id = uint64_t{1};
-    execution.remote = true;
-    execution.descriptors.push_back({0, 0, Tier::DEVICE, Tier::HOST,
-                                     {{source, 1, 0, "source"}},
-                                     {{first, 1, 0, "first"}, {first, 2, 0, "first"}}});
-    execution.descriptors.push_back({1, 0, Tier::DEVICE, Tier::HOST, {},
-                                     {{first, 1, 0, "first"}, {second, 1, 0, "second"}}});
-    manager.reportUnfreezeMetrics(execution);
-    execution.trace_id = std::string("kvcm-1");
-    execution.remote = false;
-    execution.descriptors.pop_back();
-    manager.reportUnfreezeMetrics(execution);
-    EXPECT_DOUBLE_EQ(snapshotUnfreezeBlocks(reporter, "first", Tier::HOST, "local"), 2);
-    EXPECT_DOUBLE_EQ(snapshotUnfreezeBlocks(reporter, "second", Tier::HOST, "local"), 1);
-    EXPECT_DOUBLE_EQ(snapshotUnfreezeBlocks(reporter, "first", Tier::HOST, "kvcm"), 2);
-    EXPECT_DOUBLE_EQ(snapshotUnfreezeBlocks(reporter, "second", Tier::HOST, "kvcm"), 0);
-    EXPECT_DOUBLE_EQ(snapshotUnfreezeBlocks(reporter, "source", Tier::DEVICE, "local"), 0);
-}
-
 TEST_F(KVCacheManagerTest, BackgroundRecoveryReclaimsLocalTargetsAndPublishesCapacity) {
     auto cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig config;

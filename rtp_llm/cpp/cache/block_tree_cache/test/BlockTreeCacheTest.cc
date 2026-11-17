@@ -634,6 +634,53 @@ TEST(BlockTreeCacheMetricsTest, PoolIOMetricsOnlyPopulateDiskWithIndependentPool
     EXPECT_FALSE(metrics_list[2].write_bandwidth_bytes_per_sec.has_value());
 }
 
+TEST(BlockTreeCacheMetricsTest, UnfreezeMetricsCountUniqueTargetsPerPoolAndBackend) {
+    auto monitor = std::make_shared<kmonitor::KMonitor>("unfreeze_pool_test");
+    monitor->SetServiceName("");
+    auto reporter = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
+    BlockTreeCacheMetricsReporter metrics_reporter(reporter, false);
+    auto snapshot_unfreeze_blocks = [&](const char* pool_name, Tier tier, const char* backend) {
+        kmonitor::MetricsTags tags("pool_name", pool_name);
+        tags.AddTag("tier", tierName(tier));
+        tags.AddTag("backend", backend);
+        return snapshotQps(reporter->getMetricsGroup<RtpLLMCachePoolMetrics>()->unfreeze_blocks_qps_metric,
+                           tags, "rtp_llm_kv_cache_unfreeze_blocks_qps");
+    };
+    auto first_config = std::make_shared<HostBlockPoolConfig>();
+    first_config->pool_name = "first";
+    first_config->physical_block_count = 4;
+    first_config->pool_type = BlockPoolType::HOST;
+    auto second_config = std::make_shared<HostBlockPoolConfig>();
+    second_config->pool_name = "second";
+    second_config->physical_block_count = 4;
+    second_config->pool_type = BlockPoolType::HOST;
+    auto source_config = std::make_shared<HostBlockPoolConfig>();
+    source_config->pool_name = "source";
+    source_config->physical_block_count = 4;
+    source_config->pool_type = BlockPoolType::HOST;
+    auto first = std::make_shared<HostBlockPool>(first_config);
+    auto second = std::make_shared<HostBlockPool>(second_config);
+    auto source = std::make_shared<HostBlockPool>(source_config);
+    FrozenTask::ExecutionInfo execution;
+    execution.trace_id = uint64_t{1};
+    execution.remote = true;
+    execution.descriptors.push_back({0, 0, Tier::DEVICE, Tier::HOST,
+                                     {{source, 1, 0, "source"}},
+                                     {{first, 1, 0, "first"}, {first, 2, 0, "first"}}});
+    execution.descriptors.push_back({1, 0, Tier::DEVICE, Tier::HOST, {},
+                                     {{first, 1, 0, "first"}, {second, 1, 0, "second"}}});
+    metrics_reporter.reportUnfreezeMetrics(execution);
+    execution.trace_id = std::string("kvcm-1");
+    execution.remote = false;
+    execution.descriptors.pop_back();
+    metrics_reporter.reportUnfreezeMetrics(execution);
+    EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks("first", Tier::HOST, "local"), 2);
+    EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks("second", Tier::HOST, "local"), 1);
+    EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks("first", Tier::HOST, "kvcm"), 2);
+    EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks("second", Tier::HOST, "kvcm"), 0);
+    EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks("source", Tier::DEVICE, "local"), 0);
+}
+
 TEST(BlockTreeCacheMetricsTest, FrozenMetricIsOwnerOnlyAndIncludesZeroForEveryTier) {
     auto reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
     RtpLLMCachePoolMetricsCollector collector;
