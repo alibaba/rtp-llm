@@ -776,7 +776,9 @@ class AllReduceUnitTest(unittest.TestCase):
         fast_path.should_use.return_value = True
         fast_path.all_reduce_into.side_effect = lambda source, target: target.fill_(2)
         fast_path.all_reduce.return_value = torch.full_like(tensor, 3)
-        module = SimpleNamespace(get_all_reduce=lambda: fast_path)
+        module = SimpleNamespace(
+            get_all_reduce=lambda: fast_path, batch_invariant_enabled=lambda: False
+        )
         with (
             patch.object(collective, "_get_all_reduce_module", return_value=module),
             patch.object(collective, "_canonical_p2p", None),

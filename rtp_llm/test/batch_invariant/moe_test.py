@@ -30,20 +30,31 @@ def main():
     parser.add_argument(
         "--legacy", action="store_true", help="Report baseline differences"
     )
+    parser.add_argument("--tp4-397b", action="store_true")
     args = parser.parse_args()
     torch.manual_seed(48)
     config = ModelConfig()
     config.model_type = "qwen35_moe"
     config.data_type = "bf16"
-    config.hidden_size = 2048
-    config.expert_num = 256
-    config.moe_inter_size = 512
-    config.moe_k = 8
+    if args.tp4_397b:
+        config.hidden_size = 4096
+        config.expert_num = 512
+        config.moe_inter_size = 1024
+        config.moe_k = 10
+    else:
+        config.hidden_size = 2048
+        config.expert_num = 256
+        config.moe_inter_size = 512
+        config.moe_k = 8
     config.has_moe_norm = True
+    tp = 4 if args.tp4_397b else 1
+    parallel = ParallelismConfig()
+    parallel.world_size = parallel.local_world_size = parallel.tp_size = tp
+    parallel.ffn_tp_size = tp
     k, e, i, top_k = (
         config.hidden_size,
         config.expert_num,
-        config.moe_inter_size,
+        config.moe_inter_size // tp,
         config.moe_k,
     )
 
@@ -52,7 +63,7 @@ def main():
 
     x = weight(65, k)
     adapter = MoEConfigAdapter(
-        config, ParallelismConfig(), MoeConfig(), batch_invariant=not args.legacy
+        config, parallel, MoeConfig(), batch_invariant=not args.legacy
     )
     executor = TritonFusedMoeExecutor(
         adapter,

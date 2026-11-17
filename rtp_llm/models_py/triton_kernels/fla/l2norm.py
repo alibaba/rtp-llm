@@ -141,7 +141,11 @@ def l2norm_fwd_kernel(
 
 
 def l2norm_fwd(
-    x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | None = None
+    x: torch.Tensor,
+    eps: float = 1e-6,
+    output_dtype: torch.dtype | None = None,
+    *,
+    batch_invariant: bool = False,
 ):
     x_shape_og = x.shape
     x = x.view(-1, x.shape[-1])
@@ -159,9 +163,9 @@ def l2norm_fwd(
     if D > BD:
         raise RuntimeError("This layer doesn't support feature dim >= 64KB.")
 
-    # Not use this path since different batch will always go into compile， since T is different,
-    # and compile time is too long (70ms) compared to kernel execution time (under 1ms)
-    if D <= 512 and T <= 128:
+    # The small-input kernel divides by the norm. Keep one reduction and
+    # rounding path when the same Q/K row can arrive in a different chunk.
+    if not batch_invariant and D <= 512 and T <= 128:
         NB = triton.cdiv(T, 2048)
 
         def grid(meta):
