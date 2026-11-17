@@ -749,6 +749,7 @@ class KVCacheConfig:
     block_tree_transfer_queue_max_size: int
     block_tree_frozen_recovery_interval_ms: int
     block_tree_frozen_recovery_query_timeout_ms: int
+    block_tree_frozen_force_release_timeout_ms: int
     block_pool_frozen_abort_lower_ratio: float
     block_pool_frozen_abort_upper_ratio: float
     block_tree_device_evict_low_watermark_ratio: float
