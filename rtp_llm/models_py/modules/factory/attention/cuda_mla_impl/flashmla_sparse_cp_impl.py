@@ -707,6 +707,17 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         )
 
         self.kv_restore_unpad_indices = mla_params.cp_kv_restore_unpad_indices
+        captured_projection = getattr(self, "_bounded_projection_graph_geometry", None)
+        if self.use_cuda_graph and captured_projection is not None:
+            captured_rows, captured_restore = captured_projection
+            current_restore = (
+                self.kv_restore_unpad_indices.numel(),
+                self.kv_restore_unpad_indices.data_ptr(),
+            )
+            if local_tokens != captured_rows or (
+                captured_restore is not None and current_restore != captured_restore
+            ):
+                raise RuntimeError("bounded CP projection graph geometry or restore address changed")
         self.total_global_ids = mla_params.cp_total_global_ids
         self.total_local_ids = mla_params.cp_total_local_ids
         self.total_local_ids_is_identity = _total_local_ids_are_identity(
@@ -1081,18 +1092,16 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         from rtp_llm.models_py.distributed.pynccl_cp import all_gather_into_tensor
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.cp_bounded_gather import (
             _PROJECTION_SCRATCH_BYTES,
-            gather_projection_chunks,
+            gather_projection_components,
         )
 
+        row_bytes = (
+            compressed_kv.shape[1] * compressed_kv.element_size()
+            + k_pe.shape[1] * k_pe.element_size()
+        )
         bounded = (
-            compressed_kv.dtype == k_pe.dtype
-            and compressed_kv.is_cuda
-            and not self.use_cuda_graph
-            and not torch.cuda.is_current_stream_capturing()
-            and compressed_kv.shape[0]
-            * (compressed_kv.shape[1] + k_pe.shape[1])
-            * compressed_kv.element_size()
-            * (self.prefill_cp_size + 1)
+            compressed_kv.is_cuda
+            and compressed_kv.shape[0] * row_bytes * (self.prefill_cp_size + 1)
             > _PROJECTION_SCRATCH_BYTES
         )
         packed = None
@@ -1139,16 +1148,15 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
 
         with torch.cuda.stream(gather_stream):
             if bounded:
-                restored = gather_projection_chunks(
-                    compressed_kv,
-                    k_pe,
-                    self.prefill_cp_size,
-                    None if rank_major_slots is not None or defer_restore else self.kv_restore_unpad_indices,
-                    all_gather_into_tensor,
+                restore = None if rank_major_slots is not None or defer_restore else self.kv_restore_unpad_indices
+                restored_ckv, restored_k_pe = gather_projection_components(
+                    compressed_kv, k_pe, self.prefill_cp_size, restore, all_gather_into_tensor
                 )
-                restored_ckv, restored_k_pe = restored.split(
-                    (compressed_kv.size(-1), k_pe.size(-1)), dim=-1
-                )
+                if torch.cuda.is_current_stream_capturing():
+                    self._bounded_projection_graph_geometry = (
+                        compressed_kv.shape[0],
+                        None if restore is None else (restore.numel(), restore.data_ptr()),
+                    )
             elif packed is not None:
                 # Reuse the existing cKV window; no extra persistent KV budget.
                 gathered = all_gather(packed, group=Group.TP, role="mla_ckv")

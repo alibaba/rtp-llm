@@ -329,6 +329,56 @@ class PaddedPackTest(unittest.TestCase):
             self.assertTrue(torch.equal(result, expected))
             self.assertEqual(counts, [3, 3, 2])
 
+    def test_projection_graph_reuses_scratch_and_preserves_mixed_dtypes(self):
+        from rtp_llm.models_py.distributed import pynccl_cp
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import cp_bounded_gather
+
+        for rope_dtype in (torch.bfloat16, torch.float32, torch.float64):
+            ckv = torch.arange(64, device="cuda", dtype=torch.bfloat16).view(8, 8)[:, ::2]
+            rope = torch.arange(48, device="cuda", dtype=rope_dtype).view(8, 6)[:, ::2] + 0.000123
+            mapping = torch.tensor([0, 9, 2, 15, 7], device="cuda", dtype=torch.int64)
+            op = object.__new__(cp.SparseMlaFp8CPOp)
+            op.use_cuda_graph = True
+            op.prefill_cp_size = 2
+            op.kv_restore_unpad_indices = mapping
+            op.sharded_slot_mapping = None
+            budget = 3 * 3 * max(ckv.shape[1] * ckv.element_size(), rope.shape[1] * rope.element_size())
+            sends, receives, dtypes = [], [], []
+
+            def gather(output, part, **kwargs):
+                sends.append(part.untyped_storage().data_ptr())
+                receives.append(output.untyped_storage().data_ptr())
+                dtypes.append(part.dtype)
+                self.assertLessEqual(part.untyped_storage().nbytes() + output.untyped_storage().nbytes(), budget)
+                output[:part.shape[0]].copy_(part)
+                output[part.shape[0]:].copy_(part)
+                output[part.shape[0]:].neg_()
+
+            with patch.object(cp_bounded_gather, "_PROJECTION_SCRATCH_BYTES", budget), patch.object(pynccl_cp, "all_gather_into_tensor", gather):
+                op.gather_kv(ckv, rope)
+                sends.clear()
+                receives.clear()
+                dtypes.clear()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    actual_ckv, actual_rope, stream = op.gather_kv(ckv, rope)
+                self.assertIsNone(stream)
+                self.assertEqual(len(set(sends)), 1)
+                self.assertEqual(len(set(receives)), 1)
+                self.assertEqual(set(dtypes), {torch.bfloat16, rope_dtype})
+                pointers = (actual_ckv.data_ptr(), actual_rope.data_ptr(), mapping.data_ptr())
+                for ids in ([0, 9, 2, 15, 7], [15, 0, 7, 9, 2]):
+                    ckv.add_(1)
+                    rope.add_(0.000321)
+                    mapping.copy_(torch.tensor(ids, device="cuda", dtype=torch.int64))
+                    graph.replay()
+                    for actual, source in ((actual_ckv, ckv), (actual_rope, rope)):
+                        expected = torch.cat((source, -source), 0).index_select(0, mapping)
+                        self.assertEqual(actual.dtype, source.dtype)
+                        self.assertTrue(torch.equal(actual.contiguous().view(torch.uint8), expected.contiguous().view(torch.uint8)))
+                    self.assertEqual((actual_ckv.data_ptr(), actual_rope.data_ptr(), mapping.data_ptr()), pointers)
+                self.assertEqual(op._bounded_projection_graph_geometry, (8, (5, mapping.data_ptr())))
+
     def test_invalid_metadata_rejected_without_launch(self):
         cache, table, a, p, s = case([1], [64])
         out = torch.empty((64, 576), device="cuda", dtype=torch.bfloat16)

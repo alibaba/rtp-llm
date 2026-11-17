@@ -80,6 +80,36 @@ def _registered_worker(rank: int, world: int, port: int) -> None:
                     )
                     _assert_bits(actual_projection, expected_projection)
 
+            # Real NCCL capture/replay: mixed dtypes are separate collectives,
+            # and replay refreshes values and the fixed-address restore map.
+            for rope_dtype in (torch.float32, torch.float64):
+                projection_rope = projection[:, :3].to(rope_dtype) + 0.000123
+                full_rope = torch.empty((world * 8, 3), device=device, dtype=rope_dtype)
+                scratch_budget = (world + 1) * 3 * max(4 * projection.element_size(), 3 * projection_rope.element_size())
+                with patch.object(cp_bounded_gather, "_PROJECTION_SCRATCH_BYTES", scratch_budget):
+                    cp_bounded_gather.gather_projection_components(
+                        projection[:, :4], projection_rope, world, projection_map, gather_chunk
+                    )
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph, stream=stream):
+                        captured_ckv, captured_rope = cp_bounded_gather.gather_projection_components(
+                            projection[:, :4], projection_rope, world, projection_map, gather_chunk
+                        )
+                    pointers = (captured_ckv.data_ptr(), captured_rope.data_ptr())
+                    for ids in ([0, 9, 2, 15, 7], [15, 0, 7, 9, 2]):
+                        projection.add_(1)
+                        projection_rope.add_(0.000321)
+                        if rank == world - 1:
+                            projection.zero_()
+                            projection_rope.zero_()
+                        projection_map.copy_(torch.tensor(ids, device=device, dtype=torch.int64))
+                        graph.replay()
+                        pynccl_cp.all_gather_into_tensor(full_projection, projection, group=pg)
+                        pynccl_cp.all_gather_into_tensor(full_rope, projection_rope, group=pg)
+                        _assert_bits(captured_ckv, full_projection[:, :4].index_select(0, projection_map))
+                        _assert_bits(captured_rope, full_rope.index_select(0, projection_map))
+                        assert pointers == (captured_ckv.data_ptr(), captured_rope.data_ptr())
+
             for empty_last_rank in (False, True):
                 rows = 0 if empty_last_rank and rank == world - 1 else 4
                 q = (

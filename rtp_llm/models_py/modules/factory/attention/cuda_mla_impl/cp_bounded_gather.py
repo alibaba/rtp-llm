@@ -46,6 +46,60 @@ def _restore_chunk(
         tl.store(Output + row * WIDTH + cols, values, cols < WIDTH)
 
 
+def _gather_groups(groups, cp_size, restore_indices, gather_into):
+    """Use one fixed send/receive backing for every chunk and dtype group."""
+    first = groups[0][0]
+    rows = first.shape[0]
+    if cp_size < 1 or any(
+        value.ndim != 2 or value.shape[0] != rows or value.device != first.device
+        for group in groups for value in group
+    ):
+        raise ValueError("CP projection components require matching rows/device and positive CP size")
+    widths = [sum(value.shape[1] for value in group) for group in groups]
+    row_bytes = [width * group[0].element_size() for width, group in zip(widths, groups)]
+    largest_row = max(row_bytes)
+    if largest_row == 0 or (cp_size + 1) * largest_row > _PROJECTION_SCRATCH_BYTES:
+        raise ValueError("one CP projection row exceeds the communication scratch budget")
+    chunk_rows = min(rows, _PROJECTION_SCRATCH_BYTES // ((cp_size + 1) * largest_row))
+    output_rows = rows * cp_size if restore_indices is None else restore_indices.numel()
+    outputs = tuple(
+        torch.empty((output_rows, width), dtype=group[0].dtype, device=first.device)
+        for width, group in zip(widths, groups)
+    )
+    if rows == 0:
+        if output_rows:
+            raise ValueError("empty CP projections cannot have nonempty restore indices")
+        return outputs
+    # Allocate once outside both loops. This matters during graph capture:
+    # scratch cannot grow with the number of captured chunks or dtype groups.
+    send_bytes = torch.empty(chunk_rows * largest_row, dtype=torch.uint8, device=first.device)
+    receive_bytes = torch.empty(cp_size * send_bytes.numel(), dtype=torch.uint8, device=first.device)
+    for group, width, bytes_per_row, output in zip(groups, widths, row_bytes, outputs):
+        for start in range(0, rows, chunk_rows):
+            count = min(chunk_rows, rows - start)
+            packed = send_bytes[: count * bytes_per_row].view(group[0].dtype).view(count, width)
+            gathered = receive_bytes[: cp_size * count * bytes_per_row].view(group[0].dtype).view(cp_size * count, width)
+            if len(group) == 1:
+                packed.copy_(group[0].narrow(0, start, count))
+            else:
+                torch.cat(tuple(value.narrow(0, start, count) for value in group), dim=-1, out=packed)
+            gather_into(gathered, packed, group=Group.TP)
+            if output_rows:
+                copy_rows = output_rows if restore_indices is not None else count * cp_size
+                _restore_chunk[(copy_rows,)](
+                    gathered,
+                    restore_indices if restore_indices is not None else output,
+                    output,
+                    rows,
+                    count,
+                    start,
+                    width,
+                    restore_indices is not None,
+                    tr.next_power_of_2(width),
+                )
+    return outputs
+
+
 def gather_projection_chunks(
     compressed_kv: torch.Tensor,
     k_pe: torch.Tensor,
@@ -53,47 +107,28 @@ def gather_projection_chunks(
     restore_indices: Optional[torch.Tensor],
     gather_into: Callable,
 ) -> torch.Tensor:
-    """Gather packed projection chunks directly into their final consumer layout.
+    """Gather equal-dtype components into one packed final consumer tensor."""
+    if compressed_kv.dtype != k_pe.dtype:
+        raise ValueError("packed CP projection gather requires identical dtypes")
+    return _gather_groups(((compressed_kv, k_pe),), cp_size, restore_indices, gather_into)[0]
 
-    All ranks have the same padded local row count and dtype. Complete each
-    chunk's consume on the collective stream before allocating/submitting the
-    next chunk, so allocator reuse cannot race a consumer. Graph capture uses
-    the caller's existing path. The final output and existing restore map are
-    retained inputs/outputs, not additional chunk-local scratch.
+
+def gather_projection_components(
+    compressed_kv: torch.Tensor,
+    k_pe: torch.Tensor,
+    cp_size: int,
+    restore_indices: Optional[torch.Tensor],
+    gather_into: Callable,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Keep mixed-dtype components separate; never promote before communication.
+
+    Equal-dtype components share a packed collective. Mixed dtypes execute all
+    cKV chunks followed by all RoPE chunks, on every rank, using the same byte
+    backing. Output tensors and the immutable restore map are memory floors;
+    send plus receive backing is bounded by the fixed scratch byte budget.
+    All operations, including scratch reuse, remain on the caller's stream.
     """
-    if compressed_kv.shape[0] != k_pe.shape[0]:
-        raise ValueError("CP projection components must have identical row counts")
-    rows = compressed_kv.shape[0]
-    width = compressed_kv.shape[1] + k_pe.shape[1]
-    row_bytes = width * compressed_kv.element_size()
-    chunk_rows = max(1, _PROJECTION_SCRATCH_BYTES // ((cp_size + 1) * row_bytes))
-    output_rows = rows * cp_size if restore_indices is None else restore_indices.numel()
-    output = torch.empty(
-        (output_rows, width), dtype=compressed_kv.dtype, device=compressed_kv.device
-    )
-    for start in range(0, rows, chunk_rows):
-        count = min(chunk_rows, rows - start)
-        packed = torch.cat(
-            (compressed_kv.narrow(0, start, count), k_pe.narrow(0, start, count)), dim=-1
-        )
-        gathered = torch.empty(
-            (cp_size * count, width), dtype=packed.dtype, device=packed.device
-        )
-        gather_into(gathered, packed, group=Group.TP)
-        if output_rows:
-            copy_rows = output_rows if restore_indices is not None else count * cp_size
-            _restore_chunk[(copy_rows,)](
-                gathered,
-                restore_indices if restore_indices is not None else output,
-                output,
-                rows,
-                count,
-                start,
-                width,
-                restore_indices is not None,
-                tr.next_power_of_2(width),
-            )
-        # Drop previous receive/send tensors before the next collective creates
-        # its buffers; retaining both chunks would double the scratch bound.
-        del gathered, packed
-    return output
+    if compressed_kv.dtype == k_pe.dtype:
+        packed = gather_projection_chunks(compressed_kv, k_pe, cp_size, restore_indices, gather_into)
+        return packed.split((compressed_kv.shape[1], k_pe.shape[1]), dim=-1)
+    return _gather_groups(((compressed_kv,), (k_pe,)), cp_size, restore_indices, gather_into)
