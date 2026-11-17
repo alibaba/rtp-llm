@@ -283,13 +283,18 @@ class PrefillEndpointTest {
     @ParameterizedTest
     @CsvSource({"500,600,15", "500,-1,65", "-1,20,15"})
     void repackNormalizesInvalidFeatures(long seqLen, long hitCache, long expectedMs) {
+        // Install the spy answers before the batch is visible to endpoint background threads.
+        // Publish invalid features together after registration has used the valid values.
+        record RawFeatures(long seqLen, long hitCache) {}
         ScheduledRequest survivor = org.mockito.Mockito.spy(createScheduledRequest(1L, 500L, 200L));
         RequestExecution execution = org.mockito.Mockito.spy(survivor.execution());
-        org.mockito.Mockito.doReturn(seqLen).when(execution).seqLen();
-        org.mockito.Mockito.doReturn(hitCache).when(execution).hitCache();
+        AtomicReference<RawFeatures> features = new AtomicReference<>(new RawFeatures(500L, 200L));
+        org.mockito.Mockito.doAnswer(invocation -> features.get().seqLen()).when(execution).seqLen();
+        org.mockito.Mockito.doAnswer(invocation -> features.get().hitCache()).when(execution).hitCache();
         org.mockito.Mockito.doReturn(execution).when(survivor).execution();
         ScheduledRequest finished = createScheduledRequest(2L, 300L, 100L);
         registerBatch(endpoint, 1L, 100L, List.of(survivor, finished));
+        features.set(new RawFeatures(seqLen, hitCache));
 
         assertDoesNotThrow(() -> reportRejectedBatchMember(endpoint, 1L, 2L));
         assertEquals(expectedMs, endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().orElseThrow());
@@ -1545,7 +1550,7 @@ class PrefillEndpointTest {
         response.setFinishedTaskInfo(Map.of(Long.toString(requestId),
                 taskInfo(requestId, batchId, null, 500, 0)));
         response.setRunningTaskInfo(Map.of());
-        EndpointTestSupport.applyStatus(target, response);
+        EndpointTestSupport.applyStatus(target, response).run();
     }
 
     private static void reportSuccessfulBatchMember(
