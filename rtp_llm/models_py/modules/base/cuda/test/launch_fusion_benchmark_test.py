@@ -11,6 +11,7 @@ from unittest.mock import patch
 import torch
 from flash_mla import flash_mla_sparse_fwd
 
+from rtp_llm.models_py import prefill_optimization
 from rtp_llm.models_py.modules.base.cuda.indexer_launch_fusion import try_write_topk
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.cp_topk_offsets_triton import (
     offset_cp_topk,
@@ -243,7 +244,9 @@ class LaunchFusionBenchmarkTest(TestCase):
             "timing_note": "CUDA events measure stream latency including host launch gaps; profiler kernel sum is separate. Input allocation and compile warmup excluded; operator output allocation included. No whole-model claim.",
             "cases": [],
         }
-        with patch.dict(os.environ, enabled):
+        with patch.dict(os.environ, enabled), patch.object(
+            prefill_optimization, "ENABLED", True
+        ):
             for name, shape, baseline, candidate in self.fixtures():
                 if selected and name not in selected:
                     continue
