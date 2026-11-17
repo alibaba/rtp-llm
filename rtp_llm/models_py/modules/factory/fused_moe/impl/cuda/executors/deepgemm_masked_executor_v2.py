@@ -15,6 +15,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import ExecutorType
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.deepgemm_hybrid_executor import (
     DeepGemmHybridExecutor,
+    _is_cuda_graph_warmup_or_capture,
 )
 from rtp_llm.models_py.utils.arch import get_sm
 
@@ -47,6 +48,16 @@ class DeepGemmMaskedExecutorV2(DeepGemmHybridExecutor):
         weights: Dict[str, torch.Tensor],
     ):
         super().__init__(config, quant_config, weights)
+        # Qwen4 auto-selects this executor for decode graph capture. Large
+        # prefills still need the compact grouped layout: the masked layout
+        # reserves a full token-capacity slab for every local expert.
+        self._qwen4_sm90_mixed_graph = (
+            config.moe_strategy == "auto"
+            and config.enable_cuda_graph
+            and torch.cuda.get_device_capability(self.w13_weight.device) == (9, 0)
+            and getattr(config.model_config, "_qwen4_full_fp8", False)
+            and not getattr(config.model_config, "_qwen4_full_fp8_nvfp4", False)
+        )
 
     def execute(
         self,
@@ -57,6 +68,21 @@ class DeepGemmMaskedExecutorV2(DeepGemmHybridExecutor):
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
     ) -> CombineForwardPayload:
+        if (
+            self._qwen4_sm90_mixed_graph
+            and payload.expert_x is not None
+            and payload.expert_x.shape[0] > self.masked_max_token_num
+            and not _is_cuda_graph_warmup_or_capture()
+        ):
+            return self.execute_contiguous(
+                payload,
+                activation,
+                expert_map,
+                a2_scale,
+                apply_router_weight_on_input,
+                extra_expert_args,
+                use_eager_layout=True,
+            )
         return self.execute_masked(
             payload,
             activation,

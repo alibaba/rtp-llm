@@ -695,7 +695,16 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         a2_scale: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         extra_expert_args: Optional[dict[str, Any]],
+        *,
+        use_eager_layout: bool = False,
     ) -> CombineForwardPayload:
+        # An engine with decode graphs can still run an ordinary eager
+        # prefill. Use compact host-padded metadata without mutating its mode.
+        if use_eager_layout and _is_cuda_graph_warmup_or_capture():
+            raise ValueError(
+                "eager grouped layout is not valid during graph capture/warmup"
+            )
+        graph_layout = self.enable_cuda_graph and not use_eager_layout
         assert payload.expert_x is not None, "hidden_states_fp8 is not initialized"
         assert (
             payload.expert_x_scale is not None
@@ -716,7 +725,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             num_recv_tokens_per_expert_cpu = (
                 payload.expert_tokens_meta.expert_num_tokens_cpu
             )
-            if self.enable_cuda_graph:
+            if graph_layout:
                 raise ValueError(
                     "expert_num_tokens GPU tensor is required for CUDA graph"
                 )
@@ -766,7 +775,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
                 expert_alignment,
             )
 
-        if not self.enable_cuda_graph:
+        if not graph_layout:
             num_recv_tokens_per_expert_cpu = (
                 payload.expert_tokens_meta.expert_num_tokens_cpu
             )
@@ -823,7 +832,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         output_index = torch.full_like(topk_idx, -1)
         scatter_num_tokens_per_expert = num_recv_tokens_per_expert
         scatter_alignment = expert_alignment
-        if not self.is_sm120 and not self.enable_cuda_graph:
+        if not self.is_sm120 and not graph_layout:
             padded_num_tokens_per_expert = [
                 align_up_math(int(x), expert_alignment)
                 for x in num_recv_tokens_per_expert_cpu
@@ -848,10 +857,10 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
             output_index,
             scale_ue8m0=is_deep_gemm_e8m0_used(),
             align_m=scatter_alignment,
-            derive_counts_from_topk=self.is_sm120 and self.enable_cuda_graph,
+            derive_counts_from_topk=self.is_sm120 and graph_layout,
         )
         # Preserve the eager input lifetime without invalidating graph buffers.
-        if not self.enable_cuda_graph:
+        if not graph_layout:
             dispose_tensor(hidden_states_fp8)
         gateup_output = torch.empty(
             (all_tokens, N),
