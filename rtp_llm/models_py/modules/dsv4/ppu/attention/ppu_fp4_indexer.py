@@ -316,9 +316,7 @@ class PpuFP4Indexer(IndexerFP8):
                 )
                 step_x = x[:, index : index + 1].contiguous()
                 step_q = queries[:, index : index + 1].contiguous()
-                # The slice already owns the same absolute per-request start.
-                # Reuse it instead of capturing a scalar add for every query.
-                step_start = meta.seq_start_per_req
+                step_start = start_pos + index
             else:
                 step_x, step_q, step_start, meta = prepared
             self._forward_decode_step(
@@ -368,9 +366,7 @@ class PpuFP4Indexer(IndexerFP8):
                 if prepared is None:
                     step = slice_compressor_query(meta, batch, width, index)
                     step_x = x[:, index : index + 1].contiguous()
-                    # The slice already owns the same absolute per-request start.
-                    # Reuse it instead of capturing a scalar add for every query.
-                    step_start = step.seq_start_per_req
+                    step_start = start_pos + index
                 else:
                     step_x, _, step_start, step = prepared
                 self.compressor.forward_decode_vectorized(
