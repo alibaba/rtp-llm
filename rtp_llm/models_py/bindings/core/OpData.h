@@ -166,6 +166,11 @@ struct GptModelOutputs {
     // real graph-instance output from the ordinary decoder hidden tensor.
     torch::Tensor mtp_target_hidden_states;
 
+    // Ordinary MTP may select its greedy proposal directly from TP shards.
+    // Logits are then undefined; probabilities retain draft-vocabulary coordinates.
+    torch::Tensor draft_top1_tokens;
+    torch::Tensor draft_top1_probs;
+
     // A single request-visible status. `REPLAYED` means this forward actually
     // executed a captured generation-prefill CUDA Graph; every other non-default value is
     // the readable fallback reason returned through AuxInfo.

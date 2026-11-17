@@ -146,16 +146,17 @@ private:
     bool          shouldCaptureHiddenStates(const GptModelInputs& inputs);
 
     // Methods absorbed from GptModel
-    torch::Tensor   computeLogits(const torch::Tensor& hidden);
-    torch::Tensor   tpSyncEmbeddingOrLogits(const torch::Tensor& input);
-    GptModelOutputs forwardPostLayers(torch::Tensor         hidden,
-                                      const bool            has_context_request,
-                                      const bool            need_all_logits,
-                                      const torch::Tensor&  lm_output_indexes,
-                                      size_t                token_num,
-                                      const GptModelInputs& inputs,
-                                      torch::Tensor         merged_eagle3_hidden,
-                                      bool                  skip_final_layernorm = false);
+    torch::Tensor                           computeLogits(const torch::Tensor& hidden);
+    torch::Tensor                           tpSyncEmbeddingOrLogits(const torch::Tensor& input);
+    std::pair<torch::Tensor, torch::Tensor> sampleMtpDraftTop1(const torch::Tensor& local_logits, bool fp32_probs);
+    GptModelOutputs                         forwardPostLayers(torch::Tensor         hidden,
+                                                              const bool            has_context_request,
+                                                              const bool            need_all_logits,
+                                                              const torch::Tensor&  lm_output_indexes,
+                                                              size_t                token_num,
+                                                              const GptModelInputs& inputs,
+                                                              torch::Tensor         merged_eagle3_hidden,
+                                                              bool                  skip_final_layernorm = false);
     // CP gather-last-hidden exit: `hidden` is already the lm_output_indexes-selected,
     // post-final-layernorm rows produced by handleOutputsLastHidden, so this runs
     // lm_head directly (no index_select, no final layernorm — matching the existing
@@ -210,6 +211,7 @@ private:
     // Keep BF16 LM-head outputs in BF16 through TP communication. The public
     // logits returned to samplers remain FP32. Read once before graph capture.
     bool bf16_logits_{true};
+    bool mtp_sharded_top1_{false};
     // Only models explicitly declaring the device-length graph contract may
     // defer this host scalar. Eager fallbacks materialize the exact value.
     bool graph_device_kv_length_{false};
@@ -284,6 +286,16 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         bf16_logits_ = policy == "1";
     }
     RTP_LLM_LOG_INFO("BF16 LM-head output / TP gather enabled: %d (sampler logits remain FP32)", bf16_logits_);
+
+    if (const char* value = std::getenv("RTP_LLM_MTP_SHARDED_TOP1")) {
+        const std::string policy(value);
+        TORCH_CHECK(policy == "0" || policy == "1", "RTP_LLM_MTP_SHARDED_TOP1 must be 0 or 1");
+#if USING_CUDA
+        mtp_sharded_top1_ = policy == "1" && params.sp_config.type == SP_TYPE_MTP && params.model_id > 0
+                            && dspark_model_role_ == DSparkModelRole::NONE && pp_size_ == 1 && device_props_.tp_size > 1
+                            && !check_nan_;
+#endif
+    }
 
     const auto& generation_prefill_cuda_graph_buckets =
         params.hw_kernel_config.generation_prefill_capture_token_buckets;
@@ -387,7 +399,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     // probe, and CP processor construction has completed.
     auto cleanup_on_failure = [](PyWrappedModel* model) noexcept { model->cleanupAfterConstructionFailure(); };
     std::unique_ptr<PyWrappedModel, decltype(cleanup_on_failure)> construction_guard(this, cleanup_on_failure);
-    torch_ext::PyModelInitResources                               init_resources;
+    // Engine worker threads enter this constructor without the Python GIL.
+    if (mtp_sharded_top1_) {
+        mtp_sharded_top1_ = py::hasattr(py_instance, "prepare_mtp_draft_graph_step");
+    }
+    RTP_LLM_LOG_INFO("MTP sharded top1 enabled: %d (model_id=%zu)", mtp_sharded_top1_, params.model_id);
+    torch_ext::PyModelInitResources init_resources;
 
     if (params.kv_cache_layer_layout.has_value()) {
         // The layout carries the published per-group specs, including page geometry.
@@ -584,6 +601,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_runner->configureMtpDraftLoop(
                 params.sp_config.gen_num_per_cycle - 1, [this](const torch::Tensor& hidden) {
                     auto logits = computeLogits(hidden);
+                    if (mtp_sharded_top1_) {
+                        auto [tokens, probs] = sampleMtpDraftTop1(logits, false);
+                        return std::make_pair(tokens.to(torch::kInt32).reshape({tokens.size(0)}), probs);
+                    }
                     if (device_props_.tp_size > 1) {
                         logits = tpSyncEmbeddingOrLogits(logits);
                     }

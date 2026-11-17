@@ -63,11 +63,17 @@ struct PyWrappedModelTestPeer {
                                             bool                 need_all_logits) {
         GptModelInputs inputs;
         inputs.lm_output_indexes = indexes;
+        inputs.need_all_logits   = need_all_logits;
         if (compact) {
             return model.forwardPostLayersLastHidden(hidden, inputs);
         }
         return model.forwardPostLayers(
             hidden, true, need_all_logits, indexes, hidden.size(0), inputs, torch::Tensor(), true);
+    }
+
+    static std::pair<torch::Tensor, torch::Tensor>
+    sampleMtpDraftTop1(PyWrappedModel& model, const torch::Tensor& logits, bool fp32_probs) {
+        return model.sampleMtpDraftTop1(logits, fp32_probs);
     }
 
     static bool generationPrefillCudaGraphReady(const PyWrappedModel& model) {
@@ -1504,9 +1510,9 @@ runCustomOutput(py::object py_model, py::object handler, torch::Tensor indexes, 
         model.prepareAttentionInputs(inputs);
         model.updateKVCacheKernelBlockId(inputs);
     }
-    const auto outputs      = compact_output ? PyWrappedModelTestPeer::forwardPostLayersLastHidden(
+    const auto outputs            = compact_output ? PyWrappedModelTestPeer::forwardPostLayersLastHidden(
                                               model, torch::ones({2, width}, lm_head->kernel.options()), inputs) :
-                                               model.forward(inputs);
+                                                     model.forward(inputs);
     result["graph_status"]  = generationPrefillCudaGraphStatusString(outputs.generation_prefill_cuda_graph_status);
     result["custom_output"] = outputs.custom_output;
     result["custom_output_error"] = outputs.custom_output_error;
@@ -1550,11 +1556,14 @@ py::object makeNativeLmHead(py::object                   py_model,
                             std::optional<torch::Tensor> scales,
                             int                          tp_size,
                             int                          tp_rank,
-                            size_t                       vocab_size) {
+                            size_t                       vocab_size,
+                            bool                         mtp_draft,
+                            std::optional<torch::Tensor> d2t_map) {
     if (!isRuntimeInitialized()) {
         initRuntime(kernel.get_device());
     }
-    auto                weights = convertNativeLmHead(kernel, scales.value_or(torch::Tensor()), true);
+    auto weights     = convertNativeLmHead(kernel, scales.value_or(torch::Tensor()), true);
+    weights->d2t_map = d2t_map.value_or(torch::Tensor());
     GptModelDescription description;
     description.data_type                    = DataType::TYPE_BF16;
     description.norm_type                    = NormType::rmsnorm;
@@ -1567,20 +1576,47 @@ py::object makeNativeLmHead(py::object                   py_model,
     params.parallelism_config.tp_size    = tp_size;
     params.parallelism_config.tp_rank    = tp_rank;
     params.parallelism_config.local_rank = kernel.get_device();
-    auto model                           = std::make_shared<PyWrappedModel>(params, std::move(py_model));
+    params.model_id                      = mtp_draft ? 1 : 0;
+    params.sp_config.type                = mtp_draft ? SP_TYPE_MTP : SP_TYPE_NONE;
+    if (mtp_draft) {
+        py_model.attr("prepare_mtp_draft_graph_step") = py::cpp_function([]() {});
+    }
+    std::shared_ptr<PyWrappedModel> model;
+    {
+        // Match production engine worker threads: constructor attribute probes
+        // must acquire the GIL themselves.
+        py::gil_scoped_release release;
+        model = std::make_shared<PyWrappedModel>(params, std::move(py_model));
+    }
     return py::cpp_function(
-        [model](const torch::Tensor& hidden, const torch::Tensor& indexes, bool compact, bool need_all_logits) {
+        [model](const torch::Tensor& hidden,
+                const torch::Tensor& indexes,
+                bool                 compact,
+                bool                 need_all_logits,
+                bool                 sample_local_logits,
+                bool                 fp32_probs) {
+            if (sample_local_logits) {
+                auto [tokens, probs] = PyWrappedModelTestPeer::sampleMtpDraftTop1(*model, hidden, fp32_probs);
+                py::dict result;
+                result["tokens"] = tokens;
+                result["probs"]  = probs;
+                return result;
+            }
             auto outputs = PyWrappedModelTestPeer::nativePostLayers(*model, hidden, indexes, compact, need_all_logits);
             py::dict result;
             result["logits"]        = outputs.logits;
             result["all_logits"]    = outputs.all_logits;
             result["hidden_states"] = outputs.hidden_states;
+            result["tokens"]        = outputs.draft_top1_tokens;
+            result["probs"]         = outputs.draft_top1_probs;
             return result;
         },
         py::arg("hidden"),
         py::arg("indexes"),
-        py::arg("compact")         = false,
-        py::arg("need_all_logits") = false);
+        py::arg("compact")             = false,
+        py::arg("need_all_logits")     = false,
+        py::arg("sample_local_logits") = false,
+        py::arg("fp32_probs")          = true);
 }
 
 py::object
@@ -1650,7 +1686,9 @@ PYBIND11_MODULE(libth_pywrapped_model_cache_store_integration_test, m) {
           py::arg("scales")     = torch::Tensor(),
           py::arg("tp_size")    = 1,
           py::arg("tp_rank")    = 0,
-          py::arg("vocab_size") = 0);
+          py::arg("vocab_size") = 0,
+          py::arg("mtp_draft")  = false,
+          py::arg("d2t_map")    = torch::Tensor());
     m.def(
         "convert_native_lm_head",
         [](torch::Tensor kernel, std::optional<torch::Tensor> scales, bool mixed_quantization) {

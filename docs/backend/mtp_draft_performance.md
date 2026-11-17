@@ -36,6 +36,21 @@ does not promise output equivalence to FP32 logits. Compare accepted/proposed
 counts and output token IDs separately; a similar mean acceptance rate alone
 does not establish numerical equivalence.
 
+## Sharded draft top-1
+
+Set `RTP_LLM_MTP_SHARDED_TOP1=1` before server startup to select ordinary MTP
+draft tokens from local vocabulary shards. Each TP rank sends one 8-byte
+candidate per row instead of its full logits shard, then selects the global
+top-1 token. The LM-head GEMM and logits precision follow the existing policy.
+The default is disabled, and the policy is fixed before graph capture.
+
+This path requires CUDA, TP greater than one, PP equal to one, and a draft model
+with the MTP graph-step contract. Target execution, DSpARK, NaN-checking mode,
+and calls requesting all logits retain the existing path. Compact outputs
+with vocabulary padding also retain that path to preserve their output contract.
+Draft-to-target token mapping and top-1 tie-breaking follow the existing
+selection behavior.
+
 ## RTX transport selection
 
 On SM120 Blackwell RTX devices, RTP leaves transport selection to NCCL when
@@ -50,6 +65,9 @@ Relevant regression coverage includes:
 
 - `rtp_llm.cpp.models.test.native_lm_head_test`, run with each logits policy:
   dtype, actual two-rank gather, and CUDA Graph replay with changing inputs.
+- `rtp_llm.cpp.models.test.mtp_draft_top1_test`: two-rank draft selection,
+  BF16/FP32 logits, ties, non-finite values, vocabulary padding and mapping,
+  fallback paths, and CUDA Graph replay with changing inputs.
 - `rtp_llm.cpp.models.test.pywrapped_model_cache_store_integration_test`:
   device-length metadata and exact eager fallback after deferred totals.
 - `rtp_llm.models_py.modules.qwen4_exp.test.qsa.decode_rope_stride_test` and
