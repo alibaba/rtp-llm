@@ -2,6 +2,7 @@ import json
 import logging
 import math
 import os
+from copy import copy
 from typing import Any, Dict, Optional
 
 import torch
@@ -891,6 +892,15 @@ class ModelConfig(CppModelConfig):
         if not quant_config and requested is not None:
             quant_config = requested
             logging.info(f"need_load_quant by {quant_config.get_method()}")
+
+        if isinstance(quant_config, Fp8BlockWiseQuantConfig) and self.model_type in (
+            "deepseek_v4",
+            "deepseek_v4_mtp",
+            "deepseek_v4_dspark",
+        ):
+            # Presets can be shared by several model configurations.
+            quant_config = copy(quant_config)
+            quant_config.prefer_sm120_blockwise = True
 
         # Set quant_algo if quant_config exists
         if quant_config:

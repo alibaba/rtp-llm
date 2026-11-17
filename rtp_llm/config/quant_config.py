@@ -533,10 +533,12 @@ class Fp8BlockWiseQuantConfig(QuantizationConfig):
         bits: int = 8,
         group_size: int = 128,
         is_quanted: bool = False,
+        prefer_sm120_blockwise: bool = False,
         **kwargs: Any,
     ):
         super().__init__(bits=bits, group_size=group_size, is_quanted=is_quanted)
         self.scale_fmt = kwargs.get("scale_fmt", None)
+        self.prefer_sm120_blockwise = prefer_sm120_blockwise
 
     @classmethod
     def get_method(cls) -> str:

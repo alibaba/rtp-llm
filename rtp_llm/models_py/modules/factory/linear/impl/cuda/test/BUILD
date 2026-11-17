@@ -59,3 +59,26 @@ py_test(
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13"},
 )
+
+py_test(
+    name = "fp8_blockwise_sm120_factory_test",
+    srcs = ["fp8_blockwise_sm120_factory_test.py"],
+    deps = py_test_deps,
+)
+
+# Run the unittest entrypoint directly. Pytest can load the enclosing CUDA
+# implementation package under an alias and register its strategies twice.
+py_test(
+    name = "fp8_blockwise_sm120_hardware_test",
+    srcs = ["fp8_blockwise_sm120_hardware_test.py"],
+    deps = py_test_deps + ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["dsv4_cuda13", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    legacy_create_init = 0,
+    visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
+)

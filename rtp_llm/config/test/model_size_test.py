@@ -12,6 +12,29 @@ from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.ops import ProfilingDebugLoggingConfig, VitSeparation
 
 
+class Dsv4Fp8PreferenceTest(unittest.TestCase):
+    def test_checkpoint_and_preset_are_model_local(self):
+        with TemporaryDirectory() as checkpoint:
+            for load_from_checkpoint in (False, True):
+                if load_from_checkpoint:
+                    _write_quant_config(checkpoint)
+                for model_type in ("deepseek_v4", "qwen3_5", "deepseek_v4_mtp"):
+                    with self.subTest(
+                        checkpoint=load_from_checkpoint, model=model_type
+                    ):
+                        config = ModelConfig()
+                        config.model_type = model_type
+                        config.ckpt_path = checkpoint
+                        config.quantization = "FP8_PER_BLOCK"
+                        config.init_precision_config(
+                            kv_cache_config=None, act_type="BF16"
+                        )
+                        self.assertEqual(
+                            config.quant_config.prefer_sm120_blockwise,
+                            model_type in ("deepseek_v4", "deepseek_v4_mtp"),
+                        )
+
+
 class ModelSizeTest(unittest.TestCase):
     def test_visual_estimation_matches_deployment(self):
         modes = (
@@ -385,8 +408,9 @@ class ExpertWeightDtypeSizeTest(unittest.TestCase):
             config = base()
             apply_quant_scope_to_pricing(
                 config,
-                ModelOptFp4Config(bits=4, group_size=16, is_quanted=True,
-                                  mixed_attention=True),
+                ModelOptFp4Config(
+                    bits=4, group_size=16, is_quanted=True, mixed_attention=True
+                ),
             )
             self.assertEqual(config.dense_weight_dtype, "bf16")
             self.assertEqual((config.expert_weight_dtype or "").strip(), "")
@@ -542,7 +566,10 @@ class Fp4ExpertStorageDetectionTest(unittest.TestCase):
         # Dense FP8 block-wise scale names must not trigger either.
         self.assertIsNone(
             detect_fp4_expert_storage(
-                {"layers.3.attn.wq.weight_scale_inv", "layers.3.ffn.experts.17.w1.weight_inv"}
+                {
+                    "layers.3.attn.wq.weight_scale_inv",
+                    "layers.3.ffn.experts.17.w1.weight_inv",
+                }
             )
         )
 

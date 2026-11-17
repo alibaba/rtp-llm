@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, QuantizationConfig
+from rtp_llm.device.device_type import DeviceType
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, MlaAttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from rtp_llm.model_loader.linear_attn_weight import (
@@ -52,6 +53,42 @@ B_SUFFIX = ".bias"
 QW_SUFFIX = ".weight"
 QS_SUFFIX = ".weight_scale_inv"
 APPEND_SUFFIX = "_scale_inv"
+
+
+def _sm120_inference_device(
+    kernel_weight: torch.Tensor, load_config: LoadConfig
+) -> Optional[int]:
+    """Resolve an SM120 inference target even while conversion uses CPU.
+
+    ``force_cpu_load_weights`` and the loader's memory-pressure fallback run
+    post-processing on CPU before moving the result to its final device.  The
+    physical weight layout is a consumer contract, so it must follow that
+    final device rather than the temporary tensor location.
+    """
+    if kernel_weight.is_cuda:
+        return kernel_weight.device.index
+    exported_device = load_config.exported_device
+    if (
+        exported_device is not None
+        and exported_device.get_device_type() == DeviceType.Cuda
+    ):
+        return int(exported_device.get_device_id())
+    return None
+
+
+def _preserve_output_major_fp8_layout(
+    kernel_weight: torch.Tensor, load_config: LoadConfig, quant_config: object
+) -> bool:
+    """Use compact scales only for the DSv4-owned SM120 dense layout."""
+    from rtp_llm.models_py.kernels.cuda.sm120_fp8_blockwise import (
+        prefers_sm120_blockwise,
+        sm120_blockwise_fp8_available,
+    )
+
+    if not prefers_sm120_blockwise(quant_config) or kernel_weight.ndim != 2:
+        return False
+    target_device = _sm120_inference_device(kernel_weight, load_config)
+    return target_device is not None and sm120_blockwise_fp8_available(target_device)
 
 
 def dequant_weight_split_k(
@@ -888,18 +925,36 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
             is_deep_gemm_e8m0_used,
         )
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
         from rtp_llm.models_py.kernels.cuda.fp8_kernel.fp8_kernel import (
             _transform_scale_ue8m0,
-            requant_weight_ue8m0,
         )
 
-        # need reshape for kernel weight
         processed_res = super()._postprocess(tensor, device, load_config)
         kernel_weight = processed_res[self.kernel.name]
 
-        # e8m0 not reshape, weight scale need be non contiguous
-        # TODO: rm reshape all time
-        if not is_deep_gemm_e8m0_used():
+        # Scale encoding and physical matrix layout are separate contracts.
+        # DeepGEMM-disabled legacy backends consume the historical reshaped
+        # layout, while CUTLASS SM120 consumes checkpoint-native (N, K).
+        target_device = _sm120_inference_device(kernel_weight, load_config)
+        is_dense_weight = self.kernel.name not in (W.moe_w1, W.moe_w2)
+        if is_dense_weight and self.scale is not None and target_device is not None:
+            from rtp_llm.models_py.kernels.cuda.sm120_fp8_blockwise import (
+                sm120_blockwise_layout,
+            )
+
+            sm120_blockwise_layout(
+                self.quant_config,
+                kernel_weight,
+                processed_res[self.scale.name],
+                device_id=target_device,
+            )
+        preserve_output_major = is_dense_weight and _preserve_output_major_fp8_layout(
+            kernel_weight, load_config, self.quant_config
+        )
+        use_e8m0 = not preserve_output_major and is_deep_gemm_e8m0_used(target_device)
+        reshape_legacy = not (use_e8m0 or preserve_output_major)
+        if reshape_legacy:
             kernel_weight = (
                 kernel_weight.reshape(kernel_weight.shape[-1], -1)
                 if kernel_weight.dim() == 2
@@ -909,11 +964,8 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         if self.scale is not None:
             scale_weight = processed_res[self.scale.name]
             native_e8m0_dtype = getattr(torch, "float8_e8m0fnu", None)
-            if not is_deep_gemm_e8m0_used():
-                if (
-                    native_e8m0_dtype is not None
-                    and scale_weight.dtype == native_e8m0_dtype
-                ):
+            if reshape_legacy:
+                if scale_weight.dtype == native_e8m0_dtype:
                     scale_weight = scale_weight.float()
                 scale_weight = (
                     scale_weight.reshape(scale_weight.shape[-1], -1)
@@ -930,20 +982,20 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                 scale_weight,
                 use_swizzle_a=load_config.use_swizzleA,
             )
-            # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
-
-            skip_moe_scale_repack = self.kernel.name in (
-                W.moe_w1,
-                W.moe_w2,
-            ) and load_config.moe_strategy in ("mega_moe_fp8", "mega_moe_fp8_se")
-            if is_deep_gemm_e8m0_used() and not skip_moe_scale_repack:
-                if (
-                    native_e8m0_dtype is not None
-                    and scale_weight.dtype == native_e8m0_dtype
-                ):
+            skip_moe_scale_repack = (
+                not is_dense_weight
+                and load_config.moe_strategy
+                in (
+                    "mega_moe_fp8",
+                    "mega_moe_fp8_se",
+                )
+            )
+            if use_e8m0 and not skip_moe_scale_repack:
+                if scale_weight.dtype == native_e8m0_dtype:
                     scale_weight = _transform_scale_ue8m0(
                         scale_weight, mn=kernel_weight.shape[-2]
                     )
+                # Online loading may already provide the final packed scales.
                 elif scale_weight.dtype != torch.int32:
                     kernel_weight, scale_weight = requant_weight_ue8m0(
                         kernel_weight, scale_weight
@@ -1067,8 +1119,15 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         )
 
         is_dense_weight = self.kernel.name not in (W.moe_w1, W.moe_w2)
+        preserve_output_major = is_dense_weight and _preserve_output_major_fp8_layout(
+            kernel[self.kernel.name], load_config, self.quant_config
+        )
+        target_device = _sm120_inference_device(kernel[self.kernel.name], load_config)
         direct_ue8m0 = (
-            self.scale is not None and is_dense_weight and is_deep_gemm_e8m0_used()
+            self.scale is not None
+            and is_dense_weight
+            and is_deep_gemm_e8m0_used(target_device)
+            and not preserve_output_major
         )
         if direct_ue8m0 and self.group_size != 128:
             raise ValueError(
@@ -1105,6 +1164,8 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         else:
             quant_kernel = cast_to_fp8(kernel.get(self.kernel.name))
 
+        # Generic BF16 descriptors produce input-major [K, N], including
+        # composite QKV and FFN merges. Both dense FP8 backends consume [N, K].
         if self.kernel.name == W.moe_w1 or self.kernel.name == W.moe_w2:
             pass
         elif quant_kernel.dim() == 2 and not direct_ue8m0:

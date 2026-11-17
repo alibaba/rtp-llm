@@ -68,6 +68,7 @@ class OnlineFp8LoaderTestBase(CudaFp8GEMMLinearTestBase):
             ).contiguous()
 
         loader = object.__new__(LoadQuantPerBlockFp8Weight)
+        loader.quant_config = Fp8BlockWiseQuantConfig(is_quanted=False)
         loader.group_size = 128
         loader.kernel = Mock(name="kernel")
         loader.kernel.name = "test_dense_weight"
@@ -143,6 +144,7 @@ class OnlineFp8LoaderTestBase(CudaFp8GEMMLinearTestBase):
         source_weight = torch.randn((256, 384), dtype=torch.float32)
 
         loader = object.__new__(LoadQuantPerBlockFp8Weight)
+        loader.quant_config = Fp8BlockWiseQuantConfig(is_quanted=False)
         loader.group_size = 128
         loader.kernel = Mock()
         loader.kernel.name = "test_dense_weight"
@@ -169,6 +171,7 @@ class OnlineFp8LoaderTestBase(CudaFp8GEMMLinearTestBase):
 
     def test_online_loader_rejects_non_128_group_size(self):
         loader = object.__new__(LoadQuantPerBlockFp8Weight)
+        loader.quant_config = Fp8BlockWiseQuantConfig(is_quanted=False)
         loader.group_size = 64
         loader.kernel = Mock()
         loader.kernel.name = "test_dense_weight"

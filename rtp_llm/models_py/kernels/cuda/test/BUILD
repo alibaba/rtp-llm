@@ -1,6 +1,7 @@
 load("//rtp_llm/models_py/test:defs.bzl", "models_py_test")
 
 load("//rtp_llm/test/utils:cuda13_sm100_test.bzl", "cuda13_sm100_py_test")
+load("//rtp_llm/models_py/modules/dsv4/test:defs.bzl", "dsv4_sm120_py_test")
 
 py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
@@ -85,6 +86,32 @@ py_test (
         "open_skip",
     ],
     exec_properties = {"gpu": "H20_CU13"},
+)
+
+py_test(
+    name = "ue8m0_layout_policy_test",
+    srcs = ["ue8m0_layout_policy_test.py"],
+    deps = py_test_deps,
+)
+
+py_test(
+    name = "fp8_quant_kernel_selection_test",
+    srcs = ["fp8_quant_kernel_selection_test.py"],
+    deps = py_test_deps,
+)
+
+dsv4_sm120_py_test(
+    name = "sm120_fp8_quant_invariance_test",
+    src = "sm120_fp8_quant_invariance_test.py",
+    deps = py_test_deps,
+    visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
+)
+
+dsv4_sm120_py_test(
+    name = "ue8m0_layout_policy_test_sm120",
+    src = "ue8m0_layout_policy_test.py",
+    deps = py_test_deps,
+    visibility = ["//rtp_llm/models_py/modules/dsv4/test:__pkg__"],
 )
 
 py_test (
