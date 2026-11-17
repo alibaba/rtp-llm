@@ -18,6 +18,8 @@
 #include <optional>
 #include <pthread.h>
 #include <sstream>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
@@ -426,7 +428,8 @@ bool KVCacheManager::startFrozenTaskRecovery() {
                         }, timeout_ms, stopped);
                 }
                 return TransferCompletionCleanup::Summary{};
-            });
+            },
+            [this](const FrozenTask::ExecutionInfo& execution) { reportUnfreezeMetrics(execution); });
         if (!recovery->start(static_cast<int>(kv_cache_config_.block_tree_frozen_recovery_interval_ms),
                              static_cast<int>(kv_cache_config_.block_tree_frozen_recovery_query_timeout_ms))) {
             RTP_LLM_LOG_ERROR("failed to start frozen task recovery thread");
@@ -440,6 +443,33 @@ bool KVCacheManager::startFrozenTaskRecovery() {
         RTP_LLM_LOG_ERROR("failed to initialize frozen task recovery");
     }
     return false;
+}
+
+void KVCacheManager::reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution) {
+    if (!metrics_reporter_) {
+        return;
+    }
+    struct PoolTargets {
+        Tier                             tier = Tier::NONE;
+        std::unordered_set<BlockIdxType> blocks;
+    };
+    std::unordered_map<const IBlockPool*, PoolTargets> targets;
+    for (const auto& descriptor : execution.descriptors) {
+        for (const auto& target : descriptor.targets) {
+            auto& pool_targets = targets[target.pool.get()];
+            pool_targets.tier  = descriptor.target_tier;
+            pool_targets.blocks.insert(target.block);
+        }
+    }
+    const char* backend = std::holds_alternative<std::string>(execution.trace_id) ? "kvcm" : "local";
+    for (const auto& [pool, pool_targets] : targets) {
+        RtpLLMCacheUnfreezeMetricsCollector collector;
+        collector.blocks = static_cast<int64_t>(pool_targets.blocks.size());
+        kmonitor::MetricsTags tags("pool_name", pool->poolName());
+        tags.AddTag("tier", tierName(pool_targets.tier));
+        tags.AddTag("backend", backend);
+        metrics_reporter_->report<RtpLLMCachePoolMetrics, RtpLLMCacheUnfreezeMetricsCollector>(&tags, &collector);
+    }
 }
 
 void KVCacheManager::stopFrozenTaskRecovery() noexcept {
