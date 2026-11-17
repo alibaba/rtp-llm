@@ -256,3 +256,11 @@ Master 不发起此次抢占的 Cancel RPC，也不等待取消完成才返回�
 - lifecycle：`staleInflightTimeoutMs=300000`，
   `deliveredNotAcceptedTimeoutMs=30000`，
   `maxDeliveredNotAcceptedRequestsGlobal=200`。
+
+### 空闲 Prefill grant
+
+WorkerStatus 的 `dispatch_immediate=true` 表示引擎空闲，可立即派发。此时
+`dispatch_deadline_ms` 仅约束 grant 有效期，不要求该有效期早于请求截止时间；
+请求本身仍须未超时。可用空闲 grant 优先于忙碌 grant，同类继续按剩余容量和
+截止时间选择。字段缺省 false 兼容旧引擎。预留仍按 epoch/chunk ID 扣减，
+重复状态不补充容量；有效期结束后必须等待引擎发布新 chunk ID。

@@ -8,7 +8,16 @@ public record PrefillChunk(String engineEpoch,
                            long chunkId,
                            long inputTokenCapacity,
                            int requestCapacity,
-                           long dispatchDeadlineMs) {
+                           long dispatchDeadlineMs,
+                           boolean dispatchImmediate) {
+    public PrefillChunk(String engineEpoch,
+                        long chunkId,
+                        long inputTokenCapacity,
+                        int requestCapacity,
+                        long dispatchDeadlineMs) {
+        this(engineEpoch, chunkId, inputTokenCapacity, requestCapacity, dispatchDeadlineMs, false);
+    }
+
     public boolean isValid() {
         return engineEpoch != null && !engineEpoch.isBlank() && chunkId > 0 && inputTokenCapacity > 0
                 && requestCapacity > 0 && dispatchDeadlineMs > 0;

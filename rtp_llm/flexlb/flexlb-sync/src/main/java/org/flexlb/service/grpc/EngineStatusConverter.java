@@ -64,7 +64,8 @@ public class EngineStatusConverter {
                                 workerStatusPB.getPrefillChunk().getChunkId(),
                                 workerStatusPB.getPrefillChunk().getInputTokenCapacity(),
                                 workerStatusPB.getPrefillChunk().getRequestCapacity(),
-                                workerStatusPB.getPrefillChunk().getDispatchDeadlineMs())
+                                workerStatusPB.getPrefillChunk().getDispatchDeadlineMs(),
+                                workerStatusPB.getPrefillChunk().getDispatchImmediate())
                         : null, workerStatusPB.getPrefillStepTokenBudget());
     }
 

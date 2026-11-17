@@ -685,6 +685,8 @@ message PrefillChunkPB {
     uint32 request_capacity = 4;
     // Unix epoch milliseconds; P keeps its later freeze time locally.
     int64 dispatch_deadline_ms = 5;
+    // Idle grant: deadline is validity only, not an expected wait.
+    bool dispatch_immediate = 6;
 }
 
 message WorkerStatusPB {

@@ -68,7 +68,9 @@ public final class PrefillChunkCapacity {
 
     public long remainingTokens(long inputTokens, long nowMs, long requestDeadlineMs) {
         return definition != null && nowMs < definition.dispatchDeadlineMs()
-                && definition.dispatchDeadlineMs() < requestDeadlineMs && remainingRequests > 0 && inputTokens > 0
+                && nowMs < requestDeadlineMs
+                && (definition.dispatchImmediate() || definition.dispatchDeadlineMs() < requestDeadlineMs)
+                && remainingRequests > 0 && inputTokens > 0
                 && remainingTokens >= inputTokens ? remainingTokens : Long.MAX_VALUE;
     }
 
