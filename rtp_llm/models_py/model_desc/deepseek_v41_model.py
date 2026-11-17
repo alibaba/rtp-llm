@@ -79,7 +79,10 @@ class DeepSeekV41Model(DeepSeekV4Model):
         return 4
 
     def _load_extra_weights(self, weights) -> None:
-        from rtp_llm.models_py.modules.dsv41.engram import EngramLayout
+        from rtp_llm.models_py.modules.dsv41.engram import (
+            EngramLayout,
+            create_engram_prefetch,
+        )
 
         if not isinstance(self.v4.embed, _V41ImageEmbedding):
             self.v4.embed = _V41ImageEmbedding(self.v4.embed, self)
@@ -111,6 +114,23 @@ class DeepSeekV41Model(DeepSeekV4Model):
         )
         if attachment.phase == "EMPTY":
             return
+        device = self.v4.embed.weight.device
+        # The new direct-FP8 schedule does not cover local Hopper UVA lookups.
+        if (
+            not attachment.external
+            and self._engram_prefetch is None
+            and device.type == "cuda"
+            and torch.cuda.get_device_capability(device) == (9, 0)
+        ):
+            self._engram_prefetch, self._engram_prefetch_max_rows = (
+                create_engram_prefetch(
+                    device,
+                    (
+                        (layer_id, module.embed_tokens)
+                        for layer_id, _, module in attachment.layers
+                    ),
+                )
+            )
         logging.info(
             "DeepSeek V4.1 Engram initialized on layers %s (external=%s)",
             [layer_id for layer_id, _ in attachment.layer_indices],
@@ -344,10 +364,14 @@ class DeepSeekV41Model(DeepSeekV4Model):
             return super().forward(inputs, fmha_impl)
         finally:
             try:
-                if verify_prefetch is not None:
-                    verify_prefetch.close()
-                if prefetch is not None:
-                    prefetch.clear()
+                try:
+                    if verify_prefetch is not None:
+                        verify_prefetch.close()
+                    if prefetch is not None:
+                        prefetch.clear()
+                finally:
+                    if self._engram_prefetch is not None:
+                        self._engram_prefetch.finish()
             finally:
                 self.v4._engram_lookup_prefetch = previous_prefetch
                 self._engram_forward_active = False
