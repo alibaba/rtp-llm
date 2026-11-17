@@ -19,6 +19,33 @@ protected:
     StepWindowProfiler profiler_{".", /*world_rank=*/0};
 };
 
+TEST_F(StepWindowProfilerConfigureTest, ActiveWindowKeepsItsRequestedMode) {
+    profiler_.configure(true, "first", 0, 1, true);
+    profiler_.configure(true, "second", 0, 1);
+    EXPECT_EQ(profiler_.trace_name_, "first");
+    EXPECT_TRUE(profiler_.profile_light_);
+    profiler_.configure(false, "", 0, 1);
+    profiler_.configure(true, "next", 0, 1);
+    EXPECT_EQ(profiler_.trace_name_, "next");
+    EXPECT_FALSE(profiler_.profile_light_);
+}
+
+TEST_F(StepWindowProfilerConfigureTest, FinishingCancelledStepPreservesNewWindow) {
+    profiler_.configure(true, "first", 0, 1, true);
+    // Reproduce a cancellation and a fresh RPC between startStep and finishStep.
+    // An inactive TorchProfile is sufficient to exercise the scheduling transition.
+    profiler_.profiler_ = std::make_shared<TorchProfile>("first");
+    profiler_.has_profiler_.store(true);
+    profiler_.reconfigure_.store(false);
+    profiler_.configure(false, "", 0, 1);
+    profiler_.configure(true, "next", 0, 1);
+    profiler_.finishStep();
+    EXPECT_TRUE(profiler_.enabled());
+    EXPECT_TRUE(profiler_.reconfigure_.load());
+    EXPECT_FALSE(profiler_.has_profiler_.load());
+    EXPECT_FALSE(profiler_.profile_light_);
+}
+
 TEST_F(StepWindowProfilerConfigureTest, SanitizesPathTraversal) {
     profiler_.configure(true, "../../etc/passwd", 0, 1);
     // Dots and slashes must be stripped; only [A-Za-z0-9_-] survive.

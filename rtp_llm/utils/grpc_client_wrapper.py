@@ -184,6 +184,7 @@ class GrpcClientWrapper:
                 trace_name=str(req.get("trace_name", "")),
                 start_step=int(req.get("start_step", 0)),
                 num_steps=int(req.get("num_steps", 0)),
+                profile_light=req.get("profile_light", False),
                 enable_all_rank=bool(
                     req.get("enable_all_rank", req.get("all_tp", False))
                 ),

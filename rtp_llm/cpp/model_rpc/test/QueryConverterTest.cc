@@ -289,6 +289,16 @@ TEST_F(QueryConverterTest, EnableMemoryCacheIsPreservedFromProto) {
     }
 }
 
+TEST_F(QueryConverterTest, PerRequestTimelineDetail) {
+    GenerateConfigPB request;
+    request.set_gen_timeline(true);
+    EXPECT_FALSE(QueryConverter::transGenerateConfig(&request)->profile_light);
+    request.set_profile_light(true);
+    const auto config = QueryConverter::transGenerateConfig(&request);
+    EXPECT_TRUE(config->gen_timeline);
+    EXPECT_TRUE(config->profile_light);
+}
+
 TEST_F(QueryConverterTest, AuxInfoRpcRoundTripPreservesOutputsAndLegacyDefault) {
     for (const int aux_mode : {-1, 0, 1}) {
         for (const bool streaming : {false, true}) {

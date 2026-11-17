@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpEmbeddingOp.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/cpp/embedding_engine/EmbeddingQuery.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/cast.h"
 #include "pybind11/stl.h"
@@ -39,6 +40,7 @@ void registerEmbeddingOutput(const py::module& m) {
 }
 
 PYBIND11_MODULE(libth_transformer, m) {
+    m.def("is_light_timeline", &isLightTimeline);
     registerRtpLLMOp(m);
     registerRtpEmbeddingOp(m);
     registerEmbeddingOutput(m);

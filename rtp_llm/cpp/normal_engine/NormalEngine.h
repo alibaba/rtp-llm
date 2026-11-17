@@ -47,7 +47,10 @@ public:
             metrics_reporter_->report<RtpLLMEngineMetrics, RtpLLMEngineMetricsCollector>(nullptr, &collector);
         }
     }
-    void startTimelineProfiling(const std::string& trace_name, int start_step, int num_steps) override;
+    void startTimelineProfiling(const std::string& trace_name,
+                                int                start_step,
+                                int                num_steps,
+                                bool               profile_light = false) override;
 
 private:
     struct PreparedPrefillBatch {

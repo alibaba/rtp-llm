@@ -5,6 +5,7 @@
 #include <vector>
 #include <thread>
 
+#include <ATen/ThreadLocalState.h>
 #include <fstream>
 #include <iterator>
 #include <cstdlib>
@@ -181,6 +182,35 @@ TEST(TorchProfilerTest, UnknownDrainFailureStillDisablesOnce) {
     };
     EXPECT_EQ(detail::tryDisableProfiler(disable, [] { throw 1; }), nullptr);
     EXPECT_EQ(disable_calls, 1);
+}
+
+TEST(TorchProfilerTest, LightModeFollowsOneCaptureAndItsWorkerState) {
+    TorchProfile profile("switch_modes_");
+    TorchProfileTestPeer::useCpuActivities(profile);
+    for (const bool light : {true, false, true}) {
+        EXPECT_FALSE(isLightTimeline());
+        profile.start(light);
+        EXPECT_EQ(isLightTimeline(), light);
+        { RTP_LLM_PROFILE_SCOPE("engine.test_range"); }
+        { RECORD_FUNCTION("test_operator", std::vector<c10::IValue>()); }
+        at::ThreadLocalState state;
+        std::thread          worker([&] {
+            EXPECT_FALSE(isLightTimeline());
+            at::ThreadLocalStateGuard guard(state);
+            EXPECT_EQ(isLightTimeline(), light);
+        });
+        worker.join();
+        auto [result, file_name] = profile.stopAndCollect();
+        ASSERT_NE(result, nullptr);
+        EXPECT_FALSE(isLightTimeline());
+        size_t engine_ranges = 0, operators = 0;
+        for (const auto& event : result->events()) {
+            engine_ranges += event.name() == "engine.test_range";
+            operators += event.name() == "test_operator";
+        }
+        EXPECT_EQ(engine_ranges, 1u);
+        EXPECT_EQ(operators, light ? 0u : 1u);
+    }
 }
 
 TEST(TorchProfilerTest, CpuStopRecordsTeardownAndIsIdempotent) {

@@ -3,7 +3,7 @@ from __future__ import annotations
 import libth_transformer_config
 import torch
 import typing
-__all__: list[str] = ['EmbeddingCppOutput', 'RtpEmbeddingOp', 'RtpLLMOp', 'TypedOutput']
+__all__: list[str] = ['EmbeddingCppOutput', 'RtpEmbeddingOp', 'RtpLLMOp', 'TypedOutput', 'is_light_timeline']
 class EmbeddingCppOutput:
     output: TypedOutput
     def __init__(self) -> None:
@@ -49,3 +49,6 @@ class TypedOutput:
 
 def get_multimodal_feature_hash(arg0: torch.Tensor) -> torch.Tensor:
     ...
+
+
+def is_light_timeline() -> bool: ...

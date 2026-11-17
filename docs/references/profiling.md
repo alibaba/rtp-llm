@@ -8,12 +8,16 @@ The most straightforward way of analyzing model performance is to print the exec
 
 ### Per Request Timeline
 
-Add option `"gen_timeline": True,` in `generate_config` of request could generate timeline for current request. The complete request looks like
-``` json
+Set `gen_timeline` in the inference request's `generate_config` to capture its execution.
+For example, this request captures a single prefill step in lightweight mode.
+
+```json
 {
-    "prompt": "Hello, ",
+    "prompt": "Hello",
     "generate_config": {
-        "gen_timeline": True,
+        "gen_timeline": true,
+        "profile_step": 1,
+        "profile_light": true
     }
 }
 ```
@@ -23,6 +27,29 @@ The generated timeline json file is located at the workdir where you started rtp
 ### Service-Wide Timeline
 
 You may use start arg `--gen_timeline_sync` or specify env `GEN_TIMELINE_SYNC=1` to enable service level timeline profiling. This captures a window of inference engine steps and saves the trace as a perfetto-compatible JSON file.
+
+### Lightweight timeline
+
+Set `profile_light` to `true` for an individual capture. Lightweight mode records
+explicit engine and model layer ranges, CUDA API calls and GPU activities. It skips
+individual ATen CPU operators, tensor input shapes and detailed fast-path ranges
+within DeepSeek V4.1 prefill layers. Omit the field or pass `false` to capture full
+operator and shape detail.
+
+For a four-rank capture, send the option in the JSON body of `POST /start_profile`.
+
+```json
+{
+    "gen_timeline": true,
+    "enable_all_rank": true,
+    "trace_name": "prefill_b4",
+    "num_steps": 1,
+    "profile_light": true
+}
+```
+
+After the capture window finishes, the next request can choose either mode on the
+same workers. An existing window keeps the mode of the request that started it.
 
 ### How to visualize timeline
 

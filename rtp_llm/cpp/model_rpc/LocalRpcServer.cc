@@ -887,7 +887,8 @@ LocalRpcServer::StartProfile(grpc::ServerContext* context, const StartProfileReq
                      request->num_steps(),
                      int(request->enable_all_rank()));
     if (!request->enable_all_rank()) {
-        engine_->startTimelineProfiling(request->trace_name(), request->start_step(), request->num_steps());
+        engine_->startTimelineProfiling(
+            request->trace_name(), request->start_step(), request->num_steps(), request->profile_light());
         return grpc::Status::OK;
     }
     if (maga_init_params_.parallelism_config.tp_rank != 0) {
@@ -897,7 +898,8 @@ LocalRpcServer::StartProfile(grpc::ServerContext* context, const StartProfileReq
     const auto& worker_addrs = maga_init_params_.runtime_config.world_worker_grpc_addrs;
     const auto  world_size   = maga_init_params_.parallelism_config.world_size;
     if (worker_addrs.empty() && world_size == 1) {
-        engine_->startTimelineProfiling(request->trace_name(), request->start_step(), request->num_steps());
+        engine_->startTimelineProfiling(
+            request->trace_name(), request->start_step(), request->num_steps(), request->profile_light());
         return grpc::Status::OK;
     }
     if (worker_addrs.size() != size_t(world_size)) {
@@ -922,6 +924,7 @@ LocalRpcServer::StartProfile(grpc::ServerContext* context, const StartProfileReq
         internal_request.set_trace_name(request->trace_name());
         internal_request.set_start_step(request->start_step());
         internal_request.set_num_steps(request->num_steps());
+        internal_request.set_profile_light(request->profile_light());
     }
     auto rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
                        const std::shared_ptr<grpc::ClientContext>& context,
@@ -951,7 +954,8 @@ grpc::Status LocalRpcServer::StartProfileInternal(grpc::ServerContext*          
                      context->peer().c_str(),
                      request->start_step(),
                      request->num_steps());
-    engine_->startTimelineProfiling(request->trace_name(), request->start_step(), request->num_steps());
+    engine_->startTimelineProfiling(
+        request->trace_name(), request->start_step(), request->num_steps(), request->profile_light());
     return grpc::Status::OK;
 }
 

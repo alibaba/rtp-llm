@@ -4,9 +4,11 @@
 #include <condition_variable>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
 #include <thread>
+#include <c10/util/ThreadLocalDebugInfo.h>
 #include "torch/csrc/autograd/profiler_kineto.h"
 #include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 
@@ -45,7 +47,7 @@ class TorchProfile {
 public:
     TorchProfile(const std::string& prefix, std::string output_dir = "");
     ~TorchProfile();
-    void start();
+    void start(bool profile_light = false);
 
     // Stops profiling and returns the result + filename for async saving.
     // Returns {nullptr, ""} if already stopped.
@@ -60,13 +62,14 @@ public:
 private:
     friend struct TorchProfileTestPeer;
 
-    std::string                 prefix_;
-    std::string                 output_dir_;
-    static std::atomic<size_t>  count_;
-    tpi::ProfilerConfig         config_ = tpi::ProfilerConfig(tpi::ProfilerState::KINETO, /*report_input_shapes=*/true);
-    std::set<tpi::ActivityType> activities_{tpi::ActivityType::CPU, tpi::ActivityType::CUDA};
-    bool                        stopped_        = true;
-    int                         profile_device_ = -1;
+    std::string                          prefix_;
+    std::string                          output_dir_;
+    static std::atomic<size_t>           count_;
+    tpi::ProfilerConfig                  config_{tpi::ProfilerState::KINETO};
+    std::set<tpi::ActivityType>          activities_{tpi::ActivityType::CPU, tpi::ActivityType::CUDA};
+    std::optional<c10::DebugInfoGuard>   light_context_;
+    bool                                 stopped_        = true;
+    int                                  profile_device_ = -1;
     std::shared_ptr<AsyncProfileSession> async_profile_;
 };
 
@@ -126,7 +129,8 @@ public:
     // The actual profiler start happens inside the next stepScope() (on the engine loop
     // thread), satisfying Kineto thread-affinity. If a session is already active, this is
     // a no-op (first-come-first-served).
-    void configure(bool enable, const std::string& trace_name, int start_step, int num_steps);
+    void
+    configure(bool enable, const std::string& trace_name, int start_step, int num_steps, bool profile_light = false);
 
     // Convenience overload: enable service-wide timeline profiling from config.
     // No-op if cfg.gen_timeline_sync is false.
@@ -141,6 +145,8 @@ public:
     // do not consume profiling windows on idle TP synchronization steps.
     void startStep();
     void finishStep();
+    // Close an unfinished window on the engine thread before that thread exits.
+    void stop();
 
     bool enabled() const {
         return enabled_.load(std::memory_order_relaxed);
@@ -149,22 +155,21 @@ public:
 private:
     friend class StepScope;
 
-    void beginStep();
-    void endStep();
-    void stopProfiler(const char* reason);
+    void stopProfilerLocked(const char* reason);
 
     std::string default_output_dir_;
 
-    // Atomic state set by configure(), read by beginStep()/endStep()
+    // Atomic state set by configure(), read by startStep()/finishStep()
     std::atomic<bool> enabled_{false};
     std::atomic<bool> reconfigure_{false};
     std::atomic<bool> has_profiler_{false};
     std::atomic<int>  start_step_{0};
     std::atomic<int>  num_steps_{0};
 
-    // State managed exclusively on the engine loop thread (inside begin/end/shutdown)
+    // The accepted request and profiler lifetime are protected by mu_.
     std::mutex                    mu_;
     std::string                   trace_name_;
+    bool                          profile_light_ = false;
     std::shared_ptr<TorchProfile> profiler_;
     int64_t                       waited_steps_   = 0;
     int64_t                       profiled_steps_ = 0;

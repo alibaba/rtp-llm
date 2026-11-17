@@ -148,6 +148,7 @@ cc_library(
         "//rtp_llm/cpp/model_rpc:model_rpc_server",
         "//rtp_llm/cpp/engine_base/schedulers:schedulers",
         "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/utils:profiling_scope",
         "//rtp_llm/cpp/telemetry",
         "//rtp_llm/cpp/multimodal_processor:multimodal_processor",
         ":config_extract",

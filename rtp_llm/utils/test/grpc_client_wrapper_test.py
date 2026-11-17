@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import AsyncMock
 
 import rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 as pb2
 from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
@@ -37,6 +38,15 @@ class _Stub:
 
 
 class GrpcClientWrapperTest(unittest.IsolatedAsyncioTestCase):
+    async def test_start_profile_selects_detail_per_request(self):
+        client = GrpcClientWrapper(server_port=10000)
+        client._ensure_connection = AsyncMock()
+        client.stub = AsyncMock()
+        for payload, expected in (({"profile_light": True}, True), ({}, False)):
+            self.assertEqual(await client.start_profile(payload), {"status": "ok"})
+            request = client.stub.StartProfile.await_args.args[0]
+            self.assertEqual(request.profile_light, expected)
+
     async def test_dump_torch_allocator_fans_out_all_dp_roots(self):
         client = GrpcClientWrapper(
             server_port=10000,
