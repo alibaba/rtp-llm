@@ -429,7 +429,9 @@ bool KVCacheManager::startFrozenTaskRecovery() {
                 }
                 return TransferCompletionCleanup::Summary{};
             },
-            [this](const FrozenTask::ExecutionInfo& execution) { block_tree_cache_->reportUnfreezeMetrics(execution); },
+            [this](const FrozenTask::ExecutionInfo& execution, bool forced) {
+                block_tree_cache_->reportUnfreezeMetrics(execution, forced);
+            },
             static_cast<int>(kv_cache_config_.block_tree_frozen_force_release_timeout_ms));
         if (!recovery->start(static_cast<int>(kv_cache_config_.block_tree_frozen_recovery_interval_ms),
                              static_cast<int>(kv_cache_config_.block_tree_frozen_recovery_query_timeout_ms))) {

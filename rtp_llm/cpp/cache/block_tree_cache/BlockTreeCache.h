@@ -172,7 +172,7 @@ public:
     CacheStats                                getStats() const;
     std::vector<CachePoolMetrics>             poolMetrics() const;
     void                                      reportMetrics() const;
-    void reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution) const;
+    void reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution, bool forced) const;
     void reportUnfreezeZeroMetrics(const std::vector<CachePoolMetrics>& pools) const;
     BlockTreeKeySnapshot                      getKeySnapshot(int64_t latest_version = -1) const;
     void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);

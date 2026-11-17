@@ -639,10 +639,11 @@ TEST(BlockTreeCacheMetricsTest, UnfreezeMetricsCountUniqueTargetsPerPoolAndBacke
     monitor->SetServiceName("");
     auto reporter = std::make_shared<kmonitor::MetricsReporter>(monitor, "", kmonitor::MetricsTags());
     BlockTreeCacheMetricsReporter metrics_reporter(reporter, false);
-    auto snapshot_unfreeze_blocks = [&](const char* pool_name, Tier tier, const char* backend) {
+    auto snapshot_unfreeze_blocks = [&](const char* pool_name, Tier tier, const char* backend, bool forced = false) {
         kmonitor::MetricsTags tags("pool_name", pool_name);
         tags.AddTag("tier", tierName(tier));
         tags.AddTag("backend", backend);
+        tags.AddTag("forced", forced ? "true" : "false");
         return snapshotQps(reporter->getMetricsGroup<RtpLLMCachePoolMetrics>()->unfreeze_blocks_qps_metric,
                            tags, "rtp_llm_kv_cache_unfreeze_blocks_qps");
     };
@@ -674,7 +675,9 @@ TEST(BlockTreeCacheMetricsTest, UnfreezeMetricsCountUniqueTargetsPerPoolAndBacke
         metrics_reporter.reportUnfreezeZeroMetrics(pools);
         for (const auto& pool : pools) {
             for (const char* backend : {"local", "kvcm"}) {
-                EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks(pool.pool_name.c_str(), pool.tier, backend), 0);
+                for (bool forced : {false, true}) {
+                    EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks(pool.pool_name.c_str(), pool.tier, backend, forced), 0);
+                }
             }
         }
     };
@@ -687,12 +690,17 @@ TEST(BlockTreeCacheMetricsTest, UnfreezeMetricsCountUniqueTargetsPerPoolAndBacke
                                      {{first, 1, 0, "first"}, {first, 2, 0, "first"}}});
     execution.descriptors.push_back({1, 0, Tier::DEVICE, Tier::HOST, {},
                                      {{first, 1, 0, "first"}, {second, 1, 0, "second"}}});
-    metrics_reporter.reportUnfreezeMetrics(execution);
+    metrics_reporter.reportUnfreezeMetrics(execution, false);
     execution.trace_id = std::string("kvcm-1");
     execution.remote = false;
     execution.descriptors.pop_back();
-    metrics_reporter.reportUnfreezeMetrics(execution);
+    metrics_reporter.reportUnfreezeMetrics(execution, false);
+    metrics_reporter.reportUnfreezeMetrics(execution, true);
+    execution.trace_id = uint64_t{2};
+    metrics_reporter.reportUnfreezeMetrics(execution, true);
     metrics_reporter.reportUnfreezeZeroMetrics(pools);
+    EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks("first", Tier::HOST, "kvcm", true), 2);
+    EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks("first", Tier::HOST, "local", true), 2);
     EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks("first", Tier::HOST, "local"), 2);
     EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks("second", Tier::HOST, "local"), 1);
     EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks("first", Tier::HOST, "kvcm"), 2);
