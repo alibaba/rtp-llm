@@ -18,6 +18,7 @@ from rtp_llm.multimodal.kvcm._config import RtpKvMetaObjectClientConfig
 
 
 class _ClientCode(IntEnum):
+    ER_INVALID_GRPCSTATUS = 2
     ER_SDK_ERROR_BUFFER_SAFE = 119
     ER_SDK_TIMEOUT_BUFFER_SAFE = 120
     ER_SERVICE_WRITE_IN_PROGRESS = 61
@@ -88,8 +89,11 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
             for code in (
                 _ClientCode.ER_SDK_ERROR_BUFFER_SAFE,
                 _ClientCode.ER_SDK_TIMEOUT_BUFFER_SAFE,
+                _ClientCode.ER_INVALID_GRPCSTATUS,
+                _ClientCode.SIZE_MISMATCH,
             ):
                 error = _ClientError(code)
+                error.unknown_outcome = True
                 self.assertFalse(facade.buffer_safe_after_failure(error))
                 error.data_transfer_may_be_inflight = True
                 self.assertFalse(facade.buffer_safe_after_failure(error))
@@ -98,8 +102,8 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
             conflict = _ClientError(_ClientCode.ER_SERVICE_WRITE_IN_PROGRESS)
             for operation, unknown, inflight, safe in (
                 ("save", False, False, True),
-                ("load", False, False, False),
-                ("save", True, False, False),
+                ("load", False, False, True),
+                ("save", True, False, True),
                 ("save", False, True, False),
             ):
                 with self.subTest(
@@ -115,7 +119,7 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
             self.assertTrue(facade.buffer_safe_after_failure(missing))
             missing.data_transfer_may_be_inflight = True
             self.assertFalse(facade.buffer_safe_after_failure(missing))
-            for rejected in (119, _ClientCode.SIZE_MISMATCH):
+            for rejected in (119, "ER_SDK_ERROR_BUFFER_SAFE"):
                 error = _ClientError(rejected)
                 error.data_transfer_may_be_inflight = False
                 self.assertFalse(facade.buffer_safe_after_failure(error))

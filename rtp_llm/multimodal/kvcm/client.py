@@ -285,31 +285,15 @@ class RtpKvMetaObjectClient:
         from kv_cache_manager.client.pybind import kvcm_py_client
 
         codes = kvcm_py_client.ClientErrorCode
-        if (
-            getattr(kvcm_py_client, "KV_META_OBJECT_TRANSFER_STATE_VERSION", 0) != 1
-            or getattr(error, "data_transfer_may_be_inflight", None) is not False
-            or not isinstance(getattr(error, "code", None), codes)
-            or not hasattr(codes, "ER_SDK_ERROR_BUFFER_SAFE")
-            or not hasattr(codes, "ER_SDK_TIMEOUT_BUFFER_SAFE")
-        ):
-            return False
-        if error.code == getattr(codes, "ER_SERVICE_NOT_FOUND", None):
-            # GC can remove a key between the size lookup and the native Get.
-            return getattr(error, "operation", None) == "load"
-        if error.code == getattr(codes, "ER_SERVICE_WRITE_IN_PROGRESS", None):
-            # A known conflict rejects this save before the SDK starts I/O.
-            return (
-                getattr(error, "operation", None) == "save"
-                and getattr(error, "unknown_outcome", None) is False
-            )
-        # Keep legacy numeric values, generic SDK timeouts and unknown codes
-        # conservative. The three validation codes are pre-I/O rejections.
-        return error.code in (
-            codes.ER_SDK_ERROR_BUFFER_SAFE,
-            codes.ER_SDK_TIMEOUT_BUFFER_SAFE,
-            getattr(codes, "ER_INVALID_PARAMS", None),
-            getattr(codes, "ER_INVALID_LOCAL_BUFFERS", None),
-            getattr(codes, "ER_INVALID_SDKWRAPPER_CONFIG", None),
+        # The versioned flag describes local DMA completion, independently of
+        # whether a metadata mutation's outcome is known. Legacy/untyped errors
+        # cannot provide this proof and remain quarantined.
+        return (
+            getattr(kvcm_py_client, "KV_META_OBJECT_TRANSFER_STATE_VERSION", 0) == 1
+            and getattr(error, "data_transfer_may_be_inflight", None) is False
+            and isinstance(getattr(error, "code", None), codes)
+            and hasattr(codes, "ER_SDK_ERROR_BUFFER_SAFE")
+            and hasattr(codes, "ER_SDK_TIMEOUT_BUFFER_SAFE")
         )
 
     def object_size(self, key: str, *, trace_id=None, timeout_ms=None):
