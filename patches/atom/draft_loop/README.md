@@ -23,8 +23,9 @@ fake/warmup requests and requests ineligible for CUDA graph keep the old path.
 The hook checks shared device sequence-length storage and captured metadata.
 Padded rows remain at zero; device lengths and all three token-major MRoPE
 axes advance together between steps and are restored after each loop.
-The current end-to-end validation uses text requests on an MRoPE model;
-image requests are not part of this performance claim.
+The latency measurements below use text requests on an MRoPE model.
+Multimodal functionality is covered by the separate regression below;
+those latency numbers are not a multimodal performance claim.
 The recurrent input is the pre-collapse HC hidden tensor, not the LM-head input.
 This branch's `computeLogits` already gathers TP logits: no second gather is added.
 
@@ -77,3 +78,39 @@ per cycle, versus four with separate draft steps). A completely correlated
 GPU replay contains two LM-head GEMMs, two TP collectives and two argmax /
 scatter sampling sequences. Kineto did not expose complete GPU-node
 correlations for the other rank; no complete per-node claim is made for it.
+
+## Multimodal regression
+
+The same production MRoPE implementation passed the image/video PD regression
+with the loop flag off and on. Each mode passed 36 image/mixed requests plus
+six video requests: single images, changed images with the same question,
+OCR, counting, wide/tall images, multiple images and order reversal,
+multi-turn image context, cache off/prime/hit, and mixed text/image C3.
+All 33 short answers match after whitespace/punctuation normalization.
+Nine longer outputs pass the stated fact checks; this is not an exhaustive
+semantic-accuracy or byte-identical-generation claim. The original text
+36-question and feature checks also passed again after the multimodal tests.
+
+A video request recorded 216 video tokens, 70 MTP rounds, and full draft-loop
+replays on both ranks. The complete correlated GPU sample includes the
+LM heads, TP collectives and sampling nodes. Kineto's incomplete second-rank
+GPU-node correlation remains a profiling limitation, not a fallback claim.
+
+Run against separately started graph-off and graph-on PD services:
+
+```sh
+python patches/atom/draft_loop/test_multimodal_pd.py \
+  --base-url http://127.0.0.1:29700 --result-dir /tmp/mm_base --include-video
+# Restart with RTP_LLM_MTP_DRAFT_LOOP_GRAPH=1 on D only, then:
+python patches/atom/draft_loop/test_multimodal_pd.py \
+  --base-url http://127.0.0.1:29700 --result-dir /tmp/mm_graph \
+  --video-file /tmp/mm_base/fixtures/color_change.mp4 \
+  --reference /tmp/mm_base/result.json
+```
+
+Pillow and aiohttp are required. PyAV is needed only to generate the optional
+video fixture; the server's video path requires its normal decoder dependency.
+Fixtures are generated locally. Requests, responses, hashes and checks are
+saved under the result directory. OCR ignores whitespace but verifies every
+letter/digit; the original overly strict space-sensitive failure was a test
+normalization issue, not a changed OCR character or an inference fix.
