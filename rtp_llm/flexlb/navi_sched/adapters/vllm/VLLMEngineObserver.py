@@ -3160,10 +3160,22 @@ class VLLMEngineObserver:
     def _abort_engine_requests(self, external_request_ids, request_type) -> None:
         request_ids = list(dict.fromkeys(external_request_ids))
         engine_core = self._engine_core
-        if not request_ids or engine_core is None:
+        if not request_ids:
+            return
+        if engine_core is None:
+            logger.warning(
+                "[navi-vllm-abort-not-delivered] reason=engine_core_unbound "
+                "vllm_request_ids=%s",
+                request_ids,
+            )
             return
         engine_core.aborts_queue.put_nowait(request_ids)
         engine_core.input_queue.put_nowait((request_type.ABORT, request_ids))
+        logger.info(
+            "[navi-vllm-abort-enqueued] vllm_request_ids=%s "
+            "queues=aborts_queue,input_queue",
+            request_ids,
+        )
 
     def _deliver_engine_aborts(self, external_request_ids, request_type) -> bool:
         request_ids = list(dict.fromkeys(external_request_ids))
@@ -3194,6 +3206,8 @@ class VLLMEngineObserver:
             return False
         self._discard_cache_touch_requests(request_ids)
         tracked_cancellations = {}
+        mapped_request_ids = {}
+        deferred_request_ids = []
         with self._response_lock:
             external_request_ids = self._pending_engine_abort_request_ids
             self._pending_engine_abort_request_ids = []
@@ -3201,7 +3215,9 @@ class VLLMEngineObserver:
                 external_request_id = self._response_request_ids.get(request_id)
                 if external_request_id is None:
                     self._cancelled_before_decode.add(request_id)
+                    deferred_request_ids.append(request_id)
                 else:
+                    mapped_request_ids[request_id] = external_request_id
                     self._inactive_response_request_ids.add(request_id)
                     external_request_ids.append(external_request_id)
                     state = self._pending_forward_batches.get(
@@ -3212,6 +3228,13 @@ class VLLMEngineObserver:
                             id(state), (state, set())
                         )
                         entry[1].add(request_id)
+        if request_ids:
+            logger.info(
+                "[navi-vllm-abort-mapped] request_id_map=%s "
+                "deferred_navi_request_ids=%s",
+                mapped_request_ids,
+                deferred_request_ids,
+            )
         for state, cancelled_request_ids in tracked_cancellations.values():
             try:
                 self._abort_forward_requests(state, cancelled_request_ids)
@@ -6327,6 +6350,17 @@ class VLLMEngineObserver:
         try:
             request_id = event.get("request_id")
             batch_id, schedule_batch_id = self._cause_batch_ids(request_id)
+            if (
+                event.get("event") == "terminal"
+                and event.get("status") == "FINISHED_ABORTED"
+            ):
+                logger.info(
+                    "[navi-vllm-abort-applied] vllm_request_id=%s "
+                    "batch_id=%s schedule_batch_id=%s status=FINISHED_ABORTED",
+                    request_id,
+                    batch_id,
+                    schedule_batch_id,
+                )
             self._bridge.log_request_lifecycle_audit(
                 json.dumps(
                     {

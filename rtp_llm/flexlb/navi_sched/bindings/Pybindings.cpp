@@ -443,22 +443,27 @@ public:
             state->enabled = true;
         }
         _agent->setForwardCancelHandler([state](uint64_t requestId) {
-            std::lock_guard<std::mutex> lock(state->mutex);
-            if (!state->enabled) {
-                return;
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                if (!state->enabled) {
+                    return;
+                }
+                if (state->queuedTouchRequestIds.erase(requestId) > 0) {
+                    state->touchQueue.erase(
+                        std::remove_if(
+                            state->touchQueue.begin(), state->touchQueue.end(),
+                            [requestId](
+                                const std::shared_ptr<ForwardRequestTouch> &touch) {
+                                return touch && touch->requestId == requestId;
+                            }),
+                        state->touchQueue.end());
+                }
+                state->cancelledRequests.emplace_back(requestId);
+                state->condition.notify_one();
+                state->notification.notify();
             }
-            if (state->queuedTouchRequestIds.erase(requestId) > 0) {
-                state->touchQueue.erase(
-                    std::remove_if(
-                        state->touchQueue.begin(), state->touchQueue.end(),
-                        [requestId](const std::shared_ptr<ForwardRequestTouch> &touch) {
-                            return touch && touch->requestId == requestId;
-                        }),
-                    state->touchQueue.end());
-            }
-            state->cancelledRequests.emplace_back(requestId);
-            state->condition.notify_one();
-            state->notification.notify();
+            AUTIL_LOG(INFO, "[navi-agent-abort-received] navi_request_id=%lu queued=1",
+                      requestId);
         });
         const auto enabled = _agent->setForwardBatchHandler(
             [state](const std::vector<NaviSchedForwardedRequest> &requests,

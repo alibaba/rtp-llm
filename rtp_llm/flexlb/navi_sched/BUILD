@@ -1013,6 +1013,14 @@ py_test(
 )
 
 py_test(
+    name = "navi_sched_vllm_abort_logging_test",
+    srcs = ["test/vllm/VLLMAbortLoggingTest.py"],
+    main = "test/vllm/VLLMAbortLoggingTest.py",
+    data = ["adapters/vllm/VLLMEngineObserver.py"],
+    python_version = "PY3",
+)
+
+py_test(
     name = "navi_sched_vllm_v6d_cache_source_test",
     srcs = ["test/vllm/VLLMV6DCacheSourceTest.py"],
     main = "test/vllm/VLLMV6DCacheSourceTest.py",
