@@ -295,7 +295,10 @@ class RocmExpertsFp8PerChannel(FusedMoeExpertExecutor):
                 raise RuntimeError(
                     "RTP_LLM_ROCM_FP8_MOE_DETERMINISTIC_REDUCE=1 requires MoE "
                     "weights processed by shuffle_moe_weight (AITER preshuffle "
-                    "layout), but w1/w2 lack the is_shuffled marker"
+                    "layout), but w1/w2 lack the is_shuffled marker. Re-dump "
+                    "ft-style weights with the current weights_convert so the "
+                    "index carries moe_weights_preshuffled; the replay path "
+                    "restores the marker from it"
                 )
 
             # Fail closed at construction time when the loaded workload matches

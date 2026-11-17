@@ -124,6 +124,36 @@ def resolve_ssm_state_dtype(
     return model_ssm_state_dtype
 
 
+def _resolve_explicit_w8a8_method(quantization: Optional[str]) -> Optional[str]:
+    """Resolve the W8A8 method of an explicit QUANTIZATION request.
+
+    Both spellings construct the same CompressedW8A8Int8PerChannelQuantConfig
+    in init_quant_config: the W8A8_INT8_PER_CHANNEL alias and the JSON dict
+    form (``{"method": "W8A8_INT8_PER_CHANNEL_COMPRESSED", ...}``). The
+    qwen35_moe-only gate below must see both spellings, otherwise the JSON
+    form silently bypasses it and reaches the load-time W8A8 quantizer with
+    an unsupported stacked-MoE layout (e.g. qwen3_vl_moe's permute merge).
+    """
+    request = (quantization or "").strip()
+    if not request:
+        return None
+    if request.upper() == "W8A8_INT8_PER_CHANNEL":
+        return request.upper()
+    if request.startswith("{"):
+        try:
+            parsed = json.loads(request)
+        except ValueError:
+            return None
+        if isinstance(parsed, dict):
+            method = parsed.get("method")
+            if isinstance(method, str) and method.upper() in (
+                "W8A8_INT8_PER_CHANNEL",
+                "W8A8_INT8_PER_CHANNEL_COMPRESSED",
+            ):
+                return method.upper()
+    return None
+
+
 class ModelConfig(CppModelConfig):
     # Model-specific weight estimators add to these fields when needed. Class
     # defaults keep the generic estimator statically visible and zero-cost for
@@ -890,6 +920,16 @@ class ModelConfig(CppModelConfig):
         Args:
             kv_cache_config: Optional KVCacheConfig to set attn_config.kv_cache_dtype
         """
+        # Both the alias and the JSON dict spelling of an explicit W8A8
+        # request must pass the qwen35_moe gate; the JSON form used to skip
+        # it because the alias comparison below never matched.
+        explicit_w8a8_method = _resolve_explicit_w8a8_method(self.quantization)
+        if explicit_w8a8_method is not None and self.model_type != "qwen35_moe":
+            raise ValueError(
+                f"QUANTIZATION={explicit_w8a8_method} online quantization "
+                "is supported only for the qwen35_moe model family; "
+                f"got model_type={self.model_type!r}"
+            )
         explicit_online_w8a8 = (
             self.quantization or ""
         ).upper() == "W8A8_INT8_PER_CHANNEL"

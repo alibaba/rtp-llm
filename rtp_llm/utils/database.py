@@ -126,6 +126,10 @@ class CkptDatabase(BaseDatabase):
                 self.get_pretrain_tensor_names(),
             )
 
+        self._preshuffled_keys: frozenset = (
+            self._parse_preshuffled_keys(path) if self._is_ft_style else frozenset()
+        )
+
         for ckpt_file in self.pretrain_file_list:
             for tname in ckpt_file.get_tensor_names():
                 self._tensor_index[tname] = ckpt_file
@@ -176,6 +180,11 @@ class CkptDatabase(BaseDatabase):
     @property
     def is_ft_style(self) -> bool:
         return self._is_ft_style
+
+    @property
+    def preshuffled_keys(self) -> frozenset:
+        """Tensor names dumped with the AITER preshuffle layout (ft-style only)."""
+        return self._preshuffled_keys
 
     @property
     def is_safetensor(self) -> bool:
@@ -557,3 +566,15 @@ class CkptDatabase(BaseDatabase):
 
     def dump_lora_info(self) -> None:
         self.lora_ckpt.dump_lora_info()
+
+    def _parse_preshuffled_keys(self, ckpt_path: str) -> frozenset:
+        # dump_weight_as_ft_style records the AITER preshuffle markers here:
+        # safetensors cannot persist the Python tensor attribute, so
+        # _load_from_ft_style restores it from this list.
+        meta_json = _read_hf_index(ckpt_path)
+        if meta_json is None:
+            return frozenset()
+        keys = meta_json.get("moe_weights_preshuffled", [])
+        if not isinstance(keys, list):
+            return frozenset()
+        return frozenset(key for key in keys if isinstance(key, str))

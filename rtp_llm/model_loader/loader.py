@@ -1,4 +1,5 @@
 import gc
+import json
 import logging
 import os
 import time
@@ -211,6 +212,10 @@ class ModelLoader:
         part_idx = 0
         current_size = 0
         current_dict = OrderedDict()
+        # safetensors cannot persist Python tensor attributes, so the AITER
+        # preshuffle marker is recorded here and restored by
+        # _load_from_ft_style from the merged index entry.
+        preshuffled_keys: list[str] = []
 
         def maybe_save():
             nonlocal current_size, part_idx, current_dict
@@ -248,6 +253,8 @@ class ModelLoader:
                 )
             tensor_size = tensor.numel() * tensor.element_size()
             current_dict[tensor_name] = tensor.cpu().contiguous()
+            if getattr(tensor, "is_shuffled", False):
+                preshuffled_keys.append(tensor_name)
             current_size += tensor_size
             maybe_save()
             self.force_clean_cuda_memory()
@@ -260,6 +267,17 @@ class ModelLoader:
                 f"Saved final partition {part_idx} ({current_size/1024**3:.2f}GB)"
             )
             del current_dict
+
+        # Per-rank sidecar; _generate_safetensor_meta_info merges every
+        # sidecar into the shared index as moe_weights_preshuffled so the
+        # ft-style replay path can restore the AITER preshuffle markers.
+        sidecar_path = f"{filename_prefix}preshuffled.json"
+        with open(sidecar_path, "w", encoding="utf-8") as sidecar:
+            json.dump({"moe_weights_preshuffled": preshuffled_keys}, sidecar)
+        logging.info(
+            f"Recorded {len(preshuffled_keys)} preshuffled MoE tensors in {sidecar_path}"
+        )
+        return preshuffled_keys
 
     @timer_wrapper(description="load_from_ft_style")
     def _load_from_ft_style(self, device: str):
@@ -299,7 +317,11 @@ class ModelLoader:
             source_device,
             direct_io=direct_io and source_device == device,
         )
+        # safetensors cannot persist the Python tensor attribute, so the AITER
+        # preshuffle markers recorded at dump time are restored here.
+        preshuffled_keys = self._load_config.database.preshuffled_keys
         for key, tensor in all_tensors.items():
+            is_preshuffled = key in preshuffled_keys
             if key.startswith(layer_weight_prefix):
                 # 解析键名，例如 "layers.0.weight"
                 parts = key[len(layer_weight_prefix) :].split(".")
@@ -307,11 +329,14 @@ class ModelLoader:
                 name = ".".join(parts[1:])
                 # 将张量移动到设备，并设置到对应的层
                 check_with_info(len(tensor) == 1, f"{name} have {len(tensor)} tensor)")
-                weights[layer_id][name] = tensor[0].to(
+                loaded = tensor[0].to(
                     self._resident_weight_device(
                         resident_devices, layer_id, name, device
                     )
                 )
+                if is_preshuffled:
+                    loaded.is_shuffled = True
+                weights[layer_id][name] = loaded
             elif key.startswith(global_weight_prefix):
                 name = key[len(global_weight_prefix) :]
                 if (
@@ -323,6 +348,8 @@ class ModelLoader:
                 value = tensor[0].to(
                     self._resident_weight_device(resident_devices, None, name, device)
                 )
+                if is_preshuffled:
+                    value.is_shuffled = True
                 global_weights[name] = value
         model_weights.weights = weights
         model_weights.global_weights = global_weights
