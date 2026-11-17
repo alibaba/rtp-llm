@@ -1,4 +1,5 @@
 #include "ClientWrapper.h"
+#include <utility>
 #include <limits>
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 #include "kvcm_client/HostCacheStateCompat.h"

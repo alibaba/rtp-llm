@@ -129,7 +129,6 @@ protected:
         std::atomic<int> starts{0}, saves{0}, closes{0};
         std::atomic<bool> bad_close{false};
         size_t refs = env.device_pool->refCount(env.block_id);
-        bool submitted_decode{false};
 
         Fixture(bool decode, std::shared_ptr<BoundaryBroadcastManager> broadcast = {},
                 size_t workers = 1, size_t queue_size = 8) {
@@ -193,7 +192,6 @@ protected:
             return backend->impl_->planCompletedDecode(resource, env.cache_config.seq_size_per_block);
         }
         bool submit(StorageRequest request) {
-            submitted_decode = request.decode_completion;
             return backend->write(backend->prepareWrite(std::move(request)));
         }
         void expectSettled(bool retained, bool source_unknown) {
@@ -205,9 +203,9 @@ protected:
             EXPECT_EQ(starts.load(), 1);
             EXPECT_EQ(closes.load(), retained ? 0 : 1);
             EXPECT_FALSE(bad_close.load());
-            const bool protected_owner = source_unknown && (submitted_decode || backend->protectUnknownCompletion());
+            const bool protected_owner = source_unknown && backend->protectUnknownCompletion();
             // P writes have no local targets. D publications retain actual
-            // source pins until quiescence, independently of the read policy.
+            // source pins until quiescence.
             EXPECT_FALSE(env.device_pool->isFrozen(env.block_id));
             if (!protected_owner) {
                 EXPECT_EQ(env.device_pool->refCount(env.block_id), refs);

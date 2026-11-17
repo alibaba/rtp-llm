@@ -3861,6 +3861,7 @@ TEST_F(MtpExecutorTest, DecodeEndpointCapturePinsPendingPagesWithoutWaitingForFi
         MtpExecutorTestConfig config;
         config.role_type = RoleType::DECODE;
         config.sp_type = SP_TYPE_DSPARK;
+        config.dspark_mask_token_id = 0;
         config.gen_num_per_cycle = 3;
         auto components = createMtpExecutorComponents(config);
         auto& executor = *components.executor;

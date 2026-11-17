@@ -252,6 +252,8 @@ public:
 
     CoordinatedReadPtr prepareCoordinatedRead(const StorageRequest& request,
                                               const std::vector<FunctionRequestPB>& requests) {
+        if (decode_publication_enabled_)
+            return nullptr;
         FrozenTask::ExecutionInfo execution;
         execution.trace_id = requests.front().remote_request().trace_id();
         execution.operation = "read";
@@ -1685,7 +1687,7 @@ public:
             response.set_transfer_status(REMOTE_TRANSFER_STATUS_TIMEOUT);
             return false;
         }
-        if (decode_publication_enabled_ && request.op() == REMOTE_OPERATION_WRITE) {
+        if (decode_publication_enabled_) {
             return executeProtectedPayload(request, response, task, source_may_be_touched, proof);
         }
         const std::vector<std::string>    tags(request.group_tags().begin(), request.group_tags().end());
@@ -1704,9 +1706,6 @@ public:
         bool                                   unknown = false;
         block_tree_cache_detail::ScopeRollback reconcile_completion([&] {
             response.set_payload_buffer_safe(!unknown);
-            // Only worker-observed SDK uncertainty retains registrations. A
-            // controller ambiguity with a BUFFER_SAFE worker remains recoverable.
-            if (unknown && completion_resources_) ++completion_resources_->unresolved;
             if (source_may_be_touched)
                 *source_may_be_touched = unknown;
         });
@@ -2592,7 +2591,7 @@ private:
             finishLocalPeer(write, peer, write->task.expired());
             return;
         }
-        const auto& operation = write->operations[peer];
+        auto& operation = write->operations[peer];
         auto& response = *write->responses[peer].mutable_remote_response();
         bool touched = false;
         try {
@@ -3106,9 +3105,7 @@ void KVCMStorageBackend::onRemoteCacheSkipped(const char* stage) noexcept {
 }
 
 bool KVCMStorageBackend::protectUnknownCompletion() const noexcept {
-    // D publications opt in through request.decode_completion; ordinary reads
-    // use the same native target protection/recovery as Prefill.
-    return false;
+    return impl_->protectsUnknownCompletion();
 }
 
 std::shared_ptr<void> KVCMStorageBackend::completionResourceOwner() const {

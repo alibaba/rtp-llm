@@ -1,3 +1,7 @@
+#include <mutex>
+#include <memory>
+#include <functional>
+#include <condition_variable>
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 
 #include <atomic>
