@@ -1024,7 +1024,8 @@ StreamState GenerateStream::moveToNext() {
     // boundary is different: the allocator must append blocks to the mutable
     // host table, so join the worker before acquiring mutex_.  Waiting after
     // taking mutex_ would deadlock with specUpdate().
-    if (needsAsyncBookkeepingJoinForKvReservation()) {
+    // The error transition skips reservation and defers KV release to the last worker.
+    if (needsAsyncBookkeepingJoinForKvReservation() && !hasEvent(StreamEvents::Error)) {
         waitPendingAsyncBookkeeping();
     }
 
