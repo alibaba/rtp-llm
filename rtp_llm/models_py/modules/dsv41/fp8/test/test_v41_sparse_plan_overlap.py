@@ -19,10 +19,13 @@ from rtp_llm.models_py.modules.dsv41.fp8.test import test_v41_sparse_decode as c
 class SparsePlanOverlapCPU(unittest.TestCase):
     def test_default_launch_and_explicit_disable(self):
         shared = {"candidates": Mock()}
-        source = SimpleNamespace(layer_id=20, kv_source_layer_id=20,
-                                 compress_ratio=1, _shared_attention=shared,
-                                 v41_config={"candidate_source_layer_id": 20,
-                                             "candidate_block_size": 8})
+        source = SimpleNamespace(
+            layer_id=20,
+            kv_source_layer_id=20,
+            compress_ratio=1,
+            _shared_attention=shared,
+            v41_config={"candidate_source_layer_id": 20, "candidate_block_size": 8},
+        )
         with patch.dict(os.environ), patch.object(
             sparse, "is_supported", return_value=False
         ) as supported:
@@ -35,8 +38,10 @@ class SparsePlanOverlapCPU(unittest.TestCase):
             supported.assert_not_called()
 
     def test_full_fast_return_preserves_output(self):
-        from rtp_llm.models_py.modules.dsv41.fp8.decode import full_overlap
-        from rtp_llm.models_py.modules.dsv41.fp8.decode import rope_metadata
+        from rtp_llm.models_py.modules.dsv41.fp8.decode import (
+            full_overlap,
+            rope_metadata,
+        )
 
         x = torch.empty(1, 1, 8)
         positions = torch.zeros(1, dtype=torch.int64)
@@ -46,15 +51,20 @@ class SparsePlanOverlapCPU(unittest.TestCase):
         mega.supports_decode.return_value = True
         mega.supports_pool.return_value = True
         layer = SimpleNamespace(
-            _begin_forward=Mock(), _shared_attention={}, freqs_cis=Mock(),
-            _pool_view_3d_fp8=Mock(), _mega_attention=mega,
-            compress_ratio=1, index_topk=512,
-            _source_pool=Mock(), _global_region=Mock(),
+            _begin_forward=Mock(),
+            _shared_attention={},
+            freqs_cis=Mock(),
+            _pool_view_3d_fp8=Mock(),
+            _mega_attention=mega,
+            compress_ratio=1,
+            index_topk=512,
+            _source_pool=Mock(),
+            _global_region=Mock(),
         )
         output = torch.empty_like(x)
-        with patch.object(rope_metadata, "decode_rope_metadata",
-                          return_value=(positions, Mock())), \
-             patch.object(full_overlap, "try_full_decode", return_value=output):
+        with patch.object(
+            rope_metadata, "decode_rope_metadata", return_value=(positions, Mock())
+        ), patch.object(full_overlap, "try_full_decode", return_value=output):
             actual = AttentionV41FP8._forward_decode_body(layer, x, metadata)
         self.assertIs(actual, output)
 
@@ -75,7 +85,9 @@ class SparsePlanOverlapCPU(unittest.TestCase):
     def test_interrupted_forward_joins_before_dropping_plan(self):
         work = Mock()
         shared = {"layers": {0: None}, "decode_sparse_plan_ready": work}
-        AttentionV41FP8._begin_forward(SimpleNamespace(layer_id=0, _shared_attention=shared))
+        AttentionV41FP8._begin_forward(
+            SimpleNamespace(layer_id=0, _shared_attention=shared)
+        )
         work.wait.assert_called_once()
         self.assertNotIn("decode_sparse_plan_ready", shared)
         self.assertNotIn("decode_sparse_plan", shared)
@@ -90,43 +102,68 @@ class SparsePlanOverlapCPU(unittest.TestCase):
         lengths = torch.empty(2, dtype=torch.int32)
         flags = torch.empty_like(candidates)
         valid_requests = torch.ones(2, dtype=torch.bool)
-        shared = {"candidates": candidates, "candidate_mask": Mock(),
-                  "decode_valid_requests": valid_requests}
+        shared = {
+            "candidates": candidates,
+            "candidate_mask": Mock(),
+            "decode_valid_requests": valid_requests,
+        }
         source = SimpleNamespace(
-            layer_id=20, kv_source_layer_id=20, compress_ratio=1,
+            layer_id=20,
+            kv_source_layer_id=20,
+            compress_ratio=1,
             v41_config={"candidate_source_layer_id": 20, "candidate_block_size": 8},
             _shared_attention=shared,
         )
-        keys = SimpleNamespace(pool=SimpleNamespace(shape=(1, 128)),
-                               block_table=table, logical_entries_per_block=128)
+        keys = SimpleNamespace(
+            pool=SimpleNamespace(shape=(1, 128)),
+            block_table=table,
+            logical_entries_per_block=128,
+        )
         current, auxiliary, producer = Mock(), Mock(), Mock()
         plan = sparse.SparseDecodePlan(*(Mock() for _ in range(5)))
-        with patch.dict(os.environ, {"DSV41_OVERLAP_SPARSE_PLAN": "1"}), \
-             patch.dict(overlap._PLAN_STREAMS, {0: auxiliary}, clear=True), \
-             patch.object(overlap, "has_consumer", return_value=True), \
-             patch.object(sparse, "is_supported", return_value=True), \
-             patch.object(sparse, "_plan_candidate_flags", return_value=flags), \
-             patch.object(torch.cuda, "current_stream", return_value=current), \
-             patch.object(torch.cuda, "device", return_value=nullcontext()), \
-             patch.object(torch.cuda, "stream", return_value=nullcontext()), \
-             patch.object(torch.cuda, "is_current_stream_capturing", return_value=False), \
-             patch("rtp_llm.models_py.modules.dsv41.fp8.attention._cuda_device_index",
-                   return_value=0), \
-             patch.object(sparse, "make_plan", return_value=plan) as planner:
-            overlap.start_plan(source, keys, lengths, query_len=6, producer_stream=producer)
-            self.assertEqual(auxiliary.wait_stream.call_args_list,
-                             [call(current), call(producer)])
+        with patch.dict(os.environ, {"DSV41_OVERLAP_SPARSE_PLAN": "1"}), patch.dict(
+            overlap._PLAN_STREAMS, {0: auxiliary}, clear=True
+        ), patch.object(overlap, "has_consumer", return_value=True), patch.object(
+            sparse, "is_supported", return_value=True
+        ), patch.object(
+            sparse, "_plan_candidate_flags", return_value=flags
+        ), patch.object(
+            torch.cuda, "current_stream", return_value=current
+        ), patch.object(
+            torch.cuda, "device", return_value=nullcontext()
+        ), patch.object(
+            torch.cuda, "stream", return_value=nullcontext()
+        ), patch.object(
+            torch.cuda, "is_current_stream_capturing", return_value=False
+        ), patch(
+            "rtp_llm.models_py.modules.dsv41.fp8.attention._cuda_device_index",
+            return_value=0,
+        ), patch.object(
+            sparse, "make_plan", return_value=plan
+        ) as planner:
+            overlap.start_plan(
+                source, keys, lengths, query_len=6, producer_stream=producer
+            )
+            self.assertEqual(
+                auxiliary.wait_stream.call_args_list, [call(current), call(producer)]
+            )
             planner.assert_called_once_with(
-                candidates, lengths, table, query_len=6,
+                candidates,
+                lengths,
+                table,
+                query_len=6,
                 candidate_mask=shared["candidate_mask"],
                 valid_requests=valid_requests,
+                request_ids=None,
             )
             work = shared["decode_sparse_plan_ready"]
             self.assertIs(work.inputs[-1], valid_requests)
             self.assertIs(work.plan, plan)
             current.wait_stream.assert_not_called()
             # Publication is once per forward; consumers join only when needed.
-            overlap.start_plan(source, keys, lengths, query_len=6, producer_stream=producer)
+            overlap.start_plan(
+                source, keys, lengths, query_len=6, producer_stream=producer
+            )
             self.assertEqual(planner.call_count, 1)
             overlap.wait_plan(shared)
             self.assertIs(shared["decode_sparse_plan"], plan)
@@ -134,11 +171,30 @@ class SparsePlanOverlapCPU(unittest.TestCase):
             self.assertEqual(work.inputs, ())
             self.assertNotIn("decode_sparse_plan_ready", shared)
 
+            global_stream = Mock()
+            overlap.start_plan(
+                source,
+                keys,
+                lengths,
+                query_len=6,
+                producer_stream=producer,
+                stream=global_stream,
+            )
+            self.assertIs(shared["decode_sparse_plan_ready"].auxiliary, global_stream)
+            self.assertEqual(
+                global_stream.wait_stream.call_args_list,
+                [call(current), call(producer)],
+            )
+            overlap.wait_plan(shared)
+            current.wait_stream.assert_called_with(global_stream)
+
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class SparsePlanOverlapCUDA(unittest.TestCase):
     def test_eager_and_graph_refresh_all_four_consumers(self):
-        if not sparse.is_supported(torch.empty(1, 2048, device="cuda", dtype=torch.int32)):
+        if not sparse.is_supported(
+            torch.empty(1, 2048, device="cuda", dtype=torch.int32)
+        ):
             self.skipTest("SM10x and native paged Sparse MQA required")
         torch.manual_seed(7301)
         batch, query_len, capacity = 2, 3, 32768
@@ -147,18 +203,29 @@ class SparsePlanOverlapCUDA(unittest.TestCase):
         keys = indexer.DecodeIndexerKeys(pool, table, capacity, 128)
         shared = {"layers": {0: None}}
         first = SimpleNamespace(layer_id=0, _shared_attention=shared)
-        config = dict(candidate_source_layer_id=20, candidate_topk_blocks=2048,
-                      candidate_block_size=8)
-        source_layer = SimpleNamespace(layer_id=20, kv_source_layer_id=20,
-                                       compress_ratio=1, v41_config=config,
-                                       _shared_attention=shared)
-        positions = torch.tensor([20000, 20001, 20002, 30000, 30001, 30002], device="cuda")
+        config = dict(
+            candidate_source_layer_id=20,
+            candidate_topk_blocks=2048,
+            candidate_block_size=8,
+        )
+        source_layer = SimpleNamespace(
+            layer_id=20,
+            kv_source_layer_id=20,
+            compress_ratio=1,
+            v41_config=config,
+            _shared_attention=shared,
+        )
+        positions = torch.tensor(
+            [20000, 20001, 20002, 30000, 30001, 30002], device="cuda"
+        )
         source = torch.randn(rows, capacity, device="cuda")
         producer = torch.cuda.Stream()
         x = torch.randn(batch, query_len, 32, device="cuda", dtype=torch.bfloat16)
         qr = torch.randn(batch, query_len, 16, device="cuda", dtype=torch.bfloat16)
-        frequencies = torch.polar(torch.ones(capacity, 32, device="cuda"),
-                                  torch.randn(capacity, 32, device="cuda"))
+        frequencies = torch.polar(
+            torch.ones(capacity, 32, device="cuda"),
+            torch.randn(capacity, 32, device="cuda"),
+        )
         layers = []
         for layer_id in (24, 28, 32, 36):
             layer = AttentionV41FP8.__new__(AttentionV41FP8)
@@ -170,8 +237,12 @@ class SparsePlanOverlapCUDA(unittest.TestCase):
             layer.index_n_heads, layer.index_head_dim, layer.index_topk = 32, 128, 512
             layer.rope_head_dim = 64
             layer._shared_attention, layer.v41_config = shared, config
-            layer.index_wq = torch.nn.Linear(16, 4096, bias=False, device="cuda", dtype=torch.bfloat16)
-            layer.index_weights = torch.randn(32, 32, device="cuda", dtype=torch.bfloat16)
+            layer.index_wq = torch.nn.Linear(
+                16, 4096, bias=False, device="cuda", dtype=torch.bfloat16
+            )
+            layer.index_weights = torch.randn(
+                32, 32, device="cuda", dtype=torch.bfloat16
+            )
             layer.freqs_cis = frequencies
             layers.append(layer)
             shared["layers"][layer_id] = layer
@@ -182,38 +253,63 @@ class SparsePlanOverlapCUDA(unittest.TestCase):
             lengths = (positions + 1).int()
             # Exercise the real FULL candidate producer, which returns before
             # the auxiliary stream's candidate/flag writes have completed.
-            from rtp_llm.models_py.modules.dsv41.fp8.decode.full_overlap import FullDecodeWork
+            from rtp_llm.models_py.modules.dsv41.fp8.decode.full_overlap import (
+                FullDecodeWork,
+            )
 
             current = torch.cuda.current_stream()
-            work = FullDecodeWork(current, current, producer)
-            candidates, flags = work.select_candidates(source, lengths, 8, 2048, complete=True)
+            work = FullDecodeWork(current, producer)
+            work.fork()
+            candidates, flags = work.select_candidates(
+                source, lengths, 8, 2048, complete=True
+            )
             shared["candidates"] = candidates
             shared["candidate_mask"] = (candidates, flags, 8, "sorted_prefix")
-            overlap.start_plan(
-                source_layer, keys, lengths, query_len=query_len,
+            plan_work = overlap.start_plan(
+                source_layer,
+                keys,
+                lengths,
+                query_len=query_len,
                 producer_stream=producer,
+                stream=producer,
             )
+            if plan_work is not None:
+                work.handoff_candidates(plan_work)
             self.assertEqual("decode_sparse_plan_ready" in shared, expect_async)
             # Independent main-stream work between publication and consumption.
-            scratch = torch.mm(qr.reshape(rows, 16).float(), qr.reshape(rows, 16).float().T)
+            scratch = torch.mm(
+                qr.reshape(rows, 16).float(), qr.reshape(rows, 16).float().T
+            )
             work.finish()
             self.assertEqual("decode_sparse_plan_ready" in shared, expect_async)
-            outputs = [layer._select_indices_decode(x, qr, positions) for layer in layers]
+            outputs = [
+                layer._select_indices_decode(x, qr, positions) for layer in layers
+            ]
             self.assertNotIn("decode_sparse_plan_ready", shared)
             return outputs, candidates, shared["decode_sparse_plan"], scratch
 
         def check(result):
             outputs, candidates, plan, _ = result
-            reference = sparse.make_plan(candidates, positions + 1, table, query_len=query_len)
+            reference = sparse.make_plan(
+                candidates, positions + 1, table, query_len=query_len
+            )
             for actual, expected in zip(plan[:4], reference[:4]):
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
             for layer, actual in zip(layers, outputs):
                 q = layer.index_wq(qr).view(batch, query_len, 32, 128)
                 weights = torch.nn.functional.linear(x, layer.index_weights)
-                expected = sparse.select_decode(q, weights, frequencies, positions, pool,
-                                                reference, rope_head_dim=64)
-                torch.testing.assert_close(actual.sort(-1).values, expected.sort(-1).values,
-                                           rtol=0, atol=0)
+                expected = sparse.select_decode(
+                    q,
+                    weights,
+                    frequencies,
+                    positions,
+                    pool,
+                    reference,
+                    rope_head_dim=64,
+                )
+                torch.testing.assert_close(
+                    actual.sort(-1).values, expected.sort(-1).values, rtol=0, atol=0
+                )
 
         with torch.no_grad(), patch.dict(os.environ):
             # Exercise the production default, not an explicit opt-in.

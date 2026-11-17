@@ -28,13 +28,13 @@ class _TableSnapshot:
 
 
 class _LookupStream:
-    def __init__(self, embedding, device):
+    def __init__(self, embedding, device, stream):
         self.embedding = embedding
         self.uva = embedding._uva
         self.pinned = embedding._pinned
         self.storage = getattr(embedding, "_external_storage", None)
         self.device_scale_lease = embedding._device_scale_resources()
-        self.stream = torch.cuda.Stream(device=device, priority=0)
+        self.stream = stream
         # An external record node also updates the event on graph replay.
         # Host-table unregister must wait for actual reads, not capture time.
         self.done = torch.cuda.Event(external=True)
@@ -51,7 +51,7 @@ class _LookupStream:
         )
 
 
-def prepare(module):
+def prepare(module, model=None):
     """Prepare the selected attention schedule without allocating during capture."""
     if not enabled():
         return None
@@ -65,7 +65,7 @@ def prepare(module):
         or not 0 <= index < len(layout.layer_ids)
     ):
         return None
-    return prepare_module(module, layout.layer_ids[index])
+    return prepare_module(module, layout.layer_ids[index], model=model)
 
 
 class _GraphTables:

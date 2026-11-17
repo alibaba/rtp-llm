@@ -2874,7 +2874,6 @@ class AttentionV41FP8(AttentionFP8):
             # Our QB epilogue already produced RoPE/FP4 and scaled weights.
             # Keep the upstream query contract without repeating those kernels.
             if overlap is not None:
-                overlap.wait_indexer()
                 weights = overlap.weights
             else:
                 weights = (
@@ -2924,7 +2923,6 @@ class AttentionV41FP8(AttentionFP8):
             )
         q = index_q.view(T, self.index_n_heads, self.index_head_dim)
         if overlap is not None:
-            overlap.wait_indexer()
             weights = overlap.weights
         else:
             weights = (
@@ -3008,6 +3006,12 @@ class AttentionV41FP8(AttentionFP8):
         candidate_blocks = int(config.get("candidate_topk_blocks", 0))
         candidate_size = int(config.get("candidate_block_size", 0))
         candidates = shared.get("candidates")
+        if self.layer_id > candidate_source and "decode_sparse_plan_ready" in shared:
+            # The planner owns the candidate writes until the next indexer.
+            # Dense fallback consumers also need the producer to have joined.
+            from .decode.sparse_plan_overlap import wait_plan
+
+            wait_plan(shared)
         if (
             getattr(self, "decode_sparse_mqa", False)
             and paged
@@ -3027,9 +3031,6 @@ class AttentionV41FP8(AttentionFP8):
                 and keys.logical_entries_per_block == 128
                 and sparse_decode.is_supported(candidates)
             ):
-                from .decode.sparse_plan_overlap import wait_plan
-
-                wait_plan(shared)
                 plan = shared.get("decode_sparse_plan")
                 if plan is None:
                     with record_function_range("dsv41.decode.sparse_mqa_plan"):
@@ -3066,8 +3067,6 @@ class AttentionV41FP8(AttentionFP8):
             else (positions + 1) // self.compress_ratio
         )
         if paged:
-            if overlap is not None:
-                overlap.wait_global()
             all_logits = decode_indexer.score_decode_indexer(
                 q,
                 weights.view(B, S, self.index_n_heads),
@@ -3145,8 +3144,22 @@ class AttentionV41FP8(AttentionFP8):
             ):
                 # DeepGEMM already returned rows for all B*S tokens. Keep the
                 # selection batched instead of launching once per request.
+                output = None
+                token_options = (
+                    {"slot_plan": slot_plan} if slot_plan is not None else {}
+                )
                 if candidates is not None:
                     if publish:
+                        if overlap is not None:
+                            # Both top-k branches read the same scored logits.
+                            # Keep token selection on the main replay path.
+                            overlap.fork()
+                            output = decode_topk.select_tokens(
+                                all_logits,
+                                visible_i32,
+                                self.index_topk,
+                                **token_options,
+                            )
                         select_candidates = (
                             decode_topk.select_candidates
                             if overlap is None
@@ -3178,7 +3191,7 @@ class AttentionV41FP8(AttentionFP8):
 
                         # Reuse the source's int32 lengths; plan/metadata need
                         # no data produced by the later reindex layer.
-                        start_plan(
+                        plan_work = start_plan(
                             self,
                             keys,
                             visible_i32,
@@ -3186,7 +3199,10 @@ class AttentionV41FP8(AttentionFP8):
                             producer_stream=(
                                 None if overlap is None else overlap.auxiliary
                             ),
+                            stream=None if overlap is None else overlap.auxiliary,
                         )
+                        if plan_work is not None and overlap is not None:
+                            overlap.handoff_candidates(plan_work)
                     elif candidate_source >= 0 and self.layer_id > candidate_source:
                         if cached_mask[1] is None:
                             # Sparse consumers never need a bitmap. A dense
@@ -3205,12 +3221,10 @@ class AttentionV41FP8(AttentionFP8):
                         decode_topk.mask_candidates(
                             all_logits, cached_mask[1], candidate_size
                         )
-                output = decode_topk.select_tokens(
-                    all_logits,
-                    visible_i32,
-                    self.index_topk,
-                    **({"slot_plan": slot_plan} if slot_plan is not None else {}),
-                )
+                if output is None:
+                    output = decode_topk.select_tokens(
+                        all_logits, visible_i32, self.index_topk, **token_options
+                    )
                 shared["topk"] = {self.layer_id: output}
                 return output
             # The batched chain above reads only length-bounded columns, so

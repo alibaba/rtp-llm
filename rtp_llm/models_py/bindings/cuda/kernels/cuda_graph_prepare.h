@@ -26,7 +26,7 @@ struct CudaGraphPrepareReplay {
 };
 
 #if USING_CUDA
-cudaGraphNode_t addCudaGraphPrepareNode(cudaGraph_t graph);
+cudaGraphNode_t addCudaGraphPrepareNode(cudaGraph_t graph, cudaGraphNode_t independent_root = nullptr);
 cudaGraphNode_t addIndependentCudaGraphPrepareNode(cudaGraph_t graph);
 void            disableCudaGraphPrepareReplay(const CudaGraphPrepareReplay& replay);
 #endif

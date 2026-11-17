@@ -208,13 +208,16 @@ cudaGraphNode_t addIndependentCudaGraphPrepareNode(cudaGraph_t graph) {
     return node;
 }
 
-cudaGraphNode_t addCudaGraphPrepareNode(cudaGraph_t graph) {
+cudaGraphNode_t addCudaGraphPrepareNode(cudaGraph_t graph, cudaGraphNode_t independent_root) {
     size_t count = 0;
     C10_CUDA_CHECK(cudaGraphGetRootNodes(graph, nullptr, &count));
     std::vector<cudaGraphNode_t> roots(count);
     C10_CUDA_CHECK(cudaGraphGetRootNodes(graph, roots.data(), &count));
     const auto node = addIndependentCudaGraphPrepareNode(graph);
     for (auto root : roots) {
+        if (root == independent_root) {
+            continue;
+        }
 #if CUDART_VERSION >= 13000
         C10_CUDA_CHECK(cudaGraphAddDependencies(graph, &node, &root, nullptr, 1));
 #else

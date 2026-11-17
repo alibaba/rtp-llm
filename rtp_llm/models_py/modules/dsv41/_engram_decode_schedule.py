@@ -43,8 +43,8 @@ def _eligible(module):
 
 
 class _ScheduleStream(prefetch._LookupStream):
-    def __init__(self, module, target):
-        super().__init__(module.embed_tokens, module.q_weight.device)
+    def __init__(self, module, target, stream):
+        super().__init__(module.embed_tokens, module.q_weight.device, stream)
         self.target = target
         self.grid = min(
             L1_GRID if target == 1 else L14_GRID, module.embed_tokens._num_sms
@@ -52,7 +52,7 @@ class _ScheduleStream(prefetch._LookupStream):
         self.ready = False
 
 
-def prepare_module(module, target):
+def prepare_module(module, target, *, model=None):
     """Warm shape-independent kernels on private buffers outside capture."""
     if not prefetch.enabled() or target not in (1, 14) or not _eligible(module):
         return None
@@ -65,7 +65,14 @@ def prepare_module(module, target):
         return state if state.ready else None
     if torch.cuda.is_current_stream_capturing():
         return None
-    state = _ScheduleStream(module, target)
+    # L1 is consumed before L14 starts. Share their queue within one model,
+    # while each table generation retains its own external completion event.
+    owner = module if model is None else model
+    device = module.q_weight.device
+    streams = vars(owner).setdefault("_engram_decode_lookup_streams", {})
+    if device not in streams:
+        streams[device] = torch.cuda.Stream(device=device)
+    state = _ScheduleStream(module, target, streams[device])
     state.stream.wait_stream(torch.cuda.current_stream(module.q_weight.device))
     try:
         with module.embed_tokens.lookup_guard(), torch.cuda.stream(state.stream):
@@ -104,12 +111,13 @@ class _ScheduledWork:
         self.tokens = ids.shape[0]
         self.pieces = partition_tokens(self.tokens)
         self.current = torch.cuda.current_stream(ids.device)
+        self.capturing = torch.cuda.is_current_stream_capturing()
         self.outputs = direct.allocate_outputs(ids)
         self.rows = self.outputs.pair()
         self.next_token = self.epoch = 0
         self.joined = {}
 
-    def launch(self, start, count):
+    def launch(self, start, count, *, ready=None):
         if start != self.next_token or count < 0 or start + count > self.tokens:
             raise RuntimeError(
                 "Scheduled lookup slices must cover the request in order"
@@ -121,13 +129,16 @@ class _ScheduledWork:
         embedding = self.module.embed_tokens
         if not self.state.matches(embedding):
             raise RuntimeError("Scheduled lookup table generation changed")
-        if torch.cuda.is_current_stream_capturing():
+        if self.capturing:
             from .engram import _DeviceScaleCapturePermit
 
             _DeviceScaleCapturePermit.require(
                 embedding, embedding._device_scale_resources()
             )
-        self.state.stream.wait_stream(torch.cuda.current_stream(self.ids.device))
+        if ready is None:
+            self.state.stream.wait_stream(torch.cuda.current_stream(self.ids.device))
+        else:
+            self.state.stream.wait_event(ready)
         for tensor in (self.ids, *self.rows):
             tensor.record_stream(self.state.stream)
         # Even a failed enqueue must be drained by the enclosing plan's close.
@@ -180,9 +191,26 @@ class _AttentionHook:
     def __init__(self, plan, layer, target):
         self.plan, self.layer, self.target = plan, layer, target
         self.entered = self.pre_seen = self.core_seen = self.core_finished = False
+        self.pending_slice = None
 
     def _work(self):
         return self.plan.scheduled.get(self.target)
+
+    def _start_slice(self, work, piece):
+        start, count = work.pieces[(self.layer - 10) * 2 + piece]
+        if count and work.capturing:
+            # Keep the fork at the window entrance, but capture the main
+            # branch first so replay can reuse a queue across all windows.
+            ready = torch.cuda.current_stream(work.ids.device).record_event()
+            self.pending_slice = (start, count, ready)
+        else:
+            work.launch(start, count)
+
+    def _submit_pending_slice(self, work):
+        if self.pending_slice is not None:
+            start, count, ready = self.pending_slice
+            self.pending_slice = None
+            work.launch(start, count, ready=ready)
 
     def before_attention(self):
         if self.entered:
@@ -190,7 +218,8 @@ class _AttentionHook:
         self.entered = True
 
     def before_projection(self, native_core):
-        if self.target != 14 or self._work() is None:
+        work = self._work()
+        if self.target != 14 or work is None:
             return
         if not self.entered or self.pre_seen:
             raise RuntimeError("Unexpected scheduled attention projection boundary")
@@ -198,8 +227,7 @@ class _AttentionHook:
             self.plan.cancel(self.target)
             return
         self.pre_seen = True
-        work = self._work()
-        work.launch(*work.pieces[(self.layer - 10) * 2])
+        self._start_slice(work, 0)
 
     def before_core(self):
         work = self._work()
@@ -208,6 +236,7 @@ class _AttentionHook:
         if not self.pre_seen or self.core_seen:
             raise RuntimeError("Unexpected scheduled attention core boundary")
         self.core_seen = True
+        self._submit_pending_slice(work)
         work.wait(torch.cuda.current_stream())
 
     def after_core(self):
@@ -217,20 +246,22 @@ class _AttentionHook:
         if not self.core_seen or self.core_finished:
             raise RuntimeError("Scheduled attention core completion was repeated")
         self.core_finished = True
-        work.launch(*work.pieces[(self.layer - 10) * 2 + 1])
+        self._start_slice(work, 1)
 
     def after_attention(self):
         try:
-            if (
-                self._work() is not None
-                and self.target == 14
-                and not self.core_finished
-            ):
-                raise RuntimeError("Scheduled lookup missed the native attention core")
+            work = self._work()
+            if work is not None:
+                if self.target == 14 and not self.core_finished:
+                    raise RuntimeError(
+                        "Scheduled lookup missed the native attention core"
+                    )
+                self._submit_pending_slice(work)
         finally:
             self.abort()
 
     def abort(self):
+        self.pending_slice = None
         work = self._work()
         if work is not None:
             work.wait(torch.cuda.current_stream())
@@ -242,6 +273,7 @@ class DecodeEngramSchedule:
     def __init__(self, owner, model, metadata):
         self.owner = owner
         self.scheduled, self.targets, self.bindings = {}, {}, []
+        self.metadata = self.l1_hook = None
         tokens = metadata.batch_size * metadata.q_len_per_req
         # Engram.forward slices larger inputs into new ID views. Keep that
         # bounded serial consumer instead of publishing a whole-request pair.
@@ -279,14 +311,22 @@ class DecodeEngramSchedule:
                     for a in attentions
                 ):
                     continue
-                state = prepare_module(module, target)
+                state = prepare_module(module, target, model=model)
                 if state is None:
                     continue
+                if self.metadata is None:
+                    self.metadata = metadata
+                    self.previous_stream = getattr(
+                        metadata, "_engram_lookup_stream", None
+                    )
+                    metadata._engram_lookup_stream = state.stream
                 self.targets[target] = (module, ids, state)
                 if torch.cuda.is_current_stream_capturing():
                     metadata._engram_decode_tables.entries += ((target, module, state),)
                 for index, attn in zip(producers, attentions):
                     hook = _AttentionHook(self, index, target)
+                    if target == 1:
+                        self.l1_hook = hook
                     self._bind(attn, hook)
                     if target == 14:
                         self._bind(attn._mega_attention, hook)
@@ -318,7 +358,16 @@ class DecodeEngramSchedule:
         self.scheduled[target] = work
         module._lookup_work = work
         if target == 1:
-            work.launch(0, ids.shape[0])
+            if work.capturing:
+                # Record the hash-only fork before the C++ verify callback
+                # adds the metadata dependency to the main capture stream.
+                self.l1_hook.pending_slice = (
+                    0,
+                    ids.shape[0],
+                    work.current.record_event(),
+                )
+            else:
+                work.launch(0, ids.shape[0])
 
     def cancel(self, target):
         work = self.scheduled.get(target)
@@ -329,10 +378,14 @@ class DecodeEngramSchedule:
             del self.scheduled[target]
 
     def close(self):
+        if self.metadata is not None:
+            self.metadata._engram_lookup_stream = self.previous_stream
+            self.metadata = None
         for module, existed, previous in reversed(self.bindings):
             if existed:
                 module._engram_lookup_schedule = previous
             else:
                 delattr(module, "_engram_lookup_schedule")
+        self.l1_hook = None
         self.bindings.clear()
         self.scheduled.clear()

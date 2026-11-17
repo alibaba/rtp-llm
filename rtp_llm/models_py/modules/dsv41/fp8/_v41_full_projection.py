@@ -40,7 +40,7 @@ def prepare(attn):
             target.copy_(source)
 
 
-def project(attn, x):
+def project(attn, x, *, defer_head_cast=False):
     weight = getattr(attn, "_full_projection_weight", None)
     if weight is None or weight.device != x.device:
         return None
@@ -49,6 +49,8 @@ def project(attn, x):
     projected = _linear_bf16_bf16_fp32(x.view(-1, 5120), weight)
     values = projected[:, :512]
     scores = projected[:, 512:1024] if attn.compress_ratio == 2 else values
-    # Preserve F.linear's BF16 head-weight boundary before indexer scaling.
-    heads = projected[:, -32:].to(torch.bfloat16)
+    # The overlap path casts after issuing its independent KV writes.
+    heads = projected[:, -32:]
+    if not defer_head_cast:
+        heads = heads.to(torch.bfloat16)
     return values, scores, heads

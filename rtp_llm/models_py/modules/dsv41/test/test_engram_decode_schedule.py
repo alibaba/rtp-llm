@@ -13,7 +13,7 @@ import weakref
 from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 import torch
 
@@ -126,7 +126,9 @@ class DecodeScheduleCPU(unittest.TestCase):
                 with patch.object(torch.cuda, "Stream"), patch.object(
                     torch.cuda, "Event"
                 ):
-                    state = prefetch._LookupStream(embedding, torch.device("cuda:0"))
+                    state = prefetch._LookupStream(
+                        embedding, torch.device("cuda:0"), torch.cuda.Stream()
+                    )
                 embedding._external_storage.register_lookup_event.assert_called_once_with(
                     state.done
                 )
@@ -282,6 +284,37 @@ class DecodeScheduleCPU(unittest.TestCase):
                 self.assertEqual(whole.call_count, int(supported))
                 self.assertEqual(slices.call_count, 6)
 
+    def test_verify_capture_records_l1_from_hash_event_after_l0_attention(self):
+        with ExitStack() as stack:
+            main, whole, _ = self.mock_cuda(stack)
+            model = cpu_model(16)
+            plan = prefetch.DecodeEngramPrefetch(
+                model, SimpleNamespace(batch_size=4, q_len_per_req=4)
+            )
+            stack.callback(plan.close)
+            stack.enter_context(
+                patch.object(
+                    torch.cuda, "is_current_stream_capturing", return_value=True
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "rtp_llm.models_py.modules.dsv41.engram._DeviceScaleCapturePermit.require"
+                )
+            )
+            side = model.layers[1].engram._decode_scheduled_stream.stream
+
+            def forked():
+                main.record_event.assert_called_once_with()
+                whole.assert_not_called()
+
+            plan.start_verify_lookup(forked)
+            plan.before_layer(0)
+            model.layers[0].attn.forward_decode(whole.assert_not_called)
+            side.wait_event.assert_called_once_with(main.record_event.return_value)
+            whole.assert_called_once()
+            main.wait_stream.assert_called_once_with(side)
+
     def test_empty_and_chunked_consumer_buckets_remain_serial(self):
         for tokens in (0, 32769):
             with ExitStack() as stack:
@@ -316,6 +349,46 @@ class DecodeScheduleCPU(unittest.TestCase):
                 self.assertEqual(slices.call_count, 2)
             finally:
                 plan.close()
+
+    def test_capture_forks_each_slice_before_projection_and_joins_after_it(self):
+        with ExitStack() as stack:
+            main, _, slices = self.mock_cuda(stack)
+            model = cpu_model(16)
+            plan = prefetch.DecodeEngramPrefetch(
+                model, SimpleNamespace(batch_size=4, q_len_per_req=4)
+            )
+            stack.callback(plan.close)
+            hook = model.layers[10].attn._engram_lookup_schedule
+            side = model.layers[14].engram._decode_scheduled_stream.stream
+            pre, post = object(), object()
+            main.record_event.side_effect = [pre, post]
+            stack.enter_context(
+                patch.object(
+                    torch.cuda, "is_current_stream_capturing", return_value=True
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "rtp_llm.models_py.modules.dsv41.engram."
+                    "_DeviceScaleCapturePermit.require"
+                )
+            )
+            plan.before_layer(10)
+            hook.before_attention()
+            hook.before_projection(True)
+            main.record_event.assert_called_once_with()
+            slices.assert_not_called()
+            hook.before_core()
+            side.wait_event.assert_called_once_with(pre)
+            self.assertEqual(slices.call_args.args[4:6], (0, 2))
+            main.wait_stream.assert_called_once_with(side)
+            hook.after_core()
+            self.assertEqual(main.record_event.call_count, 2)
+            self.assertEqual(slices.call_count, 1)
+            hook.after_attention()
+            self.assertEqual(side.wait_event.call_args_list, [call(pre), call(post)])
+            self.assertEqual(slices.call_args.args[4:6], (2, 2))
+            self.assertEqual(main.wait_stream.call_args_list, [call(side), call(side)])
 
     def test_enqueue_failure_and_failed_join_restore_hooks(self):
         for fail_join in (False, True):
@@ -626,6 +699,13 @@ class DecodeScheduleCUDA(unittest.TestCase):
         metadata = SimpleNamespace(batch_size=3, q_len_per_req=6)
         _, active = self.run_model(inputs, metadata)
         self.assertEqual(active, {1, 14})
+        first, later = (
+            self.model.layers[target].engram._decode_scheduled_stream
+            for target in (1, 14)
+        )
+        self.assertEqual(first.stream, later.stream)
+        self.assertIsNot(first.done, later.done)
+        self.assertIsNone(metadata._engram_lookup_stream)
         graph = torch.cuda.CUDAGraph()
         try:
             with torch.cuda.graph(graph):
