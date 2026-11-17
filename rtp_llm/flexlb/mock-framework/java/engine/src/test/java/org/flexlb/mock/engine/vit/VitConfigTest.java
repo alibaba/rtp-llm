@@ -2,6 +2,7 @@ package org.flexlb.mock.engine.vit;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.net.URI;
 import java.util.*;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
@@ -75,6 +76,29 @@ class VitConfigTest {
         for (int i = 0; i < 257; i++) inputs.addMultimodalInputs(image);
         assertDoesNotThrow(() -> VitGeometry.validate(inputs.build(), true));
         assertTrue(VitGeometry.plan(40000, 40000, 14, 3, 0, 1024).rows() <= 1024);
+    }
+
+    @Test void ossEndpointRulesPreserveSignedUrlsAndUseRealEnvironmentNames() throws Exception {
+        var publicUrl = URI.create("https://bucket.oss-cn-shanghai.aliyuncs.com:443/a%2Fb?signature=%2B%2F");
+        var internalUrl = URI.create("https://bucket.oss-cn-shanghai-internal.aliyuncs.com:443/a%2Fb?signature=%2B%2F");
+        var defaults = VitConfig.load(root()).downloadRouting();
+        assertEquals("https://bucket.cn-shanghai.oss.aliyuncs.com:443/a%2Fb?signature=%2B%2F",
+            defaults.endpoint(publicUrl).toString());
+
+        var allowed = VitConfig.fromEnvironment("vit-0", env(14, 4096, Map.of(
+            "OSS_INTERNAL_REGION_ALLOWLIST", "[\"cn-shanghai\"]",
+            "INTL_PROXY_MAP", "{\"cn-shanghai\":\"http://example.com:1234\"}"))).downloadRouting();
+        assertEquals(1234, allowed.proxies().get("cn-shanghai").getPort());
+        assertEquals(internalUrl, allowed.endpoint(internalUrl));
+
+        var empty = VitConfig.fromEnvironment("vit-0", env(14, 4096, Map.of(
+            "OSS_INTERNAL_REGION_ALLOWLIST", "[]"))).downloadRouting();
+        assertEquals(publicUrl, empty.endpoint(internalUrl));
+        var disabled = VitConfig.fromEnvironment("vit-0", env(14, 4096, Map.of(
+            "OSS_INTERNAL_REGION_ALLOWLIST", "[]", "ENABLE_OSS_INTERNAL_REWRITE", "0"))).downloadRouting();
+        assertEquals(internalUrl, disabled.endpoint(internalUrl));
+        var unrelated = URI.create("https://example.org/oss-cn-shanghai-internal.aliyuncs.com");
+        assertEquals(unrelated, empty.endpoint(unrelated));
     }
 
     private ObjectNode root() {

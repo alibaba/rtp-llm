@@ -131,6 +131,12 @@ Mock 的 WorkerStatus 上报 Prefill TP 为 CP size、Decode TP 为 1、DP 为 1
 
 完整 ENV、默认值和公式变量见 [组件配置参考](component-reference.md#engine-配置规则)。
 
+### Whale Mock ViT 下载
+
+- 使用 `INTL_PROXY_MAP` 配置工作空间地域到 HTTP 代理 URL 的 JSON 对象。Mock V 按 Frontend 传入的 `MultimodalInputsPB.region` 精确匹配，未匹配时直连。代理连接出现非超时的 I/O 异常时回退直连，两条路径共享请求期限。
+- 使用 `OSS_INTERNAL_REGION_ALLOWLIST` 配置可保留 OSS 内网地址的地域（JSON 数组）。空数组会移除所有地域 OSS 地址的 `-internal` 后缀。未配置时，已知的公网 OSS 地址按 Real 默认规则转成集团内网地址。设 `ENABLE_OSS_INTERNAL_REWRITE=0` 可关闭改写。
+- 改写只用于实际下载，图片缓存仍使用原始输入。本地使用 `mock.vit.skip.download: true` 时直接使用输入宽高。
+
 ### Mock Prefill 连接 Real ViT
 
 Mock Prefill 使用请求里的 VIT role 地址。目标不提供 Mock 的 `PrepareImages` 时，Prefill 自动改调原生

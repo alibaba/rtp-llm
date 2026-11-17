@@ -5,11 +5,16 @@ import org.flexlb.mock.protocol.grpc.MockEngineProtocol.ImageSeeds;
 import org.flexlb.mock.protocol.MultimodalProtocol;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpServer;
 import io.grpc.*;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
+import java.net.InetSocketAddress;
 import java.nio.file.*;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.stream.IntStream;
+import javax.imageio.ImageIO;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.engine.grpc.MultimodalRpcServiceGrpc;
 import org.junit.jupiter.api.Test;
@@ -70,6 +75,52 @@ class VitTest {
             .mapToDouble(line -> Double.parseDouble(line.substring(line.lastIndexOf(' ') + 1))).toArray();
         assertTrue(values.length>0,"Missing metric: "+name);
         return Arrays.stream(values).sum();
+    }
+
+    @Test void routesImageDownloadsByRequestRegionAndFallsBackOnProxyFailure() throws Exception {
+        var png = new ByteArrayOutputStream();
+        ImageIO.write(new BufferedImage(56, 28, BufferedImage.TYPE_INT_RGB), "png", png);
+        byte[] image = png.toByteArray();
+        var requests = new LinkedBlockingQueue<String>();
+        var proxy = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        var origin = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        proxy.createContext("/", exchange -> {
+            requests.add("proxy:" + exchange.getRequestURI().getPath());
+            try (exchange) {
+                if (exchange.getRequestURI().getPath().equals("/proxied")) {
+                    exchange.sendResponseHeaders(200, image.length);
+                    exchange.getResponseBody().write(image);
+                }
+            }
+        });
+        origin.createContext("/", exchange -> {
+            requests.add("direct:" + exchange.getRequestURI().getPath());
+            try (exchange) {
+                exchange.sendResponseHeaders(200, image.length);
+                exchange.getResponseBody().write(image);
+            }
+        });
+        proxy.start();
+        origin.start();
+        try (var service = new VitNode.RpcService(config("1", 4096, 4096, 4096, 0, Map.of(
+            "mock.vit.skip.download", false,
+            "INTL_PROXY_MAP", Map.of("cn-shanghai", "http://127.0.0.1:" + proxy.getAddress().getPort()))), new VitMetrics())) {
+            String direct = "http://127.0.0.1:" + origin.getAddress().getPort();
+            var proxied = input("http://image.invalid/proxied").toBuilder().setRegion("cn-shanghai").build();
+            VitTest.<MultimodalOutputPB>response(out -> service.remoteMultimodalEmbedding(proxied, out)).get(5, TimeUnit.SECONDS);
+            var unknown = input(direct + "/unmapped").toBuilder().setRegion("cn-beijing").build();
+            VitTest.<MultimodalOutputPB>response(out -> service.remoteMultimodalEmbedding(unknown, out)).get(5, TimeUnit.SECONDS);
+            var fallback = input(direct + "/fallback").toBuilder().setRegion("cn-shanghai").build();
+            VitTest.<MultimodalOutputPB>response(out -> service.remoteMultimodalEmbedding(fallback, out)).get(5, TimeUnit.SECONDS);
+
+            assertEquals("proxy:/proxied", requests.remove());
+            assertEquals("direct:/unmapped", requests.remove());
+            assertEquals("proxy:/fallback", requests.remove());
+            assertTrue(requests.contains("direct:/fallback"));
+        } finally {
+            proxy.stop(0);
+            origin.stop(0);
+        }
     }
 
     @Test void consumersCannotCompleteSharedCacheOrForwardResults() throws Exception {

@@ -2,6 +2,8 @@ package org.flexlb.mock.engine.vit;
 
 import io.grpc.Status;
 import java.io.*;
+import java.net.InetSocketAddress;
+import java.net.ProxySelector;
 import java.net.URI;
 import java.net.http.*;
 import java.nio.*;
@@ -23,8 +25,8 @@ final class VitPreparation implements AutoCloseable {
     private final VitScheduler scheduler;
     private final VitMetrics metrics;
     private final ThreadPoolExecutor workers;
-    private final HttpClient client=HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5))
-        .followRedirects(HttpClient.Redirect.ALWAYS).build();
+    private final HttpClient direct = httpClient(null);
+    private final Map<InetSocketAddress, HttpClient> proxies = new HashMap<>();
     private final Set<Task> tasks=ConcurrentHashMap.newKeySet();
     private final java.util.concurrent.atomic.AtomicInteger preparing = new java.util.concurrent.atomic.AtomicInteger();
 
@@ -32,6 +34,9 @@ final class VitPreparation implements AutoCloseable {
 
     VitPreparation(VitConfig config,VitCache cache,VitScheduler scheduler,VitMetrics metrics) {
         this.config=config; this.cache=cache; this.scheduler=scheduler; this.metrics=metrics;
+        if (!config.skipDownload()) {
+            config.downloadRouting().proxies().values().forEach(address -> proxies.computeIfAbsent(address, VitPreparation::httpClient));
+        }
         // The task set bounds queued + active media, including result publication.
         workers=new ThreadPoolExecutor(config.concurrency(),config.concurrency(),0,TimeUnit.SECONDS,
             new LinkedBlockingQueue<>(),Thread.ofVirtual().name("vit-prepare-"+config.id()+"-",0).factory());
@@ -40,7 +45,8 @@ final class VitPreparation implements AutoCloseable {
     @Override public void close() {
         synchronized(this) { closed=true; }
         for(var task:tasks) task.cancel();
-        client.shutdownNow();
+        direct.shutdownNow();
+        proxies.values().forEach(HttpClient::shutdownNow);
         for(var queued:workers.shutdownNow()) ((Task)queued).finish(null,Status.UNAVAILABLE.withDescription("V preparation stopped").asRuntimeException());
     }
 
@@ -60,7 +66,7 @@ final class VitPreparation implements AutoCloseable {
         long deadline=System.nanoTime()+TimeUnit.MILLISECONDS.toNanos(timeout);
         RuntimeException rejected=null;
         for(int i=0;i<claims.size();i++) if(claims.get(i).producer()) {
-            var task=new Task(claims.get(i),media.get(i),deadline);
+            var task=new Task(claims.get(i),media.get(i),input.getRegion(),deadline);
             tasks.add(task);
             metrics.events.observe("py_rtp_vit_preprocess_queue_size", preparing.incrementAndGet());
             task.claim.onAbandon(task::cancel);
@@ -76,6 +82,11 @@ final class VitPreparation implements AutoCloseable {
 
     int inflight() { return tasks.size(); }
 
+    private static HttpClient httpClient(InetSocketAddress proxy) {
+        return HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5))
+            .proxy(ProxySelector.of(proxy)).followRedirects(HttpClient.Redirect.ALWAYS).build();
+    }
+
     private void leavePreparation() {
         metrics.events.observe("py_rtp_vit_preprocess_queue_size", preparing.decrementAndGet());
     }
@@ -86,6 +97,7 @@ final class VitPreparation implements AutoCloseable {
     private final class Task implements Runnable {
         private final VitCache.Claim claim;
         private final MultimodalInputPB media;
+        private final String region;
 
         private final long deadline;
 
@@ -96,7 +108,12 @@ final class VitPreparation implements AutoCloseable {
 
         private boolean cancelled,finished,prepared;
 
-        Task(VitCache.Claim claim,MultimodalInputPB media,long deadline) { this.claim=claim; this.media=media; this.deadline=deadline; }
+        Task(VitCache.Claim claim, MultimodalInputPB media, String region, long deadline) {
+            this.claim = claim;
+            this.media = media;
+            this.region = region;
+            this.deadline = deadline;
+        }
 
         @Override public void run() {
             synchronized(this) { if(finished) return; runner=Thread.currentThread(); }
@@ -104,7 +121,7 @@ final class VitPreparation implements AutoCloseable {
             try {
                 check();
                 metrics.started();
-                var image=source.prepare(media,deadline);
+                var image=source.prepare(media,region,deadline);
                 synchronized(this) {
                     check();
                     prepared=true;
@@ -156,7 +173,7 @@ final class VitPreparation implements AutoCloseable {
 
         @Override public void close() { closed=true; var active=request; if(active!=null) active.cancel(true); }
 
-        VitGeometry.Image prepare(MultimodalInputPB media, long deadline) throws IOException {
+        VitGeometry.Image prepare(MultimodalInputPB media, String region, long deadline) throws IOException {
             int width, height;
             String requestKey=MultimodalProtocol.key(media);
             String identity=requestKey;
@@ -164,7 +181,7 @@ final class VitPreparation implements AutoCloseable {
             if(config.skipDownload()) {
                 width=media.getMmPreprocessConfig().getWidth(); height=media.getMmPreprocessConfig().getHeight();
             } else {
-                byte[] bytes=download(media.getMultimodalUrl(),Math.min(deadline,System.nanoTime()+TimeUnit.SECONDS.toNanos(60)));
+                byte[] bytes=download(media.getMultimodalUrl(),region,Math.min(deadline,System.nanoTime()+TimeUnit.SECONDS.toNanos(60)));
                 downloadNanos=System.nanoTime()-started;
                 // This image planner mirrors real DeepSeek V4.1 preprocessing.
                 metrics.events.observe("rtp_llm_vit_image_fetch_rt_us",downloadNanos/1e3,
@@ -191,22 +208,29 @@ final class VitPreparation implements AutoCloseable {
             } catch(NoSuchAlgorithmException error) { throw new AssertionError(error); }
         }
 
-        private byte[] download(String url,long deadline) {
+        private byte[] download(String url,String region,long deadline) {
             URI uri;
             try { uri=URI.create(url); }
             catch(IllegalArgumentException error) { throw MultimodalProtocol.invalid("Invalid image URL"); }
             if(uri.getHost()==null || (!"http".equalsIgnoreCase(uri.getScheme()) && !"https".equalsIgnoreCase(uri.getScheme())))
                 throw MultimodalProtocol.invalid("Image download requires an HTTP(S) URL");
+            uri = config.downloadRouting().endpoint(uri);
+            var proxy = region.isEmpty() ? null : config.downloadRouting().proxies().get(region);
+            HttpClient client = proxy == null ? direct : proxies.get(proxy);
             // DSV4.1 load_image_source caps original media at 10 MiB, even when the generic file limit is disabled.
             final long maxBytes=config.maxFileSizeKb()>0 ? Math.min(10L*1024*1024,config.maxFileSizeKb()*1024L) : 10L*1024*1024;
             for(int attempt=0; ; attempt++) {
                 check(deadline);
                 var message=HttpRequest.newBuilder(uri).timeout(Duration.ofNanos(Math.max(1,deadline-System.nanoTime())));
-                if(config.downloadHeaders().isEmpty()) {
+                if (client != direct) {
+                    message.header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36 DashScopeUserBot/0.1");
+                    message.header("Accept-Encoding", "null");
+                } else if (config.downloadHeaders().isEmpty()) {
                     message.header("User-Agent","Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0");
                     message.header("Accept","text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7");
+                } else {
+                    config.downloadHeaders().forEach(message::setHeader);
                 }
-                config.downloadHeaders().forEach(message::setHeader);
                 var output=new ByteArrayOutputStream();
                 var future=client.sendAsync(message.GET().build(),info->{
                     if(info.headers().firstValueAsLong("Content-Length").orElse(-1)>maxBytes)
@@ -240,6 +264,11 @@ final class VitPreparation implements AutoCloseable {
                     if(cause instanceof io.grpc.StatusRuntimeException status) throw status;
                     check(deadline);
                     if(cause instanceof HttpTimeoutException && !(cause instanceof HttpConnectTimeoutException)) throw Status.DEADLINE_EXCEEDED.withDescription("Image download expired").asRuntimeException();
+                    if (client != direct && cause instanceof IOException && !(cause instanceof HttpTimeoutException)) {
+                        client = direct;
+                        attempt--;
+                        continue;
+                    }
                     if(attempt>=2) throw Status.UNAVAILABLE.withDescription("Image download failed").withCause(cause).asRuntimeException();
                     retryPause(attempt,deadline);
                 } finally { future.cancel(true); request=null; }

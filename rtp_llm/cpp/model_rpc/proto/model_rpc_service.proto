@@ -199,6 +199,8 @@ message MultimodalInputsPB {
     int64 timeout_ms = 4;
     reserved 5;
     reserved "v41_inputs";
+    // Workspace region used by ViT to select a download proxy for this request.
+    string region = 6;
 }
 
 enum TensorDataTypePB {
