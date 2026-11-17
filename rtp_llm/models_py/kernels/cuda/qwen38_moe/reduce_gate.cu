@@ -1,21 +1,36 @@
 // SPDX-License-Identifier: Apache-2.0
-// Build with CUDA 13.2 and matching NCCL 2.28 or newer headers and runtime.
+#include "rtp_llm/models_py/kernels/cuda/qwen38_moe/reduce_gate.h"
+
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <nccl.h>
 #include <nccl_device.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
+
+// Older images still need to load the rest of the compute extension.
+// Probe the optional APIs before any rank enters the LSA communicator.
+#pragma weak ncclCommWindowRegister
+#pragma weak ncclCommWindowDeregister
+#pragma weak ncclDevCommCreate
+#pragma weak ncclDevCommDestroy
+#pragma weak ncclMemAlloc
+#pragma weak ncclMemFree
+#if NCCL_VERSION_CODE >= NCCL_VERSION(2, 30, 0)
+#pragma weak ncclCommQueryProperties
+#endif
 
 namespace {
 using Bf16                          = __nv_bfloat16;
 constexpr int            kMaxRows   = 32;
 constexpr int            kThreads   = 128;
 constexpr int            kMaxBlocks = 64;
+constexpr int            kBarrierTimeoutMs = 10000;
 thread_local std::string error_message;
 
 void check(cudaError_t status) {
@@ -30,6 +45,7 @@ void check(ncclResult_t status) {
 struct Context {
     int          device;
     int          hidden;
+    uint64_t     timeout_cycles = 0;
     ncclComm_t   comm = nullptr;
     ncclDevComm  dev{};
     ncclWindow_t window{};
@@ -58,8 +74,24 @@ struct alignas(16) Pack {
     Bf16 values[8];
 };
 
-__global__ void reduce_gate(
-    Bf16* output, const Bf16* shared, const Bf16* gate, int count, int hidden, ncclDevComm comm, ncclWindow_t window) {
+__device__ __forceinline__ void sync_or_trap(ncclLsaBarrierSession<ncclCoopCta>& barrier,
+                                            ncclCoopCta coop,
+                                            uint64_t   timeout_cycles) {
+    const auto status = barrier.sync(coop, cuda::memory_order_acq_rel, timeout_cycles);
+    // NCCL returns timeout to the waiting lanes. Make the decision uniform
+    // before any lane reads the peer window or a subsequent layer reuses it.
+    if (__syncthreads_or(status != ncclSuccess))
+        asm volatile("trap;");
+}
+
+__global__ void reduce_gate(Bf16* output,
+                            const Bf16* shared,
+                            const Bf16* gate,
+                            int count,
+                            int hidden,
+                            ncclDevComm comm,
+                            ncclWindow_t window,
+                            uint64_t timeout_cycles) {
     const auto*                        local = static_cast<const Pack*>(ncclGetLsaPointer(window, 0, comm.lsaRank));
     const auto*                        peer  = static_cast<const Pack*>(ncclGetLsaPointer(window, 0, 1 - comm.lsaRank));
     const auto*                        shared_packs = reinterpret_cast<const Pack*>(shared);
@@ -67,7 +99,7 @@ __global__ void reduce_gate(
     ncclCoopCta                        coop;
     ncclLsaBarrierSession<ncclCoopCta> barrier{coop, comm, ncclTeamTagLsa(), blockIdx.x};
     // The caller stages its local partial on this same CUDA stream.
-    barrier.sync(coop, cuda::memory_order_acq_rel);
+    sync_or_trap(barrier, coop, timeout_cycles);
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < count / 8; i += blockDim.x * gridDim.x) {
         const Pack  x          = local[i];
         const Pack  y          = peer[i];
@@ -84,7 +116,7 @@ __global__ void reduce_gate(
         output_packs[i] = result;
     }
     // All peers finish reading before a later layer can reuse the window.
-    barrier.sync(coop, cuda::memory_order_acq_rel);
+    sync_or_trap(barrier, coop, timeout_cycles);
 }
 
 template<typename Function>
@@ -98,11 +130,27 @@ int protect(Function function) {
         return 1;
     }
 }
+
+void validate_device(int device) {
+    int major, minor;
+    check(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device));
+    check(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device));
+    if (major != 12 || minor != 0)
+        throw std::runtime_error("LSA MoE requires SM120");
+    int runtime_version;
+    check(ncclGetVersion(&runtime_version));
+    if (runtime_version / 100 != NCCL_VERSION_CODE / 100)
+        throw std::runtime_error("LSA MoE requires matching NCCL major/minor headers and runtime");
+    if (!ncclCommWindowRegister || !ncclCommWindowDeregister || !ncclDevCommCreate || !ncclDevCommDestroy
+        || !ncclMemAlloc || !ncclMemFree)
+        throw std::runtime_error("NCCL device LSA symbols are unavailable");
+#if NCCL_VERSION_CODE >= NCCL_VERSION(2, 30, 0)
+    if (!ncclCommQueryProperties)
+        throw std::runtime_error("NCCL communicator capability query is unavailable");
+#endif
+}
 }  // namespace
 
-extern "C" int qwen38_lsa_abi() {
-    return 3;
-}
 extern "C" const char* qwen38_lsa_error() {
     return error_message.c_str();
 }
@@ -114,6 +162,23 @@ extern "C" int qwen38_lsa_unique_id(void* output) {
     return protect([&] { check(ncclGetUniqueId(static_cast<ncclUniqueId*>(output))); });
 }
 
+extern "C" int qwen38_lsa_device(int device, char* bus_id, int size) {
+    return protect([&] {
+        validate_device(device);
+        check(cudaDeviceGetPCIBusId(bus_id, size, device));
+    });
+}
+
+extern "C" int qwen38_lsa_peer(int device, const char* bus_id) {
+    return protect([&] {
+        int peer, accessible;
+        check(cudaDeviceGetByPCIBusId(&peer, bus_id));
+        check(cudaDeviceCanAccessPeer(&accessible, device, peer));
+        if (!accessible)
+            throw std::runtime_error("LSA MoE requires CUDA peer access");
+    });
+}
+
 extern "C" int qwen38_lsa_create(int rank, int device, int hidden, const void* unique_id, void** output) {
     return protect([&] {
         *output = nullptr;
@@ -122,16 +187,11 @@ extern "C" int qwen38_lsa_create(int rank, int device, int hidden, const void* u
         if (hidden <= 0 || hidden % 8 != 0 || hidden > std::numeric_limits<int>::max() / kMaxRows)
             throw std::runtime_error("LSA hidden size must be positive, divisible by 8 and fit its row capacity");
         check(cudaSetDevice(device));
-        int major, minor;
-        check(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device));
-        check(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device));
-        if (major != 12 || minor != 0)
-            throw std::runtime_error("LSA MoE requires SM120");
-        int runtime_version;
-        check(ncclGetVersion(&runtime_version));
-        if (runtime_version / 100 != NCCL_VERSION_CODE / 100)
-            throw std::runtime_error("Build the LSA library with matching NCCL major/minor headers");
+        validate_device(device);
         auto context = std::make_unique<Context>(device, hidden);
+        int clock_khz;
+        check(cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, device));
+        context->timeout_cycles = static_cast<uint64_t>(clock_khz) * kBarrierTimeoutMs;
         check(ncclCommInitRank(&context->comm, 2, *static_cast<const ncclUniqueId*>(unique_id), rank));
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2, 30, 0)
         ncclCommProperties properties = NCCL_COMM_PROPERTIES_INITIALIZER;
@@ -183,7 +243,8 @@ extern "C" int qwen38_lsa_apply(void*       handle,
                                                      rows * context->hidden,
                                                      context->hidden,
                                                      context->dev,
-                                                     context->window);
+                                                     context->window,
+                                                     context->timeout_cycles);
         check(cudaGetLastError());
     });
 }

@@ -1,7 +1,6 @@
 """Capability-selected SM120 IPC/P2P behind the generic collective API."""
 
 import logging
-import os
 import socket
 from dataclasses import replace
 from typing import Optional
@@ -155,7 +154,6 @@ _communicator: Optional[IpcAllReduce] = None
 _canonical_p2p = None
 _group = None
 _options = None
-_moe_reduce_gate_mode = None
 _capture_active = False
 
 
@@ -201,38 +199,22 @@ def _capability_error(device, options):
 
 def init_all_reduce(group, device, parallelism, options: CollectiveConfig):
     """Negotiate one backend before entering optional GPU setup on any rank."""
-    global _communicator, _canonical_p2p, _group, _options, _moe_reduce_gate_mode
-    role = str(getattr(parallelism, "role_type", "")).rsplit(".", 1)[-1]
-    mode = (
-        os.getenv("RTP_QWEN4_MOE_REDUCE_GATE_FUSION", "0")
-        if parallelism.tp_size == 2 and role == "DECODE"
-        else "0"
-    )
+    global _communicator, _canonical_p2p, _group, _options
     error = None
     try:
         options.validate_topology(parallelism)
-        if mode not in ("0", "1"):
-            raise ValueError("RTP_QWEN4_MOE_REDUCE_GATE_FUSION must be 0 or 1")
     except ValueError as exception:
         error = str(exception)
-    state = [
-        options.all_reduce_backend,
-        options.large_prefill,
-        error,
-        _group is group,
-        mode,
-    ]
+    state = [options.all_reduce_backend, options.large_prefill, error, _group is group]
     peers = exchange_group_state(group, state, "policy")
     if any(peer[2] is not None for peer in peers):
         raise ValueError(f"Invalid AllReduce configuration: {peers}")
-    if any(peer[4] != mode for peer in peers):
-        raise ValueError("RTP_QWEN4_MOE_REDUCE_GATE_FUSION must agree on TP ranks")
     if any(peer != state for peer in peers):
         raise ValueError(
             "AllReduce policy or initialization state differs across TP ranks"
         )
     if _group is not None:
-        if _group is not group or _options != options or _moe_reduce_gate_mode != mode:
+        if _group is not group or _options != options:
             raise RuntimeError(
                 "Destroy the distributed environment before changing policy"
             )
@@ -295,7 +277,6 @@ def init_all_reduce(group, device, parallelism, options: CollectiveConfig):
     # the state untouched when negotiation or optional construction raises.
     _communicator, _canonical_p2p = communicator, canonical_p2p
     _group, _options = group, options
-    _moe_reduce_gate_mode = mode
     logging.info(
         "AllReduce policy: requested_backend=%s, effective_backend=%s, "
         "large_prefill=%s, fallback_reason=%s",
@@ -343,13 +324,8 @@ def get_canonical_p2p():
     return _canonical_p2p
 
 
-def get_moe_reduce_gate_mode(group):
-    """Read the mode agreed by the TP group before weight loading."""
-    return _moe_reduce_gate_mode if _group is group else None
-
-
 def destroy_all_reduce():
-    global _communicator, _canonical_p2p, _group, _options, _moe_reduce_gate_mode
+    global _communicator, _canonical_p2p, _group, _options
     try:
         if _communicator is not None:
             _communicator.destroy()
@@ -358,4 +334,3 @@ def destroy_all_reduce():
     finally:
         abort_graph_capture()
         _communicator = _canonical_p2p = _group = _options = None
-        _moe_reduce_gate_mode = None

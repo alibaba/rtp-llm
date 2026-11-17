@@ -54,9 +54,28 @@ python -m pip check
 ```
 
 The upstream `b12x` extra requires PyTorch 2.12 or newer and the CUDA 13
-CuTe DSL runtime. Build the RTP-LLM native extension against the PyTorch
-version in that environment. Before deployment, run the opt-in regression on
-an SM120 GPU from that same runtime.
+CuTe DSL runtime. The stock RTP-LLM CUDA 13 build pins PyTorch 2.11 and the
+FlashInfer 0.6.9 fork. The pip command above is for an isolated regression
+environment. A service build using that environment needs a native extension
+built against its PyTorch and a matching dependency lock. The stock build
+uses CUTLASS.
+
+A service migration to PyTorch 2.12 needs matching build inputs in
+`deps/http.bzl` (the PyTorch headers/libraries archive),
+`arch_config/arch_select.bzl` (the FlashInfer wheel), and the CUDA 13
+requirements and lock files. Rebuild PyTorch-linked extensions in that
+environment, including flash-attn, deep-gemm, rtp-kernel, fast-safetensors
+and fast-hadamard-transform. Installing a different PyTorch with pip alone
+does not change Bazel's PyTorch archive. The pinned FlashInfer 0.6.9 fork
+also contains the FMHA v2 CUDA Graph CPU-scale fix. A migration to an
+upstream wheel must verify or port that fix and run the attention regressions.
+
+The adapter checks the verified FlashInfer dispatcher, static kernel and scale
+utility sources before using its private static ABI. The static kernel skips
+negative expert IDs, writes every output row and resets routing scratch
+between launches on the serialized Decode stream. A wheel with different
+static sources uses CUTLASS until its ABI is verified.
+[FlashInfer 0.7.3 static MoE source](https://github.com/flashinfer-ai/flashinfer/blob/7fa5c3b909a74c435a5b89d1bec82ce012cd3ca1/flashinfer/fused_moe/cute_dsl/blackwell_sm12x/moe_static_kernel.py)
 
 ```bash
 RTP_TEST_B12X_NVFP4_GPU=1 python -m \
@@ -64,32 +83,39 @@ RTP_TEST_B12X_NVFP4_GPU=1 python -m \
   B12xNvfp4GpuTest
 ```
 
-Set `RTP_NVFP4_HYBRID_MOE=1` on Decode workers to enable the executor.
-`decode_b12x_max_rows` accepts 0 through 16 physical input rows. Set it to 0
-to use CUTLASS for all rows. Omit `decode_cutlass_profile_ids` to use the
-runtime's normal tactic selection. Explicit tactic IDs are specific to the
-FlashInfer build and GPU shape, so validate them on the deployment wheel.
+The Qwen4 FP8-to-NVFP4 recipe selects Hybrid automatically for compatible
+SM120 TP2/EP2 Decode workers. Other ModelOpt FP4 configurations default to
+CUTLASS. `decode_b12x_max_rows` accepts 0 through 16 physical input rows.
+Set it to 0 to use CUTLASS for all rows. Set `RTP_NVFP4_HYBRID_MOE=0` to
+pin the existing CUTLASS executor for comparisons. Omit
+`decode_cutlass_profile_ids` to use the runtime's normal tactic selection.
+Explicit tactic IDs are specific to the FlashInfer build and GPU shape, so
+validate them on the deployment wheel.
 
-The separate TP2 LSA shared-expert fusion uses an ABI 3 CUDA shared library.
-Build it on Linux with CUDA 13.2 and the same NCCL major/minor headers and
-runtime (NCCL 2.28 or newer). Point `NCCL_INCLUDE_DIR` and `NCCL_LIB_DIR`
-at that installation.
+The CUDA 13 native extension includes the SM120 TP2 shared-expert LSA
+fusion. Both Decode ranks check the packaged NCCL API, model layout and
+CUDA peer access before constructing the communicator. An unsupported
+group uses the standard routed collective and shared-expert epilogue.
+Both ranks use the same logical batch shape to select the epilogue and size
+its grid. The grid has at most 64 CTAs. Each CTA uses its block index as
+one of the 64 reserved barrier slots, and the final barrier protects the
+symmetric input window until both peers have finished reading it.
+If a peer fails to arrive, NCCL's timed barrier makes the submitted kernel
+fail with a CUDA launch error instead of waiting indefinitely. The TP group
+must restart after this error.
+[NCCL 2.30.4 timed LSA barrier](https://github.com/NVIDIA/nccl/blob/v2.30.4-1/src/include/nccl_device/impl/lsa_barrier__funcs.h#L168)
+
+Run the model-entry regression with two local SM120 GPUs:
 
 ```bash
-nvcc -O3 -std=c++17 -arch=sm_120a -shared -Xcompiler=-fPIC \
-  -I"${NCCL_INCLUDE_DIR}" -L"${NCCL_LIB_DIR}" \
-  rtp_llm/models_py/kernels/cuda/qwen38_moe/reduce_gate.cu -lnccl \
-  -o libqwen38_moe_lsa.so
-export RTP_QWEN4_MOE_LSA_LIBRARY="$PWD/libqwen38_moe_lsa.so"
-export RTP_QWEN4_MOE_LSA_LIBRARY_SHA256="$(sha256sum libqwen38_moe_lsa.so | cut -d ' ' -f1)"
 export RTP_QWEN4_MOE_LSA_RESULTS="$PWD/lsa-regression.json"
 torchrun --standalone --nproc_per_node=2 -m \
   rtp_llm.models_py.modules.qwen4_exp.test.moe.reduce_gate_integration_test
 ```
 
-Use two local SM120 GPUs with peer access for this test. To enable the fusion
-in serving, set `RTP_QWEN4_MOE_REDUCE_GATE_FUSION=1` and provide the same
-library and SHA256 on both TP2 Decode workers.
+Set `RTP_TEST_LSA_MISSING_PEER=1` for a separate run that checks the timeout
+by having rank 1 omit the collective. This test intentionally faults the
+CUDA context on rank 0.
 
 ## Method 3: Using docker
 More Docker versions can be obtained from [RTP-LLM Release](../release/index.rst)

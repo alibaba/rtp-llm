@@ -1,9 +1,10 @@
-"""Run with torchrun --standalone --nproc_per_node=2 and the pinned LSA library."""
+"""Run with torchrun --standalone --nproc_per_node=2 with the CUDA 13 native extension."""
 
-import ctypes
 import json
 import os
 import statistics
+import time
+import unittest
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from unittest.mock import patch
@@ -11,10 +12,7 @@ from unittest.mock import patch
 import torch
 import torch.distributed as dist
 
-from rtp_llm.config.collective_config import CollectiveConfig
-from rtp_llm.models_py.distributed.all_reduce import destroy_all_reduce, init_all_reduce
 from rtp_llm.models_py.modules.qwen4_exp.moe.reduce_gate import (
-    load_library,
     prepare_model_reduce,
 )
 from rtp_llm.models_py.modules.qwen4_exp.moe.shared_overlap import Qwen4MoeLayer
@@ -26,15 +24,14 @@ from rtp_llm.models_py.triton_kernels.common.moe_gating import (
 def main():
     rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(rank)
+    if os.environ.get("RTP_TEST_LSA_MISSING_PEER") == "1":
+        run_missing_peer(rank)
+        return
     dist.init_process_group("nccl")
     device = torch.device("cuda", rank)
-    library = load_library(
-        os.environ["RTP_QWEN4_MOE_LSA_LIBRARY"],
-        os.environ["RTP_QWEN4_MOE_LSA_LIBRARY_SHA256"],
-    )
     results = []
     for hidden_size in (8, 264, 2048, 2560, 4096, 8192):
-        results.extend(run_hidden_size(library, device, rank, hidden_size))
+        results.extend(run_hidden_size(device, rank, hidden_size))
     if rank == 0:
         Path(os.environ["RTP_QWEN4_MOE_LSA_RESULTS"]).write_text(
             json.dumps(results, indent=2) + "\n"
@@ -44,7 +41,44 @@ def main():
         print("LSA_MODEL_ENTRY_DONE", flush=True)
 
 
-def run_hidden_size(library, device, rank, hidden_size):
+def run_missing_peer(rank):
+    from rtp_llm.ops import rtp_llm_ops
+
+    dist.init_process_group("gloo")
+    ops = rtp_llm_ops._qwen38_lsa
+    ids = [ops.unique_id() if rank == 0 else None]
+    dist.broadcast_object_list(ids, src=0)
+    hidden = 2560
+    handle = ops.create(rank, rank, hidden, ids[0])
+    value = torch.zeros(1, hidden, device="cuda", dtype=torch.bfloat16)
+    output = torch.full_like(value, float("nan"))
+    gate = torch.zeros(1, 1, device="cuda", dtype=torch.bfloat16)
+    stream = torch.cuda.current_stream()
+    dist.barrier()
+    if rank == 0:
+        start = time.monotonic()
+        ops.apply(
+            handle,
+            value.data_ptr(),
+            value.data_ptr(),
+            gate.data_ptr(),
+            output.data_ptr(),
+            1,
+            stream.cuda_stream,
+        )
+        with unittest.TestCase().assertRaisesRegex(
+            RuntimeError, "unspecified launch failure"
+        ):
+            stream.synchronize()
+        assert time.monotonic() - start < 30, "LSA timeout did not bound the wait"
+        print("LSA_MISSING_PEER_TIMEOUT", flush=True)
+    dist.barrier()
+    # A timeout makes the CUDA context unusable. Let the subprocess exit
+    # without attempting to reuse or destroy the test communicator.
+    os._exit(0)
+
+
+def run_hidden_size(device, rank, hidden_size):
     from rtp_llm.models_py.distributed import collective_torch
     from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
         PureTpRouterNvfp4Cutlass,
@@ -79,45 +113,21 @@ def run_hidden_size(library, device, rank, hidden_size):
         get_ffn_tp_size=lambda: 1,
     )
     with patch.object(collective_torch, "_get_group", return_value=dist.group.WORLD):
-        with patch.dict(os.environ, {"RTP_QWEN4_MOE_REDUCE_GATE_FUSION": "0"}):
-            init_all_reduce(
-                dist.group.WORLD, device, parallelism, CollectiveConfig("nccl")
-            )
-            assert prepare_model_reduce(model, config, parallelism) is None
-            destroy_all_reduce()
-        with patch.dict(os.environ, {"RTP_QWEN4_MOE_REDUCE_GATE_FUSION": str(rank)}):
-            try:
-                init_all_reduce(
-                    dist.group.WORLD, device, parallelism, CollectiveConfig("nccl")
-                )
-                raise AssertionError("Mismatched rank modes accepted")
-            except ValueError:
-                pass
-        with patch.dict(os.environ, {"RTP_QWEN4_MOE_REDUCE_GATE_FUSION": "1"}):
-            init_all_reduce(
-                dist.group.WORLD, device, parallelism, CollectiveConfig("nccl")
-            )
-            parallelism.ep_size = 4
-            try:
-                prepare_model_reduce(model, config, parallelism)
-                raise AssertionError("Unsupported EP layout accepted")
-            except RuntimeError:
-                pass
-            parallelism.ep_size = 2
-            config.hidden_size = hidden_size + 8 * rank
-            mlp.shared_expert_gate.weight = torch.empty(
-                1, config.hidden_size, device=device, dtype=torch.bfloat16
-            )
-            try:
-                prepare_model_reduce(model, config, parallelism)
-                raise AssertionError("Mismatched rank hidden sizes accepted")
-            except RuntimeError:
-                pass
-            config.hidden_size = hidden_size
-            mlp.shared_expert_gate.weight = torch.empty(
-                1, hidden_size, device=device, dtype=torch.bfloat16
-            )
-            owner = prepare_model_reduce(model, config, parallelism)
+        # A single rank declining must prevent either from creating a communicator.
+        parallelism.ep_size = 4 if rank == 1 else 2
+        assert prepare_model_reduce(model, config, parallelism) is None
+        parallelism.ep_size = 2
+        config.hidden_size = hidden_size + 8 * rank
+        mlp.shared_expert_gate.weight = torch.empty(
+            1, config.hidden_size, device=device, dtype=torch.bfloat16
+        )
+        assert prepare_model_reduce(model, config, parallelism) is None
+        config.hidden_size = hidden_size
+        mlp.shared_expert_gate.weight = torch.empty(
+            1, hidden_size, device=device, dtype=torch.bfloat16
+        )
+        owner = prepare_model_reduce(model, config, parallelism)
+    assert owner is not None, "SM120 CUDA 13 native LSA unavailable"
     assert mlp._reduce_shared_gate is owner
     assert not owner.supports(
         torch.empty(33, hidden_size, device=device, dtype=torch.bfloat16)
@@ -125,20 +135,10 @@ def run_hidden_size(library, device, rank, hidden_size):
     assert not owner.supports(
         torch.empty(1, hidden_size + 8, device=device, dtype=torch.bfloat16)
     )
-    invalid = ctypes.c_void_p()
-    uid = ctypes.create_string_buffer(library.qwen38_lsa_uid_size())
+    uid = owner.ops.unique_id()
     for invalid_hidden in (0, 7, (2**31 - 1) // 32 + 1):
-        assert library.qwen38_lsa_create(
-            rank, device.index, invalid_hidden, uid, ctypes.byref(invalid)
-        )
-        assert not invalid.value
-    library.qwen38_lsa_reference.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_int,
-        ctypes.c_void_p,
-    ]
+        with unittest.TestCase().assertRaisesRegex(RuntimeError, "hidden size"):
+            owner.ops.create(rank, device.index, invalid_hidden, uid)
     results = []
     for rows in (1, 2, 4, 8, 16, 32):
         torch.manual_seed(300 + rank + rows)
@@ -170,14 +170,12 @@ def run_hidden_size(library, device, rank, hidden_size):
 
         def baseline():
             output = torch.empty_like(partial)
-            owner._check(
-                library.qwen38_lsa_reference(
-                    owner.handle,
-                    partial.data_ptr(),
-                    output.data_ptr(),
-                    rows,
-                    torch.cuda.current_stream().cuda_stream,
-                )
+            owner.ops.reference(
+                owner.handle,
+                partial.data_ptr(),
+                output.data_ptr(),
+                rows,
+                torch.cuda.current_stream().cuda_stream,
             )
             reference_shared = shared if shared.data_ptr() % 16 == 0 else shared.clone()
             return sigmoid_gate_scale_add_triton(gate, reference_shared, output)
@@ -274,10 +272,9 @@ def run_hidden_size(library, device, rank, hidden_size):
     # only after both ranks synchronize and all graph users have finished.
     torch.cuda.synchronize()
     dist.barrier()
-    owner.library.qwen38_lsa_destroy(owner.handle)
+    owner.ops.destroy(owner.handle)
     owner.handle = None
     owner.close()
-    destroy_all_reduce()
     return results
 
 

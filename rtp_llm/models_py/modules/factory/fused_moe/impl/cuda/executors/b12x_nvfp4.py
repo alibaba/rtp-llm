@@ -1,13 +1,35 @@
 """Dimension-derived adapter for FlashInfer static b12x NVFP4 MoE."""
 
-import dis
-import inspect
+from functools import cache
+from hashlib import sha256
+from pathlib import Path
 from types import FunctionType
 from weakref import WeakValueDictionary
 
 import torch
 
 _WORKSPACE_POOLS = WeakValueDictionary()
+
+# Reference sources from the SM120-tested FlashInfer 0.7.3 wheel. Static
+# dispatch, workspace reset and -1 route handling depend on private code.
+_DISPATCH_SHA256 = "67c3cb8482e0a6ee7e936e54a02f9f68635c36c7683c9e92dfd2794b049db602"
+_STATIC_KERNEL_SHA256 = (
+    "bd1b3cd2cfcc76c84a15c4198df6783b422090c8202c11ffed2312f61ef6209d"
+)
+_SCALE_UTILS_SHA256 = "df35130f8c8c867a440d7ff3392ac23b19c8628429a7b65177c80bd0410c75cf"
+
+
+@cache
+def _matches_static_sources(dispatch_path, scale_utils_path):
+    dispatch = Path(dispatch_path)
+    return all(
+        sha256(path.read_bytes()).hexdigest() == expected
+        for path, expected in (
+            (dispatch, _DISPATCH_SHA256),
+            (dispatch.with_name("moe_static_kernel.py"), _STATIC_KERNEL_SHA256),
+            (Path(scale_utils_path), _SCALE_UTILS_SHA256),
+        )
+    )
 
 
 class _WorkspacePool:
@@ -19,32 +41,31 @@ class _WorkspacePool:
 class B12xNvfp4MoE:
     """Adapter for the static NVFP4 ABI in FlashInfer 0.7.3 (7fa5c3b909a7)."""
 
-    def __init__(self, w1, w2, scales, ep_rank, model_config, top_k):
-        from flashinfer.cute_dsl.utils import convert_sf_to_mma_layout
+    @staticmethod
+    def _runtime():
+        from flashinfer.cute_dsl import utils
         from flashinfer.fused_moe.cute_dsl.blackwell_sm12x import moe_dispatch
 
-        launch = getattr(moe_dispatch, "launch_sm120_static_moe", None)
-        weight_views = getattr(moe_dispatch, "_get_weight_views", None)
-        workspace = getattr(moe_dispatch, "allocate_sm120_moe_workspace", None)
-        # The pinned launcher selects static via a module flag. Bind it in a
-        # private namespace so unrelated FlashInfer users keep their dispatch.
-        if (
-            not hasattr(launch, "__code__")
-            or not callable(weight_views)
-            or not callable(workspace)
-            or not any(
-                inst.opname == "LOAD_GLOBAL" and inst.argval == "_FORCED_BACKEND"
-                for inst in dis.get_instructions(launch)
-            )
-            or "quant_mode" not in inspect.signature(launch).parameters
-            or "branches" not in inspect.signature(weight_views).parameters
-            or "backend" not in inspect.signature(workspace).parameters
-        ):
+        if not _matches_static_sources(moe_dispatch.__file__, utils.__file__):
             raise RuntimeError(
-                "b12x NVFP4 requires the FlashInfer static ABI in 0.7.3 "
-                "(7fa5c3b909a7). Use a compatible build or set "
-                "decode_b12x_max_rows=0."
+                "b12x NVFP4 requires the verified FlashInfer static sources "
+                "from 0.7.3 (7fa5c3b909a7)."
             )
+        return utils.convert_sf_to_mma_layout, moe_dispatch
+
+    @classmethod
+    def is_available(cls):
+        try:
+            cls._runtime()
+        except (ImportError, RuntimeError, OSError, AttributeError, TypeError):
+            return False
+        return True
+
+    def __init__(self, w1, w2, scales, ep_rank, model_config, top_k):
+        convert_sf_to_mma_layout, moe_dispatch = self._runtime()
+        launch = moe_dispatch.launch_sm120_static_moe
+        # This launcher uses the flag locally for both micro branches. Keep
+        # the override private so other FlashInfer callers keep their dispatch.
         self.launch = FunctionType(
             launch.__code__,
             dict(launch.__globals__, _FORCED_BACKEND="static"),
@@ -81,6 +102,8 @@ class B12xNvfp4MoE:
             pool = _WorkspacePool(model_config)
             _WORKSPACE_POOLS[key] = pool
         self.workspace_pool = pool
+        # Each static launch restores its scratch on the worker's serialized
+        # Decode stream. Layers and successive graph replays can reuse a bucket.
         self.states = pool.states
 
         def mma_scale(scale, rows, cols):
@@ -149,7 +172,9 @@ class B12xNvfp4MoE:
             self.num_experts,
             128,
         )
-        return self.launch(
+        # The verified static finalize writes every output row, including
+        # zeros for rows whose route IDs are all -1.
+        self.launch(
             workspace=state,
             weights=self.weights,
             a=x,
@@ -167,3 +192,4 @@ class B12xNvfp4MoE:
             fast_math=False,
             input_scales_are_reciprocal=True,
         )
+        return output

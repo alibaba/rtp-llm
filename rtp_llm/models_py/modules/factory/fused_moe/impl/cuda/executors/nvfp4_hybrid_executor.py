@@ -27,18 +27,8 @@ logger = logging.getLogger(__name__)
 _MAX_B12X_ROWS = 16  # Largest physical M validated in Decode serving.
 
 
-def hybrid_enabled():
-    return (
-        os.getenv(
-            "RTP_NVFP4_HYBRID_MOE",
-            os.getenv("RTP_QWEN4_NVFP4_DECODE_TACTICS", "0"),
-        )
-        == "1"
-    )
-
-
 def decode_tuning(quant_config):
-    max_rows = getattr(quant_config, "decode_b12x_max_rows", _MAX_B12X_ROWS)
+    max_rows = getattr(quant_config, "decode_b12x_max_rows", 0)
     profiles = getattr(quant_config, "decode_cutlass_profile_ids", None)
     if type(max_rows) is not int or not 0 <= max_rows <= _MAX_B12X_ROWS:
         raise ValueError(
@@ -71,8 +61,11 @@ class Nvfp4HybridExecutor(FusedMoeExpertExecutor):
     def check_conditions(cls, checker, config):
         CutlassNvfp4Executor.check_conditions(checker, config)
         pc = config.parallelism_config
-        checker.check(hybrid_enabled())
-        checker.check(str(pc.role_type).rsplit(".", 1)[-1] == "DECODE")
+        if not checker.check(
+            os.getenv("RTP_NVFP4_HYBRID_MOE", "1") == "1"
+            and str(pc.role_type).rsplit(".", 1)[-1] == "DECODE"
+        ):
+            return
         checker.check(
             torch.cuda.is_available() and torch.cuda.get_device_capability() == (12, 0)
         )
@@ -84,6 +77,17 @@ class Nvfp4HybridExecutor(FusedMoeExpertExecutor):
         checker.check(config.n_local_experts > 0)
         checker.check(0 < config.moe_k <= config.expert_num)
         checker.check(config.moe_w1_layout == "up_gate")
+        if checker.all_passed():
+            rows, profiles = decode_tuning(config.model_config.quant_config)
+            if not checker.check(bool(rows or profiles is not None)):
+                return
+            checker.check(
+                profiles is None
+                or "profile_ids" in inspect.signature(cutlass_fused_moe).parameters
+            )
+            checker.check(
+                rows == 0 or (pc.ep_size == 2 and B12xNvfp4MoE.is_available())
+            )
 
     def __init__(self, config, quant_config, weights):
         super().__init__(config, quant_config, weights)
