@@ -204,6 +204,19 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
 
     def get_weight_info(self):
         info = super().get_weight_info()
+        if os.environ.get("RTP_LLM_DSV4_FP8_LM_HEAD", "").lower() in _TRUTHY_ENV_VALUES:
+            from rtp_llm.model_loader.fp8_weight import Fp8StorageWeight
+
+            matches = [i for i, weight in enumerate(info.weights) if weight.name == W.lm_head]
+            if len(matches) != 1:
+                raise ValueError(
+                    "RTP_LLM_DSV4_FP8_LM_HEAD requires exactly one lm_head descriptor, "
+                    f"got {len(matches)}"
+                )
+            index = matches[0]
+            if not isinstance(info.weights[index], Fp8StorageWeight):
+                info.weights[index] = Fp8StorageWeight(info.weights[index])
+            logging.info("DeepSeek-V4 FP8 LM head storage enabled")
         if _is_ppu_flash(self.model_config) and self._moe_pure_tp_mode:
             from rtp_llm.models_py.modules.dsv4.ppu.resources import (
                 configure_weight_splits,
@@ -1245,7 +1258,10 @@ class DeepSeekV4DSpark(DeepSeekV4):
                 "DeepSeek-V4 DSpark cannot alias semantically incompatible "
                 f"target weights: {details}"
             )
-        return (W.embedding, W.lm_head)
+        aliases = (W.embedding, W.lm_head)
+        if os.environ.get("RTP_LLM_DSV4_FP8_LM_HEAD", "").lower() in _TRUTHY_ENV_VALUES:
+            aliases += (W.lm_head_s,)
+        return aliases
 
     @classmethod
     def _create_config(cls, ckpt_path: str):

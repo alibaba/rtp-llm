@@ -7,6 +7,7 @@ from rtp_llm.models_py.modules.dsv4.transformer import (
     _optional_env_bool,
     V4Args,
     _block_kwargs,
+    _apply_lm_head,
 )
 import logging
 import os
@@ -139,6 +140,7 @@ class V4Transformer(_BaseV4Transformer):
             self.embed = None
             self.norm = None
             self.head_weight = None
+            self.head_scale = None
             self.head_hc = None
         else:
             # ``EmbeddingTorch`` keeps ``self.weight`` as a plain attribute (no
@@ -159,10 +161,25 @@ class V4Transformer(_BaseV4Transformer):
             # LM head — plain weight matrix [vocab_size, dim].  Accept either
             # BF16 (ckpt-native) or FP32 (legacy path).
             self.head_weight = gw[W.lm_head]
-            if self.head_weight.dtype not in (torch.float32, torch.bfloat16):
+            self.head_scale = gw.get(W.lm_head_s)
+            if self.head_weight.dtype not in (
+                torch.float32,
+                torch.bfloat16,
+                torch.float8_e4m3fn,
+            ):
                 raise TypeError(
-                    f"DSV4 lm_head must be FP32 or BF16, got {self.head_weight.dtype}"
+                    f"DSV4 lm_head must be FP32, BF16, or FP8 E4M3, got {self.head_weight.dtype}"
                 )
+            if self.head_weight.dtype == torch.float8_e4m3fn:
+                if (
+                    self.head_scale is None
+                    or self.head_scale.dtype != torch.float32
+                    or self.head_scale.numel() != 1
+                    or self.head_scale.device != self.head_weight.device
+                    or not bool(torch.isfinite(self.head_scale).all().item())
+                    or not bool(self.head_scale.gt(0).all().item())
+                ):
+                    raise ValueError("DSV4 FP8 lm_head requires one positive finite FP32 scale")
             self.head_hc = build_hc_head(
                 gw[W.v4_hc_head_fn],
                 gw[W.v4_hc_head_base],
@@ -352,13 +369,7 @@ class V4Transformer(_BaseV4Transformer):
         h = self._norm(h.reshape(bsz * seq, dim_)).view(bsz, seq, -1)
 
         if apply_lm_head:
-            # Match h dtype to head_weight so F.linear works regardless of
-            # load-time dtype (bf16 when enable_fp32_lm_head=False, f32
-            # otherwise).  Final cast to f32 keeps logits dtype stable for
-            # callers that feed into f32 sampling / softmax.
-            return F.linear(
-                h[:, -1].to(self.head_weight.dtype), self.head_weight
-            ).float()
+            return _apply_lm_head(h[:, -1], self.head_weight, self.head_scale)
         return h
 
 from rtp_llm.models_py.modules.dsv4.ppu.tp_norm import tp_gather_hidden, tp_rms_norm

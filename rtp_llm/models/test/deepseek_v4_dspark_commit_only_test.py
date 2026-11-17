@@ -1,13 +1,22 @@
+import os
 from types import SimpleNamespace
 from unittest import TestCase, mock
 
 import torch.nn as nn
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.model_loader.fp8_weight import Fp8StorageWeight
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.per_block_fp8_quant_weight import V4PerBlockFp8Weight
 from rtp_llm.model_loader.weight_module import AtomicWeight
-from rtp_llm.models.deepseek_v4 import DeepSeekV4DSparkWeight, DeepSeekV4Weight
+from rtp_llm.models.deepseek_v2 import DeepSeekV2Weight
+from rtp_llm.models import deepseek_v4 as deepseek_v4_module
+from rtp_llm.models.deepseek_v4 import (
+    DeepSeekV4,
+    DeepSeekV4DSpark,
+    DeepSeekV4DSparkWeight,
+    DeepSeekV4Weight,
+)
 from rtp_llm.models_py.modules.dsv4 import block as block_module
 from rtp_llm.models_py.modules.dsv4 import transformer as transformer_module
 from rtp_llm.models_py.modules.dsv4.transformer import V4Args, V4Transformer
@@ -96,6 +105,58 @@ class DeepSeekV4DSparkCommitOnlyWeightTest(TestCase):
                     DeepSeekV4Weight, "get_weight_info", return_value=full
                 ):
                     self.assertIs(descriptor.get_weight_info(), full)
+
+
+class DeepSeekV4Fp8LmHeadWeightTest(TestCase):
+    def test_fp8_lm_head_storage_is_explicitly_gated(self) -> None:
+        embedding = AtomicWeight(W.embedding, [], identity)
+        lm_head = AtomicWeight(W.lm_head, [], identity)
+        descriptor = DeepSeekV4Weight.__new__(DeepSeekV4Weight)
+        descriptor.model_config = SimpleNamespace()
+        descriptor._moe_pure_tp_mode = False
+
+        def weight_info() -> ModelWeightInfo:
+            return ModelWeightInfo(weights=[embedding, lm_head], layer_weights=[])
+
+        with mock.patch.object(
+            DeepSeekV2Weight, "get_weight_info", side_effect=weight_info
+        ), mock.patch.object(deepseek_v4_module, "_is_ppu_flash", return_value=False):
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("RTP_LLM_DSV4_FP8_LM_HEAD", None)
+                self.assertIs(descriptor.get_weight_info().weights[1], lm_head)
+
+            with mock.patch.dict(
+                os.environ, {"RTP_LLM_DSV4_FP8_LM_HEAD": "1"}, clear=False
+            ):
+                converted = descriptor.get_weight_info()
+                self.assertIs(converted.weights[0], embedding)
+                self.assertIsInstance(converted.weights[1], Fp8StorageWeight)
+
+    def test_dspark_aliases_fp8_lm_head_scale(self) -> None:
+        config = dict(
+            vocab_size=129280,
+            hidden_size=4096,
+            data_type="bf16",
+            enable_fp32_lm_head=False,
+        )
+        target = DeepSeekV4.__new__(DeepSeekV4)
+        target.model_config = SimpleNamespace(**config)
+        draft = SimpleNamespace(**config)
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("RTP_LLM_DSV4_FP8_LM_HEAD", None)
+            self.assertEqual(
+                DeepSeekV4DSpark.speculative_weight_alias_names(target, draft),
+                (W.embedding, W.lm_head),
+            )
+
+        with mock.patch.dict(
+            os.environ, {"RTP_LLM_DSV4_FP8_LM_HEAD": "1"}, clear=False
+        ):
+            self.assertEqual(
+                DeepSeekV4DSpark.speculative_weight_alias_names(target, draft),
+                (W.embedding, W.lm_head, W.lm_head_s),
+            )
 
 
 class DeepSeekV4DSparkCommitOnlyConstructionTest(TestCase):
