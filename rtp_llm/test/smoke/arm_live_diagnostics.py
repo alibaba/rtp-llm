@@ -43,15 +43,108 @@ def _btc_arm_identity(process, expected, root_pid, uid):
         return False
 
 
+def _btc_arm_spawn_kind(argv):
+    """Classify only exact Python launch signatures, never execute child code."""
+    import ast
+
+    if len(argv) >= 3 and argv[1:3] == ["-m", "rtp_llm.start_server"]:
+        return "rtp_llm.start_server"
+    if len(argv) != 4 or argv[1] != "-c" or argv[-1] != "--multiprocessing-fork":
+        return None
+    try:
+        nodes = ast.parse(argv[2]).body
+    except (SyntaxError, ValueError):
+        return None
+    if len(nodes) != 2 or not isinstance(nodes[0], ast.ImportFrom):
+        return None
+    imported = nodes[0]
+    if (
+        imported.module != "multiprocessing.spawn"
+        or imported.level != 0
+        or len(imported.names) != 1
+        or imported.names[0].name != "spawn_main"
+        or imported.names[0].asname is not None
+    ):
+        return None
+    call = nodes[1].value if isinstance(nodes[1], ast.Expr) else None
+    if (
+        not isinstance(call, ast.Call)
+        or not isinstance(call.func, ast.Name)
+        or call.func.id != "spawn_main"
+        or call.args
+    ):
+        return None
+    if not call.keywords or any(
+        kw.arg not in {"tracker_fd", "pipe_handle", "parent_pid"}
+        or not isinstance(kw.value, ast.Constant)
+        or type(kw.value.value) is not int
+        or kw.value.value < 0
+        for kw in call.keywords
+    ):
+        return None
+    if len({kw.arg for kw in call.keywords}) != len(call.keywords):
+        return None
+    return "cpython.multiprocessing.spawn_main"
+
+
+def _btc_arm_select_records(records, sample_index, limit=4):
+    """Interleave known ranks and eligible leaves; parents use spare slots."""
+
+    def rotate(values):
+        if not values:
+            return []
+        offset = (sample_index * 2) % len(values)
+        return values[offset:] + values[:offset]
+
+    ranks = rotate(
+        sorted(
+            (r for r in records if r["source"] == "logged_rank"), key=lambda r: r["pid"]
+        )
+    )
+    leaves = rotate(
+        sorted(
+            (
+                r
+                for r in records
+                if r["source"] == "verified_unlogged_spawn" and r["is_leaf"]
+            ),
+            key=lambda r: (-r["depth"], r["pid"]),
+        )
+    )
+    parents = rotate(
+        sorted(
+            (
+                r
+                for r in records
+                if r["source"] == "verified_unlogged_spawn" and not r["is_leaf"]
+            ),
+            key=lambda r: (-r["depth"], r["pid"]),
+        )
+    )
+    other = rotate(
+        sorted(
+            (
+                r
+                for r in records
+                if r["source"] not in {"logged_rank", "verified_unlogged_spawn"}
+            ),
+            key=lambda r: r["pid"],
+        )
+    )
+    selected = []
+    while len(selected) < limit and (ranks or leaves):
+        for group in (ranks, leaves):
+            if group and len(selected) < limit:
+                selected.append(group.pop(0))
+    return selected + (parents + other)[: max(0, limit - len(selected))]
+
+
 def start_observer(suite):
     if os.environ.get("RTP_BTC_ARM_LIVE_STACKS") != "1":
         return None
     targets = {
-        "dense_tp2_sm100",
         "deepseek_v41_flash_ced_dspark_pd_cp2_dp2_sm100_arm",
-        "moe_nvfp4_deepep_ll_tp2_sm100",
         "moe_nvfp4_deepep_normal_dp2_sm100",
-        "next_moe_nvfp4_cudagraph_tp2_sm100",
     }
     if suite not in targets or os.getuid() != os.geteuid():
         return None
@@ -74,15 +167,22 @@ def start_observer(suite):
     artifacts.mkdir(parents=True, exist_ok=True)
     stopped = threading.Event()
     root_pid, uid = os.getpid(), os.getuid()
+    root_thread_ident = threading.main_thread().ident
     started = time.monotonic()
     start_wall = time.time()
     identities = {}
     owned = set()
+    owned_created = {}
     owned_lock = threading.Lock()
 
     def register(process):
+        try:
+            created = psutil.Process(process.pid).create_time()
+        except (OSError, psutil.Error):
+            created = None
         with owned_lock:
             owned.add(process)
+            owned_created[process.pid] = created
         return process
 
     def bounded_output(process, stream, limit):
@@ -164,9 +264,168 @@ def start_observer(suite):
             result["error"] = repr(exc)
         return result
 
+    root_created = psutil.Process(root_pid).create_time()
+    expected_python = os.path.realpath(sys.executable)
+    allowed_cwds = {os.path.realpath(os.getcwd()), os.path.realpath(str(output))}
+    if os.environ.get("MAGA_SERVER_WORK_DIR"):
+        allowed_cwds.add(os.path.realpath(os.environ["MAGA_SERVER_WORK_DIR"]))
+    candidate_sources = {}
+
+    def parent_scope(process, expected, rejections=None):
+        """Current verified ancestry, not a claimed kernel fork-event history."""
+
+        def reject(reason):
+            if rejections is not None:
+                rejections[process.pid] = reason
+            return None
+
+        if not _btc_arm_identity(process, expected, root_pid, uid):
+            return reject("uid/euid/create-time/current-descendant mismatch")
+        with owned_lock:
+            excluded = {p.pid: owned_created.get(p.pid) for p in owned}
+
+        def is_owned(current):
+            return current.pid in excluded and (
+                excluded[current.pid] is None
+                or current.create_time() == excluded[current.pid]
+            )
+
+        if is_owned(process):
+            return reject("observer-owned debugger/diagnostic process")
+        chain = []
+        current = process
+        seen = set()
+        child_created = expected
+        try:
+            while current.pid != root_pid:
+                if current.pid in seen or is_owned(current) or len(chain) >= 16:
+                    return reject(
+                        "unproven/cyclic/deep ancestry or owned-helper ancestor"
+                    )
+                seen.add(current.pid)
+                created = current.create_time()
+                if (
+                    current.uids().real != uid
+                    or current.uids().effective != uid
+                    or not root_created <= created <= child_created
+                ):
+                    return reject("ancestor uid/euid/create-time ordering mismatch")
+                parent_pid = current.ppid()
+                chain.append(
+                    {"pid": current.pid, "create_time": created, "ppid": parent_pid}
+                )
+                child_created = created
+                current = psutil.Process(parent_pid)
+            if (
+                current.create_time() != root_created
+                or current.uids().real != uid
+                or current.uids().effective != uid
+            ):
+                return reject("test root PID creation changed")
+            chain.append({"pid": root_pid, "create_time": root_created})
+            return {
+                "pid": process.pid,
+                "create_time": expected,
+                "real_uid": uid,
+                "effective_uid": uid,
+                "ancestry": chain,
+                "ancestry_kind": "current PPID/creation chain rechecked, not kernel birth tracing",
+                "depth": len(chain) - 1,
+            }
+        except (OSError, psutil.Error):
+            return reject("process exited or scope metadata unreadable")
+
+    def spawn_scope(process, expected, rejections=None):
+        scope = parent_scope(process, expected, rejections)
+        if scope is None:
+            return None
+        try:
+            executable = os.path.realpath(process.exe())
+            cwd = os.path.realpath(process.cwd())
+            kind = _btc_arm_spawn_kind(process.cmdline())
+            if (
+                executable != expected_python
+                or cwd not in allowed_cwds
+                or kind is None
+                or expected > time.time() + 1
+            ):
+                if rejections is not None:
+                    rejections[process.pid] = (
+                        "noncanonical exe/cwd, launch signature not exact, or outside test time"
+                    )
+                return None
+            return dict(
+                scope,
+                source="verified_unlogged_spawn",
+                canonical_executable=executable,
+                canonical_cwd=cwd,
+                command_class=kind,
+            )
+        except (OSError, psutil.Error):
+            if rejections is not None:
+                rejections[process.pid] = "exited or launch metadata unreadable"
+            return None
+
+    def candidate_scope_still_matches(process, expected):
+        source = candidate_sources.get(process.pid)
+        if source is None:
+            return False
+        ancestry = parent_scope(process, expected)
+        if ancestry is None or ancestry["ancestry"] != source["ancestry"]:
+            return False
+        if source["source"] != "verified_unlogged_spawn":
+            return True
+        current = spawn_scope(process, expected)
+        return current is not None and all(
+            current[key] == source[key]
+            for key in ("canonical_executable", "canonical_cwd", "command_class")
+        )
+
+    def compact_process_snapshot(process, expected):
+        if not candidate_scope_still_matches(process, expected):
+            return {"pid": process.pid, "rejected_identity": True}
+        proc = Path("/proc") / str(process.pid)
+        return {
+            "pid": process.pid,
+            "create_time": expected,
+            "files": {
+                name: read_limited(proc / name, 65536)
+                for name in ("status", "stat", "statm", "io", "wchan", "syscall")
+            },
+        }
+
+    def self_python_frames():
+        # Purely self-process introspection: files/functions/line numbers only.
+        frames = sys._current_frames()
+        result = {}
+        try:
+            thread_ids = sorted(frames, key=lambda tid: (tid != root_thread_ident, tid))
+            for tid in thread_ids[:128]:
+                frame = frames[tid]
+                stack = []
+                while frame is not None and len(stack) < 35:
+                    stack.append(
+                        {
+                            "file": frame.f_code.co_filename,
+                            "function": frame.f_code.co_name,
+                            "line": frame.f_lineno,
+                        }
+                    )
+                    frame = frame.f_back
+                result[str(tid)] = stack
+            return {
+                "root_pid": root_pid,
+                "root_thread_ident": root_thread_ident,
+                "threads": result,
+                "truncated_threads": len(frames) > 128,
+                "locals_collected": False,
+            }
+        finally:
+            frames.clear()
+
     def process_snapshot(process, identity):
         pid = process.pid
-        if not _btc_arm_identity(process, identity, root_pid, uid):
+        if not candidate_scope_still_matches(process, identity):
             return {"pid": pid, "rejected_identity": True}
         proc = Path("/proc") / str(pid)
         result = {"pid": pid, "create_time": identity, "uid": uid}
@@ -221,7 +480,7 @@ def start_observer(suite):
         receipt["before"] = process_snapshot(process, identity)
         debugger = shutil.which("gdb")
         receipt["debugger"] = debugger
-        if debugger is None or not _btc_arm_identity(process, identity, root_pid, uid):
+        if debugger is None or not candidate_scope_still_matches(process, identity):
             receipt["not_attached"] = "gdb unavailable or identity no longer valid"
             return receipt
         before = receipt["before"].get("status", {}).get("text", "")
@@ -280,7 +539,7 @@ def start_observer(suite):
         receipt["python_stack_availability"] = (
             "py-bt attempted; actual debugger output is authoritative"
         )
-        if stopped.is_set() or not _btc_arm_identity(process, identity, root_pid, uid):
+        if stopped.is_set() or not candidate_scope_still_matches(process, identity):
             return dict(
                 receipt, not_attached="stopping or identity changed before spawn"
             )
@@ -394,9 +653,12 @@ def start_observer(suite):
             "candidate_identity_proof": {},
         }
         candidates = {}
+        logged_ranks = set()
+        candidate_sources.clear()
         for log in sorted(output.glob("*logs/process.log"))[:8]:
             text = read_limited(log, 16 * 1024 * 1024).get("text", "")
             ranks, others = _btc_arm_logged_pids(text)
+            logged_ranks.update(ranks)
             snapshot["roles"][str(log.relative_to(output))] = {
                 "rank_pids": ranks,
                 "other_logged_pids": others,
@@ -438,7 +700,89 @@ def start_observer(suite):
                         }
                 except (OSError, psutil.Error):
                     pass
-        selected = list(sorted(candidates.values(), key=lambda item: item[0].pid))[:4]
+        # Log-free discovery uses only this test's live descendant tree.
+        discovery_rejected = {}
+        try:
+            descendants = psutil.Process(root_pid).children(recursive=True)
+            for process in descendants[:256]:
+                if process.pid in candidates:
+                    continue
+                try:
+                    expected = identities.setdefault(process.pid, process.create_time())
+                    proof = spawn_scope(process, expected, discovery_rejected)
+                    if proof is None:
+                        continue
+                    proof["is_leaf"] = False
+                    candidates[process.pid] = (process, expected)
+                    candidate_sources[process.pid] = proof
+                except (OSError, psutil.Error):
+                    discovery_rejected[process.pid] = (
+                        "exited/unreadable before scope proof"
+                    )
+            snapshot["descendants_seen"] = len(descendants)
+            snapshot["descendant_scan_truncated"] = len(descendants) > 256
+        except (OSError, psutil.Error) as exc:
+            snapshot["discovery_error"] = repr(exc)
+        for pid, (process, expected) in list(candidates.items()):
+            ancestry = parent_scope(process, expected, discovery_rejected)
+            if ancestry is None:
+                candidates.pop(pid, None)
+                candidate_sources.pop(pid, None)
+                continue
+            if pid not in candidate_sources:
+                candidate_sources[pid] = dict(
+                    ancestry,
+                    source="logged_rank" if pid in logged_ranks else "logged_process",
+                    is_leaf=False,
+                    log_proof=snapshot["candidate_identity_proof"].get(str(pid)),
+                )
+        # Leaf status concerns eligible candidates, not an excluded resource
+        # tracker or debugger child, and never creates new attach authority.
+        eligible_ancestors = {
+            entry["pid"]
+            for record in candidate_sources.values()
+            for entry in record["ancestry"][1:]
+        }
+        for record in candidate_sources.values():
+            record["is_leaf"] = record["pid"] not in eligible_ancestors
+        sample_index = [600, 1200, 1600, 3000].index(elapsed)
+        records = list(candidate_sources.values())
+        selected_records = _btc_arm_select_records(records, sample_index, 4)
+        selected = [candidates[record["pid"]] for record in selected_records]
+        snapshot["candidate_sources"] = records
+        snapshot["selection"] = {
+            "policy": "rank-first interleaved with leaf/depth unlogged-spawn rotation",
+            "sample_index": sample_index,
+            "selected_pids": [r["pid"] for r in selected_records],
+            "not_selected_pids": sorted(
+                set(candidates) - {r["pid"] for r in selected_records}
+            ),
+            "all_eligible_candidates_selected": len(candidates)
+            <= len(selected_records),
+            "complete_process_tree_gdb_coverage_claimed": False,
+            "log_free_rejected": [
+                {"pid": pid, "reason": reason}
+                for pid, reason in sorted(discovery_rejected.items())[:256]
+            ],
+        }
+        snapshot["owned_descendant_proc"] = [
+            compact_process_snapshot(*candidates[pid])
+            for pid in sorted(candidates)[:16]
+        ]
+        snapshot["owned_descendant_proc_truncated"] = len(candidates) > 16
+        snapshot["self_python_frames"] = self_python_frames()
+        snapshot["readonly_resources"] = {
+            path: read_limited(path, 4096)
+            for path in (
+                "/proc/loadavg",
+                "/proc/pressure/cpu",
+                "/proc/pressure/memory",
+                "/proc/pressure/io",
+            )
+        }
+        snapshot["cgroup_cpu"] = (
+            "Not collected: minimal fixed/proc evidence only; no cgroup traversal."
+        )
         snapshot["candidate_count"] = len(candidates)
         snapshot["selection_truncated"] = len(candidates) > 4
         try:
