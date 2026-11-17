@@ -304,6 +304,7 @@ class Block(nn.Module):
             self.attn_hc,
             self.ffn_hc,
             self.ffn_norm,
+            use_prepared=True,
             original_tokens=original_tokens,
             # Post-HC already owns this residual. Match the cross-layer policy
             # so long prefill does not retain a second full HC activation.

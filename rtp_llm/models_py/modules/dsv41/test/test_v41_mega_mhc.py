@@ -18,6 +18,7 @@ import torch
 from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCUnit
 from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import (
     is_supported,
+    prepare_mega_mhc,
     try_fused_post_pre,
 )
 
@@ -508,7 +509,10 @@ class V41MegaMHCCudaTest(unittest.TestCase):
             ):
                 self.assertFalse(is_supported(**changed))
                 self.assertIsNone(try_fused_post_pre(**changed))
+        prepare_mega_mhc(case["previous"], case["next_hc"], case["norm"])
+        self.assertIs(case["next_hc"]._mega_mhc_supported, True)
         case["next_hc"].set_previous(None)
+        self.assertIsNone(case["next_hc"]._mega_mhc_supported)
         self.assertFalse(is_supported(**case))
         self.assertIsNone(try_fused_post_pre(**case))
         case["next_hc"].set_previous(case["previous"])
@@ -527,12 +531,17 @@ class V41MegaMHCCudaTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "injected mega_mhc"):
                 try_fused_post_pre(**case)
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def test_cuda_graph_replays_updated_inputs_and_delayed_mix(self):
         for leading in (*_DECODE_LAYOUTS, (64,), (128,), (1024,)):
             with self.subTest(leading=leading):
                 case = make_case(leading)
-                graph_case = {**case, "residual": case["residual"].clone()}
+                prepare_mega_mhc(case["previous"], case["next_hc"], case["norm"])
+                graph_case = {
+                    **case,
+                    "residual": case["residual"].clone(),
+                    "use_prepared": True,
+                }
                 graph = torch.cuda.CUDAGraph()
                 stream = torch.cuda.Stream()
                 stream.wait_stream(torch.cuda.current_stream())

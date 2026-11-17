@@ -15,6 +15,7 @@ retains the unfused path instead of initializing barriers during capture.
 from __future__ import annotations
 
 import importlib
+import weakref
 from functools import lru_cache
 from typing import TYPE_CHECKING, Callable
 
@@ -61,7 +62,7 @@ def _stream_key(device: torch.device) -> tuple[int, int]:
     return stream.device.index, stream.cuda_stream
 
 
-def _units_supported(previous, next_hc, norm, device) -> bool:
+def _check_units(previous, next_hc, norm, device) -> bool:
     if device.type != "cuda":
         return False
     # Subclasses may change either mix equations or norm rounding, so only
@@ -110,6 +111,40 @@ def _units_supported(previous, next_hc, norm, device) -> bool:
     )
 
 
+@torch.no_grad()
+def prepare_mega_mhc(previous, next_hc, norm) -> None:
+    """Bind eligibility to a serving layer after loading its weights and norm.
+
+    Serving updates copy values into the existing tensors. After changing fixed
+    weight layouts or layer configuration, prepare the pair again before serving.
+    """
+    if type(next_hc) is not DelayedHCUnit:
+        return
+    next_hc._mega_mhc_supported = isinstance(next_hc.fn, torch.Tensor) and _check_units(
+        previous, next_hc, norm, next_hc.fn.device
+    )
+    if next_hc._mega_mhc_supported:
+        next_hc._mega_mhc_norm = weakref.ref(norm)
+
+
+def _units_supported(previous, next_hc, norm, device, use_prepared) -> bool:
+    if (
+        use_prepared
+        and torch.is_inference_mode_enabled()
+        and not torch.is_grad_enabled()
+    ):
+        supported = getattr(next_hc, "_mega_mhc_supported", None)
+        if supported is not None:
+            return (
+                supported
+                and next_hc._previous_ref is not None
+                and next_hc._previous_ref() is previous
+                and next_hc._mega_mhc_norm() is norm
+                and next_hc.fn.device == device
+            )
+    return _check_units(previous, next_hc, norm, device)
+
+
 def _compact_execution_tokens(original_tokens, tokens, next_hc, norm):
     if (
         type(original_tokens) is not int
@@ -153,6 +188,7 @@ def can_preserve_compact_mhc(
     *,
     original_tokens: int,
     compact_tokens: int,
+    use_prepared: bool = False,
 ) -> bool:
     """Pre-compaction metadata gate, before the previous pre-mix is produced.
 
@@ -164,7 +200,7 @@ def can_preserve_compact_mhc(
     if type(next_hc) is not DelayedHCUnit or not isinstance(next_hc.fn, torch.Tensor):
         return False
     device = next_hc.fn.device
-    if not _units_supported(previous, next_hc, norm, device):
+    if not _units_supported(previous, next_hc, norm, device, use_prepared):
         return False
     if (
         _compact_execution_tokens(original_tokens, compact_tokens, next_hc, norm)
@@ -186,6 +222,8 @@ def is_supported(
     previous: DelayedHCUnit,
     next_hc: DelayedHCUnit,
     norm: torch.nn.Module,
+    *,
+    use_prepared: bool = False,
 ) -> bool:
     """Check the exact delayed-HC/RMSNorm contract without reading GPU data."""
     if (
@@ -199,7 +237,7 @@ def is_supported(
     ):
         return False
     device = attn_out.device
-    if not _units_supported(previous, next_hc, norm, device):
+    if not _units_supported(previous, next_hc, norm, device, use_prepared):
         return False
     leading = tuple(attn_out.shape[:-1])
     contracts = (
@@ -238,8 +276,11 @@ def try_fused_post_pre(
     reuse_residual: bool = False,
     output_fp8: bool = False,
     moe_inputs: MegaMoEInputs | None = None,
+    use_prepared: bool = False,
 ) -> MHCOutput | MHCQuantizedOutput | None:
     """Return ``(residual, normalized_input, post, comb)`` or use the old path.
+
+    Fixed-layout serving layers may reuse their static check with ``use_prepared``.
 
     A successful call also publishes the FFN pre-mix for the next sublayer's
     delayed readout. Unsupported inputs return ``None``; backend execution
@@ -261,7 +302,16 @@ def try_fused_post_pre(
         raise ValueError("Choose GEMM scales or MegaMoE scales, not both")
     if moe_inputs is not None and original_tokens is not None:
         return None
-    if not is_supported(attn_out, residual, post, comb, previous, next_hc, norm):
+    if not is_supported(
+        attn_out,
+        residual,
+        post,
+        comb,
+        previous,
+        next_hc,
+        norm,
+        use_prepared=use_prepared,
+    ):
         return None
     operation = _get_mega_mhc()
     leading = tuple(attn_out.shape[:-1])
@@ -360,4 +410,9 @@ def try_fused_post_pre(
     return (*result, quantized) if output_fp8 else result
 
 
-__all__ = ["can_preserve_compact_mhc", "is_supported", "try_fused_post_pre"]
+__all__ = [
+    "can_preserve_compact_mhc",
+    "is_supported",
+    "prepare_mega_mhc",
+    "try_fused_post_pre",
+]

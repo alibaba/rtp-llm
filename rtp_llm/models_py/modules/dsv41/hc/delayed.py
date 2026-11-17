@@ -75,10 +75,12 @@ class DelayedHCUnit(HCUnitBase):
         self.base = self.base.reshape(mix_width).contiguous()
         self.scale = self.scale.reshape(3).contiguous()
         self._previous_ref = None
+        self._mega_mhc_supported: Optional[bool] = None
         self.pre_mix_out: Optional[torch.Tensor] = None
 
     def set_previous(self, previous: Optional["DelayedHCUnit"]) -> None:
         # Avoid registering predecessors as nested modules or creating cycles.
+        self._mega_mhc_supported = None
         self._previous_ref = weakref.ref(previous) if previous is not None else None
 
     def _pre_impl(self, x: torch.Tensor, dbg_tag=None):

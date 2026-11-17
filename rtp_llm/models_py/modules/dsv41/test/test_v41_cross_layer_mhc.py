@@ -114,7 +114,16 @@ def run_blocks(blocks, hidden, input_ids, captures=(), attn_fn=None):
 
 
 def reference_transition(
-    output, residual, post, comb, previous, next_hc, norm, *, output_fp8=False
+    output,
+    residual,
+    post,
+    comb,
+    previous,
+    next_hc,
+    norm,
+    *,
+    output_fp8=False,
+    use_prepared=False,
 ):
     assert not output_fp8
     residual = previous.post(output, residual, post, comb)
@@ -238,7 +247,8 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
         for block in blocks:
             block.attn = QuantizedAttention()
 
-        def backend(*args, output_fp8=False):
+        def backend(*args, output_fp8=False, use_prepared=False):
+            self.assertTrue(use_prepared)
             self.assertTrue(output_fp8)
             return (*reference_transition(*args), quantized)
 
@@ -306,7 +316,7 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
         )
 
     def test_unsupported_backend_materializes_original_post(self):
-        self.assertEqual(self.compare(backend=lambda *args, output_fp8=False: None), 2)
+        self.assertEqual(self.compare(backend=lambda *args, **kwargs: None), 2)
 
     def test_engram_opt_in_preserves_native_fallback(self):
         from rtp_llm.models_py.modules.dsv41.hc import engram_transition

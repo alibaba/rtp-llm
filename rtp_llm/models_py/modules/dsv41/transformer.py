@@ -235,11 +235,16 @@ class V4Transformer(nn.Module):
             ]
         )
         if args.v41_config is not None and not self.commit_only:
+            from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import prepare_mega_mhc
+
             # Each sublayer reads the pre-mix computed by its predecessor.
             previous = None
             for layer in self.layers:
                 layer.attn_hc.set_previous(previous)
                 layer.ffn_hc.set_previous(layer.attn_hc)
+                if previous is not None:
+                    prepare_mega_mhc(previous, layer.attn_hc, layer.attn_norm)
+                prepare_mega_mhc(layer.attn_hc, layer.ffn_hc, layer.ffn_norm)
                 previous = layer.ffn_hc
 
         if self.commit_only:

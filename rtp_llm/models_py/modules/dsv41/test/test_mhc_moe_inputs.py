@@ -275,7 +275,14 @@ class MHCPreparedMoEHostTest(unittest.TestCase):
                 out[0].fill_(0)
                 out[1].fill_(1 / 6)
 
-            def mhc(*args, original_tokens=None, moe_inputs=None, reuse_residual=False):
+            def mhc(
+                *args,
+                original_tokens=None,
+                moe_inputs=None,
+                reuse_residual=False,
+                use_prepared=False,
+            ):
+                self.assertTrue(use_prepared)
                 self.assertFalse(reuse_residual)
                 if not fused:
                     return None
@@ -326,7 +333,14 @@ class MHCPreparedMoEHostTest(unittest.TestCase):
                 out[0].fill_(0)
                 out[1].fill_(1 / 6)
 
-            def mhc(*args, original_tokens=None, moe_inputs=None, reuse_residual=False):
+            def mhc(
+                *args,
+                original_tokens=None,
+                moe_inputs=None,
+                reuse_residual=False,
+                use_prepared=False,
+            ):
+                self.assertTrue(use_prepared)
                 if not fused:
                     return None
                 result = reference_transition(*args)

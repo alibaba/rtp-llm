@@ -111,6 +111,7 @@ def forward_decode_layer(
                 hidden.previous,
                 layer.attn_hc,
                 layer.attn_norm,
+                use_prepared=True,
                 output_fp8=_can_quantize_attention_input(layer, hidden.output, attn_fn),
             )
         hidden = hidden.materialize() if prepared is None else prepared[0]

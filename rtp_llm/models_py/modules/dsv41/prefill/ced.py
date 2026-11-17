@@ -918,6 +918,7 @@ class CEDPlan:
             block.attn_hc,
             getattr(block, "ffn_hc", None),
             getattr(block, "ffn_norm", None),
+            use_prepared=True,
             original_tokens=self.original_context.chunk_length,
             compact_tokens=self.context.chunk_length,
         ):

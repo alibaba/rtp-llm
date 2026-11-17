@@ -2652,6 +2652,7 @@ class CedEncoderSplitTest(_SingleThreadTest):
             block.attn_hc,
             block.ffn_hc,
             block.ffn_norm,
+            use_prepared=True,
             original_tokens=16384,
             compact_tokens=32,
         )

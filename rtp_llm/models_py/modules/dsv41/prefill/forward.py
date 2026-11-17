@@ -709,6 +709,7 @@ def forward_layers(
                         h.previous,
                         next_layer.attn_hc,
                         next_layer.attn_norm,
+                        use_prepared=True,
                         reuse_residual=(
                             h.residual.numel() * h.residual.element_size() > 1 << 30
                         ),
