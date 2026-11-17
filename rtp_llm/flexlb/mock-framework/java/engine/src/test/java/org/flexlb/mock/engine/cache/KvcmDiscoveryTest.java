@@ -41,6 +41,17 @@ class KvcmDiscoveryTest {
         }
     }
 
+    @Test void invalidVipAddressIsReportedWhenNoLeaderCanBeFound() {
+        var vip = new Vip();
+        vip.hosts.set(List.of(WorkerHost.of("bad host", 1234, "")));
+        try (var resolver = new KvcmDiscovery(null, "kvcm-domain", "shared_128", vip)) {
+            var failure = assertThrows(IllegalStateException.class, resolver::get);
+            var errors = failure.getSuppressed();
+            assertEquals(1, errors.length);
+            assertEquals("Invalid service host", errors[0].getMessage());
+        }
+    }
+
     @Test void successfulLeaderStaysCachedUntilItsOwnEndpointFails() throws Exception {
         try (var first = new Meta(); var second = new Meta()) {
             var vip = new Vip(); vip.hosts.set(List.of(first.host()));

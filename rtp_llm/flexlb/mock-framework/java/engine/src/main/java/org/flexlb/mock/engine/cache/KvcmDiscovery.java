@@ -64,7 +64,7 @@ public final class KvcmDiscovery implements AutoCloseable {
         }
         var failure = new IllegalStateException("No reachable authoritative KVCM leader");
         List<String> addresses = discovery == null
-                ? List.of(fixedBootstrapAddress()) : bootstrapAddresses();
+                ? List.of(fixedBootstrapAddress()) : bootstrapAddresses(failure);
         for (String address : addresses) {
             try {
                 URI found = resolve(address);
@@ -96,15 +96,15 @@ public final class KvcmDiscovery implements AutoCloseable {
         if (discovery != null) discovery.shutdown();
     }
 
-    private List<String> bootstrapAddresses() {
+    private List<String> bootstrapAddresses(IllegalStateException failure) {
         var lookup = new FutureTask<>(() -> {
             var hosts = discovery.getHosts(bootstrap);
             List<String> addresses = new ArrayList<>(hosts.size());
             for (var host : hosts) {
                 try {
                     addresses.add(authority(host.getIp(), host.getPort()));
-                } catch (IllegalStateException ignored) {
-                    // A bad VIP record must not hide the other candidates.
+                } catch (IllegalStateException error) {
+                    failure.addSuppressed(error);
                 }
             }
             return addresses;
