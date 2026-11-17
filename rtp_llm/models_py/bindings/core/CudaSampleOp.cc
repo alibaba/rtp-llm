@@ -1156,6 +1156,10 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         // original matrix's prefix has no consumer and must never be copied.
         auto compact = params;
         compact.token_history_not_materialized = false;
+        if (params.token_ids.size(0) == 1) {
+            compact.token_ids = params.token_ids.narrow(1, params.token_ids.size(1) - 1, 1);
+            return sampleGreedy(compact);
+        }
         compact.token_ids = torch::empty({params.token_ids.size(0), 1}, params.token_ids.options());
         auto result = sampleGreedy(compact);
         params.token_ids.select(1, params.token_ids.size(1) - 1).copy_(compact.token_ids.select(1, 0));

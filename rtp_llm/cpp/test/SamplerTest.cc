@@ -222,10 +222,12 @@ TEST_F(SamplerTest, testGlm5RngSlotsPreserveRepeatedForwardOutputs) {
         auto actual_output = pooled.forward(actual_input);
         expected_tokens.push_back(baseline_output.token_ids);
         actual_tokens.push_back(actual_output.token_ids);
-        expected_probs.push_back(baseline_input.all_probs);
-        actual_probs.push_back(actual_input.all_probs);
+        expected_probs.push_back(baseline_output.all_probs);
+        actual_probs.push_back(actual_output.all_probs);
     }
     for (size_t i = 0; i < actual_tokens.size(); ++i) {
+        ASSERT_TRUE(actual_probs[i].defined());
+        ASSERT_TRUE(expected_probs[i].defined());
         EXPECT_TRUE(torch::equal(actual_tokens[i], expected_tokens[i]));
         EXPECT_TRUE(torch::equal(actual_probs[i], expected_probs[i]));
     }

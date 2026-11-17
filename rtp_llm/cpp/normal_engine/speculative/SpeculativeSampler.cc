@@ -303,7 +303,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
                                    deferred_rng_pool_,
                                    target_sampler_output.deferred_rng_lease});
             if (target_sampler_output.deferred_rng_lease) {
-                target_sampler_output.prepared_rejection_rng = {};
+                target_sampler_output.prepared_rejection_rng = at::Tensor();
                 target_sampler_output.deferred_rng_lease.reset();
             }
         } else if (mtpFusionEnabled() && draft_sampler_output.draft_point_mass && all_greedy && !has_forced_accept) {
