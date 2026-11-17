@@ -30,10 +30,10 @@ class RtpSchedulerTest {
     @TempDir Path directory;
 
     @ParameterizedTest
-    @CsvSource({"0,3,128,2", "1,5,128,1", "0,5,7,1"})
-    void eosOutputLimitAndSequenceLimitDoNotReplaceAcceptanceWithDeliveredTokens(
-            double eos, int maxNewTokens, int maxSequence, int delivered) throws Exception {
-        var config = metricConfig(4, eos, maxSequence); var listener = new Listener();
+    @CsvSource({"12,3,128,2", "2,5,128,1", "12,5,7,1"})
+    void sampledRequestAndContextLimitsDoNotReplaceAcceptanceWithDeliveredTokens(
+            int mean, int maxNewTokens, int maxSequence, int delivered) throws Exception {
+        var config = metricConfig(4, mean, maxSequence); var listener = new Listener();
         try (var cache = new KvCacheManager(config.physicalBlockSize(), 32, 0);
              var scheduler = RtpTestMetrics.fifo(new Object(), config, cache)) {
             var request = scheduler.enqueue(metricInput(1, maxNewTokens), listener);
@@ -837,12 +837,12 @@ class RtpSchedulerTest {
         }
     }
 
-    private RtpConfig metricConfig(double tokensPerStep, double eos, int maxSequence) throws Exception {
+    private RtpConfig metricConfig(double tokensPerStep, int mean, int maxSequence) throws Exception {
         var json = new ObjectMapper(); ObjectNode root = json.valueToTree(LLMMockEngineTest.configuration("decode"));
         var values = (ObjectNode) root.path("component").path("config");
         values.put("seq_size_per_block", 2).put("concurrency_limit", 2).put("max_seq_len", maxSequence);
         ((ObjectNode) values.path("mock.compute")).putObject("decode").put("tokens.per.step", tokensPerStep);
-        ((ObjectNode) values.path("mock.compute")).putObject("eos").put("probability", eos);
+        if (mean > 0) ((ObjectNode) values.path("mock.compute")).putObject("output").put("mean.tokens", mean);
         var path = directory.resolve("metric.json"); json.writeValue(path.toFile(), root);
         return RtpConfig.load(path);
     }

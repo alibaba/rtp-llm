@@ -108,7 +108,7 @@ Case 的 `frontend/start/playback` 通过 Python 调用 Java frontend0 的 `fron
 
 带图记录保存媒体 ID、插入位置及参考展开长度。插入位置按图片前的纯文本 token 数表示。Frontend 插入占位 token，先向 Master 选 V 并读取 ViT 元数据，再用实际展开长度和行 hash 生成路由键。参考长度不一致时记告警，继续使用 ViT 的结果。基础块和 CP 由回放时的 Frontend 与 Prefill 配置共同决定。[多模态与 CP 配置](component-reference.md#prefill-cp)
 
-请求可以分别记录实际输出量和上限。实际量为正时用作本次生成长度并屏蔽 EOS。缺少实际量时使用请求上限并保留 Engine 的 EOS 行为。两项都缺省时使用 `fallback_max_output_tokens`，未提供该参数则启动失败。
+请求可以分别记录实际输出量和上限。实际量为正时用作本次生成上限并设置 `ignore_eos`。缺少实际量时使用记录的请求上限，Decode 可在该上限内按高斯分布采样输出长度。两项都缺省时使用 `fallback_max_output_tokens`，未提供该参数则启动失败。
 
 ## Mock Engine 如何处理请求
 

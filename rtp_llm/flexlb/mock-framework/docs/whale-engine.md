@@ -120,8 +120,8 @@ Mock 的 WorkerStatus 上报 Prefill TP 为 CP size、Decode TP 为 1、DP 为 1
 | ViT     | `43` 或 `2 + 0.00001 * totalImagePixels` | 用 `VIT_GPU_MAX_BATCH_SIZE`、`VIT_GPU_BATCH_WAIT_MS` 控制合批。用 `VIT_CONCURRENCY`、`VIT_MAX_QUEUE_SIZE` 控制准备并发和等待额度。公式只模拟 Forward，图片下载与排队另计。 |
 
 - **投机解码。** 只在 Decode 配 `MOCK_COMPUTE_DECODE_TOKENS_PER_STEP`，默认 1。设为 `2.6` 时，每请求每轮产出 2 或 3 个 token，长期均值为 2.6。Mock 用这个值模拟接受后的产出量。
-- **EOS。** P/D 可配 `MOCK_COMPUTE_EOS_PROBABILITY`，默认 0，按 token 判断。概率在 0 和 1 之间时必填整数 `MOCK_COMPUTE_EOS_SEED`。请求的 `min_new_tokens` 和 `ignore_eos` 控制 EOS 是否生效，`max_new_tokens` 和剩余上下文限制最终长度。
-  P/D 使用相同概率 `p > 0`、从第一个 token 就允许 EOS 时，输出长度按几何分布采样，不截断的平均值为 `1/p`。例如 `p = 0.001` 时平均约 1000 token，有效上限为 1024 时平均约 641 token。
+- **输出长度。** Decode 可配 `MOCK_COMPUTE_OUTPUT_MEAN_TOKENS`、`MOCK_COMPUTE_OUTPUT_STDDEV_PERCENT` 和 `MOCK_COMPUTE_OUTPUT_SEED`。例如均值 1000、百分比 10 对应标准差 100 token。Decode 每条请求采样一次，首个 Prefill token 计入总长。
+  采样长度满足 `min_new_tokens`，最终受请求的 `max_new_tokens` 和剩余上下文容量限制。百分比和种子默认 0。未配置均值或请求开启 `ignore_eos` 时，生成到有效上限。
 
 ### Prefill 轮间开销
 

@@ -60,7 +60,7 @@ def test_vision_playback_through_real_master(tmp_path):
     }
     decode = {
         **engine,
-        "config": {**engine["config"], "mock.compute.eos.probability": 1},
+        "config": {**engine["config"], "mock.compute.output.mean.tokens": 1},
     }
     vision = {
         "config": {

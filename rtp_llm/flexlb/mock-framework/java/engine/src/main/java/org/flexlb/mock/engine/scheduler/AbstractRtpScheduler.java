@@ -70,7 +70,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
             stream.generating = true;
             stream.state.transferred(1);
             // The first P token may already reach D's context/output limit. No Decode forward is needed.
-            if (stream.state.snapshot().generated() >= outputLimit(stream)) { emit(stream, true); return; }
+            if (stream.state.snapshot().generated() >= stream.outputLimit) { emit(stream, true); return; }
             stream.phase = QUEUED; stream.enqueuedAt = stream.timingStarted; waiting.addLast(stream);
             return;
         }
@@ -154,7 +154,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         var batch = completedBatch(work);
         long input = 0, computed = 0, output = 0, maxSequence = 0;
         // Like Real's staged accept_len, this describes the completed computation,
-        // before cancellation filtering and EOS/max-length output truncation.
+        // before cancellation filtering and output-limit truncation.
         long tpotStepNanos = System.nanoTime() - batch.inputStarted();
         long acceptedTokens = 0;
         var byPriority = new TreeMap<Integer, RtpMetrics.TokenCounts>();
@@ -331,19 +331,12 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         return sum <= budget && longest * (selected.size() + 1L) <= budget;
     }
 
-    private int outputLimit(GenerateStream stream) {
-        return Math.min(stream.input.maxNewTokens(),
-            config.maxSeqLen() - stream.input.tokens());
-    }
-
     private int workTokens(GenerateStream stream) {
         if (!live(stream)) return 0;
         var progress = stream.state.snapshot();
         if (stream.nextStep == null)
             stream.nextStep = config.compute().prepare(config.role(), new ComputeModel.Request(
-                Long.toString(stream.input.requestId()), progress.iterations(), stream.input.tokens(), progress.generated(),
-                stream.input.minNewTokens(), stream.input.maxNewTokens(),
-                config.maxSeqLen(), stream.input.ignoreEos()));
+                progress.iterations(), progress.generated(), stream.outputLimit));
         if (prefill()) return stream.input.tokens();
         return 1;
     }
@@ -536,6 +529,7 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
         final Input input;
         final Listener listener;
         final RequestState state;
+        final int outputLimit;
         final ArrayDeque<Notice> notices = new ArrayDeque<>();
 
         KvCacheManager.Lease lease;
@@ -564,6 +558,10 @@ public abstract class AbstractRtpScheduler implements EngineScheduler {
             this.input = input;
             timingStarted = input.started();
             this.listener = listener;
+            int hardLimit = Math.min(input.maxNewTokens(), config.maxSeqLen() - input.tokens());
+            outputLimit = prefill() ? hardLimit
+                : config.compute().decodeOutputLimit(Long.toString(input.requestId()), input.minNewTokens(),
+                    hardLimit, input.ignoreEos());
             this.state = new RequestState(input.deadline(), failure -> terminal(this, failure));
         }
 

@@ -599,24 +599,23 @@ class PdGenerationTest {
         }
     }
 
-    @Test void eosOnFirstTokenCompletesDWithoutADuplicateTokenOrForward() throws Exception {
-        try (var p = node("prefill", 8, 1, Map.of("eos", Map.of("probability", 1))); var d = node("decode", 8, 1);
+    @Test void sampledLengthOfOneCompletesDecodeWithoutAnExtraTokenOrForward() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1, Map.of("output", Map.of("mean.tokens", 1)));
                 var call = new Call(p, input(d, 1, 5, 10, 2000, true))) {
-            call.output(1, true, 1); assertEquals("completed", call.next());
+            call.output(1, false, 1); call.output(1, true, 0); assertEquals("completed", call.next());
             assertEquals(0, metric(d, "rtp_llm_model_forward_seconds_count", "role=\"decode\""));
             assertFalse(d.status().getFinishedTaskList(0).hasErrorInfo()); assertEquals(16, d.status().getAvailableKvCache());
         }
     }
 
-    @Test void eosLengthIsStableAcrossRoundWidths() throws Exception {
+    @Test void sampledLengthIsStableAcrossRoundWidths() throws Exception {
         var compute = ComputeModel.fromJson(new ObjectMapper().readTree("""
-            {"forward":{"expression":"1"},"eos":{"probability":0.2,"seed":42}}
+            {"forward":{"expression":"1"},"output":{"mean_tokens":10,"stddev_percent":20,"seed":42}}
             """));
-        var generation = new ComputeModel.Request("77", 0, 5, 0, 3, 20, 25, false);
-        int expected = compute.completed(new ComputeModel.Plan(generation, 20)).committedTokens();
+        int expected = compute.decodeOutputLimit("77", 3, 20, false);
         for (int width : new int[]{1, 4}) {
-            try (var p = node("prefill", 16, 1, Map.of("eos", Map.of("probability", .2, "seed", 42)));
-                    var d = node("decode", 16, 1, Map.of("decode", Map.of("tokens.per.step", width), "eos", Map.of("probability", .2, "seed", 42)))) {
+            try (var p = node("prefill", 16, 1);
+                    var d = node("decode", 16, 1, Map.of("decode", Map.of("tokens.per.step", width), "output", Map.of("mean.tokens", 10, "stddev.percent", 20, "seed", 42)))) {
                 var input = input(d, 77, 5, 20, 2000, true).toBuilder(); input.getGenerateConfigBuilder().setMinNewTokens(3);
                 try (var call = new Call(p, input.build())) {
                     int sum = 0; boolean finished = false;
@@ -632,16 +631,16 @@ class PdGenerationTest {
     }
 
     @Test void ignoreEosKeepsAnExplicitOutputLengthAuthoritative() throws Exception {
-        try (var p = node("prefill", 8, 1, Map.of("eos", Map.of("probability", 1)));
-                var d = node("decode", 8, 1, Map.of("eos", Map.of("probability", 1)))) {
+        try (var p = node("prefill", 8, 1);
+                var d = node("decode", 8, 1, Map.of("output", Map.of("mean.tokens", 1)))) {
             var input = input(d, 1, 3, 4, 2000, true).toBuilder(); input.getGenerateConfigBuilder().setIgnoreEos(true);
             try (var call = new Call(p, input.build())) { call.completeOutput(4); }
         }
     }
 
-    @Test void decodeOwnsItsEosAndReportsOnlyCommittedOutput() throws Exception {
+    @Test void decodeReportsOnlyCommittedOutputAtTheSampledLimit() throws Exception {
         try (var p = node("prefill", 16, 1); var d = node("decode", 16, 1,
-                Map.of("decode", Map.of("tokens.per.step", 5), "eos", Map.of("probability", 1)))) {
+                Map.of("decode", Map.of("tokens.per.step", 5), "output", Map.of("mean.tokens", 1)))) {
             var input = input(d, 1, 5, 20, 2000, true).toBuilder(); input.getGenerateConfigBuilder().setMinNewTokens(3);
             try (var call = new Call(p, input.build())) {
                 call.output(1, false, 1); call.output(3, true, 2); assertEquals("completed", call.next());

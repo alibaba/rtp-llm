@@ -13,22 +13,26 @@ import org.junit.jupiter.api.Test;
 class ComputeModelTest {
     private static final ObjectMapper JSON = new ObjectMapper();
 
-    @Test void oneComponentOwnsForwardProgressAndEos() throws Exception {
+    @Test void oneComponentOwnsForwardProgressAndOutputLimits() throws Exception {
         var compute = load("{\"forward\":{\"expression\":\"0.5*totalComputeTokens\"}}");
         assertEquals(0, compute.effectiveConfiguration().at("/forward/noise/stddev_ms").doubleValue());
         var batch = FormulaForwardTest.batch(FormulaForwardTest.request("a", 10, 2));
         assertEquals(Duration.ofMillis(4), compute.sampleDuration(Role.prefill, "p0", batch).planned());
         assertEquals(new ComputeModel.Result(1, false, 1), compute.completed(compute.prepare(Role.prefill,
-            new ComputeModel.Request("r", 0, 8, 0, 0, 4, 100, false))));
+            new ComputeModel.Request(0, 0, 4))));
     }
 
-    @Test void maximumSequenceAndOutputLimitsWinEvenWithEosIgnored() throws Exception {
-        var compute = load("{\"forward\":{\"expression\":\"1\"},\"decode\":{\"tokens_per_step\":5},\"eos\":{\"probability\":1}}");
+    @Test void requestAndContextLimitsWinWhenSamplingIsBypassed() throws Exception {
+        var compute = load("""
+            {"forward":{"expression":"1"},"decode":{"tokens_per_step":5},"output":{"mean_tokens":2}}
+            """);
+        assertEquals(5, compute.decodeOutputLimit("r", 0, 5, true));
+        assertEquals(4, compute.decodeOutputLimit("r", 9, 4, false));
         assertEquals(new ComputeModel.Result(4, true, 5), compute.completed(compute.prepare(Role.decode,
-            new ComputeModel.Request("r", 0, 8, 1, 0, 5, 100, true))));
+            new ComputeModel.Request(0, 1, 5))));
         assertEquals(new ComputeModel.Result(3, true, 5), compute.completed(compute.prepare(Role.decode,
-            new ComputeModel.Request("r", 0, 8, 1, 0, 20, 12, true))));
-        assertThrows(IllegalArgumentException.class, () -> new ComputeModel.Request("r", 0, 8, 0, 0, 1, 8, false));
+            new ComputeModel.Request(0, 1, 4))));
+        assertThrows(IllegalArgumentException.class, () -> new ComputeModel.Request(0, 1, 1));
     }
 
     @Test void rejectsLegacyLocationsMisspellingsAndInvalidNestedModels() throws Exception {
@@ -42,10 +46,10 @@ class ComputeModelTest {
                 "{\"forward\":{\"expression\":\"1\"},\"decode\":{\"draft_tokens\":-1,\"acceptance_rate\":1,\"seed\":42}}",
                 "{\"forward\":{\"expression\":\"1\"},\"decode\":{\"draft_tokens\":4,\"acceptance_rate\":1.01,\"seed\":42}}",
                 "{\"forward\":{\"expression\":\"1\"},\"decode\":{\"draft_tokens\":4,\"acceptance_rate\":1,\"seed\":1.5}}",
-                "{\"forward\":{\"expression\":\"1\"},\"eos\":{\"probability\":-0.1,\"seed\":42}}",
-                "{\"forward\":{\"expression\":\"1\"},\"eos\":{\"probability\":1.1,\"seed\":42}}",
-                "{\"forward\":{\"expression\":\"1\"},\"eos\":{\"unknown\":1}}",
-                "{\"forward\":{\"expression\":\"1\"},\"eos\":{\"probability\":0.1}}", "{\"forward\":null}",
+                "{\"forward\":{\"expression\":\"1\"},\"output\":{\"mean_tokens\":0}}",
+                "{\"forward\":{\"expression\":\"1\"},\"output\":{\"mean_tokens\":2,\"stddev_percent\":-1}}",
+                "{\"forward\":{\"expression\":\"1\"},\"output\":{\"unknown\":1}}",
+                "{\"forward\":{\"expression\":\"1\"},\"output\":{\"stddev_percent\":10}}", "{\"forward\":null}",
                 "{\"forward\":{\"expression\":\"1\"},\"decode\":{\"draft_tokens\":3,\"tokens_per_step\":2.6}}"})
             assertThrows(Exception.class, () -> load(value), value);
     }

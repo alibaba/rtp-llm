@@ -8,8 +8,9 @@ mock.compute.forward.expression: 15.26 + 0.10343 * batchSize
 mock.compute.decode.tokens.per.step: 2.874334269284765
 test_block_num: 991894
 reserve_block_ratio: 5
-mock.compute.eos.probability: 0.00089
-mock.compute.eos.seed: 20261105
+mock.compute.output.mean.tokens: 1120
+mock.compute.output.stddev.percent: 10
+mock.compute.output.seed: 20261105
 image_token_id: 129264
 cache_key_hash_seed: "4923373599811257905"
 enable_memory_cache: false

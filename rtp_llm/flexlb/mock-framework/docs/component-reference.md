@@ -55,7 +55,7 @@ real 默认值和映射以 `rtp_llm/server/server_args`、`rtp_llm/config/engine
 | mock.engine.prefill.overhead.ms                                               | 仅 Prefill。非负整数，默认 0。控制一轮输出提交后到下一轮允许组批前的额外等待，单位 ms。见 [Prefill 轮间开销](whale-engine.md#prefill-轮间开销)。                           |
 | mock.compute.forward.noise.stddev.ms / stddev.ratio / max.deviation.ms / seed | 有界噪声，详见 Compute；数值后缀均相对 mock.compute.forward.noise。                                                                                                        |
 | mock.compute.decode.tokens.per.step                                           | D 平均每轮进度，与真实投机机制不同。                                                                                                                                       |
-| mock.compute.eos.probability / seed                                           | P/D 的概率停止模型。                                                                                                                                                       |
+| mock.compute.output.mean.tokens / stddev.percent / seed                       | Decode 输出总长的高斯均值、标准差百分比和随机种子。                                                                                                                        |
 
 ### ENV 输入
 
@@ -104,20 +104,21 @@ vit:
 
 Frontend 和 P/D 对齐 `image_token_id`。真实 Frontend 接入使用其生效标记。Mock Frontend 和 Prefill 从 ViT 接收每张图的 seed 和 split size，按需展开行 hash。真实 Frontend 仍通过原生 RPC 获取逐行 hash。
 
-## Compute、Forward、Decode 和 EOS
+## Compute、Forward 和 Decode
 
 以 Decode 的 `config` 为例。
 
 ```yaml
 mock.compute.forward.expression: "19.5 + 0.175 * batchSize"
 mock.compute.decode.tokens.per.step: 2.6
-mock.compute.eos.probability: 0.0025
-mock.compute.eos.seed: 20260922
+mock.compute.output.mean.tokens: 1000
+mock.compute.output.stddev.percent: 10
+mock.compute.output.seed: 20260922
 ```
 
 每个 P/D/V 必填 `mock.compute.forward.expression`，结果为每个 batch 的毫秒数。公式支持 `param(name, value)` 和 `sum(...)`。逐请求变量只在 `sum` 中使用，包括 `inputTokens`、`hitCacheTokens`、`computeTokens`、`hasHitCache`、`outputTokens`、`generatedTokens`、`contextTokens`、`stepTokens`、`priority`、`imageCount` 和 `imagePixels`。Batch 公式可用 `batchSize` 和 `total*`、`max*` 派生量，RTP 还提供 `cpSize` 和 `cpEnabled`。ViT 的 `imagePixels` 和 `totalImagePixels` 使用 resize 与补边后送入视觉编码器的尺寸。公式倍率直接写在表达式中。
 
-`forward.noise` 默认关闭，启用时指定 seed 和正的 `max.deviation.ms`。Decode 的 `tokens.per.step` 默认 1，设为 2.6 时每轮每请求产出 2 或 3 个 token。P/D 的 `eos.probability` 默认 0，概率介于 0 和 1 时需要 seed。实际输出受 EOS、`min_new_tokens`、`ignore_eos`、`max_new_tokens` 和剩余上下文约束。
+`forward.noise` 默认关闭，启用时指定 seed 和正的 `max.deviation.ms`。Decode 的 `tokens.per.step` 默认 1，设为 2.6 时每轮每请求产出 2 或 3 个 token。Decode 按请求采样一次输出总长，计入 Prefill 已生成的首 token。标准差百分比是相对均值的比例，均值 1000、百分比 10 对应标准差 100 token。采样四舍五入后至少取 1 和 `min_new_tokens` 中的较大值，再按 `max_new_tokens` 和剩余上下文容量截断。标准差百分比和种子默认 0。未配置均值或请求启用 `ignore_eos` 时，按请求和上下文上限生成。
 
 ## DSV4.1 Engine 与 KVCM 接线
 
