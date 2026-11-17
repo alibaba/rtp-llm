@@ -633,7 +633,7 @@ def _native_pd_latency_model_fingerprint(
         if execution_geometry_enabled or execution_cache_source_enabled:
             raise ValueError("unified prefill does not use execution geometry")
         values["navi_latency_mode"] = (
-            "unified_native_prefill_capacity19_prior_cache_v4"
+            "unified_native_prefill_capacity19_prior_cache_v5"
             if capacity_split_prediction
             else "unified_native_prefill_admission_v1"
         )
@@ -4010,7 +4010,10 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             if stats is not None:
                 resolved_cache_tokens = sum(
                     max(0, int(getattr(stats, field, 0) or 0))
-                    for field in ("num_local_cached_tokens", "num_external_cached_tokens")
+                    for field in (
+                        "num_local_cached_tokens",
+                        "num_external_cached_tokens",
+                    )
                 )
                 computed_tokens = max(
                     computed_tokens, min(prompt_tokens, resolved_cache_tokens)
@@ -4031,11 +4034,11 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             ),
             remaining_total_tokens=remaining_prefill_tokens,
             context_before_cache_forecast=context_before_cache_forecast,
+            # A queued request can find more cache before its first forward.
+            # Keep the shared result even when an earlier lookup was complete.
             cache_lookup=(
                 state.cache_lookups.get(self._navi_request_id(request))
-                if self._pp_capacity_unified
-                and state is not None
-                and not cache_lookup_complete
+                if self._pp_capacity_unified and state is not None
                 else None
             ),
         )
@@ -4064,7 +4067,14 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 request, inflight_scheduled_tokens.get(request_id, 0)
             )
             self._workload_contributions[request_id] = contribution
-            if not self._native_cache_lookup_complete(request):
+            waiting_for_first_forward = (
+                contribution.cache_lookup is not None
+                and contribution.cache_lookup.result is None
+            )
+            if (
+                not self._native_cache_lookup_complete(request)
+                or waiting_for_first_forward
+            ):
                 self._pending_cache_lookup_request_ids.add(request_id)
             self._workload_aggregate.apply(contribution, 1)
 
