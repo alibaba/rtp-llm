@@ -386,6 +386,7 @@ def _prefill_compress_state_kernel(
     TRAP: tl.constexpr,
     REDUCE_WIDTH: tl.constexpr,
     HAS_CARRY: tl.constexpr,
+    V4_CACHE: tl.constexpr,
 ):
     pid = tl.program_id(0)
     if pid < count:
@@ -421,6 +422,7 @@ def _prefill_compress_state_kernel(
             BLOCKS,
             TRAP,
             REDUCE_WIDTH,
+            V4_CACHE=V4_CACHE,
         )
     else:
         # Pair compression and state copy have different owner maps and grids.
@@ -744,6 +746,7 @@ def compress_main_and_store_states(
         trap_invalid_kv_access_enabled(),
         min(128, 512 // min(1 << (count.bit_length() - 1), 16)) if count else 32,
         carry is not None,
+        V4_CACHE=main_pool.shape[-1] == 584,
         num_warps=4,
         enable_fp_fusion=False,
     )

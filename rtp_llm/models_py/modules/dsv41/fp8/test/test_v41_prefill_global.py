@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from itertools import product
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -33,6 +34,7 @@ def _case(
     tile_offset=0,
     batch=1,
     boundary_offset=0,
+    main_entry_bytes=288,
     seed=123,
     device="cuda",
 ):
@@ -99,7 +101,7 @@ def _case(
         freqs=freqs,
         norm=norm,
         index_norm=index_norm,
-        main_pool=pool(288),
+        main_pool=pool(main_entry_bytes),
         index_pool=pool(68),
         main_slots=main_slots,
         index_slots=index_slots,
@@ -224,15 +226,19 @@ class PrefillGlobalGateTest(unittest.TestCase):
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class PrefillGlobalCudaTest(unittest.TestCase):
     def test_mapped_compress_and_state_single_launch(self):
-        for rows, batch, offset in (
-            (1, 1, 0),
-            (97, 3, 17),
-            (8192, 9, 17),
-            (65536, 1, 0),
-        ):
-            with self.subTest(rows=rows, batch=batch, offset=offset):
-                ref = _case(rows, 2, strided=True, batch=batch, tile_offset=offset)
-                got = _case(rows, 2, strided=True, batch=batch, tile_offset=offset)
+        shapes = ((1, 1, 0), (5, 1, 0), (97, 3, 17), (8192, 9, 17), (65536, 1, 0))
+        for (rows, batch, offset), entry_bytes in product(shapes, (288, 584)):
+            with self.subTest(
+                rows=rows, batch=batch, offset=offset, entry_bytes=entry_bytes
+            ):
+                case_kwargs = dict(
+                    strided=True,
+                    batch=batch,
+                    tile_offset=offset,
+                    main_entry_bytes=entry_bytes,
+                )
+                ref = _case(rows, 2, **case_kwargs)
+                got = _case(rows, 2, **case_kwargs)
                 if rows == 1:
                     ref.carry = got.carry = None
                 padded = triton.cdiv(rows, 4) * 4
