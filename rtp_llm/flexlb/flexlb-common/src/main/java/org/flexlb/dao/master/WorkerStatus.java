@@ -48,7 +48,23 @@ public class WorkerStatus {
     private final EndpointTrace trace = new EndpointTrace();
 
     /** ViT scalar telemetry is independent of the LLM status-version reducer. */
-    public record VitLoad(long inflightInputs, long receivedNanos) {}
+    public record VitLoad(long inflightInputs, long receivedNanos, long routedAtPollStart) {
+        public VitLoad(long inflightInputs, long receivedNanos) {
+            this(inflightInputs, receivedNanos, 0L);
+        }
+    }
+
+    // Cumulative for this worker generation. The next poll supersedes estimates
+    // for routes assigned before it began, while the reported load stays intact.
+    private final AtomicLong vitRoutedInputs = new AtomicLong();
+
+    public long vitRoutedInputs() {
+        return vitRoutedInputs.get();
+    }
+
+    public boolean tryAddVitRoutedInputs(long observed, int mediaCount) {
+        return vitRoutedInputs.compareAndSet(observed, observed + mediaCount);
+    }
 
     private volatile VitLoad vitLoad;
 
@@ -64,7 +80,7 @@ public class WorkerStatus {
                 return;
             }
             vitLoad = inflightInputs == null || inflightInputs < 0 ? null
-                    : new VitLoad(inflightInputs, System.nanoTime());
+                    : new VitLoad(inflightInputs, System.nanoTime(), lease.vitRoutedAtStart);
         }
     }
 
@@ -389,6 +405,7 @@ public class WorkerStatus {
         private final PollKind kind;
         private final AtomicReference<PollLease> slot;
         private final EndpointTrace.Poll pollTrace;
+        private final long vitRoutedAtStart;
         /** Guarded by owner.workerHealth; one RPC result cannot count as several failures. */
         private boolean statusRpcResultRecorded;
 
@@ -399,6 +416,7 @@ public class WorkerStatus {
             this.owner = owner;
             this.kind = kind;
             this.slot = slot;
+            this.vitRoutedAtStart = owner.vitRoutedInputs();
             this.pollTrace = owner.trace.beginPoll(kind.name(), syncCycleId);
         }
 

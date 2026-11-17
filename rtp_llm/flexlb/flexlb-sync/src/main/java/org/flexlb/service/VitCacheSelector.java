@@ -24,6 +24,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
@@ -59,7 +60,7 @@ public class VitCacheSelector {
     }
 
     /** Keep the exact load sample used for this candidate's routing decision. */
-    private record LoadedCandidate(Candidate candidate, WorkerStatus.VitLoad sample) {}
+    private record LoadedCandidate(Candidate candidate, WorkerStatus.VitLoad sample, long routedInputs) {}
 
     private record MatchScore(int hashHits, int embeddingHits, int gpuHits, int pendingHits)
             implements Comparable<MatchScore> {
@@ -122,22 +123,33 @@ public class VitCacheSelector {
                 || keys.stream().anyMatch(k -> k == null || k.isEmpty() || k.length() > 4096)) {
             return errorStatus(StrategyErrorType.INVALID_REQUEST);
         }
+        // Charge the initial ViT route, once per media input (before key deduplication).
+        int mediaCount = ctx.getRequest().isVitRouteOnly() ? keys.size() : 0;
         if (!affinity) {
-            return selectLeastInflight(ctx, group, config, span);
+            ServerStatus result;
+            do {
+                result = selectLeastInflight(ctx, group, config, mediaCount, span);
+            } while (result == null);
+            return result;
         }
         keys = new ArrayList<>(new LinkedHashSet<>(keys));
         Map<String, Candidate> candidates = directory.candidates(group, keys);
         // A cold key's placement is published atomically with its selection.
         synchronized (pending) {
-            return selectAffinity(ctx, group, config, keys, candidates, span);
+            ServerStatus result;
+            do {
+                result = selectAffinity(ctx, group, config, keys, candidates, mediaCount, span);
+            } while (result == null);
+            return result;
         }
     }
 
     private ServerStatus selectLeastInflight(
-            BalanceContext ctx, String group, RoutingConfig.VitConfig config, Span span) {
+            BalanceContext ctx, String group, RoutingConfig.VitConfig config, int mediaCount, Span span) {
         WorkerStatus selected = null;
         WorkerStatus.VitLoad selectedSample = null;
         String address = null;
+        long selectedRouted = 0;
         long bestLoad = Long.MAX_VALUE;
         int ties = 0;
         long nowNanos = System.nanoTime();
@@ -147,7 +159,8 @@ public class VitCacheSelector {
                 continue;
             }
             WorkerStatus.VitLoad sample = worker.vitLoad();
-            long load = load(sample, nowNanos, config);
+            long routed = worker.vitRoutedInputs();
+            long load = load(sample, routed, nowNanos, config);
             if (load < bestLoad) {
                 bestLoad = load;
                 ties = 0;
@@ -155,24 +168,33 @@ public class VitCacheSelector {
             if (load == bestLoad && ThreadLocalRandom.current().nextInt(++ties) == 0) {
                 selected = worker;
                 selectedSample = sample;
+                selectedRouted = routed;
                 address = entry.address();
             }
         }
-        ServerStatus result = checkedStatus(selected, address, ctx.getRequestId(), group);
-        if (result.isSuccess()) {
+        ServerStatus result = checkedStatus(selected, address, ctx.getRequestId(), group, selectedRouted, mediaCount);
+        if (result != null && result.isSuccess()) {
+            if (mediaCount > 0) {
+                var snapshot = directory.snapshotFor(selected);
+                rememberPlacement(selected, snapshot == null ? null : snapshot.instance(),
+                        snapshot == null ? Set.of() : snapshot.keys(),
+                        ctx.getRequest().getCacheAffinityKeys(), ctx.getRequest().getGenerateTimeout());
+            }
             recordLoad(span, selectedSample, nowNanos, config);
         }
         return result;
     }
 
-    private static long load(WorkerStatus.VitLoad sample, long nowNanos, RoutingConfig.VitConfig config) {
-        return sample != null && nowNanos - sample.receivedNanos()
-                <= TimeUnit.MILLISECONDS.toNanos(config.getLoadMaxAgeMs())
-                ? sample.inflightInputs() : Long.MAX_VALUE;
+    private static long load(WorkerStatus.VitLoad sample, long routed, long nowNanos, RoutingConfig.VitConfig config) {
+        if (sample == null || nowNanos - sample.receivedNanos() > TimeUnit.MILLISECONDS.toNanos(config.getLoadMaxAgeMs())) {
+            return Long.MAX_VALUE;
+        }
+        long unreported = routed - sample.routedAtPollStart();
+        return Math.min(sample.inflightInputs(), Long.MAX_VALUE - unreported) + unreported;
     }
 
     private ServerStatus selectAffinity(BalanceContext ctx, String group,
-            RoutingConfig.VitConfig config, List<String> keys, Map<String, Candidate> candidates, Span span) {
+            RoutingConfig.VitConfig config, List<String> keys, Map<String, Candidate> candidates, int mediaCount, Span span) {
         long now = System.currentTimeMillis();
         long nowNanos = System.nanoTime();
         List<LoadedCandidate> best = new ArrayList<>();
@@ -192,7 +214,8 @@ public class VitCacheSelector {
             MatchScore score = new MatchScore(
                     candidate.hashHits(), candidate.embeddingHits(), candidate.gpuHits(), pendingHits);
             WorkerStatus.VitLoad sample = candidate.worker().vitLoad();
-            long load = load(sample, nowNanos, config);
+            long routed = candidate.worker().vitRoutedInputs();
+            long load = load(sample, routed, nowNanos, config);
             int comparison = bestScore == null ? 1 : score.compareTo(bestScore);
             if (comparison == 0) { comparison = Long.compare(bestLoad, load); }
             if (comparison > 0) {
@@ -201,7 +224,7 @@ public class VitCacheSelector {
                 bestLoad = load;
             }
             if (comparison >= 0) {
-                best.add(new LoadedCandidate(candidate, sample));
+                best.add(new LoadedCandidate(candidate, sample, routed));
             }
         }
         if (best.isEmpty()) {
@@ -209,23 +232,31 @@ public class VitCacheSelector {
         }
         LoadedCandidate selectedLoad = best.get(ThreadLocalRandom.current().nextInt(best.size()));
         Candidate selected = selectedLoad.candidate();
-        ServerStatus result = checkedStatus(selected.worker(), selected.worker().getIpPort(), ctx.getRequestId(), group);
-        if (!result.isSuccess()) {
+        ServerStatus result = checkedStatus(selected.worker(), selected.worker().getIpPort(), ctx.getRequestId(), group,
+                selectedLoad.routedInputs(), mediaCount);
+        if (result == null || !result.isSuccess()) {
             return result;
         }
-        long timeout = ctx.getRequest().getGenerateTimeout();
-        long ttl = timeout <= 0 ? MIN_PENDING_TTL_MS
-                : Math.min(MAX_PENDING_TTL_MS, Math.max(MIN_PENDING_TTL_MS, timeout));
-        for (String key : keys) {
-            if (!selected.hashKeys().contains(key)) {
-                pending.put(key, new Placement(selected.worker(), selected.instance(), now + ttl));
-            }
-        }
+        rememberPlacement(selected.worker(), selected.instance(), selected.hashKeys(), keys,
+                ctx.getRequest().getGenerateTimeout());
         recordLoad(span, selectedLoad.sample(), nowNanos, config);
         return result;
     }
 
-    private ServerStatus checkedStatus(WorkerStatus selected, String address, long requestId, String group) {
+    private void rememberPlacement(WorkerStatus worker, String instance, Set<String> confirmedHashKeys,
+                                   List<String> keys, long timeout) {
+        long ttl = Math.min(MAX_PENDING_TTL_MS, Math.max(MIN_PENDING_TTL_MS, timeout));
+        Placement placement = new Placement(worker, instance, System.currentTimeMillis() + ttl);
+        for (String key : keys) {
+            if (!confirmedHashKeys.contains(key)) {
+                pending.put(key, placement);
+            }
+        }
+    }
+
+    /** Null means another request claimed this observation; retry the load comparison. */
+    private ServerStatus checkedStatus(WorkerStatus selected, String address, long requestId, String group,
+                                       long observedRouted, int mediaCount) {
         if (selected == null) {
             return errorStatus(StrategyErrorType.NO_VIT_WORKER);
         }
@@ -233,6 +264,9 @@ public class VitCacheSelector {
             if (pin == null || pin.endpoint().getStatus() != selected
                     || (group != null && !Objects.equals(group, selected.getGroup()))) {
                 return errorStatus(StrategyErrorType.NO_VIT_WORKER);
+            }
+            if (mediaCount > 0 && !selected.tryAddVitRoutedInputs(observedRouted, mediaCount)) {
+                return null;
             }
             return status(selected, requestId);
         }

@@ -42,8 +42,8 @@ public class VitCacheDirectory {
     });
     private boolean wasMaster;
 
-    private record Snapshot(WorkerStatus worker, String instance, Set<String> keys,
-                            Set<String> gpuEmbeddingKeys, Set<String> cpuEmbeddingKeys, long time) {}
+    record Snapshot(WorkerStatus worker, String instance, Set<String> keys,
+                    Set<String> gpuEmbeddingKeys, Set<String> cpuEmbeddingKeys, long time) {}
     public record Candidate(WorkerStatus worker, String instance, Set<String> hashKeys,
                             int hashHits, int embeddingHits, int gpuHits) {}
 
@@ -160,6 +160,16 @@ public class VitCacheDirectory {
         }
     }
 
+    // A load-only route needs the selected worker's epoch and known keys only.
+    Snapshot snapshotFor(WorkerStatus worker) {
+        return freshSnapshot(snapshots.get(worker.getIpPort()), worker, System.currentTimeMillis());
+    }
+
+    private static Snapshot freshSnapshot(Snapshot snapshot, WorkerStatus worker, long now) {
+        return snapshot != null && snapshot.worker() == worker && now - snapshot.time() <= 2 * SYNC_INTERVAL_MS
+                ? snapshot : null;
+    }
+
     /** Cache matches share immutable key sets from one directory view. */
     public Map<String, Candidate> candidates(String group, List<String> keys) {
         var fleet = workers.vitRoutingSnapshot();
@@ -171,11 +181,7 @@ public class VitCacheDirectory {
             if (group != null && !Objects.equals(group, worker.getGroup())) {
                 continue;
             }
-            Snapshot snapshot = cacheView.get(entry.address());
-            if (snapshot != null && (snapshot.worker() != worker
-                    || now - snapshot.time() > 2 * SYNC_INTERVAL_MS)) {
-                snapshot = null;
-            }
+            Snapshot snapshot = freshSnapshot(cacheView.get(entry.address()), worker, now);
             int hashHits = 0;
             int gpuHits = 0;
             int cpuHits = 0;
