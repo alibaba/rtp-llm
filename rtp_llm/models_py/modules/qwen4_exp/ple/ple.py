@@ -1230,6 +1230,7 @@ class Qwen4ExpPLELayer(nn.Module):
                 self.conv_weight,
                 self.conv_dilation,
                 residual=hyper_states if add_residual else None,
+                verify=add_residual,
             )
             if fused is not None:
                 return fused, candidate_inputs

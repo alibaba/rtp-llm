@@ -95,7 +95,7 @@ def _ple_conv(
         )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["LENGTH"])
 def _ple_verify_conv(
     Gated,
     Normed,
@@ -103,10 +103,10 @@ def _ple_verify_conv(
     Weight,
     Residual,
     Output,
-    LENGTH: tl.constexpr,
+    LENGTH,
+    INITIAL_BATCH_STRIDE,
+    INITIAL_ROW_STRIDE,
     WIDTH: tl.constexpr,
-    INITIAL_BATCH_STRIDE: tl.constexpr,
-    INITIAL_ROW_STRIDE: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     batch, token = tl.program_id(1), tl.program_id(2)
@@ -146,6 +146,7 @@ def try_ple_conv(
     residual=None,
     roll_state=False,
     tune_bf16_prefill=False,
+    verify=False,
 ):
     if not (
         gated.is_cuda
@@ -196,9 +197,11 @@ def try_ple_conv(
         return None
     output = torch.empty_like(gated)
     batch, length, width = gated.shape
-    # Each program handles one token so all lanes select the same history row.
+    # Opt in from target verification. Each program handles one token so
+    # all lanes select the same history row.
     if (
-        initial is not None
+        verify
+        and initial is not None
         and residual is not None
         and not roll_state
         and 0 < batch < 65536

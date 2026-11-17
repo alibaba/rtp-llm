@@ -175,14 +175,27 @@ class PrefillTritonRecompileRegressionTest(unittest.TestCase):
                         torch.randn(batch, 9, 10240, **kw) if has_initial else None
                     )
                     residual = torch.randn_like(gated) if has_residual else None
-                    actual = ple_conv_triton.try_ple_conv(
-                        gated, normed, initial, weight, 3, residual=residual
-                    )
                     expected = reference_conv(gated, normed, initial, weight, residual)
-                    self.assertIsNotNone(actual)
-                    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+                    verify_modes = (
+                        (False, True) if has_initial and has_residual else (False,)
+                    )
+                    for verify in verify_modes:
+                        actual = ple_conv_triton.try_ple_conv(
+                            gated,
+                            normed,
+                            initial,
+                            weight,
+                            3,
+                            residual=residual,
+                            verify=verify,
+                        )
+                        self.assertIsNotNone(actual)
+                        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
-        self.assert_reuses_variants(ple_conv_triton, run, (5, 16), (6, 7, 15, 127))
+        # Warm both sides of the verify dispatch boundary before probing.
+        self.assert_reuses_variants(
+            ple_conv_triton, run, (5, 16, 33), (6, 7, 15, 32, 127)
+        )
 
     def test_small_moe_routes_reuse_tile_buckets(self):
         from rtp_llm.models_py.modules.qwen4_exp.moe import moe_align_triton
