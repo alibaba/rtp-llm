@@ -177,19 +177,20 @@ TEST(FrozenTaskRecoveryTest, ReleaseObserverRunsOnceAfterReleaseAndCannotInterru
     second->freeze();
     State state = State::RUNNING;
     std::vector<TransferExecutionTrace> released;
-    FrozenTaskRecovery recovery(
-        [&] { return std::vector<std::shared_ptr<FrozenTask>>{first, second}; },
-        [&](const auto& execution, int) { return proof(execution, state); },
-        {},
-        [&](const auto& execution) {
-            const auto& task = execution.trace_id == first->execution().trace_id ? first : second;
-            EXPECT_EQ(task->snapshot().state, FrozenTask::State::RELEASED);
-            EXPECT_FALSE(pool->isFrozen(execution.descriptors.front().targets.front().block));
-            released.push_back(execution.trace_id);
-            if (std::holds_alternative<uint64_t>(execution.trace_id))
-                throw std::runtime_error("metrics unavailable");
-            throw 42;
-        });
+    FrozenTaskRecovery recovery([&] { return std::vector<std::shared_ptr<FrozenTask>>{first, second}; },
+                                [&](const auto& execution, int) { return proof(execution, state); },
+                                {},
+                                [&](const auto& execution, bool forced) {
+                                    EXPECT_FALSE(forced);
+                                    const auto& task =
+                                        execution.trace_id == first->execution().trace_id ? first : second;
+                                    EXPECT_EQ(task->snapshot().state, FrozenTask::State::RELEASED);
+                                    EXPECT_FALSE(pool->isFrozen(execution.descriptors.front().targets.front().block));
+                                    released.push_back(execution.trace_id);
+                                    if (std::holds_alternative<uint64_t>(execution.trace_id))
+                                        throw std::runtime_error("metrics unavailable");
+                                    throw 42;
+                                });
     EXPECT_EQ(recovery.runOnce(1000).released, 0u);
     EXPECT_TRUE(released.empty());
     state = State::BUFFER_SAFE;
@@ -245,7 +246,10 @@ TEST(FrozenTaskRecoveryTest, TimeoutReleasesRunningUnknownAndFailedQueriesOnlyOn
                                             return result;
                                         },
                                         {},
-                                        [&](const auto&) { ++notifications; });
+                                        [&](const auto&, bool forced) {
+                                            EXPECT_TRUE(forced);
+                                            ++notifications;
+                                        });
             const auto         pending = recovery.runOnce(1000);
             EXPECT_EQ(pending.released, 0u);
             EXPECT_EQ(pending.pending, 1u);
@@ -279,7 +283,7 @@ TEST(FrozenTaskRecoveryTest, ConfiguredTimeoutCanShortenExtendOrDisableForcedRel
         FrozenTaskRecovery recovery([&] { return std::vector<std::shared_ptr<FrozenTask>>{task}; },
                                     [&](const auto& execution, int) { return proof(execution, state); },
                                     {},
-                                    {},
+                                    [&](const auto&, bool forced) { EXPECT_EQ(forced, state != State::BUFFER_SAFE); },
                                     timeout_ms);
         EXPECT_EQ(recovery.runOnce(1000).released, timeout_ms == 1000 ? 1u : 0u);
         EXPECT_EQ(pool->isFrozen(block), timeout_ms != 1000);

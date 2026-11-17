@@ -77,7 +77,8 @@ BlockTreeCacheMetricsReporter::BlockTreeCacheMetricsReporter(
 }
 BlockTreeCacheMetricsReporter::~BlockTreeCacheMetricsReporter() = default;
 
-void BlockTreeCacheMetricsReporter::reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution) const {
+void BlockTreeCacheMetricsReporter::reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution,
+                                                          bool                             forced) const {
     if (!metrics_reporter_) {
         return;
     }
@@ -100,6 +101,7 @@ void BlockTreeCacheMetricsReporter::reportUnfreezeMetrics(const FrozenTask::Exec
         kmonitor::MetricsTags tags("pool_name", pool->poolName());
         tags.AddTag("tier", tierName(pool_targets.tier));
         tags.AddTag("backend", backend);
+        tags.AddTag("forced", forced ? "true" : "false");
         metrics_reporter_->report<RtpLLMCachePoolMetrics, RtpLLMCacheUnfreezeMetricsCollector>(&tags, &collector);
     }
 }
@@ -114,7 +116,11 @@ void BlockTreeCacheMetricsReporter::reportUnfreezeZeroMetrics(const std::vector<
             kmonitor::MetricsTags tags("pool_name", pool.pool_name);
             tags.AddTag("tier", tierName(pool.tier));
             tags.AddTag("backend", backend);
-            metrics_reporter_->report<RtpLLMCachePoolMetrics, RtpLLMCacheUnfreezeMetricsCollector>(&tags, &collector);
+            for (const char* forced : {"false", "true"}) {
+                tags.AddTag("forced", forced);
+                metrics_reporter_->report<RtpLLMCachePoolMetrics, RtpLLMCacheUnfreezeMetricsCollector>(&tags,
+                                                                                                       &collector);
+            }
         }
     }
 }

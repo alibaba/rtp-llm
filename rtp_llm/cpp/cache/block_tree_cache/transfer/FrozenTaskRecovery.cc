@@ -280,7 +280,7 @@ FrozenTaskRecovery::Summary FrozenTaskRecovery::runOnce(int                     
                 ++summary.released;
                 try {
                     if (on_released_)
-                        on_released_(task->execution());
+                        on_released_(task->execution(), expired && !safe);
                 } catch (const std::exception& error) {
                     try {
                         RTP_LLM_LOG_WARNING("FrozenTask release observer failed: %s", error.what());
