@@ -1,5 +1,6 @@
 package org.flexlb.service.grpc;
 
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatus.EngineObservation;
@@ -13,7 +14,6 @@ import org.flexlb.enums.PriorityPreemptionProgress;
 import org.flexlb.enums.TaskPhase;
 
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -71,12 +71,18 @@ public class EngineStatusConverter {
         cacheStatus.setBlockSize(cacheStatusPB.getBlockSize());
         cacheStatus.setVersion(cacheStatusPB.getVersion());
 
-        // Copy the keys so the Master index does not retain the protobuf response.
-        Set<Long> cachedKeys =
-                new HashSet<>(
-                        cacheStatusPB.getCacheKeyListCount() == 0
-                                ? cacheStatusPB.getCacheKeysMap().keySet()
-                                : cacheStatusPB.getCacheKeyListList());
+        // Store packed keys without boxing each one or retaining the protobuf response.
+        int packedKeyCount = cacheStatusPB.getCacheKeyListCount();
+        Set<Long> cachedKeys;
+        if (packedKeyCount == 0) {
+            cachedKeys = new LongOpenHashSet(cacheStatusPB.getCacheKeysMap().keySet());
+        } else {
+            var packedKeys = new LongOpenHashSet(packedKeyCount);
+            for (int index = 0; index < packedKeyCount; index++) {
+                packedKeys.add(cacheStatusPB.getCacheKeyList(index));
+            }
+            cachedKeys = packedKeys;
+        }
         cacheStatus.setCachedKeys(cachedKeys);
         cacheStatus.setCacheKeySize(cachedKeys.size());
         return cacheStatus;

@@ -1,6 +1,7 @@
 package org.flexlb.service.grpc;
 
 import com.google.protobuf.CodedOutputStream;
+import it.unimi.dsi.fastutil.longs.LongSet;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -13,6 +14,7 @@ import java.util.List;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -28,15 +30,17 @@ class EngineStatusConverterTest {
     @Test
     void prefersPackedCacheKeysAndReadsLegacySnapshots() throws Exception {
         var legacy = EngineRpcService.CacheStatusPB.newBuilder().putCacheKeys(17L, true);
-        var packed = legacy.clone().addCacheKeyList(Long.MIN_VALUE).addCacheKeyList(Long.MAX_VALUE);
+        var packed =
+                legacy.clone().addAllCacheKeyList(List.of(Long.MIN_VALUE, 0L, Long.MAX_VALUE, 0L));
 
         assertEquals(
                 Set.of(17L),
                 EngineStatusConverter.convertToCacheStatus(legacy.build()).getCachedKeys());
         var received = EngineRpcService.CacheStatusPB.parseFrom(packed.build().toByteArray());
         var cacheStatus = EngineStatusConverter.convertToCacheStatus(received);
-        assertEquals(Set.of(Long.MIN_VALUE, Long.MAX_VALUE), cacheStatus.getCachedKeys());
-        assertEquals(2, cacheStatus.getCacheKeySize());
+        assertInstanceOf(LongSet.class, cacheStatus.getCachedKeys());
+        assertEquals(Set.of(Long.MIN_VALUE, 0L, Long.MAX_VALUE), cacheStatus.getCachedKeys());
+        assertEquals(3, cacheStatus.getCacheKeySize());
     }
 
     @Test
