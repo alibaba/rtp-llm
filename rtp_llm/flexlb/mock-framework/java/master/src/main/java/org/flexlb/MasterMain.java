@@ -1,16 +1,23 @@
 package org.flexlb;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.net.InetAddresses;
 import org.flexlb.config.DeploymentIdentity;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.mock.master.LoopbackGrpcServer;
+import org.flexlb.mock.master.LoopbackLBStatusConsistencyService;
+import org.flexlb.mock.master.LoopbackZookeeperMasterElectService;
 import org.flexlb.mock.protocol.ControlHttpServer;
 import org.flexlb.mock.protocol.Role;
 import org.flexlb.service.grace.ApplicationLifecycle;
 import org.flexlb.sync.status.WorkerDirectory;
+import org.springframework.beans.factory.support.BeanDefinitionRegistry;
+import org.springframework.beans.factory.support.RootBeanDefinition;
 import org.springframework.boot.SpringApplication;
 import org.springframework.core.SpringProperties;
 import org.springframework.core.env.AbstractEnvironment;
 
+import java.net.Inet4Address;
 import java.net.InetSocketAddress;
 import java.nio.file.Path;
 import java.util.List;
@@ -46,14 +53,34 @@ public final class MasterMain {
         var directory = Path.of(required("MOCK_OUTPUT_DIR"));
         int port = Integer.parseInt(required("MOCK_MASTER_PORT"));
         String host = required("FLEXLB_ADVERTISED_IP");
+        if (!(InetAddresses.forString(host) instanceof Inet4Address ipv4)
+                || !ipv4.isLoopbackAddress()) {
+            throw new IllegalArgumentException("Local Mock Master requires an IPv4 loopback address");
+        }
         SpringProperties.setFlag(AbstractEnvironment.IGNORE_GETENV_PROPERTY_NAME);
         org.flexlb.OpenTelemetryBootstrap.configureFromEnvironment();
         var application = new SpringApplication(Application.class);
+        // Replace the scanned services before Spring initializes their resources.
+        application.addInitializers(
+                context ->
+                        context.addBeanFactoryPostProcessor(
+                                factory -> {
+                                    var registry = (BeanDefinitionRegistry) factory;
+                                    replaceBean(
+                                            registry, "flexlbGrpcServer", LoopbackGrpcServer.class);
+                                    replaceBean(
+                                            registry,
+                                            "zookeeperMasterElectService",
+                                            LoopbackZookeeperMasterElectService.class);
+                                    replaceBean(
+                                            registry,
+                                            "LBStatusConsistencyService",
+                                            LoopbackLBStatusConsistencyService.class);
+                                }));
         application.setRegisterShutdownHook(false);
         var context =
                 application.run(
                         "--server.address=" + host,
-                        "--flexlb.advertised-ip=" + host,
                         "--server.port=" + port,
                         "--management.server.port=" + port,
                         "--flexlb.log.path=" + directory.resolve("logs"));
@@ -147,6 +174,11 @@ public final class MasterMain {
 
     private static String required(String key) {
         return Objects.requireNonNull(System.getenv(key), "Missing " + key);
+    }
+
+    private static void replaceBean(BeanDefinitionRegistry registry, String name, Class<?> type) {
+        registry.removeBeanDefinition(name);
+        registry.registerBeanDefinition(name, new RootBeanDefinition(type));
     }
 
     public record None() {}
