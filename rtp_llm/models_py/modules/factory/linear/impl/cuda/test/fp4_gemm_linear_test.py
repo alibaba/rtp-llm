@@ -2,10 +2,13 @@ import logging
 import os
 import unittest
 
+from rtp_llm.test.utils import hang_watchdog
+
+hang_watchdog.install(seconds=0)
+
 import torch
 import torch.nn.functional as F
 from flashinfer import fp4_quantize
-
 from rtp_llm.config.quant_config import init_quant_config
 from rtp_llm.device.device_impl import CudaImpl
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp4_linear import (

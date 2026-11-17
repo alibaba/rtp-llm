@@ -36,7 +36,7 @@ py_test(
         "fp8_deepgemm_linear_sm120_test.py",
         "fp8_linear_test.py",
     ],
-    deps = py_test_deps,
+    deps = py_test_deps + ["//rtp_llm/test/utils:hang_watchdog"],
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13"},
 )
@@ -55,7 +55,7 @@ py_test(
 py_test(
     name = "fp4_gemm_linear_test",
     srcs = ["fp4_gemm_linear_test.py"],
-    deps = py_test_deps,
+    deps = py_test_deps + ["//rtp_llm/test/utils:hang_watchdog"],
     tags = ["SM100_ARM_CU13"],
     exec_properties = {"gpu": "SM100_ARM_CU13"},
 )

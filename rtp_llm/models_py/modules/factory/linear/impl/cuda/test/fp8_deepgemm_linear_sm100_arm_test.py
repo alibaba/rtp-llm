@@ -1,6 +1,10 @@
 import platform
 import unittest
 
+from rtp_llm.test.utils import hang_watchdog
+
+hang_watchdog.install(seconds=0)
+
 from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     has_deep_gemm,
     is_deep_gemm_e8m0_used,
