@@ -14,6 +14,23 @@ class CPByteSlicedSlotCompaction(NamedTuple):
     contiguous_block_start: int = -1
 
 
+def normalize_gather_row_offsets(out, row_offsets, batch):
+    if row_offsets is None:
+        return None
+    if not (
+        out.ndim == 2
+        and out.shape[1] == 512
+        and out.stride(1) == 1
+        and out.stride(0) >= 512
+        and isinstance(row_offsets, torch.Tensor)
+        and row_offsets.device == out.device
+        and row_offsets.dtype in (torch.int32, torch.int64)
+        and row_offsets.shape == (batch,)
+    ):
+        raise ValueError("Packed SWA gather needs a row matrix and per-request offsets")
+    return row_offsets.contiguous()
+
+
 def build_cp_byte_sliced_slot_compaction(
     slot_mapping: torch.Tensor,
     full_entries_per_block: int,

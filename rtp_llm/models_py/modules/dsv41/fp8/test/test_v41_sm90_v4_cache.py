@@ -3,10 +3,14 @@
 import math
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
 from rtp_llm.models_py.modules.dsv41.fp8 import _v41_sm90_v4_cache as codec
+from rtp_llm.models_py.modules.dsv41.fp8._swa_cp_byte_sliced import (
+    build_cp_byte_sliced_slot_compaction,
+)
 from rtp_llm.models_py.modules.dsv41.fp8._swa_kv_insert_triton import (
     quantize_and_insert_k_cache as v4_writer,
 )
@@ -179,6 +183,84 @@ class SM90V4CacheTest(unittest.TestCase):
                     rebuilt = torch.cat(slices, dim=1)
                     self.assertEqual(rebuilt.shape, (3, stride))
                     torch.testing.assert_close(rebuilt, expected_raw, rtol=0, atol=0)
+
+    def test_packed_prefix_reads_write_only_selected_workspace_rows(self):
+        from rtp_llm.models_py.distributed import collective_torch
+
+        entries, cp_size = 128, 8
+        raw, pool = _pool(3, entries, cp=cp_size)
+        keys = torch.randn(3, 512, dtype=torch.bfloat16, device="cuda")
+        key_slots = torch.tensor([1, 129, 258], device="cuda")
+        v4_writer(keys, pool, key_slots)
+        slots = torch.tensor([[129, -1, 1], [258, -1, -1]], device="cuda")
+        lens = torch.tensor([3, 1], device="cuda", dtype=torch.int32)
+        row_offsets = torch.tensor([1, 87, 8, 87], device="cuda")[::2]
+        cp = build_cp_byte_sliced_slot_compaction(
+            slots, entries, raw.shape[0], "SM90 packed prefix test", "mask", lens
+        )
+        slices = [x.contiguous() for x in raw.chunk(cp_size, dim=1)]
+        gathered = torch.cat([x.index_select(0, cp.unique_blocks) for x in slices])
+        expected = torch.full((12, 528), -123, dtype=torch.bfloat16, device="cuda")
+        base = _read_v4_rows(pool, key_slots).bfloat16()
+        expected[[2, 4, 9], :512] = base[[1, 0, 2]]
+        expected[3, :512] = 0
+
+        def check(read, expected_rows=expected):
+            out = torch.full_like(expected_rows, -123)
+            read(out[:, :512])
+            torch.testing.assert_close(
+                out.view(torch.int16), expected_rows.view(torch.int16)
+            )
+
+        check(
+            lambda out: codec.dequantize_and_gather_k_cache_slots(
+                out, pool, slots, lens, 1, out_row_offsets=row_offsets
+            )
+        )
+        check(
+            lambda out: codec.dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+                out, raw, slots, lens, 1, entries, 0, 1, cp, out_row_offsets=row_offsets
+            )
+        )
+        for direct in ("0", "1"):
+            with self.subTest(direct=direct), patch.dict(
+                "os.environ", {"DSV4_CP_SWA_DIRECT_DEQUANT_SCATTER": direct}
+            ), patch.object(collective_torch, "all_gather", return_value=gathered):
+                check(
+                    lambda out: codec.dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+                        out,
+                        slices[0],
+                        slots,
+                        lens,
+                        1,
+                        entries,
+                        0,
+                        cp_size,
+                        cp,
+                        out_row_offsets=row_offsets,
+                    )
+                )
+        masked_slots = torch.full_like(slots, -1)
+        empty_cp = build_cp_byte_sliced_slot_compaction(
+            masked_slots, entries, raw.shape[0], "SM90 masked prefix test", "mask", lens
+        )
+        masked_expected = expected.clone()
+        masked_expected[[2, 4, 9], :512] = 0
+        check(
+            lambda out: codec.dequantize_and_gather_k_cache_slots_cp_byte_sliced(
+                out,
+                slices[0],
+                masked_slots,
+                lens,
+                1,
+                entries,
+                0,
+                cp_size,
+                empty_cp,
+                out_row_offsets=row_offsets,
+            ),
+            masked_expected,
+        )
 
     @torch.no_grad()
     def test_fused_qkv_584_matches_unfused_writer(self):

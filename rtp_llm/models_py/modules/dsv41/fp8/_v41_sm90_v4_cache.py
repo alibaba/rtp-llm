@@ -21,6 +21,7 @@ import triton.language as tl
 
 from . import _swa_dequant_triton as _reader
 from . import _swa_kv_insert_triton as _writer
+from ._swa_cp_byte_sliced import normalize_gather_row_offsets
 from ._v41_fp4_triton import _e2m1_to_float, _round_e2m1
 
 HEAD_DIM = 512
@@ -224,20 +225,33 @@ def dequantize_swa_k_cache(pool_3d, slots, *, out_dtype=torch.bfloat16, out=None
 dequantize_k_cache_slots = dequantize_swa_k_cache
 
 
-def dequantize_and_gather_k_cache_slots(
-    out, k_cache, slot_mapping, gather_lens, offset
-):
-    slots = _checked_slots(k_cache, slot_mapping)
-    if slots.ndim != 2 or out.ndim != 3 or out.shape[0] != slots.shape[0]:
-        raise ValueError("gather needs [B,W] slots and [B,M,512] output")
-    if offset < 0 or offset + slots.shape[1] > out.shape[1] or out.shape[2] != HEAD_DIM:
+def _gather_workspace(out, slots, gather_lens, offset, out_row_offsets):
+    if slots.ndim != 2 or out.device != slots.device or offset < 0:
+        raise ValueError("invalid V4 gather workspace")
+    out_row_offsets = normalize_gather_row_offsets(out, out_row_offsets, slots.shape[0])
+    if out_row_offsets is None and (
+        out.ndim != 3
+        or out.shape[0] != slots.shape[0]
+        or offset + slots.shape[1] > out.shape[1]
+        or out.shape[-1] != HEAD_DIM
+    ):
         raise ValueError("gather output window is out of range")
     if gather_lens is not None:
         if gather_lens.device != out.device or gather_lens.numel() != slots.shape[0]:
             raise ValueError("gather lengths must have one CUDA value per request")
         gather_lens = gather_lens.reshape(-1).clamp(0, slots.shape[1]).to(torch.int32)
+    return gather_lens, out_row_offsets
+
+
+def dequantize_and_gather_k_cache_slots(
+    out, k_cache, slot_mapping, gather_lens, offset, *, out_row_offsets=None
+):
+    slots = _checked_slots(k_cache, slot_mapping)
+    gather_lens, out_row_offsets = _gather_workspace(
+        out, slots, gather_lens, offset, out_row_offsets
+    )
     _reader.dequantize_and_gather_k_cache_slots(
-        out, k_cache, slots, gather_lens, offset
+        out, k_cache, slots, gather_lens, offset, out_row_offsets=out_row_offsets
     )
 
 
@@ -403,32 +417,19 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     cp_rank,
     cp_size,
     compaction,
+    *,
+    out_row_offsets=None,
 ):
     if not _valid_cp(
         k_cache_raw, slot_mapping, full_entries_per_block, cp_rank, cp_size, compaction
     ):
         raise ValueError("invalid V4 CP byte-sliced cache contract")
-    if (
-        slot_mapping.ndim != 2
-        or out.ndim != 3
-        or out.shape[0] != slot_mapping.shape[0]
-        or out.shape[-1] != HEAD_DIM
-        or offset < 0
-        or offset + slot_mapping.shape[1] > out.shape[1]
-    ):
-        raise ValueError("invalid CP gather output window")
-    if gather_lens is not None:
-        if (
-            gather_lens.device != out.device
-            or gather_lens.numel() != slot_mapping.shape[0]
-        ):
-            raise ValueError("CP gather lengths must have one device value per request")
-        gather_lens = (
-            gather_lens.reshape(-1).clamp(0, slot_mapping.shape[1]).to(torch.int32)
-        )
+    gather_lens, out_row_offsets = _gather_workspace(
+        out, slot_mapping, gather_lens, offset, out_row_offsets
+    )
     if slot_mapping.numel() == 0:
         return
-    if compaction.unique_blocks.numel() == 0:
+    if compaction.unique_blocks.numel() == 0 and out_row_offsets is None:
         target = out[:, offset : offset + slot_mapping.shape[1], :]
         if gather_lens is None:
             target.zero_()
@@ -446,7 +447,12 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
             (k_cache_raw.stride(0), ENTRY_BYTES, 1),
         )
         return dequantize_and_gather_k_cache_slots(
-            out, view, slot_mapping, gather_lens, offset
+            out,
+            view,
+            slot_mapping,
+            gather_lens,
+            offset,
+            out_row_offsets=out_row_offsets,
         )
     return _reader.dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         out,
@@ -458,4 +464,5 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
         cp_rank,
         cp_size,
         compaction,
+        out_row_offsets=out_row_offsets,
     )
