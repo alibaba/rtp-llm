@@ -11,7 +11,8 @@ namespace rtp_llm {
 
 class NormalSamplerInputGatherer {
 public:
-    NormalSamplerInputGatherer() = default;
+    explicit NormalSamplerInputGatherer(bool allow_history_elision = false):
+        allow_history_elision_(allow_history_elision) {}
 
     absl::StatusOr<SamplerInputs> gather(const StreamGroups&    stream_groups,
                                          const GptModelInputs&  model_inputs,
@@ -31,6 +32,8 @@ public:
     void setLogitsProcessorInputs(SamplerInputs&                sampler_inputs,
                                   std::list<GenerateStreamPtr>& all_streams,
                                   bool                          score_batch = false) const;
+private:
+    bool allow_history_elision_;
 };
 
 }  // namespace rtp_llm

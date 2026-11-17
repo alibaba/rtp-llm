@@ -768,6 +768,36 @@ TEST_F(NormalBatchStreamProcessorTest, testSamplerInputSnapshotsOnlyRequestedRow
     EXPECT_FALSE(plain_output.value().generate_outputs[0].token_logprobs.has_value());
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testGlm5NormalHistoryElisionKeepsConsumers) {
+    auto model_config = makeLogprobsModelConfig(4);
+    model_config.model_type = "glm_5";
+    auto processor = makeLogprobsProcessor(model_config);
+    GptModelInputs inputs;
+    GptModelOutputs output;
+    output.logits = torch::zeros({1, 4}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    for (int consumer = 0; consumer < 6; ++consumer) {
+        auto stream = makeLogprobsStream(model_config, false, 0, 1, true);
+        auto& config = *stream->generateConfig();
+        if (consumer == 1) config.repetition_penalty = 1.1f;
+        if (consumer == 2) config.presence_penalty = 0.1f;
+        if (consumer == 3) config.frequency_penalty = 0.1f;
+        if (consumer == 4) config.no_repeat_ngram_size = 2;
+        if (consumer == 5) stream->logits_processor_list_.push_back(std::make_shared<TestStatefulLogitsProcessor>(false));
+        auto result = processor->gatherSamplerInput({{stream}}, inputs, output);
+        ASSERT_TRUE(result.ok());
+        EXPECT_EQ(result.value().token_ids.is_cuda(), consumer == 0);
+        if (consumer != 0) {
+            EXPECT_EQ(result.value().token_ids.data_ptr<int32_t>()[0], 0);
+        }
+    }
+    model_config.model_type = "other_model";
+    auto legacy = makeLogprobsProcessor(model_config);
+    auto stream = makeLogprobsStream(model_config, false, 0, 1, true);
+    auto result = legacy->gatherSamplerInput({{stream}}, inputs, output);
+    ASSERT_TRUE(result.ok());
+    EXPECT_FALSE(result.value().token_ids.is_cuda());
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testSamplerInputPreservesNarrowLogitsWithoutLogprobs) {
     auto           model_config = makeLogprobsModelConfig(100);
     auto           processor    = makeLogprobsProcessor(model_config);
