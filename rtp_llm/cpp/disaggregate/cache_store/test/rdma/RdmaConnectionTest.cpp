@@ -1,5 +1,8 @@
 #include "gtest/gtest.h"
 
+#include <array>
+
+#include "rtp_llm/cpp/disaggregate/cache_store/NoRdmaMemoryUtilImpl.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/rdma/RdmaConnection.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/rdma/RdmaClient.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/rdma/RdmaServer.h"
@@ -274,7 +277,7 @@ TEST_F(RdmaConnectionTest, testWriteBlock_AppendBlock_Success) {
                                        callback);
     ASSERT_TRUE(second_block != nullptr);
 
-    ASSERT_TRUE(first_block->appendBlock(second_block));
+    ASSERT_TRUE(first_block->appendBlock(second_block, *memory_util_));
 
     // verfiy append
     ASSERT_EQ(request_block_buffer->getBlock("k_token_id_str_0_layer_id_0")->addr, first_block->getBlock()->addr);
@@ -289,7 +292,7 @@ TEST_F(RdmaConnectionTest, testWriteBlock_AppendBlock_Success) {
                                       callback);
     ASSERT_TRUE(third_block != nullptr);
 
-    ASSERT_TRUE(first_block->appendBlock(third_block));
+    ASSERT_TRUE(first_block->appendBlock(third_block, *memory_util_));
     ASSERT_EQ(3, first_block->getSubBlockCount());
     ASSERT_EQ(request_block_buffer->getBlock("k_token_id_str_0_layer_id_0")->addr, first_block->getBlock()->addr);
     ASSERT_EQ(3072, first_block->getBlock()->len);
@@ -333,14 +336,14 @@ TEST_F(RdmaConnectionTest, testWriteBlock_AppendBlock_Failed) {
 
     // 本端地址不连续
     {
-        ASSERT_FALSE(first_block->appendBlock(third_block));
+        ASSERT_FALSE(first_block->appendBlock(third_block, *memory_util_));
 
         second_block->getBlock()->gpu_mem = false;
-        ASSERT_FALSE(first_block->appendBlock(second_block));
+        ASSERT_FALSE(first_block->appendBlock(second_block, *memory_util_));
         second_block->getBlock()->gpu_mem = true;
 
         second_block->getBlock()->adopted = false;
-        ASSERT_FALSE(first_block->appendBlock(second_block));
+        ASSERT_FALSE(first_block->appendBlock(second_block, *memory_util_));
         second_block->getBlock()->adopted = true;
     }
     {
@@ -348,13 +351,43 @@ TEST_F(RdmaConnectionTest, testWriteBlock_AppendBlock_Failed) {
         auto test_block = makeWriteBlock(request_block_buffer->getBlock("k_token_id_str_1_layer_id_0"),
                                          request_block_buffer->getBlock("v_token_id_str_2_layer_id_0"),
                                          callback);
-        ASSERT_FALSE(first_block->appendBlock(test_block));
+        ASSERT_FALSE(first_block->appendBlock(test_block, *memory_util_));
     }
     {
         // nic_rkeys 不一致
         second_block->nic_rkeys_[1111] = 2222;
-        ASSERT_FALSE(first_block->appendBlock(second_block));
+        ASSERT_FALSE(first_block->appendBlock(second_block, *memory_util_));
     }
+}
+
+TEST(RdmaConnectionWriteBlockTest, testConcatRequiresOneLocalMr) {
+    constexpr uint32_t block_size = 1024;
+    class LocalMemoryUtil: public NoRdmaMemoryUtilImpl {
+    public:
+        bool isMemoryMr(void*, uint64_t len, bool, bool) override {
+            return len <= region_size;
+        }
+        uint64_t region_size = block_size;
+    };
+
+    auto payload          = std::make_shared<std::array<char, 2 * block_size>>();
+    auto make_write_block = [&](uint32_t offset) {
+        auto addr  = std::shared_ptr<void>(payload, payload->data() + offset);
+        auto block = std::make_shared<BlockBuffer>("block", addr, block_size, false, true);
+        auto peer  = std::make_shared<BlockBufferInfo>();
+        peer->set_len(block_size);
+        peer->mutable_rdma_info()->set_addr(block_size + offset);
+        return std::make_shared<RdmaConnectionWriteBlock>(block, peer, [](bool) {});
+    };
+    auto            first  = make_write_block(0);
+    auto            second = make_write_block(block_size);
+    LocalMemoryUtil memory;
+
+    EXPECT_FALSE(first->appendBlock(second, memory));
+    EXPECT_EQ(first->getBlock()->len, block_size);
+    memory.region_size = 2 * block_size;
+    EXPECT_TRUE(first->appendBlock(second, memory));
+    EXPECT_EQ(first->getBlock()->len, 2 * block_size);
 }
 
 TEST_F(RdmaConnectionTest, testBugScenario_WrongRkey_ProtectionError) {
