@@ -442,6 +442,53 @@ class FullFp8CudaTest(unittest.TestCase):
         self.assertIs(model.weight.weights[0][name], owner)
         self.assertNotEqual(owner.data_ptr(), table.data_ptr())
 
+    def test_ple_loader_pinned_owner_is_reused_by_uva(self):
+        from rtp_llm.device.device_type import DeviceType
+        from rtp_llm.models.qwen4_exp.qwen4_exp_weight import Qwen4ExpPleNgramWeight
+        from rtp_llm.models_py.modules.qwen4_exp.ple.ple import Qwen4ExpNGramEmbedding
+
+        table, scale = quantized(torch.randn(8, 32))
+        source = SimpleNamespace(
+            load_tensor=lambda name, dtype: [
+                {"table": table, "scale": scale}[name].to(dtype)
+            ]
+        )
+        descriptor = Qwen4ExpPleNgramWeight(
+            W.qwen4_ple_ngram_shards,
+            [CkptWeightInfo("table")],
+            preserve_fp8=True,
+            scale_weight=CkptWeightInfo("scale"),
+        )
+        loaded = descriptor.load(
+            source,
+            0,
+            "cuda:0",
+            SimpleNamespace(
+                tp_size=1,
+                tp_rank=0,
+                merge_lora=False,
+                compute_dtype=torch.bfloat16,
+                exported_device=SimpleNamespace(
+                    get_device_type=lambda: DeviceType.Cuda
+                ),
+            ),
+        )
+        owner = loaded[W.qwen4_ple_ngram_shards + ".0"]
+        self.assertTrue(owner.is_pinned())
+        torch.testing.assert_close(
+            owner.view(torch.uint8), table.view(torch.uint8), rtol=0, atol=0
+        )
+        embedding = Qwen4ExpNGramEmbedding(
+            [owner],
+            torch.tensor([3, 4], device="cuda"),
+            torch.tensor([0, 4], device="cuda"),
+            torch.tensor([2, 3], device="cuda"),
+            ngram_size=2,
+            eos_token_id=0,
+            weight_scale=loaded[W.qwen4_ple_ngram_scale],
+        )
+        self.assertIs(embedding.shards[0], owner)
+
     def test_fp8_device_vocab_graph(self):
         weight, scale = quantized(torch.randn(257, 320))
         ids = torch.tensor([0, 17, 256, -1], dtype=torch.int32, device="cuda")

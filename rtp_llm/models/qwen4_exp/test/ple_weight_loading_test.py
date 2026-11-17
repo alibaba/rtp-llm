@@ -1,9 +1,11 @@
 import unittest
+import weakref
 from types import SimpleNamespace
 from unittest import mock
 
 import torch
 
+from rtp_llm.device.device_type import DeviceType
 from rtp_llm.model_loader.load_config import LoadMethod
 from rtp_llm.model_loader.loader import ModelLoader
 from rtp_llm.model_loader.model_weight_info import ModelWeights
@@ -76,6 +78,47 @@ def _ngram_weight(**kwargs):
 
 
 class Qwen4ExpPleNgramWeightTest(unittest.TestCase):
+    def test_cuda_pins_each_shard_before_loading_the_next(self):
+        refs = []
+
+        class Source(_RecordingTensorSource):
+            def load_tensor(source, name, data_type=torch.float16):
+                if refs:
+                    self.assertIsNone(refs[-1]())
+                tensors = super().load_tensor(name, data_type)
+                refs.append(weakref.ref(tensors[0]))
+                return tensors
+
+        source = Source()
+        config = _load_config(64, 1)
+        config.exported_device = SimpleNamespace(
+            get_device_type=lambda: DeviceType.Cuda
+        )
+        pins = []
+
+        def pin(tensor):
+            pins.append(len(source.requests))
+            return tensor.clone()
+
+        with mock.patch.object(torch.Tensor, "pin_memory", pin):
+            loaded = _ngram_weight().load(source, 1, "cuda:0", config)
+        self.assertEqual(pins, [1, 2])
+        self.assertEqual(len(loaded), 2)
+        self.assertTrue(all(ref() is None for ref in refs))
+
+        for backend in (DeviceType.Cpu, DeviceType.ROCm, DeviceType.Ppu):
+            config.exported_device = SimpleNamespace(get_device_type=lambda: backend)
+            with mock.patch.object(torch.Tensor, "pin_memory") as pin_mock:
+                _ngram_weight().load(_RecordingTensorSource(), 1, "cpu", config)
+                pin_mock.assert_not_called()
+        config.exported_device = SimpleNamespace(
+            get_device_type=lambda: DeviceType.Cuda
+        )
+        config.force_cpu_load_weights = True
+        with mock.patch.object(torch.Tensor, "pin_memory") as pin_mock:
+            _ngram_weight().load(_RecordingTensorSource(), 1, "cpu", config)
+            pin_mock.assert_not_called()
+
     def test_fp8_residency_keeps_table_bytes_and_global_scale(self):
         class Fp8Source(_RecordingTensorSource):
             def load_tensor(self, name, data_type=torch.float16):
