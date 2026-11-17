@@ -3,6 +3,21 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "f16_hot_path_dispatch_test",
+    srcs = ["f16_hot_path_dispatch_test.py"],
+    deps = py_test_deps,
+)
+
+py_test(
+    name = "cached_f16_gemm_test",
+    srcs = ["cached_f16_gemm_test.py"],
+    deps = py_test_deps,
+    timeout = "long",
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
+
+py_test(
     name = "rocm_linear_test",
     srcs = ["rocm_linear_test.py"],
     deps = py_test_deps,

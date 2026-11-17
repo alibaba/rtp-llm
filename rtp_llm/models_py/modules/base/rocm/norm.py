@@ -1,3 +1,4 @@
+import os
 from typing import Tuple
 
 import torch
@@ -6,6 +7,7 @@ from aiter import layernorm2d_fwd as layernorm2d_fwd
 from aiter import layernorm2d_fwd_with_add as layernorm2d_fwd_with_add
 from aiter import rms_norm, rmsnorm2d_fwd_opus, rmsnorm2d_fwd_with_add_opus
 from aiter import rmsnorm2d_fwd_with_add as fused_add_rmsnorm
+from aiter.ops.rmsnorm import rmsnorm as rmsnorm_out
 from torch import nn
 
 from rtp_llm.models_py.modules.base.common.norm import (
@@ -62,8 +64,31 @@ class LayerNorm(BaseLayerNorm):
 class RMSNorm(BaseNorm):
     def __init__(self, weight: torch.Tensor, eps: float = 1e-6):
         super().__init__(weight, eps)
+        self._direct_rmsnorm = os.environ.get("RTP_ROCM_RMSNORM_FAST_PATH", "1") == "1"
 
     def forward(self, hidden_states: torch.Tensor):
+        # Same HIP kernel as AITER's common path, without its nested outer
+        # custom-op dispatch or a fresh weight.data wrapper. Keep uncommon
+        # layouts/dtypes (especially odd hidden sizes) on the existing path.
+        if (
+            self._direct_rmsnorm
+            and hidden_states.is_cuda
+            and hidden_states.dim() == 2
+            and hidden_states.shape[0] > 0
+            and hidden_states.dtype in (torch.float16, torch.bfloat16)
+            and 0 < hidden_states.shape[-1] <= 8192
+            and hidden_states.shape[-1] % 2 == 0
+            and hidden_states.is_contiguous()
+            and self.weight.dtype == hidden_states.dtype
+            and self.weight.device == hidden_states.device
+            and self.weight.dim() == 1
+            and self.weight.numel() == hidden_states.shape[-1]
+            and self.weight.is_contiguous()
+            and not self.weight.requires_grad
+        ):
+            output = torch.empty_like(hidden_states)
+            rmsnorm_out(output, hidden_states, self.weight, self.variance_epsilon)
+            return output
         if _requires_opus_rmsnorm(hidden_states):
             return rmsnorm2d_fwd_opus(
                 hidden_states, self.weight.data, self.variance_epsilon

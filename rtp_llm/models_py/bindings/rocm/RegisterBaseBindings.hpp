@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/common/RtpEmbeddingLookup.h"
 #include "rtp_llm/models_py/bindings/common/FusedQKRmsNorm.h"
 #include "rtp_llm/models_py/bindings/rocm/Gemm.h"
+#include "rtp_llm/models_py/bindings/rocm/CachedF16Gemm.h"
 #include "rtp_llm/models_py/bindings/rocm/FusedRopeKVCacheOp.h"
 #include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
 #include "rtp_llm/models_py/bindings/rocm/TrtllmAllReduceFusion.h"
@@ -82,6 +83,9 @@ void registerBasicRocmOps(py::module& rtp_ops_m) {
                   py::arg("norm_size"));
 
     rtp_ops_m.def("gemm", &gemm, "Gemm kernel", py::arg("output"), py::arg("input"), py::arg("weight"));
+    rtp_ops_m.def("rocm_cached_f16_gemm", &rocmCachedF16Gemm,
+                 py::arg("input"), py::arg("weight"), py::arg("bias"), py::arg("preshuffle"));
+    rtp_ops_m.def("rocm_f16_gemm_cache_stats", &rocmF16GemmCacheStats);
 
     // CUDA Graph Copy Kernel Functions (also supported in ROCm)
     rtp_ops_m.def("cuda_graph_copy_small2large",

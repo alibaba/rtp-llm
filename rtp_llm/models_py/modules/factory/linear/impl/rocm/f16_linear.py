@@ -9,6 +9,8 @@ from rtp_llm.models_py.modules.factory.linear import LinearBase
 from aiter import hipb_mm, hipb_create_extension
 from functools import lru_cache
 from rtp_llm.ops import HWKernelConfig
+from rtp_llm.ops.compute_ops import rtp_llm_ops
+
 
 class RocmF16LinearBase(LinearBase):
     """ROCm F16 (non-quantized) Linear"""
@@ -19,7 +21,7 @@ class RocmF16LinearBase(LinearBase):
         quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
-        hw_kernel_config: Optional['HWKernelConfig'] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
@@ -34,12 +36,19 @@ class RocmF16LinearBase(LinearBase):
         quant_config: object = None,
         weight_scale_2: Optional[torch.Tensor] = None,
     ):
-        super().__init__(weight, weight_scales, input_scales,
-                         bias, quant_config, weight_scale_2)
+        super().__init__(
+            weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
+        )
         self.weight = weight
         self.bias = bias
-        
-    @staticmethod    
+        self._cached_gemm = (
+            getattr(rtp_llm_ops, "rocm_cached_f16_gemm", None)
+            if os.environ.get("RTP_ROCM_F16_GEMM_PLAN_CACHE", "1") == "1"
+            and os.environ.get("HIP_ONLINE_TUNING", "") not in ("1", "true")
+            else None
+        )
+
+    @staticmethod
     @lru_cache(maxsize=1)
     def init_hipblas():
         hipb_create_extension()
@@ -47,7 +56,7 @@ class RocmF16LinearBase(LinearBase):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError("Subclasses must implement `forward`.")
 
-        
+
 class RocmF16LinearWithSwizzle(RocmF16LinearBase):
 
     @classmethod
@@ -56,14 +65,24 @@ class RocmF16LinearWithSwizzle(RocmF16LinearBase):
         quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
-        hw_kernel_config: Optional['HWKernelConfig'],
+        hw_kernel_config: Optional["HWKernelConfig"],
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
-        return weight_scales is None and hw_kernel_config is not None and hw_kernel_config.use_swizzleA
+        return (
+            weight_scales is None
+            and hw_kernel_config is not None
+            and hw_kernel_config.use_swizzleA
+        )
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
+        # Initialize the legacy graph/fallback resources during eager warmup,
+        # even when all eager calls hit the native cache. The initializer is cached.
         self.init_hipblas()
+        if self._cached_gemm is not None:
+            output = self._cached_gemm(input, self.weight, self.bias, True)
+            if output is not None:
+                return output
         return hipb_mm(
             input,
             self.weight,
@@ -75,7 +94,8 @@ class RocmF16LinearWithSwizzle(RocmF16LinearBase):
             scaleOut=None,
             bpreshuffle=True,
         )
-        
+
+
 class RocmF16LinearNoSwizzle(RocmF16LinearBase):
 
     @classmethod
@@ -84,7 +104,7 @@ class RocmF16LinearNoSwizzle(RocmF16LinearBase):
         quant_config: object,
         weight: torch.Tensor,
         weight_scales: Optional[torch.Tensor],
-        hw_kernel_config: Optional['HWKernelConfig'],
+        hw_kernel_config: Optional["HWKernelConfig"],
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
@@ -99,6 +119,10 @@ class RocmF16LinearNoSwizzle(RocmF16LinearBase):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         self.init_hipblas()
+        if self._cached_gemm is not None:
+            output = self._cached_gemm(input, self.weight, self.bias, False)
+            if output is not None:
+                return output
         return hipb_mm(
             input,
             self.weight,

@@ -116,6 +116,7 @@ cc_library(
     ]),
     copts = rocm_copts(),
     deps = torch_deps() + [
+        "@local_config_rocm//rocm:hipblaslt",
         ":mrope_config_validation",
         "//rtp_llm/models_py/bindings/core:types_hdr",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_kv_cache",

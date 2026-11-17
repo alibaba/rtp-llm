@@ -55,6 +55,19 @@ class NormTest(TestCase):
                     rtol=5e-2,
                 )
 
+    def test_rms_norm_fast_path_matches_previous_kernel_exactly(self):
+        for dtype, q, hidden in itertools.product(
+            self.DTYPES, (1, 4, 14, 15, 16), (2560, 769, 8199)
+        ):
+            with self.subTest(dtype=dtype, q=q, hidden=hidden):
+                weight = torch.randn(hidden, dtype=dtype)
+                x = torch.randn(q, hidden, dtype=dtype)
+                norm = RMSNorm(weight)
+                norm._direct_rmsnorm = False
+                expected = norm(x)
+                norm._direct_rmsnorm = True
+                torch.testing.assert_close(norm(x), expected, atol=0, rtol=0)
+
 
 if __name__ == "__main__":
     main()
