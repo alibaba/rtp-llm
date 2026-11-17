@@ -1,8 +1,7 @@
+import logging
 import time
 
-from vllm.logger import init_logger
-
-logger = init_logger("vllm.v1.executor.multiproc_executor")
+logger = logging.getLogger("vllm.v1.executor.multiproc_executor")
 SLOW_WORKER_RPC_NS = 500_000_000
 
 

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+import logging
 import time
 from concurrent.futures import Future
 from contextlib import suppress
 from typing import Any
 
-from vllm.logger import init_logger
-
-logger = init_logger("vllm.v1.engine.core")
+logger = logging.getLogger("vllm.v1.engine.core")
 
 
 class VLLMCoreCallbacks:
