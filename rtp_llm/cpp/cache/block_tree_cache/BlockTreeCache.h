@@ -63,7 +63,7 @@ struct BlockTreeCacheConfig {
     size_t business_queue_max_size{10000};
 
     // ---- Per-rank WorkLoop owners or legacy workers per direction ----
-    size_t transfer_worker_count{1};
+    size_t transfer_worker_count{2};
     size_t btc_crc_slot_count{8};
     bool   btc_transfer_engine_async{true};
     size_t transfer_queue_max_size{10000};

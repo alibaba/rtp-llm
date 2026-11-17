@@ -194,7 +194,8 @@ struct KVCacheConfig {
     bool btc_transfer_engine_async = true;
     // Slots per device in each WorkLoop's private async CRC service.
     int64_t btc_crc_slot_count                 = 8;
-    int64_t block_tree_transfer_worker_count   = 1;
+    int     block_tree_task_pool_size          = 4;
+    int64_t block_tree_transfer_worker_count   = 2;
     int64_t block_tree_business_queue_max_size = 10000;
     int64_t block_tree_transfer_queue_max_size = 10000;
     // Coordinator recovery and completion cleanup; interval zero pauses both.

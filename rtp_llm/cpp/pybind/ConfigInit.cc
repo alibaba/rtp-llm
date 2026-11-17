@@ -524,6 +524,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                        &KVCacheConfig::memory_cache_max_descriptors_per_transfer_batch)
         .def_readwrite("btc_transfer_engine_async", &KVCacheConfig::btc_transfer_engine_async)
         .def_readwrite("btc_crc_slot_count", &KVCacheConfig::btc_crc_slot_count)
+        .def_readwrite("block_tree_task_pool_size", &KVCacheConfig::block_tree_task_pool_size)
         .def_readwrite("block_tree_transfer_worker_count", &KVCacheConfig::block_tree_transfer_worker_count)
         .def_readwrite("block_tree_business_queue_max_size", &KVCacheConfig::block_tree_business_queue_max_size)
         .def_readwrite("block_tree_transfer_queue_max_size", &KVCacheConfig::block_tree_transfer_queue_max_size)
@@ -631,7 +632,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      20,
+                                      21,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -723,7 +724,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.block_pool_frozen_abort_upper_ratio,
                                       self.disk_cache_evict_max_pending_bytes,
                                       self.block_tree_frozen_recovery_interval_ms,
-                                      self.block_tree_frozen_recovery_query_timeout_ms);
+                                      self.block_tree_frozen_recovery_query_timeout_ms,
+                                      self.block_tree_task_pool_size);
             },
             [](py::tuple t) {
                 if (t.size() < 2 || !py::isinstance<py::str>(t[0]) || !py::isinstance<py::int_>(t[1])
@@ -731,7 +733,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     || !((t.size() == 83 && t[1].cast<int>() == 13) || (t.size() == 84 && t[1].cast<int>() == 14)
                          || (t.size() == 85 && t[1].cast<int>() == 15) || (t.size() == 86 && t[1].cast<int>() == 16)
                          || (t.size() == 90 && t[1].cast<int>() == 17) || (t.size() == 91 && t[1].cast<int>() == 18)
-                         || (t.size() == 92 && t[1].cast<int>() == 19) || (t.size() == 94 && t[1].cast<int>() == 20))) {
+                         || (t.size() == 92 && t[1].cast<int>() == 19) || (t.size() == 94 && t[1].cast<int>() == 20)
+                         || (t.size() == 95 && t[1].cast<int>() == 21))) {
                     throw std::runtime_error("invalid KVCacheConfig state");
                 }
 
@@ -835,6 +838,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 if (t.size() >= 94) {
                     c.block_tree_frozen_recovery_interval_ms      = t[92].cast<int64_t>();
                     c.block_tree_frozen_recovery_query_timeout_ms = t[93].cast<int64_t>();
+                }
+                if (t.size() >= 95) {
+                    c.block_tree_task_pool_size = t[94].cast<int>();
                 }
                 if (c.block_tree_frozen_recovery_interval_ms < 0
                     || c.block_tree_frozen_recovery_interval_ms > std::numeric_limits<int>::max()

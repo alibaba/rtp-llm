@@ -12,6 +12,7 @@ namespace detail {
 // cannot be replaced by a silently truncated JSON fragment.
 std::ostringstream asyncProfileOutputStream();
 AsyncProfileKind               exportedAsyncProfileKind(const AsyncProfileEvent& event);
+bool                           isWorkerTransferStage(const AsyncProfileEvent& event);
 int64_t                        asyncProfileBaseTimeNs(const std::string& trace);
 std::vector<AsyncProfileEvent> resolveAsyncProfileLinks(const std::vector<AsyncProfileEvent>& events);
 }  // namespace detail

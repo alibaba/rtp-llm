@@ -12,7 +12,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageTimer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 
@@ -42,7 +41,6 @@ std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask    
     const auto    deadline    = task.deadline();
     auto          context     =
         std::make_shared<TransferBatchAsyncContext>(descriptors.size(), nullptr, task.completionProof());
-    const int64_t queue_begin = currentTimeUs();
     const auto    identity    = CacheStageContext::local(source, target);
     const auto    request_id  = task.requestId().value_or(-1);
     const auto    transfer_id = task.traceId();
@@ -65,17 +63,13 @@ std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask    
                                                            transfer_id,
                                                            identity,
                                                            AsyncProfileKind::Wait);
-    auto          on_timeout  = [this, context, proof, source, target, queue_begin, queue_timer, total_timer]() {
+    auto          on_timeout  = [context, proof, queue_timer, total_timer]() {
         block_tree_cache_detail::ScopeRollback publish([proof] {
             if (proof) proof->report(true);
         });
         try {
             queue_timer.finish(false);
             total_timer.finish(false);
-            if (metrics_reporter_ != nullptr) {
-                metrics_reporter_->reportQueueWaitMetric(
-                    false, "transfer", nullptr, source, target, currentTimeUs() - queue_begin);
-            }
             TransferResult result(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer expired in TE worker queue"),
                                   CacheCopyError::NOT_EXECUTED);
             result.buffer_safe = true;
@@ -102,8 +96,7 @@ std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask    
          request_id,
          transfer_id,
          queue_timer,
-         total_timer,
-         queue_begin]() {
+         total_timer]() {
             bool buffer_safe = true;  // No operation has started yet.
             block_tree_cache_detail::ScopeRollback publish([&] {
                 if (proof) proof->report(buffer_safe);
@@ -120,10 +113,6 @@ std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask    
             };
             try {
                 queue_timer.finish(true);
-                if (metrics_reporter_ != nullptr) {
-                    metrics_reporter_->reportQueueWaitMetric(
-                        false, "transfer", nullptr, source, target, currentTimeUs() - queue_begin);
-                }
                 result = TransferResult::emptyAggregate(descriptors.size());
                 for (size_t begin = 0; begin < descriptors.size(); begin += max_descriptors_per_batch_) {
                     const size_t end = std::min(begin + max_descriptors_per_batch_, descriptors.size());

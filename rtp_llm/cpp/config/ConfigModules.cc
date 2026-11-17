@@ -137,6 +137,7 @@ std::string KVCacheConfig::to_string() const {
         << "\n"
         << "btc_transfer_engine_async: " << btc_transfer_engine_async << "\n"
         << "btc_crc_slot_count: " << btc_crc_slot_count << "\n"
+        << "block_tree_task_pool_size: " << block_tree_task_pool_size << "\n"
         << "block_tree_transfer_worker_count: " << block_tree_transfer_worker_count << "\n"
         << "block_tree_business_queue_max_size: " << block_tree_business_queue_max_size << "\n"
         << "block_tree_transfer_queue_max_size: " << block_tree_transfer_queue_max_size << "\n"

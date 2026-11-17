@@ -77,23 +77,6 @@ BlockTreeCacheMetricsReporter::BlockTreeCacheMetricsReporter(
 }
 BlockTreeCacheMetricsReporter::~BlockTreeCacheMetricsReporter() = default;
 
-void BlockTreeCacheMetricsReporter::reportLockMetrics(const char* operation,
-                                                      double      wait_latency_us,
-                                                      double      hold_latency_us) const noexcept {
-    if (!metrics_reporter_) {
-        return;
-    }
-    try {
-        RtpLLMCacheLockMetricsCollector collector;
-        collector.wait_latency_us  = wait_latency_us;
-        collector.hold_latency_us  = hold_latency_us;
-        collector.total_latency_us = wait_latency_us + hold_latency_us;
-        kmonitor::MetricsTags tags;
-        tags.AddTag("operation", operation);
-        metrics_reporter_->report<RtpLLMCacheLockMetrics, RtpLLMCacheLockMetricsCollector>(&tags, &collector);
-    } catch (...) {}
-}
-
 void BlockTreeCacheMetricsReporter::flushStageMetrics() const {
     if (stage_metrics_)
         stage_metrics_->flush();
@@ -463,31 +446,6 @@ int BlockTreeCacheMetricsReporter::transferDirectionIndex(Tier source_tier, Tier
     return -1;
 }
 
-void BlockTreeCacheMetricsReporter::reportQueueWaitMetric(bool        callback,
-                                                          const char* pool_type,
-                                                          const char* operation,
-                                                          Tier        source_tier,
-                                                          Tier        target_tier,
-                                                          int64_t     latency_us) const noexcept {
-    if (metrics_reporter_ == nullptr) {
-        return;
-    }
-    try {
-        RtpLLMCacheTransferMetricsCollector collector;
-        collector.pool_type                 = pool_type;
-        collector.operation                 = operation == nullptr ? "" : operation;
-        collector.source_tier               = source_tier == Tier::NONE ? "" : tierName(source_tier);
-        collector.target_tier               = target_tier == Tier::NONE ? "" : tierName(target_tier);
-        collector.queue_waiting_tasks       = 1;
-        collector.queue_wait_latency_us     = latency_us;
-        collector.report_transfer           = false;
-        collector.report_task_queue         = !callback;
-        collector.report_callback_queue     = callback;
-        collector.report_queue_wait_latency = latency_us >= 0;
-        metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(nullptr, &collector);
-    } catch (...) {}
-}
-
 void BlockTreeCacheMetricsReporter::reportQueueBacklog(const BlockTreeQueueSizes& queue_sizes,
                                                        const char*                pool_type) const {
     if (metrics_reporter_ == nullptr) {
@@ -501,13 +459,6 @@ void BlockTreeCacheMetricsReporter::reportQueueBacklog(const BlockTreeQueueSizes
     collector.report_transfer          = false;
     collector.report_queue_backlog     = true;
     metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(nullptr, &collector);
-}
-
-void BlockTreeCacheMetricsReporter::reportWorkLoopQueueWait(Tier    source,
-                                                            Tier    target,
-                                                            int64_t latency_us) const noexcept {
-    if (stage_metrics_ && latency_us >= 0)
-        stage_metrics_->recordQueueWait(tierName(source), tierName(target), latency_us);
 }
 
 void BlockTreeCacheMetricsReporter::maybeReportCopyError(Tier                  source_tier,

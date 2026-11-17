@@ -30,6 +30,11 @@ size_t checkedMultiply(size_t a, size_t b) {
     return a * b;
 }
 
+int64_t steadyNowUs() noexcept {
+    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
 }  // namespace
 
 int CrcCopyExecutor::deviceFor(const GroupSet& group) {
@@ -184,9 +189,10 @@ CrcCopyItem CrcCopyExecutor::makeItem(const HostBufferView&     host,
 }
 
 bool CrcCopyExecutor::trySubmit(const std::vector<HostBufferView>&     hosts,
-                                   const std::vector<TransferDescriptor>& descriptors,
-                                   const GroupSetPtr&                     group,
-                                   DoneCallback                           done) {
+                                const std::vector<TransferDescriptor>& descriptors,
+                                const GroupSetPtr&                     group,
+                                DoneCallback                           done,
+                                Timing*                                timing) {
     if (!done)
         throw std::invalid_argument("CRC stage callback is required");
     const auto reject = [&] {
@@ -223,6 +229,9 @@ bool CrcCopyExecutor::trySubmit(const std::vector<HostBufferView>&     hosts,
 
     // Every allocation and capture precedes the first possible CUDA enqueue.
     auto& operation = slot->operation.emplace();
+    operation.timing = timing;
+    if (timing)
+        timing->slot_acquired_us = steadyNowUs();
     try {
         operation.group       = group;
         operation.descriptors = descriptors;
@@ -238,8 +247,11 @@ bool CrcCopyExecutor::trySubmit(const std::vector<HostBufferView>&     hosts,
         operation.done = std::move(done);
         // The primitive returns only after draining any partial submission error.
         const auto state = slot->copy->trySubmit(items, direction);
-        if (state == CrcCopyState::PENDING)
+        if (state == CrcCopyState::PENDING) {
+            if (timing)
+                timing->submit_return_us = steadyNowUs();
             return true;
+        }
         auto callback = std::move(operation.done);
         slot->operation.reset();
         if (state != CrcCopyState::BUSY)
@@ -259,6 +271,9 @@ void CrcCopyExecutor::advance(Slot& slot, bool deliver) {
         const auto state = slot.copy->poll();
         if (state == CrcCopyState::PENDING)
             return;
+        // First outer completion confirmation, including terminal error paths.
+        if (operation.timing && !operation.timing->completed_us)
+            operation.timing->completed_us = steadyNowUs();
         // Construct the result before retiring the terminal workspace. Mapping
         // preserves terminal safety even if diagnostic allocation fails.
         const auto direction = operation.descriptors.front().source_tier == Tier::DEVICE ? CrcCopyDirection::EVICT :

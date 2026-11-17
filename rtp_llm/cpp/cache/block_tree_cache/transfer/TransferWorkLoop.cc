@@ -134,9 +134,11 @@ std::shared_ptr<TransferAsyncContext>
 TransferWorkLoop::reject(const TransferTask& task, const char* message, ErrorCode code) {
     const auto count = task.descriptors().size();
     auto       total = timer(task, "worker_task_total", 0, count, AsyncProfileKind::Lifecycle, "worker_task");
-    auto       queue = timer(task, "transfer_queue_wait", 0, count, AsyncProfileKind::Wait, "worker_task");
-    queue.finish(false);
-    total.finish(false);
+    auto       queue = timer(
+        task, "transfer_queue_wait", 0, count, AsyncProfileKind::Wait, "worker_task", nullptr, total.startSteadyUs());
+    const auto end_us = (total || queue) ? AsyncProfileSession::steadyNowUs() : -1;
+    queue.finishAtSteady(end_us, false);
+    total.finishAtSteady(end_us, false);
     return std::make_shared<CompletedTransferAsyncContext>(
         unsubmittedResult(TransferResult(ErrorInfo(code, message), CacheCopyError::NOT_EXECUTED)),
         count, task.completionProof());
@@ -173,11 +175,18 @@ TransferWorkLoop::execute(TransferTask&& task, BeforeCompleteCallback&& before_c
         // Admission and the move are atomic with respect to competing submitters
         // and shutdown. The resident budget counts unfinished batches.
         auto    total_timer = timer(task, "worker_task_total", 0, count, AsyncProfileKind::Lifecycle, "worker_task");
-        auto    queue_timer = timer(task, "transfer_queue_wait", 0, count, AsyncProfileKind::Wait, "worker_task");
+        auto    queue_or_finalize_timer = timer(task,
+                                             "transfer_queue_wait",
+                                             0,
+                                             count,
+                                             AsyncProfileKind::Wait,
+                                             "worker_task",
+                                             &total_timer.trace(),
+                                             total_timer.startSteadyUs());
         Entries incoming;
         incoming.push_back(std::make_unique<Entry>(std::move(task), std::move(before_complete)));
         incoming.front()->task_timer     = std::move(total_timer);
-        incoming.front()->queue_timer    = std::move(queue_timer);
+        incoming.front()->queue_or_finalize_timer = std::move(queue_or_finalize_timer);
         auto context                     = incoming.front()->context;
         unsubmitted.dismiss();
         incoming_.splice(incoming_.end(), incoming);
@@ -213,12 +222,14 @@ size_t TransferWorkLoop::outstandingBatches() const {
     return entry_count_;
 }
 
-TransferStageTimer TransferWorkLoop::timer(const TransferTask& task,
-                                           const char*         stage,
-                                           size_t              begin,
-                                           size_t              end,
-                                           AsyncProfileKind    kind,
-                                           const char*         scope) const noexcept {
+TransferStageTimer TransferWorkLoop::timer(const TransferTask&     task,
+                                           const char*             stage,
+                                           size_t                  begin,
+                                           size_t                  end,
+                                           AsyncProfileKind        kind,
+                                           const char*             scope,
+                                           const AsyncProfileSpan* parent,
+                                           int64_t                 start_us) const noexcept {
     return TransferStageTimer(
         metrics_reporter_.get(),
         stage,
@@ -227,17 +238,25 @@ TransferStageTimer TransferWorkLoop::timer(const TransferTask& task,
         end,
         world_rank_,
         scope,
-        task.traceId(),
+        parent ? parent->transferId() : task.traceId(),
         task.descriptors().empty() ?
             CacheStageContext::local(Tier::NONE, Tier::NONE) :
             CacheStageContext::local(task.descriptors().front().source_tier, task.descriptors().front().target_tier),
-        kind);
+        kind,
+        parent,
+        start_us);
 }
 
 void TransferWorkLoop::startStepTimer(Entry& entry, const char* stage) {
     if (!entry.step_started) {
         entry.step_started = true;
-        entry.step_timer   = timer(entry.task, stage, 0, entry.task.descriptors().size(), AsyncProfileKind::Lifecycle);
+        entry.step_timer   = timer(entry.task,
+                                 stage,
+                                 0,
+                                 entry.task.descriptors().size(),
+                                 AsyncProfileKind::Lifecycle,
+                                 "worker_batch",
+                                 &entry.task_timer.trace());
     }
 }
 
@@ -250,11 +269,7 @@ bool TransferWorkLoop::plan(Entry& entry) {
         return true;  // Keep the same buffers and step across retries and successors.
     {
         const bool expired = entry.task.expired();
-        const auto elapsed = entry.queue_timer.finish(!expired);
-        if (metrics_reporter_) {
-            const auto& first = entry.task.descriptors().front();
-            metrics_reporter_->reportWorkLoopQueueWait(first.source_tier, first.target_tier, elapsed);
-        }
+        entry.queue_or_finalize_timer.finish(!expired);
         if (expired) {
             fail(entry,
                  unsubmittedResult(TransferResult(
@@ -275,8 +290,21 @@ bool TransferWorkLoop::plan(Entry& entry) {
     if (combined) {
         if (!staging_.pool)
             throw std::invalid_argument("async disk staging is unavailable");
-        entry.batch_timer = timer(entry.task, "worker_batch_total", 0, descriptors.size(), AsyncProfileKind::Lifecycle);
-        entry.staging_timer = timer(entry.task, "staging_wait", 0, descriptors.size(), AsyncProfileKind::Wait);
+        entry.batch_timer   = timer(entry.task,
+                                  "worker_batch_total",
+                                  0,
+                                  descriptors.size(),
+                                  AsyncProfileKind::Lifecycle,
+                                  "worker_batch",
+                                  &entry.task_timer.trace());
+        entry.staging_timer = timer(entry.task,
+                                    "staging_wait",
+                                    0,
+                                    descriptors.size(),
+                                    AsyncProfileKind::Wait,
+                                    "worker_batch",
+                                    &entry.task_timer.trace(),
+                                    entry.batch_timer.startSteadyUs());
         if (entry.staging.empty() && !acquireStaging(entry))
             return false;
     } else {
@@ -372,9 +400,40 @@ void TransferWorkLoop::submitCrc(Entry& entry) {
     startStepTimer(entry, entry.step == Step::CRC_LOAD ? "h2d" : "d2h");
     const auto& owner   = group(entry);
     auto&       waiting = crc_waiting_.at(owner->devicePools().front()->deviceIndex());
-    // The callback only fills a stable Entry and preallocated intrusive indexes.
+    // Settle the stable Entry and intrusive indexes. Optional observations use
+    // the existing task span and preallocated profiling buffer.
     CrcCopyExecutor::DoneCallback done = [this, &entry, &waiting](TransferResult result) noexcept {
         assert(isCrc(entry.step));
+        const auto& timing = entry.crc_timing;
+        if (timing.completed_us && result.ok()) {
+            const auto& trace             = entry.task_timer.trace();
+            const auto  released_us       = trace.active() ? AsyncProfileSession::steadyNowUs() : 0;
+            entry.queue_or_finalize_timer = timer(entry.task,
+                                                  "transfer_finalize_latency",
+                                                  0,
+                                                  entry.task.descriptors().size(),
+                                                  AsyncProfileKind::Lifecycle,
+                                                  "worker_batch",
+                                                  &entry.task_timer.trace(),
+                                                  timing.completed_us);
+            if (released_us) {
+                const auto& descriptor = entry.task.descriptors().front();
+                const auto  identity   = CacheStageContext::local(descriptor.source_tier, descriptor.target_tier);
+                auto        released   = AsyncProfileSpan::fromSteady("slot_released",
+                                                             entry.task.requestId().value_or(-1),
+                                                             0,
+                                                             entry.task.descriptors().size(),
+                                                             released_us,
+                                                             world_rank_,
+                                                             trace.transferId(),
+                                                             identity.path,
+                                                             "worker_batch",
+                                                             identity.operation,
+                                                             AsyncProfileKind::Derived,
+                                                             &trace);
+                released.finishAtSteady(released_us);
+            }
+        }
         recordResult(entry, std::move(result));
         completed_.push(entry);
         if (auto* next = waiting.head) {
@@ -382,7 +441,19 @@ void TransferWorkLoop::submitCrc(Entry& entry) {
             ready_.push(*next);
         }
     };
-    const bool handled = crc_->trySubmit(entry.hosts, entry.task.descriptors(), owner, std::move(done));
+    auto*      timing  = entry.task_timer ? &entry.crc_timing : nullptr;
+    const bool handled = crc_->trySubmit(entry.hosts, entry.task.descriptors(), owner, std::move(done), timing);
+    if (timing && timing->submit_return_us) {
+        auto submit = timer(entry.task,
+                            "crc_submit_cpu",
+                            0,
+                            entry.task.descriptors().size(),
+                            AsyncProfileKind::Execution,
+                            "worker_batch",
+                            &entry.task_timer.trace(),
+                            timing->slot_acquired_us);
+        submit.finishAtSteady(timing->submit_return_us, true);
+    }
     if (!handled) {
         waitForResource(entry, waiting);
     } else {
@@ -499,12 +570,13 @@ void TransferWorkLoop::consumeStage(Entry& entry) {
     auto& terminal = entry.result;
     // End asynchronous stages only after their safe result reaches the owner.
     // Busy retries retain the same timer and do not produce extra samples.
-    entry.step_timer.finish(terminal.ok());
+    const auto end_us = entry.task_timer ? AsyncProfileSession::steadyNowUs() : -1;
+    entry.step_timer.finishAtSteady(end_us, terminal.ok());
     entry.step_timer   = {};
     entry.step_started = false;
     if (!terminal.ok()) {
-        entry.batch_timer.finish(false);
-        entry.task_timer.finish(false);
+        entry.batch_timer.finishAtSteady(end_us, false);
+        entry.task_timer.finishAtSteady(end_us, false);
         const auto& descriptor = entry.task.descriptors().front();
         if (!isCrc(entry.step))
             terminal.status = transferStatusToErrorInfo(terminal.copy_error == CacheCopyError::INVALID_REQUEST ?
@@ -528,8 +600,8 @@ void TransferWorkLoop::consumeStage(Entry& entry) {
         entry.step = Step::CRC_LOAD;
         tryStep(entry);
     } else {
-        entry.batch_timer.finish(true);
-        entry.task_timer.finish(true);
+        entry.batch_timer.finishAtSteady(end_us, true);
+        entry.task_timer.finishAtSteady(end_us, true);
         releaseStaging(entry);
         finish(entry);
     }
@@ -538,15 +610,18 @@ void TransferWorkLoop::consumeStage(Entry& entry) {
 void TransferWorkLoop::fail(Entry& entry, TransferResult result) {
     removeWaiter(entry);
     recordResult(entry, std::move(result));
-    entry.step_timer.finish(false);
-    entry.staging_timer.finish(false);
-    entry.batch_timer.finish(false);
-    entry.task_timer.finish(false);
+    const auto end_us = entry.task_timer ? AsyncProfileSession::steadyNowUs() : -1;
+    entry.step_timer.finishAtSteady(end_us, false);
+    entry.staging_timer.finishAtSteady(end_us, false);
+    entry.batch_timer.finishAtSteady(end_us, false);
+    entry.task_timer.finishAtSteady(end_us, false);
     releaseStaging(entry);
     finish(entry);
 }
 
 void TransferWorkLoop::finish(Entry& entry) {
+    auto finalize_timer =
+        entry.crc_timing.completed_us ? std::move(entry.queue_or_finalize_timer) : TransferStageTimer{};
     entry.task_timer.finish(entry.result.ok());
     try {
         abortOnOom([&] {
@@ -562,9 +637,12 @@ void TransferWorkLoop::finish(Entry& entry) {
     // Context ready precedes callback return. Neither permits early reuse of
     // admission capacity or destruction of the callback's captured resources.
     entries_.erase(entry.position);
-    std::lock_guard<std::mutex> lock(mutex_);
-    --entry_count_;
-    cv_.notify_all();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        --entry_count_;
+        cv_.notify_all();
+    }
+    finalize_timer.finish(true);
 }
 
 void TransferWorkLoop::cancelStaging() {

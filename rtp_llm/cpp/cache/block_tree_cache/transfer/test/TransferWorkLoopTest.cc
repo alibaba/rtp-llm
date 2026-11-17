@@ -21,6 +21,7 @@
 #include <set>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
 
 #include <sys/resource.h>
 #include <unistd.h>
@@ -237,9 +238,15 @@ void checkWorkLoopTrace(const std::vector<AsyncProfileEvent>& events) {
             continue;
         if (r.stage == "transfer_queue_wait" || r.stage == "staging_wait") {
             EXPECT_EQ(r.kind, AsyncProfileKind::Wait) << r.stage;
+        } else if (r.stage == "crc_submit_cpu") {
+            EXPECT_EQ(r.kind, AsyncProfileKind::Execution);
+        } else if (r.stage == "slot_released") {
+            EXPECT_EQ(r.kind, AsyncProfileKind::Derived);
+            EXPECT_EQ(event.start_us, event.end_us);
         } else {
             EXPECT_TRUE(r.stage == "worker_task_total" || r.stage == "worker_batch_total" || r.stage == "h2d"
-                        || r.stage == "d2h" || r.stage == "disk_read" || r.stage == "disk_write")
+                        || r.stage == "d2h" || r.stage == "disk_read" || r.stage == "disk_write"
+                        || r.stage == "transfer_finalize_latency")
                 << r.stage;
             EXPECT_EQ(r.kind, AsyncProfileKind::Lifecycle) << r.stage;
         }
@@ -332,13 +339,6 @@ protected:
         tags.AddTag("transfer_rank", "3");
         EXPECT_DOUBLE_EQ(snapshot(metrics()->transfer_stage_qps_metric, tags), count) << stage;
         EXPECT_GE(snapshot(metrics()->transfer_stage_latency_sum_us_metric, tags), 0) << stage;
-    }
-    void checkQueueWait(size_t count, Tier source = Tier::HOST, Tier target = Tier::DISK) {
-        kmonitor::MetricsTags tags("pool_type", "transfer");
-        tags.AddTag("source_tier", tierName(source));
-        tags.AddTag("target_tier", tierName(target));
-        EXPECT_DOUBLE_EQ(snapshot(metrics()->task_queue_waiting_tasks_metric, tags), count);
-        EXPECT_GE(snapshot(metrics()->transfer_task_queue_wait_latency_us_metric, tags), 0);
     }
     TransferTask writes(size_t count = 1) {
         std::vector<TransferDescriptor> descriptors;
@@ -1085,7 +1085,6 @@ TEST_F(TransferWorkLoopTest, ResidentDiskBatchesFitDerivedWorkerQueues) {
         checkStage("transfer_queue_wait", q, true, source, target, "worker_task");
         checkStage("transfer_queue_wait", 3, false, source, target, "worker_task");
         checkStage(write ? "disk_write" : "disk_read", q, true, source, target);
-        checkQueueWait(q, source, target);
     }
 }
 
@@ -1188,7 +1187,6 @@ TEST_F(TransferWorkLoopTest, AdmissionAndQueueTimeoutsDoNotStartIo) {
     checkStage("transfer_queue_wait", 2, false, Tier::HOST, Tier::DISK, "worker_task");
     checkStage("transfer_queue_wait", 1, true, Tier::HOST, Tier::DISK, "worker_task");
     checkStage("disk_write", 1);
-    checkQueueWait(2);  // The pre-admission timeout is not a consumed queue task.
 }
 
 TEST_F(TransferWorkLoopTest, StartedExpiredTaskAndDroppedContextStillFinishAfterStop) {
@@ -1331,7 +1329,6 @@ TEST_F(TransferWorkLoopTest, DiskRejectionHasNoCallbackAndIsNotRetried) {
     checkStage("disk_write", 1, false);
     checkStage("worker_task_total", 1, false, Tier::HOST, Tier::DISK, "worker_task");
     checkStage("transfer_queue_wait", 1, true, Tier::HOST, Tier::DISK, "worker_task");
-    checkQueueWait(1);
 }
 
 TEST_F(TransferWorkLoopTest, RequestJoinsIndependentBatchFailuresInOriginalOrder) {
@@ -1584,7 +1581,6 @@ TEST_F(TransferWorkLoopTest, StageCapturePreservesMetricSampleCounts) {
     checkStage("worker_task_total", 24, true, Tier::HOST, Tier::DISK, "worker_task");
     checkStage("transfer_queue_wait", 24, true, Tier::HOST, Tier::DISK, "worker_task");
     checkStage("disk_write", 24);
-    checkQueueWait(24);
 }
 
 TEST_F(TransferWorkLoopTest, RejectedAdmissionAndTruncatedCaptureDoNotChangeCompletion) {
@@ -1598,6 +1594,8 @@ TEST_F(TransferWorkLoopTest, RejectedAdmissionAndTruncatedCaptureDoNotChangeComp
     auto events = session->finish();
     ASSERT_EQ(events.size(), 2u);
     checkWorkLoopTrace(events);
+    EXPECT_EQ(events[0].start_us, events[1].start_us);
+    EXPECT_EQ(events[0].end_us, events[1].end_us);
     for (const auto& event : events)
         EXPECT_NE(event.record.kind, AsyncProfileKind::Execution);
 
@@ -1647,8 +1645,10 @@ TEST_F(TransferWorkLoopTest, InlineTimersDoNotAllocateSharedObserversOrRetainRep
         entry.position = owner.entries_.begin();
         owner.tryStep(entry);
         EXPECT_EQ(bool(entry.task_timer), with_reporter);
-        EXPECT_EQ(bool(entry.queue_timer), with_reporter);
+        EXPECT_EQ(bool(entry.queue_or_finalize_timer), with_reporter);
         EXPECT_EQ(bool(entry.step_timer), with_reporter);
+        EXPECT_EQ(entry.task_timer.startSteadyUs(), entry.queue_or_finalize_timer.startSteadyUs());
+        EXPECT_EQ(entry.task_timer.startSteadyUs() >= 0, with_reporter);
         EXPECT_EQ(reporter.use_count(), reporter_owners);
         restore.run();
         owner.start();
@@ -1660,10 +1660,9 @@ TEST_F(TransferWorkLoopTest, InlineTimersDoNotAllocateSharedObserversOrRetainRep
     checkStage("worker_task_total", 1, true, Tier::HOST, Tier::DISK, "worker_task");
     checkStage("transfer_queue_wait", 1, true, Tier::HOST, Tier::DISK, "worker_task");
     checkStage("disk_write", 1);
-    checkQueueWait(1);
 }
 
-TEST_F(TransferWorkLoopTest, DisabledStageMetricsSkipWorkLoopQueueAggregation) {
+TEST_F(TransferWorkLoopTest, DisabledStageMetricsSkipQueueStages) {
     enableMetrics(false);
     EXPECT_EQ(reporter->stage_metrics_, nullptr);
     initialize();
@@ -1674,11 +1673,6 @@ TEST_F(TransferWorkLoopTest, DisabledStageMetricsSkipWorkLoopQueueAggregation) {
     EXPECT_FALSE(reporter->stageMetricsEnabled());
     reporter->flushStageMetrics();
     EXPECT_EQ(seriesCount(metrics()->transfer_stage_qps_metric), 0u);
-    EXPECT_EQ(seriesCount(metrics()->task_queue_waiting_tasks_metric), 0u);
-    EXPECT_EQ(seriesCount(metrics()->transfer_task_queue_wait_latency_us_metric), 0u);
-    // The existing direct reporter remains independent of the aggregation switch.
-    reporter->reportQueueWaitMetric(false, "transfer", nullptr, Tier::HOST, Tier::DISK, 17);
-    checkQueueWait(1);
 }
 
 class TransferWorkLoopCrcTest: public TransferWorkLoopTest {
@@ -1882,7 +1876,7 @@ TEST_F(TransferWorkLoopCrcTest, CombinedRoutesKeepOnlyBatchStageIntervals) {
     }
     engine->shutdown();
     const auto events = session->finish();
-    ASSERT_EQ(events.size(), 12u);
+    ASSERT_EQ(events.size(), 18u);
     checkWorkLoopTrace(events);
     std::map<std::string, size_t> stages;
     for (const auto& event : events)
@@ -1893,7 +1887,201 @@ TEST_F(TransferWorkLoopCrcTest, CombinedRoutesKeepOnlyBatchStageIntervals) {
                                              {"staging_wait", 2},
                                              {"transfer_queue_wait", 2},
                                              {"h2d", 2},
-                                             {"disk_read", 2}}));
+                                             {"disk_read", 2},
+                                             {"crc_submit_cpu", 2},
+                                             {"transfer_finalize_latency", 2},
+                                             {"slot_released", 2}}));
+}
+
+TEST_F(TransferWorkLoopCrcTest, ReusesTaskSpanAndTimerStorageWithStageMetrics) {
+    enableMetrics();
+    initialize(8, 2, 1);
+    ASSERT_TRUE(await(engine->execute(evict(0))));
+    engine->waitForIdle();
+    seedDisk(0);
+    for (auto* owner : {engine->evict_loops_.front().get(), engine->load_loops_.front().get()})
+        for (auto& [ordinal, slots] : owner->crc_->slots_)
+            for (auto& slot : slots)
+                slot.copy->setTestHook([&, slot_ptr = &slot](const char* point, void*, void*) {
+                    if (std::strcmp(point, "metadata") == 0) {
+                        EXPECT_TRUE(slot_ptr->operation);
+                        if (!slot_ptr->operation)
+                            return int(cudaErrorInvalidValue);
+                        auto* timing = slot_ptr->operation->timing;
+                        EXPECT_NE(timing, nullptr);
+                        if (timing) {
+                            EXPECT_GT(timing->slot_acquired_us, 0);
+                            EXPECT_EQ(timing->submit_return_us, 0);
+                        }
+                    }
+                    return int(cudaSuccess);
+                });
+    TransferTask parent({}, 30s, 42);
+    parent.setWorkflow(1234, 5678);
+    const auto                            transfer_id = parent.traceId();
+    const std::vector<TransferDescriptor> routes{TransferDescriptor::deviceToHost(0, {sources[0]}, hosts[0]),
+                                                 TransferDescriptor::hostToDevice(0, hosts[0], {targets[0]}),
+                                                 TransferDescriptor::diskToDevice(0, disks[0], {targets[0]})};
+    auto                                  run = [&](bool profiled) {
+        for (const auto& descriptor : routes) {
+            auto& owner =
+                *(descriptor.source_tier == Tier::DEVICE ? engine->evict_loops_.front() : engine->load_loops_.front());
+            auto context = owner.execute(parent.subtask({descriptor}), [&](const TransferResult& result) {
+                EXPECT_TRUE(result.ok());
+                for (const auto& [ordinal, slots] : owner.crc_->slots_)
+                    for (const auto& slot : slots)
+                        EXPECT_FALSE(slot.operation.has_value());
+                if (profiled) {
+                    std::this_thread::sleep_for(2ms);
+                } else {
+                    const auto& timing = owner.entries_.front()->crc_timing;
+                    EXPECT_GT(timing.slot_acquired_us, 0);
+                    EXPECT_LE(timing.slot_acquired_us, timing.submit_return_us);
+                    EXPECT_LE(timing.submit_return_us, timing.completed_us);
+                }
+            });
+            ASSERT_TRUE(await(context));
+            owner.waitForIdle();
+        }
+    };
+    ASSERT_NO_FATAL_FAILURE(run(false));
+    reporter->flushStageMetrics();
+    const auto baseline_series = seriesCount(metrics()->transfer_stage_qps_metric);
+    for (const auto& descriptor : routes)
+        for (const char* stage : {"crc_submit_cpu", "transfer_finalize_latency"})
+            checkStage(stage,
+                       descriptor.source_tier == Tier::DEVICE ? 2 : 1,
+                       true,
+                       descriptor.source_tier,
+                       descriptor.target_tier);
+    auto session = AsyncProfileSession::start(100000);
+    ASSERT_NO_FATAL_FAILURE(run(true));
+    ASSERT_NO_FATAL_FAILURE(run(true));
+    engine->shutdown();
+    reporter->flushStageMetrics();
+    EXPECT_EQ(seriesCount(metrics()->transfer_stage_qps_metric), baseline_series);
+    for (const auto& descriptor : routes)
+        for (const char* stage : {"crc_submit_cpu", "transfer_finalize_latency"})
+            checkStage(stage, 2, true, descriptor.source_tier, descriptor.target_tier);
+    const auto events = session->finish();
+    checkWorkLoopTrace(events);
+    using Key = std::pair<uint64_t, uint64_t>;
+    std::map<Key, std::map<std::string, const AsyncProfileEvent*>> batches;
+    std::map<uint64_t, const AsyncProfileEvent*>                   roots;
+    for (const auto& event : events) {
+        EXPECT_EQ(event.record.request_id, 42);
+        EXPECT_EQ(event.record.transfer_id, transfer_id);
+        EXPECT_EQ(event.record.workflow_id, 1234u);
+        EXPECT_EQ(event.record.parent_transfer_id, 5678u);
+        EXPECT_EQ(event.record.rank, 3);
+        EXPECT_FALSE(event.start_clipped || event.end_clipped);
+        if (event.record.stage == "worker_task_total") {
+            roots.emplace(event.span_id, &event);
+            continue;
+        }
+        ASSERT_NE(event.record.batch_span_id, 0u);
+        const Key key{event.session_id, event.record.batch_span_id};
+        EXPECT_TRUE(batches[key].emplace(event.record.stage, &event).second);
+    }
+    ASSERT_EQ(batches.size(), 6u);
+    ASSERT_EQ(roots.size(), batches.size());
+    std::map<std::string, size_t> paths;
+    for (const auto& [key, stages] : batches) {
+        ASSERT_EQ(roots.count(key.second), 1u);
+        const auto& task     = *roots.at(key.second);
+        const auto& submit   = *stages.at("crc_submit_cpu");
+        const auto& finalize = *stages.at("transfer_finalize_latency");
+        const auto& released = *stages.at("slot_released");
+        const auto& queue    = *stages.at("transfer_queue_wait");
+        const auto& crc      = *stages.at(submit.record.path == "device_to_host" ? "d2h" : "h2d");
+        EXPECT_EQ(queue.start_us, task.start_us);
+        EXPECT_EQ(crc.end_us, task.end_us);
+        EXPECT_LE(queue.end_us, crc.start_us);
+        EXPECT_LE(crc.start_us, submit.start_us);
+        EXPECT_LE(submit.end_us, finalize.start_us);
+        EXPECT_LE(finalize.start_us, released.start_us);
+        EXPECT_LE(released.start_us, crc.end_us);
+        EXPECT_LE(crc.end_us, finalize.end_us);
+        EXPECT_GE(finalize.end_us - finalize.start_us, 2000);
+        EXPECT_EQ(submit.record.start_tid, finalize.record.start_tid);
+        EXPECT_EQ(submit.record.start_tid, released.record.start_tid);
+        if (submit.record.path == "disk_to_device") {
+            EXPECT_EQ(stages.at("worker_batch_total")->start_us, stages.at("staging_wait")->start_us);
+            EXPECT_EQ(stages.at("worker_batch_total")->end_us, task.end_us);
+            EXPECT_LE(stages.at("staging_wait")->end_us, stages.at("disk_read")->start_us);
+            EXPECT_LE(stages.at("disk_read")->end_us, crc.start_us);
+        }
+        ++paths[submit.record.path];
+    }
+    EXPECT_EQ(paths,
+              (std::map<std::string, size_t>{{"device_to_host", 2}, {"host_to_device", 2}, {"disk_to_device", 2}}));
+    const auto json = mergeAsyncProfileTrace(R"({"traceEvents":[]})", events);
+    EXPECT_NE(json.find("transfer_finalize_latency"), std::string::npos);
+    EXPECT_NE(json.find("slot_released"), std::string::npos);
+    EXPECT_NE(json.find("transfer_queue_wait"), std::string::npos);
+    EXPECT_EQ(json.find("worker_task_total"), std::string::npos);
+    static_assert(std::is_trivially_copyable<CrcCopyExecutor::Timing>::value, "CRC output must remain raw POD");
+    std::printf("TRANSFER_TIMING_SIZE entry=%zu operation=%zu record=%zu span=%zu timing=%zu buffer_entry=%zu\n",
+                sizeof(TransferWorkLoop::Entry),
+                sizeof(CrcCopyExecutor::Operation),
+                sizeof(AsyncProfileRecord),
+                sizeof(AsyncProfileSpan),
+                sizeof(CrcCopyExecutor::Timing),
+                sizeof(AsyncProfileSession::Entry));
+}
+
+TEST_F(TransferWorkLoopCrcTest, DisabledStageMetricsKeepCrcTimingOffUnlessProfiling) {
+    enableMetrics(false);
+    initialize();
+    auto& owner = *engine->evict_loops_.front();
+    for (bool profiled : {false, true}) {
+        SCOPED_TRACE(profiled);
+        auto session = profiled ? AsyncProfileSession::start(100000) : nullptr;
+        auto context = owner.execute(evict(0), [&](const TransferResult& result) {
+            EXPECT_TRUE(result.ok());
+            const auto& timing = owner.entries_.front()->crc_timing;
+            EXPECT_EQ(timing.slot_acquired_us > 0, profiled);
+            EXPECT_EQ(timing.submit_return_us > 0, profiled);
+            EXPECT_EQ(timing.completed_us > 0, profiled);
+        });
+        ASSERT_TRUE(await(context));
+        owner.waitForIdle();
+        if (session) {
+            const auto events = session->finish();
+            checkWorkLoopTrace(events);
+            EXPECT_EQ(events.size(), 6u);
+        }
+    }
+    engine->shutdown();
+    reporter->flushStageMetrics();
+    EXPECT_EQ(seriesCount(metrics()->transfer_stage_qps_metric), 0u);
+}
+
+TEST_F(TransferWorkLoopCrcTest, DiskSuccessorCannotEnterACaptureStartedAfterAdmission) {
+    for (bool admitted_with_profile : {false, true}) {
+        SCOPED_TRACE(admitted_with_profile);
+        initialize();
+        seedDisk(0);
+        io->blocked        = true;
+        const auto reads   = io->reads;
+        auto       first   = admitted_with_profile ? AsyncProfileSession::start(100000) : nullptr;
+        auto       context = engine->load_loops_.front()->execute(
+            makeTransferTask({TransferDescriptor::diskToDevice(0, disks[0], {targets[0]})}));
+        ASSERT_TRUE(io->waitReads(reads + 1));
+        if (first) {
+            const auto events = first->finish();
+            EXPECT_TRUE(std::any_of(events.begin(), events.end(), [](const auto& event) {
+                return event.record.stage == "disk_read" && event.end_clipped;
+            }));
+        }
+        auto second = AsyncProfileSession::start(100000);
+        io->release();
+        ASSERT_TRUE(await(context));
+        engine->shutdown();
+        EXPECT_TRUE(context->success());
+        expectTarget(0);
+        EXPECT_TRUE(second->finish().empty());
+    }
 }
 
 TEST_F(TransferWorkLoopCrcTest, SlowWriteBackpressureKeepsOtherStagesAndDirectionProgressing) {
@@ -2012,7 +2200,7 @@ TEST_F(TransferWorkLoopCrcTest, ExpiredStagingWaiterIsSkippedWithoutBlockingTheN
         EXPECT_TRUE(owner.staging_.waiting.empty());
         EXPECT_EQ(owner.staging_.pool->free_id_list_.size(), 1u);
         reporter->flushStageMetrics();
-        EXPECT_EQ(seriesCount(metrics()->transfer_stage_qps_metric), 9u);
+        EXPECT_EQ(seriesCount(metrics()->transfer_stage_qps_metric), 11u);
         const auto source = operation == TransferOperation::LOAD ? Tier::DISK : Tier::DEVICE;
         const auto target = operation == TransferOperation::LOAD ? Tier::DEVICE : Tier::DISK;
         checkStage("transfer_queue_wait", 3, true, source, target, "worker_task");
@@ -2024,7 +2212,8 @@ TEST_F(TransferWorkLoopCrcTest, ExpiredStagingWaiterIsSkippedWithoutBlockingTheN
         checkStage("staging_wait", 1, false, source, target);
         checkStage(operation == TransferOperation::LOAD ? "disk_read" : "disk_write", 2, true, source, target);
         checkStage(operation == TransferOperation::LOAD ? "h2d" : "d2h", 2, true, source, target);
-        checkQueueWait(3, source, target);
+        for (const char* stage : {"crc_submit_cpu", "transfer_finalize_latency"})
+            checkStage(stage, 2, true, source, target);
         if (operation == TransferOperation::LOAD) {
             expectTarget(0);
             expectTarget(2);
@@ -2102,12 +2291,12 @@ TEST_F(TransferWorkLoopCrcTest, ClosedAdmissionStillSubmitsCrcSuccessorsAndSmall
     for (size_t i = 0; i < 5; ++i)
         expectTarget(i);
     reporter->flushStageMetrics();
-    EXPECT_EQ(seriesCount(metrics()->transfer_stage_qps_metric), 6u);
+    EXPECT_EQ(seriesCount(metrics()->transfer_stage_qps_metric), 8u);
     checkStage("transfer_queue_wait", 5, true, Tier::DISK, Tier::DEVICE, "worker_task");
     checkStage("worker_task_total", 5, true, Tier::DISK, Tier::DEVICE, "worker_task");
-    for (const char* stage : {"worker_batch_total", "staging_wait", "disk_read", "h2d"})
+    for (const char* stage :
+         {"worker_batch_total", "staging_wait", "disk_read", "h2d", "crc_submit_cpu", "transfer_finalize_latency"})
         checkStage(stage, 5, true, Tier::DISK, Tier::DEVICE);
-    checkQueueWait(5, Tier::DISK, Tier::DEVICE);
 }
 
 TEST_F(TransferWorkLoopCrcTest, BurstWithOneSlotCompletesEveryWaitingEntryExactlyOnce) {
@@ -2164,11 +2353,11 @@ TEST_F(TransferWorkLoopCrcTest, BurstWithOneSlotCompletesEveryWaitingEntryExactl
     checkStage("worker_task_total", 8, true, Tier::DEVICE, Tier::HOST, "worker_task");
     checkStage("transfer_queue_wait", 8, true, Tier::DEVICE, Tier::HOST, "worker_task");
     checkStage("disk_write", 1, true, Tier::HOST, Tier::DISK);
-    checkQueueWait(8, Tier::DEVICE, Tier::HOST);
-    checkQueueWait(1, Tier::HOST, Tier::DISK);
+    for (const char* stage : {"crc_submit_cpu", "transfer_finalize_latency"})
+        checkStage(stage, 8, true, Tier::DEVICE, Tier::HOST);
     const auto events = session->finish();
     checkWorkLoopTrace(events);
-    EXPECT_EQ(events.size(), 27u);  // Busy retries add no intervals: nine direct tasks.
+    EXPECT_EQ(events.size(), 51u);  // Three new observations per accepted CRC batch; none per Busy retry.
 }
 
 TEST_F(TransferWorkLoopCrcTest, ClosingWithQueuedDiskWritesDrainsBothWrites) {
@@ -2263,7 +2452,23 @@ TEST_F(TransferWorkLoopCrcTest, CrcErrorsDoNotIssueDiskWrites) {
         checkStage("d2h", 1, false, Tier::DEVICE, Tier::HOST);
         checkStage("worker_task_total", 1, false, Tier::DEVICE, Tier::HOST, "worker_task");
         checkStage("transfer_queue_wait", 1, true, Tier::DEVICE, Tier::HOST, "worker_task");
-        checkWorkLoopTrace(session->finish());
+        EXPECT_EQ(seriesCount(metrics()->transfer_stage_qps_metric), std::strcmp(phase, "query") == 0 ? 4u : 3u);
+        if (std::strcmp(phase, "query") == 0)
+            checkStage("crc_submit_cpu", 1, true, Tier::DEVICE, Tier::HOST);
+        const auto events = session->finish();
+        checkWorkLoopTrace(events);
+        size_t                                          submitted = 0, finalized = 0, released = 0;
+        std::map<std::string, const AsyncProfileEvent*> stages;
+        for (const auto& event : events) {
+            stages.emplace(event.record.stage, &event);
+            submitted += event.record.stage == "crc_submit_cpu";
+            finalized += event.record.stage == "transfer_finalize_latency";
+            released += event.record.stage == "slot_released";
+        }
+        EXPECT_EQ(submitted, std::strcmp(phase, "query") == 0 ? 1u : 0u);
+        EXPECT_EQ(finalized, 0u);  // Failed copies retain their original failure observations.
+        EXPECT_EQ(released, 0u);
+        EXPECT_EQ(stages.at("worker_task_total")->end_us, stages.at("d2h")->end_us);
     }
 }
 
@@ -2285,13 +2490,15 @@ TEST_F(TransferWorkLoopCrcTest, SmallStagingRequestCompletesHealthyBatchesAfterC
     expectTarget(0);
     expectTarget(2);
     reporter->flushStageMetrics();
-    EXPECT_EQ(seriesCount(metrics()->transfer_stage_qps_metric), 9u);
+    EXPECT_EQ(seriesCount(metrics()->transfer_stage_qps_metric), 11u);
     checkStage("worker_batch_total", 2, true, Tier::DISK, Tier::DEVICE);
     checkStage("worker_batch_total", 1, false, Tier::DISK, Tier::DEVICE);
     checkStage("staging_wait", 3, true, Tier::DISK, Tier::DEVICE);
     checkStage("disk_read", 3, true, Tier::DISK, Tier::DEVICE);
     checkStage("h2d", 2, true, Tier::DISK, Tier::DEVICE);
     checkStage("h2d", 1, false, Tier::DISK, Tier::DEVICE);
+    checkStage("crc_submit_cpu", 3, true, Tier::DISK, Tier::DEVICE);
+    checkStage("transfer_finalize_latency", 2, true, Tier::DISK, Tier::DEVICE);
     checkStage("worker_task_total", 2, true, Tier::DISK, Tier::DEVICE, "worker_task");
     checkStage("worker_task_total", 1, false, Tier::DISK, Tier::DEVICE, "worker_task");
 }

@@ -34,7 +34,7 @@ namespace {
 TEST(PerRankBlockTransferEngineConfigTest, UsesWorkLoopAndEightCrcSlotsByDefault) {
     PerRankBlockTransferEngine engine(std::vector<GroupSetPtr>{});
     EXPECT_TRUE(engine.asyncEnabled());
-    EXPECT_EQ(engine.transferWorkerCount(), 1u);
+    EXPECT_EQ(engine.transferWorkerCount(), 2u);
     EXPECT_EQ(engine.crcSlotCount(), 8u);
 }
 
@@ -215,7 +215,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskRoundTrip) {
     releasePoolBlock(*disk_pool_, disk_block);
 }
 
-TEST_F(PerRankBlockTransferEngineHostDiskTest, ReportsSuccessfulQueueWaitThroughMetricsReporter) {
+TEST_F(PerRankBlockTransferEngineHostDiskTest, LegacyReportsQueueWaitStageAndBacklogThroughMetricsReporter) {
     auto metrics_reporter       = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
     auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(metrics_reporter);
     auto engine                 = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group_set_},
@@ -243,23 +243,21 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, ReportsSuccessfulQueueWaitThrough
 
     auto* transfer_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheTransferMetrics>();
     ASSERT_NE(transfer_metrics, nullptr);
-    kmonitor::MetricsTags tags("pool_type", "transfer");
-    tags.AddTag("source_tier", tierName(Tier::HOST));
-    tags.AddTag("target_tier", tierName(Tier::DISK));
-    auto* waiting_tasks = transfer_metrics->task_queue_waiting_tasks_metric;
-    ASSERT_NE(waiting_tasks, nullptr);
-    EXPECT_EQ(waiting_tasks->metric_data_->Size(), 1u);
-    auto* metric = waiting_tasks->DeclareMetric(&tags);
-    ASSERT_NE(metric, nullptr);
+    EXPECT_EQ(transfer_metrics->transfer_stage_qps_metric->metric_data_->Size(), 3u);
+    kmonitor::MetricsTags tags("operation", "evict");
+    tags.AddTag("source_tier", "HOST");
+    tags.AddTag("target_tier", "DISK");
+    tags.AddTag("scope", "worker_task");
+    tags.AddTag("stage", "transfer_queue_wait");
+    tags.AddTag("success", "true");
+    tags.AddTag("transfer_rank", "0");
+    auto* queue_wait = transfer_metrics->transfer_stage_qps_metric->DeclareMetric(&tags);
+    ASSERT_NE(queue_wait, nullptr);
     kmonitor::MetricsRecord record(nullptr, nullptr, 0);
-    metric->Snapshot(&record, 1000);
-    EXPECT_TRUE(waiting_tasks->UndeclareMetric(metric));
+    queue_wait->Snapshot(&record, 1000);
+    EXPECT_TRUE(transfer_metrics->transfer_stage_qps_metric->UndeclareMetric(queue_wait));
     ASSERT_EQ(record.Values().size(), 1u);
     EXPECT_DOUBLE_EQ(std::stod(record.Values().front()->Value()), 1);
-    auto* latency = transfer_metrics->transfer_task_queue_wait_latency_us_metric;
-    ASSERT_NE(latency, nullptr);
-    EXPECT_EQ(latency->metric_data_->Size(), 1u);
-    EXPECT_EQ(transfer_metrics->transfer_stage_qps_metric->metric_data_->Size(), 3u);
     EXPECT_EQ(transfer_metrics->task_queue_backlog_metric->metric_data_->Size(), 3u);
 
     releasePoolBlock(*host_pool_, host_block);

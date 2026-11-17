@@ -242,7 +242,10 @@ void writeEvent(std::ostream& out, const AsyncProfileEvent& e, int64_t base, boo
          << ",\"start_clipped\":" << (e.start_clipped ? "true" : "false")
          << ",\"end_clipped\":" << (e.end_clipped ? "true" : "false")
          << ",\"incomplete\":" << (e.start_clipped || e.end_clipped ? "true" : "false")
-         << ",\"thread_mismatch\":" << (thread_mismatch ? "true" : "false") << '}';
+         << ",\"thread_mismatch\":" << (thread_mismatch ? "true" : "false");
+    if (r.batch_span_id)
+        args << ",\"batch_span_id\":" << quoted(std::to_string(r.batch_span_id));
+    args << '}';
     auto common = [&] {
         if (!first)
             out << ',';
@@ -272,6 +275,17 @@ void writeEvent(std::ostream& out, const AsyncProfileEvent& e, int64_t base, boo
 namespace detail {
 AsyncProfileKind exportedAsyncProfileKind(const AsyncProfileEvent& event) {
     return exportedKind(event);
+}
+
+bool isWorkerTransferStage(const AsyncProfileEvent& event) {
+    const auto& r = event.record;
+    if (!r.batch_span_id || (r.path != "host_to_device" && r.path != "device_to_host" && r.path != "disk_to_device"))
+        return false;
+    if (r.stage == "transfer_queue_wait")
+        return r.scope == "worker_task";
+    return r.scope == "worker_batch"
+           && (r.stage == "staging_wait" || r.stage == "disk_read" || r.stage == "h2d" || r.stage == "d2h"
+               || r.stage == "transfer_finalize_latency" || r.stage == "slot_released");
 }
 int64_t asyncProfileBaseTimeNs(const std::string& trace) {
     return baseTimeNs(trace);
@@ -327,9 +341,11 @@ std::string mergeAsyncProfileTrace(const std::string&                    native_
     }
     for (const auto& event : events) {
         // Keep every real execution event, including its request identity.
-        // Only the optional request-owned logical projection is removed.
+        // Hide optional request projections except the selected
+        // WorkLoop transfer stages needed for boundary analysis.
         if (exportedKind(event) != AsyncProfileKind::Execution
-            && (event.record.request_id >= 0 || event.record.path == "request"))
+            && (event.record.request_id >= 0 || event.record.path == "request")
+            && !detail::isWorkerTransferStage(event))
             continue;
         writeEvent(extra, event, base, first);
     }

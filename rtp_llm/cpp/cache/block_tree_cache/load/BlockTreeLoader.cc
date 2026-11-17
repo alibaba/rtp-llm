@@ -371,14 +371,15 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
         scheduleContextSettlement(task, ready_context);
     });
     if (task) {
-        const int64_t queue_begin = currentTimeUs();
-        auto          on_timeout  = [this, task, queue_begin]() {
-            metrics_reporter_.reportQueueWaitMetric(false,
-                                                    "business",
-                                                    transferOperationName(TransferOperation::LOAD),
-                                                    Tier::NONE,
-                                                    Tier::NONE,
-                                                    currentTimeUs() - queue_begin);
+        auto queue_wait = TransferStageTimer::create(
+            CacheStageContext::forWorkflow(
+                metrics_reporter_, task->load_descs, "load", context->requestId().value_or(-1), context->workflowId()),
+            "business_queue_wait",
+            "business_task",
+            AsyncProfileKind::Wait);
+        block_tree_cache_detail::ScopeRollback discard_wait([&] { queue_wait.discard(); });
+        auto                                   on_timeout = [this, task, queue_wait]() {
+            queue_wait.finish(false);
             const size_t descriptor_count = task->load_descs.size();
             RTP_LLM_LOG_WARNING("load expired in business queue, descriptor_count=%zu", descriptor_count);
             if (!task->context->completeTransfers(descriptor_count, false)) {
@@ -395,19 +396,15 @@ bool BlockTreeLoader::commitLoad(const std::shared_ptr<LoadAsyncContext>& contex
         const auto deadline = queue_task.deadline();
         if (!task_pool_->submit(
                 BlockTreeTaskClass::LOAD,
-                [this, task, queue_begin]() {
-                    metrics_reporter_.reportQueueWaitMetric(false,
-                                                            "business",
-                                                            transferOperationName(TransferOperation::LOAD),
-                                                            Tier::NONE,
-                                                            Tier::NONE,
-                                                            currentTimeUs() - queue_begin);
+                [this, task, queue_wait]() {
+                    queue_wait.finish(true);
                     runLoadTask(task);
                 },
                 deadline,
                 std::move(on_timeout))) {
             return false;
         }
+        discard_wait.dismiss();
     }
 
     rollback_guard.dismiss();
@@ -516,40 +513,27 @@ void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&  
     if (task) {
         transfer_id = task->completionTransfer().traceId();
     }
-    auto          observation = CompletionStageContext::forWorkflow(metrics_reporter_,
-                                                           descriptors,
-                                                           "load",
-                                                           context->requestId().value_or(-1),
-                                                           transfer_id,
-                                                           context->localTransfersSucceeded());
-    auto          timers      = CompletionStageTimers::create(observation);
-    const int64_t queue_begin = currentTimeUs();
-    auto          settle      = [this, task, context, observation, timers, queue_begin](bool queued) {
-        timers.finishQueue(observation.success);
+    auto stage_context = CacheStageContext::forWorkflow(
+        metrics_reporter_, descriptors, "load", context->requestId().value_or(-1), transfer_id);
+    const bool transfer_success = context->localTransfersSucceeded();
+    auto       timers           = CompletionStageTimers::create(stage_context);
+    auto       settle           = [this, task, context, stage_context, timers, transfer_success]() {
+        timers.finishQueue(transfer_success);
         bool                                   success = false;
         block_tree_cache_detail::ScopeRollback finish([&] { timers.finish(success); });
-        CompletionStageScope                   execute(observation, "completion_execute", "business_completion");
-        if (queued) {
-            metrics_reporter_.reportQueueWaitMetric(
-                true, "business", "load", Tier::NONE, Tier::NONE, currentTimeUs() - queue_begin);
-        }
+        auto                                   execute =
+            TransferStageTimer::scope(stage_context, "completion_execute", "business_completion", transfer_success);
         bool                              settlement_success = context->localTransfersSucceeded();
         bool                              host_success       = context->hostTransfersSucceeded();
         std::vector<JoinedLoadCompletion> joined_contexts;
         if (task) {
             {
-                CacheLockGuard lock(mutex_, metrics_reporter_, "load_settle", std::defer_lock);
-                {
-                    CompletionStageScope wait(
-                        observation, "completion_lock_wait", "business_completion", AsyncProfileKind::Wait);
-                    lock.lock();
-                }
-                CompletionStageScope tree(observation, "completion_settle", "business_completion");
+                CacheLockGuard lock(mutex_, "load_settle", stage_context);
                 settlement_success =
-                    settleLoadLocked(*task, settlement_success, host_success, joined_contexts, observation);
-                tree.setSuccess(settlement_success);
+                    settleLoadLocked(*task, settlement_success, host_success, joined_contexts, stage_context);
             }
-            CompletionStageScope notify(observation, "completion_join_notify", "business_completion");
+            auto notify = TransferStageTimer::scope(
+                stage_context, "completion_join_notify", "business_completion", transfer_success);
             for (const auto& joined_context : joined_contexts) {
                 bool    join_completed       = false;
                 int64_t join_wait_latency_us = 0;
@@ -562,7 +546,8 @@ void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&  
             }
         }
         {
-            CompletionStageScope notify(observation, "completion_notify", "business_completion");
+            auto notify =
+                TransferStageTimer::scope(stage_context, "completion_notify", "business_completion", transfer_success);
             if (!context->settle(settlement_success, host_success)) {
                 RTP_LLM_LOG_WARNING("failed to publish load context settlement, context_id=%lu", context->contextId());
             }
@@ -571,9 +556,9 @@ void BlockTreeLoader::scheduleContextSettlement(const LoadTaskRunner::TaskPtr&  
         }
         execute.setSuccess(success);
     };
-    if (!task_pool_->submitCompletion([settle] { settle(true); })) {
+    if (!task_pool_->submitCompletion(settle)) {
         RTP_LLM_LOG_WARNING("load completion queue is closed; settling context inline");
-        settle(false);
+        settle();
     }
 }
 
@@ -601,7 +586,7 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&              task,
                                        bool                               aggregate_success,
                                        bool&                              host_success,
                                        std::vector<JoinedLoadCompletion>& joined_contexts,
-                                       CompletionStageContext             observation) {
+                                       const CacheStageContext&           stage_context) {
     std::vector<BlockTreeEvictor::InvalidationSource> corrupted;
     const auto collect_corrupted = [this, &corrupted](const TransferTask& transfer, const TransferResult& result) {
         for (size_t index = 0; index < result.block_errors.size(); ++index) {
@@ -628,14 +613,14 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&              task,
 
     const bool valid                            = validateLoadTaskLocked(task);
     host_success                                = host_success && valid;
-    const bool settlement_success               = aggregate_success && valid;
-    observation.success                         = settlement_success;
+    const bool                            settlement_success = aggregate_success && valid;
     bool                                  state_settled = false;
     std::unordered_map<TreeNode*, size_t> pending_nodes;
 
     const auto& descriptors = task.load_descs;
     {
-        CompletionStageScope            update(observation, "completion_tree_update", "business_completion");
+        auto update = TransferStageTimer::scope(
+            stage_context, "completion_tree_update", "business_completion", settlement_success);
         std::vector<TransferDescriptor> detached_descs;
         for (size_t desc_index = 0; desc_index < descriptors.size(); ++desc_index) {
             const TransferDescriptor& desc      = descriptors[desc_index];
@@ -695,11 +680,13 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&              task,
         evictor_.discardDetachedTransfer(detached_descs);
     }
     {
-        CompletionStageScope refs(observation, "completion_release_refs", "business_completion");
+        auto refs = TransferStageTimer::scope(
+            stage_context, "completion_release_refs", "business_completion", settlement_success);
         load_task_runner_.releaseTaskResources(task);
     }
     {
-        CompletionStageScope joins(observation, "completion_join_registry", "business_completion");
+        auto joins = TransferStageTimer::scope(
+            stage_context, "completion_join_registry", "business_completion", settlement_success);
         for (const TransferDescriptor& desc : task.load_descs) {
             if (!desc.initial_owner) {
                 continue;
@@ -715,12 +702,14 @@ bool BlockTreeLoader::settleLoadLocked(LoadTaskRunner::Task&              task,
         }
     }
     {
-        CompletionStageScope cleanup(observation, "completion_cleanup", "business_completion");
+        auto cleanup =
+            TransferStageTimer::scope(stage_context, "completion_cleanup", "business_completion", settlement_success);
         tree_->removePendingNodes(pending_nodes);
         evictor_.invalidateSources(corrupted);
     }
     {
-        CompletionStageScope watermark(observation, "completion_watermark", "business_completion");
+        auto watermark =
+            TransferStageTimer::scope(stage_context, "completion_watermark", "business_completion", settlement_success);
         settled_(state_settled);
     }
     return settlement_success;

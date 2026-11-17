@@ -2407,6 +2407,7 @@ TEST_F(BlockTreeCacheFactoryTest, TransferQueueConfigurationPropagatesAndValidat
     {
         auto          allocator = initAllocator<CoordinatorCacheManager>(config);
         KVCacheConfig kv_cache_config;
+        kv_cache_config.block_tree_task_pool_size          = 6;
         kv_cache_config.block_tree_transfer_worker_count   = 7;
         kv_cache_config.btc_crc_slot_count                 = 3;
         kv_cache_config.block_tree_business_queue_max_size = 211;
@@ -2414,6 +2415,7 @@ TEST_F(BlockTreeCacheFactoryTest, TransferQueueConfigurationPropagatesAndValidat
         kv_cache_config.disk_cache_evict_max_pending_bytes = 80 * 1024 * 1024;
         auto cache                                         = createBlockTreeCache(config, kv_cache_config, allocator);
         ASSERT_NE(cache, nullptr);
+        EXPECT_EQ(cache->config().task_pool_size, 6);
         EXPECT_EQ(cache->config().transfer_worker_count, 7u);
         EXPECT_EQ(cache->config().btc_crc_slot_count, 3u);
         EXPECT_EQ(cache->config().business_queue_max_size, 211u);
@@ -2428,11 +2430,15 @@ TEST_F(BlockTreeCacheFactoryTest, TransferQueueConfigurationPropagatesAndValidat
         kv_cache_config.block_tree_transfer_queue_max_size = 0;
         auto cache                                         = createBlockTreeCache(config, kv_cache_config, allocator);
         ASSERT_NE(cache, nullptr);
+        EXPECT_EQ(cache->config().task_pool_size, 4);
+        EXPECT_EQ(cache->config().transfer_worker_count, 2u);
         EXPECT_EQ(cache->config().business_queue_max_size, 0u);
         EXPECT_EQ(cache->config().transfer_queue_max_size, 0u);
         EXPECT_EQ(cache->config().disk_cache_evict_max_pending_bytes, 100u * 1024 * 1024);
     }
     for (const auto& invalid_field : {std::string("worker"),
+                                      std::string("task_pool_zero"),
+                                      std::string("task_pool_negative"),
                                       std::string("worker_queue"),
                                       std::string("slots"),
                                       std::string("total_slots"),
@@ -2444,6 +2450,10 @@ TEST_F(BlockTreeCacheFactoryTest, TransferQueueConfigurationPropagatesAndValidat
         KVCacheConfig kv_cache_config;
         if (invalid_field == "worker") {
             kv_cache_config.block_tree_transfer_worker_count = 0;
+        } else if (invalid_field == "task_pool_zero") {
+            kv_cache_config.block_tree_task_pool_size = 0;
+        } else if (invalid_field == "task_pool_negative") {
+            kv_cache_config.block_tree_task_pool_size = -1;
         } else if (invalid_field == "worker_queue") {
             kv_cache_config.block_tree_transfer_worker_count   = 2;
             kv_cache_config.block_tree_transfer_queue_max_size = 1;

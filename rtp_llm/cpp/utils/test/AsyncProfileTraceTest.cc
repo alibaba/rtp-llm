@@ -448,8 +448,19 @@ TEST(AsyncProfileTraceTest, BundleContainsUnchangedNativeGpuFlowsAndPhysicalWork
     wait.record.stage          = "queue_wait";
     wait.start_us              = 1000001;
     wait.end_us                = 1000009;
+    auto worker                 = sample(AsyncProfileKind::Lifecycle, 3);
+    worker.record.stage         = "transfer_finalize_latency";
+    worker.record.batch_span_id = e.record.batch_span_id = 9007199254740993ULL;
+    auto released                                        = worker;
+    released.span_id                                     = 4;
+    released.record.stage                                = "slot_released";
+    released.record.kind                                 = AsyncProfileKind::Derived;
+    released.start_us = released.end_us = 1000020;
+    auto hidden = worker, unlinked = worker;
+    hidden.record.path            = "request";
+    unlinked.record.batch_span_id = 0;
     const std::string path     = ::testing::TempDir() + "request_bundle_" + std::to_string(getpid()) + ".zip";
-    writeAsyncProfileBundle(path, native, {e, wait});
+    writeAsyncProfileBundle(path, native, {e, wait, worker, released, hidden, unlinked});
     std::ifstream     in(path, std::ios::binary);
     const std::string archive{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
     EXPECT_EQ(archive.substr(0, 4), std::string("PK\x03\x04", 4));
@@ -460,6 +471,15 @@ TEST(AsyncProfileTraceTest, BundleContainsUnchangedNativeGpuFlowsAndPhysicalWork
     EXPECT_EQ(archive.find("KV requests"), std::string::npos);
     EXPECT_EQ(archive.find("Request " + std::to_string(e.record.request_id)), std::string::npos);
     EXPECT_NE(archive.find("queue_wait [wait]"), std::string::npos);
+    EXPECT_NE(archive.find("transfer_finalize_latency [lifetime]"), std::string::npos);
+    EXPECT_NE(archive.find("slot_released [derived]"), std::string::npos);
+    EXPECT_TRUE(asyncProfileWorkflowTrace(native, {e}).empty());
+    const auto logical = traceEvents(mergeAsyncProfileTrace(native, {worker, released, hidden, unlinked}));
+    ASSERT_EQ(logical.size(), 6u);
+    const auto args = AnyCast<JsonMap>(AnyCast<JsonMap>(logical[2]).at("args"));
+    EXPECT_EQ(AnyCast<std::string>(args.at("batch_span_id")), "9007199254740993");
+    EXPECT_DOUBLE_EQ(std::stod(ToString(AnyCast<JsonMap>(logical[4]).at("ts"), true)), 20);
+    EXPECT_DOUBLE_EQ(std::stod(ToString(AnyCast<JsonMap>(logical[5]).at("ts"), true)), 20);
     std::remove(path.c_str());
 }
 
@@ -556,8 +576,11 @@ TEST(AsyncProfileTraceTest, PackedWorkflowKeepsExactPairsAndSharesSequentialKind
     next.end_us              = 1000050;
     next.record.kind         = AsyncProfileKind::Execution;
     next.record.stage        = "callback";
-    const auto proto =
-        asyncProfileWorkflowTrace(R"({"baseTimeNanoseconds":1000000000,"traceEvents":[]})", {total, crossing, next});
+    auto point               = backgroundSample(AsyncProfileKind::Derived, 4);
+    point.start_us = point.end_us = 1000045;
+    size_t     points             = 0;
+    const auto proto              = asyncProfileWorkflowTrace(R"({"baseTimeNanoseconds":1000000000,"traceEvents":[]})",
+                                                              {total, crossing, next, point});
     std::map<uint64_t, std::vector<std::pair<uint64_t, std::string>>> stacks;
     std::map<std::string, std::pair<uint64_t, uint64_t>>              intervals;
     std::map<std::string, uint64_t>                                   tracks;
@@ -592,6 +615,7 @@ TEST(AsyncProfileTraceTest, PackedWorkflowKeepsExactPairsAndSharesSequentialKind
                 if (event.tag == 23)
                     name = std::string(event.data);
             }
+            points += type == 3;
             if (type == 1) {
                 stacks[track].push_back({timestamp, name});
                 tracks[name] = track;
@@ -607,6 +631,7 @@ TEST(AsyncProfileTraceTest, PackedWorkflowKeepsExactPairsAndSharesSequentialKind
     for (const auto& stack : stacks)
         EXPECT_TRUE(stack.second.empty());
     ASSERT_EQ(intervals.size(), 3u);
+    EXPECT_EQ(points, 1u);
     EXPECT_EQ(intervals["total [lifetime] / host_to_device"], std::make_pair(uint64_t(10000), uint64_t(30000)));
     EXPECT_EQ(intervals["crossing_wait [wait] / host_to_device"], std::make_pair(uint64_t(20000), uint64_t(40000)));
     EXPECT_EQ(intervals["callback [execution] / host_to_device"], std::make_pair(uint64_t(40000), uint64_t(50000)));
