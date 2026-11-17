@@ -281,6 +281,8 @@ bool AgentLatencyInputR::submitBatchFinishedImpl(
     input.latencyValidationValid = latencyValidationValid;
     input.modelLatencyMs = input.unifiedLatencySample ? unifiedLatencyMs : latencyMs;
     input.precedingFeatures = precedingFeatures;
+    input.hasCompletedCapacityFeatures =
+        unifiedLatencyMs == -1.0 && precedingFeatures.usesCapacitySplit();
     input.localBatch = localBatch;
     input.backendQueueLatencyMs = backendQueueLatencyMs;
     input.predictedQueueLatencyMs = predictedQueueLatencyMs;

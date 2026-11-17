@@ -885,9 +885,11 @@ public:
         double runningElapsedTimeMs, int64_t runningDecodeRequestCount,
         int64_t runningDecodeGeneratedTokenCount,
         int64_t runningDecodeRemainingTokenBudget, double admissionToFirstExecutionMs,
-        double nativePreparationMs, int64_t executionFinishTimeUs)
+        double nativePreparationMs, int64_t executionFinishTimeUs,
+        bool useCompletedCapacityFeatures = false)
     {
-        if (!reporter || values.empty()) {
+        if (!reporter || values.empty() ||
+            (useCompletedCapacityFeatures && unifiedLatencyMs != -1.0)) {
             return false;
         }
         std::vector<NaviSchedRequestStats> requests;
@@ -899,7 +901,7 @@ public:
             request.cacheHitTokenCount = std::get<2>(value);
             requests.emplace_back(request);
         }
-        if (unifiedLatencyMs < 0.0) {
+        if (unifiedLatencyMs < 0.0 && !useCompletedCapacityFeatures) {
             return reporter->finishBatch(
                 requests, wallTimeMs, executeModelTimeMs, executionStepCount,
                 prefillTokenCount, decodeRequestStepCount, decodeTokenCount,
@@ -918,6 +920,13 @@ public:
                 runningDecodeRequestCount, runningDecodeGeneratedTokenCount,
                 runningDecodeRemainingTokenBudget)) {
             return false;
+        }
+        if (useCompletedCapacityFeatures) {
+            return reporter->finishBatch(
+                requests, wallTimeMs, executeModelTimeMs, executionStepCount,
+                prefillTokenCount, decodeRequestStepCount, decodeTokenCount,
+                admissionToFirstExecutionMs, nativePreparationMs, executionFinishTimeUs,
+                &sampleFeatures);
         }
         return reporter->finishBatchWithUnifiedLatency(
             requests, wallTimeMs, executeModelTimeMs, executionStepCount,
@@ -1366,6 +1375,7 @@ void bindNaviSchedData(py::module_ &m)
 {
     m.attr("VLLM_WAITING_REQUEST_IDS_VERSION") = 1;
     m.attr("VLLM_SHARED_EXECUTION_SAMPLES_VERSION") = 1;
+    m.attr("VLLM_NATIVE_CAPACITY_COMPLETION_FEATURES_VERSION") = 1;
     m.def("native_wire_versions", []() {
         py::dict versions;
         versions["agent_update_protocol"] = NAVI_SCHED_AGENT_UPDATE_VERSION;
@@ -1496,6 +1506,7 @@ void bindNaviSchedData(py::module_ &m)
             py::arg("admission_to_first_execution_ms") = -1.0,
             py::arg("native_preparation_ms") = 0.0,
             py::arg("execution_finish_time_us") = 0,
+            py::arg("use_completed_capacity_features") = false,
             py::call_guard<py::gil_scoped_release>())
         .def("enable_observed_execution_window_training",
              &VLLMAgentBridge::enableObservedExecutionWindowTraining,

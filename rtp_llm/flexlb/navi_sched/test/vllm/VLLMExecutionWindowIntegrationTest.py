@@ -19,7 +19,197 @@ from navi_sched import NaviSchedAgent
 from navi_sched import _navi_sched_core as core
 
 
+def native_capacity_completion_probe():
+    """Check actual pybind -> reporter -> kernel samples in an isolated process."""
+    from VLLMV6DWireIntegrationTest import empty_workload_report
+
+    original = os.getcwd()
+    agent = None
+    libc = ctypes.CDLL(None, use_errno=True)
+    fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+    if fd < 0:
+        raise OSError(ctypes.get_errno(), "inotify_init1")
+    with tempfile.TemporaryDirectory(prefix="navi-capacity-completion-") as directory:
+        root = Path(directory)
+        watched = set()
+        try:
+            os.chdir(directory)
+            agent = NaviSchedAgent(
+                "capacity_completion_test",
+                server_ip="127.0.0.1",
+                server_port=17204,
+                total_blocks=1024,
+                block_size=16,
+                linear_step=1,
+                hybrid_tail_required=False,
+                pd_separated=True,
+                latency_prediction_mode="unified",
+                pd_unified_capacity_split=True,
+                runtime_config={"thread_num": 2},
+                name="capacity_completion_agent",
+                enable_kmon=False,
+                enable_snapshot=False,
+                wait_no_query=False,
+                latency_validation_enabled=True,
+                latency_fit_batch_size=1,
+                latency_fit_interval=0,
+                latency_warmup_sample_count=0,
+                latency_cold_start_fit_epochs=1,
+            ).init()
+            bridge = core._VLLMAgentBridge(
+                agent, pd_separated=True, prefill_capacity_split=True
+            )
+            assert core.VLLM_NATIVE_CAPACITY_COMPLETION_FEATURES_VERSION == 1
+            finishes = {}
+            for enabled, prior_id, current_id in ((False, 1, 2), (True, 3, 4)):
+                assert bridge.report_workload(**empty_workload_report())
+                handles = {}
+                for request_id in (prior_id, current_id):
+                    handle = bridge.start_batch(
+                        1000 + request_id,
+                        [
+                            (
+                                request_id,
+                                96,
+                                16,
+                                list(range(request_id * 10, request_id * 10 + 6)),
+                            )
+                        ],
+                    )
+                    assert handle is not None
+                    handles[request_id] = handle
+                finish_us = time.time_ns() // 1000
+                arguments = dict(
+                    reporter=handles[current_id],
+                    values=[(current_id, 96, 0)],
+                    wall_time_ms=10.0,
+                    execute_model_time_ms=10.0,
+                    execution_step_count=1,
+                    prefill_token_count=96,
+                    decode_request_step_count=0,
+                    decode_token_count=0,
+                    unified_latency_ms=-1.0,
+                    preceding_request_count=1,
+                    sample_batch_count=2,
+                    running_request_count=2,
+                    running_cache_hit_token_count=80,
+                    running_cache_miss_token_count=112,
+                    running_cache_miss_token_square_sum=9472.0,
+                    running_cache_hit_miss_token_product_sum=1280.0,
+                    waiting_request_count=0,
+                    waiting_cache_hit_token_count=0,
+                    waiting_cache_miss_token_count=0,
+                    waiting_cache_miss_token_square_sum=0.0,
+                    waiting_cache_hit_miss_token_product_sum=0.0,
+                    running_elapsed_time_ms=0.0,
+                    running_decode_request_count=0,
+                    running_decode_generated_token_count=0,
+                    running_decode_remaining_token_budget=0,
+                    admission_to_first_execution_ms=0.0,
+                    native_preparation_ms=0.0,
+                    execution_finish_time_us=finish_us,
+                )
+                if enabled:
+                    arguments["use_completed_capacity_features"] = True
+                assert bridge.finish_batch_with_execution(**arguments)
+                finishes[current_id] = finish_us
+                arguments.update(
+                    reporter=handles[prior_id],
+                    values=[(prior_id, 96, 80)],
+                    prefill_token_count=16,
+                    preceding_request_count=0,
+                    sample_batch_count=1,
+                    running_request_count=1,
+                    running_cache_hit_token_count=80,
+                    running_cache_miss_token_count=16,
+                    running_cache_miss_token_square_sum=256.0,
+                    execution_finish_time_us=time.time_ns() // 1000,
+                )
+                arguments.pop("use_completed_capacity_features", None)
+                assert bridge.finish_batch_with_execution(**arguments)
+            deadline = time.monotonic() + 20
+            while True:
+                for path in [root, *root.rglob("*")]:
+                    if path.is_dir() and path not in watched:
+                        result = libc.inotify_add_watch(
+                            fd, os.fsencode(path), 0x100 | 0x80 | 0x8 | 0x2
+                        )
+                        if result < 0:
+                            raise OSError(ctypes.get_errno(), str(path))
+                        watched.add(path)
+                text = "\n".join(
+                    p.read_text(errors="replace")
+                    for p in root.rglob("*.log")
+                    if p.is_file()
+                )
+                records = {}
+                for line in text.splitlines():
+                    if "[navi-latency-training-sample]" not in line:
+                        continue
+                    for identity in (2, 4):
+                        if "request_ids=[" + str(identity) + "]" in line:
+                            records[identity] = dict(
+                                re.findall(r"(\w+)=([^\s]+)", line)
+                            )
+                if len(records) == 2:
+                    for identity, expected in (
+                        (2, (0, 192, 18432.0, 0.0)),
+                        (4, (80, 112, 9472.0, 1280.0)),
+                    ):
+                        record = records[identity]
+                        actual = tuple(
+                            float(record[k])
+                            for k in (
+                                "running_hit_tokens",
+                                "running_miss_tokens",
+                                "running_miss_square_sum",
+                                "running_hit_miss_sum",
+                            )
+                        )
+                        assert actual == expected, (identity, actual, expected)
+                        assert record["unified_sample"] == "1", record
+                        assert (
+                            int(record["event_time_us"]) >= finishes[identity]
+                        ), record
+                        assert float(record["target_ms"]) >= 0.0, record
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
+                    raise AssertionError(
+                        "Native capacity samples missing:\n" + text[-5000:]
+                    )
+                try:
+                    os.read(fd, 65536)
+                except BlockingIOError:
+                    pass
+        finally:
+            if agent is not None:
+                agent.stop()
+            os.chdir(original)
+            os.close(fd)
+
+
 class VLLMExecutionWindowIntegrationTest(unittest.TestCase):
+
+    def test_native_capacity_completion_reaches_training(self):
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import pathlib,runpy,sys; sys.path.insert(0,str(pathlib.Path(sys.argv[1]).parent)); "
+                "runpy.run_path(sys.argv[1])['native_capacity_completion_probe']()",
+                str(Path(__file__).resolve()),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=45,
+        )
+        self.assertEqual(0, result.returncode, result.stdout[-8000:])
+
     def test_empty_control_steps_do_not_discard_prefill_samples(self):
         from types import SimpleNamespace
 
@@ -37,6 +227,7 @@ class VLLMExecutionWindowIntegrationTest(unittest.TestCase):
 
         observer = VLLMEngineObserver.__new__(VLLMEngineObserver)
         observer._native_ingress = True
+        observer._pp_capacity_unified = False
         observer._v6d_scheduler = None
         observer._observed_execution_window_training = True
         assembler = PrefillExecutionWindowAssembler((4,))
@@ -207,6 +398,7 @@ class VLLMPipelineBatchSampleTest(unittest.TestCase):
 
         observer = VLLMEngineObserver.__new__(VLLMEngineObserver)
         observer._native_ingress = True
+        observer._pp_capacity_unified = False
         observer._pp_workload_timing_enabled = True
         observer._vllm_config = SimpleNamespace(
             parallel_config=SimpleNamespace(pipeline_parallel_size=4)
