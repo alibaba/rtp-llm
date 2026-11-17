@@ -2,9 +2,29 @@ import os
 import unittest
 
 import torch
+import triton
+import triton.language as tl
 
-from rtp_llm.models_py.kernels.cuda.scaled_rope import scaled_rope_qk_inplace
+from rtp_llm.models_py.kernels.cuda.scaled_rope import (
+    _qk_offset,
+    scaled_rope_qk_inplace,
+)
 from rtp_llm.models_py.kernels.cuda.test.scaled_rope_reference import reference_rope
+
+
+@triton.jit
+def _qk_offset_probe(
+    output,
+    token,
+    head,
+    Q_TOKEN: tl.constexpr,
+    K_TOKEN: tl.constexpr,
+    HEAD_STRIDE: tl.constexpr,
+):
+    # Exercise the exact address arithmetic used for Q AND K, without needing
+    # a multi-gigabyte QKV allocation merely to reach the overflow boundary.
+    tl.store(output, _qk_offset(token, head, Q_TOKEN, HEAD_STRIDE))
+    tl.store(output + 1, _qk_offset(token, head, K_TOKEN, HEAD_STRIDE))
 
 
 class ScaledRopeTest(unittest.TestCase):
@@ -16,6 +36,27 @@ class ScaledRopeTest(unittest.TestCase):
             raise RuntimeError(
                 "scaled RoPE GPU target requires its assigned accelerator"
             )
+
+    def test_qk_offsets_cross_int32_boundary(self):
+        output = torch.empty(2, dtype=torch.int64, device=self.device)
+        for q_stride, k_stride in ((10240, 6144), (5120, 4096)):
+            for stride in (q_stride, k_stride):
+                boundary = (2**31 + stride - 1) // stride
+                for token in (boundary - 1, boundary, boundary + 1):
+                    with self.subTest(
+                        token=token, q_stride=q_stride, k_stride=k_stride
+                    ):
+                        _qk_offset_probe[(1,)](
+                            output, token, 3, q_stride, k_stride, 128
+                        )
+                        self.assertEqual(
+                            output.tolist(),
+                            [token * q_stride + 3 * 128, token * k_stride + 3 * 128],
+                        )
+        # Head offsets must also be widened before multiplication, not just
+        # the token-stride product; Q/K are allowed to have strided head views.
+        _qk_offset_probe[(1,)](output, 1, 32769, 128, 256, 65536)
+        self.assertEqual(output.tolist(), [128 + 32769 * 65536, 256 + 32769 * 65536])
 
     def fixture(self, dtype):
         torch.manual_seed(523)

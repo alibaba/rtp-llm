@@ -13,6 +13,13 @@ import triton.language as tl
 
 
 @triton.jit
+def _qk_offset(token, head, token_stride: tl.constexpr, head_stride: tl.constexpr):
+    # Cast BEFORE multiplying: fused QKV views retain the entire row stride,
+    # and long/batched prefill can cross INT32_MAX even with small head sizes.
+    return token.to(tl.int64) * token_stride + head.to(tl.int64) * head_stride
+
+
+@triton.jit
 def _scaled_rope(
     Q,
     K,
@@ -33,7 +40,8 @@ def _scaled_rope(
     HIGH: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    token, head = tl.program_id(0), tl.program_id(1)
+    token = tl.program_id(0).to(tl.int64)
+    head = tl.program_id(1).to(tl.int64)
     lane = tl.arange(0, BLOCK)
     mask = lane < DIM // 2
     pos = tl.load(Positions + token).to(tl.float32)
@@ -56,13 +64,13 @@ def _scaled_rope(
     angle = pos * inv_freq
     cosine, sine = tl.cos(angle), tl.sin(angle)
     if head < Q_HEADS:
-        ptr = Q + token * Q_TOKEN + head * Q_HEAD
+        ptr = Q + _qk_offset(token, head, Q_TOKEN, Q_HEAD)
         x = tl.load(ptr + lane, mask=mask, other=0).to(tl.float32)
         y = tl.load(ptr + lane + DIM // 2, mask=mask, other=0).to(tl.float32)
         tl.store(ptr + lane, x * cosine - y * sine, mask=mask)
         tl.store(ptr + lane + DIM // 2, y * cosine + x * sine, mask=mask)
     else:
-        ptr = K + token * K_TOKEN + (head - Q_HEADS) * K_HEAD
+        ptr = K + _qk_offset(token, head - Q_HEADS, K_TOKEN, K_HEAD)
         x = tl.load(ptr + lane, mask=mask, other=0).to(tl.float32)
         y = tl.load(ptr + lane + DIM // 2, mask=mask, other=0).to(tl.float32)
         tl.store(ptr + lane, x * cosine - y * sine, mask=mask)
