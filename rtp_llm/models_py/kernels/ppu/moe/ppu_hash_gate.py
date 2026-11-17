@@ -16,7 +16,7 @@ def _hash_routes(
     TABLE,
     OUT_I,
     OUT_W,
-    VALID,
+    VALID_FLAG,
     MASK,
     E: tl.constexpr,
     K: tl.constexpr,
@@ -63,9 +63,10 @@ def _hash_routes(
         keep = keep & tl.load(MASK + row)
     tl.store(OUT_I + row * PAD + slots, tl.where(keep, indices, -1))
     tl.store(OUT_W + row * PAD + slots, tl.where(keep, weights, 0.0))
-    tl.store(
-        VALID + row, token_ok & (tl.sum(((slots < K) & ~index_ok).to(tl.int32), 0) == 0)
+    row_ok = token_ok & (
+        tl.sum(((slots < K) & ~index_ok).to(tl.int32), 0) == 0
     )
+    tl.atomic_and(VALID_FLAG, row_ok.to(tl.int32))
 
 
 def is_supported(scores, input_ids, table):
@@ -105,7 +106,7 @@ def hash_gate_with_padding(
         # Retain PyTorch's subnormal softplus/sqrt behavior. The PPU libdevice
         # fused activation flushes some tiny intermediates and is not bit-exact.
         active = F.softplus(scores).sqrt()
-        valid = torch.empty((m,), device=scores.device, dtype=torch.bool)
+        valid_flag = torch.ones((), device=scores.device, dtype=torch.int32)
         _hash_routes[(m,)](
             scores,
             active,
@@ -113,7 +114,7 @@ def hash_gate_with_padding(
             table,
             indices,
             weights,
-            valid,
+            valid_flag,
             active_token_mask,
             e,
             k,
@@ -126,5 +127,5 @@ def hash_gate_with_padding(
             enable_fp_fusion=False,
         )
         # Keep the baseline's asynchronous bounds check for finite hash rows.
-        torch._assert_async(valid.all(), "hash token/expert index out of bounds")
+        torch._assert_async(valid_flag, "hash token/expert index out of bounds")
     return weights, indices
