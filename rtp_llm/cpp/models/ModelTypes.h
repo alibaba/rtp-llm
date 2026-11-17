@@ -25,6 +25,12 @@ namespace rtp_llm {
 
 class KVCacheManager;  // Forward declaration
 
+enum class MtpIndexerRole : int32_t {
+    NORMAL = 0,
+    SEED   = 1,
+    REUSE  = 2,
+};
+
 /** Model-level container for stage-boundary tensors, independent of PP transport. */
 struct PPIntermediateTensors {
     std::map<std::string, torch::Tensor> tensors;
@@ -62,8 +68,8 @@ struct GptModelInitParams {
     RuntimeConfig                                runtime_config;
     ConcurrencyConfig                            concurrency_config;
     SpeculativeExecutionConfig                   sp_config;
-    int64_t                                      max_seq_len  = 0;
-    int64_t                                      hidden_size  = 0;
+    int64_t                                      max_seq_len = 0;
+    int64_t                                      hidden_size = 0;
     std::shared_ptr<KVCacheManager>              cache_manager;
     // nullopt selects the main-model cache config; otherwise selects this MTP module config.
     std::optional<int> mtp_cache_config_index;
@@ -78,7 +84,8 @@ struct GptModelInitParams {
     HiddenStateCaptureDtype hidden_state_capture_dtype = HiddenStateCaptureDtype::BF16;
 
     // Warmup wrappers borrow the Python model later used by the real executor.
-    bool owns_py_model = true;
+    bool           owns_py_model    = true;
+    MtpIndexerRole mtp_indexer_role = MtpIndexerRole::NORMAL;
 };
 
 enum GptModelInputIndex : size_t {
@@ -182,6 +189,7 @@ enum GptModelInputControlFlag : uint32_t {
     kControlOpaqueKvCacheStore  = 1u << 9,
     kControlShutdown            = 1u << 10,
     kControlMiddleChunkOnly     = 1u << 11,
+    kControlDraftExtend         = 1u << 12,
 };
 
 GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs);
@@ -280,6 +288,11 @@ public:
     // hidden buffer. Passing num_tokens < 0 asks the producer for its last
     // written row count.
     virtual torch::Tensor getMtpLastHiddenStates(int64_t /*num_tokens*/) {
+        return torch::Tensor();
+    }
+
+    virtual void          loadMtpIndexerTopk(const torch::Tensor& /*topk*/) {}
+    virtual torch::Tensor snapshotMtpIndexerTopk(int64_t /*batch_size*/) {
         return torch::Tensor();
     }
 

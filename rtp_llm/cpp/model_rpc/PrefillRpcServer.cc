@@ -195,9 +195,9 @@ std::optional<ErrorInfo> PrefillRpcServer::parseDownstreamError(const grpc::Stat
             }                                                                                                          \
         }                                                                                                              \
         auto status = prefill_context.closeGrpcStream(ErrorCodeToString(new_error_code));                              \
-        if (prefill_context.isRequestCancelled()) {                                                                     \
-            new_error_code = ErrorCode::CANCELLED;                                                                       \
-            new_error_msg  = "request is cancelled";                                                                    \
+        if (prefill_context.isRequestCancelled()) {                                                                    \
+            new_error_code = ErrorCode::CANCELLED;                                                                     \
+            new_error_msg  = "request is cancelled";                                                                   \
         } else if (!status.ok()) {                                                                                     \
             const auto& error_msg = status.error_message();                                                            \
             if (error_msg.find("Connect Failed") != std::string::npos) {                                               \
@@ -535,9 +535,9 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     } else {
         // Batch enqueue opens the stream before FetchResponse binds its ServerContext.
         prefill_context.client_stream = std::make_shared<CancellableDecodeClientStream>(
-            prefill_context.grpc_connection.stub.get(),
-            client_context,
-            [&prefill_context] { return prefill_context.isRequestCancelled(); });
+            prefill_context.grpc_connection.stub.get(), client_context, [&prefill_context] {
+                return prefill_context.isRequestCancelled();
+            });
     }
     auto&             client_stream = prefill_context.client_stream;
     GenerateRequestPB alloc_request = buildAllocateRequest(prefill_context);
@@ -700,6 +700,10 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
         }
         QueryConverter::transTensorPB(generate_request.mutable_propose_probs(), all_probs_cpu);
         QueryConverter::transTensorPB(generate_request.mutable_propose_hidden(), hidden_states_cpu);
+    }
+    const auto indexer_seed = stream->getMtpAsyncDeviceState().mtp_indexer_topk_gpu;
+    if (indexer_seed.defined()) {
+        QueryConverter::transTensorPB(generate_request.mutable_propose_mtp_indexer_topk(), indexer_seed.cpu());
     }
 
     generate_request.set_stage(RemoteStage::GENERATE);

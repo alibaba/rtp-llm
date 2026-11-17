@@ -503,7 +503,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     }
 
     // Per-launch capacity contract: see fuse_copy_util.h sizing rationale.
-    // Worst case here is ~8 contiguous + (1 + 2 * group_count) strided copies,
+    // Worst case here is ~9 contiguous + (1 + 2 * group_count) strided copies,
     // batched into one launch each. If new copies are added below — or if the
     // hybrid KV-cache group_count grows materially — re-check MAX_FUSED_*_COPIES.
     FusedD2DCopyParams     d2d_copies;
@@ -514,6 +514,19 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             d2d_copies.add(src.data_ptr(), dst.data_ptr(), bytes);
         }
     };
+
+    if (inputs.attention_inputs.mtp_indexer_seed_rows.defined()
+        && inputs.attention_inputs.mtp_indexer_seed_rows.numel() > 0) {
+        const auto& src = inputs.attention_inputs.mtp_indexer_seed_rows;
+        auto&       dst = py_model_inputs_.attention_inputs.mtp_indexer_seed_rows;
+        RTP_LLM_CHECK_WITH_INFO(src.is_cuda() && src.scalar_type() == torch::kInt32 && src.is_contiguous()
+                                    && src.dim() == 1 && src.numel() == state.current_batch_size
+                                    && dst.numel() >= src.numel(),
+                                "MTP seed rows must be CUDA int32 with one accepted row per request");
+        // Request lanes fix graph capacity, while live input/position rows
+        // remain packed. Accepted seed rows keep those packed coordinates.
+        tryAddD2DCopy(src, dst, src.numel() * sizeof(int32_t));
+    }
 
     // Collect a strided 2D D2D copy: copies src[0..rows, 0..cols] into dst[0..rows, 0..cols]
     // where src and dst may have different column strides (copySmallerIntoLarger semantics).
@@ -1677,8 +1690,10 @@ int CudaGraphRunner::getCurrentRealGraphSize(const CudaGraphState& state) const 
 }
 
 void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs) {
-    inputs.attention_inputs.is_target_verify = is_target_verify_;
-    inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
+    inputs.attention_inputs.is_target_verify      = is_target_verify_;
+    inputs.attention_inputs.is_draft_extend       = isMtpDraftPrefillCudaGraph();
+    inputs.attention_inputs.mtp_indexer_seed_rows = torch::zeros({int(max_bs_)}, options_cuda_int32_);
+    inputs.attention_inputs.is_prefill            = is_prefill_cuda_graph_mode_ || is_target_verify_;
     // GraphRunner owns the captured input object.  The Python FMHA factory
     // prepares only attention tags and cannot mark PLE/QSA side regions.
     // Set the mode here so refreshTaggedAttentionInputs propagates it to every
@@ -2143,6 +2158,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     // Common slice operations for input_ids and padding_offset
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || is_target_verify_;
     inputs.attention_inputs.is_target_verify = is_target_verify_;
+    inputs.attention_inputs.is_draft_extend  = isMtpDraftPrefillCudaGraph();
     inputs.attention_inputs.is_cuda_graph    = true;
     // Request-lane MTP draft prefill has fixed lanes per captured request,
     // while each graph key captures only its own request capacity.
@@ -2162,6 +2178,8 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     }
     inputs.attention_inputs.input_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);
+    inputs.attention_inputs.mtp_indexer_seed_rows =
+        capture_mem_hold_.py_model_inputs_.attention_inputs.mtp_indexer_seed_rows.slice(0, 0, batch_size);
     inputs.attention_inputs.input_lengths_device =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths_device.slice(0, 0, batch_size);
     inputs.attention_inputs.padding_offset =

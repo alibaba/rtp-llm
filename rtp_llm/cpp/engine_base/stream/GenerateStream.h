@@ -699,7 +699,8 @@ public:
         // monotonically while workers overlap and resets to exact host state
         // once bookkeeping catches up.
         // -1 = unset (first iter / cleared).
-        int next_seq_len_upper_bound = -1;
+        int           next_seq_len_upper_bound = -1;
+        torch::Tensor mtp_indexer_topk_gpu;
     };
 
     uint64_t setMtpAsyncDeviceState(MtpAsyncDeviceState state) {

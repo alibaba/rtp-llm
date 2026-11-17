@@ -466,6 +466,8 @@ message GenerateRequestPB {
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
     repeated StagePeerGroupPB stage_peer_groups = 12;
+    // Request-scoped expanded raw-token MTP indexer selection from Prefill.
+    TensorPB propose_mtp_indexer_topk = 14;
 }
 
 // In the TP case, the decode master broadcasts to decode workers.

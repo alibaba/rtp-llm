@@ -92,6 +92,8 @@ public:
     void                       releaseBuffers() override;
     torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
+    void                       loadMtpIndexerTopk(const torch::Tensor& topk) override;
+    torch::Tensor              snapshotMtpIndexerTopk(int64_t batch_size) override;
     bool                       hasMtpTargetHiddenBuffer() const override;
     void                       prepareAttentionInputs(const GptModelInputs& inputs) override;
     void                       prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
@@ -178,6 +180,7 @@ private:
     const bool                       owns_generation_prefill_cuda_graph_{false};
     bool                             enable_cuda_graph_{false};
     bool                             is_prefill_cuda_graph_mode_{false};
+    MtpIndexerRole                   mtp_indexer_role_{MtpIndexerRole::NORMAL};
     GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_init_status_{
         GenerationPrefillCudaGraphStatus::NOT_REQUESTED};
     bool use_spec_decoding_{false};
@@ -237,6 +240,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                                                                params.sp_config.type)),
     enable_cuda_graph_(params.hw_kernel_config.enable_cuda_graph && allow_cuda_graph && pp_size_ == 1),
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
+    mtp_indexer_role_(params.mtp_indexer_role),
     generation_prefill_cuda_graph_init_status_(owns_generation_prefill_cuda_graph_ ?
                                                    GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE :
                                                    GenerationPrefillCudaGraphStatus::NOT_REQUESTED),
@@ -359,7 +363,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
-    py_model_             = py_instance;
+    py_model_ = py_instance;
     // MtpExecutor passes use_spec_decoding only to its target wrapper. The
     // normal and draft wrappers may share the same Python class, but must not
     // activate target transactions.
@@ -421,6 +425,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             generation_prefill_cuda_graph_init_status_ = GenerationPrefillCudaGraphStatus::CAPTURE_UNAVAILABLE;
         }
     }
+    if (mtp_indexer_role_ != MtpIndexerRole::NORMAL) {
+        RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "set_mtp_indexer_role"),
+                                "MTP indexer role requires the model sharing API");
+        py_model_.attr("set_mtp_indexer_role")(static_cast<int>(mtp_indexer_role_));
+    }
     if (enable_cuda_graph_) {
 #if USING_CUDA || USING_ROCM
         c10::ScalarType dtype = dataTypeToTorchType(description_.data_type);
@@ -451,6 +460,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         }
         graph_params.model_data_type        = dtype;
         graph_params.max_context_batch_size = params.concurrency_config.concurrency_limit;
+        if (mtp_indexer_role_ != MtpIndexerRole::NORMAL) {
+            graph_params.max_context_batch_size =
+                std::min<int64_t>(graph_params.max_context_batch_size, params.runtime_config.max_generate_batch_size);
+        }
         graph_params.prefill_capture_seq_lens   = params.hw_kernel_config.prefill_capture_seq_lens;
         graph_params.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
         if (params.kv_cache_layer_layout.has_value()) {

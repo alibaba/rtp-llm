@@ -191,6 +191,16 @@ bool PyWrappedModel::hasMtpTargetHiddenBuffer() const {
     return has_mtp_hidden_buffer_;
 }
 
+void PyWrappedModel::loadMtpIndexerTopk(const torch::Tensor& topk) {
+    py::gil_scoped_acquire gil;
+    py_model_.attr("load_mtp_indexer_topk")(topk);
+}
+
+torch::Tensor PyWrappedModel::snapshotMtpIndexerTopk(int64_t batch_size) {
+    py::gil_scoped_acquire gil;
+    return py_model_.attr("snapshot_mtp_indexer_topk")(batch_size).cast<torch::Tensor>();
+}
+
 bool PyWrappedModel::hasSpeculativeTargetCommitHooks() const {
     return has_speculative_target_commit_hooks_;
 }
@@ -377,6 +387,10 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.dtype            = dataTypeToTorchType(description_.data_type);
     py_attn_inputs.is_prefill       = !decode_batch_size;
     py_attn_inputs.is_target_verify = inputs.is_target_verify;
+    py_attn_inputs.is_draft_extend  = inputs.is_draft_extend;
+    if (mtp_indexer_role_ != MtpIndexerRole::NORMAL) {
+        py_attn_inputs.mtp_indexer_seed_rows = to_device_i32(inputs.lm_output_indexes);
+    }
     RTP_LLM_CHECK_WITH_INFO(
         context_batch_size + decode_batch_size == batch_size,
         "batch size check failed context_batch_size[%ld] decode_batch_size[%ld] total_batch_size[%ld]",
@@ -1010,6 +1024,11 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
         const bool can_run_graph = !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr
                                    && graph_runner->canRun(py_model_inputs, graph_state);
+        const bool fixed_mtp_role = mtp_indexer_role_ != MtpIndexerRole::NORMAL;
+        const bool graph_required = enable_cuda_graph_ && fixed_mtp_role
+                                    && (!py_model_inputs.attention_inputs.is_prefill || inputs.is_draft_extend);
+        RTP_LLM_CHECK_WITH_INFO(!graph_required || can_run_graph,
+                                "MTP indexer sharing requires the fixed-role CUDA graph; eager fallback is disabled");
         if (!capture_hidden_states && is_generation_prefill_runner && !can_run_graph) {
             generation_prefill_cuda_graph_status =
                 graph_state.generation_prefill_status == GenerationPrefillCudaGraphStatus::NOT_REQUESTED ?

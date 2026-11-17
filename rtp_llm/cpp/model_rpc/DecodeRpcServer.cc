@@ -727,6 +727,16 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                 const auto cuda_i32             = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
                 sp_output_buffer->all_probs     = propose_probs_t.to(torch::kCUDA);
                 sp_output_buffer->hidden_states = propose_hidden_t.to(torch::kCUDA);
+                torch::Tensor indexer_seed_gpu;
+                if (generate_request.has_propose_mtp_indexer_topk()) {
+                    auto seed = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_mtp_indexer_topk()));
+                    const auto expected_topk = propose_maga_init_params_->getEngineInitParams()
+                                                   .model_config_.attn_config.sparse_attention_topk;
+                    RTP_LLM_CHECK_WITH_INFO(seed.scalar_type() == torch::kInt32 && seed.dim() == 2 && seed.size(0) == 1
+                                                && expected_topk > 0 && seed.size(1) == expected_topk,
+                                            "invalid PD MTP indexer seed: expected int32 [1, configured raw topk]");
+                    indexer_seed_gpu = seed.to(torch::kCUDA);
+                }
 
                 auto propose_tokens_gpu = sp_output_buffer->draftTokens().to(cuda_i32, /*non_blocking=*/true);
                 auto accept_len         = torch::ones({1}, cuda_i32);
@@ -756,7 +766,12 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                         .draft_all_probs_gpu          = sp_output_buffer->all_probs,
                         .previous_seq_len_upper_bound = generate_stream->seqLength(),
                         .next_seq_len_upper_bound     = generate_stream->seqLength(),
+                        .mtp_indexer_topk_gpu         = std::move(indexer_seed_gpu),
                     });
+                } else if (indexer_seed_gpu.defined()) {
+                    auto state                 = generate_stream->getMtpAsyncDeviceState();
+                    state.mtp_indexer_topk_gpu = std::move(indexer_seed_gpu);
+                    generate_stream->setMtpAsyncDeviceState(std::move(state));
                 }
             }
         }

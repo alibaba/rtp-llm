@@ -106,6 +106,8 @@ public:
 
     // Hyper-connection residual multiplier. Default 1 (no expansion).
     int64_t hc_mult = 1;
+    // Checkpoint capability; runtime MTP indexer sharing also requires explicit opt-in.
+    bool index_share_for_mtp_iteration = false;
     // DeepSeek-V4 specific.
     int64_t hc_sinkhorn_iters = 0;
     double  hc_eps            = 1e-6;

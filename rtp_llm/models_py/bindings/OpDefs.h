@@ -347,7 +347,9 @@ struct PyAttentionInputs {
     std::optional<PyContextParallelParams> context_parallel_info;
 
     // Headwise attention config (Python dict or None).
-    py::object headwise_config{py::none()};
+    py::object    headwise_config{py::none()};
+    bool          is_draft_extend{false};
+    torch::Tensor mtp_indexer_seed_rows;
 };
 
 struct BertEmbeddingInputs {
