@@ -4,6 +4,7 @@ Run the Bazel target on one idle CUDA GPU. No model/checkpoint is required.
 Padding table entries are deliberately invalid: padding must never read them.
 """
 
+import json
 import os
 import random
 import statistics
@@ -338,6 +339,49 @@ class PaddedPackTest(unittest.TestCase):
             self.assertTrue(torch.equal(result, expected))
             self.assertEqual(counts, [3, 3, 2])
 
+    def test_projection_inverse_is_prepared_only_for_restored_consumers(self):
+        from rtp_llm.models_py.distributed import pynccl_cp
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import cp_bounded_gather
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashmla_sparse_cp_impl import SparseMlaFp8CPOp
+
+        ckv = torch.arange(32, device="cuda", dtype=torch.bfloat16).view(8, 4)
+        rope = ckv + 100
+        ids = torch.tensor([0, 9, 2, 15, 7], dtype=torch.int64)
+        op = object.__new__(SparseMlaFp8CPOp)
+        op.use_cuda_graph = False
+        op.prefill_cp_size = 2
+        op.kv_restore_unpad_indices = ids.cuda()
+        op.sharded_slot_mapping = torch.arange(16, device="cuda")
+        op._rank_major_source_slots = op.sharded_slot_mapping
+        op.rank_major_slot_mapping = op.sharded_slot_mapping
+        op._projection_restore_plan = (ids, torch.ones_like(ids), 8)
+        op._projection_restore_inverse = None
+        expected = torch.cat((ckv, ckv + 200))
+
+        def gather(output, part, **kwargs):
+            output.copy_(torch.cat((part, part + 200)))
+
+        with patch.object(cp_bounded_gather, "_PROJECTION_SCRATCH_BYTES", 144), patch.object(
+            pynccl_cp, "all_gather_into_tensor", gather
+        ), patch.object(cp_bounded_gather, "prepare_restore_inverse",
+                        wraps=cp_bounded_gather.prepare_restore_inverse) as prepare:
+            actual, _, _ = op.gather_kv(ckv, rope)
+            self.assertTrue(torch.equal(actual, expected))
+            prepare.assert_not_called()
+            op.sharded_slot_mapping = op.sharded_slot_mapping.clone()
+            actual, _, _ = op.gather_kv(ckv, rope, defer_restore=True)
+            self.assertTrue(torch.equal(actual, expected))
+            prepare.assert_not_called()
+            actual, _, _ = op.gather_kv(ckv, rope)
+            self.assertTrue(torch.equal(actual, expected.index_select(0, ids.cuda())))
+            self.assertEqual(prepare.call_count, 1)
+            op.gather_kv(ckv, rope)
+            self.assertEqual(prepare.call_count, 1)
+            op._projection_restore_plan = (ids.flip(0), torch.ones_like(ids), 8)
+            actual, _, _ = op.gather_kv(ckv, rope)
+            self.assertTrue(torch.equal(actual, expected.index_select(0, ids.flip(0).cuda())))
+            self.assertEqual(prepare.call_count, 2)
+
     def test_projection_graph_reuses_scratch_and_preserves_mixed_dtypes(self):
         from rtp_llm.models_py.distributed import pynccl_cp
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import cp_bounded_gather
@@ -419,6 +463,7 @@ class PaddedPackTest(unittest.TestCase):
         for actual, padded in [
             ([16384] * 4, [16896] * 4),
             ([3, 0, 65535], [512, 512, 65536]),
+            ([16381, 0, 32771], [16896, 512, 33280]),
         ]:
             cache, table, a, p, s = case(actual, padded)
             tmp = torch.empty((sum(actual), 576), device="cuda", dtype=torch.bfloat16)
@@ -443,13 +488,18 @@ class PaddedPackTest(unittest.TestCase):
                     cache, out, table, a, p, s
                 )
 
-            timings = {}
-            for name, fn in [("legacy", old), ("fused", new)]:
-                for _ in range(20):
+            old()
+            expected = out.clone()
+            new()
+            self.assertTrue(torch.equal(out, expected))
+            operations = (("legacy", old), ("fused", new))
+            samples = {"legacy": [], "fused": []}
+            for _ in range(20):
+                for _, fn in operations:
                     fn()
-                torch.cuda.synchronize()
-                samples = []
-                for _ in range(9):
+            torch.cuda.synchronize()
+            for repeat in range(10):
+                for name, fn in operations[::1 if repeat % 2 == 0 else -1]:
                     begin, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(
                         enable_timing=True
                     )
@@ -458,14 +508,31 @@ class PaddedPackTest(unittest.TestCase):
                         fn()
                     end.record()
                     end.synchronize()
-                    samples.append(begin.elapsed_time(end) * 10)
-                timings[name] = statistics.median(samples)
+                    samples[name].append(begin.elapsed_time(end) * 10)
+            profiles = {}
+            for name, fn in operations:
+                with torch.profiler.profile(activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ]) as profile:
+                    for _ in range(10):
+                        fn()
+                    torch.cuda.synchronize()
+                kernels = [event for event in profile.events()
+                           if event.device_type == torch.autograd.DeviceType.CUDA
+                           and not event.name.lower().startswith(("memcpy", "memset"))]
+                profiles[name] = {
+                    "kernel_sum_us_per_iter": sum(event.time_range.elapsed_us() for event in kernels) / 10,
+                    "kernel_launches_per_iter": len(kernels) / 10,
+                    "kernel_names": sorted({event.name for event in kernels}),
+                }
             print(
                 "CP_KV_PACK_BENCHMARK",
-                actual,
-                padded,
-                timings,
-                "microseconds",
+                json.dumps({
+                    "actual": actual, "padded": padded,
+                    "cuda_event_stream_latency_us": {name: statistics.median(values) for name, values in samples.items()},
+                    "samples_us": samples, "profiles": profiles,
+                }),
                 flush=True,
             )
 

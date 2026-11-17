@@ -416,6 +416,7 @@ class SparseMlaFp8CPOpTest(TestCase):
 
         device = self.device
         op = object.__new__(SparseMlaFp8CPOp)
+        op.prefill_cp_size = 1
         op.kv_restore_unpad_indices = torch.arange(2, dtype=torch.long, device=device)
         op.kv_cache_write_op = SimpleNamespace(forward=lambda *_args, **_kwargs: None)
         op.write_cache_store_impl = None
@@ -476,6 +477,10 @@ class SparseMlaFp8CPOpTest(TestCase):
         ), patch.object(
             rtp_llm_ops,
             "cp_gather_and_upconvert_fp8_kv_cache_v2",
+            side_effect=_record_cp_gather,
+        ), patch.object(
+            rtp_llm_ops,
+            "cp_gather_and_upconvert_fp8_kv_cache_padded",
             side_effect=_record_cp_gather,
         ):
             out = op.forward(

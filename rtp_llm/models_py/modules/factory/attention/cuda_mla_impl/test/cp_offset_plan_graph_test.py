@@ -64,6 +64,8 @@ class CpOffsetPlanGraphTest(TestCase):
 
         with patch.object(cp_bounded_gather, "_PROJECTION_SCRATCH_BYTES", 1):
             op.plan(params, blocks, inputs)
+        self.assertIsNone(op._projection_restore_inverse)
+        op._prepare_projection_restore_inverse()
         inverse_address = op._projection_restore_inverse.data_ptr()
         address = op.precomputed_kv_offsets.data_ptr()
         indices = torch.tensor(

@@ -833,6 +833,9 @@ class StagingRankMajorProtocolTest(unittest.TestCase):
                         op = SimpleNamespace(
                             block_table=table,
                             kv_cache_sharded=True,
+                            kv_owner_tokens_per_block=64,
+                            prefill_cp_size=cp_size,
+                            prefill_cp_rank=0,
                             sharded_slot_mapping=slots,
                             rank_major_slot_mapping=plan,
                             _rank_major_source_slots=slots,
@@ -841,6 +844,12 @@ class StagingRankMajorProtocolTest(unittest.TestCase):
                         )
                         fmha = SimpleNamespace(
                             fmha_impl=op,
+                            fmha_params=SimpleNamespace(
+                                prefill_ragged_kv_len_indptr_h=torch.tensor(
+                                    [0, cp_size * 256, cp_size * 512],
+                                    dtype=torch.int32,
+                                )
+                            ),
                             overlap_kv=True,
                             attn_inputs=SimpleNamespace(
                                 is_prefill=True, kv_cache_kernel_block_id_host=table

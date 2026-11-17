@@ -720,33 +720,29 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 raise RuntimeError("bounded CP projection graph geometry or restore address changed")
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.cp_bounded_gather import (
             _PROJECTION_SCRATCH_BYTES,
-            prepare_restore_inverse,
         )
 
-        # Match fill_cp_plan_params: only mask == 1 contributes logical rows.
-        # Refresh values even when all pointers and shapes are unchanged.
-        # Production projections are BF16/FP16. Nonstandard wider callers below
-        # this threshold retain the generic destination-gather fallback.
         bounded_projection = (
             local_tokens * (self.kv_lora_rank + self.qk_rope_head_dim)
             * 2 * (self.prefill_cp_size + 1) > _PROJECTION_SCRATCH_BYTES
         )
-        if bounded_projection:
-            inverse = prepare_restore_inverse(
-                kv_restore_cpu[padding_mask_cpu == 1].to(dtype=torch.int64),
-                local_tokens * self.prefill_cp_size,
-                self.kv_restore_unpad_indices.device,
-                current=getattr(self, "_projection_restore_inverse", None),
-                forbid_realloc=self.use_cuda_graph and captured_projection is not None,
-            )
-            if inverse is None:
-                raise ValueError("CP planner restore must be a unique source subset")
-            self._projection_restore_inverse = inverse
-        else:
-            self._projection_restore_inverse = None
+        # Keep this forward's CPU metadata until a restored gather needs it.
+        # Rank-major and indexed cache writes do not consume an inverse.
+        self._projection_restore_plan = (
+            (kv_restore_cpu, padding_mask_cpu, local_tokens)
+            if bounded_projection else None
+        )
         captured_inverse = getattr(self, "_bounded_projection_graph_inverse", None)
+        if not bounded_projection:
+            self._projection_restore_inverse = None
+        elif self.use_cuda_graph and (
+            captured_inverse is not None
+            or (captured_projection is None
+                and getattr(self, "_projection_restore_inverse", None) is not None)
+        ):
+            self._prepare_projection_restore_inverse()
         if self.use_cuda_graph and captured_projection is not None:
-            current_inverse = self._projection_restore_inverse
+            current_inverse = getattr(self, "_projection_restore_inverse", None)
             if captured_inverse is not None and (
                 current_inverse is None or current_inverse.data_ptr() != captured_inverse
             ):
@@ -1104,6 +1100,32 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             return None
         return getattr(self, "rank_major_slot_mapping", None)
 
+    def _prepare_projection_restore_inverse(self):
+        pending = getattr(self, "_projection_restore_plan", None)
+        if pending is None:
+            return getattr(self, "_projection_restore_inverse", None)
+        if torch.cuda.is_current_stream_capturing():
+            # A cold capture can use generic restore; CPU planning/H2D must be
+            # outside capture. Warmed inverse graphs refresh in plan().
+            return None
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.cp_bounded_gather import (
+            prepare_restore_inverse,
+        )
+
+        restore_cpu, padding_cpu, local_tokens = pending
+        inverse = prepare_restore_inverse(
+            restore_cpu[padding_cpu == 1].to(dtype=torch.int64),
+            local_tokens * self.prefill_cp_size,
+            self.kv_restore_unpad_indices.device,
+            current=getattr(self, "_projection_restore_inverse", None),
+            forbid_realloc=getattr(self, "_bounded_projection_graph_inverse", None) is not None,
+        )
+        if inverse is None:
+            raise ValueError("CP planner restore must be a unique source subset")
+        self._projection_restore_inverse = inverse
+        self._projection_restore_plan = None
+        return inverse
+
     def gather_kv(
         self,
         compressed_kv: torch.Tensor,
@@ -1150,6 +1172,10 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         ):
             raise ValueError("CP KV gather rows differ from the rank-major write plan")
 
+        inverse = (
+            self._prepare_projection_restore_inverse()
+            if bounded and rank_major_slots is None and not defer_restore else None
+        )
         gather_stream = None
         if (
             overlap
@@ -1182,7 +1208,6 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         with torch.cuda.stream(gather_stream):
             if bounded:
                 restore = None if rank_major_slots is not None or defer_restore else self.kv_restore_unpad_indices
-                inverse = getattr(self, "_projection_restore_inverse", None) if restore is not None else None
                 if inverse is not None and gather_stream is not None:
                     inverse.record_stream(gather_stream)
                 restored_ckv, restored_k_pe = gather_projection_components(
