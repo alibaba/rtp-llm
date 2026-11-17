@@ -941,6 +941,18 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
+    return forwardImpl(inputs, false);
+}
+
+GptModelOutputs PyWrappedModel::forwardMtpDraft(const GptModelInputs& inputs, int steps) {
+    if (!supportsMtpDraftGraph(steps) || inputs.is_fake_stream || inputs.warmup || inputs.skip_lm_head
+        || inputs.capture_hidden_states) {
+        return {};
+    }
+    return forwardImpl(inputs, true);
+}
+
+GptModelOutputs PyWrappedModel::forwardImpl(const GptModelInputs& inputs, bool whole_mtp_draft) {
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
 
     // Establish the cleanup guard before touching inputs: both the performance
@@ -1062,8 +1074,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             && generation_prefill_graph_runner_ != nullptr && !is_generation_prefill_runner) {
             generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::MIXED_PREFILL_DECODE_NOT_SUPPORTED;
         }
-        const bool can_run_graph = moe_forward_allows_graph_ && !capture_hidden_states && enable_cuda_graph_
-                                   && graph_runner != nullptr && graph_runner->canRun(py_model_inputs, graph_state);
+        const bool graph_matches_call = graph_runner && ((graph_runner->mtpDraftSteps() > 0) == whole_mtp_draft);
+        const bool can_run_graph = moe_forward_allows_graph_ && graph_matches_call && !capture_hidden_states && enable_cuda_graph_
+                                   && graph_runner->canRun(py_model_inputs, graph_state);
+        if (whole_mtp_draft && !can_run_graph) { return {}; }
         // The eager Python instance retains this wrapper's SEED/REUSE role and
         // shares its request-local TopK buffer with the graph clones. Batches
         // outside the captured buckets must use that same role eagerly.
@@ -1083,6 +1097,17 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 graph_state.current_real_graph_bs);
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner->forward(py_model_inputs, graph_state);
+            if (whole_mtp_draft) {
+                auto draft = graph_runner->mtpDraftOutputs(graph_state);
+                GptModelOutputs result;
+                result.draft_token_ids = std::move(draft.draft_token_ids);
+                result.draft_probs = std::move(draft.draft_probs);
+                return result;
+            }
+            if (!py_model_inputs.attention_inputs.is_prefill
+                && py::hasattr(py_model_, "activate_draft_lm_head_graph")) {
+                py_model_.attr("activate_draft_lm_head_graph")(graph_state.current_real_graph_bs);
+            }
             if (is_generation_prefill_runner) {
                 generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::REPLAYED;
             }

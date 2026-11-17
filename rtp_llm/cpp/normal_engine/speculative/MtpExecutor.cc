@@ -3178,9 +3178,25 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     draft_token_columns.push_back(to_cuda_i32_flat(pre_target_token_t));
     draft_token_columns.push_back(pre_propose_token_t_raw);
 
-    // n-1 steps draft model decode
     const size_t decode_steps = propose_step_ - 1;
-    for (size_t i = 0; i < decode_steps; ++i) {
+    GptModelOutputs loop_output;
+    if (!model_input.is_fake_stream && !model_input.warmup && draft_model_->supportsMtpDraftGraph(decode_steps)) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.draft_loop_graph");
+        ensureModelInputsOnCuda(model_input, "draft_decode.loop_graph");
+        const auto start = autil::TimeUtility::currentTimeInMicroSeconds();
+        loop_output = draft_model_->forwardMtpDraft(model_input, decode_steps);
+        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start;
+    }
+    const bool used_loop_graph = !loop_output.draft_token_ids.empty();
+    if (used_loop_graph) {
+        RTP_LLM_CHECK_WITH_INFO(loop_output.draft_token_ids.size() == decode_steps && loop_output.draft_probs.size() == decode_steps,
+                                "MTP loop graph returned wrong step count");
+        for (size_t i = 0; i < decode_steps; ++i) {
+            draft_token_columns.push_back(loop_output.draft_token_ids[i]);
+            draft_probs_list.push_back(loop_output.draft_probs[i].reshape({static_cast<int64_t>(batch_size), 1, -1}));
+        }
+    }
+    for (size_t i = 0; !used_loop_graph && i < decode_steps; i++) {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(loop_iter=%zu)", i);
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %zu/%zu start, batch_size %zu", i, decode_steps, batch_size);
         ensureModelInputsOnCuda(model_input, "draft_decode.loop_forward");

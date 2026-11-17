@@ -205,6 +205,8 @@ public:
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     /** Builds rank-local PP warmup activations from full model inputs, applying CP padding when enabled. */
     virtual PPIntermediateTensors      makePPWarmUpInputTensors(const GptModelInputs& inputs, bool enable_cp);
+    virtual bool supportsMtpDraftGraph(int) const { return false; }
+    virtual GptModelOutputs forwardMtpDraft(const GptModelInputs&, int) { return {}; }
     virtual void                       releaseBuffers() {}
     virtual void                       prepareAttentionInputs(const GptModelInputs& inputs) {}
     virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {

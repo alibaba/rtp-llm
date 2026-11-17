@@ -159,6 +159,8 @@ struct GptModelOutputs {
     // device and is carried by GenerateStream between decode cycles.
     torch::Tensor mtp_indexer_topk;
 
+    std::vector<torch::Tensor> draft_token_ids;
+    std::vector<torch::Tensor> draft_probs;
     std::vector<torch::Tensor> moe_gating;
 
     // Explicit model-forward output for speculative target features.  Keeping

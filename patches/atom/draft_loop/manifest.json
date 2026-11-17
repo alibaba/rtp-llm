@@ -1,0 +1,11 @@
+{
+  "atom_version": "0.1.8+g9af739efc",
+  "wheel_sha256": "41bebd65c177fed38fdc24a444f0af10107619a292c625c9c85ff9eec4ecda5a",
+  "patch_sha256": "a0d9ad1bab3dc1b7b4e768af6cd50f743c9cec0a621e404e616af7819237a34b",
+  "files": {
+    "atom/plugin/rtpllm/models/qwen4_exp.py": {
+      "source_sha256": "e38f63c2921d185282e32bd2d315227c00651a2dc5cb0c1c6c9ef6c3f3e2c799",
+      "patched_sha256": "de62b9d5e401ba35957461c27670bbb802f7850ae36839601fbe45b1186304d1"
+    }
+  }
+}
