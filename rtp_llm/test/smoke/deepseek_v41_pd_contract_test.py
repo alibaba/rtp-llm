@@ -3,7 +3,8 @@
 import logging
 import re
 import unittest
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack
 from pathlib import Path
 
 from rtp_llm.server.host_service import EndPoint, GroupEndPoint, ServiceRoute
@@ -98,7 +99,10 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
         # Use the same independent server lifecycle and endpoint routing as
         # PdSeperationCaseRunner. Register cleanup before parallel startup so
         # failures and assertion errors always stop both processes.
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with ThreadPoolExecutor(max_workers=2) as executor, ExitStack() as failed_start:
+            # Stop both roles before executor shutdown joins a blocked startup.
+            for manager in (self.server, self.graph_server):
+                failed_start.callback(manager.stop_server)
             starts = [
                 executor.submit(
                     manager.start_server,
@@ -108,8 +112,9 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
                 )
                 for manager in (self.server, self.graph_server)
             ]
-            for result in starts:
+            for result in as_completed(starts):
                 self.assertTrue(result.result())
+            failed_start.pop_all()
 
     def _long_prefix_reuse_checks(self, prompt):
         # Fresh SWA uses BF16 while a reused prefix uses MXFP8-dequantized KV.
