@@ -130,11 +130,9 @@ def _mega_representative_ms(max_m, num_sms, hidden=5120):
     return tuple(representatives)
 
 
-def _small_prenorm_ms(max_m):
-    # DG's M is runtime, but _reduce_prenorm_kernel.TOKENS is constexpr.
-    return tuple(
-        range(1, min(max(int(max_m), 0), v41_prenorm.max_supported_tokens()) + 1)
-    )
+def _small_prenorm_ms(max_m, capability):
+    limit = min(int(max_m), v41_prenorm.max_supported_tokens(capability))
+    return tuple(range(1, limit + 1))
 
 
 def _fused_pre_warmup_specs(max_m: int, k_value: int) -> tuple[tuple[int, int], ...]:
@@ -254,7 +252,7 @@ def _launch_sm90_mega(pair, tokens, device):
 def _launch_fused_pre(unit, tokens, device):
     residual = torch.ones((1, tokens, 4, unit.dim), dtype=torch.bfloat16, device=device)
     previous = torch.full((1, tokens, 4), 0.25, dtype=torch.float32, device=device)
-    use_deepgemm = tokens <= v41_prenorm.max_supported_tokens()
+    use_deepgemm = tokens <= v41_prenorm.configured_max_tokens()
     _tile_ops().mhc_pre_big_fuse(
         residual,
         unit.fn,
@@ -338,8 +336,8 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
     )
     mega_num_sms = common._get_deep_gemm_num_sms(device) if mega_enabled else 0
     fused_enabled = can_fuse_big_pre()
-    fused_deepgemm = fused_enabled and v41_prenorm.max_supported_tokens() > 64
-    small_ms = _small_prenorm_ms(max_m) if small_enabled else ()
+    fused_deepgemm = fused_enabled and v41_prenorm.configured_max_tokens() > 64
+    small_ms = _small_prenorm_ms(max_m, capability) if small_enabled else ()
     mega_ms = _mega_representative_ms(int(max_m), mega_num_sms) if mega_enabled else ()
     fused_specs = {
         config: _fused_pre_warmup_specs(int(max_m), source.dim * source.hc_mult)
