@@ -853,6 +853,78 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             torch.cuda.synchronize()
             torch.testing.assert_close(output.hidden_states, expected)
 
+    def test_device_block_tables_refresh_pinned_host_mirrors_with_row_pitch(self):
+        class HostTablePrepare:
+            def prepare_cuda_graph(self, attention):
+                self.snapshot = attention.kv_cache_kernel_block_id.clone()
+
+        class HostTableModel(TaggedBlockRowModel):
+            def __init__(self):
+                self.impls = {tag: HostTablePrepare() for tag in GROUP_TAGS}
+
+            def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+                return self.impls
+
+        model = HostTableModel()
+        runner = CudaGraphRunner()
+        width = 32
+        runner.init_decode(model, HIDDEN_SIZE, 81920, width, [4], GROUP_TAGS)
+        # Revisit one graph after shrinking and growing. Wider staging tables
+        # must be clipped, shorter rows and removed requests must become zero.
+        for step, (batch, live_width, column_stride) in enumerate(
+            ((4, 32, 1), (1, 7, 1), (3, 40, 1), (2, 13, 2), (1, 1, 1), (3, 5, 1))
+        ):
+            with self.subTest(batch=batch, width=live_width, stride=column_stride):
+                inputs = _build_decode_inputs(
+                    GROUP_TAGS, {"full": 0, "aux": 0}, batch_size=batch
+                )
+                groups = inputs.attention_inputs
+                expected = {}
+                for index, tag in enumerate(GROUP_TAGS):
+                    backing = torch.arange(
+                        batch * (live_width * column_stride + 3),
+                        dtype=torch.int32,
+                        device="cuda",
+                    ).reshape(batch, -1)
+                    source = (
+                        backing[:, : live_width * column_stride : column_stride]
+                        + step
+                        + index
+                    )
+                    # Keep a nontrivial row pitch; arithmetic above may compact.
+                    staging = torch.empty(
+                        (batch, source.shape[1] * column_stride + 3),
+                        dtype=torch.int32,
+                        device="cuda",
+                    )
+                    view = staging[:, : source.shape[1] * column_stride : column_stride]
+                    view.copy_(source)
+                    if step == 5:
+                        # Broadcast rows have zero pitch and need Torch's fallback.
+                        view = view[:1].expand(batch, -1)
+                        source = view.contiguous()
+                    groups[tag].kv_cache_kernel_block_id = view
+                    groups[tag].kv_cache_kernel_block_id_device = source.contiguous()
+                    mirror = torch.zeros((4, width), dtype=torch.int32)
+                    mirror[:batch, : min(width, live_width)] = source[:, :width].cpu()
+                    expected[tag] = mirror
+                inputs.attention_inputs = groups
+                self.assertTrue(runner.canRun(inputs))
+                output = runner.forward(inputs)
+                # The CPU planner sees the current mirror before any user sync.
+                for tag, impl in model.impls.items():
+                    torch.testing.assert_close(impl.snapshot, expected[tag])
+                torch.cuda.synchronize()
+                signature = expected["full"][:batch].sum(1) + 16 * expected["aux"][
+                    :batch
+                ].sum(1)
+                torch.testing.assert_close(
+                    output.hidden_states,
+                    signature.to(
+                        output.hidden_states.device, dtype=output.hidden_states.dtype
+                    )[:, None].expand_as(output.hidden_states),
+                )
+
     def test_decode_heterogeneous_block_width_replay(self) -> None:
         for tags in (GROUP_TAGS, list(reversed(GROUP_TAGS))):
             for bpk in (4, 128):
