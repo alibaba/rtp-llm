@@ -5,7 +5,6 @@ def _intercept_frontend_request(unused_request, unused_raw_request) -> bool:
     return True
 
 
-
 def _agent_rank_selected(environ) -> bool:
     selected = environ.get("NAVI_SCHED_RANK_LISTEN")
     if selected is None:
@@ -30,15 +29,20 @@ def register_enabled_vllm_plugin() -> None:
         raise ValueError("NaviSched requires PYTHONHASHSEED=0")
 
     from vllm import plugins
-    from vllm.plugins import (
-        register_engine_observer_factory,
-        register_engine_transport_factory,
-    )
+    from . import VLLMPluginRegistry as adapter
+    from .VLLMWorkerDiagnostics import VLLMWorkerDiagnostics
+    from .VLLMIterationMetrics import record_iteration_tokens
+
+    adapter.create_worker_diagnostics = VLLMWorkerDiagnostics
+    adapter.record_iteration_tokens = record_iteration_tokens
+    adapter.install(plugins)
+    register_engine_observer_factory = adapter.register_engine_observer_factory
+    register_engine_transport_factory = adapter.register_engine_transport_factory
 
     # Every compute rank retains worker timing. Only the selected host owns
     # the scheduler Agent and request-facing NaviSched integration.
     selected = _agent_rank_selected(os.environ)
-    register_worker = getattr(plugins, "register_worker_observer_factory", None)
+    register_worker = getattr(adapter, "register_worker_observer_factory", None)
     if register_worker is not None:
         from .VLLMWorkerObserver import create_vllm_worker_observer
 
@@ -65,12 +69,12 @@ def register_enabled_vllm_plugin() -> None:
     redirect_prefill = os.environ.get("VLLM_NAVI_SCHED_PREFILL_CORE_REDIRECT") == "1"
     if not dashllm_prefill or redirect_prefill:
         register_engine_transport_factory(create_vllm_engine_transport)
-    register_frontend = getattr(plugins, "register_frontend_request_interceptor", None)
+    register_frontend = getattr(adapter, "register_frontend_request_interceptor", None)
     if register_frontend is not None:
         register_frontend(_intercept_frontend_request)
-    register_metrics = getattr(plugins, "register_scheduler_iteration_metrics", None)
+    register_metrics = getattr(adapter, "register_scheduler_iteration_metrics", None)
     if register_metrics is not None:
         register_metrics()
     if not dashllm_prefill:
-        plugins.register_renderer_transport_factory(create_deferred_renderer)
-        plugins.register_frontend_app_configurator(configure_native_preparation)
+        adapter.register_renderer_transport_factory(create_deferred_renderer)
+        adapter.register_frontend_app_configurator(configure_native_preparation)

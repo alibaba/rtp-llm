@@ -1840,3 +1840,11 @@ cc_test(
     srcs = ["test/LatencyPpInitialFitTest.cpp"],
     deps = [":navi_sched_role_lib", "//aios/unittest_framework", "//aios/navi:navi_ops_testlib"],
 )
+
+py_test(
+    name = "navi_sched_vllm_adapter_callbacks_test",
+    srcs = ["test/vllm/VLLMAdapterCallbacksTest.py"],
+    data = glob(["adapters/vllm/*.py"]),
+    main = "test/vllm/VLLMAdapterCallbacksTest.py",
+    python_version = "PY3",
+)
