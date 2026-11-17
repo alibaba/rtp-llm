@@ -102,7 +102,7 @@ public:
 
     std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
         const auto& descriptors = task.descriptors();
-        batches_.push_back(descriptors);
+        batches_.emplace_back(descriptors.begin(), descriptors.end());
         const TransferDescriptor& first     = descriptors.front();
         const std::string         direction = first.source_tier == Tier::HOST ? "host_" : "disk_";
         const std::string         suffix    = direction + std::to_string(first.group_set_id);
@@ -131,7 +131,7 @@ public:
         bool released = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            batches_.push_back(task.descriptors());
+            batches_.emplace_back(task.descriptors().begin(), task.descriptors().end());
             contexts_.push_back(context);
             released = released_;
         }

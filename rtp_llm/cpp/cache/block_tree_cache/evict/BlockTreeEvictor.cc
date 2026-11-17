@@ -484,9 +484,19 @@ BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t
         if (!eviction_desc.has_value()) {
             break;
         }
-        timings.emplace_back(eviction_desc->node->group_set_resources[eviction_desc->group_set_id].candidate_meta);
-        reserveSource({*eviction_desc});
-        descriptors.push_back(std::move(*eviction_desc));
+        if (descriptors.empty()) {
+            descriptors.reserve(max_victim_count);
+            timings.reserve(max_victim_count);
+        }
+        auto& desc     = *eviction_desc;
+        auto& resource = desc.node->group_set_resources[desc.group_set_id];
+        timings.emplace_back(resource.candidate_meta);
+        // Reserve the source before selecting the next victim.
+        suspendCandidate(desc.node, desc.group_set_id, desc.source_tier);
+        resource.eviction_access_seq = resource.candidate_meta.last_access_seq;
+        resource.transfer_state      = GroupSetTransferState::EVICTING;
+        tree_->refreshPublishedState(desc.node);
+        descriptors.push_back(std::move(desc));
     }
     if (descriptors.empty()) {
         return {/*direct_progress=*/false,
@@ -906,7 +916,7 @@ void BlockTreeEvictor::finishWatermarkRoundLocked(size_t group_set_id, Tier sour
     round = {};
 }
 
-void BlockTreeEvictor::updatePendingRelease(const std::vector<TransferDescriptor>& descs, bool reserve) {
+void BlockTreeEvictor::updatePendingRelease(DescriptorView descs, bool reserve) {
     updatePendingReleaseBlocks(descs, reserve, /*revoked=*/false);
     for (const auto& desc : descs) {
         auto& pending_count =
@@ -920,9 +930,7 @@ void BlockTreeEvictor::updatePendingRelease(const std::vector<TransferDescriptor
     }
 }
 
-void BlockTreeEvictor::updatePendingReleaseBlocks(const std::vector<TransferDescriptor>& descs,
-                                                  bool                                   reserve,
-                                                  bool                                   revoked) {
+void BlockTreeEvictor::updatePendingReleaseBlocks(DescriptorView descs, bool reserve, bool revoked) {
     if (descs.empty()) {
         return;
     }
@@ -1079,7 +1087,7 @@ void BlockTreeEvictor::completeDrop(const TransferDescriptor& desc) {
                             desc.node->cache_key);
 }
 
-void BlockTreeEvictor::completeEvict(const std::vector<TransferDescriptor>& descs) {
+void BlockTreeEvictor::completeEvict(DescriptorView descs) {
     const TransferDescriptor&       first     = descs.front();
     const GroupSetPtr&              group_set = tree_->groupSets()[first.group_set_id];
     MultiNodeResource               source_holder{first.group_set_id, first.source_tier, {}};
@@ -1089,7 +1097,6 @@ void BlockTreeEvictor::completeEvict(const std::vector<TransferDescriptor>& desc
     source_holder.node_blocks.reserve(descs.size());
     target_holder.node_blocks.reserve(descs.size());
     active_target_holder.node_blocks.reserve(descs.size());
-    restore_descs.reserve(descs.size());
 
     const int64_t tier_enter_time_us = currentTimeUs();
     for (const TransferDescriptor& desc : descs) {
@@ -1144,30 +1151,16 @@ void BlockTreeEvictor::completeEvict(const std::vector<TransferDescriptor>& desc
     restoreSource(restore_descs);
 }
 
-void BlockTreeEvictor::rollbackTransferLocked(const std::vector<TransferDescriptor>& descs) {
+void BlockTreeEvictor::rollbackTransferLocked(DescriptorView descs) {
     releaseTargetBlocks(descs);
     restoreSource(descs);
     settleEviction(descs);
 }
 
-// Reserve the source: remove it from its source heap and mark the in-flight state so
-// no other selector can pick it. The caller must first verify that the resource
-// is IDLE; assigning EVICTING is not safe for an already reserved resource.
-void BlockTreeEvictor::reserveSource(const std::vector<TransferDescriptor>& eviction_descs) {
-    for (const TransferDescriptor& desc : eviction_descs) {
-        GroupSetResource& resource = desc.node->group_set_resources[desc.group_set_id];
-        suspendCandidate(desc.node, desc.group_set_id, desc.source_tier);
-        resource.eviction_access_seq = resource.candidate_meta.last_access_seq;
-        resource.transfer_state      = GroupSetTransferState::EVICTING;
-        tree_->refreshPublishedState(desc.node);
-    }
-}
-
 // Restore a reserved source after a failed/aborted move: clear the in-flight
 // state and re-evaluate candidacy at the source tier.
-void BlockTreeEvictor::restoreSource(const std::vector<TransferDescriptor>& eviction_descs) {
+void BlockTreeEvictor::restoreSource(DescriptorView eviction_descs) {
     std::vector<TransferDescriptor> detached_descs;
-    detached_descs.reserve(eviction_descs.size());
     for (const TransferDescriptor& desc : eviction_descs) {
         GroupSetResource& resource = desc.node->group_set_resources[desc.group_set_id];
         if (!desc.isCurrentOwner()) {
@@ -1193,7 +1186,7 @@ void BlockTreeEvictor::restoreSource(const std::vector<TransferDescriptor>& evic
     discardDetachedTransfer(detached_descs);
 }
 
-void BlockTreeEvictor::discardDetachedTransfer(const std::vector<TransferDescriptor>& transfer_descs) {
+void BlockTreeEvictor::discardDetachedTransfer(DescriptorView transfer_descs) {
     std::map<std::pair<size_t, Tier>, MultiNodeResource> source_holders;
     for (const TransferDescriptor& desc : transfer_descs) {
         GroupSetResource& resource     = desc.node->group_set_resources[desc.group_set_id];
@@ -1245,7 +1238,7 @@ void BlockTreeEvictor::invalidateSources(const std::vector<InvalidationSource>& 
     }
 }
 
-void BlockTreeEvictor::releaseTargetBlocks(const std::vector<TransferDescriptor>& descs) {
+void BlockTreeEvictor::releaseTargetBlocks(DescriptorView descs) {
     if (descs.empty()) {
         return;
     }
@@ -1263,7 +1256,7 @@ void BlockTreeEvictor::releaseTargetBlocks(const std::vector<TransferDescriptor>
     }
 }
 
-void BlockTreeEvictor::settleEviction(const std::vector<TransferDescriptor>& descs) {
+void BlockTreeEvictor::settleEviction(DescriptorView descs) {
     std::map<std::pair<size_t, Tier>, MultiNodeResource> source_holders;
     std::unordered_map<TreeNode*, size_t>                pending_nodes;
     std::unordered_set<TreeNode*>                        refresh_nodes;

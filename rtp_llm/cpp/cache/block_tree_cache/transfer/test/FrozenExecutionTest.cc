@@ -80,7 +80,7 @@ public:
 
     std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
         submitted_traces.push_back(task.traceId());
-        submitted_descriptors.push_back(task.descriptors());
+        submitted_descriptors.emplace_back(task.descriptors().begin(), task.descriptors().end());
         submitted_proofs.push_back(task.completionProof());
         if (contexts_.empty()) {
             throw std::runtime_error("unexpected extra execution");

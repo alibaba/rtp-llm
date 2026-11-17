@@ -226,7 +226,7 @@ public:
         const auto& descriptors = task.descriptors();
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            batches.push_back(descriptors);
+            batches.emplace_back(descriptors.begin(), descriptors.end());
         }
         TransferResult result(descriptors.size());
         std::fill(result.block_errors.begin(), result.block_errors.end(), CacheCopyError::NONE);
@@ -276,7 +276,7 @@ TEST_P(RequestLevelBroadcastTest, EachRankReceivesWholeRequestAndMergesLocalBatc
     auto                    sender = std::make_shared<RecordingLocalTransferEngine>(2, NULL_BLOCK_IDX, GetParam());
     BlockTransferDispatcher dispatcher(sender, multi);
     std::vector<TransferDescriptor> descriptors;
-    const std::vector<size_t>       group_ids{0, 1, 0, 0, 1, 1, 0};
+    const std::vector<size_t>       group_ids{0, 0, 0, 0, 1, 1, 1};
     for (size_t i = 0; i < group_ids.size(); ++i)
         descriptors.push_back(TransferDescriptor::hostToDevice(group_ids[i], i + 1, {1}));
     std::promise<TransferResult> done;
@@ -363,9 +363,10 @@ TEST_P(RequestLevelBroadcastTest, DiskLoadBroadcastsWholeTaskAndUsesBackendBatch
     auto                    multi = std::make_shared<MultiRankBlockTransferEngine>(groups, manager);
     BlockTransferDispatcher dispatcher(std::make_shared<RecordingLocalTransferEngine>(2, NULL_BLOCK_IDX, GetParam()),
                                        multi);
-    TransferTask            task({}, std::chrono::seconds(5));
+    std::vector<TransferDescriptor> descriptors;
     for (size_t i = 0; i < 5; ++i)
-        task.addDescriptor(TransferDescriptor::diskToDevice(0, i + 1, {1}));
+        descriptors.push_back(TransferDescriptor::diskToDevice(0, i + 1, {1}));
+    TransferTask                 task(std::move(descriptors), std::chrono::seconds(5));
     std::promise<TransferResult> done;
     auto                         future = done.get_future();
     dispatcher.runTransfer(std::move(task), [&](TransferResult result) { done.set_value(std::move(result)); });

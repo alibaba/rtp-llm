@@ -92,6 +92,7 @@ void releaseDeviceBlocks(BlockTreeCache& cache, const DeviceBlockPoolPtr& pool, 
 void releaseRequestRefsForTest(BlockTreeCache& cache, const std::vector<MultiNodeResource>& resources);
 
 void prepareGroupSetsForTest(std::vector<GroupSetPtr>& group_sets);
+void reserveEvictionSourceForTest(BlockTreeEvictor& evictor, const TransferDescriptor& desc);
 
 class CallbackBarrier {
 public:

@@ -458,6 +458,14 @@ std::vector<GroupSetPtr> workLoopTestGroups(std::vector<GroupSetPtr> groups) {
     return groups;
 }
 
+void reserveEvictionSourceForTest(BlockTreeEvictor& evictor, const TransferDescriptor& desc) {
+    auto& resource = desc.node->group_set_resources[desc.group_set_id];
+    evictor.suspendCandidate(desc.node, desc.group_set_id, desc.source_tier);
+    resource.eviction_access_seq = resource.candidate_meta.last_access_seq;
+    resource.transfer_state      = GroupSetTransferState::EVICTING;
+    evictor.tree_->refreshPublishedState(desc.node);
+}
+
 void prepareGroupSetsForTest(std::vector<GroupSetPtr>& group_sets) {
     prepareGroupSets(group_sets);
 }

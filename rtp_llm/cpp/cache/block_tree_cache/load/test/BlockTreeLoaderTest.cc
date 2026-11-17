@@ -32,6 +32,7 @@ using block_tree_cache_test::insertGroupSetResources;
 using block_tree_cache_test::makeHostPool;
 using block_tree_cache_test::makeStructuralDevicePool;
 using block_tree_cache_test::releaseDeviceBlocks;
+using block_tree_cache_test::reserveEvictionSourceForTest;
 
 class ReadFailureBackend final: public StorageBackend {
 public:
@@ -2029,7 +2030,7 @@ TEST(BlockTreeLoaderTest, ReplacedLoadCannotChangeNewEvictionState) {
                 ASSERT_TRUE(next);
                 next->target_blocks = {env->groups[0]->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICT)};
                 ASSERT_FALSE(isNullBlockIdx(next->target_blocks.front()));
-                evictor.reserveSource({*next});
+                reserveEvictionSourceForTest(evictor, *next);
             }
             if (completion == 0) {
                 EXPECT_TRUE(owner->abortPending());
@@ -2086,7 +2087,7 @@ TEST(BlockTreeLoaderTest, NonOwnerPrefixDoesNotPublishOwnerDeviceSuffix) {
             ASSERT_EQ(eviction->node->cache_key, env->keys.front());
             eviction->target_blocks = {env->groups[0]->allocateSingleBlock(Tier::DISK, BlockTreeRefType::EVICT)};
             ASSERT_FALSE(isNullBlockIdx(eviction->target_blocks.front()));
-            env->cache->evictor_.reserveSource({*eviction});
+            reserveEvictionSourceForTest(env->cache->evictor_, *eviction);
         } else {
             pending = env->cache->match({env->keys.front()}).async_context;
             ASSERT_NE(pending, nullptr);

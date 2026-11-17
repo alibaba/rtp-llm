@@ -42,12 +42,13 @@ int CrcCopyExecutor::deviceFor(const GroupSet& group) {
 }
 
 CrcCopyExecutor::CrcCopyExecutor(const std::vector<GroupSetPtr>& groups,
+                                 CrcCopyDirection                direction,
                                  size_t                          max_batch,
                                  size_t                          slots_per_device,
                                  int64_t                         world_rank,
                                  std::shared_ptr<CrcDumpWriter>  dump_writer,
                                  bool                            async):
-    async_(async) {
+    direction_(direction), async_(async) {
     if (!CrcCopyWorkspace::available() || !max_batch || !slots_per_device)
         throw std::invalid_argument("CRC requires CUDA 13 and positive workspace limits");
     if (!dump_writer)
@@ -123,10 +124,10 @@ TransferStatus CrcCopyExecutor::statusFor(CrcCopyState state) {
     }
 }
 
-TransferResult CrcCopyExecutor::mapResult(CrcCopyState                           result,
-                                          CrcCopyDirection                       direction,
-                                          const std::vector<TransferDescriptor>& descriptors,
-                                          const std::vector<CrcCopyFailure>&     failures) {
+TransferResult CrcCopyExecutor::mapResult(CrcCopyState                       result,
+                                          CrcCopyDirection                   direction,
+                                          DescriptorView                     descriptors,
+                                          const std::vector<CrcCopyFailure>& failures) {
     const auto     status = statusFor(result);
     TransferResult transfer_result;
     transfer_result.status.setErrorCode(status == TransferStatus::OK           ? ErrorCode::NONE_ERROR :
@@ -175,8 +176,8 @@ CrcCopyItem CrcCopyExecutor::makeItem(const HostBufferView&     host,
     for (const auto& tile : getDeviceHostCopyTiles(*group, descriptor.blocksAt(Tier::DEVICE)))
         item.tiles.push_back({tile.buffer.addr, tile.host_offset, tile.buffer.size_bytes});
     if (borrow_descriptor) {
-        // Async descriptors live in the stable slot until finish() clears the
-        // workspace's item captures, including after deferred diagnostics.
+        // The caller retains descriptor storage through completion. finish()
+        // clears these captures before the stage callback can release it.
         item.dump_metadata = [descriptor_ptr = &descriptor, group_owner = group] {
             return CrcDumpWriter::dumpMetadata(*descriptor_ptr, *group_owner);
         };
@@ -189,11 +190,11 @@ CrcCopyItem CrcCopyExecutor::makeItem(const HostBufferView&     host,
     return item;
 }
 
-bool CrcCopyExecutor::trySubmit(const std::vector<HostBufferView>&     hosts,
-                                const std::vector<TransferDescriptor>& descriptors,
-                                const GroupSetPtr&                     group,
-                                DoneCallback                           done,
-                                Timing*                                timing) {
+bool CrcCopyExecutor::trySubmit(const std::vector<HostBufferView>& hosts,
+                                DescriptorView                     descriptors,
+                                const GroupSetPtr&                 group,
+                                DoneCallback                       done,
+                                Timing*                            timing) {
     if (!done)
         throw std::invalid_argument("CRC stage callback is required");
     const auto reject = [&] {
@@ -205,8 +206,7 @@ bool CrcCopyExecutor::trySubmit(const std::vector<HostBufferView>&     hosts,
     if (!accepting_ || !async_ || !group || hosts.empty() || hosts.size() != descriptors.size()) {
         return reject();
     }
-    const bool evict     = descriptors.front().source_tier == Tier::DEVICE;
-    const auto direction = evict ? CrcCopyDirection::EVICT : CrcCopyDirection::LOAD;
+    const bool evict = direction_ == CrcCopyDirection::EVICT;
     if (!group->crcEnabled() || groups_.find(group.get()) == groups_.end())
         return reject();
     for (size_t i = 0; i < descriptors.size(); ++i) {
@@ -229,17 +229,16 @@ bool CrcCopyExecutor::trySubmit(const std::vector<HostBufferView>&     hosts,
         return false;
 
     // Every allocation and capture precedes the first possible CUDA enqueue.
-    auto& operation = slot->operation.emplace(Operation{});
+    auto& operation  = slot->operation.emplace(descriptors);
     operation.timing = timing;
     if (timing)
         timing->slot_acquired_us = steadyNowUs();
     try {
         operation.group       = group;
-        operation.descriptors = descriptors;
         std::vector<CrcCopyItem> items;
         items.reserve(hosts.size());
         for (size_t i = 0; i < descriptors.size(); ++i) {
-            const auto& descriptor = operation.descriptors[i];
+            const auto& descriptor = descriptors[i];
             items.push_back(makeItem(hosts[i], descriptor, group, true));
         }
         TransferResult invalid(TransferStatus::INVALID_ARGS);
@@ -247,7 +246,7 @@ bool CrcCopyExecutor::trySubmit(const std::vector<HostBufferView>&     hosts,
         invalid.buffer_safe = failed.buffer_safe = true;
         operation.done                           = std::move(done);
         // The primitive returns only after draining any partial submission error.
-        const auto state = slot->copy->trySubmit(items, direction);
+        const auto state = slot->copy->trySubmit(items, direction_);
         if (state == CrcCopyState::PENDING) {
             if (timing)
                 timing->submit_return_us = steadyNowUs();
@@ -277,9 +276,7 @@ void CrcCopyExecutor::advance(Slot& slot, bool deliver) {
             operation.timing->completed_us = steadyNowUs();
         // Construct the result before retiring the terminal workspace. Mapping
         // preserves terminal safety even if diagnostic allocation fails.
-        const auto direction = operation.descriptors.front().source_tier == Tier::DEVICE ? CrcCopyDirection::EVICT :
-                                                                                           CrcCopyDirection::LOAD;
-        operation.result     = mapResult(state, direction, operation.descriptors, slot.copy->failures());
+        operation.result = mapResult(state, direction_, operation.descriptors, slot.copy->failures());
         slot.copy->finish();
     }
     if (!deliver)

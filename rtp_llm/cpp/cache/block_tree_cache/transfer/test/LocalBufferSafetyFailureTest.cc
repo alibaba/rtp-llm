@@ -63,10 +63,9 @@ State state(const TransferTaskRegistry& registry, uint64_t trace) {
 class SafeExecutor final: public TransferExecutor {
 public:
     explicit SafeExecutor(BlockTreeTaskPool& pool): TransferExecutor(pool, 1, nullptr) {}
-    bool           fail_diagnostics{false};
-    TransferResult executeBatch(const std::vector<HostBufferView>&,
-                                const std::vector<TransferDescriptor>&,
-                                const std::vector<const GroupSet*>&) override {
+    bool fail_diagnostics{false};
+    TransferResult
+    executeBatch(const std::vector<HostBufferView>&, DescriptorView, const std::vector<const GroupSet*>&) override {
         TransferResult result(fail_diagnostics ? TransferStatus::DISK_IO_ERROR : TransferStatus::OK);
         result.buffer_safe = true;
         if (fail_diagnostics)
@@ -167,9 +166,8 @@ template<typename Base>
 class SafeStage final: public Base {
 public:
     explicit SafeStage(BlockTreeTaskPool& pool): Base(pool, 1) {}
-    TransferResult executeBatch(const std::vector<HostBufferView>&,
-                                const std::vector<TransferDescriptor>&,
-                                const std::vector<const GroupSet*>&) override {
+    TransferResult
+    executeBatch(const std::vector<HostBufferView>&, DescriptorView, const std::vector<const GroupSet*>&) override {
         return TransferResult::emptyAggregate();
     }
 };

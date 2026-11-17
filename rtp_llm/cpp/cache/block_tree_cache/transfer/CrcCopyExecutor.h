@@ -37,6 +37,7 @@ public:
     // TODO(legacy removal): remove the async parameter. Legacy passes false and
     // shares slots_per_device among the workers of one direction.
     CrcCopyExecutor(const std::vector<GroupSetPtr>& groups,
+                    CrcCopyDirection                direction,
                     size_t                          max_batch,
                     size_t                          slots_per_device = 8,
                     int64_t                         world_rank       = 0,
@@ -48,9 +49,9 @@ public:
     // Internal callers supply resolved descriptors and configured GroupSets,
     // PerRank has validated descriptor endpoints; the caller supplies one
     // direction/device per nonempty batch and one host view per descriptor.
-    TransferResult copy(const std::vector<HostBufferView>&     hosts,
-                        const std::vector<TransferDescriptor>& descriptors,
-                        const std::vector<const GroupSet*>&    groups);
+    TransferResult copy(const std::vector<HostBufferView>&  hosts,
+                        DescriptorView                      descriptors,
+                        const std::vector<const GroupSet*>& groups);
 
     // false = Busy, without submission or callback; the caller retries later.
     // true = handled: this service has taken responsibility for exactly one result,
@@ -58,14 +59,14 @@ public:
     // in this stack; accepted work calls it from poll(). A preparation exception precedes CUDA
     // submission and has no callback. Callbacks must not allocate, throw or reenter
     // this service. They only fill the owner's already allocated stage record.
-    // The caller keeps the storage behind hosts and business block references
-    // valid through completion, including diagnostics/recovery.
+    // The caller keeps descriptor storage, host buffers and business block
+    // references valid through done, including deferred diagnostics.
     // WorkLoop supplies a validated, homogeneous CRC batch and a nonempty callback.
-    bool trySubmit(const std::vector<HostBufferView>&     hosts,
-                   const std::vector<TransferDescriptor>& descriptors,
-                   const GroupSetPtr&                     group,
-                   DoneCallback                           done,
-                   Timing*                                timing = nullptr);
+    bool trySubmit(const std::vector<HostBufferView>& hosts,
+                   DescriptorView                     descriptors,
+                   const GroupSetPtr&                 group,
+                   DoneCallback                       done,
+                   Timing*                            timing = nullptr);
     // Scans every device. Safe slots retire before their callbacks run.
     // true means undelivered work remains. Async slot access needs no mutex.
     // Result-mapping exceptions propagate from poll() and stopAndWaitForIo().
@@ -75,9 +76,10 @@ public:
 
 private:
     struct Operation {
+        explicit Operation(DescriptorView descriptors): descriptors(descriptors) {}
         std::optional<TransferResult>   result;
         GroupSetPtr                     group;
-        std::vector<TransferDescriptor> descriptors;
+        DescriptorView                  descriptors;
         DoneCallback                    done;
         Timing*                         timing{nullptr};
     };
@@ -94,18 +96,17 @@ private:
                                 const GroupSetPtr&        group,
                                 bool                      borrow_descriptor = false);
     // TODO(legacy removal): remove this synchronous slot execution helper.
-    TransferResult        execute(int                                    device,
-                                  const std::vector<CrcCopyItem>&        items,
-                                  CrcCopyDirection                       direction,
-                                  const std::vector<TransferDescriptor>& descriptors);
-    static TransferResult mapResult(CrcCopyState                           state,
-                                    CrcCopyDirection                       direction,
-                                    const std::vector<TransferDescriptor>& descriptors,
-                                    const std::vector<CrcCopyFailure>&     failures);
+    TransferResult
+    execute(int device, const std::vector<CrcCopyItem>& items, CrcCopyDirection direction, DescriptorView descriptors);
+    static TransferResult mapResult(CrcCopyState                       state,
+                                    CrcCopyDirection                   direction,
+                                    DescriptorView                     descriptors,
+                                    const std::vector<CrcCopyFailure>& failures);
     void                  advance(Slot& slot, bool deliver);
     static int            deviceFor(const GroupSet& group);
     static TransferStatus statusFor(CrcCopyState state);
 
+    const CrcCopyDirection                 direction_;
     std::map<int, std::vector<Slot>>       slots_;
     std::map<const GroupSet*, GroupSetPtr> groups_;
     // TODO(legacy removal): remove mutex_/cv_; only legacy workers use them.

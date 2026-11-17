@@ -262,8 +262,7 @@ public:
                     descriptor.rank        = rank;
                     descriptor.group_tag   = tag;
                     descriptor.source_uri  = remote.uris(uri);
-                    descriptor.targets.push_back(
-                        {pool, remote.block_ids(static_cast<int>(block_index)), member, pool->poolName()});
+                    descriptor.targets.push_back({pool, remote.block_ids(static_cast<int>(block_index)), member});
                     execution.descriptors.push_back(std::move(descriptor));
                 }
             }

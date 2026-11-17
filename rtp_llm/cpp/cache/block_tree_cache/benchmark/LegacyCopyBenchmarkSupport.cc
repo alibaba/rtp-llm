@@ -42,10 +42,10 @@ public:
                                                BenchmarkDeviceHostCopyStats*       stats):
         Cuda3DBatchDeviceHostCopyStrategy(std::move(strategy)), stats_(stats) {}
 
-    StrategyResult tryExecute(const std::vector<HostBufferView>&     hosts,
-                              const std::vector<TransferDescriptor>& descriptors,
-                              const std::vector<const GroupSet*>&    group_sets,
-                              const DeviceHostCopyExecutionContext&  context) override {
+    StrategyResult tryExecute(const std::vector<HostBufferView>&    hosts,
+                              DescriptorView                        descriptors,
+                              const std::vector<const GroupSet*>&   group_sets,
+                              const DeviceHostCopyExecutionContext& context) override {
         const auto start   = Clock::now();
         auto       result  = Cuda3DBatchDeviceHostCopyStrategy::tryExecute(hosts, descriptors, group_sets, context);
         const auto elapsed = elapsedNs(start, Clock::now());

@@ -67,7 +67,7 @@ public:
     std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
         const auto& descriptors = task.descriptors();
         ++submit_count_;
-        submitted_batches_.push_back(descriptors);
+        submitted_batches_.emplace_back(descriptors.begin(), descriptors.end());
         submitted_deadlines_.push_back(task.deadline());
         submitted_trace_ids_.push_back(task.traceId());
         submitted_proofs_.push_back(task.completionProof());
@@ -169,7 +169,7 @@ TEST_P(DispatcherBackendTest, LocalRequestSplitsBeforeEngineAndPreservesDeadline
         std::deque<std::shared_ptr<TransferAsyncContext>>{first, second, third}, 2, GetParam());
     ASSERT_EQ(engine->asyncEnabled(), GetParam());
     BlockTransferDispatcher dispatcher(engine, nullptr);
-    TransferTask task({descriptor(0), descriptor(1), descriptor(0), descriptor(0)}, std::chrono::seconds(30));
+    TransferTask task({descriptor(0), descriptor(0), descriptor(0), descriptor(1)}, std::chrono::seconds(30));
     const auto   deadline = task.deadline();
     const auto   trace_id = task.traceId();
     auto         context  = dispatcher.executePerRank(std::move(task));
@@ -188,7 +188,7 @@ TEST_P(DispatcherBackendTest, LocalRequestSplitsBeforeEngineAndPreservesDeadline
     ASSERT_TRUE(context->done());
     EXPECT_EQ(context->result().block_errors,
               (std::vector<CacheCopyError>{
-                  CacheCopyError::NONE, CacheCopyError::NONE, CacheCopyError::NONE, CacheCopyError::IO_FAILED}));
+                  CacheCopyError::NONE, CacheCopyError::NONE, CacheCopyError::IO_FAILED, CacheCopyError::NONE}));
     dispatcher.waitForTransfers();
 }
 
@@ -287,7 +287,7 @@ TEST(BlockTransferDispatcherTest, AsynchronousRunTransferGroupsAndWaitsForEveryB
         size_t    callback_count = 0;
         ErrorInfo final_error    = ErrorInfo::OkStatus();
         dispatcher.runTransfer(
-            TransferTask({descriptor(0), descriptor(1), descriptor(0), descriptor(0)}, std::chrono::seconds(30)),
+            TransferTask({descriptor(0), descriptor(0), descriptor(0), descriptor(1)}, std::chrono::seconds(30)),
             [&](TransferResult error) {
                 ++callback_count;
                 final_error = std::move(error.status);
@@ -315,7 +315,7 @@ TEST(BlockTransferDispatcherTest, AsynchronousRunTransferGroupsAndWaitsForEveryB
     }
 }
 
-TEST(BlockTransferDispatcherTest, ReorderedBatchesReturnBlockResultsInOriginalTaskOrder) {
+TEST(BlockTransferDispatcherTest, OutOfOrderCompletionsPreserveBlockResults) {
     auto first  = std::make_shared<TransferBatchAsyncContext>();
     auto second = std::make_shared<TransferBatchAsyncContext>();
     auto third  = std::make_shared<TransferBatchAsyncContext>();
@@ -325,7 +325,7 @@ TEST(BlockTransferDispatcherTest, ReorderedBatchesReturnBlockResultsInOriginalTa
     size_t                  callback_count = 0;
     TransferResult          result;
     dispatcher.runTransfer(
-        TransferTask({descriptor(0), descriptor(1), descriptor(0), descriptor(0)}, std::chrono::seconds(5)),
+        TransferTask({descriptor(0), descriptor(0), descriptor(0), descriptor(1)}, std::chrono::seconds(5)),
         [&](TransferResult completed) {
             ++callback_count;
             result = std::move(completed);
@@ -342,7 +342,7 @@ TEST(BlockTransferDispatcherTest, ReorderedBatchesReturnBlockResultsInOriginalTa
     EXPECT_EQ(
         result.block_errors,
         (std::vector<CacheCopyError>{
-            CacheCopyError::NOT_EXECUTED, CacheCopyError::NONE, CacheCopyError::CRC_MISMATCH, CacheCopyError::NONE}));
+            CacheCopyError::NOT_EXECUTED, CacheCopyError::CRC_MISMATCH, CacheCopyError::NONE, CacheCopyError::NONE}));
 }
 
 TEST(BlockTransferDispatcherTest, ExecutePerRankDrainWaitsForConsumerCallbackReturn) {
@@ -743,6 +743,84 @@ TEST(BlockTransferDispatcherTest, WorkerExecutionDoesNotSubmitCoordinatorCleanup
     EXPECT_TRUE(dispatcher.frozenTasks().empty());
     EXPECT_EQ(cleanup->size(), 0u);
     EXPECT_EQ(dispatcher.taskRegistry().size(), 1u);
+    dispatcher.waitForTransfers();
+}
+
+TEST(BlockTransferDispatcherTest, DelayedFreezePreservesOriginalBlocksAcrossCallerReplacementAndWorkerBatching) {
+    using namespace block_transfer_engine_test;
+    auto host = makeHostPool(16, 8);
+    auto groups =
+        std::vector<GroupSetPtr>{makeTestGroupSet(0, makeTestTopology({makeTestGroupBase()}), {"group0"}, {}, host)};
+    const auto first       = host->malloc();
+    const auto second      = host->malloc();
+    const auto replacement = host->malloc();
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(second.has_value());
+    ASSERT_TRUE(replacement.has_value());
+    for (const auto block : {*first, *second, *replacement})
+        host->incTreeRef(block, BlockTreeRefType::LOAD);
+    auto first_pending  = std::make_shared<TransferBatchAsyncContext>();
+    auto second_pending = std::make_shared<TransferBatchAsyncContext>();
+    auto engine         = std::make_shared<ScriptedPerRankEngine>(
+        std::deque<std::shared_ptr<TransferAsyncContext>>{first_pending, second_pending}, 1, true, groups);
+    BlockTransferDispatcher dispatcher(engine);
+    auto                    cleanup = std::make_shared<TransferCompletionCleanup>();
+    dispatcher.setCompletionCleanup(cleanup);
+    size_t   settlements  = 0;
+    uint64_t parent_trace = 0;
+    {
+        TransferTask task(
+            {TransferDescriptor::deviceToHost(0, {7}, *first), TransferDescriptor::deviceToHost(0, {8}, *second)},
+            std::chrono::seconds(30),
+            91);
+        task.setWorkflow(73, 61);
+        parent_trace = task.traceId();
+        dispatcher.runTransfer(
+            task,
+            [&](TransferResult result) {
+                ++settlements;
+                EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+                EXPECT_TRUE(host->isFrozen(*first));
+                EXPECT_TRUE(host->isFrozen(*second));
+                EXPECT_FALSE(host->isFrozen(*replacement));
+                host->decTreeRef(*first, BlockTreeRefType::LOAD);
+                host->decTreeRef(*second, BlockTreeRefType::LOAD);
+            },
+            "load");
+        task = TransferTask({TransferDescriptor::deviceToHost(0, {9}, *replacement)}, std::chrono::seconds(30));
+    }
+    ASSERT_EQ(engine->submittedBatchCount(), 2u);
+    first_pending->complete(ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "physical completion unknown"));
+    EXPECT_EQ(settlements, 0u);
+    second_pending->complete(TransferStatus::OK);
+    ASSERT_EQ(settlements, 1u);
+    const auto records = dispatcher.frozenTasks();
+    ASSERT_EQ(records.size(), 1u);
+    const auto& execution = records.front()->execution();
+    EXPECT_EQ(std::get<uint64_t>(execution.trace_id), engine->submitted_trace_ids_.front());
+    EXPECT_EQ(execution.operation, "load");
+    EXPECT_EQ(execution.request_id, 91);
+    EXPECT_EQ(execution.workflow_id, 73u);
+    EXPECT_EQ(execution.parent_trace_id, parent_trace);
+    ASSERT_EQ(execution.descriptors.size(), 2u);
+    for (size_t index = 0; index < execution.descriptors.size(); ++index) {
+        const auto& descriptor = execution.descriptors[index];
+        ASSERT_EQ(descriptor.sources.size(), 1u);
+        ASSERT_EQ(descriptor.targets.size(), 1u);
+        EXPECT_EQ(descriptor.sources.front().block, index == 0 ? 7 : 8);
+        EXPECT_EQ(descriptor.targets.front().block, index == 0 ? *first : *second);
+        EXPECT_EQ(descriptor.targets.front().pool.get(), host.get());
+        EXPECT_EQ(descriptor.targets.front().pool_name, host->poolName());
+    }
+    for (const auto& proof : engine->submitted_proofs_)
+        proof->report(true);
+    EXPECT_EQ(cleanup->size(), 0u);
+    EXPECT_TRUE(records.front()->unfreeze());
+    EXPECT_FALSE(host->isAllocated(*first));
+    EXPECT_FALSE(host->isAllocated(*second));
+    EXPECT_TRUE(host->isAllocated(*replacement));
+    host->decTreeRef(*replacement, BlockTreeRefType::LOAD);
+    EXPECT_EQ(cleanup->drain(localCleanupForget(dispatcher), 1000).forgotten, 1u);
     dispatcher.waitForTransfers();
 }
 

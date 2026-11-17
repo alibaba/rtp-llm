@@ -8,6 +8,7 @@
 #include <mutex>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -48,17 +49,26 @@ private:
 // Only this coordinator boundary owns freezing; worker-local dispatch never does.
 struct BlockTransferDispatcher::CoordinatedExecution {
     CoordinatedExecution(const BlockTransferDispatcher* owner,
-                         FrozenTask::ExecutionInfo      execution,
+                         const TransferTask&            task,
+                         const char*                    completion_operation,
                          TransferDoneCallback           done):
-        owner(owner), execution(std::move(execution)), done(std::move(done)) {
+        owner(owner),
+        task(task),
+        operation(completion_operation ? completion_operation : "transfer"),
+        done(std::move(done)) {
         prepared_slot.emplace_back();
         if (owner->completion_cleanup_) {
             TransferCompletionTarget target;
-            target.remote = this->execution.remote;
-            target.peers.reserve(this->execution.expected_peers.size());
-            for (const auto& peer : this->execution.expected_peers)
-                target.peers.push_back({peer.rank, peer.address});
-            cleanup = owner->completion_cleanup_->prepare(std::move(target), this->execution.trace_id);
+            target.remote = owner->multi_rank_engine_ != nullptr;
+            if (target.remote) {
+                const auto& addresses = owner->multi_rank_engine_->participantAddresses();
+                target.peers.reserve(addresses.size());
+                for (size_t rank = 0; rank < addresses.size(); ++rank)
+                    target.peers.push_back({rank, addresses[rank]});
+            } else {
+                target.peers.push_back({0, "local"});
+            }
+            cleanup = owner->completion_cleanup_->prepare(std::move(target), task.traceId());
         }
     }
 
@@ -66,7 +76,7 @@ struct BlockTransferDispatcher::CoordinatedExecution {
         if (claimed.exchange(true, std::memory_order_acq_rel))
             return;
         try {
-            result.expandBlockErrors(execution.descriptors.size());
+            result.expandBlockErrors(task->descriptors().size());
         } catch (...) {
             // Empty block_errors is a uniform UNKNOWN without another allocation.
             // Establish custody before delivering this diagnostic fallback.
@@ -77,6 +87,9 @@ struct BlockTransferDispatcher::CoordinatedExecution {
         }
         try {
             if (result.status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
+                // The immutable task snapshot survives worker preparation. Resolve
+                // physical pools only when freezing, before business settlement.
+                auto execution = owner->buildExecutionInfo(*task, operation.c_str());
                 if (!result.execution_diagnostics) {
                     auto diagnostics      = std::make_shared<TransferExecutionDiagnostics>();
                     diagnostics->trace_id = execution.trace_id;
@@ -118,6 +131,7 @@ struct BlockTransferDispatcher::CoordinatedExecution {
         } catch (...) {
             std::terminate();
         }
+        task.reset();
         // A retained or late child callback must not retain the business owner
         // after completion. Invoke outside all registry/pool/frozen-task locks.
         auto       notify  = std::move(done);
@@ -139,7 +153,8 @@ struct BlockTransferDispatcher::CoordinatedExecution {
     }
 
     const BlockTransferDispatcher*         owner;
-    FrozenTask::ExecutionInfo              execution;
+    std::optional<TransferTask>            task;
+    std::string                            operation;
     TransferDoneCallback                   done;
     TransferCompletionCleanup::Prepared    cleanup;
     std::list<std::shared_ptr<FrozenTask>> prepared_slot;
@@ -270,8 +285,8 @@ BlockTransferDispatcher::executeMultiRank(TransferTask task, const char* complet
     return executePerRank(std::move(task));
 }
 
-FrozenTask::ExecutionInfo BlockTransferDispatcher::describeExecution(const TransferTask& task,
-                                                                     const char*         completion_operation) const {
+FrozenTask::ExecutionInfo BlockTransferDispatcher::buildExecutionInfo(const TransferTask& task,
+                                                                      const char*         completion_operation) const {
     FrozenTask::ExecutionInfo info;
     info.trace_id        = task.traceId();
     info.operation       = completion_operation ? completion_operation : "transfer";
@@ -280,7 +295,8 @@ FrozenTask::ExecutionInfo BlockTransferDispatcher::describeExecution(const Trans
     info.parent_trace_id = task.parentTraceId();
     info.remote          = multi_rank_engine_ != nullptr;
     if (multi_rank_engine_) {
-        const auto addresses = multi_rank_engine_->participantAddresses();
+        const auto& addresses = multi_rank_engine_->participantAddresses();
+        info.expected_peers.reserve(addresses.size());
         for (size_t rank = 0; rank < addresses.size(); ++rank)
             info.expected_peers.push_back({rank, addresses[rank]});
     } else {
@@ -310,7 +326,7 @@ FrozenTask::ExecutionInfo BlockTransferDispatcher::describeExecution(const Trans
                     else if (tier == Tier::DISK)
                         pool = group->diskPool();
                 }
-                saved_blocks.push_back({pool, blocks[member], member, pool ? pool->poolName() : "unresolved"});
+                saved_blocks.push_back({pool, blocks[member], member});
             }
             return saved_blocks;
         };
@@ -324,8 +340,7 @@ FrozenTask::ExecutionInfo BlockTransferDispatcher::describeExecution(const Trans
 void BlockTransferDispatcher::submitCoordinated(TransferTask         task,
                                                 TransferDoneCallback done,
                                                 const char*          completion_operation) const {
-    auto execution =
-        std::make_shared<CoordinatedExecution>(this, describeExecution(task, completion_operation), std::move(done));
+    auto execution = std::make_shared<CoordinatedExecution>(this, task, completion_operation, std::move(done));
     // Construct the subscription before starting any I/O. The child's callback
     // vector may still reject it; that path also passes through this finalizer.
     TransferAsyncContext::DoneCallback complete = [execution](TransferResult result) {
@@ -415,8 +430,7 @@ void BlockTransferDispatcher::runTransfer(TransferTask         task,
         }
         done(std::move(result));
     };
-    submitCoordinated(
-        task.rpcSubtask(std::move(task.mutableDescriptorsForPreparation())), std::move(callback), completion_operation);
+    submitCoordinated(task.rpcSubtask(), std::move(callback), completion_operation);
 }
 
 void BlockTransferDispatcher::cancelPendingStagingTransfers() const {

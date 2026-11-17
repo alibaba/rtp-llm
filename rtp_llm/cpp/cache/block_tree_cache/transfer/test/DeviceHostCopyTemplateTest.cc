@@ -283,7 +283,7 @@ class BatchProbe: public Cuda3DBatchDeviceHostCopyStrategy {
 public:
     explicit BatchProbe(std::function<StrategyResult()> action): action_(std::move(action)) {}
     StrategyResult tryExecute(const std::vector<HostBufferView>&,
-                              const std::vector<TransferDescriptor>&,
+                              DescriptorView,
                               const std::vector<const GroupSet*>&,
                               const DeviceHostCopyExecutionContext&) override {
         return action_();

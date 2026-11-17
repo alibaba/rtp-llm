@@ -78,10 +78,10 @@ public:
                               const DeviceHostCopyExecutionContext&) override {
         return StrategyResult::notApplicable(true);
     }
-    virtual StrategyResult tryExecute(const std::vector<HostBufferView>&     hosts,
-                                      const std::vector<TransferDescriptor>& descriptors,
-                                      const std::vector<const GroupSet*>&    group_sets,
-                                      const DeviceHostCopyExecutionContext&  context);
+    virtual StrategyResult tryExecute(const std::vector<HostBufferView>&    hosts,
+                                      DescriptorView                        descriptors,
+                                      const std::vector<const GroupSet*>&   group_sets,
+                                      const DeviceHostCopyExecutionContext& context);
 
 private:
     static std::vector<DeviceHostCopyTemplate>                     initializeCopy3DTemplates(const GroupSet& group);

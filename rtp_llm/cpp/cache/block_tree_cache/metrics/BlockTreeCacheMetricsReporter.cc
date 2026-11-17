@@ -555,15 +555,14 @@ int64_t BlockTreeCacheMetricsReporter::reportTransferStarted(TransferOperation  
     return begin_time_us;
 }
 
-void BlockTreeCacheMetricsReporter::reportTransferFinished(
-    TransferOperation                      operation,
-    Tier                                   source_tier,
-    Tier                                   target_tier,
-    size_t                                 descriptors_per_transfer,
-    int64_t                                begin_time_us,
-    bool                                   success,
-    const std::vector<TransferDescriptor>& successful_descriptors,
-    const std::vector<GroupSetPtr>&        group_sets) {
+void BlockTreeCacheMetricsReporter::reportTransferFinished(TransferOperation               operation,
+                                                           Tier                            source_tier,
+                                                           Tier                            target_tier,
+                                                           size_t                          descriptors_per_transfer,
+                                                           int64_t                         begin_time_us,
+                                                           bool                            success,
+                                                           DescriptorView                  successful_descriptors,
+                                                           const std::vector<GroupSetPtr>& group_sets) {
     if (metrics_reporter_ == nullptr) {
         return;
     }
@@ -612,9 +611,9 @@ void BlockTreeCacheMetricsReporter::accumulateTransferBytes(const TransferDescri
     }
 }
 
-void BlockTreeCacheMetricsReporter::accumulateTransferBytes(const std::vector<TransferDescriptor>& descs,
-                                                            const std::vector<GroupSetPtr>&        group_sets,
-                                                            BlockTreeTransferBytes& transfer_bytes) const {
+void BlockTreeCacheMetricsReporter::accumulateTransferBytes(DescriptorView                  descs,
+                                                            const std::vector<GroupSetPtr>& group_sets,
+                                                            BlockTreeTransferBytes&         transfer_bytes) const {
     for (const TransferDescriptor& desc : descs) {
         accumulateTransferBytes(desc, group_sets[desc.group_set_id], transfer_bytes);
     }

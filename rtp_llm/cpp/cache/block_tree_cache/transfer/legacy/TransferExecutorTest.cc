@@ -27,9 +27,8 @@ public:
     std::vector<TransferResult> results;
 
 private:
-    TransferResult executeBatch(const std::vector<HostBufferView>&,
-                                const std::vector<TransferDescriptor>&,
-                                const std::vector<const GroupSet*>&) override {
+    TransferResult
+    executeBatch(const std::vector<HostBufferView>&, DescriptorView, const std::vector<const GroupSet*>&) override {
         ++calls;
         if (throw_on_execute) {
             throw std::runtime_error("injected executing copy exception");
@@ -175,9 +174,8 @@ public:
     size_t         calls{0};
 
 private:
-    TransferResult executeBatch(const std::vector<HostBufferView>&,
-                                const std::vector<TransferDescriptor>&,
-                                const std::vector<const GroupSet*>&) override {
+    TransferResult
+    executeBatch(const std::vector<HostBufferView>&, DescriptorView, const std::vector<const GroupSet*>&) override {
         ++calls;
         if (throw_on_execute) {
             throw std::runtime_error("injected executing stage exception");

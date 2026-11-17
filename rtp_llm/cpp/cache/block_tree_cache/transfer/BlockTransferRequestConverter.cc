@@ -143,30 +143,30 @@ bool BlockTransferRequestConverter::encodeTransfer(MemoryOperationRequestPB&    
             return false;
         }
         const GroupSet& group_set = *group_sets[descriptor.group_set_id];
-        CopyItem        item;
-        for (const auto& tag : group_set.groupTags()) {
-            item.add_group_tags(tag);
+        const auto&     group_tags = group_set.groupTags();
+        const bool      has_device = descriptor.source_tier == Tier::DEVICE || descriptor.target_tier == Tier::DEVICE;
+        if (has_device && descriptor.blocksAt(Tier::DEVICE).size() != group_tags.size()) {
+            return false;
+        }
+        auto* item = request.add_copy_items();
+        for (const auto& tag : group_tags) {
+            item->add_group_tags(tag);
         }
 
         if (descriptor.source_tier == Tier::HOST || descriptor.target_tier == Tier::HOST) {
-            item.set_mem_block(descriptor.singleBlockAt(Tier::HOST));
+            item->set_mem_block(descriptor.singleBlockAt(Tier::HOST));
         }
         if (descriptor.source_tier == Tier::DISK || descriptor.target_tier == Tier::DISK) {
-            item.set_disk_block(descriptor.singleBlockAt(Tier::DISK));
+            item->set_disk_block(descriptor.singleBlockAt(Tier::DISK));
         }
-        if (descriptor.source_tier == Tier::DEVICE || descriptor.target_tier == Tier::DEVICE) {
-            const auto& blocks     = descriptor.blocksAt(Tier::DEVICE);
-            const auto& group_tags = group_set.groupTags();
-            if (blocks.size() != group_tags.size()) {
-                return false;
-            }
+        if (has_device) {
+            const auto& blocks = descriptor.blocksAt(Tier::DEVICE);
             for (size_t i = 0; i < blocks.size(); ++i) {
-                auto* group_block = item.add_group_blocks();
+                auto* group_block = item->add_group_blocks();
                 group_block->set_tag(group_tags[i]);
                 group_block->set_block_id(blocks[i]);
             }
         }
-        request.add_copy_items()->CopyFrom(item);
     }
     return true;
 }

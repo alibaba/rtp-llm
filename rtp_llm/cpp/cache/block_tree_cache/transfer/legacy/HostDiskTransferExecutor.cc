@@ -15,9 +15,9 @@ HostDiskTransferExecutor::HostDiskTransferExecutor(BlockTreeTaskPool& transfer_t
     TransferExecutor(
         transfer_task_pool, max_descriptors_per_batch, std::move(metrics_reporter), load_task_pool, world_rank) {}
 
-TransferResult HostDiskTransferExecutor::executeBatch(const std::vector<HostBufferView>&     hosts,
-                                                      const std::vector<TransferDescriptor>& descriptors,
-                                                      const std::vector<const GroupSet*>&    group_sets) try {
+TransferResult HostDiskTransferExecutor::executeBatch(const std::vector<HostBufferView>&  hosts,
+                                                      DescriptorView                      descriptors,
+                                                      const std::vector<const GroupSet*>& group_sets) try {
     // Normal returns either reject before I/O or follow synchronous disk I/O,
     // including partial failures. Synchronous disk calls retain no access on unwind.
     const auto completed = [](TransferStatus status) {

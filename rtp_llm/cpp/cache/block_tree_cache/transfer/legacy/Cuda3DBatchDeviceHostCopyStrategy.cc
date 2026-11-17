@@ -102,10 +102,10 @@ Cuda3DBatchDeviceHostCopyStrategy::initializeCopy3DTemplates(const GroupSet& gro
     return templates;
 }
 
-StrategyResult Cuda3DBatchDeviceHostCopyStrategy::tryExecute(const std::vector<HostBufferView>&     hosts,
-                                                             const std::vector<TransferDescriptor>& descriptors,
-                                                             const std::vector<const GroupSet*>&    group_sets,
-                                                             const DeviceHostCopyExecutionContext&  context) {
+StrategyResult Cuda3DBatchDeviceHostCopyStrategy::tryExecute(const std::vector<HostBufferView>&    hosts,
+                                                             DescriptorView                        descriptors,
+                                                             const std::vector<const GroupSet*>&   group_sets,
+                                                             const DeviceHostCopyExecutionContext& context) {
 #if USING_CUDA && !USE_PPU && CUDART_VERSION >= 13000 && CUDART_VERSION < 14000
     bool buffer_safe = true;
     try {

@@ -25,8 +25,8 @@ TransferDescriptor removedDeviceToDisk(size_t group, std::vector<BlockIdxType> d
 
 TEST(TransferTaskTest, SubtasksPreserveQueryIdAndDeadline) {
     TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::seconds(10), 73);
-    auto         child      = task.subtask(task.descriptors());
-    auto         grandchild = child.subtask(child.descriptors());
+    auto         child      = task.subtask(0, task.descriptors().size());
+    auto         grandchild = child.subtask(0, child.descriptors().size());
     EXPECT_EQ(child.deadline(), task.deadline());
     EXPECT_EQ(grandchild.deadline(), task.deadline());
     EXPECT_EQ(grandchild.requestId(), 73);
@@ -51,7 +51,7 @@ TEST(TransferTaskTest, RpcBatchesHaveDistinctExecutionTracesWithinWorkflow) {
     EXPECT_EQ(first.parentTraceId(), task.traceId());
     EXPECT_EQ(second.parentTraceId(), task.traceId());
 
-    auto nested_rpc = first.rpcSubtask(first.descriptors());
+    auto nested_rpc = first.rpcSubtask();
     EXPECT_NE(nested_rpc.traceId(), first.traceId());
     EXPECT_EQ(nested_rpc.workflowId(), task.workflowId());
     EXPECT_EQ(nested_rpc.parentTraceId(), first.traceId());
@@ -59,8 +59,10 @@ TEST(TransferTaskTest, RpcBatchesHaveDistinctExecutionTracesWithinWorkflow) {
 
 TEST(TransferTaskTest, WorkerSubtasksPreserveReceivedExecutionTrace) {
     TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::seconds(10), 73);
-    const auto   rpc = task.rpcSubtask(task.descriptors());
-    TransferTask worker(rpc.descriptors(), std::chrono::seconds(10), rpc.requestId());
+    const auto   rpc = task.rpcSubtask();
+    TransferTask worker(std::vector<TransferDescriptor>(rpc.descriptors().begin(), rpc.descriptors().end()),
+                        std::chrono::seconds(10),
+                        rpc.requestId());
     worker.setTraceId(rpc.traceId());
     worker.setWorkflow(rpc.workflowId(), rpc.parentTraceId());
 
@@ -78,7 +80,7 @@ TEST(TransferTaskTest, WorkerSubtasksPreserveReceivedExecutionTrace) {
 
 TEST(TransferTaskTest, CopyAndMovePreserveExecutionTrace) {
     TransferTask parent({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::seconds(10), 73);
-    const auto   task   = parent.rpcSubtask(parent.descriptors());
+    const auto   task   = parent.rpcSubtask();
     auto         copied = task;
     auto         moved  = std::move(copied);
     EXPECT_EQ(moved.traceId(), task.traceId());
@@ -104,15 +106,78 @@ TEST(TransferTaskTest, CompletionProofFollowsOwnershipButNotNewSubtasks) {
     auto copied = task;
     auto moved  = std::move(copied);
     EXPECT_EQ(moved.completionProof(), proof);
-    EXPECT_EQ(task.subtask(task.descriptors()).completionProof(), nullptr);
-    EXPECT_EQ(task.rpcSubtask(task.descriptors()).completionProof(), nullptr);
+    EXPECT_EQ(task.subtask(0, task.descriptors().size()).completionProof(), nullptr);
+    EXPECT_EQ(task.rpcSubtask().completionProof(), nullptr);
 
-    auto owned = task.subtask(task.descriptors());
+    auto owned = task.subtask(0, task.descriptors().size());
     owned.setCompletionProof(task.completionProof());
     EXPECT_EQ(owned.completionProof(), proof);
     task.setCompletionProof(nullptr);
     EXPECT_EQ(task.completionProof(), nullptr);
     EXPECT_EQ(owned.completionProof(), proof);
+}
+
+TEST(TransferTaskTest, RpcSubmissionSharesDescriptorsWithoutChangingParent) {
+    TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2, 3})}, std::chrono::seconds(10), 73);
+    const auto   proof = std::make_shared<TransferBufferSafety>([] {});
+    task.setCompletionProof(proof);
+    const auto rpc = task.rpcSubtask();
+
+    EXPECT_EQ(task.completionProof(), proof);
+    EXPECT_EQ(rpc.descriptors().data(), task.descriptors().data());
+    EXPECT_EQ(rpc.deadline(), task.deadline());
+    EXPECT_EQ(rpc.requestId(), task.requestId());
+    EXPECT_EQ(rpc.workflowId(), task.workflowId());
+    EXPECT_EQ(rpc.parentTraceId(), task.traceId());
+    EXPECT_NE(rpc.traceId(), task.traceId());
+    EXPECT_EQ(rpc.completionProof(), nullptr);
+}
+
+TEST(TransferTaskTest, CopiesAndNestedRangesShareDescriptorsAfterParentDestruction) {
+    const TransferDescriptor* original        = nullptr;
+    const BlockIdxType*       original_blocks = nullptr;
+    const auto                proof           = std::make_shared<TransferBufferSafety>([] {});
+    auto                      child           = [&] {
+        TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2}),
+                           TransferDescriptor::hostToDevice(0, 3, {4}),
+                           TransferDescriptor::hostToDevice(0, 5, {6, 7})},
+                          std::chrono::seconds(10),
+                          73);
+        original        = &task.descriptors()[2];
+        original_blocks = original->target_blocks.data();
+        auto copy       = task;
+        EXPECT_EQ(copy.descriptors().data(), task.descriptors().data());
+        const auto range = copy.subtask(1, 3);
+        EXPECT_EQ(range.descriptors().data(), task.descriptors().data() + 1);
+        EXPECT_EQ(range.descriptors().size(), 2u);
+        const auto nested = range.subtask(1, 2, proof);
+        EXPECT_EQ(nested.deadline(), task.deadline());
+        EXPECT_EQ(nested.traceId(), task.traceId());
+        EXPECT_EQ(nested.requestId(), task.requestId());
+        EXPECT_EQ(range.completionProof(), nullptr);
+        return nested;
+    }();
+    ASSERT_EQ(child.descriptors().size(), 1u);
+    EXPECT_EQ(child.descriptors().data(), original);
+    EXPECT_EQ(child.descriptors().front().target_blocks.data(), original_blocks);
+    EXPECT_EQ(child.descriptors().front().target_blocks, (std::vector<BlockIdxType>{6, 7}));
+    EXPECT_EQ(child.completionProof(), proof);
+    auto assigned = child.subtask(0, 0);
+    EXPECT_TRUE(assigned.descriptors().empty());
+    assigned = child;
+    EXPECT_EQ(assigned.descriptors().data(), original);
+}
+
+TEST(TransferTaskTest, SanityCheckAcceptsProducerGroupedRequests) {
+    TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2}),
+                       TransferDescriptor::hostToDevice(0, 3, {4}),
+                       TransferDescriptor::hostToDevice(1, 5, {6})},
+                      std::chrono::seconds(10));
+    EXPECT_TRUE(task.sanityCheck());
+    EXPECT_TRUE(task.subtask(1, 3).sanityCheck());
+    auto moved = std::move(task);
+    EXPECT_TRUE(task.descriptors().empty());
+    EXPECT_EQ(moved.descriptors().size(), 3u);
 }
 
 TEST(TransferResultTest, MergePreservesMessagesAndHighestPriorityCode) {
