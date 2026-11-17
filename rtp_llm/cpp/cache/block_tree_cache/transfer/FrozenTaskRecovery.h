@@ -38,7 +38,8 @@ public:
         bool   cleanup_failed{false};
     };
 
-    FrozenTaskRecovery(TaskSource source, Query query, Cleanup cleanup = {}, OnReleased on_released = {});
+    FrozenTaskRecovery(TaskSource source, Query query, Cleanup cleanup = {}, OnReleased on_released = {},
+                       int force_release_timeout_ms = 60000);
     ~FrozenTaskRecovery();
 
     // The owner serializes start/stop/destruction outside the recovery thread.
@@ -66,6 +67,7 @@ private:
     Query      query_;
     Cleanup    cleanup_;
     OnReleased on_released_;
+    const int64_t force_release_timeout_us_;
     std::atomic<bool> running_{false};
     // Accessed only by the successful running_ claimant.
     std::chrono::steady_clock::time_point next_pending_log_{};

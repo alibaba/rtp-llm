@@ -2432,6 +2432,47 @@ TEST_F(KVCacheManagerTest, FrozenRecoveryStartsOnlyForEnabledAllocatorOwner) {
     }
 }
 
+TEST_F(KVCacheManagerTest, FrozenForceReleaseTimeoutReachesRecoveryWorker) {
+    const auto cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    for (const int timeout_ms : {0, 1000, 1200000}) {
+        SCOPED_TRACE(timeout_ms);
+        KVCacheConfig config;
+        config.enable_memory_cache = true;
+        config.memory_cache_size_mb = 1;
+        config.block_tree_frozen_force_release_timeout_ms = timeout_ms;
+        auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, config);
+        ASSERT_TRUE(manager->init());
+        ASSERT_NE(manager->frozen_task_recovery_, nullptr);
+        manager->frozen_task_recovery_->stop();
+        const auto& groups = manager->blockTreeCache()->groupSets();
+        auto engine = std::make_shared<RecordingBatchTransferEngine>(groups);
+        engine->completion_error = ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "local I/O outcome unknown");
+        manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
+        manager->block_tree_cache_->setCompletionCleanup(manager->completion_cleanup_);
+        auto pool = groups.front()->hostPool();
+        ASSERT_NE(pool, nullptr);
+        const auto block = pool->malloc();
+        ASSERT_TRUE(block.has_value());
+        pool->incTreeRef(*block, BlockTreeRefType::EVICT);
+        manager->block_tree_cache_->transfer_dispatcher_->runTransfer(
+            TransferTask({TransferDescriptor::deviceToHost(0, {1}, *block)}, std::chrono::seconds(30)),
+            [&](TransferResult result) {
+                EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+                pool->decTreeRef(*block, BlockTreeRefType::EVICT);
+            }, "evict");
+        const auto records = manager->frozenTasks();
+        ASSERT_EQ(records.size(), 1u);
+        records.front()->frozen_at_us_ -= std::chrono::duration_cast<std::chrono::microseconds>(
+                                            std::chrono::minutes(10)).count();
+        EXPECT_EQ(manager->frozen_task_recovery_->runOnce(1000).released, timeout_ms == 1000 ? 1u : 0u);
+        EXPECT_EQ(pool->isAllocated(*block), timeout_ms != 1000);
+        ASSERT_NE(engine->last_proof, nullptr);
+        engine->last_proof->report(true);
+        EXPECT_EQ(manager->frozen_task_recovery_->runOnce(1000).released, timeout_ms == 1000 ? 0u : 1u);
+        EXPECT_FALSE(pool->isAllocated(*block));
+    }
+}
+
 TEST_F(KVCacheManagerTest, CompletionCleanupHandlesSuccessAndLateSafeFailureAndHonorsPausedPolling) {
     for (const int mode : {0, 1, 2}) {
         SCOPED_TRACE(mode);
@@ -2511,6 +2552,15 @@ TEST_F(KVCacheManagerTest, InvalidFrozenRecoveryConfigurationFailsBeforeAllocati
         KVCacheConfig config;
         config.block_tree_frozen_recovery_interval_ms = values.first;
         config.block_tree_frozen_recovery_query_timeout_ms = values.second;
+        KVCacheManager manager(cache_config, false, nullptr, config);
+        EXPECT_FALSE(manager.init());
+        EXPECT_FALSE(manager.initialized());
+        EXPECT_EQ(manager.blockTreeCache(), nullptr);
+        EXPECT_EQ(manager.frozen_task_recovery_, nullptr);
+    }
+    for (const int64_t timeout_ms : std::vector<int64_t>{-1, overflow}) {
+        KVCacheConfig config;
+        config.block_tree_frozen_force_release_timeout_ms = timeout_ms;
         KVCacheManager manager(cache_config, false, nullptr, config);
         EXPECT_FALSE(manager.init());
         EXPECT_FALSE(manager.initialized());
