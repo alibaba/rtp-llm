@@ -1865,6 +1865,60 @@ TEST_F(GenerateStreamTest, timeInfoSnapshotIsCoherentDuringLifecyclePublication)
     EXPECT_TRUE(final_info.generation_done);
 }
 
+TEST_F(GenerateStreamTest, testOutputLogprobsFloorPreservesHistoryAndInvalidValues) {
+    const float inf      = std::numeric_limits<float>::infinity();
+    const float nan      = std::numeric_limits<float>::quiet_NaN();
+    auto        selected = torch::tensor({{-inf, -10000.0f, -9999.0f, -0.25f, nan, inf}}, torch::kFloat32);
+    auto        expected = torch::tensor({-9999.0f, -9999.0f, -9999.0f, -0.25f, nan, inf}, torch::kFloat32);
+    auto        tokens   = torch::arange(1, 7, torch::kInt32).reshape({1, 6});
+
+    for (bool streaming : {false, true}) {
+        for (int top_k : {0, 2}) {
+            SCOPED_TRACE(testing::Message() << "streaming=" << streaming << ", top_k=" << top_k);
+            auto config             = std::make_shared<GenerateConfig>();
+            config->return_logprobs = true;
+            config->top_logprobs    = top_k;
+            config->max_new_tokens  = 6;
+            config->is_streaming    = streaming;
+            config->ignore_eos      = true;
+            auto stream             = GenerateStreamBuilder().createContextStream({1}, config);
+            auto top_ids            = tokens.unsqueeze(2).repeat({1, 1, top_k});
+            auto top_values         = selected.unsqueeze(2).repeat({1, 1, top_k});
+            auto expected_top       = expected.unsqueeze(1).repeat({1, top_k});
+
+            for (int start = 0; start < 6; start += 2) {
+                stream->update({.new_tokens            = tokens.narrow(1, start, 2),
+                                .num_new_tokens        = 2,
+                                .token_logprobs        = selected.narrow(1, start, 2),
+                                .top_logprob_token_ids = top_ids.narrow(1, start, 2),
+                                .top_logprobs          = top_values.narrow(1, start, 2)});
+                ASSERT_FALSE(stream->hasError());
+                if (!streaming && start < 4) {
+                    EXPECT_FALSE(stream->hasOutput());
+                    continue;
+                }
+                auto result = stream->nextOutput(1);
+                ASSERT_TRUE(result.ok());
+                ASSERT_EQ(result.value().generate_outputs.size(), 1u);
+                const auto& output = result.value().generate_outputs.front();
+                const int   offset = streaming ? start : 0;
+                const int   count  = streaming ? 2 : 6;
+                EXPECT_EQ(output.logprobs_offset, 0);
+                EXPECT_EQ(output.logprobs_count, count);
+                ASSERT_TRUE(output.token_logprobs.has_value());
+                ASSERT_TRUE(output.top_logprobs.has_value());
+                ASSERT_TRUE(output.top_logprob_token_ids.has_value());
+                EXPECT_TRUE(torch::allclose(*output.token_logprobs, expected.narrow(0, offset, count), 0, 0, true));
+                EXPECT_TRUE(torch::allclose(*output.top_logprobs, expected_top.narrow(0, offset, count), 0, 0, true));
+                EXPECT_TRUE(torch::equal(*output.top_logprob_token_ids, top_ids[0].narrow(0, offset, count)));
+                EXPECT_TRUE(torch::equal(output.output_ids, tokens.narrow(1, offset, count)));
+            }
+            EXPECT_TRUE(torch::allclose(stream->getTokenLogProbs().narrow(1, 0, 6), selected, 0, 0, true));
+            EXPECT_TRUE(torch::allclose(stream->getTopLogProbs().narrow(1, 0, 6), top_values, 0, 0, true));
+        }
+    }
+}
+
 TEST_F(GenerateStreamTest, testLogprobsHistoryUsesBoundedGeometricGrowth) {
     auto generate_config             = std::make_shared<GenerateConfig>();
     generate_config->return_logprobs = true;

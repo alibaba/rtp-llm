@@ -247,8 +247,9 @@ public:
     std::optional<PromptLogitsOutput> prompt_logits;
     // Output of the deployment-registered post-layers CustomHandler.
     std::optional<torch::Tensor> custom_output;
-    // Compact raw-target log probabilities for the content-token suffix in this
-    // response. `logprobs_offset` is the first matching position in output_ids
+    // Compact target log probabilities for the content-token suffix in this
+    // response, floored at -9999 (including -Inf); NaN and +Inf remain invalid.
+    // `logprobs_offset` is the first matching position in output_ids
     // and `logprobs_count` is the compact tensor length. Thinking-only outputs
     // have count zero and leave the optional tensors unset.
     int32_t logprobs_offset = 0;

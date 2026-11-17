@@ -134,10 +134,15 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                 const int64_t history_start = compact_output_start - content_output_start;
                 RTP_LLM_CHECK(history_start + logprobs_count <= logprobs_history_size_);
                 RTP_LLM_CHECK(logprobs_history_size_ <= token_logprobs_.size(1));
-                generate_output.token_logprobs = token_logprobs_[i].narrow(0, history_start, logprobs_count).clone();
+                // Match DeepInfer's output floor for log(0), without changing
+                // sampling probabilities/history or hiding NaN and +Inf.
+                constexpr float min_output_logprob = -9999.0f;
+                generate_output.token_logprobs =
+                    token_logprobs_[i].narrow(0, history_start, logprobs_count).clamp_min(min_output_logprob);
                 generate_output.top_logprob_token_ids =
                     top_logprob_token_ids_[i].narrow(0, history_start, logprobs_count).clone();
-                generate_output.top_logprobs = top_logprobs_[i].narrow(0, history_start, logprobs_count).clone();
+                generate_output.top_logprobs =
+                    top_logprobs_[i].narrow(0, history_start, logprobs_count).clamp_min(min_output_logprob);
             }
         }
 
