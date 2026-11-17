@@ -15,17 +15,17 @@ import java.util.List;
  * Registers the Mock Runner's discovery file as an Engine endpoint provider.
  */
 @Component
-public final class LocalMasterDiscovery implements ServiceDiscoveryProvider {
+public final class LocalFileServiceDiscoveryProvider implements ServiceDiscoveryProvider {
     private final LocalServiceDiscovery fileDiscovery;
 
-    public LocalMasterDiscovery(ConfigService configService) {
+    public LocalFileServiceDiscoveryProvider(ConfigService configService) {
         this.fileDiscovery = new LocalServiceDiscovery(
                 configService.modelServiceConfig().getDiscoveryFile());
     }
 
     @Override
     public ServiceDiscoveryType getType() {
-        return ServiceDiscoveryType.FILE;
+        return ServiceDiscoveryType.LOCAL_FILE;
     }
 
     @Override

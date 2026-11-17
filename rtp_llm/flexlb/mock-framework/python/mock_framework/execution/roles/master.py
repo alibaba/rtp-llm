@@ -59,7 +59,7 @@ def _resolve_discovery(route_json, topology, *, require_engines):
                     addresses.append(f"{host}:{port}")
             if require_engines and not addresses:
                 raise ValueError(f"No running Engines for native {role}_endpoint")
-            endpoint["discovery"] = {"type": "file"}
+            endpoint["discovery"] = {"type": "local-file"}
             hosts[domain] = addresses
         if not hosts or groups[0].get("pd_fusion_endpoint") is not None:
             raise ValueError("local Master supports separate P/D/V endpoints only")

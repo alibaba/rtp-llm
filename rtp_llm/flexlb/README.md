@@ -329,7 +329,7 @@ Master selects a provider from each Engine endpoint's `discovery.type`.
 For `static-env`, put the host list under that endpoint's `discovery.hosts`.
 Endpoints that omit the `discovery` object use address-based discovery.
 
-The Mock Runner sets `discovery.type` to `file` on P/D/V endpoints and writes
+The Mock Runner sets `discovery.type` to `local-file` on P/D/V endpoints and writes
 `MODEL_SERVICE_CONFIG.discovery_file`. The file maps service domains to
 `host:port` lists whose ports follow the endpoint protocol.
 

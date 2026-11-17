@@ -50,7 +50,7 @@ def test_binds_only_run_owned_discovery_and_preserves_business_document(tmp_path
     route = json.loads(env["MODEL_SERVICE_CONFIG"])
     assert "hosts" not in route
     assert route["role_endpoints"][0]["prefill_endpoint"]["discovery"] == {
-        "type": "file"
+        "type": "local-file"
     }
     assert json.loads(Path(route["discovery_file"]).read_text()) == {
         "p-domain": ["127.0.0.1:30001"],

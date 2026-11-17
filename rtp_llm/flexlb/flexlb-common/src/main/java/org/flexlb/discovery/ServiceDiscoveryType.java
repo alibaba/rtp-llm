@@ -12,7 +12,7 @@ public enum ServiceDiscoveryType {
     VIPSERVER("vipserver"),
     DASHSCOPE("dashscope"),
     STATIC_ENV("static-env"),
-    FILE("file");
+    LOCAL_FILE("local-file");
 
     private final String value;
 
