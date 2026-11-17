@@ -272,7 +272,7 @@ class AllReduceUnitTest(unittest.TestCase):
 
     def test_rank_policy_mismatch_fails_before_optional_initialization(self):
         def disagree(group, state, tag):
-            return [state, ["nccl", None, None, False, state[4]]]
+            return [state, ["nccl", None, None, False]]
 
         with (
             patch.object(
@@ -283,25 +283,6 @@ class AllReduceUnitTest(unittest.TestCase):
         ):
             self.init(self.options)
         probe.assert_not_called()
-
-    def test_decode_moe_gate_policy_is_agreed_even_with_nccl(self):
-        pc = SimpleNamespace(tp_size=2, role_type="DECODE")
-        options = CollectiveConfig("nccl")
-        with patch.dict("os.environ", {"RTP_QWEN4_MOE_REDUCE_GATE_FUSION": "1"}):
-            with (
-                patch.object(
-                    all_reduce_module,
-                    "exchange_group_state",
-                    side_effect=lambda group, state, tag: [state, [*state[:4], "0"]],
-                ),
-                self.assertRaisesRegex(ValueError, "must agree on TP ranks"),
-            ):
-                all_reduce_module.init_all_reduce(self.group, self.device, pc, options)
-            self.assertIsNone(all_reduce_module.get_moe_reduce_gate_mode(self.group))
-            all_reduce_module.init_all_reduce(self.group, self.device, pc, options)
-        self.assertEqual(all_reduce_module.get_moe_reduce_gate_mode(self.group), "1")
-        all_reduce_module.destroy_all_reduce()
-        self.assertIsNone(all_reduce_module.get_moe_reduce_gate_mode(self.group))
 
     def test_one_rank_probe_failure_falls_back_before_allocation(self):
         def peer_failed(group, value, tag):

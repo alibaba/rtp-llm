@@ -1,10 +1,7 @@
 """Model-owned TP2 LSA reduction with the shared expert epilogue."""
 
-import ctypes
-import hashlib
-import os
+import logging
 import socket
-from pathlib import Path
 
 import torch
 import torch.distributed as dist
@@ -15,6 +12,7 @@ from rtp_llm.models_py.distributed.collective_utils import exchange_group_state
 # close occurs on only one rank or a graph runner still references the model.
 _PROCESS_LIFETIME_CONTEXTS = []
 _MAX_ROWS = 32
+logger = logging.getLogger(__name__)
 
 
 def _aligned_buffer_like(value):
@@ -28,89 +26,18 @@ def _aligned_buffer_like(value):
     return storage.narrow(0, offset, value.numel()).view_as(value)
 
 
-def load_library(path, expected_sha256):
-    path = Path(path)
-    if (
-        not expected_sha256
-        or hashlib.sha256(path.read_bytes()).hexdigest() != expected_sha256
-    ):
-        raise ValueError("Qwen3.8 LSA library SHA256 mismatch")
-    library = ctypes.CDLL(str(path.resolve()))
-    library.qwen38_lsa_error.restype = ctypes.c_char_p
-    library.qwen38_lsa_abi.restype = ctypes.c_int
-    if library.qwen38_lsa_abi() != 3:
-        raise ValueError("Qwen3.8 LSA requires ABI 3. Rebuild reduce_gate.cu.")
-    library.qwen38_lsa_uid_size.restype = ctypes.c_int
-    library.qwen38_lsa_unique_id.argtypes = [ctypes.c_void_p]
-    library.qwen38_lsa_create.argtypes = [
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_void_p,
-        ctypes.POINTER(ctypes.c_void_p),
-    ]
-    library.qwen38_lsa_apply.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_int,
-        ctypes.c_void_p,
-    ]
-    library.qwen38_lsa_destroy.argtypes = [ctypes.c_void_p]
-    library.qwen38_lsa_destroy.restype = None
-    return library
-
-
 class LsaMoeReduce:
     """One symmetric window shared by serialized forwards of a single model."""
 
-    def __init__(self, library, group, device, hidden_size):
-        if dist.get_world_size(group) != 2:
-            raise ValueError("Qwen3.8 LSA reduction requires a TP2 group")
-        if not (
-            type(hidden_size) is int
-            and 0 < hidden_size <= (2**31 - 1) // _MAX_ROWS
-            and hidden_size % 8 == 0
-        ):
-            raise ValueError(
-                "LSA hidden size must be positive, divisible by 8 and fit its row capacity"
-            )
+    def __init__(self, ops, group, device, hidden_size, uid):
         self.hidden_size = hidden_size
-        self.library = library
-        self.device = torch.device(device)
+        self.ops = ops
+        self.device = device
         self.closed = False
-        self.handle = ctypes.c_void_p()
-        uid = ctypes.create_string_buffer(library.qwen38_lsa_uid_size())
-        state = {"uid": None, "error": None, "hidden": hidden_size}
-        if dist.get_rank(group) == 0:
-            try:
-                self._check(library.qwen38_lsa_unique_id(uid))
-                state["uid"] = bytes(uid).hex()
-            except Exception as error:
-                state["error"] = str(error)
-        peers = exchange_group_state(group, state, "qwen38-lsa-uid")
-        if (
-            any(peer["error"] for peer in peers)
-            or len({peer["hidden"] for peer in peers}) != 1
-        ):
-            raise RuntimeError(str(peers))
-        uid.raw = bytes.fromhex(peers[0]["uid"])
-        with torch.cuda.device(self.device):
-            self._check(
-                library.qwen38_lsa_create(
-                    dist.get_rank(group),
-                    self.device.index,
-                    hidden_size,
-                    uid,
-                    ctypes.byref(self.handle),
-                )
+        with torch.cuda.device(device):
+            self.handle = ops.create(
+                dist.get_rank(group), device.index, hidden_size, uid
             )
-
-    def _check(self, status):
-        if status:
-            raise RuntimeError(self.library.qwen38_lsa_error().decode())
 
     def supports(self, value):
         # TP consumes the same logical batch shape on both ranks. Local tensor
@@ -143,16 +70,14 @@ class LsaMoeReduce:
         output = _aligned_buffer_like(partial)
         with torch.cuda.device(self.device):
             stream = torch.cuda.current_stream(self.device)
-            self._check(
-                self.library.qwen38_lsa_apply(
-                    self.handle,
-                    partial.data_ptr(),
-                    shared.data_ptr(),
-                    gate.data_ptr(),
-                    output.data_ptr(),
-                    partial.shape[0],
-                    stream.cuda_stream,
-                )
+            self.ops.apply(
+                self.handle,
+                partial.data_ptr(),
+                shared.data_ptr(),
+                gate.data_ptr(),
+                output.data_ptr(),
+                partial.shape[0],
+                stream.cuda_stream,
             )
         return output
 
@@ -164,28 +89,15 @@ class LsaMoeReduce:
 
 
 def prepare_model_reduce(model, config, parallelism):
-    """Agree on the mode and layout before constructing a device communicator."""
+    """Select LSA only after both TP ranks agree on capability and layout."""
     role = str(parallelism.role_type).rsplit(".", 1)[-1]
-    if getattr(config, "is_mtp", False) or role != "DECODE":
+    if role != "DECODE" or parallelism.tp_size != 2 or not dist.is_initialized():
         return None
-    mode = os.getenv("RTP_QWEN4_MOE_REDUCE_GATE_FUSION", "0")
-    if parallelism.tp_size != 2:
-        if mode != "0":
-            raise ValueError("Qwen3.8 LSA shared merge requires TP2")
-        return None
-    if not dist.is_initialized():
-        if mode == "0":
-            return None
-        raise RuntimeError("Initialize distributed execution before LSA setup")
     from rtp_llm.models_py.distributed import collective_torch
-    from rtp_llm.models_py.distributed.all_reduce import get_moe_reduce_gate_mode
 
     group = collective_torch._get_group(collective_torch.Group.TP)
-    agreed_mode = get_moe_reduce_gate_mode(group)
-    if agreed_mode == "0" or (agreed_mode is None and mode == "0"):
+    if dist.get_world_size(group) != 2:
         return None
-    if agreed_mode != "1":
-        raise RuntimeError("Initialize the TP AllReduce policy before LSA setup")
 
     from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
         PureTpRouterNvfp4Cutlass,
@@ -197,10 +109,12 @@ def prepare_model_reduce(model, config, parallelism):
         "layers": len(model.layers),
         "hidden": config.hidden_size,
     }
-    library = None
+    ops = None
+    device = None
     try:
         if not (
-            parallelism.ep_size == 2
+            not getattr(config, "is_mtp", False)
+            and parallelism.ep_size == 2
             and parallelism.dp_size == parallelism.pp_size == 1
             and parallelism.local_world_size == 2
             and parallelism.get_ffn_tp_size() == 1
@@ -230,25 +144,41 @@ def prepare_model_reduce(model, config, parallelism):
                 raise ValueError(
                     "Unsupported shared-expert or routed collective layout"
                 )
-        library = load_library(
-            os.environ["RTP_QWEN4_MOE_LSA_LIBRARY"],
-            os.environ["RTP_QWEN4_MOE_LSA_LIBRARY_SHA256"],
-        )
+        from rtp_llm.ops import rtp_llm_ops
+
+        ops = rtp_llm_ops._qwen38_lsa
+        device = torch.device("cuda", torch.cuda.current_device())
+        state["bus_id"] = ops.device(device.index)
     except Exception as error:
         state["error"] = str(error)
     peers = exchange_group_state(group, state, "qwen38-lsa-layout")
     if (
-        any(peer["error"] for peer in peers)
+        any(peer["error"] is not None for peer in peers)
         or len({peer["host"] for peer in peers}) != 1
         or len({peer["layers"] for peer in peers}) != 1
         or len({peer["hidden"] for peer in peers}) != 1
+        or len({peer["bus_id"] for peer in peers}) != 2
     ):
-        raise RuntimeError(f"Qwen3.8 LSA startup agreement failed: {peers}")
+        logger.info("MoE LSA unavailable for this TP group: %s", peers)
+        return None
+
+    rank = dist.get_rank(group)
+    state = {"error": None, "uid": None}
+    try:
+        ops.check_peer(device.index, peers[1 - rank]["bus_id"])
+        if rank == 0:
+            state["uid"] = ops.unique_id().hex()
+    except Exception as error:
+        state["error"] = str(error)
+    peers = exchange_group_state(group, state, "qwen38-lsa-peer")
+    if any(peer["error"] is not None for peer in peers):
+        logger.info("MoE LSA peer setup unavailable: %s", peers)
+        return None
+
+    # From here both ranks enter the same native collective. Propagate errors
+    # instead of allowing one rank to revert to a different protocol.
     owner = LsaMoeReduce(
-        library,
-        group,
-        torch.device("cuda", torch.cuda.current_device()),
-        config.hidden_size,
+        ops, group, device, config.hidden_size, bytes.fromhex(peers[0]["uid"])
     )
     for layer in model.layers:
         layer.mlp._reduce_shared_gate = owner
