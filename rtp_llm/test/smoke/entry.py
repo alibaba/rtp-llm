@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import shutil
+from pathlib import Path
 from typing import Any, Dict, List, Type, Union
 
 logging.basicConfig(
@@ -24,6 +25,7 @@ from smoke.multi_inst_case_runner import (
     PdSeperationCaseRunner,
     VitSeperationCaseRunner,
 )
+from smoke.startup_resource_monitor import monitor_startup_resources
 from smoke.task_info import TaskInfo
 from smoke.utils import resolve_prompt_refs
 
@@ -136,7 +138,9 @@ if __name__ == "__main__":
     dmesg_baseline = snapshot_dmesg()
 
     try:
-        task_states = runner.run()
+        output_dir = Path(os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd()))
+        with monitor_startup_resources(output_dir / "startup_resources.jsonl"):
+            task_states = runner.run()
     except Exception as e:
         exc_type = classify_exception(e)
         if exc_type != ExceptionType.NOT_GPU_ERROR:

@@ -107,7 +107,7 @@ _DMESG_ERROR_PATTERNS = re.compile(
 
 
 def dump_dmesg_errors(baseline: int = 0) -> str:
-    """Read dmesg lines generated after baseline, filter for crash/OOM patterns."""
+    """Keep bounded raw kernel context when the case delta contains a fault."""
     try:
         out = subprocess.run(
             ["dmesg", "-T"],
@@ -119,10 +119,13 @@ def dump_dmesg_errors(baseline: int = 0) -> str:
             return f"dmesg failed (code {out.returncode})"
         lines = out.stdout.splitlines()
         new_lines = lines[baseline:]
-        matched = [l for l in new_lines if _DMESG_ERROR_PATTERNS.search(l)]
-        if not matched:
+        if not any(_DMESG_ERROR_PATTERNS.search(line) for line in new_lines):
             return f"(no crash/OOM messages in {len(new_lines)} new dmesg lines)"
-        return "\n".join(matched[-30:])
+        # OOM charge fields and numeric task rows do not match the fault regex.
+        # Keep raw context so the report can identify the memory charge owner.
+        omitted = len(new_lines) - 4096
+        prefix = f"({omitted} earlier kernel lines omitted)\n" if omitted > 0 else ""
+        return prefix + "\n".join(new_lines[-4096:])
     except FileNotFoundError:
         return "dmesg not found"
     except subprocess.TimeoutExpired:

@@ -8,6 +8,7 @@ asyncio event loop (the ``enqueue`` coroutine needs one) and its own
 from __future__ import annotations
 
 import asyncio
+import faulthandler
 import json
 import logging
 import os
@@ -658,6 +659,7 @@ class DashScApp:
     def start(self, ready_pipe_writer=None, bind_barrier=None) -> None:
         servicer: DashScAppServicer | None = None
         _init_trace_telemetry()
+        faulthandler.dump_traceback_later(300, repeat=True)
         try:
             port = self.server_config.dash_sc_grpc_server_port
             is_proxy = _is_proxy_mode_enabled()
@@ -835,6 +837,8 @@ class DashScApp:
             self._stop_enqueue_loop()
             _shutdown_trace_telemetry()
             raise
+        finally:
+            faulthandler.cancel_dump_traceback_later()
 
         if ready_pipe_writer is not None:
             try:

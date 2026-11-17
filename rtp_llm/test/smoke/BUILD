@@ -48,6 +48,11 @@ py_test(
 )
 
 py_test(
+    name = "startup_resource_monitor_test",
+    srcs = ["startup_resource_monitor.py", "startup_resource_monitor_test.py"],
+)
+
+py_test(
     name = "dash_cancel_state_test",
     srcs = [
         "dash_cancel_state.py",
@@ -64,11 +69,20 @@ py_test(
 )
 
 py_test(
+    name = "gpu_diagnostics_test",
+    srcs = [
+        "gpu_diagnostics.py",
+        "gpu_diagnostics_test.py",
+    ],
+)
+
+py_test(
     name = "deepseek_v41_pd_startup_test",
     srcs = [
         "deepseek_v41_contract_test.py",
         "deepseek_v41_pd_contract_test.py",
         "deepseek_v41_pd_startup_test.py",
+        "startup_resource_monitor.py",
     ],
     env = {"GPU_COUNT": "0"},
     deps = SMOKE_FRAMEWORK_DEPS + ["//rtp_llm:sdk"],
@@ -231,6 +245,7 @@ custom_smoke_test(
         "deepseek_v41_contract_test.py",
         "deepseek_v41_pd_contract_test.py",
         "deepseek_v41_dspark_contract_test.py",
+        "startup_resource_monitor.py",
     ],
 )
 
@@ -249,7 +264,7 @@ custom_smoke_test(
     smoke_args = "--tp_size 2 --ep_size 2 --dp_size 1 --world_size 4 --act_type BF16 --fp8_kv_cache 1 --seq_size_per_block 256 --kernel_seq_size_per_block 128 --max_seq_len 4096 --max_context_batch_size 1 --concurrency_limit 4 --reuse_cache 1 --load_method fastsafetensors --reserver_runtime_mem_mb 32768 --cache_store_rdma_mode 0 --use_local 1 --load_cache_timeout_ms 120000 --prefill_cp_kv_cache_sharded 1 --prefill_cp_size 2",
     gpu_type = ["SM100_ARM_CU13"],
     tags = ["dsv41_cuda13", "model_contract", "pd_contract"],
-    data = ["//rtp_llm:sdk", "deepseek_v41_contract_test.py"],
+    data = ["//rtp_llm:sdk", "deepseek_v41_contract_test.py", "startup_resource_monitor.py"],
 )
 
 custom_smoke_test(
