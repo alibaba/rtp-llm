@@ -657,6 +657,24 @@ TEST(BlockTreeCacheMetricsTest, UnfreezeMetricsCountUniqueTargetsPerPoolAndBacke
     auto first = std::make_shared<HostBlockPool>(first_config);
     auto second = std::make_shared<HostBlockPool>(second_config);
     auto source = std::make_shared<HostBlockPool>(source_config);
+    std::vector<BlockTreePoolMetricsSnapshot> pools(4);
+    pools[0].pool_name = "first";
+    pools[0].tier = Tier::HOST;
+    pools[1].pool_name = "second";
+    pools[1].tier = Tier::HOST;
+    pools[2].pool_name = "source";
+    pools[2].tier = Tier::DEVICE;
+    pools[3].pool_name = "disk";
+    pools[3].tier = Tier::DISK;
+    auto expect_zero_metrics = [&] {
+        metrics_reporter.reportUnfreezeZeroMetrics(pools);
+        for (const auto& pool : pools) {
+            for (const char* backend : {"local", "kvcm"}) {
+                EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks(pool.pool_name.c_str(), pool.tier, backend), 0);
+            }
+        }
+    };
+    expect_zero_metrics();
     FrozenTask::ExecutionInfo execution;
     execution.trace_id = uint64_t{1};
     execution.remote = true;
@@ -670,11 +688,13 @@ TEST(BlockTreeCacheMetricsTest, UnfreezeMetricsCountUniqueTargetsPerPoolAndBacke
     execution.remote = false;
     execution.descriptors.pop_back();
     metrics_reporter.reportUnfreezeMetrics(execution);
+    metrics_reporter.reportUnfreezeZeroMetrics(pools);
     EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks("first", Tier::HOST, "local"), 2);
     EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks("second", Tier::HOST, "local"), 1);
     EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks("first", Tier::HOST, "kvcm"), 2);
     EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks("second", Tier::HOST, "kvcm"), 0);
     EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks("source", Tier::DEVICE, "local"), 0);
+    expect_zero_metrics();
 }
 
 TEST(BlockTreeCacheMetricsTest, FrozenMetricIsOwnerOnlyAndIncludesZeroForEveryTier) {
