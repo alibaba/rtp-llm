@@ -40,6 +40,16 @@ from rtp_llm.dash_sc.proto import predict_v2_pb2_grpc
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 
 
+def _self_diag_phase(name):
+    if os.environ.get("RTP_BTC_0731_SELF_DIAG") == "1":
+        try:
+            from smoke.btc_self_diagnostics import phase
+
+            phase(name)
+        except Exception:
+            pass
+
+
 DASH_SC_GRPC_ENDPOINT = "/__dash_sc_grpc__"
 PROMPT_MODE_RAW = "raw"
 PROMPT_MODE_DSV4_CHAT = "dsv4_chat"
@@ -182,13 +192,21 @@ def _encode_prompt_for_smoke(
     thinking_mode = _resolve_dsv4_thinking_mode(
         dsv4_thinking_mode, enable_thinking
     )
-    rendered_prompt = _load_dsv4_encoding_module(ckpt_path).encode_messages(
+    _self_diag_phase("dsv4_module_load.begin")
+    encoding_module = _load_dsv4_encoding_module(ckpt_path)
+    _self_diag_phase("dsv4_module_load.end")
+    _self_diag_phase("dsv4_render.begin")
+    rendered_prompt = encoding_module.encode_messages(
         messages,
         thinking_mode=thinking_mode,
         drop_thinking=True,
         add_default_bos_token=True,
     )
-    return _tokenizer_encode_to_int_list(tokenizer, rendered_prompt)
+    _self_diag_phase("dsv4_render.end")
+    _self_diag_phase("tokenizer_encode.begin")
+    encoded = _tokenizer_encode_to_int_list(tokenizer, rendered_prompt)
+    _self_diag_phase("tokenizer_encode.end")
+    return encoded
 
 # Default per-attempt stream timeout; a query may override it.
 DASH_SC_GRPC_TIMEOUT_SECONDS = 600.0
@@ -480,7 +498,9 @@ class DashScGrpcComparer(NormalComparer):
         ckpt = self.qr_info.get("_model_path") or self.qr_info.get("model_path")
         tok_path = ckpt
         model_type = self.qr_info.get("_model_type") or self.qr_info.get("model_type")
+        _self_diag_phase("tokenizer_create.begin")
         tokenizer = TokenizerFactory.create(ckpt, tok_path or ckpt, model_type)
+        _self_diag_phase("tokenizer_create.end")
         return _encode_prompt_for_smoke(
             tokenizer=tokenizer,
             ckpt_path=ckpt,

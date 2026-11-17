@@ -133,6 +133,19 @@ if __name__ == "__main__":
 
     runner = runner_class(**runner_params)
 
+    stop_self_diag = None
+    if (
+        os.environ.get("RTP_BTC_0731_SELF_DIAG") == "1"
+        and args.suite_name
+        == "smoke_v4_flash_0731_pd_cp2ep2_dp2ep2_dspark_cprr_async_xgrammar_json_sm100"
+    ):
+        try:
+            from smoke.btc_self_diagnostics import start
+
+            stop_self_diag = start(args.suite_name)
+        except Exception:
+            pass
+
     dmesg_baseline = snapshot_dmesg()
 
     try:
@@ -149,6 +162,11 @@ if __name__ == "__main__":
             )
         raise
     finally:
+        if stop_self_diag is not None:
+            try:
+                stop_self_diag()
+            except Exception:
+                pass
         output_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
         rocm_debug_dir = os.path.join(output_dir, "rocm_debug")
         for pattern in [
