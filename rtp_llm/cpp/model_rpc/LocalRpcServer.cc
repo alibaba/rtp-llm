@@ -509,8 +509,8 @@ grpc::Status LocalRpcServer::pollBatchStreamOutput(
                 }
             }
             if (terminal_output || (stream->isFinished() && !stream->hasOutput())) {
-                if (collectors[i].empty()) {
-                    fail({ErrorCode::EXECUTION_EXCEPTION, "batch item completed without output"});
+                if (!terminal_output) {
+                    fail({ErrorCode::EXECUTION_EXCEPTION, "batch item completed without terminal output"});
                     continue;
                 }
                 auto output = collectors[i].finish();

@@ -161,6 +161,7 @@ private:
     friend class P2PConnectorAsyncReadContextChecker;
 
     void dispatchDoneCallbacks();
+    void scheduleCancelRetry(const char* reason);
     struct DoneNotifier {
         P2PConnectorAsyncReadContext& context;
         ~DoneNotifier() { context.dispatchDoneCallbacks(); }
@@ -237,6 +238,8 @@ private:
     KickoffState         kickoff_state_{KickoffState::QUEUED};  // guarded by state_mutex_
     std::shared_ptr<const std::function<void()>> wakeup_callback_;  // accessed with atomic_load/store
     std::atomic<int64_t>             control_retry_ms_{0};
+    int64_t                          cancel_retry_interval_ms_{10};
+    int64_t                          next_cancel_warning_ms_{0};
     std::atomic<bool>                control_active_{false};
 };
 
