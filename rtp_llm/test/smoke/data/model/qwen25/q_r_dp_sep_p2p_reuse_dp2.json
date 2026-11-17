@@ -46,8 +46,8 @@
                     "local_reuse_len": 8,
                     "prefill_total_reuse_len": 8,
                     "prefill_local_reuse_len": 8,
-                    "decode_total_reuse_len": 0,
-                    "decode_local_reuse_len": 0,
+                    "decode_total_reuse_len": 8,
+                    "decode_local_reuse_len": 8,
                     "output_len": 10,
                     "iter_count": 10
                 }
