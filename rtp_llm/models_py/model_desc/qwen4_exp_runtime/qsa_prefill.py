@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import math
 from typing import Any
 
@@ -19,8 +20,212 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     is_qsa_rope_style,
 )
 
-from .qsa_cache_views import _block_table, _same_tensor_metadata, _typed_2d_pool
+from .qsa_cache_views import (
+    _block_table,
+    _indexer_position_pool_and_table,
+    _same_tensor_metadata,
+    _typed_2d_pool,
+)
 from .qsa_selection import select_qsa_paged_tokens
+
+
+def _prefill_has_private_writes(host_table, table, pool, prefixes, lengths, *, ratio):
+    if (
+        host_table is None
+        or host_table.device.type != "cpu"
+        or host_table.dtype != torch.int32
+        or host_table.shape != table.shape
+    ):
+        return False
+    reused, written = set(), set()
+    for row, prefix, length in zip(host_table.tolist(), prefixes, lengths):
+        first = prefix // 128
+        covered = prefix + length // ratio * ratio
+        last = (covered + 127) // 128
+        if last > len(row) or any(
+            not 0 < block < pool.shape[0] for block in row[:last]
+        ):
+            return False
+        reused.update(row[:first])
+        for block in row[first:last]:
+            if block in written:
+                return False
+            written.add(block)
+    return reused.isdisjoint(written)
+
+
+def try_fused_prefill_selection(self, q, raw_keys, indexer, rope_config):
+    """Prepare ordinary Q/K and write private side pages in one launch."""
+    inputs = self.main_inputs
+    if (
+        inputs.is_cuda_graph
+        or inputs.is_s_padded
+        or torch.cuda.is_current_stream_capturing()
+        or indexer.compress_ratio != 4
+        or indexer.token_budget != 2048
+        or self.position_state_cache is None
+        or self.position_state_inputs is None
+        or any(
+            cache.seq_size_per_block != 128
+            for cache in (
+                self.indexer_kv_cache,
+                self.indexer_state_cache,
+                self.position_state_cache,
+            )
+        )
+    ):
+        return None
+
+    lengths = self._validate_mode_and_metadata(
+        expect_prefill=True, allow_prefix_reuse=True
+    )
+    prefix_host = inputs.prefix_lengths
+    cu_host = inputs.cu_seqlens
+    batch = len(lengths)
+    if (
+        prefix_host.device.type != "cpu"
+        or prefix_host.shape != (batch,)
+        or cu_host is None
+        or cu_host.device.type != "cpu"
+        or cu_host.dtype != torch.int32
+        or self.host_values(cu_host) != [0, *itertools.accumulate(lengths)]
+        or sum(lengths) != q.shape[0]
+    ):
+        return None
+    prefixes = self.host_values(prefix_host)
+    if any(prefix < 0 or prefix % 128 for prefix in prefixes):
+        return None
+    emit_dense = not any(prefixes)
+    compressed = [(p + n) // 4 for p, n in zip(prefixes, lengths)]
+    if min(compressed) < 1 or (emit_dense and batch != 1):
+        return None
+    # The paged FlashInfer API has no internal score windows. Bound the
+    # compact candidate buffer with the existing paged scorer budget.
+    if (
+        not emit_dense
+        and 4 * sum(n * k for n, k in zip(lengths, compressed))
+        > _MAX_SCORE_WORKSPACE_BYTES
+    ):
+        return None
+
+    device = q.device
+    prefix_device, cu = inputs.prefix_lengths_device, inputs.cu_seqlens_device
+    positions = inputs.combo_position_ids
+    if (
+        prefix_device is None
+        or prefix_device.dtype != torch.int32
+        or prefix_device.shape != (batch,)
+        or cu is None
+        or cu.shape != (batch + 1,)
+        or positions is None
+        or not positions.is_contiguous()
+        or positions.numel() != q.shape[0] * 3
+    ):
+        return None
+    kv_pool = _typed_2d_pool(
+        self.indexer_kv_cache,
+        tag=INDEXER_KV_TAG,
+        storage_dtype=torch.uint8,
+        payload_dtype=torch.bfloat16,
+        entries=32,
+        width=128,
+    )
+    state_pool = _typed_2d_pool(
+        self.indexer_state_cache,
+        tag=INDEXER_STATE_TAG,
+        storage_dtype=torch.float32,
+        payload_dtype=torch.float32,
+        entries=8,
+        width=128,
+    )
+    kv_table = _block_table(
+        self.indexer_kv_inputs,
+        "kv_cache_kernel_block_id_device",
+        tag=INDEXER_KV_TAG,
+        batch_size=batch,
+        device=device,
+    )
+    state_table = _block_table(
+        self.indexer_state_inputs,
+        "kv_cache_block_id_device",
+        tag=INDEXER_STATE_TAG,
+        batch_size=batch,
+        device=device,
+    )
+    position_pool, position_table = _indexer_position_pool_and_table(
+        self, batch, device
+    )
+    if not all(
+        _prefill_has_private_writes(host, table, pool, prefixes, lengths, ratio=ratio)
+        for host, table, pool, ratio in (
+            (self.indexer_kv_inputs.kv_cache_kernel_block_id, kv_table, kv_pool, 4),
+            (self.indexer_state_inputs.kv_cache_block_id, state_table, state_pool, 1),
+            (
+                self.position_state_inputs.kv_cache_block_id,
+                position_table,
+                position_pool,
+                1,
+            ),
+        )
+    ):
+        return None
+
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.flashinfer_indexer import (
+        select_flashinfer_prefix_blocks,
+        try_flashinfer_prefill_selection,
+    )
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill import (
+        try_prepare_fused_prefill,
+    )
+
+    checks = self._prewrite_checks
+    if checks is not None and not checks.verified:
+        checks.verify()
+    self.mark_side_cache_written()
+    prepared = try_prepare_fused_prefill(
+        q,
+        raw_keys,
+        cu,
+        prefix_device,
+        positions.view(-1, 3),
+        indexer.q_norm_gamma,
+        indexer.k_norm_gamma,
+        indexer.rope_inv_freq(rope_config, fused_prep=True),
+        state_pool,
+        state_table,
+        kv_pool,
+        kv_table,
+        position_pool,
+        position_table,
+        max_length=max(lengths),
+        norm_eps=indexer.norm_eps,
+        rope_config=rope_config,
+        emit_dense=emit_dense,
+    )
+    if prepared is None:
+        self.finalize_side_cache()
+        return None
+    self.take_prewrite_checks()
+    rotated, dense_keys, visible_lengths, compressed_lengths = prepared
+    if emit_dense:
+        selected = try_flashinfer_prefill_selection(rotated.unsqueeze(0), dense_keys)
+        if selected is None:
+            raise RuntimeError("fused QSA prefill requires the FlashInfer BF16 scorer")
+        return selected.squeeze(0)
+
+    from rtp_llm.models_py.kernels.cuda.qsa.qsa_topk_triton import expand_qsa_block_ids
+
+    block_ids = select_flashinfer_prefix_blocks(
+        rotated,
+        kv_pool,
+        kv_table,
+        cu,
+        prefix_device,
+        compressed_lengths,
+        max(lengths),
+        max(compressed),
+    )
+    return expand_qsa_block_ids(block_ids, visible_lengths)
 
 
 def write_prefill_indexer_cache(

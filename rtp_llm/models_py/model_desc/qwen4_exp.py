@@ -199,15 +199,44 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             and hidden_states.dtype == torch.bfloat16
             and torch.cuda.get_device_capability(hidden_states.device) == (12, 0)
         )
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.flashinfer_indexer import (
+            use_fused_indexer_prep,
+        )
+
+        fused_query = (
+            use_fused_indexer_prep()
+            and type(qsa_runtime) is Qwen4ExpQSARuntimeContext
+            and type(self.qsa_indexer) is Qwen4ExpQSAIndexer
+            and not qsa_runtime.main_inputs.is_target_verify
+            and not qsa_runtime.is_mtp_draft
+            and (
+                qsa_runtime.main_inputs.is_prefill
+                or qsa_runtime.main_inputs.is_cuda_graph
+            )
+            and (self.qsa_indexer.n_heads, self.qsa_indexer.head_dim) == (8, 128)
+            and hidden_states.is_cuda
+            and torch.version.hip is None
+            and hidden_states.dtype == torch.bfloat16
+            and torch.cuda.get_device_capability(hidden_states.device) == (10, 3)
+            and not any(
+                name in self.qsa_indexer.__dict__
+                for name in (
+                    "project",
+                    "project_raw",
+                    "split_projected",
+                    "forward_causal_from_projected",
+                )
+            )
+        )
         if projected is None:
             q, raw_keys = (
                 self.qsa_indexer.project_raw(hidden_states)
-                if raw_query
+                if raw_query or fused_query
                 else self.qsa_indexer.project(hidden_states)
             )
         else:
             q, raw_keys = projected
-            if not raw_query:
+            if not (raw_query or fused_query):
                 from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
                     exact_head_rms_norm,
                 )
@@ -229,6 +258,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 raw_keys,
                 indexer=self.qsa_indexer,
                 rope_config=self.qsa_rope_config,
+                **({"raw_query": True} if fused_query else {}),
             )
         if self.is_mtp_draft and bool(qsa_runtime.main_inputs.is_cuda_graph):
             return qsa_runtime.select_draft_graph_tokens(
@@ -237,6 +267,22 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 indexer=self.qsa_indexer,
                 rope_config=self.qsa_rope_config,
                 **({"raw_query": True} if raw_query else {}),
+            )
+        if fused_query:
+            from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_prefill import (
+                try_fused_prefill_selection,
+            )
+            from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+                exact_head_rms_norm,
+            )
+
+            selected = try_fused_prefill_selection(
+                qsa_runtime, q, raw_keys, self.qsa_indexer, self.qsa_rope_config
+            )
+            if selected is not None:
+                return selected
+            q = exact_head_rms_norm(
+                q, self.qsa_indexer.q_norm_gamma, self.qsa_indexer.norm_eps
             )
         prefixes = qsa_runtime.main_inputs.prefix_lengths
         prefix_values = qsa_runtime.host_values(prefixes)
@@ -398,6 +444,20 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 from rtp_llm.models_py.modules.base.common.fp8_linear import (
                     project_fp8_pair,
                 )
+                from rtp_llm.models_py.modules.qwen4_exp.qsa.flashinfer_indexer import (
+                    use_fused_indexer_prep,
+                )
+
+                if (
+                    type(qsa_runtime) is Qwen4ExpQSARuntimeContext
+                    and attention_inputs.is_prefill
+                    and not attention_inputs.is_target_verify
+                    and not self.is_mtp_draft
+                    and use_fused_indexer_prep()
+                ):
+                    checks = qsa_runtime._prewrite_checks
+                    if checks is not None:
+                        checks.verify()
 
                 prepared = None
                 if (

@@ -1,6 +1,7 @@
 """Transactional, zero-prefix QSA prefill for the released BF16 layout."""
 
 import itertools
+import math
 
 import torch
 import triton
@@ -20,11 +21,179 @@ from rtp_llm.models_py.kernels.cuda.qsa.indexer_prefill import (
     _kv_snapshot,
     _kv_write,
     _metadata,
+    _prepare_fused_prefill,
     _restore_slots,
     _state_snapshot,
     _state_write,
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import IndexerCacheUndo
+
+
+def try_prepare_fused_prefill(
+    q,
+    raw_keys,
+    cu_seqlens,
+    prefixes,
+    positions,
+    q_gamma,
+    k_gamma,
+    inv_freq,
+    state_pool,
+    state_table,
+    kv_pool,
+    kv_table,
+    position_pool,
+    position_table,
+    *,
+    max_length,
+    norm_eps,
+    rope_config,
+    emit_dense,
+):
+    """Prepare Q and append to owned, validated cache pages in one launch.
+
+    Prefixes are page-aligned. Only the single zero-prefix request path emits
+    dense K. The caller owns data-level checks and cache publication.
+    """
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import is_qsa_rope_style
+
+    rows = q.shape[0]
+    batch = prefixes.numel()
+    tables = (state_table, kv_table, position_table)
+    pools = (state_pool, kv_pool, position_pool)
+    if not (
+        q.is_cuda
+        and torch.version.hip is None
+        and torch.cuda.get_device_capability(q.device) == (10, 3)
+        and 0 < max_length <= rows
+        and 0 < batch <= 65535
+        and (not emit_dense or (batch == 1 and max_length == rows))
+        and q.dtype == raw_keys.dtype == torch.bfloat16
+        and q.shape == (rows, 8, 128)
+        and q.stride()[1:] == (128, 1)
+        and raw_keys.shape == (rows, 128)
+        and raw_keys.stride(1) == 1
+        and positions.shape == (rows, 3)
+        and positions.dtype == torch.int32
+        and cu_seqlens.shape == (batch + 1,)
+        and cu_seqlens.dtype == torch.int32
+        and prefixes.shape == (batch,)
+        and prefixes.dtype in (torch.int32, torch.int64)
+        and state_pool.shape[1:] == (8, 128)
+        and state_pool.dtype == torch.float32
+        and kv_pool.shape[1:] == (32, 128)
+        and kv_pool.dtype == torch.bfloat16
+        and position_pool.shape[1:] == (8, 3)
+        and position_pool.dtype == torch.int32
+        and all(
+            t.ndim == 2
+            and t.shape[0] == batch
+            and t.shape[1] > 0
+            and t.stride(1) == 1
+            and t.dtype == torch.int32
+            and t.device == q.device
+            for t in tables
+        )
+        and all(
+            g.shape == (128,) and g.dtype in (torch.bfloat16, torch.float32)
+            for g in (q_gamma, k_gamma)
+        )
+        and isinstance(inv_freq, torch.Tensor)
+        and inv_freq.shape == (32,)
+        and inv_freq.dtype == torch.float32
+        and raw_keys.device == q.device
+        and all(
+            t.device == q.device and t.is_contiguous()
+            for t in (
+                cu_seqlens,
+                prefixes,
+                positions,
+                q_gamma,
+                k_gamma,
+                inv_freq,
+                *pools,
+            )
+        )
+        and is_qsa_rope_style(rope_config, "Mrope")
+        and int(rope_config.dim) == 64
+        and int(rope_config.index_factor) == 3
+        and bool(rope_config.mrope_interleaved)
+        and bool(getattr(rope_config, "indexer_is_neox_style", True))
+        and math.isfinite(norm_eps)
+        and norm_eps >= 0
+    ):
+        return None
+    sections = (
+        int(rope_config.mrope_dim1),
+        int(rope_config.mrope_dim2),
+        int(rope_config.mrope_dim3),
+    )
+    scale = float(getattr(rope_config, "scale", 1.0))
+    if not (
+        min(sections) >= 0
+        and sum(sections) == 32
+        and sections[1] <= 11
+        and sections[2] <= 10
+        and math.isfinite(scale)
+        and scale > 0
+    ):
+        return None
+
+    rotated = torch.empty(q.shape, dtype=q.dtype, device=q.device)
+    dense = visible = compressed = None
+    if emit_dense:
+        dense = torch.empty((1, rows // 4, 128), dtype=q.dtype, device=q.device)
+    else:
+        visible = torch.empty((rows,), dtype=torch.int32, device=q.device)
+        compressed = torch.empty((batch,), dtype=torch.int32, device=q.device)
+    # Reuse the CTA for long prompts while keeping the Q reduction warp layout.
+    query_tile = 4 if max_length >= 16384 else 1
+    tiles = (
+        triton.cdiv(max_length, query_tile)
+        + max_length // 4
+        + triton.cdiv(max_length, 128)
+    )
+    _prepare_fused_prefill[(tiles, batch)](
+        q,
+        raw_keys,
+        cu_seqlens,
+        prefixes,
+        positions,
+        q_gamma,
+        k_gamma,
+        inv_freq,
+        state_pool,
+        state_table,
+        kv_pool,
+        kv_table,
+        position_pool,
+        position_table,
+        rotated,
+        dense,
+        visible,
+        compressed,
+        max_length,
+        Q_STRIDE=q.stride(0),
+        RAW_STRIDE=raw_keys.stride(0),
+        STATE_ROWS=state_table.stride(0),
+        STATE_COLS=state_table.shape[1],
+        STATE_BLOCKS=state_pool.shape[0],
+        KV_ROWS=kv_table.stride(0),
+        KV_COLS=kv_table.shape[1],
+        KV_BLOCKS=kv_pool.shape[0],
+        POSITION_ROWS=position_table.stride(0),
+        POSITION_COLS=position_table.shape[1],
+        POSITION_BLOCKS=position_pool.shape[0],
+        EPS=norm_eps,
+        INV_SCALE=1.0 / scale,
+        H=sections[1],
+        W=sections[2],
+        EMIT_DENSE=emit_dense,
+        Q_TILE=query_tile,
+        num_warps=8,
+        enable_fp_fusion=False,
+    )
+    return rotated, dense, visible, compressed
 
 
 def restore_padded_indexer_cache(undo: IndexerCacheUndo) -> None:

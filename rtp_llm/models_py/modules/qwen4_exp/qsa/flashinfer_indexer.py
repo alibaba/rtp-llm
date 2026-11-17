@@ -24,6 +24,13 @@ def use_flashinfer_indexer():
     return backend == "flashinfer"
 
 
+def use_fused_indexer_prep():
+    return (
+        os.environ.get("QWEN4_QSA_FUSED_INDEXER_PREP") == "1"
+        and use_flashinfer_indexer()
+    )
+
+
 def select_flashinfer_prefill_blocks(q, block_keys):
     """Run the FROST scorer and radix TopK used by qsa_select_forward.
 
@@ -91,7 +98,42 @@ def try_flashinfer_prefill_selection(q, block_keys):
     return expand_qsa_block_ids(block_ids).unsqueeze(0)
 
 
-def try_flashinfer_decode_selection(q, cache, table, lengths):
+def select_flashinfer_prefix_blocks(
+    q, cache, table, cu, prefixes, kv_lens, max_q, max_k
+):
+    """Select logical compressed block IDs from the prefix and the new pages."""
+    setup_cutlass_import_path()
+    from flashinfer.experimental.qwen_3_5_block._cudnn_frost.deepseek_sparse_attention.indexer_forward import (
+        indexer_forward_top_k_wrapper,
+    )
+    from flashinfer.experimental.qwen_3_5_block._cudnn_frost.QSA.selection import (
+        _constant_weights,
+    )
+
+    rows, heads, dim = q.shape
+    weights = _constant_weights(rows * heads, q.device).view(rows, heads)
+    return indexer_forward_top_k_wrapper(
+        q,
+        cache.unsqueeze(2),
+        weights,
+        top_k=512,
+        ratio=4,
+        qhead_per_kv_head=heads,
+        sm_scale=dim**-0.5,
+        cu_seqlens_q=cu,
+        max_seqlen_q=max_q,
+        max_seqlen_k=max_k,
+        q_causal_offsets=prefixes,
+        microbatch_rows=0,
+        topk_indices_global=False,
+        return_softmax=False,
+        deterministic=True,
+        block_table=table,
+        kv_lens=kv_lens,
+    )["indices"]
+
+
+def prepare_flashinfer_decode_selection(q, cache, table):
     if not (
         q.is_cuda
         and q.dtype == cache.dtype == torch.bfloat16
@@ -112,13 +154,8 @@ def try_flashinfer_decode_selection(q, cache, table, lengths):
         qsa_topk_decode_kernel_module,
     )
 
-    from rtp_llm.models_py.kernels.cuda.qsa.qsa_topk_triton import (
-        expand_qsa_block_ids,
-        mask_qsa_decode_pages,
-    )
-
     # Page-table capacity stays fixed while visible lengths change under replay.
-    rows, heads, dim = q.shape
+    rows, heads, _ = q.shape
     cols = table.shape[1] * 32
     try:
         with torch.cuda.device(q.device):
@@ -138,7 +175,23 @@ def try_flashinfer_decode_selection(q, cache, table, lengths):
         )
     except NotImplementedError:
         return None
+    return run_qsa_score_paged, score_recipe, topk, topk_recipe
 
+
+def try_flashinfer_decode_selection(q, cache, table, lengths, *, recipe=None):
+    if recipe is None:
+        recipe = prepare_flashinfer_decode_selection(q, cache, table)
+        if recipe is None:
+            return None
+
+    from rtp_llm.models_py.kernels.cuda.qsa.qsa_topk_triton import (
+        expand_qsa_block_ids,
+        mask_qsa_decode_pages,
+    )
+
+    run_qsa_score_paged, score_recipe, topk, topk_recipe = recipe
+    rows, _, dim = q.shape
+    cols = table.shape[1] * 32
     scores = torch.empty((rows, cols), device=q.device, dtype=torch.float32)
     counts = torch.empty_like(lengths)
     block_ids = torch.empty((rows, 512), device=q.device, dtype=torch.int32)

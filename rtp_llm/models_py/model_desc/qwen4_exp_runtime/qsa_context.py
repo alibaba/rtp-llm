@@ -58,6 +58,9 @@ class Qwen4ExpQSARuntimeContext:
     _side_cache_undo: IndexerCacheUndo | None = field(
         default=None, init=False, repr=False, compare=False
     )
+    _side_cache_written: bool = field(
+        default=False, init=False, repr=False, compare=False
+    )
     _target_verify_plan: TargetVerifyPlan | None = field(
         default=None, init=False, repr=False, compare=False
     )
@@ -105,6 +108,9 @@ class Qwen4ExpQSARuntimeContext:
 
     def rollback_side_cache(self) -> None:
         """Restore one failed QSA side write and make rollback idempotent."""
+        if self._side_cache_written:
+            object.__setattr__(self, "_side_cache_written", False)
+            return
         if self._position_state is not None:
             self._position_state.rollback()
         undo = self._side_cache_undo
@@ -119,11 +125,20 @@ class Qwen4ExpQSARuntimeContext:
 
     def finalize_side_cache(self) -> None:
         """Discard undo state after the paired main attention succeeds."""
+        if self._side_cache_written:
+            object.__setattr__(self, "_side_cache_written", False)
+            return
         if self._side_cache_undo is None:
             raise RuntimeError(
                 "qwen4_exp QSA has no active side-cache transaction to finalize"
             )
         object.__setattr__(self, "_side_cache_undo", None)
+
+    def mark_side_cache_written(self) -> None:
+        """Record an ordinary fused side write that has no undo buffers."""
+        if self._side_cache_undo is not None or self._side_cache_written:
+            raise RuntimeError("qwen4_exp QSA side-cache transaction is already active")
+        object.__setattr__(self, "_side_cache_written", True)
 
     def positions(self, ratio, checks=None):
         if self.position_state_cache is None:
@@ -382,9 +397,15 @@ class Qwen4ExpQSARuntimeContext:
         *,
         indexer: Any,
         rope_config: Any,
+        raw_query: bool = False,
     ) -> torch.Tensor:
         return qsa_decode.select_decode_tokens(
-            self, q, raw_keys, indexer=indexer, rope_config=rope_config
+            self,
+            q,
+            raw_keys,
+            indexer=indexer,
+            rope_config=rope_config,
+            raw_query=raw_query,
         )
 
     def select_target_verify_tokens(

@@ -5,12 +5,150 @@ entry. The completion branch depends on a device sequence length, so the
 launch geometry is stable across CUDA Graph replays.
 """
 
+import math
+
 import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.kernels.cuda.qsa.indexer_decode import _write_decode_key
+from rtp_llm.models_py.kernels.cuda.qsa.indexer_decode import (
+    _prepare_fused_decode,
+    _write_decode_key,
+)
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_compressor import IndexerCacheUndo
+
+
+def try_prepare_fused_decode(
+    q,
+    raw_keys,
+    lengths,
+    positions,
+    q_gamma,
+    k_gamma,
+    inv_freq,
+    state_pool,
+    state_table,
+    kv_pool,
+    kv_table,
+    position_pool,
+    position_table,
+    *,
+    norm_eps,
+    rope_config,
+    padded,
+):
+    """Prepare ordinary SM103 decode from the replay's inclusive token lengths."""
+    from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import is_qsa_rope_style
+
+    if (
+        q.ndim != 3
+        or not q.is_cuda
+        or torch.version.hip is not None
+        or torch.cuda.get_device_capability(q.device) != (10, 3)
+        or not is_qsa_rope_style(rope_config, "Mrope")
+        or int(rope_config.dim) != 64
+        or int(rope_config.index_factor) != 3
+        or not rope_config.mrope_interleaved
+        or not getattr(rope_config, "indexer_is_neox_style", True)
+        or inv_freq is None
+    ):
+        return None
+    sections = (
+        int(rope_config.mrope_dim1),
+        int(rope_config.mrope_dim2),
+        int(rope_config.mrope_dim3),
+    )
+    scale = float(getattr(rope_config, "scale", 1.0))
+    if (
+        min(sections) < 0
+        or sum(sections) != 32
+        or sections[1] > 11
+        or sections[2] > 10
+        or not math.isfinite(scale)
+        or scale <= 0
+    ):
+        return None
+    batch = q.shape[0]
+    packed = (
+        lengths,
+        positions,
+        q_gamma,
+        k_gamma,
+        inv_freq,
+        state_pool,
+        state_table,
+        kv_pool,
+        kv_table,
+        position_pool,
+        position_table,
+    )
+    tables = (state_table, kv_table, position_table)
+    if not (
+        batch > 0
+        and all(t.device == q.device and t.is_contiguous() for t in packed)
+        and q.shape == (batch, 8, 128)
+        and q.stride(1) == 128
+        and q.stride(2) == 1
+        and raw_keys.shape == (batch, 128)
+        and raw_keys.stride(1) == 1
+        and raw_keys.device == q.device
+        and q.dtype == raw_keys.dtype == torch.bfloat16
+        and lengths.shape == (batch,)
+        and positions.shape == (batch, 3)
+        and positions.dtype == lengths.dtype == torch.int32
+        and q_gamma.shape == k_gamma.shape == (128,)
+        and all(t.dtype in (torch.bfloat16, torch.float32) for t in (q_gamma, k_gamma))
+        and inv_freq.dtype == torch.float32
+        and inv_freq.shape == (32,)
+        and state_pool.shape[1:] == (8, 128)
+        and state_pool.dtype == torch.float32
+        and kv_pool.shape[1:] == (32, 128)
+        and kv_pool.dtype == torch.bfloat16
+        and position_pool.shape[1:] == (8, 3)
+        and position_pool.dtype == torch.int32
+        and all(
+            t.ndim == 2
+            and t.shape[0] == batch
+            and t.shape[1] > 0
+            and t.dtype == torch.int32
+            for t in tables
+        )
+    ):
+        return None
+    rotated = torch.empty(q.shape, dtype=q.dtype, device=q.device)
+    visible = torch.empty_like(lengths)
+    _prepare_fused_decode[(batch, 9)](
+        q,
+        raw_keys,
+        lengths,
+        positions,
+        q_gamma,
+        k_gamma,
+        inv_freq,
+        state_pool,
+        state_table,
+        kv_pool,
+        kv_table,
+        position_pool,
+        position_table,
+        rotated,
+        visible,
+        Q_STRIDE=q.stride(0),
+        RAW_STRIDE=raw_keys.stride(0),
+        STATE_WIDTH=state_table.shape[1],
+        KV_WIDTH=kv_table.shape[1],
+        POSITION_WIDTH=position_table.shape[1],
+        STATE_BLOCKS=state_pool.shape[0],
+        KV_BLOCKS=kv_pool.shape[0],
+        POSITION_BLOCKS=position_pool.shape[0],
+        H_SECTION=sections[1],
+        W_SECTION=sections[2],
+        INV_SCALE=1.0 / scale,
+        EPS=norm_eps,
+        PADDED=padded,
+        num_warps=1,
+    )
+    return rotated, visible
 
 
 def is_supported(

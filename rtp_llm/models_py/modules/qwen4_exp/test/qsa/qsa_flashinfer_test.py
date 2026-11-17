@@ -10,16 +10,349 @@ from rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score import (
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection import (
     select_qsa_paged_tokens,
 )
+from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+    exact_head_rms_norm,
+)
 from rtp_llm.models_py.modules.qwen4_exp.qsa.flashinfer_indexer import (
+    select_flashinfer_prefix_blocks,
     try_flashinfer_decode_selection,
     try_flashinfer_prefill_selection,
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa.flashinfer_prefill import (
     try_flashinfer_cold_prefill,
 )
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
+    Qwen4ExpQSAIndexer,
+    apply_partial_rope,
+    build_qsa_rope,
+)
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (
+    try_prepare_fused_decode,
+    write_decode_key_,
+)
+from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_prefill import (
+    try_prepare_fused_prefill,
+    write_zero_prefix_prefill,
+)
 
 
 class QsaFlashInferTest(unittest.TestCase):
+    def _prep_fixture(self, rows):
+        if torch.cuda.get_device_capability() != (10, 3):
+            self.skipTest("fused QSA preparation requires SM103")
+        torch.manual_seed(1234)
+        rope = SimpleNamespace(
+            style="Mrope",
+            dim=64,
+            base=1e6,
+            scale=1.0,
+            index_factor=3,
+            mrope_interleaved=True,
+            mrope_dim1=12,
+            mrope_dim2=10,
+            mrope_dim3=10,
+            indexer_is_neox_style=True,
+        )
+        inv = rope.base ** (-2.0 * torch.arange(32, device="cuda") / 64)
+        joint = torch.randn((rows, 9, 128), device="cuda", dtype=torch.bfloat16)
+        gamma = torch.randn(128, device="cuda", dtype=torch.bfloat16) * 0.1
+        return rope, inv, joint, gamma
+
+    def _prep_rope(self, positions, rope):
+        return build_qsa_rope(
+            positions.flatten(),
+            rope,
+            token_count=positions.shape[0],
+            dtype=torch.bfloat16,
+            device=positions.device,
+        )
+
+    def test_model_routes_prefill_to_fused_indexer(self):
+        from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpAttention
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_context import (
+            Qwen4ExpQSARuntimeContext,
+        )
+
+        rope, _, joint, gamma = self._prep_fixture(4)
+        hidden = joint.new_empty((4, 32))
+        indexer = Qwen4ExpQSAIndexer(
+            joint.new_empty((1152, 32)),
+            gamma,
+            gamma,
+            n_heads=8,
+            kv_heads=1,
+            head_dim=128,
+            token_budget=2048,
+            compress_ratio=4,
+            norm_eps=1e-6,
+            rope_config=rope,
+        )
+        attention = Qwen4ExpAttention.__new__(Qwen4ExpAttention)
+        torch.nn.Module.__init__(attention)
+        attention.qsa_indexer = indexer
+        attention.qsa_rope_config = rope
+        attention.is_mtp_draft = False
+        inputs = SimpleNamespace(is_prefill=True, is_target_verify=False)
+        ctx = Qwen4ExpQSARuntimeContext(None, inputs, None, inputs, None, inputs)
+        q, raw = joint[:, :8], joint[:, 8]
+        selected = torch.empty(4, 2051, device="cuda", dtype=torch.int32)
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "QWEN4_QSA_FUSED_INDEXER_PREP": "1",
+                    "QWEN4_QSA_INDEXER_BACKEND": "flashinfer",
+                },
+            ),
+            patch(
+                "rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_prefill.try_fused_prefill_selection",
+                autospec=True,
+                return_value=selected,
+            ) as prepare,
+        ):
+            self.assertIs(
+                attention._qsa_selected_indices(hidden, ctx, projected=(q, raw)),
+                selected,
+            )
+        prepare.assert_called_once_with(ctx, q, raw, indexer, rope)
+
+    def test_fused_cold_prefill_matches_dense_keys_and_cache(self):
+        rows = 129
+        rope, inv, joint, gamma = self._prep_fixture(rows)
+        q, raw = joint[:, :8], joint[:, 8]
+        cu = torch.tensor([0, rows], device="cuda", dtype=torch.int32)
+        prefixes = cu[:1]
+        positions = (
+            torch.arange(rows, device="cuda")[:, None] + torch.arange(3, device="cuda")
+        ).int()
+        table = torch.tensor([[2, 1]], device="cuda", dtype=torch.int32)
+        kv = torch.randn(3, 32, 128, device="cuda", dtype=torch.bfloat16)
+        state = torch.randn(3, 8, 128, device="cuda")
+        coords = torch.full((3, 8, 3), -1, device="cuda", dtype=torch.int32)
+        expected_kv, expected_state = kv.clone(), state.clone()
+        cos, sin = self._prep_rope(positions, rope)
+        expected = write_zero_prefix_prefill(
+            raw,
+            cu,
+            [rows],
+            cos[None],
+            sin[None],
+            gamma,
+            expected_kv,
+            table,
+            expected_state,
+            table,
+            page_size=128,
+            norm_eps=1e-6,
+            emit_dense_keys=True,
+        )
+        rotated, dense, visible, compressed = try_prepare_fused_prefill(
+            q,
+            raw,
+            cu,
+            prefixes,
+            positions,
+            gamma,
+            gamma,
+            inv,
+            state,
+            table,
+            kv,
+            table,
+            coords,
+            table,
+            max_length=rows,
+            norm_eps=1e-6,
+            rope_config=rope,
+            emit_dense=True,
+        )
+        self.assertIsNone(visible)
+        self.assertIsNone(compressed)
+        expected_q = apply_partial_rope(
+            exact_head_rms_norm(q, gamma, 1e-6),
+            cos[:, None],
+            sin[:, None],
+        )
+        for actual, reference in (
+            (rotated, expected_q),
+            (dense, expected["block_keys"]),
+            (kv, expected_kv),
+            (state, expected_state),
+            (coords[2], positions[120:128]),
+            (coords[1, 0], positions[128]),
+        ):
+            torch.testing.assert_close(actual, reference, atol=0, rtol=0)
+
+    def test_fused_prefill_prepares_mixed_prefix_and_cold_rows(self):
+        rows = 136
+        rope, inv, joint, gamma = self._prep_fixture(rows)
+        q, raw = joint[:, :8], joint[:, 8]
+        cu = torch.tensor([0, 129, rows], device="cuda", dtype=torch.int32)
+        prefixes = torch.tensor([0, 128], device="cuda", dtype=torch.int32)
+        logical = torch.cat(
+            (torch.arange(129, device="cuda"), torch.arange(128, 135, device="cuda"))
+        )
+        positions = (logical[:, None] + torch.arange(3, device="cuda")).int()
+        kv = torch.randn(6, 32, 128, device="cuda", dtype=torch.bfloat16)
+        state = torch.randn(6, 8, 128, device="cuda")
+        coords = torch.full((6, 8, 3), -1, device="cuda", dtype=torch.int32)
+        before_k, before_state, before_coords = (
+            kv.clone(),
+            state.clone(),
+            coords.clone(),
+        )
+        kt = torch.tensor([[4, 3], [1, 2]], device="cuda", dtype=torch.int32)
+        st = torch.tensor([[3, 2], [4, 1]], device="cuda", dtype=torch.int32)
+        pt = torch.tensor([[2, 1], [4, 3]], device="cuda", dtype=torch.int32)
+        prepared = try_prepare_fused_prefill(
+            q,
+            raw,
+            cu,
+            prefixes,
+            positions,
+            gamma,
+            gamma,
+            inv,
+            state,
+            st,
+            kv,
+            kt,
+            coords,
+            pt,
+            max_length=129,
+            norm_eps=1e-6,
+            rope_config=rope,
+            emit_dense=False,
+        )
+        self.assertIsNotNone(prepared)
+        rotated, dense, visible, compressed = prepared
+        self.assertIsNone(dense)
+        cos, sin = self._prep_rope(positions, rope)
+        expected_q = apply_partial_rope(
+            exact_head_rms_norm(q, gamma, 1e-6),
+            cos[:, None],
+            sin[:, None],
+        )
+        torch.testing.assert_close(rotated, expected_q, atol=0, rtol=0)
+        torch.testing.assert_close(visible, logical.int() + 1)
+        torch.testing.assert_close(compressed, prefixes.new_tensor([32, 33]))
+        for source, count, page in ((0, 32, 4), (129, 1, 2)):
+            groups = raw[source : source + 4 * count].unflatten(0, (-1, 4))
+            pooled = exact_head_rms_norm(groups.float().mean(1).bfloat16(), gamma, 1e-6)
+            expected = apply_partial_rope(
+                pooled,
+                cos[source : source + 4 * count : 4],
+                sin[source : source + 4 * count : 4],
+            )
+            before_k[page, :count].copy_(expected)
+        for start, end, state_id, pos_id in (
+            (120, 128, 3, 2),
+            (128, 129, 2, 1),
+            (129, 136, 1, 3),
+        ):
+            before_state[state_id, : end - start].copy_(raw[start:end])
+            before_coords[pos_id, : end - start].copy_(positions[start:end])
+        for actual, expected in (
+            (kv, before_k),
+            (state, before_state),
+            (coords, before_coords),
+        ):
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+        block_ids = select_flashinfer_prefix_blocks(
+            rotated,
+            kv,
+            kt,
+            cu,
+            prefixes,
+            compressed,
+            129,
+            33,
+        )
+        for row in (0, 3, 128, 129, 132, 135):
+            ids = block_ids[row]
+            wanted = torch.arange(
+                (logical[row].item() + 1) // 4, device="cuda", dtype=torch.int32
+            )
+            torch.testing.assert_close(ids[ids >= 0].sort().values, wanted)
+
+    def test_fused_decode_replays_with_live_lengths_and_positions(self):
+        rope, inv, joint, gamma = self._prep_fixture(4)
+        q, raw = joint[:, :8], joint[:, 8]
+        lengths = torch.tensor([128, 129, 132, 1], device="cuda", dtype=torch.int32)
+        xyz = (lengths[:, None] + torch.arange(3, device="cuda")).int()
+        table = torch.tensor(
+            [[1, 2], [3, 4], [5, 6], [0, 0]], device="cuda", dtype=torch.int32
+        )
+        kv = torch.randn(7, 32, 128, device="cuda", dtype=torch.bfloat16)
+        state = torch.randn(7, 8, 128, device="cuda")
+        coords = torch.randint(0, 512, (7, 8, 3), device="cuda", dtype=torch.int32)
+        initial = tuple(x.clone() for x in (kv, state, coords))
+
+        def prepare():
+            return try_prepare_fused_decode(
+                q,
+                raw,
+                lengths,
+                xyz,
+                gamma,
+                gamma,
+                inv,
+                state,
+                table,
+                kv,
+                table,
+                coords,
+                table,
+                norm_eps=1e-6,
+                rope_config=rope,
+                padded=True,
+            )
+
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            self.assertIsNotNone(prepare())
+        torch.cuda.current_stream().wait_stream(side)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=side):
+            rotated, visible = prepare()
+        for actual, before in zip((kv, state, coords), initial):
+            actual.copy_(before)
+        lengths.copy_(lengths.new_tensor([132, 128, 129, 2]))
+        xyz.add_(7)
+        table.copy_(table.new_tensor([[5, 6], [1, 2], [3, 4], [0, 0]]))
+        joint.normal_()
+        graph.replay()
+        cos, sin = self._prep_rope(xyz, rope)
+        q_expected = apply_partial_rope(
+            exact_head_rms_norm(q, gamma, 1e-6),
+            cos[:, None],
+            sin[:, None],
+        )
+        torch.testing.assert_close(rotated, q_expected, atol=0, rtol=0)
+        torch.testing.assert_close(visible, lengths.new_tensor([132, 128, 129, 0]))
+        expected_kv, expected_state, expected_coords = initial
+        source = torch.stack(
+            (expected_coords[6, 0], expected_coords[1, 4], xyz[2], xyz[3])
+        )
+        kcos, ksin = self._prep_rope(source, rope)
+        write_decode_key_(
+            raw.contiguous(),
+            lengths - 1,
+            kcos,
+            ksin,
+            gamma,
+            expected_kv,
+            table,
+            expected_state,
+            table,
+            norm_eps=1e-6,
+        )
+        for row, block, slot in ((0, 6, 3), (1, 1, 7), (2, 4, 0)):
+            expected_coords[block, slot].copy_(xyz[row])
+        for actual, expected in zip((kv, state, coords), initial):
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
     def test_indexer_selects_segment_local_causal_blocks_and_tail(self):
         tokens = 2055  # 513 complete blocks plus a partial tail.
         q = torch.zeros((1, tokens, 8, 128), device="cuda", dtype=torch.bfloat16)

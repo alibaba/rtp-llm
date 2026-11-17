@@ -13,6 +13,7 @@ from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import (
 )
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
     _block_table,
+    _indexer_position_pool_and_table,
     _typed_2d_pool,
     _validate_required_blocks,
 )
@@ -20,8 +21,10 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection import (
     select_qsa_paged_tokens,
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa.flashinfer_indexer import (
+    prepare_flashinfer_decode_selection,
     try_flashinfer_decode_selection,
     use_flashinfer_indexer,
+    use_fused_indexer_prep,
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     apply_partial_rope,
@@ -39,6 +42,7 @@ def select_decode_tokens(
     *,
     indexer: Any,
     rope_config: Any,
+    raw_query: bool = False,
 ) -> torch.Tensor:
     """Write/score one ordinary text decode token per request.
 
@@ -79,21 +83,10 @@ def select_decode_tokens(
         )
     if q.device != raw_keys.device:
         raise RuntimeError("qwen4_exp QSA decode q/raw keys must share a device")
-    # The draft projection yields a strided raw-key view.  The fixed-shape
-    # writer accepts contiguous rows, and this copy is captured in Graph.
-    raw_keys = raw_keys.contiguous()
-
     # Device-input eager batches share one immutable metadata snapshot across
     # sparse layers. Host-input/Graph batches read their existing host mirror.
     host_lengths = self.host_values(sequence_lengths)
     host_max_compressed = (max(host_lengths) + 1) // ratio
-    # Replay refreshes this device tensor before launching the captured graph.
-    # Reading the pinned mirror inside capture would freeze an H2D dependency.
-    sequence_lengths = (
-        self.main_inputs.sequence_lengths_plus_1_device - 1
-        if graph_decode
-        else sequence_lengths.to(device=q.device, dtype=torch.int32, non_blocking=True)
-    ).contiguous()
     invalid_lengths = any(length < 0 for length in host_lengths)
     if invalid_lengths:
         raise RuntimeError("qwen4_exp QSA sequence_lengths must be non-negative")
@@ -106,6 +99,117 @@ def select_decode_tokens(
             f"configured index_factor={index_factor}: got {actual} values "
             f"for batch={batch_size}"
         )
+    kv_tokens_per_block = int(self.indexer_kv_cache.seq_size_per_block)
+    if kv_tokens_per_block <= 0 or kv_tokens_per_block % ratio:
+        raise RuntimeError(
+            "qwen4_exp QSA indexer KV page size must be positive and divisible "
+            f"by ratio={ratio}, got {kv_tokens_per_block}"
+        )
+    kv_entries_per_block = kv_tokens_per_block // ratio
+    kv_pool = _typed_2d_pool(
+        self.indexer_kv_cache,
+        tag=INDEXER_KV_TAG,
+        storage_dtype=torch.uint8,
+        payload_dtype=torch.bfloat16,
+        entries=kv_entries_per_block,
+        width=head_dim,
+    )
+    state_pool = _typed_2d_pool(
+        self.indexer_state_cache,
+        tag=INDEXER_STATE_TAG,
+        storage_dtype=torch.float32,
+        payload_dtype=torch.float32,
+        entries=2 * ratio,
+        width=head_dim,
+    )
+    if kv_pool.device != q.device or state_pool.device != q.device:
+        raise RuntimeError(
+            "qwen4_exp QSA side pools and decode projection must share a device"
+        )
+    kv_table = _block_table(
+        self.indexer_kv_inputs,
+        "kv_cache_kernel_block_id_device",
+        tag=INDEXER_KV_TAG,
+        batch_size=batch_size,
+        device=q.device,
+    )
+    state_table = _block_table(
+        self.indexer_state_inputs,
+        "kv_cache_block_id_device",
+        tag=INDEXER_STATE_TAG,
+        batch_size=batch_size,
+        device=q.device,
+    )
+
+    if (
+        graph_decode
+        and raw_query
+        and not self.is_mtp_draft
+        and ratio == 4
+        and token_budget == 2048
+        and self.position_state_cache is not None
+        and self.position_state_inputs is not None
+        and kv_tokens_per_block
+        == self.indexer_state_cache.seq_size_per_block
+        == self.position_state_cache.seq_size_per_block
+        == 128
+        and position_ids.is_contiguous()
+        and use_fused_indexer_prep()
+    ):
+        recipe = prepare_flashinfer_decode_selection(q, kv_pool, kv_table)
+        if recipe is not None:
+            from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer_decode import (
+                try_prepare_fused_decode,
+            )
+
+            position_pool, position_table = _indexer_position_pool_and_table(
+                self, batch_size, q.device
+            )
+            self.mark_side_cache_written()
+            prepared = try_prepare_fused_decode(
+                q,
+                raw_keys,
+                self.main_inputs.sequence_lengths_plus_1_device,
+                position_ids.view(-1, 3),
+                indexer.q_norm_gamma,
+                indexer.k_norm_gamma,
+                indexer.rope_inv_freq(rope_config, fused_prep=True),
+                state_pool,
+                state_table,
+                kv_pool,
+                kv_table,
+                position_pool,
+                position_table,
+                norm_eps=indexer.norm_eps,
+                rope_config=rope_config,
+                padded=self.main_inputs.is_s_padded,
+            )
+            if prepared is not None:
+                rotated, visible_lengths = prepared
+                return try_flashinfer_decode_selection(
+                    rotated, kv_pool, kv_table, visible_lengths, recipe=recipe
+                )
+            self.finalize_side_cache()
+
+    if raw_query:
+        from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
+            exact_head_rms_norm,
+        )
+
+        q = exact_head_rms_norm(q, indexer.q_norm_gamma, indexer.norm_eps)
+
+    # The draft projection yields a strided raw-key view.  The fixed-shape
+    # writer accepts contiguous rows, and this copy is captured in Graph.
+    raw_keys = raw_keys.contiguous()
+
+    # Replay refreshes this device tensor before launching the captured graph.
+    # Reading the pinned mirror inside capture would freeze an H2D dependency.
+    sequence_lengths = (
+        self.main_inputs.sequence_lengths_plus_1_device - 1
+        if graph_decode
+        else sequence_lengths.to(device=q.device, dtype=torch.int32, non_blocking=True)
+    ).contiguous()
+
     # The MTP draft transports the engine's absolute positions, whose
     # bookkeeping intentionally differs from the logical cache rows, so
     # only non-draft decodes can be validated against sequence_lengths.
@@ -168,48 +272,6 @@ def select_decode_tokens(
             logical_positions=decode_logical_positions,
             checks=checks,
         )
-
-    kv_tokens_per_block = int(self.indexer_kv_cache.seq_size_per_block)
-    if kv_tokens_per_block <= 0 or kv_tokens_per_block % ratio:
-        raise RuntimeError(
-            "qwen4_exp QSA indexer KV page size must be positive and divisible "
-            f"by ratio={ratio}, got {kv_tokens_per_block}"
-        )
-    kv_entries_per_block = kv_tokens_per_block // ratio
-    kv_pool = _typed_2d_pool(
-        self.indexer_kv_cache,
-        tag=INDEXER_KV_TAG,
-        storage_dtype=torch.uint8,
-        payload_dtype=torch.bfloat16,
-        entries=kv_entries_per_block,
-        width=head_dim,
-    )
-    state_pool = _typed_2d_pool(
-        self.indexer_state_cache,
-        tag=INDEXER_STATE_TAG,
-        storage_dtype=torch.float32,
-        payload_dtype=torch.float32,
-        entries=2 * ratio,
-        width=head_dim,
-    )
-    if kv_pool.device != q.device or state_pool.device != q.device:
-        raise RuntimeError(
-            "qwen4_exp QSA side pools and decode projection must share a device"
-        )
-    kv_table = _block_table(
-        self.indexer_kv_inputs,
-        "kv_cache_kernel_block_id_device",
-        tag=INDEXER_KV_TAG,
-        batch_size=batch_size,
-        device=q.device,
-    )
-    state_table = _block_table(
-        self.indexer_state_inputs,
-        "kv_cache_block_id_device",
-        tag=INDEXER_STATE_TAG,
-        batch_size=batch_size,
-        device=q.device,
-    )
 
     active = state_table.ne(0).any(dim=1) if self.main_inputs.is_s_padded else None
 

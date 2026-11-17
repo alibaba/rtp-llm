@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 
+from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import INDEXER_ROPE_POS_TAG
 from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
 from rtp_llm.models_py.utils.cache_payload_view import (
     CachePayloadGeometry,
@@ -75,6 +76,25 @@ def _block_table(
             f"QSA cache {tag!r} {name} is on {table.device}, expected {device}"
         )
     return table
+
+
+def _indexer_position_pool_and_table(context, batch_size, device):
+    pool = _typed_2d_pool(
+        context.position_state_cache,
+        tag=INDEXER_ROPE_POS_TAG,
+        storage_dtype=torch.int32,
+        payload_dtype=torch.int32,
+        entries=8,
+        width=3,
+    )
+    table = _block_table(
+        context.position_state_inputs,
+        "kv_cache_block_id_device",
+        tag=INDEXER_ROPE_POS_TAG,
+        batch_size=batch_size,
+        device=device,
+    )
+    return pool, table
 
 
 def _validate_required_blocks(

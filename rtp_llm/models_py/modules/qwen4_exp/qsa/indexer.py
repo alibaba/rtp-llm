@@ -34,7 +34,11 @@ from rtp_llm.models_py.modules.base.common.zero_centered_rms_norm import (
     exact_head_rms_norm,
 )
 
-from .flashinfer_indexer import try_flashinfer_prefill_selection, use_flashinfer_indexer
+from .flashinfer_indexer import (
+    try_flashinfer_prefill_selection,
+    use_flashinfer_indexer,
+    use_fused_indexer_prep,
+)
 from .validation import DeviceChecks
 
 # Bound fallback logits and their head reduction independently of context length.
@@ -469,19 +473,26 @@ class Qwen4ExpQSAIndexer(nn.Module):
         score_weights = None
         self._score_weights_key = None
         self._rope_inv_freq_key = None
+        self._rope_inv_freq_fused_only = False
         if (
             rope_config is not None
             and int(rope_config.dim) == 64
             and qk_proj.is_cuda
             and torch.version.hip is None
-            and torch.cuda.get_device_capability(qk_proj.device) == (12, 0)
         ):
-            base = float(rope_config.base)
-            frequency = base ** (
-                -2.0 * torch.arange(32, dtype=torch.float32, device=qk_proj.device) / 64
+            capability = torch.cuda.get_device_capability(qk_proj.device)
+            self._rope_inv_freq_fused_only = (
+                capability == (10, 3) and use_fused_indexer_prep()
             )
-            self._rope_inv_freq_key = (base, 64)
-            if n_heads > 0 and head_dim > 0:
+            if capability == (12, 0) or self._rope_inv_freq_fused_only:
+                base = float(rope_config.base)
+                frequency = base ** (
+                    -2.0
+                    * torch.arange(32, dtype=torch.float32, device=qk_proj.device)
+                    / 64
+                )
+                self._rope_inv_freq_key = (base, 64)
+            if capability == (12, 0) and n_heads > 0 and head_dim > 0:
                 score_weights = torch.full(
                     (128, n_heads),
                     1.0 / math.sqrt(head_dim),
@@ -492,7 +503,9 @@ class Qwen4ExpQSAIndexer(nn.Module):
         self.register_buffer("_rope_inv_freq", frequency, persistent=False)
         self.register_buffer("_score_weight_buffer", score_weights, persistent=False)
 
-    def rope_inv_freq(self, config):
+    def rope_inv_freq(self, config, *, fused_prep=False):
+        if self._rope_inv_freq_fused_only and not fused_prep:
+            return None
         if self._rope_inv_freq_key == (float(config.base), int(config.dim)):
             return self._rope_inv_freq
         return None
