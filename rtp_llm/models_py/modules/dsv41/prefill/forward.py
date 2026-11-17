@@ -1070,16 +1070,21 @@ def forward_prefill(
 
     block_tables_by_type = build_block_tables_batched(kv_cache, attn)
 
-    hidden = forward_layers(
-        v4,
-        kv_cache,
-        input_ids,
-        positions,
-        cu_seqlens,
-        block_tables_by_type,
-        attn_inputs=attn,
-        prepare_hidden_fn=prepare_hidden_fn,
-        allow_ced=permits_ced(inputs),
-        expert_token_counts=inputs.expert_token_counts,
-    )  # [T_total, dim]
+    # Decode and target verify have already been dispatched separately. Scope
+    # mHC stream setup to this prefill so variable batches share it across layers.
+    from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import prefill_mhc_stream
+
+    with prefill_mhc_stream(input_ids.device) if input_ids.is_cuda else nullcontext():
+        hidden = forward_layers(
+            v4,
+            kv_cache,
+            input_ids,
+            positions,
+            cu_seqlens,
+            block_tables_by_type,
+            attn_inputs=attn,
+            prepare_hidden_fn=prepare_hidden_fn,
+            allow_ced=permits_ced(inputs),
+            expert_token_counts=inputs.expert_token_counts,
+        )  # [T_total, dim]
     return PyModelOutputs(hidden)

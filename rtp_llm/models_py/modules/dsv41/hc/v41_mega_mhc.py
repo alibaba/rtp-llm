@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import importlib
 import weakref
+from contextlib import contextmanager
+from contextvars import ContextVar
 from functools import lru_cache
 from typing import TYPE_CHECKING, Callable
 
@@ -60,6 +62,53 @@ def _is_dense_tensor(value, shape, dtype, device) -> bool:
 def _stream_key(device: torch.device) -> tuple[int, int]:
     stream = torch.cuda.current_stream(device)
     return stream.device.index, stream.cuda_stream
+
+
+class _PrefillMHCStream:
+    def __init__(self, device: torch.device):
+        self.device = device
+        self.key = _stream_key(device)
+        self.warmed = self.key in _WARMED_STREAMS
+
+
+_PREFILL_STREAM: ContextVar[_PrefillMHCStream | None] = ContextVar(
+    "dsv41_mhc_prefill_stream", default=None
+)
+
+
+@contextmanager
+def prefill_mhc_stream(device: torch.device):
+    """The prefill layer loop submits mHC on its caller's stream.
+
+    Attention and CP side streams restore that stream before returning. Keep
+    standalone calls and externally captured forwards on the checked path.
+    """
+    with torch.cuda.device(device):
+        stream = (
+            None
+            if torch.cuda.is_current_stream_capturing()
+            else _PrefillMHCStream(device)
+        )
+        token = _PREFILL_STREAM.set(stream)
+        try:
+            yield
+        finally:
+            _PREFILL_STREAM.reset(token)
+
+
+def _prefill_stream(device, use_prepared):
+    stream = _PREFILL_STREAM.get() if use_prepared else None
+    return stream if stream is not None and stream.device == device else None
+
+
+def _stream_supports_mhc(device, use_prepared):
+    if _prefill_stream(device, use_prepared) is not None:
+        return True
+    with torch.cuda.device(device):
+        return (
+            not torch.cuda.is_current_stream_capturing()
+            or _stream_key(device) in _WARMED_STREAMS
+        )
 
 
 def _check_units(previous, next_hc, norm, device) -> bool:
@@ -207,11 +256,7 @@ def can_preserve_compact_mhc(
         is None
     ):
         return False
-    with torch.cuda.device(device):
-        return (
-            not torch.cuda.is_current_stream_capturing()
-            or _stream_key(device) in _WARMED_STREAMS
-        )
+    return _stream_supports_mhc(device, use_prepared)
 
 
 def is_supported(
@@ -256,11 +301,7 @@ def is_supported(
         or any(tensor.requires_grad for tensor, _, _ in contracts)
     ):
         return False
-    with torch.cuda.device(device):
-        return (
-            not torch.cuda.is_current_stream_capturing()
-            or _stream_key(device) in _WARMED_STREAMS
-        )
+    return _stream_supports_mhc(device, use_prepared)
 
 
 def try_fused_post_pre(
@@ -357,48 +398,55 @@ def try_fused_post_pre(
             dtype=torch.int32,
         ).T[:execution_tokens]
         quantized = (q, sf)
-    with torch.cuda.device(attn_out.device):
-        capturing = torch.cuda.is_current_stream_capturing()
-        arguments = dict(
-            x=attn_out,
-            residual=residual,
-            shifted_prev_mix=previous_pre,
-            post_mix=post,
-            comb_res_mix=comb,
-            # Let the native TF32 tensor map convert the checkpoint FP32
-            # weights, including its round-to-nearest-even halfway rule.
-            fn=next_hc.fn,
-            mix_scales=next_hc.scale,
-            mix_bases=next_hc.base,
-            hc_mult=4,
-            hc_norm_eps=next_hc.norm_eps,
-            hc_pre_eps=next_hc.hc_eps,
-            hc_post_scale=2.0,
-            sinkhorn_eps=next_hc.hc_eps,
-            num_sinkhorn_iters=next_hc.hc_sinkhorn_iters,
-            rmsnorm_weight=norm.weight,
-            rmsnorm_eps=norm.variance_epsilon,
-            rmsnorm_scale=1.0,
-            new_residual=new_residual,
-            new_prev_mix=new_pre,
-            new_post_mix=new_post,
-            new_comb_res_mix=new_comb,
-            y_bf16=normalized,
+    arguments = dict(
+        x=attn_out,
+        residual=residual,
+        shifted_prev_mix=previous_pre,
+        post_mix=post,
+        comb_res_mix=comb,
+        # Let the native TF32 tensor map convert the checkpoint FP32
+        # weights, including its round-to-nearest-even halfway rule.
+        fn=next_hc.fn,
+        mix_scales=next_hc.scale,
+        mix_bases=next_hc.base,
+        hc_mult=4,
+        hc_norm_eps=next_hc.norm_eps,
+        hc_pre_eps=next_hc.hc_eps,
+        hc_post_scale=2.0,
+        sinkhorn_eps=next_hc.hc_eps,
+        num_sinkhorn_iters=next_hc.hc_sinkhorn_iters,
+        rmsnorm_weight=norm.weight,
+        rmsnorm_eps=norm.variance_epsilon,
+        rmsnorm_scale=1.0,
+        new_residual=new_residual,
+        new_prev_mix=new_pre,
+        new_post_mix=new_post,
+        new_comb_res_mix=new_comb,
+        y_bf16=normalized,
+    )
+    if quantized is not None:
+        arguments.update(y_fp8=q, y_gemm_sf=sf)
+    elif moe_inputs is not None:
+        arguments.update(
+            y_fp8=moe_inputs.x,
+            y_routed_sf=moe_inputs.x_sf,
+            y_shared_sf=moe_inputs.shared_l1_acts_sf,
+            shared_sf_block_m=moe_inputs.block_m,
         )
-        if quantized is not None:
-            arguments.update(y_fp8=q, y_gemm_sf=sf)
-        elif moe_inputs is not None:
-            arguments.update(
-                y_fp8=moe_inputs.x,
-                y_routed_sf=moe_inputs.x_sf,
-                y_shared_sf=moe_inputs.shared_l1_acts_sf,
-                shared_sf_block_m=moe_inputs.block_m,
-            )
+    prefill_stream = _prefill_stream(attn_out.device, use_prepared)
+    if prefill_stream is not None:
         operation(**arguments)
-        if quantized is not None:
-            quantized = (q[:tokens].view(*leading, 5120), sf[:tokens])
-        if not capturing:
-            _WARMED_STREAMS.add(_stream_key(attn_out.device))
+        if not prefill_stream.warmed:
+            _WARMED_STREAMS.add(prefill_stream.key)
+            prefill_stream.warmed = True
+    else:
+        with torch.cuda.device(attn_out.device):
+            capturing = torch.cuda.is_current_stream_capturing()
+            operation(**arguments)
+            if not capturing:
+                _WARMED_STREAMS.add(_stream_key(attn_out.device))
+    if quantized is not None:
+        quantized = (q[:tokens].view(*leading, 5120), sf[:tokens])
     next_hc.pre_mix_out = new_pre[:tokens].view(*leading, 4)
     result = (
         new_residual[:tokens].view(*leading, 4, 5120),
@@ -413,6 +461,7 @@ def try_fused_post_pre(
 __all__ = [
     "can_preserve_compact_mhc",
     "is_supported",
+    "prefill_mhc_stream",
     "prepare_mega_mhc",
     "try_fused_post_pre",
 ]

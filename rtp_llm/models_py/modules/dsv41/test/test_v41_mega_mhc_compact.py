@@ -402,6 +402,86 @@ class CompactMegaMHCContractTest(unittest.TestCase):
             )
             gpu.capability.assert_not_called()
 
+    def test_eager_prefill_checks_the_stream_once_for_variable_inputs(self):
+        device = torch.device("cuda:0")
+        with _blackwell() as gpu, torch.inference_mode():
+            op._WARMED_STREAMS.clear()
+            cases = [_case(shape, device) for shape in ((1,), (13,), (4, 7))]
+            for case in cases:
+                op.prepare_mega_mhc(case["previous"], case["next_hc"], case["norm"])
+            with patch.object(torch.cuda, "device", wraps=nullcontext) as select_device:
+                with op.prefill_mhc_stream(device):
+                    for case in cases:
+                        self.assertIsNotNone(
+                            op.try_fused_post_pre(**case, use_prepared=True)
+                        )
+                    self.assertTrue(
+                        op.can_preserve_compact_mhc(
+                            case["previous"],
+                            case["next_hc"],
+                            case["norm"],
+                            original_tokens=4096,
+                            compact_tokens=32,
+                            use_prepared=True,
+                        )
+                    )
+                select_device.assert_called_once_with(device)
+            gpu.capturing.assert_called_once()
+            gpu.stream.assert_called_once_with(device)
+            self.assertEqual(gpu.operation.call_count, len(cases))
+            self.assertEqual(op._WARMED_STREAMS, {(0, 47)})
+            # A separate caller recording on this warmed stream can now fuse.
+            gpu.capturing.return_value = True
+            self.assertIsNotNone(op.try_fused_post_pre(**case))
+
+    def test_eager_prefill_registers_only_after_a_successful_fused_call(self):
+        device = torch.device("cuda:0")
+        with _blackwell() as gpu, torch.inference_mode():
+            case = _case((3,), device)
+            op.prepare_mega_mhc(case["previous"], case["next_hc"], case["norm"])
+            op._WARMED_STREAMS.clear()
+            with op.prefill_mhc_stream(device):
+                self.assertFalse(op._WARMED_STREAMS)
+                with patch.object(case["previous"], "pre_mix_out", None):
+                    self.assertIsNone(op.try_fused_post_pre(**case, use_prepared=True))
+                gpu.operation.assert_not_called()
+                self.assertFalse(op._WARMED_STREAMS)
+                gpu.operation.side_effect = RuntimeError("backend failure")
+                with self.assertRaisesRegex(RuntimeError, "backend failure"):
+                    op.try_fused_post_pre(**case, use_prepared=True)
+                self.assertFalse(op._WARMED_STREAMS)
+            gpu.capturing.return_value = True
+            self.assertIsNone(op.try_fused_post_pre(**case, use_prepared=True))
+
+    def test_prefill_scope_keeps_capture_and_other_devices_checked(self):
+        device = torch.device("cuda:0")
+        other = torch.device("cuda:1")
+        with _blackwell() as gpu, torch.inference_mode():
+            case = _case((3,), device)
+            op.prepare_mega_mhc(case["previous"], case["next_hc"], case["norm"])
+            gpu.capturing.return_value = True
+            with op.prefill_mhc_stream(device):
+                self.assertIsNotNone(op.try_fused_post_pre(**case, use_prepared=True))
+                gpu.stream.return_value = (0, 48)
+                self.assertIsNone(op.try_fused_post_pre(**case, use_prepared=True))
+
+            # The scope and stream queries for GPU 1 are mocked. Keep tensors
+            # on GPU 0 so this also runs with just one visible CUDA device.
+            op._WARMED_STREAMS.clear()
+            op._WARMED_STREAMS.add((1, 47))
+            gpu.stream.side_effect = lambda d: (d.index, 47)
+            gpu.capturing.return_value = False
+            with op.prefill_mhc_stream(other):
+                gpu.capturing.return_value = True
+                self.assertIsNone(op.try_fused_post_pre(**case, use_prepared=True))
+            gpu.capturing.return_value = False
+            with op.prefill_mhc_stream(device):
+                # A standalone caller still checks the current stream.
+                gpu.capturing.return_value = True
+                self.assertIsNone(op.try_fused_post_pre(**case))
+            gpu.operation.assert_called_once()
+            self.assertEqual(op._WARMED_STREAMS, {(1, 47)})
+
     @torch.inference_mode()
     def test_padding_zero_initialization_and_output_storage_without_base(self):
         for original, rows, leading in (
