@@ -24,6 +24,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config import (
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.jit_warmup import (
     resolve_mega_num_sms,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.parallelism import (
+    get_world_ep_group,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.se_buffer import (
     _get_or_create_mega_se_buf,
     _get_or_create_mega_se_output,
@@ -48,7 +51,6 @@ from .fp8_fp4_base import Fp8Fp4ExecutorBase
 from .mega_moe import (
     MegaMoeExecutor,
     _activate_mega_moe_rank_nvcc_tmpdir,
-    _get_validated_world_ep_group,
     _mega_intermediate_size,
     _mega_output_capacity,
     _restore_tmpdir,
@@ -107,7 +109,7 @@ class MegaMoeSEExecutor(MegaMoeExecutor):
 
         self._setup_shared_expert_weights(layer_weights, deep_gemm, D, inter)
 
-        group = _get_validated_world_ep_group(cfg, dist)
+        group = get_world_ep_group(cfg, dist)
         self._mega_group = group
         self._mega_buf = _get_or_create_mega_se_buf(
             group=group,

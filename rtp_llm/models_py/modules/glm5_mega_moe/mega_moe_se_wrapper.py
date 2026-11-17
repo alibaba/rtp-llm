@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 import torch
+
 from rtp_llm.utils.model_weight import W
 
 from .mega_moe_se import GLM5MegaMoESE
@@ -63,13 +64,6 @@ class MegaMoeSEWrapper(MegaMoeWrapper):
         del w1, s1, w2, s2
         torch.cuda.empty_cache()
         self.mega_moe.maybe_warmup_fused_shared_jit_once()
-
-    def clone_for_cuda_graph(self) -> "MegaMoeSEWrapper":
-        clone = object.__new__(type(self))
-        torch.nn.Module.__init__(clone)
-        clone.mega_moe = self.mega_moe.clone_for_cuda_graph()
-        clone.expert_num = self.expert_num
-        return clone
 
     def forward(
         self,

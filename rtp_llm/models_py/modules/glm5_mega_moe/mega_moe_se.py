@@ -12,6 +12,10 @@ from typing import Optional
 
 import torch
 
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.parallelism import (
+    get_world_ep_group,
+)
+
 from .input_packer_se import get_mega_moe_se_input_packer
 from .jit_warmup_se import (
     clamp_token_counts,
@@ -62,17 +66,13 @@ class GLM5MegaMoESE(GLM5MegaMoE):
         import torch.distributed as dist
 
         cfg = self.cfg
-        if not dist.is_initialized():
-            raise RuntimeError(
-                "GLM5 MegaMoE SE requires torch.distributed to be initialized"
-            )
         if cfg.n_activated_experts > 31:
             raise ValueError(
                 "mega_moe_se requires topk <= 31 because shared output uses "
                 f"one combine slot, got topk={cfg.n_activated_experts}"
             )
 
-        self._mega_group = dist.group.WORLD
+        self._mega_group = get_world_ep_group(cfg, dist)
         self._mega_buf = get_or_create_mega_moe_se_buf(
             group=self._mega_group,
             num_experts=cfg.n_routed_experts,

@@ -107,6 +107,24 @@ def _get_or_create_final_out(
     return cached
 
 
+def synchronized_moe_chunk_tokens(tokens: int, device: torch.device, *, group) -> int:
+    """Use the stack plan or synchronize before any rank-local chunk decision.
+
+    CUDA graph and decode callers must fit one invocation in their static
+    capacity; graph capture cannot perform a host scalar read.
+    """
+    if not dist.is_available() or not dist.is_initialized():
+        return tokens
+    planned_tokens = _SYNCHRONIZED_CHUNK_TOKENS.get()
+    if planned_tokens is not None:
+        return planned_tokens
+    if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+        return tokens
+    token_count = torch.tensor(tokens, dtype=torch.int64, device=device)
+    dist.all_reduce(token_count, op=dist.ReduceOp.MAX, group=group)
+    return int(token_count.item())
+
+
 @contextmanager
 def synchronized_moe_chunk_plan(
     layers: Iterable[nn.Module], tokens: int, device: torch.device
@@ -257,14 +275,7 @@ class ChunkedFp8Fp4MoeLayer(nn.Module):
             or not dist.is_initialized()
         ):
             return tokens
-        planned_tokens = _SYNCHRONIZED_CHUNK_TOKENS.get()
-        if planned_tokens is not None:
-            return planned_tokens
-        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
-            return tokens
-        token_count = torch.tensor(tokens, dtype=torch.int64, device=device)
-        dist.all_reduce(token_count, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
-        return int(token_count.item())
+        return synchronized_moe_chunk_tokens(tokens, device, group=dist.group.WORLD)
 
     def _observer(self, positions: Optional[torch.Tensor]):
         return self._observer_factory(positions) if self._observer_factory else None

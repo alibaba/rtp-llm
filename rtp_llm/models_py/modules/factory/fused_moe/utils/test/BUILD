@@ -7,6 +7,17 @@ _CUDA13_ONLY = select({
 })
 
 py_test(
+    name = "glm_mega_moe_contract_test",
+    srcs = ["glm_mega_moe_contract_test.py"],
+    tags = ["glm53_contract"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+    target_compatible_with = _CUDA13_ONLY,
+)
+
+py_test(
     name = "timeline_test",
     srcs = ["timeline_test.py"],
     deps = [

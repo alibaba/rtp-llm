@@ -40,6 +40,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.jit_warmup impor
     parse_mega_moe_jit_warmup_tokens_override,
     resolve_mega_num_sms,
 )
+from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.parallelism import (
+    get_world_ep_group,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.warmup_sync import (
     sync_cuda_graph_warmup_ranks,
 )
@@ -134,21 +137,6 @@ def _restore_tmpdir(previous_tmpdir: str | None) -> None:
         os.environ["TMPDIR"] = previous_tmpdir
 
 
-def _get_validated_world_ep_group(cfg, dist):
-    if not dist.is_initialized():
-        raise RuntimeError("MegaMoE requires torch.distributed to be initialized")
-    group = dist.group.WORLD
-    actual_size = dist.get_world_size(group)
-    actual_rank = dist.get_rank(group)
-    if actual_size != cfg.ep_size or actual_rank != cfg.ep_rank:
-        raise RuntimeError(
-            "MegaMoE currently requires the EP group to equal WORLD: "
-            f"runtime WORLD is rank {actual_rank}/{actual_size}, but "
-            f"configuration EP is rank {cfg.ep_rank}/{cfg.ep_size}"
-        )
-    return group
-
-
 class MegaMoeExecutor(Fp8Fp4ExecutorBase):
     execute_empty_inputs = True
 
@@ -184,7 +172,7 @@ class MegaMoeExecutor(Fp8Fp4ExecutorBase):
         # fed into the MoE; bounded from ``max_tokens_per_rank`` (plumbed
         # from the runtime token budget). The library aligns this internally
         # using ``get_token_alignment_for_mega_moe()``.
-        group = _get_validated_world_ep_group(cfg, dist)
+        group = get_world_ep_group(cfg, dist)
         self._mega_group = group
         # Symm buffer is single-layer staging — share one across all
         # MoE layers via the module-level cache (see _get_or_create_mega_buf).

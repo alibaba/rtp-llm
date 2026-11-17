@@ -3,6 +3,7 @@
 from typing import Any, Dict, Optional
 
 import torch
+
 from rtp_llm.utils.model_weight import W
 
 from .mega_moe_fp8_se import GLM5MegaMoEFP8SE
@@ -59,15 +60,10 @@ class MegaMoeFp8SEWrapper(MegaMoeWrapper):
         torch.cuda.empty_cache()
         self.mega_moe.maybe_warmup_fused_shared_jit_once()
 
-    def clone_for_cuda_graph(self) -> "MegaMoeFp8SEWrapper":
-        clone = object.__new__(type(self))
-        torch.nn.Module.__init__(clone)
-        clone.mega_moe = self.mega_moe.clone_for_cuda_graph()
-        clone.expert_num = self.expert_num
-        return clone
-
     def prepare_fused_mhc_inputs(self, hidden_states):
         """Expose this graph clone's own activation/routing destinations."""
+        if not self._is_decode_role:
+            return None
         import deep_gemm
 
         tokens = hidden_states.shape[0]
@@ -103,7 +99,8 @@ class MegaMoeFp8SEWrapper(MegaMoeWrapper):
 
     def forward_prepacked(self, hidden_states, metadata):
         if (
-            metadata["owner"] is not self
+            not self._is_decode_role
+            or metadata["owner"] is not self
             or metadata["tokens"] != hidden_states.shape[0]
         ):
             raise ValueError(
