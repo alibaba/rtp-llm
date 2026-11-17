@@ -89,7 +89,7 @@ TEST_F(Glm5PackedVerifyPrepareTest, UnsupportedMetadataLeavesOutputUntouched) {
 
 TEST_F(Glm5PackedVerifyPrepareTest, CapsProduceOrderedRowsAndAllConsumers) {
     const auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
-    for (int batch : {1, 3, 129, 257, 1024}) {
+    for (int batch : {1, 3, 129, 257, 1024, 1025, 2049, 8193}) {
         auto caps_host = torch::empty({batch}, torch::kInt32);
         std::vector<int64_t> expected_rows;
         for (int request = 0; request < batch; ++request) {
@@ -145,6 +145,53 @@ TEST_F(Glm5PackedVerifyPrepareTest, CapsGraphReplayConsumesChangedMetadata) {
     }
 }
 
+TEST_F(Glm5PackedVerifyPrepareTest, LargeCapsGraphReplay) {
+    auto stream = at::cuda::getStreamFromPool();
+    c10::cuda::CUDAStreamGuard guard(stream);
+    const auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt64);
+    const int batch = 2049;
+    auto caps = torch::arange(batch, options).remainder(4);
+    auto dense = torch::arange(batch * 4, options);
+    const int64_t total = (caps + 1).sum().item<int64_t>();
+    Glm5PackedVerifyInputs output;
+    ASSERT_TRUE(tryGlm5PackedVerifyPrepareFromCaps(dense, caps, total, {}, {}, output, stream.stream()));
+    ASSERT_EQ(cudaStreamSynchronize(stream.stream()), cudaSuccess);
+    at::cuda::CUDAGraph graph;
+    graph.capture_begin();
+    ASSERT_TRUE(tryGlm5PackedVerifyPrepareFromCaps(dense, caps, total, {}, {}, output, stream.stream()));
+    graph.capture_end();
+    for (int replay = 0; replay < 3; ++replay) {
+        caps.copy_(caps.roll(17));
+        dense.add_(100);
+        graph.replay();
+        auto rows = torch::arange(batch * 4, options);
+        rows = rows.masked_select(rows.remainder(4) <= caps.repeat_interleave(4));
+        EXPECT_TRUE(torch::equal(output.rows, rows));
+        EXPECT_TRUE(torch::equal(output.tokens, dense.index_select(0, rows)));
+        EXPECT_TRUE(torch::equal(output.lengths, caps + 1));
+        EXPECT_TRUE(torch::equal(output.lm_output_indexes, torch::arange(total, options)));
+    }
+}
+
+TEST_F(Glm5PackedVerifyPrepareTest, LargeInvalidCapsAssertInIsolatedProcess) {
+    const auto previous_style = ::testing::FLAGS_gtest_death_test_style;
+    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+    for (int invalid : {-1, 0, 4}) {
+        ASSERT_EXIT({
+            const auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+            auto dense = torch::arange(4100, options);
+            auto caps = torch::zeros({1025}, options);
+            caps.index_put_({1024}, invalid);
+            Glm5PackedVerifyInputs output;
+            auto stream = at::cuda::getCurrentCUDAStream().stream();
+            const int64_t total = invalid == 0 ? 1026 : 1025;
+            if (!tryGlm5PackedVerifyPrepareFromCaps(dense, caps, total, {}, {}, output, stream)) std::_Exit(2);
+            std::_Exit(cudaStreamSynchronize(stream) == cudaErrorAssert ? 0 : 1);
+        }, ::testing::ExitedWithCode(0), "");
+    }
+    ::testing::FLAGS_gtest_death_test_style = previous_style;
+}
+
 TEST_F(Glm5PackedVerifyPrepareTest, CapsUnsupportedMetadataPreservesFallbackOutput) {
     const auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
     auto dense = torch::arange(12, options);
@@ -155,8 +202,6 @@ TEST_F(Glm5PackedVerifyPrepareTest, CapsUnsupportedMetadataPreservesFallbackOutp
     EXPECT_FALSE(tryGlm5PackedVerifyPrepareFromCaps(dense, caps, 2, {}, {}, output, stream));
     EXPECT_FALSE(tryGlm5PackedVerifyPrepareFromCaps(dense, caps, 13, {}, {}, output, stream));
     EXPECT_FALSE(tryGlm5PackedVerifyPrepareFromCaps(dense.to(torch::kFloat32), caps, 6, {}, {}, output, stream));
-    EXPECT_FALSE(tryGlm5PackedVerifyPrepareFromCaps(torch::zeros({4100}, options), torch::zeros({1025}, options),
-                                                   1025, {}, {}, output, stream));
     EXPECT_EQ(output.tokens.data_ptr(), dense.data_ptr());
     EXPECT_FALSE(output.rows.defined());
 }

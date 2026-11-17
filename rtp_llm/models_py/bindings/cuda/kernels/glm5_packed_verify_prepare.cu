@@ -76,13 +76,15 @@ __global__ void packedVerifyFromCaps(IntegerVector tokens, IntegerVector positio
     // One CTA computes the batch prefix once, then directly writes every
     // admitted row. The host guard bounds batch to this shared workspace.
     __shared__ int64_t ends[1024];
+    __shared__ int invalid;
     const int tid = threadIdx.x;
+    if (tid == 0) invalid = 0;
+    __syncthreads();
     for (int request = tid; request < batch; request += blockDim.x) {
         const int64_t cap = readInteger(caps.input, request, caps.wide);
         const bool valid = cap >= 0 && cap < dense_stride;
-        CUDA_KERNEL_ASSERT(valid);
+        if (!valid) atomicExch(&invalid, 1);
         ends[request] = valid ? cap + 1 : 0;
-        if (valid) writeInteger(caps.output, request, cap + 1, caps.wide);
     }
     __syncthreads();
     for (int offset = 1; offset < batch; offset *= 2) {
@@ -101,8 +103,12 @@ __global__ void packedVerifyFromCaps(IntegerVector tokens, IntegerVector positio
         }
         __syncthreads();
     }
-    CUDA_KERNEL_ASSERT(ends[batch - 1] == packed_count);
-    if (ends[batch - 1] != packed_count) return;
+    const bool valid = !invalid && ends[batch - 1] == packed_count;
+    CUDA_KERNEL_ASSERT(valid);
+    if (!valid) return;
+    for (int request = tid; request < batch; request += blockDim.x) {
+        writeInteger(caps.output, request, ends[request] - (request == 0 ? 0 : ends[request - 1]), caps.wide);
+    }
     for (int64_t dense = tid; dense < batch * dense_stride; dense += blockDim.x) {
         const int64_t request = dense / dense_stride;
         const int64_t position = dense % dense_stride;
@@ -118,6 +124,60 @@ __global__ void packedVerifyFromCaps(IntegerVector tokens, IntegerVector positio
         if (types.input) {
             writeInteger(types.output, packed, readInteger(types.input, dense, types.wide), types.wide);
         }
+    }
+}
+
+// Tile the prefix so the workspace grows with batch, not shared-memory capacity.
+__global__ void largeCapsPrefix(IntegerVector caps, int64_t* ends, int32_t* status,
+                                int64_t batch, int64_t stride, int64_t total) {
+    __shared__ int64_t tile[256];
+    __shared__ int invalid;
+    const int tid = threadIdx.x;
+    if (tid == 0) invalid = 0;
+    __syncthreads();
+    int64_t carry = 0;
+    for (int64_t base = 0; base < batch; base += 256) {
+        const int64_t row = base + tid;
+        const int64_t cap = row < batch ? readInteger(caps.input, row, caps.wide) : 0;
+        const bool valid = row >= batch || (cap >= 0 && cap < stride);
+        if (!valid) atomicExch(&invalid, 1);
+        tile[tid] = row < batch && valid ? cap + 1 : 0;
+        __syncthreads();
+        for (int offset = 1; offset < 256; offset *= 2) {
+            const int64_t value = tile[tid] + (tid >= offset ? tile[tid - offset] : 0);
+            __syncthreads();
+            tile[tid] = value;
+            __syncthreads();
+        }
+        if (row < batch) ends[row] = carry + tile[tid];
+        carry += tile[255];
+        __syncthreads();
+    }
+    if (tid == 0) {
+        const bool valid = !invalid && carry == total;
+        status[0] = valid ? 1 : 0;
+        CUDA_KERNEL_ASSERT(valid);
+    }
+}
+
+__global__ void largeCapsPack(IntegerVector tokens, IntegerVector positions, IntegerVector types,
+                              IntegerVector caps, const int64_t* ends, const int32_t* status,
+                              int64_t* rows, void* indexes, int64_t batch, int64_t stride) {
+    if (status[0] != 1) return;
+    for (int64_t dense = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         dense < batch * stride; dense += static_cast<int64_t>(gridDim.x) * blockDim.x) {
+        const int64_t request = dense / stride;
+        const int64_t position = dense % stride;
+        const int64_t begin = request == 0 ? 0 : ends[request - 1];
+        const int64_t length = ends[request] - begin;
+        if (position == 0) writeInteger(caps.output, request, length, caps.wide);
+        if (position >= length) continue;
+        const int64_t packed = begin + position;
+        rows[packed] = dense;
+        writeInteger(indexes, packed, packed, caps.wide);
+        writeInteger(tokens.output, packed, readInteger(tokens.input, dense, tokens.wide), tokens.wide);
+        if (positions.input) writeInteger(positions.output, packed, readInteger(positions.input, dense, positions.wide), positions.wide);
+        if (types.input) writeInteger(types.output, packed, readInteger(types.input, dense, types.wide), types.wide);
     }
 }
 
@@ -194,8 +254,8 @@ bool tryGlm5PackedVerifyPrepareFromCaps(const torch::Tensor& dense_tokens,
     if (!supportedVector(dense_tokens, device) || !supportedVector(caps, device)) return false;
     const int64_t batch = caps.numel();
     const int64_t dense_count = dense_tokens.numel();
-    // Bound the single-CTA shared prefix workspace; larger batches retain the general path.
-    if (batch <= 0 || batch > 1024 || dense_count % batch != 0 || packed_count < batch
+    // Small batches retain the original single-CTA producer.
+    if (batch <= 0 || dense_count % batch != 0 || packed_count < batch
         || packed_count > dense_count || packed_count > std::numeric_limits<int32_t>::max()) return false;
     for (const auto& optional : {position_ids, token_type_ids}) {
         if (optional.defined() && (!supportedVector(optional, device) || optional.numel() != dense_count)) return false;
@@ -212,11 +272,26 @@ bool tryGlm5PackedVerifyPrepareFromCaps(const torch::Tensor& dense_tokens,
     for (const auto& source : {dense_tokens, caps, position_ids, token_type_ids}) {
         if (source.defined()) c10::cuda::CUDACachingAllocator::recordStream(source.storage().data_ptr(), cuda_stream);
     }
-    packedVerifyFromCaps<<<1, 256, 0, stream>>>(
-        vectorPair(dense_tokens, prepared.tokens), vectorPair(position_ids, prepared.position_ids),
-        vectorPair(token_type_ids, prepared.token_type_ids), vectorPair(caps, prepared.lengths),
-        prepared.rows.data_ptr<int64_t>(), prepared.lm_output_indexes.data_ptr(), packed_count, batch, dense_count / batch);
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    if (batch <= 1024) {
+        packedVerifyFromCaps<<<1, 256, 0, stream>>>(
+            vectorPair(dense_tokens, prepared.tokens), vectorPair(position_ids, prepared.position_ids),
+            vectorPair(token_type_ids, prepared.token_type_ids), vectorPair(caps, prepared.lengths),
+            prepared.rows.data_ptr<int64_t>(), prepared.lm_output_indexes.data_ptr(), packed_count, batch, dense_count / batch);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+    } else {
+        auto ends = torch::empty({batch}, caps.options().dtype(torch::kInt64));
+        auto status = torch::empty({1}, caps.options().dtype(torch::kInt32));
+        largeCapsPrefix<<<1, 256, 0, stream>>>(vectorPair(caps, prepared.lengths), ends.data_ptr<int64_t>(),
+                                              status.data_ptr<int32_t>(), batch, dense_count / batch, packed_count);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+        const int blocks = static_cast<int>(std::min<int64_t>((dense_count - 1) / 256 + 1, 4096));
+        largeCapsPack<<<blocks, 256, 0, stream>>>(
+            vectorPair(dense_tokens, prepared.tokens), vectorPair(position_ids, prepared.position_ids),
+            vectorPair(token_type_ids, prepared.token_type_ids), vectorPair(caps, prepared.lengths),
+            ends.data_ptr<int64_t>(), status.data_ptr<int32_t>(), prepared.rows.data_ptr<int64_t>(),
+            prepared.lm_output_indexes.data_ptr(), batch, dense_count / batch);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
     output = std::move(prepared);
     return true;
 }
