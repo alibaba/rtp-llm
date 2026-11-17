@@ -1,6 +1,7 @@
 """Model-owned DSA scratch; target/draft and mutable Graph metadata stay isolated."""
 
 import math
+from dataclasses import dataclass
 from functools import lru_cache
 
 import torch
@@ -157,12 +158,32 @@ class DsaPhaseWorkspace:
         self.arenas.clear()
 
 
+@dataclass(frozen=True)
+class ExternalActivationBudget:
+    """Model-supplied live bytes for global and rank-local token rows."""
+
+    bytes_per_token: int
+    indexer_bytes_per_token: int = 0
+    local_bytes_per_token: int = 0
+    local_token_divisor: int = 1
+
+    def bytes_for(self, tokens: int, *, indexer: bool = False) -> int:
+        per_token = self.bytes_per_token
+        if indexer:
+            per_token += self.indexer_bytes_per_token
+        return (
+            tokens * per_token
+            + (tokens // self.local_token_divisor) * self.local_bytes_per_token
+        )
+
+
 class DsaWorkspaceOwner:
     """One owner per model, shared across its serial DSA layers and prepares."""
 
     def __init__(
         self,
         *,
+        external_activation_budget: ExternalActivationBudget,
         index_heads=32,
         index_dim=128,
         indexer_use_fp8=False,
@@ -172,12 +193,8 @@ class DsaWorkspaceOwner:
         latent_dim=512,
         suffix_dim=64,
         value_dim=128,
-        hidden_dim=0,
-        q_rank=0,
-        nope_dim=128,
         tp_size=1,
         device="cuda",
-        attn_res_blocks=0,
         indexer_budget_bytes=None,
         sfa_budget_bytes=None,
         prefill_kv_workspace_budget_bytes=8 * 1024**3,
@@ -207,12 +224,8 @@ class DsaWorkspaceOwner:
         self.indexer_score = None
         self.heads, self.latent_dim = heads, latent_dim
         self.suffix_dim, self.value_dim = suffix_dim, value_dim
-        self.hidden_dim, self.q_rank, self.tp_size = hidden_dim, q_rank, tp_size
-        self.query_heads = heads // tp_size
-        self.nope_dim = nope_dim
-        if not isinstance(attn_res_blocks, int) or attn_res_blocks < 0:
-            raise ValueError("DSA AttnRes block capacity must be a nonnegative integer")
-        self.attn_res_blocks = attn_res_blocks
+        self.tp_size = tp_size
+        self.external_activation_budget = external_activation_budget
         self.device = torch.device(device)
         from rtp_llm.models_py.modules.dsv4.indexer_topk import (
             native_exact_topk_enabled,
@@ -272,58 +285,11 @@ class DsaWorkspaceOwner:
                 phase.release()
 
     def external_projection_bytes(self, tokens, *, indexer=False):
-        if self.routing_plan is not None:
-            # Charge complete local projections before planning history KV
-            # chunks. Residual, normalized H, O and reverse destination are
-            # separate from the persistent published source.
-            rows = tokens
-            full = rows * (
-                4 * self.hidden_dim * 2
-                + 2 * (self.latent_dim + self.suffix_dim) * 2
-                + self.heads * (self.nope_dim + self.suffix_dim) * 2
-                + 2 * self.heads * self.value_dim * 2
-                + self.index_dim * 2
-                + self.index_heads * (self.index_dim + 4)
-            )
-            # Full receive activation and its FP8 encoding if needed, the
-            # latent columns retained by Gate, and raw BF16 Indexer Q.
-            temporary = rows * (
-                3 * self.hidden_dim
-                + 4 * ((self.hidden_dim + 127) // 128)
-                + 2 * self.q_rank * 2
-                + self.index_heads * (2 * self.index_dim + 8)
-            )
-            anchors = rows * self.attn_res_blocks * self.hidden_dim * 2
-            # TopK running arrays belong to Indexer phase specifications;
-            # SFA's incoming TopK and absorbed/padded Q belong to its execution
-            # planner. Shared projection weights are model storage, not scratch.
-            return full + temporary + anchors + self.layout_bytes + self.route_bytes
-        # Gathered hidden (or subsequent O-projection), fused QKV/gate, Q
-        # latent/norm and unabsorbed Q survive the phase boundary. Include
-        # them before choosing KV capacity; they are never Q-chunked here.
-        local_heads = (
-            self.heads if self.prefill_query_cp else self.heads // self.tp_size
+        return (
+            self.external_activation_budget.bytes_for(tokens, indexer=indexer)
+            + self.layout_bytes
+            + self.route_bytes
         )
-        features = (
-            self.hidden_dim
-            + 2 * self.q_rank
-            + self.latent_dim
-            + self.suffix_dim
-            + local_heads * self.value_dim
-            + self.query_heads * (self.nope_dim + self.suffix_dim)
-        )
-        if indexer:
-            features += (
-                self.index_heads * self.index_dim
-                + self.index_dim
-                + 4 * self.index_heads
-            )
-        # The decoder allocates every AttnRes anchor before its layer loop.
-        # These model-owned BF16 SP rows stay live across both DSA phases;
-        # 93-layer capacity must not reuse the four-layer activation estimate.
-        local_rows = tokens if self.prefill_query_cp else tokens // self.tp_size
-        anchors = local_rows * self.attn_res_blocks * self.hidden_dim * 2
-        return tokens * features * 2 + anchors + self.layout_bytes + self.route_bytes
 
     def bind_value_weights(self, layers):
         from rtp_llm.models_py.distributed.collective_torch import Group, all_gather

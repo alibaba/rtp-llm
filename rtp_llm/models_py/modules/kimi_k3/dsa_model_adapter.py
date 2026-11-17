@@ -13,6 +13,66 @@ from rtp_llm.models_py.model_desc.block_map import (
 from rtp_llm.ops import HybridAttentionType, KvCacheDataType, RoleType
 
 
+def _dsa_activation_budgets(config, parallelism, *, prefill_query_cp):
+    """Keep decoder projection and AttnRes lifetimes at the model boundary."""
+    from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.dsa_kv_workspace import (
+        ExternalActivationBudget,
+    )
+
+    dsa, a = config.k3_runtime_config.dsa, config.attn_config
+    hidden = config.hidden_size
+    tp = parallelism.tp_size
+    block_size = config.k3_runtime_config.attn_res_block_size
+    blocks = (config.num_layers + block_size - 1) // block_size if block_size else 0
+    if not isinstance(blocks, int) or blocks < 0:
+        raise ValueError("DSA AttnRes block capacity must be a nonnegative integer")
+    anchor_bytes = blocks * hidden * 2
+    local_heads = a.head_num if prefill_query_cp else a.head_num // tp
+    query_heads = (
+        a.head_num
+        if prefill_query_cp or parallelism.role_type == RoleType.DECODE
+        else a.head_num // tp
+    )
+    # Full projections survive KV chunks; only AttnRes anchors use SP rows.
+    ordinary = ExternalActivationBudget(
+        bytes_per_token=2
+        * (
+            hidden
+            + 2 * a.q_lora_rank
+            + a.kv_lora_rank
+            + a.rope_head_dim
+            + local_heads * a.v_head_dim
+            + query_heads * (a.nope_head_dim + a.rope_head_dim)
+        ),
+        indexer_bytes_per_token=2
+        * (
+            dsa.index_num_heads * dsa.index_head_dim
+            + dsa.index_head_dim
+            + 4 * dsa.index_num_heads
+        ),
+        local_bytes_per_token=anchor_bytes,
+        local_token_divisor=1 if prefill_query_cp else tp,
+    )
+    # Natural rows retain residual/norm/O/restore, QKV/gate projections,
+    # receive/FP8 encoding temporaries and every decoder AttnRes anchor.
+    natural = ExternalActivationBudget(
+        bytes_per_token=(
+            4 * hidden * 2
+            + 2 * (a.kv_lora_rank + a.rope_head_dim) * 2
+            + a.head_num * (a.nope_head_dim + a.rope_head_dim) * 2
+            + 2 * a.head_num * a.v_head_dim * 2
+            + dsa.index_head_dim * 2
+            + dsa.index_num_heads * (dsa.index_head_dim + 4)
+            + 3 * hidden
+            + 4 * ((hidden + 127) // 128)
+            + 2 * a.q_lora_rank * 2
+            + dsa.index_num_heads * (2 * dsa.index_head_dim + 8)
+            + anchor_bytes
+        )
+    )
+    return ordinary, natural
+
+
 class KimiK31ModelAdapter:
     """No decoder loop: K3 keeps its shared layers, MoE and output handling."""
 
@@ -42,9 +102,17 @@ class KimiK31ModelAdapter:
 
         config, parallelism = self.config, self.parallelism_config
         dsa, a = config.k3_runtime_config.dsa, config.attn_config
-        block_size = config.k3_runtime_config.attn_res_block_size
-        blocks = (config.num_layers + block_size - 1) // block_size if block_size else 0
+        cp = parallelism.prefill_cp_config
+        prefill_query_cp = (
+            parallelism.role_type == RoleType.PREFILL
+            and cp.is_enabled()
+            and getattr(cp, "preserve_tp_layout", False)
+        )
+        self._dsa_activation_budgets = _dsa_activation_budgets(
+            config, parallelism, prefill_query_cp=prefill_query_cp
+        )
         owner = DsaWorkspaceOwner(
+            external_activation_budget=self._dsa_activation_budgets[0],
             prefill_kv_workspace_budget_bytes=config.prefill_kv_workspace_budget_bytes,
             index_heads=dsa.index_num_heads,
             index_dim=dsa.index_head_dim,
@@ -55,22 +123,11 @@ class KimiK31ModelAdapter:
             latent_dim=a.kv_lora_rank,
             suffix_dim=a.rope_head_dim,
             value_dim=a.v_head_dim,
-            hidden_dim=config.hidden_size,
-            q_rank=a.q_lora_rank,
-            nope_dim=a.nope_head_dim,
-            attn_res_blocks=blocks,
             tp_size=parallelism.tp_size,
             device=torch.device("cuda", torch.cuda.current_device()),
         )
         owner.mega_a2a = owner.mega_a2a and parallelism.role_type == RoleType.DECODE
-        cp = parallelism.prefill_cp_config
-        owner.prefill_query_cp = (
-            parallelism.role_type == RoleType.PREFILL
-            and cp.is_enabled()
-            and getattr(cp, "preserve_tp_layout", False)
-        )
-        if owner.prefill_query_cp or parallelism.role_type == RoleType.DECODE:
-            owner.query_heads = owner.heads
+        owner.prefill_query_cp = prefill_query_cp
         self.dsa_workspace = owner
         self.dsa_workspace.graph_max_requests = self._max_generate_batch_size
         self.dsa_workspace.graph_max_queries = max(
@@ -292,6 +349,9 @@ class KimiK31ModelAdapter:
             self._outer_layout if self._outer_layout is not None else self._query_layout
         )
         owner.routing_plan = self._routing_plan
+        owner.external_activation_budget = self._dsa_activation_budgets[
+            int(self._routing_plan is not None)
+        ]
         owner.row_exchange = self._row_exchange
         # Storage identity, rather than tensor identity, counts views only once.
         storages = {}

@@ -98,6 +98,7 @@ class DsaKVExecution:
             owner.native_exact_topk,
             owner.indexer_use_fp8,
             owner.sfa_use_fp8,
+            owner.external_activation_budget,
             owner.layout_bytes,
             owner.routing_plan is not None,
             owner.route_bytes,
