@@ -6,7 +6,9 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/barex_rdma/proto/rdma_service.pb.h"
 #include "autil/LoopThread.h"
 #include "autil/LockFreeThreadPool.h"
+#include <condition_variable>
 #include <list>
+#include <thread>
 #include <mutex>
 #include <memory>
 #include <atomic>
@@ -29,8 +31,8 @@ public:
     ~RdmaTransferService();
 
 public:
-    /// @brief 启动 wait-check 轮询线程和 worker 线程池
-    /// @param wait_check_interval_us 轮询间隔(微秒)
+    /// @brief Start the event-driven matcher and transfer workers.
+    /// @param wait_check_interval_us Retained for compatibility with existing callers.
     /// @param worker_thread_count 工作线程数
     /// @param per_connection_block_count 每个connection最多传输的block数，默认UINT64_MAX表示不限制
     bool init(int64_t wait_check_interval_us = 1000,
@@ -45,7 +47,8 @@ public:
 
 private:
     void transferViaRdma(const std::shared_ptr<RdmaTaskContext>& ctx);
-    void waitCheckProc();
+    void waitForTasks();
+    uint64_t matchWaitingTasks();
     void transferDeadlineCheckProc();
 
 private:
@@ -60,7 +63,16 @@ private:
 
     std::mutex                                   wait_tasks_mutex_;
     std::list<std::shared_ptr<RdmaTaskContext>>  wait_tasks_;
-    autil::LoopThreadPtr                         wait_check_loop_thread_;
+    struct MatchWakeup {
+        std::mutex mutex;
+        std::condition_variable cv;
+        bool changed{false};
+        bool stopping{false};
+
+        void notify();
+    };
+    std::shared_ptr<MatchWakeup> match_wakeup_{std::make_shared<MatchWakeup>()};
+    std::thread match_thread_;
 
     struct TransferResources {
         std::atomic<bool>                    physical_done{false};

@@ -54,6 +54,10 @@ public:
     /// Acquire one physical receive slot. Call completion once for each acquired slot.
     bool startTransfer();
 
+    // Observe cancellation while waiting for staging, before taking a physical receive slot.
+    size_t addCancelCallback(std::function<void()> callback);
+    void removeCancelCallback(size_t id);
+
     /// @brief 强制终止任务，无论当前状态如何（仅供 P2P connector worker 超时安全网使用）。
     void forceCancel() override;
 
@@ -82,6 +86,8 @@ private:
     mutable TransferErrorCode error_code_       = TransferErrorCode::OK;
     mutable std::string       error_msg_;
     std::function<void()>     done_callback_;
+    std::map<size_t, std::function<void()>> cancel_callbacks_;
+    size_t next_cancel_callback_id_{1};
 };
 
 /// @brief 内部 task store，被 TcpKVCacheReceiver / RdmaKVCacheReceiver 私有持有
@@ -103,12 +109,14 @@ public:
     std::shared_ptr<TransferTask> stealTask(const std::string& unique_key);
 
     int64_t getTaskCount() const;
+    void setTaskAddedCallback(std::function<void()> callback);
 
 private:
     mutable std::shared_mutex                            mutex_;
     std::map<std::string, std::shared_ptr<TransferTask>> task_map_;
     std::map<std::string, int64_t> completed_batches_;
     std::multimap<int64_t, std::string> completed_expiry_;
+    std::function<void()> task_added_callback_;
 };
 
 }  // namespace transfer

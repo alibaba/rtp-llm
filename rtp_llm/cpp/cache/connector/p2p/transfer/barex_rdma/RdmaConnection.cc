@@ -427,6 +427,10 @@ void RdmaConnection::sendReadRequest(
     }
     // The paired Barex backend returns synchronous errors before accepting
     // work. Accepted batches report their result only through the drain callback.
+    if (deadline_ms > 0 && static_cast<uint64_t>(currentTimeMs()) >= deadline_ms) {
+        callback(TransferErrorCode::TIMEOUT, readContext() + "RDMA read deadline expired before submission");
+        return;
+    }
     const auto result = channel->ReadBatch(mems, rdma_callback, false);
     if (result != ::accl::barex::BAREX_SUCCESS) {
         callback(TransferErrorCode::RDMA_FAILED,

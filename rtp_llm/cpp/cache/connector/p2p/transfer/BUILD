@@ -73,11 +73,22 @@ cc_library(
 )
 
 cc_library(
+    name = "tcp_backend_factory",
+    hdrs = ["TcpBackendFactory.h"],
+    srcs = ["TcpBackendFactory.cc"],
+    deps = [
+        ":transfer_backend_factory_interface",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_backend",
+        "//rtp_llm/cpp/utils:core_utils",
+    ],
+)
+
+cc_library(
     name = "transfer_backend_base_impl",
     srcs = ["TransferBackendFactory.cc"],
     deps = [
         ":transfer_backend_factory_interface",
-        "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_backend",
+        ":tcp_backend_factory",
         "//rtp_llm/cpp/utils:core_utils",
     ],
     visibility = ["//visibility:public"],
@@ -101,7 +112,7 @@ cc_library(
         "//:using_rdma": [
             ":transfer_backend_factory_interface",
             "//rtp_llm/cpp/cache/connector/p2p/transfer/barex_rdma:rdma_interface",
-            "//rtp_llm/cpp/cache/connector/p2p/transfer/tcp:tcp_backend",
+            ":tcp_backend_factory",
             "//rtp_llm/cpp/cache/connector/p2p/transfer/barex_rdma:rdma_backend",
             "//rtp_llm/cpp/utils:core_utils",
         ],

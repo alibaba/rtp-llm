@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostStagingBlockPool.h"
 
+#include <algorithm>
 #include <exception>
 #include <mutex>
 #include <optional>
@@ -31,9 +32,9 @@ std::optional<HostStagingBlockPool::HostStagingBlockBatch> HostStagingBlockPool:
     return allocateBatchLocked(count);
 }
 
-void HostStagingBlockPool::requestBatch(size_t count, Clock::time_point deadline, BatchReadyCallback callback) {
+size_t HostStagingBlockPool::requestBatch(size_t count, Clock::time_point deadline, BatchReadyCallback callback) {
     if (!callback) {
-        return;
+        return 0;
     }
 
     std::optional<HostStagingBlockBatch> immediate_result;
@@ -44,11 +45,31 @@ void HostStagingBlockPool::requestBatch(size_t count, Clock::time_point deadline
         } else if (batch_waiters_.empty() && free_id_list_.size() >= count) {
             immediate_result.emplace(allocateBatchLocked(count));
         } else {
-            batch_waiters_.push_back(BatchWaiter{count, deadline, std::move(callback)});
-            return;
+            const auto id = next_waiter_id_++;
+            batch_waiters_.push_back(BatchWaiter{id, count, deadline, std::move(callback)});
+            return id;
         }
     }
     callback(std::move(immediate_result));
+    return 0;
+}
+
+void HostStagingBlockPool::cancelBatchWaiter(size_t waiter_id) {
+    std::vector<ReadyBatch> ready;
+    BatchReadyCallback cancelled;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = std::find_if(batch_waiters_.begin(), batch_waiters_.end(),
+                               [waiter_id](const BatchWaiter& waiter) { return waiter.id == waiter_id; });
+        if (it == batch_waiters_.end()) {
+            return;
+        }
+        cancelled = std::move(it->callback);
+        batch_waiters_.erase(it);
+        ready = collectReadyBatchesLocked();
+    }
+    cancelled(std::nullopt);
+    dispatchReadyBatches(std::move(ready));
 }
 
 void HostStagingBlockPool::cancelAllBatchWaiters() noexcept {

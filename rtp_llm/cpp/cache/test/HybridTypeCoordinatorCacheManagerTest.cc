@@ -2006,17 +2006,19 @@ TEST_F(HybridTypeCoordinatorCacheManagerTest, ConnectorRefPreservesDummyTailAcro
 
     KVCacheResource resource;
     resource.initGroups(config.topologyPtr());
-    resource.cacheKeys() = CacheKeysType{100, 101, 102};
+    resource.cacheKeys() = CacheKeysType{100, 101, 102, 103};
     resource.setLastBlockAligned(false);
-    resource.mutableBlockIds("linear").assign(BlockIndicesType{blocks[0], NULL_BLOCK_IDX, NULL_BLOCK_IDX});
-    resource.mutableBlockIds("full1").assign(BlockIndicesType{NULL_BLOCK_IDX, blocks[1], NULL_BLOCK_IDX});
+    const BlockIndicesType linear_slots{NULL_BLOCK_IDX, blocks[0], NULL_BLOCK_IDX, NULL_BLOCK_IDX};
+    const BlockIndicesType full_slots{NULL_BLOCK_IDX, NULL_BLOCK_IDX, blocks[1], NULL_BLOCK_IDX};
+    resource.mutableBlockIds("linear").assign(linear_slots);
+    resource.mutableBlockIds("full1").assign(full_slots);
 
     auto ref = allocator->incrKVCacheRef(resource, resource.cacheKeys(), /*is_connector=*/true);
     ASSERT_NE(ref, nullptr);
     EXPECT_FALSE(ref->lastBlockAligned());
     EXPECT_EQ(ref->cacheKeys(), resource.cacheKeys());
-    EXPECT_EQ(ref->blocks("linear"), (BlockIndicesType{blocks[0], NULL_BLOCK_IDX, NULL_BLOCK_IDX}));
-    EXPECT_EQ(ref->blocks("full1"), (BlockIndicesType{NULL_BLOCK_IDX, blocks[1], NULL_BLOCK_IDX}));
+    EXPECT_EQ(ref->blocks("linear"), linear_slots);
+    EXPECT_EQ(ref->blocks("full1"), full_slots);
     EXPECT_EQ(linear_pool->refCount(blocks[0]), 2u);
     EXPECT_EQ(full_pool->refCount(blocks[1]), 2u);
 
