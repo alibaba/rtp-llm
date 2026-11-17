@@ -13,6 +13,10 @@ from typing import Any, Dict, Optional
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.modules.dsv4.chunk_env import (
+    chunked_moe_enabled,
+    moe_chunk_tokens_from_env,
+)
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     resolve_moe_max_tokens_per_rank,
     synchronized_moe_chunk_tokens,
@@ -145,6 +149,8 @@ class MegaMoeWrapper(nn.Module):
             is_decode_role=is_decode_role,
             is_speculative=gen_num_per_cycle > 0,
             gen_num_per_cycle=gen_num_per_cycle,
+            chunking_enabled=chunked_moe_enabled(),
+            chunk_tokens=moe_chunk_tokens_from_env(),
         )
         if resolved != max_tokens_per_rank:
             logger.info(
