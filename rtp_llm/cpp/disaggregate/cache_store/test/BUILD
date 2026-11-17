@@ -1,6 +1,7 @@
 
 package(default_visibility = ["//rtp_llm/cpp/disaggregate/cache_store:__subpackages__"])
 load("//:def.bzl", "cc_test_wrapper", "copts")
+load("//bazel:arch_select.bzl", "torch_deps")
 load("//bazel:device_defs.bzl", "device_impl_target", "device_test_envs")
 
 cc_test = cc_test_wrapper
@@ -66,4 +67,22 @@ cc_test(
         "gpu_count": "2",
     },
     tags = ["H20_CU13"],
+)
+
+cc_test(
+    name = "tcp_isolated_copy_test",
+    srcs = ["TcpIsolatedCopyTest.cpp"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_base",
+        "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    env = {"ATOM_RTP_SPLIT_SSM_STORAGE": "1"},
+    tags = ["manual", "requires-gpu"],
+    target_compatible_with = select({
+        "@//:using_rocm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
 )

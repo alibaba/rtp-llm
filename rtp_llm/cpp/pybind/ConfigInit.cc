@@ -1949,6 +1949,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("cache_type", &KVCacheSpecDesc::cache_type)
         .def_readwrite("dtype", &KVCacheSpecDesc::dtype)
         .def_readwrite("is_state_cache", &KVCacheSpecDesc::is_state_cache)
+        .def_readwrite("linear_state_component", &KVCacheSpecDesc::linear_state_component)
         .def_readwrite("tp_transfer_mode", &KVCacheSpecDesc::tp_transfer_mode)
         .def_readwrite("entry_elems", &KVCacheSpecDesc::entry_elems)
         .def_readwrite("entry_dtype", &KVCacheSpecDesc::entry_dtype)
@@ -1988,11 +1989,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.memory,
                                       self.tail,
                                       self.cp,
-                                      self.tp_transfer_mode);
+                                      self.tp_transfer_mode,
+                                      self.linear_state_component);
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
-                if (t.size() != 20 && t.size() != 21)
+                if (t.size() != 20 && t.size() != 21 && t.size() != 22)
                     throw std::runtime_error("Invalid KVCacheSpecDesc state!");
                 c.tag                                  = t[0].cast<std::string>();
                 c.cache_type                           = t[1].cast<KVCacheSpecType>();
@@ -2014,8 +2016,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.memory                               = t[17].cast<std::optional<CacheMemoryPolicyDesc>>();
                 c.tail                                 = t[18].cast<std::optional<CacheTailPolicyDesc>>();
                 c.cp                                   = t[19].cast<std::optional<CacheCpPolicyDesc>>();
-                if (t.size() == 21) {
+                if (t.size() >= 21) {
                     c.tp_transfer_mode = t[20].cast<TpCacheTransferMode>();
+                }
+                if (t.size() == 22) {
+                    c.linear_state_component = t[21].cast<uint32_t>();
                 }
                 return c;
             }));

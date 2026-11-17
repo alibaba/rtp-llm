@@ -54,6 +54,12 @@ public:
 
     size_t kernelBlocksPerKvBlock() const;
 
+    // Execution aliases are separate from unique physical ownership. Never put
+    // duplicate IDs into blocks(): DeviceBlockPool references require uniqueness.
+    void setSingleStateExecutionMapping(bool enabled);
+    bool singleStateExecutionMapping() const { return single_state_execution_mapping_; }
+
+
     // Remove and return the last physical block ID.
     BlockIdxType popBack();
 
@@ -82,6 +88,7 @@ private:
     // Size is always block_indices.size() * kernel_blocks_per_kv_block_.
     mutable BlockIndicesType kernel_block_indices_;
     size_t                   kernel_blocks_per_kv_block_ = 1;
+    bool                     single_state_execution_mapping_ = false;
     mutable size_t           cyclic_prompt_tail_ = 0;
     // Zero means the kernel row contains the ordinary mapping.
     mutable size_t           cyclic_bank_count_  = 0;

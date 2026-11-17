@@ -95,6 +95,19 @@ struct LinearKVCacheSpec: public KVCacheSpec {
         spec->conv_elems          = history_rows * (2 * qk_row_elems + v_row_elems);
         spec->ssm_state_dtype     = linear.ssm_state_dtype;
         spec->conv_state_dtype    = linear.conv_state_dtype;
+        RTP_LLM_CHECK_WITH_INFO(desc.linear_state_component <= 2,
+                                "invalid linear state component: %u", desc.linear_state_component);
+#if USING_ROCM
+        if (desc.linear_state_component == 1) {
+            spec->conv_elems = 0;
+        } else if (desc.linear_state_component == 2) {
+            spec->ssm_elems = 0;
+        }
+#else
+        RTP_LLM_CHECK_WITH_INFO(desc.linear_state_component == 0,
+                                "split linear state storage is only supported by the ROCm ATOM path");
+#endif
+
         RTP_LLM_CHECK_WITH_INFO(spec->ssm_state_dtype != DataType::TYPE_INVALID,
                                 "LINEAR KVCacheSpecDesc tag=%s requires valid ssm_state_dtype",
                                 desc.tag.c_str());
