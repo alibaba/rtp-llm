@@ -434,12 +434,13 @@ class GenerateConfigTest(TestCase):
         config.block_tree_disk_evict_high_watermark_ratio = 0.83
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 72)
-        self.assertEqual(state[:2], ("KVCacheConfig", 9))
+        self.assertEqual(len(state), 73)
+        self.assertEqual(state[:2], ("KVCacheConfig", 10))
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.disk_cache_staging_block_count, 8)
         self.assertFalse(restored.enable_disk_cache)
+        self.assertEqual(restored.shared_hybrid_cache, config.shared_hybrid_cache)
         self.assertEqual(restored.device_eviction_policy, "fifo")
         self.assertEqual(restored.memory_eviction_policy, "lfu")
         self.assertEqual(restored.disk_eviction_policy, "lru")
@@ -469,7 +470,9 @@ class GenerateConfigTest(TestCase):
             value.__setstate__(pickle_state)
             return value
 
-        event_state = state
+        # Historical workers did not opt into the shared allocator. Their
+        # events/eviction fields survive while the new policy remains disabled.
+        event_state = (*state[:-1], 0)
         state = (state[0], 6, *state[2:64])
         self.assertEqual(restore(state).__getstate__(), event_state)
         version_five_state = (state[0], 5, *state[2:], True)

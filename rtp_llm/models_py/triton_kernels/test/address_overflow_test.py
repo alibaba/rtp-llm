@@ -669,6 +669,7 @@ class AddressOverflowTest(unittest.TestCase):
                     HEADS=16,
                     HEAD_TILE=16,
                     PAGE=16,
+                    PAGE_STRIDE=16 * 132,
                     TABLE_STRIDE=16384,
                     WIDTH=1 << 18,
                     QUERY_TILE=1,
