@@ -1191,7 +1191,11 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         device_tokens     = params.token_ids.to(torch::kCUDA, true);
         transposed_tokens = device_tokens.transpose(0, 1).contiguous();
     }
-    if (need_do_sample) {
+    const bool neutral_mixed_logits = params.allow_glm5_multistep_sampling_optimizations
+        && has_not_do_sample && need_do_sample && !requiresTokenHistory(params)
+        && std::all_of(params.temperature.data_ptr<float>(), params.temperature.data_ptr<float>() + batch_size,
+                       [](float value) { return value == 1.0f; });
+    if (need_do_sample && !neutral_mixed_logits) {
         torch::Tensor selected_logits;
         torch::Tensor mask_tensor;
         if (has_not_do_sample) {

@@ -12,6 +12,7 @@
 #include "pybind11/embed.h"
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDAGeneratorImpl.h>
+#include <ATen/record_function.h>
 #include <limits>
 #include <cuda_runtime.h>
 #include <algorithm>
@@ -2261,6 +2262,119 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopK) {
     ASSERT_EQ(output_token_ids_host[11], 2);
     assertTokenIn(output_token_ids_host, 17, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9});
     assertTokenIn(output_token_ids_host, 23, {7, 8});
+}
+
+TEST_F(CudaSamplerTest, testGlm5NeutralMixedSamplingSkipsOnlyIdentityTransforms) {
+    initializeSamplerPython();
+    static thread_local int masked_select_calls = 0;
+    static thread_local int masked_scatter_calls = 0;
+    const auto f32 = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    const auto i32 = f32.dtype(torch::kInt32);
+    const auto original = cudaTensor({0, 3, 2, 1, -1, -2, -3, -4}, {1, 8}).repeat({3, 1});
+    for (const std::string transform : {"absent", "neutral", "temperature", "greedy_temperature",
+                                       "repetition", "presence", "frequency", "ngram"}) {
+        SCOPED_TRACE(transform);
+        for (const bool deferred : {false, true}) {
+            SCOPED_TRACE(deferred);
+            torch::Tensor expected_tokens, expected_logits, expected_probs, expected_success;
+            std::vector<uint64_t> expected_offsets;
+            for (const bool enabled : {false, true}) {
+                GreedyParams params{};
+                params.logits = original.clone();
+                params.input_lengths = torch::full({3}, 3, i32);
+                params.sequence_lengths = params.input_lengths.clone();
+                params.token_ids = cudaIntTensor({1, 2, 1, -1, 1, 2, 1, -1, 1, 2, 1, -1}, {3, 4});
+                params.step = 3;
+                params.top_k = pinnedIntTensor({0, 1, 0});
+                params.top_p = pinnedFloatTensor({1, 1, 1});
+                params.temperature = pinnedFloatTensor({1, 1, 1});
+                params.do_sample = torch::tensor({true, false, true}, torch::kBool).pin_memory();
+                params.output_all_probs = torch::empty_like(original);
+                params.defer_token_sampling = deferred;
+                params.allow_glm5_multistep_sampling_optimizations = enabled;
+                if (transform != "absent") {
+                    params.repetition_penalty = pinnedFloatTensor({1, 1, 1});
+                    params.presence_penalty = pinnedFloatTensor({0, 0, 0});
+                    params.frequency_penalty = pinnedFloatTensor({0, 0, 0});
+                    params.no_repeat_ngram_size = pinnedIntTensor({0, 0, 0});
+                }
+                if (transform == "temperature") {
+                    params.temperature = pinnedFloatTensor({0.5f, 1, 2});
+                } else if (transform == "greedy_temperature") {
+                    params.temperature = pinnedFloatTensor({1, 2, 1});
+                } else if (transform == "repetition") {
+                    params.repetition_penalty = pinnedFloatTensor({2, 2, 2});
+                } else if (transform == "presence") {
+                    params.presence_penalty = pinnedFloatTensor({2, 2, 2});
+                } else if (transform == "frequency") {
+                    params.frequency_penalty = pinnedFloatTensor({2, 2, 2});
+                } else if (transform == "ngram") {
+                    params.no_repeat_ngram_size = pinnedIntTensor({1, 1, 1});
+                }
+                for (int row = 0; row < 3; ++row) {
+                    params.generator.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+                    params.generator.back().set_current_seed(731 + row);
+                }
+                masked_select_calls = masked_scatter_calls = 0;
+                GreedyOutput result;
+                {
+                    struct CallbackGuard {
+                        at::CallbackHandle handle;
+                        ~CallbackGuard() { at::removeCallback(handle); }
+                    } guard{at::addThreadLocalCallback(at::RecordFunctionCallback(
+                        [](const at::RecordFunction& fn) -> std::unique_ptr<at::ObserverContext> {
+                            const std::string name(fn.name());
+                            masked_select_calls += name == "aten::masked_select";
+                            masked_scatter_calls += name == "aten::masked_scatter_";
+                            return nullptr;
+                        }))};
+                    result = execSampleGreedy(params);
+                }
+                const bool skip = enabled && (transform == "absent" || transform == "neutral");
+                EXPECT_EQ(masked_select_calls, skip ? 0 : 1);
+                EXPECT_EQ(masked_scatter_calls, skip ? 0 : 1);
+                EXPECT_EQ(result.deferred_token_sampling, deferred);
+                EXPECT_EQ(result.success.defined(), !deferred);
+                if (!deferred) {
+                    EXPECT_TRUE(result.success.all().item<bool>());
+                }
+                EXPECT_EQ(params.token_ids.index({1, 3}).item<int32_t>(), deferred ? -1 : 1);
+                EXPECT_EQ(params.generator[1].get_offset(), 0);
+                for (int row : {0, 2}) {
+                    if (deferred) {
+                        EXPECT_EQ(params.generator[row].get_offset(), 0);
+                    } else {
+                        EXPECT_GT(params.generator[row].get_offset(), 0);
+                    }
+                }
+                if (!enabled) {
+                    expected_tokens = params.token_ids.clone();
+                    expected_logits = params.logits.clone();
+                    if (!deferred) {
+                        expected_probs = params.output_all_probs->clone();
+                        expected_success = result.success.clone();
+                    }
+                    for (const auto& generator : params.generator) {
+                        expected_offsets.push_back(generator.get_offset());
+                    }
+                    if (transform != "absent" && transform != "neutral") {
+                        auto neutral = deferred ? original.select(0, 0) : torch::softmax(original.select(0, 0), -1);
+                        EXPECT_FALSE(torch::equal(params.logits.select(0, 0), neutral));
+                    }
+                } else {
+                    EXPECT_TRUE(torch::equal(params.token_ids, expected_tokens));
+                    EXPECT_TRUE(torch::equal(params.logits, expected_logits));
+                    if (!deferred) {
+                        EXPECT_TRUE(torch::equal(*params.output_all_probs, expected_probs));
+                        EXPECT_TRUE(torch::equal(result.success, expected_success));
+                    }
+                    for (size_t row = 0; row < params.generator.size(); ++row) {
+                        EXPECT_EQ(params.generator[row].get_offset(), expected_offsets[row]);
+                    }
+                }
+            }
+        }
+    }
 }
 
 TEST_F(CudaSamplerTest, testHy4GreedyRawArgmax) {
