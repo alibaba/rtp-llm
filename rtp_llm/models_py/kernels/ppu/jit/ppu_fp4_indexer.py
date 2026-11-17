@@ -7,6 +7,51 @@ import torch
 from rtp_llm.models_py.kernels.ppu.jit.sglang_jit import load_sglang_kernel
 
 
+def _flat_rows_have_constant_stride(x: torch.Tensor) -> bool:
+    return all(
+        x.stride(dim) == x.stride(dim + 1) * x.shape[dim + 1]
+        for dim in range(x.dim() - 2)
+    )
+
+
+def rope_only_exact_inplace(
+    x: torch.Tensor, freqs_cis: torch.Tensor, *, inverse: bool = False
+) -> bool:
+    """Launch the exact native RoPE path or return False without mutating x."""
+    if not (
+        x.is_cuda
+        and x.dtype == torch.bfloat16
+        and x.dim() >= 2
+        and x.shape[-1] == 64
+        and x.stride(-1) == 1
+        and _flat_rows_have_constant_stride(x)
+        and freqs_cis.is_cuda
+        and freqs_cis.device == x.device
+        and freqs_cis.dtype == torch.complex64
+        and freqs_cis.is_contiguous()
+        and freqs_cis.shape[-1] == 32
+        and freqs_cis.numel() > 0
+    ):
+        return False
+    rows = x.numel() // 64
+    freq_rows = freqs_cis.numel() // 32
+    if rows % freq_rows:
+        return False
+
+    q2d = x.as_strided((rows, 64), (x.stride(-2), 1))
+    freqs_ri = torch.view_as_real(freqs_cis).view(-1, 64)
+    arch = torch.cuda.get_device_capability(x.device)
+    pdl = "true" if arch[0] >= 9 else "false"
+    module = load_sglang_kernel(
+        "rope_exact",
+        "compat/rope_exact.cuh",
+        f"sglang::RtpExactRopeKernel<{pdl}>::forward",
+        arch,
+    )
+    module.forward(q2d, freqs_ri, inverse)
+    return True
+
+
 @lru_cache(maxsize=None)
 def _module(kind, arch, parameter=0, canonical_topk=False):
     pdl = "true" if arch[0] >= 9 else "false"
