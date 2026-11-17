@@ -59,6 +59,12 @@ class CpOffsetPlanGraphTest(TestCase):
         op.kv_cache_sharded = True
         blocks = torch.tensor([[0], [1]], dtype=torch.int32, device="cuda")
         op.plan(params, blocks, inputs)
+        self.assertIsNone(op._projection_restore_inverse)
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import cp_bounded_gather
+
+        with patch.object(cp_bounded_gather, "_PROJECTION_SCRATCH_BYTES", 1):
+            op.plan(params, blocks, inputs)
+        inverse_address = op._projection_restore_inverse.data_ptr()
         address = op.precomputed_kv_offsets.data_ptr()
         indices = torch.tensor(
             [[0, -1], [1, 2], [-2, 3], [4, 0]], device="cuda", dtype=torch.int32
@@ -85,7 +91,16 @@ class CpOffsetPlanGraphTest(TestCase):
                 )
             )
             params.cp_cu_kv_seqlens_global = params.prefill_ragged_kv_len_indptr_d
-            op.plan(params, blocks, inputs)
+            cp_info.prefill_qkv_restore_indice.copy_(torch.tensor([3, 0, 2, 1]))
+            cp_info.prefill_qkv_padding_mask.copy_(torch.tensor([1, 0, 2, 1]))
+            with patch.object(cp_bounded_gather, "_PROJECTION_SCRATCH_BYTES", 1):
+                op.plan(params, blocks, inputs)
+            self.assertEqual(op._projection_restore_inverse.data_ptr(), inverse_address)
+            torch.testing.assert_close(
+                op._projection_restore_inverse,
+                torch.tensor([-1, 1, -1, 0], device="cuda"),
+                atol=0, rtol=0,
+            )
             self.assertEqual(op.precomputed_kv_offsets.data_ptr(), address)
             expected_offsets = torch.tensor(
                 [0 if rid == 0 else lengths[0] for rid in request_ids],

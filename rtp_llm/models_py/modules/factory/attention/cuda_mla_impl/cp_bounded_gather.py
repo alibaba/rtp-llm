@@ -23,10 +23,14 @@ def _restore_chunk(
     START,
     WIDTH: tl.constexpr,
     REMAP: tl.constexpr,
+    INVERSE: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     index = tl.program_id(0).to(tl.int64)
-    if REMAP:
+    if INVERSE:
+        source = index // CHUNK_ROWS * LOCAL_ROWS + START + index % CHUNK_ROWS
+        row = tl.load(Restore + source)
+    elif REMAP:
         row = index
         source = tl.load(Restore + row)
     else:
@@ -36,7 +40,7 @@ def _restore_chunk(
     local = source % LOCAL_ROWS
     # Only this chunk's rows read/write the large KV payload. All chunks use
     # the same request-specific map, including when padding was removed.
-    if (source >= 0) & (local >= START) & (local < START + CHUNK_ROWS):
+    if (row >= 0) & (source >= 0) & (local >= START) & (local < START + CHUNK_ROWS):
         cols = tl.arange(0, BLOCK)
         values = tl.load(
             Gathered + (owner * CHUNK_ROWS + local - START) * WIDTH + cols,
@@ -46,7 +50,54 @@ def _restore_chunk(
         tl.store(Output + row * WIDTH + cols, values, cols < WIDTH)
 
 
-def _gather_groups(groups, cp_size, restore_indices, gather_into):
+def prepare_restore_inverse(
+    restore_cpu: torch.Tensor,
+    source_rows: int,
+    device: torch.device | str,
+    current: Optional[torch.Tensor] = None,
+    forbid_realloc: bool = False,
+) -> Optional[torch.Tensor]:
+    """Build a fresh unique-subset inverse from the CP planner's CPU snapshot.
+
+    Duplicate maps retain the generic destination-gather fallback. The int64
+    inverse costs 8 * source_rows bytes, separate from communication scratch.
+    """
+    device = torch.device(device)
+    if device.type == "cuda" and device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
+    if restore_cpu.is_cuda or restore_cpu.ndim != 1 or restore_cpu.dtype != torch.int64:
+        raise ValueError("CP restore planning requires a CPU int64 vector")
+    if source_rows < 0 or (restore_cpu.numel() and (
+        int(restore_cpu.min()) < 0 or int(restore_cpu.max()) >= source_rows
+    )):
+        raise ValueError("CP restore source index is out of range")
+    counts = torch.bincount(restore_cpu, minlength=source_rows)
+    if counts.numel() and int(counts.max()) > 1:
+        if forbid_realloc and current is not None:
+            raise RuntimeError("captured CP inverse requires a unique restore subset")
+        return None
+    if current is not None and (
+        current.shape != (source_rows,) or current.dtype != torch.int64
+        or current.device != device
+        or not current.is_contiguous()
+    ):
+        if forbid_realloc:
+            raise RuntimeError("captured CP inverse geometry changed")
+        current = None
+    if forbid_realloc and current is None:
+        raise RuntimeError("captured CP inverse storage is missing")
+    inverse = torch.full(
+        (source_rows,), -1, dtype=torch.int64,
+        pin_memory=device.type == "cuda",
+    )
+    inverse[restore_cpu] = torch.arange(restore_cpu.numel(), dtype=torch.int64)
+    if current is None:
+        return inverse.to(device=device, non_blocking=True)
+    current.copy_(inverse, non_blocking=True)
+    return current
+
+
+def _gather_groups(groups, cp_size, restore_indices, gather_into, source_to_dest=None):
     """Use one fixed send/receive backing for every chunk and dtype group."""
     first = groups[0][0]
     rows = first.shape[0]
@@ -55,6 +106,12 @@ def _gather_groups(groups, cp_size, restore_indices, gather_into):
         for group in groups for value in group
     ):
         raise ValueError("CP projection components require matching rows/device and positive CP size")
+    if source_to_dest is not None and (
+        restore_indices is None or source_to_dest.shape != (rows * cp_size,)
+        or source_to_dest.dtype != torch.int64 or source_to_dest.device != first.device
+        or not source_to_dest.is_contiguous()
+    ):
+        raise ValueError("CP inverse must match the padded source geometry")
     widths = [sum(value.shape[1] for value in group) for group in groups]
     row_bytes = [width * group[0].element_size() for width, group in zip(widths, groups)]
     largest_row = max(row_bytes)
@@ -85,16 +142,17 @@ def _gather_groups(groups, cp_size, restore_indices, gather_into):
                 torch.cat(tuple(value.narrow(0, start, count) for value in group), dim=-1, out=packed)
             gather_into(gathered, packed, group=Group.TP)
             if output_rows:
-                copy_rows = output_rows if restore_indices is not None else count * cp_size
+                copy_rows = output_rows if restore_indices is not None and source_to_dest is None else count * cp_size
                 _restore_chunk[(copy_rows,)](
                     gathered,
-                    restore_indices if restore_indices is not None else output,
+                    source_to_dest if source_to_dest is not None else (restore_indices if restore_indices is not None else output),
                     output,
                     rows,
                     count,
                     start,
                     width,
                     restore_indices is not None,
+                    source_to_dest is not None,
                     tr.next_power_of_2(width),
                 )
     return outputs
@@ -106,11 +164,12 @@ def gather_projection_chunks(
     cp_size: int,
     restore_indices: Optional[torch.Tensor],
     gather_into: Callable,
+    source_to_dest: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Gather equal-dtype components into one packed final consumer tensor."""
     if compressed_kv.dtype != k_pe.dtype:
         raise ValueError("packed CP projection gather requires identical dtypes")
-    return _gather_groups(((compressed_kv, k_pe),), cp_size, restore_indices, gather_into)[0]
+    return _gather_groups(((compressed_kv, k_pe),), cp_size, restore_indices, gather_into, source_to_dest)[0]
 
 
 def gather_projection_components(
@@ -119,6 +178,7 @@ def gather_projection_components(
     cp_size: int,
     restore_indices: Optional[torch.Tensor],
     gather_into: Callable,
+    source_to_dest: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Keep mixed-dtype components separate; never promote before communication.
 
@@ -129,6 +189,6 @@ def gather_projection_components(
     All operations, including scratch reuse, remain on the caller's stream.
     """
     if compressed_kv.dtype == k_pe.dtype:
-        packed = gather_projection_chunks(compressed_kv, k_pe, cp_size, restore_indices, gather_into)
+        packed = gather_projection_chunks(compressed_kv, k_pe, cp_size, restore_indices, gather_into, source_to_dest)
         return packed.split((compressed_kv.shape[1], k_pe.shape[1]), dim=-1)
-    return _gather_groups(((compressed_kv,), (k_pe,)), cp_size, restore_indices, gather_into)
+    return _gather_groups(((compressed_kv,), (k_pe,)), cp_size, restore_indices, gather_into, source_to_dest)

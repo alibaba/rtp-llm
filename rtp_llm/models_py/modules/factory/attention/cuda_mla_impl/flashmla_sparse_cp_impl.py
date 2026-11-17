@@ -718,6 +718,39 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 captured_restore is not None and current_restore != captured_restore
             ):
                 raise RuntimeError("bounded CP projection graph geometry or restore address changed")
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.cp_bounded_gather import (
+            _PROJECTION_SCRATCH_BYTES,
+            prepare_restore_inverse,
+        )
+
+        # Match fill_cp_plan_params: only mask == 1 contributes logical rows.
+        # Refresh values even when all pointers and shapes are unchanged.
+        # Production projections are BF16/FP16. Nonstandard wider callers below
+        # this threshold retain the generic destination-gather fallback.
+        bounded_projection = (
+            local_tokens * (self.kv_lora_rank + self.qk_rope_head_dim)
+            * 2 * (self.prefill_cp_size + 1) > _PROJECTION_SCRATCH_BYTES
+        )
+        if bounded_projection:
+            inverse = prepare_restore_inverse(
+                kv_restore_cpu[padding_mask_cpu == 1].to(dtype=torch.int64),
+                local_tokens * self.prefill_cp_size,
+                self.kv_restore_unpad_indices.device,
+                current=getattr(self, "_projection_restore_inverse", None),
+                forbid_realloc=self.use_cuda_graph and captured_projection is not None,
+            )
+            if inverse is None:
+                raise ValueError("CP planner restore must be a unique source subset")
+            self._projection_restore_inverse = inverse
+        else:
+            self._projection_restore_inverse = None
+        captured_inverse = getattr(self, "_bounded_projection_graph_inverse", None)
+        if self.use_cuda_graph and captured_projection is not None:
+            current_inverse = self._projection_restore_inverse
+            if captured_inverse is not None and (
+                current_inverse is None or current_inverse.data_ptr() != captured_inverse
+            ):
+                raise RuntimeError("bounded CP projection graph inverse address changed")
         self.total_global_ids = mla_params.cp_total_global_ids
         self.total_local_ids = mla_params.cp_total_local_ids
         self.total_local_ids_is_identity = _total_local_ids_are_identity(
@@ -1149,10 +1182,16 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         with torch.cuda.stream(gather_stream):
             if bounded:
                 restore = None if rank_major_slots is not None or defer_restore else self.kv_restore_unpad_indices
+                inverse = getattr(self, "_projection_restore_inverse", None) if restore is not None else None
+                if inverse is not None and gather_stream is not None:
+                    inverse.record_stream(gather_stream)
                 restored_ckv, restored_k_pe = gather_projection_components(
-                    compressed_kv, k_pe, self.prefill_cp_size, restore, all_gather_into_tensor
+                    compressed_kv, k_pe, self.prefill_cp_size, restore, all_gather_into_tensor, inverse
                 )
                 if torch.cuda.is_current_stream_capturing():
+                    self._bounded_projection_graph_inverse = (
+                        None if inverse is None else inverse.data_ptr()
+                    )
                     self._bounded_projection_graph_geometry = (
                         compressed_kv.shape[0],
                         None if restore is None else (restore.numel(), restore.data_ptr()),

@@ -315,8 +315,15 @@ class PaddedPackTest(unittest.TestCase):
         rank_major = torch.cat((torch.cat((ckv, rope), -1), torch.cat((ckv, rope), -1) + 200), 0)
         restore = torch.tensor([0, 9, 2, 15, 7], device="cuda", dtype=torch.int64)
         budget = 3 * 3 * 8 * 2  # three local rows, send plus two-rank receive
-        for mapping in (None, restore):
+        duplicate = torch.tensor([9, 9, 0, 15, 0], device="cuda", dtype=torch.int64)
+        for mapping in (None, restore, duplicate):
             counts = []
+            inverse = (
+                None if mapping is None else
+                cp_bounded_gather.prepare_restore_inverse(mapping.cpu(), 16, "cuda")
+            )
+            if mapping is duplicate:
+                self.assertIsNone(inverse)
 
             def gather(out, part, **kwargs):
                 counts.append(part.shape[0])
@@ -324,7 +331,9 @@ class PaddedPackTest(unittest.TestCase):
                 out.copy_(torch.cat((part, part + 200), 0))
 
             with patch.object(cp_bounded_gather, "_PROJECTION_SCRATCH_BYTES", budget):
-                result = cp_bounded_gather.gather_projection_chunks(ckv, rope, 2, mapping, gather)
+                result = cp_bounded_gather.gather_projection_chunks(
+                    ckv, rope, 2, mapping, gather, inverse
+                )
             expected = rank_major if mapping is None else rank_major.index_select(0, mapping)
             self.assertTrue(torch.equal(result, expected))
             self.assertEqual(counts, [3, 3, 2])
@@ -341,6 +350,10 @@ class PaddedPackTest(unittest.TestCase):
             op.use_cuda_graph = True
             op.prefill_cp_size = 2
             op.kv_restore_unpad_indices = mapping
+            op._projection_restore_inverse = cp_bounded_gather.prepare_restore_inverse(
+                mapping.cpu(), 16, "cuda"
+            )
+            inverse_ptr = op._projection_restore_inverse.data_ptr()
             op.sharded_slot_mapping = None
             budget = 3 * 3 * max(ckv.shape[1] * ckv.element_size(), rope.shape[1] * rope.element_size())
             sends, receives, dtypes = [], [], []
@@ -371,6 +384,12 @@ class PaddedPackTest(unittest.TestCase):
                     ckv.add_(1)
                     rope.add_(0.000321)
                     mapping.copy_(torch.tensor(ids, device="cuda", dtype=torch.int64))
+                    refreshed = cp_bounded_gather.prepare_restore_inverse(
+                        torch.tensor(ids, dtype=torch.int64), 16, "cuda",
+                        current=op._projection_restore_inverse, forbid_realloc=True,
+                    )
+                    self.assertIs(refreshed, op._projection_restore_inverse)
+                    self.assertEqual(refreshed.data_ptr(), inverse_ptr)
                     graph.replay()
                     for actual, source in ((actual_ckv, ckv), (actual_rope, rope)):
                         expected = torch.cat((source, -source), 0).index_select(0, mapping)
