@@ -176,6 +176,8 @@ std::string NaviSchedAgentSummary::format() const
            ", remaining_prefill_requests=" +
            std::to_string(workload.remainingPrefillRequestCount) +
            ", running_elapsed_time_ms=" + std::to_string(workload.runningElapsedTimeMs) +
+           ", running_elapsed_request_count=" +
+           std::to_string(workload.runningElapsedRequestCount) +
            ", running_decode_requests=" +
            std::to_string(workload.runningDecodeRequestCount) +
            ", running_decode_generated_tokens=" +

@@ -164,6 +164,8 @@ navi::SummaryErrorCode AgentUpdateToMasterData::getSummary(
                                workload->runningRequestCount);
         TABLE_ADD_COLUMN_VALUE(section, "running_elapsed_time_ms",
                                workload->runningElapsedTimeMs);
+        TABLE_ADD_COLUMN_VALUE(section, "running_elapsed_request_count",
+                               workload->runningElapsedRequestCount);
         TABLE_ADD_COLUMN_VALUE(section, "running_decode_request_count",
                                workload->runningDecodeRequestCount);
         TABLE_ADD_COLUMN_VALUE(section, "running_decode_generated_tokens",

@@ -337,10 +337,13 @@ NaviSchedWorkloadSnapshot AgentReportR::observedWorkloadLocked() const
 {
     auto snapshot = _observedWorkload;
     const auto nowUs = autil::TimeUtility::currentTime();
+    const auto elapsedRequestCount = snapshot.runningElapsedRequestCount >= 0
+                                         ? snapshot.runningElapsedRequestCount
+                                         : snapshot.runningCapacityPrefillRequestCount;
     if (snapshot.eventTimeUs > 0 && snapshot.runningRequestCount > 0) {
         snapshot.runningElapsedTimeMs +=
             std::max<int64_t>(0, nowUs - snapshot.eventTimeUs) / 1000.0 *
-            snapshot.runningCapacityPrefillRequestCount;
+            elapsedRequestCount;
     }
     snapshot.revision = 1;
     snapshot.eventTimeUs = nowUs;

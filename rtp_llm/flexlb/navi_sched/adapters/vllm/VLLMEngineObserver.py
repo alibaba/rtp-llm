@@ -4550,16 +4550,20 @@ class VLLMEngineObserver:
                 ):
                     admitted_request_ids = []
                 admitted_pending_cache_tracked = admitted_state.pending_cache_tracked
-        waiting_request_options = {}
+        report_options = {
+            "running_elapsed_request_count": (
+                workload.scheduler_running_prefill.request_count
+            )
+        }
         if (
             self._native_ingress
             and getattr(naviSchedModule(), "VLLM_WAITING_REQUEST_IDS_VERSION", 0) >= 1
         ):
-            waiting_request_options["waiting_request_ids"] = list(
+            report_options["waiting_request_ids"] = list(
                 workload.waiting_request_ids or ()
             )
         if timing is not None:
-            waiting_request_options["record_timing"] = True
+            report_options["record_timing"] = True
             timing.mark("prepare_report")
         try:
             reported = self._bridge.report_workload(
@@ -4601,7 +4605,7 @@ class VLLMEngineObserver:
                 workload.running_decode_generated_tokens,
                 workload.running_decode_remaining_token_budget,
                 workload.native_handoff_batch_ids,
-                **waiting_request_options,
+                **report_options,
             )
         except Exception:
             logger.exception(

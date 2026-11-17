@@ -45,6 +45,7 @@ struct ReplayWorkloadJson : public autil::legacy::Jsonizable {
                      value.remainingPrefillRequestCount);
         json.Jsonize("running_request_count", value.runningRequestCount);
         json.Jsonize("running_elapsed_time_ms", value.runningElapsedTimeMs);
+        json.Jsonize("running_elapsed_request_count", value.runningElapsedRequestCount);
         json.Jsonize("running_decode_request_count", value.runningDecodeRequestCount,
                      value.runningDecodeRequestCount);
         json.Jsonize("running_decode_generated_token_count",

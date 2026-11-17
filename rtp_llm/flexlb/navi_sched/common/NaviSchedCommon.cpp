@@ -186,6 +186,12 @@ bool NaviSchedWorkloadSnapshot::valid() const
            batchCount <= requestCount && requestCount >= 0 &&
            remainingPrefillRequestCount >= 0 &&
            remainingPrefillRequestCount <= requestCount && runningRequestCount >= 0 &&
+           runningElapsedRequestCount >= -1 &&
+           (runningElapsedRequestCount == -1 ||
+            (runningElapsedRequestCount <= runningRequestCount &&
+             (!prefillCapacitySplit ||
+              (runningElapsedRequestCount <= remainingPrefillRequestCount &&
+               (runningElapsedRequestCount > 0 || runningElapsedTimeMs == 0.0))))) &&
            std::isfinite(runningElapsedTimeMs) && runningElapsedTimeMs >= 0.0 &&
            (runningRequestCount > 0 || runningElapsedTimeMs == 0.0) &&
            (!prefillCapacitySplit
@@ -222,6 +228,7 @@ bool NaviSchedWorkloadSnapshot::sameWorkload(const NaviSchedWorkloadSnapshot &ot
            remainingPrefillRequestCount == other.remainingPrefillRequestCount &&
            runningRequestCount == other.runningRequestCount &&
            runningElapsedTimeMs == other.runningElapsedTimeMs &&
+           runningElapsedRequestCount == other.runningElapsedRequestCount &&
            runningDecodeRequestCount == other.runningDecodeRequestCount &&
            runningDecodeGeneratedTokenCount == other.runningDecodeGeneratedTokenCount &&
            runningDecodeRemainingTokenBudget == other.runningDecodeRemainingTokenBudget &&
@@ -270,6 +277,7 @@ void NaviSchedWorkloadSnapshot::serialize(autil::DataBuffer &dataBuffer) const
     dataBuffer.write(remainingPrefillRequestCount);
     dataBuffer.write(runningRequestCount);
     dataBuffer.write(runningElapsedTimeMs);
+    dataBuffer.write(runningElapsedRequestCount);
     dataBuffer.write(runningDecodeRequestCount);
     dataBuffer.write(runningDecodeGeneratedTokenCount);
     dataBuffer.write(runningDecodeRemainingTokenBudget);
@@ -309,6 +317,7 @@ void NaviSchedWorkloadSnapshot::deserialize(autil::DataBuffer &dataBuffer)
     dataBuffer.read(remainingPrefillRequestCount);
     dataBuffer.read(runningRequestCount);
     dataBuffer.read(runningElapsedTimeMs);
+    dataBuffer.read(runningElapsedRequestCount);
     dataBuffer.read(runningDecodeRequestCount);
     dataBuffer.read(runningDecodeGeneratedTokenCount);
     dataBuffer.read(runningDecodeRemainingTokenBudget);
