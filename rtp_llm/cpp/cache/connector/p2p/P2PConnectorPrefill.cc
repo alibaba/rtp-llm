@@ -178,15 +178,34 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
     const std::string& unique_key = request.unique_key();
     const int64_t      now_ms     = currentTimeMs();
     if (unique_key.empty() || request.timeout_ms() <= 0 || request.timeout_ms() > std::numeric_limits<int32_t>::max()) {
-        if (!unique_key.empty()) {
-            stream_store_->markTerminal(unique_key, 0, P2PConnectorResourceStore::TerminalReason::FAILED);
-            stream_store_->clearPrefillPayload(unique_key);
-        }
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
         response.set_error_message("invalid StartLoad unique_key or load timeout");
         report_process_metrics();
         return;
     }
+    // Only the active StartLoad may consume the resource or finish the handoff.
+    bool accepted;
+    {
+        std::lock_guard<std::mutex> lock(active_loads_mutex_);
+        accepted = active_loads_.insert(unique_key).second;
+    }
+    if (!accepted) {
+        response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
+        response.set_error_message("StartLoad already in progress for this key");
+        report_process_metrics();
+        return;
+    }
+    struct ActiveLoadGuard {
+        std::mutex&                      mutex;
+        std::unordered_set<std::string>& loads;
+        const std::string&               key;
+
+        ~ActiveLoadGuard() {
+            std::lock_guard<std::mutex> lock(mutex);
+            loads.erase(key);
+        }
+    } active_load{active_loads_mutex_, active_loads_, unique_key};
+
     const auto handoff_timeout_ms = request.handoff_timeout_ms();
     const auto communication_timeout_ms = handoff_timeout_ms > 0 ? request.timeout_ms() : 0;
     // Older clients send a single timeout for the whole operation.
