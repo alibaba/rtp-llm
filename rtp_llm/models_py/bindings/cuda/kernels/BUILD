@@ -268,6 +268,26 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+# DSpARK uses Markov scaling on Hopper before the generic TopK fallback.
+# Build it with the platform architectures, independently of Blackwell DeepSelect.
+cc_library(
+    name = "markov_scaled_logits",
+    srcs = ["markov_scaled_logits.cu"],
+    hdrs = ["markov_scaled_logits.h"],
+    copts = cuda_copts() + [
+        "-O3",
+        "-U__CUDA_NO_HALF_OPERATORS__",
+        "-U__CUDA_NO_HALF_CONVERSIONS__",
+        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "-nvcc_options=use_fast_math",
+        "-nvcc_options=ftz=false",
+    ],
+    deps = torch_deps() + [
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+)
+
 cc_library(
     name = "deepselect_fp32",
     srcs = ["deepselect_fp32.cu", "draft_markov_topk.cu"],
@@ -282,6 +302,7 @@ cc_library(
         "//conditions:default": [],
     }),
     deps = torch_deps() + [
+        ":markov_scaled_logits",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ] + select({
