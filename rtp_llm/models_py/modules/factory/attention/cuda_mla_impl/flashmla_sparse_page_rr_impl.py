@@ -1,17 +1,110 @@
 """PageRR execution policy over the unified absorbed sparse MLA implementation."""
 
 import math
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import torch
 import torch.nn.functional as F
+import triton
+import triton.language as tl
 
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    all_gather,
+    get_mla_dcp,
+)
 from rtp_llm.models_py.utils.module_profiler import profile_scope
 from rtp_llm.utils.model_weight import W
 
 from .dsa_page_rr_params import DsaPageRRParams
 from .flashmla_sparse_impl import SparseMlaImpl, SparseMlaOp, flash_mla_sparse_fwd
-from rtp_llm.models_py.distributed.collective_torch import get_mla_dcp
+
+
+@triton.jit
+def _zero_sparse_empty_rows(Output, LSE, O0: tl.constexpr, O1: tl.constexpr,
+                            L0: tl.constexpr, L1: tl.constexpr,
+                            HEADS: tl.constexpr, DIM: tl.constexpr,
+                            HEAD_BLOCK: tl.constexpr, BLOCK: tl.constexpr):
+    row = tl.program_id(0)
+    head = tl.program_id(1) * HEAD_BLOCK + tl.arange(0, HEAD_BLOCK)
+    lse = tl.load(LSE + row * L0 + head * L1, head < HEADS, other=0.0)
+    empty = ((lse == float("inf")) | (lse == -float("inf"))) & (head < HEADS)
+    unexpected_nan = (lse != lse) & (head < HEADS)
+    write = empty | unexpected_nan
+    if tl.sum(write.to(tl.int32), 0) > 0:
+        col = tl.arange(0, BLOCK)
+        tl.store(Output + row * O0 + head[:, None] * O1 + col[None, :],
+                 tl.where(unexpected_nan[:, None], float("nan"), 0.0),
+                 write[:, None] & (col[None, :] < DIM))
+
+
+def zero_sparse_empty_rows(output, lse, heads):
+    """Single-block path: leave valid latent rows and unused LSE untouched."""
+    if lse.shape[0] != output.shape[0] or min(output.shape[1], lse.shape[1]) < heads:
+        raise ValueError("Sparse output and LSE head layouts differ")
+    if output.shape[0]:
+        _zero_sparse_empty_rows[(output.shape[0], triton.cdiv(heads, 16))](
+            output, lse, output.stride(0), output.stride(1),
+            lse.stride(0), lse.stride(1), heads, output.shape[2], 16,
+            triton.next_power_of_2(output.shape[2]), num_warps=4)
+
+
+def check_sparse_lse(lse):
+    """Reject unexpected NaNs asynchronously; +/-inf remain empty sentinels.
+
+    Called once per Prefill layer, after the online merge when chunked. This
+    checks only the small LSE state and adds no host synchronization or KV pass.
+    """
+    torch._assert_async(torch.all(lse == lse), "DSA sparse attention produced NaN LSE")
+
+
+def agree_tp_prefill_batch(contract, error, group, size):
+    """One unconditional agreement at a caller-defined preparation boundary."""
+    contracts = [(contract, error)]
+    if size > 1:
+        contracts = [None] * size
+        torch.distributed.all_gather_object(contracts, (contract, error), group=group)
+    errors = [f"rank {rank}: {item[1]}" for rank, item in enumerate(contracts) if item[1] is not None]
+    if errors or any(item[0] != contracts[0][0] for item in contracts):
+        raise ValueError(
+            "DSA TP Prefill layout disagreement: "
+            + ("; ".join(errors) if errors else "rank batch/tag geometry differs")
+        )
+
+
+def _tp_prefill_contract(params, comm, value_dim):
+    tokens = params.positions_d.numel()
+    indices = params.query_indices
+    rows = indices.numel()
+    if (
+        params.shard_size != comm.size
+        or params.shard_rank != comm.rank
+        or tokens != rows * comm.size
+        or comm.heads != comm.local_heads * comm.size
+        or not 0 < comm.heads <= 128
+        or min(comm.local_heads, comm.q_dim, value_dim) <= 0
+    ):
+        raise ValueError("inconsistent token/head shard geometry")
+    if (
+        params.positions_d.ndim != 1
+        or indices.ndim != 1
+        or indices.dtype != torch.int64
+        or indices.device != comm.device
+        or params.query_positions.shape != (rows,)
+        or params.query_requests.shape != (rows,)
+    ):
+        raise ValueError("invalid Prefill query metadata shape/device/dtype")
+    # DsaPageRRParams owns the continuous rank-local interval. Inspect tensor
+    # metadata only, not device index values or GPU scalars.
+    return (tokens, rows, comm.heads, comm.local_heads, comm.q_dim, value_dim)
+
+
+@dataclass(frozen=True)
+class DsaTpPrefillPreparation:
+    params: object
+    shape: tuple
+    contract: tuple
 
 
 class QueryCpLayout:
@@ -41,7 +134,11 @@ class PageRRSparseMlaOp(SparseMlaOp):
         self.communicator = (
             QueryCpLayout(self.num_heads)
             if workspace_owner is not None and workspace_owner.prefill_query_cp
-            else get_mla_dcp(geometry, torch.device("cuda", torch.cuda.current_device()), torch.bfloat16)
+            else get_mla_dcp(
+                geometry,
+                torch.device("cuda", torch.cuda.current_device()),
+                torch.bfloat16,
+            )
         )
         # The pinned FlashMLA BF16 sparse kernel accepts 64/128 heads.
         self.kernel_heads = 64 if self.communicator.heads <= 64 else 128
@@ -79,7 +176,7 @@ class PageRRSparseMlaOp(SparseMlaOp):
             return self.decode_kernel_heads
         return self.kernel_heads
 
-    def plan(self, params, block_table, attn_inputs=None):
+    def plan(self, params, block_table, attn_inputs=None, *, tp_prefill_shape=None):
         self.params = params
         if self._decode_fp8_backend() == "sched":
             from rtp_llm.models_py.utils.flash_mla_legacy import get_mla_metadata
@@ -109,6 +206,33 @@ class PageRRSparseMlaOp(SparseMlaOp):
                 heads, heads, self.workspace_owner.value_dim, params.positions_d.numel(),
                 torch.device("cuda", torch.cuda.current_device()), get_process_group(Group.TP),
             )
+        self.execute = self._prefill if params.is_prefill else self._decode
+        self._tp_prefill_shape = None
+        if params.is_prefill and not params.query_cp:
+            if tp_prefill_shape is None:
+                self._plan_tp_prefill(attn_inputs)
+            else:
+                # Only the model's collectively accepted preparation supplies
+                # this shape. No rank-local revalidation or vote at publication.
+                self._tp_prefill_shape = tp_prefill_shape
+
+    def _agree_tp_prefill(self, contract, error=None):
+        agree_tp_prefill_batch(
+            contract, error, self.communicator.group, self.communicator.size
+        )
+
+    def _plan_tp_prefill(self, attn_inputs=None):
+        # Standalone preparation is a collective boundary too. Tensor identity
+        # is not an immutable batch contract and must never suppress this vote.
+        contract, error = None, None
+        try:
+            contract = _tp_prefill_contract(
+                self.params, self.communicator, self.workspace_owner.value_dim
+            )
+        except ValueError as exc:
+            error = str(exc)
+        self._agree_tp_prefill(contract, error)
+        self._tp_prefill_shape = contract
 
     projects_values = True
 
@@ -160,7 +284,39 @@ class PageRRSparseMlaOp(SparseMlaOp):
         return output, lse
 
     def _prefill(self, query):
-        return self.communicator.scatter_queries(query)
+        if self.params.query_cp:
+            return self.communicator.scatter_queries(query)
+        tokens, rows, heads, _, dim, _ = self._tp_prefill_shape
+        if self.communicator.size == 1:
+            # Input BMM already owns a compact full-head Q allocation.
+            return query
+        if tokens == 0:
+            return query.new_empty((0, heads, dim))
+        gathered = self.communicator.query_gather(
+            query.transpose(0, 1).contiguous()
+        ).transpose(0, 1)
+        # The prepared interval is continuous even across requests/padding.
+        # Own the compact copy rather than retaining the full gather allocation.
+        return gathered.narrow(0, self.communicator.rank * rows, rows).clone(
+            memory_format=torch.contiguous_format
+        )
+
+    def _restore_prefill(self, output):
+        if self.params.query_cp:
+            return self.communicator.restore_queries(output)
+        tokens, _, _, local_heads, _, value_dim = self._tp_prefill_shape
+        if tokens == 0:
+            return output.new_empty((0, local_heads, value_dim))
+        gathered = (
+            all_gather(output.contiguous(), Group.TP)
+            if self.communicator.size > 1
+            else output
+        )
+        # No LSE combine: ranks computed disjoint queries over complete KV.
+        # clone also breaks backing-storage aliases for one-row/head-slice views.
+        return gathered.narrow(
+            1, self.communicator.rank * local_heads, local_heads
+        ).clone(memory_format=torch.contiguous_format)
 
     def _decode(self, query):
         if query.shape[1] == self.communicator.heads:
@@ -231,18 +387,22 @@ class PageRRSparseMlaOp(SparseMlaOp):
                             raw_partial_lse=True,
                         )
                 else:
-                    # BF16 sparse Prefill already writes zero for empty rows.
+                    zero_sparse_empty_rows(partial, lse, heads)
                     latent = partial[:, :heads]
+                if not chunked:
+                    check_sparse_lse(lse[:, :heads])
                 del partial, lse, history
             if chunked:
+                check_sparse_lse(running_lse)
                 # Reuses the now-dead KV arena; only one cast and V-up per layer.
                 latent = workspace("latent", (rows, heads, latent_dim), torch.bfloat16)
                 with profile_scope("RTP::attention.dsa.sfa.final_latent_cast"):
                     latent.copy_(running)
         value_up(latent, output)
         from rtp_llm.models_py.utils.smoke_evidence import completed_dsa_chunks
+
         completed_dsa_chunks("sfa", params, len(execution.blocks), rows)
-        output = self.communicator.restore_queries(output)
+        output = self._restore_prefill(output)
         execution.finish()
         return output
 
@@ -251,8 +411,9 @@ class PageRRSparseMlaOp(SparseMlaOp):
             map_dsa_chunk_slots,
             normalize_sparse_partial,
         )
-
-        from rtp_llm.models_py.triton_kernels.mla.lse_merge import merge_attention_states_in_place as merge_mla_states_in_place
+        from rtp_llm.models_py.triton_kernels.mla.lse_merge import (
+            merge_attention_states_in_place as merge_mla_states_in_place,
+        )
 
         params = self.params
         execution = params.sfa_execution
@@ -272,7 +433,7 @@ class PageRRSparseMlaOp(SparseMlaOp):
             output = query.new_zeros((rows, heads, value_dim))
             execution.finish()
             return (
-                self.communicator.restore_queries(output)
+                self._restore_prefill(output)
                 if params.is_prefill
                 else output[
                     :,
@@ -378,10 +539,12 @@ class SparseMlaPageRRImpl(SparseMlaImpl):
         *,
         workspace_owner=None,
         execution_phase=None,
+        prepared_tp_prefill=None,
     ):
         if execution_phase not in (None, "indexer", "sfa"):
             raise ValueError(f"Unknown DSA execution phase: {execution_phase}")
         self.execution_phase = execution_phase
+        self._prepared_tp_prefill = prepared_tp_prefill
         if workspace_owner is None:
             from .dsa_kv_workspace import DsaWorkspaceOwner
 
@@ -392,13 +555,16 @@ class SparseMlaPageRRImpl(SparseMlaImpl):
             raise ValueError(
                 "DSA SFA uses BF16 computation independently of cache dtype"
             )
-        self.page_rr_params = DsaPageRRParams(
-            attention,
-            parallelism,
-            max_seq_len=int(config.max_seq_len),
-            workspace_owner=workspace_owner,
-            is_cuda_graph=is_cuda_graph,
-        )
+        if prepared_tp_prefill is not None:
+            self.page_rr_params = prepared_tp_prefill.params
+        else:
+            self.page_rr_params = DsaPageRRParams(
+                attention,
+                parallelism,
+                max_seq_len=int(config.max_seq_len),
+                workspace_owner=workspace_owner,
+                is_cuda_graph=is_cuda_graph,
+            )
         super().__init__(
             attention,
             inputs,
@@ -415,6 +581,53 @@ class SparseMlaPageRRImpl(SparseMlaImpl):
         # SM100 sparse Decode loads FP32 scales through E8M0 conversion.
         # Prefill and Decode must therefore write the same power-of-two scales.
         self.kv_cache_write_op.use_ue8m0 = workspace_owner.sfa_use_fp8
+
+    @staticmethod
+    def prepare_tp_prefill(config, parallelism, owner, inputs, phase=None):
+        """Local-only preflight: no communicator creation, scatter or KV transport.
+
+        Build the metadata and phase plans once, before the model-wide vote;
+        constructors consume this preparation without rerunning those steps.
+        """
+        for name in ("input_lengths", "prefix_lengths"):
+            tensor = getattr(inputs, name)
+            if tensor is None or tensor.device.type != "cpu":
+                raise ValueError(f"DSA TP Prefill requires host {name} before preflight")
+        attention = config.getAttentionConfigs(parallelism.get_attn_tp_size())
+        if attention.mla_fp8_compute:
+            raise ValueError("DSA SFA uses BF16 computation independently of cache dtype")
+        params = DsaPageRRParams(
+            attention, parallelism, max_seq_len=int(config.max_seq_len),
+            workspace_owner=owner, is_cuda_graph=False,
+        )
+        params.prepare(inputs)
+        if not params.is_prefill or params.query_cp:
+            raise ValueError("TP Prefill preflight requires eager TP-head metadata")
+        comm = SimpleNamespace(
+            heads=attention.head_num * parallelism.tp_size,
+            local_heads=attention.head_num,
+            q_dim=attention.kv_lora_rank + attention.rope_head_dim,
+            size=parallelism.tp_size, rank=parallelism.tp_rank,
+            device=torch.device(owner.device),
+        )
+        shape = _tp_prefill_contract(params, comm, owner.value_dim)
+        if owner.heads != comm.heads or owner.latent_dim + owner.suffix_dim != comm.q_dim:
+            raise ValueError("TP Prefill workspace and attention geometry differ")
+        phases = (phase,) if phase is not None else ("indexer", "sfa")
+        capacities = []
+        for name in phases:
+            execution = params.prepare_execution(name)
+            wire = execution.shapes.get("cache.gather")
+            # Use the planner's actual packed transport allocation, including
+            # FP8's byte codec width. Empty history has no wire allocation.
+            transport = (wire[0], str(wire[1])) if wire is not None else None
+            capacities.append((name, execution.plan.page_capacity, transport))
+        contract = (
+            shape, tuple(inputs.input_lengths.tolist()), tuple(inputs.prefix_lengths.tolist()),
+            tuple(params.kv_lens_host), params.page_size, params.kernel_page_size,
+            tuple(capacities),
+        )
+        return DsaTpPrefillPreparation(params, shape, contract)
 
     def decode_query(self, query, layer_id):
         """Absorbed decode query of every head [rows, heads, 192] in the kernel's head layout.
@@ -447,7 +660,16 @@ class SparseMlaPageRRImpl(SparseMlaImpl):
         self.fmha_params = self.page_rr_params
         self.rope_params = self.page_rr_params
         self.cp_params = self.page_rr_params
-        self.prepare(inputs)
+        prepared = self._prepared_tp_prefill
+        if prepared is None:
+            self.prepare(inputs)
+        else:
+            self.fmha_impl.plan(
+                self.page_rr_params, self.page_rr_params.block_table, inputs,
+                tp_prefill_shape=prepared.shape,
+            )
+            self.attn_inputs = inputs
+            self._prepared_tp_prefill = None
 
     def _write_kv_cache(self, compressed_kv, k_pe, kv_cache):
         params = self.page_rr_params
@@ -456,18 +678,26 @@ class SparseMlaPageRRImpl(SparseMlaImpl):
         # Global positions are carried by the shared CP plan. Address mapping
         # is applied only after the projected values reach every cache owner.
         width = self.kv_lora_rank + self.rope_head_dim
-        if (compressed_kv.stride() == (width, 1)
-                and k_pe.stride() == (width, 1)
-                and k_pe.untyped_storage().data_ptr() == compressed_kv.untyped_storage().data_ptr()
-                and k_pe.storage_offset() == compressed_kv.storage_offset() + self.kv_lora_rank):
-            values = compressed_kv.as_strided((compressed_kv.shape[0], width), (width, 1))
+        if (
+            compressed_kv.stride() == (width, 1)
+            and k_pe.stride() == (width, 1)
+            and k_pe.untyped_storage().data_ptr()
+            == compressed_kv.untyped_storage().data_ptr()
+            and k_pe.storage_offset()
+            == compressed_kv.storage_offset() + self.kv_lora_rank
+        ):
+            values = compressed_kv.as_strided(
+                (compressed_kv.shape[0], width), (width, 1)
+            )
         else:
             values = torch.cat((compressed_kv, k_pe), dim=-1)
 
         def write(value, slots):
             self.kv_cache_write_op.forward(
-                value[:, :self.kv_lora_rank], value[:, self.kv_lora_rank:],
-                kv_cache, SimpleNamespace(slot_mapping=slots),
+                value[:, : self.kv_lora_rank],
+                value[:, self.kv_lora_rank :],
+                kv_cache,
+                SimpleNamespace(slot_mapping=slots),
             )
 
         with profile_scope("RTP::attention.mla.kv_cache_write"):
@@ -500,6 +730,9 @@ class SparseMlaPageRRImpl(SparseMlaImpl):
 
     def prepare(self, inputs, forbid_realloc=False):
         self.page_rr_params.prepare(inputs, forbid_realloc=forbid_realloc)
+        self.fmha_impl.plan(
+            self.page_rr_params, self.page_rr_params.block_table, inputs
+        )
         # Reserve the small Decode SFA arena before freezing the Graph
         # Indexer's history capacity. Actual execution still runs Indexer first.
         phases = (
@@ -514,6 +747,3 @@ class SparseMlaPageRRImpl(SparseMlaImpl):
         for phase in phases:
             self.page_rr_params.prepare_execution(phase)
         self.attn_inputs = inputs
-        self.fmha_impl.plan(
-            self.page_rr_params, self.page_rr_params.block_table, inputs
-        )

@@ -60,6 +60,141 @@ def checkpoint_fields(config):
     return ("checkpoint",) if config.get("target_only", False) else ("checkpoint", "draft_checkpoint")
 
 
+# Deployment inputs read by TorchSpec's MooncakeConfig.from_env(), not arbitrary env.
+TORCHSPEC_ENV_KEYS = frozenset(
+    {
+        "JSON_MODEL_OVERRIDE_ARGS",
+        "MOONCAKE_MASTER_SERVER",
+        "MOONCAKE_METADATA_SERVER",
+        "MOONCAKE_LOCAL_HOSTNAME",
+        "MOONCAKE_STORE_KEY_NAMESPACE",
+        "MOONCAKE_PROTOCOL",
+        "MOONCAKE_DEVICE_NAME",
+        "MOONCAKE_GLOBAL_SEGMENT_SIZE",
+        "MOONCAKE_LOCAL_BUFFER_SIZE",
+        "MOONCAKE_HOST_BUFFER_SIZE",
+        "MOONCAKE_ASYNC_PUT_POOL_SIZE",
+        "MOONCAKE_GPU_BUFFER_SIZE",
+        "MOONCAKE_MAX_SEQ_LEN",
+        "MOONCAKE_HIDDEN_DIM",
+        "MOONCAKE_NUM_AUX_LAYERS",
+        "MOONCAKE_ENABLE_GPU_DIRECT",
+    }
+)
+
+
+TORCHSPEC_CAPTURE_KEYS = frozenset(
+    {
+        "hidden_state_capture_layer_ids",
+        "hidden_state_capture_dtype",
+        "hidden_state_capture_max_inflight_samples",
+        "hidden_state_capture_max_inflight_bytes",
+        "hidden_state_capture_max_inflight_tokens",
+        "hidden_state_capture_max_pending_batches",
+        "hidden_state_capture_poll_interval_ms",
+    }
+)
+
+
+def torchspec_environment(host, role, inherited=None):
+    if "torchspec_env" in host and role != "prefill":
+        raise ValueError("torchspec_env is supported only on K3.1 Prefill")
+    environment = host.get("torchspec_env", {})
+    if not isinstance(environment, dict):
+        raise ValueError("torchspec_env must be an environment map")
+    for key, value in environment.items():
+        if key not in TORCHSPEC_ENV_KEYS:
+            raise ValueError(f"Unsupported torchspec_env key: {key}")
+        if not isinstance(value, str) or "\0" in value:
+            raise ValueError(f"torchspec_env.{key} must be a NUL-free string")
+    if "JSON_MODEL_OVERRIDE_ARGS" in environment:
+        try:
+            overrides = json.loads(environment["JSON_MODEL_OVERRIDE_ARGS"])
+        except ValueError:
+            raise ValueError(
+                "torchspec_env.JSON_MODEL_OVERRIDE_ARGS must be a JSON object"
+            ) from None
+        if not isinstance(overrides, dict):
+            raise ValueError(
+                "torchspec_env.JSON_MODEL_OVERRIDE_ARGS must be a JSON object"
+            )
+        unsupported = overrides.keys() - TORCHSPEC_CAPTURE_KEYS
+        if unsupported:
+            raise ValueError(
+                "Unsupported torchspec_env.JSON_MODEL_OVERRIDE_ARGS keys: "
+                + ", ".join(sorted(unsupported))
+            )
+        if inherited is not None:
+            try:
+                common = json.loads(inherited.get("JSON_MODEL_OVERRIDE_ARGS") or "{}")
+            except ValueError:
+                raise ValueError(
+                    "Inherited JSON_MODEL_OVERRIDE_ARGS must be a JSON object"
+                ) from None
+            if not isinstance(common, dict):
+                raise ValueError(
+                    "Inherited JSON_MODEL_OVERRIDE_ARGS must be a JSON object"
+                )
+            # Overlay only P's capture fields; shared model overrides survive.
+            environment = {
+                **environment,
+                "JSON_MODEL_OVERRIDE_ARGS": json.dumps({**common, **overrides}),
+            }
+    return environment
+
+
+def prefill_chunk_size(host, role, environment=None, command=()):
+    torchspec_environment(host, role)
+    chunk_size = host.get("prefill_chunk_size")
+    if "prefill_chunk_size" in host and (
+        role != "prefill" or type(chunk_size) is not int or chunk_size < 0
+    ):
+        raise ValueError("prefill_chunk_size requires a nonnegative integer on Prefill")
+    # The controller cannot know the serving host's environment or final argv.
+    if environment is None or role != "prefill":
+        return chunk_size
+    # Match the server's string/store argument: either spelling, last flag wins,
+    # and explicit CLI JSON replaces the whole environment JSON (not its fields).
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--json_model_override_args", type=str)
+    parsed, _ = parser.parse_known_args(command[1:])
+    value = parsed.json_model_override_args
+    if value is None:
+        value = environment.get("JSON_MODEL_OVERRIDE_ARGS")
+    try:
+        overrides = json.loads(value or "{}")
+    except ValueError:
+        raise ValueError(
+            "Effective JSON_MODEL_OVERRIDE_ARGS must be a JSON object"
+        ) from None
+    if not isinstance(overrides, dict):
+        raise ValueError("Effective JSON_MODEL_OVERRIDE_ARGS must be a JSON object")
+    # Store connectivity alone does not enable capture; explicit layer IDs opt in.
+    if overrides.get("hidden_state_capture_layer_ids"):
+        if chunk_size is not None and chunk_size > 0:
+            raise ValueError("TorchSpec capture requires prefill_chunk_size=0")
+        return 0
+    return chunk_size
+
+
+def receipt_command(command):
+    """Keep model override values out of receipts without changing server argv."""
+    result = []
+    redact_next = False
+    for argument in command:
+        if redact_next:
+            result.append("<redacted>")
+            redact_next = False
+        elif argument == "--json_model_override_args":
+            result.append(argument)
+            redact_next = True
+        elif argument.startswith("--json_model_override_args="):
+            result.append("--json_model_override_args=<redacted>")
+        else:
+            result.append(argument)
+    return result
+
+
 def validate(config):
     prefill_workspace_environment(config)
     for key in ("kda_nvfp4", "dsa_nvfp4"):
@@ -98,6 +233,7 @@ def validate(config):
         for key in ("repo_root", "artifact_root", *checkpoint_fields(config)):
             if not Path(host[key]).is_absolute():
                 raise ValueError(f"{role}.{key} must be absolute")
+        prefill_chunk_size(host, role)
         if "enable_cuda_graph" in host:
             if type(host["enable_cuda_graph"]) is not bool:
                 raise ValueError("enable_cuda_graph must be a boolean")
@@ -273,6 +409,7 @@ def usable_rdma_hcas(names):
 
 
 def serve(config, role):
+    chunk_size = prefill_chunk_size(config[role], role)
     source = owned_data(Path(config[role]["repo_root"]))
     sys.path.insert(0, str(source))
     sys.path.insert(0, str(source / Path(SCRIPT).parent))
@@ -390,11 +527,19 @@ def serve(config, role):
                           if role == "prefill" and config.get("last_n_checkpoints") is not None else None),
         disk_cache_size_mb=host.get("disk_cache_size_mb", 65536),
         prefill_token_capacity=host.get("prefill_token_capacity"),
+        prefill_chunk_size=chunk_size,
         allocator_large_segment_size_mb=host.get("allocator_large_segment_size_mb"),
         memory_cache_max_descriptors_per_transfer_batch=host.get("memory_cache_max_descriptors_per_transfer_batch"),
         max_seq_len=host.get("max_seq_len"), request_capacity=host.get("request_capacity"),
         decode_capture_batches=host.get("decode_capture_batches"), cache_store_rdma_mode=rdma)
     explicit, command = launch_config(args)
+    env = runtime_environment(source, binary)
+    env.update(explicit)
+    torchspec_env = torchspec_environment(host, role, inherited=env)
+    env.update(torchspec_env)
+    chunk_size = prefill_chunk_size(host, role, env, command)
+    if chunk_size is not None:
+        explicit["PREFILL_CHUNK_SIZE"] = str(chunk_size)
     if config.get("last_n_checkpoints") is not None:
         source_sha = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
         if (config.get("source_commit") not in (None, source_sha)
@@ -427,7 +572,8 @@ def serve(config, role):
         explicit[key] = str(cache / leaf)
     (directory / "logs").mkdir()
     explicit["LOG_PATH"] = str(directory / "logs")
-    env = runtime_environment(source, binary); env.update(explicit)
+    # Dedicated capture values stay in the child environment, not the receipt.
+    env.update(explicit)
     if role == "prefill":
         fixture = fixture_environment(directory, env)
         env.update(fixture); explicit.update(fixture)
@@ -445,9 +591,10 @@ def serve(config, role):
             manager_pid=os.getpid(), manager_start_ticks=start_ticks(os.getpid()),
             pid_namespace=os.readlink("/proc/self/ns/pid"), server_pid=process.pid,
             server_start_ticks=start_ticks(process.pid), pgid=process.pid,
-            command=command, environment={**explicit, "SPT_NOENV": env["SPT_NOENV"],
+            command=receipt_command(command), environment={**explicit, "SPT_NOENV": env["SPT_NOENV"],
                 "CC": env['CC'], "CXX": env['CXX'],
                 "K31_PD_SMOKE_ENV_ANCHOR": env["K31_PD_SMOKE_ENV_ANCHOR"]}, run_id=config["run_id"],
+            torchspec_env_keys=sorted(torchspec_env),
             source_files=actual_hashes, binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
             performance_validated=False, smoke_passed=None)
         atomic(directory / "instance.json", identity)

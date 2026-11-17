@@ -12,9 +12,10 @@ class AttentionInputView:
         return getattr(self.original, name)
 
     def __copy__(self):
-        return type(self)(self.original, **{
-            key: value for key, value in self.__dict__.items() if key != "original"
-        })
+        return type(self)(
+            self.original,
+            **{key: value for key, value in self.__dict__.items() if key != "original"}
+        )
 
 
 class QueryLayout:
@@ -25,8 +26,12 @@ class QueryLayout:
         lengths = info.prefill_actual_input_lengths_cpu
         if lengths.device.type != "cpu" or lengths.ndim != 1:
             raise ValueError("zigzag requires original host request lengths")
+        prefixes = info.prefill_prefix_lengths_cpu
+        if prefixes.device.type != "cpu" or prefixes.ndim != 1:
+            raise ValueError("zigzag requires original host prefix lengths")
         self.lengths = tuple(int(x) for x in lengths.tolist())
-        self.prefixes = tuple(int(x) for x in info.prefill_prefix_lengths_cpu.tolist())
+        self.prefixes = tuple(int(x) for x in prefixes.tolist())
+        self.prefixes_host = prefixes
         if len(self.lengths) != len(self.prefixes):
             raise ValueError("zigzag request/prefix metadata disagree")
         self.restore = info.prefill_qkv_restore_indice.long()
@@ -73,15 +78,24 @@ class QueryLayout:
         self.lengths_device = lengths.to(device=self.device, non_blocking=True)
         requests, positions = [], []
         for request, (length, prefix) in enumerate(zip(self.lengths, self.prefixes)):
-            requests.append(torch.full((length,), request, dtype=torch.int32, device=self.device))
-            positions.append(torch.arange(prefix, prefix + length, dtype=torch.int32, device=self.device))
+            requests.append(
+                torch.full((length,), request, dtype=torch.int32, device=self.device)
+            )
+            positions.append(
+                torch.arange(
+                    prefix, prefix + length, dtype=torch.int32, device=self.device
+                )
+            )
         req = torch.cat(requests)
         pos = torch.cat(positions)
-        self.rankmajor_requests = torch.zeros(self.physical_rows, dtype=torch.int32, device=self.device)
+        self.rankmajor_requests = torch.zeros(
+            self.physical_rows, dtype=torch.int32, device=self.device
+        )
         self.rankmajor_positions = torch.full_like(self.rankmajor_requests, -1)
         self.rankmajor_requests.index_copy_(0, self.natural_to_rankmajor, req)
-        self.rankmajor_positions.index_copy_(0, self.natural_to_rankmajor,
-                                           torch.where(self.natural_valid, pos, -1))
+        self.rankmajor_positions.index_copy_(
+            0, self.natural_to_rankmajor, torch.where(self.natural_valid, pos, -1)
+        )
         self.local_requests = self.rankmajor_requests[start : start + self.local_rows]
         self.local_positions = self.rankmajor_positions[start : start + self.local_rows]
         self._buffers = {} if buffers is None else buffers
@@ -120,7 +134,12 @@ class QueryLayout:
         old = self._buffers.get(key)
         if old is None or old.shape[0] < rows or old.shape[1] < columns:
             self._buffers[key] = (
-                torch.empty_strided((rows, columns), (1, (rows + 31) // 32 * 32), dtype=dtype, device=self.device)
+                torch.empty_strided(
+                    (rows, columns),
+                    (1, (rows + 31) // 32 * 32),
+                    dtype=dtype,
+                    device=self.device,
+                )
                 if column_major
                 else torch.empty((rows, columns), dtype=dtype, device=self.device)
             )
@@ -128,14 +147,25 @@ class QueryLayout:
 
     def prepare_kda_buffers(self, projection_width, output_width, *, quantized=False):
         self.reserve("projection", self.true_rows, projection_width, torch.bfloat16)
-        self.reserve("output", self.physical_rows, output_width,
-                     torch.float8_e4m3fn if quantized else torch.bfloat16)
+        self.reserve(
+            "output",
+            self.physical_rows,
+            output_width,
+            torch.float8_e4m3fn if quantized else torch.bfloat16,
+        )
         if quantized:
-            self.reserve("scales", self.physical_rows, (output_width + 511) // 512,
-                         torch.int32, column_major=True)
+            self.reserve(
+                "scales",
+                self.physical_rows,
+                (output_width + 511) // 512,
+                torch.int32,
+                column_major=True,
+            )
 
     def gather_natural(self, projected):
-        out = self.reserve("projection", self.true_rows, projected.shape[1], projected.dtype)
+        out = self.reserve(
+            "projection", self.true_rows, projected.shape[1], projected.dtype
+        )
         torch.index_select(projected, 0, self.natural_to_rankmajor, out=out)
         return out
 
@@ -148,8 +178,13 @@ class QueryLayout:
         if scales is None:
             return out, None
         packed = scales.dtype == torch.int32
-        restored = self.reserve("scales", self.physical_rows, scales.shape[1], scales.dtype,
-                                column_major=scales.stride(0) == 1)
+        restored = self.reserve(
+            "scales",
+            self.physical_rows,
+            scales.shape[1],
+            scales.dtype,
+            column_major=scales.stride(0) == 1,
+        )
         restored.fill_(0x7F7F7F7F if packed else 1.0)
         restored.index_copy_(0, self.natural_to_rankmajor, scales)
         return out, restored
@@ -162,6 +197,7 @@ class QueryLayout:
             original,
             input_lengths=self.lengths_host,
             input_lengths_device=self.lengths_device,
+            prefix_lengths=self.prefixes_host,
             cu_seqlens=self.cu_host,
             cu_seqlens_device=self.cu_device,
             valid_token_mask=self.natural_valid,

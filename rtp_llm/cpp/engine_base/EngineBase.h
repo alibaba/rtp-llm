@@ -1,6 +1,7 @@
 #pragma once
 
 #include <utility>
+#include "rtp_llm/cpp/utils/ErrorCode.h"
 
 #include "absl/status/status.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
@@ -58,6 +59,10 @@ public:
     enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs);
 
     virtual std::shared_ptr<GenerateStream> makeStream(const std::shared_ptr<GenerateInput>& input);
+
+    virtual ErrorInfo checkHealth() const {
+        return ErrorInfo::OkStatus();
+    }
 
     virtual absl::Status stop() = 0;
 

@@ -73,6 +73,8 @@ class ExceptionType(IntEnum):
     FINISHED = 8104
     OUTPUT_QUEUE_NO_UPDATE = 8105
     GRAMMAR_COMPILE_OVERLOADED = 8106, ExceptionCategory.CAPACITY
+    # Transient strict capture rejection before any reservation or publication.
+    HIDDEN_STATE_CAPTURE_BACKPRESSURE = 8107, ExceptionCategory.CAPACITY
 
     # rpc error
     GET_HOST_FAILED = 8200
@@ -90,6 +92,7 @@ class ExceptionType(IntEnum):
     LOAD_KV_CACHE_FAILED = 8212
     WAIT_TO_RUN_TIMEOUT = 8213, ExceptionCategory.TIMEOUT
     KEEP_ALIVE_TIMEOUT = 8214, ExceptionCategory.TIMEOUT
+    SERVICE_UNHEALTHY = 8216
 
     # load cache error
     LOAD_CACHE_TIMEOUT = 8300, ExceptionCategory.TIMEOUT

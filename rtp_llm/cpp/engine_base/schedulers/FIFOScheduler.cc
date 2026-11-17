@@ -352,8 +352,8 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
     // queues. group_id/group_size on a stream in waiting_streams are status metadata;
     // they must not delay or isolate ordinary FIFO admission.
 
-    bool       has_execution_mode      = false;
-    bool       scheduling_prefill_only = false;
+    bool                has_execution_mode = false;
+    StreamExecutionMode execution_mode;
     const auto capture_execution_mode  = [&](const list<GenerateStreamPtr>& streams) {
         if (has_execution_mode) {
             return;
@@ -362,8 +362,8 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
             return stream && stream->getStatus() == StreamState::RUNNING;
         });
         if (it != streams.end()) {
-            has_execution_mode      = true;
-            scheduling_prefill_only = isPrefillOnly(*it);
+            has_execution_mode = true;
+            execution_mode     = streamExecutionMode(*it);
         }
     };
     capture_execution_mode(running_streams_);
@@ -400,8 +400,8 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
             continue;
         }
 
-        const bool prefill_only = isPrefillOnly(stream);
-        if (has_execution_mode && scheduling_prefill_only != prefill_only) {
+        const auto mode = streamExecutionMode(stream);
+        if (has_execution_mode && execution_mode != mode) {
             continue;
         }
 
@@ -444,8 +444,8 @@ void FIFOScheduler::admitWaitingStreams(list<GenerateStreamPtr>&       waiting_s
         if (scheduling_progress) {
             // A failed KV allocation owns no work this round and must not pin its execution mode.
             if (!has_execution_mode) {
-                has_execution_mode      = true;
-                scheduling_prefill_only = prefill_only;
+                has_execution_mode = true;
+                execution_mode     = mode;
             }
             // Admission limits cover every stream that made progress in this
             // round, including an async cache load. Otherwise multiple pending

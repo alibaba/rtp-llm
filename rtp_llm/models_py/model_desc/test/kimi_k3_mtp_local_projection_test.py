@@ -9,7 +9,8 @@ from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3Model
 from rtp_llm.models_py.model_desc.kimi_k3_mtp import KimiK3MtpModel
 from rtp_llm.models_py.modules import Embedding
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import CudaF16Linear
-from rtp_llm.ops import PrefillCPConfig, RoleType
+from rtp_llm.ops import ParallelismConfig, RoleType
+from rtp_llm.utils.model_weight import W
 
 
 class KimiK3MtpLocalProjectionTest(unittest.TestCase):
@@ -101,6 +102,40 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "grouped E4M3 projections"):
             model._initialize_fp8_collective()
 
+    def _constructor_fixture(self, tp, dp, role):
+        config = SimpleNamespace(
+            num_layers=1,
+            is_mtp=False,
+            vocab_size=16,
+            capture_aux_hidden_layer_ids=[],
+            hidden_state_capture_layer_ids=[],
+            moe_prefill_max_tokens_per_rank=262144,
+            max_seq_len=1048576,
+            gen_num_per_cycle=2,
+            k3_runtime_config=SimpleNamespace(
+                attn_res_block_size=0, media_placeholder_token_id=None
+            ),
+            layernorm_eps=1e-5,
+        )
+        parallel = ParallelismConfig()
+        parallel.role_type = role
+        parallel.tp_size, parallel.dp_size, parallel.ep_size = tp, dp, tp * dp
+        parallel.ffn_sp_size, parallel.ffn_tp_size = tp, 1
+        parallel.enable_sp = tp > 1
+        weights = SimpleNamespace(
+            weights=[
+                {
+                    W.mla_kv_b_w: torch.ones(1, 1),
+                    "kimi_k3.mtp.enorm": torch.ones(1),
+                    "kimi_k3.mtp.hnorm": torch.ones(1),
+                }
+            ],
+            get_global_weight=lambda _: torch.ones(1),
+        )
+        layer = nn.Identity()
+        layer.layer_type = object()
+        return config, parallel, weights, layer
+
     def test_moe_workspace_uses_resolved_k3_capacity_for_every_role(self):
         from rtp_llm.models_py.model_desc import kimi_k3
 
@@ -108,33 +143,9 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
             for role in (RoleType.DECODE, RoleType.PREFILL, RoleType.PDFUSION):
                 for capacity in (192, 4096, 262144):
                     with self.subTest(tp=tp, role=role, capacity=capacity):
-                        config = SimpleNamespace(
-                            num_layers=1,
-                            vocab_size=16,
-                            capture_aux_hidden_layer_ids=[],
-                            moe_prefill_max_tokens_per_rank=262144,
-                            max_seq_len=1048576,
-                            gen_num_per_cycle=2,
-                            k3_runtime_config=SimpleNamespace(attn_res_block_size=0),
-                            layernorm_eps=1e-5,
+                        config, parallel, weights, layer = self._constructor_fixture(
+                            tp, 8 // tp, role
                         )
-                        parallel = SimpleNamespace(
-                            role_type=role,
-                            tp_size=tp,
-                            tp_rank=0,
-                            dp_size=8 // tp,
-                            ep_size=8,
-                            pp_size=1,
-                            get_attn_tp_size=lambda: tp,
-                            enable_sp=True,
-                            prefill_cp_config=PrefillCPConfig(),
-                        )
-                        weights = SimpleNamespace(
-                            weights=[{}],
-                            get_global_weight=lambda _: torch.ones(1),
-                        )
-                        layer = nn.Identity()
-                        layer.layer_type = object()
                         with (
                             patch.object(
                                 kimi_k3, "Embedding", return_value=nn.Identity()
@@ -152,6 +163,88 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
                         # Neither the generic field nor a second Decode formula
                         # may replace the K3 loader's resolved physical capacity.
                         self.assertEqual(ctor.call_args.args[-1], capacity // tp)
+
+    def test_ffn_sp_contract_for_target_and_native_mtp_after_config_hook(self):
+        from rtp_llm.models.kimi_k3.kimi_k31 import KimiK31Mtp
+        from rtp_llm.models_py.model_desc import kimi_k3, kimi_k3_mtp
+
+        cases = (
+            (1, 1, 1, 1, True),
+            (8, 1, 8, 1, True),
+            (4, 2, 4, 1, True),
+            (8, 1, 4, 2, False),
+            (4, 2, 2, 2, False),
+            (4, 2, 4, 2, False),
+            (1, 1, 1, 2, False),
+        )
+        for role in (RoleType.PREFILL, RoleType.DECODE, RoleType.PDFUSION):
+            for native_mtp in (False, True):
+                for tp, dp, ffn_sp, ffn_tp, allowed in cases:
+                    with self.subTest(
+                        role=role,
+                        native_mtp=native_mtp,
+                        tp=tp,
+                        dp=dp,
+                        ffn_sp=ffn_sp,
+                        ffn_tp=ffn_tp,
+                    ):
+                        config, parallel, weights, layer = self._constructor_fixture(
+                            tp, dp, role
+                        )
+                        parallel.ffn_sp_size, parallel.ffn_tp_size = ffn_sp, ffn_tp
+                        model_cls = KimiK3Model
+                        if native_mtp:
+                            parallel = KimiK31Mtp.speculative_parallelism_config(
+                                parallel
+                            )
+                            model_cls = KimiK3MtpModel
+                            self.assertFalse(parallel.prefill_cp_config.is_enabled())
+                        self.assertEqual(parallel.ffn_sp_size, ffn_sp)
+                        self.assertEqual(parallel.ffn_tp_size, ffn_tp)
+                        with (
+                            patch.object(
+                                kimi_k3, "Embedding", return_value=nn.Identity()
+                            ),
+                            patch.object(
+                                kimi_k3, "RMSNorm", return_value=nn.Identity()
+                            ),
+                            patch.object(
+                                kimi_k3, "KimiK3DecoderLayer", return_value=layer
+                            ) as ctor,
+                            patch.object(
+                                kimi_k3_mtp, "RMSNorm", return_value=nn.Identity()
+                            ),
+                            patch.object(
+                                kimi_k3_mtp.LinearFactory,
+                                "create_linear_from_weights",
+                                return_value=nn.Identity(),
+                            ),
+                        ):
+                            if allowed:
+                                model = model_cls(
+                                    config, parallel, weights, 63, max_moe_tokens=192
+                                )
+                                self.assertEqual(model.tp_size, tp)
+                                self.assertEqual(ctor.call_args.args[-1], 192 // tp)
+                            else:
+                                with self.assertRaisesRegex(
+                                    ValueError,
+                                    f"tp_size={tp}, ffn_sp_size={ffn_sp}, ffn_tp_size={ffn_tp}",
+                                ):
+                                    model_cls(
+                                        config,
+                                        parallel,
+                                        weights,
+                                        63,
+                                        max_moe_tokens=192,
+                                    )
+                                ctor.assert_not_called()
+
+    def test_ffn_sp_guard_preserves_enable_sp_requirement(self):
+        config, parallel, weights, _ = self._constructor_fixture(4, 2, RoleType.DECODE)
+        parallel.enable_sp = False
+        with self.assertRaisesRegex(ValueError, "requires sequence parallelism"):
+            KimiK3Model(config, parallel, weights, 63, max_moe_tokens=192)
 
     def _bf16_mtp_model(self, device="cpu"):
         model = object.__new__(KimiK3MtpModel)
@@ -173,6 +266,7 @@ class KimiK3MtpLocalProjectionTest(unittest.TestCase):
         attention._bf16_collective = None
         layer = nn.Module()
         layer.attention = attention
+        layer.block_size = 0
         model.layers = nn.ModuleList([layer])
         return model
 

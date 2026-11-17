@@ -359,9 +359,29 @@ class Qwen3GemmModel(DisaggregateModelBase):
         t: torch.Tensor,
         micro_batch_size_list: List[int],
         captured_hidden_states: Optional[torch.Tensor] = None,
+        capture_error: Optional[str] = None,
+        final_output: bool = False,
     ):
         offset = 0
         for idx, size in enumerate(micro_batch_size_list):
+            if final_output and self.capture_hidden_states_by_attn_rank[idx]:
+                # Only capture lanes carry a diagnostic before their final tensor.
+                error_bytes = (capture_error or "").encode("utf-8")
+                send(
+                    torch.tensor(
+                        [len(error_bytes)], dtype=torch.int64, device=t.device
+                    ),
+                    self.attn_dp_rank[idx],
+                    Group.DP_AND_TP,
+                )
+                if error_bytes:
+                    send(
+                        torch.tensor(
+                            list(error_bytes), dtype=torch.uint8, device=t.device
+                        ),
+                        self.attn_dp_rank[idx],
+                        Group.DP_AND_TP,
+                    )
             tensor_to_send = (
                 captured_hidden_states
                 if captured_hidden_states is not None
@@ -426,22 +446,19 @@ class Qwen3GemmModel(DisaggregateModelBase):
                 next_residuals.append(next_residual)
                 capture = capture_contexts[batch_idx]
                 capture.capture_layer(layer_idx, next_residual)
-                packed_hidden_states = None
                 if layer_idx == self.layer_num - 1:
-                    finalized_hidden_states = capture.finalize(
-                        next_residual
-                    ).hidden_states
-                    if capture.enabled:
-                        packed_hidden_states = finalized_hidden_states
-                        out = finalized_hidden_states[..., -next_residual.shape[-1] :]
-                    else:
-                        out = finalized_hidden_states
-
-                self.send_to_attention(
-                    out,
-                    batch_split_info.mirco_batch_sizes_list[batch_idx],
-                    packed_hidden_states,
-                )
+                    outputs = capture.finalize(next_residual)
+                    self.send_to_attention(
+                        outputs.hidden_states,
+                        batch_split_info.mirco_batch_sizes_list[batch_idx],
+                        outputs.captured_hidden_states,
+                        outputs.capture_error,
+                        final_output=True,
+                    )
+                else:
+                    self.send_to_attention(
+                        out, batch_split_info.mirco_batch_sizes_list[batch_idx]
+                    )
                 # send res to attention model
             residuals = next_residuals
         return []
@@ -523,9 +540,25 @@ class Qwen3AttnModel(DisaggregateModelBase):
 
     def recv_final_from_ffn_service(
         self, token_num: int, capture_hidden_states: bool
-    ) -> torch.Tensor:
-        hidden_width = self.config.hidden_size
+    ) -> PyModelOutputs:
+        capture_error = None
         if capture_hidden_states:
+            error_size = torch.empty(1, dtype=torch.int64, device=self.device)
+            recv(error_size, self.ffn_service_rank, Group.DP_AND_TP)
+            error_length = int(error_size.item())
+            if error_length:
+                error_bytes = torch.empty(
+                    error_length, dtype=torch.uint8, device=self.device
+                )
+                recv(error_bytes, self.ffn_service_rank, Group.DP_AND_TP)
+                capture_error = bytes(error_bytes.tolist()).decode("utf-8")
+        has_capture = (
+            capture_hidden_states
+            and bool(self.config.hidden_state_capture_layer_ids)
+            and capture_error is None
+        )
+        hidden_width = self.config.hidden_size
+        if has_capture:
             hidden_width *= len(self.config.hidden_state_capture_layer_ids) + 1
         t = torch.empty(
             [
@@ -536,7 +569,13 @@ class Qwen3AttnModel(DisaggregateModelBase):
             dtype=self.config.compute_dtype,
         )
         recv(t, self.ffn_service_rank, Group.DP_AND_TP)
-        return t
+        outputs = PyModelOutputs(
+            t[..., -self.config.hidden_size :].contiguous() if has_capture else t
+        )
+        if has_capture:
+            outputs.captured_hidden_states = t
+        outputs.capture_error = capture_error
+        return outputs
 
     def send_to_ffn_service(self, out: torch.Tensor):
         send(out, self.ffn_service_rank, Group.DP_AND_TP)
@@ -572,7 +611,7 @@ class Qwen3AttnModel(DisaggregateModelBase):
             out = self.recv_final_from_ffn_service(
                 mirco_batch_input.input_ids.shape[0], capture_hidden_states
             )
-            outputs.append(PyModelOutputs(out))
+            outputs.append(out)
         return outputs
 
 

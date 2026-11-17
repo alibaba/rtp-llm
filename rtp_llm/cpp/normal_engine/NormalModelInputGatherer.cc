@@ -79,7 +79,7 @@ size_t blockTableWidth(const StreamGroups& stream_groups, const std::vector<std:
         for (int batch = 0; batch < stream->currentBatchSize(); ++batch) {
             for (const auto& tag : tags) {
                 const auto& ids = resource.cacheResource(batch).blockIds(tag);
-                width = std::max(width, ids.blocksNum() * (kernel ? ids.kernelBlocksPerKvBlock() : 1));
+                width           = std::max(width, ids.blocksNum() * (kernel ? ids.kernelBlocksPerKvBlock() : 1));
             }
         }
     };
@@ -232,7 +232,7 @@ void copyKvCacheBlocksToModelInput(GptModelInputs&          model_input,
 }
 
 void gatherMultimodalInputsForContextBatch(const GenerateStreamPtr&    stream,
-                                           const std::vector<int>&      text_token_mask,
+                                           const std::vector<int>&     text_token_mask,
                                            GatherModelInputContext&    ctx,
                                            std::vector<torch::Tensor>& gathered_mm_features,
                                            std::vector<torch::Tensor>& gathered_mm_extra_input,
@@ -454,11 +454,10 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
     if (config_.has_engram) {
         model_input.engram_token_windows = torch::full({(int64_t)current_tokens_size, 4}, -1, pinned_i32);
     }
-    model_input.input_lengths    = torch::empty({(int64_t)total_batch_size}, pinned_i32);
-    model_input.sequence_lengths = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
-    model_input.prefix_lengths   = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
-    model_input.cache_store_publish_start_tokens =
-        torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
+    model_input.input_lengths                    = torch::empty({(int64_t)total_batch_size}, pinned_i32);
+    model_input.sequence_lengths                 = torch::empty({(int64_t)total_decode_batch_size}, pinned_i32);
+    model_input.prefix_lengths                   = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
+    model_input.cache_store_publish_start_tokens = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
     if (needs_custom_output_indexes) {
         model_input.custom_output_indexes = torch::empty({(int64_t)total_context_batch_size}, pinned_i64);
     }
@@ -738,8 +737,8 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
             if (ctx.need_cal_position_id) {
                 auto context_pos_ids = stream->generateContextPositionIds();
-                int begin_off = stream->prefixLength() * config_.position_id_len_factor;
-                int copy_len  = stream->contextLength() * config_.position_id_len_factor;
+                int  begin_off       = stream->prefixLength() * config_.position_id_len_factor;
+                int  copy_len        = stream->contextLength() * config_.position_id_len_factor;
                 memcpy(ctx.combo_position_ids + ctx.token_idx * config_.position_id_len_factor,
                        context_pos_ids.data_ptr<int>() + begin_off,
                        copy_len * sizeof(int));
@@ -941,9 +940,40 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
         report_mixed_mode_error(context_streams);
     }
 
-    auto model_input                  = allocateModelInputBuffers(stream_groups);
-    model_input.skip_lm_head          = prefill_only;
-    model_input.capture_hidden_states = prefill_only;
+    auto model_input         = allocateModelInputBuffers(stream_groups);
+    model_input.skip_lm_head = prefill_only;
+    const bool pure_context  = stream_groups.totalDecodeBatchSize() == 0 && stream_groups.totalContextBatchSize() > 0;
+
+    // Admission is request-level and must be checked before setting the batch
+    // capture bit. PyWrappedModel may only cancel reservations belonging to the
+    // model input it receives; keeping an unadmitted/errored context stream out
+    // here prevents a later side-path failure from cancelling another request's
+    // reservation in the same scheduler batch.
+    const bool all_context_capture_candidates =
+        config_.enable_hidden_state_capture && !config_.warm_up && pure_context && !mixed_execution_modes
+        && !model_input.is_fake_stream
+        && std::all_of(context_streams.begin(), context_streams.end(), [](const auto& stream) {
+               return stream->isHiddenStateCaptureCandidate() && stream->hasHiddenStateCaptureReservation();
+           });
+    // Hidden-state export and response generation are independent. Capture the
+    // complete context forward only when every participating context stream was
+    // admitted; skip_lm_head remains solely responsible for prefill-only responses.
+    model_input.capture_hidden_states = all_context_capture_candidates;
+    if (!model_input.capture_hidden_states) {
+        const auto cancel_capture = [](const auto& streams) {
+            for (const auto& stream : streams) {
+                if (stream->generateConfig()->requiresHiddenStateCaptureAdmission() && !stream->hasError()) {
+                    // Preserve batch geometry and TP collective order, but never report
+                    // successful required prefill when this gather suppresses capture.
+                    stream->reportError(ErrorCode::EXECUTION_EXCEPTION,
+                                        "required hidden-state capture was disabled by the gathered batch");
+                }
+                stream->cancelHiddenStateCapture();
+            }
+        };
+        cancel_capture(context_streams);
+        cancel_capture(decode_streams);
+    }
     initializeKvCacheMetadata(model_input);
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
     RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));

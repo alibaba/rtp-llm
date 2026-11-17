@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rtp_llm/cpp/utils/ServingDeviceHealth.h"
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -31,10 +32,13 @@ public:
     std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) override;
     std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
          enqueueMultiple(const std::vector<std::shared_ptr<GenerateInput>>& inputs) override;
+    // A duplicate scheduler-owned submission replaces the caller's reference
+    // with a distinct error stream; it never mutates/releases the original.
     void enqueue(std::shared_ptr<GenerateStream>& stream) override;
     absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>& generate_input,
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
+    ErrorInfo                         checkHealth() const override;
 
     KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     absl::Status step();
@@ -52,6 +56,9 @@ private:
     void                            initScheduler();
     std::shared_ptr<GenerateStream> createStream(const std::shared_ptr<GenerateInput>& input);
     bool                            validateStreamForScheduling(const GenerateStreamPtr& stream) const;
+    bool                              rejectUnhealthyStream(const GenerateStreamPtr& stream) const;
+    std::shared_ptr<GenerateStream>   createErrorStream(const std::shared_ptr<GenerateInput>& input,
+                                                        const ErrorInfo&                      error);
     std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens);
     WarmUpResult                    warmUp(const EngineInitParams& params);
     WarmUpResult                    prefillWarmUp(const EngineInitParams& params);
@@ -96,7 +103,12 @@ private:
     std::mutex                                    stop_mutex_;
     std::atomic<uint64_t>                         loop_step_{0};
     std::atomic<uint64_t>                         stop_after_step_{UINT64_MAX};
+    // Serializes request-thread capture admission with stop's executor detachment.
+    std::mutex                                    capture_admission_mutex_;
     std::unique_ptr<Executor>                     executor_;
+    // Published once before startLoop/RPC publication. stop() never resets it:
+    // health readers must not race executor_ destruction or dereference it.
+    ServingDeviceHealthPtr                        serving_device_health_;
     ModelConfig                                   model_config_;
     py::object                                    custom_output_selector_;
     ParallelismConfig                             parallelism_config;

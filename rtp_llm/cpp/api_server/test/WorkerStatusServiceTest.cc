@@ -89,6 +89,33 @@ TEST_F(WorkerStatusServiceTest, WorkerStatus_DoesNotRequestCacheKeys) {
     writer_ptr.release();
 }
 
+TEST_F(WorkerStatusServiceTest, UnhealthyWorkerRetainsCapacityAndSuccessfulStatusResponse) {
+    class UnhealthyEngine: public MockEngineBase {
+    public:
+        ErrorInfo checkHealth() const override {
+            return ErrorInfo(ErrorCode::SERVICE_UNHEALTHY, "serving device unavailable");
+        }
+    };
+    auto                engine = std::make_shared<UnhealthyEngine>();
+    WorkerStatusService service(engine, controller_);
+    KVCacheInfo         cache_info;
+    cache_info.available_kv_cache = 123;
+    cache_info.total_kv_cache     = 456;
+    EXPECT_CALL(*engine, getCacheStatusInfo(-1, false)).WillOnce(Return(cache_info));
+    auto  mock = std::make_unique<http_server::MockHttpResponseWriter>();
+    auto* raw  = mock.get();
+    EXPECT_CALL(*raw, Write).WillOnce(Invoke([](const std::string& data) {
+        EXPECT_THAT(data, HasSubstr("\"available_kv_cache\":123"));
+        EXPECT_THAT(data, HasSubstr("\"total_kv_cache\":456"));
+        EXPECT_THAT(data, HasSubstr("\"alive\":false"));
+        return true;
+    }));
+    std::unique_ptr<http_server::HttpResponseWriter> writer(std::move(mock));
+    http_server::HttpRequest                         request;
+    service.workerStatus(writer, request);
+    EXPECT_EQ(raw->_statusCode, 200);
+}
+
 TEST_F(WorkerStatusServiceTest, Stop) {
     WorkerStatusService worker_status_service(nullptr, nullptr);
     EXPECT_FALSE(worker_status_service.is_stopped_.load());
