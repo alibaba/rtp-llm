@@ -29,14 +29,35 @@ def finish_capacity_batch_through_observer(
         _AdmissionState,
         _ObservedWorkload,
         _PrefillWorkloadSlice,
-        _AdmissionPriorCacheForecast,
         _RequestCacheLookup,
         _ResolvedCacheHit,
     )
 
     end = time.perf_counter_ns()
-    lookup = _RequestCacheLookup(prior_id, _ResolvedCacheHit(80, end - 1))
-    prior = _AdmissionPriorCacheForecast(True, 96, 0, 96, 0, lookup)
+    lookup = _RequestCacheLookup(prior_id)
+    observer = VLLMEngineObserver.__new__(VLLMEngineObserver)
+    observer._pp_capacity_unified = True
+    observer._forward_request_states = {
+        str(prior_id): SimpleNamespace(
+            batch_id=1000 + prior_id, cache_lookups={prior_id: lookup}
+        )
+    }
+    native_request = SimpleNamespace(
+        request_id=str(prior_id),
+        client_index=prior_id,
+        num_prompt_tokens=96,
+        num_computed_tokens=0,
+        num_cached_tokens=0,
+        prefill_stats=SimpleNamespace(
+            num_prompt_tokens=96,
+            num_local_cached_tokens=0,
+            num_external_cached_tokens=0,
+        ),
+    )
+    assert observer._native_cache_lookup_complete(native_request)
+    contribution = observer._make_workload_contribution(native_request, 0)
+    assert contribution.cache_lookup is lookup
+    prior = observer._admission_cache_forecast(contribution, True)
     admission = _AdmissionState(
         preceding_workload=_ObservedWorkload(
             batch_count=1,
@@ -46,7 +67,7 @@ def finish_capacity_batch_through_observer(
         ),
         incoming_running_capacity_request_ids=frozenset((request_id,)),
     )
-    observer = VLLMEngineObserver.__new__(VLLMEngineObserver)
+    lookup.result = _ResolvedCacheHit(80, end - 1)
     observer._native_ingress = True
     observer._pp_capacity_unified = True
     observer._execution_geometry_enabled = False
