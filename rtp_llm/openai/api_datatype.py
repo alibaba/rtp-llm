@@ -195,7 +195,7 @@ class ChatCompletionRequest(BaseModel):
     json_format: Optional[bool] = None
     presence_penalty: Optional[float] = Field(default=None, ge=-2.0, le=2.0)
     frequency_penalty: Optional[float] = Field(default=None, ge=-2.0, le=2.0)
-    repetition_penalty: Optional[float] = None
+    repetition_penalty: Optional[float] = Field(default=None, gt=0.0)
 
     # ---- These functions are not implemented yet.
     # logit_bias: Optional[Dict[str, float]] = None

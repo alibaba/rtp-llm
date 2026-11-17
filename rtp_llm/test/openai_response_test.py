@@ -659,6 +659,9 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
                 self.assertEqual(getattr(request, field), value)
         request = ChatCompletionRequest(messages=messages, repetition_penalty=3.0)
         self.assertEqual(request.repetition_penalty, 3.0)
+        for value in (0.0, -1.0):
+            with self.assertRaises(ValidationError):
+                ChatCompletionRequest(messages=messages, repetition_penalty=value)
 
     async def _run_without_aux_info(
         self, stream: bool, num_choices: int, termination: str = "eos"
