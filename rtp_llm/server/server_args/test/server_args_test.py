@@ -544,8 +544,31 @@ class CacheConfigArgumentsTest(TestCase):
                     expected,
                 )
 
+    def test_frozen_force_release_timeout_cli_environment_and_worker_pickle(self):
+        name = "block_tree_frozen_force_release_timeout_ms"
+        env_name = name.upper()
+        for args, env, expected in (
+            ([], {}, 60000),
+            (None, {}, 60000),
+            ([], {env_name: "120000"}, 120000),
+            (None, {env_name: "1200000"}, 1200000),
+            ([f"--{name}", "0"], {env_name: "120000"}, 0),
+            ([f"--{name}", "1"], {}, 1),
+            ([], {env_name: "0"}, 0),
+            ([f"--{name}", str(2**31 - 1)], {}, 2**31 - 1),
+        ):
+            with self.subTest(args=args, env=env):
+                config = self.parse_cache_config(args, env)
+                self.assertEqual(getattr(config, name), expected)
+                restored = pickle.loads(pickle.dumps(config))
+                self.assertEqual(getattr(restored, name), expected)
+
     def test_frozen_recovery_timing_rejects_invalid_cli_and_environment(self):
         for name, values in (
+            (
+                "block_tree_frozen_force_release_timeout_ms",
+                ("-1", str(2**31), "1.5", "invalid"),
+            ),
             (
                 "block_tree_frozen_recovery_interval_ms",
                 ("-1", str(2**31), "1.5", "invalid"),

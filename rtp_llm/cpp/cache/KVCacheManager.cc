@@ -313,9 +313,11 @@ bool KVCacheManager::init() {
     if (kv_cache_config_.block_tree_frozen_recovery_interval_ms < 0
         || kv_cache_config_.block_tree_frozen_recovery_interval_ms > std::numeric_limits<int>::max()
         || kv_cache_config_.block_tree_frozen_recovery_query_timeout_ms <= 0
-        || kv_cache_config_.block_tree_frozen_recovery_query_timeout_ms > std::numeric_limits<int>::max()) {
+        || kv_cache_config_.block_tree_frozen_recovery_query_timeout_ms > std::numeric_limits<int>::max()
+        || kv_cache_config_.block_tree_frozen_force_release_timeout_ms < 0
+        || kv_cache_config_.block_tree_frozen_force_release_timeout_ms > std::numeric_limits<int>::max()) {
         RTP_LLM_LOG_ERROR("invalid frozen recovery interval/query timeout; interval must be in [0, INT_MAX] "
-                          "and query timeout in [1, INT_MAX]");
+                          "and query timeout in [1, INT_MAX], force release timeout in [0, INT_MAX]");
         return false;
     }
     if (kv_cache_config_.enable_remote_cache && kv_cache_config_.kvcm_asyncwrapper_thread_num == 0) {
@@ -427,7 +429,8 @@ bool KVCacheManager::startFrozenTaskRecovery() {
                 }
                 return TransferCompletionCleanup::Summary{};
             },
-            [this](const FrozenTask::ExecutionInfo& execution) { block_tree_cache_->reportUnfreezeMetrics(execution); });
+            [this](const FrozenTask::ExecutionInfo& execution) { block_tree_cache_->reportUnfreezeMetrics(execution); },
+            static_cast<int>(kv_cache_config_.block_tree_frozen_force_release_timeout_ms));
         if (!recovery->start(static_cast<int>(kv_cache_config_.block_tree_frozen_recovery_interval_ms),
                              static_cast<int>(kv_cache_config_.block_tree_frozen_recovery_query_timeout_ms))) {
             RTP_LLM_LOG_ERROR("failed to start frozen task recovery thread");
