@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# Reuses FlashInfer 0.7.3 SM90 CP kernels. Only checkpoint addressing changes.
-"""FlashInfer 0.7.3 H20 Prefill with direct RTP checkpoint writes.
+# Reuses frozen SM90 CP kernels with project-standard dependencies.
+"""SM90 CP Prefill with direct RTP checkpoint writes.
 
 Reuses the upstream SM90 precompute, fixup and prefill kernels. Only checkpoint
 addressing changes; Q/K and beta rounding follow the native RTP contract.
@@ -10,13 +10,21 @@ from functools import lru_cache
 
 import cutlass
 import cutlass.cute as cute
+import flashinfer
 import torch
 import triton
 import triton.language as tl
 from cuda.bindings import driver as cuda_driver
-from flashinfer.gdn_kernels.delta_rule_dsl import delta_rule_cp_sm90 as upstream
-from flashinfer.gdn_kernels.delta_rule_dsl.varlen_helper import choose_cp_chunk_len_host
 from triton.language.extra.cuda import libdevice
+
+if flashinfer.__version__.split("+")[0] == "0.6.9":
+    from .gdn_sm90 import delta_rule_cp_sm90 as upstream
+    from .gdn_sm120.varlen_helper import choose_cp_chunk_len_host
+else:
+    from flashinfer.gdn_kernels.delta_rule_dsl import delta_rule_cp_sm90 as upstream
+    from flashinfer.gdn_kernels.delta_rule_dsl.varlen_helper import (
+        choose_cp_chunk_len_host,
+    )
 
 from rtp_llm.models_py.triton_kernels.common.scatter_qkv import (
     try_scatter_qkv_l2norm_sm90,

@@ -19,6 +19,32 @@ from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
 
 
 class GdnSm90DispatchTest(unittest.TestCase):
+    def test_cp_dependency_pairs(self):
+        from rtp_llm.models_py.modules.qwen4_exp.gdn_prefill_adapter import (
+            _sm90_cp_available,
+        )
+
+        try:
+            for flashinfer_version, cutlass_version, supported in (
+                ("0.6.9+8c4f4dcf", "4.4.2", True),
+                ("0.7.3", "4.8.0", True),
+                ("0.6.9+8c4f4dcf", "4.8.0", False),
+                ("0.7.3", "4.4.2", False),
+            ):
+                with self.subTest(
+                    flashinfer=flashinfer_version, cutlass=cutlass_version
+                ), mock.patch.dict(
+                    "sys.modules",
+                    {
+                        "flashinfer": SimpleNamespace(__version__=flashinfer_version),
+                        "cutlass": SimpleNamespace(__version__=cutlass_version),
+                    },
+                ):
+                    _sm90_cp_available.cache_clear()
+                    self.assertEqual(_sm90_cp_available(), supported)
+        finally:
+            _sm90_cp_available.cache_clear()
+
     def test_extended_sm90_prefill_requires_opt_in(self):
         from rtp_llm.models_py.model_desc.qwen3_next import (
             Qwen3NextGatedDeltaNetPrefill,
@@ -793,13 +819,9 @@ class GdnSm90CandidateTest(unittest.TestCase):
         )
 
         template, _ = GdnDecodeConvGateSM90Test.make_pair(tp=2)
-        with mock.patch.dict("os.environ", {"RTP_QWEN4_SM90_GDN_EXTENDED": "1"}):
-            owner = Qwen4Sm120GdnPrefill(
-                template.linear_attn_config,
-                template.parallelism_config,
-                template.weights,
-            )
         cases = (
+            (8192, 0, 64),
+            (32768, 0, 64),
             (2048, 64, 64),
             (2049, 128, 128),
             (4800, 3200, 64),
@@ -809,6 +831,16 @@ class GdnSm90CandidateTest(unittest.TestCase):
         )
         for rows, prefix, page in cases:
             with self.subTest(rows=rows, prefix=prefix, page=page):
+                with mock.patch.dict(
+                    "os.environ",
+                    {"RTP_QWEN4_SM90_GDN_EXTENDED": "1" if prefix else "0"},
+                ):
+                    owner = Qwen4Sm120GdnPrefill(
+                        template.linear_attn_config,
+                        template.parallelism_config,
+                        template.weights,
+                    )
+                self.assertEqual(owner.sm90_cp_extended, bool(prefix))
                 packed = (
                     torch.randn(rows, 5120, device="cuda", dtype=torch.bfloat16) * 0.1
                 )
@@ -1026,7 +1058,7 @@ if __name__ == "__main__":
             and _sm90_cp_available()
         ):
             raise SystemExit(
-                "SM90 qualification requires FlashInfer 0.7.3 and CUTLASS DSL 4.8.0"
+                "SM90 qualification requires a supported FlashInfer/CUTLASS DSL pair"
             )
     result = unittest.main(verbosity=2, exit=False).result
     if required and (not result.testsRun or result.skipped):

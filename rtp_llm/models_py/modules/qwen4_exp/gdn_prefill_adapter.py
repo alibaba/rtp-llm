@@ -144,13 +144,13 @@ def _sm90_cp_available():
     except ImportError:
         logging.warning("H20 CP dependencies unavailable, using native Prefill")
         return False
-    available = (
-        flashinfer.__version__.split("+")[0] == "0.7.3"
-        and cutlass.__version__ == "4.8.0"
+    available = (flashinfer.__version__.split("+")[0], cutlass.__version__) in (
+        ("0.6.9", "4.4.2"),
+        ("0.7.3", "4.8.0"),
     )
     if not available:
         logging.warning(
-            "H20 CP Prefill requires FlashInfer 0.7.3 and Cutlass DSL 4.8.0; "
+            "SM90 CP Prefill supports FlashInfer/CUTLASS DSL 0.6.9/4.4.2 or 0.7.3/4.8.0; "
             "found %s and %s, using native Prefill",
             flashinfer.__version__,
             cutlass.__version__,

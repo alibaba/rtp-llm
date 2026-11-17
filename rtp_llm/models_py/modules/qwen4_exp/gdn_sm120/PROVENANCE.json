@@ -6,7 +6,8 @@
     "Redirect utility import to current FlashInfer0.6.9 shared cache/SM helpers",
     "Namespace isolated under Qwen4; no global dependency replacement",
     "Use cached host architecture queries and original FlashInfer scratch allocator for the CP kernel; bypass only the stale high-level checkpoint rejection, retaining kernel checkpoint arguments",
-    "Use CUTLASS DSL 4.4.2 CopyUniversalOp for both 64-bit register-to-global stores; preserve copy width, dtype and tiled layout"
+    "Use CUTLASS DSL 4.4.2 CopyUniversalOp for both 64-bit register-to-global stores; preserve copy width, dtype and tiled layout",
+    "Allow the SM90 standard-runtime adapter to supply a convergent named barrier to CollectiveInverse; existing callers retain their default barrier"
   ],
   "files": [
     {
@@ -49,7 +50,7 @@
       "name": "collective_inverse_hmma.py",
       "source_path": "flashinfer/gdn_kernels/delta_rule_dsl/collective_inverse_hmma.py",
       "source_sha256": "fa91470f65679a189ef1525b4980451ec75724e1c98b4ff23085a2f5456df790",
-      "adapted_sha256": "7b8cdd1bbc08c5ec7fef477f325eae07cb312ca67c3943bc0f0ee75bd3d7dbeb"
+      "adapted_sha256": "d105da729705b766ea2f620da047a2807bcda396f81fbfa48706c294c88c6a7a"
     },
     {
       "name": "varlen_helper.py",

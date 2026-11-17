@@ -1,0 +1,33 @@
+{
+  "source": "FlashInfer v0.7.3 SM90 CP kernels",
+  "source_url": "https://github.com/flashinfer-ai/flashinfer/tree/v0.7.3/flashinfer/gdn_kernels/delta_rule_dsl",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "flashinfer": "0.6.9+8c4f4dcf",
+    "nvidia-cutlass-dsl": "4.4.2"
+  },
+  "adaptations": [
+    "Reuse model-local common helpers already compatible with the pinned runtime",
+    "Use warpgroup.OperandMajorMode and CopyUniversalOp for the CUTLASS DSL 4.4.2 APIs, preserving operand layout and 64-bit copy width",
+    "Omit unused public non-CP and CP host wrappers; retain the CP kernel classes and precompute/fixup launchers",
+    "RTP paged checkpoint addressing is provided by gdn_prefill_cp_sm90.py",
+    "Use native NVVM named barriers on the frozen SM90 path to retain convergence under CUTLASS DSL 4.4.2; pass that barrier explicitly to the shared inverse collective"
+  ],
+  "files": [
+    {
+      "name": "delta_rule_sm90.py",
+      "source_path": "flashinfer/gdn_kernels/delta_rule_dsl/delta_rule_sm90.py",
+      "source_sha256": "a567e54ee44e4384e9b5a4944e7fd178bdc84dd444b432ac3d535d15d7a54d92",
+      "adapted_sha256": "830d66ba18f37bb55f1d890c0236d2db86cb514d131355c0c2dbb4e19a3a7114"
+    },
+    {
+      "name": "delta_rule_cp_sm90.py",
+      "source_path": "flashinfer/gdn_kernels/delta_rule_dsl/delta_rule_cp_sm90.py",
+      "source_sha256": "e99b237f2ffd9c5b1b2589568760fe597625a308ae662eb455507861e7e2c68c",
+      "adapted_sha256": "c2a970d08c12313bf329713cb9fa03aba7f1e1e627229b9113c2922f76e8580f"
+    }
+  ],
+  "local_support_files": [
+    "barrier.py"
+  ]
+}
