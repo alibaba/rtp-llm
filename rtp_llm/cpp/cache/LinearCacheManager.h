@@ -62,9 +62,13 @@ public:
                                  int                      reuse_blocks_len,
                                  bool                     reuse_enabled      = false,
                                  const RequiredPositions& required_positions = {}) const override;
+    bool singleStateExecutionMapping() const override { return compactSingleState(); }
     bool           shouldMaterializeBlock(int pos, int seq_len, int reserve_step, bool enable_reuse_cache) const;
 
 private:
+    bool compactSingleState() const;
+    bool mallocSingleState(BlockIds& block_ids, int seq_len, int reserve_step,
+                           std::vector<size_t>* backfilled_positions);
     int  retainedDecodeBlocks(int reserve_step) const;
     int  prefixCheckpointStride(bool enable_reuse_cache) const;
     bool mallocImpl(BlockIds&                block_ids,

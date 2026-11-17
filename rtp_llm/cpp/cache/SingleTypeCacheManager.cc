@@ -134,6 +134,9 @@ SingleTypeCacheManager::convertIndexToBuffer(int layer_id, int block_id, int par
 }
 
 void SingleTypeCacheManager::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
+    if (singleStateExecutionMapping()) {
+        block_ids.setSingleStateExecutionMapping(true);
+    }
     block_ids.add(new_block_indices);
     BlockIndicesType valid_blocks;
     valid_blocks.reserve(new_block_indices.size());
