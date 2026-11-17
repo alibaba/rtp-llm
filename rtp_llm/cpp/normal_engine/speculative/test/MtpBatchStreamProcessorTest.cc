@@ -2401,6 +2401,77 @@ TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatchOwnsTargetGpuTokenSnapsho
     }
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testGlm5MultistepPrefillReadsOnlyEmittedTokens) {
+    static thread_local std::vector<int64_t> readback_sizes;
+    for (const std::string model_type : {"glm_5", "deepseek_v3"}) {
+        for (const int steps : {1, 4}) {
+            for (const bool cuda_sampler : {false, true}) {
+                for (const int width : {3, 257}) {
+                    SCOPED_TRACE(model_type + "/steps=" + std::to_string(steps) + "/cuda="
+                                 + std::to_string(cuda_sampler) + "/width=" + std::to_string(width));
+                    ModelConfig model_config;
+                    model_config.model_type = model_type;
+                    model_config.max_seq_len = 2048;
+                    model_config.vocab_size = 4;
+                    model_config.num_layers = 1;
+                    RuntimeConfig runtime_config;
+                    ResourceContext resources;
+                    auto stream1 = createContextStream(model_config, runtime_config, resources, {2}, 1);
+                    auto stream2 = createContextStream(model_config, runtime_config, resources, {1, 2}, 2);
+                    StreamGroups groups(std::list<GenerateStreamPtr>{stream1, stream2});
+                    SpeculativeExecutionConfig sp_config;
+                    sp_config.gen_num_per_cycle = steps;
+                    CacheConfig cache_config;
+                    cache_config.group_types = {CacheGroupType::FULL};
+                    TestableMtpBatchStreamProcessor processor(
+                        model_config, PDSepConfig(), ProfilingDebugLoggingConfig(), cache_config, sp_config, false);
+                    MergedOutput target, draft;
+                    target.sampler_output.token_ids = torch::full({2, width}, -1, torch::kInt32);
+                    target.sampler_output.token_ids.select(1, width - 1).copy_(torch::tensor({1, 3}, torch::kInt32));
+                    if (cuda_sampler) {
+                        target.sampler_output.token_ids = target.sampler_output.token_ids.to(torch::kCUDA);
+                    }
+                    draft.sampler_output.token_ids = torch::tensor({2L, 0L}, torch::kInt64).reshape({2, 1});
+                    auto new_tokens = torch::zeros({2, 1}, torch::kInt32);
+                    std::vector<StreamSpecUpdateInfo> updates;
+                    readback_sizes.clear();
+                    {
+                        struct CallbackGuard {
+                            at::CallbackHandle handle;
+                            ~CallbackGuard() { at::removeCallback(handle); }
+                        } guard{at::addThreadLocalCallback(
+                            at::RecordFunctionCallback([](const at::RecordFunction& fn)
+                                                           -> std::unique_ptr<at::ObserverContext> {
+                                if (std::string(fn.name()) == "aten::copy_" && fn.inputs().size() >= 2
+                                    && fn.inputs()[0].isTensor() && fn.inputs()[1].isTensor()) {
+                                    const auto dst = fn.inputs()[0].toTensor();
+                                    const auto src = fn.inputs()[1].toTensor();
+                                    if (dst.device().is_cpu() && src.is_cuda() && src.scalar_type() == torch::kInt32) {
+                                        readback_sizes.push_back(src.numel());
+                                    }
+                                }
+                                return nullptr;
+                            }).needsInputs(true))};
+                        processor.preparePrefillSpecUpdateInfo(
+                            groups, target, draft, torch::Tensor(), MtpTargetLogprobs(), new_tokens, updates);
+                    }
+                    const bool compact = cuda_sampler && model_type == "glm_5" && steps > 1;
+                    EXPECT_EQ(readback_sizes, cuda_sampler ? std::vector<int64_t>{compact ? 2 : 2 * width}
+                                                          : std::vector<int64_t>{});
+                    EXPECT_EQ(toVec<int32_t>(new_tokens), (std::vector<int32_t>{1, 3}));
+                    ASSERT_EQ(updates.size(), 2);
+                    target.sampler_output.token_ids.zero_();
+                    for (size_t row = 0; row < updates.size(); ++row) {
+                        EXPECT_EQ(updates[row].target_token_gpu.numel(), 1);
+                        EXPECT_TRUE(updates[row].target_token_gpu.is_cuda());
+                        EXPECT_EQ(updates[row].target_token_gpu.item<int32_t>(), row == 0 ? 1 : 3);
+                    }
+                }
+            }
+        }
+    }
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatchUsesDraftLastHiddenOverride) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;

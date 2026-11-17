@@ -1533,11 +1533,16 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
                                            /*non_blocking=*/new_all_token_ids.is_cuda(),
                                            /*copy=*/true);
 
-    // TODO(async): stream bookkeeping below still iterates token_ids/success
-    // on CPU. Keep the .cpu() explicit until spec-update assembly is
-    // device-native.
-    const torch::Tensor new_all_token_ids_cpu =
-        new_all_token_ids.is_cuda() ? new_all_token_ids.cpu() : new_all_token_ids;
+    const auto& all_streams = stream_groups.allStreams();
+    const bool compact_target_readback = glm5_target_ && propose_step_ > 1 && new_all_token_ids.is_cuda()
+        && std::all_of(all_streams.begin(), all_streams.end(), [](const auto& stream) {
+               return stream->currentNumBeams() == 1 && stream->nextNumBeams() == 1;
+           });
+    // CPU bookkeeping needs only the emitted column. Reuse its owned GPU
+    // snapshot and keep the blocking read at the existing CPU-consumption point.
+    const torch::Tensor new_all_token_ids_cpu = compact_target_readback ? target_tokens_gpu.cpu() :
+        (new_all_token_ids.is_cuda() ? new_all_token_ids.cpu() : new_all_token_ids);
+    const size_t cpu_token_stride = compact_target_readback ? 1 : token_stride;
     const torch::Tensor success_cpu = sampler_output.success.defined() ? sampler_output.success.cpu() : torch::Tensor();
 
     int batch_idx_in      = 0;
@@ -1554,7 +1559,7 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
         auto new_tokens = new_tokens_all.narrow(0, batch_idx_out, next_batch_size);
         for (size_t i = 0; i < next_batch_size; ++i) {
             new_tokens.data_ptr<int32_t>()[i] =
-                new_all_token_ids_cpu.data_ptr<int32_t>()[(batch_idx_out + i) * token_stride + token_stride - 1];
+                new_all_token_ids_cpu.data_ptr<int32_t>()[(batch_idx_out + i) * cpu_token_stride + cpu_token_stride - 1];
         }
 
         for (int i = 0; i < cur_batch_size; ++i) {
