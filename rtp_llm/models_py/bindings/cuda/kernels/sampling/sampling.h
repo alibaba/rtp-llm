@@ -71,7 +71,8 @@ void top_p_renorm_probs(torch::Tensor                probs,
                         std::optional<torch::Tensor> maybe_top_p_arr,
                         double                       top_p_val,
                         int64_t                      cuda_stream = 0,
-                        bool                         aggregate_warp_histogram = false);
+                        bool                         aggregate_warp_histogram = false,
+                        bool                         deterministic_histogram = false);
 
 void top_k_renorm_probs(torch::Tensor                probs,
                         torch::Tensor                renorm_probs,

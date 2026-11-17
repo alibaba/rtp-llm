@@ -33,6 +33,7 @@ absl::StatusOr<SamplerInputs> NormalSamplerInputGatherer::gather(const StreamGro
 #endif
     SamplerInputs sampler_inputs =
         allocateSamplerInputs(stream_groups, total_batch_size_in, total_batch_size_out, 0, need_token_history);
+    sampler_inputs.token_history_not_materialized = !need_token_history;
     if (!need_token_history) {
         // Single-beam dispatch consumes only the newly sampled final column.
         sampler_inputs.token_ids = torch::empty(

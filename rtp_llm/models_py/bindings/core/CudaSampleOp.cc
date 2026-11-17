@@ -638,9 +638,28 @@ std::pair<torch::Tensor, torch::Tensor> makeSamplingSeedOffsetTensors(const std:
                                                                       int64_t                           batch_size,
                                                                       int                               increment,
                                                                       TensorHolder*                     buffer_holder,
-                                                                      bool batch_reservations = false) {
-    auto state_h = reserveSamplingSeedOffsets(generators, batch_size, increment, 0, batch_reservations);
-    auto state_d = state_h.to(torch::kCUDA, /*non_blocking=*/true);
+                                                                      bool batch_reservations = false,
+                                                                      const torch::Tensor& reusable_host = {},
+                                                                      const torch::Tensor& reusable_device = {}) {
+    torch::Tensor state_h;
+    torch::Tensor state_d;
+    if (batch_reservations && reusable_host.defined() && reusable_device.defined()) {
+        TORCH_CHECK(reusable_host.device().is_cpu() && reusable_host.is_pinned()
+                        && reusable_host.scalar_type() == torch::kInt64 && reusable_host.is_contiguous()
+                        && reusable_host.sizes() == c10::IntArrayRef({2, batch_size})
+                        && reusable_device.is_cuda() && reusable_device.get_device() == at::cuda::current_device()
+                        && reusable_device.scalar_type() == torch::kInt64 && reusable_device.is_contiguous()
+                        && reusable_device.sizes() == reusable_host.sizes(),
+                    "invalid event-owned sampling RNG buffers");
+        state_h = reusable_host;
+        state_d = reusable_device;
+        get_sampling_seed_offsets(generators, batch_size, increment,
+                                  state_h.data_ptr<int64_t>(), state_h.data_ptr<int64_t>() + batch_size);
+        state_d.copy_(state_h, /*non_blocking=*/true);
+    } else {
+        state_h = reserveSamplingSeedOffsets(generators, batch_size, increment, 0, batch_reservations);
+        state_d = state_h.to(torch::kCUDA, /*non_blocking=*/true);
+    }
     if (buffer_holder != nullptr) {
         buffer_holder->hold_host(state_h);
     }
@@ -947,7 +966,8 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
     auto [seed_t, offset_t] =
         makeSamplingSeedOffsetTensors(
             params.generator, batch_size, static_cast<int>(max_sampling_rounds), params.buffer_holder,
-            params.allow_glm5_multistep_sampling_optimizations);
+            params.allow_glm5_multistep_sampling_optimizations,
+            params.sampling_rng_state_host, params.sampling_rng_state_device);
 
     torch::Tensor success_t = success;
     torch::Tensor top_k_t   = force_topk > 0 ? params.top_k.clone() : params.top_k;
@@ -1110,6 +1130,23 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
 }
 
 GreedyOutput sampleGreedy(const GreedyParams& params) {
+    if (params.token_history_not_materialized) {
+        TORCH_CHECK(!params.defer_token_sampling && !params.sequence_lengths_are_token_counts
+                        && !requiresTokenHistory(params),
+                    "history-free token output is only valid for normal sampling without history consumers");
+        TORCH_CHECK(params.token_ids.is_cuda() && params.token_ids.device() == params.logits.device()
+                        && params.token_ids.scalar_type() == torch::kInt32 && params.token_ids.dim() == 2
+                        && params.token_ids.size(0) == params.logits.size(0) && params.token_ids.size(1) > 0,
+                    "history-free sampling requires a CUDA int32 output matrix");
+        // Reuse every sampling/RNG branch with a one-column output scratch. The
+        // original matrix's prefix has no consumer and must never be copied.
+        auto compact = params;
+        compact.token_history_not_materialized = false;
+        compact.token_ids = torch::empty({params.token_ids.size(0), 1}, params.token_ids.options());
+        auto result = sampleGreedy(compact);
+        params.token_ids.select(1, params.token_ids.size(1) - 1).copy_(compact.token_ids.select(1, 0));
+        return result;
+    }
     const auto batch_size        = params.logits.size(0);
     bool       has_not_do_sample = params.do_sample.has_value()
                              && std::any_of(params.do_sample.value().data_ptr<bool>(),
@@ -1207,6 +1244,13 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         GreedyParams random_params = params;
         random_params.logits       = params.logits.index_select(0, random_gpu);
         random_params.token_ids    = device_tokens.index_select(0, random_gpu);
+        if (params.sampling_rng_state_host.defined()) {
+            const int64_t random_count = random_rows.size();
+            random_params.sampling_rng_state_host = params.sampling_rng_state_host.reshape({-1})
+                                                        .narrow(0, 0, 2 * random_count).view({2, random_count});
+            random_params.sampling_rng_state_device = params.sampling_rng_state_device.reshape({-1})
+                                                          .narrow(0, 0, 2 * random_count).view({2, random_count});
+        }
         random_params.top_k        = params.top_k.index_select(0, random_cpu);
         random_params.top_p        = params.top_p.index_select(0, random_cpu);
         random_params.generator.clear();
@@ -1279,7 +1323,8 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         auto samples = transposed_tokens.select(0, transposed_tokens.size(0) - 1);
         // Reserve a fresh generator offset on every call, as for FlashInfer.
         auto [seeds, offsets] = makeSamplingSeedOffsetTensors(params.generator, batch_size, 32, params.buffer_holder,
-                params.allow_glm5_multistep_sampling_optimizations);
+                params.allow_glm5_multistep_sampling_optimizations,
+                params.sampling_rng_state_host, params.sampling_rng_state_device);
         {
             pybind11::gil_scoped_acquire gil;
             auto selected = pyGumbelSampleFn()(params.logits, seeds, offsets).cast<torch::Tensor>();

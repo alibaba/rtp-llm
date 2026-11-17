@@ -819,7 +819,8 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
         propose_step_,
         /*materialize_host_token_ids=*/!skip_history && !device_history);
     sampler_inputs.allow_glm5_multistep_sampling_optimizations =
-        glm5_target_ && propose_step_ > 1 && deferred_eligible;
+        glm5_target_ && propose_step_ > 1 && model_output.logits.is_cuda()
+        && model_output.logits.scalar_type() == torch::kFloat32;
     if (skip_history) {
         // The deferred verifier never reads history in this case. Keep the
         // sampler's [rows, width] tensor contract without allocating a

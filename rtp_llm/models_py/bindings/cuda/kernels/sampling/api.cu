@@ -13,6 +13,7 @@
 #include <mutex>
 #include <optional>
 #include <tuple>
+#include <type_traits>
 
 #include "flashinfer/air_top_p.cuh"
 #include "flashinfer/sampling.cuh"
@@ -336,7 +337,8 @@ void top_p_renorm_probs(torch::Tensor                probs,
                         std::optional<torch::Tensor> maybe_top_p_arr,
                         double                       top_p_val,
                         int64_t                      cuda_stream,
-                        bool                         aggregate_warp_histogram) {
+                        bool                         aggregate_warp_histogram,
+                        bool                         deterministic_histogram) {
     check_renorm_inputs(probs, renorm_probs);
     TORCH_CHECK(probs.scalar_type() == at::kFloat, "top_p_renorm_probs currently expects float32 probs");
 
@@ -360,20 +362,29 @@ void top_p_renorm_probs(torch::Tensor                probs,
         return;
     }
 
-    constexpr bool deterministic = false;
-    const auto     workspace_size = air_top_p_workspace_size<deterministic, float>(batch_size, vocab_size);
-    auto workspace = torch::empty({static_cast<int64_t>(workspace_size)}, probs.options().dtype(at::kByte));
+    // Keep the production default unchanged while exposing both supported
+    // histogram contracts to callers and the independent aggregation oracle.
+    auto launch = [&](auto tag) {
+        constexpr bool deterministic = decltype(tag)::value;
+        const auto     workspace_size = air_top_p_workspace_size<deterministic, float>(batch_size, vocab_size);
+        auto workspace = torch::empty({static_cast<int64_t>(workspace_size)}, probs.options().dtype(at::kByte));
 
-    status = flashinfer::sampling::air_top_p::AirTopPRenormProb<deterministic, float>(
-        static_cast<float*>(probs.data_ptr()),
-        static_cast<float*>(renorm_probs.data_ptr()),
-        top_p_ptr,
-        batch_size,
-        static_cast<float>(top_p_val),
-        vocab_size,
-        workspace.data_ptr(),
-        stream,
-        aggregate_warp_histogram);
+        status = flashinfer::sampling::air_top_p::AirTopPRenormProb<deterministic, float>(
+            static_cast<float*>(probs.data_ptr()),
+            static_cast<float*>(renorm_probs.data_ptr()),
+            top_p_ptr,
+            batch_size,
+            static_cast<float>(top_p_val),
+            vocab_size,
+            workspace.data_ptr(),
+            stream,
+            aggregate_warp_histogram);
+    };
+    if (deterministic_histogram) {
+        launch(std::true_type{});
+    } else {
+        launch(std::false_type{});
+    }
     check_cuda_status(status, "AirTopPRenormProb");
 }
 

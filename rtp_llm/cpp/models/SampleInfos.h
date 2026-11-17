@@ -92,6 +92,7 @@ public:
     std::vector<at::Generator>         rejection_generators       = {};
     int64_t                            rejection_rows             = 0;
     bool allow_glm5_multistep_sampling_optimizations = false;
+    bool token_history_not_materialized = false;
 };
 
 struct SamplerOutput {

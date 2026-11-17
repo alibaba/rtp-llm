@@ -1,6 +1,9 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/models/Sampler.h"
 #include "rtp_llm/cpp/test/ModelTestUtil.h"
+#if USING_CUDA
+#include <ATen/cuda/CUDAGeneratorImpl.h>
+#endif
 
 using namespace std;
 using namespace rtp_llm;
@@ -87,6 +90,8 @@ TEST_F(SamplerTest, testGeneralSampling) {
         torch::Tensor(),  // finished_mask
         cum_log_probs.clone(),
         torch::Tensor(),  // all_probs
+        torch::Tensor(),  // raw_logprobs_logits
+        torch::Tensor(),  // raw_logprobs_row_indices
         generator,
     };
 
@@ -170,3 +175,62 @@ TEST_F(SamplerTest, testGeneralSampling) {
         }
     }
 }
+
+#if USING_CUDA
+TEST_F(SamplerTest, testGlm5RngSlotsPreserveRepeatedForwardOutputs) {
+    Sampler reference(SamplerInitParams{"glm_5", 8});
+    Sampler pooled(SamplerInitParams{"glm_5", 8});
+    const auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    std::vector<torch::Tensor> expected_tokens, actual_tokens;
+    std::vector<torch::Tensor> expected_probs, actual_probs;
+    std::vector<at::Generator> expected_generators, actual_generators;
+    for (int row = 0; row < 16; ++row) {
+        expected_generators.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+        actual_generators.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+        expected_generators.back().set_current_seed(1000 + row);
+        actual_generators.back().set_current_seed(1000 + row);
+    }
+    auto make_inputs = [&](int batch, bool use_pool) {
+        SamplerInputs inputs{};
+        inputs.logits = torch::arange(8, options).repeat({batch, 1});
+        inputs.token_ids = torch::zeros({batch, 4}, options.dtype(torch::kInt32));
+        inputs.input_lengths = torch::full({batch}, 3, torch::kInt32);
+        inputs.sequence_lengths = inputs.input_lengths;
+        inputs.vocab_size = 8;
+        inputs.step = 3;
+        inputs.batch_size = inputs.batch_size_out = batch;
+        inputs.num_beams_in = torch::ones({batch}, torch::kInt64);
+        inputs.num_beams_out = inputs.num_beams_in;
+        const auto pinned_int = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+        const auto pinned_float = torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(true);
+        inputs.top_k = torch::full({batch}, 2, pinned_int);
+        inputs.top_p = torch::ones({batch}, pinned_float);
+        inputs.temperature = torch::ones({batch}, pinned_float);
+        inputs.all_probs = torch::zeros({batch, 8}, options);
+        const auto& generators = use_pool ? actual_generators : expected_generators;
+        inputs.generator.assign(generators.begin(), generators.begin() + batch);
+        inputs.allow_glm5_multistep_sampling_optimizations = use_pool;
+        inputs.phase = LogitsProcessorPhase::MTP_VERIFY;
+        return inputs;
+    };
+    // Retain outputs and do not synchronize between forwards: pending slots must
+    // remain immutable; varying batch sizes also exercises capacity growth.
+    for (int batch : {4, 4, 8, 16, 4, 16, 8, 4, 16}) {
+        auto baseline_input = make_inputs(batch, false);
+        auto actual_input = make_inputs(batch, true);
+        auto baseline_output = reference.forward(baseline_input);
+        auto actual_output = pooled.forward(actual_input);
+        expected_tokens.push_back(baseline_output.token_ids);
+        actual_tokens.push_back(actual_output.token_ids);
+        expected_probs.push_back(baseline_input.all_probs);
+        actual_probs.push_back(actual_input.all_probs);
+    }
+    for (size_t i = 0; i < actual_tokens.size(); ++i) {
+        EXPECT_TRUE(torch::equal(actual_tokens[i], expected_tokens[i]));
+        EXPECT_TRUE(torch::equal(actual_probs[i], expected_probs[i]));
+    }
+    for (int row = 0; row < 16; ++row) {
+        EXPECT_TRUE(torch::equal(actual_generators[row].get_state(), expected_generators[row].get_state()));
+    }
+}
+#endif

@@ -3320,3 +3320,212 @@ TEST_F(CudaSamplerTest, AirWarpHistogramMatchesUnaggregatedRenorm) {
         }
     }
 }
+
+TEST_F(CudaSamplerTest, AirWarpHistogramSupportAndSeededTokenContract) {
+    const auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    const auto stream = reinterpret_cast<int64_t>(at::cuda::getCurrentCUDAStream().stream());
+    for (bool deterministic_histogram : {false, true}) {
+        for (int64_t width : {1025, 8193}) {
+            auto probs = torch::rand({5, width}, options).pow(4);
+            probs.select(0, 0).fill_(1);
+            probs.select(0, 1).fill_(1e-8);
+            probs.select(0, 1).select(0, width - 1).fill_(1);
+            probs.div_(probs.sum(-1, true));
+            auto top_p = torch::tensor({0.0f, 1e-6f, 0.5f, 0.9f, 1.0f}, options);
+            auto reference = torch::empty_like(probs);
+            auto actual = torch::empty_like(probs);
+            top_p_renorm_probs(probs, reference, top_p, 1.0, stream, false, deterministic_histogram);
+            top_p_renorm_probs(probs, actual, top_p, 1.0, stream, true, deterministic_histogram);
+            // Any support change is a failure to investigate, not a tolerance adjustment.
+            EXPECT_TRUE(torch::equal(actual.gt(0), reference.gt(0)));
+            if (deterministic_histogram) {
+                EXPECT_TRUE(torch::equal(actual, reference));
+            } else {
+                EXPECT_TRUE(torch::allclose(actual, reference, 1e-5, 1e-7));
+            }
+            auto seed = torch::arange(5, options.dtype(torch::kInt64)) + 123;
+            auto offset = torch::zeros_like(seed);
+            auto expected_token = torch::empty({5}, options.dtype(torch::kInt32));
+            auto actual_token = torch::empty_like(expected_token);
+            auto expected_success = torch::empty({5}, options.dtype(torch::kBool));
+            auto actual_success = torch::empty_like(expected_success);
+            sampling_from_probs(reference, expected_token, expected_success, true, seed, offset, stream);
+            sampling_from_probs(actual, actual_token, actual_success, true, seed, offset, stream);
+            EXPECT_TRUE(torch::equal(actual_success, expected_success));
+            EXPECT_TRUE(torch::equal(actual_token.masked_select(actual_success),
+                                     expected_token.masked_select(expected_success)));
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, DISABLED_benchmarkAirWarpAggregationAB) {
+    const auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto stream = at::cuda::getCurrentCUDAStream().stream();
+    for (int64_t batch : {1, 32, 128}) {
+        for (int64_t width : {8193, 151552}) {
+            for (bool uniform : {false, true}) {
+                auto probs = uniform ? torch::ones({batch, width}, options) : torch::rand({batch, width}, options).pow(4);
+                probs.div_(probs.sum(-1, true));
+                auto output = torch::empty_like(probs);
+                auto top_p = torch::full({batch}, 0.9, options);
+                for (bool aggregate : {false, true}) {
+                    for (int warmup = 0; warmup < 10; ++warmup) {
+                        top_p_renorm_probs(probs, output, top_p, 1.0, reinterpret_cast<int64_t>(stream), aggregate);
+                    }
+                }
+                cudaEvent_t start, stop;
+                ASSERT_EQ(cudaEventCreate(&start), cudaSuccess);
+                ASSERT_EQ(cudaEventCreate(&stop), cudaSuccess);
+                // Alternate AB/BA order; time the API including its workspace allocation.
+                for (int repeat = 0; repeat < 4; ++repeat) {
+                    for (int arm = 0; arm < 2; ++arm) {
+                        const bool aggregate = (arm + repeat) % 2;
+                        ASSERT_EQ(cudaStreamSynchronize(stream), cudaSuccess);
+                        const auto cpu_start = std::chrono::steady_clock::now();
+                        ASSERT_EQ(cudaEventRecord(start, stream), cudaSuccess);
+                        for (int iteration = 0; iteration < 50; ++iteration) {
+                            top_p_renorm_probs(probs, output, top_p, 1.0, reinterpret_cast<int64_t>(stream), aggregate);
+                        }
+                        ASSERT_EQ(cudaEventRecord(stop, stream), cudaSuccess);
+                        const auto cpu_stop = std::chrono::steady_clock::now();
+                        ASSERT_EQ(cudaEventSynchronize(stop), cudaSuccess);
+                        float elapsed_ms = 0;
+                        ASSERT_EQ(cudaEventElapsedTime(&elapsed_ms, start, stop), cudaSuccess);
+                        const double cpu_us = std::chrono::duration<double, std::micro>(cpu_stop - cpu_start).count() / 50;
+                        std::cout << "[glm5-air-ab] batch=" << batch << " vocab=" << width << " uniform=" << uniform
+                                  << " aggregate=" << aggregate << " repeat=" << repeat
+                                  << " gpu_us=" << elapsed_ms * 1000 / 50 << " cpu_submit_us=" << cpu_us << std::endl;
+                    }
+                }
+                ASSERT_EQ(cudaEventDestroy(start), cudaSuccess);
+                ASSERT_EQ(cudaEventDestroy(stop), cudaSuccess);
+            }
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, DISABLED_benchmarkPhiloxReservationAB) {
+    for (int batch : {1, 32, 128, 512}) {
+        for (int group_size : {1, 4, 32}) {
+            std::vector<at::Generator> generators;
+            for (int row = 0; row < batch; ++row) {
+                if (row % group_size == 0) {
+                    generators.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+                    generators.back().set_current_seed(123 + row);
+                } else {
+                    generators.push_back(generators.back());
+                }
+            }
+            std::vector<int64_t> seeds(batch), offsets(batch);
+            for (int repeat = 0; repeat < 4; ++repeat) {
+                for (int arm = 0; arm < 2; ++arm) {
+                    const bool batched = (arm + repeat) % 2;
+                    const auto start = std::chrono::steady_clock::now();
+                    for (int iteration = 0; iteration < 1000; ++iteration) {
+                        if (batched) {
+                            get_sampling_seed_offsets(generators, batch, 32, seeds.data(), offsets.data());
+                        } else {
+                            for (int row = 0; row < batch; ++row) {
+                                auto state = get_seed_and_offset(32, generators[row]);
+                                seeds[row] = std::get<0>(state);
+                                offsets[row] = std::get<1>(state);
+                            }
+                        }
+                    }
+                    const double us = std::chrono::duration<double, std::micro>(
+                        std::chrono::steady_clock::now() - start).count() / 1000;
+                    std::cout << "[glm5-philox-ab] batch=" << batch << " group_size=" << group_size
+                              << " batched=" << batched << " repeat=" << repeat << " cpu_us=" << us << std::endl;
+                }
+            }
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, HistoryFreeOutputMatchesOriginalSamplingAndPreservesPrefix) {
+    const auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    constexpr int64_t batch = 4, width = 32, history = 257;
+    for (const auto& ks : {std::vector<int32_t>{1, 1, 1, 1}, std::vector<int32_t>{3, 3, 3, 3},
+                           std::vector<int32_t>{1, 3, 1, 3}}) {
+        auto logits = torch::randn({batch, width}, options);
+        auto tokens = torch::full({batch, history}, -7, options.dtype(torch::kInt32));
+        auto make_params = [&]() {
+            GreedyParams params;
+            params.logits = logits.clone();
+            params.input_lengths = pinnedIntTensor(std::vector<int32_t>(batch, history - 1));
+            params.sequence_lengths = params.input_lengths;
+            params.token_ids = tokens.clone();
+            params.step = history - 1;
+            params.top_k = pinnedIntTensor(ks);
+            params.top_p = pinnedFloatTensor(std::vector<float>(batch, 0.9f));
+            params.temperature = pinnedFloatTensor(std::vector<float>(batch, 0.8f));
+            params.output_all_probs = torch::zeros_like(logits);
+            params.cum_log_probs = torch::zeros({batch}, options);
+            for (int row = 0; row < batch; ++row) {
+                params.generator.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+                params.generator.back().set_current_seed(1234 + row);
+            }
+            return params;
+        };
+        auto baseline = make_params();
+        auto actual = make_params();
+        actual.token_history_not_materialized = true;
+        execSampleGreedy(baseline);
+        execSampleGreedy(actual);
+        EXPECT_TRUE(torch::equal(actual.token_ids, baseline.token_ids));
+        EXPECT_TRUE(torch::equal(actual.token_ids.narrow(1, 0, history - 1), tokens.narrow(1, 0, history - 1)));
+        EXPECT_TRUE(torch::equal(*actual.output_all_probs, *baseline.output_all_probs));
+        EXPECT_TRUE(torch::equal(*actual.cum_log_probs, *baseline.cum_log_probs));
+        for (int row = 0; row < batch; ++row) {
+            EXPECT_TRUE(torch::equal(actual.generator[row].get_state(), baseline.generator[row].get_state()));
+        }
+        actual.no_repeat_ngram_size = pinnedIntTensor(std::vector<int32_t>(batch, 2));
+        EXPECT_THROW(execSampleGreedy(actual), c10::Error);
+    }
+}
+
+TEST_F(CudaSamplerTest, DISABLED_benchmarkHistoryFreeOutputAB) {
+    const auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto flush = torch::zeros({1024 * 1024}, options);
+    for (int64_t batch : {1, 32, 128}) {
+        for (int64_t history : {128, 8192, 65536}) {
+            GreedyParams params;
+            params.logits = torch::randn({batch, 1024}, options);
+            params.input_lengths = pinnedIntTensor(std::vector<int32_t>(batch, history - 1));
+            params.sequence_lengths = params.input_lengths;
+            params.token_ids = torch::zeros({batch, history}, options.dtype(torch::kInt32));
+            params.step = history - 1;
+            params.top_k = pinnedIntTensor(std::vector<int32_t>(batch, 1));
+            params.top_p = pinnedFloatTensor(std::vector<float>(batch, 1.0f));
+            params.temperature = pinnedFloatTensor(std::vector<float>(batch, 1.0f));
+            for (int repeat = 0; repeat < 4; ++repeat) {
+                for (int arm = 0; arm < 2; ++arm) {
+                    params.token_history_not_materialized = (arm + repeat) % 2;
+                    const double us = benchmarkCudaEventUs([&]() { execSampleGreedy(params); }, flush, 10, 50);
+                    std::cout << "[glm5-history-ab] batch=" << batch << " history=" << history
+                              << " compact_output=" << params.token_history_not_materialized
+                              << " repeat=" << repeat << " gpu_us=" << us << std::endl;
+                }
+            }
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, BatchedPhiloxRejectsCaptureWithoutAdvancingGenerator) {
+    auto stream = at::cuda::getStreamFromPool();
+    c10::cuda::CUDAStreamGuard guard(stream);
+    auto generator = torch::make_generator<at::CUDAGeneratorImpl>();
+    generator.set_current_seed(123);
+    auto original_state = generator.get_state();
+    auto dummy = torch::zeros({1}, torch::TensorOptions().device(torch::kCUDA));
+    ASSERT_EQ(cudaStreamSynchronize(stream.stream()), cudaSuccess);
+    int64_t seeds[2] = {-1, -1}, offsets[2] = {-1, -1};
+    at::cuda::CUDAGraph graph;
+    graph.capture_begin();
+    EXPECT_THROW(get_sampling_seed_offsets({generator, generator}, 2, 32, seeds, offsets), c10::Error);
+    dummy.add_(1);
+    graph.capture_end();
+    EXPECT_EQ(seeds[0], -1);
+    EXPECT_EQ(offsets[0], -1);
+    EXPECT_TRUE(torch::equal(original_state, generator.get_state()));
+}

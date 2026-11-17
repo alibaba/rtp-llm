@@ -357,6 +357,9 @@ struct GreedyParams {
     std::vector<at::Generator>   deferred_rejection_generators     = {};
     int64_t                      deferred_rejection_rows           = 0;
     bool                         allow_glm5_multistep_sampling_optimizations = false;
+    bool                         token_history_not_materialized = false;
+    torch::Tensor                sampling_rng_state_host = {};
+    torch::Tensor                sampling_rng_state_device = {};
 };
 
 struct GreedyOutput {

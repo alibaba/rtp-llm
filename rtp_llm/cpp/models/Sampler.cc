@@ -4,6 +4,8 @@
 #include <climits>
 #include <cstdlib>
 #include <cmath>
+#include <limits>
+#include <optional>
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/BaseLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
@@ -11,6 +13,10 @@
 #include <unordered_set>
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <c10/core/InferenceMode.h>
+#if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDACachingAllocator.h>
+#endif
 
 using namespace std;
 
@@ -36,6 +42,60 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
     c10::InferenceMode inference_mode(true);
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_PROFILE_SCOPE("sampler.forward");
+    torch::Tensor rng_state_host;
+    torch::Tensor rng_state_device;
+#if USING_CUDA
+    struct CompleteRngSlot {
+        RngSlot* slot = nullptr;
+        std::optional<at::cuda::CUDAStream> stream;
+        void finish() {
+            auto* current = slot;
+            slot = nullptr;
+            if (current != nullptr) {
+                try {
+                    current->ready.record(*stream);
+                } catch (...) {
+                    current->disabled = true;
+                    throw;
+                }
+            }
+        }
+        ~CompleteRngSlot() noexcept {
+            try {
+                finish();
+            } catch (...) {
+                // Preserve an original exception; the slot is permanently disabled.
+            }
+        }
+    } complete_rng_slot;
+    if (inputs.allow_glm5_multistep_sampling_optimizations && !inputs.defer_token_sampling
+        && inputs.logits.is_cuda() && inputs.batch_size > 0
+        && inputs.batch_size <= static_cast<size_t>(std::numeric_limits<int64_t>::max() / 2)) {
+        const auto stream = at::cuda::getCurrentCUDAStream(inputs.logits.get_device());
+        cudaStreamCaptureStatus capture;
+        C10_CUDA_CHECK(cudaStreamIsCapturing(stream.stream(), &capture));
+        if (capture == cudaStreamCaptureStatusNone) {
+            for (auto& slot : rng_slots_) {
+                if (slot.disabled || (slot.device.defined() && slot.device.device() != inputs.logits.device())
+                    || !slot.ready.query()) continue;
+                const int64_t count = static_cast<int64_t>(inputs.batch_size) * 2;
+                if (!slot.device.defined() || slot.device.numel() < count) {
+                    slot.host = torch::empty({count}, torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true));
+                    slot.device = torch::empty({count}, inputs.logits.options().dtype(torch::kInt64));
+                }
+                rng_state_host = slot.host;
+                rng_state_device = slot.device;
+                c10::cuda::CUDACachingAllocator::recordStream(slot.device.storage().data_ptr(), stream);
+                complete_rng_slot.slot = &slot;
+                complete_rng_slot.stream = stream;
+                break;
+            }
+            // All three slots may still be in flight. Undefined buffers select the
+            // original independently owned packet without blocking serving.
+        }
+    }
+#endif
+
     // Helper: narrow a tensor if defined, else return undefined tensor
     auto mayNarrow = [](const torch::Tensor& t, int64_t offset, int64_t size) -> torch::Tensor {
         return t.defined() ? t.narrow(0, offset, size) : torch::Tensor();
@@ -217,7 +277,12 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  from_batch_idx_in == 0 && batch_size_in == inputs.batch_size && !inputs.rejection_generators.empty() ?
                      inputs.rejection_rows :
                      0,
-                 inputs.allow_glm5_multistep_sampling_optimizations});
+                 inputs.allow_glm5_multistep_sampling_optimizations,
+                 inputs.token_history_not_materialized,
+                 rng_state_host.defined() ? rng_state_host.narrow(0, 2 * from_batch_idx_in, 2 * batch_size_in)
+                                                    .view({2, static_cast<int64_t>(batch_size_in)}) : torch::Tensor(),
+                 rng_state_device.defined() ? rng_state_device.narrow(0, 2 * from_batch_idx_in, 2 * batch_size_in)
+                                                      .view({2, static_cast<int64_t>(batch_size_in)}) : torch::Tensor()});
             deferred_token_sampling = greedy_output.deferred_token_sampling;
             if (greedy_output.deferred_logits.defined()) {
                 compact_logits         = greedy_output.deferred_logits;
@@ -295,6 +360,11 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         from_batch_idx_out = to_batch_idx_out;
     }
 
+#if USING_CUDA
+    // The last same-stream consumer is now submitted; no cached RNG packet
+    // escapes into SamplerOutput or deferred rejection.
+    complete_rng_slot.finish();
+#endif
     buffer_holder_.release();
     return SamplerOutput(
         {std::move(all_token_ids_out),
