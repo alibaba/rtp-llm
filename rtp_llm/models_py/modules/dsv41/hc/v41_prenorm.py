@@ -140,7 +140,6 @@ def prenorm(
     # Shorter K reductions keep large-batch cancellation within the same
     # FP64-oracle tolerance. Preserve the established <=64-token path.
     splits = 32 if tokens > 64 else 16
-    weight = prepare_tf32_weight(fn)
     partial = torch.empty(
         (splits, tokens, 24), dtype=torch.float32, device=residual.device
     )
