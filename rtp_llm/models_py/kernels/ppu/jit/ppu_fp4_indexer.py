@@ -258,7 +258,17 @@ def norm_rope_store(
     )
 
 
-def paged_score(q, q_scales, weights, cache, block_table, lengths, max_context):
+def paged_score(
+    q,
+    q_scales,
+    weights,
+    cache,
+    block_table,
+    lengths,
+    max_context,
+    *,
+    schedule=None,
+):
     """Read native FP4 pages directly and retain FP32 Decode logits."""
     import deep_gemm
 
@@ -269,9 +279,10 @@ def paged_score(q, q_scales, weights, cache, block_table, lengths, max_context):
     if lengths.dtype != torch.int32 or block_table.dtype != torch.int32:
         raise ValueError("FP4 paged Decode requires int32 lengths and block tables")
     page_size = cache.shape[1]
-    schedule = deep_gemm.get_paged_mqa_logits_metadata(
-        lengths, page_size, deep_gemm.get_num_sms()
-    )
+    if schedule is None:
+        schedule = deep_gemm.get_paged_mqa_logits_metadata(
+            lengths, page_size, deep_gemm.get_num_sms()
+        )
     return deep_gemm.fp8_fp4_paged_mqa_logits(
         (q.contiguous(), q_scales.contiguous()),
         cache.view(cache.shape[0], page_size, 1, 68),

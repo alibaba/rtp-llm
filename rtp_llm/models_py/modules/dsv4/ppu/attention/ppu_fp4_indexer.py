@@ -259,6 +259,7 @@ class PpuFP4Indexer(IndexerFP8):
         *,
         q_producer_stream=None,
         decode_streams=None,
+        paged_mqa_plans=None,
     ):
         if x.ndim != 3 or x.shape[1] not in (1, 2, 3, 4, 5, 6):
             raise ValueError(
@@ -274,6 +275,7 @@ class PpuFP4Indexer(IndexerFP8):
                 compressor_meta,
                 q_producer_stream=q_producer_stream,
                 decode_streams=decode_streams,
+                paged_mqa_plan=paged_mqa_plans,
             )
         if q_producer_stream is not None or decode_streams is not None:
             raise ValueError(
@@ -286,7 +288,12 @@ class PpuFP4Indexer(IndexerFP8):
             return out_topk_buffer
         if self._batch_mtp_queries:
             return self._forward_decode_queries_batched(
-                x, qr, start_pos, out_topk_buffer, compressor_meta
+                x,
+                qr,
+                start_pos,
+                out_topk_buffer,
+                compressor_meta,
+                paged_mqa_plan=paged_mqa_plans,
             )
         queries = qr.reshape(batch, query_length, -1)
         output = out_topk_buffer.reshape(batch, query_length, self.index_topk)
@@ -326,11 +333,25 @@ class PpuFP4Indexer(IndexerFP8):
                 step_output,
                 meta.positions.reshape(batch, 1),
                 meta,
+                paged_mqa_plan=(
+                    paged_mqa_plans[index]
+                    if paged_mqa_plans is not None
+                    else None
+                ),
             )
             output[:, index : index + 1].copy_(step_output)
         return out_topk_buffer
 
-    def _forward_decode_queries_batched(self, x, qr, start_pos, out_topk_buffer, meta):
+    def _forward_decode_queries_batched(
+        self,
+        x,
+        qr,
+        start_pos,
+        out_topk_buffer,
+        meta,
+        *,
+        paged_mqa_plan=None,
+    ):
         """Batch stateless work; retain chronological C4 state transitions."""
         batch, width = x.shape[:2]
         tokens = batch * width
@@ -378,10 +399,14 @@ class PpuFP4Indexer(IndexerFP8):
             # C4 writes only newly completed compressed entries. Each query's
             # own length excludes later appended entries; state writes above
             # must remain ordered even though score/TopK can now be batched.
-            lengths = meta.compressed_lens_per_token
-            if lengths is None:
-                lengths = (meta.positions + 1) // self.compress_ratio
-            lengths = lengths.reshape(tokens, 1).to(torch.int32).contiguous()
+            if paged_mqa_plan is None:
+                lengths = meta.compressed_lens_per_token
+                if lengths is None:
+                    lengths = (meta.positions + 1) // self.compress_ratio
+                lengths = lengths.reshape(tokens, 1).to(torch.int32).contiguous()
+                schedule = None
+            else:
+                lengths, schedule = paged_mqa_plan
             table = self._kv_block_table[:batch].to(torch.int32)
             table = table.repeat_interleave(width, dim=0).contiguous()
             capacity = table.shape[1] * self._kv_eb
@@ -394,6 +419,7 @@ class PpuFP4Indexer(IndexerFP8):
                 table,
                 lengths,
                 score_width,
+                schedule=schedule,
             )
             topk_decode(
                 logits.reshape(tokens, score_width),
@@ -416,6 +442,7 @@ class PpuFP4Indexer(IndexerFP8):
         *,
         q_producer_stream=None,
         decode_streams=None,
+        paged_mqa_plan=None,
     ):
         if (q_producer_stream is None) != (decode_streams is None):
             raise ValueError("Indexer overlap requires producer and auxiliary streams")
@@ -467,10 +494,14 @@ class PpuFP4Indexer(IndexerFP8):
                     torch.view_as_real(self.freqs_cis).flatten(-2),
                     compressor_meta.positions,
                 )
-            lengths = compressor_meta.compressed_lens_per_token
-            if lengths is None:
-                lengths = (compressor_meta.positions + 1) // self.compress_ratio
-            lengths = lengths.reshape(bsz, 1).to(torch.int32).contiguous()
+            if paged_mqa_plan is None:
+                lengths = compressor_meta.compressed_lens_per_token
+                if lengths is None:
+                    lengths = (compressor_meta.positions + 1) // self.compress_ratio
+                lengths = lengths.reshape(bsz, 1).to(torch.int32).contiguous()
+                schedule = None
+            else:
+                lengths, schedule = paged_mqa_plan
             table = self._kv_block_table[:bsz].to(torch.int32).contiguous()
             capacity = table.shape[1] * self._kv_eb
             width = max(32, min(capacity, self._kv_cache_t or capacity))
@@ -482,6 +513,7 @@ class PpuFP4Indexer(IndexerFP8):
                 table,
                 lengths,
                 width,
+                schedule=schedule,
             )
             topk_decode(
                 logits.reshape(bsz, width),
@@ -591,17 +623,20 @@ class PpuFP4Attention(AttentionFP8):
         *,
         q_producer_stream=None,
     ):
-        if q_producer_stream is None:
-            return super()._decode_update_indexer(
-                x, qr, bsz, q_len, start_pos, position_ids, attn_metadata
-            )
         from rtp_llm.models_py.modules.dsv4.kv_cache_utils import (
             INDEXER_KV,
             INDEXER_STATE,
         )
 
-        if self.indexer is None or self._decode_indexer_streams is None:
+        if self.indexer is None:
+            raise ValueError("CSA layer must have an indexer")
+        if q_producer_stream is not None and self._decode_indexer_streams is None:
             raise ValueError("Indexer overlap was not prepared for this layer")
+        if q_producer_stream is not None:
+            # The metadata update and QR producer run on this stream. The
+            # schedule planner is submitted on the outer indexer stream before
+            # its inner Q/weight forks, so establish the dependency here.
+            torch.cuda.current_stream().wait_stream(q_producer_stream)
         meta = self._decode_compressor_meta_from_metadata(
             attn_metadata,
             state_attn_type=INDEXER_STATE,
@@ -609,6 +644,40 @@ class PpuFP4Attention(AttentionFP8):
             bsz=bsz,
             q_len=q_len,
         )
+        from rtp_llm.models_py.modules.dsv4.ppu.attention.fp8.decode.decode_attn_metadata import (
+            get_or_build_paged_mqa_plan,
+        )
+        import deep_gemm
+
+        source_lengths = attn_metadata.compressed_lens_per_token[4][
+            :bsz, :q_len
+        ]
+        batch_queries = bool(self.indexer._batch_mtp_queries)
+        if q_len == 1 or batch_queries:
+            paged_mqa_plans = get_or_build_paged_mqa_plan(
+                attn_metadata,
+                source_lengths=source_lengths,
+                batch_size=bsz,
+                q_len=q_len,
+                batched_queries=batch_queries,
+                query_index=None,
+                page_size=self.indexer._kv_eb,
+                num_sms=deep_gemm.get_num_sms(),
+            )
+        else:
+            paged_mqa_plans = tuple(
+                get_or_build_paged_mqa_plan(
+                    attn_metadata,
+                    source_lengths=source_lengths,
+                    batch_size=bsz,
+                    q_len=q_len,
+                    batched_queries=False,
+                    query_index=index,
+                    page_size=self.indexer._kv_eb,
+                    num_sms=deep_gemm.get_num_sms(),
+                )
+                for index in range(q_len)
+            )
         return self.indexer.forward_decode_vectorized(
             x,
             qr,
@@ -617,7 +686,10 @@ class PpuFP4Attention(AttentionFP8):
             position_ids=position_ids,
             compressor_meta=meta,
             q_producer_stream=q_producer_stream,
-            decode_streams=self._decode_indexer_streams,
+            decode_streams=(
+                self._decode_indexer_streams if q_producer_stream is not None else None
+            ),
+            paged_mqa_plans=paged_mqa_plans,
         )
 
     def _forward_decode_body(self, x, attn_metadata):
