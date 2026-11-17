@@ -86,6 +86,7 @@ class Fp8Linear(nn.Module):
         if not (
             torch.version.hip is None
             and self.compute_weight is None
+            and self.weight.dtype == torch.float8_e4m3fn
             and self.role in ("DECODE", "PDFUSION")
             and gate_up.ndim == 2
             and gate_up.is_cuda
@@ -98,8 +99,6 @@ class Fp8Linear(nn.Module):
                 or (
                     tuple(gate_up.shape) == (64, 640)
                     and tuple(self.weight.shape) == (2560, 320)
-                    and torch.cuda.is_current_stream_capturing()
-                    and torch.cuda.get_device_capability(gate_up.device) == (9, 0)
                 )
                 or (
                     os.environ.get("QWEN_MOE_FP8_SMALL_ROWS_FUSION", "0") == "1"
@@ -118,11 +117,13 @@ class Fp8Linear(nn.Module):
         )
 
         rows, width = gate_up.shape[0], self.weight.shape[1]
-        padded = torch.empty(
-            ((rows + 15) // 16 * 16, width),
-            device=gate_up.device,
-            dtype=self.weight.dtype,
-        )
+        padded = None
+        if rows % 16:
+            padded = torch.empty(
+                ((rows + 15) // 16 * 16, width),
+                device=gate_up.device,
+                dtype=self.weight.dtype,
+            )
         result = try_silu_mul_fp8_quant(gate_up, output=padded)
         if result is None:
             return None

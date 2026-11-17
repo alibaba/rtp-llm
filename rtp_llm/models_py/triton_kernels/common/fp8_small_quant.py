@@ -183,7 +183,10 @@ def try_silu_mul_fp8_quant(gate_up, *, output=None):
             (gate_up.shape[0] in (4, 8, 12, 16) and gate_up.shape[1] == 1280)
             or (
                 tuple(gate_up.shape) == (64, 640)
-                and torch.cuda.is_current_stream_capturing()
+                and (
+                    os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1"
+                    or torch.cuda.is_current_stream_capturing()
+                )
                 and torch.cuda.get_device_capability(gate_up.device) == (9, 0)
             )
             or (
