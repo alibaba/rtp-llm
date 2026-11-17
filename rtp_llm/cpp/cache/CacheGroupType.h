@@ -17,7 +17,29 @@ enum class CacheGroupType : int8_t {
     LINEAR = 0,
     FULL   = 1,
     SWA    = 2,
+    // Request-owned state, indexed by role within a request rather than token page.
+    REQUEST_STATE = 3,
 };
+
+// A model must declare the split wire layout before a D deployment may opt in.
+// P keeps its combined cache and publishes views; D owns independent pools.
+enum class LinearStateLayout : int8_t {
+    LEGACY               = 0,
+    SPLIT_EXPORT         = 1,
+    DOUBLE_BUFFER_CONV   = 2,
+    DOUBLE_BUFFER_SSM    = 3,
+    DOUBLE_BUFFER_REPLAY = 4,
+    // Verification records updates without changing this sole committed row.
+    // Acceptance replays the retained prefix into it before publishing tokens.
+    SINGLE_SSM   = 5,
+    SPLIT_CONV   = DOUBLE_BUFFER_CONV,
+    SPLIT_REPLAY = DOUBLE_BUFFER_REPLAY,
+};
+
+// Capture probes carry no request-owned state. This explicit marker is distinct
+// from an unallocated slot (-1) and the reserved physical block (0). Kernels
+// suppress state reads/writes only when the complete state row is marked dummy.
+inline constexpr int kDummyRequestStateBlockId = -2;
 
 inline const char* metricCacheGroupTypeName(CacheGroupType group_type) {
     if (group_type == CacheGroupType::LINEAR) {
@@ -28,6 +50,9 @@ inline const char* metricCacheGroupTypeName(CacheGroupType group_type) {
     }
     if (group_type == CacheGroupType::SWA) {
         return "swa";
+    }
+    if (group_type == CacheGroupType::REQUEST_STATE) {
+        return "request_state";
     }
     return "unknown";
 }
@@ -51,22 +76,24 @@ enum class CpBlockSliceMode : int8_t {
 };
 
 struct CacheGroupPolicy {
-    CacheGroupType       group_type             = CacheGroupType::FULL;
-    bool                 enable_prefix_reuse    = true;
-    bool                 reservable             = true;
-    uint32_t             explicit_block_num     = 0;
-    bool                 charge_to_paged_budget = false;
-    CacheMemoryPlacement memory_placement       = CacheMemoryPlacement::DEVICE;
-    uint32_t             active_tail_blocks     = 0;
-    bool                 validate_tail_blocks   = true;
+    CacheGroupType       group_type                      = CacheGroupType::FULL;
+    bool                 enable_prefix_reuse             = true;
+    bool                 reservable                      = true;
+    uint32_t             explicit_block_num              = 0;
+    bool                 charge_to_paged_budget          = false;
+    CacheMemoryPlacement memory_placement                = CacheMemoryPlacement::DEVICE;
+    uint32_t             active_tail_blocks              = 0;
+    bool                 validate_tail_blocks            = true;
     uint32_t             prefix_checkpoint_stride_blocks = 0;
-    CpBlockMappingMode   cp_mapping             = CpBlockMappingMode::NONE;
-    CpBlockSliceMode     cp_slice               = CpBlockSliceMode::NONE;
+    CpBlockMappingMode   cp_mapping                      = CpBlockMappingMode::NONE;
+    CpBlockSliceMode     cp_slice                        = CpBlockSliceMode::NONE;
     // Model-derived SWA attention window in tokens. Zero means no bounded
     // window is configured and remains the default for non-SWA groups.
     int sliding_window_size = 0;
     // Share one state bank across logical blocks during chunked prefill.
-    bool shared_chunk_state = false;
+    bool              shared_chunk_state  = false;
+    LinearStateLayout linear_state_layout = LinearStateLayout::LEGACY;
+    uint32_t          request_state_slots = 0;
 
     std::string policyFingerprint() const {
         std::ostringstream oss;
@@ -74,7 +101,7 @@ struct CacheGroupPolicy {
             << ':' << explicit_block_num << ':' << (charge_to_paged_budget ? 1 : 0) << ':'
             << static_cast<int>(memory_placement) << ':' << active_tail_blocks << ':' << (validate_tail_blocks ? 1 : 0)
             << ':' << static_cast<int>(cp_mapping) << ':' << static_cast<int>(cp_slice) << ':' << sliding_window_size
-            << ':' << (shared_chunk_state ? 1 : 0);
+            << ':' << (shared_chunk_state ? 1 : 0) << ':' << static_cast<int>(linear_state_layout) << ':' << request_state_slots;
         return oss.str();
     }
 };
@@ -97,7 +124,7 @@ inline std::vector<CacheStoreBlockPair> buildCacheStorePlan(const CacheGroupPoli
                                                             int                     cp_size,
                                                             size_t                  key_blocks_per_logical_block = 1,
                                                             size_t                  cache_key_count              = 0,
-                                                            size_t                  publish_start_block           = 0) {
+                                                            size_t                  publish_start_block          = 0) {
     std::vector<CacheStoreBlockPair> plan;
     if (total_logical_blocks == 0) {
         return plan;
@@ -158,6 +185,8 @@ inline const char* cacheGroupTypeName(CacheGroupType group_type) {
             return "FULL";
         case CacheGroupType::SWA:
             return "SWA";
+        case CacheGroupType::REQUEST_STATE:
+            return "REQUEST_STATE";
     }
     return "UNKNOWN";
 }

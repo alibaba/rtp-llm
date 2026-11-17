@@ -555,7 +555,14 @@ std::shared_ptr<KVCacheManager> NormalEngine::createWarmupCacheManager() {
     // pools and kernel page overrides. The warmup helper assigns the small
     // temporary capacity needed by fake streams.
     auto cache_config = CacheConfigCreator::createWarmupConfig(
-        model_config_, parallelism_config, kv_cache_config, cache_gen_num_per_cycle);
+        model_config_,
+        parallelism_config,
+        kv_cache_config,
+        cache_gen_num_per_cycle,
+        (kv_cache_config.linear_ssm_double_buffer || kv_cache_config.linear_ssm_replay) ?
+            std::min<int64_t>(runtime_config.max_generate_batch_size,
+                              (kv_cache_config.linear_pool_blocks - 1) / (kv_cache_config.linear_ssm_replay ? 1 : 2)) :
+            1);
     ParallelismConfig temp_parallelism_config;
     RuntimeConfig     temp_runtime_config;
     auto              cache_manager = make_shared<KVCacheManager>(
@@ -769,6 +776,11 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
 #else
     auto fake_input                                   = makeFakeInput(getWarmUpInputLength());
     fake_input->generate_config->num_return_sequences = runtime_config.max_generate_batch_size;
+    if (kv_cache_config.linear_ssm_double_buffer || kv_cache_config.linear_ssm_replay) {
+        fake_input->generate_config->num_return_sequences =
+            std::min<int64_t>(runtime_config.max_generate_batch_size,
+                              (kv_cache_config.linear_pool_blocks - 1) / (kv_cache_config.linear_ssm_replay ? 1 : 2));
+    }
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
 
     auto cache_manager = createWarmupCacheManager();

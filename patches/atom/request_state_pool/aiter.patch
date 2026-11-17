@@ -1,0 +1,146 @@
+diff --git a/aiter/ops/flydsl/kernels/gdr_decode.py b/aiter/ops/flydsl/kernels/gdr_decode.py
+--- a/aiter/ops/flydsl/kernels/gdr_decode.py
++++ b/aiter/ops/flydsl/kernels/gdr_decode.py
+@@ -603,6 +603,7 @@
+     min_live_slot: int = 0,
+     separate_read: bool = False,
+     compact_record: bool = False,
++    record_pool_rows: int = 0,
+ ):
+     """Gated delta rule over a speculative draft window.
+ 
+@@ -627,6 +628,8 @@
+     assert not TREE or SNAPSHOT, "the EAGLE tree is the snapshot mode's"
+     assert not TREE or len(inter_strides) == 5, "tree needs a snapshot buffer"
+     SAVE_INTER = SNAPSHOT and len(inter_strides) == 5 and not compact_record
++    INDEXED_RECORD = record_pool_rows > 0
++    assert not INDEXED_RECORD or (compact_record and CHAIN and not TREE)
+ 
+     # Only an f32 snapshot reloads exactly; a narrower one rounds.
+     LOSSLESS_SNAPSHOT = TREE and "f32" in inter_dtype
+@@ -860,14 +863,22 @@
+             )
+ 
+         if const_expr(compact_record):
++            record_row = b_i
++            record_rows = batch_size
++            if const_expr(INDEXED_RECORD):
++                # CHAIN never consumes parent_tokens. The RTP adapter passes
++                # its stable request-owned replay-pool row through that operand.
++                record_index_view = _gview(parent_tokens, None, (batch_size, 1), (1, 1))
++                record_row = fx.Int32(_load_vec(cp_i32, fx.slice(record_index_view, (b_i, None)), 1, fx.Int32))
++                record_rows = record_pool_rows
+             record_view = _gview(inter_buffer, None,
+-                (batch_size, seq_length, num_v_heads, 3, head_k_dim, 1),
++                (record_rows, seq_length, num_v_heads, 3, head_k_dim, 1),
+                 (seq_length*num_v_heads*3*head_k_dim,
+                  num_v_heads*3*head_k_dim, 3*head_k_dim, head_k_dim, 1, 1))
+             cp_record = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+             cp_record_vec = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
+             record_k_view = _gview(inter_buffer, None,
+-                (batch_size, seq_length, num_v_heads, 3, head_k_dim//VALUES_PER_THREAD_K, VALUES_PER_THREAD_K),
++                (record_rows, seq_length, num_v_heads, 3, head_k_dim//VALUES_PER_THREAD_K, VALUES_PER_THREAD_K),
+                 (seq_length*num_v_heads*3*head_k_dim,
+                  num_v_heads*3*head_k_dim, 3*head_k_dim, head_k_dim, VALUES_PER_THREAD_K, 1))
+ 
+@@ -1135,11 +1146,11 @@
+                         for ki in range_constexpr(WARP_TILE_K_ITERS):
+                             kv = warp_k_vec_start + ki * WARP_TILE_K
+                             _store_vec(cp_record_vec,
+-                                fx.slice(record_k_view, (b_i, _sq, hv_i, 0, kv//VALUES_PER_THREAD_K, None)),
++                                fx.slice(record_k_view, (record_row, _sq, hv_i, 0, kv//VALUES_PER_THREAD_K, None)),
+                                 sk_vecs[ki], VALUES_PER_THREAD_K, fx.Float32)
+                         if warp_k_vec_start == 0:
+                             _store_vec(cp_record,
+-                                fx.slice(record_view, (b_i, _sq, hv_i, 2, 0, None)),
++                                fx.slice(record_view, (record_row, _sq, hv_i, 2, 0, None)),
+                                 _decay, 1, fx.Float32)
+                     if global_v_start == 0:
+                         _record_key()
+@@ -1215,12 +1226,12 @@
+                     if const_expr(compact_record):
+                         def _record_u(_u=v_new, _gv=global_v_i, _sq=sq_i):
+                             _store_vec(cp_record,
+-                                fx.slice(record_view, (b_i, _sq, hv_i, 1, _gv, None)),
++                                fx.slice(record_view, (record_row, _sq, hv_i, 1, _gv, None)),
+                                 _u, 1, fx.Float32)
+                         if warp_k_vec_start == 0:
+                             _record_u()
+ 
+-                if const_expr(CHAIN and (not compact_record or sq_i == seq_length - 1)):
++                if const_expr(CHAIN and not NO_STATE_WRITE and (not compact_record or sq_i == seq_length - 1)):
+                     write_slot = token_slots[sq_i]
+                     write_view = _state_at(write_slot)
+ 
+@@ -1334,6 +1345,19 @@
+                     reload_parents=False,
+                     snapshot="guarded" if SAVE_INTER else "no",
+                 )
++            if const_expr(INDEXED_RECORD):
++                # Padding must not write reserved state/record row zero, and
++                # must not leave uninitialized values for downstream FP8 ops.
++                if read_slot < min_live_slot:
++                    for token in range_constexpr(seq_length):
++                        for vi in range_constexpr(WARP_TILE_V_ITERS):
++                            global_v_i = global_v_start + vi * WARP_GROUP_TILE_V
++                            def _zero_output(_sq=token, _gv=global_v_i):
++                                _store_vec(cp_data,
++                                    fx.slice(out_view, (b_i, _sq, hv_i, _gv, None)),
++                                    f32_0.to(data_num), 1, data_num)
++                            if warp_k_vec_start == 0:
++                                _zero_output()
+ 
+     @flyc.jit
+     def launch_gdr_mtp_kernel(
+diff --git a/aiter/ops/flydsl/linear_attention_kernels.py b/aiter/ops/flydsl/linear_attention_kernels.py
+--- a/aiter/ops/flydsl/linear_attention_kernels.py
++++ b/aiter/ops/flydsl/linear_attention_kernels.py
+@@ -767,6 +767,7 @@
+     disable_state_update,
+     stream,
+     compact_record=False,
++    record_pool_rows=0,
+ ):
+     batch_size, seq_length, num_k_heads, head_k_dim = query.shape
+     num_v_heads = value.shape[-2]
+@@ -836,6 +837,7 @@
+                 min_live_slot=min_live_slot,
+                 separate_read=(mode == MTP_MODE_CHAIN and inter_indices is not None),
+                 compact_record=compact_record,
++                record_pool_rows=record_pool_rows,
+                 **kwargs_,
+             )
+ 
+@@ -1335,18 +1337,26 @@
+                 stream=_mtp_stream(query, stream))
+ 
+ 
+-def flydsl_gdr_mtp_hybrid(q,k,v,a,b,bias,alog,state,out,reads,writes,record):
+-    """Save the full-accept state and FP32 records for partial-accept replay."""
++def flydsl_gdr_mtp_hybrid(q,k,v,a,b,bias,alog,state,out,reads,writes,record,record_indices=None,record_only=False):
++    """Save FP32 records; optionally omit every persistent SSM write."""
+     _mtp_common_checks(q,k,v,a,b,bias,alog,state,out)
+     if state.dtype != torch.float32 or state.shape[-2:] != (128, 128):
+         raise ValueError("Hybrid replay requires FP32 128x128 state")
+-    if (record.shape != (*q.shape[:2],v.shape[-2],3,128)
++    indexed = record_indices is not None
++    if type(record_only) is not bool or (record_only and not indexed):
++        raise ValueError("Record-only verify requires a bool flag and request-owned indexed records")
++    expected_record_shape = ((record.shape[0] if indexed else q.shape[0]), q.shape[1], v.shape[-2], 3, 128)
++    if (record.shape != expected_record_shape
+             or record.dtype != torch.float32 or not record.is_contiguous()
+             or record.device != q.device):
+         raise ValueError("Invalid hybrid replay record buffer")
++    if indexed:
++        _require_index("record_indices",record_indices,q,dims=1)
++        if record_indices.shape != (q.shape[0],) or not record_indices.is_contiguous() or record.shape[0] < 1:
++            raise ValueError("Indexed hybrid records require contiguous request-pool row IDs")
+     _require_index("reads",reads,q,dims=1)
+     _require_index("writes",writes,q,dims=2,layout="[batch, token]",covers=True)
+     _mtp_launch(mode=MTP_MODE_CHAIN, query=q,key=k,value=v,a=a,b=b,dt_bias=bias,A_log=alog,
+-        state=state,out=out,state_indices=writes,num_accepted=None,inter_indices=_mtp_contiguous_reads(reads),parent_tokens=None,
+-        inter_buffer=record,use_qk_l2norm=True,min_live_slot=0,has_tree=False,disable_state_update=False,
+-        stream=_mtp_stream(q,None),compact_record=True)
++        state=state,out=out,state_indices=writes,num_accepted=None,inter_indices=_mtp_contiguous_reads(reads),parent_tokens=record_indices,
++        inter_buffer=record,use_qk_l2norm=True,min_live_slot=1 if indexed else 0,has_tree=False,disable_state_update=record_only,
++        stream=_mtp_stream(q,None),compact_record=True,record_pool_rows=record.shape[0] if indexed else 0)

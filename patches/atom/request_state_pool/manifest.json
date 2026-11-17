@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "description": "ROCm ATOM request-owned SSM and indexed replay pools; apply after existing single-state patch",
+  "atom_version": "0.1.8+g9af739efc",
+  "aiter_version": "0.1.29+rocm7.2.0.git97d2389",
+  "components": {
+    "atom": {
+      "patch": "atom.patch",
+      "patch_sha256": "2c61a66ff5e05e2cd5db8eaf284b22c806f1da49c95d27da001412c2a134e32a",
+      "source_files_sha256": {
+        "atom/model_ops/attention_gdn.py": "f9c8f411016cfd945184ad45cd8d8ade28b25e07b42fecb936ed2adec5a69a07",
+        "atom/plugin/rtpllm/models/qwen4_exp.py": "4ecaaa091e397e59f96ffa4cf65f901847ee7965112094e2fa54d6939750e57a",
+        "atom/plugin/rtpllm/utils/linear_double_buffer.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "atom/plugin/rtpllm/utils/qwen4_exp_context.py": "6b3abe2f7650173437d9b009463b152aaf60242bd1c20635a813a8b008fd7d3f",
+        "atom/plugin/rtpllm/utils/split_ssm_storage.py": "72c2d8a3b32feff982cd74ca62116eb723dd076b48957800153fdc2c722ea346"
+      },
+      "patched_files_sha256": {
+        "atom/model_ops/attention_gdn.py": "37cd8f727b06fb7bda2b7415e1d1e0bd40b2feef7dd8345fb50b5812700568ec",
+        "atom/plugin/rtpllm/models/qwen4_exp.py": "1efaf17bbd1d7db7a448c636e6ea4d90f53d2b4e926fedecd1d77b5fbf98ed03",
+        "atom/plugin/rtpllm/utils/linear_double_buffer.py": "cb89068bc34db088afb904f3cc2eba02ac98c4a1d0df118b79bbd3c5d086214a",
+        "atom/plugin/rtpllm/utils/qwen4_exp_context.py": "7ce25e3e28fac4ed4481fd59110ef1cefebce7a32a676d111b609b9768c363a5",
+        "atom/plugin/rtpllm/utils/split_ssm_storage.py": "06b4f73a4eedf0055cec0f1bf6c726b28686fcadbbfba85047f83102ecb8f5b0"
+      }
+    },
+    "aiter": {
+      "patch": "aiter.patch",
+      "patch_sha256": "25bd310838a9aa64423bacfe35a2b556d394e85ed1f56ff8c2840edd3ae68c03",
+      "source_files_sha256": {
+        "aiter/ops/flydsl/kernels/gdr_decode.py": "ff7f5a61d70f72d794f01d89e3ce010d6d4e6a015fc72bcf21461074334262d8",
+        "aiter/ops/flydsl/linear_attention_kernels.py": "54cc3f930f2d2548ad00ea519f4e790d5cad6659aaefbf3f7bf972618d1799b6"
+      },
+      "patched_files_sha256": {
+        "aiter/ops/flydsl/kernels/gdr_decode.py": "ae9352aeeef719667b2aa832ecf3b6a6c72a0ccf9b6a1e22f7c6ebb7425f668a",
+        "aiter/ops/flydsl/linear_attention_kernels.py": "4493bfc2577fd8e2cec154f3a4806efafb913761bd8ddf0efcdc31c4b54f9598"
+      }
+    }
+  }
+}

@@ -87,7 +87,8 @@ void TcpCacheStoreLoadServiceClosure::Run() {
 
 #if USING_ROCM
     const char* split_mode = std::getenv("ATOM_RTP_SPLIT_SSM_STORAGE");
-    const bool isolated_copy = split_mode != nullptr && std::strcmp(split_mode, "1") == 0;
+    // Request-owned SSM does not invoke the legacy ATOM environment setup.
+    const bool isolated_copy = isolated_rocm_copy_stream_ || (split_mode != nullptr && std::strcmp(split_mode, "1") == 0);
     MultiCopyParams copies;
     bool has_gpu_copy = false;
 #endif

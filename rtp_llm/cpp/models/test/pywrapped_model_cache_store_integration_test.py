@@ -1527,6 +1527,56 @@ class PyWrappedModelCacheStoreIntegrationTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "status transport poisoned"):
             run_speculative_commit_bridge(model, "reduce_true")
 
+    def test_irreversible_commit_capability_is_optional_and_target_only(self):
+        model = SpeculativeCommitBridgeModel()
+        self.assertFalse(run_speculative_commit_bridge(model, "fail_stop_capability"))
+        model.requires_speculative_target_commit_fail_stop = lambda: True
+        self.assertTrue(run_speculative_commit_bridge(model, "fail_stop_capability"))
+        self.assertFalse(
+            run_speculative_commit_bridge(model, "fail_stop_capability", False)
+        )
+
+    def test_irreversible_commit_capability_requires_strict_bool(self):
+        for value in (0, 1, None, "true", object()):
+            with self.subTest(value=value):
+                model = SpeculativeCommitBridgeModel()
+                model.requires_speculative_target_commit_fail_stop = lambda: value
+                with self.assertRaisesRegex(RuntimeError, "must return bool"):
+                    run_speculative_commit_bridge(model, "fail_stop_capability")
+
+    def test_irreversible_commit_capability_refreshes_after_cache_install(self):
+        model = SpeculativeCommitBridgeModel()
+        model.cache_installed = False
+        model.requires_speculative_target_commit_fail_stop = (
+            lambda: model.cache_installed
+        )
+        model.install_cache_views = lambda: setattr(model, "cache_installed", True)
+        self.assertEqual(
+            run_speculative_commit_bridge(model, "fail_stop_capability_after_install"),
+            (False, True),
+        )
+
+    def test_irreversible_commit_capability_can_be_installed_after_initialization(self):
+        model = SpeculativeCommitBridgeModel()
+        model.install_cache_views = lambda: setattr(
+            model, "requires_speculative_target_commit_fail_stop", lambda: True
+        )
+        self.assertEqual(
+            run_speculative_commit_bridge(model, "fail_stop_capability_after_install"),
+            (False, True),
+        )
+
+    def test_irreversible_commit_capability_rejects_missing_transaction_hooks(self):
+        class NoCommitHooksModel:
+            initialize = SpeculativeCommitBridgeModel.initialize
+            forward = SpeculativeCommitBridgeModel.forward
+
+            def requires_speculative_target_commit_fail_stop(self):
+                return True
+
+        with self.assertRaisesRegex(RuntimeError, "requires all commit hooks"):
+            run_speculative_commit_bridge(NoCommitHooksModel(), "fail_stop_capability")
+
     def test_speculative_commit_prepare_exception_becomes_error(self) -> None:
         model = SpeculativeCommitBridgeModel(prepare_error=True)
 

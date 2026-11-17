@@ -152,6 +152,7 @@ try:
         KVCacheSpecDesc,
         KVCacheSpecType,
         LinearAttentionConfig,
+        LinearStateLayout,
         MiscellaneousConfig,
         ModelConfig,
         MoeConfig,

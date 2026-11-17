@@ -6,6 +6,8 @@ exports_files(
     visibility = ["//rtp_llm/models_py/modules/factory/linear/test:__pkg__"],
 )
 
+exports_files(["modules/qwen4_exp/linear_double_buffer.py"])
+
 py_library(
     name = "utils",
     srcs = glob([

@@ -2,6 +2,9 @@
 
 #include <chrono>
 #include <optional>
+
+#include <cstring>
+#include <future>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -11,6 +14,7 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/LinearStateCacheTransfer.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
@@ -200,6 +204,286 @@ KeyOffsetPairs keyOffsetPairs(const std::vector<CacheStoreBlockPair>& plan) {
     return pairs;
 }
 
+CacheConfig makeSplitLoadTestConfig(bool single = false) {
+    CacheConfig config;
+    config.layer_num                 = 1;
+    config.seq_size_per_block        = 64;
+    config.dtype                     = DataType::TYPE_BF16;
+    config.use_opaque_kv_cache_store = true;
+    ParallelismConfig parallel;
+    parallel.tp_size = 2;
+    SpecBuildContext context;
+    context.dtype              = DataType::TYPE_BF16;
+    context.seq_size_per_block = 64;
+    context.parallelism_config = &parallel;
+    std::vector<GroupBase> groups;
+    for (const auto& tag : {std::string("linear"), std::string("linear_ssm"), std::string("linear_replay")}) {
+        const bool      conv = tag == "linear";
+        const bool      ssm  = tag == "linear_ssm";
+        KVCacheSpecDesc desc;
+        desc.tag        = tag;
+        desc.cache_type = KVCacheSpecType::OpaqueState;
+        desc.dtype = desc.entry_dtype = conv ? DataType::TYPE_BF16 : DataType::TYPE_FP32;
+        desc.entry_elems              = ssm ? 32 : 16;
+        desc.explicit_entry_count     = 1;
+        desc.is_state_cache           = true;
+        desc.group_type               = conv ? CacheGroupType::LINEAR : CacheGroupType::REQUEST_STATE;
+        desc.request_state_slots      = conv ? 0 : (ssm && !single ? 2 : 1);
+        desc.linear_state_layout =
+            conv ? LinearStateLayout::DOUBLE_BUFFER_CONV :
+                   (ssm ? (single ? LinearStateLayout::SINGLE_SSM : LinearStateLayout::DOUBLE_BUFFER_SSM) :
+                          LinearStateLayout::DOUBLE_BUFFER_REPLAY);
+        desc.reuse = CacheReusePolicyDesc{false};
+        GroupBase group;
+        group.tag       = tag;
+        group.spec      = SpecBuilder::build(desc, context);
+        group.policy    = SpecBuilder::groupPolicy(desc);
+        group.block_num = 8;
+        groups.push_back(std::move(group));
+    }
+    config.setTopology(std::move(groups), {{0, {"linear", "linear_ssm", "linear_replay"}}});
+    return config;
+}
+
+struct HostSplitLoadCache {
+    CacheConfig                              config;
+    std::shared_ptr<KVCacheManager>          manager = std::make_shared<KVCacheManager>(config);
+    std::shared_ptr<CoordinatorCacheManager> allocator =
+        std::make_shared<CoordinatorCacheManager>(config, AllocationType::HOST);
+    KVCacheResource               resource;
+    std::vector<BlockIndicesType> allocated_rows;
+    bool                          request_owns_blocks = true;
+
+    explicit HostSplitLoadCache(bool single = false): config(makeSplitLoadTestConfig(single)) {
+        if (!allocator->init()) {
+            throw std::runtime_error("host split cache initialization failed");
+        }
+        manager->coordinator_manager_ = allocator;
+        resource.initGroups(config.topologyPtr());
+        resource.setCacheKeys({9001});
+        for (size_t group_id = 0; group_id < config.topology().groups().size(); ++group_id) {
+            const auto& group     = config.topology().groups()[group_id];
+            const auto  count     = group.policy.request_state_slots > 0 ? group.policy.request_state_slots : 1;
+            const auto& pool      = allocator->groupBlockPools()[group_id];
+            auto        allocated = pool->malloc(count);
+            if (!allocated) {
+                throw std::runtime_error("host split cache allocation failed");
+            }
+            allocated_rows.push_back(*allocated);
+            pool->incRef(*allocated);
+            resource.mutableBlockIds(group.tag).assign(*allocated);
+        }
+    }
+
+    ~HostSplitLoadCache() {
+        releaseRequest();
+    }
+
+    void releaseRequest() {
+        if (request_owns_blocks) {
+            for (size_t group_id = 0; group_id < allocated_rows.size(); ++group_id) {
+                allocator->groupBlockPools()[group_id]->decRef(allocated_rows[group_id]);
+            }
+            request_owns_blocks = false;
+        }
+    }
+
+    size_t refCount(const std::string& tag, size_t bank = 0) const {
+        const auto group = config.topology().groupIdForTag(tag);
+        return allocator->groupBlockPools()[group]->refCount(allocated_rows[group][bank]);
+    }
+
+    bool allBlocksReleased() const {
+        // refCount() requires an allocated block; the final decRef() removes
+        // that allocation. Inspect every original ID through the locked API,
+        // including both SSM banks and the separately released replay group.
+        for (size_t group = 0; group < allocated_rows.size(); ++group) {
+            const auto& pool = allocator->groupBlockPools()[group];
+            for (const auto block : allocated_rows[group]) {
+                if (pool->isAllocated(block)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+};
+
+class SplitLoadTestEngine final: public EngineBase {
+public:
+    explicit SplitLoadTestEngine(std::shared_ptr<KVCacheManager> cache): EngineBase(EngineInitParams{}) {
+        resource_context_.cache_manager = std::move(cache);
+    }
+    GenerateStreamPtr enqueue(const std::shared_ptr<GenerateInput>&) override {
+        return nullptr;
+    }
+    void         enqueue(GenerateStreamPtr&) override {}
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+        return absl::UnimplementedError("unused in load test");
+    }
+    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        return {};
+    }
+};
+
+class DelayedLoadCacheStore final: public NormalCacheStore {
+public:
+    DelayedLoadCacheStore() {
+        // The production base destructor stops this store even when only the
+        // transport is replaced by the deterministic test implementation.
+        request_block_buffer_store_ = std::make_shared<RequestBlockBufferStore>(nullptr);
+    }
+
+    void load(const std::shared_ptr<RequestBlockBuffer>& buffer,
+              CacheStoreLoadDoneCallback                 callback,
+              const std::string&,
+              uint32_t,
+              uint32_t,
+              uint32_t,
+              int,
+              int) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        pending_.emplace_back(buffer, std::move(callback));
+        condition_.notify_all();
+    }
+
+    std::shared_ptr<LoadContext> loadBuffers(const std::vector<std::shared_ptr<RequestBlockBuffer>>& buffers,
+                                             const std::string&                                      ip,
+                                             uint32_t                                                port,
+                                             uint32_t                                                rdma_port,
+                                             int64_t                                                 timeout_ms,
+                                             LoadContext::CheckCancelFunc                            cancelled,
+                                             int                                                     partition_count,
+                                             int partition_id) override {
+        auto context = std::make_shared<LoadContext>(shared_from_this(), false);
+        context->load(buffers, ip, port, rdma_port, timeout_ms, std::move(cancelled), partition_count, partition_id);
+        return context;
+    }
+
+    bool waitPending(size_t count) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return condition_.wait_for(lock, std::chrono::seconds(5), [&] { return pending_.size() >= count; });
+    }
+
+    void completeAll(bool success = true) {
+        std::vector<std::pair<std::shared_ptr<RequestBlockBuffer>, CacheStoreLoadDoneCallback>> pending;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            pending.swap(pending_);
+        }
+        for (const auto& entry : pending) {
+            if (success) {
+                for (const auto& block : entry.first->getBlocks()) {
+                    EXPECT_FALSE(block.second->gpu_mem);
+                    std::memset(block.second->addr.get(), 0x5a, block.second->len);
+                }
+            }
+            entry.second(success, success ? CacheStoreErrorCode::None : CacheStoreErrorCode::LoadBufferTimeout);
+        }
+    }
+
+private:
+    std::mutex                                                                              mutex_;
+    std::condition_variable                                                                 condition_;
+    std::vector<std::pair<std::shared_ptr<RequestBlockBuffer>, CacheStoreLoadDoneCallback>> pending_;
+};
+
+class ControlledLoadRpcService final: public RpcService::Service {
+public:
+    grpc::Status RemoteLoad(grpc::ServerContext*,
+                            const BroadcastLoadRequestPB* request,
+                            BroadcastLoadResponsePB*      response) override {
+        std::unique_lock<std::mutex> lock(mutex_);
+        received_ = true;
+        condition_.notify_all();
+        condition_.wait(lock, [&] { return released_; });
+        response->set_loaded_cache_block_count(request->cache_keys_size());
+        response->set_done_time_us(currentTimeUs());
+        response->mutable_error_info()->set_error_code(ErrorCodePB::NONE_ERROR);
+        return status_;
+    }
+    bool waitReceived() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return condition_.wait_for(lock, std::chrono::seconds(5), [&] { return received_; });
+    }
+    void release(grpc::Status status = grpc::Status::OK) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        status_   = std::move(status);
+        released_ = true;
+        condition_.notify_all();
+    }
+
+private:
+    std::mutex              mutex_;
+    std::condition_variable condition_;
+    bool                    received_ = false;
+    bool                    released_ = false;
+    grpc::Status            status_;
+};
+
+class CallbackLoadRpcService final: public RpcService::Service {
+public:
+    std::function<grpc::Status(grpc::ServerContext*)> callback;
+    grpc::Status
+    RemoteLoad(grpc::ServerContext* context, const BroadcastLoadRequestPB*, BroadcastLoadResponsePB*) override {
+        return callback(context);
+    }
+};
+
+class DecodeLoadRpcService final: public RpcService::Service {
+public:
+    explicit DecodeLoadRpcService(DecodeRpcServer& server): server_(server) {}
+    grpc::Status RemoteLoad(grpc::ServerContext*          context,
+                            const BroadcastLoadRequestPB* request,
+                            BroadcastLoadResponsePB*      response) override {
+        return server_.RemoteLoad(context, request, response);
+    }
+
+private:
+    DecodeRpcServer& server_;
+};
+
+struct SplitLoadRpcPeers {
+    ControlledLoadRpcService      services[2];
+    std::unique_ptr<grpc::Server> servers[2];
+    std::vector<std::string>      addresses;
+    SplitLoadRpcPeers() {
+        for (size_t rank = 0; rank < 2; ++rank) {
+            grpc::ServerBuilder builder;
+            int                 port = 0;
+            builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+            builder.RegisterService(&services[rank]);
+            servers[rank] = builder.BuildAndStart();
+            if (!servers[rank] || port == 0) {
+                throw std::runtime_error("split test RPC listener failed");
+            }
+            addresses.push_back("127.0.0.1:" + std::to_string(port));
+        }
+    }
+    ~SplitLoadRpcPeers() {
+        for (auto& service : services) {
+            service.release();
+        }
+        for (auto& server : servers) {
+            if (server) {
+                server->Shutdown();
+                server->Wait();
+            }
+        }
+    }
+};
+
+bool waitForCondition(const std::function<bool()>& predicate) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!predicate() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    return predicate();
+}
+
 }  // namespace
 
 TEST(DecodeRpcServerTest, TimeoutLearnedAfterConstructionKeepsAbsoluteDeadline) {
@@ -230,6 +514,113 @@ TEST(DecodeRpcServerTest, TimeoutLearnedAfterConstructionKeepsAbsoluteDeadline) 
     context.setRequestTimeoutMs(-1);
     EXPECT_FALSE(context.request_deadline.has_value());
     EXPECT_FALSE(context.requestDeadlineExceeded());
+}
+
+TEST(DecodeRpcServerTest, SplitLoadLeaseSnapshotsBothBanksAndReplayAfterRequestRowsChange) {
+    HostSplitLoadCache cache;
+    auto context = makeLoadContext("snapshot", {"peer"}, cache.resource.cacheKeys(), cache.resource.groupBlockIds(), 1);
+    auto lease   = DecodeRpcServer::acquireCacheLoadLease(cache.manager, context);
+    ASSERT_NE(lease, nullptr);
+    EXPECT_EQ(lease->blocks("linear_ssm"), cache.resource.blocks("linear_ssm"));
+    EXPECT_EQ(lease->blocks("linear_replay"), cache.resource.blocks("linear_replay"));
+    cache.resource.mutableBlockIds("linear_ssm").assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+    cache.resource.mutableBlockIds("linear_replay").assign({NULL_BLOCK_IDX});
+    cache.releaseRequest();
+    EXPECT_EQ(cache.refCount("linear"), 1u);
+    EXPECT_EQ(cache.refCount("linear_ssm", 0), 1u);
+    EXPECT_EQ(cache.refCount("linear_ssm", 1), 1u);
+    EXPECT_EQ(cache.refCount("linear_replay"), 1u);
+    lease.reset();
+    EXPECT_TRUE(cache.allBlocksReleased());
+}
+
+TEST(DecodeRpcServerTest, SingleStateLoadLeasePinsSoleSsmAndReplayAfterRequestRelease) {
+    HostSplitLoadCache cache(true);
+    auto context = makeLoadContext("snapshot", {"peer"}, cache.resource.cacheKeys(), cache.resource.groupBlockIds(), 1);
+    auto lease   = DecodeRpcServer::acquireCacheLoadLease(cache.manager, context);
+    ASSERT_NE(lease, nullptr);
+    EXPECT_EQ(lease->blocks("linear_ssm"), cache.resource.blocks("linear_ssm"));
+    EXPECT_EQ(lease->blocks("linear_replay"), cache.resource.blocks("linear_replay"));
+    cache.resource.mutableBlockIds("linear_ssm").assign({NULL_BLOCK_IDX});
+    cache.resource.mutableBlockIds("linear_replay").assign({NULL_BLOCK_IDX});
+    cache.releaseRequest();
+    EXPECT_EQ(cache.refCount("linear"), 1u);
+    EXPECT_EQ(cache.refCount("linear_ssm", 0), 1u);
+    EXPECT_EQ(cache.refCount("linear_replay"), 1u);
+    lease.reset();
+    EXPECT_TRUE(cache.allBlocksReleased());
+}
+
+TEST(DecodeRpcServerTest, LoadContextDrainsRealCallbacksAfterTimeoutAndCancellation) {
+    for (bool cancel : {false, true}) {
+        SCOPED_TRACE(cancel);
+        auto                                store      = std::make_shared<DelayedLoadCacheStore>();
+        auto                                context    = std::make_shared<LoadContext>(store, false);
+        auto                                bytes      = std::make_shared<std::vector<uint8_t>>(8, 0);
+        std::weak_ptr<std::vector<uint8_t>> weak_bytes = bytes;
+        auto                                buffer     = std::make_shared<RequestBlockBuffer>("drain");
+        buffer->addBlock("payload", std::shared_ptr<void>(bytes, bytes->data()), bytes->size(), false, true);
+        context->load({buffer}, "peer", 1, 2, cancel ? 1000 : 0, [cancel] { return cancel; }, 1, 0);
+        buffer.reset();
+        bytes.reset();
+        context->waitDone();
+        EXPECT_EQ(context->getErrorInfo().code(),
+                  cancel ? ErrorCode::CANCELLED : ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT);
+        auto drained = std::async(std::launch::async, [context] { context->waitCallbacksDrained(); });
+        EXPECT_EQ(drained.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+        EXPECT_FALSE(weak_bytes.expired());
+        store->completeAll();
+        EXPECT_EQ(drained.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        drained.get();
+        ASSERT_NE(weak_bytes.lock(), nullptr);
+        EXPECT_EQ(weak_bytes.lock()->front(), 0x5a);
+        context.reset();
+        EXPECT_TRUE(weak_bytes.expired());
+    }
+}
+
+TEST(DecodeRpcServerTest, QuarantinePinsUniqueIdsWithoutRetainingAllocatorOrManagerOwners) {
+    HostSplitLoadCache cache;
+    auto               context =
+        makeLoadContext("quarantine-owner", {"peer"}, cache.resource.cacheKeys(), cache.resource.groupBlockIds(), 1);
+    auto lease = DecodeRpcServer::acquireCacheLoadLease(cache.manager, context);
+    cache.releaseRequest();
+    auto quarantine = [&] { cache.manager->quarantineCacheLoad(*lease, "quarantine-owner", "unknown completion"); };
+    auto first      = std::async(std::launch::async, quarantine);
+    auto duplicate  = std::async(std::launch::async, quarantine);
+    first.get();
+    duplicate.get();
+    EXPECT_EQ(cache.allocator->quarantinedCacheLoadCount(), 1u);
+    EXPECT_EQ(cache.refCount("linear_ssm", 0), 2u);  // Original lease plus one independent quarantine reference.
+    EXPECT_EQ(cache.refCount("linear_ssm", 1), 2u);
+    lease.reset();
+    EXPECT_EQ(cache.refCount("linear_ssm", 0), 1u);
+    EXPECT_EQ(cache.refCount("linear_ssm", 1), 1u);
+
+    const auto                             group          = cache.config.topology().groupIdForTag("linear_ssm");
+    auto                                   pool           = cache.allocator->groupBlockPools()[group];
+    const auto                             banks          = cache.allocated_rows[group];
+    std::weak_ptr<KVCacheManager>          weak_manager   = cache.manager;
+    std::weak_ptr<CoordinatorCacheManager> weak_allocator = cache.allocator;
+    cache.manager.reset();
+    EXPECT_TRUE(weak_manager.expired());
+    EXPECT_FALSE(weak_allocator.expired()) << "an external allocator owner remains";
+    EXPECT_EQ(pool->refCount(banks[0]), 1u);
+    cache.allocator.reset();
+    EXPECT_TRUE(weak_allocator.expired()) << "plain quarantine snapshots must not create an owner cycle";
+    EXPECT_EQ(pool->refCount(banks[0]), 1u);
+    EXPECT_EQ(pool->refCount(banks[1]), 1u);
+    auto reusable = pool->malloc(pool->freeBlocksNum());
+    ASSERT_TRUE(reusable.has_value());
+    for (auto block : *reusable) {
+        EXPECT_NE(block, banks[0]);
+        EXPECT_NE(block, banks[1]);
+    }
+    pool->incRef(*reusable);
+    pool->decRef(*reusable);
+    std::weak_ptr<DeviceBlockPool> weak_pool = pool;
+    pool.reset();
+    EXPECT_TRUE(weak_pool.expired());
 }
 
 TEST(DecodeRpcServerTest, invalidPrefillOnlyUsesInvalidArgumentWithDetails) {
@@ -448,11 +839,11 @@ TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::string                                   request_key = "request";
-    const std::vector<std::string>                      peer_addrs  = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType>                     cache_keys  = {101, 102};
-    GroupBlockIds                                       group_block_ids;
-    const auto                                          load_context = makeLoadContext(request_key,
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101, 102};
+    GroupBlockIds                   group_block_ids;
+    const auto                      load_context = makeLoadContext(request_key,
                                               peer_addrs,
                                               cache_keys,
                                               std::move(group_block_ids),
@@ -477,11 +868,11 @@ TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};
 
-    const std::string                                   request_key = "request";
-    const std::vector<std::string>                      peer_addrs  = {"prefill-0", "prefill-1"};
-    const std::vector<CacheKeyType>                     cache_keys  = {101};
-    GroupBlockIds                                       group_block_ids;
-    const auto                                          load_context = makeLoadContext(request_key,
+    const std::string               request_key = "request";
+    const std::vector<std::string>  peer_addrs  = {"prefill-0", "prefill-1"};
+    const std::vector<CacheKeyType> cache_keys  = {101};
+    GroupBlockIds                   group_block_ids;
+    const auto                      load_context = makeLoadContext(request_key,
                                               peer_addrs,
                                               cache_keys,
                                               std::move(group_block_ids),
@@ -1319,6 +1710,287 @@ TEST(DecodeRpcServerTest, NonCancelledGenerateRequestReadPreservesFailure) {
 
 class PrefillCompletionRpcTest: public DeviceTestBase {};
 
+TEST_F(PrefillCompletionRpcTest, SplitRemoteLoadReportsRealCallbackResultAfterDeadline) {
+    for (bool callback_success : {false, true}) {
+        SCOPED_TRACE(callback_success);
+        HostSplitLoadCache cache;
+        DecodeRpcServer    server;
+        server.engine_                                      = std::make_shared<SplitLoadTestEngine>(cache.manager);
+        server.maga_init_params_.parallelism_config.tp_size = 2;
+        server.maga_init_params_.model_config_.num_layers   = 1;
+        server.model_id                                     = 9;
+        server.resource_.workers                            = {"d0", "d1"};
+        auto store                                          = std::make_shared<DelayedLoadCacheStore>();
+        server.resource_.cache_store                        = store;
+        auto context                                        = makeLoadContext("late-local",
+                                                                              {"127.0.0.1:1:2", "127.0.0.1:3:4"},
+                                       cache.resource.cacheKeys(),
+                                       cache.resource.groupBlockIds(),
+                                       1);
+        context.timeout_ms                                  = 0;
+        auto                    request = server.constructRemoteLoadRequest(context, 0, context.peer_addrs);
+        BroadcastLoadResponsePB response;
+        auto rpc = std::async(std::launch::async, [&] { return server.RemoteLoad(nullptr, &request, &response); });
+        EXPECT_TRUE(store->waitPending(2));
+        cache.releaseRequest();
+        EXPECT_EQ(cache.refCount("linear_ssm", 0), 1u);
+        EXPECT_EQ(cache.refCount("linear_ssm", 1), 1u);
+        EXPECT_EQ(cache.refCount("linear_replay"), 1u);
+        EXPECT_EQ(rpc.wait_for(std::chrono::milliseconds(30)), std::future_status::timeout);
+        store->completeAll(callback_success);
+        EXPECT_EQ(rpc.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        EXPECT_TRUE(rpc.get().ok());
+        EXPECT_EQ(response.error_info().error_code(),
+                  callback_success ? ErrorCodePB::NONE_ERROR :
+                                     transErrorCodeToRPC(ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT));
+        EXPECT_EQ(response.loaded_cache_block_count(), callback_success ? 1 : 0);
+        EXPECT_TRUE(cache.allBlocksReleased());
+    }
+}
+
+TEST_F(PrefillCompletionRpcTest, SplitFanoutTimeoutKeepsBothBanksUntilAllRanksSucceedAfterServerDestruction) {
+    HostSplitLoadCache cache;
+    SplitLoadRpcPeers  peers;
+    auto               server = std::make_unique<DecodeRpcServer>();
+    server->engine_           = std::make_shared<SplitLoadTestEngine>(cache.manager);
+    server->resource_.workers = server->resource_.grpc_workers = peers.addresses;
+    DecodeRpcContext             rpc_context{nullptr};
+    kmonitor::MetricsReporterPtr reporter;
+    DecodeGenerateContext        decode(rpc_context, 0, nullptr, reporter, nullptr);
+    decode.peer_addrs = {"p0:1:2", "p1:1:2"};
+    auto context      = makeLoadContext(
+        "late-fanout", decode.peer_addrs, cache.resource.cacheKeys(), cache.resource.groupBlockIds(), 1);
+    context.timeout_ms = 1;
+    const auto start   = std::chrono::steady_clock::now();
+    const auto result  = server->loadCacheAsyncForTpDrained(decode, context);
+    EXPECT_EQ(result.error_info.code(), ErrorCode::LOAD_CACHE_TIMEOUT);
+    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(2));
+    EXPECT_TRUE(peers.services[0].waitReceived());
+    EXPECT_TRUE(peers.services[1].waitReceived());
+    cache.releaseRequest();
+    EXPECT_EQ(cache.refCount("linear_ssm", 0), 1u);
+    EXPECT_EQ(cache.refCount("linear_ssm", 1), 1u);
+    EXPECT_FALSE(cache.manager->hasQuarantinedCacheLoads());
+    const auto                             ssm_group      = cache.config.topology().groupIdForTag("linear_ssm");
+    auto                                   pool           = cache.allocator->groupBlockPools()[ssm_group];
+    const auto                             banks          = cache.allocated_rows[ssm_group];
+    std::weak_ptr<CoordinatorCacheManager> weak_allocator = cache.allocator;
+    server.reset();
+    cache.manager.reset();
+    cache.allocator.reset();
+    EXPECT_FALSE(weak_allocator.expired()) << "background fanout must own the allocator, not the destroyed server";
+    peers.services[0].release();
+    EXPECT_EQ(pool->refCount(banks[0]), 1u);
+    EXPECT_EQ(pool->refCount(banks[1]), 1u);
+    peers.services[1].release();
+    EXPECT_TRUE(waitForCondition([&] { return weak_allocator.expired(); }));
+    EXPECT_FALSE(pool->isAllocated(banks[0]));
+    EXPECT_FALSE(pool->isAllocated(banks[1]));
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+    // Reusable banks after late success also prove the allocator was not quarantined.
+}
+
+TEST_F(PrefillCompletionRpcTest, SingleStateFanoutTimeoutPinsSoleSsmUntilAllRankCallbacksDrain) {
+    HostSplitLoadCache cache(true);
+    SplitLoadRpcPeers  peers;
+    auto               server = std::make_unique<DecodeRpcServer>();
+    server->engine_           = std::make_shared<SplitLoadTestEngine>(cache.manager);
+    server->resource_.workers = server->resource_.grpc_workers = peers.addresses;
+    DecodeRpcContext             rpc_context{nullptr};
+    kmonitor::MetricsReporterPtr reporter;
+    DecodeGenerateContext        decode(rpc_context, 0, nullptr, reporter, nullptr);
+    decode.peer_addrs = {"p0:1:2", "p1:1:2"};
+    auto context      = makeLoadContext(
+        "late-fanout", decode.peer_addrs, cache.resource.cacheKeys(), cache.resource.groupBlockIds(), 1);
+    context.timeout_ms = 1;
+    const auto start   = std::chrono::steady_clock::now();
+    const auto result  = server->loadCacheAsyncForTpDrained(decode, context);
+    EXPECT_EQ(result.error_info.code(), ErrorCode::LOAD_CACHE_TIMEOUT);
+    EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::seconds(2));
+    EXPECT_TRUE(peers.services[0].waitReceived());
+    EXPECT_TRUE(peers.services[1].waitReceived());
+    cache.releaseRequest();
+    EXPECT_EQ(cache.refCount("linear_ssm", 0), 1u);
+    EXPECT_FALSE(cache.manager->hasQuarantinedCacheLoads());
+    const auto                             ssm_group      = cache.config.topology().groupIdForTag("linear_ssm");
+    auto                                   pool           = cache.allocator->groupBlockPools()[ssm_group];
+    const auto                             banks          = cache.allocated_rows[ssm_group];
+    std::weak_ptr<CoordinatorCacheManager> weak_allocator = cache.allocator;
+    server.reset();
+    cache.manager.reset();
+    cache.allocator.reset();
+    EXPECT_FALSE(weak_allocator.expired()) << "background fanout must own the allocator, not the destroyed server";
+    peers.services[0].release();
+    EXPECT_EQ(pool->refCount(banks[0]), 1u);
+    peers.services[1].release();
+    EXPECT_TRUE(waitForCondition([&] { return weak_allocator.expired(); }));
+    EXPECT_FALSE(pool->isAllocated(banks[0]));
+    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
+    // Reusable banks after late success also prove the allocator was not quarantined.
+}
+
+TEST_F(PrefillCompletionRpcTest, SplitFanoutAfterFrontendTimeoutUsesActualLateCallbackResult) {
+    for (bool callback_success : {false, true}) {
+        SCOPED_TRACE(callback_success);
+        HostSplitLoadCache cache;
+        SplitLoadRpcPeers  controlled_peers;
+        DecodeRpcServer    server;
+        server.engine_                                      = std::make_shared<SplitLoadTestEngine>(cache.manager);
+        server.maga_init_params_.parallelism_config.tp_size = 2;
+        server.maga_init_params_.model_config_.num_layers   = 1;
+        auto store                                          = std::make_shared<DelayedLoadCacheStore>();
+        server.resource_.cache_store                        = store;
+        DecodeLoadRpcService local_service(server);
+        grpc::ServerBuilder  builder;
+        int                  port = 0;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+        builder.RegisterService(&local_service);
+        auto local_server = builder.BuildAndStart();
+        ASSERT_NE(local_server, nullptr);
+        server.resource_.workers =
+            server.resource_.grpc_workers = {"127.0.0.1:" + std::to_string(port), controlled_peers.addresses[1]};
+
+        DecodeRpcContext             rpc_context{nullptr};
+        kmonitor::MetricsReporterPtr reporter;
+        DecodeGenerateContext        decode(rpc_context, 0, nullptr, reporter, nullptr);
+        decode.peer_addrs = {"127.0.0.1:1:2", "127.0.0.1:3:4"};
+        auto context      = makeLoadContext(
+            "real-late-fanout", decode.peer_addrs, cache.resource.cacheKeys(), cache.resource.groupBlockIds(), 1);
+        context.timeout_ms = 1;
+        const auto result  = server.loadCacheAsyncForTpDrained(decode, context);
+        EXPECT_EQ(result.error_info.code(), ErrorCode::LOAD_CACHE_TIMEOUT);
+        EXPECT_TRUE(store->waitPending(2));
+        EXPECT_TRUE(controlled_peers.services[1].waitReceived());
+        cache.releaseRequest();
+        EXPECT_EQ(cache.refCount("linear_ssm", 0), 2u) << "local callback and fanout each retain a real lease";
+        EXPECT_EQ(cache.refCount("linear_ssm", 1), 2u);
+        EXPECT_FALSE(cache.manager->hasQuarantinedCacheLoads());
+        controlled_peers.services[1].release();
+        store->completeAll(callback_success);
+        if (callback_success) {
+            EXPECT_TRUE(waitForCondition([&] { return cache.allBlocksReleased(); }));
+            EXPECT_FALSE(cache.manager->hasQuarantinedCacheLoads());
+        } else {
+            EXPECT_TRUE(waitForCondition([&] {
+                return cache.manager->hasQuarantinedCacheLoads() && cache.refCount("linear", 0) == 1
+                       && cache.refCount("linear_ssm", 0) == 1 && cache.refCount("linear_ssm", 1) == 1
+                       && cache.refCount("linear_replay", 0) == 1;
+            }));
+            EXPECT_FALSE(cache.allBlocksReleased());
+        }
+        local_server->Shutdown();
+        local_server->Wait();
+    }
+}
+
+TEST_F(PrefillCompletionRpcTest, SplitFanoutTransportFailureQuarantinesAndRejectsAnotherLoad) {
+    HostSplitLoadCache cache;
+    SplitLoadRpcPeers  peers;
+    auto               server = std::make_unique<DecodeRpcServer>();
+    server->engine_           = std::make_shared<SplitLoadTestEngine>(cache.manager);
+    server->resource_.workers = server->resource_.grpc_workers = peers.addresses;
+    DecodeRpcContext             rpc_context{nullptr};
+    kmonitor::MetricsReporterPtr reporter;
+    DecodeGenerateContext        decode(rpc_context, 0, nullptr, reporter, nullptr);
+    decode.peer_addrs = {"p0:1:2", "p1:1:2"};
+    auto context      = makeLoadContext(
+        "failed-fanout", decode.peer_addrs, cache.resource.cacheKeys(), cache.resource.groupBlockIds(), 1);
+    context.timeout_ms = 1;
+    peers.services[0].release(grpc::Status(grpc::StatusCode::UNAVAILABLE, "injected lost completion"));
+    server->loadCacheAsyncForTpDrained(decode, context);
+    cache.releaseRequest();
+    EXPECT_TRUE(waitForCondition([&] { return cache.manager->hasQuarantinedCacheLoads(); }));
+    const auto rejected = server->loadCacheAsyncForTpDrained(decode, context);
+    EXPECT_EQ(rejected.error_info.code(), ErrorCode::LOAD_KV_CACHE_FAILED);
+    EXPECT_NE(rejected.error_info.ToString().find("restart required"), std::string::npos);
+    EXPECT_GE(cache.refCount("linear_ssm", 0), 1u);
+    EXPECT_GE(cache.refCount("linear_ssm", 1), 1u);
+    peers.services[1].release();
+    // The successful rank cannot resolve ownership of the failed rank.
+    EXPECT_GE(cache.refCount("linear_ssm", 0), 1u);
+    server.reset();
+    EXPECT_TRUE(waitForCondition([&] { return cache.refCount("linear_ssm", 0) == 1; }));
+    EXPECT_EQ(cache.refCount("linear_ssm", 1), 1u);
+    // Destroying the RPC server does not recover an externally owned allocator.
+    DecodeRpcServer replacement;
+    replacement.engine_           = std::make_shared<SplitLoadTestEngine>(cache.manager);
+    replacement.resource_.workers = replacement.resource_.grpc_workers = peers.addresses;
+    const auto replacement_result = replacement.loadCacheAsyncForTpDrained(decode, context);
+    EXPECT_EQ(replacement_result.error_info.code(), ErrorCode::LOAD_KV_CACHE_FAILED);
+    EXPECT_NE(replacement_result.error_info.ToString().find("restart required"), std::string::npos);
+    auto empty_resource = std::make_shared<BatchKVCacheResource>();
+    empty_resource->resetBatchSize(1);
+    empty_resource->initGroups(cache.config.topologyPtr());
+    empty_resource->setBatchCacheKeys(0, {1234});
+    auto input             = std::make_shared<GenerateInput>();
+    input->input_ids       = torch::arange(64, torch::kInt32);
+    input->generate_config = std::make_shared<GenerateConfig>();
+    auto tokens            = std::make_shared<CompleteTokenIds>(1, 1, 128, 64);
+    tokens->init(input);
+    MallocInfo allocation{empty_resource, tokens};
+    allocation.reuse_cache = allocation.enable_cache_lookup = false;
+    const auto admission                                    = cache.allocator->malloc(allocation);
+    EXPECT_FALSE(admission.success);
+    EXPECT_EQ(admission.status, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED);
+    EXPECT_EQ(cache.allocator->quarantinedCacheLoadCount(), 1u);
+    EXPECT_EQ(cache.refCount("linear_ssm", 0), 1u);
+}
+
+TEST_F(PrefillCompletionRpcTest, SplitFanoutFrontendCancellationDrainsRpcWithoutQuarantine) {
+    HostSplitLoadCache cache;
+    SplitLoadRpcPeers  peers;
+    DecodeRpcServer    server;
+    server.engine_           = std::make_shared<SplitLoadTestEngine>(cache.manager);
+    server.resource_.workers = server.resource_.grpc_workers = peers.addresses;
+    std::promise<ErrorCode> frontend_result;
+    auto                    frontend_done = frontend_result.get_future();
+    CallbackLoadRpcService  frontend;
+    frontend.callback = [&](grpc::ServerContext* server_context) {
+        DecodeRpcContext             rpc_context{nullptr};
+        kmonitor::MetricsReporterPtr reporter;
+        DecodeGenerateContext        decode(rpc_context, 0, server_context, reporter, nullptr);
+        decode.peer_addrs = {"p0:1:2", "p1:1:2"};
+        auto context      = makeLoadContext(
+            "cancelled-fanout", decode.peer_addrs, cache.resource.cacheKeys(), cache.resource.groupBlockIds(), 1);
+        context.server_context = server_context;
+        context.timeout_ms     = 5000;
+        const auto result      = server.loadCacheAsyncForTpDrained(decode, context);
+        frontend_result.set_value(result.error_info.code());
+        return grpc::Status::OK;
+    };
+    grpc::ServerBuilder builder;
+    int                 port = 0;
+    builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+    builder.RegisterService(&frontend);
+    auto frontend_server = builder.BuildAndStart();
+    ASSERT_NE(frontend_server, nullptr);
+    auto stub = RpcService::NewStub(
+        grpc::CreateChannel("127.0.0.1:" + std::to_string(port), grpc::InsecureChannelCredentials()));
+    grpc::ClientContext     client_context;
+    BroadcastLoadRequestPB  request;
+    BroadcastLoadResponsePB response;
+    auto client = std::async(std::launch::async, [&] { return stub->RemoteLoad(&client_context, request, &response); });
+    EXPECT_TRUE(peers.services[0].waitReceived());
+    EXPECT_TRUE(peers.services[1].waitReceived());
+    client_context.TryCancel();
+    EXPECT_EQ(client.get().error_code(), grpc::StatusCode::CANCELLED);
+    const auto completed = frontend_done.wait_for(std::chrono::seconds(5));
+    EXPECT_EQ(completed, std::future_status::ready);
+    if (completed == std::future_status::ready) {
+        EXPECT_EQ(frontend_done.get(), ErrorCode::CANCELLED);
+    }
+    cache.releaseRequest();
+    EXPECT_EQ(cache.refCount("linear_ssm", 0), 1u);
+    EXPECT_EQ(cache.refCount("linear_ssm", 1), 1u);
+    peers.services[0].release();
+    EXPECT_EQ(cache.refCount("linear_ssm", 0), 1u);
+    peers.services[1].release();
+    EXPECT_TRUE(waitForCondition([&] { return cache.allBlocksReleased(); }));
+    EXPECT_FALSE(cache.manager->hasQuarantinedCacheLoads());
+    frontend_server->Shutdown();
+    frontend_server->Wait();
+}
+
 TEST_F(PrefillCompletionRpcTest, AllocationLoadTimeoutPreservesDeadlineAndReleasesResources) {
     for (bool timeout : {false, true}) {
         SCOPED_TRACE(timeout);
@@ -1412,8 +2084,8 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
             resource_released       = stream->stream_cache_resource_->isResourceReleased();
             blocks_after_completion = stream->stream_cache_resource_->curBlocksNum();
             EXPECT_EQ(stream->outputTokenLen(), 0);
-            const auto timing       = stream->getTimeInfo();
-            executed                = timing.running_started || timing.first_token_committed || timing.generation_done;
+            const auto timing = stream->getTimeInfo();
+            executed          = timing.running_started || timing.first_token_committed || timing.generation_done;
             RpcMetricsCollector metrics;
             context.collectBasicMetrics(metrics);
             error_qps = metrics.error_qps;
@@ -1780,6 +2452,132 @@ TEST(DecodeRpcServerTest, FullGroupKeepsWholeLogicalBlocksAfterReuse) {
                                                           kBaseSeqSizePerBlock);
 
     EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{2, 2}, {3, 3}}));
+}
+
+TEST(DecodeRpcServerTest, DoubleBufferedSsmLoadsLastPromptKeyIntoCommittedBank) {
+    auto policy                = defaultCacheGroupPolicy(CacheGroupType::REQUEST_STATE);
+    policy.linear_state_layout = LinearStateLayout::DOUBLE_BUFFER_SSM;
+    policy.request_state_slots = 2;
+    for (const size_t prompt_pages : {1u, 127u, 128u, 129u}) {
+        for (const size_t reuse_pages : {size_t{0}, prompt_pages / 2, prompt_pages}) {
+            const auto plan = DecodeRpcServer::buildGroupLoadPlan(policy, 2, prompt_pages, reuse_pages, true, 64, 64);
+            ASSERT_EQ(plan.size(), 1u);
+            EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{static_cast<int>(prompt_pages - 1), 0}}));
+            const auto producer = buildCacheStorePlan(
+                defaultCacheGroupPolicy(CacheGroupType::LINEAR), prompt_pages, 0, true, 0, 1, 1, prompt_pages);
+            ASSERT_EQ(producer.size(), 1u);
+            EXPECT_EQ(plan[0].key_index, producer[0].key_index);
+            EXPECT_EQ(plan[0].offset_index, 0);  // Never the scratch bank or prompt-page index.
+        }
+    }
+}
+
+TEST(DecodeRpcServerTest, SingleSsmLoadsLastPromptKeyIntoSoleAllocatorRow) {
+    auto policy                = defaultCacheGroupPolicy(CacheGroupType::REQUEST_STATE);
+    policy.linear_state_layout = LinearStateLayout::SINGLE_SSM;
+    policy.request_state_slots = 1;
+    for (const size_t prompt_pages : {1u, 127u, 128u, 129u}) {
+        for (const size_t reuse_pages : {size_t{0}, prompt_pages / 2, prompt_pages}) {
+            const auto plan = DecodeRpcServer::buildGroupLoadPlan(policy, 1, prompt_pages, reuse_pages, true, 64, 64);
+            ASSERT_EQ(plan.size(), 1u);
+            EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{static_cast<int>(prompt_pages - 1), 0}}));
+            const auto producer = buildCacheStorePlan(
+                defaultCacheGroupPolicy(CacheGroupType::LINEAR), prompt_pages, 0, true, 0, 1, 1, prompt_pages);
+            ASSERT_EQ(producer.size(), 1u);
+            EXPECT_EQ(plan[0].key_index, producer[0].key_index);
+            EXPECT_EQ(plan[0].offset_index, 0);  // Never the scratch bank or prompt-page index.
+        }
+    }
+}
+
+TEST(DecodeRpcServerTest, DoubleBufferedConvKeepsLogicalTailAndReplayHasNoTransfer) {
+    auto conv                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+    conv.linear_state_layout = LinearStateLayout::DOUBLE_BUFFER_CONV;
+    const auto plan          = DecodeRpcServer::buildGroupLoadPlan(conv, 131, 128, 96, true, 64, 64);
+    EXPECT_EQ(keyOffsetPairs(plan), (KeyOffsetPairs{{127, 127}}));
+    EXPECT_THROW(DecodeRpcServer::buildGroupLoadPlan(conv, 2, 128, 96, true, 64, 64), std::invalid_argument);
+    auto replay                = defaultCacheGroupPolicy(CacheGroupType::REQUEST_STATE);
+    replay.linear_state_layout = LinearStateLayout::DOUBLE_BUFFER_REPLAY;
+    replay.request_state_slots = 1;
+    EXPECT_TRUE(DecodeRpcServer::buildGroupLoadPlan(replay, 1, 128, 96, true, 64, 64).empty());
+    EXPECT_THROW(linearStateCacheWireTag(replay.linear_state_layout, "linear_replay"), std::invalid_argument);
+}
+
+TEST(DecodeRpcServerTest, SingleSsmRejectsExtraSlotAndInvalidTransferDestination) {
+    auto policy                = defaultCacheGroupPolicy(CacheGroupType::REQUEST_STATE);
+    policy.linear_state_layout = LinearStateLayout::SINGLE_SSM;
+    policy.request_state_slots = 1;
+    EXPECT_EQ(linearStateCacheWireTag(policy.linear_state_layout, "linear_ssm"), "linear.ssm");
+    for (const size_t count : {0u, 2u, 3u}) {
+        EXPECT_THROW(DecodeRpcServer::buildGroupLoadPlan(policy, count, 128, 96, true, 64, 64), std::invalid_argument);
+    }
+    policy.request_state_slots = 2;
+    EXPECT_THROW(DecodeRpcServer::buildGroupLoadPlan(policy, 1, 128, 0, true, 64, 64), std::invalid_argument);
+    EXPECT_THROW(validateLinearStateDestinationBlock(LinearStateLayout::SINGLE_SSM, -1), std::invalid_argument);
+    EXPECT_THROW(validateLinearStateDestinationBlock(LinearStateLayout::SINGLE_SSM, -2), std::invalid_argument);
+}
+
+TEST(DecodeRpcServerTest, DoubleBufferedSsmRejectsMissingBanksAndNullDestinations) {
+    auto policy                = defaultCacheGroupPolicy(CacheGroupType::REQUEST_STATE);
+    policy.linear_state_layout = LinearStateLayout::DOUBLE_BUFFER_SSM;
+    policy.request_state_slots = 2;
+    for (const size_t bank_count : {0u, 1u, 3u}) {
+        EXPECT_THROW(DecodeRpcServer::buildGroupLoadPlan(policy, bank_count, 128, 0, true, 64, 64),
+                     std::invalid_argument);
+    }
+    policy.request_state_slots = 1;
+    EXPECT_THROW(DecodeRpcServer::buildGroupLoadPlan(policy, 2, 128, 0, true, 64, 64), std::invalid_argument);
+    policy.request_state_slots = 2;
+    EXPECT_THROW(DecodeRpcServer::buildGroupLoadPlan(policy, 2, 128, 0, true, 128, 64), std::invalid_argument);
+    EXPECT_TRUE(DecodeRpcServer::buildGroupLoadPlan(policy, 2, 0, 0, true, 64, 64).empty());
+    for (const auto layout : {LinearStateLayout::DOUBLE_BUFFER_SSM, LinearStateLayout::DOUBLE_BUFFER_CONV}) {
+        EXPECT_THROW(validateLinearStateDestinationBlock(layout, NULL_BLOCK_IDX), std::invalid_argument);
+        EXPECT_THROW(validateLinearStateDestinationBlock(layout, -2), std::invalid_argument);
+        EXPECT_NO_THROW(validateLinearStateDestinationBlock(layout, 7));
+    }
+    EXPECT_NO_THROW(validateLinearStateDestinationBlock(LinearStateLayout::LEGACY, NULL_BLOCK_IDX));
+}
+
+TEST(DecodeRpcServerTest, DoubleBufferedLinearTransferRejectsHeterogeneousTpAndCp) {
+    EXPECT_NO_THROW(validateSplitLinearGlobalTopology(2, 2, 2, 1));
+    EXPECT_NO_THROW(validateSplitLinearTransfer(2, 1, 1, 1, 0));
+    EXPECT_THROW(validateSplitLinearGlobalTopology(2, 2, 4, 1), std::invalid_argument);
+    EXPECT_THROW(validateSplitLinearGlobalTopology(4, 4, 2, 1), std::invalid_argument);
+    EXPECT_THROW(validateSplitLinearGlobalTopology(2, 2, 2, 2), std::invalid_argument);
+    EXPECT_THROW(validateSplitLinearTransfer(2, 2, 1, 1, 0), std::invalid_argument);
+    EXPECT_THROW(validateSplitLinearTransfer(2, 1, 1, 2, 0), std::invalid_argument);
+    EXPECT_THROW(validateSplitLinearTransfer(2, 1, 2, 1, 0), std::invalid_argument);
+    EXPECT_THROW(validateSplitLinearTransfer(1, 1, 1, 1, 0), std::invalid_argument);
+    EXPECT_THROW(validateSplitLinearTransfer(2, 1, 1, 1, 1), std::invalid_argument);
+}
+
+TEST(DecodeRpcServerTest, LinearStateWireSlicesPreservePayloadAndRejectOverflow) {
+    const auto slices = linearStateSplitExportSlices(3 * 192, 192, 2, 128, 64);
+    EXPECT_EQ(slices[0].tag, "linear.ssm");
+    EXPECT_EQ(slices[0].slice.offset, 2 * 192u);
+    EXPECT_EQ(slices[0].slice.bytes, 128u);
+    EXPECT_EQ(slices[1].tag, "linear.conv");
+    EXPECT_EQ(slices[1].slice.offset, 2 * 192u + 128u);
+    EXPECT_EQ(slices[1].slice.bytes, 64u);
+    EXPECT_EQ(linearStateCacheWireTag(LinearStateLayout::DOUBLE_BUFFER_SSM, "linear_ssm"), slices[0].tag);
+    EXPECT_EQ(linearStateCacheWireTag(LinearStateLayout::DOUBLE_BUFFER_CONV, "linear"), slices[1].tag);
+    EXPECT_EQ(linearStateCacheWireTag(LinearStateLayout::LEGACY, "linear"), "linear");
+    EXPECT_THROW(linearStateCacheWireTag(LinearStateLayout::DOUBLE_BUFFER_SSM, "linear"), std::invalid_argument);
+    EXPECT_THROW(linearStateSplitExportSlices(3 * 192, 192, -1, 128, 64), std::invalid_argument);
+    EXPECT_THROW(linearStateSplitExportSlices(3 * 192, 192, 3, 128, 64), std::out_of_range);
+    EXPECT_THROW(linearStateSplitExportSlices(3 * 192 - 1, 192, 2, 128, 64), std::out_of_range);
+    EXPECT_THROW(linearStateSplitExportSlices(3 * 192, 192, 2, 193, 64), std::invalid_argument);
+    EXPECT_THROW(linearStateSplitExportSlices(3 * 192, 192, 2, 128, 65), std::invalid_argument);
+    EXPECT_THROW(linearStateSplitExportSlices(3 * 192, 192, 2, 0, 64), std::invalid_argument);
+    EXPECT_THROW(
+        checkedLinearStateCacheSlice(std::numeric_limits<size_t>::max(), 16, std::numeric_limits<int64_t>::max(), 0, 8),
+        std::overflow_error);
+    EXPECT_THROW(checkedLinearStateCacheSlice(std::numeric_limits<size_t>::max(),
+                                              std::numeric_limits<size_t>::max(),
+                                              0,
+                                              0,
+                                              static_cast<size_t>(std::numeric_limits<uint32_t>::max()) + 1),
+                 std::invalid_argument);
 }
 
 TEST(DecodeRpcServerTest, EmptyTableOrMissingCacheKeysYieldNoLoad) {

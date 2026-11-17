@@ -187,7 +187,7 @@ static rtp_llm::ModelConfig makeTestModelConfig(uint32_t num_layers) {
 }
 
 static rtp_llm::CacheConfig makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers,
-                                                               int      mtp_module_num,
+                                                               int      gen_num_per_cycle,
                                                                uint32_t block_num,
                                                                uint32_t mtp_module_layers = 1) {
     auto score_model_config   = makeTestModelConfig(main_layers);
@@ -203,7 +203,7 @@ static rtp_llm::CacheConfig makeMtpCacheConfigByCreateSpConfig(uint32_t main_lay
 
     rtp_llm::SpeculativeExecutionConfig sp_config;
     sp_config.type              = SP_TYPE_MTP;
-    sp_config.gen_num_per_cycle = mtp_module_num;
+    sp_config.gen_num_per_cycle = gen_num_per_cycle;
 
     auto       config              = CacheConfigCreator::createConfig(score_model_config,
                                                    parallelism_config,
@@ -215,6 +215,20 @@ static rtp_llm::CacheConfig makeMtpCacheConfigByCreateSpConfig(uint32_t main_lay
     const auto candidate_block_num = CacheConfigCreator::computeLocalBlockNum(
         config, score_model_config, runtime_config, kv_cache_config, parallelism_config, std::nullopt, sp_config);
     return rtp_llm::test::finalizeCacheConfig(std::move(config), candidate_block_num);
+}
+
+// Explicit multi-module layouts remain supported by the generic cache container.
+// Production MTP creation uses one active draft, independent of proposal width.
+static CacheConfig
+makeExplicitMultiModuleCacheConfig(uint32_t main_layers, int module_count, uint32_t block_num, uint32_t module_layers) {
+    KVCacheConfig options;
+    options.test_block_num = block_num;
+    auto       config      = CacheConfigCreator::createConfig(makeTestModelConfig(main_layers), {}, options);
+    const auto draft       = CacheConfigCreator::createConfig(makeTestModelConfig(module_layers), {}, options);
+    for (int module = 0; module < module_count; ++module) {
+        config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, module, main_layers));
+    }
+    return finalizeCacheConfig(std::move(config), block_num);
 }
 
 CompleteTokenIdsPtr createCompleteTokenIds(int batch_size, int seq_length, int seq_size_per_block = 8) {
@@ -332,7 +346,7 @@ protected:
 
     static std::vector<uint8_t> readDeviceBytes(const void* src_device, size_t bytes) {
         auto        device_tensor = torch::from_blob(const_cast<void*>(src_device),
-                                              {static_cast<int64_t>(bytes)},
+                                                     {static_cast<int64_t>(bytes)},
                                               torch::TensorOptions(torch::kUInt8).device(torch::kCUDA));
         auto        host_tensor   = device_tensor.cpu();
         const auto* data          = host_tensor.data_ptr<uint8_t>();
@@ -1303,9 +1317,27 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, ConvertToGlobalLayerIdSingleNoMtp)
               std::numeric_limits<uint32_t>::max());
 }
 
-TEST_F(SingleTypeCoordinatorCacheManagerTest, ConvertToGlobalLayerIdSingleWithMtp) {
+TEST_F(SingleTypeCoordinatorCacheManagerTest, MtpCreatorKeepsAllLayersOfOnlyTheActiveDraft) {
     auto config = makeMtpCacheConfigByCreateSpConfig(
-        /*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/8, /*mtp_module_layers=*/3);
+        /*main_layers=*/2, /*gen_num_per_cycle=*/3, /*block_num=*/8, /*mtp_module_layers=*/3);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+    EXPECT_EQ(config.layer_all_num(), 5u);
+    EXPECT_EQ(config.mtp_sub_configs[0]->layer_num, 3u);
+    auto manager = std::make_shared<KVCacheManager>(config);
+    ASSERT_TRUE(manager->init());
+    const auto all_layout   = manager->allLayerCacheBase();
+    const auto draft_layout = manager->getMTPModuleGroupedCacheLayerLayout(0);
+    ASSERT_EQ(all_layout.group("default").size(), 5u);
+    ASSERT_EQ(draft_layout.group("default").size(), 3u);
+    for (size_t layer = 0; layer < 3; ++layer) {
+        EXPECT_EQ(draft_layout.at(layer).kv_addr.data_ptr(), all_layout.at(2 + layer).kv_addr.data_ptr());
+    }
+    EXPECT_THROW(manager->getMTPModuleGroupedCacheLayerLayout(1), std::runtime_error);
+}
+
+TEST_F(SingleTypeCoordinatorCacheManagerTest, ConvertToGlobalLayerIdSingleWithMtp) {
+    auto config = makeExplicitMultiModuleCacheConfig(
+        /*main_layers=*/2, /*module_count=*/2, /*block_num=*/8, /*module_layers=*/3);
     allocator_ = std::make_shared<TestSingleTypeCoordinatorCacheManager>(config);
 
     // main model: global == local
@@ -1345,7 +1377,7 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, SingleLayerMtpConfigSlicesDescript
     config.kv_cache_spec_descs[1][0].tag                   = "layer1";
     config.hybrid_attention_config.enable_hybrid_attention = true;
     config.hybrid_attention_config.hybrid_attention_types  = {HybridAttentionType::LINEAR,
-                                                             HybridAttentionType::SLIDING_WINDOW};
+                                                              HybridAttentionType::SLIDING_WINDOW};
 
     const auto single_layer = makeSingleLayerMTPModelConfig(config, /*source_layer=*/1);
 
@@ -1489,8 +1521,8 @@ TEST_F(SingleTypeCoordinatorCacheManagerTest, LayerCacheBase) {
 }
 
 TEST_F(SingleTypeCoordinatorCacheManagerTest, ManagerLayoutsPreserveSingleTypeGroupTensorsForMainAndMtp) {
-    auto config = makeMtpCacheConfigByCreateSpConfig(
-        /*main_layers=*/2, /*mtp_module_num=*/2, /*block_num=*/8, /*mtp_module_layers=*/3);
+    auto config = makeExplicitMultiModuleCacheConfig(
+        /*main_layers=*/2, /*module_count=*/2, /*block_num=*/8, /*module_layers=*/3);
     auto manager = std::make_shared<KVCacheManager>(config);
     ASSERT_TRUE(manager->init());
 

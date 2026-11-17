@@ -1371,6 +1371,11 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info,
     }
 
     // for spec-decode linear attention, we need to adjust cache blocks
+    // Only a completed target-verify transaction publishes the SSM scratch bank.
+    // PD/prefill updates have no proposal step and must not switch the received bank.
+    if (accept_token_num > 0 && update_info.speculative_propose_step > 0 && stream_cache_resource_) {
+        stream_cache_resource_->commitLinearState(0);
+    }
     if (accept_token_num > 1 && stream_cache_resource_) {
         int seq_size_per_block = seqSizePerBlock();
 

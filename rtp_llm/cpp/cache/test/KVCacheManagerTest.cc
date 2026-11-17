@@ -538,7 +538,7 @@ TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudg
     const auto candidate =
         CacheConfigCreator::computeLocalBlockNum(candidate_config, target, {}, options, {}, std::nullopt, sp);
     EXPECT_EQ(candidate_config.group("default").block_num, 0u);
-    ASSERT_EQ(candidate_config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(candidate_config.mtp_sub_configs.size(), 1u);
     for (const auto& sub : candidate_config.mtp_sub_configs) {
         EXPECT_EQ(sub->group("default").block_num, 0u);
     }
@@ -549,14 +549,14 @@ TEST_F(KVCacheManagerTest, CandidateConfigAllocatesMergedDraftSegmentsWithinBudg
     ASSERT_TRUE(manager.init());
     const auto& config = manager.cacheConfig();
     EXPECT_EQ(config.group("default").block_num, candidate);
-    ASSERT_EQ(config.mtp_sub_configs.size(), 2u);
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
     ASSERT_EQ(manager.coordinator_manager_->groupBlockPools().size(), 1u);
     const auto& pool        = manager.coordinator_manager_->groupBlockPools()[0];
     const auto  pool_config = std::dynamic_pointer_cast<const DeviceBlockPoolConfig>(pool->config_);
     ASSERT_NE(pool_config, nullptr);
-    ASSERT_EQ(pool_config->memory_layouts.size(), 3u);
-    // FP16 K+V: 4 tokens/block * 2 bytes/element * (2 target + 2*4 draft elements/token).
-    constexpr size_t bytes_per_block = 4 * 2 * 2 * (2 + 2 * 4);
+    ASSERT_EQ(pool_config->memory_layouts.size(), 2u);
+    // FP16 K+V: 4 tokens/block * 2 bytes/element * (2 target + 4 active draft elements/token).
+    constexpr size_t bytes_per_block = 4 * 2 * 2 * (2 + 4);
     constexpr size_t budget_bytes    = 1024 * 1024;
     EXPECT_EQ(config.group("default").block_num, budget_bytes / bytes_per_block);
     EXPECT_EQ(pool->getTotalSizeBytes(), static_cast<size_t>(config.group("default").block_num) * bytes_per_block);
@@ -736,11 +736,11 @@ TEST_F(KVCacheManagerTest, AuxiliaryPagedCacheReducesBlockBudget) {
 
     KVCacheConfig kv_cache_config;
     kv_cache_config.kv_cache_mem_mb = 1;
-    const auto config = CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, kv_cache_config);
+    const auto config   = CacheConfigCreator::createConfig(model_config, ParallelismConfig{}, kv_cache_config);
     const auto baseline = CacheConfigCreator::computeLocalBlockNum(
         config, model_config, RuntimeConfig{}, kv_cache_config, ParallelismConfig{});
     model_config.auxiliary_paged_cache_bytes_per_block = 1024;
-    const auto with_aux = CacheConfigCreator::computeLocalBlockNum(
+    const auto with_aux                                = CacheConfigCreator::computeLocalBlockNum(
         config, model_config, RuntimeConfig{}, kv_cache_config, ParallelismConfig{});
     EXPECT_LT(with_aux, baseline);
     EXPECT_LE(static_cast<size_t>(with_aux) * (config.blockSizeBytesForGroup("full") + 1024), 1024u * 1024u);
@@ -1821,8 +1821,8 @@ public:
         return std::make_shared<CompletedTransferAsyncContext>(std::move(result), task.descriptors().size());
     }
 
-    size_t submitted_batch_count{0};
-    size_t submitted_descriptor_count{0};
+    size_t                      submitted_batch_count{0};
+    size_t                      submitted_descriptor_count{0};
     std::vector<CacheCopyError> copy_errors;
     ErrorInfo                   completion_error{ErrorInfo::OkStatus()};
 };

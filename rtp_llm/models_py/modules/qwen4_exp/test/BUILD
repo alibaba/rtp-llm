@@ -20,6 +20,8 @@ models_py_test(
 
 # Keep the standalone grouped-FP8 kernel test free of the native-engine testlib.
 
+exports_files(["linear_double_buffer_test.py"])
+
 py_library(
     name = "math_references",
     srcs = glob(["reference/*.py"]),
@@ -610,4 +612,12 @@ models_py_test(
     src = "qsa/main_qk_norm_rope_test.py",
     gpu = "RTX_5000_PRO_CU13",
     deps = [":test_support"],
+)
+
+py_test(
+    name = "linear_double_buffer_test",
+    srcs = ["linear_double_buffer_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    tags = ["L20_CU13"],
+    exec_properties = {"gpu": "L20_CU13"},
 )

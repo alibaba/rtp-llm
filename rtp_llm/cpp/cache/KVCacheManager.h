@@ -49,6 +49,9 @@ public:
     bool initialized() const {
         return coordinator_manager_ != nullptr;
     }
+    bool isWarmup() const {
+        return warmup_;
+    }
 
     /** The first stage's TP0 allocates request blocks; other ranks receive its block IDs. */
     bool isAllocatorOwner() const {
@@ -145,6 +148,9 @@ public:
     // Increment KV cache reference count for PD separation (connector refcount)
     std::shared_ptr<KVCacheResource>
     incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector = true);
+    void
+    quarantineCacheLoad(const KVCacheResource& resource, const std::string& request_key, const std::string& reason);
+    bool hasQuarantinedCacheLoads() const;
 
     // CP page-level RR sharding context. Returns nullptr when sharding is not active
     // (single-rank or kv_cache_sharded=false).  Used by connector / cache_store to
@@ -154,9 +160,9 @@ public:
     }
 
 private:
-    std::function<void()> allocationChangeCallback() const;
-    void                  reportMetricsLoop();
-    void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
+    std::function<void()>             allocationChangeCallback() const;
+    void                              reportMetricsLoop();
+    void                              reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
 
     // 成员变量

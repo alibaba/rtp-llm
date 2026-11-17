@@ -79,7 +79,7 @@ cc_test(
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),
-    env = {"ATOM_RTP_SPLIT_SSM_STORAGE": "1"},
+    env = {"ATOM_RTP_SPLIT_SSM_STORAGE": "0"},
     tags = ["manual", "requires-gpu"],
     target_compatible_with = select({
         "@//:using_rocm": [],

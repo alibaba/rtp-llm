@@ -1,5 +1,6 @@
 #pragma once
 #include "rtp_llm/models_py/bindings/OpDefs.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -58,7 +59,8 @@ struct GraphParams {
     // Golden cache-group identity for CUDA graph capture/replay. A one-group
     // topology keeps the direct AttentionInputs fast path; multiple groups
     // require an exact tag -> AttentionInputs mapping at replay time.
-    std::vector<std::string> kv_cache_group_tags;
+    std::vector<std::string>       kv_cache_group_tags;
+    std::vector<LinearStateLayout> kv_cache_state_layouts;
     // Final kernel block-table width, in kernel block IDs per row. Callers
     // compute it from model topology and actual reserve/fake bounds before
     // constructing the graph; this struct never re-derives page geometry.

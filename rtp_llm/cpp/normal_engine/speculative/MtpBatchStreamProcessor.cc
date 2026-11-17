@@ -44,11 +44,13 @@ torch::Tensor MtpBatchStreamProcessor::advanceEngramTokenWindows(const torch::Te
     return chronological.gather(1, indexes);
 }
 
-torch::Tensor MtpBatchStreamProcessor::advanceLinearCacheBlockTable(const torch::Tensor& current_table,
-                                                                    const torch::Tensor& previous_seq_lengths,
-                                                                    const torch::Tensor& accept_lengths,
-                                                                    const std::vector<CacheGroupType>& group_types,
-                                                                    int64_t seq_size_per_block) {
+torch::Tensor
+MtpBatchStreamProcessor::advanceLinearCacheBlockTable(const torch::Tensor&                  current_table,
+                                                      const torch::Tensor&                  previous_seq_lengths,
+                                                      const torch::Tensor&                  accept_lengths,
+                                                      const std::vector<CacheGroupType>&    group_types,
+                                                      int64_t                               seq_size_per_block,
+                                                      const std::vector<LinearStateLayout>& state_layouts) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.advance_linear_cache_block_table");
     RTP_LLM_CHECK_WITH_INFO(current_table.defined() && current_table.is_cuda()
                                 && current_table.scalar_type() == torch::kInt32 && current_table.dim() == 3,
@@ -65,6 +67,8 @@ torch::Tensor MtpBatchStreamProcessor::advanceLinearCacheBlockTable(const torch:
     const int64_t group_count = current_table.size(0);
     const int64_t batch_size  = current_table.size(1);
     const int64_t block_count = current_table.size(2);
+    RTP_LLM_CHECK_WITH_INFO(state_layouts.empty() || state_layouts.size() == static_cast<size_t>(group_count),
+                            "MTP state layout count must match the cache groups");
     RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(group_types.size()) == group_count,
                             "MTP cache snapshot group count mismatch: table=%ld config=%zu",
                             group_count,
@@ -115,6 +119,14 @@ torch::Tensor MtpBatchStreamProcessor::advanceLinearCacheBlockTable(const torch:
 
     auto next_table = current_table.clone();
     for (int64_t group_id = 0; group_id < group_count; ++group_id) {
+        if (!state_layouts.empty()
+            && state_layouts[static_cast<size_t>(group_id)] == LinearStateLayout::DOUBLE_BUFFER_SSM) {
+            RTP_LLM_CHECK_WITH_INFO(block_count >= 2, "SSM snapshot requires two bank columns");
+            auto previous = current_table.select(0, group_id).narrow(1, 0, 2);
+            auto swapped  = torch::where((accept > 0).unsqueeze(1), previous.flip({1}), previous);
+            next_table.select(0, group_id).narrow(1, 0, 2).copy_(swapped);
+            continue;
+        }
         if (group_types[static_cast<size_t>(group_id)] != CacheGroupType::LINEAR) {
             continue;
         }
@@ -626,7 +638,7 @@ absl::Status MtpBatchStreamProcessor::dispatchPrefill(const StreamGroups&  strea
 absl::Status MtpBatchStreamProcessor::dispatchDecode(const StreamGroups&                          stream_groups,
                                                      const speculative::SpeculativeSamplerOutput& spec_decode_output,
                                                      const MergedOutput&                          draft_prefill_output,
-                                                     bool                                         draft_probs_owned) const {
+                                                     bool draft_probs_owned) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     std::vector<StreamSpecUpdateInfo> spec_update_infos;
@@ -784,9 +796,10 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     // Greedy sampling with identity history penalties reads only the output
     // token slot. Keep the full-history path for stochastic sampling, beams,
     // penalties, n-grams and custom logits processors.
-    const char* compact_env = std::getenv("RTP_LLM_MTP_COMPACT_GREEDY_HISTORY");
-    const bool compact_enabled = compact_env == nullptr || std::strcmp(compact_env, "0") != 0;
-    const bool compact_greedy_history = compact_enabled && !spec_logits_result.has_active_processor
+    const char* compact_env     = std::getenv("RTP_LLM_MTP_COMPACT_GREEDY_HISTORY");
+    const bool  compact_enabled = compact_env == nullptr || std::strcmp(compact_env, "0") != 0;
+    const bool  compact_greedy_history =
+        compact_enabled && !spec_logits_result.has_active_processor
         && std::all_of(all_streams.begin(), all_streams.end(), [](const GenerateStreamPtr& stream) {
                const auto& config = stream->generateConfig();
                return !config->stochastic() && stream->currentNumBeams() == 1 && stream->nextNumBeams() == 1
@@ -799,9 +812,8 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
         // Sampler::forward uses a blocking CPU-to-GPU transfer on ROCm. The
         // greedy sampler overwrites this sole output slot before any read, so
         // allocate it directly on the logits device and avoid that sync.
-        sampler_inputs.token_ids = torch::empty(
-            {static_cast<int64_t>(total_batch_size), 1},
-            torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+        sampler_inputs.token_ids = torch::empty({static_cast<int64_t>(total_batch_size), 1},
+                                                torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     }
 
     int64_t batch_idx = 0;
@@ -1563,7 +1575,7 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
     torch::Tensor owned_draft_probs;
     if (draft_sampler_output.all_probs.defined()) {
         owned_draft_probs = draft_probs_owned ? draft_sampler_output.all_probs :
-                                               draft_sampler_output.all_probs.to(torch::kCUDA).clone();
+                                                draft_sampler_output.all_probs.to(torch::kCUDA).clone();
     }
 
     int batch_idx_in  = 0;

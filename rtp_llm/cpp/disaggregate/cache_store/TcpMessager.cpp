@@ -11,7 +11,7 @@ bool TcpMessager::init(MessagerInitParams params) {
     init_params_ = params;
 
     tcp_client_ = std::make_shared<TcpClient>();
-    if (!tcp_client_->init(init_params_.io_thread_count)) {
+    if (!tcp_client_->init(init_params_.io_thread_count, init_params_.rpc_client_queue_size)) {
         RTP_LLM_LOG_WARNING("messager init failed, tcp client init failed");
         return false;
     }
@@ -75,7 +75,8 @@ void TcpMessager::load(const std::shared_ptr<LoadRequest>&                      
                                                         load_response,
                                                         request->callback,
                                                         collector,
-                                                        init_params_.device_id);
+                                                        init_params_.device_id,
+                                                        init_params_.isolated_rocm_copy_stream);
 
     collector->markRequestCallBegin();
     KvCacheStoreService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),

@@ -28,6 +28,7 @@
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <algorithm>
 #include <cstring>
+#include <cstdio>
 #include <exception>
 #include <sstream>
 #if USING_CUDA
@@ -261,6 +262,34 @@ public:
 private:
     ModelBase* model_ = nullptr;
     bool       armed_ = false;
+};
+
+[[noreturn]] void failStopIrreversibleTargetState(const char* phase, const std::string& error = {}) {
+    RTP_LLM_LOG_ERROR("irreversible speculative target %s failed; restart required: %s", phase, error.c_str());
+    // Keep a diagnostic on stderr even when the normal logger is file-only.
+    std::fprintf(stderr, "irreversible speculative target %s failed; fail-stop: %s\n", phase, error.c_str());
+    std::terminate();
+}
+
+class IrreversibleTargetStateGuard {
+public:
+    IrreversibleTargetStateGuard(bool armed, const char* phase): armed_(armed), phase_(phase) {}
+
+    ~IrreversibleTargetStateGuard() {
+        if (armed_) {
+            // In particular, a TP status transport exception must not unwind
+            // into the outer guard's finish(false) after A may have changed.
+            failStopIrreversibleTargetState(phase_, "operation did not reach its publication boundary");
+        }
+    }
+
+    void dismiss() {
+        armed_ = false;
+    }
+
+private:
+    bool        armed_;
+    const char* phase_;
 };
 
 }  // namespace
@@ -594,6 +623,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     data_type_             = params.model_config_.data_type;
     mtp_input_hidden_size_ = static_cast<size_t>(params.model_config_.getMtpInputHiddenSize());
     propose_step_          = propose_params->gen_num_per_circle;
+    require_speculative_target_commit_fail_stop_ = params.kv_cache_config.linear_ssm_replay;
     RTP_LLM_CHECK_WITH_INFO(
         propose_step_ > 0, "speculative proposal width/gen_num_per_cycle must be positive, got %zu", propose_step_);
     vocab_size_                = params.model_config_.vocab_size;
@@ -1156,11 +1186,30 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         global_model_input.input_lengths = snapshotMutableHostInputToCuda(model_input.input_lengths, buffer_holder_);
     }
 
+    // A decode worker's first token also goes through prefillStep. Single-SSM
+    // execution writes canonical state directly here, without a verify replay
+    // transaction, so no later prepare/forward/publication error is retryable.
+    IrreversibleTargetStateGuard canonical_guard(require_speculative_target_commit_fail_stop_, "canonical prefill");
+    const auto                   finish_canonical_prefill = [&](const absl::Status& status) {
+        if (require_speculative_target_commit_fail_stop_ && !status.ok()) {
+            failStopIrreversibleTargetState("canonical prefill dispatch", status.ToString());
+        }
+        canonical_guard.dismiss();
+        return status;
+    };
+
     // target model prefill
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_forward)");
         maybePrintModelInput(model_input, "prefill target model");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        if (require_speculative_target_commit_fail_stop_) {
+            // Install/cache the actual views before querying the dynamic
+            // capability, and validate before any canonical state write.
+            model_->prepareAttentionInputs(model_input);
+            THROW_IF_STATUS_ERROR(validateSpeculativeTargetCommitCapability(
+                true, model_->hasSpeculativeTargetCommitHooks(), model_->requiresSpeculativeTargetCommitFailStop()));
+        }
         model_output          = std::move(forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET));
         mtp::maybeOverrideLastHiddenWithMtpBuffer(
             model_output, *model_, cp_enabled ? -1 : model_input.combo_tokens.numel());
@@ -1186,12 +1235,12 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                     stream->reportError(ErrorCode::EXECUTION_EXCEPTION, *deferred_capture_error);
                 }
             }
-            return absl::OkStatus();
+            return finish_canonical_prefill(absl::OkStatus());
         }
         if (isTpRank0() && batch_record) {
             batch_record->setStepDurationUs(autil::TimeUtility::currentTimeInMicroSeconds() - step_start_us);
         }
-        return dispatch_prefill_only();
+        return finish_canonical_prefill(dispatch_prefill_only());
     }
 
     // Prepare the draft prefill input on each TP root. Target-only MTP uses a
@@ -1277,7 +1326,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     if (!dspark_cache_store_ok) {
         cudaSyncAndCheck();
         releaseAllModelBuffers();
-        return absl::OkStatus();
+        return finish_canonical_prefill(absl::OkStatus());
     }
 
     // Do not consume the target publisher error until every required draft/FFN/DP
@@ -1295,7 +1344,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                 stream->reportError(ErrorCode::EXECUTION_EXCEPTION, *deferred_capture_error);
             }
         }
-        return absl::OkStatus();
+        return finish_canonical_prefill(absl::OkStatus());
     }
 
     if (target_only) {
@@ -1305,13 +1354,13 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         if (isTpRank0() && batch_record) {
             batch_record->setStepDurationUs(autil::TimeUtility::currentTimeInMicroSeconds() - step_start_us);
         }
-        return dispatch_prefill_only();
+        return finish_canonical_prefill(dispatch_prefill_only());
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
         cudaSyncAndCheck();
         releaseAllModelBuffers();
-        return absl::OkStatus();
+        return finish_canonical_prefill(absl::OkStatus());
     }
 
     if (cp_enabled && !is_dspark_) {
@@ -1354,7 +1403,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
         releaseAllModelBuffers();
 
-        return result;
+        return finish_canonical_prefill(result);
     }
 }
 
@@ -1860,10 +1909,88 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         return global_sampling_status;
     }
 
+    auto prepare_post_rejection_inputs = [&]() {
+        if (isTpRank0()) {
+            if (is_dspark_) {
+                // Target verify wrote its aux features into the shared MTP hidden
+                // buffer inside the (possibly graphed) forward; replay does not
+                // advance the Python-side row count, so pass the explicit verify
+                // geometry.
+                batch_stream_processor_->updateDecodePostDSparkCommitInput(
+                    model_input, model_output.all_hidden_states, batch_size);
+            } else {
+                batch_stream_processor_->updateDecodePostDraftModelInput(
+                    model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, buffer_holder_);
+            }
+            if (metrics_reporter_) {
+                accept_len_ready_event.record(cuda_graph::graphGetCurrentStream());
+            }
+        } else {
+            if (is_dspark_) {
+                RTP_LLM_CHECK_WITH_INFO(model_output.all_hidden_states.defined(),
+                                        "dspark target TP rank did not bind the MTP hidden buffer");
+                batch_stream_processor_->updateDecodePostDSparkCommitInput(
+                    model_input, model_output.all_hidden_states, batch_size);
+            } else {
+                model_input.is_target_verify   = false;
+                const auto cuda_i32            = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+                model_input.lm_output_indexes  = torch::empty({(int64_t)batch_size}, cuda_i32);
+                model_input.last_hidden_states = model_output.all_hidden_states;
+            }
+        }
+
+        // Record before broadcast/draft work so the worker waits only for
+        // accept_len/accept_tokens, not the queue tail.
+        if (useStreamAsync()) {
+            rejection_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+            rejection_event->record(cuda_graph::graphGetCurrentStream());
+        }
+
+        // The post-rejection input is final here: fork the draft-prefill prepare so
+        // its host work and mirror D2H waits overlap the post-rejection broadcast
+        // and the commit's GPU tail instead of serializing the step boundary. The
+        // runner joins below before runDraftPrefillForward; a worker failure
+        // surfaces at that sync, before the forward consumes the prepared state.
+        // The prepare reads only lengths/tables/metadata, all final at this point;
+        // the tensors the broadcast overwrites in place on non-root ranks are
+        // consumed inside the forward, after the join.
+        launchDraftPrefillPrepareAsync(model_input, /*post_rejection=*/true);
+        // Keep the hidden rows selected from this round's target-forward result.
+        // A Python-side hidden buffer is stale after Graph replay, and replacing
+        // last_hidden_states here would also undo rejection sampling's compaction.
+        broadcastPostRejectionInputs(model_input);
+    };
+
+    bool draft_prefill_submitted = false;
+    auto submit_draft_prefill = [&]() {
+        draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        // This model owns the independent draft cache. Neither request state
+        // publication nor output dispatch happens in this submission phase.
+        draft_prefill_model_output = runDraftPrefillForward(model_input);
+        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        draft_prefill_submitted = true;
+    };
+
+    const bool irreversible_target_commit =
+        speculativeTargetTransactionsEnabled() && model_->requiresSpeculativeTargetCommitFailStop();
+    bool post_rejection_prepared = false;
+    std::function<void()> overlap_post_rejection;
+#if USING_ROCM
+    if (irreversible_target_commit && useStreamAsync() && !is_dspark_) {
+        overlap_post_rejection = [&] {
+            prepare_post_rejection_inputs();
+            post_rejection_prepared = true;
+            // Preserve the original overlap of draft host preparation with
+            // the target GPU tail; completion waits on the replay event only.
+            submit_draft_prefill();
+        };
+    }
+#endif
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(commit_target_side_state)");
         auto status = prepareAndCommitSpeculativeTargetState(
-            speculative_sampler_output.accept_len, batch_size, model_input.is_fake_stream);
+            speculative_sampler_output.accept_len, batch_size, model_input.is_fake_stream, overlap_post_rejection);
         if (!status.ok()) {
             // The helper has already issued the rank-symmetric abort.
             target_commit_guard.dismiss();
@@ -1871,72 +1998,22 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
         target_commit_guard.dismiss();
     }
+    // A is now advanced but request/output bookkeeping is not yet published.
+    // No native exception or non-OK dispatch may make this batch retryable.
+    IrreversibleTargetStateGuard publication_guard(irreversible_target_commit, "post-commit decode");
 
-    if (isTpRank0()) {
-        if (is_dspark_) {
-            // Target verify wrote its aux features into the shared MTP hidden
-            // buffer inside the (possibly graphed) forward; replay does not
-            // advance the Python-side row count, so pass the explicit verify
-            // geometry.
-            batch_stream_processor_->updateDecodePostDSparkCommitInput(
-                model_input, model_output.all_hidden_states, batch_size);
-        } else {
-            batch_stream_processor_->updateDecodePostDraftModelInput(
-                model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, buffer_holder_);
-        }
-        if (metrics_reporter_) {
-            accept_len_ready_event.record(cuda_graph::graphGetCurrentStream());
-        }
-    } else {
-        if (is_dspark_) {
-            RTP_LLM_CHECK_WITH_INFO(model_output.all_hidden_states.defined(),
-                                    "dspark target TP rank did not bind the MTP hidden buffer");
-            batch_stream_processor_->updateDecodePostDSparkCommitInput(
-                model_input, model_output.all_hidden_states, batch_size);
-        } else {
-            model_input.is_target_verify   = false;
-            const auto cuda_i32            = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-            model_input.lm_output_indexes  = torch::empty({(int64_t)batch_size}, cuda_i32);
-            model_input.last_hidden_states = model_output.all_hidden_states;
-        }
+    if (!post_rejection_prepared) {
+        prepare_post_rejection_inputs();
     }
 
-    // Record before broadcast/draft work so the worker waits only for
-    // accept_len/accept_tokens, not the queue tail.
-    if (useStreamAsync()) {
-        rejection_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
-        rejection_event->record(cuda_graph::graphGetCurrentStream());
-    }
-
-    // The post-rejection input is final here: fork the draft-prefill prepare so
-    // its host work and mirror D2H waits overlap the post-rejection broadcast
-    // and the commit's GPU tail instead of serializing the step boundary. The
-    // runner joins below before runDraftPrefillForward; a worker failure
-    // surfaces at that sync, before the forward consumes the prepared state.
-    // The prepare reads only lengths/tables/metadata, all final at this point;
-    // the tensors the broadcast overwrites in place on non-root ranks are
-    // consumed inside the forward, after the join.
-    launchDraftPrefillPrepareAsync(model_input, /*post_rejection=*/true);
-    // Keep the hidden rows selected from this round's target-forward result.
-    // A Python-side hidden buffer is stale after Graph replay, and replacing
-    // last_hidden_states here would also undo rejection sampling's compaction.
-    broadcastPostRejectionInputs(model_input);
-
-    draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
-
-    {
-        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        // DSpARK tail = commit only: dense verify rows into the draft
-        // feature KV (incremental-prefill shape; output unused). The next
-        // round's proposal is produced at the next round head, from this
-        // freshly committed ring.
-        draft_prefill_model_output = runDraftPrefillForward(model_input);
-        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    if (!draft_prefill_submitted) {
+        submit_draft_prefill();
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
         cudaSyncAndCheck();
         releaseAllModelBuffers();
+        publication_guard.dismiss();
         return absl::OkStatus();
     }
 
@@ -1994,6 +2071,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             stream->setEngramTokenWindowGpu(next_history.narrow(0, row++, 1));
         }
     }
+    if (irreversible_target_commit && !dispatch_result.ok()) {
+        failStopIrreversibleTargetState("output dispatch", dispatch_result.ToString());
+    }
+    publication_guard.dismiss();
     return dispatch_result;
 }
 
@@ -2204,6 +2285,8 @@ void MtpExecutor::launchDraftPrefillPrepareAsync(const GptModelInputs& model_inp
 }
 
 GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input, const StreamGroups& stream_groups) {
+    IrreversibleTargetStateGuard target_guard(require_speculative_target_commit_fail_stop_,
+                                              "target verify prepare/forward");
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_model_verify)");
     // Verify rows contain generated text, while the gathered decode mask still
     // has only one entry per request rather than gamma+1 entries.
@@ -2246,9 +2329,15 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
         // fail-stop boundary.
         model_->prepareAttentionInputs(model_input);
     }
+    // Actual cache views install the Python capability during preparation.
+    // Reject a missing contract before target verification can touch state.
+    THROW_IF_STATUS_ERROR(validateSpeculativeTargetCommitCapability(require_speculative_target_commit_fail_stop_,
+                                                                    target_transactions_enabled,
+                                                                    model_->requiresSpeculativeTargetCommitFailStop()));
     GptModelOutputs model_output = forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET);
     RTP_LLM_LOG_DEBUG("[MTP decode] target model verify forward end");
     model_input.is_target_verify = false;
+    target_guard.dismiss();
     return model_output;
 }
 
@@ -2262,6 +2351,36 @@ absl::Status MtpExecutor::validateSpeculativeTargetExecutionPolicy(bool target_c
                             "speculative target commit hooks do not yet support EPLB");
     }
     return absl::OkStatus();
+}
+
+absl::Status MtpExecutor::validateSpeculativeTargetCommitCapability(bool required, bool hooks, bool fail_stop) {
+    if ((required && !fail_stop) || (fail_stop && !hooks)) {
+        return absl::FailedPreconditionError(
+            "single-SSM replay requires explicit irreversible speculative target commit hooks");
+    }
+    return absl::OkStatus();
+}
+
+void MtpExecutor::runSpeculativeBookkeeping(bool fail_stop, const std::function<absl::Status()>& work) {
+    try {
+        const auto status = work();
+        if (!status.ok()) {
+            if (fail_stop) {
+                failStopIrreversibleTargetState("async bookkeeping", status.ToString());
+            }
+            RTP_LLM_LOG_ERROR("[stream-async] dispatchDecode (worker) failed: %s", status.ToString().c_str());
+        }
+    } catch (const std::exception& error) {
+        if (fail_stop) {
+            failStopIrreversibleTargetState("async bookkeeping", error.what());
+        }
+        throw;
+    } catch (...) {
+        if (fail_stop) {
+            failStopIrreversibleTargetState("async bookkeeping", "unknown exception");
+        }
+        throw;
+    }
 }
 
 bool MtpExecutor::speculativeTargetTransactionsEnabled() const {
@@ -2341,8 +2460,12 @@ absl::Status MtpExecutor::rendezvousSpeculativeTargetSamplingStatus(const absl::
     return rendezvousSpeculativeTargetPhaseStatus(local_status, "sampling/cap");
 }
 
-absl::Status
-MtpExecutor::prepareAndCommitSpeculativeTargetState(torch::Tensor& accept_len, size_t batch_size, bool is_fake_stream) {
+absl::Status MtpExecutor::prepareAndCommitSpeculativeTargetState(
+    torch::Tensor& accept_len, size_t batch_size, bool is_fake_stream, const std::function<void()>& before_completion) {
+    const bool target_hooks        = model_ != nullptr && model_->hasSpeculativeTargetCommitHooks();
+    const bool irreversible_commit = model_ != nullptr && model_->requiresSpeculativeTargetCommitFailStop();
+    RETURN_IF_STATUS_ERROR(validateSpeculativeTargetCommitCapability(
+        require_speculative_target_commit_fail_stop_, target_hooks, irreversible_commit));
     if (model_ == nullptr || !model_->hasSpeculativeTargetCommitHooks()) {
         return absl::OkStatus();
     }
@@ -2423,11 +2546,24 @@ MtpExecutor::prepareAndCommitSpeculativeTargetState(torch::Tensor& accept_len, s
         return absl::InternalError(message);
     }
 
-    // Commit is tentative until every rank reports success. Implementations
-    // retain their originals so a peer failure can roll this rank back.
-    std::string local_commit_error;
+    // The default contract retains originals. Single-SSM replay cannot restore
+    // A after the first write, so arm before calling the hook, including when a
+    // launch throws after partially submitting work.
+    IrreversibleTargetStateGuard commit_guard(irreversible_commit, "commit/finalize consensus");
+    std::string                  local_commit_error;
+    std::shared_ptr<torch::Event> replay_complete;
     try {
         local_commit_error = model_->finishSpeculativeTargetCommit(true);
+        if (irreversible_commit && local_commit_error.empty() && before_completion) {
+            replay_complete = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
+            replay_complete->record(cuda_graph::graphGetCurrentStream());
+        }
+        if (irreversible_commit && local_commit_error.empty() && !before_completion) {
+            // CPU status consensus proves only that hosts reached the phase.
+            // Publish success only after the actual replay writes completed.
+            // Adapters must join any side stream into this stream before return.
+            cuda_graph::graphGetCurrentStream().synchronize();
+        }
     } catch (const std::exception& e) {
         local_commit_error = std::string("commit threw: ") + e.what();
     } catch (...) {
@@ -2435,6 +2571,9 @@ MtpExecutor::prepareAndCommitSpeculativeTargetState(torch::Tensor& accept_len, s
     }
     const bool global_commit_ok = reduceSpeculativeTargetPrepareStatus(local_commit_error.empty());
     if (!global_commit_ok) {
+        if (irreversible_commit) {
+            failStopIrreversibleTargetState("commit", local_commit_error);
+        }
         rollbackSpeculativeTargetStateOrFailStop("commit");
         std::string message = "speculative target side-state commit failed on at least one TP rank";
         if (!local_commit_error.empty()) {
@@ -2443,8 +2582,28 @@ MtpExecutor::prepareAndCommitSpeculativeTargetState(torch::Tensor& accept_len, s
         return absl::InternalError(message);
     }
 
+    // All ranks have agreed that replay was submitted. The ROCm request-pool
+    // adapter may prepare private draft inputs and enqueue their TP broadcast
+    // while replay is pending. No request cache/page table or output is published.
+    // Keep the irreversible guard armed: a callback failure cannot be retried,
+    // and must not enter a different collective from a healthy peer.
+    if (before_completion) {
+        try {
+            before_completion();
+        } catch (const std::exception& error) {
+            failStopIrreversibleTargetState("post-rejection overlap", error.what());
+        } catch (...) {
+            failStopIrreversibleTargetState("post-rejection overlap", "unknown exception");
+        }
+    }
     std::string local_finalize_error;
     try {
+        if (irreversible_commit && before_completion) {
+            // Verify target replay completion before publishing its state,
+            // without waiting for the independent draft work queued after it.
+            // Adapters join replay side streams before finish() returns.
+            replay_complete->synchronize();
+        }
         local_finalize_error = model_->finalizeSpeculativeTargetCommit();
     } catch (const std::exception& e) {
         local_finalize_error = std::string("finalize threw: ") + e.what();
@@ -2453,6 +2612,9 @@ MtpExecutor::prepareAndCommitSpeculativeTargetState(torch::Tensor& accept_len, s
     }
     const bool global_finalize_ok = reduceSpeculativeTargetPrepareStatus(local_finalize_error.empty());
     if (!global_finalize_ok) {
+        if (irreversible_commit) {
+            failStopIrreversibleTargetState("finalize", local_finalize_error);
+        }
         RTP_LLM_LOG_ERROR("speculative target finalize failed on at least one TP rank; local error: %s",
                           local_finalize_error.c_str());
         // Commit was globally successful, so rollback is no longer legal;
@@ -2460,6 +2622,7 @@ MtpExecutor::prepareAndCommitSpeculativeTargetState(torch::Tensor& accept_len, s
         // transaction with an ambiguous retained undo log.
         std::terminate();
     }
+    commit_guard.dismiss();
     return absl::OkStatus();
 }
 
@@ -3570,20 +3733,22 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         RTP_LLM_CHECK_WITH_INFO(kv_cache_kernel_block_id.dim() == 3 && kv_cache_kernel_block_id.size(1) == batch_size,
                                 "MTP kernel cache snapshot source must be [group,batch,blocks], batch=%ld",
                                 batch_size);
-        std::vector<CacheGroupType> group_types;
-        const auto&                 cache_config = cache_manager_->cacheConfig();
+        std::vector<CacheGroupType>    group_types;
+        std::vector<LinearStateLayout> state_layouts;
+        const auto&                    cache_config = cache_manager_->cacheConfig();
         group_types.reserve(cache_config.topology().groups().size());
         for (const auto& group : cache_config.topology().groups()) {
             group_types.push_back(group.policy.group_type);
+            state_layouts.push_back(group.policy.linear_state_layout);
         }
         const auto block_size  = static_cast<int>(cache_config.seq_size_per_block);
         const auto table_width = std::min(kv_cache_block_id.size(2), kv_cache_kernel_block_id.size(2));
         if (hasLinearCacheSnapshotCapacity(all_streams, table_width, static_cast<int>(propose_step_ + 1), block_size)) {
             auto accept_i32        = accept_len_gpu_all.to(torch::kInt32);
             next_kv_cache_block_id = MtpBatchStreamProcessor::advanceLinearCacheBlockTable(
-                kv_cache_block_id, prev_seq_len_all, accept_i32, group_types, block_size);
+                kv_cache_block_id, prev_seq_len_all, accept_i32, group_types, block_size, state_layouts);
             next_kv_cache_kernel_block_id = MtpBatchStreamProcessor::advanceLinearCacheBlockTable(
-                kv_cache_kernel_block_id, prev_seq_len_all, accept_i32, group_types, block_size);
+                kv_cache_kernel_block_id, prev_seq_len_all, accept_i32, group_types, block_size, state_layouts);
         } else {
             // This should coincide with an allocator boundary. Publishing no
             // snapshot makes the next scheduler iteration join bookkeeping and
@@ -3645,7 +3810,8 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     if (draft_probs_all.defined()) {
         draft_prefill_copy.sampler_output.all_probs = draft_probs_all;
     }
-    auto  stream_groups_copy = stream_groups;
+    auto       stream_groups_copy = stream_groups;
+    const bool fail_stop          = model_ != nullptr && model_->requiresSpeculativeTargetCommitFailStop();
 
     auto streams_for_inc = stream_groups_copy.allStreams();
     for (auto& s : streams_for_inc) {
@@ -3657,29 +3823,39 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
                                      spec_decode_copy   = std::move(spec_decode_copy),
                                      draft_prefill_copy = std::move(draft_prefill_copy),
                                      rejection_event,
-                                     draft_event]() mutable {
+                                     draft_event,
+                                     fail_stop]() mutable {
+        IrreversibleTargetStateGuard worker_guard(fail_stop, "async bookkeeping setup");
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_bookkeeping_worker)");
 
         auto worker_streams = stream_groups_copy.allStreams();
 
-        auto dec_guard = std::shared_ptr<void>(nullptr, [worker_streams](void*) {
-            for (auto& s : worker_streams) {
-                s->decPendingAsyncBookkeepingAndMaybeRelease();
+        // This guard needs no allocation: a failed shared_ptr control-block
+        // allocation would invoke its deleter before the fail-stop boundary.
+        struct PendingBookkeepingReleaseGuard {
+            const std::list<GenerateStreamPtr>& streams;
+            bool                                fail_stop;
+            ~PendingBookkeepingReleaseGuard() {
+                if (fail_stop && std::uncaught_exceptions() > 0) {
+                    failStopIrreversibleTargetState("async bookkeeping", "exception before row publication");
+                }
+                for (const auto& stream : streams) {
+                    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+                }
             }
+        } dec_guard{worker_streams, fail_stop};
+
+        runSpeculativeBookkeeping(fail_stop, [&] {
+            if (rejection_event) {
+                rejection_event->block(cuda_graph::graphGetCurrentStream());
+            }
+            if (draft_event) {
+                draft_event->block(cuda_graph::graphGetCurrentStream());
+            }
+            return processor->dispatchDecode(
+                stream_groups_copy, spec_decode_copy, draft_prefill_copy, /*draft_probs_owned=*/true);
         });
-
-        if (rejection_event) {
-            rejection_event->block(cuda_graph::graphGetCurrentStream());
-        }
-        if (draft_event) {
-            draft_event->block(cuda_graph::graphGetCurrentStream());
-        }
-
-        auto status = processor->dispatchDecode(
-            stream_groups_copy, spec_decode_copy, draft_prefill_copy, /*draft_probs_owned=*/true);
-        if (!status.ok()) {
-            RTP_LLM_LOG_ERROR("[stream-async] dispatchDecode (worker) failed: %s", status.ToString().c_str());
-        }
+        worker_guard.dismiss();
     });
 
     return absl::OkStatus();
