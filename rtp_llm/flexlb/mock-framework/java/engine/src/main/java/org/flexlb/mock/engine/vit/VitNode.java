@@ -63,6 +63,8 @@ public final class VitNode implements AutoCloseable {
         }
     }
 
+    int inflight() { return service.preparation.inflight(); }
+
     /**
      * Serves native multimodal RPCs and owns their workers and pending replies.
      */

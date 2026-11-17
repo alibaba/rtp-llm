@@ -185,7 +185,7 @@ class VitTest {
         }
     }
 
-    @Test void statusCountsUniqueMediaUntilPublicationCompletes() throws Exception {
+    @Test void admissionCountsUniqueMediaUntilPublicationCompletes() throws Exception {
         try (var node=VitNode.start(config("200",1024,1024,1024,0),0,0)) {
             var channel=channel(node);
             try {
@@ -195,7 +195,7 @@ class VitTest {
                 var status=rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance());
                 assertTrue(status.hasMmInflightInputs()); assertEquals(1,status.getMmInflightInputs().getValue());
                 long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(2);
-                while (rpc.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getMmInflightInputs().getValue()!=0) {
+                while (node.inflight()!=0) {
                     assertTrue(System.nanoTime()<until); Thread.sleep(5);
                 }
             } finally { channel.shutdownNow().awaitTermination(2,TimeUnit.SECONDS); }

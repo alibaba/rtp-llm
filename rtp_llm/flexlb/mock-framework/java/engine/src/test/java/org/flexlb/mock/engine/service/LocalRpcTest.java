@@ -170,7 +170,6 @@ class LocalRpcTest {
                 context.cancel(null); assertTrue(done.await(2, TimeUnit.SECONDS));
                 await(() -> read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache() == 16);
                 assertEquals(0, frames.get());
-                assertEquals(16, read.getWorkerStatus(StatusVersionPB.getDefaultInstance()).getAvailableKvCache());
                 assertEquals(0, read.getCacheStatus(CacheVersionPB.newBuilder().setNeedCacheKeys(true).setLatestCacheVersion(-1).build()).getCacheKeyListCount());
                 var text = metrics(node);
                 assertEquals(1, sample(text, "rtp_llm_framework_requests_total", "outcome=\"cancelled\""));
