@@ -18,6 +18,8 @@ namespace {
 constexpr int64_t kLeasePollInitialIntervalMs = 10;
 constexpr int64_t kLeasePollMaxIntervalMs     = 100;
 constexpr int64_t kLeasePollRpcTimeoutMs      = 500;
+constexpr int64_t kCancelRetryMaxBaseMs      = 800;
+constexpr int64_t kCancelWarningIntervalMs   = 30 * 1000;
 constexpr int64_t kRetainedKvExitGraceMs      = 30 * 1000;
 constexpr int     kBasisPointsPerPercent     = 100;
 constexpr int     kBasisPointsPerWhole       = 100 * kBasisPointsPerPercent;
@@ -422,24 +424,31 @@ void P2PConnectorAsyncReadContext::cancel(const std::shared_ptr<P2PBroadcastClie
     const bool read_confirmed_success = read_call && read_call->done() && read_call->success();
     const bool lease_stop_confirmation_required = lease_hold_pending_.load(std::memory_order_acquire);
     if ((lease_stop_confirmation_required || !read_confirmed_success) && tp_broadcast_client
-        && !cancel_confirmed_.load(std::memory_order_acquire)) {
+        && !cancel_confirmed_.load(std::memory_order_acquire)
+        && P2PNotification::nowMs() >= control_retry_ms_.load(std::memory_order_acquire)) {
         bool expected = false;
         if (tp_cancel_broadcast_triggered_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+            if (P2PNotification::nowMs() < control_retry_ms_.load(std::memory_order_acquire)
+                || cancel_confirmed_.load(std::memory_order_acquire)) {
+                tp_cancel_broadcast_triggered_.store(false, std::memory_order_release);
+                notify();
+                return;
+            }
             std::shared_ptr<P2PBroadcastClient::Result> cancel_result;
             try {
                 cancel_result = tp_broadcast_client->cancel(
                     unique_key, P2PConnectorBroadcastType::CANCEL_READ, request_deadline_ms_, 0, 0);
-            } catch (...) {
-                // This invocation owns the CAS; allow a retry without releasing
-                // the target lease if RPC creation throws.
-                control_retry_ms_.store(P2PNotification::nowMs() + kLeasePollInitialIntervalMs);
-                tp_cancel_broadcast_triggered_.store(false, std::memory_order_release);
+            } catch (const std::exception& error) {
+                scheduleCancelRetry(error.what());
                 notify();
-                throw;
+                return;
+            } catch (...) {
+                scheduleCancelRetry("broadcast submission threw");
+                notify();
+                return;
             }
             if (!cancel_result) {
-                control_retry_ms_.store(P2PNotification::nowMs() + kLeasePollInitialIntervalMs);
-                tp_cancel_broadcast_triggered_.store(false, std::memory_order_release);
+                scheduleCancelRetry("broadcast submission failed");
             } else {
                 std::lock_guard<std::mutex> lock(state_mutex_);
                 cancel_result_ = std::move(cancel_result);
@@ -448,6 +457,22 @@ void P2PConnectorAsyncReadContext::cancel(const std::shared_ptr<P2PBroadcastClie
         }
     }
     notify();
+}
+
+void P2PConnectorAsyncReadContext::scheduleCancelRetry(const char* reason) {
+    // Only the owner of the pending broadcast may advance the backoff.
+    const int64_t now_ms = P2PNotification::nowMs();
+    const auto jitter = std::hash<const void*>{}(this) % (cancel_retry_interval_ms_ / 4 + 1);
+    control_retry_ms_.store(now_ms + cancel_retry_interval_ms_ + static_cast<int64_t>(jitter),
+                            std::memory_order_release);
+    cancel_retry_interval_ms_ = std::min(cancel_retry_interval_ms_ * 2, kCancelRetryMaxBaseMs);
+    if (now_ms >= next_cancel_warning_ms_) {
+        next_cancel_warning_ms_ = now_ms + kCancelWarningIntervalMs;
+        RTP_LLM_LOG_WARNING("CANCEL_READ failed; retrying while lease is held, unique_key=%s reason=%s",
+                            unique_key_.c_str(),
+                            reason);
+    }
+    tp_cancel_broadcast_triggered_.store(false, std::memory_order_release);
 }
 
 void P2PConnectorAsyncReadContext::checkCancelDone() {
@@ -471,16 +496,12 @@ void P2PConnectorAsyncReadContext::checkCancelDone() {
         return;
     }
 
-    const auto error = cancel_result->firstError().error;
-    RTP_LLM_LOG_WARNING("CANCEL_READ broadcast failed; retrying while lease is held, unique_key=%s reason=%s",
-                        uniqueKey().c_str(),
-                        error.ToString().c_str());
+    const auto error = cancel_result->firstError().error.ToString();
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (cancel_result_ == cancel_result) {
             cancel_result_.reset();
-            control_retry_ms_.store(P2PNotification::nowMs() + kLeasePollInitialIntervalMs);
-            tp_cancel_broadcast_triggered_.store(false, std::memory_order_release);
+            scheduleCancelRetry(error.c_str());
         }
     }
 }
@@ -633,11 +654,9 @@ void P2PConnectorAsyncReadContext::runControl(const std::shared_ptr<P2PBroadcast
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR(
             "P2P control RPC failed, retaining lease, unique_key=%s error=%s", uniqueKey().c_str(), e.what());
-        control_retry_ms_.store(P2PNotification::nowMs() + kLeasePollInitialIntervalMs);
         lease_poll_next_ms_.store(P2PNotification::nowMs() + kLeasePollInitialIntervalMs);
     } catch (...) {
         RTP_LLM_LOG_ERROR("P2P control RPC failed, retaining lease, unique_key=%s", uniqueKey().c_str());
-        control_retry_ms_.store(P2PNotification::nowMs() + kLeasePollInitialIntervalMs);
         lease_poll_next_ms_.store(P2PNotification::nowMs() + kLeasePollInitialIntervalMs);
     }
     notify();
