@@ -1305,5 +1305,7 @@ class DeepSeekV4Model(GptModelBase):
             # First-class outputs survive CUDA graph replay; Python mutable
             # state alone cannot represent the target's current auxiliary rows.
             aux = self.get_mtp_target_hidden_states(int(inputs.input_ids.numel()))
-            return PyModelOutputs(result.hidden_states, aux)
+            # Keep other first-class outputs (including captured local logits)
+            # instead of reconstructing a hidden/aux-only result envelope.
+            result.mtp_target_hidden_states = aux
         return result

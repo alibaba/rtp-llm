@@ -191,14 +191,20 @@ class IntegrationTest(unittest.TestCase):
                 )["FAKE_BALANCE_EXPERT"],
                 "0",
             )
-        with self.assertRaisesRegex(ValueError, "without DSpark"):
-            preset_env(
-                "decode",
-                "/weights",
-                parent={},
-                dspark_gamma=3,
-                fake_balance_expert=True,
+        for role in ("prefill", "decode"):
+            env = preset_env(
+                role, "/weights",
+                parent={"RTP_V41_PPU_MOE_BACKEND": "megamoe",
+                        "RTP_V41_PPU_MOE_PRECISION": "w4a4"},
+                dspark_gamma=3, fake_balance_expert=True,
+                shared_decode_graph=role == "decode",
             )
+            self.assertEqual(env["FAKE_BALANCE_EXPERT"], "1")
+            self.assertEqual(env["GEN_NUM_PER_CIRCLE"], "3")
+            if role == "decode":
+                self.assertEqual(env["ENABLE_CUDA_GRAPH"], "1")
+                for key in MEGAMOE_DSPARK_ASYNC_FLAGS:
+                    self.assertEqual(env[key], "0")
 
     def test_encoder_recovery_is_explicit_and_requires_bounded_decoder_replay(self):
         with self.assertRaisesRegex(ValueError, "requires --ced-mode bounded"):

@@ -1,4 +1,4 @@
-"""PPU MegaAttention with channelwise FP8 output feeding ``wo_a``.
+"""Opt-in PPU MegaAttention with channelwise FP8 output feeding ``wo_a``.
 
 The ABI follows FlashMLA-for-sail as consumed by SGLang 631e12a9. It fuses
 Q RoPE, sparse attention, inverse O RoPE and whole-4096-channel output
@@ -33,6 +33,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import env_value as
 
 
 ENV = "RTP_V41_PPU_MEGA_ATTENTION"
+LAUNCH_REUSE_ENV = "RTP_V41_PPU_DECODE_LAUNCH_REUSE"
 HEAD_DIM = 512
 ROPE_DIM = 64
 GROUP_WIDTH = 4096
@@ -87,21 +88,21 @@ def _cos_sin_table(freqs_cis):
     return table
 
 
-def _readonly_prefill_binding(module, operation):
+def _readonly_prefill_binding(module, operation, *, name="prefill", entry_name="fused_norm_rope_attn_rope_cast_fwd"):
     # The installed/preflight-qualified FlashMLA wrapper passes positions to
     # a const int32_t* native input. Bind that actual chain once; a custom
     # adapter or a changed wrapper/native entry must keep independent casts.
     native = vars(module).get("_backend")
-    entry = getattr(native, "fused_norm_rope_attn_rope_cast_fwd", None)
+    entry = getattr(native, entry_name, None)
     if (
         module.__name__ != "flash_mla.fused_norm_rope_attn_rope_cast"
         or not inspect.isfunction(operation)
         or operation.__globals__ is not vars(module)
-        or vars(module).get("prefill") is not operation
+        or vars(module).get(name) is not operation
         or getattr(native, "__name__", None) != "flash_mla_cuda"
         or not inspect.isbuiltin(entry)
         or getattr(entry, "__module__", None) != "flash_mla_cuda"
-        or getattr(entry, "__name__", None) != "fused_norm_rope_attn_rope_cast_fwd"
+        or getattr(entry, "__name__", None) != entry_name
     ):
         return None
     receipt = os.environ.get("RTP_V41_PPU_FLASHMLA_BUILD_RECEIPT")
@@ -124,7 +125,7 @@ def _readonly_prefill_binding(module, operation):
             "exec", dont_inherit=True,
         )
         original = next((value for value in compiled.co_consts
-                         if isinstance(value, CodeType) and value.co_name == "prefill"), None)
+                         if isinstance(value, CodeType) and value.co_name == name), None)
         if operation.__code__ != original:
             return None
     except (ImportError, OSError, ValueError, KeyError, TypeError, AttributeError):
@@ -155,6 +156,9 @@ def _backend():
         prefill_kwargs={"use_legacy": False} if _accepts_interleaved_flag(prefill) else {},
         decode_kwargs={"use_legacy": False} if _accepts_interleaved_flag(decode) else {},
         readonly_prefill=_readonly_prefill_binding(module, prefill),
+        readonly_decode=_readonly_prefill_binding(
+            module, decode, name="decode", entry_name="fused_norm_rope_attn_rope_cast_decode",
+        ),
     )
 
 
@@ -221,8 +225,8 @@ def eligibility_reason(attn, freqs_cis):
 def prepare(attn, freqs_cis=None):
     """Return a prepared adapter, or None before activation/cache work.
 
-    Attention/output quantization keeps its separate qualification contract.
-    The qualified path defaults on and supports an explicit environment opt-out.
+    The opt-in changes attention/output quantization and therefore requires
+    separate correctness and performance acceptance. It defaults to off.
     """
     if freqs_cis is None:
         freqs_cis = getattr(attn, "freqs_cis", None)
@@ -237,6 +241,9 @@ def prepare(attn, freqs_cis=None):
     binding = vars(backend).get("readonly_prefill") if type(backend) is SimpleNamespace else None
     if binding is not None:
         result._readonly_prefill = backend, binding
+    binding = vars(backend).get("readonly_decode") if type(backend) is SimpleNamespace else None
+    if binding is not None:
+        result._readonly_decode = backend, binding
     return result
 
 
@@ -249,6 +256,7 @@ class PPUMegaAttention:
         # Direct/custom adapter construction retains the independent-cast ABI.
         # Only prepare() can attach its authenticated resolver result.
         self._readonly_prefill = None
+        self._readonly_decode = None
         self.heads, self.groups = attn.geometry.n_heads, attn.geometry.o_groups
         self.rank, self.q_rank = attn.geometry.o_lora_rank, attn.geometry.q_lora_rank
         self.device = attn.wq_b.weight.device
@@ -424,7 +432,18 @@ class PPUMegaAttention:
             out, recipe=(1, 1, GROUP_WIDTH),
         )
         if valid_mask is not None:
-            out = torch.where(valid_mask[:, None, None], out, 0)
+            if (
+                optimization_env_value(LAUNCH_REUSE_ENV, "0") == "1"
+                and rows in (1, 8, 24, 32) and _normal(out, torch.bfloat16) and out.is_contiguous()
+                and valid_mask.dtype == torch.bool and valid_mask.is_contiguous()
+                and valid_mask.device == out.device
+            ):
+                # out is a fresh private destination, never a caller-owned
+                # view. Leave live bytes untouched (including signed zero)
+                # and write +0 to idle rows, even if their GEMM produced NaN.
+                _mask_owned_output(out, valid_mask)
+            else:
+                out = torch.where(valid_mask[:, None, None], out, 0)
         return out
 
     def prefill(self, q, kv, indices, positions, topk_lengths, *, packed_q=False, valid_mask=None):
@@ -440,7 +459,7 @@ class PPUMegaAttention:
         )
         return self._project_output(data, scale, q.shape[0], valid_mask)
 
-    def decode(self, q, plan, positions, *, packed_q=False, mask_output=True, phase="decode"):
+    def decode(self, q, plan, positions, *, packed_q=False, mask_output=True, phase="decode", shared=None):
         """Consume the same interleaved-pool plan as ordinary packed_decode.
 
         A Verify caller must enter its existing journal staging context before
@@ -451,7 +470,21 @@ class PPUMegaAttention:
             raise ValueError("PPU MegaAttention paged decode: " + reason)
         if q.shape[0] == 0:
             return q.new_empty((0, self.groups, self.rank))
-        common = self._common(self._query(q, packed_q), positions, plan.valid_mask)
+        if (shared is not None and plan.valid_mask is not None
+                and optimization_env_value(LAUNCH_REUSE_ENV, "0") == "1"
+                and readonly_decode_positions(self)):
+            # The dictionary belongs to this one capture/forward. Retain
+            # sources as well as the result, so object IDs cannot be reused.
+            key = ("mega_decode_positions", id(positions), id(plan.valid_mask))
+            if key not in shared:
+                converted = torch.where(plan.valid_mask, positions, 0).to(torch.int32)
+                shared[key] = positions, plan.valid_mask, converted
+            source, valid, converted = shared[key]
+            if source is not positions or valid is not plan.valid_mask:
+                raise RuntimeError("MegaAttention position reuse belongs to another replay")
+            common = self._common(self._query(q, packed_q), converted, None)
+        else:
+            common = self._common(self._query(q, packed_q), positions, plan.valid_mask)
         extra = plan.global_indices
         data, scale, _ = self.backend.decode(
             **common, k_cache=plan.swa_cache,
@@ -469,6 +502,55 @@ _READONLY_PREFILL_METHODS = tuple(
                  "_query", "_current", "_indices_ok")
 )
 _READONLY_PREFILL_NORMAL = _normal
+
+
+@lru_cache(maxsize=1)
+def _owned_output_mask_kernel():
+    import triton
+    import triton.language as tl
+
+    @triton.jit
+    def mask_owned_output(output, valid, WIDTH: tl.constexpr, BLOCK: tl.constexpr):
+        row = tl.program_id(0)
+        if not tl.load(valid + row):
+            column = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+            tl.store(output + row * WIDTH + column, 0, column < WIDTH)
+
+    return triton, mask_owned_output
+
+
+def _mask_owned_output(output, valid):
+    triton, kernel = _owned_output_mask_kernel()
+    width = output.numel() // output.shape[0]
+    kernel[(output.shape[0], triton.cdiv(width, 1024))](output, valid, width, 1024, num_warps=4)
+    return output
+
+
+_READONLY_DECODE_METHODS = tuple(
+    (name, vars(PPUMegaAttention)[name])
+    for name in ("decode", "decode_reason", "query_reason", "_common", "_query",
+                 "_current", "_indices_ok", "_cache_ok")
+)
+
+
+def readonly_decode_positions(mega):
+    """Only the authenticated original const-position consumer may reuse."""
+    if type(mega) is not PPUMegaAttention or _normal is not _READONLY_PREFILL_NORMAL:
+        return False
+    if any(name in vars(mega) or vars(PPUMegaAttention).get(name) is not original
+           for name, original in _READONLY_DECODE_METHODS):
+        return False
+    prepared = getattr(mega, "_readonly_decode", None)
+    if prepared is None:
+        return False
+    backend = mega.backend
+    owner, binding = prepared
+    if backend is not owner or getattr(backend, "readonly_decode", None) is not binding:
+        return False
+    module, operation, code, native, entry = binding
+    return (backend.decode is operation and vars(module).get("decode") is operation
+            and operation.__code__ is code and operation.__globals__.get("_backend") is native
+            and getattr(native, "fused_norm_rope_attn_rope_cast_decode", None) is entry)
 
 
 def readonly_prefill_positions(mega):

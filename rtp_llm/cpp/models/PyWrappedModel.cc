@@ -726,7 +726,8 @@ torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const Gp
 GptModelOutputs PyWrappedModel::callForwardPostLayers(torch::Tensor         hidden_states,
                                                       const GptModelInputs& inputs,
                                                       bool                  skip_final_layernorm,
-                                                      size_t                num_valid_tokens) {
+                                                      size_t                num_valid_tokens,
+                                                      torch::Tensor         graph_logits) {
     RTP_LLM_PROFILE_SCOPE("py_model.callForwardPostLayers");
     size_t num_input_tokens = num_valid_tokens != -1 ? num_valid_tokens : inputs.combo_tokens.size(0);
     return forwardPostLayers(hidden_states,
@@ -737,7 +738,8 @@ GptModelOutputs PyWrappedModel::callForwardPostLayers(torch::Tensor         hidd
                              num_input_tokens,
                              inputs,
                              torch::Tensor(),
-                             skip_final_layernorm);
+                             skip_final_layernorm,
+                             graph_logits);
 }
 
 torch::Tensor PyWrappedModel::customOutputIndexes(const GptModelInputs& inputs) {
@@ -1526,7 +1528,8 @@ GptModelOutputs PyWrappedModel::forwardImpl(const GptModelInputs& inputs, bool p
                 // regular C++ lm_head and TP logits gather for every proposal
                 // row; the speculative executor owns only Markov sampling.
                 return finalize_outputs(
-                    attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true)));
+                    attach_mtp_target_hidden_states(
+                        callForwardPostLayers(hidden_states, inputs, true, -1, py_model_outputs.logits)));
             }
             // Commit only updates the draft KV cache and has no logits
             // consumer. Preserve its row-aligned hidden output for the common
@@ -1597,10 +1600,21 @@ GptModelOutputs PyWrappedModel::forwardImpl(const GptModelInputs& inputs, bool p
                     attach_mtp_target_hidden_states(forwardPostLayersLastHidden(hidden_states, inputs))));
             }
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
+            // Dense Q=4 Verify is tagged as context input. At TP=1 its even
+            // per-request rows need neither CP padding nor reordering, so the
+            // graph's local logits already follow the restored hidden rows.
+            const auto graph_logits =
+                device_props_.tp_size == 1 && inputs.is_target_verify && !inputs.is_packed_target_verify
+                        && py_model_outputs.logits.defined()
+                        && static_cast<int64_t>(num_valid_tokens) == py_model_outputs.logits.size(0) ?
+                    py_model_outputs.logits :
+                    torch::Tensor();
             return finalize_outputs(with_context_kv_dependency(
-                attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens))));
+                attach_mtp_target_hidden_states(
+                    callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens, graph_logits))));
         }
-        auto outputs = attach_mtp_target_hidden_states(callForwardPostLayers(hidden_states, inputs, true));
+        auto outputs = attach_mtp_target_hidden_states(
+            callForwardPostLayers(hidden_states, inputs, true, -1, py_model_outputs.logits));
         if (device_props_.tp_size == 1) {
             outputs = with_context_kv_dependency(std::move(outputs));
         }
@@ -1676,7 +1690,8 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                                                   size_t                token_num,
                                                   const GptModelInputs& inputs,
                                                   torch::Tensor         merged_eagle3_hidden,
-                                                  bool                  skip_final_layernorm) {
+                                                  bool                  skip_final_layernorm,
+                                                  torch::Tensor         graph_logits) {
     DevicePerfWrapper wrapper(enable_device_perf_, "forwardPostLayers");
     if (enable_sp && device_props_.tp_size > 1) {
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(sp_all_gather)");
@@ -1772,7 +1787,37 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         printTorchTensorData(last_hidden, "last_hidden");
 
         torch::Tensor logits;
-        {
+        if (graph_logits.defined()) {
+            // DSpark proposal/verify use context-style lengths. The head
+            // scores every graph row; apply the same row selection as above.
+            RTP_LLM_CHECK_WITH_INFO(!enable_sp && skip_final_layernorm
+                                        && graph_logits.is_cuda() && graph_logits.dim() == 2
+                                        && graph_logits.size(0) == hidden.size(0)
+                                        && graph_logits.size(1) == lm_head->kernel.size(0)
+                                        && graph_logits.device() == last_hidden.device()
+                                        && (graph_logits.scalar_type() == torch::kFloat32
+                                            || (dspark_model_role_ == DSparkModelRole::PROPOSE
+                                                && graph_logits.scalar_type() == torch::kBFloat16)),
+                                    "invalid precomputed decode graph logits: context=%d all=%d sp=%d normalized=%d "
+                                    "rows=%ld/%ld vocab=%ld/%ld dtype=%d role=%d",
+                                    has_context_request,
+                                    need_all_logits,
+                                    enable_sp,
+                                    skip_final_layernorm,
+                                    graph_logits.dim() == 2 ? graph_logits.size(0) : -1,
+                                    hidden.size(0),
+                                    graph_logits.dim() == 2 ? graph_logits.size(1) : -1,
+                                    lm_head->kernel.size(0),
+                                    static_cast<int>(graph_logits.scalar_type()),
+                                    static_cast<int>(dspark_model_role_));
+            // Preserve the sampler's FP32 API and ownership across replays.
+            if (has_context_request && !need_all_logits) {
+                logits = torch::index_select(graph_logits, 0, lm_output_indexes_device.to(torch::kLong))
+                             .to(torch::kFloat32);
+            } else {
+                logits = graph_logits.to(torch::kFloat32, /*non_blocking=*/false, /*copy=*/true);
+            }
+        } else {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(lm_head_mm)");
 #if USING_CUDA
             if (lm_head->kernel.dtype() == torch::kBFloat16) {

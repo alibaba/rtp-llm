@@ -41,6 +41,7 @@ class OptimizationConfigTest(unittest.TestCase):
             "FAKE_BALANCE_EXPERT", "RTP_V41_PPU_EPLB", "RTP_V41_PPU_LOCAL_PREFILL_SG_ALIGN",
             "RTP_V41_PPU_CP8_YOCO_Q8_ATTENTION", "RTP_V41_PPU_OPTIMIZED_DIAGNOSTICS",
             "RTP_V41_PPU_QKV_STREAMS", "RTP_V41_PPU_PACKED_ATTENTION",
+            "RTP_V41_PPU_DRAFT_LM_HEAD_BF16", "RTP_V41_PPU_MLA_PACKED_VERIFY",
         )
         with patch.dict(os.environ, {}, clear=True):
             before = dict(os.environ)

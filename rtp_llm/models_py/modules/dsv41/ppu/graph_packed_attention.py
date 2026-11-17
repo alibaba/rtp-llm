@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import torch
 
 from rtp_llm.models_py.modules.dsv41.ppu.graph_cache import NativeGraphCache
+from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import env_value as optimization_env_value
 from rtp_llm.models_py.modules.dsv41.ppu.packed_attention import (
     enabled,
     load_packed_backend,
@@ -19,6 +20,97 @@ VERIFY_PACKED_ATTENTION_ENV = "RTP_V41_PPU_VERIFY_PACKED_ATTENTION"
 GRAPH_VISIBLE_INDEXER_ENV = "RTP_V41_PPU_GRAPH_VISIBLE_INDEXER"
 GRAPH_SHARED_MLA_METADATA_ENV = "RTP_V41_PPU_GRAPH_SHARED_MLA_METADATA"
 _PACKED_WIDTHS = {"swa_kv": 528, "global_kv_1": 288, "global_kv_2": 288}
+
+
+def _can_fuse_tail_copies(pages, payloads):
+    if optimization_env_value("RTP_V41_PPU_DECODE_LAUNCH_REUSE", "0") != "1" or len(pages) not in (1, 2):
+        return False
+    tensors = [*pages, *payloads]
+    if not all(
+        type(t) is torch.Tensor and t.is_cuda and t.dtype == torch.uint8
+        and t.ndim == 2 and t.shape[0] in (1, 8, 24, 32)
+        and t.shape[1] in (288, 528) and t.is_contiguous()
+        and t.device == pages[0].device for t in tensors
+    ) or any(page.shape != payload.shape for page, payload in zip(pages, payloads)):
+        return False
+    # Each destination and source must occupy a distinct byte interval. Keep
+    # ordered copy_ semantics for overlapping or custom/strided adapters.
+    spans = sorted((t.data_ptr(), t.data_ptr() + t.numel()) for t in tensors)
+    return all(left[1] <= right[0] for left, right in zip(spans, spans[1:]))
+
+
+@lru_cache(maxsize=1)
+def _tail_copy_kernels():
+    import triton
+    import triton.language as tl
+
+    @triton.jit
+    def backup_and_stage(page0, payload0, backup0, page1, payload1, backup1,
+                         SIZE0: tl.constexpr, SIZE1: tl.constexpr, BLOCK: tl.constexpr):
+        offset = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+        if tl.program_id(0) == 0:
+            old = tl.load(page0 + offset, offset < SIZE0, other=0)
+            new = tl.load(payload0 + offset, offset < SIZE0, other=0)
+            tl.store(backup0 + offset, old, offset < SIZE0)
+            tl.store(page0 + offset, new, offset < SIZE0)
+        elif SIZE1:
+            old = tl.load(page1 + offset, offset < SIZE1, other=0)
+            new = tl.load(payload1 + offset, offset < SIZE1, other=0)
+            tl.store(backup1 + offset, old, offset < SIZE1)
+            tl.store(page1 + offset, new, offset < SIZE1)
+
+    @triton.jit
+    def restore_tail(page0, backup0, page1, backup1,
+                     SIZE0: tl.constexpr, SIZE1: tl.constexpr, BLOCK: tl.constexpr):
+        offset = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+        if tl.program_id(0) == 0:
+            old = tl.load(backup0 + offset, offset < SIZE0, other=0)
+            tl.store(page0 + offset, old, offset < SIZE0)
+        elif SIZE1:
+            old = tl.load(backup1 + offset, offset < SIZE1, other=0)
+            tl.store(page1 + offset, old, offset < SIZE1)
+
+    @triton.jit
+    def stage_tail(page0, payload0, page1, payload1,
+                   SIZE0: tl.constexpr, SIZE1: tl.constexpr, BLOCK: tl.constexpr):
+        offset = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+        if tl.program_id(0) == 0:
+            tl.store(page0 + offset, tl.load(payload0 + offset, offset < SIZE0, other=0), offset < SIZE0)
+        elif SIZE1:
+            tl.store(page1 + offset, tl.load(payload1 + offset, offset < SIZE1, other=0), offset < SIZE1)
+
+    @triton.jit
+    def copy_reserved_pages(pages, backups, sizes, RESTORE: tl.constexpr, BLOCK: tl.constexpr):
+        page_id = tl.program_id(0)
+        offset = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+        size = tl.load(sizes + page_id)
+        page = tl.load(pages + page_id).to(tl.pointer_type(tl.uint8))
+        backup = tl.load(backups + page_id).to(tl.pointer_type(tl.uint8))
+        if RESTORE:
+            tl.store(page + offset, tl.load(backup + offset, offset < size, other=0), offset < size)
+        else:
+            tl.store(backup + offset, tl.load(page + offset, offset < size, other=0), offset < size)
+
+    return triton, backup_and_stage, restore_tail, stage_tail, copy_reserved_pages
+
+
+@contextmanager
+def _fused_tail_copies(pages, payloads):
+    triton, stage, restore, _, _ = _tail_copy_kernels()
+    backups = [torch.empty_like(page) for page in pages]
+    paired = len(pages) == 2
+    page1, payload1, backup1 = (pages[1], payloads[1], backups[1]) if paired else (None, None, None)
+    size0, size1 = pages[0].numel(), pages[1].numel() if paired else 0
+    grid = (len(pages), triton.cdiv(max(size0, size1), 1024))
+    # Compilation/enqueue failure occurs before entering the transaction, so
+    # uninitialized backups are never restored. The one launch writes every
+    # backup and staged destination before the same stream reaches the consumer.
+    stage[grid](pages[0], payloads[0], backups[0], page1, payload1, backup1,
+                size0, size1, 1024, num_warps=4)
+    try:
+        yield
+    finally:
+        restore[grid](pages[0], backups[0], page1, backup1, size0, size1, 1024, num_warps=4)
 
 
 @lru_cache(maxsize=1)
@@ -132,6 +224,8 @@ class GraphPackedAttention:
         self.offsets = torch.arange(g.window, dtype=torch.int64, device=cache.device)
         self.views = {}
         self.swa_domains = {}
+        self._tail_transaction_active = False
+        self._tail_transaction = None
         for owner, tag in cache.geometry.pool_keys():
             if tag not in _PACKED_WIDTHS:
                 continue
@@ -143,6 +237,46 @@ class GraphPackedAttention:
             )
             if tag == "swa_kv":
                 self.swa_domains[owner] = (domain, tensor.shape[0])
+        if (journal is not None and journal.rows in (8, 32)
+            and optimization_env_value("RTP_V41_PPU_DECODE_LAUNCH_REUSE", "0") == "1"
+            and optimization_env_value("RTP_V41_PPU_VERIFY_BATCHED_JOURNAL", "0") == "1"):
+            pages = [view[0, :journal.rows, 0] for view in self.views.values()]
+            payloads = [journal.payloads[key] for key in self.views]
+            tensors = [*pages, *payloads]
+            spans = sorted((t.data_ptr(), t.data_ptr() + t.numel()) for t in tensors)
+            if (
+                pages and all(_can_fuse_tail_copies([p], [v]) for p, v in zip(pages, payloads))
+                and all(left[1] <= right[0] for left, right in zip(spans, spans[1:]))
+            ):
+                backups = [torch.empty_like(page) for page in pages]
+                self._tail_transaction = SimpleNamespace(
+                    pages=pages, backups=backups,
+                    page_ptrs=torch.tensor([p.data_ptr() for p in pages], dtype=torch.int64, device=cache.device),
+                    backup_ptrs=torch.tensor([p.data_ptr() for p in backups], dtype=torch.int64, device=cache.device),
+                    sizes=torch.tensor([p.numel() for p in pages], dtype=torch.int32, device=cache.device),
+                    max_size=max(p.numel() for p in pages),
+                )
+
+    @contextmanager
+    def verify_tail_transaction(self):
+        """Borrow block 0 for one serialized Verify, restoring even on failure."""
+        transaction = getattr(self, "_tail_transaction", None)
+        if transaction is None:
+            yield
+            return
+        if self._tail_transaction_active:
+            raise RuntimeError("packed Verify journal transaction is already active")
+        triton, _, _, _, copy = _tail_copy_kernels()
+        grid = (len(transaction.pages), triton.cdiv(transaction.max_size, 1024))
+        copy[grid](transaction.page_ptrs, transaction.backup_ptrs, transaction.sizes, False, 1024)
+        self._tail_transaction_active = True
+        try:
+            yield
+        finally:
+            try:
+                copy[grid](transaction.page_ptrs, transaction.backup_ptrs, transaction.sizes, True, 1024)
+            finally:
+                self._tail_transaction_active = False
 
     def _native_indices(
         self, owner, tag, positions, valid, width, *, selected=None, ratio=1,
@@ -271,6 +405,23 @@ class GraphPackedAttention:
         # synchronous Verify stream borrows it only across this MLA call,
         # then restores its previous bytes for other Graph modes.
         pages = [self.views[key][0, :self.journal.rows, 0] for key in keys]
+        payloads = [self.journal.payloads[key] for key in keys]
+        if getattr(self, "_tail_transaction_active", False):
+            if not _can_fuse_tail_copies(pages, payloads):
+                raise RuntimeError("packed Verify journal storage changed inside transaction")
+            triton, _, _, stage, _ = _tail_copy_kernels()
+            size0 = pages[0].numel()
+            size1 = pages[1].numel() if len(pages) == 2 else 0
+            stage[(len(pages), triton.cdiv(max(size0, size1), 1024))](
+                pages[0], payloads[0], pages[1] if size1 else None,
+                payloads[1] if size1 else None, size0, size1, 1024,
+            )
+            yield
+            return
+        if _can_fuse_tail_copies(pages, payloads):
+            with _fused_tail_copies(pages, payloads):
+                yield
+            return
         backups = [page.clone() for page in pages]
         try:
             for key, page in zip(keys, pages):
@@ -323,10 +474,13 @@ class GraphPackedAttention:
         if mega is not None:
             if mega.decode_reason(q, plan, positions, phase=mega_phase) is not None:
                 return None
+            from rtp_llm.models_py.modules.dsv41.ppu.mega_attention import PPUMegaAttention
+
+            options = {"shared": scheduler_cache} if type(mega) is PPUMegaAttention else {}
             with self._stage_verify_tail(keys):
                 return mega.decode(
                     q, plan, positions, packed_q=True,
-                    mask_output=mask_output, phase=mega_phase,
+                    mask_output=mask_output, phase=mega_phase, **options,
                 )
         with self._stage_verify_tail(keys):
             return packed_decode(

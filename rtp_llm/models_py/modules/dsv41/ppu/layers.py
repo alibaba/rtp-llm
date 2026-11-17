@@ -641,14 +641,17 @@ class PPUSharedGate(nn.Module):
     def forward(self, hidden, *, image_rows=None, graph_routes=None, allow_top3_graph_routes=False):
         state = getattr(self.runtime, "current", None)
         if (
-            state is not None and not allow_top3_graph_routes
-            and not getattr(state, "proposal", False) and not getattr(state, "idle", False)
+            state is not None and not getattr(state, "idle", False)
             and self._mega_gate.enabled and self._mega_gate.finite_domain_qualified
         ):
             verify = getattr(state, "verify", False) or bool(
                 getattr(getattr(state, "attn", None), "is_target_verify", False)
             )
-            phase = "verify" if verify else "prefill" if getattr(state, "prefill", False) else "decode"
+            proposal = getattr(state, "proposal", False) or allow_top3_graph_routes
+            phase = (
+                "proposal" if proposal else "verify" if verify
+                else "prefill" if getattr(state, "prefill", False) else "decode"
+            )
             graph = bool(getattr(state, "is_graph", False))
             # Match MoE's existing post-router masking before native finite
             # checks, including padded CP rows and eager target Verify rows.
@@ -780,7 +783,7 @@ class PPUSharedMoE(nn.Module):
                 ids = torch.where(real[:, None], ids, -1)
                 weights = torch.where(real[:, None], weights, 0)
                 routed_rows.copy_((ids >= 0).any(-1).sum())
-            if not getattr(state, "bulk_counters", False):
+            if not (getattr(state, "bulk_counters", False) or getattr(state, "bulk_verify_counters", False)):
                 state.moe_calls[self.layer_id].add_(1)
             engine = self.ops.moe_engine
             if state.grouped_moe is None:
@@ -928,7 +931,7 @@ class PPUSharedEngram(nn.Module):
         state = getattr(self, "_graph_state", None)
         if state is not None:
             fused_mask = getattr(state, "bulk_counters", False)
-            if not fused_mask:
+            if not (fused_mask or getattr(state, "bulk_verify_counters", False)):
                 state.engram_calls[self.layer_id].add_(1)
             embedded = state.engram.lookup(
                 hashes, layer_id=self.layer_id, valid_mask=state.metadata.valid_mask

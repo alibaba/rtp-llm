@@ -103,6 +103,7 @@ class _NativeMega(types.ModuleType):
         self.case, self.events = case, events
         self.transforms, self.buffers, self.dispatches, self.completes = [], [], [], []
         self.expected_clamp = 10.0
+        self.expected_topk = 6
 
     def transform_weights_for_mega_moe(
         self, l1_weights, l2_weights, activation="swiglu"
@@ -151,7 +152,8 @@ class _NativeMega(types.ModuleType):
         activation="swiglu",
     ):
         self.case.assertEqual(
-            (num_experts, num_topk, hidden, intermediate_hidden), (8, 8, 512, 128)
+            (num_experts, num_topk, hidden, intermediate_hidden),
+            (8, self.expected_topk, 512, 128),
         )
         self.case.assertEqual(num_shared_experts, 0)
         self.case.assertIn(use_fp8_dispatch, (None, False))
@@ -186,8 +188,8 @@ class _NativeMega(types.ModuleType):
         ):
             self.case.assertEqual(tensor.dtype, dtype)
             self.case.assertTrue(tensor.is_contiguous())
-        self.case.assertEqual(tuple(topk_idx.shape), (count, 8))
-        self.case.assertEqual(tuple(topk_weights.shape), (count, 8))
+        self.case.assertEqual(tuple(topk_idx.shape), (count, sym_buffer.num_topk))
+        self.case.assertEqual(tuple(topk_weights.shape), (count, sym_buffer.num_topk))
         sym_buffer.source = hidden_states[:count].clone()
         sym_buffer.topk_idx[:count].copy_(topk_idx[:count])
         sym_buffer.topk_weights[:count].copy_(topk_weights[:count])
@@ -238,7 +240,7 @@ class _NativeMega(types.ModuleType):
         output = torch.zeros(y.shape, dtype=torch.float32)
         start = sym_buffer.group.rank() * 4
         for token in range(count):
-            for slot in range(8):
+            for slot in range(sym_buffer.num_topk):
                 expert = int(sym_buffer.topk_idx[token, slot])
                 if expert < 0:
                     continue
@@ -343,7 +345,7 @@ class _CPUHarness:
         self.events.append(("all_reduce", local, global_count))
         rows.fill_(global_count)
 
-    def runner(self, *, group=None, rank=0, limit=10.0, bind=True):
+    def runner(self, *, group=None, rank=0, limit=10.0, bind=True, top_k=6):
         with _selection("megamoe"):
             runner = moe_module.PPUMoE(
                 num_routed_experts=8,
@@ -352,6 +354,7 @@ class _CPUHarness:
                 ep_rank=rank,
                 hidden_size=512,
                 inter_dim=128,
+                top_k=top_k,
                 swiglu_limit=limit,
                 group=group,
             )
@@ -435,7 +438,7 @@ class MegaMoESelectionTest(unittest.TestCase):
 
 
 class MegaMoENativeBoundaryTest(unittest.TestCase):
-    def test_strict_native_abi_global_routes_padding_and_single_weight_application(
+    def test_strict_native_abi_compact_routes_and_single_weight_application(
         self,
     ):
         with _CPUHarness(self) as harness:
@@ -446,8 +449,8 @@ class MegaMoENativeBoundaryTest(unittest.TestCase):
             torch.testing.assert_close(staged_x, x, rtol=0, atol=0)
             self.assertTrue(torch.equal(staged_ids[:, :6], ids.long()))
             self.assertTrue(torch.equal(staged_weights[:, :6], weights.float()))
-            self.assertTrue((staged_ids[:, 6:] == -1).all())
-            self.assertTrue((staged_weights[:, 6:] == 0).all())
+            self.assertEqual(staged_ids.shape, (3, 6))
+            self.assertEqual(staged_weights.shape, (3, 6))
             coefficients = ((ids.float() + 1) * weights.float()).sum(-1)
             expected = (x.float() * coefficients[:, None]).bfloat16()
             torch.testing.assert_close(actual, expected, rtol=0, atol=0)
@@ -458,6 +461,30 @@ class MegaMoENativeBoundaryTest(unittest.TestCase):
             self.assertEqual(stats["mega_moe_calls"], 1)
             self.assertEqual(stats["grouped_gemm_calls"], 0)
             self.assertEqual(stats["route_weight_stage"], "after_gemm2")
+
+    def test_actual_topk_workspace_and_dispatch_accept_padded_or_compact_routes(self):
+        for top_k in (3, 6):
+            for padded in (False, True):
+                with self.subTest(top_k=top_k, padded=padded), _CPUHarness(self) as harness:
+                    harness.native.expected_topk = top_k
+                    runner = harness.runner(top_k=top_k)
+                    x, ids, weights = _inputs(3)
+                    ids, weights = ids[:, :top_k].clone(), weights[:, :top_k].clone()
+                    ids[1, 0], weights[1, 0] = -7, 0
+                    ids[2], weights[2] = -1, 0
+                    expected_ids, expected_weights = ids.clone(), weights.clone()
+                    if padded:
+                        ids, weights = moe_module.pad_topk_for_dispatch(ids, weights)
+                    actual = runner(x, ids, weights, layer_id=7)
+                    buffer = harness.native.buffers[0]
+                    staged = harness.native.dispatches[0]
+                    self.assertEqual(buffer.num_topk, top_k)
+                    self.assertEqual(buffer.topk_idx.shape, (128, top_k))
+                    torch.testing.assert_close(staged[1], expected_ids.long())
+                    torch.testing.assert_close(staged[2], expected_weights)
+                    self.assertEqual(torch.count_nonzero(actual[2]).item(), 0)
+                    coefficients = ((expected_ids.clamp_min(0).float() + 1) * expected_weights).sum(-1)
+                    torch.testing.assert_close(actual, (x.float() * coefficients[:, None]).bfloat16(), rtol=0, atol=0)
 
     def test_missing_native_apis_fail_clearly_on_every_attempt_including_empty_rank(
         self,

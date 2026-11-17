@@ -284,7 +284,7 @@ class SharedPPUBlock(Block):
             target_verify=target_verify,
         )
         if graph:
-            if not getattr(state, "bulk_counters", False):
+            if not (getattr(state, "bulk_counters", False) or getattr(state, "bulk_verify_counters", False)):
                 state.layer_calls[self.layer_id].add_(1)
         else:
             state.executed_layers.append(self.layer_id)

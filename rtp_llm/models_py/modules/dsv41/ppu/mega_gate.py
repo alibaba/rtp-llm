@@ -2,8 +2,9 @@
 """Opt-in PPU DeepGEMM MegaGate adapters with an explicit finite-domain contract.
 
 ``try_mega_gate`` retains the original eager Prefill experiment API.
-``PPUMegaGate`` adds model-owned dispatch for Prefill, Decode and Verify,
-including warmed Decode/Verify graph capture. Both default to declining.
+``PPUMegaGate`` adds model-owned dispatch for Prefill, Decode, Verify and
+Proposal, including warmed Decode/Verify/Proposal graph capture. Both default
+to declining. Target E384/top6 and draft E128/top3 retain distinct admission.
 Metadata admission does not establish numerical equivalence: the caller must
 explicitly accept the finite-domain contract before selecting this path.
 Native sqrtsoftplus uses sum + 1e-20, whereas the existing router uses 1e-12;
@@ -30,6 +31,8 @@ import torch
 HIDDEN_SIZE = 5120
 NUM_EXPERTS = 384
 TOP_K = 6
+DRAFT_NUM_EXPERTS = 128
+DRAFT_TOP_K = 3
 COMM_SLOTS = 8
 MAX_PREFILL_ROWS = 16384
 MAX_DECODE_ROWS = 2048
@@ -91,16 +94,15 @@ def eligibility_reason(
     ):
         return "hidden"
     rows, device = hidden.shape[0], hidden.device
-    if not _dense(
-        router_weight, (NUM_EXPERTS, HIDDEN_SIZE), torch.bfloat16, device
-    ):
+    if type(top_k) is not int or top_k not in (TOP_K, DRAFT_TOP_K):
+        return "top_k"
+    experts = NUM_EXPERTS if top_k == TOP_K else DRAFT_NUM_EXPERTS
+    if not _dense(router_weight, (experts, HIDDEN_SIZE), torch.bfloat16, device):
         return "weight"
     if router_bias is not None and not _dense(
-        router_bias, (NUM_EXPERTS,), torch.float32, device
+        router_bias, (experts,), torch.float32, device
     ):
         return "bias"
-    if type(top_k) is not int or top_k != TOP_K:
-        return "top_k"
     if (
         type(routed_scaling_factor) not in (int, float)
         or not math.isfinite(routed_scaling_factor)
@@ -114,7 +116,7 @@ def eligibility_reason(
         return "visual_pair"
     if image_rows is not None and (
         not _dense(image_rows, (rows,), torch.bool, device)
-        or not _dense(router_bias_vl, (NUM_EXPERTS,), torch.float32, device)
+        or not _dense(router_bias_vl, (experts,), torch.float32, device)
     ):
         return "visual"
     if graph_routes is not None:
@@ -166,6 +168,7 @@ def _pack_kernel():
         packed_weights,
         routed_count,
         M,
+        ROUTES: tl.constexpr,
         COUNT_ROWS: tl.constexpr,
         BLOCK_ROWS: tl.constexpr,
     ):
@@ -173,19 +176,19 @@ def _pack_kernel():
         rows = pid * BLOCK_ROWS + tl.arange(0, BLOCK_ROWS)
         slots = tl.arange(0, 8)
         real = tl.load(valid_mask + rows, rows < M, other=False)
-        live = (rows[:, None] < M) & real[:, None] & (slots[None, :] < 6)
+        live = (rows[:, None] < M) & real[:, None] & (slots[None, :] < ROUTES)
         ids = tl.load(
-            native_ids + rows[:, None] * 6 + slots[None, :], live, other=-1
+            native_ids + rows[:, None] * ROUTES + slots[None, :], live, other=-1
         )
         weights = tl.load(
-            native_weights + rows[:, None] * 6 + slots[None, :], live, other=0.0
+            native_weights + rows[:, None] * ROUTES + slots[None, :], live, other=0.0
         )
         destination = rows[:, None] * 8 + slots[None, :]
         tl.store(packed_ids + destination, ids, rows[:, None] < M)
         tl.store(packed_weights + destination, weights, rows[:, None] < M)
         if pid == 0:
             # As in the existing fused router, the native contract gives every
-            # valid row six nonnegative IDs. Counting valid rows therefore
+            # valid row ROUTES nonnegative IDs. Counting valid rows therefore
             # equals the previous any(ids >= 0) reduction. COUNT_ROWS only pads
             # this reduction; M and all pack tiles retain runtime row bounds.
             count_rows = tl.arange(0, COUNT_ROWS)
@@ -204,6 +207,7 @@ def _pack_dispatch_triton(ids, weights, valid, count):
     packed_weights = weights.new_empty((rows, COMM_SLOTS))
     operation[(triton.cdiv(rows, 128),)](
         ids, weights, valid, packed_ids, packed_weights, count, rows,
+        ROUTES=ids.shape[1],
         COUNT_ROWS=triton.next_power_of_2(rows), BLOCK_ROWS=128, num_warps=4,
     )
     return packed_ids, packed_weights
@@ -218,9 +222,10 @@ def _pack_dispatch(ids, weights, valid, count):
         return _pack_dispatch_triton(ids, weights, valid, count)
     # CPU native doubles retain the independent portable adapter contract.
     rows = ids.shape[0]
-    ids = torch.cat((ids, ids.new_full((rows, COMM_SLOTS - TOP_K), -1)), dim=1)
+    slots = COMM_SLOTS - ids.shape[1]
+    ids = torch.cat((ids, ids.new_full((rows, slots), -1)), dim=1)
     weights = torch.cat(
-        (weights, weights.new_zeros((rows, COMM_SLOTS - TOP_K))), dim=1
+        (weights, weights.new_zeros((rows, slots))), dim=1
     )
     ids.masked_fill_(~valid[:, None], -1)
     weights.masked_fill_(~valid[:, None], 0)
@@ -340,9 +345,10 @@ class PPUMegaGate:
     ``finite_domain_qualified`` flags, both False by default. The latter accepts
     the native finite-domain/epsilon semantics; it is not a numerical PASS.
     Forward returns logical ``(ids int64, weights float32)``. With graph_routes
-    it also pads 6 routes to 8, applies the live mask and writes the row count.
+    it also pads 6 target or 3 draft routes to 8, applies the live mask and
+    writes the row count.
     A separate valid_mask admits non-direct callers without changing their
-    six-slot output or moving their existing output masking/packing.
+    native route width or moving their existing output masking/packing.
 
     Graph warmup must call ``forward(..., is_graph=True)`` outside capture with
     the same phase, row bucket, optional operands and stream as capture. This
@@ -354,8 +360,8 @@ class PPUMegaGate:
     they deliberately do not emulate the original router's recovery policy.
 
     All new runtime paths are unvalidated until the deferred device/Graph and
-    model tests run. Prefill capture and speculative proposal/top-3 are outside
-    the admitted domain; the existing router keeps those calls.
+    model tests run. Proposal admits only draft E128/top3; the other phases
+    admit only target E384/top6. Prefill capture remains outside the domain.
     """
 
     def __init__(self, *, enabled=False, finite_domain_qualified=False):
@@ -384,7 +390,9 @@ class PPUMegaGate:
     ):
         if not self.enabled or not self.finite_domain_qualified:
             return None
-        if phase not in ("prefill", "decode", "verify") or type(is_graph) is not bool:
+        if phase not in ("prefill", "decode", "verify", "proposal") or type(is_graph) is not bool:
+            return None
+        if type(top_k) is not int or top_k != (DRAFT_TOP_K if phase == "proposal" else TOP_K):
             return None
         if is_graph and phase == "prefill":
             return None
@@ -419,7 +427,7 @@ class PPUMegaGate:
             capturing = torch.cuda.is_current_stream_capturing()
             stream = torch.cuda.current_stream().cuda_stream
         signature = (
-            hidden.device, phase, rows, top_k, router_bias is not None,
+            hidden.device, phase, rows, router_weight.shape[0], top_k, router_bias is not None,
             image_rows is not None, graph_routes is not None,
             valid_mask is not None, stream,
         )

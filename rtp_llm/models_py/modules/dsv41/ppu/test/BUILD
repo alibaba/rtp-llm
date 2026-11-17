@@ -1,11 +1,14 @@
 package(default_visibility = ["//visibility:public"])
 
 [
-    py_test(
+    sh_test(
         name = "mega_gate_" + mode + "_test",
-        srcs = ["test_mega_gate.py"],
-        main = "test_mega_gate.py",
-        deps = ["//rtp_llm/models_py:v41_ppu_moe"],
+        srcs = ["test_mega_gate.sh"],
+        data = [
+            "test_mega_gate.py",
+            "//rtp_llm/models_py:v41_ppu_moe",
+            "//rtp_llm/models_py:v41_ppu_shared_sources",
+        ],
         env = {
             "GPU_COUNT": str(gpus),
             "RTP_V41_TEST_LOCAL_WORKSPACE_DEVICE": str(gpus),

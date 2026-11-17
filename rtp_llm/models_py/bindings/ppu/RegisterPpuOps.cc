@@ -2,6 +2,7 @@
 #include "rtp_llm/models_py/bindings/ppu/PpuSiluMulMxfp4Op.h"
 #include "rtp_llm/models_py/bindings/cuda/RegisterBaseBindings.hpp"
 #include "rtp_llm/models_py/bindings/cuda/RegisterAttnOpBindings.hpp"
+#include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
 #include "rtp_llm/models_py/bindings/ppu/FusedRopeKVCacheOp.h"
 #ifdef ENABLE_FP8
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp8_quant.h"
@@ -22,6 +23,11 @@ static void per_token_quant_fp8_stub(torch::Tensor input, torch::Tensor output_q
 #endif
 
 void registerPyModuleOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("cublas_gemm_bf16_bf16_fp32",
+                  &torch_ext::cublas_gemm_bf16_bf16_fp32,
+                  "BF16 x BF16 GEMM with FP32 accumulation and output, shared with the C++ lm_head",
+                  py::arg("input"),
+                  py::arg("weight"));
 #ifdef USE_PPU
     rtp_ops_m.def("ppu_silu_and_mul_post_quant_mxfp4",
                   [](torch::Tensor gate_up, py::object swiglu_limit) {

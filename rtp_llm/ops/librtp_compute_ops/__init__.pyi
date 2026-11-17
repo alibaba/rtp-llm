@@ -432,6 +432,13 @@ class PyModelOutputs:
     def hidden_states(self, arg0: torch.Tensor) -> None: ...
 
     @property
+    def logits(self) -> torch.Tensor | None:
+        """Optional local-vocabulary decode graph logits."""
+
+    @logits.setter
+    def logits(self, arg0: torch.Tensor | None) -> None: ...
+
+    @property
     def mtp_target_hidden_states(self) -> torch.Tensor | None:
         """
         Optional target features consumed by speculative decoding

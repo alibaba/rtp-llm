@@ -71,6 +71,7 @@ class PPUOps(V41BackendOps):
         num_local_experts: int = 48,
         hidden_size: int = 5120,
         inter_dim: int = 2048,
+        top_k: int = 6,
         swiglu_limit: float = _SWIGLU_LIMIT,
         mhc_config: Optional[MHCConfig] = None,
         enpm_group: Optional[object] = None,
@@ -86,6 +87,7 @@ class PPUOps(V41BackendOps):
             ep_size=ep_size,
             hidden_size=hidden_size,
             inter_dim=inter_dim,
+            top_k=top_k,
             swiglu_limit=swiglu_limit,
             group=deepep_group,
         )

@@ -66,6 +66,79 @@ def increment_decode_counters(layers, moe, engram, engram_mask):
     )
 
 
+@lru_cache(maxsize=1)
+def _verify_epilogue_kernel():
+    import triton
+    import triton.language as tl
+
+    @triton.jit
+    def finish_verify(
+        hidden, aux, valid, ids, windows, consumed_ids, consumed_windows,
+        completions, layers, moe, engram, engram_mask,
+        HIDDEN: tl.constexpr, AUX: tl.constexpr, ROWS: tl.constexpr,
+        IDS: tl.constexpr, WINDOWS: tl.constexpr, COUNTERS: tl.constexpr,
+        BULK: tl.constexpr, BLOCK: tl.constexpr,
+    ):
+        index = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        live = tl.load(valid + index // HIDDEN, index < ROWS * HIDDEN, other=False)
+        value = tl.load(hidden + index, index < ROWS * HIDDEN, other=0)
+        tl.store(hidden + index, tl.where(live, value, 0), index < ROWS * HIDDEN)
+        if AUX:
+            live_aux = tl.load(valid + index // AUX, index < ROWS * AUX, other=False)
+            value_aux = tl.load(aux + index, index < ROWS * AUX, other=0)
+            tl.store(aux + index, tl.where(live_aux, value_aux, 0), index < ROWS * AUX)
+        tl.store(consumed_ids + index, tl.load(ids + index, index < IDS, other=0), index < IDS)
+        tl.store(consumed_windows + index, tl.load(windows + index, index < WINDOWS, other=0), index < WINDOWS)
+        if tl.program_id(0) == 0:
+            completion = tl.load(completions)
+            tl.store(completions, completion + 1)
+            if BULK:
+                active = index < COUNTERS
+                tl.store(layers + index, tl.load(layers + index, active, other=0) + 1, active)
+                tl.store(moe + index, tl.load(moe + index, active, other=0) + 1, active)
+                with_engram = active & tl.load(engram_mask + index, active, other=False)
+                tl.store(engram + index, tl.load(engram + index, with_engram, other=0) + 1, with_engram)
+
+    return triton, finish_verify
+
+
+def finish_verify_outputs(hidden, aux, valid, inputs, impl, runtime, *, bulk_counters):
+    """Finish one serialized Verify; retain live NaNs/signed zeros and idle +0."""
+    tensors = [hidden, valid, inputs.input_ids, inputs.engram_token_windows,
+               impl.consumed_ids, impl.consumed_windows, impl.cache.completions]
+    if aux is not None:
+        tensors.append(aux)
+    if not all(t.is_cuda and t.is_contiguous() and t.device == hidden.device for t in tensors):
+        return False
+    spans = sorted((t.data_ptr(), t.data_ptr() + t.numel() * t.element_size()) for t in tensors if t.numel())
+    if any(left[1] > right[0] for left, right in zip(spans, spans[1:])):
+        return False
+    if (
+        hidden.ndim != 2 or valid.ndim != 1 or hidden.shape[0] != valid.numel()
+        or (aux is not None and (aux.ndim != 2 or aux.shape[0] < valid.numel()))
+        or inputs.input_ids.shape != impl.consumed_ids.shape
+        or inputs.engram_token_windows.shape != impl.consumed_windows.shape
+        or inputs.input_ids.dtype != impl.consumed_ids.dtype
+        or inputs.engram_token_windows.dtype != impl.consumed_windows.dtype
+        or impl.cache.completions.numel() != 1
+    ):
+        return False
+    triton, kernel = _verify_epilogue_kernel()
+    rows, width = hidden.shape
+    aux_width = 0 if aux is None else aux.shape[1]
+    total = max(hidden.numel(), rows * aux_width, inputs.input_ids.numel(),
+                inputs.engram_token_windows.numel(), runtime.layer_calls.numel())
+    kernel[(triton.cdiv(total, 1024),)](
+        hidden, aux, valid, inputs.input_ids, inputs.engram_token_windows,
+        impl.consumed_ids, impl.consumed_windows, impl.cache.completions,
+        runtime.layer_calls, runtime.moe_calls, runtime.engram_calls,
+        getattr(runtime, "_engram_layer_mask", None), width, aux_width, rows,
+        inputs.input_ids.numel(), inputs.engram_token_windows.numel(),
+        runtime.layer_calls.numel(), bulk_counters, 1024,
+    )
+    return True
+
+
 def device_rows(attention_inputs, name, device, rows):
     value = getattr(attention_inputs, name, None)
     if (value is None or value.device != device or value.ndim != 1 or value.numel() < rows

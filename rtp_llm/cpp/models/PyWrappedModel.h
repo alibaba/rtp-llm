@@ -145,7 +145,8 @@ private:
     GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
                                                           const GptModelInputs& inputs,
                                                           bool                  skip_final_layernorm,
-                                                          size_t                num_valid_tokens = -1);
+                                                          size_t                num_valid_tokens = -1,
+                                                          torch::Tensor         graph_logits = torch::Tensor());
     // Compact context rows prepared once by input gathering.
     torch::Tensor customOutputIndexes(const GptModelInputs& inputs);
     void          initializeCustomOutput();
@@ -163,7 +164,8 @@ private:
                                       size_t                token_num,
                                       const GptModelInputs& inputs,
                                       torch::Tensor         merged_eagle3_hidden,
-                                      bool                  skip_final_layernorm = false);
+                                      bool                  skip_final_layernorm = false,
+                                      torch::Tensor         graph_logits = torch::Tensor());
     // CP gather-last-hidden exit: `hidden` is already the lm_output_indexes-selected,
     // post-final-layernorm rows produced by handleOutputsLastHidden, so this runs
     // lm_head directly (no index_select, no final layernorm — matching the existing

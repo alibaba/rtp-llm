@@ -311,6 +311,7 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("mtp_target_hidden_states"),
              "Initialize with hidden states and speculative target features")
         .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
+        .def_readwrite("logits", &PyModelOutputs::logits, "Optional local-vocabulary decode graph logits")
         .def(pybind11::init<torch::Tensor, torch::Tensor, torch::Tensor>(),
              pybind11::arg("hidden_states"),
              pybind11::arg("mtp_target_hidden_states"),

@@ -162,8 +162,14 @@ class DeepSeekV41PPUDSparkModel(DeepSeekV41DSparkModel):
             num_routed_experts=g.n_routed_experts, num_local_experts=views.local_experts,
             num_physical_experts=views.physical_experts,
             hidden_size=g.hidden_size, inter_dim=g.moe_inter_dim,
+            top_k=g.n_activated_experts,
             swiglu_limit=g.swiglu_limit, mhc_config=g.mhc_config(), enpm_group=enpm,
             deepep_group=group, sm_scale=g.sm_scale(), window=g.window,
+        )
+        ops.moe_engine.configure_fake_balance(
+            self._v4_args.fake_balance_expert,
+            top_k=g.n_activated_experts,
+            dp_rank=self._v4_args.dp_rank, dp_size=self._v4_args.dp_size,
         )
         self._shared_ops = ops
         self._v4_args.fp8_kv_cache = self.fp8_kv_cache = True
@@ -429,6 +435,7 @@ class DeepSeekV41PPUDSparkModel(DeepSeekV41DSparkModel):
         if kind == "commit" and features is not None and not bool(torch.isfinite(features).all()):
             raise RuntimeError("shared draft commit received non-finite target features")
         state = SharedForwardState(runtime, inputs, attn, cache, prefill=False, idle=idle, prefixes=prefixes, lengths=lengths)
+        state.proposal = kind == "proposal"
         if kind == "proposal":
             state.active_token_mask = (torch.tensor(prefixes, device=runtime.device) > 0).repeat_interleave(self._dspark_query_width)
         state.proposal_native_before = cache.fingerprint(prefixes) if cache is not None and kind == "proposal" and os.environ.get("RTP_V41_SHARED_VALIDATE_STATE") == "1" else None
@@ -475,6 +482,11 @@ class DeepSeekV41PPUDSparkModel(DeepSeekV41DSparkModel):
                 result = super().forward_propose(inputs, impl)
             valid = valid[:, None]
             output = PyModelOutputs(torch.where(valid, result.hidden_states, 0))
+            from rtp_llm.models_py.modules.dsv41.ppu.graph_runtime import graph_lm_head
+
+            logits = graph_lm_head(self, output.hidden_states, draft=True)
+            if logits is not None:
+                output.logits = logits
             confidence = getattr(result, "dspark_confidence_hidden_logits", None)
             if confidence is not None and confidence.numel():
                 output.dspark_confidence_hidden_logits = torch.where(valid, confidence, 0)

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import torch
 
 from rtp_llm.models_py.modules.dsv41.ppu import _quant
+from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import env_value as optimization_env_value
 from rtp_llm.models_py.modules.dsv41.ppu.topk import (
     native_topk_op as _verify_topk_op,
     select_tokens,
@@ -137,6 +138,61 @@ def _indexer_score_tiles(
     packed_query, packed_pool, weights = _score_inputs(
         query, head_weights, pool, physical_page, compact, quantized_query,
     )
+    if (
+        kernels is not None and logical_page == physical_page
+        and optimization_env_value("RTP_V41_PPU_INDEXER_PAGED_PREFIX", "0") == "1"
+    ):
+        # Dense physical pages need no sparse block indirection. Score once,
+        # but retain the old tile widths/strides for downstream TopK ties.
+        from deep_gemm import fp8_fp4_paged_mqa_logits, get_paged_mqa_logits_metadata, get_num_sms
+
+        key = ("verify_indexer_paged_metadata", table.data_ptr(), table.shape,
+               table.stride(), id(visible), id(valid_mask), pool.shape[0],
+               physical_page, capacity)
+        entry = None if tile_metadata_cache is None else tile_metadata_cache.get(key)
+        if entry is None:
+            safe_pages = torch.empty(table.shape, dtype=torch.int32, device=query.device)
+            lengths = torch.empty(query.shape[0], dtype=torch.int32, device=query.device)
+            rows = torch.empty_like(lengths)
+            tile_lengths = torch.empty(
+                (kernels.triton.cdiv(capacity, _TOPK_TILE), query.shape[0]),
+                dtype=torch.int32, device=query.device,
+            )
+            kernels.prepare_tiles[(query.shape[0], kernels.triton.cdiv(table.shape[1], 256))](
+                table, visible, valid_mask, safe_pages, lengths, rows, None,
+                visible.stride(0), valid_mask.stride(0), *table.stride(),
+                table.shape[1], pool.shape[0], 1, 1, 0, 0, capacity, 256,
+                TILE_LENGTHS=tile_lengths, TILE_COUNT=tile_lengths.shape[0],
+            )
+            metadata = get_paged_mqa_logits_metadata(
+                lengths[:, None], physical_page, get_num_sms(), indices=rows,
+                metadata_extra=(1, 32, 128, torch.int8),
+            )
+            entry = safe_pages, lengths, rows, metadata, tile_lengths
+            if tile_metadata_cache is not None:
+                tile_metadata_cache[key] = entry
+        safe_pages, lengths, rows, metadata, tile_lengths = entry
+        scores = fp8_fp4_paged_mqa_logits(
+            packed_query, packed_pool, weights, lengths[:, None], safe_pages,
+            metadata, capacity, indices=rows,
+        )
+        allowed = None if candidates is None else _cached_candidate_flags(
+            candidates, capacity, candidate_block_size, candidate_flags_cache,
+        )
+        for start in range(0, capacity, _TOPK_TILE):
+            width = min(_TOPK_TILE, capacity - start)
+            first_page = start // logical_page
+            pages = safe_pages[:, first_page:first_page + (width + logical_page - 1) // logical_page]
+            local_lengths = tile_lengths[start // _TOPK_TILE]
+            logits = torch.empty((query.shape[0], width), dtype=torch.float32, device=query.device)
+            kernels.write_logits[(query.shape[0], kernels.triton.cdiv(width, 1024))](
+                scores[:, start:], pages, local_lengths, allowed, candidate_active, logits,
+                scores.stride(0), pages.shape[1], logical_page, start, width,
+                candidate_block_size, 0 if allowed is None else allowed.shape[1], 1024,
+                PAGE_ROW_STRIDE=pages.stride(0),
+            )
+            yield logits, local_lengths, scores.dtype == torch.bfloat16
+        return
     if kernels is None:
         rows = torch.arange(query.shape[0], dtype=torch.int32, device=query.device)
     else:
@@ -268,6 +324,7 @@ def _compact_kernels():
         logical_blocks: tl.constexpr, physical_blocks: tl.constexpr,
         blocks: tl.constexpr, start: tl.constexpr, width: tl.constexpr,
         BLOCK: tl.constexpr,
+        TILE_LENGTHS=None, TILE_COUNT: tl.constexpr = 0,
     ):
         row = tl.program_id(0)
         segment = tl.program_id(1)
@@ -279,13 +336,17 @@ def _compact_kernels():
         page = tl.where((page > 0) & (page < pool_blocks), page, 0)
         tl.store(safe_pages + row * page_count + column, page, column < page_count)
         block = (column // logical_blocks) * physical_blocks + column % logical_blocks
-        tl.store(block_ids + row * blocks + column, block, column < blocks)
+        if block_ids is not None:
+            tl.store(block_ids + row * blocks + column, block, column < blocks)
         if segment == 0:
             length = tl.load(visible + row * visible_stride)
             active = tl.load(valid_mask + row * valid_stride)
             length = tl.minimum(tl.maximum(length - start, 0), width)
             tl.store(lengths + row, tl.where(active, length, 0))
             tl.store(rows + row, row)
+            for tile_id in tl.static_range(TILE_COUNT):
+                local = tl.minimum(tl.maximum(length - tile_id * 65536, 0), 65536)
+                tl.store(TILE_LENGTHS + tile_id * tl.num_programs(0) + row, tl.where(active, local, 0))
 
     @triton.jit
     def write_logits(
@@ -294,12 +355,13 @@ def _compact_kernels():
         logical_page: tl.constexpr, start: tl.constexpr, width: tl.constexpr,
         candidate_block: tl.constexpr, candidate_stride: tl.constexpr,
         BLOCK: tl.constexpr,
+        PAGE_ROW_STRIDE: tl.constexpr = 0,
     ):
         row = tl.program_id(0)
         column = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
         length = tl.load(lengths + row)
         live = (column < width) & (column < length)
-        page = tl.load(pages + row * page_count + column // logical_page, live, other=0)
+        page = tl.load(pages + row * (PAGE_ROW_STRIDE or page_count) + column // logical_page, live, other=0)
         live = live & (page != 0)
         if candidate_stride > 0:
             active = tl.load(candidate_active + row)

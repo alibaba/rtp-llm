@@ -385,6 +385,10 @@ struct PyModelInputs {
 
 struct PyModelOutputs {
     torch::Tensor hidden_states;
+    // Optional local-vocabulary logits produced by the model's decode graph.
+    // The runner retains capture storage; post layers copy into round-owned
+    // storage before another replay can overwrite it.
+    torch::Tensor logits;
     // Optional model-side features consumed by speculative decoders.  This is
     // a first-class forward output because CUDA graph replay does not execute
     // Python and therefore cannot safely recover it from mutable model state.

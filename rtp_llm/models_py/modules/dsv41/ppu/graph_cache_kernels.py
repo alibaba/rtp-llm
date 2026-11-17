@@ -23,9 +23,9 @@ def _verify_table_check():
 
     @triton.jit
     def verify_table_tile_mismatch(
-        captured, live, tile, BATCH: tl.constexpr, COLUMNS: tl.constexpr,
-        CAPTURED_STRIDE_ROW: tl.constexpr, CAPTURED_STRIDE_COL: tl.constexpr,
-        LIVE_STRIDE_ROW: tl.constexpr, LIVE_STRIDE_COL: tl.constexpr,
+        captured, live, tile, BATCH: tl.constexpr, COLUMNS,
+        CAPTURED_STRIDE_ROW, CAPTURED_STRIDE_COL,
+        LIVE_STRIDE_ROW, LIVE_STRIDE_COL,
         BLOCK: tl.constexpr,
     ):
         index = tile * BLOCK + tl.arange(0, BLOCK)
@@ -41,11 +41,17 @@ def _verify_table_check():
         )
         return tl.max((original != current).to(tl.int32), axis=0)
 
-    @triton.jit
+    # Live table widths/strides grow at page boundaries. Specializing on
+    # them compiled three new kernels per boundary in DP8 Decode (~570ms).
+    # Keep the exact comparison, but reuse its code across live geometry.
+    @triton.jit(do_not_specialize=[
+        "COLUMNS", "CAPTURED_STRIDE_ROW", "CAPTURED_STRIDE_COL",
+        "LIVE_STRIDE_ROW", "LIVE_STRIDE_COL",
+    ], do_not_specialize_on_alignment=["captured", "live", "flags"])
     def verify_table_mismatch(
-        captured, live, flags, BATCH: tl.constexpr, COLUMNS: tl.constexpr,
-        CAPTURED_STRIDE_ROW: tl.constexpr, CAPTURED_STRIDE_COL: tl.constexpr,
-        LIVE_STRIDE_ROW: tl.constexpr, LIVE_STRIDE_COL: tl.constexpr,
+        captured, live, flags, BATCH: tl.constexpr, COLUMNS,
+        CAPTURED_STRIDE_ROW, CAPTURED_STRIDE_COL,
+        LIVE_STRIDE_ROW, LIVE_STRIDE_COL,
         BLOCK: tl.constexpr,
     ):
         tile = tl.program_id(0)
@@ -55,18 +61,41 @@ def _verify_table_check():
         )
         tl.store(flags + tile, mismatch)
 
-    @triton.jit
+    # Triton 3.7 does not propagate do_not_specialize into tuple elements.
+    # Flatten the bounded (at most eight) table arguments at the launch
+    # boundary, then reconstruct tuples inside the kernel. This also keeps
+    # pointer alignment from creating variants for sliced native tables.
+    @triton.jit(
+        do_not_specialize=[f"{field}{i}" for i in range(8)
+                           for field in ("C", "AR", "AC", "BR", "BC", "END")],
+        do_not_specialize_on_alignment=["flags"] + [f"{field}{i}" for i in range(8)
+                                                     for field in ("A", "B")],
+    )
     def verify_tables_mismatch(
-        captured, live, flags, BATCH: tl.constexpr, BLOCK: tl.constexpr,
-        GEOMETRY: tl.constexpr, OFFSETS: tl.constexpr,
+        flags, BATCH: tl.constexpr, BLOCK: tl.constexpr, TABLES: tl.constexpr,
+        A0, B0, C0, AR0, AC0, BR0, BC0, END0,
+        A1, B1, C1, AR1, AC1, BR1, BC1, END1,
+        A2, B2, C2, AR2, AC2, BR2, BC2, END2,
+        A3, B3, C3, AR3, AC3, BR3, BC3, END3,
+        A4, B4, C4, AR4, AC4, BR4, BC4, END4,
+        A5, B5, C5, AR5, AC5, BR5, BC5, END5,
+        A6, B6, C6, AR6, AC6, BR6, BC6, END6,
+        A7, B7, C7, AR7, AC7, BR7, BC7, END7,
     ):
+        captured = (A0, A1, A2, A3, A4, A5, A6, A7)
+        live = (B0, B1, B2, B3, B4, B5, B6, B7)
+        geometry = ((C0, AR0, AC0, BR0, BC0), (C1, AR1, AC1, BR1, BC1),
+                    (C2, AR2, AC2, BR2, BC2), (C3, AR3, AC3, BR3, BC3),
+                    (C4, AR4, AC4, BR4, BC4), (C5, AR5, AC5, BR5, BC5),
+                    (C6, AR6, AC6, BR6, BC6), (C7, AR7, AC7, BR7, BC7))
+        offsets = (0, END0, END1, END2, END3, END4, END5, END6, END7)
         tile = tl.program_id(0)
-        for table in tl.static_range(len(GEOMETRY)):
-            if tile >= OFFSETS[table] and tile < OFFSETS[table + 1]:
+        for table in tl.static_range(TABLES):
+            if tile >= offsets[table] and tile < offsets[table + 1]:
                 mismatch = verify_table_tile_mismatch(
-                    captured[table], live[table], tile - OFFSETS[table], BATCH,
-                    GEOMETRY[table][0], GEOMETRY[table][1], GEOMETRY[table][2],
-                    GEOMETRY[table][3], GEOMETRY[table][4], BLOCK,
+                    captured[table], live[table], tile - offsets[table], BATCH,
+                    geometry[table][0], geometry[table][1], geometry[table][2],
+                    geometry[table][3], geometry[table][4], BLOCK,
                 )
                 tl.store(flags + tile, mismatch)
 
@@ -857,8 +886,11 @@ def _launch_joint_table_checks(single, batched, captured, live, geometry, offset
         snapshot.record_stream(stream)
         current.record_stream(stream)
     if len(captured) <= 8:
+        args = [value for snapshot, current, shape, end in zip(captured, live, geometry, offsets[1:])
+                for value in (snapshot, current, *shape, end)]
+        args += [captured[0], live[0], *geometry[0], offsets[-1]] * (8 - len(captured))
         batched[(offsets[-1],)](
-            captured, live, flags, batch, block, geometry, offsets, num_warps=4,
+            flags, batch, block, len(captured), *args, num_warps=4,
         )
         return
     for snapshot, current, shape, start, end in zip(captured, live, geometry, offsets, offsets[1:]):

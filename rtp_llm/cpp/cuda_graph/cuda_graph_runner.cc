@@ -1399,6 +1399,9 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs&                inpu
         if (dspark_confidence_hidden_logits.defined()) {
             outputs.dspark_confidence_hidden_logits = dspark_confidence_hidden_logits.slice(0, 0, state.seq_len_sum);
         }
+        if (instance.mem_hold_.logits_.defined()) {
+            outputs.logits = instance.mem_hold_.logits_.slice(0, 0, state.seq_len_sum);
+        }
     }
     const auto& impl = instance.mem_hold_.attn_pyobj_;
     if (impl && py::hasattr(impl, "finish_cuda_graph_replay")) {
@@ -2350,6 +2353,16 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                 throw;
             }
             graph_instances_[key].mem_hold_.decoder_layer_hidden_states_.copy_(outputs.hidden_states);
+            if (outputs.logits.defined()) {
+                RTP_LLM_CHECK_WITH_INFO(!is_prefill_cuda_graph_mode_ && outputs.logits.is_cuda()
+                                            && outputs.logits.dim() == 2
+                                            && outputs.logits.size(0) == outputs.hidden_states.size(0)
+                                            && outputs.logits.device() == outputs.hidden_states.device()
+                                            && (outputs.logits.scalar_type() == torch::kFloat32
+                                                || outputs.logits.scalar_type() == torch::kBFloat16),
+                                        "decode graph logits must be device FP32/BF16 [tokens, local_vocab]");
+                graph_instances_[key].mem_hold_.logits_ = outputs.logits;
+            }
             auto& mtp_target_hidden_states = graph_instances_[key].mem_hold_.mtp_target_hidden_states_;
             RTP_LLM_CHECK_WITH_INFO(mtp_target_hidden_states.defined() == outputs.mtp_target_hidden_states.defined(),
                                     "MTP target hidden output presence changed during CUDA graph capture");

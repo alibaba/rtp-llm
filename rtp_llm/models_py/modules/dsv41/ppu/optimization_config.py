@@ -1,7 +1,7 @@
 """Operator switches shared by qualified PPU execution paths.
 
 A canonical switch overrides its phase-specific aliases. Qualified fusion
-and local-Prefill switches default on; other callers keep their defaults.
+and local-Prefill/Decode switches default on; other callers keep their defaults.
 These switches select implementations; callers still enforce eligibility.
 """
 
@@ -53,19 +53,22 @@ VALUE_ALIASES = {
     "RTP_V41_PPU_VERIFY_MHC_REDUCE_BLOCK_M": MHC_REDUCE_BLOCK_M,
     "RTP_V41_PPU_PROPOSAL_MHC_REDUCE_BLOCK_M": MHC_REDUCE_BLOCK_M,
 }
-# Defaults mirror the qualified PPU fusion and cached-Prefill configuration.
+# Defaults mirror the qualified PPU fusion, cached-Prefill and Decode configuration.
 # Eligibility, dependency receipts and explicit opt-outs remain caller-owned.
 DEFAULT_ENABLED = frozenset((
     "RTP_V41_PPU_AIU_PRENORM",
     "RTP_V41_PPU_CP8_DENSE_INDEX_BOUNDS",
     "RTP_V41_PPU_CP8_YOCO_FAST_PREFILL",
     "RTP_V41_PPU_CROSS_LAYER_MHC",
+    "RTP_V41_PPU_DECODE_LAUNCH_REUSE",
     "RTP_V41_PPU_DENSE_PROJECTIONS",
     "RTP_V41_PPU_DIRECT_MOE_ROUTES",
     "RTP_V41_PPU_DP_PREFILL_FORWARD_MEGA_CAPACITY",
     "RTP_V41_PPU_FUSED_BF16_ROPE",
     "RTP_V41_PPU_FUSED_KV_ROW_PACK",
+    "RTP_V41_PPU_GRAPH_LM_HEAD",
     "RTP_V41_PPU_GROUPED_QO_ROPE",
+    "RTP_V41_PPU_INDEXER_PAGED_PREFIX",
     "RTP_V41_PPU_LOCAL_PREFILL_AIU_PRENORM",
     "RTP_V41_PPU_LOCAL_PREFILL_ATTENTION_PROVIDER",
     "RTP_V41_PPU_LOCAL_PREFILL_COMPACT_ROWS",
@@ -94,6 +97,8 @@ DEFAULT_ENABLED = frozenset((
     "RTP_V41_PPU_SPARSE_TOPK",
     "RTP_V41_PPU_SPLIT_L20",
     "RTP_V41_PPU_SWA_BOUNDED_REPLAY",
+    "RTP_V41_PPU_VERIFY_BATCHED_JOURNAL",
+    "RTP_V41_PPU_VERIFY_FUSED_EPILOGUE",
     "RTP_V41_PPU_VERIFY_MEGA_MHC",
 ))
 

@@ -42,7 +42,7 @@ class _MaskCPU:
         def run(ids, pattern, output_ids, output_weights, rows, **kwargs):
             original = ids[:, :6]
             output_ids[:, :6].copy_(torch.where(original >= 0, pattern[:rows], original))
-            output_weights[:, :6].copy_((original >= 0).float())
+            output_weights[:, :6].copy_((original >= 0).float() / 6)
             output_ids[:, 6:].fill_(-1)
             output_weights[:, 6:].zero_()
         return run
@@ -55,7 +55,8 @@ def native_double(value):
         source = torch.zeros_like(ids)
         expected = reference._apply_fake_balance(source, torch.zeros_like(weights))
         ids.copy_(expected[0])
-        weights.copy_(expected[1])
+        # The existing native op writes ones; normalization belongs to PPUMoE.
+        weights.copy_(expected[1] * reference._fake_balance_config[1])
     return Mock(side_effect=run)
 
 
@@ -78,7 +79,8 @@ class FakeBalanceTest(unittest.TestCase):
                 ids, weights = engine(rank)._apply_fake_balance(*routes(rows))
                 self.assertTrue(torch.all(ids[:, 6:] == -1))
                 self.assertTrue(torch.all(weights[:, 6:] == 0))
-                self.assertTrue(torch.all(weights[:, :6] == 1))
+                self.assertTrue(torch.all(weights[:, :6] == 1 / 6))
+                torch.testing.assert_close(weights.sum(-1), torch.ones(rows))
                 for row in ids[:, :6]:
                     self.assertEqual(len(set(row.tolist())), 6)
                 counts += torch.bincount(ids[:, :6].flatten(), minlength=384)
@@ -143,6 +145,109 @@ class FakeBalanceTest(unittest.TestCase):
                 PPUMoE(ep_size=8).configure_fake_balance(
                     enabled, top_k=top_k, dp_rank=rank, dp_size=size
                 )
+
+    def test_shared_graph_overrides_logical_routes_before_physical_mapping(self):
+        for enabled in (False, True):
+            with patch.dict(os.environ, {"RTP_V41_PPU_MOE_PRECISION": "w4a4"}):
+                value = engine(3, enabled=enabled, backend="megamoe")
+            x = torch.zeros(8, 5120, dtype=torch.bfloat16)
+            value._processed[(0, x.device)] = object()
+            value._mega_buffer, value._mega_capacity = object(), 8
+            ids, weights = routes()
+            ids[2:4] = -1
+            expected = value._apply_fake_balance(ids, weights)
+            original = ids.clone(), weights.clone()
+            with patch.object(value, "_map_expert_ids", side_effect=lambda ids, weights, layer: ids + 1000) as mapping, patch.object(
+                value, "_forward_megamoe", return_value="native_result",
+            ) as dispatch:
+                self.assertEqual(value.forward_shared_graph(x, ids, weights, layer_id=0), "native_result")
+            torch.testing.assert_close(mapping.call_args.args[0], expected[0])
+            torch.testing.assert_close(mapping.call_args.args[1], expected[1])
+            torch.testing.assert_close(dispatch.call_args.args[1], expected[0] + 1000)
+            torch.testing.assert_close(dispatch.call_args.args[2], expected[1])
+            self.assertIs(dispatch.call_args.kwargs["prepared_buffer"], value._mega_buffer)
+            self.assertTrue(torch.equal(ids, original[0]))
+            self.assertTrue(torch.equal(weights, original[1]))
+
+    def test_shared_graph_prepares_target_and_draft_override_before_capture(self):
+        for experts, top_k in ((384, 6), (128, 3)):
+            with patch.dict(os.environ, {"RTP_V41_PPU_MOE_BACKEND": "megamoe",
+                                        "RTP_V41_PPU_MOE_PRECISION": "w4a4"}):
+                value = PPUMoE(ep_size=8, num_routed_experts=experts,
+                               num_local_experts=experts // 8, top_k=top_k)
+            value.configure_fake_balance(True, top_k=top_k, dp_rank=0, dp_size=8)
+            x = torch.zeros(8, 5120, dtype=torch.bfloat16)
+            with patch.object(torch.cuda, "is_current_stream_capturing", return_value=False), patch.object(
+                value, "_validate_megamoe_input",
+            ), patch.object(value, "_ensure_mega_buffer"), patch.object(
+                value, "_processed_weights",
+            ) as processed, patch.object(value, "_apply_fake_balance", wraps=value._apply_fake_balance) as override:
+                value.prepare_shared_graph(x, (0, 1))
+            self.assertEqual(override.call_count, 1)
+            ids, weights = override.call_args.args
+            self.assertEqual(ids.shape, (1, top_k))
+            self.assertTrue(torch.all(ids[:, :top_k] == 0))
+            self.assertTrue(torch.all(ids[:, top_k:] == -1))
+            self.assertEqual(processed.call_count, 2)
+
+    def test_compact_target_and_draft_match_legacy_mapping_and_keep_masks(self):
+        for experts, top_k in ((384, 6), (128, 3)):
+            for rank in range(8):
+                with patch.dict(os.environ, {"RTP_V41_PPU_MOE_BACKEND": "megamoe"}):
+                    value = PPUMoE(ep_size=8, ep_rank=rank, num_routed_experts=experts,
+                                   num_local_experts=experts // 8, top_k=top_k)
+                value.configure_fake_balance(True, top_k=top_k, dp_rank=rank, dp_size=8)
+                with patch.dict(os.environ, {"RTP_V41_PPU_MOE_BACKEND": "grouped"}):
+                    reference = PPUMoE(ep_size=8, ep_rank=rank, num_routed_experts=experts,
+                                       num_local_experts=experts // 8, top_k=top_k)
+                reference.configure_fake_balance(True, top_k=top_k, dp_rank=rank, dp_size=8)
+                ids, weights = routes(16)
+                ids[2, 1], ids[4:8] = -7, -1
+                weights.fill_(float("nan"))
+                expected = reference._apply_fake_balance(ids, weights)
+                actual = value._apply_fake_balance(ids, weights)
+                for new, old in zip(actual, expected):
+                    self.assertEqual(new.shape, (16, top_k))
+                    torch.testing.assert_close(new, old[:, :top_k])
+
+    def test_sail_round_robin_matches_logical_layer_and_shard_formula(self):
+        for experts, top_k in ((384, 6), (128, 3)):
+            for rank in range(8):
+                with patch.dict(os.environ, {"RTP_V41_PPU_MOE_BACKEND": "megamoe",
+                    "RTP_V41_PPU_MEGAMOE_FAKE_BALANCE_POLICY": "sail_round_robin"}):
+                    value = PPUMoE(ep_size=8, ep_rank=rank, num_routed_experts=experts,
+                                   num_local_experts=experts // 8, top_k=top_k)
+                value.configure_fake_balance(True, top_k=top_k, dp_rank=rank, dp_size=8)
+                for layer in (0, 1, 17, 39):
+                    ids, weights = routes(32)
+                    ids[3, 1], ids[8:10] = -7, -1
+                    before = ids.clone(), weights.clone()
+                    actual = value._apply_fake_balance(ids, weights, layer_id=layer)
+                    deal = torch.arange(32 * top_k).reshape(32, top_k) + layer + rank + 8 * rank
+                    expected = (deal % 8) * (experts // 8) + (deal // 8) % (experts // 8)
+                    valid = ids[:, :top_k] >= 0
+                    torch.testing.assert_close(actual[0], torch.where(valid, expected, ids[:, :top_k]))
+                    torch.testing.assert_close(actual[1], valid.float() / top_k)
+                    self.assertTrue(torch.equal(ids, before[0]))
+                    self.assertTrue(torch.equal(weights, before[1]))
+                self.assertEqual(value.execution_stats()["fake_balance_policy"], "sail_round_robin")
+
+    def test_sail_policy_declines_native_prefill_cache_and_forwards_layer(self):
+        with patch.dict(os.environ, {"RTP_V41_PPU_MEGAMOE_FAKE_BALANCE_POLICY": "sail_round_robin"}):
+            value = engine(3, backend="megamoe")
+        ids, weights = routes()
+        receipt = prepare_double(value)
+        with patch.object(value, "_prefill_fake_device_eligible", side_effect=AssertionError("native cache lookup")):
+            self.assertIsNone(value._try_prefill_fake_balance(ids, weights, receipt))
+        expected = value._apply_fake_balance(ids, weights, layer_id=17)
+        with patch.object(value, "_forward_megamoe", return_value="done") as dispatch:
+            self.assertEqual(value.forward(torch.zeros(8, 5120), ids, weights, layer_id=17), "done")
+        torch.testing.assert_close(dispatch.call_args.args[1], expected[0])
+        value._processed[(17, torch.device("cpu"))] = object()
+        value._mega_capacity = 8
+        with patch.object(value, "_forward_megamoe", return_value="done") as dispatch:
+            value.forward_shared_graph(torch.zeros(8, 5120), ids, weights, layer_id=17)
+        torch.testing.assert_close(dispatch.call_args.args[1], expected[0])
 
     @torch.no_grad()
     def test_prefill_pattern_prefix_masks_padding_and_private_outputs(self):

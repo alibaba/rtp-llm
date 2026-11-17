@@ -84,6 +84,9 @@ public:
     bool       uses_device_metadata_{false};
     bool       uses_physical_block_tables_{false};
     at::Tensor decoder_layer_hidden_states_;
+    // Retain the graph's actual output allocation, avoiding an in-graph
+    // vocabulary-sized copy. Consumers receive independent round storage.
+    at::Tensor logits_;
     at::Tensor mtp_target_hidden_states_;
     // V4.1 confidence-head hidden contributions: FP32 [tokens, 1].
     at::Tensor               dspark_confidence_hidden_logits_;

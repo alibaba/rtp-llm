@@ -91,6 +91,7 @@ class DeepSeekV41PPUModel(DeepSeekV41Model):
             num_physical_experts=self.shared_weight_views.physical_experts,
             num_local_experts=self.shared_weight_views.local_experts,
             hidden_size=g.hidden_size, inter_dim=g.moe_inter_dim,
+            top_k=g.n_activated_experts,
             swiglu_limit=g.swiglu_limit, mhc_config=g.mhc_config(),
             enpm_group=enpm, deepep_group=group,
             sm_scale=g.sm_scale(), window=g.window,

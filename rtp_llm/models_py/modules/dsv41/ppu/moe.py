@@ -80,7 +80,7 @@ __all__ = [
     "ROUTED_SCALING_FACTOR",
 ]
 
-# V4.1 communication slots (top-6 padded to 8 with -1/0.0) and SwiGLU limit.
+# DeepEP communication slots. MegaMoE uses the model's actual top-k instead.
 COMM_SLOTS = 8
 SWIGLU_LIMIT = 10.0
 DEFAULT_TOP_K = 6
@@ -554,6 +554,38 @@ def _get_triton_kernels():
         import triton.language as tl
         from triton.language.extra import libdevice
 
+        # Adapted from sglang-for-sail 631e12a (Apache-2.0),
+        # srt/layers/moe/topk.py::_simulate_balanced_routing_kernel.
+        # Preserve RTP's native FakeBalance mapping by default, per-slot negative
+        # sentinels and private output ownership rather than sail's in-place
+        # override. Uniform weights are normalized to 1/K like sail.
+        # Logical->physical expert mapping still follows this op.
+        @triton.jit(do_not_specialize=["deal_offset"])
+        def _simulate_balanced_routing_kernel(
+            original_ids, output_ids, output_weights,
+            stride_im, stride_ik,
+            num_ranks, experts_per_rank, rank_offset, local_offset,
+            deal_offset, K: tl.constexpr, BLOCK_K: tl.constexpr, SAIL: tl.constexpr,
+        ):
+            t = tl.program_id(0)
+            j = tl.arange(0, BLOCK_K)
+            mask = j < K
+            original = tl.load(
+                original_ids + t * stride_im + j * stride_ik, mask, other=-1,
+            )
+            deal = t * K + j
+            if SAIL:
+                deal += deal_offset
+                rank = deal % num_ranks
+                local = (deal // num_ranks) % experts_per_rank
+            else:
+                rank = (rank_offset + deal % num_ranks) % num_ranks
+                local = (local_offset + deal // num_ranks) % experts_per_rank
+            gid = rank * experts_per_rank + local
+            live = original >= 0
+            tl.store(output_ids + t * K + j, tl.where(live, gid, original), mask)
+            tl.store(output_weights + t * K + j, tl.where(live, 1.0 / K, 0.0), mask)
+
         @triton.jit
         def _mask_fake_routes_kernel(
             original_ids, pattern_ids, output_ids, output_weights, M,
@@ -569,7 +601,7 @@ def _get_triton_kernels():
             # slots. The old compact-then-pad path always replaces the tail.
             ids = tl.where(live, balanced, original)
             tl.store(output_ids + offset, ids, row < M)
-            tl.store(output_weights + offset, tl.where(live, 1.0, 0.0), row < M)
+            tl.store(output_weights + offset, tl.where(live, 1.0 / 6, 0.0), row < M)
 
         @triton.jit
         def _accumulate_mega_expert_load_kernel(
@@ -1148,6 +1180,7 @@ def _get_triton_kernels():
 
         bundle = _Kernels()
         bundle.triton = triton
+        bundle.simulate_balanced_routing = _simulate_balanced_routing_kernel
         bundle.mask_fake_routes = _mask_fake_routes_kernel
         bundle.accumulate_mega_expert_load = _accumulate_mega_expert_load_kernel
         bundle.router_gate = _router_gate_kernel
@@ -1573,6 +1606,7 @@ class PPUMoE:
         ep_size: int = 1,
         hidden_size: int = 5120,
         inter_dim: int = 2048,
+        top_k: int = DEFAULT_TOP_K,
         swiglu_limit: float = SWIGLU_LIMIT,
         group: Optional[object] = None,
     ):
@@ -1585,6 +1619,9 @@ class PPUMoE:
         self.ep_size = int(ep_size)
         self.hidden_size = int(hidden_size)
         self.inter_dim = int(inter_dim)
+        self.top_k = int(top_k)
+        if not 1 <= self.top_k <= 16:
+            raise ValueError("MegaMoE top-k must be in [1, 16]")
         self.swiglu_limit = float(swiglu_limit)
         # Freeze the selected precision for this instance and its weight cache.
         selection = dict(os.environ)
@@ -1604,6 +1641,11 @@ class PPUMoE:
         self._dp_capacity_evidence = None
         self._fake_balance_config = None
         self._fake_balance_op = None
+        self._fake_balance_policy = os.environ.get(
+            "RTP_V41_PPU_MEGAMOE_FAKE_BALANCE_POLICY", "rtp",
+        )
+        if self._fake_balance_policy not in ("rtp", "sail_round_robin"):
+            raise ValueError("MegaMoE fake balance policy must be rtp or sail_round_robin")
         self._prefill_fake_pattern = None
         self._prefill_fake_pattern_generation = None
         self._prefill_fake_pattern_builds = 0
@@ -1641,12 +1683,14 @@ class PPUMoE:
             raise ValueError("fake balance must be an explicit boolean")
         if not 0 <= dp_rank < dp_size or not 0 < top_k <= self.num_routed_experts:
             raise ValueError("fake balance requires valid DP rank/size and top-k")
+        if self.backend == "megamoe" and top_k != self.top_k:
+            raise ValueError("fake balance top-k must match the MegaMoE model geometry")
         config = (enabled, int(top_k), int(dp_rank), int(dp_size))
         if self._fake_balance_config not in (None, config):
             raise ValueError("fake balance configuration is frozen per model")
         self._fake_balance_config = config
 
-    def _apply_fake_balance(self, expert_ids, expert_weights):
+    def _apply_fake_balance(self, expert_ids, expert_weights, *, layer_id=None):
         """Override only real routes; preserve idle rows and communication padding.
 
         Native FakeBalanceExpertOp expects tightly packed [T, real_top_k]
@@ -1658,6 +1702,12 @@ class PPUMoE:
         if config is None or not config[0] or expert_ids.shape[0] == 0:
             return expert_ids, expert_weights
         _, top_k, dp_rank, dp_size = config
+        sail = self.backend == "megamoe" and self._fake_balance_policy == "sail_round_robin"
+        # Match sail631e12a's logical round-robin workload, before EPLB remap.
+        # This opt-in benchmarks fewer active experts at small batches than
+        # RTP's global-expert-balanced default; it is not a kernel optimization.
+        deal_offset = (0 if layer_id is None else int(layer_id))
+        deal_offset += dp_rank * max(self.ep_size, dp_size) // dp_size + dp_rank * self.ep_size
         if expert_ids.ndim != 2 or expert_ids.shape != expert_weights.shape:
             raise ValueError("fake balance requires matching [tokens, slots] routes")
         if expert_ids.shape[1] < top_k:
@@ -1666,11 +1716,34 @@ class PPUMoE:
             raise TypeError("fake balance expert IDs must be int32 or int64")
         if expert_weights.dtype != torch.float32:
             raise TypeError("fake balance expert weights must be float32")
+        if self.backend == "megamoe" and expert_ids.is_cuda:
+            kernels = _get_triton_kernels()
+            ids = torch.empty(
+                (expert_ids.shape[0], top_k), dtype=expert_ids.dtype, device=expert_ids.device,
+            )
+            weights = torch.empty(
+                ids.shape, dtype=torch.float32, device=expert_weights.device,
+            )
+            logical_local = self.num_routed_experts // self.ep_size
+            kernels.simulate_balanced_routing[(ids.shape[0],)](
+                expert_ids, ids, weights, *expert_ids.stride(),
+                self.ep_size, logical_local,
+                self.ep_size * dp_rank // dp_size,
+                int(dp_rank * max(logical_local / dp_size, 1.0)),
+                deal_offset, K=top_k, BLOCK_K=kernels.triton.next_power_of_2(top_k),
+                SAIL=sail, num_warps=1,
+            )
+            return ids, weights
         original = expert_ids[:, :top_k]
         valid = original >= 0
         ids = original.clone(memory_format=torch.contiguous_format)
         weights = expert_weights[:, :top_k].clone(memory_format=torch.contiguous_format)
-        if ids.is_cuda:
+        if sail:
+            index = torch.arange(ids.numel(), device=ids.device).reshape(ids.shape) + deal_offset
+            logical_local = self.num_routed_experts // self.ep_size
+            ids.copy_((index % self.ep_size) * logical_local + (index // self.ep_size) % logical_local)
+            weights.fill_(1.0 / top_k)
+        elif ids.is_cuda:
             if self._fake_balance_op is None:
                 if torch.cuda.is_current_stream_capturing():
                     raise RuntimeError(
@@ -1684,6 +1757,7 @@ class PPUMoE:
                     self.num_routed_experts, top_k, dp_rank, dp_size, self.ep_size
                 )
             self._fake_balance_op(ids, weights)
+            weights.mul_(1.0 / top_k)
         else:
             # CPU reference of RTP's existing fakeBalanceExpertKernel mapping.
             index = torch.arange(ids.numel(), device=ids.device).reshape(ids.shape)
@@ -1693,10 +1767,11 @@ class PPUMoE:
             rank = (rank_offset + index % self.ep_size) % self.ep_size
             local = (local_offset + index // self.ep_size) % logical_local
             ids.copy_(rank * logical_local + local)
-            weights.fill_(1.0)
+            weights.fill_(1.0 / top_k)
         ids = torch.where(valid, ids, original)
         weights = torch.where(valid, weights, torch.zeros_like(weights))
-        return pad_topk_for_dispatch(ids, weights, slots=expert_ids.shape[1])
+        slots = top_k if self.backend == "megamoe" else expert_ids.shape[1]
+        return pad_topk_for_dispatch(ids, weights, slots=slots)
 
     def _prefill_fake_device_eligible(self, ids, weights):
         from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
@@ -1744,7 +1819,8 @@ class PPUMoE:
         admission propagate without retrying the legacy route chain.
         """
         config = self._fake_balance_config
-        if (config is None or not config[0] or config[1] != 6 or config[3] != 8
+        if (self._fake_balance_policy != "rtp"
+                or config is None or not config[0] or config[1] != 6 or config[3] != 8
                 or not isinstance(receipt, _DPForwardMegaBuffer)
                 or (self.backend, self.precision, self.ep_size, self.num_routed_experts)
                 != ("megamoe", "w4a4", 8, 384)
@@ -1863,7 +1939,9 @@ class PPUMoE:
             "fake_balance_expert": bool(
                 self._fake_balance_config and self._fake_balance_config[0]
             ),
+            "fake_balance_policy": self._fake_balance_policy,
             "mega_workspace_capacity": self._mega_capacity,
+            "mega_workspace_top_k": self.top_k,
             "mega_received_assignments": (
                 0
                 if self._mega_recv_stats is None
@@ -1986,7 +2064,7 @@ class PPUMoE:
         fake_routes = (self._try_prefill_fake_balance(expert_ids, expert_weights, dp_preparation)
                        if dp_preparation is not None else None)
         expert_ids, expert_weights = (fake_routes if fake_routes is not None else
-                                     self._apply_fake_balance(expert_ids, expert_weights))
+                                     self._apply_fake_balance(expert_ids, expert_weights, layer_id=layer_id))
         expert_ids = self._map_expert_ids(expert_ids, expert_weights, layer_id)
         if self.backend == "megamoe":
             # Empty owners must still enter MegaMoE's cross-rank protocol.
@@ -2239,7 +2317,7 @@ class PPUMoE:
                 group,
                 self.num_physical_experts,
                 required,
-                COMM_SLOTS,
+                self.top_k,
                 self.hidden_size,
                 self.inter_dim,
                 num_shared_experts=0,
@@ -2258,12 +2336,16 @@ class PPUMoE:
         """Graph-external allocation/weight preparation; never run in capture."""
         if self.backend != "megamoe" or self.precision != "w4a4":
             raise ValueError("shared Graph requires MegaMoE/W4A4")
-        if self._fake_balance_config and self._fake_balance_config[0]:
-            raise ValueError("shared Graph fake balance belongs to N9")
         if torch.cuda.is_current_stream_capturing():
             raise RuntimeError("shared Graph resources must be prepared outside capture")
         self._validate_megamoe_input(x)
         self._ensure_mega_buffer(x)
+        if self._fake_balance_config and self._fake_balance_config[0]:
+            # Compile the compact fused override outside Graph capture.
+            # Replay still reads validity from the live route tensors.
+            ids = torch.zeros((1, self.top_k), dtype=torch.int64, device=x.device)
+            weights = torch.zeros((1, self.top_k), dtype=torch.float32, device=x.device)
+            self._apply_fake_balance(ids, weights)
         for layer_id in layer_ids:
             self._processed_weights(layer_id, x.device)
 
@@ -2284,6 +2366,7 @@ class PPUMoE:
             raise RuntimeError("shared Graph weights/workspace were not prepared")
         if x.shape[0] > self._mega_capacity:
             raise ValueError("shared Graph exceeds its fixed MegaMoE capacity")
+        expert_ids, expert_weights = self._apply_fake_balance(expert_ids, expert_weights, layer_id=layer_id)
         expert_ids = self._map_expert_ids(expert_ids, expert_weights, layer_id)
         return self._forward_megamoe(
             x, expert_ids, expert_weights, layer_id, expert_load,
@@ -2305,11 +2388,14 @@ class PPUMoE:
         self._validate_megamoe_input(x)
         layer_id = self._resolve_layer_id(layer_id)
         w13, s13, w2, s2, _, _ = self._processed_weights(layer_id, x.device)
-        ids, weights = pad_topk_for_dispatch(
-            expert_ids.to(torch.int64),
-            expert_weights.to(torch.float32),
-            slots=COMM_SLOTS,
-        )
+        if expert_ids.ndim != 2 or expert_ids.shape != expert_weights.shape:
+            raise ValueError("MegaMoE requires matching [tokens, slots] routes")
+        if expert_ids.shape[0] != x.shape[0] or expert_ids.shape[1] < self.top_k:
+            raise ValueError("MegaMoE routes must cover the model's actual top-k")
+        # Gate/DeepEP callers may still supply padded routes. The native
+        # workspace and dispatch always receive exactly the model geometry.
+        ids = expert_ids[:, :self.top_k].to(torch.int64).contiguous()
+        weights = expert_weights[:, :self.top_k].to(torch.float32).contiguous()
         buffer = self._ensure_mega_buffer(x, prepared_buffer=prepared_buffer)
         mega = self._get_mega_module()
         counts = (

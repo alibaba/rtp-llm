@@ -212,7 +212,7 @@ class VerifyMoEOverlap:
                 )
                 # Preserve the original gate-success counter boundary: a
                 # router exception must not count an attempted MegaMoE call.
-                if not getattr(state, "bulk_counters", False):
+                if not (getattr(state, "bulk_counters", False) or getattr(state, "bulk_verify_counters", False)):
                     state.moe_calls[owner.layer_id].add_(1)
                 routed = self.engine.forward_shared_graph(
                     flat, ids, weights, layer_id=owner.layer_id, expert_load=expert_load,

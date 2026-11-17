@@ -12,7 +12,9 @@ import os
 import sys
 import time
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace as NS
 from unittest.mock import Mock, patch
 
 import torch
@@ -25,7 +27,7 @@ GATE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(GATE)
 
 
-def _reference(x, weight, bias, *, scale=1.5, image=None, image_bias=None, valid=None):
+def _reference(x, weight, bias, *, top_k=GATE.TOP_K, scale=1.5, image=None, image_bias=None, valid=None):
     """Original RTP FP32 projection, stable softplus and ranking-only bias."""
     logits = (
         torch.mm(x, weight.t(), out_dtype=torch.float32)
@@ -37,7 +39,7 @@ def _reference(x, weight, bias, *, scale=1.5, image=None, image_bias=None, valid
     if image is not None:
         text_bias = torch.zeros_like(image_bias) if bias is None else bias
         ranking = scores + torch.where(image[:, None], image_bias, text_bias)
-    ids = ranking.topk(GATE.TOP_K, dim=-1).indices
+    ids = ranking.topk(top_k, dim=-1).indices
     values = scores.gather(1, ids)
     values = values / (values.sum(-1, keepdim=True) + 1e-12) * scale
     if valid is not None:
@@ -47,11 +49,11 @@ def _reference(x, weight, bias, *, scale=1.5, image=None, image_bias=None, valid
 
 
 def _native_double(x, weight, top_k, **kwargs):
-    assert top_k == GATE.TOP_K
     ids, values = _reference(
         x,
         weight,
         kwargs["bias"],
+        top_k=top_k,
         scale=kwargs["routed_scaling_factor"],
         image=kwargs["image_token_mask"],
         image_bias=kwargs["image_bias"],
@@ -61,7 +63,7 @@ def _native_double(x, weight, top_k, **kwargs):
     kwargs["out"][1].copy_(values)
 
 
-def _case(rows=3, *, device="cpu", generator=None):
+def _case(rows=3, *, device="cpu", generator=None, experts=GATE.NUM_EXPERTS):
     x = torch.randn(
         (rows, GATE.HIDDEN_SIZE),
         device=device,
@@ -69,12 +71,12 @@ def _case(rows=3, *, device="cpu", generator=None):
         generator=generator,
     )
     weight = torch.randn(
-        (GATE.NUM_EXPERTS, GATE.HIDDEN_SIZE),
+        (experts, GATE.HIDDEN_SIZE),
         device=device,
         dtype=torch.bfloat16,
         generator=generator,
     ) * 0.001
-    bias = torch.arange(GATE.NUM_EXPERTS, device=device, dtype=torch.float32) * 0.25
+    bias = torch.arange(experts, device=device, dtype=torch.float32) * 0.25
     return x, weight, bias
 
 
@@ -277,6 +279,142 @@ class MegaGateAdapterContracts(unittest.TestCase):
             ), "hardware_or_capture")
 
 
+class MegaGateProposalContracts(unittest.TestCase):
+    """Exercise the real adapter and Gate caller without a device runtime."""
+
+    def setUp(self):
+        scope = torch.inference_mode()
+        scope.__enter__()
+        self.addCleanup(scope.__exit__, None, None, None)
+        self.stream = NS(cuda_stream=7)
+        for name, kwargs in (
+            ("_hardware_supported", {"return_value": True}),
+        ):
+            mocked = patch.object(GATE, name, **kwargs)
+            mocked.start()
+            self.addCleanup(mocked.stop)
+        for name, kwargs in (
+            ("device", {"side_effect": lambda device: nullcontext()}),
+            ("current_stream", {"side_effect": lambda: self.stream}),
+            ("is_current_stream_capturing", {"return_value": False}),
+        ):
+            mocked = patch.object(torch.cuda, name, **kwargs)
+            value = mocked.start()
+            self.addCleanup(mocked.stop)
+            if name == "is_current_stream_capturing":
+                self.capturing = value
+        self.x, self.weight, self.bias = _case(experts=128)
+        self.native = Mock(side_effect=_native_double)
+        self.adapter = GATE.PPUMegaGate(enabled=True, finite_domain_qualified=True)
+        self.adapter._operation = self.native
+
+    def call(self, **kwargs):
+        return self.adapter.forward(
+            self.x, self.weight, self.bias, phase="proposal", top_k=3, **kwargs,
+        )
+
+    def test_top3_native_width_padding_mask_and_count(self):
+        actual = self.call()
+        expected = _reference(self.x, self.weight, self.bias, top_k=3)
+        for value, reference in zip(actual, expected):
+            torch.testing.assert_close(value, reference, rtol=0, atol=0)
+        self.assertEqual(self.native.call_args.args[2], 3)
+        self.assertEqual(self.native.call_args.kwargs["out"][0].shape, (3, 3))
+        valid, count = torch.tensor([True, False, True]), torch.tensor(91)
+        actual = self.call(is_graph=True, graph_routes=(valid, count))
+        expected = _reference(self.x, self.weight, self.bias, top_k=3, valid=valid)
+        for value, reference in zip(actual, expected):
+            self.assertEqual(value.shape, (3, 8))
+            torch.testing.assert_close(value[:, :3], reference, rtol=0, atol=0)
+        self.assertTrue(bool((actual[0][:, 3:] == -1).all()))
+        self.assertTrue(bool((actual[1][:, 3:] == 0).all()))
+        self.assertEqual(count.item(), 2)
+        retained = tuple(value.clone() for value in actual)
+        valid.zero_()
+        later = self.call(is_graph=True, graph_routes=(valid, count))
+        self.assertTrue(bool((later[0] == -1).all()))
+        self.assertTrue(bool((later[1] == 0).all()))
+        self.assertEqual(count.item(), 0)
+        for value, reference in zip(actual, retained):
+            torch.testing.assert_close(value, reference, rtol=0, atol=0)
+
+    def test_geometry_phase_and_optin_rejections_do_not_dispatch(self):
+        target_x, target_weight, target_bias = _case()
+        cases = (
+            (self.weight, self.bias, "decode", 3),
+            (self.weight, self.bias, "verify", 3),
+            (self.weight, self.bias, "proposal", 6),
+            (target_weight, target_bias, "proposal", 3),
+            (target_weight, target_bias, "proposal", 6),
+        )
+        for weight, bias, phase, top_k in cases:
+            with self.subTest(phase=phase, experts=weight.shape[0], top_k=top_k):
+                self.assertIsNone(self.adapter.forward(
+                    target_x, weight, bias, phase=phase, top_k=top_k,
+                ))
+        for enabled, finite in ((False, True), (True, False)):
+            adapter = GATE.PPUMegaGate(enabled=enabled, finite_domain_qualified=finite)
+            adapter._operation = self.native
+            self.assertIsNone(adapter.forward(
+                self.x, self.weight, self.bias, phase="proposal", top_k=3,
+            ))
+        self.native.assert_not_called()
+
+    def test_capture_requires_matching_stream_rows_and_optional_operands(self):
+        valid, count = torch.ones(3, dtype=torch.bool), torch.tensor(91)
+        self.capturing.return_value = True
+        self.assertIsNone(self.call(is_graph=True, graph_routes=(valid, count)))
+        self.native.assert_not_called()
+        self.assertEqual(count.item(), 91)
+        self.capturing.return_value = False
+        self.call(is_graph=True, graph_routes=(valid, count))
+        self.capturing.return_value = True
+        self.assertIsNotNone(self.call(is_graph=True, graph_routes=(valid, count)))
+        calls = self.native.call_count
+        count.fill_(91)
+        self.stream = NS(cuda_stream=8)
+        self.assertIsNone(self.call(is_graph=True, graph_routes=(valid, count)))
+        self.stream = NS(cuda_stream=7)
+        self.assertIsNone(self.call(is_graph=True))
+        self.assertIsNone(self.adapter.forward(
+            self.x[:2], self.weight, self.bias, phase="proposal", top_k=3,
+            is_graph=True, graph_routes=(valid[:2], count),
+        ))
+        self.assertEqual(self.native.call_count, calls)
+        self.assertEqual(count.item(), 91)
+
+    def test_native_failure_propagates_without_router_retry(self):
+        self.native.side_effect = RuntimeError("proposal native failed")
+        count = torch.tensor(91)
+        with self.assertRaisesRegex(RuntimeError, "proposal native failed"):
+            self.call(graph_routes=(torch.ones(3, dtype=torch.bool), count))
+        self.native.assert_called_once()
+        self.assertEqual(count.item(), 91)
+
+    def test_real_shared_gate_passes_proposal_phase_and_masks(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.layers import PPUSharedGate
+
+        gate = PPUSharedGate.__new__(PPUSharedGate)
+        torch.nn.Module.__init__(gate)
+        gate.weight, gate.bias, gate.bias_vl = self.weight, self.bias, None
+        gate.top_k, gate.route_scale = 3, 1.5
+        gate._mega_gate = self.adapter
+        valid, count = torch.tensor([True, False, True]), torch.tensor(91)
+        for graph in (False, True):
+            state = NS(proposal=True, is_graph=graph, prefill=False, idle=False,
+                       active_token_mask=valid, metadata=NS(valid_mask=valid))
+            gate.runtime = NS(current=state)
+            kwargs = dict(graph_routes=(valid, count), allow_top3_graph_routes=True) if graph else {}
+            actual = gate(self.x, **kwargs)
+            expected = _reference(self.x, self.weight, self.bias, top_k=3, valid=valid)
+            for value, reference in zip(actual, expected):
+                torch.testing.assert_close(value[:, :3], reference, rtol=0, atol=0)
+            if graph:
+                self.assertEqual(actual[0].shape, (3, 8))
+                self.assertEqual(count.item(), 2)
+        self.assertEqual(self.native.call_count, 2)
+
+
 @unittest.skipUnless(
     os.environ.get("RTP_V41_TEST_LOCAL_WORKSPACE_DEVICE") == "1", "explicit PPU test"
 )
@@ -384,6 +522,59 @@ class MegaGatePPUQualification(unittest.TestCase):
         self.assertTrue(bool((expected[0] == 5).any(-1).all()))
         self.assertFalse(bool((expected[0] == 6).any()))
         self._assert_routes(actual, expected, rows=140, case="fp32_cutoff")
+
+    def test_proposal_top3_changed_input_graph_replay_and_padding(self):
+        """Real native E128/top3 and fused 3-to-8 packing, including idle rows."""
+        for rows in (1, 3, 24, 96):
+            with self.subTest(rows=rows):
+                x = torch.zeros((rows, 5120), device="cuda", dtype=torch.bfloat16)
+                x[:, 0] = 4
+                weight = torch.zeros((128, 5120), device="cuda", dtype=torch.bfloat16)
+                weight[:, 0] = torch.arange(128, device="cuda").to(torch.bfloat16) / 128
+                bias = torch.arange(128, device="cuda", dtype=torch.float32) * 0.001
+                valid = torch.arange(rows, device="cuda") % 3 != 1
+                count = torch.full((), -1, device="cuda", dtype=torch.int64)
+                adapter = GATE.PPUMegaGate(enabled=True, finite_domain_qualified=True)
+
+                def run():
+                    result = adapter.forward(
+                        x, weight, bias, phase="proposal", top_k=3, is_graph=True,
+                        graph_routes=(valid, count),
+                    )
+                    self.assertIsNotNone(result, "Proposal MegaGate declined")
+                    return result
+
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    for _ in range(3):
+                        run()
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=stream):
+                    actual = run()
+                graph.replay()
+                torch.cuda.synchronize()
+                first_ids = actual[0].clone()
+                for changed, idle in ((False, False), (True, False), (True, True)):
+                    if changed:
+                        x[:, 0] = -4
+                    if idle:
+                        valid.zero_()
+                    graph.replay()
+                    torch.cuda.synchronize()
+                    expected = _reference(x, weight, bias, top_k=3, valid=valid)
+                    self._assert_routes(
+                        (actual[0][:, :3], actual[1][:, :3]), expected,
+                        rows=rows, case="proposal_graph", changed=changed, idle=idle,
+                    )
+                    self.assertEqual(actual[0].shape, (rows, 8))
+                    self.assertEqual(actual[1].shape, (rows, 8))
+                    self.assertTrue(bool((actual[0][:, 3:] == -1).all()))
+                    self.assertTrue(bool((actual[1][:, 3:] == 0).all()))
+                    self.assertEqual(int(count), int(valid.sum()))
+                    if changed and not idle:
+                        self.assertFalse(torch.equal(actual[0][valid], first_ids[valid]))
 
     def test_existing_ptpc_dense_bytes_survive_native_mega_gate_call(self):
         """Prove runtime coexistence; setUp has already resolved MegaGate.

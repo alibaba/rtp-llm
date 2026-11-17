@@ -8,7 +8,7 @@ capture; the same forward is used for capture and graph-safe eager.
 import os
 import weakref
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 
 import torch
@@ -19,6 +19,7 @@ from rtp_llm.models_py.modules.dsv41.ppu.graph_engram import GraphEngram
 from rtp_llm.models_py.modules.dsv41.ppu.graph_metadata import increment_decode_counters
 from rtp_llm.models_py.modules.dsv41.ppu.optimization_config import (
     enabled as optimization_enabled,
+    env_value as optimization_env_value,
     graph_mhc_options,
 )
 from rtp_llm.ops import PyModelOutputs
@@ -28,6 +29,26 @@ _GRAPH_WEIGHT_NAMES = ("weight", "bias", "fn", "base", "scale", "q_weight", "k_w
 _GRAPH_WEIGHT_NAME_SET = frozenset(_GRAPH_WEIGHT_NAMES)
 _MODULE_LOOKUP_HOOKS = frozenset(("__dict__", "__getattribute__", "__getattr__"))
 _STANDARD_MODULE_GETATTR = torch.nn.Module.__getattr__
+
+
+def graph_lm_head(model, hidden, *, draft=False):
+    """Capture the same local head; C++ keeps vocabulary/gather/ownership rules."""
+    if optimization_env_value("RTP_V41_PPU_GRAPH_LM_HEAD", "0") != "1":
+        return None
+    from rtp_llm.ops.compute_ops import rtp_llm_ops
+    from rtp_llm.utils.model_weight import W
+
+    weight = model.weight.global_weights[W.lm_head]
+    if (
+        not model._is_speculative or not model._is_decode_role
+        or weight.dtype != torch.bfloat16 or hidden.dtype != torch.bfloat16
+        or weight.ndim != 2 or hidden.ndim != 2 or weight.shape[1] != hidden.shape[1]
+        or weight.device != hidden.device
+    ):
+        raise ValueError("PPU graph lm_head requires speculative decode BF16 resident weights/hidden")
+    if draft and os.environ.get("RTP_V41_PPU_DRAFT_LM_HEAD_BF16", "0") == "1":
+        return torch.mm(hidden, weight.t())
+    return rtp_llm_ops.cublas_gemm_bf16_bf16_fp32(hidden, weight)
 
 
 def _plain_module_weight_lookup(cls):
@@ -137,11 +158,23 @@ class SharedGraphRuntime:
                 for index, layer in enumerate(layers)
             )
         )
-        if self._bulk_counters:
+        self._bulk_verify_counters = (
+            optimization_env_value("RTP_V41_PPU_DECODE_LAUNCH_REUSE", "0") == "1"
+            and self.device.type == "cuda" and self.grouped is None and not draft
+            and model._is_speculative and row_width == 4 and len(layers) == g.num_layers
+            and all(layer.layer_id == i and layer.ffn.routed_enabled
+                    and (layer.engram is not None) == (i in g.engram_layer_ids)
+                    for i, layer in enumerate(layers))
+        )
+        if self._bulk_counters or self._bulk_verify_counters:
             self._engram_layer_mask = torch.tensor(
                 [index in g.engram_layer_ids for index in range(g.num_layers)],
                 dtype=torch.bool, device=self.device,
             )
+        if self._bulk_verify_counters:
+            # Compile outside capture without changing the real counters.
+            temporary = [torch.zeros_like(self.layer_calls) for _ in range(3)]
+            increment_decode_counters(*temporary, self._engram_layer_mask)
         self.engram = GraphEngram(
             self.ops, g, device=self.device, max_batch_size=self.max_rows,
             fuse_metadata=self._bulk_counters,
@@ -156,14 +189,17 @@ class SharedGraphRuntime:
     def _storage_signature(self):
         model = self._model()
         weights = [model.v4.embed.weight, model.v4.norm.weight]
+        if optimization_env_value("RTP_V41_PPU_GRAPH_LM_HEAD", "0") == "1":
+            from rtp_llm.utils.model_weight import W
+
+            weights.append(model.weight.global_weights[W.lm_head])
         weights.extend(model.shared_weight_views._resident.values())
         weights.extend(_graph_module_weights(model.v4, direct=self._fast_storage_signature))
         for values in self.ops.moe_engine._weights.values():
             weights.extend(values)
         for values in self.ops.moe_engine._processed.values():
             weights.extend(v for v in values if isinstance(v, torch.Tensor))
-        signature = tuple((t.data_ptr(), tuple(t.shape), t.dtype) for t in weights)
-        return signature
+        return tuple((t.data_ptr(), tuple(t.shape), t.dtype) for t in weights)
 
     def validate(self):
         self.engram.validate()
@@ -208,6 +244,11 @@ class SharedGraphRuntime:
             "RTP_V41_PPU_PROPOSAL_BATCHED_WO_A", default=True,
         )
         bulk_counters = self._bulk_counters and not verify
+        bulk_verify_counters = (
+            getattr(self, "_bulk_verify_counters", False) and mode == "dense"
+            and metadata.batch_size == 8 and metadata.q_len_per_req == 4
+            and torch.cuda.is_current_stream_capturing()
+        )
         hashes = None
         if self.geometry.engram_layer_ids:
             if windows is None or tuple(windows.shape) != (
@@ -222,6 +263,7 @@ class SharedGraphRuntime:
             engram_calls=self.engram_calls, routed_rows_device=self.routed_rows_device,
             grouped_moe=self.grouped,
             verify=verify, proposal=mode == "proposal", bulk_counters=bulk_counters,
+            bulk_verify_counters=bulk_verify_counters,
             verify_moe_overlap=(
                 self.verify_moe_overlap.lookup_current_stream()
                 if self.verify_moe_overlap is not None and mode == "dense"
@@ -285,21 +327,37 @@ class SharedGraphRuntime:
         metadata = impl.metadata
         with self.bind(impl, metadata, windows=inputs.engram_token_windows) as state:
             ids = torch.where(metadata.valid_mask, inputs.input_ids.reshape(rows), 0)
-            hidden = model.v4.forward_decode(
-                ids, metadata, expert_token_counts=inputs.expert_token_counts,
-                kv_cache=model.kv_cache,
-            )
-            if state.bulk_counters:
+            packed = getattr(impl, "packed_attention", None)
+            transaction = packed.verify_tail_transaction() if verify and packed is not None else nullcontext()
+            with transaction:
+                hidden = model.v4.forward_decode(
+                    ids, metadata, expert_token_counts=inputs.expert_token_counts,
+                    kv_cache=model.kv_cache,
+                )
+            fused_epilogue = False
+            if state.verify and optimization_env_value("RTP_V41_PPU_VERIFY_FUSED_EPILOGUE", "0") == "1":
+                from rtp_llm.models_py.modules.dsv41.ppu.graph_metadata import finish_verify_outputs
+
+                fused_epilogue = finish_verify_outputs(
+                    hidden, model.v4._mtp_hidden_buffer, metadata.valid_mask,
+                    inputs, impl, self, bulk_counters=state.bulk_verify_counters,
+                )
+            if (state.bulk_counters or state.bulk_verify_counters) and not fused_epilogue:
                 increment_decode_counters(
                     self.layer_calls, self.moe_calls, self.engram_calls, self._engram_layer_mask,
                 )
             if state.attention_calls and torch.cuda.is_current_stream_capturing():
                 self.attention_capture_calls.update(state.attention_calls)
-            if state.verify:
+            if state.verify and not fused_epilogue:
                 aux = model.v4._mtp_hidden_buffer
                 if aux is not None:
                     aux[:rows].masked_fill_(~metadata.valid_mask[:, None], 0)
                 impl.consumed_ids.copy_(inputs.input_ids)
                 impl.consumed_windows.copy_(inputs.engram_token_windows)
                 impl.cache.completions.add_(1)
-        return PyModelOutputs(torch.where(metadata.valid_mask[:, None], hidden, 0))
+        output = PyModelOutputs(hidden if fused_epilogue else torch.where(metadata.valid_mask[:, None], hidden, 0))
+        if verify and getattr(impl, "mode", None) == "dense":
+            logits = graph_lm_head(model, output.hidden_states)
+            if logits is not None:
+                output.logits = logits
+        return output

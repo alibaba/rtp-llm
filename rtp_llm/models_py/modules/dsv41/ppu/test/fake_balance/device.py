@@ -18,7 +18,7 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 
-from rtp_llm.models_py.modules.dsv41.ppu.moe import PPUMoE
+from rtp_llm.models_py.modules.dsv41.ppu.moe import PPUMoE, pad_topk_for_dispatch
 
 WORLD, EXPERTS, LOCAL, TOP_K, HIDDEN, INTERMEDIATE = 8, 384, 48, 6, 512, 128
 
@@ -126,7 +126,7 @@ def verify_prefill_route_pack(rank, directory):
                 ids[:, 6:] = 93
                 weights[:, :6] = float('nan')
                 snapshots = ids.clone(), weights.clone()
-                expected = value._apply_fake_balance(ids, weights)
+                expected = pad_topk_for_dispatch(*value._apply_fake_balance(ids, weights))
                 actual = value._try_prefill_fake_balance(ids, weights, receipt)
                 if actual is None:
                     raise AssertionError('eligible PPU route pack did not launch')
@@ -156,7 +156,7 @@ def verify_prefill_route_pack(rank, directory):
             raise AssertionError('cached pattern requires mutation-tracked tensors')
         for live in (0, 17, 140):
             _, ids, weights = inputs(140, live)
-            expected = value._apply_fake_balance(ids, weights)
+            expected = pad_topk_for_dispatch(*value._apply_fake_balance(ids, weights))
             actual = value._try_prefill_fake_balance(ids, weights, receipt)
             if actual is None or any(not torch.equal(new.view(torch.uint8), old.view(torch.uint8))
                                      for new, old in zip(actual, expected)):
@@ -199,8 +199,8 @@ def verify_prefill_route_pack(rank, directory):
         names = [event['name'] for event in events if event.get('cat') == 'kernel']
         if sum('_mask_fake_routes_kernel' in name for name in names) != 1:
             raise AssertionError('exactly one cached mask/pad kernel must execute')
-        if sum('fakeBalanceExpertKernel' in name for name in names) != 1:
-            raise AssertionError('legacy oracle must execute the real native fake kernel')
+        if sum('_simulate_balanced_routing_kernel' in name for name in names) != 1:
+            raise AssertionError('compact override must execute exactly one fused kernel')
         side = torch.cuda.Stream()
         side.wait_stream(torch.cuda.current_stream(device))
         with torch.cuda.stream(side):
@@ -224,6 +224,130 @@ def verify_prefill_route_pack(rank, directory):
         dist.barrier()
 
 
+@torch.no_grad()
+def verify_compact_balance_kernel(rank, directory):
+    """Compare fused top6/top3 routes to the independent existing native op."""
+    from rtp_llm.models_py.modules.base.cuda.select_topk import FakeBalanceExpert
+
+    results = []
+    os.environ["RTP_V41_PPU_MOE_BACKEND"] = "megamoe"
+    os.environ["RTP_V41_PPU_MOE_PRECISION"] = "w4a4"
+    for experts, top_k in ((384, 6), (128, 3)):
+        value = PPUMoE(num_routed_experts=experts, num_local_experts=experts // WORLD,
+                       ep_size=WORLD, ep_rank=rank, top_k=top_k)
+        value.configure_fake_balance(True, top_k=top_k, dp_rank=rank, dp_size=WORLD)
+        oracle = FakeBalanceExpert(experts, top_k, rank, WORLD, WORLD)
+        for dtype in (torch.int32, torch.int64):
+            for slots in (top_k, 8):
+                for rows in (1, 8, 32):
+                    storage = torch.zeros((rows * 2, slots * 2), dtype=dtype, device="cuda")
+                    ids = storage[::2, ::2]
+                    ids[::2, 0] = -7
+                    ids[-1] = -1
+                    ids[0, top_k - 1] = torch.iinfo(dtype).min
+                    weights = torch.full(ids.shape, float("nan"), device="cuda")
+                    original = ids.clone()
+                    compact = ids[:, :top_k].clone(memory_format=torch.contiguous_format)
+                    expected_weights = torch.empty(compact.shape, device="cuda")
+                    oracle(compact, expected_weights)
+                    expected_weights.mul_(1.0 / top_k)
+                    valid = ids[:, :top_k] >= 0
+                    expected_ids = torch.where(valid, compact, ids[:, :top_k])
+                    expected_weights = torch.where(valid, expected_weights, 0)
+                    actual = value._apply_fake_balance(ids, weights)
+                    torch.testing.assert_close(actual[0], expected_ids, rtol=0, atol=0)
+                    torch.testing.assert_close(actual[1], expected_weights, rtol=0, atol=0)
+                    assert actual[0].is_contiguous() and actual[1].is_contiguous()
+                    assert not torch._C._is_alias_of(actual[0], ids)
+                    assert torch.equal(ids, original) and torch.isnan(weights).all()
+                    results.append(dict(path="compact_fake_native_oracle", experts=experts,
+                                        top_k=top_k, rows=rows, input_slots=slots,
+                                        dtype=str(dtype), status="PASS"))
+            with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
+                                                    torch.profiler.ProfilerActivity.CUDA]) as profile:
+                value._apply_fake_balance(ids, weights)
+                torch.cuda.synchronize()
+            trace = directory / f"compact-top{top_k}-{dtype}-rank{rank}.trace.json"
+            profile.export_chrome_trace(str(trace))
+            names = [event["name"] for event in json.loads(trace.read_text())["traceEvents"]
+                     if event.get("cat") == "kernel"]
+            assert len(names) == 1 and "_simulate_balanced_routing_kernel" in names[0], names
+    return results
+
+
+@torch.no_grad()
+def verify_shared_graph_balance(rank):
+    """Actual fixed-workspace dispatch, target/draft geometry and live masks."""
+    results = []
+    hidden, intermediate = 5120, 2304
+    os.environ["RTP_V41_PPU_MOE_BACKEND"] = "megamoe"
+    os.environ["RTP_V41_PPU_MOE_PRECISION"] = "w4a4"
+    for experts, top_k, rows in ((384, 6, 8), (384, 6, 32), (128, 3, 24)):
+        local = experts // WORLD
+        value = PPUMoE(num_routed_experts=experts, num_local_experts=local,
+                       ep_rank=rank, ep_size=WORLD, hidden_size=hidden,
+                       inter_dim=intermediate, top_k=top_k, group=dist.group.WORLD)
+        value.configure_fake_balance(True, top_k=top_k, dp_rank=rank, dp_size=WORLD)
+        generator = torch.Generator().manual_seed(11600 + rank)
+        pairs = []
+        for n, k in ((2 * intermediate, hidden), (hidden, intermediate)):
+            packed = torch.randint(256, (local, n, k // 2), generator=generator,
+                                   dtype=torch.uint8).cuda()
+            scale = torch.full((local, n, k // 32), 120, dtype=torch.uint8, device="cuda")
+            pairs.append((packed, scale))
+        value.bind_expert_weights(0, *pairs)
+        x = torch.full((rows, hidden), 0.125, dtype=torch.bfloat16, device="cuda")
+        ids = torch.full((rows, 8), -1, dtype=torch.int64, device="cuda")
+        ids[:, :top_k] = torch.arange(top_k, device="cuda")
+        weights = torch.zeros((rows, 8), dtype=torch.float32, device="cuda")
+        weights[:, :top_k] = 0.25
+        try:
+            value.prepare_shared_graph(x, (0,))
+            assert value._mega_buffer.num_topk == top_k
+            assert value._mega_buffer.topk_idx.shape[1] == top_k
+            stream = torch.cuda.Stream()
+            stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(stream):
+                for _ in range(2):
+                    value.forward_shared_graph(x, ids, weights, layer_id=0)
+            torch.cuda.current_stream().wait_stream(stream)
+            torch.cuda.synchronize()
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                output = value.forward_shared_graph(x, ids, weights, layer_id=0)
+            for live, one_busy in ((rows, False), (rows // 2, False), (0, False), (rows, True), (rows, False)):
+                actual_live = live if not one_busy or rank == 0 else 0
+                ids.fill_(-1)
+                ids[:actual_live, :top_k] = torch.arange(top_k, device="cuda")
+                weights.zero_()
+                weights[:actual_live, :top_k] = 0.5
+                x.fill_(0.0625 if live != rows else 0.25)
+                before = value._mega_recv_stats.clone()
+                graph.replay()
+                torch.cuda.synchronize()
+                assert torch.isfinite(output).all()
+                assert torch.count_nonzero(output[actual_live:]) == 0
+                counts = value._mega_recv_stats.long() - before.long()
+                gathered = [torch.empty_like(counts) for _ in range(WORLD)]
+                dist.all_gather(gathered, counts)
+                per_expert = torch.cat(gathered).cpu()
+                per_rank = per_expert.reshape(WORLD, local).sum(1)
+                assignments = live * top_k * (1 if one_busy else WORLD)
+                assert int(per_expert.sum()) == assignments
+                assert int(per_rank.max() - per_rank.min()) <= 1
+                assert int(per_expert.max() - per_expert.min()) <= 1
+                results.append(dict(experts=experts, top_k=top_k, rows=rows,
+                                    live=live, one_busy=one_busy,
+                                    received_assignments_per_rank=per_rank.tolist(),
+                                    total_assignments=assignments,
+                                    native_top_k=value._mega_buffer.num_topk,
+                                    path="forward_shared_graph", status="PASS"))
+        finally:
+            value.close()
+            dist.barrier()
+    return results
+
+
 def worker(args):
     rank = int(os.environ["RANK"])
     torch.cuda.set_device(rank)
@@ -236,6 +360,15 @@ def worker(args):
     )
     results = []
     try:
+        if args.shared_graph_only:
+            results = verify_compact_balance_kernel(rank, args.output)
+            results.extend(verify_shared_graph_balance(rank))
+            write(args.output / f"rank-{rank}.json", dict(
+                rank=rank, status="PASS", cases=results,
+                scope="shared_graph_fake_balance", torch=torch.__version__,
+                device=torch.cuda.get_device_name(rank),
+            ))
+            return
         prefill_route_pack = verify_prefill_route_pack(rank, args.output)
         for backend in (() if args.route_pack_only else ("grouped", "megamoe")):
             for enabled in (False, True):
@@ -345,6 +478,9 @@ def main():
     # Separate discrete route validation from the broader legacy DeepEP and
     # Graph suite. The default continues to run every existing backend case.
     args.route_pack_only = os.environ.get("RTP_V41_TEST_FAKE_ROUTE_PACK_ONLY", "0") == "1"
+    args.shared_graph_only = os.environ.get("RTP_V41_TEST_FAKE_SHARED_GRAPH_ONLY", "0") == "1"
+    if args.route_pack_only and args.shared_graph_only:
+        raise ValueError("choose one focused fake-balance device scope")
     if args.worker:
         worker(args)
         return

@@ -82,6 +82,7 @@ cc_library(
     copts = copts(),
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
+        "//rtp_llm/models_py/bindings/cuda:bf16_gemm_op",
         "//rtp_llm/models_py/bindings/core:exec_ctx_state",
         "//rtp_llm/models_py/bindings/cuda:cuda_bindings_base",
         "//rtp_llm/models_py/bindings/cuda:cuda_attn_bindings_base",

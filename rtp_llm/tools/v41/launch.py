@@ -105,8 +105,8 @@ def preset_env(
         )
     if type(fake_balance_expert) is not bool:
         raise ValueError("fake_balance_expert must be an explicit boolean")
-    if fake_balance_expert and dspark_gamma:
-        raise ValueError("PPU fake balance is qualified only without DSpark")
+    if fake_balance_expert and shared_grouped_graph:
+        raise ValueError("balanced shared Decode Graph requires MegaMoE/W4A4")
     prefill_wait_timeout_ms = bounded_prefill_wait_timeout_ms(prefill_wait_timeout_ms)
     if prefill_parallel not in ("cp", "dp"):
         raise ValueError("prefill_parallel must be cp or dp")
@@ -362,8 +362,8 @@ def preset_env(
     if shared_decode_graph or shared_grouped_graph:
         from rtp_llm.models_py.modules.dsv41.ppu.moe_precision import moe_backend, moe_precision
 
-        if role != "decode" or fake_balance_expert:
-            raise ValueError("shared Decode Graph requires shared DP8 Decode without fake balance")
+        if role != "decode":
+            raise ValueError("shared Decode Graph requires shared DP8 Decode")
         expected = ("grouped", "w4a8") if shared_grouped_graph else ("megamoe", "w4a4")
         if (moe_backend(env), moe_precision(env)) != expected:
             raise ValueError(f"shared Decode Graph requires {expected[0]}/{expected[1]}")

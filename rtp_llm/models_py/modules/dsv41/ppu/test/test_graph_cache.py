@@ -218,6 +218,101 @@ class DecodeGraphMetadataTest(unittest.TestCase):
 
 @unittest.skipUnless(
     os.environ.get("RTP_V41_TEST_GRAPH_DEVICE") == "1" and torch.cuda.is_available(),
+    "requires explicit PPU/CUDA table-geometry qualification",
+)
+class VerifyTableGeometryDeviceTest(unittest.TestCase):
+    """Changing page widths must retain exact checks without new JIT variants."""
+
+    @torch.inference_mode()
+    def test_single_table_growth_strides_masks_and_jit_reuse(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import _verify_table_check
+
+        single, _, cdiv = _verify_table_check()
+        device = torch.cuda.current_device()
+        for dtype in (torch.int32, torch.int64):
+            captured = torch.arange(8 * 768 * 2, dtype=dtype, device="cuda").reshape(8, -1)[:, ::2]
+            variants = None
+            for width in (513, 1, 17, 511, 512, 514, 527, 528, 529, 544, 641):
+                # Both the row stride and column stride change after warmup.
+                storage = torch.empty((8, 2 * width + 17), dtype=dtype, device="cuda")
+                live = storage[:, 1:1 + 2 * width:2]
+                live.copy_(captured[:, :width])
+                count = cdiv(8 * width, 256)
+                flags = torch.empty(count + 1, dtype=torch.int32, device="cuda")[1:]
+
+                def check():
+                    single[(count,)](captured, live, flags, 8, width,
+                                      *captured.stride(), *live.stride(), 256, num_warps=4)
+
+                check()
+                self.assertEqual(int(flags.count_nonzero()), 0)
+                live[-1, -1].add_(1)
+                check()
+                self.assertEqual(int(flags.count_nonzero()), 1)
+                current = len(single.device_caches[device][0])
+                if variants is None:
+                    variants = current
+                self.assertEqual(current, variants, f"page width {width} recompiled the single-table check")
+
+    @torch.inference_mode()
+    def test_joint_table_growth_offsets_and_jit_reuse(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import (
+            _launch_joint_table_checks, _verify_table_check,
+        )
+
+        single, batched, cdiv = _verify_table_check()
+        device = torch.cuda.current_device()
+        for dtype in (torch.int32, torch.int64):
+            captured = tuple(torch.arange(8 * 768, dtype=dtype, device="cuda").reshape(8, -1)
+                             for _ in range(7))
+            variants = None
+            for width in (513, 514, 527, 528, 529, 544, 641):
+                widths = (width, width - 1, 2, width, width + 1, 3, width)
+                live = tuple(torch.empty((8, 2 * columns + 17), dtype=dtype, device="cuda")
+                             [:, 1:1 + 2 * columns:2] for columns in widths)
+                for snapshot, table in zip(captured, live):
+                    table.copy_(snapshot[:, :table.size(1)])
+                geometry = tuple((table.shape[1], *snapshot.stride(), *table.stride())
+                                 for snapshot, table in zip(captured, live))
+                offsets = [0]
+                for columns in widths:
+                    offsets.append(offsets[-1] + cdiv(8 * columns, 256))
+                flags = torch.empty(offsets[-1] + 1, dtype=torch.int32, device="cuda")[1:]
+
+                def check():
+                    _launch_joint_table_checks(single, batched, captured, live, geometry,
+                                               tuple(offsets), flags, 8, 256,
+                                               torch.cuda.current_stream())
+
+                check()
+                self.assertEqual(int(flags.count_nonzero()), 0)
+                live[-1][-1, -1].add_(1)
+                check()
+                self.assertEqual(int(flags.count_nonzero()), 1)
+                self.assertTrue(bool(flags[offsets[-2]:].any()))
+                current = len(batched.device_caches[device][0])
+                if variants is None:
+                    variants = current
+                self.assertEqual(current, variants, f"page width {width} recompiled the joint check")
+
+    @torch.inference_mode()
+    def test_public_pending_receipt_still_rejects_changed_table(self):
+        from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import try_enqueue_verify_table_check
+
+        captured = torch.arange(8 * 768, device="cuda", dtype=torch.int32).reshape(8, -1)
+        for width in (513, 529, 641):
+            live = captured[:, :width].clone()
+            pending = try_enqueue_verify_table_check((("pool", captured, live),), 8)
+            self.assertIsNotNone(pending)
+            pending.validate()
+            live[-1, -1].add_(1)
+            pending = try_enqueue_verify_table_check((("pool", captured, live),), 8)
+            with self.assertRaisesRegex(RuntimeError, "native block table changed"):
+                pending.validate()
+
+
+@unittest.skipUnless(
+    os.environ.get("RTP_V41_TEST_GRAPH_DEVICE") == "1" and torch.cuda.is_available(),
     "requires explicit PPU/CUDA Graph device qualification",
 )
 class GraphCacheDeviceTest(unittest.TestCase):
