@@ -331,6 +331,62 @@ class CompactMegaMHCContractTest(unittest.TestCase):
                 for value, before in zip(source, saved):
                     self.assertTrue(torch.equal(value, before))
 
+    @torch.inference_mode()
+    def test_unpadded_layouts_preserve_strides_and_residual_view(self):
+        for leading, unusual_strides in (
+            ((3,), False),
+            ((11,), False),
+            ((2, 5), False),
+            ((1,), True),
+            ((7,), True),
+        ):
+            with self.subTest(leading=leading, unusual_strides=unusual_strides):
+                case = _case(leading)
+                tokens = math.prod(leading)
+                if unusual_strides:
+                    post = case["post"]
+                    case["post"] = post.as_strided(post.shape, (4, 1, 17))
+                    if tokens == 1:
+                        x = case["attn_out"]
+                        case["attn_out"] = x.as_strided(x.shape, (29, 1))
+
+                backend = Mock()
+                with patch.object(op, "is_supported", return_value=True), patch.object(
+                    op, "_get_mega_mhc", return_value=backend
+                ), patch.object(torch.cuda, "device"), patch.object(
+                    torch.cuda, "is_current_stream_capturing", return_value=True
+                ):
+                    residual, normalized, post, comb, (q, sf) = op.try_fused_post_pre(
+                        **case, reuse_residual=True, output_fp8=True
+                    )
+
+                args = backend.call_args.kwargs
+                for native, source, suffix in (
+                    (args["x"], case["attn_out"], (5120,)),
+                    (args["post_mix"], case["post"], (4, 1)),
+                ):
+                    flat = source.view(tokens, *suffix)
+                    self.assertEqual(native.shape, flat.shape)
+                    self.assertEqual(native.stride(), flat.stride())
+                if len(leading) == 1 and not unusual_strides:
+                    self.assertIs(args["x"], case["attn_out"])
+                    self.assertIs(normalized, args["y_bf16"])
+                for result, storage, shape in (
+                    (residual, case["residual"], (*leading, 4, 5120)),
+                    (normalized, args["y_bf16"], (*leading, 5120)),
+                    (post, args["new_post_mix"], (*leading, 4, 1)),
+                    (comb, args["new_comb_res_mix"], (*leading, 4, 4)),
+                    (q, args["y_fp8"], (*leading, 5120)),
+                ):
+                    self.assertEqual(result.data_ptr(), storage.data_ptr())
+                    self.assertEqual(result.shape, shape)
+                    self.assertEqual(result.stride(), storage.view(shape).stride())
+                self.assertEqual(sf.data_ptr(), args["y_gemm_sf"].data_ptr())
+                self.assertEqual(sf.shape, (tokens, 40))
+                self.assertEqual(sf.stride(), (1, (tokens + 3) // 4 * 4))
+                residual.unsqueeze_(0)
+                self.assertEqual(case["residual"].shape, (*leading, 4, 5120))
+
     def test_failure_and_cold_fallback_do_not_publish_mixes(self):
         case = _case((32,))
         previous_pre = case["previous"].pre_mix_out
