@@ -63,6 +63,17 @@ py_test(
     ],
 )
 
+py_test(
+    name = "deepseek_v41_pd_startup_test",
+    srcs = [
+        "deepseek_v41_contract_test.py",
+        "deepseek_v41_pd_contract_test.py",
+        "deepseek_v41_pd_startup_test.py",
+    ],
+    env = {"GPU_COUNT": "0"},
+    deps = SMOKE_FRAMEWORK_DEPS + ["//rtp_llm:sdk"],
+)
+
 exports_files([
     "entry.py",
     "data/prompt_candidates.json",
