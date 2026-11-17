@@ -142,10 +142,9 @@ final class FlexlbConfigValidator {
             }
             require(!config.isPrefillCostOrder()
                             || (config.isSingleDecision()
-                                && config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH
-                                && config.getRouter().getRoles().getPrefill().getTokenBalance() != null),
+                                && config.getDispatcher().getType() == DispatcherConfig.Type.NON_BATCH),
                     "scheduler.ordering.prefillCostOrder",
-                    "requires QUEUE, SINGLE, NON_BATCH and tokenBalance");
+                    "requires QUEUE, SINGLE and NON_BATCH");
             validateQueue(config.queueScheduler());
         }
         config.getDispatcher().validateFor(config.getScheduler());
