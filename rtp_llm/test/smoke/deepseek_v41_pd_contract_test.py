@@ -9,6 +9,7 @@ from pathlib import Path
 
 from rtp_llm.server.host_service import EndPoint, GroupEndPoint, ServiceRoute
 from rtp_llm.test.smoke import deepseek_v41_contract_test as contract
+from rtp_llm.test.smoke.startup_resource_monitor import monitor_startup_resources
 from rtp_llm.test.utils.device_resource import get_gpu_ids
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
@@ -23,6 +24,11 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
     reuse_field = "prefill_total_reuse_len"
 
     def start_servers(self):
+        resource_cleanup = ExitStack()
+        self.addCleanup(resource_cleanup.close)
+        resource_cleanup.enter_context(
+            monitor_startup_resources(self.output_dir / "startup_resources.jsonl")
+        )
         gpu_ids = list(get_gpu_ids())
         role_size = self.prefill_cp_size
         self.assertGreaterEqual(len(gpu_ids), 2 * role_size)

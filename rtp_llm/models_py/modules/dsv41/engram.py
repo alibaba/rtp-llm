@@ -25,6 +25,7 @@ import math
 import mmap
 import os
 import shutil
+import threading
 import time
 import uuid
 import weakref
@@ -543,9 +544,12 @@ class _PinnedSharedTable:
                             offset = 0
                             next_progress_bytes = 8 * 1024**3
                             logger.info(
-                                "Engram staging copy started path=%s total_bytes=%s",
+                                "Engram staging copy started path=%s total_bytes=%s "
+                                "pid=%s native_tid=%s",
                                 partial,
                                 total_bytes,
+                                os.getpid(),
+                                threading.get_native_id(),
                             )
                             for tensor in sources:
                                 source = tensor.view(torch.uint8).reshape(-1).numpy()
