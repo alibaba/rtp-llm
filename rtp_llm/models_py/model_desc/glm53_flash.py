@@ -8,6 +8,7 @@ Hybrid architecture:
 
 import logging
 import os
+from contextlib import nullcontext
 from importlib.util import find_spec
 from typing import Any, Dict, Optional
 
@@ -59,6 +60,9 @@ from rtp_llm.models_py.modules.glm53_mega_mhc import (
     fused_post_pre_rms,
 )
 from rtp_llm.models_py.modules.glm53_mhc import fused_post_pre as glm53_fused_post_pre
+from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_wrapper import (
+    glm_prefill_moe_chunk_plan,
+)
 from rtp_llm.models_py.modules.hybrid.glm53_mla_attention import MlaAttention
 from rtp_llm.models_py.triton_kernels.causal_conv1d.glm53_causal_conv1d import (
     CausalConv1dMetadata,
@@ -1899,69 +1903,80 @@ class Glm53FlashModel(GptModelBase):
             and len(self.layers) > 0
         )
         deferred_post = deferred_comb = None
-        for i, decoder_layer in enumerate(self.layers):
-            is_linear = decoder_layer.layer_type == HybridAttentionType.LINEAR
-            tag = "linear" if is_linear else "full"
-            layer_inputs = linear_inputs if is_linear else attention_inputs
-            layer_kv_cache = (
-                self.kv_cache.get_layer_cache(i, tag) if self.kv_cache else None
+        moe_chunk_plan = (
+            glm_prefill_moe_chunk_plan(
+                self.layers,
+                hidden_states.shape[0],
+                hidden_states.device,
+                token_sharded=attn_meta.token_shard is not None,
             )
-            if use_deferred_mhc:
-                hidden_states, residual, deferred_post, deferred_comb = (
-                    decoder_layer.forward_hc_deferred(
-                        hidden_states,
-                        fmha_impl,
-                        layer_kv_cache,
-                        layer_inputs,
-                        attn_meta,
-                        self.kv_cache,
-                        residual,
-                        deferred_post,
-                        deferred_comb,
-                    )
+            if attention_inputs.is_prefill and not is_target_verify
+            else nullcontext()
+        )
+        with moe_chunk_plan:
+            for i, decoder_layer in enumerate(self.layers):
+                is_linear = decoder_layer.layer_type == HybridAttentionType.LINEAR
+                tag = "linear" if is_linear else "full"
+                layer_inputs = linear_inputs if is_linear else attention_inputs
+                layer_kv_cache = (
+                    self.kv_cache.get_layer_cache(i, tag) if self.kv_cache else None
                 )
-            else:
-                if _HC_VALIDATED_DISPATCH and i > 0:
-                    # Layer zero validates the public HC input/output contract.
-                    # Every Kimi HC layer has the same implementation, dim and
-                    # hc_mult; later kernels retain their own layout checks.
-                    output = decoder_layer(
-                        hidden_states,
-                        residual,
-                        fmha_impl,
-                        kv_cache=layer_kv_cache,
-                        attention_inputs=layer_inputs,
-                        attn_meta=attn_meta,
-                        global_kv_cache=self.kv_cache,
-                        hc_shapes_validated=True,
+                if use_deferred_mhc:
+                    hidden_states, residual, deferred_post, deferred_comb = (
+                        decoder_layer.forward_hc_deferred(
+                            hidden_states,
+                            fmha_impl,
+                            layer_kv_cache,
+                            layer_inputs,
+                            attn_meta,
+                            self.kv_cache,
+                            residual,
+                            deferred_post,
+                            deferred_comb,
+                        )
                     )
                 else:
-                    output = decoder_layer(
-                        hidden_states,
-                        residual,
-                        fmha_impl,
-                        kv_cache=layer_kv_cache,
-                        attention_inputs=layer_inputs,
-                        attn_meta=attn_meta,
-                        global_kv_cache=self.kv_cache,
-                    )
-                hidden_states = output.hidden_states
-                residual = output.residual
-            if (
-                self.kv_cache is not None
-                and layer_inputs.is_prefill
-                and not is_target_verify
-            ):
-                for layer_cache in self.kv_cache.get_layer_cache_groups(i):
-                    if layer_cache.tag == "full":
-                        continue  # Full MLA publishes its own cache after the write.
-                    group = select_attention_inputs_for_tag(
-                        group_inputs, layer_cache.tag
-                    )
-                    if group.cache_store_writer and group.cache_store_inputs:
-                        group.cache_store_writer.write(
-                            group.cache_store_inputs, layer_cache
+                    if _HC_VALIDATED_DISPATCH and i > 0:
+                        # Layer zero validates the public HC input/output contract.
+                        # Every Kimi HC layer has the same implementation, dim and
+                        # hc_mult; later kernels retain their own layout checks.
+                        output = decoder_layer(
+                            hidden_states,
+                            residual,
+                            fmha_impl,
+                            kv_cache=layer_kv_cache,
+                            attention_inputs=layer_inputs,
+                            attn_meta=attn_meta,
+                            global_kv_cache=self.kv_cache,
+                            hc_shapes_validated=True,
                         )
+                    else:
+                        output = decoder_layer(
+                            hidden_states,
+                            residual,
+                            fmha_impl,
+                            kv_cache=layer_kv_cache,
+                            attention_inputs=layer_inputs,
+                            attn_meta=attn_meta,
+                            global_kv_cache=self.kv_cache,
+                        )
+                    hidden_states = output.hidden_states
+                    residual = output.residual
+                if (
+                    self.kv_cache is not None
+                    and layer_inputs.is_prefill
+                    and not is_target_verify
+                ):
+                    for layer_cache in self.kv_cache.get_layer_cache_groups(i):
+                        if layer_cache.tag == "full":
+                            continue  # Full MLA publishes its own cache after the write.
+                        group = select_attention_inputs_for_tag(
+                            group_inputs, layer_cache.tag
+                        )
+                        if group.cache_store_writer and group.cache_store_inputs:
+                            group.cache_store_writer.write(
+                                group.cache_store_inputs, layer_cache
+                            )
 
         if use_deferred_mhc:
             assert deferred_post is not None and deferred_comb is not None

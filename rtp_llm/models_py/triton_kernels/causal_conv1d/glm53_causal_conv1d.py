@@ -93,8 +93,10 @@ def prepare_causal_conv1d_metadata(
             For example, if sequences have lengths [5, 1, 1, 1], then
             query_start_loc = [0, 5, 6, 7, 8].
         device: The device to place the output tensors on.
-        query_start_loc_cpu: Optional CPU mirror of query_start_loc. The caller
-            must supply the same boundaries when this mirror is available.
+        query_start_loc_cpu: Optional CPU mirror of query_start_loc. An empty
+            CPU tensor means that the framework built metadata on the GPU and
+            did not retain a host mirror. A populated mirror must contain the
+            same boundaries as query_start_loc.
 
     Returns:
         CausalConv1dMetadata containing precomputed batch_ptr, token_chunk_offset_ptr,
@@ -106,11 +108,15 @@ def prepare_causal_conv1d_metadata(
         >>> output = causal_conv1d_fn(x, weight, bias, ..., metadata=metadata)
     """
     if query_start_loc_cpu is not None:
-        if (
-            query_start_loc_cpu.device.type != "cpu"
-            or query_start_loc_cpu.shape != query_start_loc.shape
-        ):
+        if query_start_loc_cpu.device.type != "cpu":
             raise ValueError("query_start_loc_cpu must be a matching CPU mirror")
+        # PyWrappedModel represents an unavailable host mirror with an empty
+        # tensor when input lengths already reside on the GPU (e.g. MTP warmup).
+        if query_start_loc_cpu.numel() == 0:
+            query_start_loc_cpu = None
+        elif query_start_loc_cpu.shape != query_start_loc.shape:
+            raise ValueError("query_start_loc_cpu must be a matching CPU mirror")
+    if query_start_loc_cpu is not None:
         boundaries = query_start_loc_cpu.numpy()
     else:
         boundaries = query_start_loc.cpu().numpy()
@@ -550,9 +556,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
 def _compiled_prefill_runner(device, dtypes, launch_values, grid):
     # Retain compiled code only. The returned launcher resolves the current
     # CUDA stream on every call, preserving the model's asynchronous ordering.
-    kernel = _causal_conv1d_fwd_kernel.warmup(
-        *dtypes, *launch_values, grid=grid
-    )
+    kernel = _causal_conv1d_fwd_kernel.warmup(*dtypes, *launch_values, grid=grid)
     return kernel[grid]
 
 

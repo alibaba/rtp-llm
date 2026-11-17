@@ -8,6 +8,7 @@ into one kernel, so there's no separate router/executor.
 """
 
 import logging
+from contextlib import nullcontext
 from typing import Any, Dict, Optional
 
 import torch
@@ -19,6 +20,7 @@ from rtp_llm.models_py.modules.dsv4.chunk_env import (
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.fp8_fp4.chunked_layer import (
     resolve_moe_max_tokens_per_rank,
+    synchronized_moe_chunk_plan,
     synchronized_moe_chunk_tokens,
 )
 
@@ -26,6 +28,30 @@ from .mega_moe import GLM5MegaMoE
 
 logger = logging.getLogger(__name__)
 _CHUNKED_GLM5_MOE_LOGGED = False
+
+
+def glm_prefill_moe_chunk_plan(layers, tokens, device, *, token_sharded=False):
+    """Share one EP plan across a GLM stack with unchanged routed geometry.
+
+    Standalone wrappers retain their per-call synchronization. Heterogeneous
+    routing layouts also use that fallback rather than sharing an unsafe plan.
+    """
+    moes = [getattr(layer, "mlp", None) for layer in layers]
+    moes = [
+        moe
+        for moe in moes
+        if isinstance(getattr(moe, "fused_moe", None), MegaMoeWrapper)
+        and not moe.fused_moe._is_decode_role
+    ]
+    layouts = {(moe.routed_tp_size, moe.route_local_tokens) for moe in moes}
+    if len(layouts) != 1:
+        return nullcontext()
+    tp_size, local_router = next(iter(layouts))
+    if not token_sharded and tp_size > 1:
+        tokens = (tokens + tp_size - 1) // tp_size
+        if not local_router:
+            tokens = max(tokens, 1)  # slice_routed_tokens pads an empty input.
+    return synchronized_moe_chunk_plan([moe.fused_moe for moe in moes], tokens, device)
 
 
 def _split_stacked_moe_w1_up_gate(
@@ -60,6 +86,11 @@ class MegaMoeWrapper(nn.Module):
         # then forward as usual:
         output = self.fused_moe(hidden_states, topk_weights, topk_ids, activation="SiGLU")
     """
+
+    # Participate in the framework's forward-scoped EP chunk plan. Chunking
+    # still protects physical kernel capacity when the env budget is disabled.
+    strategy_name = "mega_moe"
+    chunking_enabled = True
 
     def _get_mega_moe_cls(self):
         return GLM5MegaMoE
