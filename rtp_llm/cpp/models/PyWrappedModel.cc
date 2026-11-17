@@ -24,6 +24,7 @@
 #include <c10/cuda/CUDAStream.h>
 #include "rtp_llm/models_py/bindings/cuda/Bf16GemmOp.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/attention_input_metadata.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/mtp_draft_top1.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/scaled_fp8_quant.h"
 #include <ATen/ops/_scaled_mm.h>
 #endif
@@ -1273,6 +1274,29 @@ torch::Tensor PyWrappedModel::tpSyncEmbeddingOrLogits(const torch::Tensor& input
     return transposed;
 }
 
+std::pair<torch::Tensor, torch::Tensor> PyWrappedModel::sampleMtpDraftTop1(const torch::Tensor& local_logits,
+                                                                           bool                 fp32_probs) {
+    RTP_LLM_PROFILE_SCOPE("py_model.mtp_sharded_top1");
+#if USING_CUDA
+    const auto vocab      = description_.output_vocab_size > 0 ? description_.output_vocab_size :
+                                                                 local_logits.size(1) * device_props_.tp_size;
+    auto       candidates = mtpDraftLocalTop1(local_logits, device_props_.tp_size, device_props_.tp_rank, vocab);
+    if (device_props_.tp_size > 1 && local_logits.size(0) > 0) {
+        execAllGather({{candidates}});
+    }
+    auto tokens = mtpDraftGlobalTop1(candidates);
+    auto probs  = torch::zeros({local_logits.size(0), static_cast<int64_t>(vocab)},
+                              fp32_probs ? local_logits.options().dtype(torch::kFloat32) : local_logits.options());
+    probs.scatter_(-1, tokens, 1.0);
+    if (tokens.size(0) > 0) {
+        execMappingDraft2Target({tokens, weights_.d2t_map, static_cast<int>(tokens.size(0)), 0, 1});
+    }
+    return {tokens, probs};
+#else
+    TORCH_CHECK(false, "MTP sharded top1 requires CUDA");
+#endif
+}
+
 GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
                                                   const bool            has_context_request,
                                                   const bool            need_all_logits,
@@ -1356,6 +1380,14 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             }
         }
         printTorchTensorData(logits, "logits");
+        if (mtp_sharded_top1_ && !need_all_logits) {
+            auto [tokens, probs]      = sampleMtpDraftTop1(logits, true);
+            outputs.draft_top1_tokens = tokens;
+            outputs.draft_top1_probs  = probs;
+            outputs.hidden_states     = last_hidden;
+            outputs.all_hidden_states = merged_eagle3_hidden.defined() ? merged_eagle3_hidden : hidden;
+            return outputs;
+        }
         if (device_props_.tp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(tp_sync_logits)");
             logits = tpSyncEmbeddingOrLogits(logits);
@@ -1413,6 +1445,19 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     torch::Tensor last_hidden = hidden;
     auto          logits      = computeLogits(last_hidden);
     printTorchTensorData(logits, "logits");
+    // Compact output has historically retained padding. Preserve that contract
+    // when a padded vocabulary is present, and when callers request all logits.
+    if (mtp_sharded_top1_ && !inputs.need_all_logits
+        && (description_.output_vocab_size == 0
+            || description_.output_vocab_size == static_cast<size_t>(logits.size(1) * device_props_.tp_size))) {
+        GptModelOutputs outputs;
+        auto [tokens, probs]      = sampleMtpDraftTop1(logits, true);
+        outputs.draft_top1_tokens = tokens;
+        outputs.draft_top1_probs  = probs;
+        outputs.hidden_states     = last_hidden;
+        outputs.all_hidden_states = last_hidden;
+        return outputs;
+    }
     if (device_props_.tp_size > 1) {
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(tp_sync_logits)");
         logits = tpSyncEmbeddingOrLogits(logits);

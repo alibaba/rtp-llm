@@ -44,6 +44,17 @@
 
 namespace rtp_llm {
 
+namespace {
+speculative::FastTopKSamplerOutput sampleOrdinaryMtpDraft(const GptModelOutputs&        output,
+                                                          speculative::FastTopKSampler& sampler) {
+    if (output.draft_top1_tokens.defined()) {
+        RTP_LLM_CHECK_WITH_INFO(output.draft_top1_probs.defined(), "MTP top1 output is missing probabilities");
+        return {output.draft_top1_probs, output.draft_top1_tokens};
+    }
+    return sampler.forward(output.logits, 1);
+}
+}  // namespace
+
 bool MtpExecutor::dsparkPrefillCPRoleIsValid(const PrefillCPConfig& prefill_cp_config, RoleType role_type) {
     return !prefill_cp_config.is_enabled() || role_type == RoleType::PREFILL;
 }
@@ -1243,7 +1254,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             // Seeding is commit-only: there is no proposal to sample. The
             // decode worker produces the first proposal at its round head.
         } else {
-            fast_topk_sampler_output       = fast_topk_sampler_->forward(draft_model_output.logits);
+            fast_topk_sampler_output       = sampleOrdinaryMtpDraft(draft_model_output, *fast_topk_sampler_);
             draft_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
             draft_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
         }
@@ -1872,7 +1883,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             // Tail is commit-only; the proposal lives and dies inside one
             // round, so no bookkeeping/PD channel carries it anymore.
         } else {
-            auto fast_topk_sampler_output          = fast_topk_sampler_->forward(draft_prefill_model_output.logits);
+            auto fast_topk_sampler_output = sampleOrdinaryMtpDraft(draft_prefill_model_output, *fast_topk_sampler_);
             draft_prefill_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
             draft_prefill_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
         }
@@ -3058,7 +3069,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %zu forward done", i);
 
         // sample
-        auto fast_topk_sampler_output = fast_topk_sampler_->forward(draft_decode_model_output.logits, 1);
+        auto fast_topk_sampler_output = sampleOrdinaryMtpDraft(draft_decode_model_output, *fast_topk_sampler_);
         auto draft_probs              = fast_topk_sampler_output.all_probs;
         auto draft_probs_reshape      = draft_probs.reshape({(int)batch_size, 1, -1});
         auto draft_token_ids          = fast_topk_sampler_output.token_ids;
