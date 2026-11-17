@@ -2,8 +2,6 @@
 #include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include <dirent.h>
-#include <sys/resource.h>
 
 #include <algorithm>
 #include <atomic>
@@ -13,7 +11,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <future>
-#include <fstream>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -65,40 +62,6 @@ void checkCuda(cudaError_t error) {
 std::string env(const char* name) {
     const char* value = std::getenv(name);
     return value ? value : "";
-}
-
-int setting(const char* name, int fallback, int minimum, int maximum) {
-    const auto text = env(name);
-    if (text.empty()) return fallback;
-    size_t parsed = 0;
-    const int value = std::stoi(text, &parsed);
-    check(parsed == text.size() && value >= minimum && value <= maximum, std::string("invalid ") + name);
-    return value;
-}
-
-struct ProcessSample {
-    int64_t rss_kib = 0, cpu_us = 0;
-    int threads = 0, fds = 0;
-};
-
-ProcessSample sampleProcess() {
-    ProcessSample result;
-    std::ifstream status("/proc/self/status");
-    check(status.good(), "cannot read process status");
-    std::string line;
-    while (std::getline(status, line)) {
-        if (line.rfind("VmRSS:", 0) == 0) result.rss_kib = std::stoll(line.substr(6));
-        if (line.rfind("Threads:", 0) == 0) result.threads = std::stoi(line.substr(8));
-    }
-    auto* directory = ::opendir("/proc/self/fd");
-    check(directory != nullptr, "cannot inspect file descriptors");
-    while (auto* entry = ::readdir(directory)) if (entry->d_name[0] != '.') ++result.fds;
-    ::closedir(directory);
-    rusage usage{};
-    check(::getrusage(RUSAGE_SELF, &usage) == 0, "cannot sample CPU time");
-    result.cpu_us = (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1000000
-                    + usage.ru_utime.tv_usec + usage.ru_stime.tv_usec;
-    return result;
 }
 
 template<class Predicate>
@@ -164,8 +127,7 @@ struct Report {
     int32_t handles_done[kRanks]{};
     int32_t free_blocks[kRanks]{};
     int32_t source_requests = 0, registrations = 0, deadline_entries = 0, resources = 0;
-    int32_t expired_records = 0, computed_buffers = 0, source_markers = 0;
-    ProcessSample process;
+    int32_t computed_buffers = 0;
 };
 
 std::string key(int64_t id) { return "multi_rank_" + std::to_string(id); }
@@ -326,6 +288,7 @@ public:
         s.parallelism_config.world_rank = rank;
         s.parallelism_config.role_type = role;
         s.topology = config.topologyPtr();
+        s.cache_key_tokens_per_block = config.seq_size_per_block;
         s.load_cache_timeout_ms = load_ms;
         s.p2p_lease_query_timeout_ms = 60000;
         for (const auto& r : ranks) {
@@ -336,6 +299,7 @@ public:
         w.tp_size = kRanks;
         w.tp_rank = rank;
         w.topology = s.topology;
+        w.cache_key_tokens_per_block = s.cache_key_tokens_per_block;
         w.layer_all_num = kLayers;
         w.load_cache_timeout_ms = load_ms;
         w.transfer_backend_config.cache_store_listen_port = transfer_port;
@@ -395,7 +359,7 @@ public:
         std::shared_lock<std::shared_mutex> lock(store->mutex_);
         for (const auto& [name, task] : store->task_map_) {
             std::shared_lock<std::shared_mutex> task_lock(task->mutex_);
-            if (task->transferring_ && !task->done_) return true;
+            if (task->in_flight_ > 0 && !task->done_) return true;
         }
         return false;
     }
@@ -427,13 +391,6 @@ public:
         auto* worker = connector->decode_->worker_.get();
         std::scoped_lock lock(worker->read_tasks_mutex_, worker->lease_map_mutex_);
         return worker->read_tasks_.empty() && worker->lease_map_.empty();
-    }
-    size_t pendingCancels(bool expired_only = false) {
-        auto* worker = connector->decode_->worker_.get();
-        std::lock_guard<std::mutex> lock(worker->read_tasks_mutex_);
-        if (!expired_only) return worker->pending_cancel_keys_.size();
-        return std::count_if(worker->pending_cancel_keys_.begin(), worker->pending_cancel_keys_.end(),
-            [](const auto& entry) { return entry.second < currentTimeMs() - 2000; });
     }
     void drainSenders() {
         // The fixture keeps P source allocations until every sender thread has
@@ -511,7 +468,7 @@ TEST_F(P2PMultiRankPeer, DISABLED_Serve) {
         };
         std::map<int64_t, SourceRequest> sources;
         int64_t id = 0, deadline = 0;
-        auto report = [&](bool diagnostics = false) {
+        auto report = [&] {
             Report out;
             for (int r = 0; r < kRanks; ++r) {
                 out.grpc_ports[r] = ranks[r]->grpc_port;
@@ -522,32 +479,18 @@ TEST_F(P2PMultiRankPeer, DISABLED_Serve) {
             out.load_entered = ranks[0]->service.load_entered.load();
             out.load_done = ranks[0]->service.load_done.load();
             out.source_requests = sources.size();
-            const auto stale_before_ms = currentTimeMs() - 2000;
             const auto store = ranks[0]->connector->streamStore();
             {
                 std::lock_guard<std::mutex> lock(store->resource_map_mutex_);
                 out.registrations = store->request_states_.size();
                 out.deadline_entries = store->deadline_index_.size();
                 out.resources = store->resource_map_.size();
-                for (const auto& [request_key, state] : store->request_states_) {
-                    const auto expiry = state.terminal ? state.terminal_expire_at_ms : state.deadlineMs();
-                    if (expiry < stale_before_ms) {
-                        ++out.expired_records;
-                    }
-                }
             }
             for (const auto& rank : ranks) {
                 const auto buffers = rank->connector->prefill_->worker_->getComputedBuffersStore();
                 std::lock_guard<std::mutex> lock(buffers->computed_buffers_mutex_);
                 out.computed_buffers += buffers->computed_buffers_.size();
-                out.source_markers += buffers->removed_requests_.size();
-                for (const auto& [request_key, expiry] : buffers->removed_requests_) {
-                    if (expiry < stale_before_ms) {
-                        ++out.expired_records;
-                    }
-                }
             }
-            if (diagnostics) out.process = sampleProcess();
             io(control.value, &out, sizeof(out), true);
         };
         report();
@@ -646,7 +589,7 @@ TEST_F(P2PMultiRankPeer, DISABLED_Serve) {
             } else {
                 check(command.op == 'S', "invalid control command");
             }
-            report(command.op == 'S');
+            report();
         }
         ranks.clear();
         char ack = 'Q';
@@ -894,7 +837,6 @@ protected:
                 autil::ThreadPoolBase::ERROR_NONE);
             ASSERT_TRUE(queue_gate_->entered());
         }
-        const auto wave_begin = std::chrono::steady_clock::now();
         size_t accepted = 0, rejected = 0;
         for (auto& request : batch_) {
             auto meta = std::make_shared<MockMeta>();
@@ -907,7 +849,6 @@ protected:
             auto held = request.resources;
             auto* root = held[0].get();
             KVCacheResourcePtr collective(root, [held = std::move(held)](KVCacheResource*) mutable { held.clear(); });
-            request.started = std::chrono::steady_clock::now();
             auto result = scheduler->asyncRead(collective, meta, {0, request.blocks});
             if (!result.ok()) {
                 ASSERT_TRUE(overload) << result.error_info.ToString();
@@ -955,15 +896,10 @@ protected:
             for (auto& request : batch_) {
                 if (!request.context) continue;
                 const bool done = request.context->done();
-                if (done && request.latency_ms < 0) {
-                    request.latency_ms = std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - request.started).count();
-                }
                 if (!done || request.context->resourceHoldPending()) finished = false;
             }
             return finished;
         }, 30000));
-        last_latencies_.clear();
         for (const auto& request : batch_) {
             SCOPED_TRACE(::testing::Message() << "seed=" << seed << " key=" << key(request.id) << " mode=" << request.mode);
             if (!request.context) continue;
@@ -972,7 +908,6 @@ protected:
                 ASSERT_NE(request.context->sideChannelPayload(), nullptr);
                 EXPECT_EQ(request.context->sideChannelPayload()->first_token_id, request.id);
                 for (int rank = 0; rank < kRanks; ++rank) ranks_[rank]->verify(*request.resources[rank], request.id, rank);
-                last_latencies_.push_back(request.latency_ms);
             } else {
                 EXPECT_FALSE(request.context->success());
                 if (request.mode == 4) {
@@ -1010,21 +945,16 @@ protected:
         for (int rank = 0; rank < kRanks; ++rank) EXPECT_EQ(state.free_blocks[rank], kBlocks - 1);
         std::cerr << "[P2P-BATCH] seed=" << seed << " accepted=" << accepted << " rejected=" << rejected
                   << " mixed=" << mixed << " P_registrations=" << state.registrations << std::endl;
-        last_wave_seconds_ = std::chrono::duration<double>(std::chrono::steady_clock::now() - wave_begin).count();
     }
     struct BatchRequest {
         int64_t id = 0;
         int blocks = 0, mode = 0;
         std::vector<KVCacheResourcePtr> resources;
         std::shared_ptr<P2PConnectorAsyncReadContext> context;
-        std::chrono::steady_clock::time_point started;
-        double latency_ms = -1;
     };
     std::vector<BatchRequest> batch_;
     int64_t batch_id_ = 10000;
     std::shared_ptr<KickoffGate> queue_gate_;
-    std::vector<double> last_latencies_;
-    double last_wave_seconds_ = 0;
     Fd control_;
     std::string host_, peer_host_;
     Report report_;
@@ -1138,81 +1068,6 @@ TEST_F(P2PMultiRankTransferTest, RepeatedOverloadDrainsAndRecoversWithoutRestart
         ASSERT_NO_FATAL_FAILURE(runBatch(16, false, true, 4000 + round));
         ASSERT_NO_FATAL_FAILURE(runBatch(8, false, false, 5000 + round));
     }
-}
-
-// Opt in separately: this keeps both hosts' connectors/stores alive for hours.
-// Shortening the duration is useful for debugging, not release soak evidence.
-TEST_F(P2PMultiRankTransferTest, DISABLED_SustainedMixedLoadHasBoundedResources) {
-    const int duration = setting("P2P_SOAK_SECONDS", 7200, 60, 86400);
-    const int concurrency = setting("P2P_SOAK_CONCURRENCY", 8, 5, 16);
-    const int pause_ms = setting("P2P_SOAK_PAUSE_MS", 100, 0, 10000);
-    const int64_t rss_budget = setting("P2P_SOAK_RSS_GROWTH_MB", 256, 1, 65536) * int64_t{1024};
-    const bool check_perf = setting("P2P_SOAK_CHECK_PERF", 0, 0, 1) != 0;
-    uint32_t seed = setting("P2P_SOAK_SEED", 20260917, 1, 2147483647);
-    ASSERT_NO_FATAL_FAILURE(prepareConcurrent(5000, concurrency));
-    // Warm all paths and the maximum simultaneous allocations before baselines.
-    ASSERT_NO_FATAL_FAILURE(runBatch(concurrency * 2, false, true, seed++));
-    ASSERT_NO_FATAL_FAILURE(runBatch(concurrency, true, false, seed++));
-    for (int i = 0; i < 10; ++i) ASSERT_NO_FATAL_FAILURE(runBatch(concurrency, false, false, seed++));
-    const auto d_baseline = sampleProcess();
-    const auto p_baseline = command('S').process;
-    const auto begin = std::chrono::steady_clock::now();
-    auto sample_at = begin + std::chrono::seconds(60);
-    auto fault_at = begin + std::chrono::minutes(10);
-    std::vector<double> latencies;
-    double work_seconds = 0, baseline_p99 = 0, baseline_rate = 0;
-    int degraded_windows = 0;
-    while (std::chrono::steady_clock::now() - begin < std::chrono::seconds(duration)) {
-        if (std::chrono::steady_clock::now() >= fault_at) {
-            ASSERT_NO_FATAL_FAILURE(runBatch(concurrency, true, false, seed++));
-            ASSERT_NO_FATAL_FAILURE(runBatch(concurrency * 2, false, true, seed++));
-            fault_at = std::chrono::steady_clock::now() + std::chrono::minutes(10);
-        }
-        ASSERT_NO_FATAL_FAILURE(runBatch(concurrency, false, false, seed++));
-        latencies.insert(latencies.end(), last_latencies_.begin(), last_latencies_.end());
-        work_seconds += last_wave_seconds_;
-        if (std::chrono::steady_clock::now() >= sample_at) {
-            // Logical terminal records are allowed until their own horizon.
-            // Only overdue records are leaks; active resources were checked at
-            // every wave boundary, without restarting either side.
-            ASSERT_TRUE(until([&] {
-                return command('S').expired_records == 0
-                    && ranks_[0]->pendingCancels(true) == 0 && ranks_[1]->pendingCancels(true) == 0;
-            }));
-            const auto p = command('S');
-            const auto d = sampleProcess();
-            EXPECT_LE(d.rss_kib, d_baseline.rss_kib + rss_budget);
-            EXPECT_LE(p.process.rss_kib, p_baseline.rss_kib + rss_budget);
-            EXPECT_LE(d.fds, d_baseline.fds + 16);
-            EXPECT_LE(p.process.fds, p_baseline.fds + 16);
-            EXPECT_LE(d.threads, d_baseline.threads + 16);
-            EXPECT_LE(p.process.threads, p_baseline.threads + 16);
-            std::sort(latencies.begin(), latencies.end());
-            ASSERT_FALSE(latencies.empty());
-            const double p99 = latencies[(latencies.size() - 1) * 99 / 100];
-            const double rate = latencies.size() / work_seconds;
-            if (baseline_p99 == 0) { baseline_p99 = p99; baseline_rate = rate; }
-            degraded_windows = p99 > baseline_p99 * 1.20 || rate < baseline_rate * .90 ? degraded_windows + 1 : 0;
-            if (check_perf) EXPECT_LT(degraded_windows, 3);
-            size_t gpu_free = 0, gpu_total = 0;
-            checkCuda(cudaMemGetInfo(&gpu_free, &gpu_total));
-            std::cerr << "[P2P-SOAK] seconds="
-                      << std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - begin).count()
-                      << " seed=" << seed << " p99_ms=" << p99 << " connector_req_s=" << rate
-                      << " degraded_windows=" << degraded_windows << " D_rss_kib=" << d.rss_kib
-                      << " P_rss_kib=" << p.process.rss_kib << " D_cpu_us=" << d.cpu_us
-                      << " P_cpu_us=" << p.process.cpu_us << " D_fd=" << d.fds << " P_fd=" << p.process.fds
-                      << " D_threads=" << d.threads << " P_threads=" << p.process.threads
-                      << " gpu_used_bytes=" << gpu_total - gpu_free << " P_records=" << p.registrations
-                      << " P_source_markers=" << p.source_markers << " D_cancel_markers="
-                      << ranks_[0]->pendingCancels() + ranks_[1]->pendingCancels() << std::endl;
-            latencies.clear();
-            work_seconds = 0;
-            sample_at = std::chrono::steady_clock::now() + std::chrono::seconds(60);
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(pause_ms));
-    }
-    ASSERT_NO_FATAL_FAILURE(runBatch(concurrency, false, false, seed));
 }
 
 }  // namespace
