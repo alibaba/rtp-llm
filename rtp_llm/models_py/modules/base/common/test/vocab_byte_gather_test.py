@@ -1,4 +1,5 @@
 import unittest
+from datetime import timedelta
 from unittest.mock import patch
 
 import torch
@@ -23,7 +24,7 @@ class VocabByteGatherTest(VocabByteGatherTestFixture, unittest.TestCase):
             ("_get_group", {"return_value": self.tp_group}),
             (
                 "exchange_group_state",
-                {"side_effect": lambda _, state, tag: [state] * 2},
+                {"side_effect": lambda _, state, tag, **kwargs: [state] * 2},
             ),
         ):
             patcher = patch(MODULE + "." + name, **options)
@@ -44,7 +45,10 @@ class VocabByteGatherTest(VocabByteGatherTestFixture, unittest.TestCase):
             ):
                 module.prepare_byte_gather()
             agree.assert_called_once_with(
-                self.tp_group, capability == (12, 0), "vocabulary_byte_gather"
+                self.tp_group,
+                capability == (12, 0),
+                "vocabulary_byte_gather",
+                timeout=timedelta(minutes=10),
             )
             gather.assert_not_called()
             self.assertIsNone(module.column_scales)

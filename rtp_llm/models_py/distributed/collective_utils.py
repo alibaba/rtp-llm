@@ -8,7 +8,7 @@ import torch.distributed as dist
 _exchange_epochs = {}
 
 
-def exchange_group_state(group, state, tag):
+def exchange_group_state(group, state, tag, *, timeout=timedelta(seconds=120)):
     # All members execute the same initialization sequence. Include the group
     # and round so reinitialization cannot consume an earlier decision.
     name = getattr(group, "group_name", "default")
@@ -19,5 +19,5 @@ def exchange_group_state(group, state, tag):
     store = dist.distributed_c10d._get_default_store()
     keys = [prefix + str(rank) for rank in range(dist.get_world_size(group))]
     store.set(keys[dist.get_rank(group)], json.dumps(state).encode())
-    store.wait(keys, timedelta(seconds=120))
+    store.wait(keys, timeout)
     return [json.loads(store.get(key)) for key in keys]
