@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import suppress
 from typing import Any, Dict, List, Optional
 
 import psutil
@@ -287,10 +288,12 @@ class MagaServerManager(object):
                     parent.children(recursive=True)
                 )  # 获取所有子进程（递归）
                 for child in children:
-                    child.terminate()  # 先尝试优雅终止
+                    with suppress(psutil.NoSuchProcess):
+                        child.terminate()
                 _, alive = psutil.wait_procs(children, timeout=5)
                 for child in alive:
-                    child.kill()  # 强制终止未退出的进程
+                    with suppress(psutil.NoSuchProcess):
+                        child.kill()
                 parent.terminate()
                 # 添加超时机制，避免永久阻塞
                 try:
