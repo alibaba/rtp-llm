@@ -1,11 +1,21 @@
 """Paged indexer regression for heterogeneous shared-cache block pitches."""
 
+import contextlib
+import sys
 import unittest
 from unittest import mock
 
 import torch
 
-from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_score, glm53_indexer_score
+# The host contracts exercise layout/reference code and mock the native call.
+# DeepGEMM's wheel initializes CUDA at import, even on a CPU-only worker.
+# GPU tests still import and execute the real installed backends.
+with (
+    contextlib.nullcontext()
+    if torch.cuda.is_available()
+    else mock.patch.dict(sys.modules, {"deep_gemm": None})
+):
+    from rtp_llm.models_py.modules.dsv4.fp8 import _indexer_score, glm53_indexer_score
 from rtp_llm.models_py.modules.dsv4.fp8._indexer_cache_view import (
     paged_indexer_cache_view,
 )
