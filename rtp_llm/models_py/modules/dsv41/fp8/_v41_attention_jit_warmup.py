@@ -565,12 +565,6 @@ def _warm_pool(attn, layout, cp_size, cp_rank, max_batch_size, device):
             gather_fp8_indexer(pages, slots)
             unpack_raw_fp8_indexer(gather_raw_fp8_indexer(pages, slots))
             return
-        from . import _v41_grouped_gemm
-
-        if _v41_grouped_gemm._enabled():
-            _require_launch(
-                _v41_grouped_gemm.warmup(attn.index_wk), "grouped index GEMM"
-            )
         pool = _private_pool(layout, 68, device)
         projected = torch.zeros((rows, 128), dtype=torch.bfloat16, device=device)
         for offset, slot_offset in ((0, 0), (0, 1), (1, 0), (1, 1)):
