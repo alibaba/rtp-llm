@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <limits>
 #include <memory>
@@ -1724,6 +1725,67 @@ TEST_F(HybridPoolCoordinatorCacheManagerTest, LinearAndSWAPeakFitEqualSmallPools
     allocator->free({resource, token_ids});
     EXPECT_EQ(allocator->freeBlocksNum(), 6u);
 }
+
+#if USING_ROCM
+TEST_F(HybridPoolCoordinatorCacheManagerTest, SingleStateAdmissionRetriesFullPoolWithoutLoadContext) {
+    struct ScopedEnv {
+        const char* name;
+        bool existed;
+        std::string old;
+        ScopedEnv(const char* key, const char* value): name(key), existed(std::getenv(key) != nullptr),
+            old(existed ? std::getenv(key) : "") { setenv(name, value, 1); }
+        ~ScopedEnv() { if (existed) setenv(name, old.c_str(), 1); else unsetenv(name); }
+    };
+    ScopedEnv slots("ATOM_RTP_SSM_STATE_SLOTS", "1");
+    ScopedEnv role("ROLE_TYPE", "DECODE");
+    CacheConfig config;
+    config.dtype = DataType::TYPE_FP16;
+    config.layer_num = 1;
+    config.seq_size_per_block = 4;
+    LinearAttentionConfig linear{};
+    linear.linear_num_key_heads = 1;
+    linear.linear_num_value_heads = 1;
+    linear.linear_key_head_dim = 1;
+    linear.linear_value_head_dim = 1;
+    linear.linear_conv_kernel_dim = 2;
+    linear.ssm_state_dtype = config.dtype;
+    linear.conv_state_dtype = config.dtype;
+    ParallelismConfig parallelism;
+    parallelism.tp_size = 1;
+    KVCacheSpecDesc desc;
+    desc.tag = "linear";
+    desc.cache_type = KVCacheSpecType::LinearAttention;
+    desc.dtype = config.dtype;
+    desc.linear_state_component = 1;
+    SpecBuildContext ctx;
+    ctx.dtype = config.dtype;
+    ctx.seq_size_per_block = 4;
+    ctx.kernel_tokens_per_block = 4;
+    ctx.linear_attention_config = &linear;
+    ctx.parallelism_config = &parallelism;
+    auto spec = SpecBuilder::build(desc, ctx);
+    config.fromGroupedSpecs({spec}, {{0}}, {CacheGroupType::LINEAR}, {"linear"});
+    config.setGroupBlockLayout({"linear"}, {3}, {spec->block_size_bytes()}, {0});
+    auto allocator = makeAllocator(config, RoleType::DECODE);
+    ASSERT_TRUE(allocator->init());
+    allocator->setReserveBlocksNum(0);
+    auto pool = allocator->groupBlockPools()[0];
+    auto held = pool->malloc(pool->freeBlocksNum());
+    ASSERT_TRUE(held.has_value());
+    pool->incRef(*held);
+    auto resource = makeBatchResource(1, config);
+    auto tokens = makeCompleteTokenIds(1, 4, 4);
+    MallocInfo info{resource, tokens};
+    info.reuse_cache = false;
+    // No cache load and no reserve must still recognize transient SSM exhaustion.
+    EXPECT_EQ(allocator->preparedReserveStatusForTest(info, 0, {{}}, false),
+              MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED);
+    pool->decRef(*held);
+    EXPECT_EQ(allocator->preparedReserveStatusForTest(info, 0, {{}}, false), MallocStatus::NONE);
+    ASSERT_TRUE(allocator->malloc(info).success);
+    allocator->free({resource, tokens});
+}
+#endif
 
 TEST_F(HybridPoolCoordinatorCacheManagerTest, PreparedSWALoadReserveRejectsPoolLocalShortfall) {
     auto config    = makeTinySwaMultiPoolHybridConfig(/*linear_block_num=*/8, /*swa_block_num=*/4);
