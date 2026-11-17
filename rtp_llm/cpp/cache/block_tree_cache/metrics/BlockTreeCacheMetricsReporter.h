@@ -45,6 +45,7 @@ public:
     }
     void flushStageMetrics() const;
     void reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution) const;
+    void reportUnfreezeZeroMetrics(const std::vector<CachePoolMetrics>& pools) const;
 
     // Durations are per worker batch, except coordinator multi-rank stages.
     // Request/transfer IDs belong in the timeline, never in metric tags.
