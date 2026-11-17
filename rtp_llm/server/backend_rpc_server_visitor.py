@@ -876,6 +876,15 @@ class BackendRPCServerVisitor:
             )
 
     def _validate_input(self, input: GenerateInput) -> None:
+        if (
+            self.remote_vit
+            and RoleType.VIT not in self.backend_role_list
+            and input.mm_inputs
+        ):
+            raise FtRuntimeException(
+                ExceptionType.MM_NOT_SUPPORTED_ERROR,
+                "Multimodal requests require a VIT domain when VIT_SEPARATION=2.",
+            )
         if input.prompt_length <= 0:
             raise FtRuntimeException(
                 ExceptionType.LONG_PROMPT_ERROR,
