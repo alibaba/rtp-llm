@@ -745,10 +745,14 @@ bool CacheConfigCreator::useSharedBlockPool(const CacheConfig&       config,
         return false;
     }
 
-    const auto& cp        = parallelism_config.prefill_cp_config;
-    bool        supported = model_config.model_type == "glm5_3_flash" && !kv_cache_config.enable_disk_cache
-                     && parallelism_config.pp_size == 1 && !cp.kv_cache_sharded && cp.prefill_cp_size <= 1
-                     && cp.method == CPRotateMethod::DISABLED && config.groupNums() > 1;
+    const auto& cp = parallelism_config.prefill_cp_config;
+    // GLM53 can shard Prefill KV pages through CPSlotMapper while its model
+    // owns the forward communication. Sharing rank-local byte storage does
+    // not change that mapping or enable the framework CP forward path.
+    const bool supported_cp = cp.method == CPRotateMethod::DISABLED && cp.prefill_cp_size <= 1
+                              && (!cp.kv_cache_sharded || parallelism_config.role_type == RoleType::PREFILL);
+    bool supported = model_config.model_type == "glm5_3_flash" && !kv_cache_config.enable_disk_cache
+                     && parallelism_config.pp_size == 1 && supported_cp && config.groupNums() > 1;
     bool       has_linear = false;
     bool       has_full   = false;
     const auto compatible = [](const CacheConfig& owner) {
@@ -768,10 +772,18 @@ bool CacheConfigCreator::useSharedBlockPool(const CacheConfig&       config,
     supported = supported && has_linear && has_full;
     RTP_LLM_CHECK_WITH_INFO(
         policy != 1 || supported,
-        "shared hybrid cache requires recurrent hybrid groups, PP=1, disabled CP, one kernel "
+        "shared hybrid cache requires recurrent hybrid groups, PP=1, disabled framework CP, one kernel "
         "page per physical block, disabled disk cache and no independently sized or host-placed device pools");
     if (!supported) {
-        RTP_LLM_LOG_INFO("shared hybrid cache auto policy retained independent pools for unsupported layout");
+        RTP_LLM_LOG_INFO("shared hybrid cache auto policy retained independent pools: model=%s pp=%zu "
+                         "framework_cp=%d kv_cache_sharded=%d prefill_cp_size=%ld groups=%zu disk=%d",
+                         model_config.model_type.c_str(),
+                         static_cast<size_t>(parallelism_config.pp_size),
+                         static_cast<int>(cp.method),
+                         cp.kv_cache_sharded,
+                         cp.prefill_cp_size,
+                         config.groupNums(),
+                         kv_cache_config.enable_disk_cache);
     }
     return supported;
 }
