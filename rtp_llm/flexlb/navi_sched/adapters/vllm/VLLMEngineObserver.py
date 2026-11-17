@@ -41,7 +41,7 @@ from .VLLMForwardProtocol import forward_outputs_fields, forward_request_type
 from .VLLMImageCacheMap import VLLMImageCacheMap
 from .VLLMCoreCallbacks import VLLMCoreCallbacks
 from .VLLMSchedulerObserver import VLLMSchedulerObserver
-from .VLLMCacheCallbacks import VLLMCacheObserver, promote_request_blocks
+from .VLLMCacheCallbacks import VLLMCacheObserver
 
 logger = logging.getLogger("vllm.navi_sched.agent")
 
@@ -2819,7 +2819,16 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
         for request_id, request, accepted_time_ns in touches:
             try:
                 cache_manager = scheduler.kv_cache_manager
-                promoted += promote_request_blocks(cache_manager, request)
+                cached_blocks, _, _ = cache_manager.get_computed_blocks(request)
+                blocks = [block for group in cached_blocks.blocks for block in group]
+                if blocks:
+                    # vLLM 0.29 exposes cache lookup and block-pool touch/free,
+                    # rather than a KVCacheManager promotion method. Releasing
+                    # the temporary references moves free cached blocks to the
+                    # back of the eviction queue without pinning them.
+                    cache_manager.block_pool.touch(blocks)
+                    cache_manager.block_pool.free_blocks(blocks)
+                promoted += len(blocks)
             except Exception:
                 logger.exception(
                     "failed to promote NaviSched VLLM cache-touch request: "
