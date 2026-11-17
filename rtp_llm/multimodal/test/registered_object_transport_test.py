@@ -168,6 +168,12 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         self.device = patch("torch.cuda.device", return_value=nullcontext())
         self.device.start()
         self.addCleanup(self.device.stop)
+        stream_factory = patch("torch.cuda.Stream")
+        stream_factory.start()
+        self.addCleanup(stream_factory.stop)
+        stream_context = patch("torch.cuda.stream", return_value=nullcontext())
+        stream_context.start()
+        self.addCleanup(stream_context.stop)
         self.stream = patch("torch.cuda.current_stream", return_value=Mock())
         self.stream.start()
         self.addCleanup(self.stream.stop)
@@ -181,6 +187,8 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         transport._host_staging = torch.empty(16, dtype=torch.uint8)
         transport._arena = torch.empty(transport._GUARD_BYTES + 16, dtype=torch.uint8)
         transport._pool = object()
+        transport._stream = torch.cuda.current_stream()
+        transport.device_failed = False
         transport._client = Mock()
         return transport
 
@@ -363,6 +371,25 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         transport.close()
         transport._client.close.assert_called_once()
         self.assertIsNone(transport._arena)
+
+    def test_safe_failure_reuses_same_arena_for_next_request(self):
+        for method in ("load_one", "save_one"):
+            with self.subTest(method=method):
+                slot = self.transport()
+                native = getattr(slot._client, method)
+                failure = RuntimeError("safe SDK error")
+                native.side_effect = [failure, None]
+                slot._client.buffer_safe_after_failure.side_effect = (
+                    lambda exc: exc is failure
+                )
+                payload = torch.arange(16, dtype=torch.uint8)
+                with self.assertRaises(RuntimeError):
+                    getattr(slot, method)("a", payload)
+                getattr(slot, method)("b", payload)
+                first, second = (call.args[1] for call in native.call_args_list)
+                self.assertEqual(first.data_ptr(), second.data_ptr())
+                self.assertFalse(slot.quarantined)
+                slot.close()
 
     def test_failed_close_keeps_allocator_and_registration_owner(self):
         transport = self.transport()

@@ -274,6 +274,41 @@ class RtpKvMetaObjectClient:
         self.load((key,), (tensor,), trace_id=trace_id)
         return tensor
 
+    def buffer_safe_after_failure(self, error: Exception) -> bool:
+        """Require the wheel's explicit completion contract, as in prefill."""
+        from .lookup import KvMetaLookupError
+
+        if isinstance(error, KvMetaLookupError) and error.reason == "discovery":
+            return True  # The native transfer has not been submitted.
+        if not isinstance(error, self._client_error_type):
+            return False
+        from kv_cache_manager.client.pybind import kvcm_py_client
+
+        codes = kvcm_py_client.ClientErrorCode
+        if (
+            getattr(kvcm_py_client, "KV_META_OBJECT_TRANSFER_STATE_VERSION", 0) != 1
+            or getattr(error, "data_transfer_may_be_inflight", None) is not False
+            or not isinstance(getattr(error, "code", None), codes)
+            or not hasattr(codes, "ER_SDK_ERROR_BUFFER_SAFE")
+            or not hasattr(codes, "ER_SDK_TIMEOUT_BUFFER_SAFE")
+        ):
+            return False
+        if error.code == getattr(codes, "ER_SERVICE_WRITE_IN_PROGRESS", None):
+            # A known conflict rejects this save before the SDK starts I/O.
+            return (
+                getattr(error, "operation", None) == "save"
+                and getattr(error, "unknown_outcome", None) is False
+            )
+        # Keep legacy numeric values, generic SDK timeouts and unknown codes
+        # conservative. The three validation codes are pre-I/O rejections.
+        return error.code in (
+            codes.ER_SDK_ERROR_BUFFER_SAFE,
+            codes.ER_SDK_TIMEOUT_BUFFER_SAFE,
+            getattr(codes, "ER_INVALID_PARAMS", None),
+            getattr(codes, "ER_INVALID_LOCAL_BUFFERS", None),
+            getattr(codes, "ER_INVALID_SDKWRAPPER_CONFIG", None),
+        )
+
     def object_size(self, key: str, *, trace_id=None, timeout_ms=None):
         """Return exact size or None from KVMeta Get; never expose a storage URI."""
         from .lookup import KvMetaLookup

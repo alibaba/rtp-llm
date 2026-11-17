@@ -138,7 +138,9 @@ def plan_object(value: Any, *, devices=None, max_bytes=1024**3) -> TensorObjectP
     return TensorObjectPlan(header, tensors, encoded, offset, nbytes)
 
 
-def pack_object(plan: TensorObjectPlan, *, observe_stage=None) -> torch.Tensor:
+def pack_object(
+    plan: TensorObjectPlan, *, out: torch.Tensor | None = None, observe_stage=None
+) -> torch.Tensor:
     """CPU staging compatibility path for the existing one-buffer SDK."""
 
     def stage(name):
@@ -147,7 +149,16 @@ def pack_object(plan: TensorObjectPlan, *, observe_stage=None) -> torch.Tensor:
         )
 
     with stage("pack_allocate"):
-        output = torch.zeros(plan.nbytes, dtype=torch.uint8)
+        if out is None:
+            output = torch.zeros(plan.nbytes, dtype=torch.uint8)
+        else:
+            if (
+                out.device.type != "cpu" or out.dtype != torch.uint8 or out.ndim != 1
+                or not out.is_contiguous() or out.numel() < plan.nbytes
+            ):
+                raise ValueError("invalid packing buffer")
+            output = out[:plan.nbytes]
+            output.zero_()  # Alignment padding is part of the wire digest.
     with stage("pack_payload"):
         for tensor, spec in zip(plan.tensors, plan.header["tensors"]):
             if not spec["nbytes"]:

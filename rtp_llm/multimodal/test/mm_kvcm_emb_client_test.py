@@ -18,6 +18,9 @@ from rtp_llm.multimodal.kvcm._config import RtpKvMetaObjectClientConfig
 
 
 class _ClientCode(IntEnum):
+    ER_SDK_ERROR_BUFFER_SAFE = 119
+    ER_SDK_TIMEOUT_BUFFER_SAFE = 120
+    ER_SERVICE_WRITE_IN_PROGRESS = 61
     NOT_FOUND = 60
     SIZE_MISMATCH = 62
 
@@ -72,6 +75,49 @@ def _kv_cache_config(**overrides):
 
 
 class RtpKvMetaObjectClientTest(unittest.TestCase):
+    def test_registered_buffer_reuse_requires_typed_code_and_native_completion(self):
+        facade = object.__new__(RtpKvMetaObjectClient)
+        facade._client_error_type = _ClientError
+        native = SimpleNamespace(
+            ClientErrorCode=_ClientCode, KV_META_OBJECT_TRANSFER_STATE_VERSION=1
+        )
+        module = ModuleType("kv_cache_manager.client.pybind")
+        module.kvcm_py_client = native
+        with patch.dict(sys.modules, {"kv_cache_manager.client.pybind": module}):
+            for code in (
+                _ClientCode.ER_SDK_ERROR_BUFFER_SAFE,
+                _ClientCode.ER_SDK_TIMEOUT_BUFFER_SAFE,
+            ):
+                error = _ClientError(code)
+                self.assertFalse(facade.buffer_safe_after_failure(error))
+                error.data_transfer_may_be_inflight = True
+                self.assertFalse(facade.buffer_safe_after_failure(error))
+                error.data_transfer_may_be_inflight = False
+                self.assertTrue(facade.buffer_safe_after_failure(error))
+            conflict = _ClientError(_ClientCode.ER_SERVICE_WRITE_IN_PROGRESS)
+            for operation, unknown, inflight, safe in (
+                ("save", False, False, True),
+                ("load", False, False, False),
+                ("save", True, False, False),
+                ("save", False, True, False),
+            ):
+                with self.subTest(
+                    operation=operation, unknown=unknown, inflight=inflight
+                ):
+                    conflict.operation = operation
+                    conflict.unknown_outcome = unknown
+                    conflict.data_transfer_may_be_inflight = inflight
+                    self.assertEqual(facade.buffer_safe_after_failure(conflict), safe)
+            for rejected in (119, _ClientCode.SIZE_MISMATCH):
+                error = _ClientError(rejected)
+                error.data_transfer_may_be_inflight = False
+                self.assertFalse(facade.buffer_safe_after_failure(error))
+            error = _ClientError(_ClientCode.ER_SDK_ERROR_BUFFER_SAFE)
+            error.data_transfer_may_be_inflight = False
+            native.KV_META_OBJECT_TRANSFER_STATE_VERSION = 0
+            self.assertFalse(facade.buffer_safe_after_failure(error))
+            self.assertFalse(facade.buffer_safe_after_failure(TimeoutError()))
+
     def _create(self, config=None, *, generic_client=None):
         underlying = MagicMock() if generic_client is None else generic_client
         config_type = MagicMock(side_effect=lambda **values: SimpleNamespace(**values))

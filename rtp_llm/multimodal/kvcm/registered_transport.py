@@ -159,6 +159,7 @@ class RegisteredObjectTransport:
         self._lock = threading.Lock()
         self._closed = False
         self._poisoned = False
+        self.device_failed = False
         self._capacity = max_object_bytes
         self._device = torch.device(device)
         if self._device.type != "cuda":
@@ -195,6 +196,7 @@ class RegisteredObjectTransport:
                             device=self._device,
                         )
                     _enable_sync_memops(self._arena)
+                    self._stream = torch.cuda.Stream(device=self._device)
                     self._client = factory(gpu_tensors=(self._arena,))
                 except Exception as error:
                     self._poisoned = True
@@ -203,6 +205,11 @@ class RegisteredObjectTransport:
                     raise
         self.instance_id = self._client.instance_id
         self.instance_group = self._client.instance_group
+
+    @property
+    def quarantined(self):
+        # Monotonic. A caller can bypass a failed transport without waiting on IO.
+        return self._poisoned
 
     def _check_available(self):
         if self._closed or self._poisoned:
@@ -246,7 +253,7 @@ class RegisteredObjectTransport:
     def is_transfer_quiescent(self, error):
         if self._closed or self._poisoned:
             return False
-        check = getattr(self._client, "is_transfer_quiescent", None)
+        check = getattr(self._client, "buffer_safe_after_failure", None)
         try:
             return callable(check) and check(error) is True
         except Exception:
@@ -254,8 +261,11 @@ class RegisteredObjectTransport:
 
     def _handle_failure(self, error, **context):
         # Legacy SDKs and unclassified CUDA/native exceptions remain unsafe.
-        if not self.is_transfer_quiescent(error):
-            self._quarantine(error, **context)
+        if context.get("stage") != "sdk_transfer":
+            self.device_failed = True
+        elif self.is_transfer_quiescent(error):
+            return
+        self._quarantine(error, **context)
 
     def _view(self, tensor):
         self._check_available()
@@ -282,14 +292,22 @@ class RegisteredObjectTransport:
             with self._stage(operation, "cuda_gate_wait"):
                 stack.enter_context(cuda_graph_gate.operation())
             stack.enter_context(torch.cuda.device(self._device))
+            stack.enter_context(torch.cuda.stream(self._stream))
             yield
 
     def object_size(self, key, **kwargs):
-        with ExitStack() as stack:
-            with self._stage("read", "metadata_lock_wait"):
-                stack.enter_context(self._lock)
-            self._check_available()
-            return self._client.object_size(key, **kwargs)
+        # Metadata lookup uses its own client lock and never touches the arena.
+        self._check_available()
+        return self._client.object_size(key, **kwargs)
+
+    def pack(self, plan):
+        from .tensor_object import pack_object
+
+        try:
+            return pack_object(plan, out=self._host_staging, observe_stage=self._observe_stage)
+        except Exception as error:
+            self._handle_failure(error, operation="write", stage="pack")
+            raise
 
     def save_one(self, key, buffer, **kwargs):
         with self._serialized("write"):
@@ -298,9 +316,10 @@ class RegisteredObjectTransport:
             try:
                 host = self._host_staging[: buffer.numel()]
                 with self._stage("write", "host_copy"):
-                    host.copy_(buffer)
+                    if host.data_ptr() != buffer.data_ptr():
+                        host.copy_(buffer)
                 failure_stage = "gpu_copy"
-                stream = torch.cuda.current_stream(self._device)
+                stream = self._stream
                 with self._stage("write", "h2d_staging"):
                     transfer.copy_(host, non_blocking=True)
                     stream.synchronize()
@@ -331,7 +350,7 @@ class RegisteredObjectTransport:
                 with self._stage("read", "native_load"):
                     self._client.load_one(key, transfer, **kwargs)
                 failure_stage = "gpu_ready_wait"
-                stream = torch.cuda.current_stream(self._device)
+                stream = self._stream
                 with self._stage("read", "gpu_ready_wait"):
                     stream.synchronize()
                 failure_stage = "gpu_copy"
@@ -370,6 +389,80 @@ class RegisteredObjectTransport:
                 self._quarantine(error, stage="close")
                 raise
             self._closed = True
+            self._stream = None
             self._host_staging = None
             self._arena = None
             self._pool = None
+
+
+class RegisteredTransportPool:
+    """Fixed, client-owned registrations. A lease may move to the IO worker."""
+
+    def __init__(self, factory, *, max_object_bytes, device, slots=1, observe_stage=None):
+        if slots not in (1, 2):
+            raise ValueError("expected one or two registered clients")
+        self._condition = threading.Condition()
+        self._accepting = True
+        self._closed = False
+        self._slots = []
+        self._in_use = set()
+        try:
+            for _ in range(slots):
+                self._slots.append(
+                    RegisteredObjectTransport(
+                        factory, max_object_bytes=max_object_bytes, device=device, observe_stage=observe_stage
+                    )
+                )
+        except Exception:
+            self.close()
+            raise
+        self.instance_id = self._slots[0].instance_id
+        self.instance_group = self._slots[0].instance_group
+
+    @property
+    def quarantined(self):
+        return any(slot.device_failed is True for slot in self._slots) or all(
+            slot.quarantined for slot in self._slots
+        )
+
+    def object_size(self, key, **kwargs):
+        for slot in self._slots:
+            if not slot.quarantined:
+                return slot.object_size(key, **kwargs)
+        return None
+
+    def acquire(self, *, wait=False):
+        """Reads try once. Only background writers wait for an active lease."""
+        with self._condition:
+            while self._accepting and not self.quarantined:
+                for slot in self._slots:
+                    if not slot.quarantined and slot not in self._in_use:
+                        self._in_use.add(slot)
+                        return slot
+                if not wait:
+                    break
+                self._condition.wait()
+        return None
+
+    def stop_acquiring(self):
+        with self._condition:
+            self._accepting = False
+            self._condition.notify_all()
+
+    def release(self, slot):
+        with self._condition:
+            self._in_use.remove(slot)
+            self._condition.notify_all()
+
+    def close(self):
+        self.stop_acquiring()
+        with self._condition:
+            if self._closed:
+                return
+            self._closed = True
+            self._condition.wait_for(lambda: not self._in_use)
+        for slot in self._slots:
+            try:
+                slot.close()
+            except Exception:
+                logging.exception("Failed to close registered GDR slot")
