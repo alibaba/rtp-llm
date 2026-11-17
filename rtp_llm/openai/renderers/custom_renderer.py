@@ -124,7 +124,9 @@ class StreamStatus:
         self.index += 1
         self.output = output
         delta_output_ids = output.output_ids.cpu().flatten().tolist()
-        self.output_ids_list = copy.deepcopy(self.output_ids_list + delta_output_ids)
+        # Token IDs are immutable. Keep a fresh list so last_output_ids remains
+        # a snapshot of the previous chunk without recursively copying history.
+        self.output_ids_list = self.output_ids_list + delta_output_ids
         if output.aux_info is None:
             self.has_real_aux_info = False
             if self._fallback_aux_info is None:
