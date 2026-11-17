@@ -178,8 +178,12 @@ std::vector<SingleTypeCacheManagerPtr> alignCoordinatorGroups(const CacheConfig&
     return aligned;
 }
 
-std::shared_ptr<HostBlockPool>
-createHostPool(const std::string& name, const BackingLayout& layout, size_t usable_blocks, size_t alignment) {
+std::shared_ptr<HostBlockPool> createHostPool(const std::string&                      name,
+                                              const BackingLayout&                    layout,
+                                              size_t                                  usable_blocks,
+                                              size_t                                  alignment,
+                                              std::shared_ptr<SharedHostBlockBacking> shared_backing = nullptr,
+                                              size_t                                  shared_group   = 0) {
     if (layout.payload_bytes == 0 || usable_blocks == 0) {
         return nullptr;
     }
@@ -190,7 +194,14 @@ createHostPool(const std::string& name, const BackingLayout& layout, size_t usab
     config->payload_bytes        = layout.payload_bytes;
     config->stride_bytes         = layout.pool_stride;
     config->alignment            = alignment;
-    auto pool                    = std::make_shared<HostBlockPool>(config);
+    if (shared_backing) {
+        config->shared_backing       = std::move(shared_backing);
+        config->shared_arena         = config->shared_backing->arena();
+        config->shared_arena_group   = shared_group;
+        config->physical_block_count = config->shared_arena->slotCount(shared_group);
+        config->stride_bytes         = config->shared_arena->stride(shared_group);
+    }
+    auto pool = std::make_shared<HostBlockPool>(config);
     return pool->init() ? pool : nullptr;
 }
 
@@ -459,9 +470,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             "CRC32C KV cache protection disabled by KVCacheConfig.enable_crc; host/disk transfers use plain copies");
     }
     if (kv_cache_config.enable_crc && (host_enabled || disk_enabled) && !CrcBlockCopyBatch::available()) {
-        RTP_LLM_LOG_WARNING(
-            "CRC32C requested by KVCacheConfig.enable_crc but the CRC backend is unavailable; "
-            "host/disk transfers use plain copies");
+        RTP_LLM_LOG_WARNING("CRC32C requested by KVCacheConfig.enable_crc but the CRC backend is unavailable; "
+                            "host/disk transfers use plain copies");
     }
     // HOST buffers are also used directly for disk I/O, so both pools share the disk alignment when needed.
     const size_t pool_alignment =
@@ -529,8 +539,29 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
 
     std::vector<std::shared_ptr<HostBlockPool>> host_pools(group_members.size());
     if (host_enabled && !group_members.empty()) {
-        const size_t bytes        = static_cast<size_t>(kv_cache_config.memory_cache_size_mb) * 1024UL * 1024UL;
-        const auto   block_counts = tier_block_counts(bytes, layout->block_nums ? &layout->block_nums->host : nullptr);
+        const size_t bytes = static_cast<size_t>(kv_cache_config.memory_cache_size_mb) * 1024UL * 1024UL;
+        std::shared_ptr<SharedHostBlockBacking> shared_host;
+        std::vector<size_t>                     block_counts;
+        if (cache_config.use_shared_block_pool) {
+            RTP_LLM_CHECK_WITH_INFO(parallelism_config.pp_size == 1 && !disk_enabled && !layout->block_nums,
+                                    "shared host cache cannot replace PP-negotiated or disk capacities");
+            std::vector<size_t> shared_strides;
+            const size_t        alignment = std::max<size_t>(256, pool_alignment);
+            for (const auto stride : pool_strides) {
+                RTP_LLM_CHECK_WITH_INFO(stride > 0 && stride <= std::numeric_limits<size_t>::max() - alignment + 1,
+                                        "shared host cache stride overflow");
+                shared_strides.push_back((stride + alignment - 1) / alignment * alignment);
+            }
+            auto arena  = std::make_shared<SharedBlockArena>(bytes, shared_strides);
+            shared_host = std::make_shared<SharedHostBlockBacking>(arena, alignment, "block_tree_shared_host");
+            for (size_t group = 0; group < group_members.size(); ++group) {
+                RTP_LLM_CHECK_WITH_INFO(arena->slotCount(group) > 1,
+                                        "shared host cache needs a usable slot for every group");
+                block_counts.push_back(arena->slotCount(group));
+            }
+        } else {
+            block_counts = tier_block_counts(bytes, layout->block_nums ? &layout->block_nums->host : nullptr);
+        }
         for (size_t group_set_id = 0; group_set_id < group_members.size(); ++group_set_id) {
             const std::vector<std::string>& members = group_members[group_set_id];
             const GroupBase&                first   = cache_config.topology().group(members.front());
@@ -544,8 +575,12 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                              pool_strides[group_set_id],
                              physical_blocks * pool_strides[group_set_id],
                              bytes);
-            host_pools[group_set_id] =
-                createHostPool(pool_name, backing_layouts[group_set_id], physical_blocks - 1, pool_alignment);
+            host_pools[group_set_id] = createHostPool(pool_name,
+                                                      backing_layouts[group_set_id],
+                                                      physical_blocks - 1,
+                                                      pool_alignment,
+                                                      shared_host,
+                                                      group_set_id);
             if (!host_pools[group_set_id]) {
                 return nullptr;
             }
@@ -556,7 +591,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     if (disk_enabled && !group_members.empty()) {
         const size_t bytes        = static_cast<size_t>(kv_cache_config.disk_cache_size_mb) * 1024UL * 1024UL;
         const auto   block_counts = tier_block_counts(bytes, layout->block_nums ? &layout->block_nums->disk : nullptr);
-        auto guard =
+        auto         guard =
             createDiskMountGuard(kv_cache_config, parallelism_config.local_world_size, parallelism_config.local_rank);
         if (!guard) {
             return nullptr;
@@ -698,8 +733,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     }
     // Only tp_rank 0 drives normal request scheduling, so it is the
     // single rank per DP group that owns a mutable BlockTree worth scanning.
-    const bool owns_mutable_block_tree =
-        parallelism_config.tp_rank == 0;
+    const bool owns_mutable_block_tree  = parallelism_config.tp_rank == 0;
     config.full_prefix_scan_interval_ms = owns_mutable_block_tree ? configured_scan_interval_ms : 0;
 
     auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(std::move(metrics_reporter));

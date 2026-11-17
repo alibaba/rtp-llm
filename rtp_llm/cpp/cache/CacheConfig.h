@@ -50,7 +50,9 @@ public:
     bool disable_decode_first_malloc_device_reuse = false;
     /** PP stages can own a single tag from a multi-tag model. Preserve the full-model
      * transfer format so P and D use the same keys and block policy after partitioning. */
-    bool model_has_multiple_cache_groups = false;
+    bool     model_has_multiple_cache_groups = false;
+    bool     use_shared_block_pool           = false;
+    uint64_t shared_cache_bytes              = 0;
 
     rtp_llm::DataType dtype              = rtp_llm::DataType::TYPE_INVALID;
     uint32_t          layer_num          = 0;  // the number of main model layers

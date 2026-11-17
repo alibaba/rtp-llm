@@ -72,7 +72,6 @@ namespace {
 static std::atomic<bool> g_runtime_initialized{false};
 static std::once_flag    g_init_flag;
 
-
 static int64_t g_device_id = 0;
 }  // anonymous namespace
 
@@ -199,20 +198,34 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
 
     const size_t max_blocks_per_batch = static_cast<size_t>(param.host_kv_cache_offset.size(1));
 
-    const auto& group = cache_config.groupForLayer(layer_kv.layer_id, layer_kv.tag);
+    const auto& group = cache_config.physicalGroupForLayer(layer_kv.layer_id, layer_kv.tag);
     RTP_LLM_CHECK_WITH_INFO(
         group.spec != nullptr, "cache-store tag=%s has no KVCacheSpec attached", layer_kv.tag.c_str());
 
     // LayerKVCache may expose kernel-page views; CacheStore keys and block IDs use physical pages.
     const size_t seq_size_per_block              = group.seqSizePerBlock();
-    const size_t kv_block_stride_bytes           = group.kvBlockStrideBytes();
-    const size_t kv_scale_stride_bytes           = group.kvScaleStrideBytes();
+    size_t       kv_block_stride_bytes           = group.kvBlockStrideBytes();
+    size_t       kv_scale_stride_bytes           = group.kvScaleStrideBytes();
     const size_t kv_block_transfer_bytes         = group.kvBlockStrideBytes();
     const size_t kv_scale_transfer_bytes         = group.kvScaleStrideBytes();
     const bool   use_group_cache_transfer_policy = cache_config.usesGroupCacheTransferPolicy();
     const auto* linear_spec = cache_config.use_mla ? dynamic_cast<const LinearKVCacheSpec*>(group.spec.get()) : nullptr;
     const auto  linear_segments =
         linear_spec ? linear_spec->transferSegments(1, 0) : std::vector<LinearKVCacheSpec::BlockSegment>();
+
+    if (cache_config.use_shared_block_pool) {
+        RTP_LLM_CHECK_WITH_INFO(group.kernelBlocksPerKvBlock() == 1 && layer_kv.kv_cache_base.dim() >= 2,
+                                "shared cache publication requires one kernel page per physical slot");
+        // Typed slot pitch includes the other physical owners inside this
+        // arena cell. Only this layer's payload is sent under its CacheStore
+        // key; sending the whole pitch would overwrite unrelated cache data.
+        kv_block_stride_bytes =
+            static_cast<size_t>(layer_kv.kv_cache_base.stride(0)) * layer_kv.kv_cache_base.element_size();
+        if (layer_kv.kv_scale_base.defined()) {
+            kv_scale_stride_bytes =
+                static_cast<size_t>(layer_kv.kv_scale_base.stride(0)) * layer_kv.kv_scale_base.element_size();
+        }
+    }
 
     RTP_LLM_CHECK_WITH_INFO(
         seq_size_per_block > 0, "cache-store tag=%s has zero tokens_per_block", layer_kv.tag.c_str());
@@ -279,7 +292,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     const auto   host_kv_cache_offset  = param.host_kv_cache_offset.accessor<int32_t, 2>();
     const auto   input_lengths_host    = param.input_lengths_host.accessor<int32_t, 1>();
     const auto   prefix_lengths_host   = param.prefix_lengths_host.accessor<int32_t, 1>();
-    const auto   publish_start_tokens = param.publish_start_tokens.accessor<int32_t, 1>();
+    const auto   publish_start_tokens  = param.publish_start_tokens.accessor<int32_t, 1>();
     const auto   request_ids           = param.request_id.accessor<int64_t, 1>();
     const auto   request_pd_separation = param.request_pd_separation.accessor<bool, 1>();
     const auto   cache_keys            = param.cache_keys.accessor<int64_t, 2>();
@@ -334,16 +347,19 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                 (request_cache_key_count + key_blocks_per_group_block - 1) / key_blocks_per_group_block;
         const size_t key_blocks_per_logical_block = compact_cp_mapping ? 1 : key_blocks_per_group_block;
 
-        const int64_t request_id       = request_ids[context_index];
-        const int publish_start_token = publish_start_tokens[context_index];
+        const int64_t request_id          = request_ids[context_index];
+        const int     publish_start_token = publish_start_tokens[context_index];
         RTP_LLM_CHECK_WITH_INFO(publish_start_token >= 0 && publish_start_token <= prefix_length,
                                 "cache-store tag=%s invalid publish_start_token=%d for prefix_length=%d",
-                                layer_kv.tag.c_str(), publish_start_token, prefix_length);
+                                layer_kv.tag.c_str(),
+                                publish_start_token,
+                                prefix_length);
         const size_t publish_start_block =
             group.policy.group_type == CacheGroupType::FULL && group.policy.active_tail_blocks == 0 ?
-                static_cast<size_t>(publish_start_token) / seq_size_per_block : 0;
-        auto event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
-        auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
+                static_cast<size_t>(publish_start_token) / seq_size_per_block :
+                0;
+        auto                 event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
+        auto                 request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
         std::vector<int64_t> publication_lease_keys;
         std::vector<int32_t> publication_lease_blocks;
         RTP_LLM_LOG_DEBUG("write cache store, request id is %ld, blocks num is %zu",
@@ -380,6 +396,10 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                     offset_index,
                     block_id);
                 return;
+            }
+            if (cache_config.use_shared_block_pool) {
+                RTP_LLM_CHECK_WITH_INFO(block_id >= 0 && block_id < layer_kv.kv_cache_base.size(0),
+                                        "shared cache publication slot id is outside its typed namespace");
             }
             publication_lease_keys.push_back(
                 cache_keys[static_cast<int64_t>(batch_id)][static_cast<int64_t>(key_index)]);
@@ -659,11 +679,11 @@ namespace {
 std::mutex g_comm_mutex;
 
 // Avoid destroying static Python objects after interpreter finalization.
-py::function* g_broadcast_fn            = nullptr;
-py::function* g_allreduce_fn            = nullptr;
-py::function* g_allgather_fn            = nullptr;
-py::function* g_isend_fn                = nullptr;
-py::function* g_irecv_fn                = nullptr;
+py::function* g_broadcast_fn = nullptr;
+py::function* g_allreduce_fn = nullptr;
+py::function* g_allgather_fn = nullptr;
+py::function* g_isend_fn     = nullptr;
+py::function* g_irecv_fn     = nullptr;
 
 void clearCommOpsUnlocked() {
     py::function broadcast_fn;
@@ -869,7 +889,7 @@ void initRuntime(size_t device_id) {
         ROCM_CHECK(hipSetDevice(device_id));
 #endif
 
-        g_device_id           = device_id;
+        g_device_id = device_id;
 
         g_runtime_initialized.store(true, std::memory_order_release);
         RTP_LLM_LOG_INFO("Runtime init done (communication via c10d ProcessGroup)");
@@ -901,12 +921,7 @@ void registerExecCtxOps(pybind11::module& m) {
     m.def("get_device_id", &getDeviceId);
     m.def("preprocess_weight_scale", &preprocessWeightScale, py::arg("weight"), py::arg("scale"));
 
-    m.def(
-        "init_exec_ctx",
-        [](size_t device_id) {
-            initRuntime(device_id);
-        },
-        py::arg("device_id"));
+    m.def("init_exec_ctx", [](size_t device_id) { initRuntime(device_id); }, py::arg("device_id"));
 
     m.def(
         "register_comm_ops",

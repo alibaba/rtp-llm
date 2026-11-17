@@ -563,4 +563,92 @@ uint32_t CacheConfigCreator::selectConfirmedBlockNum(const int* candidates, size
     return static_cast<uint32_t>(confirmed);
 }
 
+bool CacheConfigCreator::useSharedBlockPool(const CacheConfig&       config,
+                                            const ModelConfig&       model_config,
+                                            const ParallelismConfig& parallelism_config,
+                                            const KVCacheConfig&     kv_cache_config) {
+    const int policy = kv_cache_config.shared_hybrid_cache;
+    RTP_LLM_CHECK_WITH_INFO(policy >= -1 && policy <= 1, "shared hybrid cache policy must be -1, 0 or 1");
+    if (policy == 0
+        || (policy == -1
+            && (model_config.model_type != "glm5_3_flash" || parallelism_config.role_type == RoleType::DECODE))) {
+        return false;
+    }
+
+    const auto& cp        = parallelism_config.prefill_cp_config;
+    bool        supported = model_config.model_type == "glm5_3_flash" && !kv_cache_config.enable_disk_cache
+                     && parallelism_config.pp_size == 1 && !cp.kv_cache_sharded && cp.prefill_cp_size <= 1
+                     && cp.method == CPRotateMethod::DISABLED && config.groupNums() > 1;
+    bool       has_linear = false;
+    bool       has_full   = false;
+    const auto compatible = [](const CacheConfig& owner) {
+        return std::all_of(owner.groups().begin(), owner.groups().end(), [](const GroupBase& group) {
+            return group.kernelBlocksPerKvBlock() == 1 && group.policy.explicit_block_num == 0
+                   && group.policy.memory_placement == CacheMemoryPlacement::DEVICE;
+        });
+    };
+    supported = supported && compatible(config);
+    for (const auto& child : config.mtp_sub_configs) {
+        supported = supported && child != nullptr && compatible(*child);
+    }
+    for (const auto& group : config.groups()) {
+        has_linear = has_linear || group.policy.group_type == CacheGroupType::LINEAR;
+        has_full   = has_full || group.policy.group_type == CacheGroupType::FULL;
+    }
+    supported = supported && has_linear && has_full;
+    RTP_LLM_CHECK_WITH_INFO(
+        policy != 1 || supported,
+        "shared hybrid cache requires recurrent hybrid groups, PP=1, disabled CP, one kernel "
+        "page per physical block, disabled disk cache and no independently sized or host-placed device pools");
+    if (!supported) {
+        RTP_LLM_LOG_INFO("shared hybrid cache auto policy retained independent pools for unsupported layout");
+    }
+    return supported;
+}
+
+uint64_t CacheConfigCreator::computeLocalCacheBytes(const CacheConfig&                               config,
+                                                    const ModelConfig&                               model_config,
+                                                    const RuntimeConfig&                             runtime_config,
+                                                    const KVCacheConfig&                             kv_cache_config,
+                                                    const ParallelismConfig&                         parallelism_config,
+                                                    const std::optional<WarmUpResult>&               warm_up_result,
+                                                    const std::optional<SpeculativeExecutionConfig>& sp_config) {
+    if (kv_cache_config.test_block_num > 0) {
+        // Preserve TEST_BLOCK_NUM's existing independent-pool byte ledger. It
+        // constrains the common budget, rather than capping every namespace.
+        const auto budget = blockBudgetForConfig(config);
+        size_t     bytes  = budget.explicit_pool_reserve_bytes;
+        addBudgetBytes(bytes, budget.paged_block_bytes, static_cast<size_t>(kv_cache_config.test_block_num));
+        addBudgetBytes(bytes, budget.swa_block_bytes, static_cast<size_t>(kv_cache_config.test_block_num));
+        return bytes;
+    }
+    return MemoryEvaluationHelper::getKVCacheMemorySize(
+        runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
+}
+
+uint64_t CacheConfigCreator::synchronizeCacheBytes(uint64_t local_bytes, const ParallelismConfig& parallelism_config) {
+    RTP_LLM_CHECK_WITH_INFO(local_bytes > 0
+                                && local_bytes <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+                            "shared cache byte budget must fit positive int64");
+    const auto layout = RankLayout::fromParallelismConfig(parallelism_config);
+    const auto count  = static_cast<size_t>(layout.laneStride());
+    if (count == 1) {
+        return local_bytes;
+    }
+    auto  bytes  = torch::empty({static_cast<int64_t>(count)}, torch::kInt64).pin_memory();
+    auto* values = bytes.data_ptr<int64_t>();
+    values[static_cast<size_t>(layout.stageRank())] = static_cast<int64_t>(local_bytes);
+    execAllGather({{bytes}, ParallelMode::STAGE});
+    execSyncCommunication(false);
+    cudaSyncAndCheck();
+    return selectConfirmedCacheBytes(values, count);
+}
+
+uint64_t CacheConfigCreator::selectConfirmedCacheBytes(const int64_t* candidates, size_t count) {
+    RTP_LLM_CHECK_WITH_INFO(candidates != nullptr && count > 0, "cross-rank cache byte budgets must not be empty");
+    const auto bytes = *std::min_element(candidates, candidates + count);
+    RTP_LLM_CHECK_WITH_INFO(bytes > 0, "cross-rank cache byte budgets must be positive");
+    return static_cast<uint64_t>(bytes);
+}
+
 }  // namespace rtp_llm

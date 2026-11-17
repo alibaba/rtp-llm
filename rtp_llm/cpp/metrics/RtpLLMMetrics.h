@@ -378,16 +378,16 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMGrammarMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* compile_qps_metric                  = nullptr;
-    kmonitor::MutableMetric* compile_invalid_qps_metric          = nullptr;
-    kmonitor::MutableMetric* cache_hit_qps_metric                = nullptr;
-    kmonitor::MutableMetric* overload_qps_metric                 = nullptr;
-    kmonitor::MutableMetric* compile_latency_us_metric           = nullptr;
-    kmonitor::MutableMetric* compile_inflight_metric             = nullptr;
-    kmonitor::MutableMetric* verdict_cache_bytes_metric          = nullptr;
-    kmonitor::MutableMetric* total_cache_budget_bytes_metric     = nullptr;
-    kmonitor::MutableMetric* compiler_cache_budget_bytes_metric  = nullptr;
-    kmonitor::MutableMetric* verdict_cache_budget_bytes_metric   = nullptr;
+    kmonitor::MutableMetric* compile_qps_metric                 = nullptr;
+    kmonitor::MutableMetric* compile_invalid_qps_metric         = nullptr;
+    kmonitor::MutableMetric* cache_hit_qps_metric               = nullptr;
+    kmonitor::MutableMetric* overload_qps_metric                = nullptr;
+    kmonitor::MutableMetric* compile_latency_us_metric          = nullptr;
+    kmonitor::MutableMetric* compile_inflight_metric            = nullptr;
+    kmonitor::MutableMetric* verdict_cache_bytes_metric         = nullptr;
+    kmonitor::MutableMetric* total_cache_budget_bytes_metric    = nullptr;
+    kmonitor::MutableMetric* compiler_cache_budget_bytes_metric = nullptr;
+    kmonitor::MutableMetric* verdict_cache_budget_bytes_metric  = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -636,14 +636,14 @@ private:
     }
 
 private:
-    int64_t                                       context_token_num_            = 0;
-    int64_t                                       context_time_us_              = 0;
-    int64_t                                       context_token_num_with_cache_ = 0;
-    int64_t                                       context_time_us_with_cache_   = 0;
-    int64_t                                       generate_token_num_           = 0;
-    int64_t                                       total_token_num_              = 0;
-    int64_t                                       report_window_us_             = 0;
-    bool                                          report_zero_tps_              = false;
+    int64_t                                          context_token_num_            = 0;
+    int64_t                                          context_time_us_              = 0;
+    int64_t                                          context_token_num_with_cache_ = 0;
+    int64_t                                          context_time_us_with_cache_   = 0;
+    int64_t                                          generate_token_num_           = 0;
+    int64_t                                          total_token_num_              = 0;
+    int64_t                                          report_window_us_             = 0;
+    bool                                             report_zero_tps_              = false;
     std::map<int32_t, RtpLLMTokenPSMetricsCollector> priority_collectors_;
 };
 
@@ -1069,6 +1069,9 @@ public:
     std::optional<int64_t> write_bytes;
     std::optional<double>  read_bandwidth_bytes_per_sec;
     std::optional<double>  write_bandwidth_bytes_per_sec;
+    std::optional<int64_t> shared_arena_total_bytes;
+    std::optional<int64_t> shared_arena_free_bytes;
+    std::optional<int64_t> shared_arena_available_bytes;
 };
 
 class RtpLLMCachePoolMetrics: public kmonitor::MetricsGroup {
@@ -1098,6 +1101,9 @@ public:
     kmonitor::MutableMetric* write_bytes_metric                   = nullptr;
     kmonitor::MutableMetric* read_bandwidth_bytes_per_sec_metric  = nullptr;
     kmonitor::MutableMetric* write_bandwidth_bytes_per_sec_metric = nullptr;
+    kmonitor::MutableMetric* shared_arena_total_bytes_metric      = nullptr;
+    kmonitor::MutableMetric* shared_arena_free_bytes_metric       = nullptr;
+    kmonitor::MutableMetric* shared_arena_available_bytes_metric  = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -1147,10 +1153,10 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheCopyErrorMetricsCollector* collector);
 
 private:
-    kmonitor::MutableMetric* transfer_qps_metric             = nullptr;
-    kmonitor::MutableMetric* transfer_failed_qps_metric      = nullptr;
+    kmonitor::MutableMetric* transfer_qps_metric                = nullptr;
+    kmonitor::MutableMetric* transfer_failed_qps_metric         = nullptr;
     kmonitor::MutableMetric* memory_cache_copy_error_qps_metric = nullptr;
-    kmonitor::MutableMetric* descriptors_per_transfer_metric = nullptr;
+    kmonitor::MutableMetric* descriptors_per_transfer_metric    = nullptr;
     // Compatibility alias retained while dashboards migrate to the clarified name.
     kmonitor::MutableMetric* transfer_descriptor_count_compat_metric    = nullptr;
     kmonitor::MutableMetric* transfer_latency_us_metric                 = nullptr;
@@ -1383,23 +1389,23 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheReuseMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* device_input_length_metric              = nullptr;
-    kmonitor::MutableMetric* kv_cache_reuse_length_metric            = nullptr;
-    kmonitor::MutableMetric* stream_cache_device_reuse_length_metric = nullptr;
-    kmonitor::MutableMetric* stream_cache_memory_reuse_length_metric = nullptr;
-    kmonitor::MutableMetric* stream_cache_disk_reuse_length_metric   = nullptr;
-    kmonitor::MutableMetric* stream_cache_remote_reuse_length_metric = nullptr;
+    kmonitor::MutableMetric* device_input_length_metric               = nullptr;
+    kmonitor::MutableMetric* kv_cache_reuse_length_metric             = nullptr;
+    kmonitor::MutableMetric* stream_cache_device_reuse_length_metric  = nullptr;
+    kmonitor::MutableMetric* stream_cache_memory_reuse_length_metric  = nullptr;
+    kmonitor::MutableMetric* stream_cache_disk_reuse_length_metric    = nullptr;
+    kmonitor::MutableMetric* stream_cache_remote_reuse_length_metric  = nullptr;
     kmonitor::MutableMetric* reuse_block_first_hit_idletime_ms_metric = nullptr;
     kmonitor::MutableMetric* reuse_block_hit_idletime_ms_metric       = nullptr;
-    kmonitor::MutableMetric* match_cost_time_us_metric               = nullptr;
-    kmonitor::MutableMetric* load_qps_metric                         = nullptr;
-    kmonitor::MutableMetric* load_fail_qps_metric                    = nullptr;
-    kmonitor::MutableMetric* load_prepare_latency_us_metric          = nullptr;
-    kmonitor::MutableMetric* load_wait_latency_us_metric             = nullptr;
-    kmonitor::MutableMetric* match_to_ready_latency_us_metric        = nullptr;
-    kmonitor::MutableMetric* load_joined_request_qps_metric          = nullptr;
-    kmonitor::MutableMetric* load_join_dependency_count_metric       = nullptr;
-    kmonitor::MutableMetric* load_join_wait_latency_us_metric        = nullptr;
+    kmonitor::MutableMetric* match_cost_time_us_metric                = nullptr;
+    kmonitor::MutableMetric* load_qps_metric                          = nullptr;
+    kmonitor::MutableMetric* load_fail_qps_metric                     = nullptr;
+    kmonitor::MutableMetric* load_prepare_latency_us_metric           = nullptr;
+    kmonitor::MutableMetric* load_wait_latency_us_metric              = nullptr;
+    kmonitor::MutableMetric* match_to_ready_latency_us_metric         = nullptr;
+    kmonitor::MutableMetric* load_joined_request_qps_metric           = nullptr;
+    kmonitor::MutableMetric* load_join_dependency_count_metric        = nullptr;
+    kmonitor::MutableMetric* load_join_wait_latency_us_metric         = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

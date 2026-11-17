@@ -122,6 +122,57 @@ class PipelinePartitionArgumentsTest(TestCase):
                     server_args.setup_args(["--tp_size", "1"])
 
 
+class SharedHybridCacheArgumentsTest(TestCase):
+    def test_policy_environment_cli_and_transport(self):
+        from rtp_llm.server.server_args import server_args
+
+        for env, args, expected in (
+            ({}, [], -1),
+            ({"RTP_LLM_SHARED_HYBRID_CACHE": "0"}, [], 0),
+            ({"RTP_LLM_SHARED_HYBRID_CACHE": "1"}, [], 1),
+            ({"RTP_LLM_SHARED_HYBRID_CACHE": "1"}, ["--shared_hybrid_cache", "0"], 0),
+        ):
+            with (
+                self.subTest(env=env, args=args),
+                patch.dict(os.environ, env, clear=True),
+            ):
+                config = server_args.setup_args(args).kv_cache_config
+                self.assertEqual(config.shared_hybrid_cache, expected)
+                self.assertEqual(
+                    pickle.loads(pickle.dumps(config)).shared_hybrid_cache, expected
+                )
+
+    def test_legacy_transport_preserves_independent_pools(self):
+        from rtp_llm.ops import KVCacheConfig
+
+        config = KVCacheConfig()
+        config.reuse_cache = True
+        config.linear_pool_blocks = 8
+        config.swa_pool_blocks = 16
+        state = list(config.__getstate__())
+        self.assertEqual(state[0:2], ["KVCacheConfig", 10])
+        state[1] = 9
+        legacy = KVCacheConfig.__new__(KVCacheConfig)
+        legacy.__setstate__(tuple(state[:-1]))
+        self.assertEqual(legacy.shared_hybrid_cache, 0)
+        self.assertTrue(legacy.reuse_cache)
+        self.assertEqual(legacy.linear_pool_blocks, 8)
+        self.assertEqual(legacy.swa_pool_blocks, 16)
+
+    def test_invalid_policy_is_rejected_by_parser_and_transport(self):
+        from rtp_llm.ops import KVCacheConfig
+        from rtp_llm.server.server_args import server_args
+
+        with patch.dict(os.environ, {}, clear=True), patch("sys.stderr", io.StringIO()):
+            with self.assertRaises(SystemExit):
+                server_args.setup_args(["--shared_hybrid_cache", "2"])
+        state = list(KVCacheConfig().__getstate__())
+        state[-1] = 2
+        config = KVCacheConfig.__new__(KVCacheConfig)
+        with self.assertRaisesRegex(RuntimeError, "invalid shared hybrid cache policy"):
+            config.__setstate__(tuple(state))
+
+
 class AsyncCachePrepareArgumentsTest(TestCase):
     def test_environment_cli_and_transport(self):
         from rtp_llm.server.server_args import server_args

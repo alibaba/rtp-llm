@@ -10,10 +10,28 @@
 
 namespace rtp_llm {
 
+class SharedHostBlockBacking {
+public:
+    SharedHostBlockBacking(std::shared_ptr<SharedBlockArena> arena, size_t alignment, const std::string& name);
+    SharedHostBlockBacking(const SharedHostBlockBacking&)                             = delete;
+    SharedHostBlockBacking&                  operator=(const SharedHostBlockBacking&) = delete;
+    const std::shared_ptr<SharedBlockArena>& arena() const {
+        return arena_;
+    }
+    uint8_t* data() const {
+        return backing_.data();
+    }
+
+private:
+    std::shared_ptr<SharedBlockArena> arena_;
+    AlignedHostMemory                 backing_;
+};
+
 struct HostBlockPoolConfig: public BlockPoolConfigBase {
-    size_t payload_bytes{0};
-    size_t stride_bytes{0};
-    size_t alignment{4096};
+    size_t                                  payload_bytes{0};
+    size_t                                  stride_bytes{0};
+    size_t                                  alignment{4096};
+    std::shared_ptr<SharedHostBlockBacking> shared_backing;
 };
 
 struct HostBlockBuffer {
@@ -40,9 +58,12 @@ public:
     // the pool is not initialized or the block index is out of range.
     HostBlockBuffer blockBuffer(BlockIdxType block) const;
 
-    size_t payloadBytes() const;
-    size_t strideBytes() const;
-    size_t blockSizeBytes() const override;
+    size_t                                         payloadBytes() const;
+    size_t                                         strideBytes() const;
+    size_t                                         blockSizeBytes() const override;
+    const std::shared_ptr<SharedHostBlockBacking>& sharedBacking() const {
+        return shared_backing_;
+    }
 
     std::string debugString() const override;
 
@@ -50,7 +71,8 @@ private:
     const HostBlockPoolConfig& config() const;
 
 private:
-    std::optional<AlignedHostMemory> backing_;
+    std::optional<AlignedHostMemory>        backing_;
+    std::shared_ptr<SharedHostBlockBacking> shared_backing_;
 };
 
 }  // namespace rtp_llm

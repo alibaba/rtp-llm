@@ -133,9 +133,17 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
     pool_collector.write_bytes                       = pool_snapshot.write_bytes;
     pool_collector.read_bandwidth_bytes_per_sec      = pool_snapshot.read_bandwidth_bytes_per_sec;
     pool_collector.write_bandwidth_bytes_per_sec     = pool_snapshot.write_bandwidth_bytes_per_sec;
+    if (pool_snapshot.shared_arena_metrics) {
+        pool_collector.shared_arena_total_bytes     = pool_snapshot.shared_arena_metrics->total_bytes;
+        pool_collector.shared_arena_free_bytes      = pool_snapshot.shared_arena_metrics->free_bytes;
+        pool_collector.shared_arena_available_bytes = pool_snapshot.shared_arena_metrics->available_bytes;
+    }
 
     kmonitor::MetricsTags pool_tags("pool_name", pool_snapshot.pool_name);
     pool_tags.AddTag("tier", pool_snapshot.tier);
+    if (pool_snapshot.shared_namespace) {
+        pool_tags.AddTag("cache_backing", "shared_namespace");
+    }
     metrics_reporter->report<RtpLLMCachePoolMetrics, RtpLLMCachePoolMetricsCollector>(&pool_tags, &pool_collector);
 }
 
@@ -252,8 +260,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     }
 
     if (pd_sep_config_.role_type == RoleType::PREFILL) {
-        prefill_cache_hit_metrics_reporter_ =
-            std::make_unique<PrefillCacheHitMetricsReporter>(metrics_reporter_);
+        prefill_cache_hit_metrics_reporter_ = std::make_unique<PrefillCacheHitMetricsReporter>(metrics_reporter_);
     }
 
     RTP_LLM_LOG_INFO("cache config: layer_num=%d, block_size=%dB, seq_size_per_block=%zu",

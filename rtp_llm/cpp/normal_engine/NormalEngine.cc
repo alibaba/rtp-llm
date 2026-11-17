@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/PPTopologyValidator.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
@@ -608,10 +609,9 @@ WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
     RTP_LLM_FAIL("prefillWarmUp is not supported on non-CUDA platforms");
     return {};
 #else
-    const int64_t token_budget = runtime_config.fifo_scheduler_config.prefill_chunk_size;
-    const bool    use_global_budget_warmup =
-        token_budget > 0 && !runtime_config.warm_up_with_loss;
-    const int64_t token_heavy_seq_len = std::max<int64_t>(1, static_cast<int64_t>(getWarmUpInputLength()));
+    const int64_t token_budget             = runtime_config.fifo_scheduler_config.prefill_chunk_size;
+    const bool    use_global_budget_warmup = token_budget > 0 && !runtime_config.warm_up_with_loss;
+    const int64_t token_heavy_seq_len      = std::max<int64_t>(1, static_cast<int64_t>(getWarmUpInputLength()));
 
     auto fake_input = makeFakeInput(static_cast<size_t>(token_heavy_seq_len));
     fake_input->generate_config->num_return_sequences =
@@ -855,17 +855,27 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         model_config_, parallelism_config, kv_cache_config, sp_config, draft_model_config, isMTPEagle(), isEagle());
     auto block_tree_layout = planBlockTreeCacheLayout(config, kv_cache_config);
     RTP_LLM_CHECK_WITH_INFO(block_tree_layout != nullptr, "failed to plan BlockTreeCache layout");
-    const auto local_block_num = CacheConfigCreator::computeLocalBlockNum(
-        config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
-    const auto confirmed_block_num = CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config);
-    if (parallelism_config.pp_size > 1) {
-        PPCacheCapacityNegotiator negotiator(parallelism_config.pp_size);
-        const auto                capacity =
-            negotiator.negotiate(config, confirmed_block_num, block_tree_layout->sizing, runtime_config);
-        config.finalizeBlockNums(capacity.paged_block_num, runtime_config, &capacity.block_num_overrides);
-        block_tree_layout->block_nums = capacity.block_tree;
+    if (CacheConfigCreator::useSharedBlockPool(config, model_config_, parallelism_config, kv_cache_config)) {
+        const auto local_bytes = CacheConfigCreator::computeLocalCacheBytes(
+            config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
+        const auto agreed_bytes = CacheConfigCreator::synchronizeCacheBytes(local_bytes, parallelism_config);
+        DeviceBlockPoolConfigHelper::finalizeSharedConfig(config, agreed_bytes, runtime_config);
+        RTP_LLM_LOG_INFO("shared hybrid cache initialized from rank-agreed budget: local_bytes=%lu agreed_bytes=%lu",
+                         local_bytes,
+                         config.shared_cache_bytes);
     } else {
-        config.finalizeBlockNums(confirmed_block_num, runtime_config);
+        const auto local_block_num = CacheConfigCreator::computeLocalBlockNum(
+            config, model_config_, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
+        const auto confirmed_block_num = CacheConfigCreator::synchronizeBlockNum(local_block_num, parallelism_config);
+        if (parallelism_config.pp_size > 1) {
+            PPCacheCapacityNegotiator negotiator(parallelism_config.pp_size);
+            const auto                capacity =
+                negotiator.negotiate(config, confirmed_block_num, block_tree_layout->sizing, runtime_config);
+            config.finalizeBlockNums(capacity.paged_block_num, runtime_config, &capacity.block_num_overrides);
+            block_tree_layout->block_nums = capacity.block_tree;
+        } else {
+            config.finalizeBlockNums(confirmed_block_num, runtime_config);
+        }
     }
     auto cache_manager = make_shared<KVCacheManager>(config,
                                                      false,
@@ -923,7 +933,7 @@ absl::Status NormalEngine::stop() {
         return absl::OkStatus();
     }
     RTP_LLM_LOG_INFO("stop normal engine");
-    running_ = false;
+    running_                    = false;
     const auto scheduler_status = scheduler_->stop();
     // Ask rank 0 to stop at a step boundary. Receivers must finish all model
     // collectives for inputs that rank 0 has already published before exiting.

@@ -347,10 +347,8 @@ bool RtpLLMGrammarMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(compile_inflight_metric, "rtp_llm_grammar_compile_inflight");
     REGISTER_GAUGE_MUTABLE_METRIC(verdict_cache_bytes_metric, "rtp_llm_grammar_verdict_cache_bytes");
     REGISTER_GAUGE_MUTABLE_METRIC(total_cache_budget_bytes_metric, "rtp_llm_grammar_total_cache_budget_bytes");
-    REGISTER_GAUGE_MUTABLE_METRIC(compiler_cache_budget_bytes_metric,
-                                  "rtp_llm_grammar_compiler_cache_budget_bytes");
-    REGISTER_GAUGE_MUTABLE_METRIC(verdict_cache_budget_bytes_metric,
-                                  "rtp_llm_grammar_verdict_cache_budget_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(compiler_cache_budget_bytes_metric, "rtp_llm_grammar_compiler_cache_budget_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(verdict_cache_budget_bytes_metric, "rtp_llm_grammar_verdict_cache_budget_bytes");
     return true;
 }
 
@@ -650,6 +648,9 @@ void RtpLLMCacheOperationMetrics::report(const kmonitor::MetricsTags*          t
 }
 
 bool RtpLLMCachePoolMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_GAUGE_MUTABLE_METRIC(shared_arena_total_bytes_metric, "rtp_llm_kv_cache_shared_arena_total_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(shared_arena_free_bytes_metric, "rtp_llm_kv_cache_shared_arena_free_bytes");
+    REGISTER_GAUGE_MUTABLE_METRIC(shared_arena_available_bytes_metric, "rtp_llm_kv_cache_shared_arena_available_bytes");
     REGISTER_GAUGE_MUTABLE_METRIC(block_size_bytes_metric, "rtp_llm_kv_cache_block_size_bytes");
     REGISTER_GAUGE_MUTABLE_METRIC(free_blocks_metric, "rtp_llm_kv_cache_free_blocks");
     REGISTER_GAUGE_MUTABLE_METRIC(used_blocks_metric, "rtp_llm_kv_cache_used_blocks");
@@ -675,6 +676,15 @@ bool RtpLLMCachePoolMetrics::init(kmonitor::MetricsGroupManager* manager) {
 }
 
 void RtpLLMCachePoolMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCachePoolMetricsCollector* collector) {
+    if (collector->shared_arena_total_bytes) {
+        REPORT_MUTABLE_METRIC(shared_arena_total_bytes_metric, *collector->shared_arena_total_bytes);
+    }
+    if (collector->shared_arena_free_bytes) {
+        REPORT_MUTABLE_METRIC(shared_arena_free_bytes_metric, *collector->shared_arena_free_bytes);
+    }
+    if (collector->shared_arena_available_bytes) {
+        REPORT_MUTABLE_METRIC(shared_arena_available_bytes_metric, *collector->shared_arena_available_bytes);
+    }
     REPORT_MUTABLE_METRIC(block_size_bytes_metric, collector->block_size_bytes);
     REPORT_MUTABLE_METRIC(free_blocks_metric, collector->free_blocks);
     REPORT_MUTABLE_METRIC(used_blocks_metric, collector->used_blocks);

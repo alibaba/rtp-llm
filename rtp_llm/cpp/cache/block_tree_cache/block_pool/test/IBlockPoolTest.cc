@@ -51,6 +51,15 @@ std::shared_ptr<TestPool> makeInitializedPool(size_t physical_block_count) {
     return pool;
 }
 
+std::shared_ptr<TestPool> makeSharedPool(const std::shared_ptr<SharedBlockArena>& arena, size_t group) {
+    auto config                = std::make_shared<TestPoolConfig>("shared", arena->slotCount(group));
+    config->shared_arena       = arena;
+    config->shared_arena_group = group;
+    auto pool                  = std::make_shared<TestPool>(config);
+    pool->init();
+    return pool;
+}
+
 }  // namespace
 
 TEST(IBlockPoolTest, BlockZeroIsInvalidAndNeverAllocated) {
@@ -66,6 +75,90 @@ TEST(IBlockPoolTest, BlockZeroIsInvalidAndNeverAllocated) {
     ASSERT_TRUE(blocks.has_value());
     EXPECT_EQ(blocks->size(), 3u);
     EXPECT_EQ(std::find(blocks->begin(), blocks->end(), 0), blocks->end());
+}
+
+TEST(IBlockPoolTest, SharedArenaBorrowsBytesOnlyAfterFinalActiveHold) {
+    auto arena = std::make_shared<SharedBlockArena>(4096, std::vector<size_t>{512, 1024});
+    auto small = makeSharedPool(arena, 0);
+    auto large = makeSharedPool(arena, 1);
+    EXPECT_EQ(small->totalBlocksNum(), 6u);
+    EXPECT_EQ(large->totalBlocksNum(), 3u);
+    const auto allocated = small->malloc(6);
+    ASSERT_TRUE(allocated.has_value());
+    const auto ids = *allocated;
+    small->incTreeRef(ids, BlockTreeRefType::CACHE);
+    EXPECT_EQ(arena->freeBytes(), 0u);
+    EXPECT_EQ(arena->availableBytes(), 3072u);
+    EXPECT_EQ(large->freeBlocksNum(), 0u);
+    EXPECT_EQ(large->availableBlocksNum(), 3u);
+    EXPECT_FALSE(large->malloc().has_value());  // CACHE metadata must be evicted first.
+
+    for (const auto hold : {BlockTreeRefType::LOAD, BlockTreeRefType::STORE, BlockTreeRefType::EVICTION}) {
+        small->incTreeRef(ids[0], hold);
+        EXPECT_EQ(arena->availableBytes(), 2560u);
+        EXPECT_EQ(large->availableBlocksNum(), 2u);
+        small->decTreeRef(ids[0], hold);
+        EXPECT_EQ(arena->availableBytes(), 3072u);
+    }
+
+    size_t notifications = 0;
+    small->setCapacityChangeCallback([&] {
+        // Notification must run outside both the local pool and arena locks.
+        (void)large->freeBlocksNum();
+        ++notifications;
+    });
+    small->decTreeRef(BlockIdList{ids[0], ids[1]}, BlockTreeRefType::CACHE);
+    EXPECT_GT(notifications, 0u);
+    const auto borrowed = large->malloc();
+    ASSERT_TRUE(borrowed.has_value());
+    const size_t large_begin = static_cast<size_t>(*borrowed) * arena->stride(1);
+    for (size_t i = 2; i < ids.size(); ++i) {
+        const size_t small_begin = static_cast<size_t>(ids[i]) * arena->stride(0);
+        EXPECT_TRUE(large_begin + arena->stride(1) <= small_begin || small_begin + arena->stride(0) <= large_begin);
+    }
+    large->incTreeRef(*borrowed, BlockTreeRefType::CACHE);
+    large->decTreeRef(*borrowed, BlockTreeRefType::CACHE);
+    small->decTreeRef(BlockIdList(ids.begin() + 2, ids.end()), BlockTreeRefType::CACHE);
+    EXPECT_EQ(arena->freeBytes(), arena->usableBytes());
+    EXPECT_EQ(arena->availableBytes(), arena->usableBytes());
+}
+
+TEST(IBlockPoolTest, SharedArenaJointAdmissionAndFailedAllocationRollback) {
+    SharedBlockArena arena(4096, {512, 1024});
+    EXPECT_EQ(arena.freeSlots(0), 6u);
+    EXPECT_EQ(arena.freeSlots(1), 3u);
+    EXPECT_FALSE(arena.canAllocate({4, 2}, SharedBlockArena::Capacity::TOTAL));
+    EXPECT_TRUE(arena.canAllocate({2, 2}, SharedBlockArena::Capacity::TOTAL));
+    EXPECT_THROW(arena.canAllocate({1}, SharedBlockArena::Capacity::FREE), std::invalid_argument);
+    const auto large = arena.malloc(1, 1);
+    ASSERT_EQ(large.size(), 1u);
+    arena.setReclaimable(1, large[0], true);
+    const auto free_before      = arena.freeBytes();
+    const auto available_before = arena.availableBytes();
+    EXPECT_TRUE(arena.malloc(0, 6).empty());  // Partial allocation must roll back.
+    EXPECT_EQ(arena.freeBytes(), free_before);
+    EXPECT_EQ(arena.availableBytes(), available_before);
+    EXPECT_EQ(arena.freeSlots(0), 4u);
+    arena.release(1, large[0]);
+    EXPECT_EQ(arena.freeBytes(), arena.usableBytes());
+    EXPECT_EQ(arena.availableBytes(), arena.usableBytes());
+}
+
+TEST(IBlockPoolTest, SharedArenaRejectsWrongOwnerAndProtectsFrozenSlots) {
+    auto arena = std::make_shared<SharedBlockArena>(4096, std::vector<size_t>{512, 1024});
+    auto small = makeSharedPool(arena, 0);
+    auto large = makeSharedPool(arena, 1);
+    auto block = small->malloc();
+    ASSERT_TRUE(block.has_value());
+    EXPECT_THROW(arena->release(1, *block), std::logic_error);
+    EXPECT_THROW(arena->release(0, 0), std::logic_error);
+    small->freezeBlock(*block);
+    small->incTreeRef(*block, BlockTreeRefType::CACHE);
+    small->decTreeRef(*block, BlockTreeRefType::CACHE);
+    EXPECT_TRUE(small->isFrozen(*block));
+    EXPECT_TRUE(small->isAllocated(*block));
+    EXPECT_EQ(arena->availableBytes(), arena->usableBytes() - 512);
+    EXPECT_EQ(large->availableBlocksNum(), 2u);
 }
 
 TEST(IBlockPoolTest, MallocReturnsAllocatedTreeRefcountZeroBlocks) {

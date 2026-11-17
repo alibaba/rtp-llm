@@ -40,10 +40,12 @@ struct BlockTreePoolMetricsSnapshot {
     size_t      store_ref_blocks{0};
     size_t      frozen_ref_blocks{0};
 
-    std::optional<int64_t> read_bytes;
-    std::optional<int64_t> write_bytes;
-    std::optional<double>  read_bandwidth_bytes_per_sec;
-    std::optional<double>  write_bandwidth_bytes_per_sec;
+    std::optional<int64_t>                   read_bytes;
+    std::optional<int64_t>                   write_bytes;
+    std::optional<double>                    read_bandwidth_bytes_per_sec;
+    std::optional<double>                    write_bandwidth_bytes_per_sec;
+    bool                                     shared_namespace = false;
+    std::optional<SharedBlockArena::Metrics> shared_arena_metrics;
 };
 
 enum class CacheTransferOperation : uint8_t {
