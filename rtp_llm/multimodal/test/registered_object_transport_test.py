@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 import torch
 from rtp_llm.multimodal.kvcm.registered_transport import (
     RegisteredObjectTransport,
+    RegisteredTransportPool,
     RegisteredTransportUnavailableError,
     _enable_sync_memops,
 )
@@ -223,6 +224,124 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         transport._client.load_one.assert_called_once()
         transport.close()
 
+    def gc_pool(self, slot, ttl=300):
+        pool = object.__new__(RegisteredTransportPool)
+        pool._condition = threading.Condition()
+        pool._slots = [slot]
+        pool._in_use = set()
+        pool._accepting = True
+        pool._closed = False
+        pool._gc_stop = threading.Event()
+        pool._observe_hold = Mock()
+        pool._quarantine_ttl_seconds = ttl
+        self.addCleanup(pool._gc_stop.set)
+        self.addCleanup(pool.close)
+        return pool
+
+    def test_gc_returns_expired_tensor_to_registered_pool_after_lease_release(self):
+        slot = self.transport()
+        pool = self.gc_pool(slot)
+        arena, client = slot._arena, slot._client
+        slot._client.load_one.side_effect = TimeoutError("unconfirmed completion")
+        with self.assertLogs(level="ERROR"), self.assertRaises(TimeoutError):
+            slot.load_one("old-key", torch.zeros(16, dtype=torch.uint8))
+        slot._quarantine_started -= 299
+        pool._gc_tick()
+        self.assertTrue(slot.quarantined)
+        slot._quarantine_started -= 2
+        pool._in_use.add(slot)
+        pool._gc_tick()
+        self.assertTrue(slot.quarantined)
+        pool.release(slot)
+        pool._gc_tick()
+        self.assertFalse(slot.quarantined)
+        self.assertIs(pool.acquire(), slot)
+        pool.release(slot)
+        self.assertIs(slot._arena, arena)
+        self.assertIs(slot._client, client)
+        client.close.assert_not_called()
+        client.load_one.side_effect = None
+        slot.load_one("new-key", torch.zeros(16, dtype=torch.uint8))
+        self.assertEqual(client.load_one.call_count, 2)
+        self.assertEqual(RegisteredObjectTransport._quarantined_transports, [])
+        self.assertIn(
+            "gc_success", [call.args[1] for call in pool._observe_hold.call_args_list]
+        )
+
+    def test_gc_does_not_recycle_cuda_failures_or_contended_slots(self):
+        slot = self.transport()
+        pool = self.gc_pool(slot)
+        with self.assertLogs(level="ERROR"):
+            slot._quarantine(
+                TimeoutError("GPU error"), stage="gpu_copy", operation="read"
+            )
+        slot.device_failed = True
+        slot._quarantine_started -= 301
+        pool._gc_tick()
+        self.assertTrue(slot.quarantined)
+        slot.device_failed = False
+        slot._quarantine_stage = "sdk_transfer"
+        with slot._lock:
+            pool._gc_tick()
+        self.assertTrue(slot.quarantined)
+        pool._gc_tick()
+        self.assertFalse(slot.quarantined)
+
+    def test_closed_pool_gc_unregisters_before_releasing_tensor_and_pool(self):
+        slot = self.transport()
+        pool = self.gc_pool(slot)
+        arena, allocator, client = slot._arena, slot._pool, slot._client
+        with self.assertLogs(level="ERROR"):
+            slot._quarantine(
+                TimeoutError("unknown IO"), stage="sdk_transfer", operation="read"
+            )
+        pool.close()
+        self.assertFalse(pool._gc_stop.is_set())
+        slot._quarantine_started -= 301
+        client.close.side_effect = RuntimeError("MR deregistration failed")
+        with self.assertLogs(level="ERROR"):
+            pool._gc_tick()
+        self.assertTrue(slot.quarantined)
+        self.assertIs(slot._arena, arena)
+        self.assertIs(slot._pool, allocator)
+        self.assertIn(
+            "gc_error", [call.args[1] for call in pool._observe_hold.call_args_list]
+        )
+
+        def close_native():
+            self.assertIs(slot._arena, arena)
+            self.assertIs(slot._pool, allocator)
+
+        client.close.side_effect = close_native
+        pool._gc_tick()
+        self.assertFalse(slot.quarantined)
+        self.assertIsNone(slot._arena)
+        self.assertIsNone(slot._pool)
+        self.assertIsNone(slot._client)
+
+    def test_background_gc_honors_configured_ttl(self):
+        slot = self.transport()
+        pool = self.gc_pool(slot, ttl=1)
+        with self.assertLogs(level="ERROR"):
+            slot._quarantine(
+                TimeoutError("unknown IO"), stage="sdk_transfer", operation="read"
+            )
+        done = threading.Event()
+
+        def observed(*args):
+            if args[1] == "gc_success":
+                done.set()
+
+        pool._observe_hold.side_effect = observed
+        slot._quarantine_started -= 2
+        worker = threading.Thread(target=pool._gc_loop, daemon=True)
+        worker.start()
+        self.assertTrue(done.wait(3))
+        self.assertFalse(slot.quarantined)
+        pool.close()
+        worker.join(2)
+        self.assertFalse(worker.is_alive())
+
     def test_transfer_failure_quarantines_arena_and_blocks_reuse(self):
         for operation in ("save_one", "load_one"):
             with self.subTest(operation=operation):
@@ -241,7 +360,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
                         )
                 self.assertEqual(len(logs.output), 1)
                 first = json.loads(logs.output[0].split("MM_EMB_GDR_QUARANTINE ", 1)[1])
-                self.assertEqual(first["action"], "restart_worker")
+                self.assertEqual(first["action"], "hold_registered_slot")
                 self.assertEqual(first["error_code"], "ER_SDK_TIMEOUT")
                 self.assertEqual(first["error_reason"], "sdk_timeout")
                 self.assertTrue(first["data_transfer_may_be_inflight"])
@@ -353,7 +472,9 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         transport._client.save_one.side_effect = TimeoutError(
             "original transfer failure"
         )
-        transport._client.buffer_safe_after_failure.side_effect = RuntimeError("bad proof")
+        transport._client.buffer_safe_after_failure.side_effect = RuntimeError(
+            "bad proof"
+        )
         with self.assertLogs(level="ERROR"):
             with self.assertRaisesRegex(TimeoutError, "original transfer failure"):
                 transport.save_one("key", torch.zeros(16, dtype=torch.uint8))

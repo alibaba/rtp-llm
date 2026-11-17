@@ -122,6 +122,7 @@ _EMBEDDING_CACHE_FIELDS = {
         "max_object_bytes": ("mm_remote_cache_max_object_bytes", int, 1),
         "max_inflight_bytes": ("mm_remote_cache_max_inflight_bytes", int, 1),
         "max_pending": ("mm_remote_cache_max_pending", int, 1),
+        "quarantine_ttl_seconds": ("mm_remote_cache_quarantine_ttl_seconds", int, 1),
     },
 }
 

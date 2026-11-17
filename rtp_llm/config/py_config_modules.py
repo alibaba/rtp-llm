@@ -372,6 +372,7 @@ class VitConfig:
         self.mm_remote_cache_max_inflight_bytes: int = 1024**3
         self.mm_remote_cache_max_pending: int = 8
         self.mm_remote_cache_read_timeout_ms: int = 200
+        self.mm_remote_cache_quarantine_ttl_seconds: int = 300
         self.url_cache_item_num: int = 100
         self.use_igraph_cache: bool = True
         self.igraph_search_dom: str = "com.taobao.search.igraph.common"
@@ -495,6 +496,7 @@ class VitConfig:
             f"mm_remote_cache_max_inflight_bytes: {self.mm_remote_cache_max_inflight_bytes}\n"
             f"mm_remote_cache_max_pending: {self.mm_remote_cache_max_pending}\n"
             f"mm_remote_cache_read_timeout_ms: {self.mm_remote_cache_read_timeout_ms}\n"
+            f"mm_remote_cache_quarantine_ttl_seconds: {self.mm_remote_cache_quarantine_ttl_seconds}\n"
             f"url_cache_item_num: {self.url_cache_item_num}\n"
             f"use_igraph_cache: {self.use_igraph_cache}\n"
             f"igraph_search_dom: {self.igraph_search_dom}\n"

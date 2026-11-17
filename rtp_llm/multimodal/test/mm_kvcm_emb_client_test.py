@@ -22,6 +22,7 @@ class _ClientCode(IntEnum):
     ER_SDK_TIMEOUT_BUFFER_SAFE = 120
     ER_SERVICE_WRITE_IN_PROGRESS = 61
     NOT_FOUND = 60
+    ER_SERVICE_NOT_FOUND = 60
     SIZE_MISMATCH = 62
 
 
@@ -108,6 +109,12 @@ class RtpKvMetaObjectClientTest(unittest.TestCase):
                     conflict.unknown_outcome = unknown
                     conflict.data_transfer_may_be_inflight = inflight
                     self.assertEqual(facade.buffer_safe_after_failure(conflict), safe)
+            missing = _ClientError(_ClientCode.ER_SERVICE_NOT_FOUND)
+            missing.operation = "load"
+            missing.data_transfer_may_be_inflight = False
+            self.assertTrue(facade.buffer_safe_after_failure(missing))
+            missing.data_transfer_may_be_inflight = True
+            self.assertFalse(facade.buffer_safe_after_failure(missing))
             for rejected in (119, _ClientCode.SIZE_MISMATCH):
                 error = _ClientError(rejected)
                 error.data_transfer_may_be_inflight = False

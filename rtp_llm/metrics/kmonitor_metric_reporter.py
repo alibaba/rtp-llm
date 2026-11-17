@@ -120,6 +120,19 @@ class AccMetrics(Enum):
         "py_rtp_vit_remote_embedding_cache_write_in_progress_qps"
     )
 
+    VIT_REMOTE_EMB_BUFFER_HOLD_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_buffer_hold_qps"
+    )
+    VIT_REMOTE_EMB_BUFFER_GC_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_buffer_gc_qps"
+    )
+    VIT_REMOTE_EMB_BUFFER_GC_SUCCESS_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_buffer_gc_success_qps"
+    )
+    VIT_REMOTE_EMB_BUFFER_GC_ERROR_QPS_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_buffer_gc_error_qps"
+    )
+
     # Creation is distinct from per-operation acquisition of a shared client.
     VIT_REMOTE_EMB_CLIENT_CREATE_QPS_METRIC = (
         "py_rtp_vit_remote_embedding_cache_client_create_qps"
@@ -150,6 +163,18 @@ class AccMetrics(Enum):
 
 
 class GaugeMetrics(Enum):
+    VIT_REMOTE_EMB_BUFFER_HOLD_BYTES_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_buffer_hold_bytes"
+    )
+    VIT_REMOTE_EMB_BUFFER_RETAINED_BYTES_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_buffer_retained_bytes"
+    )
+    VIT_REMOTE_EMB_BUFFER_HOLD_AGE_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_buffer_hold_age_seconds"
+    )
+    VIT_REMOTE_EMB_BUFFER_HOLD_COUNT_METRIC = (
+        "py_rtp_vit_remote_embedding_cache_buffer_hold_count"
+    )
     RESPONSE_FIRST_TOKEN_RT_METRIC = "py_rtp_response_first_token_rt"
     RESPONSE_ITER_RT_METRIC = "py_rtp_response_iterate_rt"
     RESPONSE_ITERATE_COUNT = "py_rtp_response_iterate_count"

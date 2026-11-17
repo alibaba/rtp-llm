@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import threading
+import time
 import uuid
 from contextlib import ExitStack, contextmanager, nullcontext
 
@@ -152,10 +153,19 @@ class RegisteredObjectTransport:
     _quarantine_lock = threading.Lock()
     _quarantined_transports = []
 
-    def __init__(self, factory, *, max_object_bytes, device, observe_stage=None):
+    def __init__(
+        self,
+        factory,
+        *,
+        max_object_bytes,
+        device,
+        observe_stage=None,
+        on_quarantine=None,
+    ):
         if max_object_bytes <= 0 or max_object_bytes > 1024**3:
             raise ValueError("invalid registered object capacity")
         self._observe_stage = observe_stage
+        self._on_quarantine = on_quarantine
         self._lock = threading.Lock()
         self._closed = False
         self._poisoned = False
@@ -221,6 +231,9 @@ class RegisteredObjectTransport:
             )
 
     def _record_quarantine(self, error, **context):
+        self._quarantine_started = time.monotonic()
+        self._quarantine_operation = context.get("operation", "unknown")
+        self._quarantine_stage = context.get("stage", "unknown")
         self._quarantine_cause = _safe_error_context(error)
         self._quarantine_cause.setdefault("data_transfer_may_be_inflight", True)
         self._quarantine_id = uuid.uuid4().hex
@@ -231,8 +244,8 @@ class RegisteredObjectTransport:
                     dict(
                         event="gdr_transport_quarantined",
                         reason="gdr_transport_quarantined",
-                        action="restart_worker",
-                        message="GDR completion is not proven safe; arena retained; restart worker",
+                        action="hold_registered_slot",
+                        message="GDR completion is unknown; isolate the registered slot and use encoder fallback",
                         quarantine_id=self._quarantine_id,
                         **self._quarantine_cause,
                         **context,
@@ -243,12 +256,47 @@ class RegisteredObjectTransport:
         except Exception:
             pass  # Diagnostics must never mask the original failure.
 
+        observer = getattr(self, "_on_quarantine", None)
+        if observer is not None:
+            observer(self)
+
     def _quarantine(self, error, **context):
         if not self._poisoned:
             self._poisoned = True
             with self._quarantine_lock:
                 self._quarantined_transports.append(self)
             self._record_quarantine(error, **context)
+
+    def reclaim_quarantine(self, ttl_seconds):
+        # The pool excludes leased slots. Never wait behind a live IO worker.
+        if not self._lock.acquire(blocking=False):
+            return False
+        try:
+            if (
+                not self._poisoned
+                or self.device_failed
+                or self._quarantine_stage != "sdk_transfer"
+                or time.monotonic() - self._quarantine_started < ttl_seconds
+            ):
+                return False
+            if self._closed:
+                # Closed pools retire the MR before releasing Tensor/pool owners.
+                self._client.close()
+                self._client = None
+                self._stream = None
+                self._host_staging = None
+                self._arena = None
+                self._pool = None
+            # For a serving pool, the operator-selected TTL returns this Tensor
+            # to its fixed registration. It is not a BufferSafe completion.
+            # No allocator reuse or MR replacement occurs. The codec verifies
+            # the complete checksum and exact key before exposing a late read.
+            with self._quarantine_lock:
+                self._quarantined_transports.remove(self)
+            self._poisoned = False
+            return True
+        finally:
+            self._lock.release()
 
     def is_transfer_quiescent(self, error):
         if self._closed or self._poisoned:
@@ -304,7 +352,9 @@ class RegisteredObjectTransport:
         from .tensor_object import pack_object
 
         try:
-            return pack_object(plan, out=self._host_staging, observe_stage=self._observe_stage)
+            return pack_object(
+                plan, out=self._host_staging, observe_stage=self._observe_stage
+            )
         except Exception as error:
             self._handle_failure(error, operation="write", stage="pack")
             raise
@@ -398,9 +448,24 @@ class RegisteredObjectTransport:
 class RegisteredTransportPool:
     """Fixed, client-owned registrations. A lease may move to the IO worker."""
 
-    def __init__(self, factory, *, max_object_bytes, device, slots=1, observe_stage=None):
+    def __init__(
+        self,
+        factory,
+        *,
+        max_object_bytes,
+        device,
+        slots=1,
+        observe_stage=None,
+        quarantine_ttl_seconds=300,
+        observe_hold=None,
+    ):
         if slots not in (1, 2):
             raise ValueError("expected one or two registered clients")
+        if type(quarantine_ttl_seconds) is not int or quarantine_ttl_seconds <= 0:
+            raise ValueError("quarantine_ttl_seconds must be a positive integer")
+        self._quarantine_ttl_seconds = quarantine_ttl_seconds
+        self._observe_hold = observe_hold
+        self._gc_stop = threading.Event()
         self._condition = threading.Condition()
         self._accepting = True
         self._closed = False
@@ -410,7 +475,11 @@ class RegisteredTransportPool:
             for _ in range(slots):
                 self._slots.append(
                     RegisteredObjectTransport(
-                        factory, max_object_bytes=max_object_bytes, device=device, observe_stage=observe_stage
+                        factory,
+                        max_object_bytes=max_object_bytes,
+                        device=device,
+                        observe_stage=observe_stage,
+                        on_quarantine=self._on_quarantine,
                     )
                 )
         except Exception:
@@ -418,6 +487,63 @@ class RegisteredTransportPool:
             raise
         self.instance_id = self._slots[0].instance_id
         self.instance_group = self._slots[0].instance_group
+        self._gc_thread = threading.Thread(
+            target=self._gc_loop, name="mm-emb-quarantine-gc", daemon=True
+        )
+        self._gc_thread.start()
+
+    def _on_quarantine(self, slot):
+        self._report_hold(slot._quarantine_operation, "entered")
+
+    def _report_hold(self, operation, event):
+        if self._observe_hold is None:
+            return
+        held = [slot for slot in self._slots if slot.quarantined]
+        registered_bytes = sum(
+            slot._GUARD_BYTES + slot._capacity
+            for slot in self._slots
+            if slot._arena is not None
+        )
+        held_bytes = sum(slot._GUARD_BYTES + slot._capacity for slot in held)
+        age = max(
+            (time.monotonic() - slot._quarantine_started for slot in held), default=0
+        )
+        try:
+            self._observe_hold(
+                operation, event, held_bytes, age, registered_bytes, len(held)
+            )
+        except Exception as error:
+            logging.error("MM_EMB_GDR_GC_METRIC_ERROR %s", _safe_error_context(error))
+
+    def _gc_loop(self):
+        while not self._gc_stop.wait(min(10, self._quarantine_ttl_seconds)):
+            self._gc_tick()
+            if self._closed and not any(slot.quarantined for slot in self._slots):
+                self._gc_stop.set()
+
+    def _gc_tick(self):
+        with self._condition:
+            candidates = [
+                slot
+                for slot in self._slots
+                if slot not in self._in_use and slot.quarantined
+            ]
+        for slot in candidates:
+            try:
+                if not slot.reclaim_quarantine(self._quarantine_ttl_seconds):
+                    continue
+            except Exception as error:
+                logging.error(
+                    "MM_EMB_GDR_GC_ERROR quarantine_id=%s details=%s",
+                    slot._quarantine_id,
+                    _safe_error_context(error),
+                )
+                self._report_hold(slot._quarantine_operation, "gc_error")
+                continue
+            self._report_hold(slot._quarantine_operation, "gc_success")
+            with self._condition:
+                self._condition.notify_all()
+        self._report_hold("unknown", "held")
 
     @property
     def quarantined(self):
@@ -466,3 +592,5 @@ class RegisteredTransportPool:
                 slot.close()
             except Exception:
                 logging.exception("Failed to close registered GDR slot")
+        if not any(slot.quarantined for slot in self._slots):
+            self._gc_stop.set()

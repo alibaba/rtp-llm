@@ -45,6 +45,7 @@ class RemoteCacheTest(unittest.TestCase):
         # A late RDMA can replay a complete, internally checksummed old object.
         # Byte integrity alone must not authorize using it for another request.
         store = Store()
+        store.quarantined = False
         remote = self.remote(store, gdr_enabled=True)
         remote.submit_result("old-key", (torch.ones(3), None))
         self.assertTrue(store.saved.wait(2))
@@ -57,6 +58,7 @@ class RemoteCacheTest(unittest.TestCase):
 
     def test_gdr_rejects_unbound_legacy_payload_and_publishes_bound_replacement(self):
         store = Store({"old": pack_object(plan_object((torch.ones(3), None)))})
+        store.quarantined = False
         remote = self.remote(store, gdr_enabled=True)
         self.assertIsNone(remote.load("old"))
         self.assertTrue(remote._key_prefix.startswith("mm-v4:"))
@@ -65,6 +67,43 @@ class RemoteCacheTest(unittest.TestCase):
         encoded = unpack_object(store.objects["new"])
         self.assertEqual(encoded["cache_key"], "new")
         self.assertIsNotNone(remote.load("new"))
+
+    def test_reclaimed_between_size_and_load_is_a_miss_without_read_error(self):
+        store = Store({"key": pack_object(plan_object((torch.ones(3), None)))})
+        error = type("KvMetaObjectClientError", (RuntimeError,), {})("key reclaimed")
+        error.code = SimpleNamespace(name="ER_SERVICE_NOT_FOUND")
+        error.operation = "load"
+        error.data_transfer_may_be_inflight = False
+        remote = self.remote(store)
+        with patch.object(store, "load_one", side_effect=error):
+            with self.assertNoLogs(level="ERROR"):
+                self.assertIsNone(remote.load("key"))
+        self.assertEqual(remote.stats()["miss"], 1)
+        self.assertEqual(remote.stats().get("read_error", 0), 0)
+        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+
+    def test_quarantine_gc_metric_totals_and_retained_bytes(self):
+        for event in ("gc_success", "gc_error"):
+            with patch(
+                "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
+            ) as report:
+                MMRemoteEmbeddingCache._observe_buffer_hold(
+                    "read", event, 0, 0, 4096, 0
+                )
+            for metric, expected in (
+                (AccMetrics.VIT_REMOTE_EMB_BUFFER_GC_QPS_METRIC, 1),
+                (
+                    AccMetrics.VIT_REMOTE_EMB_BUFFER_GC_SUCCESS_QPS_METRIC,
+                    int(event == "gc_success"),
+                ),
+                (
+                    AccMetrics.VIT_REMOTE_EMB_BUFFER_GC_ERROR_QPS_METRIC,
+                    int(event == "gc_error"),
+                ),
+                (GaugeMetrics.VIT_REMOTE_EMB_BUFFER_RETAINED_BYTES_METRIC, 4096),
+                (GaugeMetrics.VIT_REMOTE_EMB_BUFFER_HOLD_BYTES_METRIC, 0),
+            ):
+                self.assertEqual(self.metric_values(report, metric), [(expected, {})])
 
     def test_timed_out_read_reports_late_failure_without_double_counting_qps(self):
         from rtp_llm.multimodal.kvcm.lookup import KvMetaLookupError
@@ -403,6 +442,7 @@ class RemoteCacheTest(unittest.TestCase):
             pool = RegisteredTransportPool(
                 None, max_object_bytes=65536, device="cpu", slots=count
             )
+        self.addCleanup(pool._gc_stop.set)
         return (
             self.remote(
                 pool, gdr_enabled=True, gdr_pool=pool, read_timeout_ms=5000, **kwargs
@@ -413,7 +453,16 @@ class RemoteCacheTest(unittest.TestCase):
     def test_two_slow_writes_preserve_distinct_results_without_blocking_callers(self):
         remote, slots = self.slot_cache()
         results = [(torch.arange(8) + i, None) for i in range(2)]
-        slots[0].objects["hit"] = pack_object(plan_object(results[0]))
+        slots[0].objects["hit"] = pack_object(
+            plan_object(
+                {
+                    "cache_key": "hit",
+                    "version": 1,
+                    "result": results[0],
+                    "greennet": None,
+                }
+            )
+        )
         packed = threading.Barrier(3)
         resume = threading.Event()
 
@@ -449,7 +498,11 @@ class RemoteCacheTest(unittest.TestCase):
     def test_caller_timeout_keeps_only_the_active_read_slot(self):
         remote, slots = self.slot_cache()
         result = (torch.arange(8), None)
-        slots[0].objects["hit"] = pack_object(plan_object(result))
+        slots[0].objects["hit"] = pack_object(
+            plan_object(
+                {"cache_key": "hit", "version": 1, "result": result, "greennet": None}
+            )
+        )
         busy = slots[0]
         busy.read_gate.clear()
         try:
@@ -473,7 +526,16 @@ class RemoteCacheTest(unittest.TestCase):
     def test_late_gdr_read_wakes_bounded_writes_and_busy_reads_skip_metadata(self):
         remote, (slot,) = self.slot_cache(1, max_pending=3)
         value = torch.arange(8)
-        slot.objects["hit"] = pack_object(plan_object((value, None)))
+        slot.objects["hit"] = pack_object(
+            plan_object(
+                {
+                    "cache_key": "hit",
+                    "version": 1,
+                    "result": (value, None),
+                    "greennet": None,
+                }
+            )
+        )
         slot.read_gate.clear()
         try:
             with concurrent.futures.ThreadPoolExecutor(1) as caller:
@@ -484,7 +546,9 @@ class RemoteCacheTest(unittest.TestCase):
                 slot, "object_size", wraps=slot.object_size
             ) as metadata, patch.object(
                 remote._executor, "submit", wraps=remote._executor.submit
-            ) as submit, patch.object(remote, "_report_outcome") as outcome:
+            ) as submit, patch.object(
+                remote, "_report_outcome"
+            ) as outcome:
                 self.assertIsNone(remote.load("busy"))
                 metadata.assert_not_called()
                 submit.assert_not_called()
@@ -1060,19 +1124,17 @@ class RemoteCacheTest(unittest.TestCase):
         for inflight, unknown in ((False, False), (True, False), (False, True)):
             with self.subTest(inflight=inflight, unknown=unknown):
                 remote = self.remote(Store())
-                error = KvMetaObjectClientError(
-                    inflight=inflight, unknown=unknown
-                )
-                with patch.object(
-                    remote._client, "save_one", side_effect=error
-                ), patch(
+                error = KvMetaObjectClientError(inflight=inflight, unknown=unknown)
+                with patch.object(remote._client, "save_one", side_effect=error), patch(
                     "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
                 ) as report, patch(
                     "rtp_llm.multimodal.mm_remote_embedding_cache.logging.error"
                 ) as error_log:
                     remote.submit_result("key", (torch.ones(3, 4), None))
                     deadline = time.monotonic() + 2
-                    while remote.stats()["inflight_tasks"] and time.monotonic() < deadline:
+                    while (
+                        remote.stats()["inflight_tasks"] and time.monotonic() < deadline
+                    ):
                         time.sleep(0.005)
                     self.assertEqual(remote.stats()["inflight_tasks"], 0)
                 skipped = not inflight and not unknown
@@ -1102,13 +1164,22 @@ class RemoteCacheTest(unittest.TestCase):
                     self.metric_values(
                         report, AccMetrics.VIT_REMOTE_EMB_SKIP_QPS_METRIC
                     ),
-                    [(1, {"operation": "write", "reason": "write_in_progress"})]
-                    if skipped else [],
+                    (
+                        [(1, {"operation": "write", "reason": "write_in_progress"})]
+                        if skipped
+                        else []
+                    ),
                 )
                 stage = "metadata_put_start" if skipped else "transfer"
                 self.assertIn(
-                    (1, {"operation": "write", "stage": stage,
-                         "status": "skipped" if skipped else "error"}),
+                    (
+                        1,
+                        {
+                            "operation": "write",
+                            "stage": stage,
+                            "status": "skipped" if skipped else "error",
+                        },
+                    ),
                     self.metric_values(
                         report, AccMetrics.VIT_REMOTE_EMB_STAGE_QPS_METRIC
                     ),
@@ -1125,8 +1196,10 @@ class RemoteCacheTest(unittest.TestCase):
                     ("error", int(not skipped)),
                 ):
                     self.assertIn(
-                        (expected, {"operation": "write", "stage": "all",
-                                    "status": label}),
+                        (
+                            expected,
+                            {"operation": "write", "stage": "all", "status": label},
+                        ),
                         self.metric_values(
                             report, AccMetrics.VIT_REMOTE_EMB_OPERATION_QPS_METRIC
                         ),

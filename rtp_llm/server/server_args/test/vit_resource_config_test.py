@@ -39,6 +39,14 @@ class VitResourceConfigTest(unittest.TestCase):
             apply_embedding_cache_config(config, parsed.mm_embedding_cache_config)
         return config, parser
 
+    def test_remote_quarantine_ttl_is_configurable(self):
+        config, _ = self.parse(
+            env={
+                "MM_EMBEDDING_CACHE_CONFIG": '{"remote":{"quarantine_ttl_seconds":17}}'
+            }
+        )
+        self.assertEqual(config.mm_remote_cache_quarantine_ttl_seconds, 17)
+
     def test_embedding_json_expands_existing_fields_with_zero_local_cache(self):
         document = json.dumps(
             {

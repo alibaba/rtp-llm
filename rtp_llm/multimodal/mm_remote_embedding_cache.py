@@ -44,6 +44,16 @@ def _is_write_in_progress(error):
     )
 
 
+def _is_read_miss(error):
+    return (
+        type(error).__name__ == "KvMetaObjectClientError"
+        and getattr(getattr(error, "code", None), "name", None)
+        == "ER_SERVICE_NOT_FOUND"
+        and getattr(error, "operation", None) == "load"
+        and getattr(error, "data_transfer_may_be_inflight", None) is False
+    )
+
+
 def _log_error(marker, error, **context):
     try:
         logging.error(
@@ -205,6 +215,10 @@ class MMRemoteEmbeddingCache:
                     max_object_bytes=vit_config.mm_remote_cache_max_object_bytes,
                     device=device,
                     observe_stage=cls._observe_stage,
+                    quarantine_ttl_seconds=getattr(
+                        vit_config, "mm_remote_cache_quarantine_ttl_seconds", 300
+                    ),
+                    observe_hold=cls._observe_buffer_hold,
                 )
             return raw_factory()
 
@@ -525,8 +539,11 @@ class MMRemoteEmbeddingCache:
         except Exception as error:
             outcome = (
                 "skipped"
-                if operation == "write" and stage == "transfer"
-                and _is_write_in_progress(error)
+                if stage == "transfer"
+                and (
+                    (operation == "write" and _is_write_in_progress(error))
+                    or (operation == "read" and _is_read_miss(error))
+                )
                 else "error"
             )
             raise
@@ -534,7 +551,8 @@ class MMRemoteEmbeddingCache:
             elapsed_ms = (time.perf_counter() - started) * 1000
             metric_stage = (
                 "metadata_put_start"
-                if outcome == "skipped" and stage == "transfer" else stage
+                if operation == "write" and outcome == "skipped" and stage == "transfer"
+                else stage
             )
             cls._report_outcome(operation + "_stage", outcome, stage=metric_stage)
             tags = {"operation": operation, "stage": metric_stage}
@@ -607,6 +625,42 @@ class MMRemoteEmbeddingCache:
             self._report_skip(operation, "gdr_quarantined")
             return True
         return False
+
+    @classmethod
+    def _observe_buffer_hold(
+        cls, operation, event, nbytes, age_seconds, registered_bytes, held_count
+    ):
+        for kind in ("read", "write"):
+            cls._report_metric(
+                AccMetrics.VIT_REMOTE_EMB_BUFFER_HOLD_QPS_METRIC,
+                int(event == "entered" and operation == kind),
+                {"operation": kind},
+            )
+        cls._report_metric(
+            AccMetrics.VIT_REMOTE_EMB_BUFFER_GC_QPS_METRIC,
+            int(event in ("gc_success", "gc_error")),
+            {},
+        )
+        cls._report_metric(
+            AccMetrics.VIT_REMOTE_EMB_BUFFER_GC_SUCCESS_QPS_METRIC,
+            int(event == "gc_success"),
+            {},
+        )
+        cls._report_metric(
+            AccMetrics.VIT_REMOTE_EMB_BUFFER_GC_ERROR_QPS_METRIC,
+            int(event == "gc_error"),
+            {},
+        )
+        for metric, value in (
+            (GaugeMetrics.VIT_REMOTE_EMB_BUFFER_HOLD_BYTES_METRIC, nbytes),
+            (
+                GaugeMetrics.VIT_REMOTE_EMB_BUFFER_RETAINED_BYTES_METRIC,
+                registered_bytes,
+            ),
+            (GaugeMetrics.VIT_REMOTE_EMB_BUFFER_HOLD_AGE_METRIC, age_seconds),
+            (GaugeMetrics.VIT_REMOTE_EMB_BUFFER_HOLD_COUNT_METRIC, held_count),
+        ):
+            cls._report_metric(metric, value, {})
 
     def _get_client(self):
         with self._client_lock:
@@ -872,7 +926,9 @@ class MMRemoteEmbeddingCache:
                         "write", "write_in_progress", report_outcome=False
                     )
                 else:
-                    outcome = "timeout" if isinstance(error, _TIMEOUT_ERRORS) else "error"
+                    outcome = (
+                        "timeout" if isinstance(error, _TIMEOUT_ERRORS) else "error"
+                    )
                     self.record(
                         "write_error",
                         key=key,
@@ -1037,12 +1093,15 @@ class MMRemoteEmbeddingCache:
                 # unpack_object can return CPU views. Keep the result independent
                 # of the pinned slot, even when the caller times out during IO.
                 buffer = torch.empty(size, dtype=torch.uint8)
-                with self._observe_stage("read", "transfer", size):
-                    try:
+                try:
+                    with self._observe_stage("read", "transfer", size):
                         source.load_one(key, buffer, trace_id=trace_id)
-                    except Exception as error:
-                        self._retire_client(client, error)
-                        raise
+                except Exception as error:
+                    if _is_read_miss(error):
+                        timing["outcome"] = "miss"
+                        return None
+                    self._retire_client(client, error)
+                    raise
                 timing["sdk_api_ms"] = (time.perf_counter() - api_started) * 1000
                 return buffer
             finally:

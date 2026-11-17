@@ -293,6 +293,9 @@ class RtpKvMetaObjectClient:
             or not hasattr(codes, "ER_SDK_TIMEOUT_BUFFER_SAFE")
         ):
             return False
+        if error.code == getattr(codes, "ER_SERVICE_NOT_FOUND", None):
+            # GC can remove a key between the size lookup and the native Get.
+            return getattr(error, "operation", None) == "load"
         if error.code == getattr(codes, "ER_SERVICE_WRITE_IN_PROGRESS", None):
             # A known conflict rejects this save before the SDK starts I/O.
             return (
