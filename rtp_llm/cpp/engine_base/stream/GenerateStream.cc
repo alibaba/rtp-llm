@@ -1163,7 +1163,7 @@ bool GenerateStream::needFinishBySPTokens() {
         fillSubGenerateStatus(StreamState::RUNNING);
     }
 
-    if (seqLength() >= generate_input_->generate_config->min_new_tokens + inputLength()) {
+    if (seqLength() >= static_cast<int64_t>(inputLength()) + generate_input_->generate_config->min_new_tokens) {
         matchEosToken();
         matchStopWordsList();
     }
@@ -1182,7 +1182,10 @@ void GenerateStream::matchEosToken() {
 
 void GenerateStream::matchEosToken(int batch_id) {
     if ((!generate_input_->generate_config->ignore_eos)
-        && complete_token_ids_->matchEosToken(batch_id, special_tokens_.eos_token_id)) {
+        && complete_token_ids_->matchEosToken(batch_id,
+                                              special_tokens_.eos_token_id,
+                                              static_cast<int64_t>(inputLength())
+                                                  + generate_input_->generate_config->min_new_tokens)) {
         sub_generate_status_[batch_id] = StreamState::FINISHED;
     }
 }
@@ -1209,7 +1212,12 @@ void GenerateStream::matchStopWordsList(int batch_id) {
             && stop_words[0] == special_tokens_.eos_token_id) {
             continue;
         }
-        if (complete_token_ids_->matchStopWordsList(batch_id, stop_words)) {
+        // One speculative commit may cross the minimum; do not trim at an
+        // earlier stop from the same commit. Match eligibility follows its end.
+        if (complete_token_ids_->matchStopWordsList(batch_id,
+                                                    stop_words,
+                                                    static_cast<int64_t>(inputLength())
+                                                        + generate_input_->generate_config->min_new_tokens)) {
             match = true;
             break;
         }
