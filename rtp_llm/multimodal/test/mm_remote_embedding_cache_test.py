@@ -41,6 +41,31 @@ from rtp_llm.utils.grpc_util import trans_from_tensor
 
 
 class RemoteCacheTest(unittest.TestCase):
+    def test_gdr_rejects_a_whole_valid_payload_from_a_different_key(self):
+        # A late RDMA can replay a complete, internally checksummed old object.
+        # Byte integrity alone must not authorize using it for another request.
+        store = Store()
+        remote = self.remote(store, gdr_enabled=True)
+        remote.submit_result("old-key", (torch.ones(3), None))
+        self.assertTrue(store.saved.wait(2))
+        store.objects["new-key"] = store.objects["old-key"]
+        self.assertIsNone(remote.load("new-key"))
+        value = remote.load("old-key")
+        self.assertTrue(torch.equal(value[0], torch.ones(3)))
+        self.assertEqual(remote.stats()["hit"], 1)
+        self.assertEqual(remote.stats()["read_error"], 1)
+
+    def test_gdr_rejects_unbound_legacy_payload_and_publishes_bound_replacement(self):
+        store = Store({"old": pack_object(plan_object((torch.ones(3), None)))})
+        remote = self.remote(store, gdr_enabled=True)
+        self.assertIsNone(remote.load("old"))
+        self.assertTrue(remote._key_prefix.startswith("mm-v4:"))
+        remote.submit_result("new", (torch.ones(3), None))
+        self.assertTrue(store.saved.wait(2))
+        encoded = unpack_object(store.objects["new"])
+        self.assertEqual(encoded["cache_key"], "new")
+        self.assertIsNotNone(remote.load("new"))
+
     def test_timed_out_read_reports_late_failure_without_double_counting_qps(self):
         from rtp_llm.multimodal.kvcm.lookup import KvMetaLookupError
 

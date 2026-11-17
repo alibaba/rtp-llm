@@ -95,7 +95,9 @@ class MMRemoteEmbeddingCache:
         scope = json.dumps(
             [namespace, self._model_identity], sort_keys=True, separators=(",", ":")
         ).encode()
-        self._key_prefix = "mm-v3:" + hashlib.sha256(scope).hexdigest() + ":"
+        # v4 binds the exact object key into checksummed codec metadata. Older
+        # payloads cannot be mistaken for a new read after timed arena reuse.
+        self._key_prefix = "mm-v4:" + hashlib.sha256(scope).hexdigest() + ":"
         self.request_scoped_inspection = request_scoped_inspection
         if gdr_enabled is None:
             gdr_enabled = os.environ.get("MM_REMOTE_CACHE_GDR_ENABLE") == "1"
@@ -742,7 +744,12 @@ class MMRemoteEmbeddingCache:
                         request_scoped=self.request_scoped_inspection,
                     )
             plan = plan_object(
-                {"version": 1, "result": result, "greennet": inspection},
+                {
+                    "version": 1,
+                    "result": result,
+                    "greennet": inspection,
+                    "cache_key": key,
+                },
                 max_bytes=self.max_object_bytes,
             )
         except (ValueError, TypeError, RecursionError):
@@ -905,9 +912,19 @@ class MMRemoteEmbeddingCache:
         future.add_done_callback(done)
 
     @staticmethod
-    def _decode_value(value):
+    def _decode_value(value, expected_key=None, *, require_key=False):
         # Older workers wrote the bare result tuple/list without inspection metadata.
         approval = None
+        if isinstance(value, dict) and "cache_key" in value:
+            if (
+                not isinstance(value["cache_key"], str)
+                or value["cache_key"] != expected_key
+            ):
+                raise ValueError("remote embedding cache key mismatch")
+            value = dict(value)
+            value.pop("cache_key")
+        elif require_key:
+            raise ValueError("remote embedding cache key binding missing")
         if isinstance(value, dict):
             if (
                 set(value) != {"version", "result", "greennet"}
@@ -1058,7 +1075,9 @@ class MMRemoteEmbeddingCache:
                     cuda_device=self.cuda_device,
                     observe_stage=self._observe_stage,
                 )
-                value, approval = self._decode_value(value)
+                value, approval = self._decode_value(
+                    value, key, require_key=self._transport_mode == "gdr"
+                )
                 if (
                     entry is not None
                     and restore_approval
