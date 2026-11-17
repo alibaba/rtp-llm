@@ -1,8 +1,8 @@
-"""CPU contracts for the SM90 FP8 page table and DeepGEMM score wrapper."""
+"""Contracts for the SM90 FP8 page table, DeepGEMM, and decode selection."""
 
 import sys
 import unittest
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -97,6 +97,138 @@ class FP8DeepGEMMContractTest(unittest.TestCase):
             result.compact_selected(selected)[:, 0].tolist(),
             [0, 512, 1024, 2048, 2560, 3072],
         )
+
+
+@unittest.skipUnless(
+    torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0),
+    "SM90 GPU required",
+)
+class FP8DeepGEMMDecodeTest(unittest.TestCase):
+    def test_eager_table_capacity_and_short_causal_selection(self):
+        from rtp_llm.models_py.modules.dsv41.fp8 import _v41_decode_global
+        from rtp_llm.models_py.modules.dsv41.fp8.attention_v41 import AttentionV41FP8
+        from rtp_llm.models_py.modules.dsv41.kv_cache_utils import INDEXER_KV
+
+        device = torch.device("cuda")
+        max_seq_len = 2048
+        tokens_per_block = 128
+        topk = 512
+        q = torch.ones((2, 1, 32, 128), dtype=torch.bfloat16, device=device)
+        weights = torch.ones((2, 32), dtype=torch.float32, device=device)
+        freqs = torch.ones((max_seq_len, 32), dtype=torch.complex64, device=device)
+        output_ids = torch.arange(topk, dtype=torch.int32, device=device)
+        for ratio, widths in ((1, (1, 4, 8, 16)), (2, (1, 8, 9, 16))):
+            for table_width in widths:
+                with self.subTest(ratio=ratio, table_width=table_width):
+                    raw_span = min(max_seq_len, table_width * tokens_per_block)
+                    expected_capacity = raw_span // ratio
+                    positions = torch.tensor([0, raw_span - 1], device=device)
+                    table = (
+                        torch.arange(
+                            1, table_width + 1, dtype=torch.int32, device=device
+                        )
+                        .expand(2, -1)
+                        .contiguous()
+                    )
+                    entries = tokens_per_block // ratio
+                    pool = torch.empty(
+                        (table_width + 1, entries, 132),
+                        dtype=torch.uint8,
+                        device=device,
+                    )
+                    # All K elements are one before the per-key scale. Make the
+                    # positive dot products increase strictly with logical ID.
+                    pages = cache.dg_pages(pool).flatten(1)
+                    pages[:, : 64 * 128].fill_(0x38)
+                    scales = pages[:, 64 * 128 :].view(torch.float32)
+                    scales.copy_(
+                        torch.arange(
+                            1, scales.numel() + 1, dtype=torch.float32, device=device
+                        ).view_as(scales)
+                    )
+                    attn = SimpleNamespace(
+                        _shared_attention={},
+                        _source_pool=lambda tag: pool,
+                        _cp_ctx=None,
+                        _rope_max_seq_len=max_seq_len,
+                        _block_tables_by_type={INDEXER_KV: table},
+                        _kv_cache=SimpleNamespace(
+                            group_tags=(INDEXER_KV,),
+                            get_kernel_seq_size_per_block=lambda tag: tokens_per_block,
+                        ),
+                        _indexer_mode="fp8_dg",
+                        compress_ratio=ratio,
+                        is_index_source=True,
+                        layer_id=1,
+                        kv_source_layer_id=1,
+                        index_n_heads=32,
+                        index_head_dim=128,
+                        index_topk=topk,
+                        v41_config={"candidate_source_layer_id": 1},
+                        rope_head_dim=64,
+                        freqs_cis=freqs,
+                    )
+                    x = torch.zeros((2, 1, 1), dtype=torch.bfloat16, device=device)
+                    with patch.object(
+                        _v41_decode_global, "try_produce_global", return_value=True
+                    ):
+                        AttentionV41FP8._produce_global_decode(
+                            attn,
+                            x,
+                            positions,
+                            torch.arange(2, device=device),
+                            positions,
+                        )
+                    keys = attn._shared_attention["global"][1]
+                    self.assertEqual(keys.capacity, expected_capacity)
+                    visible = (positions + 1) // ratio
+                    logical_ids = output_ids + (visible[:, None] - topk).clamp_min(0)
+                    reference = torch.where(
+                        logical_ids < visible[:, None], logical_ids, -1
+                    ).int()
+                    actual = AttentionV41FP8._select_indices_decode(
+                        attn, x, None, positions, prepared_query=(q, weights, None)
+                    )
+                    short = visible <= topk
+                    torch.testing.assert_close(
+                        actual[short], reference[short], rtol=0, atol=0
+                    )
+                    # Kernel output order is unspecified for nontrivial TopK.
+                    torch.testing.assert_close(
+                        actual[~short].sort(-1).values,
+                        reference[~short],
+                        rtol=0,
+                        atol=0,
+                    )
+
+                    self.assertEqual(keys.block_table.shape[1] * 64, keys.capacity)
+                    logits = score.score_paged_fp8_indexer(
+                        q,
+                        weights.view(2, 1, 32),
+                        freqs,
+                        positions,
+                        keys.pool,
+                        keys.block_table,
+                        visible[:, None],
+                        max_ctx_len=keys.capacity,
+                        rope_head_dim=64,
+                    )
+                    torch.testing.assert_close(
+                        logits.lengths, visible.int(), rtol=0, atol=0
+                    )
+                    self.assertEqual(logits.logits.shape, (2, keys.capacity))
+                    expected_scales = torch.arange(
+                        entries + 1,
+                        entries + keys.capacity + 1,
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                    torch.testing.assert_close(
+                        logits.logits[1],
+                        expected_scales * (32 * 128) ** 0.5,
+                        rtol=1e-5,
+                        atol=0,
+                    )
 
 
 if __name__ == "__main__":
