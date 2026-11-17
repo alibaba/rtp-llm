@@ -2192,7 +2192,15 @@ MallocStatus CoordinatorCacheManager::evaluatePreparedInitCapacity(const MallocI
                                                                    size_t                 reserve_blocks,
                                                                    const PreparedKVCache& prepared,
                                                                    bool                   has_load_context) const {
-    if (reserve_blocks == 0 && !has_load_context) {
+    // Single-state PD admission must classify a full SSM pool before attempting
+    // materialization. A failed attempt can roll back before initMalloc examines
+    // capacity, and a concurrent release can then turn a retryable shortage into
+    // INTERNAL_ERROR. malloc_mutex_ serializes this check with other allocations.
+    // singleStateExecutionMapping() is enabled only for the ROCm ATOM decode path.
+    const bool single_state = std::any_of(kv_cache_groups_.begin(), kv_cache_groups_.end(), [](const auto& group) {
+        return group && group->singleStateExecutionMapping();
+    });
+    if (reserve_blocks == 0 && !has_load_context && !single_state) {
         return MallocStatus::NONE;
     }
     if (!has_load_context) {
