@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <limits>
+#include <cstdlib>
+#include <string>
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include <numeric>
 #include <unordered_set>
 
@@ -78,6 +81,47 @@ void LinearCacheManager::releaseRequestStateToDecodeTail(BlockIds& block_ids, in
     }
 }
 
+bool LinearCacheManager::compactSingleState() const {
+#if USING_ROCM
+    const char* mode = std::getenv("ATOM_RTP_SSM_STATE_SLOTS");
+    const char* role = std::getenv("ROLE_TYPE");
+    if (mode == nullptr || std::string(mode) != "1" || role == nullptr || std::string(role) != "DECODE"
+        || tag() != "linear") return false;
+    const auto* linear = dynamic_cast<const LinearKVCacheSpec*>(config().spec.get());
+    return linear != nullptr && linear->k_block_size() > 0 && linear->v_block_size() == 0;
+#else
+    return false;
+#endif
+}
+
+bool LinearCacheManager::mallocSingleState(BlockIds& block_ids, int seq_len, int reserve_step,
+                                           std::vector<size_t>* backfilled_positions) {
+    if (backfilled_positions != nullptr) backfilled_positions->clear();
+    if (seq_len <= 0) return true;
+    BlockIdxType owner = NULL_BLOCK_IDX;
+    for (const auto block : block_ids.blocks()) {
+        if (!isNullBlockIdx(block)) {
+            RTP_LLM_CHECK_WITH_INFO(owner == NULL_BLOCK_IDX, "single-state SSM has multiple physical owners");
+            owner = block;
+        }
+    }
+    const int slots = needBlocksNum(seq_len, 0, reserve_step);
+    BlockIndicesType next(slots, NULL_BLOCK_IDX);
+    const int tail = needBlocksNum(seq_len, 0, 0) - 1;
+    if (isNullBlockIdx(owner)) {
+        if (!ensureFreeBlocks(1)) return false;
+        auto allocated = block_pool_->malloc(1);
+        if (!allocated.has_value()) return false;
+        owner = allocated->front();
+        block_pool_->incRef(owner);
+    }
+    // Physical ownership remains unique; only the execution table aliases.
+    next[tail] = owner;
+    block_ids.assign(std::move(next));
+    block_ids.setSingleStateExecutionMapping(true);
+    return true;
+}
+
 int LinearCacheManager::retainedDecodeBlocks(int reserve_step) const {
     return std::max(2, static_cast<int>(activeTailBlocks())) + reserve_step;
 }
@@ -136,6 +180,11 @@ int LinearCacheManager::estimatePeakNeedBlocks(int                     seq_len,
                                                int                     reserve_step,
                                                bool                    enable_reuse_cache,
                                                bool                    reclaim_history) const {
+    if (compactSingleState()) {
+        RTP_LLM_CHECK_WITH_INFO(!enable_reuse_cache, "compact D SSM requires reuse_cache=false");
+        return std::any_of(current_block_indices.begin(), current_block_indices.end(),
+                           [](auto id) { return !isNullBlockIdx(id); }) ? 0 : 1;
+    }
     const int current_seq_slots = (seq_len + seqSizePerBlock() - 1) / seqSizePerBlock();
     const int final_seq_slots   = (seq_len + remaining_tokens + seqSizePerBlock() - 1) / seqSizePerBlock();
     const int extra_blocks      = reserve_step ? reserve_step - 1 : 0;
@@ -199,6 +248,11 @@ int LinearCacheManager::estimateInitialBatchPeakNeedBlocks(int  seq_len,
                                                            bool enable_reuse_cache,
                                                            int  target_batch_size,
                                                            bool reclaim_history) const {
+    if (compactSingleState()) {
+        RTP_LLM_CHECK_WITH_INFO(!enable_reuse_cache && target_batch_size <= 1,
+                                "compact D SSM requires reuse_cache=false and one return sequence per request");
+        return seq_len > 0 ? 1 : 0;
+    }
     const int  batch_size = std::max(target_batch_size, 1);
     const auto seq_slots  = [&](int length) { return (length + seqSizePerBlock() - 1) / seqSizePerBlock(); };
 
@@ -296,6 +350,13 @@ NeedBlocksInfo LinearCacheManager::getNeedBlocks(int                      common
                                                  bool                     reuse_enabled,
                                                  const RequiredPositions& required_positions,
                                                  size_t                   reclaimed_prefix_blocks) const {
+    if (compactSingleState()) {
+        RTP_LLM_CHECK_WITH_INFO(!reuse_enabled, "compact D SSM requires reuse_cache=false");
+        NeedBlocksInfo result;
+        if (common_seq_len > 0) result.common_blocks = 1;
+        else if (seq_len > 0) result.extra_blocks = 1;
+        return result;
+    }
     (void)reserve_step;
     NeedBlocksInfo info;
     const int      reuse_slots  = reuse_enabled ? reuse_blocks_len : 0;
@@ -348,6 +409,10 @@ bool LinearCacheManager::mallocImpl(BlockIds&                block_ids,
                                     bool                     enable_reuse_cache,
                                     std::vector<size_t>*     backfilled_positions,
                                     const RequiredPositions& required_positions) {
+    if (compactSingleState()) {
+        RTP_LLM_CHECK_WITH_INFO(!enable_reuse_cache, "compact D SSM requires reuse_cache=false");
+        return mallocSingleState(block_ids, seq_len, reserve_step, backfilled_positions);
+    }
     if (backfilled_positions != nullptr) {
         backfilled_positions->clear();
     }
@@ -450,6 +515,11 @@ bool LinearCacheManager::mallocImpl(BlockIds&                block_ids,
 }
 
 void LinearCacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
+    if (compactSingleState()) {
+        RTP_LLM_CHECK_WITH_INFO(!enable_reuse_cache, "compact D SSM requires reuse_cache=false");
+        return;
+    }
+
     const auto& block_indices = block_ids.blocks();
     if (block_indices.empty()) {
         return;

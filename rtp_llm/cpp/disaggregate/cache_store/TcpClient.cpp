@@ -1,5 +1,8 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpClient.h"
 
+#include <cstdlib>
+#include <cstring>
+
 #include "aios/network/arpc/arpc/metric/KMonitorANetClientMetricReporter.h"
 
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -77,8 +80,21 @@ std::shared_ptr<arpc::RPCChannelBase> TcpClient::openChannel(const std::string& 
     // workers behind a saturated channel: ANet reports enqueue failure through
     // the RPC callback, and the cache-load state machine applies its bounded
     // transfer retry policy without starving healthy peers.
+    size_t queue_size = 1000ul;
+#if USING_ROCM
+    const char* split_ssm = std::getenv("ATOM_RTP_SPLIT_SSM_STORAGE");
+    if (split_ssm != nullptr && std::strcmp(split_ssm, "1") == 0) {
+        // Separately published SSM and convolution layers increase the number
+        // of simultaneous PD load RPCs. Keep nonblocking enqueue semantics,
+        // with a bounded queue sized for high-concurrency split-layout bursts.
+        // C192 can enqueue over 20K per-layer loads before P publishes them;
+        // 4096 rejects valid PD requests before the server can process them.
+        queue_size = 32768ul;
+    }
+#endif
+    RTP_LLM_LOG_INFO("cache-store channel %s nonblocking queue capacity %zu", spec.c_str(), queue_size);
     return std::shared_ptr<arpc::RPCChannelBase>(
-        dynamic_cast<arpc::RPCChannelBase*>(rpc_channel_manager_->OpenChannel(spec, false, 1000ul)));
+        dynamic_cast<arpc::RPCChannelBase*>(rpc_channel_manager_->OpenChannel(spec, false, queue_size)));
 }
 
 std::shared_ptr<TransferConnection>

@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 
@@ -29,6 +30,71 @@ GroupBase makeResourceGroup(std::string tag, CacheGroupType type) {
 }
 
 }  // namespace
+
+TEST(BlockIdsTest, SingleStateExecutionAliasesDoNotDuplicateOwnership) {
+    BlockIds ids;
+    ids.assign({NULL_BLOCK_IDX, 7, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+    ids.setSingleStateExecutionMapping(true);
+    EXPECT_EQ(ids.kernelBlocks(), (BlockIndicesType{7, 7, 7, 7}));
+    EXPECT_EQ(ids.blocks(), (BlockIndicesType{NULL_BLOCK_IDX, 7, NULL_BLOCK_IDX, NULL_BLOCK_IDX}));
+    ids.swap(1, 3);
+    EXPECT_EQ(ids.blocks()[1], 7);
+    // Crossing a token page moves ownership without changing its physical ID.
+    ids.assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX, 7, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+    EXPECT_EQ(ids.kernelBlocks(), (BlockIndicesType{7, 7, 7, 7, 7}));
+    ids.setSingleStateExecutionMapping(false);
+    EXPECT_EQ(ids.kernelBlocks(), ids.blocks());
+}
+
+TEST(BlockIdsTest, SingleStateRejectsMultipleOwnersAndPreservesCopyMapping) {
+    BlockIds ids;
+    ids.assign({NULL_BLOCK_IDX, 7, NULL_BLOCK_IDX});
+    ids.setSingleStateExecutionMapping(true);
+    BlockIds copy = ids;
+    EXPECT_EQ(copy.kernelBlocks(), (BlockIndicesType{7, 7, 7}));
+    copy.assign({7, 8});
+    EXPECT_ANY_THROW(copy.kernelBlocks());
+    EXPECT_EQ(ids.kernelBlocks(), (BlockIndicesType{7, 7, 7}));
+    copy.assign({});
+    EXPECT_TRUE(copy.kernelBlocks().empty());
+}
+
+TEST(LinearStorageLayoutTest, SplitComponentsPreserveOriginalByteBudget) {
+    LinearAttentionConfig linear;
+    linear.linear_conv_kernel_dim = 4;
+    linear.linear_key_head_dim = 8;
+    linear.linear_value_head_dim = 8;
+    linear.linear_num_key_heads = 4;
+    linear.linear_num_value_heads = 8;
+    linear.ssm_state_dtype = DataType::TYPE_FP32;
+    linear.conv_state_dtype = DataType::TYPE_BF16;
+    ParallelismConfig parallelism;
+    parallelism.tp_size = 2;
+    SpecBuildContext context;
+    context.dtype = DataType::TYPE_BF16;
+    context.seq_size_per_block = 64;
+    context.linear_attention_config = &linear;
+    context.parallelism_config = &parallelism;
+    KVCacheSpecDesc desc;
+    desc.tag = "linear";
+    desc.cache_type = KVCacheSpecType::LinearAttention;
+    const auto combined = LinearKVCacheSpec::build(desc, context);
+    EXPECT_GT(combined->k_block_size_bytes(), 0u);
+    EXPECT_GT(combined->v_block_size_bytes(), 0u);
+    desc.linear_state_component = 1;
+#if USING_ROCM
+    const auto state = LinearKVCacheSpec::build(desc, context);
+    desc.linear_state_component = 2;
+    const auto conv = LinearKVCacheSpec::build(desc, context);
+    EXPECT_EQ(state->v_block_size_bytes(), 0u);
+    EXPECT_EQ(conv->k_block_size_bytes(), 0u);
+    EXPECT_EQ(state->block_size_bytes(), combined->k_block_size_bytes());
+    EXPECT_EQ(conv->block_size_bytes(), combined->v_block_size_bytes());
+    EXPECT_EQ(state->block_size_bytes() + conv->block_size_bytes(), combined->block_size_bytes());
+#else
+    EXPECT_ANY_THROW(LinearKVCacheSpec::build(desc, context));
+#endif
+}
 
 TEST(GroupBlockIdsTest, CopyOwnsIdentityAndSharesHolders) {
     GroupBlockIds copy;

@@ -59,6 +59,8 @@ struct KVCacheSpecDesc {
     KVCacheSpecType cache_type     = KVCacheSpecType::MultiHeadAttention;
     DataType        dtype          = DataType::TYPE_INVALID;
     bool            is_state_cache = false;
+    // ROCm ATOM opt-in: 0 = legacy combined, 1 = SSM only, 2 = convolution only.
+    uint32_t        linear_state_component = 0;
 
     uint32_t entry_elems = 0;
     DataType entry_dtype = DataType::TYPE_INVALID;

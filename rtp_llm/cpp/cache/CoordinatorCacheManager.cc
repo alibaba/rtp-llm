@@ -1854,8 +1854,14 @@ int CoordinatorCacheManager::singleBatchNeedBlocks(const BatchKVCacheResourcePtr
         const auto& tag               = config_.groupTags()[static_cast<size_t>(group_id)];
         const int   effective_seq_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, tag, seq_len);
         const int   cur_blocks        = batch_kv_cache_resource->blocksNum(0, tag);
-        need_blocks +=
-            kv_cache_groups_[static_cast<size_t>(group_id)]->needBlocksNum(effective_seq_len, cur_blocks, reserve_step);
+        const auto& group = *kv_cache_groups_[static_cast<size_t>(group_id)];
+        if (group.singleStateExecutionMapping()) {
+            // Growing the logical alias table does not allocate another SSM.
+            const auto& ids = batch_kv_cache_resource->cacheResource(0).blocks(tag);
+            need_blocks += std::any_of(ids.begin(), ids.end(), [](auto id) { return !isNullBlockIdx(id); }) ? 0 : 1;
+        } else {
+            need_blocks += group.needBlocksNum(effective_seq_len, cur_blocks, reserve_step);
+        }
     }
     return need_blocks;
 }

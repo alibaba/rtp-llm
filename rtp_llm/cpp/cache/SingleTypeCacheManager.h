@@ -123,6 +123,7 @@ public:
     uint32_t explicitBlockNum() const;
     size_t   activeTailBlocks() const;
 
+    virtual bool singleStateExecutionMapping() const { return false; }
     virtual bool                 prefixReusable() const;
     virtual bool                 hasSparseSlots() const;
     virtual bool                 hasKernelBlockSubdiv() const;

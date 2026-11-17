@@ -104,10 +104,31 @@ const BlockIndicesType& BlockIds::blocks() const {
 }
 
 const BlockIndicesType& BlockIds::kernelBlocks() const {
+    if (single_state_execution_mapping_) {
+        BlockIdxType state = NULL_BLOCK_IDX;
+        for (const auto block : block_indices) {
+            if (block != NULL_BLOCK_IDX) {
+                RTP_LLM_CHECK_WITH_INFO(state == NULL_BLOCK_IDX, "single-state row has multiple owners");
+                state = block;
+            }
+        }
+        RTP_LLM_CHECK_WITH_INFO(state != NULL_BLOCK_IDX || block_indices.empty(), "single-state row has no owner");
+        kernel_block_indices_.assign(block_indices.size(), state);
+        return kernel_block_indices_;
+    }
     if (cyclic_bank_count_ > 0) {
         syncKernelBlocks();
     }
     return kernel_block_indices_;
+}
+
+void BlockIds::setSingleStateExecutionMapping(bool enabled) {
+    RTP_LLM_CHECK_WITH_INFO(!enabled || kernel_blocks_per_kv_block_ == 1,
+                            "single-state execution does not support subdivided blocks");
+    single_state_execution_mapping_ = enabled;
+    if (!enabled) {
+        syncKernelBlocks();
+    }
 }
 
 void BlockIds::copySharedKernelBlocks(size_t prompt_tail, size_t chunk_tail, BlockIdxType* destination) const {
@@ -170,6 +191,12 @@ void BlockIds::remove(const std::vector<size_t>& indices) {
 }
 
 void BlockIds::swap(size_t pos_a, size_t pos_b) {
+    // Every execution slot denotes the committed SSM. Conv/PLE use separate
+    // holders and keep their ordinary accepted-token swaps.
+    if (single_state_execution_mapping_) {
+        return;
+    }
+
     if (pos_a >= block_indices.size() || pos_b >= block_indices.size()) {
         RTP_LLM_LOG_ERROR("BlockIds::swap: pos_a=%zu or pos_b=%zu is out of range, block_indices.size()=%zu",
                           pos_a,
