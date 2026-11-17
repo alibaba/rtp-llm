@@ -208,6 +208,8 @@ class ModelBase {
 public:
     virtual ~ModelBase()                                                     = default;
     virtual GptModelOutputs            forward(const GptModelInputs& inputs) = 0;
+    virtual bool supportsMtpDraftGraph(int) const { return false; }
+    virtual GptModelOutputs forwardMtpDraft(const GptModelInputs&, int) { return {}; }
     virtual void                       releaseBuffers() {}
     virtual void                       prepareAttentionInputs(const GptModelInputs& inputs) {}
     virtual std::optional<std::string> takeDeferredHiddenStateCaptureError() {

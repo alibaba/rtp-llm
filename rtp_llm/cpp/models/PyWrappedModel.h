@@ -86,6 +86,10 @@ public:
 
     GptModelOutputs            forward(const GptModelInputs& inputs) override;
     GptModelOutputs            forwardMicroBatched(const GptModelInputs& inputs, bool capture_hidden_states);
+    bool supportsMtpDraftGraph(int steps) const override {
+        return steps > 0 && graph_runner_ && graph_runner_->mtpDraftSteps() == steps;
+    }
+    GptModelOutputs forwardMtpDraft(const GptModelInputs& inputs, int steps) override;
     void                       releaseBuffers() override;
     torch::Tensor              getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor              getMtpLastHiddenStates(int64_t num_tokens) override;
@@ -103,6 +107,7 @@ public:
     std::optional<bool>        reduceSpeculativeTargetPrepareStatus(bool local_ok) override;
 
 private:
+    GptModelOutputs forwardImpl(const GptModelInputs& inputs, bool whole_mtp_draft);
     friend struct test::PyWrappedModelTestPeer;
 
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
@@ -537,6 +542,32 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
         auto graph_runner =
             std::make_unique<CudaGraphRunner>(graph_params, py_instance, forward_method, params.metrics_reporter);
+#if USING_ROCM
+        const char* mtp_loop_env = std::getenv("RTP_LLM_MTP_DRAFT_LOOP_GRAPH");
+        if (mtp_loop_env && std::string(mtp_loop_env) == "1" && params.model_id == 1
+            && graph_params.role == CudaGraphRole::DECODE && params.sp_config.gen_num_per_cycle > 1 && !check_nan_
+            && py::hasattr(py_instance, "prepare_mtp_draft_graph_step")
+            && py::hasattr(py_instance, "supports_mtp_draft_loop_graph")
+            && py_instance.attr("supports_mtp_draft_loop_graph").cast<bool>()
+            && py::str(py_instance.attr("__class__").attr("__module__")).cast<std::string>().rfind("atom.", 0) == 0) {
+            graph_runner->configureMtpDraftLoop(
+                params.sp_config.gen_num_per_cycle - 1, [this](const torch::Tensor& hidden) {
+                    // This branch's computeLogits already includes TP gather and FP32 promotion.
+                    auto logits = computeLogits(hidden);
+                    if (description_.output_vocab_size > 0) {
+                        logits = logits.narrow(1, 0, description_.output_vocab_size).contiguous();
+                    }
+                    // Match FastTopKSampler::forward(top_k=1). One-hot values
+                    // are exact in either logit dtype; assembling the proposals
+                    // promotes them with the first proposal's FP32 distribution.
+                    logits = logits.to(torch::kFloat32);
+                    auto tokens = torch::argmax(logits, -1, true);
+                    auto probs  = torch::zeros_like(logits).scatter_(-1, tokens, 1.0);
+                    execMappingDraft2Target({tokens, weights_.d2t_map, static_cast<int>(tokens.size(0)), 0, 1});
+                    return std::make_pair(tokens.to(torch::kInt32).reshape({tokens.size(0)}), probs);
+                });
+        }
+#endif
         {
             void* nccl_comm = cuda_graph::getGraphCaptureTpNcclComm();
             cuda_graph::register_graph_capture_nccl_comm(nccl_comm,

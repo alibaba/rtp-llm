@@ -77,6 +77,11 @@ struct GraphParams {
 
 };
 
+struct MtpDraftGraphOutputs {
+    std::vector<torch::Tensor> draft_token_ids;
+    std::vector<torch::Tensor> draft_probs;
+};
+
 class GraphBase {
 public:
     GraphBase(py::object py_instance): py_instance_(std::move(py_instance)) {}
@@ -89,6 +94,8 @@ public:
     virtual bool           canRun(const PyModelInputs& inputs,
                                   CudaGraphState&      state,
                                   CudaGraphCheckMode   mode = CudaGraphCheckMode::FORWARD) = 0;
+    virtual int mtpDraftSteps() const { return 0; }
+    virtual MtpDraftGraphOutputs mtpDraftOutputs(const CudaGraphState&) const { return {}; }
     virtual bool           captureSessionMayBeDirty() const                              = 0;
     virtual void           prepareAttentionInputs(const PyModelInputs& inputs,
                                                   CudaGraphState&      state,

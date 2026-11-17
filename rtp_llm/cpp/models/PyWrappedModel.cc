@@ -1119,6 +1119,18 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
 }
 
 GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
+    return forwardImpl(inputs, false);
+}
+
+GptModelOutputs PyWrappedModel::forwardMtpDraft(const GptModelInputs& inputs, int steps) {
+    if (!supportsMtpDraftGraph(steps) || inputs.is_fake_stream || inputs.warmup || inputs.skip_lm_head
+        || inputs.capture_hidden_states) {
+        return {};
+    }
+    return forwardImpl(inputs, true);
+}
+
+GptModelOutputs PyWrappedModel::forwardImpl(const GptModelInputs& inputs, bool whole_mtp_draft) {
     RTP_LLM_PROFILE_SCOPE("py_model.forward");
 
     // Establish the cleanup guard before touching inputs: both the performance
@@ -1250,8 +1262,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             && generation_prefill_graph_runner_ != nullptr && !is_generation_prefill_runner) {
             generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::MIXED_PREFILL_DECODE_NOT_SUPPORTED;
         }
-        const bool can_run_graph = !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr
+        const bool graph_matches_call = graph_runner && ((graph_runner->mtpDraftSteps() > 0) == whole_mtp_draft);
+        const bool can_run_graph = graph_matches_call && !capture_hidden_states && enable_cuda_graph_ && graph_runner
                                    && graph_runner->canRun(py_model_inputs, graph_state);
+        if (whole_mtp_draft && !can_run_graph) { return {}; }
         if (!capture_hidden_states && is_generation_prefill_runner && !can_run_graph) {
             generation_prefill_cuda_graph_status =
                 graph_state.generation_prefill_status == GenerationPrefillCudaGraphStatus::NOT_REQUESTED ?
@@ -1269,6 +1283,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 graph_state.current_real_graph_bs);
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner->forward(py_model_inputs, graph_state);
+            if (whole_mtp_draft) {
+                auto draft = graph_runner->mtpDraftOutputs(graph_state);
+                GptModelOutputs result;
+                result.draft_token_ids = std::move(draft.draft_token_ids);
+                result.draft_probs = std::move(draft.draft_probs);
+                return result;
+            }
             if (has_speculative_target_commit_hooks_ && py_model_inputs.attention_inputs.is_target_verify) {
                 py_model_.attr("activate_speculative_target_graph_replay")(graph_state.current_real_graph_bs);
             }
