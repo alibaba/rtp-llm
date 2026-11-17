@@ -90,6 +90,16 @@ class ScrRestoreEnvFileTest(unittest.TestCase):
         self.assertEqual(os.environ["HIPPO_SLAVE_IP"], "192.0.2.100")
         self.assertEqual(runtime.get_restore_runtime_identity().environment_keys, ())
 
+    def test_nonlocal_hostname_aborts_without_releasing(self):
+        events = []
+        self.local_probe.bind.side_effect = OSError("address not available")
+        with patch.object(
+            runtime, "current_pod_ip", return_value="192.0.2.20"
+        ), self.assertRaisesRegex(ValueError, "hostname IP is not local"):
+            self.barrier(events)
+        self.assertEqual(events, ["prepare", "barrier", "abort"])
+        self.assertEqual(os.environ["RequestedIP"], "192.0.2.10")
+
     def test_file_is_read_after_barrier_and_before_components(self):
         # The seed-side bytes are invalid; only the newly published input may be read.
         self.path.write_text("not-json", encoding="utf-8")

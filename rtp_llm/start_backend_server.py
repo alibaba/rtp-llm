@@ -246,9 +246,9 @@ def local_rank_start(
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
         ignore_sigpipe("after engine startup")
-        # The model and its KV-cache allocations now exist.  Registration is
-        # rank-local and fail-open; the controller is intentionally not called
-        # from this worker process.
+        # The model and its KV-cache allocations now exist. Registration adds
+        # rank-local hints to the controller's whole-process snapshot. The
+        # required checkpoint rendezvous is the barrier below.
         _register_scr_resources(backend_manager, py_env_configs)
 
         # Every deployment passes the same startup barrier point.  It is a

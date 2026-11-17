@@ -238,9 +238,9 @@ def get_frontend_world_info(
     """Resolve only the TP leaders needed by this frontend's local workers.
 
     A TP group can span nodes, leaving a frontend with no local TP leader.
-    Backends register before frontends start. Read those leaders' actual ports
-    from the existing registry, without changing backend/local membership or
-    including unrelated DP groups. The temporary store is not retained for SCR.
+    Read the leaders' actual ports from the backend registry. A separated
+    frontend with this layout must use its backend's master address. The
+    temporary store is not retained for SCR.
     """
     current = get_world_info(server_config, distribute_config, parallelism_config)
     pc = parallelism_config
@@ -262,11 +262,11 @@ def get_frontend_world_info(
         attempt_timeout = min(attempt_timeout, distribute_config.dist_comm_timeout)
     deadline = time.monotonic() + budget
     members = list(current.members)
-    # A frontend with no route cannot serve its DP lane. Wait for the actual
-    # registration within the configured budget instead of publishing an empty route.
+    # Resolve the topology first so an invalid master configuration is reported
+    # directly. The registry can take longer to start and announce its leaders.
+    master_ip, master_port = get_master(distribute_config, pc)
     while missing:
         try:
-            master_ip, master_port = get_master(distribute_config, pc)
             timeout = timedelta(
                 seconds=max(0.001, min(attempt_timeout, deadline - time.monotonic()))
             )

@@ -1,6 +1,7 @@
 """Frontend routing tests: PP stage-0 selection plus sCR-aware TP leader discovery."""
 
 import os
+import tempfile
 import unittest
 from datetime import timedelta
 from types import SimpleNamespace
@@ -196,6 +197,26 @@ class FrontendRoutingTest(unittest.TestCase):
                                 ],
                             )
                             store.assert_not_called()
+
+    def test_missing_master_annotation_is_reported_before_registry_retry(self):
+        configs = self.config(pp=1, tp=4)
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.dict(os.environ, {"RTPLLM_ENABLE_SCR": "0"}, clear=True),
+            patch.object(ds, "TCPStore") as store,
+            patch.object(
+                ds.time, "sleep", side_effect=AssertionError("should not retry")
+            ),
+        ):
+            configs.distribute_config.gang_annotation_path = f"{directory}/annotations"
+            with self.assertRaises(FileNotFoundError) as error:
+                ds.get_frontend_world_info(
+                    configs.server_config,
+                    configs.distribute_config,
+                    configs.parallelism_config,
+                )
+        self.assertEqual(error.exception.filename, f"{directory}/annotations")
+        store.assert_not_called()
 
     def test_remote_leader_uses_actual_tcpstore_registration(self):
         configs = PyEnvConfigs()

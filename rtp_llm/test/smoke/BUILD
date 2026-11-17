@@ -227,6 +227,7 @@ cc_binary(
     srcs = ["scr_pinned_probe.cc"],
     linkshared = True,
     linkopts = ["-ldl", "-pthread"],
+    tags = ["manual"],
     deps = ["@local_config_cuda//cuda:cupti_headers"],
 )
 

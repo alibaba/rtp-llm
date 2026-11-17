@@ -211,7 +211,9 @@ class CheckpointBarrier:
         expected = None
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
-            snapshots = self.snapshots(timeout=min(2, deadline - time.monotonic()))
+            # The window controls when to start a sample. Each sample gets its
+            # own bounded round-trip budget, even at the end of the window.
+            snapshots = self.snapshots(timeout=2)
             network = tcp_snapshot(root_pid)
             pids = network["pids"]
             if expected is not None and pids != expected:

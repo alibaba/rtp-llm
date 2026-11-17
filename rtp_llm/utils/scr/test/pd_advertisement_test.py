@@ -32,20 +32,10 @@ class ScrPdAdvertisementTest(unittest.TestCase):
             local_rank=0,
             world_rank=0,
         )
-        self.world = NS(
-            num_nodes=1,
-            members=[
-                NS(
-                    ip="127.0.0.1",
-                    world_rank=i,
-                    local_rank=i,
-                    cache_store_listen_port=18632 + i * 10,
-                    cache_store_rdma_listen_port=18634 + i * 10,
-                    rpc_server_port=18631 + i * 10,
-                )
-                for i in range(2)
-            ],
-        )
+        members = [
+            WorkerInfo("127.0.0.1", i, i, f"rank-{i}", 18630, 10) for i in range(2)
+        ]
+        self.world = WorldInfo(members, members[0], members[0], 1, True)
         for context in (
             patch.object(fixup, "_runtime_identity", None),
         ):
@@ -119,12 +109,7 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         with patch(
             "rtp_llm.distribute.distributed_server.get_world_info",
             return_value=self.world,
-        ), patch(
-            "rtp_llm.distribute.distributed_server.get_dp_addrs_from_world_info",
-            return_value=["127.0.0.1:18631"],
-        ), patch(
-            "socket.gethostbyname", return_value="192.0.2.20"
-        ):
+        ), patch("socket.gethostbyname", return_value="192.0.2.20"):
             _BackendVisitorTemplateHook(visitor, configs, self.world).restore_fixup(
                 RestoreContext("generation-2", "192.0.2.20")
             )

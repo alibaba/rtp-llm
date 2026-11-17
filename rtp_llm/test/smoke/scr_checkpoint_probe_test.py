@@ -451,6 +451,22 @@ class BlockingCheckpointTest(unittest.TestCase):
                 with self.assertRaises(TimeoutError):
                     barrier.snapshots(timeout=0.02)
 
+    def test_last_sample_has_its_own_reply_deadline(self):
+        barrier = CheckpointBarrier("expected")
+        self.addCleanup(barrier.close)
+        samples = clean_snapshot()
+        with patch(
+            "rtp_llm.test.smoke.scr_checkpoint_probe.time.monotonic",
+            side_effect=[0, 0.9, 1.1, 1.2],
+        ), patch(
+            "rtp_llm.test.smoke.scr_checkpoint_probe.tcp_snapshot",
+            return_value=samples["network"],
+        ), patch.object(
+            barrier, "snapshots", return_value=samples["participants"]
+        ) as snapshots:
+            self.assertEqual(list(barrier.observe(123, seconds=1)), [samples])
+        snapshots.assert_called_once_with(timeout=2)
+
     def test_detached_participant_cannot_be_observed_as_clean(self):
         barrier = CheckpointBarrier("expected")
         self.addCleanup(barrier.close)

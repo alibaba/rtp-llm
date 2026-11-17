@@ -135,9 +135,10 @@ def check_server_health(server_port, path="/health"):
     try:
         import requests
 
-        # This probe always targets this process's local server.
-        host = "127.0.0.1"
-        response = requests.get(f"http://{host}:{server_port}{path}", timeout=60)
+        # Probe the local listener directly, including in proxy environments.
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.get(f"http://127.0.0.1:{server_port}{path}", timeout=60)
         health_ok = False
         if response.status_code == 200:
             try:

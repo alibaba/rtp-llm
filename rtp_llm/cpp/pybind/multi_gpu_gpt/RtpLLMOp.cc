@@ -34,7 +34,7 @@ namespace rtp_llm {
 namespace {
 
 int64_t getStartupTimeoutMs(int64_t health_check_timeout_s) {
-    constexpr int64_t kDefaultStartupTimeoutMs = 600 * 1000;
+    constexpr int64_t kDefaultStartupTimeoutMs = 3600 * 1000;
     const auto        explicit_timeout_ms      = autil::EnvUtil::getEnv("RTP_LLM_STARTUP_TIMEOUT_MS", int64_t(0));
     if (explicit_timeout_ms > 0) {
         return explicit_timeout_ms;
@@ -251,7 +251,7 @@ void RtpLLMOp::startRPCServer() {
     // may omit ServerConfig's health-check timeout and use the RPC default.
     const auto health_timeout_s = py::hasattr(server_config, "startup_health_check_timeout") ?
                                       server_config.attr("startup_health_check_timeout").cast<int64_t>() :
-                                      0;
+                                      600;
     const int64_t startup_timeout_ms = getStartupTimeoutMs(health_timeout_s);
     rpc_server_deferred_ = false;
 

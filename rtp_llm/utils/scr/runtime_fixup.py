@@ -125,14 +125,13 @@ def fixup_runtime_after_restore(
     if parsed.is_loopback or parsed.is_unspecified or parsed.is_multicast:
         raise ValueError("restore identity requires a non-loopback Pod IP")
     pod_ip = str(parsed)
-    if supplied_ip is not None:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-            try:
-                probe.bind((pod_ip, 0))
-            except OSError as exc:
-                raise ValueError(
-                    "SCR restore environment RequestedIP is not local"
-                ) from exc
+    # Both the restored environment and the hostname can still name the seed.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind((pod_ip, 0))
+        except OSError as exc:
+            source = "RequestedIP" if supplied_ip is not None else "hostname IP"
+            raise ValueError(f"SCR restore {source} is not local") from exc
     extension = sys.modules.get("libth_transformer")
     refresh_logger = getattr(extension, "refresh_logger_after_scr", None)
     if extension is not None and not callable(refresh_logger):
