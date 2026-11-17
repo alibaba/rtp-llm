@@ -104,6 +104,12 @@ void fusedStridedCopy(const FusedStridedCopyParams& params);
 
 GreedyOutput     execSampleGreedy(const GreedyParams& params);
 torch::Tensor    execSampleFromProbs(const torch::Tensor& probabilities);
+#if USING_CUDA
+void execPrepareDSparkLogits(const torch::Tensor& base_logits,
+                             const torch::Tensor& markov_bias,
+                             const torch::Tensor& temperature,
+                             torch::Tensor&       output);
+#endif
 BeamSearchOutput execSampleBeamSearch(BeamSearchParams params);
 void             execRejectionSampling(const RejectionSamplingParams& params);
 void             execMappingDraft2Target(const MappingDraft2TargetParams& params);

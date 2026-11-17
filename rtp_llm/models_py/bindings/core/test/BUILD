@@ -96,6 +96,25 @@ cc_test(
     tags = ["manual"],
 )
 
+cc_test(
+    name = "dspark_prepare_logits_test",
+    srcs = ["DSparkPrepareLogitsTest.cc"],
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda/kernels/sampling:sampling",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+    copts = test_copts,
+    exec_properties = select({
+        "@//:using_ppu": {"gpu": "PPU-ZW810E"},
+        "//conditions:default": {"gpu": "L20_CU13"},
+    }),
+    tags = ["L20_CU13", "PPU-ZW810E"],
+    target_compatible_with = select({
+        "@//:using_cuda": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
 # Run focused cache-store coverage in default wildcard test gates while keeping
 # the broader GPU-linked ExecOps suite manual.
 cc_test(

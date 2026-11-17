@@ -58,17 +58,26 @@ SamplerOutput SpeculativeSampler::sampleDSparkDraft(const torch::Tensor& base_lo
     auto proposal_logits =
         base_logits.narrow(1, 0, draft_vocab_size)
             .view({batch_size, static_cast<int64_t>(propose_step_), static_cast<int64_t>(draft_vocab_size)});
+#if USING_CUDA
+    auto prepared_logits = torch::empty({batch_size, static_cast<int64_t>(draft_vocab_size)}, base_logits.options());
+#else
     auto temperature_column = temperature.unsqueeze(1);
+#endif
 
     for (int64_t step = 0; step < static_cast<int64_t>(propose_step_); ++step) {
         auto markov_embedding = markov_w1.index_select(0, previous_tokens);
-        auto markov_bias      = torch::mm(markov_embedding, markov_w2.transpose(0, 1)).to(torch::kFloat32);
-        auto logits           = proposal_logits.select(1, step) + markov_bias;
+        auto markov_bias      = torch::mm(markov_embedding, markov_w2.transpose(0, 1));
+#if USING_CUDA
+        execPrepareDSparkLogits(proposal_logits.select(1, step), markov_bias, temperature, prepared_logits);
+        auto logits = prepared_logits;
+#else
+        auto logits = proposal_logits.select(1, step) + markov_bias.to(torch::kFloat32);
+        logits.div_(temperature_column);
+#endif
 
         // Draft q applies request temperature only. Materialize that exact
         // dense distribution once, sample from it with FlashInfer, and pass
         // the same q to rejection sampling. Request top-k/top-p stay target-side.
-        logits.div_(temperature_column);
         auto sampling_probabilities = torch::softmax(logits, -1);
         auto sampled_draft_tokens   = execSampleFromProbs(sampling_probabilities).to(torch::kInt32);
         auto sampled_target_tokens  = sampled_draft_tokens;

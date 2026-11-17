@@ -75,4 +75,10 @@ void top_k_renorm_probs(torch::Tensor                probs,
                         int64_t                      top_k_val,
                         int64_t                      cuda_stream = 0);
 
+void prepare_dspark_logits(const torch::Tensor& base_logits,
+                           const torch::Tensor& markov_bias,
+                           const torch::Tensor& temperature,
+                           torch::Tensor&       output,
+                           int64_t              cuda_stream = 0);
+
 }  // namespace rtp_llm
