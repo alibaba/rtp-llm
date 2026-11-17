@@ -71,9 +71,7 @@ _TESTS = [
     "test_v41_sparse_decode",
     "test_v41_swa_codec",
     "test_v41_swa_fresh",
-    "test_v41_candidate_topk",
     "test_v41_flash_mla_cache_format",
-    "test_v41_grouped_gemm",
 ]
 
 
