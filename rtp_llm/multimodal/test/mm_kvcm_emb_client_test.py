@@ -77,6 +77,54 @@ def _kv_cache_config(**overrides):
 
 
 class RtpKvMetaObjectClientTest(unittest.TestCase):
+    def test_metadata_client_lock_wait_is_bounded_without_rpc(self):
+        from rtp_llm.multimodal.kvcm.lookup import KvMetaLookupError
+
+        client, *_ = self._create()
+        client._lookup_lock.acquire()
+        try:
+            with patch("rtp_llm.multimodal.kvcm.lookup.KvMetaLookup") as lookup:
+                with self.assertRaises(KvMetaLookupError) as caught:
+                    client.object_size("key", timeout_ms=10)
+                self.assertEqual(caught.exception.reason, "deadline")
+                lookup.assert_not_called()
+        finally:
+            client._lookup_lock.release()
+            client.close()
+
+    def test_metadata_setup_uses_one_deadline_and_keeps_client_reusable(self):
+        from rtp_llm.multimodal.kvcm.lookup import KvMetaLookupError
+
+        for setup_seconds in (0.025, 0.060):
+            with self.subTest(setup_seconds=setup_seconds):
+                client, native, *_ = self._create()
+                clock = [1.0]
+                lookup = MagicMock()
+                lookup.size.return_value = 12
+
+                def create_lookup(config):
+                    clock[0] += setup_seconds
+                    return lookup
+
+                with patch.object(kvcm_client.time, "monotonic", lambda: clock[0]):
+                    with patch(
+                        "rtp_llm.multimodal.kvcm.lookup.KvMetaLookup", create_lookup
+                    ):
+                        if setup_seconds > 0.050:
+                            with self.assertRaises(KvMetaLookupError) as caught:
+                                client.object_size("key", timeout_ms=50)
+                            self.assertEqual(caught.exception.reason, "deadline")
+                            lookup.size.assert_not_called()
+                        else:
+                            self.assertEqual(
+                                client.object_size("key", timeout_ms=50), 12
+                            )
+                            remaining = lookup.size.call_args.kwargs["timeout_ms"]
+                            self.assertTrue(0 < remaining <= 25)
+                        native.close.assert_not_called()
+                        self.assertEqual(client.object_size("next", timeout_ms=50), 12)
+                client.close()
+
     def test_registered_buffer_reuse_requires_typed_code_and_native_completion(self):
         facade = object.__new__(RtpKvMetaObjectClient)
         facade._client_error_type = _ClientError

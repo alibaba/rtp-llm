@@ -320,7 +320,12 @@ class MMRemoteEmbeddingCache:
         with self._stats_lock:
             self._stats[event] += 1
             count = self._stats[event]
-        failure = event in ("read_error", "read_late_error", "write_error")
+        failure = event in (
+            "read_error",
+            "read_late_error",
+            "read_late_complete",
+            "write_error",
+        )
         # Keep counters/metrics for every outcome, but never emit normal
         # request logs, even when a legacy audit flag is still configured.
         if not failure:
@@ -1203,8 +1208,9 @@ class MMRemoteEmbeddingCache:
 
             def complete_read(completed):
                 try:
-                    if caller_timed_out and not completed.cancelled():
-                        error = completed.exception()
+                    if caller_timed_out:
+                        cancelled = completed.cancelled()
+                        error = None if cancelled else completed.exception()
                         if error is not None:
                             self.record(
                                 "read_late_error",
@@ -1216,6 +1222,25 @@ class MMRemoteEmbeddingCache:
                                 caller_timed_out=True,
                                 elapsed_ms=(time.perf_counter() - started) * 1000,
                                 **self._error_context(error),
+                            )
+                        else:
+                            # This is the completion of an already failed read,
+                            # not a new hit or a second error-QPS observation.
+                            self.record(
+                                "read_late_complete",
+                                key=key,
+                                trace_id=trace_id,
+                                stage=timing["stage"],
+                                nbytes=timing["nbytes"],
+                                timeout_ms=timeout_ms,
+                                caller_timed_out=True,
+                                elapsed_ms=(time.perf_counter() - started) * 1000,
+                                sdk_api_ms=timing.get("sdk_api_ms"),
+                                completion_outcome=(
+                                    "cancelled"
+                                    if cancelled
+                                    else timing.get("outcome", "success")
+                                ),
                             )
                 finally:
                     self._release(cost)

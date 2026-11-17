@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Mapping, Sequence
 from types import TracebackType
 from typing import Any, TypeVar
@@ -298,15 +299,30 @@ class RtpKvMetaObjectClient:
 
     def object_size(self, key: str, *, trace_id=None, timeout_ms=None):
         """Return exact size or None from KVMeta Get; never expose a storage URI."""
-        from .lookup import KvMetaLookup
+        from .lookup import KvMetaLookup, KvMetaLookupError
 
-        with self._lookup_lock:
+        budget_ms = self._config.call_timeout_ms if timeout_ms is None else timeout_ms
+        deadline = time.monotonic() + budget_ms / 1000
+        if budget_ms <= 0 or not self._lookup_lock.acquire(
+            timeout=max(0, deadline - time.monotonic())
+        ):
+            raise KvMetaLookupError(
+                "KVMeta lookup client lock deadline exceeded", reason="deadline"
+            )
+        try:
             if self._closed:
                 raise RuntimeError("KVCM client is closed")
             if self._lookup is None:
                 self._lookup = KvMetaLookup(self._config)
             lookup = self._lookup
-        return lookup.size(key, trace_id=trace_id, timeout_ms=timeout_ms)
+        finally:
+            self._lookup_lock.release()
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
+            raise KvMetaLookupError(
+                "KVMeta lookup client setup deadline exceeded", reason="deadline"
+            )
+        return lookup.size(key, trace_id=trace_id, timeout_ms=remaining_ms)
 
     def save_object(self, key: str, value: Any, *, devices=None, trace_id=None):
         """Save one complete tensor tree; synchronize GPU producer streams first."""

@@ -1004,7 +1004,10 @@ class RemoteCacheTest(unittest.TestCase):
                     gate.set()
                     remote.close()
         outcomes = [c.args[0] for c in record.call_args_list]
-        self.assertEqual(outcomes, ["read_error"])
+        self.assertEqual(outcomes, ["read_error", "read_late_complete"])
+        completed = record.call_args_list[-1].kwargs
+        self.assertEqual(completed["trace_id"], "late-miss")
+        self.assertEqual(completed["completion_outcome"], "miss")
         self.assertEqual(remote.stats().get("miss", 0), 0)
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
 
@@ -1429,7 +1432,7 @@ class RemoteCacheTest(unittest.TestCase):
         remote = self.remote(store, read_timeout_ms=30)
         with patch(
             "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"
-        ) as report:
+        ) as report, patch.object(remote, "record", wraps=remote.record) as record:
             try:
                 self.assertIsNone(remote.load("key"))
                 self.assertTrue(store.read_started.is_set())
@@ -1441,6 +1444,13 @@ class RemoteCacheTest(unittest.TestCase):
             finally:
                 store.read_gate.set()
                 remote.close()
+        completed = [
+            call
+            for call in record.call_args_list
+            if call.args[0] == "read_late_complete"
+        ]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0].kwargs["completion_outcome"], "success")
         tags = {"operation": "read"}
         self.assertEqual(
             self.metric_values(report, AccMetrics.VIT_REMOTE_EMB_READ_ERROR_QPS_METRIC),
