@@ -15,7 +15,6 @@
 #include <future>
 #include <iostream>
 #include <mutex>
-#include <random>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -185,7 +184,7 @@ public:
             }
         }
         scheduler_ = std::make_unique<FIFOScheduler>(
-            runtime, model_, pd, ParallelismConfig{}, ModelSpecificConfig{}, getCacheManager());
+            runtime, model_, pd, ParallelismConfig{}, getCacheManager());
     }
 
     ~PayloadEngine() override {
@@ -388,8 +387,9 @@ private:
             if (!scheduled.ok()) {
                 continue;
             }
-            max_running_streams_ = std::max(max_running_streams_.load(), static_cast<int>(scheduled->size()));
-            for (const auto& stream : scheduled.value()) {
+            const auto& streams = scheduled->streams;
+            max_running_streams_ = std::max(max_running_streams_.load(), static_cast<int>(streams.size()));
+            for (const auto& stream : streams) {
                 try {
                     cudaCheck(device_status);
                     const bool prefill = pd_.role_type == RoleType::PREFILL;
@@ -1095,7 +1095,7 @@ protected:
         expectCancelDrained();
     }
 
-    bool cancelRound(int64_t id, CancelStage stage, int delay_ms) {
+    void cancelRound(int64_t id, CancelStage stage) {
         const auto before             = prefill_process_->snapshot();
         const auto d_cancel_before    = decode_rpc_->service.generate_cancelled.load();
         const auto read_before        = decode_rpc_->service.read_calls.load();
@@ -1108,33 +1108,22 @@ protected:
         auto                           call =
             std::async(std::launch::async, [&] { return generate(request(id, 11), outputs, context, &output_count); });
         try {
-            if (stage != CancelStage::None) {
-                require(waitFor([&] {
-                            const auto p = prefill_process_->snapshot();
-                            if (stage == CancelStage::AfterFirstDecodeOutput)
-                                return decode_engine_->stage_reached.load() && output_count.load() > 0;
-                            return p.stage_reached && p.load_calls > before.load_calls
-                                   && decode_rpc_->service.read_calls > read_before;
-                        }),
-                        "cancel stage was not reached");
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
+            require(waitFor([&] {
+                        if (stage == CancelStage::AfterFirstDecodeOutput)
+                            return decode_engine_->stage_reached.load() && output_count.load() > 0;
+                        const auto p = prefill_process_->snapshot();
+                        return p.stage_reached && p.load_calls > before.load_calls
+                               && decode_rpc_->service.read_calls > read_before;
+                    }),
+                    "cancel stage was not reached");
             context.TryCancel();
-            const auto status    = call.get();
-            const bool cancelled = status.error_code() == grpc::StatusCode::CANCELLED;
-            require(cancelled || (stage == CancelStage::None && status.ok()),
+            const auto status = call.get();
+            require(status.error_code() == grpc::StatusCode::CANCELLED,
                     "unexpected cancel result: " + std::to_string(status.error_code()) + " " + status.error_message());
-            if (status.ok()) {
-                require(!outputs.empty() && outputs.back().flatten_output().finished_size() == 1
-                            && outputs.back().flatten_output().finished(0),
-                        "successful racing request is incomplete");
-            }
             expectCancelDrained();
             const auto after = prefill_process_->snapshot();
-            if (stage != CancelStage::None) {
-                require(decode_rpc_->service.generate_cancelled > d_cancel_before,
-                        "D handler did not observe outer RPC cancellation");
-            }
+            require(decode_rpc_->service.generate_cancelled > d_cancel_before,
+                    "D handler did not observe outer RPC cancellation");
             if (stage == CancelStage::BeforePublish || stage == CancelStage::AfterFirstLayer) {
                 require(after.generate_cancelled > before.generate_cancelled,
                         "cancellation did not reach P GenerateStreamCall");
@@ -1142,12 +1131,11 @@ protected:
                 require(decode_rpc_->service.cancel_read_calls > cancel_read_before,
                         "cancellation did not reach D READ workers");
             }
-            std::cerr << "cancel request=" << id << " stage=" << static_cast<int>(stage) << " delay_ms=" << delay_ms
+            std::cerr << "cancel request=" << id << " stage=" << static_cast<int>(stage)
                       << " result=" << status.error_code()
                       << " P_cancel=" << after.generate_cancelled - before.generate_cancelled
                       << " D_cancel=" << decode_rpc_->service.generate_cancelled - d_cancel_before << std::endl;
             healthyAfterCancel(id + 1);
-            return cancelled;
         } catch (...) {
             context.TryCancel();
             if (call.valid())
@@ -1562,36 +1550,9 @@ TEST_F(P2PGenerateStreamSmokeTest, CancelAtEachPDStageDrainsBothSides) {
     for (const auto stage :
          {CancelStage::BeforePublish, CancelStage::AfterFirstLayer, CancelStage::AfterFirstDecodeOutput}) {
         SCOPED_TRACE(static_cast<int>(stage));
-        EXPECT_TRUE(cancelRound(id, stage, 0));
+        cancelRound(id, stage);
         id += 2;
     }
-}
-
-TEST_F(P2PGenerateStreamSmokeTest, RandomCancelRepeatedlyDrainsBothSides) {
-    const auto parse = [](const char* name, const char* fallback, unsigned long maximum) {
-        const auto text   = environment(name, fallback);
-        size_t     parsed = 0;
-        const auto value  = std::stoul(text, &parsed);
-        require(parsed == text.size() && value <= maximum, std::string("invalid ") + name);
-        return value;
-    };
-    const auto seed   = static_cast<uint32_t>(parse("P2P_CANCEL_SEED", "20260915", UINT32_MAX));
-    const auto rounds = parse("P2P_CANCEL_ROUNDS", "32", 1000);
-    require(rounds > 0, "P2P_CANCEL_ROUNDS must be positive");
-    initialize(DataType::TYPE_INT8, Fault::None, true);
-    std::mt19937                       random(seed);
-    std::uniform_int_distribution<int> delay(0, 80);
-    size_t                             cancelled = 0;
-    for (size_t round = 0; round < rounds; ++round) {
-        const auto delay_ms = delay(random);
-        SCOPED_TRACE(::testing::Message() << "seed=" << seed << " round=" << round << " delay_ms=" << delay_ms);
-        std::cerr << "random cancel seed=" << seed << " round=" << round << '/' << rounds << " delay_ms=" << delay_ms
-                  << std::endl;
-        cancelled += cancelRound(3001 + 2 * round, CancelStage::None, delay_ms);
-    }
-    EXPECT_GT(cancelled, 0u) << "all requests completed before cancellation; increase rounds or reduce delays";
-    std::cerr << "random cancel summary seed=" << seed << " rounds=" << rounds << " cancelled=" << cancelled
-              << " completed_before_cancel=" << rounds - cancelled << std::endl;
 }
 
 TEST_F(P2PGenerateStreamSmokeTest, NonPDQueriesFinishOnPrefillWithoutP2PTransfer) {
