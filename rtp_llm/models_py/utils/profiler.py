@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextvars
+import sys
 from contextlib import contextmanager
 from typing import Optional, Type
 
@@ -30,6 +31,23 @@ class _NoopRecordFunctionRange:
 
 
 _NOOP_RECORD_FUNCTION_RANGE = _NoopRecordFunctionRange()
+
+
+def is_light_timeline() -> bool:
+    # Standalone models can also run under a Python-owned profiler.
+    probe = getattr(sys.modules.get("libth_transformer"), "is_light_timeline", None)
+    return probe is not None and probe()
+
+
+def active_layer_forward_range():
+    # Choose the range type once per forward. Full traces avoid GPU projections
+    # of each layer by using FUNCTION instead of USER_SCOPE.
+    record = (
+        torch.profiler.record_function
+        if is_light_timeline()
+        else torch._C._profiler._RecordFunctionFast
+    )
+    return lambda layer_idx: record(f"forward(layer={layer_idx})")
 
 
 def record_function_ranges_enabled() -> bool:

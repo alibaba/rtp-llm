@@ -9,6 +9,11 @@ from typing import Any, Callable, ContextManager, Optional, Type
 
 import torch
 
+from rtp_llm.models_py.utils.profiler import (
+    active_layer_forward_range,
+    is_light_timeline,
+)
+
 _RANGES_ENABLED = os.environ.get("DSV4_RECORD_FUNCTION_RANGES", "1") != "0"
 _DISABLED_DEPTH: contextvars.ContextVar[int] = contextvars.ContextVar(
     "dsv4_record_function_ranges_disabled", default=0
@@ -49,14 +54,6 @@ def _noop_layer_forward_range(_layer_idx: int) -> ContextManager[Any]:
     return _NOOP_RECORD_FUNCTION_RANGE
 
 
-def _active_layer_forward_range(layer_idx: int) -> ContextManager[Any]:
-    # ``record_function`` uses USER_SCOPE, which Kineto mirrors onto every GPU
-    # stream covered by the range.  A default _RecordFunctionFast uses FUNCTION
-    # scope instead: the layer remains visible as one CPU ``cpu_op`` interval,
-    # without a ``gpu_user_annotation`` projection that lengthens the timeline.
-    return torch._C._profiler._RecordFunctionFast(f"forward(layer={layer_idx})")
-
-
 def _torch_profiler_enabled() -> bool:
     # StepWindowProfiler starts Kineto from C++ on the same engine thread that
     # enters Python. This query observes that thread-local profiler state and
@@ -74,7 +71,7 @@ def make_layer_forward_range() -> LayerForwardRange:
     """
     if not record_function_ranges_enabled() or not _torch_profiler_enabled():
         return _noop_layer_forward_range
-    return _active_layer_forward_range
+    return active_layer_forward_range()
 
 
 @contextmanager

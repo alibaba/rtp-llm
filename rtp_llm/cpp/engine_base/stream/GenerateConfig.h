@@ -115,8 +115,9 @@ public:
     int                max_thinking_tokens = 0;
     std::vector<int>   begin_think_token_ids;
     std::vector<int>   end_think_token_ids;
-    bool               gen_timeline = false;
-    int                profile_step = 3;
+    bool               gen_timeline  = false;
+    bool               profile_light = false;
+    int                profile_step  = 3;
     std::string        profile_trace_name;
     bool               ignore_eos          = false;
     bool               reuse_cache         = true;
@@ -273,8 +274,9 @@ public:
                      << ", max_thinking_tokens: " << max_thinking_tokens
                      << ", begin_think_token_ids: " << vectorToString(begin_think_token_ids)
                      << ", end_think_token_ids: " << vectorToString(end_think_token_ids)
-                     << ", gen_timeline: " << gen_timeline << ", profile_step: " << profile_step
-                     << ", reuse_cache: " << reuse_cache << ", enable_device_cache: " << enable_device_cache
+                     << ", gen_timeline: " << gen_timeline << ", profile_light: " << profile_light
+                     << ", profile_step: " << profile_step << ", reuse_cache: " << reuse_cache
+                     << ", enable_device_cache: " << enable_device_cache
                      << ", enable_memory_cache: " << enable_memory_cache << ", enable_disk_cache: " << enable_disk_cache
                      << ", enable_remote_cache: " << enable_remote_cache << ", unique_key: " << unique_key
                      << ", combo_token_size: " << combo_token_size
@@ -394,6 +396,7 @@ public:
         JSONIZE(begin_think_token_ids);
         JSONIZE(end_think_token_ids);
         JSONIZE(gen_timeline);
+        JSONIZE(profile_light);
         JSONIZE(profile_step);
         JSONIZE(profile_trace_name);
         JSONIZE(reuse_cache);

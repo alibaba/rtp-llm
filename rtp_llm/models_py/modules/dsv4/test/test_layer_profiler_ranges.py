@@ -14,6 +14,7 @@ from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4.decode import forward as decode_forward
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import SWA_KV
 from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
+from rtp_llm.models_py.utils import profiler as shared_profiler
 
 
 def _logging_layer_range(events):
@@ -152,6 +153,19 @@ class LayerProfilerRangeTest(unittest.TestCase):
                 pass
 
         record_function.assert_not_called()
+
+    def test_light_timeline_layer_uses_user_scope(self):
+        with patch.object(
+            shared_profiler, "is_light_timeline", return_value=True
+        ), patch.object(_profiler, "_RANGES_ENABLED", True), torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU]
+        ) as prof:
+            with _profiler.make_layer_forward_range()(5):
+                torch.ones(1)
+
+        layers = [event for event in prof.events() if event.name == "forward(layer=5)"]
+        self.assertEqual(len(layers), 1)
+        self.assertTrue(layers[0].is_user_annotation)
 
     def test_layer_range_is_cpu_function_scope(self):
         with patch.object(_profiler, "_RANGES_ENABLED", True), torch.profiler.profile(

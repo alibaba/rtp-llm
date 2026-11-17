@@ -16,6 +16,7 @@ struct EmbeddingProfileConfig {
     bool        gen_timeline = false;
     int         profile_step = 1;
     std::string profile_trace_name;
+    bool        profile_light = false;
 };
 
 class EmbeddingStream {

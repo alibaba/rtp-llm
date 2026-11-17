@@ -9,8 +9,11 @@ grpc::Status EmbeddingRpcServiceImpl::StartProfile(grpc::ServerContext*         
                                                    const StartProfileRequestPB* request,
                                                    EmptyPB*                     response) {
     try {
-        embedding_engine_->startTimelineProfiling(
-            request->trace_name(), request->start_step(), request->num_steps(), request->enable_all_rank());
+        embedding_engine_->startTimelineProfiling(request->trace_name(),
+                                                  request->start_step(),
+                                                  request->num_steps(),
+                                                  request->enable_all_rank(),
+                                                  request->profile_light());
         return grpc::Status::OK;
     } catch (const std::invalid_argument& e) {
         return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, e.what());
@@ -80,6 +83,7 @@ grpc::Status EmbeddingRpcServiceImpl::embedding(grpc::ServerContext*    context,
         // Stage 3: Embedding Decode
         EmbeddingProfileConfig profile_config;
         profile_config.gen_timeline       = request->gen_timeline();
+        profile_config.profile_light      = request->profile_light();
         profile_config.profile_step       = request->profile_step();
         profile_config.profile_trace_name = request->profile_trace_name();
         embedding_output                  = embedding_engine_->decode(embedding_input, profile_config);

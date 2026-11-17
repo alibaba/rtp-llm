@@ -23,6 +23,7 @@ class TestExtractProfileConfig(unittest.TestCase):
         self.assertEqual(config["gen_timeline"], False)
         self.assertEqual(config["profile_step"], 1)
         self.assertEqual(config["profile_trace_name"], "")
+        self.assertFalse(config["profile_light"])
 
     def test_generate_config(self):
         request = {
@@ -31,12 +32,14 @@ class TestExtractProfileConfig(unittest.TestCase):
                 "gen_timeline": True,
                 "profile_step": 3,
                 "profile_trace_name": "my_trace",
+                "profile_light": True,
             },
         }
         config = EmbeddingEndpoint._extract_profile_config(request)
         self.assertEqual(config["gen_timeline"], True)
         self.assertEqual(config["profile_step"], 3)
         self.assertEqual(config["profile_trace_name"], "my_trace")
+        self.assertTrue(config["profile_light"])
 
     def test_extra_configs(self):
         request = {

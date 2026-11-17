@@ -1,15 +1,25 @@
 #pragma once
 
 #include <ATen/record_function.h>
+#include <c10/util/ThreadLocalDebugInfo.h>
 
 #include <cstdio>
 #include <string>
 
 namespace rtp_llm {
 
+// Kineto and this marker travel together when an engine worker copies ATen TLS.
+struct LightTimelineContext final: c10::DebugInfoBase {};
+
+inline bool isLightTimeline() {
+    const auto* info = c10::ThreadLocalDebugInfo::get(c10::DebugInfoKind::INFERENCE_CONTEXT);
+    return dynamic_cast<const LightTimelineContext*>(info) != nullptr;
+}
+
 class ProfilingScope {
 public:
-    explicit ProfilingScope(const char* name): record_function_(at::RecordScope::FUNCTION) {
+    explicit ProfilingScope(const char* name):
+        record_function_(isLightTimeline() ? at::RecordScope::USER_SCOPE : at::RecordScope::FUNCTION) {
         if (record_function_.isActive()) {
             record_function_.before(name);
             active_ = true;
