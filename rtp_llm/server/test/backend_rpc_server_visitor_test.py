@@ -747,6 +747,7 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
     def _visitor(self, model_rpc_client) -> BackendRPCServerVisitor:
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.max_seq_len = 1024
+        visitor.remote_vit = False
         visitor.model_rpc_client = model_rpc_client
         visitor.host_service = _FakeHostService()
         visitor.pd_route_retry_on_unavailable = 3
