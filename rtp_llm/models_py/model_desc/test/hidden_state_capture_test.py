@@ -184,6 +184,9 @@ def _make_qwen_model(layer_ids: list[int]) -> Qwen3Model:
     model.kv_cache = None
     model.embed_tokens = _Embedding()
     model.layers = nn.ModuleList([_QwenLayer(1), _QwenLayer(2), _QwenLayer(3)])
+    model._local_global_layer_ids = tuple(model.layer_ids())
+    model._cached_kv_cache = None
+    model._layer_kv_caches = None
     model.norm = _QwenNorm()
     model._init_capture_context(
         model._capture_canonical_layer,

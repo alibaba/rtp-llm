@@ -115,6 +115,69 @@ class Qwen3StageConstructionTest(unittest.TestCase):
         mock_norm.assert_not_called()
 
 
+class Qwen3LayerCacheReuseTest(unittest.TestCase):
+    class NativeCache:
+        def __init__(self, layer_count):
+            self.layer_count = layer_count
+            self.views = [
+                SimpleNamespace(
+                    kv_cache_base=torch.zeros(1), kv_scale_base=None, tag="default"
+                )
+                for _ in range(layer_count)
+            ]
+            self.get_layer_cache = Mock(side_effect=lambda idx: self.views[idx])
+
+        def get_layer_cache_groups(self, idx):
+            return [self.views[idx]]
+
+    def setUp(self):
+        # Keep these contract checks CPU-only; no kernels or model weights.
+        from rtp_llm.models_py.model_desc import qwen3
+
+        for patcher in (
+            patch.object(qwen3, "KVCache", self.NativeCache),
+            patch.object(torch.version, "hip", "test"),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.model, _, _, _ = make_qwen3(pp_size=2, pp_rank=1)
+
+    def test_reuses_live_views_and_model_local_ids(self):
+        cache = self.NativeCache(4)
+        self.model.initialize(SimpleNamespace(kv_cache=cache))
+        first = self.model._get_cached_layer_kv_caches()
+        self.assertIs(self.model._get_cached_layer_kv_caches(), first)
+        self.assertEqual(
+            [call.args[0] for call in cache.get_layer_cache.call_args_list],
+            [0, 1, 2, 3],
+        )
+        cache.views[0].kv_cache_base.fill_(7)
+        self.assertEqual(first[0].kv_cache_base.item(), 7)
+
+    def test_replacement_and_reinitialization_discard_old_views(self):
+        old = self.NativeCache(4)
+        self.model.initialize(SimpleNamespace(kv_cache=old))
+        first = self.model._get_cached_layer_kv_caches()
+        replacement = self.NativeCache(4)
+        self.model.kv_cache = replacement
+        second = self.model._get_cached_layer_kv_caches()
+        self.assertIsNot(first, second)
+        self.assertIs(second[0], replacement.views[0])
+        self.model.initialize(SimpleNamespace(kv_cache=replacement))
+        self.assertIsNot(second, self.model._get_cached_layer_kv_caches())
+        self.assertEqual(replacement.get_layer_cache.call_count, 8)
+
+    def test_absent_adapter_and_non_rocm_cache_keep_fallback(self):
+        self.assertIsNone(self.model._get_cached_layer_kv_caches())
+        self.model.kv_cache = SimpleNamespace()
+        self.assertIsNone(self.model._get_cached_layer_kv_caches())
+        cache = self.NativeCache(4)
+        self.model.kv_cache = cache
+        with patch.object(torch.version, "hip", None):
+            self.assertIsNone(self.model._get_cached_layer_kv_caches())
+        cache.get_layer_cache.assert_not_called()
+
+
 class Qwen3NextPPBoundaryTest(unittest.TestCase):
     """qwen3_next fuses add-norm, so the stage boundary carries both
     hidden_states and residual: non-first stages resume both from
@@ -428,6 +491,9 @@ class Qwen3PPBoundaryTest(unittest.TestCase):
         model.config = SimpleNamespace(
             hidden_state_capture_layer_ids=[], num_layers=3, is_mtp=False
         )
+        model._local_global_layer_ids = tuple(model.layer_ids())
+        model._cached_kv_cache = None
+        model._layer_kv_caches = None
         model._init_capture_context(
             model._capture_canonical_layer, model._capture_canonical_final
         )

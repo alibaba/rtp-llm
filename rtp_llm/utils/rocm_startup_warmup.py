@@ -54,6 +54,26 @@ class RocmWarmupCase:
     max_new_tokens: int = 2
 
 
+def resolve_rocm_warmup_max_seq_len(
+    configured_max_seq_len: Optional[int], model_max_seq_len: Optional[int]
+) -> int:
+    """Use the backend's resolved limit, not an optional CLI argument.
+
+    Direct callers with an explicit limit remain supported. Missing metadata
+    must fail closed rather than guess a limit larger than the loaded model.
+    """
+    limit = (
+        model_max_seq_len if model_max_seq_len is not None else configured_max_seq_len
+    )
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        raise ValueError(
+            "ROCm startup warmup needs a positive model max_seq_len from the "
+            "backend startup status (or an explicit MAX_SEQ_LEN); "
+            f"model={model_max_seq_len!r}, configured={configured_max_seq_len!r}"
+        )
+    return limit
+
+
 def rocm_warmup_cases(max_seq_len: int, prefix_len: int = 256):
     # 256 aligns with the Qwen ROCm block sizes. Reject unsupported small
     # contexts instead of silently skipping the cached-CK or decode path.

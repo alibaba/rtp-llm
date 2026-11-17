@@ -41,6 +41,9 @@ class DenseMLP(nn.Module):
 
         self.activation_type = activation_type
         self.parallelism_config = parallelism_config
+        # Parallelism is fixed when weights/modules are constructed, just as
+        # for CausalAttention.attn_tp_size. Avoid a pybind call on every layer.
+        self.ffn_tp_size = parallelism_config.get_ffn_tp_size()
         if self.activation_type not in _ACTIVATION_FUNC_MAP:
             raise ValueError(f"Unsupported activation type: {activation_type}")
         self.act_fn = _ACTIVATION_FUNC_MAP[activation_type]()
@@ -107,9 +110,8 @@ class DenseMLP(nn.Module):
             if output is None:
                 activated = self.act_fn(up)
 
-        ffn_tp_size = self.parallelism_config.get_ffn_tp_size()
         if output is None:
             output = self.down_proj(activated)
-        if not skip_allreduce and ffn_tp_size > 1:
+        if not skip_allreduce and self.ffn_tp_size > 1:
             output = all_reduce(output, group=Group.TP)
         return output

@@ -56,13 +56,21 @@ def _install_hot_hook_runtime(role: str, py_env_configs) -> None:
         logging.error("failed to install RTP hot hook runtime for %s: %s", role, e)
 
 
-def _send_pipe_status(pipe_writer, status: str, message: str, error_trace: str = ""):
+def _send_pipe_status(
+    pipe_writer,
+    status: str,
+    message: str,
+    error_trace: str = "",
+    *,
+    model_max_seq_len: Optional[int] = None,
+):
     if pipe_writer is None:
         return
     try:
-        pipe_writer.send(
-            {"status": status, "message": message, "traceback": error_trace}
-        )
+        payload = {"status": status, "message": message, "traceback": error_trace}
+        if model_max_seq_len is not None:
+            payload["model_max_seq_len"] = model_max_seq_len
+        pipe_writer.send(payload)
         pipe_writer.close()
     except Exception as e:
         logging.warning(f"Failed to send status via pipe: {e}")
@@ -126,6 +134,9 @@ def local_rank_start(
             pipe_writer,
             "success",
             f"Backend server started successfully on rank {py_env_configs.parallelism_config.local_rank}",
+            # ModelFactory has resolved checkpoint defaults, CLI overrides and
+            # config updates here. The parent's optional CLI argument has not.
+            model_max_seq_len=backend_manager.engine.config.max_seq_len,
         )
         pipe_writer = None  # success closed it
 

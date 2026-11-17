@@ -2,6 +2,7 @@ import asyncio
 import unittest
 
 from rtp_llm.utils.rocm_startup_warmup import (
+    resolve_rocm_warmup_max_seq_len,
     rocm_startup_warmup_enabled,
     rocm_warmup_cases,
     run_rocm_warmup_cases,
@@ -46,6 +47,32 @@ class RocmWarmupPolicyTest(unittest.TestCase):
     def test_invalid_override_fails_closed(self):
         with self.assertRaises(ValueError):
             rocm_startup_warmup_enabled("typo", **self.config)
+
+
+class RocmWarmupLimitTest(unittest.TestCase):
+    def test_omitted_cli_limit_uses_resolved_checkpoint_limit(self):
+        self.assertEqual(resolve_rocm_warmup_max_seq_len(None, 4096), 4096)
+
+    def test_backend_limit_wins_over_unresolved_cli_limit(self):
+        self.assertEqual(resolve_rocm_warmup_max_seq_len(8192, 512), 512)
+
+    def test_explicit_limit_supports_direct_callers(self):
+        self.assertEqual(resolve_rocm_warmup_max_seq_len(2048, None), 2048)
+
+    def test_missing_or_invalid_limit_fails_closed(self):
+        for invalid in (None, 0, -1, True, 3.5):
+            with self.subTest(limit=invalid):
+                with self.assertRaisesRegex(ValueError, "positive model max_seq_len"):
+                    resolve_rocm_warmup_max_seq_len(None, invalid)
+
+    def test_invalid_backend_limit_does_not_fall_back_to_cli(self):
+        with self.assertRaises(ValueError):
+            resolve_rocm_warmup_max_seq_len(8192, 0)
+
+    def test_plan_respects_small_resolved_model_limit(self):
+        limit = resolve_rocm_warmup_max_seq_len(None, 512)
+        for case in rocm_warmup_cases(limit):
+            self.assertLessEqual(len(case.token_ids) + case.max_new_tokens, limit)
 
 
 class RocmWarmupPlanTest(unittest.TestCase):

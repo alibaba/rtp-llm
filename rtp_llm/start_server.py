@@ -115,6 +115,7 @@ def start_backend_server_impl(
     global_controller,
     py_env_configs: PyEnvConfigs,
     process_manager: ProcessManager = None,
+    startup_metadata: dict | None = None,
 ):
     from rtp_llm.start_backend_server import start_backend_server
 
@@ -173,6 +174,10 @@ def start_backend_server_impl(
             try:
                 status_msg = pipe_reader.recv()
                 if status_msg.get("status") == "success":
+                    if startup_metadata is not None:
+                        startup_metadata["model_max_seq_len"] = status_msg.get(
+                            "model_max_seq_len"
+                        )
                     logging.info(
                         f"Backend server started successfully: {status_msg.get('message', '')}"
                     )
@@ -722,6 +727,9 @@ def start_server(py_env_configs: PyEnvConfigs):
 
     # Impls register spawned processes right after start, so later failures still reach them in the finally cleanup.
     startup_warmup_gate_file = _setup_startup_warmup_health_gate(py_env_configs)
+    # Filled by the backend's startup handshake before health checks complete.
+    # Do not overwrite the user's optional CLI config with resolved model data.
+    backend_startup_metadata = {}
 
     try:
         if py_env_configs.role_config.role_type == RoleType.VIT:
@@ -735,7 +743,10 @@ def start_server(py_env_configs: PyEnvConfigs):
             # For backend server, vit_process_engine is None when vit is separated
             logging.info("start backend server")
             start_backend_server_impl(
-                global_controller, py_env_configs, process_manager
+                global_controller,
+                py_env_configs,
+                process_manager,
+                startup_metadata=backend_startup_metadata,
             )
 
         if py_env_configs.role_config.role_type != RoleType.VIT:
@@ -764,7 +775,10 @@ def start_server(py_env_configs: PyEnvConfigs):
             logging.error("[START_SERVER] Health checks failed")
             raise Exception("Health checks failed")
 
-        _maybe_run_startup_real_warmup(py_env_configs)
+        _maybe_run_startup_real_warmup(
+            py_env_configs,
+            model_max_seq_len=backend_startup_metadata.get("model_max_seq_len"),
+        )
         _mark_startup_warmup_health_gate_ready(startup_warmup_gate_file)
 
         logging.info(
@@ -1069,11 +1083,14 @@ async def _run_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
     )
 
 
-async def _run_rocm_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
+async def _run_rocm_startup_real_warmup_grpc(
+    py_env_configs: PyEnvConfigs, model_max_seq_len: int | None = None
+):
     from rtp_llm.config.generate_config import GenerateConfig
     from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
     from rtp_llm.utils.base_model_datatypes import GenerateInput
     from rtp_llm.utils.rocm_startup_warmup import (
+        resolve_rocm_warmup_max_seq_len,
         rocm_warmup_cases,
         run_rocm_warmup_cases,
     )
@@ -1082,7 +1099,11 @@ async def _run_rocm_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
         raise ValueError(
             "ROCm startup warmup currently requires non-speculative decoding"
         )
-    cases = rocm_warmup_cases(int(py_env_configs.model_args.max_seq_len))
+    max_seq_len = resolve_rocm_warmup_max_seq_len(
+        py_env_configs.model_args.max_seq_len, model_max_seq_len
+    )
+    cases = rocm_warmup_cases(max_seq_len)
+    logging.info("ROCm startup warmup model max_seq_len=%s", max_seq_len)
     addresses = _get_startup_real_warmup_grpc_addresses(py_env_configs)
     timeout_s = float(os.environ.get("RTP_LLM_ROCM_STARTUP_WARMUP_TIMEOUT_S", "600"))
     if not 0 < timeout_s < float("inf"):
@@ -1150,17 +1171,21 @@ async def _run_rocm_startup_real_warmup_grpc(py_env_configs: PyEnvConfigs):
             await client.close()
 
 
-def _maybe_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
+def _maybe_run_startup_real_warmup(
+    py_env_configs: PyEnvConfigs, model_max_seq_len: int | None = None
+) -> bool:
     if not _should_run_startup_real_warmup(py_env_configs):
         return False
 
     try:
         warmup = (
-            _run_rocm_startup_real_warmup_grpc
+            _run_rocm_startup_real_warmup_grpc(
+                py_env_configs, model_max_seq_len=model_max_seq_len
+            )
             if _rocm_startup_warmup_requested(py_env_configs)
-            else _run_startup_real_warmup_grpc
+            else _run_startup_real_warmup_grpc(py_env_configs)
         )
-        _run_startup_real_warmup_async(warmup(py_env_configs))
+        _run_startup_real_warmup_async(warmup)
         return True
     except StartupRealWarmupAddressResolutionError:
         logging.error(

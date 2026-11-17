@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
 import torch
@@ -15,7 +16,13 @@ from rtp_llm.models_py.modules import (
     RMSNorm,
 )
 from rtp_llm.ops import HWKernelConfig, ParallelismConfig
-from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import (
+    KVCache,
+    LayerKVCache,
+    PyModelInitResources,
+    PyModelInputs,
+    PyModelOutputs,
+)
 from rtp_llm.utils.model_weight import W
 
 
@@ -101,6 +108,9 @@ class Qwen3Model(GptModelBase):
         )
 
         layer_ids = self.layer_ids()
+        self._local_global_layer_ids = tuple(layer_ids)
+        self._cached_kv_cache = None
+        self._layer_kv_caches = None
         self.embed_tokens = (
             Embedding(
                 config, parallelism_config, weights.get_global_weight(W.embedding)
@@ -133,6 +143,38 @@ class Qwen3Model(GptModelBase):
             self._capture_canonical_final,
         )
 
+    def initialize(self, init_resource: PyModelInitResources) -> bool:
+        # Reinitialization must not retain views of an earlier cache pool, even
+        # if the caller supplies the same handle again.
+        self._cached_kv_cache = None
+        self._layer_kv_caches = None
+        initialized = super().initialize(init_resource)
+        self._get_cached_layer_kv_caches()
+        return initialized
+
+    def _get_cached_layer_kv_caches(self):
+        # The native cache owns an immutable grouped layout. Its layer views
+        # alias live storage, not request data; block tables remain per-forward.
+        # Restrict reuse to plain ROCm Qwen3/native caches: derived models,
+        # adapters and CUDA backends keep their existing per-call wrappers.
+        kv_cache = self.kv_cache
+        if (
+            torch.version.hip is None
+            or type(self) is not Qwen3Model
+            or not isinstance(kv_cache, KVCache)
+        ):
+            self._cached_kv_cache = None
+            self._layer_kv_caches = None
+            return None
+        if kv_cache is not self._cached_kv_cache:
+            layer_caches = tuple(
+                kv_cache.get_layer_cache(local_idx)
+                for local_idx in range(len(self.layers))
+            )
+            self._layer_kv_caches = layer_caches
+            self._cached_kv_cache = kv_cache
+        return self._layer_kv_caches
+
     def _capture_canonical_layer(
         self, hidden_states: torch.Tensor, residual: torch.Tensor | None
     ) -> torch.Tensor:
@@ -157,20 +199,32 @@ class Qwen3Model(GptModelBase):
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
         capture = self.capture_context(inputs.capture_hidden_states)
-        layer_ids = self.layer_ids()
+        capture_enabled = capture.enabled
+        layer_ids = self._local_global_layer_ids
+        layer_kv_caches = self._get_cached_layer_kv_caches()
+        grouped_fmha = isinstance(fmha_impl, Mapping)
         # Cache surfaces are indexed by model-local layer ids (the C++ layout is projected to this stage).
         for local_idx, decoder_layer in enumerate(self.layers):
-            layer_fmha_impl = select_fmha_impl_for_layer(
-                fmha_impl, self.kv_cache, local_idx
+            layer_fmha_impl = (
+                select_fmha_impl_for_layer(fmha_impl, self.kv_cache, local_idx)
+                if grouped_fmha
+                else fmha_impl
             )
             hidden_states = decoder_layer(
                 hidden_states,
                 layer_fmha_impl,
                 kv_cache=(
-                    self.kv_cache.get_layer_cache(local_idx) if self.kv_cache else None
+                    layer_kv_caches[local_idx]
+                    if layer_kv_caches is not None
+                    else (
+                        self.kv_cache.get_layer_cache(local_idx)
+                        if self.kv_cache is not None
+                        else None
+                    )
                 ),
             )
-            capture.capture_layer(layer_ids[local_idx], hidden_states)
+            if capture_enabled:
+                capture.capture_layer(layer_ids[local_idx], hidden_states)
         if self.norm is not None:
             return capture.finalize(hidden_states)
         # Non-last stage: emit the single boundary tensor (fused-residual models emit two, see qwen3_next).

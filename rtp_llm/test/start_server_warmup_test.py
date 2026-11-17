@@ -1,12 +1,47 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from rtp_llm import start_server
 from rtp_llm.ops import RoleType, SpeculativeType
 
 
 class StartupRealWarmupTest(unittest.TestCase):
+    def test_backend_status_carries_resolved_model_limit(self):
+        from rtp_llm.start_backend_server import _send_pipe_status
+
+        writer = Mock()
+        _send_pipe_status(writer, "success", "ready", model_max_seq_len=4096)
+        writer.send.assert_called_once_with(
+            {
+                "status": "success",
+                "message": "ready",
+                "traceback": "",
+                "model_max_seq_len": 4096,
+            }
+        )
+        writer.close.assert_called_once()
+
+    def test_resolved_limit_reaches_rocm_warmup_without_changing_cli_config(self):
+        config = SimpleNamespace(model_args=SimpleNamespace(max_seq_len=None))
+        with patch.object(
+            start_server, "_should_run_startup_real_warmup", return_value=True
+        ), patch.object(
+            start_server, "_rocm_startup_warmup_requested", return_value=True
+        ), patch.object(
+            start_server, "_run_rocm_startup_real_warmup_grpc", new=Mock()
+        ) as warmup, patch.object(
+            start_server, "_run_startup_real_warmup_async"
+        ) as run:
+            self.assertTrue(
+                start_server._maybe_run_startup_real_warmup(
+                    config, model_max_seq_len=4096
+                )
+            )
+        warmup.assert_called_once_with(config, model_max_seq_len=4096)
+        run.assert_called_once_with(warmup.return_value)
+        self.assertIsNone(config.model_args.max_seq_len)
+
     def test_rocm_warmup_auto_default_and_override_use_the_readiness_gate(self):
         config = SimpleNamespace(
             parallelism_config=SimpleNamespace(world_size=1, world_rank=0, tp_size=1),
