@@ -240,9 +240,9 @@ def native_capacity_completion_probe():
                             records[identity] = dict(
                                 re.findall(r"(\w+)=([^\s]+)", line)
                             )
-                if len(records) == 3:
+                if {4, 6}.issubset(records):
+                    assert 2 not in records, records[2]
                     for identity, expected in (
-                        (2, (0, 192, 18432.0, 0.0)),
                         (4, (80, 112, 9472.0, 1280.0)),
                         (6, (80, 112, 9472.0, 1280.0)),
                     ):
