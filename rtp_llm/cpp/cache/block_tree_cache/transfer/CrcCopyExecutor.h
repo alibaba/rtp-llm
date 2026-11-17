@@ -27,6 +27,12 @@ class CrcCopyExecutor {
 public:
     using DoneCallback = std::function<void(TransferResult)>;
 
+    // Optional borrowed output: one zero-initialized record per batch, valid
+    // through done. Only raw steady-clock boundaries; profiling stays upstream.
+    struct Timing {
+        int64_t slot_acquired_us{0}, submit_return_us{0}, completed_us{0};
+    };
+
     // Groups have validated physical copy geometry. Slot count is per device.
     // TODO(legacy removal): remove the async parameter. Legacy passes false and
     // shares slots_per_device among the workers of one direction.
@@ -58,7 +64,8 @@ public:
     bool trySubmit(const std::vector<HostBufferView>&     hosts,
                    const std::vector<TransferDescriptor>& descriptors,
                    const GroupSetPtr&                     group,
-                   DoneCallback                           done);
+                   DoneCallback                           done,
+                   Timing*                                timing = nullptr);
     // Scans every device. Safe slots retire before their callbacks run.
     // true means undelivered work remains. Async slot access needs no mutex.
     // Result-mapping exceptions propagate from poll() and stopAndWaitForIo().
@@ -72,6 +79,7 @@ private:
         GroupSetPtr                     group;
         std::vector<TransferDescriptor> descriptors;
         DoneCallback                    done;
+        Timing*                         timing{nullptr};
     };
     struct Slot {
         std::unique_ptr<CrcCopyWorkspace> copy;

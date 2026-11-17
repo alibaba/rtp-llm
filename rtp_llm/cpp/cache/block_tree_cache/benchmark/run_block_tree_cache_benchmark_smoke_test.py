@@ -125,7 +125,10 @@ class BenchmarkSmokeTest(unittest.TestCase):
             )
 
             results = {}
-            for case in ("smoke_tree_online_mini", "smoke_transfer_d2h_mini"):
+            for case, expected_owners in (
+                ("smoke_tree_online_mini", 2),
+                ("smoke_transfer_d2h_mini", 1),
+            ):
                 case_dir = os.path.join(output_dir, "smoke", case)
                 manifest_path = os.path.join(case_dir, "manifest.json")
                 result_path = os.path.join(case_dir, "rep_0000", "result.json")
@@ -140,7 +143,7 @@ class BenchmarkSmokeTest(unittest.TestCase):
                 self.assertEqual(mode.get("transfer_implementation"), "workloop")
                 self.assertEqual(mode.get("btc_transfer_engine_async"), 1)
                 self.assertEqual(mode.get("enable_crc"), 1)
-                self.assertEqual(mode.get("owners_per_direction"), 1)
+                self.assertEqual(mode.get("owners_per_direction"), expected_owners)
 
             tree = results["smoke_tree_online_mini"]
             self.assertGreater(tree.get("metrics", {}).get("loads_committed", 0), 0)

@@ -330,4 +330,47 @@ TEST(AsyncProfilingScopeTest, TaskLinksAreBoundedDeduplicatedAndCaptureLocal) {
     EXPECT_EQ(second.front().record.workflow_id, 1u);
 }
 
+TEST(AsyncProfilingScopeTest, TaskSpanBindsBatchIdentityAndCannotReviveInALaterSession) {
+    const auto start = AsyncProfileSession::steadyNowUs();
+    auto       disabled =
+        AsyncProfileSpan::fromSteady("off", 42, 0, 8, start, 3, 99, "host_to_device", "worker_batch", "load");
+    auto             first = AsyncProfileSession::start(16);
+    AsyncProfileSpan task("worker_task_total", 42, 0, 8, 0, 3, 99, "host_to_device", AsyncProfileKind::Lifecycle);
+    auto             moved = std::move(task);
+    EXPECT_FALSE(task.active());
+    task      = std::move(moved);
+    auto span = AsyncProfileSpan::fromSteady(
+        "h2d", 42, 0, 8, start, 3, 99, "host_to_device", "worker_batch", "load", AsyncProfileKind::Lifecycle, &task);
+    const auto old = first->finish();
+    ASSERT_EQ(old.size(), 2u);
+    EXPECT_TRUE(old[0].end_clipped);
+    EXPECT_TRUE(old[1].end_clipped);
+    EXPECT_EQ(old[1].record.batch_span_id, old[0].span_id);
+
+    auto second = AsyncProfileSession::start(16);
+    auto tail   = AsyncProfileSpan::fromSteady(
+        "tail", 42, 0, 8, start, 3, 99, "host_to_device", "worker_batch", "load", AsyncProfileKind::Lifecycle, &task);
+    span.finishAtSteady(AsyncProfileSession::steadyNowUs());
+    tail.finishAtSteady(AsyncProfileSession::steadyNowUs());
+    auto off = AsyncProfileSpan::fromSteady(
+        "off", 42, 0, 8, start, 3, 99, "host_to_device", nullptr, nullptr, AsyncProfileKind::Lifecycle, &disabled);
+    off.finishAtSteady(AsyncProfileSession::steadyNowUs());
+    task.finish();
+    EXPECT_TRUE(second->finish().empty());
+}
+
+TEST(AsyncProfilingScopeTest, DefaultStopRetainsPointsInTheSessionsMappedClockDomain) {
+    AsyncProfileSession session(AsyncProfileSession::nowUs() + 1000000, 8);
+    AsyncProfileRecord  point;
+    point.kind     = AsyncProfileKind::Derived;
+    point.start_us = session.toWallUs(AsyncProfileSession::steadyNowUs());
+    auto* entry    = session.add(point);
+    ASSERT_NE(entry, nullptr);
+    entry->end_us.store(point.start_us, std::memory_order_release);
+    const auto events = session.finish();
+    ASSERT_EQ(events.size(), 1u);
+    EXPECT_EQ(events[0].start_us, events[0].end_us);
+    EXPECT_FALSE(events[0].end_clipped);
+}
+
 }  // namespace rtp_llm

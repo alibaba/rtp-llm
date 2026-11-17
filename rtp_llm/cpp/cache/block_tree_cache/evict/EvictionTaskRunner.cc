@@ -45,11 +45,10 @@ void EvictionTaskRunner::runTransfer(std::shared_ptr<const EvictionTransferTask>
         task->transfer_task,
         [this, task, &metrics_reporter, transfer_begin, on_done = std::move(on_done)](TransferResult result) mutable {
             const bool success = result.ok();
-            auto       observation =
-                CompletionStageContext::forTransfer(metrics_reporter, task->transfer_task, "evict", success);
-            CompletionStageScope total(observation, "callback_total", "workflow_callback");
+            auto       stage_context = CacheStageContext::forTransfer(metrics_reporter, task->transfer_task, "evict");
+            auto       total = TransferStageTimer::scope(stage_context, "callback_total", "workflow_callback", success);
             {
-                CompletionStageScope metrics(observation, "metrics_report", "workflow_callback");
+                auto metrics = TransferStageTimer::scope(stage_context, "metrics_report", "workflow_callback", success);
                 metrics_reporter.reportTransferFinished(TransferOperation::EVICT,
                                                         task->descriptors().front().source_tier,
                                                         task->descriptors().front().target_tier,

@@ -500,6 +500,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                        &KVCacheConfig::memory_cache_max_descriptors_per_transfer_batch)
         .def_readwrite("btc_transfer_engine_async", &KVCacheConfig::btc_transfer_engine_async)
         .def_readwrite("btc_crc_slot_count", &KVCacheConfig::btc_crc_slot_count)
+        .def_readwrite("block_tree_task_pool_size", &KVCacheConfig::block_tree_task_pool_size)
         .def_readwrite("block_tree_transfer_worker_count", &KVCacheConfig::block_tree_transfer_worker_count)
         .def_readwrite("block_tree_business_queue_max_size", &KVCacheConfig::block_tree_business_queue_max_size)
         .def_readwrite("block_tree_transfer_queue_max_size", &KVCacheConfig::block_tree_transfer_queue_max_size)
@@ -606,7 +607,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const KVCacheConfig& self) {
                 return py::make_tuple(std::string("KVCacheConfig"),
-                                      18,
+                                      19,
                                       self.reuse_cache,
                                       self.multi_task_prompt,
                                       self.multi_task_prompt_str,
@@ -698,9 +699,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.block_pool_frozen_abort_upper_ratio,
                                       self.disk_cache_evict_max_pending_bytes,
                                       self.block_tree_frozen_recovery_interval_ms,
-                                      self.block_tree_frozen_recovery_query_timeout_ms);
+                                      self.block_tree_frozen_recovery_query_timeout_ms,
+                                      self.block_tree_task_pool_size);
             },
             [](py::tuple t) {
+                const py::tuple task_pool_state = t;
+                const bool has_task_pool = t.size() == 95 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 19;
+                if (has_task_pool) {
+                    t    = t[py::slice(0, 94, 1)].cast<py::tuple>();
+                    t[1] = py::int_(18);
+                }
                 const py::tuple recovery_timing_state = t;
                 const bool      has_recovery_timing =
                     t.size() == 94 && py::isinstance<py::int_>(t[1]) && t[1].cast<int>() == 18;
@@ -803,6 +811,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 }
 
                 KVCacheConfig c;
+                if (has_task_pool) {
+                    c.block_tree_task_pool_size = task_pool_state[94].cast<int>();
+                }
                 if (has_recovery_timing) {
                     c.block_tree_frozen_recovery_interval_ms      = recovery_timing_state[92].cast<int64_t>();
                     c.block_tree_frozen_recovery_query_timeout_ms = recovery_timing_state[93].cast<int64_t>();

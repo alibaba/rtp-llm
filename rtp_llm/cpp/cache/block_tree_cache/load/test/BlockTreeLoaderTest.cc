@@ -350,6 +350,7 @@ TEST(BlockTreeLoaderTest, HostLoadUsesReservedAdmissionWhenBackgroundQueueIsFull
     auto completion_promise = std::make_shared<std::promise<ErrorInfo>>();
     auto completion_future  = completion_promise->get_future();
     load_context->onDone([completion_promise](ErrorInfo error) { completion_promise->set_value(std::move(error)); });
+    auto profile = AsyncProfileSession::start();
     ASSERT_TRUE(load_context->commit());
     {
         std::lock_guard<std::mutex> lock(environment->cache->task_pool_->lifecycle_mutex_);
@@ -373,6 +374,18 @@ TEST(BlockTreeLoaderTest, HostLoadUsesReservedAdmissionWhenBackgroundQueueIsFull
     environment->reclaimAll();
     environment->expectFullyReclaimed();
     EXPECT_EQ(environment->cache->task_pool_->pending_tasks_.load(), 0);
+    const auto events         = profile->finish();
+    size_t     business_waits = 0;
+    for (const auto& event : events) {
+        if (event.record.stage == "business_queue_wait") {
+            ++business_waits;
+            EXPECT_EQ(event.record.operation, "load");
+            EXPECT_EQ(event.record.scope, "business_task");
+            EXPECT_EQ(event.record.kind, AsyncProfileKind::Wait);
+            EXPECT_EQ(event.record.path, "host_to_device");
+        }
+    }
+    EXPECT_EQ(business_waits, 1u);
 }
 
 TEST(BlockTreeLoaderTest, PrefixValidatorClipsHostMatchBeforeImageInterior) {

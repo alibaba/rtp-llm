@@ -27,7 +27,7 @@ public:
                                         DeviceHostCopyOptions    device_host_options                      = {},
                                         size_t                   device_disk_staging_block_count          = 128,
                                         size_t                   max_descriptors_per_batch                = 32,
-                                        size_t                   transfer_worker_count                    = 1,
+                                        size_t                   transfer_worker_count                    = 2,
                                         size_t                   transfer_queue_max_size                  = 10000,
                                         std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter   = nullptr,
                                         int64_t                                        world_rank         = 0,
@@ -89,7 +89,7 @@ private:
     std::vector<std::unique_ptr<TransferWorkLoop>> load_loops_, evict_loops_;
     std::atomic<size_t>                            next_load_{0}, next_evict_{0};
     bool                                           async_{false}, enable_disk_cache_{false};
-    size_t                                         transfer_worker_count_{1};
+    size_t                                         transfer_worker_count_{2};
     size_t                                         crc_slot_count_;
 };
 

@@ -43,7 +43,6 @@ public:
         return stage_metrics_ != nullptr;
     }
     void flushStageMetrics() const;
-    void reportLockMetrics(const char* operation, double wait_latency_us, double hold_latency_us) const noexcept;
 
     // Durations are per worker batch, except coordinator multi-rank stages.
     // Request/transfer IDs belong in the timeline, never in metric tags.
@@ -102,17 +101,7 @@ public:
                                 bool                                   success,
                                 const std::vector<TransferDescriptor>& successful_descriptors,
                                 const std::vector<GroupSetPtr>&        group_sets);
-    void reportQueueWaitMetric(bool        callback,
-                               const char* pool_type,
-                               const char* operation,
-                               Tier        source_tier,
-                               Tier        target_tier,
-                               int64_t     latency_us) const noexcept;
     void reportQueueBacklog(const BlockTreeQueueSizes& queue_sizes, const char* pool_type) const;
-    // Buffered, bounded and nonblocking on the WorkLoop owner. Rejections before
-    // admission are stage failures, not consumed queue tasks. Availability follows
-    // the existing stage metrics switch; no buffer is created when it is off.
-    void reportWorkLoopQueueWait(Tier source, Tier target, int64_t latency_us) const noexcept;
 
 private:
     std::vector<CacheGroupType> eviction_metric_group_types_;

@@ -771,6 +771,10 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         RTP_LLM_LOG_ERROR("transfer worker count overflows total CRC slot count");
         return nullptr;
     }
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_config.block_tree_task_pool_size > 0,
+                            "block_tree_task_pool_size must be > 0, got %d",
+                            kv_cache_config.block_tree_task_pool_size);
+    config.task_pool_size = kv_cache_config.block_tree_task_pool_size;
     config.business_queue_max_size =
         checkedQueueSize(kv_cache_config.block_tree_business_queue_max_size, "block_tree_business_queue_max_size");
     config.transfer_queue_max_size = transfer_queue_size;

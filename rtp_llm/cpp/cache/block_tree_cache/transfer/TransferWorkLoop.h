@@ -113,7 +113,10 @@ private:
         Queue*                                      waiting_on{nullptr};
         std::optional<WaitDeadlines::iterator>      wait_deadline;
         bool                                        initial_plan{true}, step_started{false};
-        TransferStageTimer                          task_timer, queue_timer, batch_timer, staging_timer, step_timer;
+        // Queue observation ends at initial plan. Its storage is then reused
+        // for the terminal CRC lifecycle, which ends after Entry destruction.
+        TransferStageTimer      task_timer, queue_or_finalize_timer, batch_timer, staging_timer, step_timer;
+        CrcCopyExecutor::Timing crc_timing;
     };
     struct StagingResource {
         std::shared_ptr<HostStagingBlockPool> pool;
@@ -141,12 +144,15 @@ private:
     void               expireResourceWaiters();
     const GroupSetPtr& group(const Entry& entry) const;
     static bool        isCrc(Step step);
-    TransferStageTimer timer(const TransferTask& task,
-                             const char*         stage,
-                             size_t              begin,
-                             size_t              end,
-                             AsyncProfileKind    kind,
-                             const char*         scope = "worker_batch") const noexcept;
+    // An explicit start_us backfills the interval for both observers.
+    TransferStageTimer timer(const TransferTask&     task,
+                             const char*             stage,
+                             size_t                  begin,
+                             size_t                  end,
+                             AsyncProfileKind        kind,
+                             const char*             scope    = "worker_batch",
+                             const AsyncProfileSpan* parent   = nullptr,
+                             int64_t                 start_us = -1) const noexcept;
     void               startStepTimer(Entry& entry, const char* stage);
 
     // Private policy: OOM is fatal and never becomes a task failure or retry.

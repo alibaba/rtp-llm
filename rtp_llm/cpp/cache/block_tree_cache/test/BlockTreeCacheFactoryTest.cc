@@ -2454,6 +2454,7 @@ TEST_F(BlockTreeCacheFactoryTest, TransferQueueConfigurationPropagatesAndValidat
     {
         auto          allocator = initAllocator<CoordinatorCacheManager>(config);
         KVCacheConfig kv_cache_config;
+        kv_cache_config.block_tree_task_pool_size          = 6;
         kv_cache_config.block_tree_transfer_worker_count   = 7;
         kv_cache_config.btc_crc_slot_count                 = 3;
         kv_cache_config.block_tree_business_queue_max_size = 211;
@@ -2461,6 +2462,7 @@ TEST_F(BlockTreeCacheFactoryTest, TransferQueueConfigurationPropagatesAndValidat
         kv_cache_config.disk_cache_evict_max_pending_bytes = 80 * 1024 * 1024;
         auto cache                                         = createBlockTreeCache(config, kv_cache_config, allocator);
         ASSERT_NE(cache, nullptr);
+        EXPECT_EQ(cache->config().task_pool_size, 6);
         EXPECT_EQ(cache->config().transfer_worker_count, 7u);
         EXPECT_EQ(cache->config().btc_crc_slot_count, 3u);
         EXPECT_EQ(cache->config().business_queue_max_size, 211u);
@@ -2475,11 +2477,15 @@ TEST_F(BlockTreeCacheFactoryTest, TransferQueueConfigurationPropagatesAndValidat
         kv_cache_config.block_tree_transfer_queue_max_size = 0;
         auto cache                                         = createBlockTreeCache(config, kv_cache_config, allocator);
         ASSERT_NE(cache, nullptr);
+        EXPECT_EQ(cache->config().task_pool_size, 4);
+        EXPECT_EQ(cache->config().transfer_worker_count, 2u);
         EXPECT_EQ(cache->config().business_queue_max_size, 0u);
         EXPECT_EQ(cache->config().transfer_queue_max_size, 0u);
         EXPECT_EQ(cache->config().disk_cache_evict_max_pending_bytes, 100u * 1024 * 1024);
     }
     for (const auto& invalid_field : {std::string("worker"),
+                                      std::string("task_pool_zero"),
+                                      std::string("task_pool_negative"),
                                       std::string("worker_queue"),
                                       std::string("slots"),
                                       std::string("total_slots"),
@@ -2491,6 +2497,10 @@ TEST_F(BlockTreeCacheFactoryTest, TransferQueueConfigurationPropagatesAndValidat
         KVCacheConfig kv_cache_config;
         if (invalid_field == "worker") {
             kv_cache_config.block_tree_transfer_worker_count = 0;
+        } else if (invalid_field == "task_pool_zero") {
+            kv_cache_config.block_tree_task_pool_size = 0;
+        } else if (invalid_field == "task_pool_negative") {
+            kv_cache_config.block_tree_task_pool_size = -1;
         } else if (invalid_field == "worker_queue") {
             kv_cache_config.block_tree_transfer_worker_count   = 2;
             kv_cache_config.block_tree_transfer_queue_max_size = 1;
@@ -3251,10 +3261,19 @@ void verifyCrcLocalTierBudgets(bool enable_crc, int tokens_per_block = 64) {
         if (crc_available) {
             const auto& engine              = cache->transfer_dispatcher_->per_rank_engine_;
             size_t      actual_device_bytes = 0;
-            for (const auto* owner : {engine->load_loops_.front().get(), engine->evict_loops_.front().get()}) {
-                for (const auto& entry : owner->crc_->slots_)
-                    for (const auto& slot : entry.second)
-                        actual_device_bytes += slot.copy->deviceMemoryBytes();
+            for (const auto* owners : {&engine->load_loops_, &engine->evict_loops_}) {
+                ASSERT_EQ(owners->size(), cache->config().transfer_worker_count);
+                for (const auto& owner : *owners) {
+                    ASSERT_NE(owner, nullptr);
+                    ASSERT_NE(owner->crc_, nullptr);
+                    for (const auto& entry : owner->crc_->slots_) {
+                        ASSERT_EQ(entry.second.size(), cache->config().btc_crc_slot_count);
+                        for (const auto& slot : entry.second) {
+                            ASSERT_NE(slot.copy, nullptr);
+                            actual_device_bytes += slot.copy->deviceMemoryBytes();
+                        }
+                    }
+                }
             }
             EXPECT_GT(actual_device_bytes, 0u);
             EXPECT_EQ(blockTreeCrcWorkspaceBytes(config, options), actual_device_bytes);
@@ -3284,15 +3303,21 @@ void verifyCrcLocalTierBudgets(bool enable_crc, int tokens_per_block = 64) {
             const size_t staging_stride = ((storage_bytes + 4095) / 4096) * 4096;
             if (engine->asyncEnabled()) {
                 size_t staging_bytes = 0;
-                for (const auto* owner : {engine->load_loops_.front().get(), engine->evict_loops_.front().get()}) {
-                    const auto& pool = owner->staging_.pool;
-                    ASSERT_NE(pool, nullptr);
-                    EXPECT_EQ(pool->stride_bytes_, staging_stride);
-                    staging_bytes += pool->block_count_ * pool->stride_bytes_;
-                    if (!host_on)
-                        std::memset(pool->backing_.data(), 0xa5, pool->block_count_ * pool->stride_bytes_);
+                for (const auto* owners : {&engine->load_loops_, &engine->evict_loops_}) {
+                    ASSERT_EQ(owners->size(), cache->config().transfer_worker_count);
+                    for (const auto& owner : *owners) {
+                        ASSERT_NE(owner, nullptr);
+                        const auto& pool = owner->staging_.pool;
+                        ASSERT_NE(pool, nullptr);
+                        EXPECT_EQ(pool->stride_bytes_, staging_stride);
+                        staging_bytes += pool->block_count_ * pool->stride_bytes_;
+                        if (!host_on)
+                            std::memset(pool->backing_.data(), 0xa5, pool->block_count_ * pool->stride_bytes_);
+                    }
                 }
-                EXPECT_EQ(staging_bytes, cache->config().device_disk_staging_block_count * staging_stride);
+                EXPECT_EQ(staging_bytes,
+                          cache->config().device_disk_staging_block_count * engine->transferWorkerCount()
+                              * staging_stride);
             } else {
                 const auto& executor = engine->legacy_->device_disk_executor_;
                 ASSERT_NE(executor, nullptr);
@@ -3650,8 +3675,11 @@ TEST_F(BlockTreeCacheFactoryTest, Qwen7bBlock64AutomaticBudgetLeavesSpaceForDefa
     RuntimeConfig    runtime;
     const auto       runtime_bytes = MemoryEvaluationHelper::getDefaultRuntimeMemorySize(runtime, {}, model);
     constexpr size_t kv_bytes      = 128u << 20;
-    if (getGpuExecStatus().device_memory_status.available_bytes <= runtime_bytes + crc_bytes + kv_bytes)
-        GTEST_SKIP() << "requires enough free GPU memory for default Qwen-7B CRC workspaces";
+    const auto       available_bytes = getGpuExecStatus().device_memory_status.available_bytes;
+    if (available_bytes <= runtime_bytes + crc_bytes + kv_bytes)
+        GTEST_SKIP() << "requires enough free GPU memory for default Qwen-7B CRC workspaces"
+                     << " available_bytes=" << available_bytes << " crc_bytes=" << crc_bytes
+                     << " runtime_bytes=" << runtime_bytes << " kv_bytes=" << kv_bytes;
     // Clamp available capacity without allocating model weights. The real KV
     // backing and all default CRC slots are then created in production order.
     const WarmUpResult measured{runtime_bytes + crc_bytes + kv_bytes, 0};

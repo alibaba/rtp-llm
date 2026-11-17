@@ -409,14 +409,14 @@ bool BlockTreeEvictor::submitEvictionTask(std::vector<TransferDescriptor>    des
                                                           task_ptr->timings[i]);
     }
     updatePendingRelease(task_ptr->descriptors(), true);
-    const int64_t queue_begin = currentTimeUs();
-    auto          on_timeout  = [this, task_ptr, queue_begin]() {
-        metrics_reporter_->reportQueueWaitMetric(false,
-                                                 "business",
-                                                 transferOperationName(TransferOperation::EVICT),
-                                                 Tier::NONE,
-                                                 Tier::NONE,
-                                                 currentTimeUs() - queue_begin);
+    auto queue_wait =
+        TransferStageTimer::create(CacheStageContext::forTransfer(*metrics_reporter_, task_ptr->transfer_task, "evict"),
+                                   "business_queue_wait",
+                                   "business_task",
+                                   AsyncProfileKind::Wait);
+    block_tree_cache_detail::ScopeRollback discard_wait([&] { queue_wait.discard(); });
+    auto                                   on_timeout = [this, task_ptr, queue_wait]() {
+        queue_wait.finish(false);
         RTP_LLM_LOG_WARNING("eviction expired in business queue, source=%s target=%s descriptors=%zu",
                             tierName(task_ptr->descriptors().front().source_tier),
                             tierName(task_ptr->descriptors().front().target_tier),
@@ -426,13 +426,8 @@ bool BlockTreeEvictor::submitEvictionTask(std::vector<TransferDescriptor>    des
     const auto deadline  = task_ptr->transfer_task.deadline();
     const bool submitted = task_pool_->submit(
         BlockTreeTaskClass::BACKGROUND,
-        [this, task_ptr, queue_begin]() {
-            metrics_reporter_->reportQueueWaitMetric(false,
-                                                     "business",
-                                                     transferOperationName(TransferOperation::EVICT),
-                                                     Tier::NONE,
-                                                     Tier::NONE,
-                                                     currentTimeUs() - queue_begin);
+        [this, task_ptr, queue_wait]() {
+            queue_wait.finish(true);
             runEvictionTask(task_ptr);
         },
         deadline,
@@ -459,6 +454,7 @@ bool BlockTreeEvictor::submitEvictionTask(std::vector<TransferDescriptor>    des
         metrics_reporter_->reportEvictionFinished(*task_ptr, tree_->groupSets(), false, {}, 0);
         return false;
     }
+    discard_wait.dismiss();
     return true;
 }
 
@@ -556,29 +552,18 @@ void BlockTreeEvictor::completeEvictionTask(std::shared_ptr<const EvictionTransf
 
 void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task,
                                                   bool                                        success) noexcept {
-    auto observation = CompletionStageContext::forTransfer(*metrics_reporter_, task->transfer_task, "evict", success);
-    auto timers      = CompletionStageTimers::create(observation);
-    const int64_t queue_begin = currentTimeUs();
-    auto settle = [this, task = std::move(task), success, observation, timers, queue_begin](bool queued) noexcept {
+    auto stage_context = CacheStageContext::forTransfer(*metrics_reporter_, task->transfer_task, "evict");
+    auto timers        = CompletionStageTimers::create(stage_context);
+    auto settle        = [this, task = std::move(task), success, stage_context, timers]() noexcept {
         timers.finishQueue(success);
         block_tree_cache_detail::ScopeRollback finish([&] { timers.finish(success); });
-        CompletionStageScope                   execute(observation, "completion_execute", "business_completion");
-        if (queued) {
-            metrics_reporter_->reportQueueWaitMetric(
-                true, "business", "evict", Tier::NONE, Tier::NONE, currentTimeUs() - queue_begin);
-        }
+        auto execute = TransferStageTimer::scope(stage_context, "completion_execute", "business_completion", success);
         size_t            cancelled_blocks           = 0;
         bool              has_valid_eviction         = false;
         std::vector<bool> skip_eviction_metrics;
         skip_eviction_metrics.reserve(task->descriptors().size());
         {
-            CacheLockGuard lock(*mutex_, *metrics_reporter_, "watermark", std::defer_lock);
-            {
-                CompletionStageScope wait(
-                    observation, "completion_lock_wait", "business_completion", AsyncProfileKind::Wait);
-                lock.lock();
-            }
-            CompletionStageScope tree(observation, "completion_settle", "business_completion");
+            CacheLockGuard lock(*mutex_, "watermark", stage_context);
             updatePendingRelease(task->descriptors(), false);
             for (const TransferDescriptor& desc : task->descriptors()) {
                 heaps_[desc.group_set_id].pending_timings.erase({desc.node, desc.generation});
@@ -594,21 +579,25 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
 
             if (success) {
                 {
-                    CompletionStageScope update(observation, "completion_tree_update", "business_completion");
+                    auto update = TransferStageTimer::scope(
+                        stage_context, "completion_tree_update", "business_completion", success);
                     completeEvict(task->descriptors());
                 }
                 {
-                    CompletionStageScope cleanup(observation, "completion_cleanup", "business_completion");
+                    auto cleanup =
+                        TransferStageTimer::scope(stage_context, "completion_cleanup", "business_completion", success);
                     settleEviction(task->descriptors());
                 }
             } else {
-                CompletionStageScope rollback(observation, "completion_rollback", "business_completion");
+                auto rollback =
+                    TransferStageTimer::scope(stage_context, "completion_rollback", "business_completion", success);
                 rollbackTransferLocked(task->descriptors());
             }
             const auto& descriptor = task->descriptors().front();
 
             {
-                CompletionStageScope watermark(observation, "completion_watermark", "business_completion");
+                auto watermark =
+                    TransferStageTimer::scope(stage_context, "completion_watermark", "business_completion", success);
                 const bool is_host_disk = descriptor.source_tier == Tier::HOST && descriptor.target_tier == Tier::DISK;
                 auto&      round =
                     heaps_[descriptor.group_set_id].watermark_rounds[static_cast<size_t>(descriptor.source_tier)];
@@ -626,7 +615,8 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
             }
         }
         if (has_valid_eviction) {
-            CompletionStageScope metrics(observation, "completion_metrics", "business_completion");
+            auto metrics =
+                TransferStageTimer::scope(stage_context, "completion_metrics", "business_completion", success);
             metrics_reporter_->reportEvictionFinished(
                 *task, tree_->groupSets(), success, skip_eviction_metrics, cancelled_blocks);
         }
@@ -634,7 +624,7 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
 
     bool submitted = false;
     try {
-        submitted = task_pool_->submitCompletion([settle] { settle(true); });
+        submitted = task_pool_->submitCompletion(settle);
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("failed to enqueue eviction settlement: %s", error.what());
     } catch (...) {
@@ -642,7 +632,7 @@ void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const Eviction
     }
     if (!submitted) {
         RTP_LLM_LOG_WARNING("eviction completion queue is closed; settling inline");
-        settle(false);
+        settle();
     }
 }
 

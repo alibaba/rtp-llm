@@ -83,6 +83,7 @@ struct AsyncProfileMetadata {
     uint64_t         parent_transfer_id{0};
     uint64_t         related_workflow_id{0};
     int64_t          client_request_id{-1};
+    uint64_t         batch_span_id{0};
 
     AsyncProfileMetadata() = default;
     AsyncProfileMetadata(const AsyncProfileRecord& r):
@@ -138,8 +139,9 @@ public:
     using Record = AsyncProfileRecord;
     struct Entry {
         Record               record;
+        uint64_t             batch_span_id{0};
         int64_t              end_tid{0};  // Published by end_us's release store.
-        std::atomic<int64_t> end_us{0};
+        std::atomic<int64_t> end_us{0};   // Zero is pending; -1 is explicitly discarded.
         std::atomic<bool>    finishing{false};
         std::atomic<bool>    ready{false};
     };
@@ -237,7 +239,7 @@ public:
         return start_us_ + (steady_us - steady_start_us_);
     }
 
-    Entry* add(Record record) noexcept {
+    Entry* add(Record record, uint64_t batch_span_id = 0) noexcept {
         if (closed_.load(std::memory_order_acquire))
             return nullptr;
         if (saturated_.load(std::memory_order_relaxed)) {
@@ -249,6 +251,7 @@ public:
             if (size_.compare_exchange_weak(index, index + 1, std::memory_order_acq_rel)) {
                 auto& entry  = entries_[index];
                 entry.record = record;
+                entry.batch_span_id = batch_span_id ? batch_span_id : index + 1;
                 entry.ready.store(true, std::memory_order_release);
                 return &entry;
             }
@@ -265,7 +268,13 @@ public:
         r.start_us     = start_us;
         return add(r);
     }
-    std::vector<AsyncProfileEvent> finish(int64_t stop_us = nowUs()) {
+    std::vector<AsyncProfileEvent> finish(int64_t stop_us = 0) {
+        // Wall and steady clocks are independently rounded to microseconds.
+        // A freshly recorded mapped point can be 1us ahead of wall nowUs().
+        // At the default boundary retain observations in either clock domain;
+        // callers supplying an explicit clipping boundary keep that boundary.
+        if (!stop_us)
+            stop_us = std::max(nowUs(), toWallUs(steadyNowUs()));
         if (closed_.exchange(true, std::memory_order_acq_rel))
             return {};
         {
@@ -289,6 +298,8 @@ public:
                 continue;
             }
             const auto end         = entry.end_us.load(std::memory_order_acquire);
+            if (end < 0)
+                continue;
             const auto begin       = std::max(start_us_, entry.record.start_us);
             const auto clipped_end = end == 0 ? stop_us : std::min(end, stop_us);
             if (clipped_end >= begin) {
@@ -296,6 +307,7 @@ public:
                 if (end == 0 || end > stop_us)
                     name += " incomplete=1";
                 AsyncProfileEvent event{std::move(name), begin, clipped_end, entry.record};
+                event.record.batch_span_id = entry.batch_span_id == index + 1 ? 0 : entry.batch_span_id;
                 event.pid             = getpid();
                 event.end_tid         = end == 0 ? 0 : entry.end_tid;
                 event.session_id      = generation_;
@@ -397,22 +409,33 @@ public:
         record_.client_request_id = client_request_id;
         capture();
     }
-    static AsyncProfileSpan fromSteady(const char*      stage,
-                                       int64_t          request_id,
-                                       size_t           begin,
-                                       size_t           end,
-                                       int64_t          start,
-                                       int64_t          rank,
-                                       uint64_t         id,
-                                       const char*      path,
-                                       const char*      scope     = nullptr,
-                                       const char*      operation = nullptr,
-                                       AsyncProfileKind kind      = AsyncProfileKind::Execution) noexcept {
+    bool active() const noexcept {
+        return owner_ && entry_ && AsyncProfileSession::currentGeneration() == owner_->generation();
+    }
+    uint64_t transferId() const noexcept {
+        return record_.transfer_id;
+    }
+
+    static AsyncProfileSpan fromSteady(const char*             stage,
+                                       int64_t                 request_id,
+                                       size_t                  begin,
+                                       size_t                  end,
+                                       int64_t                 start,
+                                       int64_t                 rank,
+                                       uint64_t                id,
+                                       const char*             path,
+                                       const char*             scope     = nullptr,
+                                       const char*             operation = nullptr,
+                                       AsyncProfileKind        kind      = AsyncProfileKind::Execution,
+                                       const AsyncProfileSpan* parent    = nullptr) noexcept {
         AsyncProfileSpan span;
         span.record_          = {stage, path, nullptr, request_id, begin, end, rank, id, 0, scope, operation, kind};
         span.steady_start_us_ = start;
-        span.captured_        = false;
-        span.capture();
+        span.captured_        = parent != nullptr;
+        if (parent && parent->active())
+            span.capture(parent->owner_, parent->entry_->batch_span_id);
+        else if (!parent)
+            span.capture();
         return span;
     }
     void finish(int64_t end_us = 0) const noexcept {
@@ -440,20 +463,29 @@ public:
             }
         }
     }
+    void discard() noexcept {
+        if (entry_ && !entry_->finishing.exchange(true, std::memory_order_acq_rel))
+            entry_->end_us.store(-1, std::memory_order_release);
+        captured_ = true;
+        entry_    = nullptr;
+        owner_.reset();
+    }
 
 private:
     void capture() noexcept {
-        if (auto session = AsyncProfileSession::current()) {
-            captured_         = true;
-            record_.start_tid = asyncProfileThreadId();
-            if (record_.kind == AsyncProfileKind::Execution)
-                record_.start_thread_name = session->currentThreadName();
-            if (record_.start_us == 0)
-                record_.start_us = session->toWallUs(steady_start_us_);
-            entry_ = session->add(record_);
-            if (entry_)
-                owner_ = std::move(session);
-        }
+        if (auto session = AsyncProfileSession::current())
+            capture(std::move(session));
+    }
+    void capture(std::shared_ptr<AsyncProfileSession> session, uint64_t batch_span_id = 0) noexcept {
+        captured_         = true;
+        record_.start_tid = asyncProfileThreadId();
+        if (record_.kind == AsyncProfileKind::Execution)
+            record_.start_thread_name = session->currentThreadName();
+        if (record_.start_us == 0)
+            record_.start_us = session->toWallUs(steady_start_us_);
+        entry_ = session->add(record_, batch_span_id);
+        if (entry_)
+            owner_ = std::move(session);
     }
     static void finishEntry(AsyncProfileSession::Entry* entry, int64_t end_us) noexcept {
         if (entry && !entry->finishing.exchange(true, std::memory_order_acq_rel)) {

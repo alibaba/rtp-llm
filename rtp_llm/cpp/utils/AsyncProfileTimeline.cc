@@ -83,24 +83,28 @@ struct Timeline {
 };
 std::string eventArgs(const AsyncProfileEvent& e) {
     const auto& r = e.record;
-    return annotation("request_id", std::to_string(r.request_id))
-           + annotation("client_request_id", std::to_string(r.client_request_id))
-           + annotation("workflow_id", std::to_string(r.workflow_id))
-           + annotation("transfer_id", std::to_string(r.transfer_id))
-           + annotation("parent_transfer_id", std::to_string(r.parent_transfer_id))
-           + annotation("related_workflow_id", std::to_string(r.related_workflow_id))
-           + annotation("session_id", std::to_string(e.session_id)) + annotation("span_id", std::to_string(e.span_id))
-           + annotation("kind", kindName(detail::exportedAsyncProfileKind(e)))
-           + annotation("declared_kind", kindName(r.kind)) + annotation("original_name", e.name)
-           + annotation("stage", r.stage) + annotation("path", r.path) + annotation("operation", r.operation)
-           + annotation("scope", r.scope) + annotation("rank", std::to_string(r.rank))
-           + annotation("batch_begin", std::to_string(r.begin)) + annotation("batch_end", std::to_string(r.end))
-           + annotation("origin_pid", std::to_string(e.pid)) + annotation("start_tid", std::to_string(r.start_tid))
-           + annotation("end_tid", std::to_string(e.end_tid))
-           + annotation("thread_mismatch", e.thread_mismatch ? "true" : "false")
-           + annotation("incomplete", e.start_clipped || e.end_clipped ? "true" : "false")
-           + annotation("start_clipped", e.start_clipped ? "true" : "false")
-           + annotation("end_clipped", e.end_clipped ? "true" : "false");
+    auto        args = annotation("request_id", std::to_string(r.request_id))
+                + annotation("client_request_id", std::to_string(r.client_request_id))
+                + annotation("workflow_id", std::to_string(r.workflow_id))
+                + annotation("transfer_id", std::to_string(r.transfer_id))
+                + annotation("parent_transfer_id", std::to_string(r.parent_transfer_id))
+                + annotation("related_workflow_id", std::to_string(r.related_workflow_id))
+                + annotation("session_id", std::to_string(e.session_id))
+                + annotation("span_id", std::to_string(e.span_id))
+                + annotation("kind", kindName(detail::exportedAsyncProfileKind(e)))
+                + annotation("declared_kind", kindName(r.kind)) + annotation("original_name", e.name)
+                + annotation("stage", r.stage) + annotation("path", r.path) + annotation("operation", r.operation)
+                + annotation("scope", r.scope) + annotation("rank", std::to_string(r.rank))
+                + annotation("batch_begin", std::to_string(r.begin)) + annotation("batch_end", std::to_string(r.end))
+                + annotation("origin_pid", std::to_string(e.pid)) + annotation("start_tid", std::to_string(r.start_tid))
+                + annotation("end_tid", std::to_string(e.end_tid))
+                + annotation("thread_mismatch", e.thread_mismatch ? "true" : "false")
+                + annotation("incomplete", e.start_clipped || e.end_clipped ? "true" : "false")
+                + annotation("start_clipped", e.start_clipped ? "true" : "false")
+                + annotation("end_clipped", e.end_clipped ? "true" : "false");
+    if (r.batch_span_id)
+        args += annotation("batch_span_id", std::to_string(r.batch_span_id));
+    return args;
 }
 
 // ZIP STORE keeps the native JSON bytes intact, needs no compression dependency
@@ -200,9 +204,10 @@ std::string asyncProfileWorkflowTrace(const std::string& native, const std::vect
     std::map<std::string, std::vector<const AsyncProfileEvent*>> slices;
     for (const auto& e : events) {
         const auto& r = e.record;
-        // Request-owned logical projections are intentionally hidden. Their
-        // real execution events remain on OS threads in timeline.json.
-        if (r.stage == "task_link" || r.request_id >= 0 || r.path == "request")
+        // Expose only selected WorkLoop stages for request-owned
+        // logical work. Sampled execution stays on real OS threads once.
+        if (r.stage == "task_link" || ((r.request_id >= 0 || r.path == "request") && !detail::isWorkerTransferStage(e))
+            || (r.batch_span_id && detail::exportedAsyncProfileKind(e) == AsyncProfileKind::Execution))
             continue;
         const auto name = r.path == "profiler" ? "KV diagnostics" : "KV background";
         slices[name].push_back(&e);
@@ -238,7 +243,8 @@ std::string asyncProfileWorkflowTrace(const std::string& native, const std::vect
                 // Temporal containment does not make another request a child.
                 if (e->end_us <= parent.end_us && e->pid == parent.pid
                     && e->record.request_id == parent.record.request_id
-                    && e->record.workflow_id == parent.record.workflow_id)
+                    && e->record.workflow_id == parent.record.workflow_id
+                    && e->record.batch_span_id == parent.record.batch_span_id)
                     break;
             }
             if (index == lanes.size())

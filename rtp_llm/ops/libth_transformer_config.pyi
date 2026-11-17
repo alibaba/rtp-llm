@@ -741,6 +741,7 @@ class KVCacheConfig:
     block_tree_full_prefix_scan_interval_ms: int
     btc_transfer_engine_async: bool
     btc_crc_slot_count: int
+    block_tree_task_pool_size: int
     block_tree_transfer_worker_count: int
     block_tree_business_queue_max_size: int
     block_tree_transfer_queue_max_size: int

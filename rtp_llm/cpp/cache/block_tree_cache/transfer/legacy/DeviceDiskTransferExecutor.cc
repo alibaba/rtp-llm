@@ -19,7 +19,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferStageTimer.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
-#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm {
 
@@ -249,7 +248,6 @@ DeviceDiskTransferExecutor::execute(TransferTask task, const std::vector<const G
 
                         auto batch_leases =
                             std::make_shared<HostStagingBlockPool::HostStagingBlockBatch>(std::move(*leases));
-                        const int64_t queue_begin = currentTimeUs();
                         auto          queue_timer = TransferStageTimer::create(metrics_reporter_,
                                                                       "transfer_queue_wait",
                                                                       request_id,
@@ -260,24 +258,11 @@ DeviceDiskTransferExecutor::execute(TransferTask task, const std::vector<const G
                                                                       transfer_id,
                                                                       identity,
                                                                       AsyncProfileKind::Wait);
-                        auto          on_timeout  = [this,
-                                           complete_batch,
-                                           begin,
-                                           end,
-                                           queue_begin,
-                                           queue_timer,
-                                           batch_timer,
-                                           transfer_name,
-                                           source,
-                                           target]() {
+                        auto on_timeout = [complete_batch, begin, end, queue_timer, batch_timer, transfer_name]() {
                             block_tree_cache_detail::ScopeRollback fallback(
                                 [&] { complete_batch(TransferResult::executionException(true)); });
                             queue_timer.finish(false);
                             batch_timer.finish(false);
-                            if (metrics_reporter_ != nullptr) {
-                                metrics_reporter_->reportQueueWaitMetric(
-                                    false, "transfer", nullptr, source, target, currentTimeUs() - queue_begin);
-                            }
                             TransferResult result(
                                 ErrorInfo(ErrorCode::DEADLINE_EXCEEDED,
                                           std::string(transfer_name) + " expired in TE worker queue, descriptor_range=["
@@ -301,7 +286,6 @@ DeviceDiskTransferExecutor::execute(TransferTask task, const std::vector<const G
                              transfer_id,
                              queue_timer,
                              batch_timer,
-                             queue_begin,
                              load,
                              transfer_name,
                              source,
@@ -310,11 +294,7 @@ DeviceDiskTransferExecutor::execute(TransferTask task, const std::vector<const G
                                 bool buffer_safe = true;
                                 try {
                                     queue_timer.finish(true);
-                                    const auto& sub_descriptors = batch_task.descriptors();
-                                    if (metrics_reporter_ != nullptr) {
-                                        metrics_reporter_->reportQueueWaitMetric(
-                                            false, "transfer", nullptr, source, target, currentTimeUs() - queue_begin);
-                                    }
+                                    const auto&                 sub_descriptors = batch_task.descriptors();
                                     std::vector<HostBufferView> hosts;
                                     hosts.reserve(batch_leases->size());
                                     for (size_t index = 0; index < batch_leases->size(); ++index) {

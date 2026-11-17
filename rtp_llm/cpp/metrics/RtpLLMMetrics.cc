@@ -22,7 +22,6 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMCachePoolMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheTransferMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheEvictionMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheInsertMetrics);
-AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheLockMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheReuseMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMExecutorMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMTokenPSMetrics);
@@ -748,12 +747,6 @@ bool RtpLLMCacheTransferMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(transfer_stage_qps_metric, "rtp_llm_kv_cache_transfer_stage_qps");
     REGISTER_QPS_MUTABLE_METRIC(transfer_stage_latency_sum_us_metric, "rtp_llm_kv_cache_transfer_stage_latency_sum_us");
     REGISTER_QPS_MUTABLE_METRIC(transfer_stage_dropped_qps_metric, "rtp_llm_kv_cache_transfer_stage_dropped_qps");
-    REGISTER_GAUGE_MUTABLE_METRIC(transfer_task_queue_wait_latency_us_metric,
-                                  "rtp_llm_kv_cache_transfer_task_queue_wait_latency_us");
-    REGISTER_QPS_MUTABLE_METRIC(task_queue_waiting_tasks_metric, "rtp_llm_kv_cache_task_queue_waiting_tasks");
-    REGISTER_QPS_MUTABLE_METRIC(callback_queue_waiting_tasks_metric, "rtp_llm_kv_cache_callback_queue_waiting_tasks");
-    REGISTER_GAUGE_MUTABLE_METRIC(callback_queue_wait_latency_us_metric,
-                                  "rtp_llm_kv_cache_callback_queue_wait_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(task_queue_backlog_metric, "rtp_llm_kv_cache_task_queue_backlog");
     REGISTER_GAUGE_MUTABLE_METRIC(transfer_in_flight_metric, "rtp_llm_kv_cache_transfer_in_flight");
     REGISTER_QPS_MUTABLE_METRIC(transfer_bytes_metric, "rtp_llm_kv_cache_transfer_bytes");
@@ -806,24 +799,6 @@ void RtpLLMCacheTransferMetrics::report(const kmonitor::MetricsTags*         tag
         report_backlog("load", collector->load_queue_backlog);
         report_backlog("background", collector->background_queue_backlog);
         report_backlog("completion", collector->completion_queue_backlog);
-    }
-    if (collector->report_task_queue || collector->report_callback_queue) {
-        kmonitor::MetricsTags queue_tags("pool_type", collector->pool_type);
-        if (!collector->operation.empty()) {
-            queue_tags.AddTag("operation", collector->operation);
-        }
-        if (!collector->source_tier.empty()) {
-            queue_tags.AddTag("source_tier", collector->source_tier);
-            queue_tags.AddTag("target_tier", collector->target_tier);
-        }
-        auto* waiting_metric =
-            collector->report_task_queue ? task_queue_waiting_tasks_metric : callback_queue_waiting_tasks_metric;
-        reportKmonMetric(waiting_metric, &queue_tags, collector->queue_waiting_tasks);
-        if (collector->report_queue_wait_latency) {
-            auto* latency_metric = collector->report_task_queue ? transfer_task_queue_wait_latency_us_metric :
-                                                                  callback_queue_wait_latency_us_metric;
-            reportKmonMetric(latency_metric, &queue_tags, collector->queue_wait_latency_us);
-        }
     }
     if (!collector->report_transfer) {
         return;
@@ -933,19 +908,6 @@ void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*            
     auto not_selected_tags = selection_tags;
     not_selected_tags.AddTag("selected", "false");
     choose_victim_qps_metric->Report(&not_selected_tags, collector->calls - collector->selected);
-}
-
-bool RtpLLMCacheLockMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_GAUGE_MUTABLE_METRIC(total_latency_us_metric, "rtp_llm_kv_cache_lock_total_latency_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(wait_latency_us_metric, "rtp_llm_kv_cache_lock_wait_latency_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(hold_latency_us_metric, "rtp_llm_kv_cache_lock_hold_latency_us");
-    return true;
-}
-
-void RtpLLMCacheLockMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMCacheLockMetricsCollector* collector) {
-    total_latency_us_metric->Report(tags, collector->total_latency_us);
-    wait_latency_us_metric->Report(tags, collector->wait_latency_us);
-    hold_latency_us_metric->Report(tags, collector->hold_latency_us);
 }
 
 bool RtpLLMCacheInsertMetrics::init(kmonitor::MetricsGroupManager* manager) {

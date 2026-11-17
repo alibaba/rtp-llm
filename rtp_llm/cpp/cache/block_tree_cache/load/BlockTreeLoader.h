@@ -19,7 +19,7 @@ namespace rtp_llm {
 
 class BlockTransferDispatcher;
 class BlockTreeTaskPool;
-struct CompletionStageContext;
+struct CacheStageContext;
 
 struct BlockTreeMatchResult {
     size_t                                              matched_device_blocks{0};
@@ -92,7 +92,7 @@ private:
                           bool                               aggregate_success,
                           bool&                              host_success,
                           std::vector<JoinedLoadCompletion>& joined_contexts,
-                          CompletionStageContext             observation);
+                          const CacheStageContext&           stage_context);
 
     bool changeTransferState(TreeNode*             node,
                              size_t                group_set_id,

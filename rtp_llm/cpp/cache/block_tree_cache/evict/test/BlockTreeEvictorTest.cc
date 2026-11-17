@@ -2801,6 +2801,7 @@ TEST_F(BlockTreeEvictorTest, BatchAdmissionRejectionRollsBackEveryPlannedDescrip
     }
     size_t settled_count = 0;
     evictor_->settled_   = [&](bool) { ++settled_count; };
+    auto profile         = AsyncProfileSession::start();
     task_pool.stopAdmission();
 
     EXPECT_FALSE(evictor_
@@ -2829,6 +2830,22 @@ TEST_F(BlockTreeEvictorTest, BatchAdmissionRejectionRollsBackEveryPlannedDescrip
         }
     }
     task_pool.shutdown();
+    evictor_runtime_.metrics_reporter_.flushStageMetrics();
+    auto*                 metrics = evictor_runtime_.metricsReporter()->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    kmonitor::MetricsTags tags("operation", "evict");
+    tags.AddTag("source_tier", "DEVICE");
+    tags.AddTag("target_tier", "HOST");
+    tags.AddTag("stage", "business_queue_wait");
+    tags.AddTag("scope", "business_task");
+    tags.AddTag("success", "false");
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_qps_metric, tags), 0);
+    tags.AddTag("success", "true");
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_qps_metric, tags), 0);
+    const auto events = profile->finish();
+    EXPECT_EQ(std::count_if(events.begin(),
+                            events.end(),
+                            [](const auto& event) { return event.record.stage == "business_queue_wait"; }),
+              0);
 }
 
 TEST_F(BlockTreeEvictorTest, BatchQueueTimeoutRollsBackEveryPlannedDescriptorOnce) {
@@ -2866,6 +2883,7 @@ TEST_F(BlockTreeEvictorTest, BatchQueueTimeoutRollsBackEveryPlannedDescriptorOnc
 
     std::vector<bool> settled_events;
     evictor_->settled_   = [&](bool check_watermark) { settled_events.push_back(check_watermark); };
+    auto       profile   = AsyncProfileSession::start();
     const bool submitted = evictor_
                                ->batchEvictLocked(
                                    /*group_set_id=*/0, Tier::DEVICE, /*max_victim_count=*/2)
@@ -2905,6 +2923,22 @@ TEST_F(BlockTreeEvictorTest, BatchQueueTimeoutRollsBackEveryPlannedDescriptorOnc
         }
     }
     task_pool.shutdown();
+    evictor_runtime_.metrics_reporter_.flushStageMetrics();
+    auto*                 metrics = evictor_runtime_.metricsReporter()->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    kmonitor::MetricsTags tags("operation", "evict");
+    tags.AddTag("source_tier", "DEVICE");
+    tags.AddTag("target_tier", "HOST");
+    tags.AddTag("stage", "business_queue_wait");
+    tags.AddTag("scope", "business_task");
+    tags.AddTag("success", "false");
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_qps_metric, tags), 1);
+    tags.AddTag("success", "true");
+    EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_qps_metric, tags), 0);
+    const auto events = profile->finish();
+    EXPECT_EQ(std::count_if(events.begin(),
+                            events.end(),
+                            [](const auto& event) { return event.record.stage == "business_queue_wait"; }),
+              1);
 }
 
 TEST_F(BlockTreeEvictorTest, BatchTargetExhaustionLeavesEntirePlannedBatchUnchanged) {

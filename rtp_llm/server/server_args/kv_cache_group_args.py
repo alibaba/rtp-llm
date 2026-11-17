@@ -499,12 +499,20 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         ),
     )
     kv_cache_group.add_argument(
+        "--block_tree_task_pool_size",
+        env_name="BLOCK_TREE_TASK_POOL_SIZE",
+        bind_to=(kv_cache_config, "block_tree_task_pool_size"),
+        type=int,
+        default=4,
+        help="BlockTreeCache 共享业务任务池的线程数，默认 4，必须大于 0。",
+    )
+    kv_cache_group.add_argument(
         "--block_tree_transfer_worker_count",
         env_name="BLOCK_TREE_TRANSFER_WORKER_COUNT",
         bind_to=(kv_cache_config, "block_tree_transfer_worker_count"),
         type=int,
-        default=1,
-        help="每 rank 每方向的 TransferEngine 执行线程数；异步模式为 WorkLoop 数，legacy 为 worker 数，默认 1。",
+        default=2,
+        help="每 rank 每方向的 TransferEngine 执行线程数；异步模式为 WorkLoop 数，legacy 为 worker 数，默认 2。",
     )
     kv_cache_group.add_argument(
         "--block_tree_business_queue_max_size",
