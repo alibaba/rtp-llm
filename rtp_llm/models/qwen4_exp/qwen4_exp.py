@@ -57,6 +57,11 @@ class Qwen4Exp(Qwen35Moe):
         root = Path(ckpt_path)
         config_json = json.loads((root / "config.json").read_text())
         source_quant = config_json.get("quantization_config")
+        text_config = config_json["text_config"]
+        source_dtype = text_config.get("dtype") or text_config.get("torch_dtype")
+        if not source_quant and source_dtype == "bfloat16":
+            # Keep BF16 head weights; the CUDA GEMM still returns FP32 logits.
+            config.enable_fp32_lm_head = False
         from rtp_llm.models.qwen4_exp.moe_nvfp4 import (
             is_qwen4_nvfp4_checkpoint,
             validate_moe_nvfp4_checkpoint,
