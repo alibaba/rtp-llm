@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import inspect
 import itertools
 import json
 import logging
@@ -1406,7 +1407,22 @@ class _NaviSchedScheduler:
             self._observer._abort_forward_requests(state, cancelled_ids)
 
         native_results = self._scheduler.finish_requests(request_ids, finished_status)
-        native_ids = {request.request_id for request in native_results}
+        native_ids = {
+            result[0] if isinstance(result, tuple) else result.request_id
+            for result in native_results
+        }
+        if native_results:
+            native_returns_pairs = isinstance(native_results[0], tuple)
+        else:
+            # Preserve the scheduler's contract even when all aborted requests
+            # were held outside its queues and its native result is empty.
+            try:
+                result_type = inspect.signature(
+                    self._scheduler.finish_requests
+                ).return_annotation
+            except (TypeError, ValueError):
+                result_type = None
+            native_returns_pairs = "tuple[" in str(result_type).lower()
         changed_request_ids = set(native_ids)
         if requested is None:
             with self._observer._workload_lock:
@@ -1417,7 +1433,9 @@ class _NaviSchedScheduler:
             self._scheduler, changed_request_ids, "finish_requests"
         )
         return native_results + [
-            request for request in held_results if request.request_id not in native_ids
+            (request.request_id, request.client_index)
+            if native_returns_pairs else request
+            for request in held_results if request.request_id not in native_ids
         ]
 
     def schedule(self, throttle_prefills: bool | None = None):
