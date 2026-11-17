@@ -1451,16 +1451,30 @@ class Qwen4ExpModel(Qwen35Model):
         )
 
         pending_injection = None
-        defer_residual = (
-            not is_cuda_graph
-            and hyper_states.is_cuda
+        defer_residual = False
+        defer_m11_residual = False
+        if (
+            hyper_states.is_cuda
             and torch.version.hip is None
             and hyper_states.ndim == 2
-            and hyper_states.shape[1] == 10240
-            and 4093 <= hyper_states.shape[0] <= 16384
             and hyper_states.dtype == torch.bfloat16
-            and torch.cuda.get_device_capability(hyper_states.device) == (12, 0)
-        )
+        ):
+            capability = torch.cuda.get_device_capability(hyper_states.device)
+            rows, width = hyper_states.shape
+            defer_m11_residual = (
+                capability == (10, 3)
+                and width == 32768
+                and rows > 0
+                and hyper_states.is_contiguous()
+                and not hyper_states.requires_grad
+            )
+            defer_residual = defer_m11_residual or (
+                capability == (12, 0)
+                and not is_cuda_graph
+                and width == 10240
+                and 4093 <= rows <= 16384
+            )
+        module_hooks = torch.nn.modules.module
         qsa_metadata_cache = {}
         for i, decoder_layer in enumerate(self.layers):
             if str(i) in self.ple_layers:
@@ -1515,7 +1529,20 @@ class Qwen4ExpModel(Qwen35Model):
                 attn_meta=attn_meta,
                 qsa_runtime=qsa_runtime,
             )
-            if defer_residual and isinstance(decoder_layer, Qwen4ExpDecoderLayer):
+            can_defer = defer_residual and isinstance(
+                decoder_layer, Qwen4ExpDecoderLayer
+            )
+            if can_defer and defer_m11_residual:
+                # Hooks and overridden forwards must see the materialized stream.
+                can_defer = (
+                    type(decoder_layer) is Qwen4ExpDecoderLayer
+                    and "forward" not in decoder_layer.__dict__
+                    and not decoder_layer._forward_pre_hooks
+                    and not decoder_layer._forward_hooks
+                    and not module_hooks._global_forward_pre_hooks
+                    and not module_hooks._global_forward_hooks
+                )
+            if can_defer:
                 hyper_states, pending_output, pending_gate = (
                     decoder_layer.forward_deferred(
                         hyper_states,
