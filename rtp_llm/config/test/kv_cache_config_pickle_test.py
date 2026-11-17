@@ -19,8 +19,8 @@ class KVCacheConfigPickleTest(TestCase):
             with self.subTest(enable_crc=enable_crc):
                 config.enable_crc = enable_crc
                 state = config.__getstate__()
-                self.assertEqual(len(state), 72)
-                self.assertEqual(state[:2], ("KVCacheConfig", 9))
+                self.assertEqual(len(state), 74)
+                self.assertEqual(state[:2], ("KVCacheConfig", 11))
                 self.assertEqual(
                     state[64:69], tuple(KV_CACHE_EVENT_FIELD_VALUES.values())
                 )
@@ -75,14 +75,44 @@ class KVCacheConfigPickleTest(TestCase):
         config = KVCacheConfig()
         config.reuse_cache_tail_blocks = 13
         config.linear_pool_blocks = 31
+        config.linear_ssm_double_buffer = True
         config.swa_pool_blocks = 17
         for _ in range(2):
             config = pickle.loads(pickle.dumps(config))
             self.assertEqual(config.reuse_cache_tail_blocks, 13)
             self.assertEqual(config.linear_pool_blocks, 31)
+            self.assertTrue(config.linear_ssm_double_buffer)
             self.assertEqual(config.swa_pool_blocks, 17)
         self.assertFalse(hasattr(config, "linear_step"))
         self.assertFalse(hasattr(config, "linear_cache_tail_blocks"))
+
+    def test_version_nine_leaves_double_buffer_disabled(self):
+        state = list(KVCacheConfig().__getstate__()[:72])
+        state[1] = 9
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(tuple(state))
+        self.assertFalse(restored.linear_ssm_double_buffer)
+
+    def test_single_state_survives_workers_without_enabling_double_buffer(self):
+        config = KVCacheConfig()
+        config.linear_ssm_replay = True
+        config.linear_pool_blocks = 193
+        for _ in range(2):
+            config = pickle.loads(pickle.dumps(config))
+            self.assertTrue(config.linear_ssm_replay)
+            self.assertFalse(config.linear_ssm_double_buffer)
+            self.assertEqual(config.linear_pool_blocks, 193)
+        self.assertIn("linear_ssm_replay: 1\n", config.to_string())
+
+    def test_version_ten_preserves_double_buffer_and_disables_single_state(self):
+        source = KVCacheConfig()
+        source.linear_ssm_double_buffer = True
+        state = list(source.__getstate__()[:73])
+        state[1] = 10
+        restored = KVCacheConfig.__new__(KVCacheConfig)
+        restored.__setstate__(tuple(state))
+        self.assertTrue(restored.linear_ssm_double_buffer)
+        self.assertFalse(restored.linear_ssm_replay)
 
     def test_version_eight_uses_new_retention_defaults(self):
         source = KVCacheConfig()

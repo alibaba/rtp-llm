@@ -60,8 +60,7 @@ int LinearCacheManager::retainedDecodeBlocks(int reserve_step) const {
 }
 
 int LinearCacheManager::prefixCheckpointStride(bool enable_reuse_cache) const {
-    return enable_reuse_cache && prefixReuseEnabled() ? static_cast<int>(policy().prefix_checkpoint_stride_blocks) :
-                                                         0;
+    return enable_reuse_cache && prefixReuseEnabled() ? static_cast<int>(policy().prefix_checkpoint_stride_blocks) : 0;
 }
 
 int LinearCacheManager::needBlocksNum(int seq_len, int current_blocks, int reserve_step) const {
@@ -224,7 +223,11 @@ bool LinearCacheManager::mallocImpl(BlockIds&                block_ids,
         if (required_positions.count(static_cast<size_t>(pos)) != 0) {
             return true;
         }
-        if (isPrefixCheckpointSlot(static_cast<size_t>(pos), prefixCheckpointStride(enable_reuse_cache))) {
+        // Decode cannot reconstruct historical states omitted by prefill or PD
+        // transfer. Keep those checkpoint holes sparse instead of allocating
+        // uninitialized states that the decode peak estimate does not reserve.
+        if ((is_prefill || pos >= current_blocks_len)
+            && isPrefixCheckpointSlot(static_cast<size_t>(pos), prefixCheckpointStride(enable_reuse_cache))) {
             return true;
         }
         if (is_prefill) {
@@ -306,7 +309,7 @@ void LinearCacheManager::removeSkippedBlocks(BlockIds& block_ids, bool enable_re
         return;
     }
     const int checkpoint_stride = prefixCheckpointStride(enable_reuse_cache);
-    const int block_size = static_cast<int>(block_indices.size());
+    const int block_size        = static_cast<int>(block_indices.size());
 
     BlockIndicesType    blocks_to_free;
     std::vector<size_t> pos_to_remove;

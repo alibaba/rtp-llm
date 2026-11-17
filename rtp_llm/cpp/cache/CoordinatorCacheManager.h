@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 #include "kmonitor/client/MetricsReporter.h"
@@ -80,6 +81,13 @@ public:
         int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const;
     virtual std::shared_ptr<KVCacheResource>
     incrKVCacheRef(const KVCacheResource& kvcache_resource, const CacheKeysType& cache_keys, bool is_connector = false);
+    // Retain independent pool references when remote writers may still be live.
+    // Duplicate physical IDs are idempotent. These references are never returned
+    // to allocation, including after server/manager destruction; only pool
+    // destruction ends quarantine. The snapshot holds no allocator/lease owner.
+    size_t
+    quarantineCacheLoad(const KVCacheResource& resource, const std::string& request_key, const std::string& reason);
+    size_t                          quarantinedCacheLoadCount() const;
     virtual GroupedCacheLayerLayout allLayerCacheBase() const;
     virtual bool                    updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
                                                   const std::vector<int>&         block_src_batch,
@@ -234,7 +242,14 @@ protected:
     // operation thread-safe, but without this transaction lock concurrent
     // init-malloc callers can all pass the same reserve check and collectively
     // consume the forward-progress reserve before any one of them allocates.
-    std::mutex malloc_mutex_;
+    mutable std::mutex malloc_mutex_;
+    struct QuarantinedCacheLoad {
+        KVCacheResource resource;
+        std::string     request_key;
+        std::string     reason;
+    };
+    std::vector<QuarantinedCacheLoad>             quarantined_cache_loads_;
+    std::vector<std::unordered_set<BlockIdxType>> quarantined_load_blocks_;
 
     struct PreparedKVCache {
         size_t                         matched_device_blocks = 0;

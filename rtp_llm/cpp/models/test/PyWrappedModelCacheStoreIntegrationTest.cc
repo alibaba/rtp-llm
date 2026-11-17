@@ -397,10 +397,10 @@ GptModelInputs makeInputs(const std::vector<int32_t>&     input_lengths,
     inputs.prefix_lengths      = pinnedTensor(std::vector<int32_t>(batch_size, 0), {static_cast<int64_t>(batch_size)});
     inputs.cache_store_publish_start_tokens =
         pinnedTensor(std::vector<int32_t>(batch_size, 0), {static_cast<int64_t>(batch_size)});
-    inputs.kv_cache_block_id   = pinnedTensor(block_ids,
-                                            {static_cast<int64_t>(group_tags.size()),
-                                             static_cast<int64_t>(batch_size),
-                                             static_cast<int64_t>(block_table_width)});
+    inputs.kv_cache_block_id        = pinnedTensor(block_ids,
+                                                   {static_cast<int64_t>(group_tags.size()),
+                                                    static_cast<int64_t>(batch_size),
+                                                    static_cast<int64_t>(block_table_width)});
     inputs.kv_cache_kernel_block_id = inputs.kv_cache_block_id.clone().pin_memory();
     inputs.request_id               = pinnedLongTensor(request_ids, {static_cast<int64_t>(batch_size)});
     inputs.request_pd_separation    = pinnedBoolTensor(batch_size, true);
@@ -667,17 +667,17 @@ Scenario makeMtpScenario() {
 
 Scenario makeScenario(const std::string& name) {
     if (name == "cyclic_chunk_views") {
-        auto config      = makeCacheConfig({{"swa", 2, 24}, {"full", 2, 16}});
-        auto groups      = config.topology().groups();
-        groups[0].policy = defaultCacheGroupPolicy(CacheGroupType::SWA);
-        auto full_spec                      = groups[1].spec->clone();
+        auto config                          = makeCacheConfig({{"swa", 2, 24}, {"full", 2, 16}});
+        auto groups                          = config.topology().groups();
+        groups[0].policy                     = defaultCacheGroupPolicy(CacheGroupType::SWA);
+        auto full_spec                       = groups[1].spec->clone();
         full_spec->kernel_seq_size_per_block = 1;
-        groups[1].spec                      = std::move(full_spec);
+        groups[1].spec                       = std::move(full_spec);
         config.setTopology(std::move(groups), {LayerBase{kLayerId, {"swa", "full"}}});
         auto layout = makeLayout(config);
         // Both chunk rows use cyclic execution banks, but only the final
         // SWA row exposes its owned tail blocks to cache-store publication.
-        auto inputs = makeInputs(/*input_lengths=*/{4, 4},
+        auto inputs                             = makeInputs(/*input_lengths=*/{4, 4},
                                  /*request_ids=*/{301, 302},
                                  /*cache_keys=*/{3101, 3102, 3103, 3104, 3201, 3202, 0, 0},
                                  /*cache_keys_width=*/4,
@@ -688,9 +688,8 @@ Scenario makeScenario(const std::string& name) {
                                  /*global_stride_bytes=*/24);
         inputs.prefix_lengths                   = pinnedTensor({4, 0}, {2});
         inputs.cache_store_publish_start_tokens = pinnedTensor({4, 0}, {2});
-        inputs.kv_cache_kernel_block_id = pinnedTensor(
-            {3, 4, 3, 4, 0, 0, 0, 0, 5, 6, 5, 6, 0, 0, 0, 0,
-             2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 0, 0, 0, 0},
+        inputs.kv_cache_kernel_block_id         = pinnedTensor(
+            {3, 4, 3, 4, 0, 0, 0, 0, 5, 6, 5, 6, 0, 0, 0, 0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 0, 0, 0, 0},
             {2, 2, 8});
         return {std::move(config), std::move(layout.layout), std::move(layout.base_addresses), std::move(inputs)};
     }
@@ -699,13 +698,13 @@ Scenario makeScenario(const std::string& name) {
         auto layout           = makeLayout(config);
         auto inputs           = makeInputs({1, 3, 4},
                                            {501, 502, 503},
-                                           std::vector<int64_t>(24, 0),
-                                           8,
-                                           std::vector<int32_t>(24, 1),
+                                 std::vector<int64_t>(24, 0),
+                                 8,
+                                 std::vector<int32_t>(24, 1),
                                            {"full"},
-                                           8,
-                                           128,
-                                           256);
+                                 8,
+                                 128,
+                                 256);
         inputs.input_lengths  = inputs.input_lengths.cuda();
         inputs.prefix_lengths = pinnedTensor({128, 256, 512}, {3});
         inputs.pd_separation  = false;
@@ -1585,9 +1584,9 @@ runCustomOutput(py::object py_model, py::object handler, torch::Tensor indexes, 
         model.prepareAttentionInputs(inputs);
         model.updateKVCacheKernelBlockId(inputs);
     }
-    const auto outputs            = compact_output ? PyWrappedModelTestPeer::forwardPostLayersLastHidden(
+    const auto outputs      = compact_output ? PyWrappedModelTestPeer::forwardPostLayersLastHidden(
                                               model, torch::ones({2, width}, lm_head->kernel.options()), inputs) :
-                                                     model.forward(inputs);
+                                               model.forward(inputs);
     result["graph_status"]  = generationPrefillCudaGraphStatusString(outputs.generation_prefill_cuda_graph_status);
     result["custom_output"] = outputs.custom_output;
     result["custom_output_error"] = outputs.custom_output_error;
@@ -1643,9 +1642,9 @@ runPyWrappedModelSpeculativeCommitBridge(py::object py_model, const std::string&
                               /*cache_manager=*/nullptr,
                               /*mtp_cache_config_index=*/std::nullopt};
     PyWrappedModel     model(params,
-                             std::move(py_model),
-                             /*is_prefill_cuda_graph_mode=*/false,
-                             /*use_spec_decoding=*/is_speculative_target);
+                         py_model,
+                         /*is_prefill_cuda_graph_mode=*/false,
+                         /*use_spec_decoding=*/is_speculative_target);
 
     if (action == "reduce_true" || action == "reduce_false") {
         const auto result = model.reduceSpeculativeTargetPrepareStatus(action == "reduce_true");
@@ -1653,6 +1652,14 @@ runPyWrappedModelSpeculativeCommitBridge(py::object py_model, const std::string&
     }
     if (action == "has_hooks") {
         return py::bool_(model.hasSpeculativeTargetCommitHooks());
+    }
+    if (action == "fail_stop_capability") {
+        return py::bool_(model.requiresSpeculativeTargetCommitFailStop());
+    }
+    if (action == "fail_stop_capability_after_install") {
+        const bool before = model.requiresSpeculativeTargetCommitFailStop();
+        py_model.attr("install_cache_views")();
+        return py::make_tuple(before, model.requiresSpeculativeTargetCommitFailStop());
     }
     if (action == "prepare") {
         auto accept_len =

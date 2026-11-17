@@ -108,7 +108,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     cum_log_probs_ = torch::zeros({(int64_t)init_batch_size}, torch::kFloat32);
 
     is_context_stream_ = std::make_shared<std::atomic<bool>>(true);
-    generate_status_    = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
+    generate_status_   = std::make_shared<GenerateStateMachine>(stream_cache_resource_);
     sub_generate_status_.reserve(maxBatchSize());
     sub_generate_status_.clear();
     resizeSubGenerateStatus(init_batch_size);
@@ -122,9 +122,8 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     if (!input->fake_query && chunk_size > 0 && input->generate_config->isPrefillOnly()
         && !model_config.hidden_state_capture_layer_ids.empty()
         && (resource_context.role_type == RoleType::PREFILL || resource_context.role_type == RoleType::PDFUSION)) {
-        reportEvent(StreamEvents::Error,
-                    ErrorCode::INVALID_PARAMS,
-                    "chunked prefill incompatible: hidden_state_capture");
+        reportEvent(
+            StreamEvents::Error, ErrorCode::INVALID_PARAMS, "chunked prefill incompatible: hidden_state_capture");
         return;
     }
     if (!input->fake_query && chunk_size > 0
@@ -138,13 +137,12 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                              config.return_hidden_states                     ? "return_hidden_states" :
                              config.return_all_hidden_states                 ? "return_all_hidden_states" :
                              getReturnAllProbs() != ReturnAllProbsMode::NONE ? "return_all_probs" :
-                             input->custom_output_token_position >= 0       ? "custom_output" :
+                             input->custom_output_token_position >= 0        ? "custom_output" :
                              multimodalFeaturesLength() != 0                 ? "multimodal" :
                                                                                nullptr;
         if (reason != nullptr) {
-            reportEvent(StreamEvents::Error,
-                        ErrorCode::INVALID_PARAMS,
-                        "chunked prefill incompatible: " + std::string(reason));
+            reportEvent(
+                StreamEvents::Error, ErrorCode::INVALID_PARAMS, "chunked prefill incompatible: " + std::string(reason));
             return;
         }
         setChunkSize(static_cast<int>(chunk_size));
@@ -1249,6 +1247,11 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     }
 
     // for spec-decode linear attention, we need to adjust cache blocks
+    // Only a completed target-verify transaction publishes the SSM scratch bank.
+    // PD/prefill updates have no proposal step and must not switch the received bank.
+    if (accept_token_num > 0 && update_info.speculative_propose_step > 0 && stream_cache_resource_) {
+        stream_cache_resource_->commitLinearState(0);
+    }
     if (accept_token_num > 1 && stream_cache_resource_) {
         int seq_size_per_block = seqSizePerBlock();
 

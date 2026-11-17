@@ -129,6 +129,8 @@ protected:
     bool                reduceSpeculativeTargetPrepareStatus(bool local_ok);
     static bool         asyncPrepareAllowed(bool requested, bool target_commit_hooks);
     static absl::Status validateSpeculativeTargetExecutionPolicy(bool target_commit_hooks, bool eplb_enabled);
+    static absl::Status validateSpeculativeTargetCommitCapability(bool required, bool hooks, bool fail_stop);
+    static void         runSpeculativeBookkeeping(bool fail_stop, const std::function<absl::Status()>& work);
     bool                speculativeTargetTransactionsEnabled() const;
     absl::Status        rendezvousSpeculativeTargetPhaseStatus(const absl::Status& local_status, const char* phase);
     absl::Status        rendezvousSpeculativeTargetSamplingStatus(const absl::Status& local_status);
@@ -148,8 +150,8 @@ protected:
     // decodeStep helpers — extracted to keep decodeStep readable. Each helper
     // owns a single phase (prepare, forward, broadcast, dispatch) and
     // preserves the original PROFILE_SCOPE labels.
-    void            waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
-    void            launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
+    void waitPreviousBookkeepingBeforeStreamPreparation(const std::list<GenerateStreamPtr>& streams);
+    void launchTargetVerifyPrepareAsync(const GptModelInputs& model_input, size_t batch_size);
     // post_rejection=true forks with the final post-commit input, which is
     // safe under speculative target hooks; the default pre-rejection fork
     // keeps its historical useAsyncPrepare() gate.
@@ -353,6 +355,7 @@ private:
     // rollback, and finalize phases of a target side-state transaction.
     torch::Tensor             speculative_target_prepare_status_;
     std::function<bool(bool)> speculative_target_status_reducer_for_test_;
+    bool                      require_speculative_target_commit_fail_stop_{false};
     std::function<void()>     before_model_forward_;
     std::function<void()>     after_model_forward_;
     bool                      profile_work_started_ = false;

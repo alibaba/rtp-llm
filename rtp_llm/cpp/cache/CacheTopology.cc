@@ -46,6 +46,8 @@ size_t GroupBase::cacheKeyTokenStride() const {
 
 size_t GroupBase::reuseBlockCount(size_t matched_block_count) const {
     switch (policy.group_type) {
+        case CacheGroupType::REQUEST_STATE:
+            return 0;
         case CacheGroupType::FULL:
             return matched_block_count;
         case CacheGroupType::LINEAR:
@@ -71,7 +73,8 @@ uint32_t GroupBase::localKvHeadNum() const {
 size_t
 GroupBase::chunkCacheBlockCount(int prompt_tokens, int chunk_tokens, bool reuse_cache, int reserve_tokens) const {
     if (prompt_tokens <= 0 || chunk_tokens <= 0 || policy.group_type == CacheGroupType::FULL
-        || policy.shared_chunk_state || (reuse_cache && policy.enable_prefix_reuse)) {
+        || policy.group_type == CacheGroupType::REQUEST_STATE || policy.shared_chunk_state
+        || (reuse_cache && policy.enable_prefix_reuse)) {
         return 0;
     }
     const size_t block_tokens = seqSizePerBlock();
@@ -88,10 +91,10 @@ GroupBase::chunkCacheBlockCount(int prompt_tokens, int chunk_tokens, bool reuse_
 }
 
 size_t CacheTopology::blockSizeBytesForGroup(std::string_view group_tag) const {
-    const auto& cache_group            = group(group_tag);
-    const auto  kv_block_stride_bytes  = cache_group.kvBlockStrideBytes();
-    const auto  kv_scale_stride_bytes  = cache_group.kvScaleStrideBytes();
-    const auto  layer_count            = layerIdsForGroup(group_tag).size();
+    const auto& cache_group           = group(group_tag);
+    const auto  kv_block_stride_bytes = cache_group.kvBlockStrideBytes();
+    const auto  kv_scale_stride_bytes = cache_group.kvScaleStrideBytes();
+    const auto  layer_count           = layerIdsForGroup(group_tag).size();
     RTP_LLM_CHECK_WITH_INFO(kv_scale_stride_bytes <= std::numeric_limits<size_t>::max() - kv_block_stride_bytes,
                             "CacheTopology tag=%s stride overflow",
                             cache_group.tag.c_str());

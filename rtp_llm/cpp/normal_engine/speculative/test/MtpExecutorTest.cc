@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <exception>
 #include <functional>
@@ -19,6 +20,7 @@
 #include "rtp_llm/cpp/models/context_parallel/ZigzagProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/normal_engine/HiddenStateCapturePolicy.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 
 #define private public
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
@@ -115,16 +117,16 @@ TEST(MtpExecutorPolicyTest, HybridCacheWaitsBeforeReadingNextRoundHostState) {
 }
 
 TEST(MtpExecutorPolicyTest, MtpSequenceUpperBoundChainsUntilBookkeepingCatchesUp) {
-    constexpr int width       = 8;
-    const int     first_next  = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
-                                    /*pending=*/false, /*previous_next_bound=*/-1, /*host_seq_len=*/96)
-                                + width;
-    const int     second_next = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
-                                    /*pending=*/true, /*previous_next_bound=*/first_next, /*host_seq_len=*/96)
-                                + width;
-    const int     third_next  = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
-                                    /*pending=*/true, /*previous_next_bound=*/second_next, /*host_seq_len=*/96)
-                                + width;
+    constexpr int width      = 8;
+    const int     first_next = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
+                               /*pending=*/false, /*previous_next_bound=*/-1, /*host_seq_len=*/96)
+                           + width;
+    const int second_next = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
+                                /*pending=*/true, /*previous_next_bound=*/first_next, /*host_seq_len=*/96)
+                            + width;
+    const int third_next = MtpExecutor::selectMtpPreviousSeqLenUpperBound(
+                               /*pending=*/true, /*previous_next_bound=*/second_next, /*host_seq_len=*/96)
+                           + width;
     EXPECT_EQ(104, first_next);
     EXPECT_EQ(112, second_next);
     EXPECT_EQ(120, third_next);
@@ -304,6 +306,10 @@ public:
         return speculative_target_commit_enabled_;
     }
 
+    bool requiresSpeculativeTargetCommitFailStop() const override {
+        return speculative_target_fail_stop_;
+    }
+
     std::string prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) override {
         if (!speculative_target_commit_enabled_) {
             return {};
@@ -325,11 +331,17 @@ public:
             ++speculative_target_commit_count_;
             speculative_target_state_committed_ = true;
             speculative_target_undo_retained_   = true;
+            if (commit_observer_) {
+                commit_observer_();
+            }
             if (speculative_target_commit_throws_) {
                 throw std::runtime_error("injected commit exception");
             }
             return {};
         } else {
+            if (speculative_target_fail_stop_ && speculative_target_state_committed_) {
+                return "cannot roll back irreversible target state";
+            }
             ++speculative_target_abort_count_;
             speculative_target_state_committed_ = false;
             speculative_target_undo_retained_   = false;
@@ -343,6 +355,9 @@ public:
         }
         recordEvent("finalize_target");
         ++speculative_target_finalize_count_;
+        if (speculative_target_finalize_throws_) {
+            throw std::runtime_error("injected finalize exception");
+        }
         speculative_target_undo_retained_ = false;
         return {};
     }
@@ -358,6 +373,18 @@ public:
 
     void setSpeculativeTargetCommitThrows(bool enabled) {
         speculative_target_commit_throws_ = enabled;
+    }
+
+    void setSpeculativeTargetFailStop(bool enabled) {
+        speculative_target_fail_stop_ = enabled;
+    }
+
+    void setSpeculativeTargetFinalizeThrows(bool enabled) {
+        speculative_target_finalize_throws_ = enabled;
+    }
+
+    void setCommitObserver(std::function<void()> observer) {
+        commit_observer_ = std::move(observer);
     }
 
     bool speculativeTargetStateCommitted() const {
@@ -573,6 +600,7 @@ private:
     std::exception_ptr                         publication_exception_;
     std::function<void()>                      publication_observer_;
     std::function<void()>                      forward_observer_;
+    std::function<void()>                      commit_observer_;
     std::function<void(const GptModelInputs&)> input_observer_;
     std::shared_ptr<std::vector<std::string>>  event_log_;
     std::string                                event_name_;
@@ -580,6 +608,8 @@ private:
     bool                                       speculative_target_commit_enabled_  = false;
     bool                                       speculative_target_prepare_throws_  = false;
     bool                                       speculative_target_commit_throws_   = false;
+    bool                                       speculative_target_finalize_throws_ = false;
+    bool                                       speculative_target_fail_stop_       = false;
     bool                                       speculative_target_state_committed_ = false;
     bool                                       speculative_target_undo_retained_   = false;
     std::string                                speculative_target_prepare_error_;
@@ -780,8 +810,69 @@ public:
     using MtpExecutor::reduceSpeculativeTargetPrepareStatus;
     using MtpExecutor::rendezvousSpeculativeTargetPhaseStatus;
     using MtpExecutor::rendezvousSpeculativeTargetSamplingStatus;
+    using MtpExecutor::runSpeculativeBookkeeping;
+    using MtpExecutor::validateSpeculativeTargetCommitCapability;
     using MtpExecutor::validateSpeculativeTargetExecutionPolicy;
 };
+
+// GPU death tests must re-exec a clean process instead of forking a live
+// CUDA/HIP context. Restore the global setting for all existing tests.
+class ScopedThreadsafeDeathTest {
+public:
+    ScopedThreadsafeDeathTest(): previous_(::testing::FLAGS_gtest_death_test_style) {
+        ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+    }
+    ~ScopedThreadsafeDeathTest() {
+        ::testing::FLAGS_gtest_death_test_style = previous_;
+    }
+
+private:
+    std::string previous_;
+};
+
+TEST(MtpExecutorPolicyTest, SingleSsmRequiresExplicitIrreversibleCommitCapability) {
+    for (bool required : {false, true}) {
+        for (bool hooks : {false, true}) {
+            for (bool fail_stop : {false, true}) {
+                SCOPED_TRACE(::testing::Message() << required << "," << hooks << "," << fail_stop);
+                const auto status =
+                    TestableMtpExecutor::validateSpeculativeTargetCommitCapability(required, hooks, fail_stop);
+                EXPECT_EQ(status.ok(), (!required || fail_stop) && (!fail_stop || hooks));
+            }
+        }
+    }
+}
+
+TEST(MtpExecutorPolicyTest, ReversibleBookkeepingRetainsLegacyFailureBehavior) {
+    EXPECT_NO_THROW(TestableMtpExecutor::runSpeculativeBookkeeping(false, [] { return absl::OkStatus(); }));
+    EXPECT_NO_THROW(TestableMtpExecutor::runSpeculativeBookkeeping(
+        false, [] { return absl::InternalError("legacy dispatch error"); }));
+    EXPECT_THROW(TestableMtpExecutor::runSpeculativeBookkeeping(
+                     false, []() -> absl::Status { throw std::runtime_error("legacy worker exception"); }),
+                 std::runtime_error);
+    EXPECT_NO_THROW(TestableMtpExecutor::runSpeculativeBookkeeping(true, [] { return absl::OkStatus(); }));
+}
+
+TEST(MtpExecutorPolicyDeathTest, IrreversibleBookkeepingFailsBeforeCallerCanCatchOrReleaseRows) {
+    ScopedThreadsafeDeathTest death_style;
+    EXPECT_DEATH(
+        {
+            TestableMtpExecutor::runSpeculativeBookkeeping(
+                true, [] { return absl::InternalError("injected dispatch status"); });
+        },
+        "irreversible speculative target async bookkeeping failed; fail-stop");
+    EXPECT_DEATH(
+        {
+            try {
+                TestableMtpExecutor::runSpeculativeBookkeeping(
+                    true, []() -> absl::Status { throw std::runtime_error("injected worker exception"); });
+            } catch (...) {
+                // A deferred AsyncRunner exception would reach here and let
+                // its outer pending-count guard release the request rows.
+            }
+        },
+        "irreversible speculative target async bookkeeping failed; fail-stop");
+}
 
 TEST(MtpExecutorPolicyTest, TargetHooksDisableSpeculativeAsyncPrepare) {
     EXPECT_TRUE(TestableMtpExecutor::asyncPrepareAllowed(/*requested=*/true, /*target_commit_hooks=*/false));
@@ -884,13 +975,13 @@ public:
         ResourceContext            resource_context;
         SpeculativeExecutionConfig sp_config;
 
-        model_config.max_seq_len                           = test_config.max_seq_len;
-        model_config.vocab_size                            = test_config.vocab_size;
-        model_config.num_layers                            = test_config.num_layers;
-        model_config.attn_config.rope_config.index_factor  = test_config.position_id_len_factor;
-        sp_config.type                                     = test_config.sp_type;
-        sp_config.gen_num_per_cycle                        = test_config.gen_num_per_cycle;
-        sp_config.sp_dspark_mask_token_id                  = test_config.dspark_mask_token_id;
+        model_config.max_seq_len                          = test_config.max_seq_len;
+        model_config.vocab_size                           = test_config.vocab_size;
+        model_config.num_layers                           = test_config.num_layers;
+        model_config.attn_config.rope_config.index_factor = test_config.position_id_len_factor;
+        sp_config.type                                    = test_config.sp_type;
+        sp_config.gen_num_per_cycle                       = test_config.gen_num_per_cycle;
+        sp_config.sp_dspark_mask_token_id                 = test_config.dspark_mask_token_id;
 
         resource_context.cache_manager =
             std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
@@ -925,26 +1016,30 @@ public:
         test_kv_cache_config.kernel_seq_size_per_block = 2;
 
         auto configure_cache_model = [](ModelConfig& cache_model_config) {
-            cache_model_config.data_type                    = rtp_llm::TYPE_INT8;
-            cache_model_config.attn_config.kv_head_num      = 128;
-            cache_model_config.attn_config.size_per_head    = 256;
+            cache_model_config.data_type                           = rtp_llm::TYPE_INT8;
+            cache_model_config.attn_config.kv_head_num             = 128;
+            cache_model_config.attn_config.size_per_head           = 256;
             cache_model_config.attn_config.tokens_per_block        = 2;
             cache_model_config.attn_config.kernel_tokens_per_block = 2;
-            cache_model_config.attn_config.kv_cache_dtype   = KvCacheDataType::BASE;
+            cache_model_config.attn_config.kv_cache_dtype          = KvCacheDataType::BASE;
         };
         configure_cache_model(score_cache_model_config);
         configure_cache_model(propose_cache_model_config);
 
-        auto cache_sp_config              = sp_config;
-        cache_sp_config.gen_num_per_cycle = 1;
-        auto           cache_config       = CacheConfigCreator::createConfig(score_cache_model_config,
+        auto cache_sp_config = sp_config;
+        if (cache_sp_config.gen_num_per_cycle == 0) {
+            // Give the executor's zero-width rejection test a valid cache.
+            // All positive-width cases must exercise the real cache geometry.
+            cache_sp_config.gen_num_per_cycle = 1;
+        }
+        auto           cache_config    = CacheConfigCreator::createConfig(score_cache_model_config,
                                                              params.parallelism_config,
                                                              test_kv_cache_config,
                                                              cache_sp_config,
                                                              &propose_cache_model_config,
                                                              /*is_mtp=*/true,
                                                              /*is_eagle=*/false);
-        const uint32_t local_block_num    = CacheConfigCreator::computeLocalBlockNum(cache_config,
+        const uint32_t local_block_num = CacheConfigCreator::computeLocalBlockNum(cache_config,
                                                                                   score_cache_model_config,
                                                                                   params.runtime_config,
                                                                                   test_kv_cache_config,
@@ -1176,7 +1271,10 @@ public:
     }
 
     void runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers = true);
-    void runSingleBatchDecodeScenario(bool with_prefill_only, bool stale_python_hidden = false);
+    void runSingleBatchDecodeScenario(bool with_prefill_only,
+                                      bool stale_python_hidden = false,
+                                      bool irreversible_target = false,
+                                      bool fail_post_commit    = false);
 
     void setupAlignmentModel(FakeModel*          model,
                              vector<string>&     forward_trace,
@@ -1282,9 +1380,9 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
         if (with_linear) {
             config.layer_num = single_layer ? 1 : 2;
             config.fromGroupedSpecs({test::makeLinearSpec("linear", 4, TYPE_FP16, 1, 1), full},
-                                    {{0}, {single_layer ? 0 : 1}},
-                                    {CacheGroupType::LINEAR, CacheGroupType::FULL},
-                                    {"linear", "full"});
+                                               {{0}, {single_layer ? 0 : 1}},
+                                               {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                               {"linear", "full"});
         }
         auto groups = config.topology().groups();
         for (auto& group : groups) {
@@ -1371,6 +1469,22 @@ TEST_P(MtpCacheStrideTest, ForwardAndPrepareUseSingleGroupStrideOnly) {
 
 INSTANTIATE_TEST_SUITE_P(CacheTopology, MtpCacheStrideTest, ::testing::Values(0, 1, 2));
 
+TEST_F(MtpExecutorTest, testMtpProposalWidthUsesOneActiveDraftCache) {
+    for (const int gamma : {1, 2, 3}) {
+        SCOPED_TRACE(gamma);
+        MtpExecutorTestConfig test_config;
+        test_config.gen_num_per_cycle = gamma;
+        auto        components        = createMtpExecutorComponents(test_config);
+        const auto& manager           = components.executor->cache_manager_;
+        const auto& config            = manager->cacheConfig();
+        ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+        EXPECT_EQ(config.layer_all_num(), 2u);
+        EXPECT_EQ(components.executor->propose_step_, static_cast<size_t>(gamma));
+        EXPECT_EQ(manager->getMTPModuleGroupedCacheLayerLayout(0).group("full").activeLayerCount(), 1u);
+        EXPECT_THROW(manager->getMTPModuleGroupedCacheLayerLayout(1), std::runtime_error);
+    }
+}
+
 TEST_F(MtpExecutorTest, testMtpConstructorRejectsZeroProposalWidth) {
     MtpExecutorTestConfig test_config;
     test_config.sp_type           = SP_TYPE_MTP;
@@ -1385,7 +1499,7 @@ TEST_F(MtpExecutorTest, testMtpConstructorRejectsZeroProposalWidth) {
 }
 
 TEST_F(MtpExecutorTest, testMtpTargetHiddenRowsZeroUsesTensorRows) {
-    auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto            components = createMtpExecutorComponents(MtpExecutorTestConfig{});
     GptModelOutputs output;
     output.mtp_target_hidden_states = torch::ones({3, 8}, torch::kFloat);
 
@@ -1840,21 +1954,21 @@ TEST_F(MtpExecutorTest, testCPChunkedPrefillRestoresGlobalPositionIds) {
     // Use the real CP splitter with fake model forwards and TP collectives.
     for (const bool explicit_position_ids : {false, true}) {
         for (const bool middle_chunk : {false, true}) {
-            SCOPED_TRACE(testing::Message() << "explicit_position_ids=" << explicit_position_ids
-                                           << ", middle_chunk=" << middle_chunk);
+            SCOPED_TRACE(testing::Message()
+                         << "explicit_position_ids=" << explicit_position_ids << ", middle_chunk=" << middle_chunk);
             MtpExecutorTestConfig test_config;
-            test_config.gen_num_per_cycle      = 2;
-            test_config.mm_position_ids_style  = explicit_position_ids ? MROPE : DEFAULT;
-            test_config.position_id_len_factor = explicit_position_ids ? 3 : 1;
-            auto  components = createMtpExecutorComponents(test_config);
-            auto& executor = *components.executor;
+            test_config.gen_num_per_cycle                         = 2;
+            test_config.mm_position_ids_style                     = explicit_position_ids ? MROPE : DEFAULT;
+            test_config.position_id_len_factor                    = explicit_position_ids ? 3 : 1;
+            auto  components                                      = createMtpExecutorComponents(test_config);
+            auto& executor                                        = *components.executor;
             executor.parallelism_config_.prefill_cp_config.method = CPRotateMethod::ALL_GATHER;
             executor.warm_up_ = true;  // Stop after draft forward, before draft sampling.
 
             constexpr int prefix_len = 4;
             constexpr int chunk_len  = 8;
             const int     prompt_len = prefix_len + chunk_len + (middle_chunk ? 2 : 0);
-            vector<int> prompt{0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1};
+            vector<int>   prompt{0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1};
             prompt.resize(prompt_len);
             auto stream = createContextStream(
                 components.model_config, components.runtime_config, components.resource_context, prompt);
@@ -1865,8 +1979,9 @@ TEST_F(MtpExecutorTest, testCPChunkedPrefillRestoresGlobalPositionIds) {
 
             torch::Tensor prompt_positions;
             if (explicit_position_ids) {
-                prompt_positions = (torch::arange(prompt_len, torch::kInt32).unsqueeze(1) * 10
-                                    + torch::arange(3, torch::kInt32)).flatten();
+                prompt_positions =
+                    (torch::arange(prompt_len, torch::kInt32).unsqueeze(1) * 10 + torch::arange(3, torch::kInt32))
+                        .flatten();
                 stream->setContextPositionIds(prompt_positions);
             }
 
@@ -1900,14 +2015,14 @@ TEST_F(MtpExecutorTest, testCPChunkedPrefillRestoresGlobalPositionIds) {
                 input.combo_position_ids = local_positions;
             };
 
-            GptModelInputs draft_input = target_input;
+            GptModelInputs draft_input     = target_input;
             draft_input.combo_tokens       = torch::tensor({1, 2, 3, 0, 1, 2, 3, middle_chunk ? 0 : 2}, torch::kInt32);
             draft_input.last_hidden_states = target_output.all_hidden_states;
             if (explicit_position_ids) {
                 auto tail = middle_chunk ? torch::tensor({120, 121, 122}, torch::kInt32) :
                                            torch::tensor({112, 112, 112}, torch::kInt32);
-                draft_input.combo_position_ids = torch::cat(
-                    {prompt_positions.narrow(0, (prefix_len + 1) * 3, (chunk_len - 1) * 3), tail});
+                draft_input.combo_position_ids =
+                    torch::cat({prompt_positions.narrow(0, (prefix_len + 1) * 3, (chunk_len - 1) * 3), tail});
             }
             components.fake_draft_model->setInputs({draft_input});
             components.fake_draft_model->setOutputs({GptModelOutputs{}});
@@ -2191,7 +2306,10 @@ TEST_F(MtpExecutorTest, testMultiBatchPrefill) {
     checkOutput(stream2, {2, 3, 0}, {0, 1}, {0.0, 0.0, 1.0, 0.0}, {1.13, 1.14});
 }
 
-void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only, bool stale_python_hidden) {
+void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only,
+                                                   bool stale_python_hidden,
+                                                   bool irreversible_target,
+                                                   bool fail_post_commit) {
     // test single batch decode accept partial
     // input [0, 1, 2] + [3]
     // darft [3] + [2, 1, 3]
@@ -2286,7 +2404,9 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only, bool 
     target_prepare_input.prefix_lengths          = torch::tensor({2}, torch::kInt32);
     target_prepare_input.sequence_lengths_plus_1 = torch::tensor({3}, torch::kInt32);
     target_prepare_input.lm_output_indexes       = torch::tensor({0}, torch::kInt32);
-    components.fake_target_model->setPrepareInputs({target_prepare_input});
+    if (!irreversible_target) {
+        components.fake_target_model->setPrepareInputs({target_prepare_input});
+    }
 
     target_output.logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 1.1f, 1.2f, 1.3f, 1.4f, 2.1f, 2.2f,
                                           2.3f, 2.4f, 3.1f, 3.2f, 3.3f, 3.4f, 4.1f, 4.2f, 4.3f, 4.4f})
@@ -2383,6 +2503,18 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only, bool 
     auto* active_draft_model       = components.fake_draft_model.get();
     auto* draft_prefill_fake_model = components.fake_draft_prefill_model.get();
     auto* fake_target_model        = components.fake_target_model.get();
+    if (irreversible_target) {
+        fake_target_model->enableSpeculativeTargetCommit();
+        fake_target_model->setSpeculativeTargetFailStop(true);
+        components.executor->require_speculative_target_commit_fail_stop_ = true;
+        if (fail_post_commit) {
+            draft_prefill_fake_model->setForwardObserver([fake_target_model] {
+                EXPECT_EQ(fake_target_model->speculativeTargetFinalizeCount(), 1u);
+                EXPECT_TRUE(fake_target_model->speculativeTargetStateCommitted());
+                throw std::runtime_error("injected draft failure after irreversible target commit");
+            });
+        }
+    }
 
     // Replace models with fake models
     setupFakeModels(components.executor.get(),
@@ -2420,6 +2552,21 @@ void MtpExecutorTest::runSingleBatchDecodeScenario(bool with_prefill_only, bool 
 
 TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     runSingleBatchDecodeScenario(/*with_prefill_only=*/false);
+}
+
+TEST_F(MtpExecutorTest, testSingleBatchDecodeWithIrreversibleTargetPublishesOutput) {
+    runSingleBatchDecodeScenario(false, false, /*irreversible_target=*/true);
+}
+
+TEST_F(MtpExecutorTest, testDraftFailureAfterIrreversibleCommitCannotReturnToCaller) {
+    ScopedThreadsafeDeathTest death_style;
+    EXPECT_DEATH(
+        {
+            try {
+                runSingleBatchDecodeScenario(false, false, /*irreversible_target=*/true, /*fail_post_commit=*/true);
+            } catch (...) {}
+        },
+        "irreversible speculative target post-commit decode failed; fail-stop");
 }
 
 TEST_F(MtpExecutorTest, testDecodePreservesAcceptedGraphHiddenRowsWithStalePythonBuffer) {
@@ -2728,9 +2875,9 @@ TEST_F(MtpExecutorTest, testDSparkDraftUsesFlashInferSamplingAndReturnsExactQ) {
     stream->generateConfig()->temperature = 0.5f;
     StreamGroups stream_groups({stream});
 
-    auto base_logits   = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.4f, 0.3f, 0.2f, 0.7f, 0.1f, 0.0f, -0.1f})
-                             .reshape({1, gamma, vocab_size})
-                             .to(torch::kCUDA);
+    auto base_logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.4f, 0.3f, 0.2f, 0.7f, 0.1f, 0.0f, -0.1f})
+                           .reshape({1, gamma, vocab_size})
+                           .to(torch::kCUDA);
     auto anchors       = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     auto padded_logits = torch::cat(
         {base_logits.reshape({gamma, vocab_size}),
@@ -2906,8 +3053,8 @@ TEST_F(MtpExecutorTest, testDSparkReducedVocabFeedsMappedTargetTokenIntoMarkovCh
     auto anchors     = torch::tensor({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     auto temperature = torch::ones({1}, cuda_float);
     auto markov_w1   = torch::tensor({0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f}, torch::kFloat32)
-                           .reshape({target_vocab_size, 1})
-                           .to(torch::kCUDA);
+                         .reshape({target_vocab_size, 1})
+                         .to(torch::kCUDA);
     auto markov_w2 =
         torch::tensor({-100.0f, 0.0f, 100.0f}, torch::kFloat32).reshape({draft_vocab_size, 1}).to(torch::kCUDA);
 
@@ -3097,8 +3244,7 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     // of the dense verify result. A stale capture-time Python buffer must not
     // replace either the live forward output or these compacted commit rows.
     target_output.mtp_target_hidden_states = target_output.all_hidden_states;
-    components.fake_target_model->setMtpTargetHiddenStates(
-        torch::full_like(target_output.all_hidden_states, -99.0f));
+    components.fake_target_model->setMtpTargetHiddenStates(torch::full_like(target_output.all_hidden_states, -99.0f));
 
     components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
     components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
@@ -3640,6 +3786,188 @@ TEST_F(MtpExecutorTest, testSpeculativeTargetPeerCommitFailureRollsBackLocalComm
     EXPECT_EQ(target_model->speculativeTargetFinalizeCount(), 0u);
     EXPECT_FALSE(target_model->speculativeTargetStateCommitted());
     EXPECT_FALSE(target_model->speculativeTargetUndoRetained());
+}
+
+TEST_F(MtpExecutorTest, testIrreversibleTargetPrepareFailureStillAbortsBeforeWrites) {
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle = 2;
+    auto  components              = createMtpExecutorComponents(test_config);
+    auto* target                  = components.fake_target_model.get();
+    target->enableSpeculativeTargetCommit("injected reversible prepare failure");
+    target->setSpeculativeTargetFailStop(true);
+    components.executor->require_speculative_target_commit_fail_stop_ = true;
+    components.executor->setTargetModel(std::move(components.fake_target_model));
+    auto accept_len = torch::tensor({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+
+    const auto status = components.executor->prepareAndCommitSpeculativeTargetState(accept_len, 1);
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(target->speculativeTargetCommitCount(), 0u);
+    EXPECT_EQ(target->speculativeTargetAbortCount(), 1u);
+    EXPECT_FALSE(target->speculativeTargetStateCommitted());
+}
+
+TEST_F(MtpExecutorTest, testIrreversibleTargetCommitWaitsForCurrentStreamBeforeHostConsensus) {
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle = 2;
+    auto  components              = createMtpExecutorComponents(test_config);
+    auto* target                  = components.fake_target_model.get();
+    target->enableSpeculativeTargetCommit();
+    target->setSpeculativeTargetFailStop(true);
+    components.executor->require_speculative_target_commit_fail_stop_ = true;
+
+    // Use a non-default execution stream: waiting on the device's default
+    // stream or a CPU-only TP reducer does not complete this delayed write.
+    const auto                   stream = cuda_graph::graphGetStreamFromPool(false);
+    cuda_graph::GraphStreamGuard stream_guard(stream);
+    std::atomic<bool>            callback_completed{false};
+    auto committed  = torch::zeros({1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    auto completion = cuda_graph::makeGraphEvent();
+    target->setCommitObserver([&] {
+        const auto callback = [](void* context) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            static_cast<std::atomic<bool>*>(context)->store(true, std::memory_order_release);
+        };
+#if USING_ROCM
+        ASSERT_EQ(hipLaunchHostFunc(stream.stream(), callback, &callback_completed), hipSuccess);
+#else
+        ASSERT_EQ(cudaLaunchHostFunc(stream.stream(), callback, &callback_completed), cudaSuccess);
+#endif
+        committed.fill_(7);
+        completion.record(stream);
+    });
+    components.executor->setTargetModel(std::move(components.fake_target_model));
+    size_t reductions                                                = 0;
+    components.executor->speculative_target_status_reducer_for_test_ = [&](bool local_ok) {
+        ++reductions;
+        if (reductions == 3) {
+            // query() and the host atomic do not synchronize the stream.
+            EXPECT_TRUE(completion.query());
+            EXPECT_TRUE(callback_completed.load(std::memory_order_acquire));
+            EXPECT_TRUE(local_ok);
+        }
+        return local_ok;
+    };
+    // MTP2: zero accepted draft tokens still commits the target token (1);
+    // partial/full acceptance are 2/3. Only an inactive row has length zero.
+    auto accept_len   = torch::tensor({1, 2, 3, 0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    const auto status = components.executor->prepareAndCommitSpeculativeTargetState(accept_len, 4);
+    stream.synchronize();
+    EXPECT_TRUE(status.ok()) << status.ToString();
+    EXPECT_EQ(toVec<int32_t>(target->preparedAcceptLen()), (std::vector<int32_t>{1, 2, 3, 0}));
+    EXPECT_EQ(committed.cpu().item<int32_t>(), 7);
+    EXPECT_EQ(reductions, 4u);
+    EXPECT_EQ(target->speculativeTargetCommitCount(), 1u);
+    EXPECT_EQ(target->speculativeTargetAbortCount(), 0u);
+    EXPECT_EQ(target->speculativeTargetFinalizeCount(), 1u);
+    EXPECT_TRUE(target->speculativeTargetStateCommitted());
+    EXPECT_FALSE(target->speculativeTargetUndoRetained());
+}
+
+TEST_F(MtpExecutorTest, testIrreversibleCommitAndFinalizeFailuresCannotRollBackOrReturn) {
+    ScopedThreadsafeDeathTest death_style;
+    for (const std::string phase :
+         {"commit", "peer_commit", "commit_consensus", "finalize", "peer_finalize", "finalize_consensus"}) {
+        SCOPED_TRACE(phase);
+        EXPECT_DEATH(
+            {
+                MtpExecutorTestConfig test_config;
+                test_config.gen_num_per_cycle = 2;
+                auto  components              = createMtpExecutorComponents(test_config);
+                auto* target                  = components.fake_target_model.get();
+                target->enableSpeculativeTargetCommit();
+                target->setSpeculativeTargetFailStop(true);
+                target->setSpeculativeTargetCommitThrows(phase == "commit");
+                target->setSpeculativeTargetFinalizeThrows(phase == "finalize");
+                components.executor->require_speculative_target_commit_fail_stop_ = true;
+                components.executor->setTargetModel(std::move(components.fake_target_model));
+                size_t reductions                                                = 0;
+                components.executor->speculative_target_status_reducer_for_test_ = [&](bool local_ok) {
+                    ++reductions;
+                    if ((reductions == 3 && phase == "commit_consensus")
+                        || (reductions == 4 && phase == "finalize_consensus")) {
+                        throw std::runtime_error("injected broken host TP transport");
+                    }
+                    return local_ok && !(reductions == 3 && phase == "peer_commit")
+                           && !(reductions == 4 && phase == "peer_finalize");
+                };
+                auto accept_len = torch::tensor({2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+                try {
+                    (void)components.executor->prepareAndCommitSpeculativeTargetState(accept_len, 1);
+                } catch (...) {
+                    // A caller must not be able to catch and reuse a partially
+                    // advanced request after any rank entered commit.
+                }
+            },
+            "irreversible speculative target (commit|finalize|commit/finalize consensus) failed; fail-stop");
+    }
+}
+
+TEST_F(MtpExecutorTest, testSingleSsmCanonicalFirstTokenPrepareAndForwardFailuresAreFatal) {
+    ScopedThreadsafeDeathTest death_style;
+    for (bool fail_prepare : {true, false}) {
+        SCOPED_TRACE(fail_prepare);
+        EXPECT_DEATH(
+            {
+                MtpExecutorTestConfig test_config;
+                test_config.gen_num_per_cycle = 2;
+                test_config.role_type         = RoleType::DECODE;
+                auto components               = createMtpExecutorComponents(test_config);
+                auto stream                   = createContextStream(
+                    components.model_config, components.runtime_config, components.resource_context, {1});
+                auto* target = components.fake_target_model.get();
+                target->enableSpeculativeTargetCommit();
+                target->setSpeculativeTargetFailStop(true);
+                target->setSkipInputCheck(true);
+                if (fail_prepare) {
+                    target->setInputObserver(
+                        [](const GptModelInputs&) { throw std::runtime_error("injected canonical prepare error"); });
+                } else {
+                    target->setForwardObserver([] { throw std::runtime_error("injected canonical write error"); });
+                }
+                components.executor->require_speculative_target_commit_fail_stop_ = true;
+                components.executor->setTargetModel(std::move(components.fake_target_model));
+                MtpMetricsCollector metrics;
+                try {
+                    (void)components.executor->prefillStep({stream}, metrics, 0);
+                } catch (...) {}
+            },
+            "irreversible speculative target canonical prefill failed; fail-stop");
+    }
+}
+
+TEST_F(MtpExecutorTest, testSingleSsmTargetVerifyPrepareAndForwardFailuresAreFatal) {
+    ScopedThreadsafeDeathTest death_style;
+    for (bool fail_prepare : {true, false}) {
+        SCOPED_TRACE(fail_prepare);
+        EXPECT_DEATH(
+            {
+                MtpExecutorTestConfig test_config;
+                test_config.gen_num_per_cycle = 2;
+                auto  components              = createMtpExecutorComponents(test_config);
+                auto* target                  = components.fake_target_model.get();
+                target->enableSpeculativeTargetCommit();
+                target->setSpeculativeTargetFailStop(true);
+                target->setSkipInputCheck(true);
+                if (fail_prepare) {
+                    target->setInputObserver(
+                        [](const GptModelInputs&) { throw std::runtime_error("injected verify prepare error"); });
+                } else {
+                    target->setForwardObserver([] { throw std::runtime_error("injected verify forward error"); });
+                }
+                components.executor->require_speculative_target_commit_fail_stop_ = true;
+                components.executor->setTargetModel(std::move(components.fake_target_model));
+                GptModelInputs input;
+                input.combo_tokens     = torch::tensor({1, 2, 3}, torch::kInt32);
+                input.input_lengths    = torch::tensor({3}, torch::kInt32);
+                input.prefix_lengths   = torch::tensor({1}, torch::kInt32);
+                input.sequence_lengths = torch::empty({0}, torch::kInt32);
+                StreamGroups streams(std::list<GenerateStreamPtr>{});
+                try {
+                    (void)components.executor->runTargetVerifyForward(input, streams);
+                } catch (...) {}
+            },
+            "irreversible speculative target target verify prepare/forward failed; fail-stop");
+    }
 }
 
 #if USING_CUDA

@@ -199,6 +199,28 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="每个 SWA 独立池的物理 block 总数（含 block 0）；0 表示自动计算，模型专用配置优先。",
     )
     kv_cache_group.add_argument(
+        "--linear_ssm_double_buffer",
+        env_name="LINEAR_SSM_DOUBLE_BUFFER",
+        bind_to=(kv_cache_config, "linear_ssm_double_buffer"),
+        type=str2bool,
+        default=False,
+        help=(
+            "启用模型声明的 D 端 SSM 双缓冲；仅支持 TP2、CP1、reuse 关闭和链式 MTP。"
+            "linear_pool_blocks 指定完整 SSM 槽总数（含空槽）；卷积/replay 池容量自动配套计算。"
+        ),
+    )
+    kv_cache_group.add_argument(
+        "--linear_ssm_replay",
+        env_name="LINEAR_SSM_REPLAY",
+        bind_to=(kv_cache_config, "linear_ssm_replay"),
+        type=str2bool,
+        default=False,
+        help=(
+            "启用模型声明的 D 端单 SSM + replay；仅支持 TP2、CP1、reuse 关闭和链式 MTP。"
+            "linear_pool_blocks 为请求容量加一个空槽；与 linear_ssm_double_buffer 互斥。"
+        ),
+    )
+    kv_cache_group.add_argument(
         "--ssm_state_dtype",
         env_name="SSM_STATE_DTYPE",
         bind_to=(kv_cache_config, "ssm_state_dtype"),

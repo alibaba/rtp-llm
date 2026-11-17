@@ -229,13 +229,21 @@ public:
     // Optional target-verify side-state transaction. Models that stage
     // recurrent/side-cache candidates during speculative target verification
     // opt in here. The prepare phase must validate and select the accepted
-    // candidates without mutating persistent cache pools. Once every TP rank
-    // has prepared successfully, finish(true) tentatively applies that
-    // prevalidated plan while retaining enough original state for rollback.
-    // finish(false) discards an uncommitted plan or rolls back a tentative
-    // commit and must be idempotent. Both finish paths report errors instead
-    // of throwing so every TP rank can reach the same status rendezvous.
+    // candidates without mutating persistent cache pools. By default,
+    // finish(true) retains originals so finish(false) can roll back a tentative
+    // commit. An explicitly irreversible implementation instead marks itself
+    // before its first persistent write and must reject finish(false) after
+    // that point. The executor then fail-stops on any commit/consensus failure.
+    // Both finish paths report errors so every TP rank can rendezvous.
     virtual bool hasSpeculativeTargetCommitHooks() const {
+        return false;
+    }
+
+    // Read after attention/cache initialization: adapters may install this
+    // capability only after seeing the actual allocator layout. Irreversible
+    // writes must use the executor's current stream (or join it before return).
+    // The executor waits for that stream before publishing commit success.
+    virtual bool requiresSpeculativeTargetCommitFailStop() const {
         return false;
     }
 

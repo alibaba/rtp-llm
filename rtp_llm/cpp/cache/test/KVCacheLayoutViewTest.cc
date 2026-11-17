@@ -138,6 +138,21 @@ TEST(KVCacheLayoutViewTest, MlaReshapesKvAndScaleWithoutChangingStorage) {
     EXPECT_EQ(layer.kv_scale_base.data_ptr(), scale.data_ptr());
 }
 
+TEST(KVCacheLayoutViewTest, ExposesResolvedStateLayoutWithoutInferringFromTensorWidth) {
+    for (const auto layout : {LinearStateLayout::DOUBLE_BUFFER_SSM, LinearStateLayout::SINGLE_SSM}) {
+        auto group =
+            makeGroup("linear_ssm", KVCacheSpecType::OpaqueState, CacheGroupType::REQUEST_STATE, 64, 64, 32, 0);
+        const uint32_t slots             = layout == LinearStateLayout::SINGLE_SSM ? 1 : 2;
+        group.policy.linear_state_layout = layout;
+        group.policy.request_state_slots = slots;
+        const auto         base          = torch::zeros({4, 32}, torch::kUInt8);
+        torch_ext::KVCache cache(makeLayout({std::move(group)}, {"linear_ssm"}, {{base, {}}}));
+        EXPECT_EQ(cache.getLinearStateLayout("linear_ssm"), static_cast<int>(layout));
+        EXPECT_EQ(cache.getRequestStateSlots("linear_ssm"), slots);
+        EXPECT_ANY_THROW(cache.getLinearStateLayout("missing"));
+    }
+}
+
 TEST(KVCacheLayoutViewTest, FullOpaqueExpandsButLinearSwaAndStateStayPhysical) {
     const auto opaque       = torch::arange(3 * 64, torch::TensorOptions().dtype(torch::kUInt8)).reshape({3, 64});
     auto       opaque_group = makeGroup("opaque", KVCacheSpecType::OpaqueKV, CacheGroupType::FULL, 512, 128, 64, 0);

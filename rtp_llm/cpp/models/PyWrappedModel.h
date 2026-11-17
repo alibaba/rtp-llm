@@ -97,10 +97,29 @@ public:
     HiddenStateCaptureStats    hiddenStateCaptureStats() const;
     std::optional<std::string> takeDeferredHiddenStateCaptureError() override;
     bool                       hasSpeculativeTargetCommitHooks() const override;
-    std::string                prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) override;
-    std::string                finishSpeculativeTargetCommit(bool commit) override;
-    std::string                finalizeSpeculativeTargetCommit() override;
-    std::optional<bool>        reduceSpeculativeTargetPrepareStatus(bool local_ok) override;
+    bool                       requiresSpeculativeTargetCommitFailStop() const override {
+        if (!use_spec_decoding_) {
+            return false;
+        }
+        py::gil_scoped_acquire gil;
+        constexpr const char*  capability = "requires_speculative_target_commit_fail_stop";
+        if (!py::hasattr(py_model_, capability)) {
+            return false;
+        }
+        // Cache views may install the adapter after initialize(). Never cache
+        // a missing/false capability from the earlier wrapper construction.
+        py::object value = py_model_.attr(capability)();
+        RTP_LLM_CHECK_WITH_INFO(py::isinstance<py::bool_>(value),
+                                "requires_speculative_target_commit_fail_stop must return bool");
+        const bool required = value.cast<bool>();
+        RTP_LLM_CHECK_WITH_INFO(!required || has_speculative_target_commit_hooks_,
+                                "irreversible speculative target state requires all commit hooks");
+        return required;
+    }
+    std::string         prepareSpeculativeTargetCommit(const torch::Tensor& accept_len) override;
+    std::string         finishSpeculativeTargetCommit(bool commit) override;
+    std::string         finalizeSpeculativeTargetCommit() override;
+    std::optional<bool> reduceSpeculativeTargetPrepareStatus(bool local_ok) override;
 
 private:
     friend struct test::PyWrappedModelTestPeer;
@@ -113,8 +132,8 @@ private:
     torch_ext::PyEmbeddingInputs  buildPyEmbeddingInputs(const GptModelInputs& inputs);
     torch_ext::PyMultimodalInputs buildPyMultimodalInputs(const GptModelInputs& inputs);
     torch_ext::BertEmbeddingInputs
-    buildBertEmbeddingInputs(const GptModelInputs& inputs,
-                             const torch::Tensor&  prepared_position_ids = torch::Tensor());
+                                    buildBertEmbeddingInputs(const GptModelInputs& inputs,
+                                                             const torch::Tensor&  prepared_position_ids = torch::Tensor());
     torch_ext::AttentionInputsByTag setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                                    const GptModelInputs&         inputs);
     GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
@@ -360,8 +379,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
-    py_model_                 = py_instance;
-    supports_micro_batch_     = py::hasattr(py_model_, "forward_micro_batch");
+    py_model_             = py_instance;
+    supports_micro_batch_ = py::hasattr(py_model_, "forward_micro_batch");
     // MtpExecutor passes use_spec_decoding only to its target wrapper. The
     // normal and draft wrappers may share the same Python class, but must not
     // activate target transactions.
@@ -471,6 +490,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         if (params.kv_cache_layer_layout.has_value()) {
             RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr, "cache-backed CUDA graph requires a cache manager");
             graph_params.kv_cache_group_tags = params.kv_cache_layer_layout->topology().groupTags();
+            for (const auto& group : params.kv_cache_layer_layout->topology().groups()) {
+                graph_params.kv_cache_state_layouts.push_back(group.policy.linear_state_layout);
+            }
         }
         // Most models transport explicit positions only for MRoPE. A model
         // that consumes those positions with Base RoPE (Qwen4 MTP's indexer)

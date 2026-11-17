@@ -96,6 +96,9 @@ GroupSetPtr createGroupSet(const GroupBase&                group,
                            BlockTreeDiskBlockPoolPtr       disk_pool) {
     GroupSetPtr result;
     switch (group.policy.group_type) {
+        case CacheGroupType::REQUEST_STATE:
+            RTP_LLM_CHECK_WITH_INFO(false, "request state must not enter the prefix cache");
+            break;
         case CacheGroupType::FULL:
             result =
                 std::make_shared<FullGroupSet>(std::move(device_pools), std::move(host_pool), std::move(disk_pool));
@@ -456,9 +459,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
             "CRC32C KV cache protection disabled by KVCacheConfig.enable_crc; host/disk transfers use plain copies");
     }
     if (kv_cache_config.enable_crc && (host_enabled || disk_enabled) && !CrcBlockCopyBatch::available()) {
-        RTP_LLM_LOG_WARNING(
-            "CRC32C requested by KVCacheConfig.enable_crc but the CRC backend is unavailable; "
-            "host/disk transfers use plain copies");
+        RTP_LLM_LOG_WARNING("CRC32C requested by KVCacheConfig.enable_crc but the CRC backend is unavailable; "
+                            "host/disk transfers use plain copies");
     }
     const bool crc_backend_available =
         kv_cache_config.enable_crc && CrcBlockCopyBatch::available() && (host_enabled || disk_enabled);
@@ -535,7 +537,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     if (disk_enabled && !group_members.empty()) {
         const size_t bytes        = static_cast<size_t>(kv_cache_config.disk_cache_size_mb) * 1024UL * 1024UL;
         const auto   block_counts = computeTierBlockCounts(bytes, device_block_counts, pool_strides);
-        auto guard =
+        auto         guard =
             createDiskMountGuard(kv_cache_config, parallelism_config.local_world_size, parallelism_config.local_rank);
         if (!guard) {
             return nullptr;

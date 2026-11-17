@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/LinearStateCacheTransfer.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -208,6 +209,17 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     const auto& group = cache_config.groupForLayer(layer_kv.layer_id, layer_kv.tag);
     RTP_LLM_CHECK_WITH_INFO(
         group.spec != nullptr, "cache-store tag=%s has no KVCacheSpec attached", layer_kv.tag.c_str());
+    const bool split_linear_export = group.policy.linear_state_layout == LinearStateLayout::SPLIT_EXPORT;
+    if (split_linear_export) {
+        (void)linearStateCacheWireTag(group.policy.linear_state_layout, layer_kv.tag);
+        RTP_LLM_CHECK_WITH_INFO(cp_size == 1 && cp_rank == 0 && group.policy.group_type == CacheGroupType::LINEAR
+                                    && group.spec->type == KVCacheSpecType::LinearAttention
+                                    && group.spec->scale_block_size_bytes() == 0
+                                    && group.kvBlockStrideBytes() <= std::numeric_limits<uint32_t>::max(),
+                                "split linear export requires CP1 and an unscaled combined LINEAR spec");
+        RTP_LLM_CHECK_WITH_INFO(layer_kv.kv_cache_base.defined() && layer_kv.kv_cache_base.is_contiguous(),
+                                "split linear export requires contiguous block storage");
+    }
 
     // LayerKVCache may expose kernel-page views; CacheStore keys and block IDs use physical pages.
     const size_t seq_size_per_block              = group.seqSizePerBlock();
@@ -215,7 +227,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     const size_t kv_scale_stride_bytes           = group.kvScaleStrideBytes();
     const size_t kv_block_transfer_bytes         = group.kvBlockStrideBytes();
     const size_t kv_scale_transfer_bytes         = group.kvScaleStrideBytes();
-    const bool   use_group_cache_transfer_policy = cache_config.topology().groups().size() > 1;
+    const bool   use_group_cache_transfer_policy = cache_config.topology().groups().size() > 1 || split_linear_export;
 
     RTP_LLM_CHECK_WITH_INFO(
         seq_size_per_block > 0, "cache-store tag=%s has zero tokens_per_block", layer_kv.tag.c_str());
@@ -282,7 +294,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     const auto   host_kv_cache_offset  = param.host_kv_cache_offset.accessor<int32_t, 2>();
     const auto   input_lengths_host    = param.input_lengths_host.accessor<int32_t, 1>();
     const auto   prefix_lengths_host   = param.prefix_lengths_host.accessor<int32_t, 1>();
-    const auto   publish_start_tokens = param.publish_start_tokens.accessor<int32_t, 1>();
+    const auto   publish_start_tokens  = param.publish_start_tokens.accessor<int32_t, 1>();
     const auto   request_ids           = param.request_id.accessor<int64_t, 1>();
     const auto   request_pd_separation = param.request_pd_separation.accessor<bool, 1>();
     const auto   cache_keys            = param.cache_keys.accessor<int64_t, 2>();
@@ -337,16 +349,19 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                 (request_cache_key_count + key_blocks_per_group_block - 1) / key_blocks_per_group_block;
         const size_t key_blocks_per_logical_block = compact_cp_mapping ? 1 : key_blocks_per_group_block;
 
-        const int64_t request_id       = request_ids[context_index];
-        const int publish_start_token = publish_start_tokens[context_index];
+        const int64_t request_id          = request_ids[context_index];
+        const int     publish_start_token = publish_start_tokens[context_index];
         RTP_LLM_CHECK_WITH_INFO(publish_start_token >= 0 && publish_start_token <= prefix_length,
                                 "cache-store tag=%s invalid publish_start_token=%d for prefix_length=%d",
-                                layer_kv.tag.c_str(), publish_start_token, prefix_length);
+                                layer_kv.tag.c_str(),
+                                publish_start_token,
+                                prefix_length);
         const size_t publish_start_block =
             group.policy.group_type == CacheGroupType::FULL && group.policy.active_tail_blocks == 0 ?
-                static_cast<size_t>(publish_start_token) / seq_size_per_block : 0;
-        auto event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
-        auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
+                static_cast<size_t>(publish_start_token) / seq_size_per_block :
+                0;
+        auto                 event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
+        auto                 request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
         std::vector<int64_t> publication_lease_keys;
         std::vector<int32_t> publication_lease_blocks;
         RTP_LLM_LOG_DEBUG("write cache store, request id is %ld, blocks num is %zu",
@@ -400,6 +415,14 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                 // full row. Dividing here would slice an already-sliced row.
             }
 
+            std::array<LinearStateWireSlice, 2> split_slices;
+            if (split_linear_export) {
+                split_slices = linearStateSplitExportSlices(layer_kv.kv_cache_base.nbytes(),
+                                                            kv_block_stride_bytes,
+                                                            block_id,
+                                                            group.spec->k_block_size_bytes(),
+                                                            group.spec->v_block_size_bytes());
+            }
             const bool use_opaque_key_prefix = cache_config.use_opaque_kv_cache_store || use_group_cache_transfer_policy
                                                || group.spec->type == KVCacheSpecType::MultiHeadLatentAttention;
             void*                 kv_addr = kv_cache_data + static_cast<size_t>(block_id) * kv_block_stride_bytes;
@@ -431,6 +454,21 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                 std::shared_ptr<void> v_block_addr(kv_cache_owner, static_cast<uint8_t*>(kv_addr) + kv_half);
                 request_blocks->addBlock("k_" + cache_key, k_block_addr, kv_half, kv_gpu_mem, true);
                 request_blocks->addBlock("v_" + cache_key, v_block_addr, kv_half, kv_gpu_mem, true);
+            }
+
+            if (split_linear_export) {
+                // These aliases share the combined block's allocator lease and
+                // store callback. Never publish them as independent allocations.
+                for (const auto& exported : split_slices) {
+                    const auto alias_key = makeCacheKey(
+                        cache_model_id,
+                        std::to_string(cache_keys[static_cast<int64_t>(batch_id)][static_cast<int64_t>(key_index)]),
+                        layer_kv.layer_id,
+                        exported.tag);
+                    std::shared_ptr<void> alias_addr(kv_cache_owner, kv_cache_data + exported.slice.offset);
+                    request_blocks->addBlock(
+                        "kv_" + alias_key, alias_addr, static_cast<uint32_t>(exported.slice.bytes), kv_gpu_mem, true);
+                }
             }
 
             if (kv_scale_data) {
