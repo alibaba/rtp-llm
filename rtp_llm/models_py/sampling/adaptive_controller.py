@@ -8,10 +8,8 @@ import torch
 from rtp_llm.models_py.sampling.acceptance_estimator import OnlineAcceptanceEstimator
 from rtp_llm.models_py.sampling.adaptive_verification import (
     AdaptiveBudgetInputError,
-    BudgetCostBufferPool,
     assign_draft_token_budget,
     select_draft_token_budget,
-    select_draft_token_budget_device,
 )
 
 
@@ -45,7 +43,6 @@ class AdaptiveDraftController:
             dtype=torch.int32,
             device=self.device,
         )
-        self._budget_cost_buffers = BudgetCostBufferPool()
         self._pending: PendingVerification | None = None
         self._index_cache: OrderedDict[
             tuple[tuple[int, ...], torch.dtype],
@@ -207,23 +204,15 @@ class AdaptiveDraftController:
             caps.clamp_(max=fixed_cap)
             budget = int(np.minimum(scheduled, fixed_cap).sum())
         elif all(known):
-            if not materialize_rows and torch.version.hip is None:
-                budget = select_draft_token_budget_device(
-                    self.confidence_probs, mapping, caps, scheduled,
-                    draft_cost_ms=draft_cost_ms, verify_cost_ms=verify_cost_ms,
-                    num_non_draft_tokens=len(slots), num_sampling_requests=len(slots),
-                    cost_buffer_pool=self._budget_cost_buffers,
-                )
-            else:
-                confidence = self.confidence_probs.index_select(0, mapping).cpu().numpy()
-                budget = select_draft_token_budget(
-                    confidence,
-                    scheduled,
-                    draft_cost_ms=draft_cost_ms,
-                    verify_cost_ms=verify_cost_ms,
-                    num_non_draft_tokens=len(slots),
-                    num_sampling_requests=len(slots),
-                )
+            confidence = self.confidence_probs.index_select(0, mapping).cpu().numpy()
+            budget = select_draft_token_budget(
+                confidence,
+                scheduled,
+                draft_cost_ms=draft_cost_ms,
+                verify_cost_ms=verify_cost_ms,
+                num_non_draft_tokens=len(slots),
+                num_sampling_requests=len(slots),
+            )
             # Spend only padding already paid for by the selected capture. The
             # same survival allocator decides which real request prefixes grow.
             requested_tokens = len(slots) + budget

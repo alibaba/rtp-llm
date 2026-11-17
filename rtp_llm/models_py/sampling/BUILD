@@ -44,6 +44,15 @@ py_test(
 )
 
 py_test(
+    name = "test_adaptive_budget_perf",
+    srcs = ["test_adaptive_budget_perf.py"],
+    deps = [":sampling"],
+    data = ["//:th_transformer_config", "//:rtp_compute_ops"],
+    tags = ["SM103_CU13", "manual"],
+    exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+)
+
+py_test(
     name = "test_adaptive_verification",
     srcs = ["test_adaptive_verification.py"],
     deps = [":sampling"],
