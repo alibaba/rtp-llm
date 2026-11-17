@@ -1,10 +1,19 @@
+import json
+import os
+import tempfile
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from rtp_llm.test.smoke import deepseek_v41_pd_contract_test as pd
+from rtp_llm.test.smoke import startup_resource_monitor as resources
+
+
+class RoleStartupError(RuntimeError):
+    pass
 
 
 class DeepSeekV41PDStartupTest(unittest.TestCase):
@@ -13,10 +22,12 @@ class DeepSeekV41PDStartupTest(unittest.TestCase):
         case = pd.DeepSeekV41PDContractTest()
         case.model_path = "/unused/checkpoint"
         with (
+            tempfile.TemporaryDirectory() as output_dir,
             patch.object(pd, "get_gpu_ids", return_value=[0, 1, 2, 3]),
             patch.object(pd, "MagaServerManager", side_effect=managers) as factory,
             patch.object(case, "server_args", return_value="--world_size 4"),
         ):
+            case.output_dir = Path(output_dir)
             factory.get_free_port.side_effect = ["18000", "19000"]
             try:
                 yield case
@@ -35,7 +46,7 @@ class DeepSeekV41PDStartupTest(unittest.TestCase):
                     def failed_start(**kwargs):
                         entered.wait(timeout=10)
                         if raises:
-                            raise RuntimeError("role startup failed")
+                            raise RoleStartupError
                         return False
 
                     def waiting_start(**kwargs):
@@ -85,6 +96,73 @@ class DeepSeekV41PDStartupTest(unittest.TestCase):
             case.start_servers()
             self.assertFalse(any(event.is_set() for event in stopped))
         self.assertTrue(all(event.is_set() for event in stopped))
+
+    def test_resource_artifact_covers_launch_and_stop_then_closes(self):
+        for outcome in ("success", "false", "exception"):
+            with self.subTest(outcome=outcome):
+                sampled = threading.Event()
+                entered = threading.Barrier(2)
+                streams = []
+                snapshot = resources._snapshot
+                open_path = Path.open
+                managers = [Mock(), Mock()]
+
+                def collect(root_pid):
+                    result = snapshot(root_pid)
+                    sampled.set()
+                    return result
+
+                def capture_stream(path, *args, **kwargs):
+                    stream = open_path(path, *args, **kwargs)
+                    if path == artifact:
+                        streams.append(stream)
+                    return stream
+
+                def start(**kwargs):
+                    self.assertTrue(streams, "resource artifact absent at role launch")
+                    self.assertFalse(streams[0].closed)
+                    entered.wait(timeout=10)
+                    if outcome == "exception":
+                        raise RoleStartupError
+                    return outcome == "success"
+
+                def stop():
+                    self.assertTrue(streams, "resource artifact absent at role stop")
+                    self.assertFalse(streams[0].closed)
+                    sampled.clear()
+                    self.assertTrue(
+                        sampled.wait(timeout=5), "resource sampler stopped before roles"
+                    )
+
+                for manager in managers:
+                    manager.start_server.side_effect = start
+                    manager.stop_server.side_effect = stop
+                with self.startup_case(managers) as case:
+                    artifact = case.output_dir / "startup_resources.jsonl"
+                    with (
+                        patch.object(Path, "open", capture_stream),
+                        patch.object(resources, "_snapshot", side_effect=collect),
+                        patch.object(resources, "_INTERVAL_SECONDS", 0.01),
+                    ):
+                        if outcome == "success":
+                            case.start_servers()
+                        else:
+                            expected = (
+                                RuntimeError
+                                if outcome == "exception"
+                                else AssertionError
+                            )
+                            with self.assertRaises(expected):
+                                case.start_servers()
+                        self.assertTrue(case.doCleanups())
+                    self.assertTrue(streams[0].closed)
+                    samples = [
+                        json.loads(line) for line in artifact.read_text().splitlines()
+                    ]
+                    self.assertTrue(samples)
+                    self.assertTrue(
+                        all(sample["root_pid"] == os.getpid() for sample in samples)
+                    )
 
 
 if __name__ == "__main__":

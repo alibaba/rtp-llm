@@ -254,7 +254,8 @@ class MagaServerManager(object):
         )
         python_bin = os.environ.get("RTP_PYTHON_BIN", sys.executable)
         p = subprocess.Popen(
-            [python_bin, "-m", "rtp_llm.start_server"] + parsed_args,
+            [python_bin, "-X", "faulthandler", "-m", "rtp_llm.start_server"]
+            + parsed_args,
             env=current_env,
             stdout=self._file_stream,
             stderr=self._file_stream,
