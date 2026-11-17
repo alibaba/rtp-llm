@@ -727,8 +727,7 @@ class Qwen4ExpPLELayer(nn.Module):
         if (
             decode
             and packed is not None
-            and seq_len == 1
-            and embeddings.shape == (hyper_states.shape[0], 1, packed.shape[1])
+            and embeddings.shape == (*hyper_states.shape[:-1], packed.shape[1])
             and embeddings.device == packed.device
             and embeddings.dtype == packed.dtype
             and embeddings.is_contiguous()
@@ -765,9 +764,12 @@ class Qwen4ExpPLELayer(nn.Module):
         padding_mask: Optional[torch.Tensor] = None,
         *,
         embeddings: Optional[torch.Tensor] = None,
+        decode: bool = False,
     ) -> tuple:
         """Return the gated values and normalized convolution inputs."""
-        key, value = self._project_key_value(hyper_states, token_history, embeddings)
+        key, value = self._project_key_value(
+            hyper_states, token_history, embeddings, decode=decode
+        )
         return self._gate_projected_values(key, value, hyper_states, padding_mask)
 
     def _gate_projected_values(self, key, value, hyper_states, padding_mask=None):
@@ -1216,7 +1218,7 @@ class Qwen4ExpPLELayer(nn.Module):
             raise ValueError("qwen4_exp PLE decode chunk inputs must share one device")
 
         gated_value, candidate_inputs = self._gated_values(
-            hyper_states, token_history, embeddings=embeddings
+            hyper_states, token_history, embeddings=embeddings, decode=True
         )
         if hyper_states.is_cuda and torch.version.hip is None:
             from .ple_conv_triton import try_ple_conv

@@ -410,6 +410,25 @@ class PLEDecodeFusionTest(unittest.TestCase):
             (hidden + expected, hidden + expected, committed_inputs, initial),
         )
 
+    def test_verify_convolution_matches_generic_path_at_multiple_widths(self):
+        fixture = TailFixture(3)
+        for width in (2, 3, 4, 8, 17, 32):
+            with self.subTest(width=width):
+                opts = {"device": fixture.initial.device, "dtype": fixture.initial.dtype}
+                hidden = torch.randn(3, width, 10240, **opts)
+                gated, normed = torch.randn_like(hidden), torch.randn_like(hidden)
+                initial = torch.randn(3, 9, 10272, **opts)[..., :10240]
+                saved = initial.clone()
+                conv = ple_conv_triton.try_ple_conv
+                args = (gated, normed, initial, fixture.conv_weight, 3)
+                # The generic kernel also runs on SM120, with identical BF16 rounding.
+                with patch.object(torch.cuda, "get_device_capability", return_value=(12, 0)):
+                    expected = conv(*args, residual=hidden)
+                actual = conv(*args, residual=hidden)
+                self.assertIsNotNone(expected)
+                self.assertIsNotNone(actual)
+                self.assert_exact((actual, initial), (expected, saved))
+
     def test_cache_plan_cross_page_independent_tables(self):
         lengths = torch.tensor([63, 64, 65, 128], device="cuda", dtype=torch.int32)
         ids = torch.tensor([19, 23, 29, 31], device="cuda", dtype=torch.int32)

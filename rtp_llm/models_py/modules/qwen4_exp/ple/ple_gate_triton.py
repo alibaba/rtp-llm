@@ -157,16 +157,19 @@ def try_ple_gate(
         and torch.version.hip is None
         and _sm_supported(hidden.device)
         and hidden.ndim == 3
-        and (
-            hidden.shape[0] == 1
-            or hidden.shape[1] == 1
-            or all(x.is_contiguous() for x in (key, value, hidden))
-        )
         and hidden.dtype == torch.bfloat16
         and key.dtype == value.dtype == (torch.float32 if projected else torch.bfloat16)
         and hidden.shape[-1] == key.shape[-1] == 10240
         and value.shape[-1] == 2560
         and key.shape[:-1] == value.shape[:-1] == hidden.shape[:-1]
+        and (
+            hidden.shape[0] <= 1
+            or hidden.shape[1] <= 1
+            or all(
+                x.stride(0) == x.shape[1] * x.stride(1)
+                for x in (key, value, hidden)
+            )
+        )
         and all(x.device == hidden.device and x.stride(-1) == 1 for x in (key, value))
         and hidden.stride(-1) == 1
         and all(
@@ -188,7 +191,7 @@ def try_ple_gate(
     normed = torch.empty_like(gated)
     if hidden.shape[1]:
         decode_batch = hidden.shape[0] if decode_pages is not None else 0
-        # S=1 projection views may have the packed K/V row stride.
+        # Wide packed K/V views and contiguous tensors both have a fixed row stride.
         row_dim = 0 if hidden.shape[1] == 1 else 1
         _ple_gate[(hidden.shape[0] * hidden.shape[1], 4)](
             key,
