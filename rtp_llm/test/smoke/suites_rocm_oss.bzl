@@ -240,7 +240,7 @@ def rocm_oss_suites():
             smoke_test(
                 name="rocm_embedding_bge_reranker_fmha_fallback",
                 task_info="data/model/bert/classifier_q_r.json",
-                smoke_args="--enable_flashinfer_trt_fmha_v2 0 --enable_open_source_fmha 0 --seq_size_per_block 16 --use_aiter_pa 1 --use_asm_pa 1 --act_type FP16",
+                smoke_args="--enable_trt_fmha 0 --enable_open_source_fmha 0 --seq_size_per_block 16 --use_aiter_pa 1 --use_asm_pa 1 --act_type FP16",
                 gpu_type=["MI308X-ROCM7"],
             ),
             smoke_test(
