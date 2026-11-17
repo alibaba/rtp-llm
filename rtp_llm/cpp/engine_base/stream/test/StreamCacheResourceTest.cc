@@ -2311,9 +2311,11 @@ TEST_F(StreamCacheResourceTest, testP2PHandoffAtSequenceLimitPublishesEmptyTermi
     ASSERT_FALSE(stream_->hasError());
     auto output = stream_->nextOutput();
     ASSERT_TRUE(output.ok());
-    ASSERT_EQ(output.value().generate_outputs.size(), 1u);
-    EXPECT_EQ(output.value().generate_outputs.front().output_ids.numel(), 0);
-    EXPECT_TRUE(output.value().generate_outputs.front().finished);
+    ASSERT_EQ(output.value().generate_outputs.size(), 2u);
+    for (const auto& sequence : output.value().generate_outputs) {
+        EXPECT_EQ(sequence.output_ids.numel(), 0);
+        EXPECT_TRUE(sequence.finished);
+    }
 }
 
 TEST_F(StreamCacheResourceTest, testP2PFirstTokenAllowsAbsentPromptScoresForEmptySlice) {
