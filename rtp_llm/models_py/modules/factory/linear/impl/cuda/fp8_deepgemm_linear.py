@@ -15,6 +15,11 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     requant_weight_ue8m0,
     sgl_per_token_group_quant_fp8,
 )
+from rtp_llm.models_py.kernels.cuda.sm120_fp8_blockwise import (
+    prefers_sm120_blockwise,
+    sm120_blockwise_fp8_available,
+    sm120_blockwise_layout,
+)
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 
 if TYPE_CHECKING:
@@ -30,6 +35,10 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
     # 全局共享的 scale cache，key = (device, K, max_len)
     _global_scale_cache: dict = {}
+
+    # One-shot log: int32 dense scales routed to DeepGEMM under the CUTLASS
+    # lane (pre-quantized checkpoints only — the loader emits float scales).
+    _sm120_int32_logged: bool = False
 
     @classmethod
     def can_handle(
@@ -47,6 +56,11 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
         # Check if weight is FP8 format
         if weight.dtype not in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
+            return False
+
+        if sm120_blockwise_layout(
+            quant_config, weight, weight_scales
+        ) and sm120_blockwise_fp8_available(weight.device):
             return False
 
         # Check quantization method - handle all other FP8 methods
@@ -77,6 +91,29 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         super().__init__(
             weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
         )
+        if (
+            weight_scales is not None
+            and sm120_blockwise_layout(quant_config, weight, weight_scales)
+            and sm120_blockwise_fp8_available(weight.device)
+        ):
+            raise RuntimeError(
+                "DSv4 SM120 FP8_PER_BLOCK with compact scales requires "
+                "the CUTLASS blockwise backend"
+            )
+        if (
+            prefers_sm120_blockwise(quant_config)
+            and sm120_blockwise_fp8_available(weight.device)
+            and weight_scales is not None
+            and weight_scales.dtype == torch.int32
+            and not CudaFp8DeepGEMMLinear._sm120_int32_logged
+        ):
+            CudaFp8DeepGEMMLinear._sm120_int32_logged = True
+            logger.warning(
+                "SM120 dense weight with UE8M0 int32 scales routed to the "
+                "DeepGEMM backend (CUTLASS requires float scales). This is "
+                "the intended fallback for pre-quantized checkpoints, but "
+                "it runs a different kernel than the float-scale path."
+            )
         # Initialize parameters
         self.weight = weight
         self.weight_scales = weight_scales
@@ -94,7 +131,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
             logger.error(error_msg)
             raise ValueError(error_msg)
         # e8m0 load not need reshape
-        if is_deep_gemm_e8m0_used():
+        if is_deep_gemm_e8m0_used(weight.device):
             self.N, self.K = self.weight.shape
             self.scale_N, self.scale_K = self.weight_scales.shape
         else:
