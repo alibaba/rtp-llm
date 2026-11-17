@@ -78,67 +78,97 @@ def local_rank_start(
     """Start local rank with proper signal handling for graceful shutdown"""
     if expected_parent_pid is not None:
         arm_parent_death_sigkill(expected_parent_pid)
-    _install_hot_hook_runtime(f"backend_rank_{world_rank}", py_env_configs)
-    backend_manager = None
-    logging.info(f"[PROCESS_START]Start local rank process")
-
-    def signal_handler(signum, frame):
-        logging.info(
-            f"Local rank received signal {signum}, shutting down gracefully..."
-        )
+    rank_selfdiag = None
+    if (
+        os.environ.get("RTP_BTC_ARM_RANK_SELF_TRACE") == "1"
+        and os.environ.get("RTP_BTC_DIAG_SUITE")
+        == "deepseek_v41_flash_ced_dspark_pd_cp2_dp2_sm100_arm"
+        and os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR")
+    ):
         try:
-            backend_manager.request_shutdown()
-        except Exception as e:
-            logging.error(f"Error during backend manager shutdown: {e}")
+            from rtp_llm.test.smoke.deep41_rank_self_diagnostics import (
+                start_rank_watchdog,
+            )
 
-    copy_gemm_config()
-
+            rank_selfdiag = start_rank_watchdog()
+        except BaseException:
+            with suppress(BaseException):
+                logging.exception(
+                    "optional Deep41 rank self diagnostics failed to start"
+                )
     try:
-        set_parallelism_config(
-            py_env_configs.parallelism_config,
-            world_rank,
-            py_env_configs.prefill_cp_config,
-        )
-        finalize_rank_local_deepep_internode(
-            py_env_configs.moe_config,
-            py_env_configs.deep_ep_config,
-            py_env_configs.parallelism_config,
-        )
-        local_rank = py_env_configs.parallelism_config.local_rank
-        py_env_configs.server_config.set_local_rank(local_rank)
-        py_env_configs.distribute_config.set_local_rank(local_rank)
-        configure_kv_cache_event_host_ip_port(py_env_configs)
-        setup_cuda_device_and_accl_env(local_rank)
-        if py_env_configs.parallelism_config.world_size > 1:
-            setproctitle(f"rtp_llm_rank-{local_rank}")
-        set_global_controller(global_controller)
-        install_oom_dump()
-        from rtp_llm.server.backend_manager import BackendManager
+        _install_hot_hook_runtime(f"backend_rank_{world_rank}", py_env_configs)
+        backend_manager = None
+        logging.info(f"[PROCESS_START]Start local rank process")
 
-        backend_manager = BackendManager(py_env_configs)
-        backend_manager.start()
-        # Defer these handlers until model loading completes.
-        signal.signal(signal.SIGTERM, signal_handler)
-        signal.signal(signal.SIGINT, signal_handler)
-        logging.info("Backend server initialized successfully, sending ready status")
+        def signal_handler(signum, frame):
+            logging.info(
+                f"Local rank received signal {signum}, shutting down gracefully..."
+            )
+            try:
+                backend_manager.request_shutdown()
+            except Exception as e:
+                logging.error(f"Error during backend manager shutdown: {e}")
 
-        _send_pipe_status(
-            pipe_writer,
-            "success",
-            f"Backend server started successfully on rank {py_env_configs.parallelism_config.local_rank}",
-        )
-        pipe_writer = None  # success closed it
+        copy_gemm_config()
 
-        logging.info("Entering service loop to keep backend_manager alive")
-        backend_manager.serve_forever()
+        try:
+            set_parallelism_config(
+                py_env_configs.parallelism_config,
+                world_rank,
+                py_env_configs.prefill_cp_config,
+            )
+            finalize_rank_local_deepep_internode(
+                py_env_configs.moe_config,
+                py_env_configs.deep_ep_config,
+                py_env_configs.parallelism_config,
+            )
+            local_rank = py_env_configs.parallelism_config.local_rank
+            py_env_configs.server_config.set_local_rank(local_rank)
+            py_env_configs.distribute_config.set_local_rank(local_rank)
+            configure_kv_cache_event_host_ip_port(py_env_configs)
+            setup_cuda_device_and_accl_env(local_rank)
+            if py_env_configs.parallelism_config.world_size > 1:
+                setproctitle(f"rtp_llm_rank-{local_rank}")
+            set_global_controller(global_controller)
+            install_oom_dump()
+            from rtp_llm.server.backend_manager import BackendManager
 
-    except BaseException as e:
-        error_msg = f"start server error: {e}"
-        error_trace = traceback.format_exc()
-        logging.error(f"{error_msg}, trace: {error_trace}")
+            backend_manager = BackendManager(py_env_configs)
+            backend_manager.start()
+            # Defer these handlers until model loading completes.
+            signal.signal(signal.SIGTERM, signal_handler)
+            signal.signal(signal.SIGINT, signal_handler)
+            logging.info(
+                "Backend server initialized successfully, sending ready status"
+            )
 
-        _send_pipe_status(pipe_writer, "failed", error_msg, error_trace)
-        raise
+            _send_pipe_status(
+                pipe_writer,
+                "success",
+                f"Backend server started successfully on rank {py_env_configs.parallelism_config.local_rank}",
+            )
+            pipe_writer = None  # success closed it
+
+            logging.info("Entering service loop to keep backend_manager alive")
+            backend_manager.serve_forever()
+
+        except BaseException as e:
+            error_msg = f"start server error: {e}"
+            error_trace = traceback.format_exc()
+            logging.error(f"{error_msg}, trace: {error_trace}")
+
+            _send_pipe_status(pipe_writer, "failed", error_msg, error_trace)
+            raise
+    finally:
+        if rank_selfdiag is not None:
+            try:
+                rank_selfdiag.stop()
+            except BaseException:
+                with suppress(BaseException):
+                    logging.exception(
+                        "optional Deep41 rank self diagnostics cleanup failed"
+                    )
 
 
 def _get_local_world_size(py_env_configs: PyEnvConfigs) -> int:

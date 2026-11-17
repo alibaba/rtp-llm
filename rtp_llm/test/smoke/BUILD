@@ -286,6 +286,8 @@ custom_smoke_test(
     # v4_pro carries 3600 over the 1800 default.
     test_envs = {"RTP_TEST_WATCHDOG_SECONDS": "5400"},
     data = [
+        "deep41_rank_self_diagnostics.py",
+        "arm_live_diagnostics.py",
         "//rtp_llm:sdk",
         "data/model/deepseek_v41/full_feature_cp2_dp2.json",
         "deepseek_v41_contract_test.py",

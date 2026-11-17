@@ -10,6 +10,7 @@ logging.basicConfig(
     level="INFO", format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
+from rtp_llm.utils.util import str_to_bool
 from smoke.case_runner import CaseRunner
 from smoke.common_def import REL_PATH
 from smoke.gpu_diagnostics import (
@@ -26,8 +27,6 @@ from smoke.multi_inst_case_runner import (
 )
 from smoke.task_info import TaskInfo
 from smoke.utils import resolve_prompt_refs
-
-from rtp_llm.utils.util import str_to_bool
 
 
 def get_runner_type(
@@ -133,6 +132,18 @@ if __name__ == "__main__":
 
     runner = runner_class(**runner_params)
 
+    arm_live_observer = None
+    if os.environ.get("RTP_BTC_ARM_LIVE_STACKS") == "1":
+        try:
+            from smoke.arm_live_diagnostics import start_observer
+
+            arm_live_observer = start_observer(args.suite_name)
+        except Exception:
+            try:
+                logging.exception("opt-in ARM diagnostics could not start")
+            except Exception:
+                pass
+
     dmesg_baseline = snapshot_dmesg()
 
     try:
@@ -149,6 +160,16 @@ if __name__ == "__main__":
             )
         raise
     finally:
+        if arm_live_observer is not None:
+            try:
+                arm_live_observer.stop()
+            except Exception:
+                # Diagnostic cleanup must preserve the original test outcome
+                # and permit the pre-existing finally cleanup to continue.
+                try:
+                    logging.exception("opt-in ARM observer cleanup failed")
+                except Exception:
+                    pass
         output_dir = os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", os.getcwd())
         rocm_debug_dir = os.path.join(output_dir, "rocm_debug")
         for pattern in [

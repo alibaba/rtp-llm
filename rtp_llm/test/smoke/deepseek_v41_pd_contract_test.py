@@ -17,6 +17,7 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
     compare_generation_logits = True
     prefill_cp_size = 2
     decode_dp_size = 1
+    startup_timeout_seconds = 3600
     # Prefill owns request-level historical-cache accounting. Decode has its
     # own cache history and excludes the current request's P/D transfer.
     reuse_field = "prefill_total_reuse_len"
@@ -104,7 +105,7 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
                     manager.start_server,
                     model_path=self.model_path,
                     model_type="deepseek_v41",
-                    timeout=3600,
+                    timeout=self.startup_timeout_seconds,
                 )
                 for manager in (self.server, self.graph_server)
             ]
