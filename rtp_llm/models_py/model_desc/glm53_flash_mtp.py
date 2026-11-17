@@ -241,11 +241,19 @@ class Glm53FlashMtpModel(GptModelBase):
                 and not full_inputs.is_draft_extend
             )
         ):
-            self._mtp_indexer_seeds.store(
-                topk_indices,
-                full_inputs.mtp_indexer_seed_rows,
-                fmha_impl.fmha_params.positions_d,
-            )
+            if layout is not None:
+                self._mtp_indexer_seeds.store_prefill_cp(
+                    topk_indices,
+                    layout,
+                    fmha_impl.cp_params.total_local_ids,
+                    full_inputs.prefix_lengths,
+                )
+            else:
+                self._mtp_indexer_seeds.store(
+                    topk_indices,
+                    full_inputs.mtp_indexer_seed_rows,
+                    fmha_impl.fmha_params.positions_d,
+                )
         hidden, _ = self.norm(hidden, residual)
         if layout is not None:
             hidden = all_gather_trim(hidden, layout.sp_layout.logical_tokens, Group.TP)
