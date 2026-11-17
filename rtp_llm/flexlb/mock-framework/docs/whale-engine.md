@@ -121,6 +121,7 @@ Mock 的 WorkerStatus 上报 Prefill TP 为 CP size、Decode TP 为 1、DP 为 1
 
 - **投机解码。** 只在 Decode 配 `MOCK_COMPUTE_DECODE_TOKENS_PER_STEP`，默认 1。设为 `2.6` 时，每请求每轮产出 2 或 3 个 token，长期均值为 2.6。Mock 用这个值模拟接受后的产出量。
 - **EOS。** P/D 可配 `MOCK_COMPUTE_EOS_PROBABILITY`，默认 0，按 token 判断。概率在 0 和 1 之间时必填整数 `MOCK_COMPUTE_EOS_SEED`。请求的 `min_new_tokens` 和 `ignore_eos` 控制 EOS 是否生效，`max_new_tokens` 和剩余上下文限制最终长度。
+  P/D 使用相同概率 `p > 0`、从第一个 token 就允许 EOS 时，输出长度按几何分布采样，不截断的平均值为 `1/p`。例如 `p = 0.001` 时平均约 1000 token，有效上限为 1024 时平均约 641 token。
 
 ### Prefill 轮间开销
 
