@@ -14,7 +14,8 @@ import torch.multiprocessing as mp
 from rtp_llm.cpp.models.test.native_lm_head_test import _extension, indexes, make_head
 
 
-def worker(rank, rendezvous):
+def worker(rank, rendezvous, point_mass):
+    os.environ["RTP_LLM_MTP_POINT_MASS"] = "1" if point_mass else "0"
     torch.cuda.set_device(rank)
     dist.init_process_group(
         "nccl",
@@ -50,6 +51,7 @@ def worker(rank, rendezvous):
                     tp_rank=rank,
                     vocab_size=vocab,
                     d2t_map=mapping,
+                    mtp_draft=True,
                 )
                 for rows in (0, 1, 9):
                     full = torch.randn(rows, cols * 2, device="cuda", dtype=dtype)
@@ -74,12 +76,15 @@ def worker(rank, rendezvous):
                     before = len(gathers)
                     result = head(local, indexes(rows), sample_local_logits=True)
                     assert torch.equal(result["tokens"], mapping[expected])
-                    assert torch.equal(
-                        result["probs"],
-                        torch.zeros(rows, vocab, device="cuda").scatter_(
-                            -1, expected, 1
-                        ),
-                    )
+                    if point_mass:
+                        assert result["probs"] is None
+                    else:
+                        assert torch.equal(
+                            result["probs"],
+                            torch.zeros(rows, vocab, device="cuda").scatter_(
+                                -1, expected, 1
+                            ),
+                        )
                     assert result["tokens"].dtype == torch.int64
                     if rows:
                         assert gathers[before:] == [(torch.int64, 2 * rows)]
@@ -109,12 +114,15 @@ def worker(rank, rendezvous):
                     graph.replay()
                     expected = full[:, :vocab].argmax(-1, keepdim=True)
                     assert torch.equal(result["tokens"], mapping[expected])
-                    assert torch.equal(
-                        result["probs"],
-                        torch.zeros(9, vocab, device="cuda", dtype=dtype).scatter_(
-                            -1, expected, 1
-                        ),
-                    )
+                    if point_mass:
+                        assert result["probs"] is None
+                    else:
+                        assert torch.equal(
+                            result["probs"],
+                            torch.zeros(9, vocab, device="cuda", dtype=dtype).scatter_(
+                                -1, expected, 1
+                            ),
+                        )
                 graph.reset()
                 del head
         # Compare against actual native GEMM output, with both precision policies.
@@ -149,7 +157,10 @@ def worker(rank, rendezvous):
                     else:
                         assert result["logits"] is None
                         assert torch.equal(result["tokens"], expected)
-                        assert torch.equal(result["probs"], expected_probs)
+                        if point_mass:
+                            assert result["probs"] is None
+                        else:
+                            assert torch.equal(result["probs"], expected_probs)
                         assert gathers[-1] == (torch.int64, 2 * rows)
                         all_result = head(hidden, selected, need_all_logits=True)
                         assert all_result["tokens"] is None
@@ -174,7 +185,7 @@ def worker(rank, rendezvous):
                 assert result["logits"].shape == (rows, 2 * cols)
             del target, padded
         print(
-            f"rank {rank}: exact top1/probabilities passed; 192 changing-input graph replays",
+            f"rank {rank}: point_mass={point_mass}, exact top1 passed; 192 changing-input graph replays",
             flush=True,
         )
         dist.barrier()
@@ -188,10 +199,16 @@ def worker(rank, rendezvous):
 class MtpDraftTop1Test(unittest.TestCase):
     def test_tp2_exact_selection_and_native_head(self):
         self.assertGreaterEqual(torch.cuda.device_count(), 2)
-        with tempfile.TemporaryDirectory() as directory:
-            mp.spawn(
-                worker, args=(str(Path(directory, "rendezvous")),), nprocs=2, join=True
-            )
+        for point_mass in (False, True):
+            with self.subTest(
+                point_mass=point_mass
+            ), tempfile.TemporaryDirectory() as directory:
+                mp.spawn(
+                    worker,
+                    args=(str(Path(directory, "rendezvous")), point_mass),
+                    nprocs=2,
+                    join=True,
+                )
 
 
 if __name__ == "__main__":

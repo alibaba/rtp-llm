@@ -527,7 +527,11 @@ TEST_F(PrefillRpcServerTest, flaggedWireZeroRoutesToLocalPrefillOnly) {
 }
 
 TEST_F(PrefillRpcServerTest, mtpAndEagleSendDraftState) {
-    for (auto type : {SP_TYPE_NONE, SP_TYPE_MTP, SP_TYPE_EAGLE, SP_TYPE_DSPARK}) {
+    for (const auto& [type, point_mass] : std::vector<std::pair<SpeculativeType, bool>>{{SP_TYPE_NONE, false},
+                                                                                        {SP_TYPE_MTP, false},
+                                                                                        {SP_TYPE_MTP, true},
+                                                                                        {SP_TYPE_EAGLE, false},
+                                                                                        {SP_TYPE_DSPARK, false}}) {
         SCOPED_TRACE("type=" + std::to_string(type));
         auto input                             = std::make_shared<GenerateInput>();
         input->request_id                      = 42;
@@ -546,10 +550,11 @@ TEST_F(PrefillRpcServerTest, mtpAndEagleSendDraftState) {
         auto buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
         if (type == SP_TYPE_MTP || type == SP_TYPE_EAGLE) {
             stream->setProposeToken({7, 8});
-            buffer->propose_step  = 3;
-            buffer->tokens        = torch::tensor({{7, 8, 0, 0}}, torch::kInt32);
-            buffer->all_probs     = torch::full({1, 128}, 1.0f / 128);
-            buffer->hidden_states = torch::full({1, 8}, 0.5f);
+            buffer->propose_step             = 3;
+            buffer->tokens                   = torch::tensor({{7, 8, 0, 0}}, torch::kInt32);
+            buffer->all_probs                = point_mass ? torch::Tensor() : torch::full({1, 128}, 1.0f / 128);
+            buffer->token_ids_are_point_mass = point_mass;
+            buffer->hidden_states            = torch::full({1, 8}, 0.5f);
             stream->setSPOutputBuffer(buffer);
         } else if (type == SP_TYPE_DSPARK) {
             buffer->propose_step = 3;
@@ -578,10 +583,13 @@ TEST_F(PrefillRpcServerTest, mtpAndEagleSendDraftState) {
             (type == SP_TYPE_NONE || type == SP_TYPE_DSPARK) ? std::vector<int>{} : std::vector<int>{7, 8};
         EXPECT_EQ(std::vector<int>(sent.propose_token_ids().begin(), sent.propose_token_ids().end()), expected_tokens);
         const bool has_draft_state = type == SP_TYPE_MTP || type == SP_TYPE_EAGLE;
-        EXPECT_EQ(sent.has_propose_probs(), has_draft_state);
+        EXPECT_EQ(sent.has_propose_probs(), has_draft_state && !point_mass);
+        EXPECT_EQ(sent.propose_token_ids_are_point_mass(), point_mass);
         EXPECT_EQ(sent.has_propose_hidden(), has_draft_state);
         if (has_draft_state) {
-            EXPECT_TRUE(torch::equal(QueryConverter::transTensor(sent.propose_probs()), buffer->all_probs));
+            if (!point_mass) {
+                EXPECT_TRUE(torch::equal(QueryConverter::transTensor(sent.propose_probs()), buffer->all_probs));
+            }
             EXPECT_TRUE(torch::equal(QueryConverter::transTensor(sent.propose_hidden()), buffer->hidden_states));
         }
     }

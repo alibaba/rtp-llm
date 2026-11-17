@@ -51,6 +51,27 @@ with vocabulary padding also retain that path to preserve their output contract.
 Draft-to-target token mapping and top-1 tie-breaking follow the existing
 selection behavior.
 
+## Implicit top-1 proposal probabilities
+
+Set `RTP_LLM_MTP_POINT_MASS=1` before server startup to represent ordinary MTP
+proposal distributions with token IDs instead of dense one-hot tensors. The
+selected token has probability one and all other tokens have probability zero.
+The setting applies independently of sharded top-1 and defaults to disabled.
+It covers the first proposal, single/multistep drafting, whole-draft graph
+replay, stream/device state, and P/D handoff. DSpARK retains its actual
+probability distributions.
+
+The rejection sampler consumes this point-mass distribution for both greedy
+and stochastic target sampling. The proposal count is still configured when
+creating the engine through `sp_config.gen_num_per_cycle`, exposed by
+`--gen_num_per_cycle` or `GEN_NUM_PER_CIRCLE` at server startup.
+
+Token-only P/D handoff sets the protobuf field
+`propose_token_ids_are_point_mass`. Enable it on P only after D has been
+updated to understand this field. Updated D accepts dense handoffs from
+existing senders and can batch dense and token-only proposals together. P and
+D may use different point-mass settings when both binaries support the field.
+
 ## RTX transport selection
 
 On SM120 Blackwell RTX devices, RTP leaves transport selection to NCCL when
@@ -75,6 +96,12 @@ Relevant regression coverage includes:
   across successive draft steps.
 - `rtp_llm.config.test.server_config_setup_test`: peer capability fallback,
   explicit transport overrides and frontend behavior.
+- `SpeculativeSamplerTest`: fixed-input, fixed-random-draw comparisons of
+  dense and implicit proposals for greedy/stochastic acceptance, rejection,
+  residual sampling, token mapping, and forced acceptance.
+- `MtpBatchStreamProcessorTest`, `PrefillRpcServerTest`, and
+  `DecodeRpcServerTest`: mixed dense/token-only proposals, proposal widths,
+  asynchronous device state, P/D handoff, and clearing stale dense buffers.
 
 Measure unprofiled service throughput separately from profiler timings. For
 before/after acceptance measurements, hold checkpoint, topology, quantization,

@@ -2082,7 +2082,7 @@ MtpDraftGraphOutputs CudaGraphRunner::mtpDraftOutputs(const CudaGraphState& stat
         outputs.draft_token_ids.push_back(tokens.narrow(0, 0, state.current_batch_size));
     }
     for (const auto& probs : hold.draft_probs_) {
-        outputs.draft_probs.push_back(probs.narrow(0, 0, state.current_batch_size));
+        outputs.draft_probs.push_back(probs.defined() ? probs.narrow(0, 0, state.current_batch_size) : torch::Tensor());
     }
     return outputs;
 }

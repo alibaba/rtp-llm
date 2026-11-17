@@ -195,9 +195,9 @@ std::optional<ErrorInfo> PrefillRpcServer::parseDownstreamError(const grpc::Stat
             }                                                                                                          \
         }                                                                                                              \
         auto status = prefill_context.closeGrpcStream(ErrorCodeToString(new_error_code));                              \
-        if (prefill_context.isRequestCancelled()) {                                                                     \
-            new_error_code = ErrorCode::CANCELLED;                                                                       \
-            new_error_msg  = "request is cancelled";                                                                    \
+        if (prefill_context.isRequestCancelled()) {                                                                    \
+            new_error_code = ErrorCode::CANCELLED;                                                                     \
+            new_error_msg  = "request is cancelled";                                                                   \
         } else if (!status.ok()) {                                                                                     \
             const auto& error_msg = status.error_message();                                                            \
             if (error_msg.find("Connect Failed") != std::string::npos) {                                               \
@@ -535,9 +535,9 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     } else {
         // Batch enqueue opens the stream before FetchResponse binds its ServerContext.
         prefill_context.client_stream = std::make_shared<CancellableDecodeClientStream>(
-            prefill_context.grpc_connection.stub.get(),
-            client_context,
-            [&prefill_context] { return prefill_context.isRequestCancelled(); });
+            prefill_context.grpc_connection.stub.get(), client_context, [&prefill_context] {
+                return prefill_context.isRequestCancelled();
+            });
     }
     auto&             client_stream = prefill_context.client_stream;
     GenerateRequestPB alloc_request = buildAllocateRequest(prefill_context);
@@ -688,8 +688,12 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     /** P and D configure PP independently. Include MTP/EAGLE proposal probabilities and draft hidden
      * in the PD handoff so a non-PP D can verify the candidate and continue multi-step drafting. */
     if (sp_output_buffer && !engine_->isDSpark()) {
-        auto all_probs_cpu =
-            sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
+        generate_request.set_propose_token_ids_are_point_mass(sp_output_buffer->token_ids_are_point_mass);
+        if (!sp_output_buffer->token_ids_are_point_mass) {
+            auto all_probs_cpu =
+                sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
+            QueryConverter::transTensorPB(generate_request.mutable_propose_probs(), all_probs_cpu);
+        }
         torch::Tensor hidden_states_cpu;
         if (!sp_output_buffer->hidden_states.defined()) {
             // dummy hidden states, so datatype is not important
@@ -698,7 +702,6 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
             hidden_states_cpu = sp_output_buffer->hidden_states.is_cuda() ? sp_output_buffer->hidden_states.cpu() :
                                                                             sp_output_buffer->hidden_states;
         }
-        QueryConverter::transTensorPB(generate_request.mutable_propose_probs(), all_probs_cpu);
         QueryConverter::transTensorPB(generate_request.mutable_propose_hidden(), hidden_states_cpu);
     }
 

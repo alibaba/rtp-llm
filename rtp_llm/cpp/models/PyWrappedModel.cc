@@ -1284,10 +1284,13 @@ std::pair<torch::Tensor, torch::Tensor> PyWrappedModel::sampleMtpDraftTop1(const
     if (device_props_.tp_size > 1 && local_logits.size(0) > 0) {
         execAllGather({{candidates}});
     }
-    auto tokens = mtpDraftGlobalTop1(candidates);
-    auto probs  = torch::zeros({local_logits.size(0), static_cast<int64_t>(vocab)},
-                              fp32_probs ? local_logits.options().dtype(torch::kFloat32) : local_logits.options());
-    probs.scatter_(-1, tokens, 1.0);
+    auto          tokens = mtpDraftGlobalTop1(candidates);
+    torch::Tensor probs;
+    if (!mtp_point_mass_) {
+        probs = torch::zeros({local_logits.size(0), static_cast<int64_t>(vocab)},
+                             fp32_probs ? local_logits.options().dtype(torch::kFloat32) : local_logits.options());
+        probs.scatter_(-1, tokens, 1.0);
+    }
     if (tokens.size(0) > 0) {
         execMappingDraft2Target({tokens, weights_.d2t_map, static_cast<int>(tokens.size(0)), 0, 1});
     }

@@ -76,8 +76,9 @@ struct StreamSpecUpdateInfo {
 
     // Rejection-sampling result for this speculative decode round. Prefill
     // updates leave speculative_propose_step at zero and are not counted.
-    int speculative_propose_step = 0;
-    int accepted_draft_tokens    = 0;
+    int  speculative_propose_step       = 0;
+    int  accepted_draft_tokens          = 0;
+    bool draft_token_ids_are_point_mass = false;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -116,6 +117,7 @@ public:
 
     // hold tensors from grpc
     std::vector<torch::Tensor> tensors_holder;
+    bool                       token_ids_are_point_mass = false;
 };
 using SpeculativeExecutorStreamOutputPtr = std::shared_ptr<SpeculativeExecutorStreamOutput>;
 
@@ -280,7 +282,7 @@ public:
     // When useChunkWindow() is true, contextLength() returns the current chunk length.
     // initial_reuse_length_ stays frozen for cache-hit metrics.
     void setChunkSize(int chunk_size) {
-        chunk_size_ = chunk_size;
+        chunk_size_     = chunk_size;
         max_chunk_size_ = std::max(max_chunk_size_, chunk_size);
     }
     int maxChunkSize() const {
@@ -296,11 +298,11 @@ public:
     int  currentChunkLen() const;  // tokens to compute in the current chunk
     bool isLastChunk() const;      // current chunk reaches seqLength()
     bool isMiddleChunk() const;    // chunked + context + !last → no sample / no output row
-    void advanceChunk();  // reuse_length_ += currentChunkLen()
+    void advanceChunk();           // reuse_length_ += currentChunkLen()
     bool hasAdvancedChunk() const {
         return chunk_advanced_;
     }
-    int  cacheStorePublishStartToken() const {
+    int cacheStorePublishStartToken() const {
         return chunk_advanced_ ? prefixLength() : 0;
     }
     // Prompt token right after the current chunk; valid only for middle chunks.
@@ -680,6 +682,7 @@ public:
         // before worker-side specUpdate has written sp_output_buffer fields.
         torch::Tensor last_hidden_states_gpu;
         torch::Tensor draft_all_probs_gpu;
+        bool          draft_token_ids_are_point_mass = false;
         // Upper bound for the sequence length represented by the previous
         // round. It equals host seqLength when no worker is pending; otherwise
         // it chains from the prior published bound so multiple overlapped
@@ -783,6 +786,15 @@ public:
     torch::Tensor getDraftAllProbsGpu() const {
         std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
         return mtp_async_state_.draft_all_probs_gpu;
+    }
+    bool draftTokenIdsArePointMass(bool prefer_device_state) const {
+        if (prefer_device_state) {
+            std::lock_guard<std::mutex> lock(*mtp_async_state_mutex_);
+            if (mtp_async_state_.epoch > 0) {
+                return mtp_async_state_.draft_token_ids_are_point_mass;
+            }
+        }
+        return sp_output_buffer_ && sp_output_buffer_->token_ids_are_point_mass;
     }
     void clearSpecDecodeDeviceState() {
         // Unconditional legacy/testing escape hatch. Active MTP decode paths
@@ -919,8 +931,8 @@ protected:
     bool         consumerFinishedWithoutLock() const;
     virtual bool consumerReadyWithoutLock() const;
 
-    int                      estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
-    bool                     reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
+    int  estimateKVNeedBlocks(int remaining_tokens, int target_batch_size) const;
+    bool reportUpdateErrorWithoutLock(const std::optional<ErrorInfo>& error_info);
     bool prepareUpdateWithoutLock(const std::optional<ErrorInfo>& error_info, bool force_update_info);
     std::optional<ErrorInfo> updateNormalLogitProcessorStatus(const StreamUpdateInfo& update_info);
     std::optional<ErrorInfo> updateLogitProcessorStatus(const torch::Tensor& new_tokens, int32_t num_new_tokens);
@@ -1059,7 +1071,7 @@ protected:
     // just for bool test
     bool perf_test_ = false;
     friend class StreamCacheResource;
-    bool is_fake_stream_ = false;
+    bool                             is_fake_stream_ = false;
     std::shared_ptr<RecordedRequest> recorded_request_;
 
     // prefill TP size queried from prefill server (used for asymmetric TP)

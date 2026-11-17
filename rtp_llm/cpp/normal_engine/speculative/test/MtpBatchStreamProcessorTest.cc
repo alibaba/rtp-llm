@@ -1371,11 +1371,10 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     ResourceContext resource_context;
     resource_context.cache_manager = cache_manager;
 
-    GenerateStreamPtr stream1 = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
-    GenerateStreamPtr stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
-    GenerateStreamPtr stream3 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 3);
-    GenerateStreamPtr middle_stream =
-        createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 4);
+    GenerateStreamPtr stream1       = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    GenerateStreamPtr stream2       = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 2);
+    GenerateStreamPtr stream3       = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 3);
+    GenerateStreamPtr middle_stream = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 4);
     middle_stream->setChunkSize(2);
     ASSERT_TRUE(middle_stream->isMiddleChunk());
 
@@ -1394,8 +1393,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     model_output.all_hidden_states = torch::zeros({7, 2}, torch::kFloat32);
 
     SamplerOutput sampler_output;
-    sampler_output.token_ids =
-        torch::tensor({1, -2, 2, 1, 2, 3, 3, 2, 1, 0, 1, 2}, torch::kInt32).reshape({4, 3});
+    sampler_output.token_ids = torch::tensor({1, -2, 2, 1, 2, 3, 3, 2, 1, 0, 1, 2}, torch::kInt32).reshape({4, 3});
 
     processor.updatePrefillPostDraftModelInput(stream_groups, model_input, model_output, sampler_output, holder);
 
@@ -1421,8 +1419,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsCo
     ResourceContext resource_context;
     auto            stream1 = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 1);
     auto            stream2 = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3}, 2);
-    auto            middle_stream =
-        createContextStream(model_config, runtime_config, resource_context, {1, 2, 3, 0}, 3);
+    auto middle_stream      = createContextStream(model_config, runtime_config, resource_context, {1, 2, 3, 0}, 3);
     stream1->setContextPositionIds(torch::tensor({100, 101, 102, 110, 111, 112}, torch::kInt32));
     stream2->setContextPositionIds(torch::tensor({200, 201, 202, 210, 211, 212, 220, 221, 222}, torch::kInt32));
     middle_stream->setContextPositionIds(
@@ -1431,12 +1428,11 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsCo
     ASSERT_TRUE(middle_stream->isMiddleChunk());
     auto           stream_groups = StreamGroups({stream1, stream2, middle_stream});
     GptModelInputs model_input;
-    model_input.input_lengths = torch::tensor({2, 3, 2}, torch::kInt32);
-    model_input.combo_tokens  = torch::tensor({10, 11, 20, 21, 22, 30, 31}, torch::kInt32);
-    model_input.combo_position_ids =
-        torch::tensor({100, 101, 102, 110, 111, 112, 200, 201, 202, 210, 211, 212,
-                       220, 221, 222, 300, 301, 302, 310, 311, 312},
-                      torch::kInt32);
+    model_input.input_lengths      = torch::tensor({2, 3, 2}, torch::kInt32);
+    model_input.combo_tokens       = torch::tensor({10, 11, 20, 21, 22, 30, 31}, torch::kInt32);
+    model_input.combo_position_ids = torch::tensor(
+        {100, 101, 102, 110, 111, 112, 200, 201, 202, 210, 211, 212, 220, 221, 222, 300, 301, 302, 310, 311, 312},
+        torch::kInt32);
     GptModelOutputs model_output;
     model_output.all_hidden_states = torch::zeros({7, 2}, torch::kFloat32);
     SamplerOutput sampler_output;
@@ -1444,9 +1440,8 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInputShiftsCo
     TensorHolder holder;
     processor.updatePrefillPostDraftModelInput(stream_groups, model_input, model_output, sampler_output, holder);
     EXPECT_EQ((vector<int>{11, 12, 21, 22, 23, 31, 3}), toVec<int>(model_input.combo_tokens));
-    EXPECT_EQ((vector<int>{110, 111, 112, 112, 112, 112,
-                           210, 211, 212, 220, 221, 222, 222, 222, 222,
-                           310, 311, 312, 320, 321, 322}),
+    EXPECT_EQ((vector<int>{110, 111, 112, 112, 112, 112, 210, 211, 212, 220, 221,
+                           222, 222, 222, 222, 310, 311, 312, 320, 321, 322}),
               toVec<int>(model_input.combo_position_ids));
 }
 
@@ -1985,6 +1980,25 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutputFromDevic
     EXPECT_TRUE(sampler_output.all_probs.is_cuda());
     EXPECT_EQ(expect_all_probs, toVec<float>(sampler_output.all_probs));
 
+    // The current device snapshot takes precedence over stale worker buffers.
+    auto point_mass_state                           = stream1->getMtpAsyncDeviceState();
+    point_mass_state.draft_all_probs_gpu            = torch::Tensor();
+    point_mass_state.draft_token_ids_are_point_mass = true;
+    stream1->setMtpAsyncDeviceState(point_mass_state);
+    processor.updateOneStepDraftSamplerOutput(stream_groups, sampler_output, draft_token_probs_d_t, holder);
+    EXPECT_TRUE(sampler_output.token_ids_are_point_mass);
+    EXPECT_FALSE(sampler_output.all_probs.defined());
+    EXPECT_FALSE(draft_token_probs_d_t.defined());
+    EXPECT_EQ(expect_token_ids, toVec<int>(sampler_output.token_ids));
+
+    point_mass_state.draft_all_probs_gpu            = torch::tensor({{0.f, 0.f, 0.f, 1.f}}).to(torch::kCUDA);
+    point_mass_state.draft_token_ids_are_point_mass = false;
+    stream1->setMtpAsyncDeviceState(point_mass_state);
+    stream1->getSPOutputBuffer()->token_ids_are_point_mass = true;
+    processor.updateOneStepDraftSamplerOutput(stream_groups, sampler_output, draft_token_probs_d_t, holder);
+    EXPECT_FALSE(sampler_output.token_ids_are_point_mass);
+    EXPECT_TRUE(sampler_output.all_probs.defined());
+
     unsetenv("RTP_LLM_MTP_ASYNC_DEVICE_STATE");
 }
 
@@ -2059,6 +2073,33 @@ TEST_F(MtpBatchStreamProcessorTest, updateMultiStepDraftSamplerOutput) {
     vector<float> expect_all_probs = {0.1, 0.2, 0.3, 0.4, 1.1, 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.4,
                                       0.5, 0.6, 0.7, 0.8, 1.5, 1.6, 1.7, 1.8, 2.5, 2.6, 2.7, 2.8};
     EXPECT_EQ(expect_all_probs, toVec<float>(sampler_output.all_probs));
+    // Mix an implicit PD handoff with dense top-1 results from another worker.
+    stream1->getSPOutputBuffer()->all_probs                = torch::Tensor();
+    stream1->getSPOutputBuffer()->token_ids_are_point_mass = true;
+    draft_token_probs_list                                 = {output_token_probs_1, output_token_probs_2};
+    processor.updateMultiStepDraftSamplerOutput(stream_groups,
+                                                sampler_output,
+                                                draft_token_ids_d_t,
+                                                spec_token_ids_d_t,
+                                                draft_token_probs_d_t,
+                                                draft_token_probs_list);
+    EXPECT_TRUE(sampler_output.token_ids_are_point_mass);
+    EXPECT_FALSE(sampler_output.all_probs.defined());
+    EXPECT_FALSE(draft_token_probs_d_t.defined());
+    EXPECT_TRUE(torch::equal(sampler_output.token_ids, draft_token_ids_d_t.slice(1, 1)));
+
+    // Conversely, only the newly generated graph/eager steps can be implicit.
+    stream1->getSPOutputBuffer()->all_probs                = torch::tensor({{1.f, 0.f, 0.f, 0.f}});
+    stream1->getSPOutputBuffer()->token_ids_are_point_mass = false;
+    draft_token_probs_list                                 = {torch::Tensor(), torch::Tensor()};
+    processor.updateMultiStepDraftSamplerOutput(stream_groups,
+                                                sampler_output,
+                                                draft_token_ids_d_t,
+                                                spec_token_ids_d_t,
+                                                draft_token_probs_d_t,
+                                                draft_token_probs_list);
+    EXPECT_TRUE(sampler_output.token_ids_are_point_mass);
+    EXPECT_FALSE(sampler_output.all_probs.defined());
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testPrefillDispatchUsesDraftLastHiddenOverride) {
