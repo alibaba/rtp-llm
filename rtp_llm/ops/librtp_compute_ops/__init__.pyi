@@ -143,6 +143,7 @@ class LinearReplayLayerCache:
     conv_inputs: torch.Tensor
     slot_generations: torch.Tensor
     log_epochs: torch.Tensor
+    log_banks: torch.Tensor | None
     valid_counts: torch.Tensor
     error_flags: torch.Tensor
 

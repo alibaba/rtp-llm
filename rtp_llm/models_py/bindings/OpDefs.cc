@@ -63,6 +63,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("conv_inputs", &LinearReplayLayerCache::conv_inputs)
         .def_readwrite("slot_generations", &LinearReplayLayerCache::slot_generations)
         .def_readwrite("log_epochs", &LinearReplayLayerCache::log_epochs)
+        .def_readwrite("log_banks", &LinearReplayLayerCache::log_banks)
         .def_readwrite("valid_counts", &LinearReplayLayerCache::valid_counts)
         .def_readwrite("error_flags", &LinearReplayLayerCache::error_flags);
 
