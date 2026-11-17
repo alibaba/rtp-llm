@@ -679,8 +679,12 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         }
     }
 
-    auto micro_batch_plan  = planMicroBatches(inputs);
-    auto [split_inputs, _] = splitInputsIntoMicroBatches(inputs, micro_batch_plan);
+    // This snapshot belongs to these exact inputs, after CP/packed preparation.
+    // A new forward must never reuse the preceding request's length values.
+    torch::Tensor host_lengths;
+    auto* shared_lengths = reuse_micro_batch_lengths_ ? &host_lengths : nullptr;
+    auto micro_batch_plan = planMicroBatches(inputs, int(device_props_.enable_layer_micro_batch), layer_num_, shared_lengths);
+    auto [split_inputs, _] = splitInputsIntoMicroBatches(inputs, micro_batch_plan, shared_lengths);
     std::vector<PyModelInputs> input_list;
     input_list.reserve(split_inputs.size());
 
@@ -1351,8 +1355,11 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     return {logits, last_hidden, last_hidden, torch::Tensor(), torch::Tensor()};
 }
 
-MicroBatchPlan PyWrappedModel::planMicroBatches(const GptModelInputs& inputs) {
-    if (!int(device_props_.enable_layer_micro_batch)) {
+MicroBatchPlan PyWrappedModel::planMicroBatches(const GptModelInputs& inputs,
+                                              bool enabled,
+                                              size_t layer_num,
+                                              torch::Tensor* host_lengths) {
+    if (!enabled) {
         RTP_LLM_LOG_DEBUG("micro batch disable when enable_layer_micro_batch is false");
         return {false, {}};
     }
@@ -1361,10 +1368,11 @@ MicroBatchPlan PyWrappedModel::planMicroBatches(const GptModelInputs& inputs) {
     const auto&  sequence_lengths   = inputs.sequence_lengths;
     const size_t decoder_batch_size = sequence_lengths.size(0);
     const size_t context_batch_size = input_lengths.size(0) - decoder_batch_size;
-    // TODO(async): layer micro-batch planning still needs host lengths for
-    // split arithmetic. Keep the CPU mirror explicit while model inputs stay CUDA.
-    const auto input_lengths_host = input_lengths.is_cuda() ? input_lengths.cpu().pin_memory() : input_lengths;
-    const auto input_lengths_ptr  = input_lengths_host.data_ptr<int32_t>();
+    // Preserve the existing eager read outside the GLM5 multi-step capability.
+    torch::Tensor input_lengths_host;
+    if (host_lengths == nullptr) {
+        input_lengths_host = input_lengths.is_cuda() ? input_lengths.cpu().pin_memory() : input_lengths;
+    }
 
     if (decoder_batch_size + context_batch_size < 2) {
         RTP_LLM_LOG_DEBUG("micro batch disable when batch size %ld is less than 2",
@@ -1373,7 +1381,12 @@ MicroBatchPlan PyWrappedModel::planMicroBatches(const GptModelInputs& inputs) {
     }
 
     if (context_batch_size && decoder_batch_size) {
-        if (layer_num_ == 1) {
+        if (layer_num == 1) {
+            if (host_lengths != nullptr) {
+                *host_lengths = input_lengths.is_cuda() ? input_lengths.cpu() : input_lengths;
+                input_lengths_host = *host_lengths;
+            }
+            const auto* input_lengths_ptr = input_lengths_host.data_ptr<int32_t>();
             size_t total_token_num = decoder_batch_size;
             for (size_t i = 0; i < context_batch_size; i++) {
                 total_token_num += input_lengths_ptr[i + decoder_batch_size];
@@ -1428,7 +1441,9 @@ MicroBatchPlan PyWrappedModel::planMicroBatches(const GptModelInputs& inputs) {
 }
 
 std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>
-PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroBatchPlan& micro_batch_plan) {
+PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs,
+                                          const MicroBatchPlan& micro_batch_plan,
+                                          torch::Tensor* host_lengths) {
     c10::DeviceGuard            runtime_device_guard(getTorchCudaDevice());
     std::vector<GptModelInputs> micro_batch_inputs;
     std::vector<TokenSliceInfo> token_slice_recipes;
@@ -1437,11 +1452,18 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
     size_t                      sliced_batch_idx       = 0;
     size_t                      decode_batch_idx       = 0;
     size_t                      prefill_batch_idx      = 0;
-    // TODO(async): micro-batch token slicing still computes CPU scalar sums.
-    // Convert explicitly and keep all sliced GptModelInputs device-resident.
-    const auto  input_lengths_host = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda() ?
-                                         inputs.input_lengths.cpu().pin_memory() :
-                                         inputs.input_lengths;
+    torch::Tensor input_lengths_host;
+    if (host_lengths == nullptr) {
+        input_lengths_host = inputs.input_lengths.defined() && inputs.input_lengths.is_cuda() ?
+                                 inputs.input_lengths.cpu().pin_memory() : inputs.input_lengths;
+    } else if (micro_batch_plan.enable
+               && std::any_of(micro_batch_plan.batch_infos.begin(), micro_batch_plan.batch_infos.end(),
+                              [](const MicroBatchInfo& info) { return info.prefill_num != 0; })) {
+        if (!host_lengths->defined()) {
+            *host_lengths = inputs.input_lengths.is_cuda() ? inputs.input_lengths.cpu() : inputs.input_lengths;
+        }
+        input_lengths_host = *host_lengths;
+    }
     const auto* input_lengths_ptr  = input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
 
     if (!micro_batch_plan.enable) {

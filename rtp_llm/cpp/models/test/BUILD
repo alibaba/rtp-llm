@@ -35,6 +35,7 @@ cc_test(
     name = "model_data_test",
     srcs = [
         "ModelDataTest.cc",
+        "MicroBatchLengthsTest.cc",
     ],
     data = [],
     copts = test_copts,

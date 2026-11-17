@@ -126,9 +126,14 @@ private:
     // CP path's skip_final_layernorm=true) and returns the small [num_lm, hidden]
     // both as hidden_states and all_hidden_states.
     GptModelOutputs forwardPostLayersLastHidden(torch::Tensor hidden, const GptModelInputs& inputs);
-    MicroBatchPlan  planMicroBatches(const GptModelInputs& inputs);
-    std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>
-         splitInputsIntoMicroBatches(const GptModelInputs& inputs, const MicroBatchPlan& micro_batch_plan);
+    static MicroBatchPlan planMicroBatches(const GptModelInputs& inputs,
+                                          bool enabled,
+                                          size_t layer_num,
+                                          torch::Tensor* host_lengths = nullptr);
+    static std::pair<std::vector<GptModelInputs>, std::vector<TokenSliceInfo>>
+    splitInputsIntoMicroBatches(const GptModelInputs& inputs,
+                               const MicroBatchPlan& micro_batch_plan,
+                               torch::Tensor* host_lengths = nullptr);
     void holdInputsHostBuffers(const GptModelInputs& inputs);
 
     // Member variables (formerly inherited from GptModel)
@@ -150,6 +155,7 @@ private:
     bool           use_spec_decoding_{false};
     bool           enable_device_perf_{false};
     bool           check_nan_{false};
+    bool           reuse_micro_batch_lengths_{false};
     MtpIndexerRole mtp_indexer_role_{MtpIndexerRole::NORMAL};
 
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
@@ -183,7 +189,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     is_prefill_cuda_graph_mode_(is_prefill_cuda_graph_mode),
     use_spec_decoding_(use_spec_decoding),
     enable_device_perf_(params.profile_debug_logging_config.enable_device_perf),
-    check_nan_(params.profile_debug_logging_config.check_nan) {
+    check_nan_(params.profile_debug_logging_config.check_nan),
+    reuse_micro_batch_lengths_(params.glm5_mtp_metadata_fusion_enabled && params.sp_config.gen_num_per_cycle > 1) {
     weights_          = params.weights;
     model_id_         = params.model_id;
     mtp_indexer_role_ = int(device_props_.enable_layer_micro_batch) ? MtpIndexerRole::NORMAL : mtp_indexer_role;
