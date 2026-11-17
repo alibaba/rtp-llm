@@ -203,7 +203,6 @@ def main():
         kind = path.parent.name.split("-")[1]
         assert bool(balance is not None) == (kind != "old")
         if kind in ("new", "stress"):
-            assert balance["hotspotRescue"]["maxInputTokens"] == 131072
             assert config["scheduler"]["prefillQueueShedding"]["recovery"] is not None
         artifact = list(path.parent.rglob("master-artifact.json"))
         assert artifact and jar_hash in artifact[0].read_text()

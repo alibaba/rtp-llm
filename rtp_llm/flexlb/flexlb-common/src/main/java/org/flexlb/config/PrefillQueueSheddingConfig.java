@@ -21,10 +21,7 @@ public final class PrefillQueueSheddingConfig {
      */
     private double minAcceptingWorkerPercent = DEFAULT_MIN_ACCEPTING_WORKER_PERCENT;
 
-    /** Opt-in deadline budgeting with explicitly calibrated uncached throughput.
-     * Also preserves maxPendingComputeTokens for cold admission despite low Engine queue reports,
-     * keeping excess work globally cancellable during delayed status feedback.
-     */
+    /** Opt-in deadline budgeting with explicitly calibrated uncached throughput. */
     private DeadlineBudgetConfig deadlineBudget;
 
     @Getter

@@ -5,7 +5,7 @@ import org.flexlb.config.PrefillQueueSheddingConfig;
 import java.util.ArrayDeque;
 
 /** Bounded per-pool arrival-rate and queue-drain detector. Times are monotonic milliseconds.
- * The decision owner records new arrivals once; retries and migrations are not arrivals.
+ * The decision owner records new arrivals once; retries are not arrivals.
  */
 public final class PrefillTrafficTrend {
     public enum State { WARMUP, NORMAL, BURST_PROBE, GROWING, RECOVERING, GRACE_EXHAUSTED }

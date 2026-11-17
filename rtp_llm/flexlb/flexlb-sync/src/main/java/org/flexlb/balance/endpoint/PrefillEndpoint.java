@@ -134,8 +134,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             prefillState.configureEngineQueueAdmission(engineQueueAdmission);
         }
         if (tokenBalance != null) {
-            this.prefillState.enableTokenWorkload(
-                    tokenBalance.isEnableWindow() ? tokenBalance.getWindowMs() : 0L);
+            this.prefillState.enableTokenWorkload();
         }
     }
 
@@ -357,14 +356,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return prefillState.tokenWorkloadScore();
     }
 
-    /** Advisory outstanding pending uncached work for cold capacity checks. */
+    /** Advisory outstanding pending uncached work for pool occupancy snapshots. */
     public long pendingTokenWork() {
         return prefillState.pendingTokenWork();
-    }
-
-    /** Advisory outstanding uncached work including soft reservations, for rescue idle targets. */
-    public long outstandingTokenWork() {
-        return prefillState.outstandingTokenWork();
     }
 
     /**

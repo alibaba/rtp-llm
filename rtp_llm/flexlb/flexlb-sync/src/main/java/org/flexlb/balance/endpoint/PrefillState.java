@@ -618,8 +618,8 @@ public final class PrefillState {
     private volatile EngineQueueAdmission engineQueueAdmission;
 
     /** Enable outstanding-token accounting used by token-balanced Prefill selection. */
-    public void enableTokenWorkload(long windowMs) {
-        tokenWorkload = new PrefillTokenWorkload(windowMs);
+    public void enableTokenWorkload() {
+        tokenWorkload = new PrefillTokenWorkload();
     }
 
     /** Soft scoring reservation; never consumes admission capacity and closes exactly once. */
@@ -637,20 +637,10 @@ public final class PrefillState {
         return ledger == null ? 0.0 : ledger.snapshot().score();
     }
 
-    /** Advisory outstanding uncached pending work for cold capacity checks. */
+    /** Advisory outstanding pending uncached work for pool occupancy snapshots. */
     public long pendingTokenWork() {
         PrefillTokenWorkload ledger = tokenWorkload;
         return ledger == null ? 0L : ledger.snapshot().pendingTokens();
-    }
-
-    /** Advisory outstanding uncached work including soft reservations, for rescue idle targets. */
-    public long outstandingTokenWork() {
-        PrefillTokenWorkload ledger = tokenWorkload;
-        if (ledger == null) {
-            return 0L;
-        }
-        PrefillTokenWorkload.Snapshot snapshot = ledger.snapshot();
-        return snapshot.pendingTokens() + snapshot.plannedTokens();
     }
 
     /** Attach the Engine waiting-queue admission gate before the endpoint starts serving. */

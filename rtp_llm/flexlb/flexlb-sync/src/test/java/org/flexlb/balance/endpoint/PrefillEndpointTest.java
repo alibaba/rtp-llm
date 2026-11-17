@@ -247,9 +247,9 @@ class PrefillEndpointTest {
             assertEquals(1, invalidPredictorEndpoint.observedRequestCount(),
                     "membership settlement must not depend on prediction");
             assertEquals(List.of(1L), snapshot.batches().getFirst().requestIds());
-            assertEquals(360L, snapshot.batches().getFirst().remainingWorkMs().orElseThrow());
+            assertEquals(304L, snapshot.batches().getFirst().remainingWorkMs().orElseThrow());
             assertFalse(snapshot.hasUnknownWork());
-            assertEquals(360L, invalidPredictorEndpoint.getLoadMetric().orElseThrow());
+            assertEquals(304L, invalidPredictorEndpoint.getLoadMetric().orElseThrow());
 
             reportSuccessfulBatchMember(
                     invalidPredictorEndpoint, 1L, 1L, 40L);
@@ -273,7 +273,7 @@ class PrefillEndpointTest {
         field.set(endpoint, failingPredictor);
 
         assertDoesNotThrow(() -> reportRejectedBatchMember(endpoint, 1L, 2L));
-        assertEquals(360L, endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().orElseThrow());
+        assertEquals(304L, endpoint.captureRouteProjectionInputs().work().totalRemainingWorkMs().orElseThrow());
         assertEquals(1L, endpoint.observedRequestCount());
         assertTrue(endpoint.releaseCommittedItem(survivor.execution()));
         assertEquals(0L, endpoint.observedRequestCount());

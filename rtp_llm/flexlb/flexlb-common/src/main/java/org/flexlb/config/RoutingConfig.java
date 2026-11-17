@@ -52,35 +52,11 @@ public final class RoutingConfig {
     @Setter
     public static final class TokenBalanceConfig {
         /** Above this percentage, the largest reusable prefix wins without a TTFT cap. */
-        private double minPrefixHitPercent = 50.0;
-        /** Token backpressure cap applied to cold Prefill candidates. */
-        private long maxPendingComputeTokens = 2_000_000L;
-        /** Include recently completed uncached tokens in ranking only; disabled by default. */
-        private boolean enableWindow = false;
-        private long windowMs = 10_000L;
+        private double minPrefixHitPercent = 5.0;
         /** Engine waiting-queue depth that blocks admission and dispatch; null disables the gate. */
         private Long engineQueueAdmissionThreshold = 10L;
         /** Sustained-above-threshold waiting depth before a worker counts as congested. */
         private long engineQueueOverloadDurationMs = 5_000L;
-        /** Opt-in rescue of queued requests away from congested Engines; null disables it. */
-        private HotspotRescueConfig hotspotRescue;
-    }
-
-    /** Rescue of small, aged queued requests to lightly loaded cache-eligible Prefill workers. */
-    @Getter
-    @Setter
-    public static final class HotspotRescueConfig {
-        /** Migrate only when the source Engine reports more waiting streams than this count. */
-        private long engineQueueMigrationThreshold = 30L;
-        private long minWaitMs = 5_000L;
-        /** Total input, not just uncached tokens: a cache miss on the target must stay cheap. */
-        private long maxInputTokens = 32_768L;
-        /** Target's outstanding uncached tokens (pending plus planned), excluding completed history. */
-        private long maxIdlePendingTokens = 0L;
-        /** Minimum interval between rescue rounds; unused rounds never accumulate. */
-        private long migrationIntervalMs = 1_000L;
-        /** Maximum withdrawals per round, shared by all workers in this model scheduler. */
-        private int maxMigrationsPerRound = 1;
     }
 
     @Getter
@@ -88,7 +64,7 @@ public final class RoutingConfig {
     public static final class ExecutionTimeEstimatorConfig {
         private EstimatorType type = EstimatorType.FORMULA;
         private String expression =
-                "sum(computeTokens) + 0.3*sum(hitCacheTokens)";
+                "sum(computeTokens) + 0.02*sum(hitCacheTokens)";
     }
 
     public enum EstimatorType {

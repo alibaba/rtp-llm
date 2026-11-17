@@ -2,7 +2,6 @@ package org.flexlb.balance.scheduler;
 
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.PlacementResult;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.ScheduledRequest.DecodeBinding;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy.PrefillPoolSnapshot;
@@ -12,7 +11,6 @@ import org.flexlb.balance.strategy.SelectedRole;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
-import org.flexlb.config.RoutingConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -102,21 +100,6 @@ public class DefaultRouter {
     public PrefillPoolSnapshot prefillPoolSnapshot(String policyGroup) {
         RoleType role = prefillRole();
         return role == null ? null : prefillSelector.prefillPoolSnapshot(role, policyGroup);
-    }
-
-    /** Rescue facts per Prefill pool for one rescue round; empty without a Prefill pool. */
-    public List<CostBasedPrefillStrategy.HotspotRescuePool> hotspotRescuePools(
-            RoutingConfig.HotspotRescueConfig rescue) {
-        RoleType role = prefillRole();
-        return role == null ? List.of() : prefillSelector.hotspotRescuePools(role, rescue);
-    }
-
-    /** Whether one migrated request still has a cache-eligible idle target in its pool. */
-    public boolean hasCacheEligibleRescueTarget(
-            BalanceContext context, String policyGroup, PrefillEndpoint source) {
-        RoleType role = prefillRole();
-        return role != null && prefillSelector.hasCacheEligibleRescueTarget(
-                context, role, policyGroup, source);
     }
 
     public PlacementResult<RouteAdmission, PlacementKey> select(BalanceContext context, String policyGroup) {
