@@ -477,6 +477,9 @@ public class MetricConstant {
 
     public static final String REQUEST_MESSAGE_BYTES = "app.request.message.bytes";
 
+    public static final String JVM_GC_COLLECTION_COUNT = "app.jvm.gc.collection.count";
+    public static final String JVM_GC_PAUSE_TOTAL_MS = "app.jvm.gc.pause.total.ms";
+
     /**
      * Graceful online/offline lifecycle events
      */
