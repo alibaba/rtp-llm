@@ -60,8 +60,8 @@ std::shared_ptr<const LinearPrefillPlan> borrowedLinearPrefillPlan(
     const GroupBase& group,
     const std::shared_ptr<CPSlotMapper>& mapper,
     std::optional<int64_t> reused_tokens = std::nullopt) {
-    if (malloc_info.linear_prefill_prompt_tokens <= 0 || !malloc_info.reuse_cache
-        || config.reuse_cache_tail_blocks() == std::numeric_limits<int>::max()
+    if (malloc_info.linear_prefill_prompt_tokens <= 0
+        || (malloc_info.reuse_cache && !config.isLastNConfigured())
         || !group.supportsBorrowedLinearPrefill(config.seq_size_per_block)
         || malloc_info.batch_kv_cache_resource->batchSize() != 1) {
         return nullptr;
@@ -69,9 +69,10 @@ std::shared_ptr<const LinearPrefillPlan> borrowedLinearPrefillPlan(
     const auto& existing = malloc_info.batch_kv_cache_resource->cacheResource(0).blockIds(group.tag).linearPrefillPlan();
     const auto reused = reused_tokens.value_or(existing ? existing->reusedTokens() : 0);
     const auto checkpoint_tokens = group.seqSizePerBlock() * (mapper && mapper->isSharded() ? mapper->cpSize() : 1);
-    return std::make_shared<LinearPrefillPlan>(malloc_info.linear_prefill_prompt_tokens,
-                                               group.seqSizePerBlock(), checkpoint_tokens,
-                                               config.reuse_cache_tail_blocks(), reused);
+    // With no reusable checkpoints, the request tail owns the state for every chunk.
+    const auto tail_checkpoints = malloc_info.reuse_cache ? config.reuse_cache_tail_blocks() : 0;
+    return std::make_shared<LinearPrefillPlan>(
+        malloc_info.linear_prefill_prompt_tokens, group.seqSizePerBlock(), checkpoint_tokens, tail_checkpoints, reused);
 }
 
 RequiredPositions chunkCachePositions(const MallocInfo& malloc_info,

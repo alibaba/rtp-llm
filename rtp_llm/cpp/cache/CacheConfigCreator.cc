@@ -102,7 +102,7 @@ void configureLinearPrefillPoolRatio(CacheConfig&             config,
     if (tokens == -1 || parallelism_config.role_type != RoleType::PREFILL || options.linear_pool_blocks > 0) {
         return;
     }
-    RTP_LLM_CHECK_WITH_INFO(options.reuse_cache && config.reuse_cache_tail_blocks() < std::numeric_limits<int>::max(),
+    RTP_LLM_CHECK_WITH_INFO(options.reuse_cache && config.isLastNConfigured(),
                             "LINEAR_POOL_AVG_PROMPT_TOKENS requires REUSE_CACHE and a finite REUSE_CACHE_TAIL_BLOCKS");
 
     const auto cp_size        = config.local_kv_cache_sharded ? parallelism_config.tp_size : 1;

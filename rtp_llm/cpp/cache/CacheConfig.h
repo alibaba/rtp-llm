@@ -260,6 +260,9 @@ public:
     int reuse_cache_tail_blocks(size_t module = 0) const {
         return moduleConfig(module).reuse_cache_tail_blocks;
     }
+    bool isLastNConfigured(size_t module = 0) const {
+        return reuse_cache_tail_blocks(module) != std::numeric_limits<int>::max();
+    }
     bool use_typed_cache_regions(size_t module = 0) const {
         return moduleConfig(module).use_typed_cache_regions;
     }

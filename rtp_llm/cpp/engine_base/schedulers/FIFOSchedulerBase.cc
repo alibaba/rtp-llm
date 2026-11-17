@@ -204,8 +204,7 @@ absl::Status FIFOSchedulerBase::checkChunkedPrefillRequest(const GenerateStreamP
                                          && group.supportsBorrowedLinearPrefill(cache_config.seq_size_per_block)
                                          && stream->resourceContext().role_type == RoleType::PREFILL
                                          && stream->maxBatchSize() == 1
-                                         && cache_config.reuse_cache_tail_blocks() > 0
-                                         && cache_config.reuse_cache_tail_blocks() < std::numeric_limits<int>::max();
+                                         && cache_config.isLastNConfigured();
             const int64_t prompt_blocks = (seq_length + group.seqSizePerBlock() - 1) / group.seqSizePerBlock();
             if (sparse_reuse && !borrowed_linear && cache_config.reuse_cache_tail_blocks() < prompt_blocks) {
                 error_msg = "[chunked_prefill] cache group [" + group.tag

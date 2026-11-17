@@ -616,8 +616,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         }
         RTP_LLM_CHECK_WITH_INFO(tokens > 0, "%s must be -1 or positive", name);
         const auto tail_blocks = cache_config.reuse_cache_tail_blocks();
-        RTP_LLM_CHECK_WITH_INFO(kv_cache_config.reuse_cache && tail_blocks > 0
-                                    && tail_blocks < std::numeric_limits<int>::max(),
+        RTP_LLM_CHECK_WITH_INFO(kv_cache_config.reuse_cache && cache_config.isLastNConfigured(),
                                 "%s requires REUSE_CACHE and a finite REUSE_CACHE_TAIL_BLOCKS",
                                 name);
         const auto full   = std::find(group_types.begin(), group_types.end(), CacheGroupType::FULL);

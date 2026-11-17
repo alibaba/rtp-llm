@@ -79,8 +79,30 @@ TEST(LinearPrefillPlanTest, GrantsCanChangeWithoutAllocatingAnotherBank) {
     EXPECT_EQ(plan.round(1024, 1024).output_owner_position, 15); // First retained point C2
 }
 
+TEST(LinearPrefillPlanTest, WithoutCheckpointsEveryChunkUsesOnlyTheRequestTailBlock) {
+    for (const int64_t length : {100000, 131072}) {
+        LinearPrefillPlan plan(length, 2048, 16384, 0);
+        const auto tail = (length - 1) / 2048;
+        ASSERT_EQ(plan.newPositions(), (std::vector<int64_t>{tail}));
+        EXPECT_TRUE(plan.checkpointPositions().empty());
+
+        int64_t prefix = 0;
+        for (const int64_t grant : {int64_t{65536}, int64_t{16384}, length - 81920}) {
+            const auto round = plan.round(prefix, grant);
+            EXPECT_EQ(round.input_owner_position, prefix ? std::optional<int64_t>{tail} : std::nullopt);
+            ASSERT_EQ(round.writes.size(), 1u);
+            EXPECT_EQ(round.writes.front().execution_position, (prefix + grant - 1) / 2048);
+            EXPECT_EQ(round.writes.front().owner_position, tail);
+            EXPECT_FALSE(round.writes.front().retained);
+            EXPECT_EQ(round.output_owner_position, tail);
+            prefix += grant;
+        }
+        EXPECT_EQ(prefix, length);
+        EXPECT_FALSE(plan.canPublish(tail, length));
+    }
+}
+
 TEST(LinearPrefillPlanTest, InvalidGeometryAndGrantsFailBeforeKernelDispatch) {
-    EXPECT_THROW(LinearPrefillPlan(1024, 128, 1024, 0), std::invalid_argument);
     EXPECT_THROW(LinearPrefillPlan(1024, 128, 1024, -1), std::invalid_argument);
     EXPECT_THROW(LinearPrefillPlan(1024, 128, 1000, 5), std::invalid_argument);
     EXPECT_THROW(LinearPrefillPlan(2048, 128, 1024, 5, 128), std::invalid_argument);
