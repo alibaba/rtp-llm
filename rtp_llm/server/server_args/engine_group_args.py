@@ -47,7 +47,7 @@ def init_engine_group_args(parser, runtime_config):
     )
     engine_group.add_argument(
         "--enable_linear_replay",
-        env_name="ENABLE_LINEAR_REPLAY",
+        cli_only=True,
         bind_to=(runtime_config, "enable_linear_replay"),
         type=str2bool,
         default=True,

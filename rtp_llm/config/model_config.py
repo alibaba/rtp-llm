@@ -1129,8 +1129,16 @@ def apply_layer_num_override(model_config: ModelConfig, num_layers: int) -> None
 
 
 def _apply_model_override_args(model_config: ModelConfig, model_args: Any) -> None:
-    if model_args.json_model_override_args:
-        model_config.apply_override_args(model_args.json_model_override_args)
+    overrides = json.loads(model_args.json_model_override_args or "{}")
+    for field in (
+        "prefill_kv_workspace_budget_bytes",
+        "shared_expert_weight_shard",
+    ):
+        value = getattr(model_args, field, None)
+        if value is not None:
+            overrides[field] = value
+    if model_args.json_model_override_args or overrides:
+        model_config.apply_override_args(json.dumps(overrides))
 
 
 def build_model_config(

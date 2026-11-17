@@ -16,6 +16,67 @@ spec.loader.exec_module(launch)
 
 
 class CheckpointSourceTest(unittest.TestCase):
+    def test_all_pd_profiles_pass_retired_environment_options_by_cli(self):
+        retired = {
+            "ENABLE_LINEAR_REPLAY": "0",
+            "RTP_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB": "invalid",
+            "PREFILL_KV_WORKSPACE_BUDGET_BYTES": "1",
+            "SHARED_EXPERT_WEIGHT_SHARD": "invalid",
+            "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD": "invalid",
+        }
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(
+            launch.os.environ, retired, clear=True
+        ):
+            target, draft = Path(temporary) / "target", Path(temporary) / "draft"
+            target.mkdir()
+            draft.mkdir()
+            (target / "config.json").write_text('{"num_hidden_layers":93}')
+            for model_type in ("kimi_k3", "kimi_k31"):
+                for role, tp, dp in (
+                    ("PREFILL", 8, 1),
+                    ("DECODE", 8, 1),
+                    ("DECODE", 4, 2),
+                ):
+                    for compact in (False, True):
+                        with self.subTest(
+                            model=model_type, role=role, dp=dp, compact=compact
+                        ):
+                            args = SimpleNamespace(
+                                checkpoint=target,
+                                draft_checkpoint=draft,
+                                start_port=28000,
+                                peer_port=29000,
+                                peer_ip="127.0.0.1",
+                                server=sys.executable,
+                                model_type=model_type,
+                                role=role,
+                                tp_size=tp,
+                                dp_size=dp,
+                                ep_size=8,
+                                fp8_gemm=True,
+                                fp8_kv_cache=True,
+                                orthogonal_smoke=True,
+                                compact_smoke=compact,
+                            )
+                            environment, command = launch.launch_config(args)
+                            options = dict(zip(command[1::2], command[2::2]))
+                            self.assertTrue(retired.keys().isdisjoint(environment))
+                            self.assertEqual(options["--enable_linear_replay"], "1")
+                            self.assertEqual(
+                                options["--shared_expert_weight_shard"],
+                                "1" if role == "PREFILL" else "0",
+                            )
+                            self.assertEqual(
+                                options["--prefill_kv_workspace_budget_bytes"],
+                                str((1 if compact else 6) * 1024**3),
+                            )
+                            overrides = json.loads(
+                                options.get("--json_model_override_args", "{}")
+                            )
+                            self.assertNotIn(
+                                "prefill_kv_workspace_budget_bytes", overrides
+                            )
+
     def test_merge_profiles_select_role_executor_and_precision(self):
         with tempfile.TemporaryDirectory() as tmp:
             target, draft = Path(tmp) / "target", Path(tmp) / "draft"
@@ -52,14 +113,16 @@ class CheckpointSourceTest(unittest.TestCase):
                         "mega_moe" if role == "PREFILL" else "mega_moe_se",
                     )
                     self.assertEqual(options["--prefill_cp_size"], "8")
-                    self.assertEqual(env["ENABLE_LINEAR_REPLAY"], "1")
+                    self.assertEqual(options["--enable_linear_replay"], "1")
+                    self.assertNotIn("ENABLE_LINEAR_REPLAY", env)
                     self.assertEqual(
                         env["QUANTIZATION"], "FP8_PER_BLOCK" if fp8 else ""
                     )
                     self.assertEqual(
-                        env["SHARED_EXPERT_WEIGHT_SHARD"],
+                        options["--shared_expert_weight_shard"],
                         "1" if role == "PREFILL" else "0",
                     )
+                    self.assertNotIn("SHARED_EXPERT_WEIGHT_SHARD", env)
                     grpc = json.loads(env["GRPC_CONFIG_JSON"])
                     self.assertEqual(grpc["max_server_pollers"], 4)
                     self.assertEqual(
@@ -371,12 +434,16 @@ class CheckpointSourceTest(unittest.TestCase):
             )
             with patch.dict(launch.os.environ):
                 launch.os.environ.pop("ENABLE_LINEAR_REPLAY", None)
-                environment, _ = launch.launch_config(args)
-                self.assertEqual(environment["ENABLE_LINEAR_REPLAY"], "1")
+                environment, command = launch.launch_config(args)
+                options = dict(zip(command[1::2], command[2::2]))
+                self.assertEqual(options["--enable_linear_replay"], "1")
+                self.assertNotIn("ENABLE_LINEAR_REPLAY", environment)
 
                 launch.os.environ["ENABLE_LINEAR_REPLAY"] = "0"
-                environment, _ = launch.launch_config(args)
-                self.assertEqual(environment["ENABLE_LINEAR_REPLAY"], "1")
+                environment, command = launch.launch_config(args)
+                options = dict(zip(command[1::2], command[2::2]))
+                self.assertEqual(options["--enable_linear_replay"], "1")
+                self.assertNotIn("ENABLE_LINEAR_REPLAY", environment)
 
     def test_each_pd_role_publishes_http_endpoints_for_frontend_routing(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:
@@ -558,7 +625,10 @@ class CheckpointSourceTest(unittest.TestCase):
                 )
                 env, command = launch.launch_config(args)
                 options = dict(zip(command[1::2], command[2::2]))
-                self.assertEqual(env["RTP_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB"], "6.0")
+                self.assertNotIn("RTP_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB", env)
+                self.assertEqual(
+                    options["--prefill_kv_workspace_budget_bytes"], str(6 * 1024**3)
+                )
                 self.assertEqual(env["QUANTIZATION"], "FP8_PER_BLOCK")
                 self.assertEqual(env["FP8_KV_CACHE"], "1")
                 self.assertEqual(env["SP_TYPE"], "mtp")

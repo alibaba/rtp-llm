@@ -7,10 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set
 
 import torch
 
-from rtp_llm.config.attention_workspace import (
-    kv_workspace_bytes_from_gib,
-    validate_kv_workspace_bytes,
-)
+from rtp_llm.config.attention_workspace import validate_kv_workspace_bytes
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_factory_register import register_model
@@ -57,21 +54,19 @@ class KimiK3ModelConfig(ModelConfig):
         "k3_runtime_config",
         "attention_projection_quant_config",
         "prefill_kv_workspace_budget_bytes",
+        "shared_expert_weight_shard",
     }
     attention_projection_quant_config = None
     k3_runtime_config: KimiK3RuntimeConfig
     DEFAULT_PREFILL_KV_WORKSPACE_GIB = 6
+    shared_expert_weight_shard = False
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # Target and MTP use compact PageRR tables in both P and D roles.
         self.local_kv_cache_layout = LocalKVCacheLayoutPolicy.PAGE_RR
-        # Keep the existing K3 launcher option at the configuration boundary.
-        self.prefill_kv_workspace_budget_bytes = kv_workspace_bytes_from_gib(
-            os.environ.get(
-                "RTP_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB",
-                self.DEFAULT_PREFILL_KV_WORKSPACE_GIB,
-            )
+        self.prefill_kv_workspace_budget_bytes = (
+            self.DEFAULT_PREFILL_KV_WORKSPACE_GIB * 1024**3
         )
 
     def apply_override_args(self, json_model_override_args):
@@ -80,8 +75,14 @@ class KimiK3ModelConfig(ModelConfig):
             "prefill_kv_workspace_budget_bytes", self.prefill_kv_workspace_budget_bytes
         )
         validate_kv_workspace_bytes(budget, allow_unbounded=True)
+        shared_shard = args.get(
+            "shared_expert_weight_shard", self.shared_expert_weight_shard
+        )
+        if type(shared_shard) is not bool:
+            raise ValueError("shared_expert_weight_shard must be a boolean")
         super().apply_override_args(json_model_override_args)
         self.prefill_kv_workspace_budget_bytes = budget
+        self.shared_expert_weight_shard = shared_shard
 
     def init_precision_config(self, kv_cache_config, act_type):
         # K3's nested quantization metadata describes only routed experts.

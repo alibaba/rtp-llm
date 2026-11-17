@@ -85,7 +85,6 @@ def launch_config(args):
         "DG_JIT_PRINT_COMPILER_COMMAND": "1",
         "DG_JIT_PRINT_LOAD_TIME": "1",
         "FLASHINFER_CUDA_ARCH_LIST": "10.3",
-        "SHARED_EXPERT_WEIGHT_SHARD": "1" if args.role == "PREFILL" else "0",
         "USE_ALL_GATHER": "0",
         "USE_DEEPEP_INTERNODE": "0",
         "USE_DEEPEP_LOW_LATENCY": "0",
@@ -113,11 +112,6 @@ def launch_config(args):
         "SP_CHECKPOINT_PATH": str(draft),
         "SP_ACT_TYPE": "BF16",
         "GEN_NUM_PER_CIRCLE": "3",
-        "ENABLE_LINEAR_REPLAY": (
-            "1"
-            if args.role == "DECODE"
-            else os.environ.get("ENABLE_LINEAR_REPLAY", "1")
-        ),
         "QUANTIZATION": "FP8_PER_BLOCK" if fp8_gemm else "",
         "SP_QUANTIZATION": "",
         "FP8_KV_CACHE": str(int(fp8_kv_cache)),
@@ -188,7 +182,6 @@ def launch_config(args):
         "no_proxy": no_proxy,
     }
     if orthogonal_smoke:
-        environment["RTP_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB"] = "6.0"
         if args.role == "DECODE":
             # NCCL graph registration hangs on the SM103 DCP collective path
             # at the 64-request capture bucket; the fixed feat smoke uses 0.
@@ -207,6 +200,8 @@ def launch_config(args):
         "world_size": world_size,
         "local_world_size": world_size,
         "world_rank": 0,
+        "enable_linear_replay": 1,
+        "shared_expert_weight_shard": int(args.role == "PREFILL"),
         "prefill_cp_kv_cache_sharded": int(orthogonal_smoke),
         "prefill_cp_size": source_tp_size if orthogonal_smoke else 1,
         "remote_server_port": args.peer_port,
@@ -246,6 +241,8 @@ def launch_config(args):
         # Match the deployed service and retain the normal staged drain defaults.
         "shutdown_timeout": 120,
     }
+    if orthogonal_smoke:
+        options["prefill_kv_workspace_budget_bytes"] = 6 * 1024**3
     if orthogonal_smoke and args.role == "PREFILL":
         options["memory_cache_size_mb"] = getattr(args, "memory_cache_size_mb", 32768)
     if kv_cache_mem_mb is not None:
@@ -263,11 +260,12 @@ def launch_config(args):
             raise ValueError(
                 "Compact smoke requires FP8 P=TP8 and D=TP8 or DP2/TP4 with PageRR"
             )
-        overrides = {"prefill_kv_workspace_budget_bytes": 1024**3}
+        overrides = {}
         if model_type == "kimi_k31":
             overrides.update(kda_nvfp4=True, dsa_nvfp4=True)
             environment["FP8_MLA"] = "0"
         options.update(
+            prefill_kv_workspace_budget_bytes=1024**3,
             max_seq_len=262144,
             max_context_batch_size=4,
             concurrency_limit=4,

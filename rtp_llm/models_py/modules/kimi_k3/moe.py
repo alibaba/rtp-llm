@@ -358,7 +358,7 @@ class KimiK3LatentMoE(nn.Module):
         )
         self.shared_gate_up = weights[K3W.MOE_SHARED_GATE_UP]
         self.shared_expert_weight_shard = shared_expert_weight_shard_enabled(
-            parallelism.role_type
+            config, parallelism.role_type
         )
         self.shared_weight_tp_size = int(parallelism.tp_size)
         if self.shared_expert_weight_shard:
@@ -403,7 +403,7 @@ class KimiK3LatentMoE(nn.Module):
         if fused_shared and self.shared_expert_weight_shard:
             raise ValueError(
                 "BF16 fused shared expert requires full shared-expert weights on every rank; "
-                "set SHARED_EXPERT_WEIGHT_SHARD=0"
+                "set --shared_expert_weight_shard 0"
             )
         self.norm = (
             RMSNorm(weights[K3W.MOE_ROUTED_NORM], config.layernorm_eps)

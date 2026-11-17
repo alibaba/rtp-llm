@@ -93,7 +93,9 @@ class KimiK31ConfigTest(unittest.TestCase):
         os.environ.pop("RTP_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB", None)
         os.environ["RTP_LLM_FP4_GEMM_BACKEND"] = "cutlass"
 
-    def build_config(self, model_type="kimi_k31", *, fp8_cache=False, override=None):
+    def build_config(
+        self, model_type="kimi_k31", *, fp8_cache=False, override=None, **cli_options
+    ):
         draft = model_type.endswith("_mtp")
         source_type = "kimi_k3" if draft else model_type
         checkpoint = checkpoint_config(source_type, draft=draft)
@@ -106,6 +108,8 @@ class KimiK31ConfigTest(unittest.TestCase):
         args.task_type = TaskType.LANGUAGE_MODEL
         args.act_type = "BF16"
         args.json_model_override_args = json.dumps(override or {})
+        for name, value in cli_options.items():
+            setattr(args, name, value)
         cache = KVCacheConfig()
         cache.fp8_kv_cache = int(fp8_cache)
         cache.seq_size_per_block = cache.kernel_seq_size_per_block = 128
@@ -224,6 +228,51 @@ class KimiK31ConfigTest(unittest.TestCase):
                     self.build_config(
                         override={"prefill_kv_workspace_budget_bytes": invalid}
                     )
+
+    def test_workspace_and_shared_shard_use_model_args_instead_of_environment(self):
+        with patch.dict(
+            os.environ,
+            {
+                "RTP_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB": "1",
+                "SHARED_EXPERT_WEIGHT_SHARD": "1",
+                "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD": "1",
+            },
+        ):
+            for model_type, default_gib in (("kimi_k3", 6), ("kimi_k31", 8)):
+                with self.subTest(model_type=model_type):
+                    config = self.build_config(model_type)
+                    self.assertEqual(
+                        config.prefill_kv_workspace_budget_bytes, default_gib * 1024**3
+                    )
+                    self.assertFalse(config.shared_expert_weight_shard)
+                    config = self.build_config(
+                        model_type,
+                        prefill_kv_workspace_budget_bytes=2 * 1024**3,
+                        shared_expert_weight_shard=True,
+                    )
+                    self.assertEqual(
+                        config.prefill_kv_workspace_budget_bytes, 2 * 1024**3
+                    )
+                    self.assertTrue(config.shared_expert_weight_shard)
+
+    def test_explicit_model_args_override_json_options(self):
+        config = self.build_config(
+            override={
+                "prefill_kv_workspace_budget_bytes": 1024**3,
+                "shared_expert_weight_shard": True,
+            },
+            prefill_kv_workspace_budget_bytes=2 * 1024**3,
+            shared_expert_weight_shard=False,
+        )
+        self.assertEqual(config.prefill_kv_workspace_budget_bytes, 2 * 1024**3)
+        self.assertFalse(config.shared_expert_weight_shard)
+
+    def test_invalid_shared_shard_option_is_rejected(self):
+        for value in (0, 1, "1", None):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError, "shared_expert_weight_shard must be a boolean"
+            ):
+                self.build_config(override={"shared_expert_weight_shard": value})
 
     def test_draft_disables_query_cp_without_changing_target_or_page_rr(self):
         config = self.build_config()

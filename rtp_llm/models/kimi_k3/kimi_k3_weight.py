@@ -107,17 +107,12 @@ def _merge_mla_input_projections(
     return torch.cat((q_a, kv_a, local_output_gate), dim=0).T.contiguous()
 
 
-_LEGACY_SHARED_EXPERT_WEIGHT_SHARD_ENV = "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD"
-
-
-def shared_expert_weight_shard_enabled(role_type: RoleType) -> bool:
+def shared_expert_weight_shard_enabled(model_config, role_type: RoleType) -> bool:
     """Keep shared expert shards resident only on the Prefill TP ranks."""
 
     if role_type != RoleType.PREFILL:
         return False
-    return configured_shared_expert_weight_shard(
-        legacy_env_name=_LEGACY_SHARED_EXPERT_WEIGHT_SHARD_ENV
-    )
+    return configured_shared_expert_weight_shard(model_config)
 
 
 def _pack_shared_gate_up_full(ts: List[torch.Tensor]) -> torch.Tensor:
@@ -735,7 +730,7 @@ class KimiK3Weight(ModelDeployWeightInfo):
         n = KimiK3WeightNames
         gate_suffix = "block_sparse_moe.shared_experts.gate_proj.weight"
         up_suffix = "block_sparse_moe.shared_experts.up_proj.weight"
-        if shared_expert_weight_shard_enabled(self.role_type):
+        if shared_expert_weight_shard_enabled(self.model_config, self.role_type):
             # Main names the token-owner axis FFN SP; the all-gather still
             # uses the attention TP group. Feat called this same axis FFN TP.
             if self.tp_size <= 0 or self.tp_size % 2:

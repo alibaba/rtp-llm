@@ -7,6 +7,7 @@ import pickle
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import TestCase, main
 from unittest.mock import patch
 
@@ -122,6 +123,92 @@ class PipelinePartitionArgumentsTest(TestCase):
                     server_args.setup_args(["--tp_size", "1"])
 
 
+class CliOnlyArgumentsTest(TestCase):
+    def test_cli_only_ignores_environment_and_preserves_bindings(self):
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        for grouped in (False, True):
+            for args in (None, [], ["--other", "3"]):
+                with self.subTest(grouped=grouped, args=args):
+                    parser = EnvArgumentParser()
+                    config = SimpleNamespace(value=0)
+                    parser.set_root_config(config)
+                    target = parser.add_argument_group("test") if grouped else parser
+                    kwargs = {"bind_to": (config, "value")} if grouped else {}
+                    target.add_argument(
+                        "--value", type=int, default=7, cli_only=True, **kwargs
+                    )
+                    parser.add_argument("--other", type=int, default=1)
+                    with (
+                        patch.dict(
+                            os.environ, {"VALUE": "99", "OTHER": "2"}, clear=True
+                        ),
+                        patch.object(sys, "argv", ["prog"]),
+                    ):
+                        parsed = parser.parse_args(args)
+                    self.assertEqual(parsed.value, 7)
+                    self.assertEqual(parsed.other, 3 if args else 2)
+                    if grouped:
+                        self.assertEqual(config.value, 7)
+                    self.assertNotIn("value", parser.get_env_mappings())
+                    self.assertEqual(parser.parse_args(["--value", "9"]).value, 9)
+                    if grouped:
+                        self.assertEqual(config.value, 9)
+
+    def test_environment_mappings_do_not_leak_between_parsers(self):
+        from rtp_llm.server.server_args.server_args import EnvArgumentParser
+
+        environment_parser = EnvArgumentParser()
+        environment_parser.add_argument("--value", type=int, default=1)
+        cli_parser = EnvArgumentParser()
+        cli_parser.add_argument("--value", type=int, default=2, cli_only=True)
+        with patch.dict(os.environ, {"VALUE": "3"}, clear=True):
+            self.assertEqual(environment_parser.parse_args([]).value, 3)
+            self.assertEqual(cli_parser.parse_args([]).value, 2)
+
+
+class ModelCliArgumentsTest(TestCase):
+    def test_retired_environment_is_ignored(self):
+        from rtp_llm.server.server_args import server_args
+
+        for args in (None, []):
+            with (
+                self.subTest(args=args),
+                patch.dict(
+                    os.environ,
+                    {
+                        "RTP_MLA_PREFILL_EXPANDED_KV_BUDGET_GIB": "1",
+                        "PREFILL_KV_WORKSPACE_BUDGET_BYTES": "1024",
+                        "SHARED_EXPERT_WEIGHT_SHARD": "1",
+                        "KIMI_K3_SHARED_EXPERT_WEIGHT_SHARD": "1",
+                    },
+                    clear=True,
+                ),
+                patch.object(sys, "argv", ["prog"]),
+            ):
+                configs = server_args.setup_args(args)
+            self.assertIsNone(configs.model_args.prefill_kv_workspace_budget_bytes)
+            self.assertIsNone(configs.model_args.shared_expert_weight_shard)
+
+    def test_explicit_cli_values_are_typed(self):
+        from rtp_llm.server.server_args import server_args
+
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled), patch.dict(os.environ, {}, clear=True):
+                configs = server_args.setup_args(
+                    [
+                        "--prefill_kv_workspace_budget_bytes",
+                        str(1024**3),
+                        "--shared_expert_weight_shard",
+                        str(int(enabled)),
+                    ]
+                )
+            self.assertEqual(
+                configs.model_args.prefill_kv_workspace_budget_bytes, 1024**3
+            )
+            self.assertIs(configs.model_args.shared_expert_weight_shard, enabled)
+
+
 class LinearReplayArgumentsTest(TestCase):
     def test_default_is_enabled(self):
         from rtp_llm.server.server_args import server_args
@@ -131,10 +218,10 @@ class LinearReplayArgumentsTest(TestCase):
             configs = server_args.setup_args([])
         self.assertTrue(configs.runtime_config.enable_linear_replay)
 
-    def test_environment_values(self):
+    def test_retired_environment_is_ignored(self):
         from rtp_llm.server.server_args import server_args
 
-        for value, expected in (("1", True), ("0", False)):
+        for value in ("1", "0", "invalid"):
             for args in (None, []):
                 with self.subTest(value=value, args=args):
                     with (
@@ -146,7 +233,7 @@ class LinearReplayArgumentsTest(TestCase):
                         patch.object(sys, "argv", ["prog"]),
                     ):
                         configs = server_args.setup_args(args)
-                    self.assertIs(configs.runtime_config.enable_linear_replay, expected)
+                    self.assertTrue(configs.runtime_config.enable_linear_replay)
 
     def test_cli_overrides_environment(self):
         from rtp_llm.server.server_args import server_args
