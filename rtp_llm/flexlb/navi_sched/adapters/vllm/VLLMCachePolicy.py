@@ -202,9 +202,15 @@ def resolve_vllm_hybrid_geometry(vllm_config, kv_cache_config):
 
 def _vllm_layer_specs(spec):
     """Expand vLLM's uniform-type group wrapper to its per-layer specs."""
-    from vllm.v1.kv_cache_interface import iter_layer_specs
+    from vllm.v1 import kv_cache_interface
 
-    return tuple(iter_layer_specs(spec))
+    iterator = getattr(kv_cache_interface, "iter_layer_specs", None)
+    if iterator is not None:
+        return tuple(iterator(spec))
+    layer_specs = getattr(spec, "kv_cache_specs", None)
+    if layer_specs is not None:
+        return tuple(layer_specs.values())
+    return (spec,)
 
 
 @dataclass(frozen=True)

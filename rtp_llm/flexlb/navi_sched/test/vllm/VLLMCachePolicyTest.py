@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from navi_sched.adapters.vllm.VLLMCachePolicy import (
+    _vllm_layer_specs,
     VLLMCacheDelta,
     VLLMCachePolicy,
     VLLMCacheState,
@@ -17,6 +18,32 @@ from navi_sched.adapters.vllm.VLLMCachePolicy import (
     get_vllm_prefill_routing_policy,
     resolve_vllm_hybrid_geometry,
 )
+
+
+class LayerSpecsCompatibilityTest(unittest.TestCase):
+    def expand(self, interface, spec):
+        module = types.ModuleType("vllm.v1")
+        module.kv_cache_interface = interface
+        with mock.patch.dict(sys.modules, {"vllm.v1": module}):
+            return _vllm_layer_specs(spec)
+
+    def test_new_api_uses_native_iterator(self):
+        layer = object()
+        iterator = mock.Mock(return_value=iter([layer]))
+        spec = object()
+        self.assertEqual(
+            (layer,), self.expand(SimpleNamespace(iter_layer_specs=iterator), spec)
+        )
+        iterator.assert_called_once_with(spec)
+
+    def test_old_api_expands_uniform_group(self):
+        first, second = object(), object()
+        spec = SimpleNamespace(kv_cache_specs={"a": first, "b": second})
+        self.assertEqual((first, second), self.expand(SimpleNamespace(), spec))
+
+    def test_old_api_preserves_single_spec(self):
+        spec = object()
+        self.assertEqual((spec,), self.expand(SimpleNamespace(), spec))
 
 
 class FullAttentionSpec:
