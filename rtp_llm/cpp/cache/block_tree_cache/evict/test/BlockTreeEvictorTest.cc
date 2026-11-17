@@ -47,6 +47,7 @@ namespace {
 using block_tree_cache_test::allocateDeviceBlocksForTest;
 using block_tree_cache_test::MultiNodeBlocks;
 using block_tree_cache_test::releaseLowerTierSeedRefs;
+using block_tree_cache_test::reserveEvictionSourceForTest;
 using ScriptedTransferEngine = block_tree_cache_test::ScriptedPerRankBlockTransferEngine;
 using block_tree_cache_test::unreferenceDeviceBlocksForTest;
 
@@ -412,7 +413,7 @@ public:
         auto        context     = std::make_shared<TransferBatchAsyncContext>();
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            descriptors_.push_back(descriptors);
+            descriptors_.emplace_back(descriptors.begin(), descriptors.end());
             contexts_.push_back(context);
         }
         cv_.notify_all();
@@ -489,10 +490,6 @@ private:
 
 class BlockTreeEvictorTestPeer {
 public:
-    static void reserveSource(BlockTreeEvictor& evictor, const TransferDescriptor& eviction_desc) {
-        evictor.reserveSource({eviction_desc});
-    }
-
     static EvictionDropTask createDropTask(BlockTreeEvictor& evictor, TransferDescriptor primary_desc) {
         return evictor.createDropTask(std::move(primary_desc));
     }
@@ -1797,17 +1794,15 @@ TransferDescriptor makeSelectionDesc(TreeNode* node, size_t group_set_id, Tier s
 
 std::optional<EvictionTransferTask> activateTransferForTest(BlockTreeEvictor&  evictor,
                                                             TransferDescriptor eviction_desc) {
-    EvictionTransferTask task(TransferTask({}, std::chrono::seconds(30)));
-    task.timings.emplace_back(eviction_desc.node->group_set_resources[eviction_desc.group_set_id].candidate_meta);
+    EvictionTimingMetrics timing(eviction_desc.node->group_set_resources[eviction_desc.group_set_id].candidate_meta);
     BlockIdxType target = evictor.tree_->groupSets()[eviction_desc.group_set_id]->allocateSingleBlock(
         eviction_desc.target_tier, BlockTreeRefType::EVICT);
     if (isNullBlockIdx(target)) {
         return std::nullopt;
     }
     eviction_desc.target_blocks = {target};
-    evictor.reserveSource({eviction_desc});
-    task.mutableDescriptorsForPreparation().push_back(std::move(eviction_desc));
-    return task;
+    reserveEvictionSourceForTest(evictor, eviction_desc);
+    return EvictionTransferTask(TransferTask({std::move(eviction_desc)}, std::chrono::seconds(30)), {timing});
 }
 
 class CascadeTestEnvironment {
@@ -3829,7 +3824,7 @@ TEST_F(BlockTreeEvictorTest, SelectionCacheDefersReleasedCandidateUntilNextPass)
         ASSERT_TRUE(first.has_value());
         EXPECT_EQ(first->node, nodes[1]);
         EXPECT_EQ(eviction_batch_context.rejected_candidates.count(nodes[0]), 1u);
-        evictor_->reserveSource({*first});
+        reserveEvictionSourceForTest(*evictor_, *first);
 
         // Model a concurrent request release. The same pass must not revisit
         // the held prefix, even after its pool reference has gone away.
@@ -3837,7 +3832,7 @@ TEST_F(BlockTreeEvictorTest, SelectionCacheDefersReleasedCandidateUntilNextPass)
         const auto second = evictor_->chooseVictim(0, Tier::DEVICE, force_drop, &eviction_batch_context);
         ASSERT_TRUE(second.has_value());
         EXPECT_EQ(second->node, nodes[2]);
-        evictor_->reserveSource({*second});
+        reserveEvictionSourceForTest(*evictor_, *second);
         EXPECT_FALSE(evictor_->chooseVictim(0, Tier::DEVICE, force_drop, &eviction_batch_context).has_value());
 
         const auto selection = evictor_->getAndResetEvictionVictimMetrics();
@@ -4327,7 +4322,7 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimPreservesExistingDemotionOwnerAndTarget
                              /*initial_owner=*/true);
     owner.target_blocks = {group_->allocateSingleBlock(Tier::DISK, BlockTreeRefType::EVICT)};
     ASSERT_FALSE(isNullBlockIdx(owner.target_blocks.front()));
-    BlockTreeEvictorTestPeer::reserveSource(*evictor_, owner);
+    reserveEvictionSourceForTest(*evictor_, owner);
     const BlockIdxType owner_target = owner.target_blocks[0];
     ASSERT_EQ(insertedNode(result)->group_set_resources[0].transfer_state, GroupSetTransferState::EVICTING);
 
@@ -4720,7 +4715,7 @@ TEST_F(BlockTreeEvictorTest, InvalidationDetachesBusyDescendantAndReclaimsAfterD
     const TransferDescriptor child_transfer(
         busy_child, 0, 2, Tier::HOST, Tier::DISK, {(*blocks)[2]}, /*initial_owner=*/true);
     // Model both source reservation and timing ownership of an in-flight eviction.
-    evictor_->reserveSource({child_transfer});
+    reserveEvictionSourceForTest(*evictor_, child_transfer);
     evictor_->heaps_[0].pending_timings.emplace(
         std::make_pair(busy_child, child_transfer.generation),
         EvictionTimingMetrics(busy_child->group_set_resources[0].candidate_meta));
@@ -4865,15 +4860,18 @@ TEST_F(BlockTreeEvictorTest, RematchedEvictionReportsCancellationOnlyOnCopySucce
         ASSERT_TRUE(blocks.has_value());
         insert({100}, {{makeResource(Tier::DEVICE, (*blocks)[0])}});
         insert({200}, {{makeResource(Tier::DEVICE, (*blocks)[1])}});
-        auto batch = std::make_shared<EvictionTransferTask>(TransferTask({}, std::chrono::seconds(30)));
+        std::vector<TransferDescriptor>    descriptors;
+        std::vector<EvictionTimingMetrics> timings;
         for (size_t i = 0; i < 2; ++i) {
             auto victim = evictor_->chooseVictim(0, Tier::DEVICE);
             ASSERT_TRUE(victim.has_value());
             auto task = activateTransferForTest(*evictor_, *victim);
             ASSERT_TRUE(task.has_value());
-            batch->mutableDescriptorsForPreparation().push_back(task->descriptors().front());
-            batch->timings.push_back(task->timings.front());
+            descriptors.push_back(task->descriptors().front());
+            timings.push_back(task->timings.front());
         }
+        auto batch = std::make_shared<EvictionTransferTask>(
+            TransferTask(std::move(descriptors), std::chrono::seconds(30)), std::move(timings));
         for (const auto& desc : batch->descriptors()) {
             desc.node->group_set_resources[0].candidate_meta.last_access_seq = evictor_->nextAccessSeq();
             evictor_->onMatched(desc.node, 0);

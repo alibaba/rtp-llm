@@ -1303,16 +1303,16 @@ TEST(BlockTreeCacheMetricsTest, CompletionTagsPreserveWorkflowDirectionWithoutRe
 TEST(BlockTreeCacheMetricsTest, StageScopeReportsUnwindingAsFailureAndMixedSourcesExplicitly) {
     auto                          raw = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
     BlockTreeCacheMetricsReporter reporter(raw, true, std::chrono::hours(1));
-    TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2}), TransferDescriptor::diskToDevice(0, 3, {4})},
-                      std::chrono::seconds(1),
-                      123);
+    const std::vector<TransferDescriptor> descriptors{TransferDescriptor::hostToDevice(0, 1, {2}),
+                                                      TransferDescriptor::diskToDevice(0, 3, {4})};
+    TransferTask                          task(descriptors, std::chrono::seconds(1), 123);
     auto         stage_context = CacheStageContext::forTask(reporter, task, "load");
     EXPECT_STREQ(stage_context.source, "MIXED");
     EXPECT_STREQ(stage_context.target, "DEVICE");
     EXPECT_STREQ(stage_context.path, "mixed_to_device");
-    LoadTaskRunner::Task workflow(task.descriptors(),
-                                  TransferTask({task.descriptors()[0]}, std::chrono::seconds(1), 123),
-                                  TransferTask({task.descriptors()[1]}, std::chrono::seconds(1), 123));
+    LoadTaskRunner::Task workflow(descriptors,
+                                  TransferTask({descriptors[0]}, std::chrono::seconds(1), 123),
+                                  TransferTask({descriptors[1]}, std::chrono::seconds(1), 123));
     EXPECT_EQ(workflow.completionTransfer().traceId(), workflow.host_to_device_task.traceId());
     workflow.disk_result = TransferResult(1);
     EXPECT_EQ(workflow.completionTransfer().traceId(), workflow.disk_to_device_task.traceId());
@@ -4602,7 +4602,7 @@ TEST_F(BlockTreeCacheTest, EventPublicationTracksComponentsIndependently) {
     const TransferDescriptor desc(node, 1, 0, Tier::DEVICE, Tier::HOST, {46}, /*initial_owner=*/true);
     {
         std::lock_guard<std::mutex> lock(cache->mutex_);
-        cache->evictor_.reserveSource({desc});
+        reserveEvictionSourceForTest(cache->evictor_, desc);
     }
     EXPECT_EQ(cache->logicalCacheSnapshot().block_groups, complete.block_groups);
     ASSERT_EQ(publisher->events.size(), 5u);
@@ -4717,7 +4717,7 @@ TEST_F(BlockTreeCacheTest, EventPublicationPersistsDuringDemotionAndAfterFailure
     const TransferDescriptor desc(node, 0, 0, Tier::DEVICE, Tier::HOST, {42}, /*initial_owner=*/true);
     {
         std::lock_guard<std::mutex> lock(cache_->mutex_);
-        cache_->evictor_.reserveSource({desc});
+        reserveEvictionSourceForTest(cache_->evictor_, desc);
     }
     EXPECT_EQ(cache_->logicalCacheSnapshot().block_groups, (std::map<int64_t, std::vector<size_t>>{{100, {0}}}));
     {

@@ -20,9 +20,9 @@ public:
 private:
     friend class DeviceDiskTransferExecutor;
 
-    TransferResult executeBatch(const std::vector<HostBufferView>&     hosts,
-                                const std::vector<TransferDescriptor>& descriptors,
-                                const std::vector<const GroupSet*>&    group_sets) override;
+    TransferResult executeBatch(const std::vector<HostBufferView>&  hosts,
+                                DescriptorView                      descriptors,
+                                const std::vector<const GroupSet*>& group_sets) override;
 };
 
 }  // namespace rtp_llm

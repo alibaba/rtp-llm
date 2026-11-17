@@ -404,8 +404,9 @@ MultiRankBlockTransferEngine::MultiRankBlockTransferEngine(
     broadcast_manager_(std::move(broadcast_manager)),
     metrics_reporter_(std::move(metrics_reporter)) {}
 
-std::vector<std::string> MultiRankBlockTransferEngine::participantAddresses() const {
-    return broadcast_manager_ ? broadcast_manager_->workerAddresses() : std::vector<std::string>{};
+const std::vector<std::string>& MultiRankBlockTransferEngine::participantAddresses() const {
+    static const std::vector<std::string> empty;
+    return broadcast_manager_ ? broadcast_manager_->workerAddresses() : empty;
 }
 
 std::shared_ptr<TransferAsyncContext> MultiRankBlockTransferEngine::execute(TransferTask task,
@@ -433,7 +434,8 @@ std::shared_ptr<TransferAsyncContext> MultiRankBlockTransferEngine::execute(Tran
                 CacheCopyError::NOT_EXECUTED),
             block_count);
     };
-    MemoryOperationRequestPB request;
+    FunctionRequestPB function_request;
+    auto&             request = *function_request.mutable_mem_request();
     if (!BlockTransferRequestConverter::encodeTransfer(request, task, group_sets_)) {
         if (task.expired()) {
             return deadline_exceeded();
@@ -446,18 +448,12 @@ std::shared_ptr<TransferAsyncContext> MultiRankBlockTransferEngine::execute(Tran
         return std::make_shared<CompletedTransferAsyncContext>(
             ErrorInfo(ErrorCode::INVALID_PARAMS, "missing transfer broadcast manager"), block_count);
     }
-    const size_t      worker_count = broadcast_manager_->workerNum();
-    FunctionRequestPB function_request;
-    function_request.mutable_mem_request()->CopyFrom(request);
-    std::vector<FunctionRequestPB> requests(worker_count, function_request);
     const auto                     remaining = task.remainingTimeout();
     if (!remaining) {
         return deadline_exceeded();
     }
     const int broadcast_timeout_ms = static_cast<int>(remaining->count());
-    for (auto& rank_request : requests) {
-        rank_request.mutable_mem_request()->set_timeout_ms(broadcast_timeout_ms);
-    }
+    request.set_timeout_ms(broadcast_timeout_ms);
     auto context = MultiRankTransferAsyncContext::create(broadcast_manager_->workerAddresses(),
                                                         block_count,
                                                         std::move(wait_timer),
@@ -469,7 +465,7 @@ std::shared_ptr<TransferAsyncContext> MultiRankBlockTransferEngine::execute(Tran
     std::shared_ptr<TransferBroadcastResult> broadcast_result;
     try {
         broadcast_result = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
-            requests,
+            function_request,
             broadcast_timeout_ms,
             [](const std::shared_ptr<RpcService::Stub>&    stub,
                const std::shared_ptr<grpc::ClientContext>& context,

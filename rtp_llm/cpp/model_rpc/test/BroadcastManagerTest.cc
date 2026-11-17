@@ -390,6 +390,43 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
     }
 }
 
+TEST_F(BroadcastManagerTest, BroadcastCommonRequestKeepsIndependentPayloadsAfterCallerClearsRequest) {
+    std::vector<std::unique_ptr<TestRpcServer>> servers;
+    std::vector<std::string>                    addresses;
+    for (size_t rank = 0; rank < 2; ++rank) {
+        auto server = std::make_unique<TestRpcServer>(std::make_unique<TestRpcService>());
+        ASSERT_TRUE(server->start());
+        addresses.push_back("127.0.0.1:" + std::to_string(server->listenPort()));
+        servers.push_back(std::move(server));
+    }
+    BroadcastManager manager(addresses);
+    ASSERT_TRUE(manager.init());
+    FunctionRequestPB request;
+    auto*             memory = request.mutable_mem_request();
+    memory->set_transfer_trace_id(73);
+    memory->set_copy_direction(MemoryOperationRequestPB::H2D);
+    auto* item = memory->add_copy_items();
+    item->set_mem_block(21);
+    item->add_group_tags("common-payload");
+    const auto expected = request.SerializeAsString();
+    auto       rpc_call = [](const std::shared_ptr<RpcService::Stub>&    stub,
+                       const std::shared_ptr<grpc::ClientContext>& context,
+                       const FunctionRequestPB&                    payload,
+                       grpc::CompletionQueue* cq) { return stub->AsyncExecuteFunction(context.get(), payload, cq); };
+    auto       result   = manager.broadcast<FunctionRequestPB, FunctionResponsePB>(request, 1000, rpc_call);
+    ASSERT_NE(result, nullptr);
+    request.Clear();
+
+    ASSERT_EQ(result->worker_contexts_.size(), 2u);
+    for (const auto& context : result->worker_contexts_) {
+        EXPECT_EQ(context->request.SerializeAsString(), expected);
+        EXPECT_NE(&context->request, &request);
+    }
+    EXPECT_NE(&result->worker_contexts_[0]->request, &result->worker_contexts_[1]->request);
+    result->waitDone();
+    EXPECT_TRUE(result->success());
+}
+
 TEST_F(BroadcastManagerTest, Broadcast_OnDoneCompletesWithoutWaitDone) {
     auto service = std::make_unique<TestRpcService>();
     auto server  = std::make_unique<TestRpcServer>(std::move(service));

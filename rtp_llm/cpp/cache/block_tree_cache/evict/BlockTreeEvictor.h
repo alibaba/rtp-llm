@@ -86,7 +86,7 @@ public:
                                             std::optional<TierWatermark> full_watermark = std::nullopt);
     size_t computeWatermarkEvictCount(const GroupSet& group_set, Tier tier, const TierWatermark& watermark);
     // Release a detached operation's source CACHE reference after it settles, without publishing its target.
-    void discardDetachedTransfer(const std::vector<TransferDescriptor>& transfer_descs);
+    void discardDetachedTransfer(DescriptorView transfer_descs);
 
     // Snapshot before settlement can delete nodes; paths remain valid across cascading drops.
     struct InvalidationSource {
@@ -178,7 +178,7 @@ private:
                                  bool                  notify_settled         = true,
                                  const char*           trigger_type           = "force_drop",
                                  EvictionBatchContext* eviction_batch_context = nullptr);
-    void rollbackTransferLocked(const std::vector<TransferDescriptor>& descs);
+    void             rollbackTransferLocked(DescriptorView descs);
     void updateFullCandidate(TreeNode* node, size_t group_set_id);
     void updateFullCandidate(TreeNode* parent);
 
@@ -186,16 +186,15 @@ private:
     void                            collectFullPrune(const TransferDescriptor&                  eviction_desc,
                                                      EvictionDropTask&                          task,
                                                      std::vector<std::pair<TreeNode*, size_t>>& detached_resources) const;
-    void                            reserveSource(const std::vector<TransferDescriptor>& eviction_descs);
-    void                            restoreSource(const std::vector<TransferDescriptor>& eviction_descs);
-    void                            releaseTargetBlocks(const std::vector<TransferDescriptor>& descs);
+    void                            restoreSource(DescriptorView eviction_descs);
+    void                            releaseTargetBlocks(DescriptorView descs);
     void                            completeDrop(const TransferDescriptor& desc);
-    void                            completeEvict(const std::vector<TransferDescriptor>& descs);
-    void                            settleEviction(const std::vector<TransferDescriptor>& descs);
+    void                            completeEvict(DescriptorView descs);
+    void                            settleEviction(DescriptorView descs);
     void                            settleSingleEviction(TreeNode* node);
     void                            eraseNodeFromAllHeaps(TreeNode* node);
-    void                            updatePendingRelease(const std::vector<TransferDescriptor>& descs, bool reserve);
-    void updatePendingReleaseBlocks(const std::vector<TransferDescriptor>& descs, bool reserve, bool revoked);
+    void                            updatePendingRelease(DescriptorView descs, bool reserve);
+    void                            updatePendingReleaseBlocks(DescriptorView descs, bool reserve, bool revoked);
 
     BlockTree*                          tree_;
     BlockTreeTaskPool*                  task_pool_{nullptr};

@@ -101,6 +101,8 @@ FrozenTask::PreparedExecution FrozenTask::prepare(ExecutionInfo execution) {
             // path. Sources never contribute frozen references.
             if (source.pool) {
                 source.pool_name = source.pool->poolName();
+            } else if (source.pool_name.empty()) {
+                source.pool_name = "unresolved";
             }
         }
         for (auto& target : descriptor.targets) {

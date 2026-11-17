@@ -14,12 +14,8 @@ struct EvictionTransferTask {
     EvictionTransferTask(TransferTask task, std::vector<EvictionTimingMetrics> timings):
         transfer_task(std::move(task)), timings(std::move(timings)) {}
 
-    const std::vector<TransferDescriptor>& descriptors() const {
+    DescriptorView descriptors() const {
         return transfer_task.descriptors();
-    }
-
-    std::vector<TransferDescriptor>& mutableDescriptorsForPreparation() {
-        return transfer_task.mutableDescriptorsForPreparation();
     }
 
     TransferTask                        transfer_task;

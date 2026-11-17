@@ -30,14 +30,14 @@ public:
 private:
     friend class DeviceDiskTransferExecutor;
 
-    TransferResult executeBatch(const std::vector<HostBufferView>&     hosts,
-                                const std::vector<TransferDescriptor>& descriptors,
-                                const std::vector<const GroupSet*>&    group_sets) override;
+    TransferResult executeBatch(const std::vector<HostBufferView>&  hosts,
+                                DescriptorView                      descriptors,
+                                const std::vector<const GroupSet*>& group_sets) override;
 
     std::pair<TransferStatus, std::vector<DeviceHostCopyPlan>>
-    generatePlan(const std::vector<HostBufferView>&     hosts,
-                 const std::vector<TransferDescriptor>& descriptors,
-                 const std::vector<const GroupSet*>&    group_sets) const;
+    generatePlan(const std::vector<HostBufferView>&  hosts,
+                 DescriptorView                      descriptors,
+                 const std::vector<const GroupSet*>& group_sets) const;
 
     std::shared_ptr<CrcCopyExecutor>    load_crc_executor_, evict_crc_executor_;
     DeviceHostCopyOptions               options_;

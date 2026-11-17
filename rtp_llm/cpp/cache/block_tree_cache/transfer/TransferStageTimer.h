@@ -44,8 +44,7 @@ struct CacheStageContext {
     }
     // A logical load may settle HOST and DISK sources together. Do not charge
     // that completion to just the last physical transfer direction.
-    static CacheStageContext workflow(const char*                            operation,
-                                      const std::vector<TransferDescriptor>& descriptors) noexcept {
+    static CacheStageContext workflow(const char* operation, DescriptorView descriptors) noexcept {
         if (descriptors.empty())
             return {operation, "NONE", "NONE", "unknown"};
         auto identity      = local(descriptors.front().source_tier, descriptors.front().target_tier);
@@ -63,11 +62,11 @@ struct CacheStageContext {
 
     // Freeze eligibility before observation-only work. Later profiling sessions
     // must not turn a disabled workflow into a partially observed one.
-    static CacheStageContext forWorkflow(const BlockTreeCacheMetricsReporter&   reporter,
-                                         const std::vector<TransferDescriptor>& descriptors,
-                                         const char*                            operation,
-                                         int64_t                                request_id,
-                                         uint64_t                               transfer_id) noexcept {
+    static CacheStageContext forWorkflow(const BlockTreeCacheMetricsReporter& reporter,
+                                         DescriptorView                       descriptors,
+                                         const char*                          operation,
+                                         int64_t                              request_id,
+                                         uint64_t                             transfer_id) noexcept {
         const bool enabled = reporter.stageMetricsEnabled() || AsyncProfileSession::enabled();
         auto       context =
             enabled ? workflow(operation, descriptors) : CacheStageContext{operation, "NONE", "NONE", "unknown"};

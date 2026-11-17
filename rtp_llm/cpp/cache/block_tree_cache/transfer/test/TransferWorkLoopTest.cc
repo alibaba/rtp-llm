@@ -705,9 +705,8 @@ TEST_F(TransferWorkLoopTest, OrdinaryEntryExceptionCompletesOnlyThatTask) {
     auto task = writes();
     const auto trace = std::to_string(task.traceId());
     ASSERT_TRUE(registry.begin(trace));
-    task.setCompletionProof(std::make_shared<TransferBufferSafety>([&registry, trace] {
-        registry.finish(trace, true);
-    }));
+    task.setCompletionProof(
+        std::make_shared<TransferBufferSafety>([&registry, trace] { registry.finish(trace, true); }));
     auto context = owner.execute(std::move(task));
     owner.entries_.splice(owner.entries_.end(), owner.incoming_);
     auto& entry    = **owner.entries_.begin();
@@ -829,35 +828,6 @@ TEST_F(TransferWorkLoopTest, FixedBatchLimitAlsoBoundsRoutesWithoutStaging) {
     cleanup.run();
     EXPECT_TRUE(context->success());
     EXPECT_EQ(io->writes, 3u);
-}
-
-TEST_F(TransferWorkLoopTest, LegacyLocalRequestGroupsBeforeIndependentBatchExecution) {
-    auto second = makeTestGroupSet(1, group->topologyPtr(), {"group0"}, {}, host, disk);
-    engine      = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group, second},
-                                                          true,
-                                                          DeviceHostCopyOptions{},
-                                                          128,
-                                                          2,
-                                                          2,
-                                                          8,
-                                                          nullptr,
-                                                          0,
-                                                          1,
-                                                          false,
-                                                          diskOptions());
-    ASSERT_FALSE(engine->asyncEnabled());
-    auto context = executeRequest(makeTransferTask({TransferDescriptor::hostToDisk(0, hosts[4], disks[0]),
-                                                    TransferDescriptor::hostToDisk(1, hosts[3], disks[1]),
-                                                    TransferDescriptor::hostToDisk(0, hosts[2], disks[2]),
-                                                    TransferDescriptor::hostToDisk(1, hosts[1], disks[3]),
-                                                    TransferDescriptor::hostToDisk(0, hosts[0], disks[4])}));
-    ASSERT_TRUE(await(context));
-    request_dispatcher->shutdown();
-    EXPECT_TRUE(context->success());
-    EXPECT_EQ(context->result().block_errors, std::vector<CacheCopyError>(5, CacheCopyError::NONE));
-    EXPECT_EQ(io->writes, 5u);
-    for (size_t i = 0; i < 5; ++i)
-        EXPECT_EQ(io->data[disk->blockOffset(disks[i])], 21u - i);
 }
 
 TEST_F(TransferWorkLoopTest, PureDiskResultsAndCallbacksBelongToOwner) {
@@ -1429,31 +1399,6 @@ TEST_F(TransferWorkLoopTest, PerRankRejectsInvalidDescriptorsBeforeAdmission) {
     EXPECT_EQ(io->writes, 0u);
 }
 
-TEST_F(TransferWorkLoopTest, LocalRequestGroupsBatchesWithoutChangingResultOrder) {
-    auto second = makeTestGroupSet(1, group->topologyPtr(), {"group0"}, {}, host, disk);
-    engine       = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group, second},
-                                                          true,
-                                                          DeviceHostCopyOptions{},
-                                                          4,
-                                                          2,
-                                                          1,
-                                                          4,
-                                                          nullptr,
-                                                          0,
-                                                          1,
-                                                          true,
-                                                          diskOptions());
-    auto context = executeRequest(makeTransferTask({TransferDescriptor::hostToDisk(0, hosts[2], disks[0]),
-                                                    TransferDescriptor::hostToDisk(1, hosts[1], disks[1]),
-                                                    TransferDescriptor::hostToDisk(0, hosts[0], disks[2])}));
-    ASSERT_TRUE(await(context));
-    engine->shutdown();
-    EXPECT_EQ(context->result().block_errors, std::vector<CacheCopyError>(3, CacheCopyError::NONE));
-    EXPECT_EQ(io->data[disk->blockOffset(disks[0])], 19u);
-    EXPECT_EQ(io->data[disk->blockOffset(disks[1])], 18u);
-    EXPECT_EQ(io->data[disk->blockOffset(disks[2])], 17u);
-}
-
 TEST_F(TransferWorkLoopTest, BeforeCompleteCallbackRunsBeforeReadyAndOutsideInputLock) {
     enableMetrics();
     for (bool with_reporter : {true, false}) {
@@ -1789,13 +1734,14 @@ TEST_F(TransferWorkLoopCrcTest, DeadlineSkipsUnsubmittedCrcAndReleasesResources)
             std::shared_ptr<HostStagingBlockPool> pool;
             if (from_disk)
                 pool = std::make_shared<HostStagingBlockPool>(1, disk->strideBytes());
-            TransferWorkLoop                       owner({group},
-                                   std::make_unique<CrcCopyExecutor>(std::vector<GroupSetPtr>{group}, 1, 1),
-                                   direct_disk_executor.get(),
-                                   TransferOperation::LOAD,
-                                   1,
-                                   8,
-                                   std::move(pool));
+            TransferWorkLoop owner(
+                {group},
+                std::make_unique<CrcCopyExecutor>(std::vector<GroupSetPtr>{group}, CrcCopyDirection::LOAD, 1, 1),
+                direct_disk_executor.get(),
+                TransferOperation::LOAD,
+                1,
+                8,
+                std::move(pool));
             block_tree_cache_detail::ScopeRollback finish([&] {
                 owner.start();
                 owner.shutdown();
@@ -2124,7 +2070,7 @@ TEST_F(TransferWorkLoopCrcTest, ExpiredStagingWaiterIsSkippedWithoutBlockingTheN
         SCOPED_TRACE(transferOperationName(operation));
         size_t              callbacks = 0;
         std::atomic<size_t> submissions{0};
-        auto                crc = std::make_unique<CrcCopyExecutor>(std::vector<GroupSetPtr>{group}, 2, 1);
+        auto crc = std::make_unique<CrcCopyExecutor>(std::vector<GroupSetPtr>{group}, CrcCopyDirection::LOAD, 2, 1);
         for (auto& [ordinal, slots] : crc->slots_)
             for (auto& slot : slots)
                 slot.copy->setTestHook([&](const char* point, void*, void*) {

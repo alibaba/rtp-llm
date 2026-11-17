@@ -119,8 +119,7 @@ std::shared_ptr<TransferAsyncContext> TransferExecutor::execute(TransferTask    
                     active_begin     = begin;
                     active_end       = end;
                     const std::vector<HostBufferView>     sub_hosts(hosts.begin() + begin, hosts.begin() + end);
-                    const std::vector<TransferDescriptor> sub_descriptors(descriptors.begin() + begin,
-                                                                          descriptors.begin() + end);
+                    const DescriptorView                  sub_descriptors(descriptors.data() + begin, end - begin);
                     const std::vector<const GroupSet*>    sub_group_sets(group_sets.begin() + begin,
                                                                       group_sets.begin() + end);
                     const char*                           stage = source == Tier::DISK   ? "disk_read" :
