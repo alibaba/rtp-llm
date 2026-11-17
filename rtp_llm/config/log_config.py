@@ -89,7 +89,7 @@ def setup_logging():
 
     # nccl log file path
     if os.environ.get("NCCL_DEBUG_FILE") is None:
-        os.environ["NCCL_DEBUG_FILE"] = os.path.join(LOG_PATH, "nccl.log")
+        os.environ["NCCL_DEBUG_FILE"] = os.path.join(LOG_PATH, "nccl.%h.%p.log")
         logging.info(
             f"successfully set NCCL_DEBUG_FILE path to {os.environ['NCCL_DEBUG_FILE']}"
         )
