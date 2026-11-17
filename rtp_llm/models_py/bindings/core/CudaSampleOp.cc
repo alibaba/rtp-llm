@@ -606,24 +606,29 @@ void pyTopPRenormProbs(const torch::Tensor& probs, torch::Tensor& renorm_probs, 
 torch::Tensor reserveSamplingSeedOffsets(const std::vector<at::Generator>& generators,
                                          int64_t                           batch_size,
                                          int                               increment,
-                                         int64_t                           prefix = 0) {
+                                         int64_t                           prefix = 0,
+                                         bool                              batch_reservations = false) {
     auto options  = torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true);
     auto state_h =
         torch::empty({prefix + 2 * batch_size}, options).narrow(0, prefix, 2 * batch_size).view({2, batch_size});
     auto seed_ptr = state_h.data_ptr<int64_t>();
     auto off_ptr  = seed_ptr + batch_size;
 
-    for (int64_t i = 0; i < batch_size; ++i) {
-        // Do not resolve the default CUDA generator for explicit per-request
-        // generators. Keep PyTorch's capture checks and offset reservation intact.
-        const auto& generator = (i < static_cast<int64_t>(generators.size()) && generators[i].defined()) ?
-                                    generators[i] :
-                                    at::cuda::detail::getDefaultCUDAGenerator();
-        auto*       impl      = at::check_generator<at::CUDAGeneratorImpl>(generator);
-        std::lock_guard<std::mutex> lock(impl->mutex_);
-        const auto                  state = impl->philox_cuda_state(increment);
-        seed_ptr[i]                       = static_cast<int64_t>(state.seed_.val);
-        off_ptr[i]                        = static_cast<int64_t>(state.offset_.val);
+    if (batch_reservations) {
+        get_sampling_seed_offsets(generators, batch_size, increment, seed_ptr, off_ptr);
+    } else {
+        for (int64_t i = 0; i < batch_size; ++i) {
+            // Do not resolve the default CUDA generator for explicit per-request
+            // generators. Keep PyTorch's capture checks and offset reservation intact.
+            const auto& generator = (i < static_cast<int64_t>(generators.size()) && generators[i].defined()) ?
+                                        generators[i] :
+                                        at::cuda::detail::getDefaultCUDAGenerator();
+            auto*       impl      = at::check_generator<at::CUDAGeneratorImpl>(generator);
+            std::lock_guard<std::mutex> lock(impl->mutex_);
+            const auto                  state = impl->philox_cuda_state(increment);
+            seed_ptr[i]                       = static_cast<int64_t>(state.seed_.val);
+            off_ptr[i]                        = static_cast<int64_t>(state.offset_.val);
+        }
     }
 
     return state_h;
@@ -632,8 +637,9 @@ torch::Tensor reserveSamplingSeedOffsets(const std::vector<at::Generator>& gener
 std::pair<torch::Tensor, torch::Tensor> makeSamplingSeedOffsetTensors(const std::vector<at::Generator>& generators,
                                                                       int64_t                           batch_size,
                                                                       int                               increment,
-                                                                      TensorHolder*                     buffer_holder) {
-    auto state_h = reserveSamplingSeedOffsets(generators, batch_size, increment);
+                                                                      TensorHolder*                     buffer_holder,
+                                                                      bool batch_reservations = false) {
+    auto state_h = reserveSamplingSeedOffsets(generators, batch_size, increment, 0, batch_reservations);
     auto state_d = state_h.to(torch::kCUDA, /*non_blocking=*/true);
     if (buffer_holder != nullptr) {
         buffer_holder->hold_host(state_h);
@@ -801,7 +807,8 @@ static GreedyOutput tryCompactDeferredSampling(const GreedyParams& params, float
                 prepared_rng = reserveSamplingSeedOffsets(params.deferred_rejection_generators,
                                                           requests,
                                                           std::max<int64_t>(32, ((rows + 3) / 4) * 4),
-                                                          log_normalizer.defined() ? 12 : 11);
+                                                          log_normalizer.defined() ? 12 : 11,
+                                                          params.allow_glm5_multistep_sampling_optimizations);
             }
             return GreedyOutput{torch::Tensor(),
                                 true,
@@ -879,7 +886,8 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
         auto probs_t = torch::softmax(params.logits, -1);
         auto output  = torch::empty_like(probs_t);
         if (no_k) {
-            top_p_renorm_probs(probs_t, output, top_p, 1.0, (int64_t)cur_stream);
+            top_p_renorm_probs(probs_t, output, top_p, 1.0, (int64_t)cur_stream,
+                               params.allow_glm5_multistep_sampling_optimizations);
         } else {
             std::transform(k, k + batch_size, k, [](int32_t value) { return value <= 0 ? 1 << 30 : value; });
             if (no_p) {
@@ -887,7 +895,8 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
             } else {
                 auto temporary = torch::empty_like(probs_t);
                 top_k_renorm_probs(probs_t, temporary, top_k, 0, (int64_t)cur_stream);
-                top_p_renorm_probs(temporary, output, top_p, 1.0, (int64_t)cur_stream);
+                top_p_renorm_probs(temporary, output, top_p, 1.0, (int64_t)cur_stream,
+                               params.allow_glm5_multistep_sampling_optimizations);
             }
         }
         params.logits.copy_(output.log(), true);
@@ -937,7 +946,8 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
     constexpr int        max_sampling_rounds = 32;
     auto [seed_t, offset_t] =
         makeSamplingSeedOffsetTensors(
-            params.generator, batch_size, static_cast<int>(max_sampling_rounds), params.buffer_holder);
+            params.generator, batch_size, static_cast<int>(max_sampling_rounds), params.buffer_holder,
+            params.allow_glm5_multistep_sampling_optimizations);
 
     torch::Tensor success_t = success;
     torch::Tensor top_k_t   = force_topk > 0 ? params.top_k.clone() : params.top_k;
@@ -965,7 +975,8 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
             output_all_probs_t.copy_(input);
             return;
         }
-        top_p_renorm_probs(input, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
+        top_p_renorm_probs(input, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream,
+                               params.allow_glm5_multistep_sampling_optimizations);
         // AirTopP's histogram threshold can drop mass at p=1 due to reduction rounding.
         std::vector<int64_t> unfiltered_rows;
         for (int64_t row = 0; row < batch_size; ++row) {
@@ -1019,7 +1030,8 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
                                   0,
                                   (int64_t)cur_stream);
         if (output_all_probs_t.defined()) {
-            top_p_renorm_probs(probs_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
+            top_p_renorm_probs(probs_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream,
+                               params.allow_glm5_multistep_sampling_optimizations);
         }
     } else {
         // top_k<=0 means "no limit" in RTP config. The combined FlashInfer
@@ -1062,7 +1074,8 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
             if (output_all_probs_t.defined()) {
                 torch::Tensor temp_t = torch::zeros_like(output_all_probs_t);
                 top_k_renorm_probs(probs_t, temp_t, top_k_t, 1.0, (int64_t)cur_stream);
-                top_p_renorm_probs(temp_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream);
+                top_p_renorm_probs(temp_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream,
+                               params.allow_glm5_multistep_sampling_optimizations);
             }
         }
     }
@@ -1265,7 +1278,8 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
         && samplingRuntimeReady(false)) {
         auto samples = transposed_tokens.select(0, transposed_tokens.size(0) - 1);
         // Reserve a fresh generator offset on every call, as for FlashInfer.
-        auto [seeds, offsets] = makeSamplingSeedOffsetTensors(params.generator, batch_size, 32, params.buffer_holder);
+        auto [seeds, offsets] = makeSamplingSeedOffsetTensors(params.generator, batch_size, 32, params.buffer_holder,
+                params.allow_glm5_multistep_sampling_optimizations);
         {
             pybind11::gil_scoped_acquire gil;
             auto selected = pyGumbelSampleFn()(params.logits, seeds, offsets).cast<torch::Tensor>();
@@ -1308,7 +1322,8 @@ void rejectionSampling(const RejectionSamplingParams& params) {
                         "invalid prepared rejection RNG packet");
         } else {
             state_h = reserveSamplingSeedOffsets(
-                params.generator, batch_size, std::max<int64_t>(32, ((rows + 3) / 4) * 4), prefix);
+                params.generator, batch_size, std::max<int64_t>(32, ((rows + 3) / 4) * 4), prefix,
+                params.allow_glm5_multistep_sampling_optimizations);
         }
         pybind11::gil_scoped_acquire gil;
         if (trySubmitDeferredKernels(params, state_h.select(0, 0), state_h.select(0, 1))

@@ -216,7 +216,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                  inputs.rejection_generators,
                  from_batch_idx_in == 0 && batch_size_in == inputs.batch_size && !inputs.rejection_generators.empty() ?
                      inputs.rejection_rows :
-                     0});
+                     0,
+                 inputs.allow_glm5_multistep_sampling_optimizations});
             deferred_token_sampling = greedy_output.deferred_token_sampling;
             if (greedy_output.deferred_logits.defined()) {
                 compact_logits         = greedy_output.deferred_logits;
@@ -313,7 +314,8 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
          fallback_rows,
          prepared_rejection_rng,
          deferred_token_sampling ? verify_do_sample : torch::Tensor(),
-         log_normalizer});
+         log_normalizer,
+         inputs.allow_glm5_multistep_sampling_optimizations});
 }
 
 void Sampler::preprocessLogits(const SamplerInputs& inputs) {

@@ -349,6 +349,7 @@ struct GreedyParams {
     bool                         allow_compact_deferred_output     = false;
     std::vector<at::Generator>   deferred_rejection_generators     = {};
     int64_t                      deferred_rejection_rows           = 0;
+    bool                         allow_glm5_multistep_sampling_optimizations = false;
 };
 
 struct GreedyOutput {
@@ -449,6 +450,7 @@ struct RejectionSamplingParams {
     // never share/reuse it across concurrent rejection calls.
     torch::Tensor prepared_rejection_rng = {};
     torch::Tensor target_log_normalizer_d = {};
+    bool allow_glm5_multistep_sampling_optimizations = false;
 };
 
 struct MappingDraft2TargetParams {

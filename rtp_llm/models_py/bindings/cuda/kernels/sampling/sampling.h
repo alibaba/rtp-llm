@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <tuple>
+#include <vector>
 
 #include <torch/extension.h>
 
@@ -15,6 +16,11 @@ void sampling_from_probs(torch::Tensor probs,
                          torch::Tensor seed,
                          torch::Tensor offset,
                          int64_t       cuda_stream = 0);
+
+// Host-only reservation: contiguous rows sharing a generator are locked once.
+// Undefined/missing generators use the current device's default generator.
+void get_sampling_seed_offsets(const std::vector<at::Generator>& generators, int64_t batch_size,
+                               int increment, int64_t* seeds, int64_t* offsets);
 
 std::tuple<uint64_t, uint64_t> get_seed_and_offset(int                          increment_size,
                                                    std::optional<at::Generator> generator = std::nullopt);
@@ -64,7 +70,8 @@ void top_p_renorm_probs(torch::Tensor                probs,
                         torch::Tensor                renorm_probs,
                         std::optional<torch::Tensor> maybe_top_p_arr,
                         double                       top_p_val,
-                        int64_t                      cuda_stream = 0);
+                        int64_t                      cuda_stream = 0,
+                        bool                         aggregate_warp_histogram = false);
 
 void top_k_renorm_probs(torch::Tensor                probs,
                         torch::Tensor                renorm_probs,

@@ -3255,3 +3255,68 @@ TEST_F(CudaSamplerTest, testCompactFilteredNormalizerReuse) {
         }
     }
 }
+
+TEST_F(CudaSamplerTest, BatchedPhiloxPreservesAdjacentGeneratorReservations) {
+    auto a = torch::make_generator<at::CUDAGeneratorImpl>();
+    auto b = torch::make_generator<at::CUDAGeneratorImpl>();
+    a.set_current_seed(123);
+    b.set_current_seed(456);
+    std::vector<at::Generator> generators{a, a, b, a, b, b};
+    for (int increment : {0, 1, 31, 32, 33}) {
+        a.set_offset(0);
+        b.set_offset(0);
+        std::vector<int64_t> seeds(6), offsets(6), expected_seeds(6), expected_offsets(6);
+        for (size_t row = 0; row < generators.size(); ++row) {
+            auto state = get_seed_and_offset(increment, generators[row]);
+            expected_seeds[row] = static_cast<int64_t>(std::get<0>(state));
+            expected_offsets[row] = static_cast<int64_t>(std::get<1>(state));
+        }
+        auto expected_a = a.get_state();
+        auto expected_b = b.get_state();
+        a.set_offset(0);
+        b.set_offset(0);
+        get_sampling_seed_offsets(generators, generators.size(), increment, seeds.data(), offsets.data());
+        EXPECT_EQ(seeds, expected_seeds);
+        EXPECT_EQ(offsets, expected_offsets);
+        EXPECT_TRUE(torch::equal(a.get_state(), expected_a));
+        EXPECT_TRUE(torch::equal(b.get_state(), expected_b));
+    }
+}
+
+TEST_F(CudaSamplerTest, BatchedPhiloxPreservesDefaultGeneratorRows) {
+    auto generator = at::cuda::detail::getDefaultCUDAGenerator();
+    struct RestoreState {
+        at::Generator generator;
+        torch::Tensor state;
+        ~RestoreState() { generator.set_state(state); }
+    } restore{generator, generator.get_state()};
+    generator.set_current_seed(789);
+    generator.set_offset(0);
+    std::vector<at::Generator> rows{at::Generator(), generator};
+    int64_t seeds[4], offsets[4];
+    get_sampling_seed_offsets(rows, 4, 33, seeds, offsets);
+    for (int row = 0; row < 4; ++row) {
+        EXPECT_EQ(seeds[row], 789);
+        EXPECT_EQ(offsets[row], row * 36);
+    }
+    EXPECT_EQ(generator.get_offset(), 144);
+}
+
+TEST_F(CudaSamplerTest, AirWarpHistogramMatchesUnaggregatedRenorm) {
+    const auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    // Non-multiple widths exercise partial warps; skewed rows exercise later radix passes.
+    for (int64_t width : {1025, 4096, 8193}) {
+        for (bool uniform : {true, false}) {
+            auto probs = uniform ? torch::ones({3, width}, options) : torch::rand({3, width}, options).pow(8);
+            probs.div_(probs.sum(-1, true));
+            auto top_p = torch::tensor({0.3f, 0.8f, 0.95f}, options);
+            auto reference = torch::empty_like(probs);
+            auto actual = torch::empty_like(probs);
+            const auto stream = reinterpret_cast<int64_t>(at::cuda::getCurrentCUDAStream().stream());
+            top_p_renorm_probs(probs, reference, top_p, 1.0, stream, false);
+            top_p_renorm_probs(probs, actual, top_p, 1.0, stream, true);
+            EXPECT_TRUE(torch::allclose(actual, reference, 1e-5, 1e-7));
+            EXPECT_TRUE(torch::allclose(actual.sum(-1), torch::ones({3}, options), 1e-5, 1e-7));
+        }
+    }
+}

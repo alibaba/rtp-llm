@@ -126,6 +126,38 @@ void check_cuda_status(cudaError_t status, const char* kernel_name) {
 
 }  // namespace
 
+void get_sampling_seed_offsets(const std::vector<at::Generator>& generators, int64_t batch_size,
+                               int increment, int64_t* seed_ptr, int64_t* off_ptr) {
+    TORCH_CHECK(batch_size >= 0 && (batch_size == 0 || (seed_ptr && off_ptr)), "invalid sampling RNG output");
+    cudaStreamCaptureStatus capture;
+    C10_CUDA_CHECK(cudaStreamIsCapturing(at::cuda::getCurrentCUDAStream().stream(), &capture));
+    // Captured Philox states contain device pointers, not scalar seeds/offsets.
+    TORCH_CHECK(capture == cudaStreamCaptureStatusNone,
+                "batched sampling RNG reservation must run outside CUDA Graph capture");
+    TORCH_CHECK(increment >= 0, "sampling RNG increment must be nonnegative");
+    const uint64_t stride = (static_cast<uint64_t>(increment) + 3) / 4 * 4;
+    auto generator_at = [&](int64_t row) {
+        const auto& generator = row < static_cast<int64_t>(generators.size()) && generators[row].defined() ?
+                                    generators[row] : at::cuda::detail::getDefaultCUDAGenerator();
+        return at::check_generator<at::CUDAGeneratorImpl>(generator);
+    };
+    for (int64_t begin = 0; begin < batch_size;) {
+        auto* impl = generator_at(begin);
+        int64_t end = begin + 1;
+        while (end < batch_size && generator_at(end) == impl) ++end;
+        const uint64_t count = end - begin;
+        TORCH_CHECK(stride == 0 || count <= std::numeric_limits<uint64_t>::max() / stride,
+                    "sampling RNG reservation overflow");
+        std::lock_guard<std::mutex> lock(impl->mutex_);
+        const auto state = impl->philox_cuda_state(count * stride);
+        for (int64_t row = begin; row < end; ++row) {
+            seed_ptr[row] = static_cast<int64_t>(state.seed_.val);
+            off_ptr[row] = static_cast<int64_t>(state.offset_.val + (row - begin) * stride);
+        }
+        begin = end;
+    }
+}
+
 std::tuple<uint64_t, uint64_t> get_seed_and_offset(int                          increment_size,
                                                    std::optional<at::Generator> generator) {
     auto gen =
@@ -303,7 +335,8 @@ void top_p_renorm_probs(torch::Tensor                probs,
                         torch::Tensor                renorm_probs,
                         std::optional<torch::Tensor> maybe_top_p_arr,
                         double                       top_p_val,
-                        int64_t                      cuda_stream) {
+                        int64_t                      cuda_stream,
+                        bool                         aggregate_warp_histogram) {
     check_renorm_inputs(probs, renorm_probs);
     TORCH_CHECK(probs.scalar_type() == at::kFloat, "top_p_renorm_probs currently expects float32 probs");
 
@@ -339,7 +372,8 @@ void top_p_renorm_probs(torch::Tensor                probs,
         static_cast<float>(top_p_val),
         vocab_size,
         workspace.data_ptr(),
-        stream);
+        stream,
+        aggregate_warp_histogram);
     check_cuda_status(status, "AirTopPRenormProb");
 }
 

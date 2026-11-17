@@ -26,6 +26,7 @@
 #include <cuda/atomic>
 #include <cuda/std/limits>
 #include <type_traits>
+#include <algorithm>
 
 namespace flashinfer {
 namespace sampling {
@@ -191,6 +192,38 @@ __device__ constexpr void histAtomicAdd(HisT_* dst, T value) {
   }
 }
 
+// Only aggregate a full, converged warp whose lanes address the same bucket.
+template <bool IsDeterministic, typename T, typename HisT_>
+__device__ __forceinline__ void histAtomicAddWarp(HisT_* dst, IdxT* countDst, int bucket,
+                                                T value, bool aggregate) {
+  constexpr unsigned fullWarp = 0xffffffffu;
+  if (aggregate && __activemask() == fullWarp) {
+    int head = __shfl_sync(fullWarp, bucket, 0);
+    if (__all_sync(fullWarp, bucket == head)) {
+      if constexpr (IsDeterministic) {
+        uint64_t sum = calcMantissa(value);
+        for (int offset = 16; offset > 0; offset >>= 1)
+          sum += __shfl_down_sync(fullWarp, sum, offset);
+        if ((threadIdx.x & 31) == 0) {
+          atomicAdd(reinterpret_cast<unsigned long long*>(dst), static_cast<unsigned long long>(sum));
+          atomicAdd(countDst, static_cast<IdxT>(32));
+        }
+      } else {
+        float sum = static_cast<float>(value);
+        for (int offset = 16; offset > 0; offset >>= 1)
+          sum += __shfl_down_sync(fullWarp, sum, offset);
+        if ((threadIdx.x & 31) == 0) {
+          atomicAdd(dst, sum);
+          atomicAdd(countDst, static_cast<IdxT>(32));
+        }
+      }
+      return;
+    }
+  }
+  histAtomicAdd<IsDeterministic, T>(dst, value);
+  atomicAdd(countDst, static_cast<IdxT>(1));
+}
+
 // ======================== Vectorized process ========================
 
 template <typename T, typename Func>
@@ -229,7 +262,7 @@ template <bool IsDeterministic, typename T, typename HisT_>
 __device__ __forceinline__ void filterAndHistogram(T const* inBuf, T* outBuf, int previousLen,
                                                    Counter<T>* counter, HisT_* histogram,
                                                    IdxT* countHistogram, HisT_* histogramSmem,
-                                                   IdxT* countHistogramSmem, int pass) {
+                                                   IdxT* countHistogramSmem, int pass, bool aggregate) {
   for (IdxT i = threadIdx.x; i < NUM_BUCKETS; i += blockDim.x) {
     histogramSmem[i] = 0;
     countHistogramSmem[i] = 0;
@@ -238,10 +271,10 @@ __device__ __forceinline__ void filterAndHistogram(T const* inBuf, T* outBuf, in
   int const startBit = calcStartBit<T>(pass);
   uint32_t const mask = calcMask<T>(pass);
   if (pass == 0) {
-    auto f = [startBit, mask, histogramSmem, countHistogramSmem](T value, IdxT) {
+    auto f = [startBit, mask, histogramSmem, countHistogramSmem, aggregate](T value, IdxT) {
       int bucket = calcBucket<T>(value, startBit, mask);
-      histAtomicAdd<IsDeterministic, T>(histogramSmem + bucket, value);
-      atomicAdd(countHistogramSmem + bucket, static_cast<IdxT>(1));
+      histAtomicAddWarp<IsDeterministic, T>(histogramSmem + bucket, countHistogramSmem + bucket,
+                                           bucket, value, aggregate);
     };
     vectorizedProcess<T>(static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x,
                          static_cast<size_t>(blockDim.x) * gridDim.x, inBuf, previousLen, f);
@@ -250,7 +283,7 @@ __device__ __forceinline__ void filterAndHistogram(T const* inBuf, T* outBuf, in
     auto const kthValueBits = counter->kthValueBits;
     int const previousStartBit = calcStartBit<T>(pass - 1);
     auto f = [outBuf, startBit, mask, previousStartBit, kthValueBits, pFilterCnt, histogramSmem,
-              countHistogramSmem](T value, IdxT) {
+              countHistogramSmem, aggregate](T value, IdxT) {
       auto const previousBits = (twiddleIn(value, false) >> previousStartBit) << previousStartBit;
       if (previousBits == kthValueBits) {
         if (outBuf) {
@@ -258,8 +291,8 @@ __device__ __forceinline__ void filterAndHistogram(T const* inBuf, T* outBuf, in
           outBuf[pos] = value;
         }
         int bucket = calcBucket<T>(value, startBit, mask);
-        histAtomicAdd<IsDeterministic, T>(histogramSmem + bucket, value);
-        atomicAdd(countHistogramSmem + bucket, static_cast<IdxT>(1));
+        histAtomicAddWarp<IsDeterministic, T>(histogramSmem + bucket, countHistogramSmem + bucket,
+                                             bucket, value, aggregate);
       }
     };
     vectorizedProcess<T>(static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x,
@@ -282,7 +315,7 @@ __device__ __forceinline__ void filterAndHistogram(T const* inBuf, T* outBuf, in
 
 template <bool IsDeterministic, typename T>
 __global__ void AirTopPRenormRadixKernel(Counter<T>* counters, HisT<IsDeterministic, T>* histograms,
-                                         IdxT* countHistograms, int const pass, T* buf1, T* buf2) {
+                                         IdxT* countHistograms, int const pass, T* buf1, T* buf2, bool aggregate) {
   using HisT_ = HisT<IsDeterministic, T>;
   int const batchId = blockIdx.y;
   auto counter = counters + batchId;
@@ -316,7 +349,7 @@ __global__ void AirTopPRenormRadixKernel(Counter<T>* counters, HisT<IsDeterminis
   __shared__ IdxT countHistogramSmem[NUM_BUCKETS];
   filterAndHistogram<IsDeterministic, T, HisT_>(inBuf, outBuf, previousLen, counter, histogram,
                                                 countHistogram, histogramSmem, countHistogramSmem,
-                                                pass);
+                                                pass, aggregate);
   __syncthreads();
   __threadfence();
   bool isLastBlock = false;
@@ -460,13 +493,14 @@ __global__ void AirTopPRenormApplyKernel(T const* probs, T* renormedProbs, Count
 template <bool IsDeterministic, typename T>
 uint32_t CalcAirTopPBlockNum(int batchSize, int len, int smCnt) {
   constexpr int VECTORIZED_READ_SIZE = 16;
-  int activeBlocks;
+  int activeBlocks = 0;
   cudaOccupancyMaxActiveBlocksPerMultiprocessor(
       &activeBlocks, AirTopPRenormRadixKernel<IsDeterministic, T>, BLOCK_SIZE, 0);
   activeBlocks *= smCnt;
   IdxT bestNumBlocks = 0;
   float bestTailWavePenalty = 1.0f;
   IdxT const maxNumBlocks = ceilDiv<IdxT>(len, VECTORIZED_READ_SIZE / (int)sizeof(T) * BLOCK_SIZE);
+  if (activeBlocks <= 0) return static_cast<uint32_t>(std::max<IdxT>(maxNumBlocks, 1));
   for (int numWaves = 1;; ++numWaves) {
     IdxT numBlocks =
         std::min(maxNumBlocks, static_cast<IdxT>(std::max(numWaves * activeBlocks / batchSize, 1)));
@@ -492,7 +526,7 @@ uint32_t CalcAirTopPBlockNum(int batchSize, int len, int smCnt) {
 template <bool IsDeterministic, typename DType>
 cudaError_t AirTopPRenormProb(DType* probs, DType* renormed_prob, float* top_p_arr,
                               uint32_t batch_size, float top_p_val, uint32_t d, void* workspace,
-                              cudaStream_t stream = 0) {
+                              cudaStream_t stream = 0, bool aggregate = false) {
   using HisT_ = HisT<IsDeterministic, DType>;
 
   int dev, smCnt;
@@ -521,7 +555,7 @@ cudaError_t AirTopPRenormProb(DType* probs, DType* renormed_prob, float* top_p_a
   constexpr int numPasses = NUM_PASSES<DType>;
   for (int pass = 0; pass < numPasses; ++pass) {
     AirTopPRenormRadixKernel<IsDeterministic, DType>
-        <<<grid, BLOCK_SIZE, 0, stream>>>(counters, histograms, countHistograms, pass, buf1, buf2);
+        <<<grid, BLOCK_SIZE, 0, stream>>>(counters, histograms, countHistograms, pass, buf1, buf2, aggregate);
   }
 
   AirTopPRenormApplyKernel<DType>

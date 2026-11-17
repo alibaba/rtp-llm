@@ -91,6 +91,7 @@ public:
     bool                               defer_token_sampling = false;
     std::vector<at::Generator>         rejection_generators       = {};
     int64_t                            rejection_rows             = 0;
+    bool allow_glm5_multistep_sampling_optimizations = false;
 };
 
 struct SamplerOutput {
@@ -115,6 +116,7 @@ public:
     torch::Tensor prepared_rejection_rng  = {};
     torch::Tensor verify_do_sample        = {};
     torch::Tensor verify_log_normalizer   = {};
+    bool allow_glm5_multistep_sampling_optimizations = false;
 };
 
 struct MergedOutput {

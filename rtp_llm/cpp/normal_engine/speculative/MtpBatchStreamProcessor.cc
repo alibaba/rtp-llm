@@ -812,6 +812,8 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
         total_batch_size,
         propose_step_,
         /*materialize_host_token_ids=*/!skip_history && !device_history);
+    sampler_inputs.allow_glm5_multistep_sampling_optimizations =
+        glm5_target_ && propose_step_ > 1 && deferred_eligible;
     if (skip_history) {
         // The deferred verifier never reads history in this case. Keep the
         // sampler's [rows, width] tensor contract without allocating a
