@@ -609,7 +609,8 @@ def _register_process_groups_to_cpp():
             dest.copy_(tensor)
             return dest
         target = dest if dest is not None else tensor
-        all_reduce_comm = _get_all_reduce_module().get_all_reduce()
+        all_reduce_module = _get_all_reduce_module()
+        all_reduce_comm = all_reduce_module.get_all_reduce()
         if (
             op == 0
             and mode == _CPP_PARALLEL_MODE_TP
@@ -633,8 +634,14 @@ def _register_process_groups_to_cpp():
             target.copy_(tensor)
         device_id = torch.cuda.current_device()
         gpu_t, was_cpu = _ensure_cuda(target, device_id)
-        all_reduce_comm = _get_all_reduce_module().get_all_reduce()
         if (
+            op == 0
+            and mode == _CPP_PARALLEL_MODE_TP
+            and gpu_t.is_floating_point()
+            and all_reduce_module.batch_invariant_enabled()
+        ):
+            all_reduce_module.batch_invariant_all_reduce(gpu_t, pg, gpu_t)
+        elif (
             op == 0
             and mode == _CPP_PARALLEL_MODE_TP
             and not was_cpu
@@ -1000,10 +1007,17 @@ def all_reduce(
             return rocm_rccl.capture_all_reduce(target, _get_group(group))
 
     if group == Group.TP:
+        all_reduce_module = _get_all_reduce_module()
+        if tensor.is_floating_point() and all_reduce_module.batch_invariant_enabled():
+            output = tensor if inplace else torch.empty_like(tensor)
+            return all_reduce_module.batch_invariant_all_reduce(
+                tensor, _get_group(group), output
+            )
+
         if _canonical_p2p is not None and _canonical_p2p.should_use(tensor):
             return _canonical_p2p.all_reduce(tensor, inplace=inplace)
 
-        all_reduce_comm = _get_all_reduce_module().get_all_reduce()
+        all_reduce_comm = all_reduce_module.get_all_reduce()
         if all_reduce_comm is not None and all_reduce_comm.should_use(tensor):
             if inplace:
                 # IPC first stages the input, so the registered reduction may

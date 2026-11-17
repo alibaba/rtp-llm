@@ -1,4 +1,4 @@
-"""Bitwise regression for Qwen3.6 GDN on the CUDA varlen path."""
+"""Bitwise regression for Qwen GDN on the CUDA varlen path."""
 
 import argparse
 from itertools import accumulate
@@ -15,6 +15,7 @@ from rtp_llm.models_py.triton_kernels.fla import (
     store_ssm_state_to_block_map,
 )
 from rtp_llm.models_py.triton_kernels.fla.chunk import chunk_gated_delta_rule
+from rtp_llm.models_py.triton_kernels.fla.l2norm import l2norm_fwd
 
 
 def bit_mismatches(expected, actual):
@@ -27,13 +28,13 @@ def bit_mismatches(expected, actual):
 
 class GdnFixture:
     block = 64
-    key_heads = 16
-    value_heads = 32
     dim = 128
-    widths = (key_heads * dim, key_heads * dim, value_heads * dim)
-    channels = sum(widths)
 
-    def __init__(self):
+    def __init__(self, key_heads, value_heads, *, batch_invariant):
+        self.value_heads = value_heads
+        self.widths = (key_heads * self.dim, key_heads * self.dim, value_heads * self.dim)
+        self.channels = sum(self.widths)
+        self.batch_invariant = batch_invariant
         torch.manual_seed(813)
         base = {"device": "cuda", "dtype": torch.bfloat16}
         self.raw = [torch.randn(n + 3, self.channels, **base) for n in (193, 149)]
@@ -104,6 +105,7 @@ class GdnFixture:
                 output_final_state=True,
                 cu_seqlens=cu,
                 use_qk_l2norm_in_kernel=True,
+                batch_invariant=self.batch_invariant,
             )
             store_ssm_state_to_block_map(
                 h, final, prefixes, cu, maps, ssm, self.block, 64
@@ -162,12 +164,26 @@ class GdnFixture:
         return result
 
 
+def check_qk_norm(batch_invariant):
+    generator = torch.Generator(device="cuda").manual_seed(45)
+    qk = torch.randn((193, 128), device="cuda", dtype=torch.bfloat16, generator=generator)
+    small = l2norm_fwd(qk[:128], batch_invariant=batch_invariant)
+    mixed = l2norm_fwd(qk, batch_invariant=batch_invariant)[:128]
+    different = bit_mismatches(small, mixed)
+    print(f"Q/K norm across the 128-row dispatch boundary: {different}", flush=True)
+    if batch_invariant:
+        assert different == 0
+
+
 @torch.inference_mode()
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--report-only", action="store_true")
+    parser.add_argument("--tp4-397b", action="store_true")
     args = parser.parse_args()
-    fixture = GdnFixture()
+    heads = (4, 16) if args.tp4_397b else (16, 32)
+    fixture = GdnFixture(*heads, batch_invariant=not args.report_only)
+    check_qk_norm(fixture.batch_invariant)
     failures = 0
     for length in (7, 17, 33, 63, 64, 65, 129, 193):
         expected = fixture.run([[(0, length)]])
@@ -179,6 +195,8 @@ def main():
             cases["restored_at_64"] = [[(0, 64)], [(1, 149), (0, length - 64)]]
         if length > 128:
             cases["restored_at_128"] = [[(0, 128), (1, 149)], [(0, length - 128)]]
+        if length > 192:
+            cases["restored_at_192"] = [[(0, 192)], [(1, 149), (0, length - 192)]]
         for case, batches in cases.items():
             decode_rows = (0, 1) if case == "first" else (1, 0)
             actual = fixture.run(batches, decode_rows=decode_rows)

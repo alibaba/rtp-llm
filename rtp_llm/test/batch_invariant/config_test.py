@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from rtp_llm.config.engine_config import EngineConfig, configure_batch_invariant_model
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.ops import DataType, TaskType
+from rtp_llm.ops import CPRotateMethod, DataType, TaskType
 from rtp_llm.server.server_args.server_args import setup_args
 
 
@@ -21,6 +21,7 @@ class BatchInvariantConfigTest(unittest.TestCase):
             os.environ["RTP_BATCH_INVARIANT"] = "0"
             engine = EngineConfig.create(pickle.loads(pickle.dumps(parsed)))
         self.assertTrue(engine.hw_kernel_config.batch_invariant)
+        self.assertTrue(engine.collective_config.batch_invariant)
 
     def test_invalid_switch(self):
         with patch.dict(os.environ, {"RTP_BATCH_INVARIANT": "true"}):
@@ -72,6 +73,27 @@ class BatchInvariantConfigTest(unittest.TestCase):
             read_config.return_value["text_config"]["dtype"] = "bfloat16"
             model.mm_model_config.is_multimodal = True
             configure_batch_invariant_model(engine, model)
+            model.num_layers = 60
+            model.hidden_size = 4096
+            model.expert_num = 512
+            model.moe_k = 10
+            model.moe_inter_size = 1024
+            model.attn_config.head_num = 32
+            with self.assertRaisesRegex(
+                ValueError, "Qwen3.5-397B-A17B requires .*TP_SIZE=4"
+            ):
+                configure_batch_invariant_model(engine, model)
+            parallel = engine.parallelism_config
+            parallel.world_size = parallel.local_world_size = parallel.tp_size = 4
+            parallel.ffn_tp_size = 4
+            configure_batch_invariant_model(engine, model)
+            parallel.ep_size = 4
+            with self.assertRaisesRegex(ValueError, "DP_SIZE=EP_SIZE=PP_SIZE=1"):
+                configure_batch_invariant_model(engine, model)
+            parallel.ep_size = 1
+            parallel.prefill_cp_config.method = CPRotateMethod.PREFILL_CP
+            with self.assertRaisesRegex(ValueError, "CP disabled"):
+                configure_batch_invariant_model(engine, model)
         self.assertFalse(model.mm_model_config.is_multimodal)
         self.assertFalse(model.enable_fp32_lm_head)
 
