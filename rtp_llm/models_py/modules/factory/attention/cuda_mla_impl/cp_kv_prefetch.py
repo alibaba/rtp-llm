@@ -103,39 +103,43 @@ def prefix_plan(prefixes, lengths, size, rank, owner):
 
 
 def _upload_immutable_plan(plan, device):
-    """One owned host snapshot/transfer per dtype; consumers use tensor views.
+    """Upload one aligned, owned snapshot for all immutable plan tensors.
 
     Call on the producer stream before the auxiliary stream's wait_stream.
     Keep returned snapshots with the forward owner. PyTorch's pinned allocator
     also records nonblocking copy use, protecting early exception destruction.
     """
     device = torch.device(device)
-    groups = {}
+    entries = []
     result = dict(plan)
+    total_bytes = 0
     for key, value in plan.items():
         if isinstance(value, torch.Tensor):
             if value.device.type != "cpu":
                 raise ValueError("CP upload plan must contain CPU tensors")
-            groups.setdefault(value.dtype, []).append((key, value))
-    snapshots = []
-    for dtype, entries in groups.items():
-        host = torch.empty(
-            sum(value.numel() for _, value in entries),
-            dtype=dtype,
-            device="cpu",
-            pin_memory=device.type == "cuda",
+            # Align each typed view, including empty tensors, independently of
+            # the preceding tensor's dtype or element count.
+            offset = (total_bytes + 15) // 16 * 16
+            size = value.numel() * value.element_size()
+            entries.append((key, value, offset, size))
+            total_bytes = offset + size
+    if not entries:
+        return result, []
+    host = torch.empty(
+        total_bytes,
+        dtype=torch.uint8,
+        device="cpu",
+        pin_memory=device.type == "cuda",
+    )
+    host_bytes = host.numpy()
+    for _, value, offset, size in entries:
+        host_bytes[offset : offset + size] = (
+            value.reshape(-1).contiguous().view(torch.uint8).numpy()
         )
-        offset = 0
-        for _, value in entries:
-            host[offset : offset + value.numel()].copy_(value.reshape(-1))
-            offset += value.numel()
-        uploaded = host.to(device, non_blocking=True)
-        snapshots.append(host)
-        offset = 0
-        for key, value in entries:
-            result[key] = uploaded[offset : offset + value.numel()].view(value.shape)
-            offset += value.numel()
-    return result, snapshots
+    uploaded = host.to(device, non_blocking=True)
+    for key, value, offset, size in entries:
+        result[key] = uploaded.narrow(0, offset, size).view(value.dtype).view(value.shape)
+    return result, [host]
 
 
 class CrossLayerKvPrefetch:

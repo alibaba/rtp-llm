@@ -1470,7 +1470,7 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         ).reshape(-1, local_fused.size(-1))
         if return_rank_major:
             return gathered
-        fused_kv.copy_(gathered[self.sharded_kv_restore_indices])
+        torch.index_select(gathered, 0, self.sharded_kv_restore_indices, out=fused_kv)
         return None
 
     def _attend_with_kvcache(

@@ -410,27 +410,37 @@ class ImmutablePlanUploadTest(unittest.TestCase):
         self.assertEqual(out["empty"].numel(), 0)
         self.assertEqual(out["small"].tolist(), [0, -1, 255])
         self.assertEqual(out["count"], 7)
-        self.assertEqual(len(owners), 2)
+        self.assertEqual(len(owners), 1)
+        for key in ("strided", "empty", "small"):
+            self.assertEqual(out[key].storage_offset() * out[key].element_size() % 16, 0)
         self.assertEqual(out["small"].dtype, torch.int32)
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
     def test_async_stream_lifetime_and_independent_forwards(self):
         producer, consumer = torch.cuda.Stream(), torch.cuda.Stream()
-        results, expected = [], []
+        results, expected, lengths_results = [], [], []
         for iteration in range(20):
             source = torch.arange(32768, dtype=torch.int64) + iteration
             expected.append(source.clone())
             with torch.cuda.stream(producer):
-                plan, owners = kv._upload_immutable_plan({"indices": source}, "cuda")
+                plan, owners = kv._upload_immutable_plan(
+                    {
+                        "indices": source,
+                        "lengths": torch.tensor([iteration], dtype=torch.int32),
+                    },
+                    "cuda",
+                )
                 consumer.wait_stream(producer)
                 with torch.cuda.stream(consumer):
                     results.append(plan["indices"].clone())
+                    lengths_results.append(plan["lengths"].clone())
                 producer.wait_stream(consumer)
             source.fill_(-1)
             del plan, owners
         consumer.synchronize()
-        for result, reference in zip(results, expected):
+        for iteration, (result, reference) in enumerate(zip(results, expected)):
             self.assertTrue(torch.equal(result.cpu(), reference))
+            self.assertEqual(lengths_results[iteration].cpu().tolist(), [iteration])
 
 
 class PipelineProtocolWithoutFusionTest(PipelineProtocolTest):

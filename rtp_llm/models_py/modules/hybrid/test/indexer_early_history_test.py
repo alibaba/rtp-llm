@@ -30,6 +30,23 @@ class EarlyHistoryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             make_history_plan(torch.tensor([4]), torch.tensor([3]), 4, 64, "cpu")
 
+    def test_host_snapshot_preserves_empty_requests_and_new_row_offsets(self):
+        metadata, new_rows = make_history_plan(
+            torch.tensor([65, 0, 129]), torch.tensor([72, 0, 200]), 4, 64, "cpu"
+        )
+        self.assertEqual(
+            metadata.tolist(),
+            [[0, 64, 65, 0, 7, 0], [64, 64, 0, 7, 7, 72], [64, 128, 129, 7, 78, 72]],
+        )
+        self.assertEqual(new_rows.tolist(), list(range(78)))
+        metadata, new_rows = make_history_plan(
+            torch.tensor([64, 128]), torch.tensor([64, 128]), 4, 64, "cpu"
+        )
+        self.assertEqual(
+            metadata.tolist(), [[0, 64, 64, 0, 0, 0], [64, 128, 128, 0, 0, 64]]
+        )
+        self.assertEqual(new_rows.numel(), 0)
+
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
     def test_byte_exact_prefix_new_cache_and_scale(self):
         torch.manual_seed(314)

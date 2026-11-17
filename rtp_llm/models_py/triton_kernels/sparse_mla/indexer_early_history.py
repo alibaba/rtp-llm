@@ -1,5 +1,6 @@
 """Read only immutable prefix K before current K exists; patch new K byte-exactly."""
 
+import numpy as np
 import torch
 import triton
 import triton.language as tl
@@ -26,10 +27,20 @@ def make_history_plan(prefix, lengths, cp_size, owner_size, device):
         rows += padded
         new_rows += total - pre
         full_rows += total
-    return (
-        torch.tensor(meta, dtype=torch.int64, device=device),
-        torch.arange(new_rows, dtype=torch.int64).to(device=device),
+    # One immutable pinned snapshot owns both tables until the asynchronous
+    # copy completes; the pinned allocator tracks the nonblocking transfer.
+    device = torch.device(device)
+    metadata_size = len(meta) * 6
+    host = torch.empty(
+        metadata_size + new_rows,
+        dtype=torch.int64,
+        pin_memory=device.type == "cuda",
     )
+    host_array = host.numpy()
+    host_array[:metadata_size] = np.asarray(meta, dtype=np.int64).reshape(-1)
+    host_array[metadata_size:] = np.arange(new_rows, dtype=np.int64)
+    uploaded = host.to(device=device, non_blocking=True)
+    return uploaded[:metadata_size].view(len(meta), 6), uploaded[metadata_size:]
 
 
 @triton.jit
