@@ -673,6 +673,31 @@ class JITConfig:
         )
 
 
+class KernelTuningConfig:
+    """Kernel-tuning overlays and deterministic ROCm MoE switches.
+
+    Python-only config: consumed by rtp_llm.models_py.kernel_tuning at server
+    startup (registry.configure_kernel_tuning), deliberately outside the C++
+    ConfigModules chain. Registered as paired CLI/env arguments, so the
+    kernel-tuning helpers read the injected config for the whole process
+    lifetime instead of the raw process environment.
+    """
+
+    def __init__(self):
+        self.rocm_fp8_moe_deterministic_reduce: bool = False
+        self.rocm_fp8_moe_deterministic_max_tokens: int = 128
+        # os.pathsep-separated explicit AITER FMoE tuning config paths; empty
+        # means RTP composes the AITER stock configs plus its own overlay.
+        self.aiter_fmoe_config_paths: str = ""
+
+    def to_string(self):
+        return (
+            f"rocm_fp8_moe_deterministic_reduce: {self.rocm_fp8_moe_deterministic_reduce}\n"
+            f"rocm_fp8_moe_deterministic_max_tokens: {self.rocm_fp8_moe_deterministic_max_tokens}\n"
+            f"aiter_fmoe_config_paths: {self.aiter_fmoe_config_paths}"
+        )
+
+
 class HotHookConfig:
     """RTP hot hook (debug injection runtime) configuration.
 
@@ -770,6 +795,7 @@ class PyEnvConfigs:
         self.master_config: MasterConfig = MasterConfig()
         self.jit_config = JITConfig()
         self.hot_hook_config = HotHookConfig()
+        self.kernel_tuning_config = KernelTuningConfig()
         self.py_hw_kernel_config: HWKernelConfig = HWKernelConfig()
         self.all_reduce_backend: str = "auto"
         self.all_reduce_large_prefill: Optional[bool] = None
@@ -828,6 +854,7 @@ class PyEnvConfigs:
             + "[hot_hook_config]\n"
             + self.hot_hook_config.to_string()
             + "\n\n"
+            + "[kernel_tuning_config]\n" + self.kernel_tuning_config.to_string() + "\n\n"
             "[py_hw_kernel_config]\n" + self.py_hw_kernel_config.to_string() + "\n\n"
             "[sp_config]\n" + self.sp_config.to_string() + "\n\n"
             "[sampler_config]\n" + self.sampler_config.to_string() + "\n\n"

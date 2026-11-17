@@ -46,6 +46,27 @@ _DISPATCH_KEY_FIELDS = (
 )
 _AFFECTED_TOKEN_BUCKETS = (1, 2, 4, 8, 16)
 
+# User-provided AITER FMoE tuning config paths, injected exactly once by the
+# server startup (registry.configure_kernel_tuning). The value comes from the
+# paired CLI/env registration (--aiter_fmoe_config_paths /
+# AITER_CONFIG_FMOE); an empty string means RTP composes the AITER stock
+# configs plus its own overlay automatically.
+_explicit_config_paths: str = ""
+
+
+def set_aiter_fmoe_explicit_config_paths(paths: str) -> None:
+    """Inject user-provided AITER FMoE config paths (server startup only).
+
+    Replaces the historical direct read of the AITER_CONFIG_FMOE process
+    environment inside _configure_aiter_fmoe_overlays: the input side now
+    consumes this parsed value instead of the raw environment. Only the
+    output write below remains, because the aiter pip package itself
+    discovers its dispatch configs exclusively through that environment
+    variable.
+    """
+    global _explicit_config_paths
+    _explicit_config_paths = paths
+
 
 @dataclass(frozen=True)
 class AiterFmoeWorkloadSignature:
@@ -306,7 +327,7 @@ def _configure_aiter_fmoe_overlays() -> KernelTuningStatus:
         )
         return _CONFIG_STATUS
 
-    existing = os.environ.get("AITER_CONFIG_FMOE")
+    existing = _explicit_config_paths
     if existing:
         try:
             _validated_explicit_config_paths(existing, overlay_config, overlay_keys)
@@ -319,6 +340,11 @@ def _configure_aiter_fmoe_overlays() -> KernelTuningStatus:
             return _CONFIG_STATUS
     else:
         config_paths = [*stock_configs, overlay_config]
+        # Third-party boundary write: the aiter pip package resolves its tuned
+        # FMoE dispatch configs exclusively through this exact process
+        # environment variable, so publishing the composed search path stays
+        # necessary even though the input side above consumes the parsed
+        # server config instead of the raw environment.
         os.environ["AITER_CONFIG_FMOE"] = os.pathsep.join(map(str, config_paths))
 
     _CONFIG_STATUS = _status(True, "RTP AITER FMoE overlay configured", version)

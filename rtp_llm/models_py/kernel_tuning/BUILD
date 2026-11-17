@@ -8,6 +8,7 @@ py_library(
         "aiter/configs/*.csv",
     ]),
     deps = [
+        "//rtp_llm:config_ops",
         "//rtp_llm:torch",
     ],
     visibility = ["//visibility:public"],

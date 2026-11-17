@@ -12,7 +12,6 @@ import functools
 import importlib
 import importlib.metadata
 import logging
-import os
 from typing import Optional
 
 import aiter
@@ -21,6 +20,7 @@ import torch
 from rtp_llm.models_py.kernel_tuning import (
     ROCM_FP8_MOE_DETERMINISTIC_REDUCE_ENV,
     is_rocm_fp8_moe_deterministic_reduce_enabled,
+    rocm_fp8_moe_deterministic_max_tokens,
 )
 from rtp_llm.models_py.kernel_tuning.aiter import AITER_FMOE_SUPPORTED_VERSION
 from rtp_llm.models_py.triton_kernels.moe.fixed_order_route_reduce import (
@@ -31,13 +31,10 @@ from rtp_llm.models_py.triton_kernels.moe.fixed_order_route_reduce import (
 _LOGGER = logging.getLogger(__name__)
 _LOGGED_MESSAGES: set[str] = set()
 
-_MAX_TOKENS_ENV = "RTP_LLM_ROCM_FP8_MOE_DETERMINISTIC_MAX_TOKENS"
-
 _SUPPORTED_EXPERTS = 256
 _SUPPORTED_HIDDEN_SIZE = 2048
 _SUPPORTED_INTER_SIZE = 256
 _SUPPORTED_TOPK = 8
-_DEFAULT_MAX_TOKENS = 128
 _BLOCK_M = 32
 _SUPPORTED_GFX = "gfx942"
 _SUPPORTED_CU_COUNT = 80
@@ -57,22 +54,6 @@ def _log_once(level: int, key: str, message: str) -> None:
         return
     _LOGGED_MESSAGES.add(key)
     _LOGGER.log(level, message)
-
-
-def _max_tokens() -> int:
-    raw = os.environ.get(_MAX_TOKENS_ENV)
-    if raw is None:
-        return _DEFAULT_MAX_TOKENS
-    try:
-        return max(1, int(raw))
-    except ValueError:
-        _log_once(
-            logging.WARNING,
-            f"bad_max_tokens:{raw}",
-            f"{_MAX_TOKENS_ENV}={raw!r} is not an integer; "
-            f"using {_DEFAULT_MAX_TOKENS}",
-        )
-        return _DEFAULT_MAX_TOKENS
 
 
 @functools.lru_cache(maxsize=8)
@@ -143,8 +124,11 @@ def _shape_unsupported_reason(
         return f"hidden dtype {hidden_states.dtype} is unsupported"
     if hidden_states.dim() != 2 or hidden_states.shape[1] != _SUPPORTED_HIDDEN_SIZE:
         return f"hidden shape {tuple(hidden_states.shape)} is unsupported"
-    if not 0 < hidden_states.shape[0] <= _max_tokens():
-        return f"token count {hidden_states.shape[0]} exceeds {_max_tokens()}"
+    if not 0 < hidden_states.shape[0] <= rocm_fp8_moe_deterministic_max_tokens():
+        return (
+            f"token count {hidden_states.shape[0]} exceeds "
+            f"{rocm_fp8_moe_deterministic_max_tokens()}"
+        )
     if topk_ids.shape != (hidden_states.shape[0], _SUPPORTED_TOPK):
         return f"topk id shape {tuple(topk_ids.shape)} is unsupported"
     if topk_weights.shape != topk_ids.shape:
