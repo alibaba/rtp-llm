@@ -177,7 +177,7 @@ public:
     static size_t pendingEvictionReleasesForTest(const BlockTreeCache& cache);
     static void   runMaintenanceForTest(BlockTreeCache& cache);
     static bool
-    demoteOneForGroupSetForTest(BlockTreeCache& cache, size_t group_set_id, Tier tier, bool force_drop = false);
+    evictOneForGroupSetForTest(BlockTreeCache& cache, size_t group_set_id, Tier tier, bool force_drop = false);
     static int  reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier = Tier::DEVICE);
     static void waitForTaskPoolIdleForTest(const BlockTreeCache& cache);
     static void setTransferDrainObserverForTest(BlockTreeCache& cache, std::function<void()> observer);
@@ -235,7 +235,7 @@ public:
     void releaseRequestRefsForGroup(int group_id);
     void releaseMatch(BlockTreeMatchResult& result);
 
-    void demoteAll(Tier tier);
+    void evictAll(Tier tier);
     void runMaintenance();
     void reclaimAll();
 

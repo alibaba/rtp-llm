@@ -653,7 +653,7 @@ void BlockTreeCacheTestPeer::runMaintenanceForTest(BlockTreeCache& cache) {
     cache.checkWatermark();
 }
 
-bool BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(BlockTreeCache& cache,
+bool BlockTreeCacheTestPeer::evictOneForGroupSetForTest(BlockTreeCache& cache,
                                                          size_t          group_set_id,
                                                          Tier            tier,
                                                          bool            force_drop) {
@@ -1033,7 +1033,7 @@ void FullSWAEnvironment::runMaintenance() {
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
 }
 
-void FullSWAEnvironment::demoteAll(Tier tier) {
+void FullSWAEnvironment::evictAll(Tier tier) {
     setTierWatermark(tier, 0.01);
     for (size_t attempt = 0; attempt < options_.path_length * 4; ++attempt) {
         runMaintenance();

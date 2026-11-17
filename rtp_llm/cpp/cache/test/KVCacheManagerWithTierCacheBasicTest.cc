@@ -58,7 +58,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DevicePrefixHitKeepsLowerTiersUntouc
     ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4AllocatorPressureUsesDirectDropNotDemotion) {
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4AllocatorPressureUsesDirectDropWithoutTransfer) {
     // Eleven physical blocks leave ten usable device blocks per independent
     // pool: three 3-block cached prefixes coexist, while the next 3-block
     // request must evict exactly part of the old cache.

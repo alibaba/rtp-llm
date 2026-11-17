@@ -1513,7 +1513,7 @@ TEST(BlockTreeEvictorAsyncTest, ForceDropDetachesTwoGroupSetsBeforeLateCompletio
     EXPECT_EQ(environment.settledEvents(), (std::vector<bool>{false, false, false}));
 }
 
-void verifyLoadCorruptionWhileAnotherGroupIsDemoting(size_t corrupt_group, bool copy_success) {
+void verifyLoadCorruptionWhileAnotherGroupIsEvicting(size_t corrupt_group, bool copy_success) {
     const size_t                       busy_group = 1 - corrupt_group;
     MultiGroupAsyncEvictionEnvironment environment;
     ASSERT_TRUE(environment.init());
@@ -1568,19 +1568,19 @@ void verifyLoadCorruptionWhileAnotherGroupIsDemoting(size_t corrupt_group, bool 
 }
 
 TEST(BlockTreeEvictorAsyncTest, FullLoadCorruptionDiscardsLateEvictionSuccess) {
-    verifyLoadCorruptionWhileAnotherGroupIsDemoting(0, true);
+    verifyLoadCorruptionWhileAnotherGroupIsEvicting(0, true);
 }
 
 TEST(BlockTreeEvictorAsyncTest, FullLoadCorruptionDiscardsLateEvictionFailure) {
-    verifyLoadCorruptionWhileAnotherGroupIsDemoting(0, false);
+    verifyLoadCorruptionWhileAnotherGroupIsEvicting(0, false);
 }
 
 TEST(BlockTreeEvictorAsyncTest, LinearLoadCorruptionPreservesLateFullEvictionSuccess) {
-    verifyLoadCorruptionWhileAnotherGroupIsDemoting(1, true);
+    verifyLoadCorruptionWhileAnotherGroupIsEvicting(1, true);
 }
 
 TEST(BlockTreeEvictorAsyncTest, LinearLoadCorruptionPreservesLateFullEvictionFailure) {
-    verifyLoadCorruptionWhileAnotherGroupIsDemoting(1, false);
+    verifyLoadCorruptionWhileAnotherGroupIsEvicting(1, false);
 }
 
 void verifyMixedDetachedBatchSettlement(bool transfer_success) {
@@ -2135,7 +2135,7 @@ TEST_F(BlockTreeEvictorTest, PendingReleaseSettlementSkipsRevokedOwnersInMixedBa
     evictor_->heaps_[0].pending_timings.clear();
 }
 
-TEST_F(BlockTreeEvictorTest, CompleteEvictRejectsNonDemotingResource) {
+TEST_F(BlockTreeEvictorTest, CompleteEvictRejectsNonEvictingResource) {
     const auto allocated = device_pool_->malloc(1);
     ASSERT_TRUE(allocated.has_value());
     ASSERT_EQ(allocated->size(), 1u);
@@ -3385,7 +3385,7 @@ TEST(BlockTreeEvictorCascadeTest, StopsAtParentWithAnotherEmptyChild) {
     EXPECT_TRUE(task.cascade_descs.empty());
 }
 
-TEST(BlockTreeEvictorCascadeTest, DemotionPrepareLeavesAncestorUnchanged) {
+TEST(BlockTreeEvictorCascadeTest, EvictionPrepareLeavesAncestorUnchanged) {
     auto device_pool = makeTestDevicePool(1, "upward_cascade_exhausted_device");
     auto host_pool   = makePinnedHostPool(2);
     auto disk_pool   = makeTestDiskPool(1, "upward_cascade_exhausted_disk");
@@ -4298,9 +4298,9 @@ TEST_F(BlockTreeEvictorTest, ChooseVictimPreservesLoadOwner) {
     group_->releaseSingleBlock(Tier::HOST, source, BlockTreeRefType::CACHE);
 }
 
-TEST_F(BlockTreeEvictorTest, ChooseVictimPreservesExistingDemotionOwnerAndTarget) {
+TEST_F(BlockTreeEvictorTest, ChooseVictimPreservesExistingEvictionOwnerAndTarget) {
     auto host_pool = makePinnedHostPool(1);
-    auto disk_pool = makeTestDiskPool(1, "block_tree_evictor_demotion");
+    auto disk_pool = makeTestDiskPool(1, "block_tree_evictor_eviction");
     ASSERT_NE(host_pool, nullptr);
     ASSERT_NE(disk_pool, nullptr);
     resetGroup(host_pool, disk_pool);
@@ -4477,7 +4477,7 @@ TEST_F(BlockTreeEvictorTest, LoadSuccessAdmitsOnlyStableDeviceResource) {
     unreferenceDeviceBlocksForTest(*group_, device_set, BlockTreeRefType::CACHE);
 }
 
-TEST_F(BlockTreeEvictorTest, BatchSettlementRefreshesSharedParentAfterDemotion) {
+TEST_F(BlockTreeEvictorTest, BatchSettlementRefreshesSharedParentAfterEviction) {
     auto host_pool = makePinnedHostPool(2);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
@@ -4897,7 +4897,7 @@ TEST_F(BlockTreeEvictorTest, RematchedEvictionReportsCancellationOnlyOnCopySucce
     }
 }
 
-TEST_F(BlockTreeEvictorTest, BatchedDemotionRetainsOnlyRematchedSources) {
+TEST_F(BlockTreeEvictorTest, BatchedEvictionRetainsOnlyRematchedSources) {
     auto host_pool = makePinnedHostPool(2);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
@@ -4925,17 +4925,17 @@ TEST_F(BlockTreeEvictorTest, BatchedDemotionRetainsOnlyRematchedSources) {
     EXPECT_FALSE(retained.hasTier(Tier::HOST));
     EXPECT_EQ(retained.candidate_meta.tier_last_hit_time_us, 12345);
     EXPECT_FALSE(host_pool->isAllocated(descriptors[0].target_blocks[0]));
-    auto& demoted = descriptors[1].node->group_set_resources[0];
-    EXPECT_FALSE(demoted.hasTier(Tier::DEVICE));
-    EXPECT_EQ(demoted.host_block, descriptors[1].target_blocks[0]);
+    auto& evicted = descriptors[1].node->group_set_resources[0];
+    EXPECT_FALSE(evicted.hasTier(Tier::DEVICE));
+    EXPECT_EQ(evicted.host_block, descriptors[1].target_blocks[0]);
     EXPECT_EQ(evictor_->candidateCount(0, Tier::DEVICE), 1u);
     EXPECT_EQ(evictor_->candidateCount(0, Tier::HOST), 1u);
     EXPECT_EQ(host_pool->referencedBlocksNum(BlockTreeRefType::EVICT), 0u);
-    group_->releaseSingleBlock(Tier::HOST, demoted.host_block, BlockTreeRefType::CACHE);
-    demoted.host_block = NULL_BLOCK_IDX;
+    group_->releaseSingleBlock(Tier::HOST, evicted.host_block, BlockTreeRefType::CACHE);
+    evicted.host_block = NULL_BLOCK_IDX;
 }
 
-TEST_F(BlockTreeEvictorTest, DemotionExcludesSourceAndRollbackOrSuccessRestoresOneTier) {
+TEST_F(BlockTreeEvictorTest, EvictionExcludesSourceAndRollbackOrSuccessRestoresOneTier) {
     auto host_pool = makePinnedHostPool(1);
     ASSERT_NE(host_pool, nullptr);
     resetGroup(host_pool);
@@ -5108,7 +5108,7 @@ TEST_F(BlockTreeEvictorTest, PrimaryTargetExhaustionLeavesSourceAndCandidateUnch
     host_pool->decTreeRef(exhausted_target, BlockTreeRefType::LOAD);
 }
 
-TEST(BlockTreeEvictorCascadeTest, PrepareDemotionReservesOnlyPrimary) {
+TEST(BlockTreeEvictorCascadeTest, PrepareEvictionReservesOnlyPrimary) {
     CascadeTestEnvironment environment;
     ASSERT_TRUE(environment.init());
 

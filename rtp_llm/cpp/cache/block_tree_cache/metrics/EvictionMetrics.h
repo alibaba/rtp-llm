@@ -49,7 +49,7 @@ struct EvictionVictimCounters {
     bool                                                                       observed{false};
 };
 
-// Fixed cardinality: trigger x local tier x group type x drop/demote mode.
+// Fixed cardinality: trigger x local tier x group type x drop/evict mode.
 // All access is protected by the existing BlockTreeCache mutex, including getAndReset().
 struct EvictionVictimMetrics {
     static constexpr size_t                          kBucketCount = 2 * 3 * 3 * 2;

@@ -252,7 +252,7 @@ std::unique_ptr<BlockTreeCache> BenchmarkFixture::createCache(std::vector<GroupS
     config.watermark_host                     = {1.0, 1.0};
     config.watermark_disk                     = {1.0, 1.0};
     // Event-driven eviction: insert commits trigger checkWatermark, which
-    // demotes overflow down to the per-tier ratio watermark (0.0 = disabled).
+    // evicts overflow down to the per-tier ratio watermark (0.0 = disabled).
     if (device_watermark_ratio > 0.0) {
         config.watermark_device = {device_watermark_ratio, std::nextafter(device_watermark_ratio, 1.0)};
     }

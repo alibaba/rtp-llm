@@ -74,7 +74,7 @@ TEST(BlockTreeLoaderTest, LocalHostLoadSettlesDespiteBackendFailure) {
     // Only the ordinary group needs a HOST restore. The CRC-capable group's
     // existing DEVICE value participates in the same match without any CRC I/O.
     using Peer = block_tree_cache_test::BlockTreeCacheTestPeer;
-    ASSERT_TRUE(Peer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE));
+    ASSERT_TRUE(Peer::evictOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE));
     Peer::waitForTaskPoolIdleForTest(*environment->cache);
     auto resources = environment->resourcesForPathNode(0);
     ASSERT_TRUE(resources[0].hasTier(Tier::DEVICE));
@@ -200,7 +200,7 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
         EXPECT_TRUE(snapshot.reuse_block_first_hit_idletime_ms.has_value());
     }
     environment->releaseMatch(device_hit);
-    environment->demoteAll(Tier::DEVICE);
+    environment->evictAll(Tier::DEVICE);
     ASSERT_TRUE(environment->allResourcesAtTier(Tier::HOST));
     EXPECT_EQ(environment->cache->evictor_.candidateCount(/*group_set_id=*/0, Tier::HOST), 1u);
 
@@ -289,7 +289,7 @@ TEST(BlockTreeLoaderTest, HostLoadUsesReservedAdmissionWhenBackgroundQueueIsFull
 
     environment->insertRequestPath();
     environment->releaseRequestRefs();
-    environment->demoteAll(Tier::DEVICE);
+    environment->evictAll(Tier::DEVICE);
     ASSERT_TRUE(environment->allResourcesAtTier(Tier::HOST));
 
     constexpr size_t worker_count = 2;
@@ -594,7 +594,7 @@ TEST(BlockTreeLoaderTest, DiskTransferFailureInstallsNoLoadTargets) {
 
     environment->insertRequestPath();
     environment->releaseRequestRefs();
-    environment->demoteAll(Tier::DEVICE);
+    environment->evictAll(Tier::DEVICE);
     {
         auto host_hit = environment->cache->match(environment->keys);
         ASSERT_EQ(host_hit.reuse_time_metrics.size(), 2u);
@@ -603,7 +603,7 @@ TEST(BlockTreeLoaderTest, DiskTransferFailureInstallsNoLoadTargets) {
             EXPECT_TRUE(snapshot.reuse_block_first_hit_idletime_ms.has_value());
         }
     }
-    environment->demoteAll(Tier::HOST);
+    environment->evictAll(Tier::HOST);
     ASSERT_TRUE(environment->allResourcesAtTier(Tier::DISK));
 
     environment->scripted_per_rank_transfer_engine->clear();
@@ -683,7 +683,7 @@ TEST(BlockTreeLoaderTest, LoadStateMachineRejectsDuplicateTransitionAndRestoresS
 
     environment->insertRequestPath();
     environment->releaseRequestRefs();
-    environment->demoteAll(Tier::DEVICE);
+    environment->evictAll(Tier::DEVICE);
     auto find_result = environment->cache->tree()->findNode(environment->keys);
     ASSERT_FALSE(find_result.empty());
 
@@ -723,7 +723,7 @@ TEST(BlockTreeLoaderTest, ChangeTransferStateDoesNotOverwriteForeignTransferStat
 
     environment->insertRequestPath();
     environment->releaseRequestRefs();
-    environment->demoteAll(Tier::DEVICE);
+    environment->evictAll(Tier::DEVICE);
     auto find_result = environment->cache->tree()->findNode(environment->keys);
     ASSERT_FALSE(find_result.empty());
 
@@ -882,7 +882,7 @@ TEST(BlockTreeLoaderTest, RejectedLoadSubmissionReleasesContextAndRollsBackRefer
         ASSERT_NE(env, nullptr);
         env->insertRequestPath();
         env->releaseRequestRefs();
-        env->demoteAll(Tier::DEVICE);
+        env->evictAll(Tier::DEVICE);
         ASSERT_TRUE(env->allResourcesAtTier(Tier::HOST));
 
         auto replacement = std::make_unique<BlockTreeTaskPool>(1, 1, "load_submit_rejected");
@@ -964,7 +964,7 @@ TEST_P(ConcurrentBlockTreeLoaderTest, MixedLoadFailurePublishesHostAndKeepsJoine
     env->releaseRequestRefs();
     using Peer = block_tree_cache_test::BlockTreeCacheTestPeer;
     for (const Tier tier : {Tier::DEVICE, Tier::HOST, Tier::DEVICE}) {
-        ASSERT_TRUE(Peer::demoteOneForGroupSetForTest(*env->cache, 0, tier));
+        ASSERT_TRUE(Peer::evictOneForGroupSetForTest(*env->cache, 0, tier));
         Peer::waitForTaskPoolIdleForTest(*env->cache);
     }
     ASSERT_TRUE(env->resourcesForPathNode(0)[0].hasTier(Tier::DEVICE));
@@ -1071,7 +1071,7 @@ TEST(BlockTreeLoaderTest, HostSuccessUsesResidentSwaFallbackWithoutLoadingAnExtr
             ASSERT_NE(env, nullptr);
             env->insertRequestPath();
             env->releaseRequestRefs();
-            env->demoteAll(Tier::DEVICE);
+            env->evictAll(Tier::DEVICE);
             using Peer = block_tree_cache_test::BlockTreeCacheTestPeer;
             if (resident_window) {
                 auto warmup = env->cache->match({env->keys[0], env->keys[1]});
@@ -1083,11 +1083,11 @@ TEST(BlockTreeLoaderTest, HostSuccessUsesResidentSwaFallbackWithoutLoadingAnExtr
                 releaseTargets(warmup_refs);
                 env->releaseMatch(warmup);
                 for (size_t i = 0; i < 2; ++i) {
-                    ASSERT_TRUE(Peer::demoteOneForGroupSetForTest(*env->cache, 0, Tier::DEVICE));
+                    ASSERT_TRUE(Peer::evictOneForGroupSetForTest(*env->cache, 0, Tier::DEVICE));
                     Peer::waitForTaskPoolIdleForTest(*env->cache);
                 }
             }
-            ASSERT_TRUE(Peer::demoteOneForGroupSetForTest(*env->cache, 0, Tier::HOST));
+            ASSERT_TRUE(Peer::evictOneForGroupSetForTest(*env->cache, 0, Tier::HOST));
             Peer::waitForTaskPoolIdleForTest(*env->cache);
             ASSERT_TRUE(env->resourcesForPathNode(3)[0].hasTier(Tier::DISK));
             auto engine                                        = std::make_shared<DeferredLoadEngine>(env->groups);
@@ -1149,9 +1149,9 @@ TEST(BlockTreeLoaderTest, UnknownDiskCompletionFreezesOnlyItsTargetBeforeHostCom
     ASSERT_NE(env, nullptr);
     env->insertRequestPath();
     env->releaseRequestRefs();
-    env->demoteAll(Tier::DEVICE);
+    env->evictAll(Tier::DEVICE);
     using Peer = block_tree_cache_test::BlockTreeCacheTestPeer;
-    ASSERT_TRUE(Peer::demoteOneForGroupSetForTest(*env->cache, 1, Tier::HOST));
+    ASSERT_TRUE(Peer::evictOneForGroupSetForTest(*env->cache, 1, Tier::HOST));
     Peer::waitForTaskPoolIdleForTest(*env->cache);
     auto engine                                        = std::make_shared<DeferredLoadEngine>(env->groups);
     env->cache->transfer_dispatcher_->per_rank_engine_ = engine;
@@ -1209,7 +1209,7 @@ TEST(BlockTreeLoaderTest, SwaCorruptionDropsNonLeafResourceAndPreservesFullPath)
     ASSERT_NE(env, nullptr);
     env->insertRequestPath();
     env->releaseRequestRefs();
-    env->demoteAll(Tier::DEVICE);
+    env->evictAll(Tier::DEVICE);
     auto engine                                        = std::make_shared<DeferredLoadEngine>(env->groups);
     env->cache->transfer_dispatcher_->per_rank_engine_ = engine;
     auto owner                                         = env->cache->match(env->keys).async_context;
@@ -1255,7 +1255,7 @@ TEST(BlockTreeLoaderTest, SwaBatchCorruptionPreservesDescendantsBeyondWindow) {
     ASSERT_NE(env, nullptr);
     env->insertRequestPath();
     env->releaseRequestRefs();
-    env->demoteAll(Tier::DEVICE);
+    env->evictAll(Tier::DEVICE);
     auto engine                                        = std::make_shared<DeferredLoadEngine>(env->groups);
     env->cache->transfer_dispatcher_->per_rank_engine_ = engine;
     auto owner                                         = env->cache->match({env->keys[0], env->keys[1]}).async_context;
@@ -1312,7 +1312,7 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
     ASSERT_NE(env, nullptr);
     env->insertRequestPath();
     env->releaseRequestRefs();
-    env->demoteAll(Tier::DEVICE);
+    env->evictAll(Tier::DEVICE);
     ASSERT_TRUE(env->allResourcesAtTier(Tier::HOST));
     // A different request owns non_owner GPU allocations for reinserting the same keys.
     std::vector<block_tree_cache_test::MultiNodeBlocks> replacement_blocks;
@@ -1429,7 +1429,7 @@ TEST(BlockTreeLoaderTest, FullCorruptionRacingPendingCommitReleasesEachReference
     ASSERT_NE(env, nullptr);
     env->insertRequestPath();
     env->releaseRequestRefs();
-    env->demoteAll(Tier::DEVICE);
+    env->evictAll(Tier::DEVICE);
     auto engine                                        = std::make_shared<DeferredLoadEngine>(env->groups);
     env->cache->transfer_dispatcher_->per_rank_engine_ = engine;
     auto owner                                         = env->cache->match({env->keys[0], env->keys[1]}).async_context;
@@ -1486,7 +1486,7 @@ TEST(BlockTreeLoaderTest, FullCorruptionReclaimsIdleDescendantsOutsideTheLoadBat
     ASSERT_NE(env, nullptr);
     env->insertRequestPath();
     env->releaseRequestRefs();
-    env->demoteAll(Tier::DEVICE);
+    env->evictAll(Tier::DEVICE);
     auto engine                                        = std::make_shared<DeferredLoadEngine>(env->groups);
     env->cache->transfer_dispatcher_->per_rank_engine_ = engine;
     auto owner                                         = env->cache->match({env->keys[0], env->keys[1]}).async_context;
@@ -1521,7 +1521,7 @@ TEST(BlockTreeLoaderTest, FullPendingCommitRejectsCorruptSubtreeAndReclaimsItsNo
     ASSERT_NE(env, nullptr);
     env->insertRequestPath();
     env->releaseRequestRefs();
-    env->demoteAll(Tier::DEVICE);
+    env->evictAll(Tier::DEVICE);
     auto engine                                        = std::make_shared<DeferredLoadEngine>(env->groups);
     env->cache->transfer_dispatcher_->per_rank_engine_ = engine;
     auto owner                                         = env->cache->match({env->keys[0], env->keys[1]}).async_context;
@@ -1574,7 +1574,7 @@ TEST(BlockTreeLoaderTest, BatchSettlementHandlesCorruptionInEveryGroupAndAncesto
     ASSERT_NE(env, nullptr);
     env->insertRequestPath();
     env->releaseRequestRefs();
-    env->demoteAll(Tier::DEVICE);
+    env->evictAll(Tier::DEVICE);
     auto engine                                        = std::make_shared<DeferredLoadEngine>(env->groups);
     env->cache->transfer_dispatcher_->per_rank_engine_ = engine;
     auto owner                                         = env->cache->match(env->keys).async_context;
@@ -1606,7 +1606,7 @@ TEST(BlockTreeLoaderTest, ConcurrentFullAndSwaCorruptionPreservesSwaPathAndRecla
     ASSERT_NE(env, nullptr);
     env->insertRequestPath();
     env->releaseRequestRefs();
-    env->demoteAll(Tier::DEVICE);
+    env->evictAll(Tier::DEVICE);
     const CacheKeysType                        other_keys{200, 201, 202};
     std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(env->groups.size()));
     for (auto& per_node : resources) {
@@ -1720,9 +1720,9 @@ TEST(BlockTreeLoaderTest, PendingLoadAllowsNonOwnerLoadAcrossOwnerSettlement) {
             ASSERT_NE(env, nullptr);
             env->insertRequestPath();
             env->releaseRequestRefs();
-            env->demoteAll(Tier::DEVICE);
+            env->evictAll(Tier::DEVICE);
             if (source == Tier::DISK) {
-                env->demoteAll(Tier::HOST);
+                env->evictAll(Tier::HOST);
             }
             auto first  = env->cache->match(env->keys);
             auto second = env->cache->match(env->keys);
@@ -1789,9 +1789,9 @@ TEST(BlockTreeLoaderTest, NonOwnerInsertKeepsDevicePrefixAcrossOwnerSettlement) 
             ASSERT_NE(env, nullptr);
             env->insertRequestPath();
             env->releaseRequestRefs();
-            env->demoteAll(Tier::DEVICE);
+            env->evictAll(Tier::DEVICE);
             if (source == Tier::DISK)
-                env->demoteAll(Tier::HOST);
+                env->evictAll(Tier::HOST);
             auto engine                                        = std::make_shared<DeferredLoadEngine>(env->groups);
             env->cache->transfer_dispatcher_->per_rank_engine_ = engine;
             block_tree_cache_detail::ScopeRollback drain([&] { engine->releaseAll(); });
@@ -1913,9 +1913,9 @@ TEST(BlockTreeLoaderTest, PrunedAdoptedDeviceReleasesCurrentCacheAndOriginalLoad
             ASSERT_NE(env, nullptr);
             env->insertRequestPath();
             env->releaseRequestRefs();
-            env->demoteAll(Tier::DEVICE);
+            env->evictAll(Tier::DEVICE);
             if (source == Tier::DISK)
-                env->demoteAll(Tier::HOST);
+                env->evictAll(Tier::HOST);
             auto warmup = env->cache->match({env->keys.front()});
             ASSERT_NE(warmup.async_context, nullptr);
             auto warmup_refs = bindTargets(*env, warmup.async_context);
@@ -1994,9 +1994,9 @@ TEST(BlockTreeLoaderTest, ReplacedLoadCannotChangeNewEvictionState) {
             ASSERT_NE(env, nullptr);
             env->insertRequestPath();
             env->releaseRequestRefs();
-            env->demoteAll(Tier::DEVICE);
+            env->evictAll(Tier::DEVICE);
             if (source == Tier::DISK)
-                env->demoteAll(Tier::HOST);
+                env->evictAll(Tier::HOST);
             auto engine                                        = std::make_shared<DeferredLoadEngine>(env->groups);
             env->cache->transfer_dispatcher_->per_rank_engine_ = engine;
             block_tree_cache_detail::ScopeRollback drain([&] { engine->releaseAll(); });
@@ -2073,12 +2073,12 @@ TEST(BlockTreeLoaderTest, NonOwnerPrefixDoesNotPublishOwnerDeviceSuffix) {
         ASSERT_NE(env, nullptr);
         env->insertRequestPath();
         env->releaseRequestRefs();
-        env->demoteAll(Tier::DEVICE);
+        env->evictAll(Tier::DEVICE);
         std::optional<TransferDescriptor> eviction;
         std::shared_ptr<LoadAsyncContext> pending;
         if (evicting) {
             using Peer = block_tree_cache_test::BlockTreeCacheTestPeer;
-            ASSERT_TRUE(Peer::demoteOneForGroupSetForTest(*env->cache, 0, Tier::HOST));
+            ASSERT_TRUE(Peer::evictOneForGroupSetForTest(*env->cache, 0, Tier::HOST));
             Peer::waitForTaskPoolIdleForTest(*env->cache);
             std::lock_guard<std::mutex> lock(env->cache->mutex_);
             eviction = env->cache->evictor_.chooseVictim(0, Tier::HOST);
@@ -2136,9 +2136,9 @@ TEST(BlockTreeLoaderTest, NonOwnerLoadKeepsRemovedNodesPendingUntilLastUserFinis
             ASSERT_NE(env, nullptr);
             env->insertRequestPath();
             env->releaseRequestRefs();
-            env->demoteAll(Tier::DEVICE);
+            env->evictAll(Tier::DEVICE);
             if (source == Tier::DISK) {
-                env->demoteAll(Tier::HOST);
+                env->evictAll(Tier::HOST);
             }
             auto engine                                        = std::make_shared<DeferredLoadEngine>(env->groups);
             env->cache->transfer_dispatcher_->per_rank_engine_ = engine;
@@ -2220,7 +2220,7 @@ TEST(BlockTreeLoaderTest, ReplacedEvictionWithdrawsPendingReleaseAndReportsAllEv
                     env->insertRequestPath();
                     env->releaseRequestRefs();
                     if (old_tier == Tier::HOST) {
-                        env->demoteAll(Tier::DEVICE);
+                        env->evictAll(Tier::DEVICE);
                     }
                     auto engine = std::make_shared<DeferredLoadEngine>(env->groups);
                     env->cache->transfer_dispatcher_->per_rank_engine_ = engine;
@@ -2324,9 +2324,9 @@ TEST(BlockTreeLoaderTest, NonOwnerFullCrcPrunesBusySubtreeAndRestoresParentCandi
                 ASSERT_NE(env, nullptr);
                 env->insertRequestPath();
                 env->releaseRequestRefs();
-                env->demoteAll(Tier::DEVICE);
+                env->evictAll(Tier::DEVICE);
                 if (source == Tier::DISK) {
-                    env->demoteAll(Tier::HOST);
+                    env->evictAll(Tier::HOST);
                 }
                 ASSERT_TRUE(env->allResourcesAtTier(source));
                 auto engine                                        = std::make_shared<DeferredLoadEngine>(env->groups);
@@ -2399,9 +2399,9 @@ TEST(BlockTreeLoaderTest, NonOwnerLoadCrcFailureInvalidatesOnlyCurrentSource) {
             ASSERT_NE(env, nullptr);
             env->insertRequestPath();
             env->releaseRequestRefs();
-            env->demoteAll(Tier::DEVICE);
+            env->evictAll(Tier::DEVICE);
             if (source == Tier::DISK) {
-                env->demoteAll(Tier::HOST);
+                env->evictAll(Tier::HOST);
             }
             auto engine                                        = std::make_shared<DeferredLoadEngine>(env->groups);
             env->cache->transfer_dispatcher_->per_rank_engine_ = engine;

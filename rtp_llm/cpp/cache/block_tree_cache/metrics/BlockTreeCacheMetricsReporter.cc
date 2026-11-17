@@ -179,7 +179,7 @@ void BlockTreeCacheMetricsReporter::reportEvictionMetrics(const EvictionVictimMe
                         "trigger_type", trigger == EvictionVictimTrigger::WATERMARK ? "watermark" : "force_drop");
                     tags.AddTag("tier", tierName(tier));
                     tags.AddTag("group_type", metricCacheGroupTypeName(group_type));
-                    tags.AddTag("mode", drop ? "drop" : "demote");
+                    tags.AddTag("mode", drop ? "drop" : "evict");
                     RtpLLMCacheEvictionVictimMetricsCollector collector;
                     collector.calls              = counters.calls;
                     collector.candidates_sum     = counters.candidates_sum;

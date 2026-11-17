@@ -2003,7 +2003,7 @@ TEST(BlockTreeCacheMetricsTest, EvictionVictimMetricsPreserveDimensionsAndWeight
                                 trigger == EvictionVictimTrigger::WATERMARK ? "watermark" : "force_drop");
                     tags.AddTag("tier", tierName(tier));
                     tags.AddTag("group_type", metricCacheGroupTypeName(type));
-                    tags.AddTag("mode", drop ? "drop" : "demote");
+                    tags.AddTag("mode", drop ? "drop" : "evict");
                     auto selected_tags = tags;
                     selected_tags.AddTag("selected", "true");
                     EXPECT_DOUBLE_EQ(snapshotQps(metrics->choose_victim_qps_metric, selected_tags), 2 * (i + 1));
@@ -2227,7 +2227,7 @@ TEST_F(BlockTreeCacheTest, MatchFailsFastAtIdleResourceWithMultipleServingTiers)
     first_node->group_set_resources[0].host_block = NULL_BLOCK_IDX;
 }
 
-TEST_F(BlockTreeCacheTest, MatchReusesDemotingFullResource) {
+TEST_F(BlockTreeCacheTest, MatchReusesEvictingFullResource) {
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {10};
     resources[1][0].device_blocks = {11};
@@ -3792,7 +3792,7 @@ TEST_F(BlockTreeCacheTest, LoadDetectsHostData) {
 
     std::unique_ptr<BlockTreeCache> cache = makeBlockTreeCacheForTest(std::move(groups));
 
-    // Insert a node and manually set host data (simulating prior demotion).
+    // Insert a node and manually set host data (simulating prior eviction).
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {42};
     cache->insert({100}, resources, Tier::DEVICE);
@@ -3804,7 +3804,7 @@ TEST_F(BlockTreeCacheTest, LoadDetectsHostData) {
     resources2[0][0].device_blocks = {55};
     cache->insert({200}, resources2, Tier::DEVICE);
 
-    // Manually set host_block and clear device_blocks to simulate a demoted state.
+    // Manually set host_block and clear device_blocks to simulate a evicted state.
     auto find = cache->tree()->findNode({200});
     ASSERT_FALSE(find.empty());
     GroupSetResource& resource = find.back()->group_set_resources[0];
@@ -4705,7 +4705,7 @@ TEST_F(BlockTreeCacheTest, EventPublicationTracksComponentsIndependently) {
     EXPECT_THROW(cache->setEventPublisher(publisher, {"missing"}), std::invalid_argument);
     EXPECT_EQ(cache->logicalCacheSnapshot().block_groups, complete.block_groups);
 
-    // A demoting device source remains published through rollback.
+    // A evicting device source remains published through rollback.
     TreeNode*                node = cache->tree()->findNode({100, 200, 300}).back();
     const TransferDescriptor desc(node, 1, 0, Tier::DEVICE, Tier::HOST, {46}, /*initial_owner=*/true);
     {
@@ -4815,7 +4815,7 @@ TEST_F(BlockTreeCacheTest, EventPublicationRequiresEveryMemberOfSharedGroupSet) 
     }
 }
 
-TEST_F(BlockTreeCacheTest, EventPublicationPersistsDuringDemotionAndAfterFailure) {
+TEST_F(BlockTreeCacheTest, EventPublicationPersistsDuringEvictionAndAfterFailure) {
     auto publisher = std::make_shared<RecordingCachePublisher>();
     cache_->setEventPublisher(publisher, {"group0"});
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
