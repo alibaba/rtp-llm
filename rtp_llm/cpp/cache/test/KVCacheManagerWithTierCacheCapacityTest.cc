@@ -3,7 +3,7 @@
 namespace rtp_llm::test {
 using namespace tier_cache_test_detail;
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullLowerPoolSkipsDemotionAndRetriesAfterCapacityReturns) {
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullLowerPoolSkipsEvictionAndRetriesAfterCapacityReturns) {
     ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/16));
     auto       cache          = manager_->blockTreeCache();
     const auto initial_device = snapshotDevicePools(manager_);
@@ -134,7 +134,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullLowerPoolSkipsDemotionAndRetries
     ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceDemotionRetries) {
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceEvictionRetries) {
     if (GetParam() != TierLayout::HOST_ONLY) {
         GTEST_SKIP() << "HOST self-drain coverage requires HostOnly layout";
     }
@@ -296,7 +296,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullHostPoolSelfDrainsThenDeviceDemo
     ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostDemotionRetries) {
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4FullDiskPoolEvictsThenHostEvictionRetries) {
     if (GetParam() != TierLayout::HOST_DISK) {
         GTEST_SKIP() << "DISK eviction recovery requires HostDisk layout";
     }

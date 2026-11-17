@@ -1904,7 +1904,7 @@ TEST_F(StreamCacheResourceTest, RemoteTimeoutAllocationRetryKeepsLocalLookupAndS
         context.reset();
         block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
         for (const auto tier : {Tier::DEVICE, Tier::HOST}) {
-            const bool dropped = block_tree_cache_test::BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(
+            const bool dropped = block_tree_cache_test::BlockTreeCacheTestPeer::evictOneForGroupSetForTest(
                 *cache, group_id, tier, /*force_drop=*/true);
             if (resident) {
                 EXPECT_FALSE(dropped);

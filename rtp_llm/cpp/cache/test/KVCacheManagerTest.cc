@@ -2247,7 +2247,7 @@ protected:
         }
     }
 
-    void demote() {
+    void evict() {
         auto cache = manager_->blockTreeCache();
         // Capacity is 16: a positive ratio below 1/16 targets zero used
         // blocks. Pending loads and request-held device blocks are ineligible.
@@ -2279,7 +2279,7 @@ protected:
         auto b = request(2);
         ASSERT_NO_FATAL_FAILURE(seed(a));
         ASSERT_NO_FATAL_FAILURE(seed(b));
-        demote();
+        evict();
         BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
         BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
         ASSERT_NO_FATAL_FAILURE(hostPayload(a));
@@ -2326,7 +2326,7 @@ protected:
         ASSERT_NE(result_a.async_context, nullptr);
         ASSERT_NE(result_b.async_context, nullptr);
         if (concurrent) {
-            demote();
+            evict();
             // Two separate load tasks plus at least one eviction task must
             // reach the gate concurrently, not merely finish in one run.
             ASSERT_TRUE(barrier->waitUntilEnteredFor(3, std::chrono::seconds(10)));
@@ -2362,7 +2362,7 @@ protected:
         }
         if (concurrent) {
             // A/B keep their device copies while load_a/load_b hold request
-            // references. The same watermark still demotes the idle C/D blocks.
+            // references. The same watermark still evicts the idle C/D blocks.
             {
                 std::lock_guard<std::mutex> lock(cache->mutex_);
                 for (const auto* req : {&a, &b}) {
@@ -2396,7 +2396,7 @@ protected:
         manager_->free(FreeInfo{load_b.resource, load_b.tokens});
         if (concurrent) {
             // Releasing the request references makes A/B eligible again.
-            demote();
+            evict();
             BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
             BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
             ASSERT_NO_FATAL_FAILURE(hostPayload(a));

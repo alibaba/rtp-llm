@@ -3,7 +3,7 @@
 namespace rtp_llm::test {
 using namespace tier_cache_test_detail;
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoadsBackMissingResources) {
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkEvictsToHostAndLoadsBackMissingResources) {
     ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/16));
     ASSERT_NE(manager_, nullptr);
     auto cache = manager_->blockTreeCache();
@@ -69,23 +69,23 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
     }
 
     ASSERT_TRUE(pausable_engine->armPause());
-    ScopedTransferRelease demotion_release(pausable_engine);
+    ScopedTransferRelease eviction_release(pausable_engine);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, one_block_excess_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
-    const bool demotion_entered = pausable_engine->waitUntilEnteredFor(
+    const bool eviction_entered = pausable_engine->waitUntilEnteredFor(
         std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
-    if (!demotion_entered) {
+    if (!eviction_entered) {
         pausable_engine->release();
     }
-    ASSERT_TRUE(demotion_entered);
+    ASSERT_TRUE(eviction_entered);
 
-    auto maybe_demoting = snapshotPathResources(*cache, seed.cache_keys);
-    ASSERT_TRUE(maybe_demoting.has_value());
-    for (size_t path_index = 0; path_index < maybe_demoting->size(); ++path_index) {
+    auto maybe_evicting = snapshotPathResources(*cache, seed.cache_keys);
+    ASSERT_TRUE(maybe_evicting.has_value());
+    for (size_t path_index = 0; path_index < maybe_evicting->size(); ++path_index) {
         for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
             const GroupSetPtr&      group_set = cache->groupSets()[group_set_id];
-            const GroupSetResource& resource  = (*maybe_demoting)[path_index][group_set_id];
+            const GroupSetResource& resource  = (*maybe_evicting)[path_index][group_set_id];
             EXPECT_EQ(resource.transfer_state,
                       path_index == 2 ? GroupSetTransferState::EVICTING : GroupSetTransferState::IDLE)
                 << "path=" << path_index << " group_set=" << group_set_id;
@@ -133,20 +133,20 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
         }
     }
 
-    const auto demotion_descriptors = pausable_engine->descriptors();
-    ASSERT_EQ(demotion_descriptors.size(), cache->groupSets().size());
-    std::vector<size_t> demotions_by_group_set(cache->groupSets().size(), 0);
-    for (const auto& descriptor : demotion_descriptors) {
+    const auto eviction_descriptors = pausable_engine->descriptors();
+    ASSERT_EQ(eviction_descriptors.size(), cache->groupSets().size());
+    std::vector<size_t> evictions_by_group_set(cache->groupSets().size(), 0);
+    for (const auto& descriptor : eviction_descriptors) {
         ASSERT_LT(descriptor.group_set_id, cache->groupSets().size());
         EXPECT_EQ(descriptor.source_tier, Tier::DEVICE);
         EXPECT_EQ(descriptor.target_tier, Tier::HOST);
         EXPECT_FALSE(isNullBlockIdx(descriptor.singleBlockAt(Tier::HOST)));
         EXPECT_EQ(descriptor.blocksAt(Tier::DEVICE),
                   groupSetSeedBlocksAt(cache->groupSets()[descriptor.group_set_id], seed, /*path_index=*/2));
-        ++demotions_by_group_set[descriptor.group_set_id];
+        ++evictions_by_group_set[descriptor.group_set_id];
     }
-    for (size_t group_set_id = 0; group_set_id < demotions_by_group_set.size(); ++group_set_id) {
-        EXPECT_EQ(demotions_by_group_set[group_set_id], 1u);
+    for (size_t group_set_id = 0; group_set_id < evictions_by_group_set.size(); ++group_set_id) {
+        EXPECT_EQ(evictions_by_group_set[group_set_id], 1u);
     }
 
     for (const auto& hold : eviction_guards) {
@@ -214,7 +214,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
     const auto all_descriptors = pausable_engine->descriptors();
     ASSERT_EQ(all_descriptors.size(), 2 * cache->groupSets().size());
     std::vector<size_t> loads_by_group_set(cache->groupSets().size(), 0);
-    for (size_t index = demotion_descriptors.size(); index < all_descriptors.size(); ++index) {
+    for (size_t index = eviction_descriptors.size(); index < all_descriptors.size(); ++index) {
         const auto& descriptor = all_descriptors[index];
         ASSERT_LT(descriptor.group_set_id, cache->groupSets().size());
         EXPECT_EQ(descriptor.source_tier, Tier::HOST);
@@ -269,7 +269,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
     ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskAndLoadBack) {
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksEvictToDiskAndLoadBack) {
     if (GetParam() != TierLayout::HOST_DISK) {
         GTEST_SKIP() << "disk round-trip requires the HostDisk layout";
     }
@@ -301,23 +301,23 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
     ASSERT_TRUE(device_ratio.has_value());
 
     ASSERT_TRUE(pausable_engine->armPause());
-    ScopedTransferRelease device_demotion_release(pausable_engine);
+    ScopedTransferRelease device_eviction_release(pausable_engine);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, *device_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::DEVICE, 0.0);
-    const bool device_demotion_entered = pausable_engine->waitUntilEnteredFor(
+    const bool device_eviction_entered = pausable_engine->waitUntilEnteredFor(
         std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
-    if (!device_demotion_entered) {
+    if (!device_eviction_entered) {
         pausable_engine->release();
     }
-    ASSERT_TRUE(device_demotion_entered);
+    ASSERT_TRUE(device_eviction_entered);
 
-    auto maybe_device_demoting = snapshotPathResources(*cache, seed.cache_keys);
-    ASSERT_TRUE(maybe_device_demoting.has_value());
-    ASSERT_EQ(maybe_device_demoting->size(), 1u);
+    auto maybe_device_evicting = snapshotPathResources(*cache, seed.cache_keys);
+    ASSERT_TRUE(maybe_device_evicting.has_value());
+    ASSERT_EQ(maybe_device_evicting->size(), 1u);
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
         const auto& group_set = cache->groupSets()[group_set_id];
-        const auto& resource  = (*maybe_device_demoting)[0][group_set_id];
+        const auto& resource  = (*maybe_device_evicting)[0][group_set_id];
         EXPECT_EQ(resource.transfer_state, GroupSetTransferState::EVICTING);
         ASSERT_TRUE(resource.hasTier(Tier::DEVICE));
         EXPECT_EQ(resource.getTopTier(), Tier::DEVICE);
@@ -373,22 +373,22 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
     ASSERT_TRUE(host_ratio.has_value());
 
     ASSERT_TRUE(pausable_engine->armPause());
-    ScopedTransferRelease host_demotion_release(pausable_engine);
+    ScopedTransferRelease host_eviction_release(pausable_engine);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, *host_ratio);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache, Tier::HOST, 0.0);
-    const bool host_demotion_entered = pausable_engine->waitUntilEnteredFor(
+    const bool host_eviction_entered = pausable_engine->waitUntilEnteredFor(
         std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout));
-    if (!host_demotion_entered) {
+    if (!host_eviction_entered) {
         pausable_engine->release();
     }
-    ASSERT_TRUE(host_demotion_entered);
+    ASSERT_TRUE(host_eviction_entered);
 
-    auto maybe_host_demoting = snapshotPathResources(*cache, seed.cache_keys);
-    ASSERT_TRUE(maybe_host_demoting.has_value());
+    auto maybe_host_evicting = snapshotPathResources(*cache, seed.cache_keys);
+    ASSERT_TRUE(maybe_host_evicting.has_value());
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
         const auto& group_set = cache->groupSets()[group_set_id];
-        const auto& resource  = (*maybe_host_demoting)[0][group_set_id];
+        const auto& resource  = (*maybe_host_evicting)[0][group_set_id];
         EXPECT_EQ(resource.transfer_state, GroupSetTransferState::EVICTING);
         ASSERT_TRUE(resource.hasTier(Tier::HOST));
         EXPECT_EQ(resource.getTopTier(), Tier::HOST);
@@ -697,8 +697,8 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailurePreservesO
 
         recording_engine->clearScriptedResults();
         // A transport failure preserves the valid HOST copy for subsequent requests
-        // before the demotion retry. A successful load consumes that HOST copy,
-        // so demote the same cached path back to HOST before retrying H2Dk.
+        // before the eviction retry. A successful load consumes that HOST copy,
+        // so evict the same cached path back to HOST before retrying H2Dk.
         const size_t submits_before_host_hit = recording_engine->submittedDescriptorCount();
         auto         host_hit_resource       = makeResource(cache_config_);
         auto         host_hit_tokens         = makeTokenIds(
@@ -802,7 +802,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailurePreservesO
     ASSERT_NO_FATAL_FAILURE(reclaimAndExpectInitialPools(manager_, initial_device, initial_lower, GetParam()));
 }
 
-TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
+TEST_P(KVCacheManagerWithTierCacheTest, DSV4EvictingDeviceHitIsNotReselected) {
     ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/16));
     ASSERT_NE(manager_, nullptr);
     auto cache  = manager_->blockTreeCache();
@@ -830,16 +830,16 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
     ASSERT_GT(expected_entered_count, 0u);
     ASSERT_TRUE(engine->waitUntilEnteredCountFor(
         expected_entered_count, std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
-    auto demoting = snapshotPathResources(*cache, seed.cache_keys);
-    ASSERT_TRUE(demoting.has_value());
-    ASSERT_EQ(demoting->size(), 1u);
+    auto evicting = snapshotPathResources(*cache, seed.cache_keys);
+    ASSERT_TRUE(evicting.has_value());
+    ASSERT_EQ(evicting->size(), 1u);
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
         const auto& group_set = cache->groupSets()[group_set_id];
-        const auto& state     = (*demoting)[0][group_set_id];
+        const auto& state     = (*evicting)[0][group_set_id];
         EXPECT_EQ(state.transfer_state, GroupSetTransferState::EVICTING);
         ASSERT_TRUE(state.hasTier(Tier::DEVICE));
         EXPECT_FALSE(state.hasTier(Tier::HOST))
-            << "the demotion target is held by the eviction ticket until settlement";
+            << "the eviction target is held by the eviction ticket until settlement";
         EXPECT_EQ(state.device_blocks, groupSetSeedBlocksAt(group_set, seed, /*path_index=*/0));
         ASSERT_EQ(group_set->devicePools().size(), state.device_blocks.size());
         for (size_t member_index = 0; member_index < group_set->devicePools().size(); ++member_index) {
@@ -863,11 +863,11 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
     // remains retained by the eviction ticket rather than a new request.
     EXPECT_EQ(result.reuse_len, 0);
 
-    auto still_demoting = snapshotPathResources(*cache, seed.cache_keys);
-    ASSERT_TRUE(still_demoting.has_value());
+    auto still_evicting = snapshotPathResources(*cache, seed.cache_keys);
+    ASSERT_TRUE(still_evicting.has_value());
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
         const auto& group_set = cache->groupSets()[group_set_id];
-        const auto& state     = (*still_demoting)[0][group_set_id];
+        const auto& state     = (*still_evicting)[0][group_set_id];
         EXPECT_EQ(state.transfer_state, GroupSetTransferState::EVICTING);
         ASSERT_EQ(group_set->devicePools().size(), state.device_blocks.size());
         for (size_t member_index = 0; member_index < group_set->devicePools().size(); ++member_index) {

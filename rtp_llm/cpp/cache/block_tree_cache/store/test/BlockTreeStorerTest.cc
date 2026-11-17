@@ -328,8 +328,8 @@ protected:
         }
         for (Tier tier : {Tier::DEVICE, GetParam()}) {
             EXPECT_EQ(candidateCountForTier(*env_->cache, tier), 0u);
-            EXPECT_FALSE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*env_->cache, 0, tier, true));
-            EXPECT_FALSE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*env_->cache, 0, tier, false));
+            EXPECT_FALSE(BlockTreeCacheTestPeer::evictOneForGroupSetForTest(*env_->cache, 0, tier, true));
+            EXPECT_FALSE(BlockTreeCacheTestPeer::evictOneForGroupSetForTest(*env_->cache, 0, tier, false));
         }
         BlockTreeMatchResult match = env_->cache->match(keys_);
         EXPECT_EQ(match.matched_device_blocks, keys_.size());

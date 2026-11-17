@@ -136,7 +136,7 @@ OnlineWorkloadMetadata TreeWorkloadGenerator::generateTopology() {
     next_topology_key_ = 0;
 
     // Shared base: one path of shared_base_nodes blocks. Requests reuse its
-    // prefix and never pin it, so watermark eviction can partially demote it
+    // prefix and never pin it, so watermark eviction can partially evict it
     // and actual reuse may drop below planned reuse.
     PathKeys shared_base;
     shared_base.reserve(config_.shared_base_nodes);

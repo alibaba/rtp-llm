@@ -51,7 +51,7 @@ export BLOCK_TREE_DEVICE_HOST_COPY_PRIORITY=sm  # sm > cuda_batch > generic
 - `tree_online_high_variation_c32` 是**唯一** active/representative Tree perf case。该 case 使用混合 BASE/CONTINUATION 请求：BASE 使用 shared-base + unique suffix（原 high-variation 形状），CONTINUATION 完整继承同一 family 的 parent path 并追加唯一 tail（append-only）。family 状态跨 warmup/measured 持久化，scheduler 正确处理 dependency skip 与 token-budget FIFO。
 - Transfer 的 device 侧按 profile member/layer 构造真实 copy tile；device/host lane blocks 只按 wave width 分配，host/disk working set 独立寻址，不按 working set 大小扩张 GPU staging 内存。每个 wave 按方向将独立 endpoint 组成 transfer-engine descriptor batch，再等待该方向完成后推进配对方向。device↔disk staging lease 数至少取 wave width，避免 lane 超订导致 `staging pool exhausted`。
 - mixed case 在同一 measured window 内交替执行两个方向。展示的“混合总吞吐”是该窗口内两个方向成功字节数之和除以墙钟时间，不是两个单方向峰值的相加。
-- tier round-trip 已删除。demote/load 生命周期正确性继续由现有功能测试看护。
+- tier round-trip 已删除。evict/load 生命周期正确性继续由现有功能测试看护。
 - 计时边界：阶段为 `bootstrap → profile load → allocation → setup → warmup → measured → finalize`，只有 `measured`（含 deadline 后的已 admission request drain）计入指标；perf 运行是独立进程，其 wall time 不进入统计。
 - 内存模型：常驻显存由“同时存活的 blocks × 单 block payload”决定，而非 Tree 节点总数。Tree 使用固定 `scaled` payload，device/host pool 各 32,768 blocks；资源预检（preflight）不足时直接终止，不自动缩小命名 case。
 
@@ -230,7 +230,7 @@ result 还记录每个 tier 的 capacity/allocated/addressable blocks、每方�
 
 ## Tree 语义（在线生命周期）
 
-- 固定 workload：setup 构造约 20k 节点（3,711-block shared base + 16,289-block background tree），device/host pool 各 32,768 blocks，watermark 0.8/0.9。shared base 不 pin，持续唯一 suffix insert 会驱动 demote/load/evict churn。
+- 固定 workload：setup 构造约 20k 节点（3,711-block shared base + 16,289-block background tree），device/host pool 各 32,768 blocks，watermark 0.8/0.9。shared base 不 pin，持续唯一 suffix insert 会驱动 evict/load/drop churn。
 - 请求 path = shared base 前缀（按 13 档 hit-rate 采样的 planned reuse）+ 请求独立 key space 的 unique suffix；不同请求 suffix 不相交，也不与 shared/background keys 冲突，因此 actual reuse 不可能因 key 碰撞高于 planned reuse。
 - **C32 是 32 个逻辑 request context**（单一 deque 容器），只有一个 foreground scheduler 线程串行调用 match/insert/release；`--task-pool-size` 只控制后台 load/evict/store task pool，不创建请求线程。
 - admission 顺序为 `match → 分配 load targets → 预分配 suffix blocks → commit load`；任一分配/commit 失败整体回滚，无残留 ref/resource。suffix blocks 在 admission 阶段准备好，insert 阶段不再发生 KV allocation。

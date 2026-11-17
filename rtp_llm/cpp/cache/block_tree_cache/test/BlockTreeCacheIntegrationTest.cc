@@ -483,7 +483,7 @@ protected:
 constexpr size_t kPathLength = 4;
 constexpr size_t kPoolSize   = 16;
 
-enum class DemotionFailureStage {
+enum class EvictionFailureStage {
     D2H,
     H2DISK,
 };
@@ -492,15 +492,15 @@ std::string tierParamName(const ::testing::TestParamInfo<Tier>& info) {
     return info.param == Tier::HOST ? "Host" : "Disk";
 }
 
-std::string demotionFailureParamName(const ::testing::TestParamInfo<DemotionFailureStage>& info) {
-    return info.param == DemotionFailureStage::D2H ? "D2H" : "H2Disk";
+std::string evictionFailureParamName(const ::testing::TestParamInfo<EvictionFailureStage>& info) {
+    return info.param == EvictionFailureStage::D2H ? "D2H" : "H2Disk";
 }
 
-void demoteTo(FullSWAEnvironment& environment, Tier target_tier) {
-    environment.demoteAll(Tier::DEVICE);
+void evictTo(FullSWAEnvironment& environment, Tier target_tier) {
+    environment.evictAll(Tier::DEVICE);
     ASSERT_TRUE(environment.allResourcesAtTier(Tier::HOST));
     if (target_tier == Tier::DISK) {
-        environment.demoteAll(Tier::HOST);
+        environment.evictAll(Tier::HOST);
         ASSERT_TRUE(environment.allResourcesAtTier(Tier::DISK));
     }
 }
@@ -570,24 +570,24 @@ void runSingleMaintenance(FullSWAEnvironment& environment, Tier tier, double rat
     BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment.cache);
 }
 
-void demoteSwaSuffixKeepingFullDevice(FullSWAEnvironment& environment) {
+void evictswaSuffixKeepingFullDevice(FullSWAEnvironment& environment) {
     // Keep FULL request ownership and the caller's matched SWA prefix, but release
     // the original SWA request so only its unheld suffix can migrate.
     environment.releaseRequestRefsForGroup(1);
     const std::vector<TreeNode*> path = environment.cache->tree()->findNode(environment.keys);
     EXPECT_EQ(path.size(), kPathLength);
-    const bool first_demoted =
-        BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment.cache, /*group_set_id=*/1, Tier::DEVICE);
+    const bool first_evicted =
+        BlockTreeCacheTestPeer::evictOneForGroupSetForTest(*environment.cache, /*group_set_id=*/1, Tier::DEVICE);
     BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment.cache);
-    const bool second_demoted =
-        BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment.cache, /*group_set_id=*/1, Tier::DEVICE);
+    const bool second_evicted =
+        BlockTreeCacheTestPeer::evictOneForGroupSetForTest(*environment.cache, /*group_set_id=*/1, Tier::DEVICE);
     BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment.cache);
     for (TreeNode* node : path) {
         EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
         EXPECT_TRUE(node->group_set_resources[0].hasTier(Tier::DEVICE));
     }
-    EXPECT_TRUE(first_demoted);
-    EXPECT_TRUE(second_demoted);
+    EXPECT_TRUE(first_evicted);
+    EXPECT_TRUE(second_evicted);
 }
 
 BlockTreeMatchResult makePartialReadyDeviceContext(FullSWAEnvironment& environment) {
@@ -595,7 +595,7 @@ BlockTreeMatchResult makePartialReadyDeviceContext(FullSWAEnvironment& environme
     BlockTreeMatchResult prefix_hold = environment.cache->match({environment.keys[0], environment.keys[1]});
     EXPECT_EQ(prefix_hold.matched_device_blocks, 2u);
 
-    demoteSwaSuffixKeepingFullDevice(environment);
+    evictswaSuffixKeepingFullDevice(environment);
     environment.releaseMatch(prefix_hold);
 
     environment.scripted_per_rank_transfer_engine->clear();
@@ -878,7 +878,7 @@ TEST_F(BlockTreeCacheIntegrationTest, UncommittedLoadContextReleasesSourceRefere
     std::unique_ptr<FullSWAEnvironment> environment = FullSWAEnvironment::create();
     environment->insertRequestPath();
     environment->releaseRequestRefs();
-    demoteTo(*environment, Tier::HOST);
+    evictTo(*environment, Tier::HOST);
 
     BlockTreeMatchResult              result       = environment->cache->match(environment->keys);
     std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
@@ -933,7 +933,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForSubmitReturnedEvictio
         resources[0][0].device_blocks = request_blocks.front();
         cache->insert({100}, resources, Tier::DEVICE);
         device_pool->decRef(request_blocks.front());
-        ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*cache, 0, Tier::DEVICE));
+        ASSERT_TRUE(BlockTreeCacheTestPeer::evictOneForGroupSetForTest(*cache, 0, Tier::DEVICE));
         ASSERT_TRUE(manual_transfer_engine->waitUntilSubmitted(1, kRaceWaitTimeout));
         waitForCacheTasksToDrain(*cache);
         EXPECT_EQ(cache->task_pool_->pending_tasks_.load(), 0);
@@ -1107,7 +1107,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForSubmitReturnedLoadCon
     }
 }
 
-TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightDemotionAndDiscardsItsTarget) {
+TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightEvictionAndDiscardsItsTarget) {
     auto device_pool = makeStructuralDevicePool(0);
     auto host_pool   = makeHostPool(/*payload_bytes=*/1, /*usable_count=*/4);
     auto disk_pool   = makeDiskPool(
@@ -1134,7 +1134,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DirectDropDetachesInFlightDemotionAndDisca
     ASSERT_TRUE(insertGroupSetResources(*cache, {100, 200}, resources));
 
     pausable_copy->enablePause();
-    ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*cache, 0, Tier::HOST));
+    ASSERT_TRUE(BlockTreeCacheTestPeer::evictOneForGroupSetForTest(*cache, 0, Tier::HOST));
     ASSERT_TRUE(pausable_copy->waitUntilEnteredFor(kRaceWaitTimeout));
     const std::vector<TransferDescriptor> descriptors = pausable_copy->descriptors();
     ASSERT_EQ(descriptors.size(), 1u);
@@ -1379,7 +1379,7 @@ TEST_F(BlockTreeCacheIntegrationTest, EvictorPreservesRequestReferencedBlocksUnt
     environment->expectPoolFreeCounts({12, 12, 12}, {16, 16}, {16, 16});
 
     environment->scripted_per_rank_transfer_engine->clear();
-    environment->demoteAll(Tier::DEVICE);
+    environment->evictAll(Tier::DEVICE);
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
     EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
     environment->expectPayloads();
@@ -1387,7 +1387,7 @@ TEST_F(BlockTreeCacheIntegrationTest, EvictorPreservesRequestReferencedBlocksUnt
 
     environment->releaseRequestRefs();
     environment->expectPoolFreeCounts({12, 12, 12}, {16, 16}, {16, 16});
-    environment->demoteAll(Tier::DEVICE);
+    environment->evictAll(Tier::DEVICE);
     EXPECT_GT(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
     EXPECT_TRUE(environment->allResourcesAtTier(Tier::HOST));
     environment->expectPayloads();
@@ -1396,9 +1396,9 @@ TEST_F(BlockTreeCacheIntegrationTest, EvictorPreservesRequestReferencedBlocksUnt
     environment->expectFullyReclaimed();
 }
 
-class BlockTreeCacheDemotionFailureTest: public ::testing::TestWithParam<DemotionFailureStage> {};
+class BlockTreeCacheEvictionFailureTest: public ::testing::TestWithParam<EvictionFailureStage> {};
 
-TEST_P(BlockTreeCacheDemotionFailureTest, Evictor_DemotionFailure_RestoresSourceAndHeap) {
+TEST_P(BlockTreeCacheEvictionFailureTest, Evictor_EvictionFailure_RestoresSourceAndHeap) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -1409,10 +1409,10 @@ TEST_P(BlockTreeCacheDemotionFailureTest, Evictor_DemotionFailure_RestoresSource
     environment->insertRequestPath();
     environment->releaseRequestRefs();
 
-    const Tier source_tier = GetParam() == DemotionFailureStage::D2H ? Tier::DEVICE : Tier::HOST;
-    const Tier target_tier = GetParam() == DemotionFailureStage::D2H ? Tier::HOST : Tier::DISK;
+    const Tier source_tier = GetParam() == EvictionFailureStage::D2H ? Tier::DEVICE : Tier::HOST;
+    const Tier target_tier = GetParam() == EvictionFailureStage::D2H ? Tier::HOST : Tier::DISK;
     if (source_tier == Tier::HOST) {
-        environment->demoteAll(Tier::DEVICE);
+        environment->evictAll(Tier::DEVICE);
         ASSERT_TRUE(environment->allResourcesAtTier(Tier::HOST));
     }
 
@@ -1425,7 +1425,7 @@ TEST_P(BlockTreeCacheDemotionFailureTest, Evictor_DemotionFailure_RestoresSource
     for (size_t attempt = 0; attempt < 128; ++attempt) {
         environment->scripted_per_rank_transfer_engine->enqueue(/*success=*/false);
     }
-    environment->demoteAll(source_tier);
+    environment->evictAll(source_tier);
 
     EXPECT_TRUE(environment->allResourcesAtTier(source_tier));
     EXPECT_GT(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
@@ -1456,7 +1456,7 @@ TEST_P(BlockTreeCacheDemotionFailureTest, Evictor_DemotionFailure_RestoresSource
     }
 
     environment->scripted_per_rank_transfer_engine->clear();
-    environment->demoteAll(source_tier);
+    environment->evictAll(source_tier);
     EXPECT_TRUE(environment->allResourcesAtTier(target_tier));
     EXPECT_GT(environment->scripted_per_rank_transfer_engine->submittedDescriptorCount(), 0u);
     const std::vector<TransferDescriptor> retry_descriptors =
@@ -1485,12 +1485,12 @@ TEST_P(BlockTreeCacheDemotionFailureTest, Evictor_DemotionFailure_RestoresSource
     environment->expectFullyReclaimed();
 }
 
-INSTANTIATE_TEST_SUITE_P(DemotionFailure,
-                         BlockTreeCacheDemotionFailureTest,
-                         ::testing::Values(DemotionFailureStage::D2H, DemotionFailureStage::H2DISK),
-                         demotionFailureParamName);
+INSTANTIATE_TEST_SUITE_P(EvictionFailure,
+                         BlockTreeCacheEvictionFailureTest,
+                         ::testing::Values(EvictionFailureStage::D2H, EvictionFailureStage::H2DISK),
+                         evictionFailureParamName);
 
-TEST_F(BlockTreeCacheIntegrationTest, MatchDuringDemotionRetainsSourceAndJoinsLoad) {
+TEST_F(BlockTreeCacheIntegrationTest, MatchDuringEvictionRetainsSourceAndJoinsLoad) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -1509,11 +1509,11 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchDuringDemotionRetainsSourceAndJoinsLo
         environment->insertRequestPath();
         environment->releaseRequestRefs();
         if (source == Tier::HOST) {
-            demoteTo(*environment, Tier::HOST);
+            evictTo(*environment, Tier::HOST);
         }
         pausable_copy->enablePause();
         for (size_t group_id = 0; group_id < environment->groups.size(); ++group_id) {
-            ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, group_id, source));
+            ASSERT_TRUE(BlockTreeCacheTestPeer::evictOneForGroupSetForTest(*environment->cache, group_id, source));
         }
         ASSERT_TRUE(pausable_copy->waitUntilEnteredFor(kRaceWaitTimeout));
         auto during = environment->cache->match(environment->keys);
@@ -1586,7 +1586,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchDuringDemotionRetainsSourceAndJoinsLo
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache, pausable_copy);
         environment->insertRequestPath();
         environment->releaseRequestRefs();
-        demoteTo(*environment, Tier::HOST);
+        evictTo(*environment, Tier::HOST);
 
         BlockTreeMatchResult              first   = environment->cache->match(environment->keys);
         std::shared_ptr<LoadAsyncContext> context = takeLoadContext(first);
@@ -1726,7 +1726,7 @@ TEST_P(JoinedParentSettlementTest, OwnedChildPublishesOnlyAfterJoinedParentSettl
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache, transfer_engine);
     environment->insertRequestPath();
     environment->releaseRequestRefs();
-    demoteTo(*environment, Tier::HOST);
+    evictTo(*environment, Tier::HOST);
     transfer_engine->enableManualCompletion();
     ManualTransferCleanupGuard transfer_cleanup(transfer_engine);
 
@@ -1857,7 +1857,7 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     // back independently and leaves the FULL sibling untouched.
     environment->scripted_per_rank_transfer_engine->clear();
     environment->scripted_per_rank_transfer_engine->enqueue(/*success=*/false);
-    ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE));
+    ASSERT_TRUE(BlockTreeCacheTestPeer::evictOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE));
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
     EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
     const auto failed_descriptors = environment->scripted_per_rank_transfer_engine->descriptors();
@@ -1869,7 +1869,7 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     }
 
     environment->scripted_per_rank_transfer_engine->clear();
-    ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE));
+    ASSERT_TRUE(BlockTreeCacheTestPeer::evictOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE));
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
     const auto after_swa_to_host = environment->resourcesForPathNode(0);
     ASSERT_EQ(after_swa_to_host.size(), 2u);
@@ -1882,7 +1882,7 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     EXPECT_EQ(swa_host_descriptors[0].target_tier, Tier::HOST);
 
     environment->scripted_per_rank_transfer_engine->clear();
-    ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 0, Tier::DEVICE));
+    ASSERT_TRUE(BlockTreeCacheTestPeer::evictOneForGroupSetForTest(*environment->cache, 0, Tier::DEVICE));
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
     EXPECT_TRUE(environment->allResourcesAtTier(Tier::HOST));
     const auto full_host_descriptors = environment->scripted_per_rank_transfer_engine->descriptors();
@@ -1893,7 +1893,7 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     environment->expectPayloads();
 
     environment->scripted_per_rank_transfer_engine->clear();
-    ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::HOST));
+    ASSERT_TRUE(BlockTreeCacheTestPeer::evictOneForGroupSetForTest(*environment->cache, 1, Tier::HOST));
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
     const auto after_swa_to_disk = environment->resourcesForPathNode(0);
     ASSERT_EQ(after_swa_to_disk.size(), 2u);
@@ -1906,7 +1906,7 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     EXPECT_EQ(swa_disk_descriptors[0].target_tier, Tier::DISK);
 
     environment->scripted_per_rank_transfer_engine->clear();
-    ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 0, Tier::HOST));
+    ASSERT_TRUE(BlockTreeCacheTestPeer::evictOneForGroupSetForTest(*environment->cache, 0, Tier::HOST));
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
     EXPECT_TRUE(environment->allResourcesAtTier(Tier::DISK));
     const auto full_disk_descriptors = environment->scripted_per_rank_transfer_engine->descriptors();
@@ -1968,7 +1968,7 @@ TEST_F(BlockTreeCacheIntegrationTest, EvictionExplicitNoneCascadesAtLeafWithoutC
 
     environment->scripted_per_rank_transfer_engine->clear();
     EXPECT_TRUE(
-        BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE, /*force_drop=*/true));
+        BlockTreeCacheTestPeer::evictOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE, /*force_drop=*/true));
     block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*environment->cache);
     auto result = environment->cache->tree()->findNode(environment->keys);
     EXPECT_TRUE(result.empty());
@@ -2006,7 +2006,7 @@ TEST_F(BlockTreeCacheIntegrationTest, WorkLoopEvictLoadRetainsBusinessReferences
         resources[0][0].device_blocks = {source};
         cache->insert({100}, resources, Tier::DEVICE);
         device->decRef(source);
-        ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*cache, 0, Tier::DEVICE));
+        ASSERT_TRUE(BlockTreeCacheTestPeer::evictOneForGroupSetForTest(*cache, 0, Tier::DEVICE));
         BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
         auto nodes = cache->tree()->findNode({100});
         ASSERT_EQ(nodes.size(), 1u);
@@ -2015,7 +2015,7 @@ TEST_F(BlockTreeCacheIntegrationTest, WorkLoopEvictLoadRetainsBusinessReferences
         EXPECT_EQ(host->treeRefCount(host_block), 1u);
         EXPECT_FALSE(device->isAllocated(source));
 
-        ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*cache, 0, Tier::HOST));
+        ASSERT_TRUE(BlockTreeCacheTestPeer::evictOneForGroupSetForTest(*cache, 0, Tier::HOST));
         BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
         const auto disk_block = nodes[0]->group_set_resources[0].disk_block;
         ASSERT_NE(disk_block, NULL_BLOCK_IDX);
@@ -2146,7 +2146,7 @@ TEST_P(BlockTreeCacheLowerTierTest, FullSWA_MatchLowerTierOnlyReturnsContextWith
     auto environment = FullSWAEnvironment::create();
     environment->insertRequestPath();
     environment->releaseRequestRefs();
-    demoteTo(*environment, GetParam());
+    evictTo(*environment, GetParam());
     environment->expectPayloads();
 
     environment->scripted_per_rank_transfer_engine->clear();
@@ -2235,7 +2235,7 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesContextAndReleasesAl
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache, throwing_engine);
     environment->insertRequestPath();
     environment->releaseRequestRefs();
-    demoteTo(*environment, GetParam());
+    evictTo(*environment, GetParam());
     ASSERT_TRUE(environment->allResourcesAtTier(GetParam()));
     throwing_engine->enableThrow();
 
@@ -2331,7 +2331,7 @@ TEST_P(BlockTreeCacheLowerTierTest, SettlementStateMismatchRollsBackWholeBatch) 
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache, pausable_transfer_engine);
     environment->insertRequestPath();
     environment->releaseRequestRefs();
-    demoteTo(*environment, GetParam());
+    evictTo(*environment, GetParam());
     environment->expectPayloads();
 
     BlockTreeMatchResult              result  = environment->cache->match(environment->keys);
@@ -2424,7 +2424,7 @@ TEST_P(BlockTreeCacheLowerTierTest, AbortCommittedLoadReturnsFalseAndTransferCom
                                                                  pausable_per_rank_transfer_engine);
     environment->insertRequestPath();
     environment->releaseRequestRefs();
-    demoteTo(*environment, GetParam());
+    evictTo(*environment, GetParam());
     environment->expectPayloads();
 
     const auto snapshot_before = environment->cache->getKeySnapshot();
@@ -2524,7 +2524,7 @@ TEST_P(BlockTreeCacheLowerTierTest, AbortCompletionRaceDoesNotChangeCommittedRes
                                                                  pausable_per_rank_transfer_engine);
     environment->insertRequestPath();
     environment->releaseRequestRefs();
-    demoteTo(*environment, GetParam());
+    evictTo(*environment, GetParam());
 
     BlockTreeMatchResult              result  = environment->cache->match(environment->keys);
     std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
@@ -2610,7 +2610,7 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesLoadAndRestoresCandi
                                                                  pausable_per_rank_transfer_engine);
     environment->insertRequestPath();
     environment->releaseRequestRefs();
-    demoteTo(*environment, GetParam());
+    evictTo(*environment, GetParam());
     environment->expectPayloads();
 
     std::vector<std::vector<GroupSetResource>> resources_before;
@@ -2757,7 +2757,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadDirectTransferExceptionRestoresSou
                                                                  pausable_per_rank_transfer_engine);
     environment->insertRequestPath();
     environment->releaseRequestRefs();
-    demoteTo(*environment, Tier::DISK);
+    evictTo(*environment, Tier::DISK);
     environment->expectPayloads();
 
     const std::vector<GroupSetResource> resources_before = environment->resourcesForPathNode(0);
@@ -2845,7 +2845,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MixedHostDiskContextAbortRestoresSources) 
     ASSERT_NE(environment, nullptr);
     environment->insertRequestPath();
     environment->releaseRequestRefs();
-    demoteTo(*environment, Tier::HOST);
+    evictTo(*environment, Tier::HOST);
     runSingleMaintenance(*environment, Tier::HOST, 0.125);
     environment->scripted_per_rank_transfer_engine->clear();
 
@@ -2901,7 +2901,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MixedHostSuccessAndDiskFailureSettleEachTi
     ASSERT_NE(environment, nullptr);
     environment->insertRequestPath();
     environment->releaseRequestRefs();
-    demoteTo(*environment, Tier::HOST);
+    evictTo(*environment, Tier::HOST);
     runSingleMaintenance(*environment, Tier::HOST, 0.125);
     environment->scripted_per_rank_transfer_engine->clear();
 
@@ -3046,7 +3046,7 @@ TEST_F(BlockTreeCacheIntegrationTest, FullSWA_MatchPublishesOnlyReadyBoundary) {
     environment->insertRequestPath();
     BlockTreeMatchResult prefix_hold = environment->cache->match({environment->keys[0], environment->keys[1]});
     ASSERT_EQ(prefix_hold.matched_device_blocks, 2u);
-    demoteSwaSuffixKeepingFullDevice(*environment);
+    evictswaSuffixKeepingFullDevice(*environment);
     environment->releaseMatch(prefix_hold);
 
     for (size_t path_index = 0; path_index < kPathLength; ++path_index) {

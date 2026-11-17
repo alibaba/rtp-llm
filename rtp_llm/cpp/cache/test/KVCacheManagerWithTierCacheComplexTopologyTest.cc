@@ -415,7 +415,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
         // victim. Reverse-cascade behavior is covered by dedicated eviction tests.
         for (const auto& group_set : cache->groupSets()) {
             const size_t group_set_id = group_set->groupSetId();
-            ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*cache, group_set_id, Tier::HOST));
+            ASSERT_TRUE(BlockTreeCacheTestPeer::evictOneForGroupSetForTest(*cache, group_set_id, Tier::HOST));
             ASSERT_TRUE(waitForConditionFor(
                 [&] {
                     const auto resources = snapshotPathResources(*cache, seed.cache_keys);
