@@ -132,6 +132,28 @@ private:
         return static_cast<int64_t>(group.kernelBlocksPerKvBlock());
     }
 
+    static bool
+    canExposeKernelPages(const torch::Tensor& tensor, int64_t physical_block_num, int64_t kernel_block_num) {
+        if (tensor.is_contiguous()) {
+            return true;
+        }
+        // A shared slot may have gaps before the next slot. With one kernel
+        // page per physical block, view() only splits packed inner dimensions
+        // and retains that outer pitch. Flattening several pages through a
+        // physical-slot gap is not representable by one kernel-page stride.
+        if (physical_block_num != kernel_block_num || tensor.dim() < 2 || tensor.size(0) != physical_block_num) {
+            return false;
+        }
+        int64_t elements = 1;
+        for (int64_t dim = tensor.dim() - 1; dim > 0; --dim) {
+            if (tensor.size(dim) > 1 && tensor.stride(dim) != elements) {
+                return false;
+            }
+            elements *= tensor.size(dim);
+        }
+        return tensor.stride(0) >= elements;
+    }
+
     static torch::Tensor reshapeMlaTensor(const torch::Tensor& tensor,
                                           int64_t              physical_block_num,
                                           int64_t              kernel_block_num,
@@ -141,13 +163,16 @@ private:
         if (!tensor.defined()) {
             return {};
         }
-        RTP_LLM_CHECK_WITH_INFO(tensor.is_contiguous(), "%s for tag=%s must be contiguous", tensor_name, tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(tensor.dim() > 0 && tensor.size(0) == physical_block_num,
                                 "%s physical block count mismatch for tag=%s: got=%ld expected=%ld",
                                 tensor_name,
                                 tag.c_str(),
                                 tensor.dim() > 0 ? tensor.size(0) : -1,
                                 physical_block_num);
+        RTP_LLM_CHECK_WITH_INFO(canExposeKernelPages(tensor, physical_block_num, kernel_block_num),
+                                "%s for tag=%s must have representable packed kernel pages",
+                                tensor_name,
+                                tag.c_str());
         const int64_t page_elements = kernel_block_num * kernel_seq_size;
         RTP_LLM_CHECK_WITH_INFO(page_elements > 0 && tensor.numel() % page_elements == 0,
                                 "%s elements=%ld must be divisible by kernel page elements=%ld for tag=%s",
@@ -193,8 +218,9 @@ private:
                                     local_kv_heads,
                                     physical_seq_size);
             const int64_t head_dim = k_block_elems / (local_kv_heads * physical_seq_size);
-            RTP_LLM_CHECK_WITH_INFO(
-                buffers.kv_addr.is_contiguous(), "MHA KV cache base for tag=%s must be contiguous", group.tag.c_str());
+            RTP_LLM_CHECK_WITH_INFO(canExposeKernelPages(buffers.kv_addr, physical_block_num, kernel_block_num),
+                                    "MHA KV cache base for tag=%s must have packed kernel pages",
+                                    group.tag.c_str());
             const int64_t expected_numel = kernel_block_num * 2 * local_kv_heads * kernel_seq_size * head_dim;
             RTP_LLM_CHECK_WITH_INFO(buffers.kv_addr.numel() == expected_numel,
                                     "MHA KV cache elements=%ld expected=%ld for layer=%d tag=%s",
@@ -205,12 +231,13 @@ private:
             result.kv_cache_base =
                 buffers.kv_addr.view({kernel_block_num, 2, local_kv_heads, kernel_seq_size, head_dim});
             if (buffers.kv_scale_addr.defined()) {
-                RTP_LLM_CHECK_WITH_INFO(buffers.kv_scale_addr.is_contiguous() && buffers.kv_scale_addr.dim() > 0
-                                            && buffers.kv_scale_addr.size(0) == physical_block_num
-                                            && buffers.kv_scale_addr.numel() % kernel_block_num == 0,
-                                        "MHA scale tensor cannot be expanded for layer=%d tag=%s",
-                                        layer_id,
-                                        group.tag.c_str());
+                RTP_LLM_CHECK_WITH_INFO(
+                    canExposeKernelPages(buffers.kv_scale_addr, physical_block_num, kernel_block_num)
+                        && buffers.kv_scale_addr.dim() > 0 && buffers.kv_scale_addr.size(0) == physical_block_num
+                        && buffers.kv_scale_addr.numel() % kernel_block_num == 0,
+                    "MHA scale tensor cannot be expanded for layer=%d tag=%s",
+                    layer_id,
+                    group.tag.c_str());
                 result.kv_scale_base =
                     buffers.kv_scale_addr.view({kernel_block_num, buffers.kv_scale_addr.numel() / kernel_block_num});
             }
@@ -234,7 +261,8 @@ private:
         }
 
         if (spec_type == rtp_llm::KVCacheSpecType::OpaqueKV) {
-            RTP_LLM_CHECK_WITH_INFO(buffers.kv_addr.is_contiguous() && buffers.kv_addr.numel() % kernel_block_num == 0,
+            RTP_LLM_CHECK_WITH_INFO(canExposeKernelPages(buffers.kv_addr, physical_block_num, kernel_block_num)
+                                        && buffers.kv_addr.numel() % kernel_block_num == 0,
                                     "opaque KV cache cannot be expanded for layer=%d tag=%s",
                                     layer_id,
                                     group.tag.c_str());

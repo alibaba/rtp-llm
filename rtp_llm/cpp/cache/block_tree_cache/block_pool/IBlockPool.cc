@@ -10,16 +10,21 @@ namespace rtp_llm {
 IBlockPool::IBlockPool(std::shared_ptr<const BlockPoolConfigBase> config): config_(std::move(config)) {
     RTP_LLM_CHECK(config_ != nullptr);
     RTP_LLM_CHECK(config_->physical_block_count > 1);
+    if (config_->shared_arena) {
+        RTP_LLM_CHECK(config_->physical_block_count == config_->shared_arena->slotCount(config_->shared_arena_group));
+    }
     allocated_.assign(config_->physical_block_count, 0);
     tree_refcounts_.assign(config_->physical_block_count, 0);
     for (std::vector<uint32_t>& typed_refcounts : tree_refcounts_by_type_) {
         typed_refcounts.assign(config_->physical_block_count, 0);
     }
-    free_blocks_.reserve(config_->physical_block_count - 1);
-    for (BlockIdxType block = 1; block < static_cast<BlockIdxType>(config_->physical_block_count); ++block) {
-        free_blocks_.push_back(block);
+    if (!config_->shared_arena) {
+        free_blocks_.reserve(config_->physical_block_count - 1);
+        for (BlockIdxType block = 1; block < static_cast<BlockIdxType>(config_->physical_block_count); ++block) {
+            free_blocks_.push_back(block);
+        }
     }
-    available_blocks_num_ = free_blocks_.size();
+    available_blocks_num_ = totalBlocksNumNoLock();
 }
 
 void IBlockPool::setCapacityChangeCallback(std::function<void()> callback) {
@@ -67,14 +72,20 @@ std::optional<BlockIdList> IBlockPool::mallocNoLock(size_t n) {
     if (availableFreeBlocksNoLock() < n) {
         return std::nullopt;
     }
-    if (free_blocks_.size() - free_head_ < n) {
-        refillAscendingFreeBlocksNoLock();
-    }
-
     BlockIdList result;
-    result.reserve(n);
-    for (size_t i = 0; i < n; ++i) {
-        result.push_back(popFreeBlockNoLock());
+    if (config_->shared_arena) {
+        result = config_->shared_arena->malloc(config_->shared_arena_group, n);
+        if (result.size() != n) {
+            return std::nullopt;
+        }
+    } else {
+        if (free_blocks_.size() - free_head_ < n) {
+            refillAscendingFreeBlocksNoLock();
+        }
+        result.reserve(n);
+        for (size_t i = 0; i < n; ++i) {
+            result.push_back(popFreeBlockNoLock());
+        }
     }
 
     for (const auto block : result) {
@@ -273,7 +284,8 @@ size_t IBlockPool::freeBlocksNum() const {
 size_t IBlockPool::availableBlocksNum() const {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
-    return available_blocks_num_;
+    return config_->shared_arena ? config_->shared_arena->availableSlots(config_->shared_arena_group) :
+                                   available_blocks_num_;
 }
 
 size_t IBlockPool::usedBlocksNum() const {
@@ -322,10 +334,14 @@ size_t IBlockPool::treeRefTypeIndex(BlockTreeRefType ref_type) {
 }
 
 size_t IBlockPool::totalBlocksNumNoLock() const {
-    return config_->physical_block_count - 1;
+    return config_->shared_arena ? config_->shared_arena->totalSlots(config_->shared_arena_group) :
+                                   config_->physical_block_count - 1;
 }
 
 size_t IBlockPool::availableFreeBlocksNoLock() const {
+    if (config_->shared_arena) {
+        return config_->shared_arena->freeSlots(config_->shared_arena_group);
+    }
     RTP_LLM_CHECK(free_head_ <= free_blocks_.size());
     const size_t available_blocks = free_blocks_.size() - free_head_ + released_blocks_.size();
     RTP_LLM_CHECK(available_blocks <= totalBlocksNumNoLock());
@@ -406,6 +422,9 @@ void IBlockPool::updateActiveBlocksNumNoLock(BlockIdxType block, bool was_active
 
 void IBlockPool::updateAvailableBlocksNumNoLock(BlockIdxType block, bool was_available) {
     const bool is_available = isAvailableNoLock(block);
+    if (config_->shared_arena && allocated_[block] != 0) {
+        config_->shared_arena->setReclaimable(config_->shared_arena_group, block, is_available);
+    }
     if (was_available != is_available) {
         if (is_available) {
             ++available_blocks_num_;
@@ -424,7 +443,11 @@ void IBlockPool::freeAllocatedBlockNoLock(BlockIdxType block) {
     }
     allocated_[block]      = 0;
     tree_refcounts_[block] = 0;
-    pushFreeBlockNoLock(block);
+    if (config_->shared_arena) {
+        config_->shared_arena->release(config_->shared_arena_group, block);
+    } else {
+        pushFreeBlockNoLock(block);
+    }
 }
 
 }  // namespace rtp_llm

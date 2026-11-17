@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -152,7 +153,8 @@ public:
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
     // Skips plans containing device blocks that would remain referenced after dropping.
-    int evictForGroup(std::string_view group_tag, size_t num_blocks);
+    int  evictForGroup(std::string_view group_tag, size_t num_blocks);
+    bool ensureSharedDeviceSlots(const std::shared_ptr<SharedBlockArena>& arena, const std::vector<size_t>& demand);
 
     CacheStats                    getStats() const;
     std::vector<CachePoolMetrics> poolMetrics() const;
@@ -170,7 +172,7 @@ public:
     TransferResult                     executeTransfer(TransferTask task);
     TransferTaskRegistry::State        localTransferCompletion(uint64_t trace_id) const;
     TransferTaskRegistry::ForgetResult forgetLocalTransferCompletion(uint64_t trace_id) const;
-    void cleanupExpiredMissing() const;
+    void                               cleanupExpiredMissing() const;
     // Configure before accepting coordinator work.
     void                                     setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup);
     std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;

@@ -57,10 +57,10 @@ public:
 
     virtual ~CoordinatorCacheManager();
 
-    bool                           init();
-    virtual void                   free(const FreeInfo& free_info);
-    void reclaimLinearHistory(const BatchKVCacheResourcePtr& resource, int committed_tokens, bool reuse_cache);
-    virtual void                   insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
+    bool         init();
+    virtual void free(const FreeInfo& free_info);
+    void         reclaimLinearHistory(const BatchKVCacheResourcePtr& resource, int committed_tokens, bool reuse_cache);
+    virtual void insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
     virtual BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const;
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const;
     virtual std::vector<BlockInfo>
@@ -68,6 +68,8 @@ public:
     virtual BlockAddrInfo convertIndexToAddr(int layer_id, const std::string& group_tag, int block_id) const;
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, const std::string& group_tag, int block_id) const;
     virtual std::vector<BlockInfo> convertIndexToBuffer(
+        int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const;
+    std::vector<BlockInfo> convertLinearStatePartition(
         int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const;
     virtual std::shared_ptr<KVCacheResource>
     incrKVCacheRef(const KVCacheResource& kvcache_resource, const CacheKeysType& cache_keys, bool is_connector = false);
@@ -146,17 +148,17 @@ public:
         return reserve_block_num_;
     }
 
-    virtual void                 regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
-    virtual int64_t              getMrCostTimeMs() const;
-    virtual size_t               freeBlocksNum() const;
-    virtual size_t               availableBlocksNum() const;
-    virtual size_t               availableTokensNum() const;
-    virtual size_t               totalTokensNum() const;
-    virtual size_t               totalBlocksNum() const;
-    virtual size_t               maxAvailableTokensNum() const;
-    virtual KVCacheTokenCapacity tokenCapacity(size_t default_seq_size_per_block) const;
-    virtual std::vector<CachePoolMetrics>          poolMetrics() const;
-    std::vector<KVCachePoolCapacity>                poolCapacities() const;
+    virtual void                          regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr);
+    virtual int64_t                       getMrCostTimeMs() const;
+    virtual size_t                        freeBlocksNum() const;
+    virtual size_t                        availableBlocksNum() const;
+    virtual size_t                        availableTokensNum() const;
+    virtual size_t                        totalTokensNum() const;
+    virtual size_t                        totalBlocksNum() const;
+    virtual size_t                        maxAvailableTokensNum() const;
+    virtual KVCacheTokenCapacity          tokenCapacity(size_t default_seq_size_per_block) const;
+    virtual std::vector<CachePoolMetrics> poolMetrics() const;
+    std::vector<KVCachePoolCapacity>      poolCapacities() const;
     /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check).
     uint32_t convertToGlobalLayerId(size_t model_id, int local_layer_id) const;
 
@@ -230,6 +232,7 @@ protected:
     std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;
     const kmonitor::MetricsReporterPtr metrics_reporter_             = nullptr;
     bool                               use_device_malloc_block_pool_ = false;
+    std::shared_ptr<SharedBlockArena>  shared_arena_;
 
     size_t  reserve_block_num_{0};
     int64_t reserve_block_ratio_{0};
@@ -257,7 +260,7 @@ protected:
                                                      const std::function<bool(size_t)>&   valid_prefix           = {},
                                                      bool                                 enable_storage_backend = true,
                                                      std::optional<int64_t>               request_id             = {},
-                                                     bool                                 skip_linear            = false);
+                                                     bool                                 skip_linear = false);
     bool                              materializeInitialBlocks(const MallocInfo& malloc_info,
                                                                PreparedKVCache&  prepared,
                                                                LoadAsyncContext* context,
@@ -302,6 +305,8 @@ protected:
     size_t                                 minTokenCapacity(bool use_available_blocks, bool full_groups_only) const;
     size_t                                 totalReservableFreeBlocks() const;
     size_t                                 reserveBlocksForPool(size_t group_id) const;
+    size_t                                 sharedReferenceGroup() const;
+    int                                    equivalentSharedBlocks(const std::vector<size_t>& demand) const;
     std::vector<DeviceBlockPoolPtr>        group_block_pools_;
     RoleType                               role_type_{RoleType::PDFUSION};
     bool                                   skip_remote_reused_write_{false};

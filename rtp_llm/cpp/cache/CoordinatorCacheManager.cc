@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <unordered_map>
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -95,7 +96,7 @@ RequiredPositions chunkRequiredPositions(const MallocInfo&             malloc_in
                                          const SingleTypeCacheManager& group,
                                          const RequiredPositions&      base_positions = {}) {
     auto        required_positions = base_positions;
-    const auto& blocks = malloc_info.batch_kv_cache_resource->blocks(0, group.tag());
+    const auto& blocks             = malloc_info.batch_kv_cache_resource->blocks(0, group.tag());
     for (const size_t pos : chunkCachePositions(malloc_info, group.config())) {
         if (!malloc_info.reuse_cache || pos >= blocks.size() || isNullBlockIdx(blocks[pos])) {
             required_positions.insert(pos);
@@ -185,8 +186,8 @@ MallocResult CoordinatorCacheManager::initMalloc(const MallocInfo& malloc_info) 
 
     auto init_result = initMallocForCommonLen(malloc_info);
     if (malloc_info.batch_kv_cache_resource != nullptr) {
-        const CacheKeysType& cache_keys        = malloc_info.batch_kv_cache_resource->cacheKeys(0);
-        init_result.device_input_length        = static_cast<int64_t>(cache_keys.size()) * config_.seq_size_per_block;
+        const CacheKeysType& cache_keys = malloc_info.batch_kv_cache_resource->cacheKeys(0);
+        init_result.device_input_length = static_cast<int64_t>(cache_keys.size()) * config_.seq_size_per_block;
     }
     if (!init_result.success) {
         return finalize_init_failure(init_result);
@@ -205,10 +206,10 @@ MallocResult CoordinatorCacheManager::initMalloc(const MallocInfo& malloc_info) 
             }
             pending_async_context.reset();
             load_context.reset();
-            incr_result.match_cost_time_us         = init_result.match_cost_time_us;
-            incr_result.match_end_time_us          = init_result.match_end_time_us;
-            incr_result.device_input_length        = init_result.device_input_length;
-            incr_result.load_attempted             = init_result.load_attempted;
+            incr_result.match_cost_time_us  = init_result.match_cost_time_us;
+            incr_result.match_end_time_us   = init_result.match_end_time_us;
+            incr_result.device_input_length = init_result.device_input_length;
+            incr_result.load_attempted      = init_result.load_attempted;
             return finalize_init_failure(std::move(incr_result));
         }
         if (pending_async_context != nullptr) {
@@ -364,7 +365,10 @@ int CoordinatorCacheManager::estimateBatchPeakNeedBlocks(const BatchKVCacheResou
     // Full blocks remain shared when the batch expands, but every additional sequence needs a physical copy of the
     // current partial tail before it can diverge.
     const int expanded_sequences = target_width - current_batch_size;
-    const int tail_copy_blocks   = expanded_sequences > 0 && seq_len % seqSizePerBlock() != 0 ? expanded_sequences : 0;
+    int       tail_copy_blocks   = expanded_sequences > 0 && seq_len % seqSizePerBlock() != 0 ? expanded_sequences : 0;
+    if (shared_arena_ && tail_copy_blocks > 0) {
+        tail_copy_blocks = equivalentSharedBlocks(std::vector<size_t>(kv_cache_groups_.size(), tail_copy_blocks));
+    }
     return target_width * per_sequence_growth + tail_copy_blocks;
 }
 
@@ -538,6 +542,7 @@ std::vector<KVCachePoolCapacity> CoordinatorCacheManager::poolCapacities() const
 std::vector<CachePoolMetrics> CoordinatorCacheManager::poolMetrics() const {
     const std::vector<SingleTypeCacheManagerPtr> groups = cacheGroups();
     std::unordered_set<const IBlockPool*>        reported_pools;
+    std::unordered_set<const SharedBlockArena*>  reported_arenas;
     std::vector<CachePoolMetrics>                metrics_list;
     metrics_list.reserve(groups.size());
     for (const SingleTypeCacheManagerPtr& group : groups) {
@@ -551,8 +556,8 @@ std::vector<CachePoolMetrics> CoordinatorCacheManager::poolMetrics() const {
             continue;
         }
 
-        const size_t               pool_index = groupIdForTag(group->tag());
-        CachePoolMetrics           metrics_data;
+        const size_t     pool_index = groupIdForTag(group->tag());
+        CachePoolMetrics metrics_data;
         metrics_data.pool_index                  = pool_index;
         metrics_data.pool_name                   = pool->poolName();
         metrics_data.block_size_bytes            = pool->blockSizeBytes();
@@ -574,6 +579,16 @@ std::vector<CachePoolMetrics> CoordinatorCacheManager::poolMetrics() const {
                 0.0f :
                 static_cast<float>(100.0 * (metrics_data.total_blocks - metrics_data.available_blocks)
                                    / static_cast<double>(metrics_data.total_blocks));
+        if (const auto& arena = (*pool).sharedArena()) {
+            metrics_data.shared_namespace = true;
+            if (reported_arenas.insert(arena.get()).second) {
+                const auto memory = arena->metrics();
+                metrics_data.shared_arena_memory =
+                    CachePoolMetrics::SharedArenaMemory{static_cast<int64_t>(memory.total_bytes),
+                                                        static_cast<int64_t>(memory.free_bytes),
+                                                        static_cast<int64_t>(memory.available_bytes)};
+            }
+        }
         metrics_list.push_back(std::move(metrics_data));
     }
     return metrics_list;
@@ -908,7 +923,7 @@ bool CoordinatorCacheManager::finishDeferredMalloc(const MallocInfo& malloc_info
         auto prefill_info                         = malloc_info;
         prefill_info.enable_remove_skipped_blocks = false;
         const auto incr_result                    = incrMalloc(prefill_info);
-        success                = incr_result.success;
+        success                                   = incr_result.success;
         if (!success) {
             prepared.materialize_status = incr_result.status;
         }
@@ -952,20 +967,22 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
             auto&       block_ids        = kv_resource->mutableBlockIds(b, tag);
             const int   group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
             auto&       filled_positions = backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(group_id)];
-            const auto required_positions = chunkCachePositions(malloc_info, config_.group(tag));
+            const auto  required_positions = chunkCachePositions(malloc_info, config_.group(tag));
             auto&       group              = kv_cache_groups_[static_cast<size_t>(group_id)];
             // reuseEnabledForGroup keeps the group-scoped reuse gating (incl.
             // pd_decode_linear_tail_only) on both of main's allocation paths.
-            const bool allocated =
-                malloc_info.enable_remove_skipped_blocks ?
-                     group->mallocForDecode(
-                        block_ids, group_seq_len, reuseEnabledForGroup(malloc_info, config_, tag), reserve_step, &filled_positions) :
-                     group->malloc(block_ids,
-                                  group_seq_len,
-                                  reuseEnabledForGroup(malloc_info, config_, tag),
-                                  reserve_step,
-                                  &filled_positions,
-                                  required_positions);
+            const bool allocated = malloc_info.enable_remove_skipped_blocks ?
+                                       group->mallocForDecode(block_ids,
+                                                              group_seq_len,
+                                                              reuseEnabledForGroup(malloc_info, config_, tag),
+                                                              reserve_step,
+                                                              &filled_positions) :
+                                       group->malloc(block_ids,
+                                                     group_seq_len,
+                                                     reuseEnabledForGroup(malloc_info, config_, tag),
+                                                     reserve_step,
+                                                     &filled_positions,
+                                                     required_positions);
             if (!allocated) {
                 all_success  = false;
                 failed_batch = b;
@@ -984,13 +1001,13 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
         }
         for (int b = 0; b < batch_size; ++b) {
             for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
-                const auto& tag = config_.groupTags()[static_cast<size_t>(group_id)];
-                auto& block_ids = kv_resource->mutableBlockIds(b, tag);
+                const auto& tag       = config_.groupTags()[static_cast<size_t>(group_id)];
+                auto&       block_ids = kv_resource->mutableBlockIds(b, tag);
                 if (skipLinearForRequest(malloc_info, config_, tag)) {
                     // Tail-only handoff state collapses to the decode tail: the
                     // sparse layout never accumulates history slots.
                     kv_cache_groups_[static_cast<size_t>(group_id)]->releaseRequestStateToDecodeTail(block_ids,
-                                                                                                      reserve_step);
+                                                                                                     reserve_step);
                 } else if (config_.group(tag).policy.group_type == CacheGroupType::LINEAR
                            && malloc_info.linear_cache_policy == LinearCachePolicy::RECLAIM_COMMITTED
                            && malloc_info.enable_cache_lookup
@@ -1126,10 +1143,10 @@ void CoordinatorCacheManager::reclaimLinearHistory(const BatchKVCacheResourcePtr
     // Use the same ordering as allocation and prefix lookup. Admission must not
     // observe the interval between publication and dropping request references.
     std::lock_guard<std::mutex> lock(malloc_mutex_);
-    std::vector<size_t> ends;
-    size_t              publish_end = 0;
-    bool                advanced    = false;
-    const auto&         keys        = resource->cacheKeys(0);
+    std::vector<size_t>         ends;
+    size_t                      publish_end = 0;
+    bool                        advanced    = false;
+    const auto&                 keys        = resource->cacheKeys(0);
     for (const auto& group : kv_cache_groups_) {
         const auto& ids = resource->cacheResource(0).blockIds(group->tag());
         size_t      end = std::min(group->historyReclaimEnd(committed_tokens), ids.blocksNum());
@@ -1277,13 +1294,17 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
         if (skip_remote_reused_write_) {
             // Remote reuse is recorded only after adopting a successful load; counts use canonical keys.
             const auto& resource = kv_cache_resource->cacheResource(batch_id);
-            remote_reuse_end = std::min(resource.reuseBlockNum(), publish_prefix);
+            remote_reuse_end     = std::min(resource.reuseBlockNum(), publish_prefix);
             remote_reuse_begin =
                 std::min(resource.reuseBlockNum() - resource.storageBackendReuseBlockNum(), remote_reuse_end);
         }
-        resident_prefix_length += block_tree_cache_->insert(
-            insert_keys, resources, insert_info.target_tier, insert_info.is_resident, insert_info.request_id,
-            remote_reuse_begin, remote_reuse_end);
+        resident_prefix_length += block_tree_cache_->insert(insert_keys,
+                                                            resources,
+                                                            insert_info.target_tier,
+                                                            insert_info.is_resident,
+                                                            insert_info.request_id,
+                                                            remote_reuse_begin,
+                                                            remote_reuse_end);
     }
 }
 
@@ -1305,7 +1326,7 @@ std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const K
     const auto& resource_keys = kvcache_resource.cacheKeys();
 
     const auto ref_type              = is_connector ? DeviceBlockRefType::PD_CONNECTOR : DeviceBlockRefType::REQUEST;
-    auto selected_resource_ptr = new KVCacheResource(kvcache_resource);
+    auto       selected_resource_ptr = new KVCacheResource(kvcache_resource);
     auto       deleter               = [self = shared_from_this(), ref_type](KVCacheResource* resource) {
         self->decrKVCacheRef(*resource, ref_type);
         delete resource;
@@ -1320,7 +1341,7 @@ std::shared_ptr<KVCacheResource> CoordinatorCacheManager::incrKVCacheRef(const K
             const auto& blocks = *source_blocks_by_group[group_id];
             kv_cache_groups_[group_id]->reference(validReferenceBlocks(blocks), ref_type);
             const auto& tag                = groups[group_id].tag;
-            auto& selected_block_ids = selected_resource->mutableBlockIds(tag);
+            auto&       selected_block_ids = selected_resource->mutableBlockIds(tag);
             selected_block_ids.assign(blocks);
             // Keep the logical dummy tail when the local table has no CP block sharding.
             if (!kvcache_resource.lastBlockAligned() && blocks.size() + 1 == resource_keys.size()
@@ -1657,8 +1678,7 @@ bool CoordinatorCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batc
             for (int group_id = 0; group_id < group_nums; ++group_id) {
                 const auto& tag       = config_.groupTags()[static_cast<size_t>(group_id)];
                 auto&       block_ids = batch_kv_cache_resource->mutableBlockIds(new_batch_idx, tag);
-                kv_cache_groups_[static_cast<size_t>(group_id)]->reference(block_ids,
-                                                                           old_resource.blocks(tag));
+                kv_cache_groups_[static_cast<size_t>(group_id)]->reference(block_ids, old_resource.blocks(tag));
                 // Preserve the reclaimed-prefix marker when a forked row re-references
                 // the source group blocks (linear history reclaim bookkeeping).
                 block_ids.setReclaimedPrefixBlocks(old_resource.blockIds(tag).reclaimedPrefixBlocks());
@@ -1744,20 +1764,21 @@ int CoordinatorCacheManager::getNeedBlocks(const MallocInfo& malloc_info) const 
     const int   raw_common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), total_seq_len);
     const int   raw_seq_len        = malloc_info.complete_token_ids->seqLength();
 
-    int common_blocks_total = 0;
-    int extra_blocks_total  = 0;
+    int                 common_blocks_total = 0;
+    int                 extra_blocks_total  = 0;
+    std::vector<size_t> shared_demand(shared_arena_ ? kv_cache_groups_.size() : 0);
     for (int group_id = 0; group_id < static_cast<int>(kv_cache_groups_.size()); ++group_id) {
-        const auto& tag              = config_.groupTags()[static_cast<size_t>(group_id)];
-        const auto  group            = kv_cache_groups_[static_cast<size_t>(group_id)];
-        const bool  reuse_enabled    = reuseEnabledForGroup(malloc_info, config_, tag);
+        const auto& tag           = config_.groupTags()[static_cast<size_t>(group_id)];
+        const auto  group         = kv_cache_groups_[static_cast<size_t>(group_id)];
+        const bool  reuse_enabled = reuseEnabledForGroup(malloc_info, config_, tag);
         // Reuse length is always the group's own row: curBlocksNum() (the
         // cross-group max row) would overstate reuse for short-row groups and
         // under-count their fresh-block demand on mixed-length topologies.
-        const int   reuse_blocks_len = reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, tag) : 0;
-        const int   group_common_seq = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_common_seq_len);
-        const int   group_seq_len    = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
-        const auto  required_positions = chunkRequiredPositions(malloc_info, *group);
-        const auto  need               = group->getNeedBlocks(group_common_seq,
+        const int  reuse_blocks_len   = reuse_enabled ? malloc_info.batch_kv_cache_resource->blocksNum(0, tag) : 0;
+        const int  group_common_seq   = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_common_seq_len);
+        const int  group_seq_len      = cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, raw_seq_len);
+        const auto required_positions = chunkRequiredPositions(malloc_info, *group);
+        const auto need               = group->getNeedBlocks(group_common_seq,
                                                group_seq_len,
                                                malloc_info.complete_token_ids->getReserveStep(),
                                                reuse_blocks_len,
@@ -1765,6 +1786,13 @@ int CoordinatorCacheManager::getNeedBlocks(const MallocInfo& malloc_info) const 
                                                required_positions);
         common_blocks_total += need.common_blocks;
         extra_blocks_total += need.extra_blocks;
+        if (shared_arena_) {
+            shared_demand[static_cast<size_t>(group_id)] = static_cast<size_t>(
+                std::max<int64_t>(0, need.common_blocks + static_cast<int64_t>(batch_size) * need.extra_blocks));
+        }
+    }
+    if (shared_arena_) {
+        return equivalentSharedBlocks(shared_demand);
     }
     return common_blocks_total + batch_size * extra_blocks_total;
 }
@@ -1777,13 +1805,21 @@ int CoordinatorCacheManager::estimatePeakNeedBlocks(const KVCacheResource& kv_ca
                                                     LinearCachePolicy      linear_cache_policy) const {
     const bool reclaim_history = linear_cache_policy == LinearCachePolicy::RECLAIM_COMMITTED
                                  && canReclaimLinearHistory(/*batch_size=*/1, enable_reuse_cache);
-    int need_blocks = 0;
+    int                 need_blocks = 0;
+    std::vector<size_t> shared_demand(shared_arena_ ? static_cast<size_t>(config_.groupNums()) : 0);
     for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
         const auto& tag = config_.groupTags()[static_cast<size_t>(group_id)];
         const bool  group_reuse =
             reuseCacheForGroup(enable_reuse_cache, config_.group(tag).policy.group_type, linear_cache_policy);
-        need_blocks += kv_cache_groups_[static_cast<size_t>(group_id)]->estimatePeakNeedBlocks(
+        const int need = kv_cache_groups_[static_cast<size_t>(group_id)]->estimatePeakNeedBlocks(
             seq_len, kv_cache_resource.blocks(tag), remaining_tokens, reserve_step, group_reuse, reclaim_history);
+        need_blocks += need;
+        if (shared_arena_) {
+            shared_demand[static_cast<size_t>(group_id)] = static_cast<size_t>(std::max(need, 0));
+        }
+    }
+    if (shared_arena_) {
+        return equivalentSharedBlocks(shared_demand);
     }
     return need_blocks;
 }
@@ -1797,14 +1833,22 @@ int CoordinatorCacheManager::estimateInitialBatchPeakNeedBlocks(int             
                                                                 LinearCachePolicy linear_cache_policy) const {
     const bool reclaim_history = linear_cache_policy == LinearCachePolicy::RECLAIM_COMMITTED
                                  && canReclaimLinearHistory(std::max(1, target_batch_size), enable_reuse_cache);
-    int peak_blocks = 0;
+    int                 peak_blocks = 0;
+    std::vector<size_t> shared_demand(shared_arena_ ? kv_cache_groups_.size() : 0);
     for (size_t group_id = 0; group_id < kv_cache_groups_.size(); ++group_id) {
         const auto& group = kv_cache_groups_[group_id];
         const auto& tag   = config_.groupTags()[group_id];
         const bool  group_reuse =
             reuseCacheForGroup(enable_reuse_cache, config_.group(tag).policy.group_type, linear_cache_policy);
-        peak_blocks += group->estimateInitialBatchPeakNeedBlocks(
+        const int need = group->estimateInitialBatchPeakNeedBlocks(
             seq_len, common_seq_len, remaining_tokens, reserve_step, group_reuse, target_batch_size, reclaim_history);
+        peak_blocks += need;
+        if (shared_arena_) {
+            shared_demand[group_id] = static_cast<size_t>(std::max(need, 0));
+        }
+    }
+    if (shared_arena_) {
+        return equivalentSharedBlocks(shared_demand);
     }
     return peak_blocks;
 }
@@ -1849,13 +1893,21 @@ void CoordinatorCacheManager::checkCPShardedMallocResult(const MallocInfo& mallo
 int CoordinatorCacheManager::singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                    int                            seq_len,
                                                    int                            reserve_step) const {
-    int need_blocks = 0;
+    int                 need_blocks = 0;
+    std::vector<size_t> shared_demand(shared_arena_ ? static_cast<size_t>(config_.groupNums()) : 0);
     for (int group_id = 0; group_id < config_.groupNums(); ++group_id) {
         const auto& tag               = config_.groupTags()[static_cast<size_t>(group_id)];
         const int   effective_seq_len = cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, tag, seq_len);
         const int   cur_blocks        = batch_kv_cache_resource->blocksNum(0, tag);
-        need_blocks +=
+        const int   need =
             kv_cache_groups_[static_cast<size_t>(group_id)]->needBlocksNum(effective_seq_len, cur_blocks, reserve_step);
+        need_blocks += need;
+        if (shared_arena_) {
+            shared_demand[static_cast<size_t>(group_id)] = static_cast<size_t>(std::max(need, 0));
+        }
+    }
+    if (shared_arena_) {
+        return equivalentSharedBlocks(shared_demand);
     }
     return need_blocks;
 }
@@ -1893,12 +1945,32 @@ bool CoordinatorCacheManager::doInit() {
                               group_id);
             return false;
         }
-        const auto tag        = group.tag;
-        const auto group_type = group.policy.group_type;
-        appendPoolSummary(pool_summary, has_pool, group_id, tag, group_type, pool_config);
-        pool_total_bytes += pool_config.total_size_bytes;
-        pool_total_blocks += pool_config.physical_block_count;
         group_pool_configs.push_back(std::move(pool_config));
+    }
+
+    if (config_.use_shared_block_pool) {
+        shared_arena_ = DeviceBlockPoolConfigHelper::createSharedArena(config_, config_.shared_cache_bytes);
+        for (size_t group = 0; group < group_pool_configs.size(); ++group) {
+            RTP_LLM_CHECK_WITH_INFO(group_pool_configs[group].physical_block_count == shared_arena_->slotCount(group),
+                                    "shared cache namespace differs from the agreed configuration");
+            DeviceBlockPoolConfigHelper::bindSharedArena(group_pool_configs[group], shared_arena_, group);
+        }
+    }
+    for (size_t group = 0; group < group_pool_configs.size(); ++group) {
+        const auto& pool_config = group_pool_configs[group];
+        appendPoolSummary(pool_summary,
+                          has_pool,
+                          static_cast<int>(group),
+                          topology_groups[group].tag,
+                          topology_groups[group].policy.group_type,
+                          pool_config);
+        if (!shared_arena_) {
+            pool_total_bytes += pool_config.total_size_bytes;
+        }
+        pool_total_blocks += pool_config.physical_block_count;
+    }
+    if (shared_arena_) {
+        pool_total_bytes = shared_arena_->bytes();
     }
 
     if (has_pool) {
@@ -1911,15 +1983,21 @@ bool CoordinatorCacheManager::doInit() {
                          pool_total_blocks);
     }
 
-    int group_id = 0;
+    int                                       group_id = 0;
+    std::shared_ptr<SharedDeviceBlockBacking> shared_backing;
     for (const auto& cache_group : topology_groups) {
-        const auto& pool_config = group_pool_configs[static_cast<size_t>(group_id)];
-        const auto  group_type  = cache_group.policy.group_type;
+        auto pool_config           = group_pool_configs[static_cast<size_t>(group_id)];
+        pool_config.shared_backing = shared_backing;
+        const auto group_type      = cache_group.policy.group_type;
         auto group_pool = std::make_shared<DeviceBlockPool>(std::make_shared<const DeviceBlockPoolConfig>(pool_config));
         RTP_LLM_CHECK_WITH_INFO(group_pool->init(),
                                 "Failed to initialize block pool %s(group %d)",
                                 pool_config.pool_name.c_str(),
                                 group_id);
+        if (shared_arena_ && !shared_backing) {
+            shared_backing = group_pool->sharedBacking();
+            RTP_LLM_CHECK_WITH_INFO(shared_backing != nullptr, "shared cache backing was not initialized");
+        }
 
         SingleTypeCacheManagerPtr group;
         if (group_type == CacheGroupType::LINEAR) {
@@ -2109,6 +2187,28 @@ std::vector<BlockInfo> CoordinatorCacheManager::convertIndexToBuffer(
         layer_id, block_id, partition_count, partition_id);
 }
 
+std::vector<BlockInfo> CoordinatorCacheManager::convertLinearStatePartition(
+    int layer_id, const std::string& group_tag, int block_id, int partition_count, int partition_id) const {
+    const auto* spec  = dynamic_cast<const LinearKVCacheSpec*>(config_.topology().group(group_tag).spec.get());
+    const auto  block = convertIndexToBuffer(layer_id, group_tag, block_id);
+    RTP_LLM_CHECK_WITH_INFO(spec && block.size() == 1 && block.front().addr
+                                && block.front().size_bytes == spec->block_size_bytes(),
+                            "invalid LINEAR cache block for P2P transfer: layer=%d tag=%s block=%d",
+                            layer_id,
+                            group_tag.c_str(),
+                            block_id);
+    const auto             segments = spec->transferSegments(partition_count, partition_id);
+    std::vector<BlockInfo> result;
+    result.reserve(segments.size());
+    for (const auto& [offset, bytes] : segments) {
+        auto part       = block.front();
+        part.addr       = static_cast<char*>(part.addr) + offset;
+        part.size_bytes = bytes;
+        result.push_back(part);
+    }
+    return result;
+}
+
 void CoordinatorCacheManager::blockBatchCopy(const BlockIdPair* begin_ptr, const BlockIdPair* end_ptr) {
     if (end_ptr == begin_ptr) {
         return;
@@ -2228,7 +2328,37 @@ void CoordinatorCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBloc
     execBatchCopy(copy_params);
 }
 
+size_t CoordinatorCacheManager::sharedReferenceGroup() const {
+    RTP_LLM_CHECK_WITH_INFO(shared_arena_ && config_.groupNums() > 0, "shared cache reference requires an arena");
+    size_t reference = 0;
+    for (size_t group = 1; group < static_cast<size_t>(config_.groupNums()); ++group) {
+        if (shared_arena_->stride(group) > shared_arena_->stride(reference)) {
+            reference = group;
+        }
+    }
+    return reference;
+}
+
+int CoordinatorCacheManager::equivalentSharedBlocks(const std::vector<size_t>& demand) const {
+    RTP_LLM_CHECK_WITH_INFO(shared_arena_ && demand.size() == static_cast<size_t>(config_.groupNums()),
+                            "shared cache demand must describe every namespace");
+    uint64_t bytes = 0;
+    for (size_t group = 0; group < demand.size(); ++group) {
+        const auto stride = shared_arena_->stride(group);
+        if (demand[group] > (std::numeric_limits<uint64_t>::max() - bytes) / stride) {
+            return std::numeric_limits<int>::max();
+        }
+        bytes += demand[group] * stride;
+    }
+    const size_t unit   = shared_arena_->stride(sharedReferenceGroup());
+    const auto   blocks = bytes / unit + (bytes % unit != 0);
+    return static_cast<int>(std::min<uint64_t>(blocks, std::numeric_limits<int>::max()));
+}
+
 size_t CoordinatorCacheManager::freeBlocksNum() const {
+    if (shared_arena_) {
+        return shared_arena_->freeBytes() / shared_arena_->stride(sharedReferenceGroup());
+    }
     size_t total = 0;
     for (const auto& pool : group_block_pools_) {
         total += pool->freeBlocksNum();
@@ -2237,6 +2367,9 @@ size_t CoordinatorCacheManager::freeBlocksNum() const {
 }
 
 size_t CoordinatorCacheManager::availableBlocksNum() const {
+    if (shared_arena_) {
+        return shared_arena_->availableBytes() / shared_arena_->stride(sharedReferenceGroup());
+    }
     size_t total = 0;
     for (const auto& pool : group_block_pools_) {
         if (pool) {
@@ -2249,6 +2382,38 @@ size_t CoordinatorCacheManager::availableBlocksNum() const {
 size_t CoordinatorCacheManager::minTokenCapacity(bool use_available_blocks, bool full_groups_only) const {
     if (group_block_pools_.empty()) {
         return 0;
+    }
+
+    if (shared_arena_) {
+        // The FULL namespaces compete for the same bytes. Taking each one's
+        // independent token limit would count that budget multiple times.
+        size_t cycle_tokens = 1;
+        for (const auto& group : config_.groups()) {
+            if (group.policy.group_type == CacheGroupType::FULL) {
+                const auto tokens = logicalSeqSizePerBlockForCapacity(group.tag);
+                const auto factor = tokens / std::gcd(cycle_tokens, tokens);
+                RTP_LLM_CHECK_WITH_INFO(factor > 0 && cycle_tokens <= std::numeric_limits<size_t>::max() / factor,
+                                        "shared cache token capacity span overflow");
+                cycle_tokens *= factor;
+            }
+        }
+        size_t cycle_bytes = 0;
+        for (size_t id = 0; id < config_.groups().size(); ++id) {
+            const auto& group = config_.groups()[id];
+            if (group.policy.group_type != CacheGroupType::FULL) {
+                continue;
+            }
+            const auto count  = cycle_tokens / logicalSeqSizePerBlockForCapacity(group.tag);
+            const auto stride = shared_arena_->stride(id);
+            RTP_LLM_CHECK_WITH_INFO(count <= (std::numeric_limits<size_t>::max() - cycle_bytes) / stride,
+                                    "shared cache token capacity byte overflow");
+            cycle_bytes += count * stride;
+        }
+        if (cycle_bytes == 0) {
+            return 0;
+        }
+        const auto bytes = use_available_blocks ? shared_arena_->availableBytes() : shared_arena_->usableBytes();
+        return bytes / cycle_bytes * cycle_tokens;
     }
 
     auto calculate = [&](bool only_full_groups) {
@@ -2290,6 +2455,9 @@ size_t CoordinatorCacheManager::totalTokensNum() const {
 }
 
 size_t CoordinatorCacheManager::totalBlocksNum() const {
+    if (shared_arena_) {
+        return shared_arena_->usableBytes() / shared_arena_->stride(sharedReferenceGroup());
+    }
     size_t total = 0;
     for (const auto& pool : group_block_pools_) {
         total += pool->totalBlocksNum();
@@ -2328,6 +2496,9 @@ int64_t CoordinatorCacheManager::getMrCostTimeMs() const {
 }
 
 size_t CoordinatorCacheManager::totalReservableFreeBlocks() const {
+    if (shared_arena_) {
+        return freeBlocksNum();
+    }
     size_t      total  = 0;
     const auto& groups = config_.topology().groups();
     for (size_t group_id = 0; group_id < group_block_pools_.size(); ++group_id) {
@@ -2345,6 +2516,9 @@ size_t CoordinatorCacheManager::reservableFreeBlocksNum() const {
 }
 
 size_t CoordinatorCacheManager::reserveBlocksForPool(size_t group_id) const {
+    if (shared_arena_) {
+        return group_id == sharedReferenceGroup() ? reserveBlocksNum() : 0;
+    }
     const auto& groups = config_.topology().groups();
     if (group_id >= group_block_pools_.size() || group_id >= kv_cache_groups_.size() || !group_block_pools_[group_id]
         || !kv_cache_groups_[group_id] || !kv_cache_groups_[group_id]->isReservable()
@@ -2404,6 +2578,8 @@ CoordinatorCacheManager::evaluateInitCapacityImpl(const MallocInfo&             
     }
 
     MallocStatus            status = MallocStatus::NONE;
+    std::vector<size_t>     shared_total_demand(shared_arena_ ? kv_cache_groups_.size() : 0);
+    std::vector<size_t>     shared_additional_demand(shared_arena_ ? kv_cache_groups_.size() : 0);
     const RequiredPositions no_required_positions;
     const auto&             topology_groups = config_.topology().groups();
     for (int group_id = 0; group_id < static_cast<int>(kv_cache_groups_.size()); ++group_id) {
@@ -2411,7 +2587,7 @@ CoordinatorCacheManager::evaluateInitCapacityImpl(const MallocInfo&             
         const auto&  tag                    = topology_groups[group_index].tag;
         const int    group_common_seq       = cpEffectiveSeqLenForReserve(cp_mapper, config_, tag, raw_common_seq_len);
         const int    group_seq_len          = cpEffectiveSeqLenForReserve(cp_mapper, config_, tag, raw_seq_len);
-        const bool   reuse_enabled              = reuseEnabledForGroup(malloc_info, config_, tag);
+        const bool   reuse_enabled          = reuseEnabledForGroup(malloc_info, config_, tag);
         const int    group_reuse_blocks_len = malloc_info.batch_kv_cache_resource->blocksNum(0, tag);
         const int    effective_reuse_blocks_len = reuse_enabled ? group_reuse_blocks_len : 0;
         const auto&  base_required_positions =
@@ -2432,6 +2608,11 @@ CoordinatorCacheManager::evaluateInitCapacityImpl(const MallocInfo&             
         const auto&  pool         = group_block_pools_[group_index];
         const size_t total_blocks = pool->totalBlocksNum();
         const auto   demand       = initBlockDemand(malloc_info, planned_blocks, tag, reuse_enabled);
+        if (shared_arena_) {
+            shared_total_demand[group_index]      = demand.retained_blocks + planned_blocks;
+            shared_additional_demand[group_index] = demand.additional_blocks;
+            continue;
+        }
         const size_t group_reserve_blocks =
             (!kv_cache_groups_[group_index]->isReservable()
              || topology_groups[group_index].policy.explicit_block_num > 0 || total_reservable_blocks == 0) ?
@@ -2485,6 +2666,22 @@ CoordinatorCacheManager::evaluateInitCapacityImpl(const MallocInfo&             
             // Keep scanning: a later pool may turn this into a permanent verdict.
             status = MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
         }
+    }
+    if (shared_arena_) {
+        const size_t reference = sharedReferenceGroup();
+        shared_total_demand[reference] += reserve_blocks;
+        shared_additional_demand[reference] += reserve_blocks;
+        if (!shared_arena_->canAllocate(shared_total_demand, SharedBlockArena::Capacity::TOTAL)) {
+            return MallocStatus::PERMANENT_RESOURCE_EXHAUSTED;
+        }
+        if (mode == InitCapacityMode::TOTAL_ONLY
+            || shared_arena_->canAllocate(shared_additional_demand, SharedBlockArena::Capacity::FREE)) {
+            return MallocStatus::NONE;
+        }
+        if (block_tree_cache_ && block_tree_cache_->ensureSharedDeviceSlots(shared_arena_, shared_additional_demand)) {
+            return MallocStatus::NONE;
+        }
+        return MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
     }
     return status;
 }

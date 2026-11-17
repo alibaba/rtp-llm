@@ -50,6 +50,7 @@ cc_library(
     hdrs = [
         "block_pool/DeviceBlockPool.h",
         "block_pool/IBlockPool.h",
+        "block_pool/SharedBlockArena.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

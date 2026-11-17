@@ -108,6 +108,16 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     ##############################################################################################################
     kv_cache_group = parser.add_argument_group("KVCache")
     kv_cache_group.add_argument(
+        "--shared_hybrid_cache",
+        env_name="RTP_LLM_SHARED_HYBRID_CACHE",
+        bind_to=(kv_cache_config, "shared_hybrid_cache"),
+        type=int,
+        choices=[-1, 0, 1],
+        default=-1,
+        help="GLM53 共享 GPU/主存字节池：-1 使用模型策略，0 关闭，1 要求开启；"
+        "共享模式仅支持单 PP、无 CP、无 DISK cache、每物理块一页的布局，不兼容显式独立池容量。",
+    )
+    kv_cache_group.add_argument(
         "--enable_crc",
         env_name="ENABLE_CRC",
         bind_to=(kv_cache_config, "enable_crc"),

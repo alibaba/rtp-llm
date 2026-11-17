@@ -214,20 +214,34 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
 
     const size_t max_blocks_per_batch = static_cast<size_t>(param.host_kv_cache_offset.size(1));
 
-    const auto& group = cache_config.groupForLayer(layer_kv.layer_id, layer_kv.tag);
+    const auto& group = cache_config.physicalGroupForLayer(layer_kv.layer_id, layer_kv.tag);
     RTP_LLM_CHECK_WITH_INFO(
         group.spec != nullptr, "cache-store tag=%s has no KVCacheSpec attached", layer_kv.tag.c_str());
 
     // LayerKVCache may expose kernel-page views; CacheStore keys and block IDs use physical pages.
     const size_t seq_size_per_block              = group.seqSizePerBlock();
-    const size_t kv_block_stride_bytes           = group.kvBlockStrideBytes();
-    const size_t kv_scale_stride_bytes           = group.kvScaleStrideBytes();
+    size_t       kv_block_stride_bytes           = group.kvBlockStrideBytes();
+    size_t       kv_scale_stride_bytes           = group.kvScaleStrideBytes();
     const size_t kv_block_transfer_bytes         = group.kvBlockStrideBytes();
     const size_t kv_scale_transfer_bytes         = group.kvScaleStrideBytes();
     const bool   use_group_cache_transfer_policy = cache_config.usesGroupCacheTransferPolicy();
     const auto* linear_spec = cache_config.use_mla ? dynamic_cast<const LinearKVCacheSpec*>(group.spec.get()) : nullptr;
     const auto  linear_segments =
         linear_spec ? linear_spec->transferSegments(1, 0) : std::vector<LinearKVCacheSpec::BlockSegment>();
+
+    if (cache_config.use_shared_block_pool) {
+        RTP_LLM_CHECK_WITH_INFO(group.kernelBlocksPerKvBlock() == 1 && layer_kv.kv_cache_base.dim() >= 2,
+                                "shared cache publication requires one kernel page per physical slot");
+        // Typed slot pitch includes the other physical owners inside this
+        // arena cell. Only this layer's payload is sent under its CacheStore
+        // key; sending the whole pitch would overwrite unrelated cache data.
+        kv_block_stride_bytes =
+            static_cast<size_t>(layer_kv.kv_cache_base.stride(0)) * layer_kv.kv_cache_base.element_size();
+        if (layer_kv.kv_scale_base.defined()) {
+            kv_scale_stride_bytes =
+                static_cast<size_t>(layer_kv.kv_scale_base.stride(0)) * layer_kv.kv_scale_base.element_size();
+        }
+    }
 
     RTP_LLM_CHECK_WITH_INFO(
         seq_size_per_block > 0, "cache-store tag=%s has zero tokens_per_block", layer_kv.tag.c_str());
@@ -407,6 +421,10 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                     offset_index,
                     block_id);
                 return;
+            }
+            if (cache_config.use_shared_block_pool) {
+                RTP_LLM_CHECK_WITH_INFO(block_id >= 0 && block_id < layer_kv.kv_cache_base.size(0),
+                                        "shared cache publication slot id is outside its typed namespace");
             }
             publication_lease_keys.push_back(
                 cache_keys[static_cast<int64_t>(batch_id)][static_cast<int64_t>(key_index)]);

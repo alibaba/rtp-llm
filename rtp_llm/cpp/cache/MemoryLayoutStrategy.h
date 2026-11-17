@@ -36,6 +36,7 @@ public:
 
 private:
     void                   checkLayerIdValidity(int layer_id) const;
+    void                   initializeSharedViews(const torch::Tensor& backing);
     void                   processKVTensor(torch::Tensor& kv_cache_tensor);
     bool                   processScaleTensor(torch::Tensor& kv_scale_tensor);
     void                   clearKVTensor(torch::Tensor& kv_cache_tensor);

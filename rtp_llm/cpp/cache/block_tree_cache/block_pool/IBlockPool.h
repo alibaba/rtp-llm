@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/Types.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/SharedBlockArena.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
@@ -40,6 +41,9 @@ struct BlockPoolConfigBase {
     std::string   pool_name;
     size_t        physical_block_count{0};
     bool          allocate_storage{true};
+    // Optional overlapping typed slot namespace, backed by one byte budget.
+    std::shared_ptr<SharedBlockArena> shared_arena;
+    size_t                            shared_arena_group{0};
 };
 
 // IBlockPool owns allocation and Tree-internal lifetime shared by Device, Host, and Disk.
@@ -101,9 +105,12 @@ public:
     size_t freeBlocksNum() const;
     // Blocks that can be reclaimed for a new request: physical free blocks plus
     // blocks held exclusively by BlockTreeRefType::CACHE.
-    size_t availableBlocksNum() const;
-    size_t usedBlocksNum() const;
-    size_t activeBlocksNum() const;
+    size_t                                   availableBlocksNum() const;
+    size_t                                   usedBlocksNum() const;
+    size_t                                   activeBlocksNum() const;
+    const std::shared_ptr<SharedBlockArena>& sharedArena() const {
+        return config_->shared_arena;
+    }
 
 protected:
     explicit IBlockPool(std::shared_ptr<const BlockPoolConfigBase> config);
