@@ -104,6 +104,19 @@ void BlockTreeCacheMetricsReporter::reportUnfreezeMetrics(const FrozenTask::Exec
     }
 }
 
+void BlockTreeCacheMetricsReporter::reportUnfreezeZeroMetrics(const std::string& pool_name, const std::string& tier) const {
+    if (!metrics_reporter_) {
+        return;
+    }
+    RtpLLMCacheUnfreezeMetricsCollector collector;
+    for (const char* backend : {"local", "kvcm"}) {
+        kmonitor::MetricsTags tags("pool_name", pool_name);
+        tags.AddTag("tier", tier);
+        tags.AddTag("backend", backend);
+        metrics_reporter_->report<RtpLLMCachePoolMetrics, RtpLLMCacheUnfreezeMetricsCollector>(&tags, &collector);
+    }
+}
+
 void BlockTreeCacheMetricsReporter::flushStageMetrics() const {
     if (stage_metrics_)
         stage_metrics_->flush();

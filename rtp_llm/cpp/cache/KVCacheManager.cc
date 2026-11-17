@@ -1339,6 +1339,9 @@ void KVCacheManager::reportMetricsLoop() {
         const std::vector<CachePoolMetricsSnapshot> report_snapshots =
             mergeCachePoolMetricsSnapshots(device_pool_snapshots, tree_pool_snapshots);
         for (const CachePoolMetricsSnapshot& report_snapshot : report_snapshots) {
+            if (isAllocatorOwner()) {
+                block_tree_cache_->reportUnfreezeZeroMetrics(report_snapshot.pool_name, report_snapshot.tier);
+            }
             reportPoolCacheMetrics(metrics_reporter_, report_snapshot, should_log, isAllocatorOwner());
         }
 
