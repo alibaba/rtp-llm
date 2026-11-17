@@ -28,6 +28,54 @@ from rtp_llm.utils.model_weight import (  # noqa: E402
 
 
 class NativeNvfp4LoaderTest(unittest.TestCase):
+    def test_explicit_nvfp4_never_falls_back_to_mxfp4(self):
+        from rtp_llm.model_loader.native_mega_moe_nvfp4_weight import (
+            OnlineMegaMoeNvfp4Weight,
+        )
+        from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
+            OnlineMegaMoeFp4Weight,
+            wrap_moe_for_mega_moe,
+        )
+        from rtp_llm.model_loader.per_group_fp4_quant_weight import PerGroupFp4Weight
+
+        source = MoeAtomicWeight(
+            W.moe_w2,
+            [
+                CkptWeightInfo(
+                    "model.layers.{i}.mlp.experts.{expert_id}.down_proj.weight",
+                    identity,
+                )
+            ],
+            stack_,
+            config=MoeConfig(expert_num=4),
+        )
+        native_source = object.__new__(PerGroupFp4Weight)
+        native_source.name, native_source.kernel = W.moe_w2, source
+        with patch.dict(
+            os.environ,
+            {"MOE_STRATEGY": "mega_moe", "RTP_LLM_MOE_WEIGHT_FORMAT": "nvfp4"},
+        ):
+            self.assertIsInstance(
+                wrap_moe_for_mega_moe(source), OnlineMegaMoeNvfp4Weight
+            )
+            self.assertIsInstance(
+                wrap_moe_for_mega_moe(native_source), NativeMegaMoeNvfp4Weight
+            )
+        with patch.dict(
+            os.environ,
+            {"MOE_STRATEGY": "mega_moe_se", "RTP_LLM_MOE_WEIGHT_FORMAT": "nvfp4"},
+        ):
+            for weight in (source, native_source):
+                with self.assertRaisesRegex(
+                    ValueError, "requires MOE_STRATEGY=mega_moe"
+                ):
+                    wrap_moe_for_mega_moe(weight)
+        with patch.dict(
+            os.environ,
+            {"MOE_STRATEGY": "mega_moe", "RTP_LLM_MOE_WEIGHT_FORMAT": "auto"},
+        ):
+            self.assertIs(type(wrap_moe_for_mega_moe(source)), OnlineMegaMoeFp4Weight)
+
     def test_preserves_codes_scales_and_selected_expert_order(self):
         for key in (W.moe_w1, W.moe_w2):
             projections = (
@@ -209,10 +257,79 @@ class NativeNvfp4KernelTest(unittest.TestCase):
         dist.destroy_process_group()
         cls.directory.cleanup()
 
+    def test_fp8_conversion_preserves_projection_scales_and_accuracy(self):
+        from rtp_llm.model_loader.native_mega_moe_nvfp4_weight import (
+            OnlineMegaMoeNvfp4FromFp8Weight,
+        )
+        from rtp_llm.model_loader.online_modelopt_fp4_quant_weight import (
+            dequantize_nvfp4_expert,
+        )
+
+        torch.manual_seed(37)
+        for name in (W.moe_w1, W.moe_w2):
+            for block, exponent in ((128, False), (32, True)):
+                rows, hidden, experts = 256, 256, 2
+                weight = (torch.randn(experts, rows, hidden, device="cuda") * 8).to(
+                    torch.float8_e4m3fn
+                )
+                scale = torch.full(
+                    (experts, rows if exponent else rows // block, hidden // block),
+                    124.0 if exponent else 0.125,
+                    device="cuda",
+                )
+                # Give gate a distinct global scale; a shared/incorrect scale breaks this check.
+                scale[:, scale.shape[1] // 2 :] += 2 if exponent else 0.5
+                loader = object.__new__(OnlineMegaMoeNvfp4FromFp8Weight)
+                loader.name = name
+                loader._source_block_size = block
+                loader._scale_is_ue8m0_exponent = exponent
+                loader.kernel = SimpleNamespace(
+                    name=name, _load_raw_tensor=lambda *args: {name: weight}
+                )
+                loader.fp8_scale = SimpleNamespace(
+                    name="input_scale",
+                    _load_raw_tensor=lambda *args: {"input_scale": scale},
+                )
+                loader.out_scale = SimpleNamespace(name="scale")
+                result = loader._load_raw_tensor(None, 3, "cuda", None)
+                gsf = result[W.moe_w1_s2 if name == W.moe_w1 else W.moe_w2_s2]
+                sf = (
+                    torch.exp2(scale - 127)
+                    if exponent
+                    else scale.repeat_interleave(block, dim=1)
+                )
+                reference = (
+                    (
+                        weight.float().reshape(experts, rows, hidden // block, block)
+                        * sf.unsqueeze(-1)
+                    )
+                    .reshape_as(weight)
+                    .to(torch.bfloat16)
+                )
+                parts = 2 if name == W.moe_w1 else 1
+                self.assertEqual(
+                    tuple(gsf.shape), (experts, 2) if parts == 2 else (experts,)
+                )
+                for expert in range(experts):
+                    for part in range(parts):
+                        sl = slice(part * rows // parts, (part + 1) * rows // parts)
+                        actual = dequantize_nvfp4_expert(
+                            result[name][expert, sl].view(torch.uint8),
+                            result["scale"][expert, sl],
+                            gsf[expert, part] if parts == 2 else gsf[expert],
+                        )
+                        target = reference[expert, sl].float()
+                        relative = (
+                            actual.float() - target
+                        ).square().mean().sqrt() / target.square().mean().sqrt()
+                        self.assertTrue(torch.isfinite(actual).all())
+                        self.assertLess(relative.item(), 0.13)
+                if parts == 2:
+                    self.assertTrue((gsf[:, 1] > gsf[:, 0] * 2).all())
+
     def test_kernel_reference_and_changed_input_graph_replay(self):
         import torch.distributed as dist
         from deep_gemm.utils import per_block_cast_to_nvfp4, per_token_cast_to_nvfp4
-
         from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_nvfp4 import (
             GLM5MegaMoENVFP4,
             quantize_native_nvfp4_input,

@@ -38,7 +38,6 @@ gran_k=32)`` to match ``GLM5MegaMoE.setup_weights_from_bf16``.
 from typing import Any, Dict, Optional
 
 import torch
-
 from rtp_llm.config.quant_config import (
     Fp8BlockWiseQuantConfig,
     ModelOptFp4Config,
@@ -992,18 +991,25 @@ def mxfp4_quantize_linear_weight(weight: torch.Tensor):
 def wrap_moe_for_mega_moe(weight: WeightModule) -> WeightModule:
     """If ``weight`` is a MoE atomic / FP8 / NVFP4 wrapper for moe_w1/moe_w2,
     preserve native NVFP4 for plain mega_moe; otherwise return a load-time
-    MXFP4 quantizer. Unrelated weights are returned unchanged.
+    MXFP4 quantizer. RTP_LLM_MOE_WEIGHT_FORMAT=nvfp4 explicitly quantizes
+    FP8/BF16 experts to native NVFP4 instead. Unrelated weights are unchanged.
 
     This is the single entry point used by ``apply_mega_moe_fp4_wrappers`` in
     ``model_weight_info.py``.
     """
+    import os
+
     from rtp_llm.model_loader.mxfp8_quant_weight import Mxfp8Weight
     from rtp_llm.model_loader.per_block_fp8_quant_weight import PerBlockFp8Weight
     from rtp_llm.model_loader.per_group_fp4_quant_weight import PerGroupFp4Weight
 
-    if isinstance(weight, PerGroupFp4Weight) and weight.name in _MEGA_MOE_KERNEL_NAMES:
-        import os
+    target_format = os.environ.get("RTP_LLM_MOE_WEIGHT_FORMAT", "auto")
+    if target_format not in ("auto", "nvfp4"):
+        raise ValueError(f"Unsupported RTP_LLM_MOE_WEIGHT_FORMAT={target_format}")
+    if target_format == "nvfp4" and os.environ.get("MOE_STRATEGY") != "mega_moe":
+        raise ValueError("NVFP4 conversion requires MOE_STRATEGY=mega_moe")
 
+    if isinstance(weight, PerGroupFp4Weight) and weight.name in _MEGA_MOE_KERNEL_NAMES:
         if os.environ.get("MOE_STRATEGY") == "mega_moe":
             from rtp_llm.model_loader.native_mega_moe_nvfp4_weight import (
                 NativeMegaMoeNvfp4Weight,
@@ -1011,12 +1017,22 @@ def wrap_moe_for_mega_moe(weight: WeightModule) -> WeightModule:
 
             return NativeMegaMoeNvfp4Weight(weight.kernel)
         return OnlineMegaMoeFp4FromNvfp4Weight(weight.kernel)
+    fp8_converter = OnlineMegaMoeFp4FromFp8Weight
+    bf16_converter = OnlineMegaMoeFp4Weight
+    if target_format == "nvfp4":
+        from rtp_llm.model_loader.native_mega_moe_nvfp4_weight import (
+            OnlineMegaMoeNvfp4FromFp8Weight,
+            OnlineMegaMoeNvfp4Weight,
+        )
+
+        fp8_converter = OnlineMegaMoeNvfp4FromFp8Weight
+        bf16_converter = OnlineMegaMoeNvfp4Weight
     if isinstance(weight, Mxfp8Weight) and weight.name in _MEGA_MOE_KERNEL_NAMES:
         kernel = weight.kernel
         scale = weight.scale
         if kernel is None or scale is None:
             return weight
-        return OnlineMegaMoeFp4FromFp8Weight(
+        return fp8_converter(
             src_kernel=kernel,
             src_scale=scale,
             source_block_size=MXFP8_BLOCK,
@@ -1027,10 +1043,10 @@ def wrap_moe_for_mega_moe(weight: WeightModule) -> WeightModule:
         scale = weight.scale
         if kernel is None or scale is None:
             return weight
-        return OnlineMegaMoeFp4FromFp8Weight(
+        return fp8_converter(
             src_kernel=kernel,
             src_scale=scale,
         )
     if isinstance(weight, MoeAtomicWeight) and weight.name in _MEGA_MOE_KERNEL_NAMES:
-        return OnlineMegaMoeFp4Weight(weight)
+        return bf16_converter(weight)
     return weight

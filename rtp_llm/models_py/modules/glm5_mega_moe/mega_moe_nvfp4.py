@@ -134,7 +134,7 @@ class GLM5MegaMoENVFP4(GLM5MegaMoE):
             w1.device,
         )
         logging.info(
-            "Native NVFP4 MegaMoE: checkpoint weights preserved, block=16, layer=%d",
+            "Native NVFP4 MegaMoE: nvfp4_nvfp4_mega_moe, block=16, layer=%d",
             self.cfg.layer_id,
         )
         key = (id(self._mega_buf), self.cfg.swiglu_limit)
