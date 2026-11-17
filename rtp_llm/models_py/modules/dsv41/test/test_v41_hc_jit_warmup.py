@@ -280,18 +280,31 @@ class V41HCJitWarmupCPU(unittest.TestCase):
         owner.fn = owner.fn.t().contiguous().t()
         self.assertIsNone(warmup._unit_key(owner))
 
-    def test_small_prenorm_covers_every_reduction_constexpr(self):
-        for backend, maximum in (("tilelang_single", 64), ("deepgemm", 512)):
-            with patch.dict(os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": backend}):
-                self.assertEqual(warmup._small_prenorm_ms(0), ())
-                self.assertEqual(warmup._small_prenorm_ms(3), (1, 2, 3))
+    def test_small_prenorm_respects_standalone_dispatch_limits(self):
+        for capability, backend, maximum in (
+            ((9, 0), "auto", 256),
+            ((9, 0), "tilelang_single", 64),
+            ((10, 3), "deepgemm", 64),
+        ):
+            with self.subTest(capability=capability, backend=backend), patch.dict(
+                os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": backend}
+            ):
+                self.assertEqual(warmup._small_prenorm_ms(0, capability), ())
+                self.assertEqual(warmup._small_prenorm_ms(3, capability), (1, 2, 3))
                 self.assertEqual(
-                    warmup._small_prenorm_ms(131072), tuple(range(1, maximum + 1))
+                    warmup._small_prenorm_ms(131072, capability),
+                    tuple(range(1, maximum + 1)),
                 )
 
     def test_fused_prewarm_covers_all_decode_split_variants(self):
         with contextlib.ExitStack() as stack:
             self._mock_device(stack)
+            stack.enter_context(
+                patch.object(torch.cuda, "get_device_capability", return_value=(9, 0))
+            )
+            stack.enter_context(
+                patch.object(warmup.v41_mega_mhc, "_get_sm90_mega_mhc", return_value=None)
+            )
             stack.enter_context(
                 patch.dict(os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "deepgemm"})
             )
@@ -307,7 +320,7 @@ class V41HCJitWarmupCPU(unittest.TestCase):
             fused = stack.enter_context(patch.object(warmup, "_launch_fused_pre"))
             warmup.warmup_v41_hc_jit(model(block()), max_m=512, device="cpu")
         self.assertEqual(
-            {call.args[1] for call in standalone.call_args_list}, set(range(1, 513))
+            {call.args[1] for call in standalone.call_args_list}, set(range(1, 257))
         )
         covered = {
             min(80, 148 // ((call.args[1] + 63) // 64)) for call in fused.call_args_list

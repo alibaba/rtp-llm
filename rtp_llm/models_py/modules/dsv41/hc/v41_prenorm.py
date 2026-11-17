@@ -13,7 +13,7 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.device.device_type import is_cuda, is_sm90
+from rtp_llm.device.device_type import is_cuda
 
 
 @lru_cache(maxsize=1)
@@ -27,12 +27,18 @@ def _has_prenorm_gemm() -> bool:
     return callable(getattr(module, "tf32_hc_prenorm_gemm", None))
 
 
-def max_supported_tokens() -> int:
-    # The <=64 specialization has always selected DeepGEMM directly. Keep
-    # explicit diagnostic overrides for larger batches and share this bound
-    # with startup compilation, whose reduction specializes on every M.
+def configured_max_tokens() -> int:
+    # Diagnostic overrides keep the established <=64-token DeepGEMM path.
     backend = os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "auto").strip().lower()
     return 512 if backend in ("", "auto", "deepgemm", "dg") else 64
+
+
+def max_supported_tokens(capability: tuple[int, int]) -> int:
+    """Return the standalone prenorm dispatch limit for this GPU."""
+    if capability[0] not in (9, 10):
+        return 0
+    device_limit = 256 if capability == (9, 0) else 64
+    return min(device_limit, configured_max_tokens())
 
 
 def is_supported(residual: torch.Tensor, fn: torch.Tensor) -> bool:
@@ -48,14 +54,12 @@ def is_supported(residual: torch.Tensor, fn: torch.Tensor) -> bool:
         or fn.dtype != torch.float32
         or fn.shape != (24, 20480)
         or not fn.is_contiguous()
-        or residual.numel() // 20480 > max_supported_tokens()
         or (torch.is_grad_enabled() and (residual.requires_grad or fn.requires_grad))
     ):
         return False
-    major = torch.cuda.get_device_capability(residual.device)[0]
-    max_tokens = 256 if is_sm90(residual.device) else 64
+    max_tokens = max_supported_tokens(torch.cuda.get_device_capability(residual.device))
     return (
-        major in (9, 10)
+        max_tokens > 0
         and residual.numel() // 20480 <= max_tokens
         and _has_prenorm_gemm()
     )
