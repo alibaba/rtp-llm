@@ -1152,18 +1152,15 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
                         && params.token_ids.scalar_type() == torch::kInt32 && params.token_ids.dim() == 2
                         && params.token_ids.size(0) == params.logits.size(0) && params.token_ids.size(1) > 0,
                     "history-free sampling requires a CUDA int32 output matrix");
-        // Reuse every sampling/RNG branch with a one-column output scratch. The
-        // original matrix's prefix has no consumer and must never be copied.
-        auto compact = params;
-        compact.token_history_not_materialized = false;
-        if (params.token_ids.size(0) == 1) {
-            compact.token_ids = params.token_ids.narrow(1, params.token_ids.size(1) - 1, 1);
-            return sampleGreedy(compact);
+        // A contiguous single row already transposes as a view without a copy.
+        if (params.token_ids.size(0) != 1 || !params.token_ids.is_contiguous()) {
+            auto compact = params;
+            compact.token_history_not_materialized = false;
+            compact.token_ids = torch::empty({params.token_ids.size(0), 1}, params.token_ids.options());
+            auto result = sampleGreedy(compact);
+            params.token_ids.select(1, params.token_ids.size(1) - 1).copy_(compact.token_ids.select(1, 0));
+            return result;
         }
-        compact.token_ids = torch::empty({params.token_ids.size(0), 1}, params.token_ids.options());
-        auto result = sampleGreedy(compact);
-        params.token_ids.select(1, params.token_ids.size(1) - 1).copy_(compact.token_ids.select(1, 0));
-        return result;
     }
     const auto batch_size        = params.logits.size(0);
     bool       has_not_do_sample = params.do_sample.has_value()
