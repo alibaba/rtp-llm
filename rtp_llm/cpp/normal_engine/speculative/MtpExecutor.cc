@@ -1188,9 +1188,11 @@ void MtpExecutor::stageAcceptLenMetrics(const torch::Tensor& accept_len,
 
     if (!accept_len.is_cuda()) {
         metrics_accept_len_sum_gpu_  = torch::Tensor();
-        metrics_accept_len_sum_cpu_  = accept_len.to(torch::kInt64).sum().reshape({1}).pin_memory();
         metrics_accept_len_rows_gpu_ = torch::Tensor();
         metrics_accept_len_rows_cpu_ = accept_len.to(torch::kInt64).flatten().contiguous();
+        metrics_accept_len_sum_cpu_ = glm5_target_ && propose_step_ > 1 ?
+            metrics_accept_len_rows_cpu_.sum().reshape({1}).pin_memory() :
+            accept_len.to(torch::kInt64).sum().reshape({1}).pin_memory();
         metrics_accept_len_ready_event_.reset();
         return;
     }
@@ -1636,6 +1638,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          kv_cache_layer_to_group,
          cache_manager,
          params.model_config_.hc_mult});
+    model_init_params.glm5_mtp_metadata_fusion_enabled = glm5_target_ && propose_step_ > 1;
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");
@@ -2506,42 +2509,66 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     torch::Tensor  adaptive_caps;
     torch::Tensor  adaptive_rows;
+    int64_t adaptive_total = 0;
+    const bool prepare_from_caps = glm5_target_ && propose_step_ > 1 && mtpFusionEnabled();
     const bool     packed_verify = adaptive_verification_ && !warm_up_ && !model_input.is_fake_stream;
     GptModelInputs dense_verify_input;
     if (packed_verify) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.adaptive_pack");
         if (isTpRank0()) {
             py::gil_scoped_acquire gil;
-            auto                   plan = adaptive_session_->attr("plan")().cast<py::tuple>();
+            const auto capacities = prepare_from_caps ? model_->adaptiveTokenCapacities(batch_size) :
+                                                        std::vector<int64_t>{};
+            auto plan = adaptive_session_->attr("plan")(capacities, !prepare_from_caps).cast<py::tuple>();
             adaptive_caps               = plan[0].cast<torch::Tensor>();
             adaptive_rows               = plan[1].cast<torch::Tensor>();
+            adaptive_total              = plan[2].cast<int64_t>();
         } else {
             adaptive_caps = torch::empty({static_cast<int64_t>(batch_size)}, model_input.combo_tokens.options());
         }
         if (parallelism_config_.tp_size > 1) {
             execBroadcast({{adaptive_caps}, 0});
-            if (!isTpRank0()) {
+            if (!isTpRank0() && !prepare_from_caps) {
                 auto rows =
                     torch::arange(batch_size * (propose_step_ + 1), adaptive_caps.options().dtype(torch::kInt64));
                 auto keep     = rows.remainder(propose_step_ + 1) <= adaptive_caps.repeat_interleave(propose_step_ + 1);
                 adaptive_rows = rows.masked_select(keep);
             }
         }
+        if (prepare_from_caps && parallelism_config_.tp_size > 1) {
+            const auto capacities = model_->adaptiveTokenCapacities(batch_size);
+            auto geometry = torch::zeros({3}, torch::TensorOptions().dtype(torch::kInt64).pinned_memory(true));
+            if (isTpRank0()) {
+                geometry.data_ptr<int64_t>()[0] = adaptive_total;
+                const auto bank = std::lower_bound(capacities.begin(), capacities.end(), adaptive_total);
+                geometry.data_ptr<int64_t>()[1] = bank == capacities.end() ? 0 : *bank;
+                // Adaptive capture includes tokens_per_request=1, so the
+                // first capacity is the actual padded request dimension.
+                geometry.data_ptr<int64_t>()[2] = capacities.empty() ? 0 : capacities.front();
+            }
+            execBroadcastCpu({{geometry}, 0});
+            adaptive_total = geometry.data_ptr<int64_t>()[0];
+            const auto bank = std::lower_bound(capacities.begin(), capacities.end(), adaptive_total);
+            const int64_t local_capacity = bank == capacities.end() ? 0 : *bank;
+            RTP_LLM_CHECK_WITH_INFO(local_capacity == geometry.data_ptr<int64_t>()[1]
+                                        && (capacities.empty() ? 0 : capacities.front()) == geometry.data_ptr<int64_t>()[2],
+                                    "adaptive target capture capacity differs across TP ranks");
+        }
         dense_verify_input            = model_input;
         bool packed_prepared = false;
 #if USING_CUDA
         Glm5PackedVerifyInputs packed;
-        if (glm5_target_ && propose_step_ > 1 && mtpFusionEnabled()) {
-            packed_prepared = tryGlm5PackedVerifyPrepare(model_input.combo_tokens, adaptive_caps, adaptive_rows,
-                                                        model_input.combo_position_ids.defined()
-                                                                && model_input.combo_position_ids.numel() > 0 ?
-                                                            model_input.combo_position_ids : torch::Tensor(),
-                                                        model_input.combo_tokens_type_ids.defined()
-                                                                && model_input.combo_tokens_type_ids.numel() > 0 ?
-                                                            model_input.combo_tokens_type_ids : torch::Tensor(), packed,
-                                                        cuda_graph::graphGetCurrentStream().stream());
+        const auto positions = model_input.combo_position_ids.defined() && model_input.combo_position_ids.numel() > 0 ?
+                                   model_input.combo_position_ids : torch::Tensor();
+        const auto types = model_input.combo_tokens_type_ids.defined() && model_input.combo_tokens_type_ids.numel() > 0 ?
+                               model_input.combo_tokens_type_ids : torch::Tensor();
+        if (prepare_from_caps) {
+            packed_prepared = tryGlm5PackedVerifyPrepareFromCaps(model_input.combo_tokens, adaptive_caps, adaptive_total,
+                                                                positions, types, packed,
+                                                                cuda_graph::graphGetCurrentStream().stream());
         }
         if (packed_prepared) {
+            adaptive_rows = packed.rows;
             model_input.combo_tokens = packed.tokens;
             model_input.input_lengths = packed.lengths;
             model_input.lm_output_indexes = packed.lm_output_indexes;
@@ -2550,6 +2577,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
 #endif
         if (!packed_prepared) {
+            if (prepare_from_caps) {
+                auto rows = torch::arange(batch_size * (propose_step_ + 1), adaptive_caps.options().dtype(torch::kInt64));
+                adaptive_rows = rows.masked_select(
+                    rows.remainder(propose_step_ + 1) <= adaptive_caps.repeat_interleave(propose_step_ + 1));
+            }
             model_input.combo_tokens      = model_input.combo_tokens.index_select(0, adaptive_rows);
             model_input.input_lengths     = adaptive_caps + 1;
             model_input.lm_output_indexes = torch::arange(adaptive_rows.numel(), adaptive_caps.options());
@@ -3064,6 +3096,7 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
     model_input_copy.sequence_lengths =
         torch::empty({0}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
     model_input_copy.is_target_verify = true;
+    model_input_copy.glm5_mtp_metadata_fusion_enabled = glm5_target_ && propose_step_ > 1;
     if (isCpContextRequest(parallelism_config_, model_input_copy)) {
         // The function entry receives draft-decode-shaped inputs; only after
         // this rewrite is the eventual target-verify CP context visible.
@@ -3173,6 +3206,14 @@ GptModelOutputs MtpExecutor::runTargetVerifyForward(GptModelInputs& model_input,
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(target_model_verify)");
     maybePrintModelInput(model_input, "decode target model");
     model_input.is_target_verify        = true;
+    model_input.glm5_mtp_metadata_fusion_enabled = glm5_target_ && propose_step_ > 1;
+    struct VerifyCapabilityGuard {
+        GptModelInputs& input;
+        ~VerifyCapabilityGuard() {
+            input.is_target_verify = false;
+            input.glm5_mtp_metadata_fusion_enabled = false;
+        }
+    } verify_capability_guard{model_input};
     model_input.kv_cache_layer_to_group = target_kv_cache_layer_to_group;
     RTP_LLM_LOG_DEBUG(
         "[MTP decode] target model verify forward start, input_lengths_size=%ld, prefix_lengths_size=%ld, seq_lengths_size=%ld",
@@ -3659,17 +3700,22 @@ absl::Status MtpExecutor::dispatchDecodeOutput(const StreamGroups&              
 MtpExecutor::~MtpExecutor() {
     if (!glm5_target_ || propose_step_ <= 1) return;
     const auto stream = cuda_graph::graphGetCurrentStream();
+    bool failed_worker = false;
     for (auto* runner : {&target_verify_prepare_runner_, &draft_prefill_prepare_runner_,
                          &spec_logits_verify_async_runner_, &spec_bookkeeping_runner_}) {
         try {
             runner->sync(stream);
         } catch (...) {
+            failed_worker = true;
             // sync consumes the stored task error before adding its event edge.
             // Repeat to join that already-finished worker's device submissions.
             try { runner->sync(stream); } catch (...) {}
         }
     }
     try {
+        // A throwing worker may never record AsyncRunner's completion event.
+        // Only this exceptional teardown needs a device-wide completion fence.
+        if (failed_worker) cudaSyncAndCheck();
         stream.synchronize();
         collect_metrics_stream_.synchronize();
     } catch (const std::exception& e) {

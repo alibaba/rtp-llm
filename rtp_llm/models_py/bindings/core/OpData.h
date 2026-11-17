@@ -107,6 +107,7 @@ struct GptModelInputs {
     // So, the model has different inference logic for target verify and normal inference.
     // To select correct inference mode, we need to set this flag manually.
     bool is_target_verify = false;
+    bool glm5_mtp_metadata_fusion_enabled = false;
 
     // MTP draft model state extension after target verification. The outer
     // input remains prefill-shaped (input_lengths + prefix_lengths), while

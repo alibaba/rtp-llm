@@ -76,6 +76,11 @@ class AdaptiveGraphTest(unittest.TestCase):
                 runner = CudaGraphRunner()
                 runner.init_decode(model, 8, 64, 64, 64, [1, 4], 6, enabled)
                 self.assertEqual(len(model.captured_rows), 12 if enabled else 2)
+                self.assertEqual(
+                    runner.adaptiveTokenCapacities(2),
+                    [4, 8, 12, 16, 20, 24] if enabled else [],
+                )
+                self.assertEqual(runner.adaptiveTokenCapacities(5), [])
                 for value, lengths in enumerate(
                     ([4], [1, 3], [6, 1, 2], [1], [6], [4]), 1
                 ):
@@ -86,6 +91,12 @@ class AdaptiveGraphTest(unittest.TestCase):
                     capacity = batch * (
                         (sum(lengths) + batch - 1) // batch if enabled else 6
                     )
+                    if enabled:
+                        self.assertEqual(
+                            capacity,
+                            next(value for value in runner.adaptiveTokenCapacities(len(lengths))
+                                 if value >= sum(lengths)),
+                        )
                     torch.testing.assert_close(
                         result[: sum(lengths)],
                         torch.full_like(inputs.input_hiddens, value + capacity),

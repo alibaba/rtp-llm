@@ -28,6 +28,38 @@ def ready_controller(request_ids: list[int]) -> AdaptiveDraftController:
 
 
 class AdaptiveControllerTest(unittest.TestCase):
+    def test_graph_padding_admits_real_prefixes_and_records_final_caps(self) -> None:
+        controller = ready_controller([10, 20])
+        # The economy budget selects three drafts (five real rows). A six-row
+        # captured bank has one paid-for row available for a fourth draft.
+        controller.confidence_probs[:2].copy_(
+            torch.tensor([[0.9, 0.8, 0.7], [0.5, 0.4, 0.3]], device="cuda")
+        )
+        with patch(
+            "rtp_llm.models_py.sampling.adaptive_controller.select_draft_token_budget",
+            return_value=3,
+        ):
+            caps, rows, total = controller.plan(
+                [10, 20], [3, 3], draft_cost_ms=np.zeros(3),
+                verify_cost_ms=np.ones(9), graph_token_capacities=[3, 6, 9],
+            )
+        self.assertEqual(total, 6)
+        self.assertEqual(caps.tolist(), [3, 1])
+        self.assertEqual(rows.tolist(), [0, 1, 2, 3, 4, 5])
+        # This would fail if pending admission retained the pre-promotion cap.
+        controller.observe([10, 20], caps, [False, False])
+        self.assertIsNone(controller._pending)
+
+    def test_fixed_cap_does_not_consume_padding_and_rows_can_be_deferred(self) -> None:
+        controller = ready_controller([10, 20])
+        caps, rows, total = controller.plan(
+            [10, 20], [3, 1], draft_cost_ms=np.zeros(3),
+            verify_cost_ms=np.ones(9), fixed_cap=1,
+            graph_token_capacities=[3, 6, 9], materialize_rows=False,
+        )
+        self.assertEqual((caps.tolist(), total, rows.numel()), ([1, 1], 4, 0))
+        controller.observe([10, 20], caps, [False, False])
+
     def test_unfinished_round_is_invalidated_before_retry(self) -> None:
         with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "3"}):
             session = AdaptiveVerificationSession(2, 5, "cuda")

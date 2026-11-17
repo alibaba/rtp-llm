@@ -1,3 +1,5 @@
+from collections.abc import Sequence
+
 import logging
 import os
 
@@ -71,7 +73,9 @@ class AdaptiveVerificationSession:
             return
         self.controller.predict(ids, step, logits)
 
-    def plan(self) -> tuple[torch.Tensor, torch.Tensor, int]:
+    def plan(
+        self, graph_token_capacities: Sequence[int] = (), materialize_rows: bool = True
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
         if self.events is not None:
             self.events[1].record()
         self._collect_costs()
@@ -108,6 +112,8 @@ class AdaptiveVerificationSession:
             draft_cost_ms=draft,
             verify_cost_ms=verify,
             fixed_cap=cap if cap >= 0 else None,
+            graph_token_capacities=graph_token_capacities,
+            materialize_rows=materialize_rows,
         )
         logging.info(
             "[adaptive-verify] round=%d batch=%d draft_steps=%d target_rows=%d fixed_cap=%d calibration=%s",

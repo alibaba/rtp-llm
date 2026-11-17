@@ -159,7 +159,7 @@ class PaddedPackTest(unittest.TestCase):
         self.assertTrue(torch.equal(out.view(torch.int16), expected.view(torch.int16)))
         self.assertTrue(torch.equal(attend(out), attend(expected)))
 
-    def test_production_pack_calls_fused_op_and_preserves_graph_fallback(self):
+    def test_production_pack_calls_fused_op_for_eager_and_graph(self):
         tensors = case([3, 0, 65], [64, 64, 128])
         cache, table, a, p, s = tensors
         op = object.__new__(cp.SparseMlaFp8CPOp)
@@ -177,17 +177,30 @@ class PaddedPackTest(unittest.TestCase):
         op.indexer_copy_dst_idx = None
         out = torch.empty((256, 576), device="cuda", dtype=torch.bfloat16)
         cache_obj = SimpleNamespace(kv_cache_base=cache)
-        op.use_cuda_graph = True
-        reference = op._pack_sharded_kv_cache(cache_obj, out)
-        op.use_cuda_graph = False
-        with patch.object(
-            cp,
-            "_scatter_actual_to_padded",
-            side_effect=AssertionError("unfused scatter"),
-        ):
-            got = op._pack_sharded_kv_cache(cache_obj, out, local_fused=out)
-        self.assertEqual(got.data_ptr(), out.data_ptr())
-        self.assertTrue(torch.equal(got.view(torch.int16), reference.view(torch.int16)))
+        reference = legacy(*tensors, [3, 0, 65], [64, 64, 128])
+        for graph_mode in (False, True):
+            op.use_cuda_graph = graph_mode
+            with patch.object(
+                cp,
+                "_scatter_actual_to_padded",
+                side_effect=AssertionError("unfused scatter"),
+            ):
+                got = op._pack_sharded_kv_cache(cache_obj, out, local_fused=out)
+            self.assertEqual(got.data_ptr(), out.data_ptr())
+            self.assertTrue(torch.equal(got.view(torch.int16), reference.view(torch.int16)))
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            op._pack_sharded_kv_cache(cache_obj, out, local_fused=out)
+        original_table = table.clone()
+        for actual, padded in (([1, 0, 2], [128, 64, 64]), ([0, 0, 0], [64, 128, 64])):
+            a.copy_(torch.tensor(actual, dtype=torch.int32, device="cuda"))
+            p.copy_(torch.tensor(padded, dtype=torch.int32, device="cuda"))
+            s.copy_(torch.tensor(starts(padded), dtype=torch.int32, device="cuda"))
+            # Change a valid page as well as all live layout vectors in place.
+            table[0, 0].copy_(original_table[2, 0])
+            graph.replay()
+            reference = legacy(*tensors, actual, padded)
+            self.assertTrue(torch.equal(out.view(torch.int16), reference.view(torch.int16)))
 
     def test_same_layer_raw_history_omits_destination_and_matches_restored(self):
         # Real padded CUDA packing and stream events; substitute only transport
@@ -293,6 +306,28 @@ class PaddedPackTest(unittest.TestCase):
             self.assertTrue(
                 torch.equal(out.view(torch.int16), expected.view(torch.int16))
             )
+
+    def test_bounded_projection_gather_restores_each_chunk_exactly(self):
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import cp_bounded_gather
+
+        ckv = torch.arange(64, device="cuda", dtype=torch.bfloat16).view(8, 8)[:, ::2]
+        rope = ckv + 100
+        rank_major = torch.cat((torch.cat((ckv, rope), -1), torch.cat((ckv, rope), -1) + 200), 0)
+        restore = torch.tensor([0, 9, 2, 15, 7], device="cuda", dtype=torch.int64)
+        budget = 3 * 3 * 8 * 2  # three local rows, send plus two-rank receive
+        for mapping in (None, restore):
+            counts = []
+
+            def gather(out, part, **kwargs):
+                counts.append(part.shape[0])
+                self.assertLessEqual(part.numel() * part.element_size() * 3, budget)
+                out.copy_(torch.cat((part, part + 200), 0))
+
+            with patch.object(cp_bounded_gather, "_PROJECTION_SCRATCH_BYTES", budget):
+                result = cp_bounded_gather.gather_projection_chunks(ckv, rope, 2, mapping, gather)
+            expected = rank_major if mapping is None else rank_major.index_select(0, mapping)
+            self.assertTrue(torch.equal(result, expected))
+            self.assertEqual(counts, [3, 3, 2])
 
     def test_invalid_metadata_rejected_without_launch(self):
         cache, table, a, p, s = case([1], [64])

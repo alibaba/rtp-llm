@@ -80,6 +80,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
     shape_hints_ptr[GptModelInputIndex::preserveHostPrefillMetadata] = inputs.preserve_host_prefill_metadata;
     shape_hints_ptr[GptModelInputIndex::deferCacheStoreDrain] = inputs.defer_cache_store_drain;
+    shape_hints_ptr[GptModelInputIndex::glm5MtpMetadataFusionEnabled] = inputs.glm5_mtp_metadata_fusion_enabled;
     {
         // encode root-side tensor device for fields that may live on
         // GPU on the PDFUSION fast path, so non-root ranks can allocate matching
@@ -117,6 +118,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.is_fake_stream               = shape_hints_ptr[GptModelInputIndex::isFakeStream];
     inputs.preserve_host_prefill_metadata = shape_hints_ptr[GptModelInputIndex::preserveHostPrefillMetadata];
     inputs.defer_cache_store_drain = shape_hints_ptr[GptModelInputIndex::deferCacheStoreDrain];
+    inputs.glm5_mtp_metadata_fusion_enabled = shape_hints_ptr[GptModelInputIndex::glm5MtpMetadataFusionEnabled];
     inputs.record_execution_id          = shape_hints_ptr[GptModelInputIndex::recordExecutionId];
     if (inputs.skip_run) {
         return;

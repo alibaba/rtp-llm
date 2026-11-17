@@ -70,6 +70,57 @@ __global__ void packedVerifyPrepare(IntegerVector tokens,
     }
 }
 
+__global__ void packedVerifyFromCaps(IntegerVector tokens, IntegerVector positions, IntegerVector types,
+                                       IntegerVector caps, int64_t* rows, void* indexes,
+                                       int64_t packed_count, int64_t batch, int64_t dense_stride) {
+    // One CTA computes the batch prefix once, then directly writes every
+    // admitted row. The host guard bounds batch to this shared workspace.
+    __shared__ int64_t ends[1024];
+    const int tid = threadIdx.x;
+    for (int request = tid; request < batch; request += blockDim.x) {
+        const int64_t cap = readInteger(caps.input, request, caps.wide);
+        const bool valid = cap >= 0 && cap < dense_stride;
+        CUDA_KERNEL_ASSERT(valid);
+        ends[request] = valid ? cap + 1 : 0;
+        if (valid) writeInteger(caps.output, request, cap + 1, caps.wide);
+    }
+    __syncthreads();
+    for (int offset = 1; offset < batch; offset *= 2) {
+        int64_t updated[4];
+        #pragma unroll
+        for (int item = 0; item < 4; ++item) {
+            const int request = tid + item * 256;
+            updated[item] = request < batch ? ends[request] : 0;
+            if (request < batch && request >= offset) updated[item] += ends[request - offset];
+        }
+        __syncthreads();
+        #pragma unroll
+        for (int item = 0; item < 4; ++item) {
+            const int request = tid + item * 256;
+            if (request < batch) ends[request] = updated[item];
+        }
+        __syncthreads();
+    }
+    CUDA_KERNEL_ASSERT(ends[batch - 1] == packed_count);
+    if (ends[batch - 1] != packed_count) return;
+    for (int64_t dense = tid; dense < batch * dense_stride; dense += blockDim.x) {
+        const int64_t request = dense / dense_stride;
+        const int64_t position = dense % dense_stride;
+        const int64_t begin = request == 0 ? 0 : ends[request - 1];
+        if (position >= ends[request] - begin) continue;
+        const int64_t packed = begin + position;
+        rows[packed] = dense;
+        writeInteger(indexes, packed, packed, caps.wide);
+        writeInteger(tokens.output, packed, readInteger(tokens.input, dense, tokens.wide), tokens.wide);
+        if (positions.input) {
+            writeInteger(positions.output, packed, readInteger(positions.input, dense, positions.wide), positions.wide);
+        }
+        if (types.input) {
+            writeInteger(types.output, packed, readInteger(types.input, dense, types.wide), types.wide);
+        }
+    }
+}
+
 bool supportedVector(const torch::Tensor& tensor, int device) {
     return tensor.defined() && tensor.is_cuda() && tensor.get_device() == device && tensor.dim() == 1
            && tensor.is_contiguous() && (tensor.scalar_type() == torch::kInt32 || tensor.scalar_type() == torch::kInt64);
@@ -127,6 +178,45 @@ bool tryGlm5PackedVerifyPrepare(const torch::Tensor& dense_tokens,
             dense_count, packed_count, batch, dense_count / batch);
         C10_CUDA_KERNEL_LAUNCH_CHECK();
     }
+    output = std::move(prepared);
+    return true;
+}
+
+bool tryGlm5PackedVerifyPrepareFromCaps(const torch::Tensor& dense_tokens,
+                                        const torch::Tensor& caps,
+                                        int64_t packed_count,
+                                        const torch::Tensor& position_ids,
+                                        const torch::Tensor& token_type_ids,
+                                        Glm5PackedVerifyInputs& output,
+                                        cudaStream_t stream) {
+    if (!dense_tokens.defined() || !dense_tokens.is_cuda()) return false;
+    const int device = dense_tokens.get_device();
+    if (!supportedVector(dense_tokens, device) || !supportedVector(caps, device)) return false;
+    const int64_t batch = caps.numel();
+    const int64_t dense_count = dense_tokens.numel();
+    // Bound the single-CTA shared prefix workspace; larger batches retain the general path.
+    if (batch <= 0 || batch > 1024 || dense_count % batch != 0 || packed_count < batch
+        || packed_count > dense_count || packed_count > std::numeric_limits<int32_t>::max()) return false;
+    for (const auto& optional : {position_ids, token_type_ids}) {
+        if (optional.defined() && (!supportedVector(optional, device) || optional.numel() != dense_count)) return false;
+    }
+    const auto cuda_stream = c10::cuda::getStreamFromExternal(stream, device);
+    c10::cuda::CUDAStreamGuard guard(cuda_stream);
+    Glm5PackedVerifyInputs prepared;
+    prepared.rows = torch::empty({packed_count}, caps.options().dtype(torch::kInt64));
+    prepared.tokens = torch::empty({packed_count}, dense_tokens.options());
+    prepared.lengths = torch::empty({batch}, caps.options());
+    prepared.lm_output_indexes = torch::empty({packed_count}, caps.options());
+    if (position_ids.defined()) prepared.position_ids = torch::empty({packed_count}, position_ids.options());
+    if (token_type_ids.defined()) prepared.token_type_ids = torch::empty({packed_count}, token_type_ids.options());
+    for (const auto& source : {dense_tokens, caps, position_ids, token_type_ids}) {
+        if (source.defined()) c10::cuda::CUDACachingAllocator::recordStream(source.storage().data_ptr(), cuda_stream);
+    }
+    packedVerifyFromCaps<<<1, 256, 0, stream>>>(
+        vectorPair(dense_tokens, prepared.tokens), vectorPair(position_ids, prepared.position_ids),
+        vectorPair(token_type_ids, prepared.token_type_ids), vectorPair(caps, prepared.lengths),
+        prepared.rows.data_ptr<int64_t>(), prepared.lm_output_indexes.data_ptr(), packed_count, batch, dense_count / batch);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     output = std::move(prepared);
     return true;
 }

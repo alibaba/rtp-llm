@@ -16,6 +16,8 @@ from typing import Dict, List, Optional
 
 import torch
 
+from rtp_llm.config.prefill_optimization import PREFILL_OPTIMIZATIONS_ENABLED
+
 # flash_mla requires CUDA >= 12.9. On unsupported envs the symbols stay
 # undefined and any caller using sparse MLA will fail fast at use time.
 try:
@@ -656,6 +658,32 @@ class SparseMlaImpl(MlaImplBase):
         the captured schedule tensor address stable, so replay updates it in
         place instead of replacing the tensor object.
         """
+        from rtp_llm.models_py.modules.base.cuda.indexer_metadata_fusion import (
+            can_expand_request_pages,
+            try_expand_request_pages,
+        )
+        from rtp_llm.models_py.modules.base.cuda.paged_mqa import (
+            adaptive_target_layout,
+            physical_block_table,
+        )
+
+        previous = getattr(self, "prepared_paged_indexer_table", None)
+        self.prepared_paged_indexer_table = None
+        if (
+            PREFILL_OPTIMIZATIONS_ENABLED
+            and bool(getattr(attn_inputs, "glm5_mtp_metadata_fusion_enabled", False))
+            and adaptive_target_layout(attn_inputs)
+        ):
+            pages = physical_block_table(attn_inputs)
+            requests = self.fmha_params.batch_indice_d
+            if can_expand_request_pages(pages, requests):
+                if forbid_realloc and previous is None:
+                    raise RuntimeError("packed Indexer page table was not prepared before graph replay")
+                output = previous[1] if previous is not None and forbid_realloc else None
+                expanded = try_expand_request_pages(pages, requests, out=output)
+                # Lifetime is this attention preparation/cache group. Refresh
+                # even when shape and addresses match the previous request.
+                self.prepared_paged_indexer_table = (pages, expanded)
         if not (
             _is_multi_token_decode(attn_inputs)
             or not bool(getattr(attn_inputs, "is_prefill", False))

@@ -297,6 +297,8 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
          kv_cache_layer_to_group,
          cache_manager,
          params.model_config_.hc_mult});
+    model_init_params.glm5_mtp_metadata_fusion_enabled = params.model_config_.model_type == "glm_5"
+        && params.sp_config.gen_num_per_cycle > 1 && !is_propose_;
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");

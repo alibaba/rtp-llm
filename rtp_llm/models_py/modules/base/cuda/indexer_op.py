@@ -763,6 +763,7 @@ class IndexerOp(nn.Module):
         kv_cache: KVCache,
         fmha_params: Any,
         attention_inputs: Any,
+        prepared_paged_table=None,
     ) -> torch.Tensor:
         """
         Compute TopK indices for paged attention (decode phase).
@@ -809,7 +810,30 @@ class IndexerOp(nn.Module):
             is_target_verify
             and os.environ.get("RTP_LLM_ADAPTIVE_VERIFICATION", "0") == "1"
         ):
-            block_table = block_table.index_select(0, fmha_params.batch_indice_d.long())
+            from rtp_llm.models_py.modules.base.cuda.indexer_metadata_fusion import (
+                try_expand_request_pages,
+            )
+
+            expanded_table = None
+            metadata_fusion = PREFILL_OPTIMIZATIONS_ENABLED and bool(
+                getattr(attention_inputs, "glm5_mtp_metadata_fusion_enabled", False)
+            )
+            if metadata_fusion and prepared_paged_table is not None:
+                source, candidate = prepared_paged_table
+                if (
+                    source.data_ptr() == block_table.data_ptr()
+                    and source.shape == block_table.shape
+                    and source.stride() == block_table.stride()
+                    and candidate.shape == (q_fp8.shape[0], block_table.shape[1])
+                ):
+                    expanded_table = candidate
+            if metadata_fusion and expanded_table is None:
+                expanded_table = try_expand_request_pages(block_table, fmha_params.batch_indice_d)
+            block_table = (
+                expanded_table
+                if expanded_table is not None
+                else block_table.index_select(0, fmha_params.batch_indice_d.long())
+            )
         elif is_multi_token_decode:
             num_tokens = q_fp8.shape[0]
             batch_size = block_table.shape[0]

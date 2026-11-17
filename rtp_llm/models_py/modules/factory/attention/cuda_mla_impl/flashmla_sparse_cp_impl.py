@@ -813,14 +813,30 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                     owner_tpb,
                     block_table.device,
                 )
-            local_lens = self.indexer_cp_plan.per_req_local_kv_lens.to(torch.int32)
-            workspace_starts = torch.zeros(
-                int(local_lens.numel()), dtype=torch.int32, device=local_lens.device
+            from rtp_llm.models_py.triton_kernels.sparse_mla.cp_metadata import (
+                try_pack_lengths_and_starts,
             )
-            if int(local_lens.numel()) > 1:
-                workspace_starts[1:] = torch.cumsum(local_lens[:-1], dim=0).to(
-                    torch.int32
+
+            packed_lengths = try_pack_lengths_and_starts(
+                self.indexer_cp_plan.per_req_actual_local_kv_lens,
+                self.indexer_cp_plan.per_req_local_kv_lens,
+            )
+            if packed_lengths is not None:
+                (
+                    local_lens,
+                    workspace_starts,
+                    actual_local_lens,
+                    actual_workspace_starts,
+                ) = packed_lengths
+            else:
+                local_lens = self.indexer_cp_plan.per_req_local_kv_lens.to(torch.int32)
+                workspace_starts = torch.zeros(
+                    int(local_lens.numel()), dtype=torch.int32, device=local_lens.device
                 )
+                if int(local_lens.numel()) > 1:
+                    workspace_starts[1:] = torch.cumsum(local_lens[:-1], dim=0).to(
+                        torch.int32
+                    )
             restore_indices = self.indexer_cp_plan.restore_indices
             self.sharded_local_kv_lens = _copy_or_replace_graph_tensor(
                 self.sharded_local_kv_lens,
@@ -846,18 +862,19 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
             # the gather kernel only across rows the compact kernel block_table
             # can actually resolve. Mirrors the indexer side's
             # per_req_actual_local_kv_lens in build_indexer_cp_chunk_plan.
-            actual_local_lens = self.indexer_cp_plan.per_req_actual_local_kv_lens.to(
-                torch.int32
-            )
-            actual_workspace_starts = torch.zeros(
-                int(actual_local_lens.numel()),
-                dtype=torch.int32,
-                device=actual_local_lens.device,
-            )
-            if int(actual_local_lens.numel()) > 1:
-                actual_workspace_starts[1:] = torch.cumsum(
-                    actual_local_lens[:-1], dim=0
-                ).to(torch.int32)
+            if packed_lengths is None:
+                actual_local_lens = self.indexer_cp_plan.per_req_actual_local_kv_lens.to(
+                    torch.int32
+                )
+                actual_workspace_starts = torch.zeros(
+                    int(actual_local_lens.numel()),
+                    dtype=torch.int32,
+                    device=actual_local_lens.device,
+                )
+                if int(actual_local_lens.numel()) > 1:
+                    actual_workspace_starts[1:] = torch.cumsum(
+                        actual_local_lens[:-1], dim=0
+                    ).to(torch.int32)
             self.sharded_actual_local_kv_lens = _copy_or_replace_graph_tensor(
                 self.sharded_actual_local_kv_lens,
                 actual_local_lens.contiguous(),
@@ -1061,10 +1078,27 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         # Make the payload ready on the producer before releasing Q BMM. If
         # packing is queued on the side stream, a large Q GEMM can occupy the
         # SMs before the pack runs and delay the collective until Q finishes.
+        from rtp_llm.models_py.distributed.pynccl_cp import all_gather_into_tensor
+        from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.cp_bounded_gather import (
+            _PROJECTION_SCRATCH_BYTES,
+            gather_projection_chunks,
+        )
+
+        bounded = (
+            compressed_kv.dtype == k_pe.dtype
+            and compressed_kv.is_cuda
+            and not self.use_cuda_graph
+            and not torch.cuda.is_current_stream_capturing()
+            and compressed_kv.shape[0]
+            * (compressed_kv.shape[1] + k_pe.shape[1])
+            * compressed_kv.element_size()
+            * (self.prefill_cp_size + 1)
+            > _PROJECTION_SCRATCH_BYTES
+        )
         packed = None
-        if compressed_kv.dtype == k_pe.dtype:
+        if compressed_kv.dtype == k_pe.dtype and not bounded:
             packed = torch.cat((compressed_kv, k_pe), dim=-1)
-        else:
+        elif not bounded:
             compressed_kv = compressed_kv.contiguous()
             k_pe = k_pe.contiguous()
 
@@ -1104,7 +1138,18 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
                 self.kv_restore_unpad_indices.record_stream(gather_stream)
 
         with torch.cuda.stream(gather_stream):
-            if packed is not None:
+            if bounded:
+                restored = gather_projection_chunks(
+                    compressed_kv,
+                    k_pe,
+                    self.prefill_cp_size,
+                    None if rank_major_slots is not None or defer_restore else self.kv_restore_unpad_indices,
+                    all_gather_into_tensor,
+                )
+                restored_ckv, restored_k_pe = restored.split(
+                    (compressed_kv.size(-1), k_pe.size(-1)), dim=-1
+                )
+            elif packed is not None:
                 # Reuse the existing cKV window; no extra persistent KV budget.
                 gathered = all_gather(packed, group=Group.TP, role="mla_ckv")
                 gathered = gathered.reshape(-1, packed.size(-1))
@@ -1370,10 +1415,10 @@ class SparseMlaFp8CPOp(SparseMlaFp8Op):
         if src.ndim == 4:
             src = src.squeeze(2)
 
-        # Eager CUDA: write every padded row in one kernel. Keep the established
-        # graph path unchanged; this path consumes only the current CP plan and
-        # never an eager-only Indexer scatter map. No extra stream or allocation.
-        if src.is_cuda and not self.use_cuda_graph:
+        # The captured kernel reads actual/padded lengths and padded starts
+        # refreshed in place by plan(). The block table is the same live input
+        # as the old gather. No eager-only Indexer scatter map is consumed.
+        if src.is_cuda:
             if actual_fused is not None and (
                 tuple(actual_fused.shape)
                 != (self.sharded_actual_total_local_kv_len, fused_kv.size(1))

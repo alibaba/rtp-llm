@@ -353,6 +353,12 @@ class MlaAttention(nn.Module):
             q_c_fp8=q_c_fp8,
             q_c_scale=q_c_scale,
             **({"prepared_cp_k": prepared_cp_k} if prepared_cp_k is not None else {}),
+            **(
+                {"prepared_paged_table": fmha_impl.prepared_paged_indexer_table}
+                if PREFILL_OPTIMIZATIONS_ENABLED
+                and getattr(fmha_impl, "prepared_paged_indexer_table", None) is not None
+                else {}
+            ),
         )
 
     def forward(

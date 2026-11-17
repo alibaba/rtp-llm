@@ -361,11 +361,13 @@ class Indexer(nn.Module):
         attention_inputs: Any,
         cp_params: Optional[Any],
         prepared_k=None,
+        prepared_paged_table=None,
     ) -> torch.Tensor:
         is_multi_token_decode = self._is_multi_token_decode(attention_inputs)
         if not attention_inputs.is_prefill or is_multi_token_decode:
             return self.indexer_op._get_topk_paged(
-                q_fp8, weights, kv_cache, fmha_params, attention_inputs
+                q_fp8, weights, kv_cache, fmha_params, attention_inputs,
+                prepared_paged_table=prepared_paged_table,
             )
         if self._prefill_cp_enabled():
             assert cp_params is not None
@@ -741,6 +743,7 @@ class Indexer(nn.Module):
         q_c_fp8: Optional[torch.Tensor] = None,
         q_c_scale: Optional[torch.Tensor] = None,
         prepared_cp_k=None,
+        prepared_paged_table=None,
     ) -> torch.Tensor:
         if prepared_cp_k is not None:
             return self._consume_prefetched_cp_k(
@@ -842,7 +845,8 @@ class Indexer(nn.Module):
 
         weights = self._get_logits_head_gate(hidden_states, q_scale)
         return self._compute_topk(
-            q_fp8, weights, kv_cache, fmha_params, attention_inputs, cp_params
+            q_fp8, weights, kv_cache, fmha_params, attention_inputs, cp_params,
+            prepared_paged_table=prepared_paged_table,
         )
 
     # Compatibility implementation from 70f1ecde04. Selected once at import.

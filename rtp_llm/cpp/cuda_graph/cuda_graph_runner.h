@@ -25,6 +25,7 @@ public:
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
         is_target_verify_(graph_params.is_target_verify),
         adaptive_verification_(graph_params.adaptive_verification),
+        glm5_mtp_metadata_fusion_enabled_(graph_params.glm5_mtp_metadata_fusion_enabled),
         is_draft_extend_(graph_params.is_draft_extend),
         device_index_(cuda_graph::graphCurrentDeviceIndex()),
         capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
@@ -76,6 +77,7 @@ public:
         py_instance_.release();
         RTP_LLM_LOG_INFO("Release CudaGraphRunner Successfully");
     }
+    std::vector<int64_t> adaptiveTokenCapacities(int64_t batch_size) const override;
     void           captureDecode();
     void           capturePrefill();
     void           captureDecodeOneBatchSize(int bs, bool needs_distributed_warmup);
@@ -130,6 +132,7 @@ private:
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
     bool                    adaptive_verification_{false};
+    bool                    glm5_mtp_metadata_fusion_enabled_{false};
     bool                    is_draft_extend_{false};
     int                     device_index_{0};
     cuda_graph::GraphStream capture_stream_;

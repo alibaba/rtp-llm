@@ -75,6 +75,10 @@ public:
         return runner_->forward(inputs, state_);
     }
 
+    std::vector<int64_t> adaptiveTokenCapacities(int64_t batch_size) const {
+        return runner_->adaptiveTokenCapacities(batch_size);
+    }
+
     int getCurrentRealGraphSize() {
         return runner_ != nullptr ? runner_->getCurrentRealGraphBs(state_) : 0;
     }
@@ -120,6 +124,7 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("decode_capture_batch_sizes"),
              py::arg("tokens_per_request")    = 1,
              py::arg("adaptive_verification") = false)
+        .def("adaptiveTokenCapacities", &CudaGraphTestRunner::adaptiveTokenCapacities)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
         .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);

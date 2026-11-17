@@ -305,6 +305,7 @@ struct PyContextParallelParams {
 struct PyAttentionInputs {
     bool          is_prefill{false};
     bool          is_target_verify{false};
+    bool          glm5_mtp_metadata_fusion_enabled{false};
     bool          is_draft_extend{false};
     torch::Tensor prefix_lengths;
     torch::Tensor sequence_lengths;

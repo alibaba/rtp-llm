@@ -4,6 +4,20 @@
 #endif
 
 namespace rtp_llm {
+std::vector<int64_t> CudaGraphRunner::adaptiveTokenCapacities(int64_t batch_size) const {
+    if (!enable_cuda_graph_ || !adaptive_verification_ || !is_target_verify_ || is_prefill_cuda_graph_mode_
+        || batch_size <= 0) return {};
+    const auto batch = std::lower_bound(capture_range_.begin(), capture_range_.end(), batch_size);
+    if (batch == capture_range_.end()) return {};
+    std::vector<int64_t> capacities;
+    for (int tokens = 1; tokens <= num_tokens_per_bs_; ++tokens) {
+        if (graph_instances_.count(decodeGraphKey(*batch, tokens))) {
+            capacities.push_back(static_cast<int64_t>(*batch) * tokens);
+        }
+    }
+    return capacities;
+}
+
 int CudaGraphRunner::decodeGraphKey(int batch_size, int tokens_per_request) const {
     RTP_LLM_CHECK_WITH_INFO(batch_size > 0 && batch_size <= static_cast<int>(max_bs_) && tokens_per_request > 0
                                 && tokens_per_request <= num_tokens_per_bs_,

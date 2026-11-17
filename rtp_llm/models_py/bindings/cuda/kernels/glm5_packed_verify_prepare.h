@@ -6,6 +6,7 @@
 namespace rtp_llm {
 
 struct Glm5PackedVerifyInputs {
+    torch::Tensor rows;
     torch::Tensor tokens;
     torch::Tensor lengths;
     torch::Tensor lm_output_indexes;
@@ -27,5 +28,15 @@ bool tryGlm5PackedVerifyPrepare(const torch::Tensor& dense_tokens,
                                 const torch::Tensor& token_type_ids,
                                 Glm5PackedVerifyInputs& output,
                                 cudaStream_t stream);
+
+// Builds the ordered packed row map and its consumers directly from final caps.
+// packed_count is the planner's host-known admission total, including anchors.
+bool tryGlm5PackedVerifyPrepareFromCaps(const torch::Tensor& dense_tokens,
+                                        const torch::Tensor& caps,
+                                        int64_t packed_count,
+                                        const torch::Tensor& position_ids,
+                                        const torch::Tensor& token_type_ids,
+                                        Glm5PackedVerifyInputs& output,
+                                        cudaStream_t stream);
 
 }  // namespace rtp_llm

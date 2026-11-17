@@ -235,6 +235,7 @@ class ParamsBase:
         """
 
 class PyAttentionInputs:
+    glm5_mtp_metadata_fusion_enabled: bool
     cache_store_inputs: PyCacheStoreInputs | None
     context_parallel_info: PyContextParallelParams | None
     context_total_kv_length: int

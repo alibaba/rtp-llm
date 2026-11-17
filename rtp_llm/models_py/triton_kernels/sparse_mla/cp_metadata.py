@@ -225,3 +225,35 @@ def try_restore_indices(
                 128,
             )
     return out
+
+
+@tr.jit
+def _pack_lengths_and_starts(Actual, Padded, Out, N: tl.constexpr, BLOCK: tl.constexpr):
+    i = tl.arange(0, BLOCK)
+    actual = tl.load(Actual + i, i < N, other=0).to(tl.int64)
+    padded = tl.load(Padded + i, i < N, other=0).to(tl.int64)
+    tl.store(Out + i, padded.to(tl.int32), i < N)
+    tl.store(Out + N + i, (tl.cumsum(padded) - padded).to(tl.int32), i < N)
+    tl.store(Out + 2 * N + i, actual.to(tl.int32), i < N)
+    tl.store(Out + 3 * N + i, (tl.cumsum(actual) - actual).to(tl.int32), i < N)
+
+
+def try_pack_lengths_and_starts(
+    actual: torch.Tensor, padded: torch.Tensor
+) -> Optional[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Produce both MLA int32 length/start pairs from the shared Indexer plan."""
+    if not (
+        _supported(actual)
+        and _supported(padded)
+        and actual.ndim == padded.ndim == 1
+        and actual.shape == padded.shape
+        and actual.device == padded.device
+        and actual.numel() <= 4096
+    ):
+        return None
+    n = actual.numel()
+    packed = torch.empty((4, n), dtype=torch.int32, device=actual.device)
+    if n:
+        with torch.cuda.device(actual.device):
+            _pack_lengths_and_starts[(1,)](actual, padded, packed, n, tr.next_power_of_2(n))
+    return packed[0], packed[1], packed[2], packed[3]

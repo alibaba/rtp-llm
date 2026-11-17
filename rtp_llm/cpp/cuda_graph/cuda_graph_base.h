@@ -24,6 +24,7 @@ struct GraphParams {
     bool                 is_prefill_cuda_graph_mode   = false;
     bool                 is_target_verify             = false;
     bool                 adaptive_verification        = false;
+    bool                 glm5_mtp_metadata_fusion_enabled = false;
     bool                 is_draft_extend              = false;
     int                  max_seq_len                  = 0;
     int                  tokens_per_block             = 0;  // physical kv block size
@@ -48,6 +49,7 @@ class GraphBase {
 public:
     GraphBase(py::object py_instance): py_instance_(std::move(py_instance)) {}
     virtual ~GraphBase() {}
+    virtual std::vector<int64_t> adaptiveTokenCapacities(int64_t batch_size) const { return {}; }
     virtual void           initCapture()                                                = 0;
     virtual PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state)  = 0;
     virtual void           setPositionEncoding(torch::Tensor position_encoding)         = 0;

@@ -165,8 +165,14 @@ class AdaptiveDraftController:
         draft_cost_ms: np.ndarray,
         verify_cost_ms: np.ndarray,
         fixed_cap: int | None = None,
+        graph_token_capacities: Sequence[int] = (),
+        materialize_rows: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
         slots = self._slots(request_ids)
+        if any(type(value) is not int or value <= 0 for value in graph_token_capacities):
+            raise AdaptiveBudgetInputError("graph_token_capacities", "expected positive integer capacities")
+        if list(graph_token_capacities) != sorted(set(graph_token_capacities)):
+            raise AdaptiveBudgetInputError("graph_token_capacities", "expected strictly increasing capacities")
         scheduled = np.asarray(capacities)
         if scheduled.shape != (len(slots),):
             raise AdaptiveBudgetInputError("capacities", "batch length mismatch")
@@ -207,6 +213,14 @@ class AdaptiveDraftController:
                 num_non_draft_tokens=len(slots),
                 num_sampling_requests=len(slots),
             )
+            # Spend only padding already paid for by the selected capture. The
+            # same survival allocator decides which real request prefixes grow.
+            requested_tokens = len(slots) + budget
+            graph_capacity = next(
+                (value for value in graph_token_capacities if value >= requested_tokens),
+                requested_tokens,
+            )
+            budget = min(int(scheduled.sum()), graph_capacity - len(slots))
             if budget == 0:
                 caps.zero_()
             elif budget < int(scheduled.sum()):
@@ -214,12 +228,14 @@ class AdaptiveDraftController:
                     self.confidence_probs, mapping, caps, budget, self._survival
                 )
         total_tokens = len(slots) + budget
-        dense = torch.arange(len(slots) * (self.num_steps + 1), device=self.device)
-        valid = dense % (self.num_steps + 1) <= caps.repeat_interleave(
-            self.num_steps + 1
-        )
-        order = torch.argsort(torch.where(valid, dense, dense + dense.numel()))
-        packed = dense.index_select(0, order[:total_tokens])
+        packed = torch.empty(0, dtype=torch.int64, device=self.device)
+        if materialize_rows:
+            dense = torch.arange(len(slots) * (self.num_steps + 1), device=self.device)
+            valid = dense % (self.num_steps + 1) <= caps.repeat_interleave(
+                self.num_steps + 1
+            )
+            order = torch.argsort(torch.where(valid, dense, dense + dense.numel()))
+            packed = dense.index_select(0, order[:total_tokens])
         self._pending = PendingVerification(
             tuple(request_ids), slots, caps.clone(), known
         )

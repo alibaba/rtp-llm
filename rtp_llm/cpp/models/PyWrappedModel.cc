@@ -311,6 +311,8 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.dtype            = dataTypeToTorchType(description_.data_type);
     py_attn_inputs.is_prefill       = !decode_batch_size;
     py_attn_inputs.is_target_verify = inputs.is_target_verify;
+    py_attn_inputs.glm5_mtp_metadata_fusion_enabled =
+        inputs.is_target_verify && inputs.glm5_mtp_metadata_fusion_enabled;
     py_attn_inputs.is_draft_extend  = inputs.is_draft_extend;
     RTP_LLM_CHECK_WITH_INFO(
         context_batch_size + decode_batch_size == batch_size,

@@ -66,6 +66,7 @@ struct GptModelInitParams {
     // is the contract between target and draft for MTP — see
     // MtpExecutor::makeFakeSPOutputBuffer and CudaGraphRunner input_hiddens.
     int64_t hc_mult = 1;
+    bool glm5_mtp_metadata_fusion_enabled = false;
 };
 
 enum GptModelInputIndex : size_t {
@@ -97,6 +98,7 @@ enum GptModelInputIndex : size_t {
     isFakeStream,
     preserveHostPrefillMetadata,
     deferCacheStoreDrain,
+    glm5MtpMetadataFusionEnabled,
     // Per-tensor device hint bitmap from root so non-root ranks allocate
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,
@@ -137,6 +139,7 @@ public:
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
     virtual void            drainCacheStore() {}
+    virtual std::vector<int64_t> adaptiveTokenCapacities(int64_t batch_size) const { return {}; }
     virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
     virtual bool            cudaGraphEnabled() const {
         return false;

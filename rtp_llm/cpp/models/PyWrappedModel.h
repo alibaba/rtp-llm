@@ -75,6 +75,9 @@ public:
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
     void            releaseBuffers() override;
     void            drainCacheStore() override;
+    std::vector<int64_t> adaptiveTokenCapacities(int64_t batch_size) const override {
+        return graph_runner_ ? graph_runner_->adaptiveTokenCapacities(batch_size) : std::vector<int64_t>{};
+    }
     torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
     torch::Tensor   getPythonDebugTensor(const std::string& name, int64_t num_rows);
@@ -369,6 +372,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                              && params.sp_config.gen_num_per_cycle > 0 && !params.model_id
                                              && !is_prefill_cuda_graph_mode;
         graph_params.is_target_verify = use_spec_decoding || is_target_verify_decode;
+        graph_params.glm5_mtp_metadata_fusion_enabled = is_target_verify_decode
+            && params.glm5_mtp_metadata_fusion_enabled && params.sp_config.gen_num_per_cycle > 1;
         const char* adaptive_env      = std::getenv("RTP_LLM_ADAPTIVE_VERIFICATION");
         graph_params.adaptive_verification =
             is_target_verify_decode && adaptive_env && std::string(adaptive_env) == "1";

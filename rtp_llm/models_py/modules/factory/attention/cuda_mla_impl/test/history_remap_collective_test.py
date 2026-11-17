@@ -55,6 +55,31 @@ def _registered_worker(rank: int, world: int, port: int) -> None:
             independent = torch.empty(
                 (world * 256, 576), device=device, dtype=torch.bfloat16
             )
+            from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import cp_bounded_gather
+
+            # Force multiple chunks while retaining equal padded send shapes on
+            # every rank, including a rank whose entire payload is padding.
+            projection = torch.arange(64, device=device, dtype=torch.bfloat16).view(8, 8)
+            projection = projection + rank * 100
+            if rank == world - 1:
+                projection.zero_()
+            full_projection = torch.empty((world * 8, 8), device=device, dtype=torch.bfloat16)
+            pynccl_cp.all_gather_into_tensor(full_projection, projection, group=pg)
+            projection_map = torch.tensor([0, 9, 2, 15, 7], device=device, dtype=torch.int64)
+
+            def gather_chunk(output, source, **kwargs):
+                pynccl_cp.all_gather_into_tensor(output, source, group=pg)
+
+            with patch.object(cp_bounded_gather, "_PROJECTION_SCRATCH_BYTES", (world + 1) * 3 * 8 * 2):
+                for mapping in (None, projection_map):
+                    actual_projection = cp_bounded_gather.gather_projection_chunks(
+                        projection[:, :4], projection[:, 4:], world, mapping, gather_chunk
+                    )
+                    expected_projection = (
+                        full_projection if mapping is None else full_projection.index_select(0, mapping)
+                    )
+                    _assert_bits(actual_projection, expected_projection)
+
             for empty_last_rank in (False, True):
                 rows = 0 if empty_last_rank and rank == world - 1 else 4
                 q = (
