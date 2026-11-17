@@ -529,7 +529,6 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             # Eager prefetch and its ready/consumed lifecycle remain unchanged.
             if (
                 self.ngram_size == 3
-                and self.heads_per_ngram == 8
                 and self._cpu_uva_pointers is not None
                 and type(self) is Qwen4ExpNGramEmbedding
                 and type(self).hashed_ids is _NGRAM_HASHED_IDS

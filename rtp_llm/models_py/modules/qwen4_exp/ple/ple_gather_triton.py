@@ -61,27 +61,28 @@ def _gather_shards(
 @triton.jit
 def _gather_hashed_decode(
     history, vocab, offsets, multipliers, shard_ptrs, scale_ptr, out,
-    BATCH: tl.constexpr, SEQ: tl.constexpr, SHARD_ROWS: tl.constexpr,
-    TOTAL_SHARDS: tl.constexpr, EOS: tl.constexpr, BR: tl.constexpr,
-    FP8: tl.constexpr,
+    BATCH: tl.constexpr, SEQ: tl.constexpr, HISTORY_STRIDE: tl.constexpr,
+    HEADS: tl.constexpr, SHARD_ROWS: tl.constexpr, TOTAL_SHARDS: tl.constexpr,
+    EOS: tl.constexpr, D: tl.constexpr, BD: tl.constexpr, BR: tl.constexpr,
+    BF16: tl.constexpr, FP8: tl.constexpr,
 ):
     rows = tl.program_id(0).to(tl.int64) * BR + tl.arange(0, BR)
-    token, head = rows // 16, rows % 16
+    token, head = rows // HEADS, rows % HEADS
     request, position = token // SEQ, token % SEQ
     live = request < BATCH
-    base = history + request * (SEQ + 2) + position
+    base = history + request * HISTORY_STRIDE + position
     ids = _hash_two_three(
         tl.load(base + 2, live, EOS), tl.load(base + 1, live, EOS),
         tl.load(base, live, EOS), head, tl.load(vocab + head),
-        tl.load(offsets + head), multipliers, EOS,
+        tl.load(offsets + head), multipliers, EOS, HEADS // 2,
     )
-    cols = tl.arange(0, 256)
+    cols = tl.arange(0, BD)
     values = _lookup_shard_rows(
-        ids, live, cols, shard_ptrs, scale_ptr, SHARD_ROWS, TOTAL_SHARDS, 160, not FP8, FP8,
+        ids, live, cols, shard_ptrs, scale_ptr, SHARD_ROWS, TOTAL_SHARDS, D, BF16, FP8,
     )
     tl.store(
-        out + rows[:, None] * 160 + cols[None, :], values,
-        mask=live[:, None] & (cols[None, :] < 160),
+        out + rows[:, None] * D + cols[None, :], values,
+        mask=live[:, None] & (cols[None, :] < D),
     )
 
 
@@ -90,21 +91,23 @@ def try_gather_hashed_decode(
     *, scale=None,
 ):
     """Fuse SM90 decode or target-verify hashing and pinned shard lookup."""
+    heads = vocab.numel()
     if not (
         history.ndim == 2
         and history.shape[0] > 0
         and history.shape[1] >= 3
-        and history.is_contiguous()
+        and history.stride(0) > 0
+        and history.stride(1) == 1
         and is_supported(history, shards)
         and shards[0].device.type == "cpu"
-        and shards[0].dtype in (torch.bfloat16, torch.float8_e4m3fn)
-        and shards[0].shape[1] == 160
+        and heads > 0
+        and heads % 2 == 0
         and torch.cuda.get_device_capability(history.device) == (9, 0)
         and all(
             tensor.shape == shape and tensor.device == history.device
             and tensor.dtype == torch.int64 and tensor.is_contiguous()
             for tensor, shape in (
-                (vocab, (16,)), (offsets, (16,)), (multipliers, (3,)),
+                (vocab, (heads,)), (offsets, (heads,)), (multipliers, (3,)),
                 (pointer_table, (total_shards,)),
             )
         )
@@ -120,15 +123,20 @@ def try_gather_hashed_decode(
         return None
     batch = history.shape[0]
     seq_len = history.shape[1] - 2
+    width = shards[0].shape[1]
     out = torch.empty(
-        (batch, seq_len, 16, 160), device=history.device, dtype=torch.bfloat16
+        (batch, seq_len, heads, width),
+        device=history.device,
+        dtype=torch.bfloat16 if fp8 else shards[0].dtype,
     )
     rows_per_cta = 8
-    _gather_hashed_decode[(triton.cdiv(batch * seq_len * 16, rows_per_cta),)](
+    _gather_hashed_decode[(triton.cdiv(batch * seq_len * heads, rows_per_cta),)](
         history, vocab, offsets, multipliers, pointer_table,
         scale if fp8 else pointer_table, out,
-        BATCH=batch, SEQ=seq_len, SHARD_ROWS=shards[0].shape[0],
-        TOTAL_SHARDS=total_shards, EOS=eos, BR=rows_per_cta, FP8=fp8, num_warps=4,
+        BATCH=batch, SEQ=seq_len, HISTORY_STRIDE=history.stride(0),
+        HEADS=heads, SHARD_ROWS=shards[0].shape[0], TOTAL_SHARDS=total_shards,
+        EOS=eos, D=width, BD=triton.next_power_of_2(width), BR=rows_per_cta,
+        BF16=shards[0].dtype == torch.bfloat16, FP8=fp8, num_warps=4,
     )
     return out
 

@@ -331,16 +331,21 @@ class PLEDecodeFusionTest(unittest.TestCase):
     def test_inline_hash_gather_graph_matches_separate_kernels(self):
         eos = 151643
         shard_size = 256
-        cases = ((1, 1), (16, 1), (64, 1), (128, 1), (2, 2), (16, 4))
-        for dtype in (torch.bfloat16, torch.float8_e4m3fn):
+        standard = ((1, 1), (16, 1), (64, 1), (128, 1), (2, 2), (2, 3), (16, 4), (2, 8))
+        for dtype, heads, dim, padding, cases in (
+            (torch.bfloat16, 16, 160, 0, standard),
+            (torch.float8_e4m3fn, 16, 160, 0, standard),
+            (torch.float8_e4m3fn, 6, 96, 3, ((3, 3), (4, 8))),
+            (torch.float32, 6, 96, 3, ((3, 3),)),
+        ):
             shards = [
-                torch.randn(shard_size, 160, dtype=torch.bfloat16).to(dtype).pin_memory()
+                torch.randn(shard_size, dim, dtype=torch.bfloat16).to(dtype).pin_memory()
                 for _ in range(4)
             ]
             embedding = Qwen4ExpNGramEmbedding(
                 shards,
-                torch.full((16,), 127, device="cuda", dtype=torch.int64),
-                torch.arange(16, device="cuda", dtype=torch.int64) * 128,
+                torch.full((heads,), 127, device="cuda", dtype=torch.int64),
+                torch.arange(heads, device="cuda", dtype=torch.int64) * 128,
                 torch.tensor(
                     [8895235927375, -6951273546288326311, 1753814622540031003],
                     device="cuda", dtype=torch.int64,
@@ -353,8 +358,10 @@ class PLEDecodeFusionTest(unittest.TestCase):
                 embedding, "_reduce_rows", side_effect=lambda x: x.flatten(-2)
             ), embedding.lookup_context(True):
                 for batch, seq_len in cases:
-                    with self.subTest(dtype=dtype, batch=batch, seq_len=seq_len):
-                        history = torch.randint(eos, (batch, seq_len + 2), device="cuda")
+                    with self.subTest(dtype=dtype, batch=batch, seq_len=seq_len, heads=heads):
+                        history = torch.randint(
+                            eos, (batch, seq_len + 2 + padding), device="cuda",
+                        )[:, :seq_len + 2]
                         embedding(history, seq_len)
                         torch.cuda.synchronize()
                         graph = torch.cuda.CUDAGraph()
