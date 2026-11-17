@@ -1,4 +1,5 @@
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -54,6 +55,39 @@ class DeepJitCacheTest(unittest.TestCase):
         (self.entry / "kernel.cubin").unlink()
         with self.assertRaisesRegex(ValueError, "incomplete"):
             deepjit.validate_deepjit_snapshot(source)
+
+    def test_private_grouped_snapshot_is_complete_and_checksum_validated(self):
+        source = self.root / "source"
+        private = source / "sm120_grouped/cache/kernel-hash"
+        shutil.copytree(self.entry, private)
+        partial = private.parent / "partial"
+        partial.mkdir()
+        (partial / "kernel.cubin").write_bytes(b"unfinished")
+        files = deepjit.deepjit_snapshot_files(source, component_name="sm120_grouped")
+        self.assertEqual(
+            set(files),
+            {
+                f"sm120_grouped/cache/kernel-hash/{file.name}"
+                for file in private.iterdir()
+            },
+        )
+
+        archive = self.root / "private-snapshot.zst"
+        store.pack_zstd_tar(archive, files)
+        target = self.root / "restored-private"
+        store.extract_zstd_tar(archive, target)
+        hashes = deepjit.deepjit_checksums(target)
+        self.assertEqual(set(hashes), set(files))
+
+        manifest = target / deepjit.SNAPSHOT_MANIFEST
+        manifest.write_text(json.dumps({"schema_version": 1, "files": hashes}))
+        corrupted = target / "sm120_grouped/cache/kernel-hash/kernel.cubin"
+        corrupted.write_bytes(b"corrupt")
+        with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+            deepjit.validate_deepjit_snapshot(target)
+        corrupted.unlink()
+        with self.assertRaisesRegex(ValueError, "incomplete"):
+            deepjit.validate_deepjit_snapshot(target)
 
     def test_symlink_and_nonempty_commit_marker_are_not_publishable(self):
         (self.entry / ".committed").write_bytes(b"not committed")

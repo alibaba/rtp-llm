@@ -1,5 +1,9 @@
 workspace(name = "rtp_llm")
 
+load("//bazel:dsv4_host_tools.bzl", "dsv4_host_tools")
+
+dsv4_host_tools(name = "dsv4_host_tools")
+
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 http_archive(

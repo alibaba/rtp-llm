@@ -344,7 +344,14 @@ py_library(
         "//rtp_llm:torch",
         "//rtp_llm/models_py/triton_kernels:common",
         "//rtp_llm/models_py/triton_kernels:fla",
-    ] + triton_deps(["triton"]),
+    ] + triton_deps(["triton"]) + select({
+        "@//:using_cuda13_x86": [
+            "//rtp_llm/models_py/kernels/cuda/sm120/graph_moe",
+            "//rtp_llm/models_py/kernels/cuda/sm120/grouped_decode",
+            "//rtp_llm/models_py/kernels/cuda/sm120/sparse",
+        ],
+        "//conditions:default": [],
+    }),
     visibility = ["//rtp_llm/models_py:__subpackages__"],
 )
 

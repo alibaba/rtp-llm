@@ -1,0 +1,23 @@
+{
+  "flashinfer_default": {
+    "head": "8c4f4dcf76744c450a183e3b1be5141041dfa239",
+    "files": {
+      "csrc/fused_moe/cutlass_backend/cutlass_fused_moe_instantiation.cu": "db05873b50a03b8c96c48d2d339f032783b15152e4c11eae61ad5bf438980ac1",
+      "csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh": "e6c5fdaf6ae2738f3113a3d49af75fec2d77f76e897cf9083899c9f4bd9ca04c",
+      "csrc/fused_moe/cutlass_backend/flashinfer_cutlass_fused_moe_binding.cu": "4b433f0eff220b889744ba646cab3579f47aeae8d62c0b621d9dcab07aeed671",
+      "flashinfer/fused_moe/core.py": "fea76e962e726fbaff0af362f794c6ea78cc135a3bc0f2a0589ebebd090e4c4a",
+      "flashinfer/autotuner.py": "cb7568211865ed29c5f2dda6a120f377edea0db4c54be4748677d7b6fe3aabbd",
+      "flashinfer/jit/fused_moe.py": "5a403f3372f8b81437d854d49c65690c49a10979155caedea53c3db30fb4bb07"
+    }
+  },
+  "flashinfer_custom": {
+    "head": "399dffd680314e8072260b9eef697b1f7b500243",
+    "files": {
+      "csrc/fused_moe/cutlass_backend/cutlass_fused_moe_instantiation.cu": "db05873b50a03b8c96c48d2d339f032783b15152e4c11eae61ad5bf438980ac1",
+      "csrc/fused_moe/cutlass_backend/cutlass_fused_moe_kernels.cuh": "fd24f5f8234b0736f205dd2540f47dcaf90783a53c2fbbab66d0490c9494dbac",
+      "csrc/fused_moe/cutlass_backend/flashinfer_cutlass_fused_moe_binding.cu": "af8afe9d012744f02aa50cda309beeaeda9fc60468e8607f0e3b68b6ad913480",
+      "flashinfer/fused_moe/core.py": "a17b628c051ccae35ecfcef9946402770ad7fb49bb5f33de769dfc2240bf4709",
+      "flashinfer/fused_moe/utils.py": "4fe75295d67145df29be4dc6836ba6ba9276a59535128c9865fbdd76b0343a47"
+    }
+  }
+}

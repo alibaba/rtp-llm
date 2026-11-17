@@ -1,0 +1,4 @@
+{
+    global: PyInit_rtp_dg120_grouped;
+    local: *;
+};

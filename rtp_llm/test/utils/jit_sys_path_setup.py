@@ -117,7 +117,6 @@ def copy_package_with_lock(package_name, cache_dir):
 
     logging.info(f"[Package Copy] Found {package_name} v{version} at {source_path}")
 
-    # Keyed on version AND build variant; see _build_variant.
     cache_key = _cache_key(package_name, version, source_path)
     target_base = Path(cache_dir) / cache_key
     target_site_packages = target_base / "site-packages"
@@ -127,7 +126,9 @@ def copy_package_with_lock(package_name, cache_dir):
     lock_file = Path(cache_dir) / f".{cache_key}.lock"
     completion_marker = target_base / ".copy_complete"
 
-    # Check if already copied and complete
+    # Check if already copied and complete. The marker is written last, so an
+    # unmarked tree was never handed out and its copy is (re)done under the
+    # lock.
     if completion_marker.exists() and target_package_path.exists():
         logging.info(
             f"[Package Copy] {package_name} v{version} already cached at {target_base}"
@@ -150,7 +151,8 @@ def copy_package_with_lock(package_name, cache_dir):
         # Create target directories
         target_site_packages.mkdir(parents=True, exist_ok=True)
 
-        # Remove incomplete copy if exists
+        # Invalidate an incomplete generation before recreating its package.
+        completion_marker.unlink(missing_ok=True)
         if target_package_path.exists():
             shutil.rmtree(target_package_path)
 
@@ -177,7 +179,6 @@ def copy_package_with_lock(package_name, cache_dir):
             # Verify copy
             if not target_package_path.exists():
                 raise RuntimeError(f"Copy verification failed for {package_name}")
-
             # Create completion marker
             completion_marker.write_text(f"{package_name}=={version}\n")
 
@@ -188,7 +189,9 @@ def copy_package_with_lock(package_name, cache_dir):
 
         except Exception as e:
             logging.info(f"[Package Copy] Failed to copy {package_name}: {e}")
-            # Clean up incomplete copy
+            # Clean up incomplete copy; the missing marker means this
+            # generation was never published, so deleting is safe.
+            completion_marker.unlink(missing_ok=True)
             if target_package_path.exists():
                 shutil.rmtree(target_package_path, ignore_errors=True)
             return None
@@ -388,9 +391,7 @@ def setup_jit_cache(cache_dir=None, packages=None):
     # scope 的 flashinfer 工作区。树是跨 UID 共享的：邻居 scope 可能不可读或
     # 整树在扫描中被删，glob 有守卫。
     try:
-        v2_scopes = sorted(
-            Path("/tmp/rtp-llm/.jit_cache/v2").glob("*/flashinfer")
-        )
+        v2_scopes = sorted(Path("/tmp/rtp-llm/.jit_cache/v2").glob("*/flashinfer"))
     except OSError:
         v2_scopes = []
     for scope_workspace in v2_scopes:
