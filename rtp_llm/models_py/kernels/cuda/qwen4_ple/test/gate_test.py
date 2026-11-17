@@ -27,21 +27,25 @@ class PleGateTest(PLEProjectionFixture, unittest.TestCase):
     def kernel_cache_size(kernel):
         return sum(len(cache[0]) for cache in kernel.device_caches.values())
 
-    def tensors(self, rows):
+    def tensors(self, rows, group_size=2560):
         torch.manual_seed(7300 + rows)
-        shapes = [(1, rows, 10240), (1, rows, 2560), (1, rows, 10240)]
+        width = 4 * group_size
+        shapes = [(1, rows, width), (1, rows, group_size), (1, rows, width)]
         return [torch.randn(s, device="cuda", dtype=torch.bfloat16) for s in shapes] + [
-            torch.randn(10240, device="cuda", dtype=torch.bfloat16) * 0.07
+            torch.randn(width, device="cuda", dtype=torch.bfloat16) * 0.07
             for _ in range(3)
         ]
 
     def reference(self, key, value, hidden, gk, gq, gc):
-        kn = grouped_rms_norm(key, gk, 2560, 1e-6).unflatten(-1, (4, 2560))
-        qn = grouped_rms_norm(hidden, gq, 2560, 1e-6).unflatten(-1, (4, 2560))
-        gate = (kn * qn).sum(-1, keepdim=True) / math.sqrt(2560)
+        group_size = value.shape[-1]
+        kn = grouped_rms_norm(key, gk, group_size, 1e-6).unflatten(-1, (4, group_size))
+        qn = grouped_rms_norm(hidden, gq, group_size, 1e-6).unflatten(
+            -1, (4, group_size)
+        )
+        gate = (kn * qn).sum(-1, keepdim=True) / math.sqrt(group_size)
         gate = gate.abs().clamp_min(1e-6).sqrt() * gate.sign()
         gated = (torch.sigmoid(gate) * value.unsqueeze(-2)).flatten(-2)
-        return gated, grouped_rms_norm(gated, gc, 2560, 1e-6)
+        return gated, grouped_rms_norm(gated, gc, group_size, 1e-6)
 
     def test_all_materialization_boundaries(self):
         for rows in (1, 4, 16, 127, 128, 257, 4096):
@@ -50,6 +54,40 @@ class PleGateTest(PLEProjectionFixture, unittest.TestCase):
                 try_ple_gate(*tensors, 1e-6), self.reference(*tensors)
             ):
                 torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+    def test_sm10x_gate_matches_eager_and_graph(self):
+        if torch.cuda.get_device_capability() not in ((10, 0), (10, 3)):
+            self.skipTest("requires SM100 or SM103")
+        for rows in (1, 127, 128, 129, 1024):
+            with self.subTest(rows=rows):
+                tensors = self.tensors(rows, group_size=8192)
+                tensors[0][:, 0, :8192].zero_()
+                actual = try_ple_gate(*tensors, 1e-6)
+                self.assertIsNotNone(actual)
+                for candidate, reference in zip(actual, self.reference(*tensors)):
+                    torch.testing.assert_close(candidate, reference, rtol=0, atol=0)
+                if rows == 129:
+                    donated = tensors[0].clone()
+                    reused = try_ple_gate(donated, *tensors[1:], 1e-6, reuse_key=True)
+                    self.assertIsNotNone(reused)
+                    self.assertEqual(reused[0].data_ptr(), donated.data_ptr())
+                    for candidate, reference in zip(reused, actual):
+                        torch.testing.assert_close(candidate, reference, rtol=0, atol=0)
+
+        key, value, hidden, *gammas = self.tensors(4, group_size=8192)
+        tensors = [x.transpose(0, 1).contiguous() for x in (key, value, hidden)]
+        tensors.extend(gammas)
+        actual = try_ple_gate(*tensors, 1e-6)
+        self.assertIsNotNone(actual)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = try_ple_gate(*tensors, 1e-6)
+        for _ in range(2):
+            for tensor in tensors[:3]:
+                tensor.normal_()
+            graph.replay()
+            for candidate, reference in zip(actual, self.reference(*tensors)):
+                torch.testing.assert_close(candidate, reference, rtol=0, atol=0)
 
     def test_batched_page_quant_and_projected_gate_are_exact(self):
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import (

@@ -506,6 +506,7 @@ class Qwen4ExpPLELayer(nn.Module):
         padding_mask: Optional[torch.Tensor] = None,
         *,
         embeddings: Optional[torch.Tensor] = None,
+        reuse_key: bool = False,
     ) -> tuple:
         """Shared front half: n-gram embed, gate against the stream, normalize.
 
@@ -546,6 +547,7 @@ class Qwen4ExpPLELayer(nn.Module):
                 self.norm_query,
                 self.norm_conv,
                 self.norm_eps,
+                reuse_key=reuse_key and self.key_projection is None,
             )
             if fused is not None:
                 gated_value, gated_value_normed = fused
@@ -595,7 +597,19 @@ class Qwen4ExpPLELayer(nn.Module):
         gated_value, gated_value_normed = self._gated_values(
             hyper_states, token_history, padding_mask, embeddings=embeddings
         )
-        output = gated_value + self._short_conv(gated_value_normed)
+        output = None
+        if self.hc_hidden_size == 32768 and gated_value.is_cuda:
+            from rtp_llm.models_py.kernels.cuda.qwen4_ple.conv import try_ple_conv
+
+            output = try_ple_conv(
+                gated_value,
+                gated_value_normed,
+                None,
+                self.conv_weight,
+                self.conv_dilation,
+            )
+        if output is None:
+            output = gated_value + self._short_conv(gated_value_normed)
         return output, self.prefill_conv_state(gated_value_normed)
 
     def prefill_with_state(
@@ -713,6 +727,80 @@ class Qwen4ExpPLELayer(nn.Module):
         ]
         return output, snapshots
 
+    def _try_sm10x_prefill_page_snapshots(
+        self,
+        hyper_states,
+        token_history,
+        embeddings,
+        page_size,
+        conv_buffer,
+        add_residual,
+        cache_commit,
+    ):
+        if not (
+            hyper_states.is_cuda
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(hyper_states.device)
+            in ((10, 0), (10, 3))
+            and hyper_states.shape[0] == 1
+            and self.hc_hidden_size == 32768
+            and self.hidden_size == 8192
+            and self.short_conv_state_len == 9
+            and page_size == 128
+            and hyper_states.shape[1] > page_size
+        ):
+            return None
+
+        from rtp_llm.models_py.kernels.cuda.qwen4_ple.conv import try_ple_conv
+
+        length = hyper_states.shape[1]
+        gated, normed = self._gated_values(
+            hyper_states, token_history, embeddings=embeddings, reuse_key=True
+        )
+        conv_args = (gated, normed, conv_buffer, self.conv_weight, self.conv_dilation)
+        residual = hyper_states if add_residual else None
+        if cache_commit is not None:
+            output = try_ple_conv(
+                *conv_args,
+                residual=residual,
+                out=gated,
+                cache_commit=cache_commit,
+                history=token_history,
+                page_size=page_size,
+            )
+            if output is not None:
+                return output, None
+        output = try_ple_conv(
+            *conv_args,
+            residual=residual,
+            out=gated,
+        )
+        if output is None:
+            return None
+        if cache_commit is not None:
+            from rtp_llm.models_py.kernels.cuda.qwen4_ple.commit import (
+                try_store_prefill_state,
+            )
+
+            state_pool, ctx_pool, state_blocks, ctx_blocks = cache_commit
+            if try_store_prefill_state(
+                state_pool,
+                ctx_pool,
+                normed,
+                token_history,
+                state_blocks,
+                ctx_blocks,
+                page_size,
+            ):
+                return output, None
+        snapshots = [
+            normed[:, end - self.short_conv_state_len : end]
+            for end in range(page_size, length + 1, page_size)
+        ]
+        if length % page_size:
+            snapshots.append(normed[:, -self.short_conv_state_len :])
+        return output, snapshots
+
     def prefill_page_snapshots(
         self,
         hyper_states: torch.Tensor,
@@ -722,16 +810,20 @@ class Qwen4ExpPLELayer(nn.Module):
         *,
         embeddings: Optional[torch.Tensor] = None,
         add_residual: bool = False,
-    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        cache_commit: (
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None
+        ) = None,
+    ) -> tuple[torch.Tensor, list[torch.Tensor] | None]:
         """Gather once while retaining every page's resumable prefill state.
 
-        Projections keep their original page-sized shapes to preserve BF16
-        accumulation and rounding. The opt-in BF16 route batches only the
-        existing row-local gate and convolution consumers. N-gram hashing, shard gather,
+        SM10x M11 projects and convolves the full request. The legacy routes may
+        project by page to preserve BF16 rounding. N-gram hashing, shard gather,
         and its TP reduction run once per request, including a partial final
         page and a reused prefix's left context. With ``add_residual``, the
         convolution epilogue also adds the outer residual after rounding the
         PLE output to BF16, as in vLLM's outer-residual PLE consumer.
+        A validated single-request cache destination may consume snapshots
+        directly, in which case the returned snapshot list is None.
         """
         if page_size <= 0:
             raise ValueError("PLE snapshot page size must be positive")
@@ -746,6 +838,17 @@ class Qwen4ExpPLELayer(nn.Module):
             raise ValueError("PLE snapshot prefill must contain at least one token")
         if embeddings is None:
             embeddings = self.ple_embedding(token_history, length)
+        sm10x = self._try_sm10x_prefill_page_snapshots(
+            hyper_states,
+            token_history,
+            embeddings,
+            page_size,
+            conv_buffer,
+            add_residual,
+            cache_commit,
+        )
+        if sm10x is not None:
+            return sm10x
         batched_bf16 = self._try_bf16_prefill_page_snapshots(
             hyper_states, embeddings, page_size, conv_buffer, add_residual
         )
@@ -917,6 +1020,10 @@ class Qwen4ExpPLELayer(nn.Module):
         conv_buffer: torch.Tensor,
         *,
         embeddings: Optional[torch.Tensor] = None,
+        add_residual: bool = False,
+        cache_commit: (
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None
+        ) = None,
     ) -> tuple:
         """One decode token: PLE output plus the rolled conv buffer.
 
@@ -925,10 +1032,54 @@ class Qwen4ExpPLELayer(nn.Module):
         ``conv_buffer`` is ``[B, state_len, hc_hidden]`` of prior conv inputs.
         Unlike prefill's ``_short_conv``, the real cached history is used instead
         of a zero left pad.
+        With ``add_residual``, add ``hyper_state`` after rounding the PLE output.
+        With fused cache commit, the next state is written directly and returned
+        as ``None``.
         """
         gated_value, gated_value_normed = self._gated_values(
             hyper_state, token_history_step, embeddings=embeddings
         )
+        if cache_commit is not None and add_residual and self.conv_dilation == 3:
+            from rtp_llm.models_py.kernels.cuda.qwen4_ple.decode_epilogue import (
+                try_decode_epilogue,
+            )
+
+            output = try_decode_epilogue(
+                gated_value,
+                gated_value_normed,
+                hyper_state,
+                conv_buffer,
+                self.conv_weight,
+                *cache_commit,
+                token_history_step,
+            )
+            if output is not None:
+                return output, None
+        if self.hc_hidden_size == 32768 and gated_value.is_cuda:
+            from rtp_llm.models_py.kernels.cuda.qwen4_ple.conv import try_ple_conv
+
+            residual = None
+            if (
+                add_residual
+                and hyper_state.is_contiguous()
+                and hyper_state.dtype == gated_value.dtype
+                and not hyper_state.requires_grad
+            ):
+                residual = hyper_state
+            fused = try_ple_conv(
+                gated_value,
+                gated_value_normed,
+                conv_buffer,
+                self.conv_weight,
+                self.conv_dilation,
+                residual=residual,
+                return_state=True,
+            )
+            if fused is not None:
+                if add_residual and residual is None:
+                    output, new_buffer = fused
+                    return hyper_state + output, new_buffer
+                return fused
         conv_in = torch.cat([conv_buffer, gated_value_normed], dim=1).transpose(1, 2)
         conv_out = F.silu(
             F.conv1d(
@@ -940,7 +1091,7 @@ class Qwen4ExpPLELayer(nn.Module):
         ).transpose(1, 2)
         output = gated_value + conv_out
         new_buffer = torch.cat([conv_buffer, gated_value_normed], dim=1)[:, 1:]
-        return output, new_buffer
+        return (hyper_state + output if add_residual else output), new_buffer
 
     def decode_chunk(
         self,

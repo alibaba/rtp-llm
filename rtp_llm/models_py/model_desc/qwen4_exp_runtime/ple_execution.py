@@ -242,7 +242,14 @@ class PLEExecution:
         ctx_pool = self._fixed_state_pool(
             ctx_cache, torch.int64, ple.ple_embedding.context_len, 1
         ).squeeze(-1)
-        ids = input_ids.reshape(-1).to(device=hyper_states.device, dtype=torch.long)
+        graph_capture = bool(state_inputs.is_cuda_graph)
+        graph_decode = (
+            graph_capture and not state_inputs.is_prefill and not is_target_verify
+        )
+        ids = input_ids.reshape(-1).to(
+            device=hyper_states.device,
+            dtype=input_ids.dtype if graph_decode else torch.long,
+        )
         if hyper_states.dim() != 2 or int(hyper_states.shape[0]) != int(ids.numel()):
             raise RuntimeError("qwen4_exp PLE expects packed [tokens, hc_hidden] input")
         eos = ple.ple_embedding.eos_token_id
@@ -251,7 +258,6 @@ class PLEExecution:
         if page_size <= 0:
             raise RuntimeError("qwen4_exp PLE cache page size must be positive")
 
-        graph_capture = bool(state_inputs.is_cuda_graph)
         host_block_tables = (
             getattr(state_inputs, "kv_cache_block_id", None),
             getattr(ctx_inputs, "kv_cache_block_id", None),
@@ -379,6 +385,47 @@ class PLEExecution:
                 write_states = []
                 write_contexts = []
                 offset = 0
+                full_m11_prefill = (
+                    hyper_states.is_cuda
+                    and torch.version.hip is None
+                    and ple.hc_hidden_size == 32768
+                    and page_size == 128
+                    and torch.cuda.get_device_capability(hyper_states.device)
+                    in ((10, 0), (10, 3))
+                )
+                cache_commit = None
+                if (
+                    full_m11_prefill
+                    and trusted_host_tables
+                    and len(lengths) == 1
+                    and lengths[0] > page_size
+                    and all(table.shape[0] > 0 for table in host_block_tables)
+                ):
+                    first = prefixes[0] // page_size
+                    end = first + (lengths[0] + page_size - 1) // page_size
+                    state_host, ctx_host = host_block_tables
+                    if end <= min(state_host.shape[1], ctx_host.shape[1]):
+                        state_ids = state_host[0, first:end].tolist()
+                        ctx_ids = ctx_host[0, first:end].tolist()
+                        live = [
+                            (s, c)
+                            for s, c in zip(state_ids, ctx_ids)
+                            if s > 0 and c > 0
+                        ]
+                        if (
+                            state_ids[-1] > 0
+                            and ctx_ids[-1] > 0
+                            and max(state_ids) < state_pool.shape[0]
+                            and max(ctx_ids) < ctx_pool.shape[0]
+                            and len({s for s, _ in live}) == len(live)
+                            and len({c for _, c in live}) == len(live)
+                        ):
+                            cache_commit = (
+                                state_pool,
+                                ctx_pool,
+                                device_block_tables[0][0, first:end],
+                                device_block_tables[1][0, first:end],
+                            )
                 for idx, (prefix, length) in enumerate(zip(prefixes, lengths)):
                     if prefix > 0:
                         state = read_buffers[idx : idx + 1]
@@ -386,7 +433,9 @@ class PLEExecution:
                     else:
                         state = None
                         context = ids.new_full((1, context_len), eos)
-                    if length >= 2 * page_size:
+                    if length >= 2 * page_size or (
+                        full_m11_prefill and length > page_size
+                    ):
                         request_ids = ids[offset : offset + length].view(1, length)
                         history = torch.cat((context, request_ids), dim=1)
                         output, snapshots = ple.prefill_page_snapshots(
@@ -395,6 +444,7 @@ class PLEExecution:
                             page_size,
                             state,
                             add_residual=True,
+                            cache_commit=cache_commit,
                             embeddings=(
                                 ple.ple_embedding._reduce_rows(local_rows[idx])
                                 if local_rows is not None
@@ -402,6 +452,8 @@ class PLEExecution:
                                 else None
                             ),
                         )
+                        if snapshots is None:
+                            return output.squeeze(0)
                         for end, snapshot in zip(
                             range(page_size, length + page_size, page_size), snapshots
                         ):
@@ -601,6 +653,8 @@ class PLEExecution:
                 raise RuntimeError(
                     "qwen4_exp PLE decode sequence_lengths must be a 1-D integer tensor"
                 )
+            prepared = None
+            decode_embeddings = None
             if graph_capture:
                 sequence_plus_one_device = getattr(
                     state_inputs, "sequence_lengths_plus_1_device", None
@@ -614,80 +668,150 @@ class PLEExecution:
                     raise RuntimeError(
                         "qwen4_exp PLE decode Graph requires device sequence lengths"
                     )
-                sequence_lengths = sequence_plus_one_device.to(torch.long) - 1
+                if (
+                    state_pool.is_cuda
+                    and torch.version.hip is None
+                    and torch.cuda.get_device_capability(state_pool.device)
+                    in ((10, 0), (10, 3))
+                ):
+                    from rtp_llm.models_py.kernels.cuda.qwen4_ple.commit import (
+                        prepare_decode_graph,
+                    )
+                    from rtp_llm.models_py.kernels.cuda.qwen4_ple.decode_embedding import (
+                        try_prepare_decode_embedding,
+                    )
+
+                    state_table = PLECacheViews._resolve_block_table(
+                        state_inputs, PLE_STATE_TAG
+                    )
+                    ctx_table = PLECacheViews._resolve_block_table(
+                        ctx_inputs, PLE_NGRAM_CTX_TAG
+                    )
+                    fused_inputs = try_prepare_decode_embedding(
+                        sequence_plus_one_device,
+                        ids,
+                        state_table,
+                        ctx_table,
+                        state_pool,
+                        ctx_pool,
+                        page_size,
+                        eos,
+                        ple.ple_embedding,
+                    )
+                    if fused_inputs is not None:
+                        prepared = fused_inputs[:4]
+                        decode_embeddings = fused_inputs[4]
+                    else:
+                        prepared = prepare_decode_graph(
+                            sequence_plus_one_device,
+                            ids.long(),
+                            state_table,
+                            ctx_table,
+                            state_pool,
+                            ctx_pool,
+                            page_size,
+                            eos,
+                        )
+                if prepared is None:
+                    ids = ids.long()
+                    sequence_lengths = sequence_plus_one_device.to(torch.long) - 1
             else:
                 sequence_lengths = sequence_lengths.to(dtype=torch.long)
-            padded = bool(state_inputs.is_s_padded)
-            if not graph_capture and bool(
-                (sequence_lengths < (0 if padded else 1)).any().item()
-            ):
-                raise RuntimeError(
-                    "qwen4_exp PLE decode requires a non-empty prefill history"
+            if prepared is not None:
+                conv_buffer, history, state_write_blocks, ctx_write_blocks = prepared
+            else:
+                padded = bool(state_inputs.is_s_padded)
+                if not graph_capture and bool(
+                    (sequence_lengths < (0 if padded else 1)).any().item()
+                ):
+                    raise RuntimeError(
+                        "qwen4_exp PLE decode requires a non-empty prefill history"
+                    )
+                read_pages = torch.div(
+                    sequence_lengths - 1, page_size, rounding_mode="floor"
                 )
-            read_pages = torch.div(
-                sequence_lengths - 1, page_size, rounding_mode="floor"
-            )
-            write_pages = torch.div(sequence_lengths, page_size, rounding_mode="floor")
-            state_read_blocks = self._physical_blocks(
-                state_inputs,
-                PLE_STATE_TAG,
-                read_pages,
-                int(state_pool.shape[0]),
-                state_pool.device,
-                graph_capture=graph_capture,
-            )
-            ctx_read_blocks = self._physical_blocks(
-                ctx_inputs,
-                PLE_NGRAM_CTX_TAG,
-                read_pages,
-                int(ctx_pool.shape[0]),
-                ctx_pool.device,
-                graph_capture=graph_capture,
-            )
-            state_write_blocks = self._physical_blocks(
-                state_inputs,
-                PLE_STATE_TAG,
-                write_pages,
-                int(state_pool.shape[0]),
-                state_pool.device,
-                graph_capture=graph_capture,
-            )
-            ctx_write_blocks = self._physical_blocks(
-                ctx_inputs,
-                PLE_NGRAM_CTX_TAG,
-                write_pages,
-                int(ctx_pool.shape[0]),
-                ctx_pool.device,
-                graph_capture=graph_capture,
-            )
-            conv_buffer = state_pool.index_select(0, state_read_blocks)
-            context = ctx_pool.index_select(0, ctx_read_blocks)
-            live = sequence_lengths.to(device=state_pool.device) > 0
-            eager_live = PLECacheViews.eager_live_rows(state_inputs, ctx_inputs)
-            if eager_live is not None:
-                live = live & eager_live.to(live.device)
-            conv_buffer = torch.where(live[:, None, None], conv_buffer, 0)
-            context = torch.where(live[:, None], context, eos)
-            state_write_blocks = torch.where(live, state_write_blocks, 0)
-            ctx_write_blocks = torch.where(live, ctx_write_blocks, 0)
-            history = torch.cat([context, ids.view(batch, 1)], dim=1)
+                write_pages = torch.div(
+                    sequence_lengths, page_size, rounding_mode="floor"
+                )
+                state_read_blocks = self._physical_blocks(
+                    state_inputs,
+                    PLE_STATE_TAG,
+                    read_pages,
+                    int(state_pool.shape[0]),
+                    state_pool.device,
+                    graph_capture=graph_capture,
+                )
+                ctx_read_blocks = self._physical_blocks(
+                    ctx_inputs,
+                    PLE_NGRAM_CTX_TAG,
+                    read_pages,
+                    int(ctx_pool.shape[0]),
+                    ctx_pool.device,
+                    graph_capture=graph_capture,
+                )
+                state_write_blocks = self._physical_blocks(
+                    state_inputs,
+                    PLE_STATE_TAG,
+                    write_pages,
+                    int(state_pool.shape[0]),
+                    state_pool.device,
+                    graph_capture=graph_capture,
+                )
+                ctx_write_blocks = self._physical_blocks(
+                    ctx_inputs,
+                    PLE_NGRAM_CTX_TAG,
+                    write_pages,
+                    int(ctx_pool.shape[0]),
+                    ctx_pool.device,
+                    graph_capture=graph_capture,
+                )
+                conv_buffer = state_pool.index_select(0, state_read_blocks)
+                context = ctx_pool.index_select(0, ctx_read_blocks)
+                live = sequence_lengths.to(device=state_pool.device) > 0
+                eager_live = PLECacheViews.eager_live_rows(state_inputs, ctx_inputs)
+                if eager_live is not None:
+                    live = live & eager_live.to(live.device)
+                conv_buffer = torch.where(live[:, None, None], conv_buffer, 0)
+                context = torch.where(live[:, None], context, eos)
+                state_write_blocks = torch.where(live, state_write_blocks, 0)
+                ctx_write_blocks = torch.where(live, ctx_write_blocks, 0)
+                history = torch.cat([context, ids.view(batch, 1)], dim=1)
+            if (
+                decode_embeddings is None
+                and local_rows is not None
+                and local_rows[0] is not None
+            ):
+                decode_embeddings = ple.ple_embedding._reduce_rows(local_rows[0])
             output, new_state = ple.decode_step(
                 hyper_states.view(batch, 1, -1),
                 history,
                 conv_buffer,
-                embeddings=(
-                    ple.ple_embedding._reduce_rows(local_rows[0])
-                    if local_rows is not None and local_rows[0] is not None
+                add_residual=True,
+                embeddings=decode_embeddings,
+                cache_commit=(
+                    (state_pool, ctx_pool, state_write_blocks, ctx_write_blocks)
+                    if prepared is not None
                     else None
                 ),
             )
+            if new_state is None:
+                return output.squeeze(1)
             from rtp_llm.models_py.kernels.cuda.qwen4_ple.commit import (
                 store_decode_rows,
+                try_store_decode_state,
             )
 
-            store_decode_rows(state_pool, state_write_blocks, new_state)
-            store_decode_rows(ctx_pool, ctx_write_blocks, history[:, -context_len:])
-            return hyper_states + output.squeeze(1)
+            if prepared is None or not try_store_decode_state(
+                state_pool,
+                ctx_pool,
+                state_write_blocks,
+                ctx_write_blocks,
+                new_state,
+                history,
+            ):
+                store_decode_rows(state_pool, state_write_blocks, new_state)
+                store_decode_rows(ctx_pool, ctx_write_blocks, history[:, -context_len:])
+            return output.squeeze(1)
 
     def _ple_input_ids(self, inputs: PyModelInputs) -> torch.Tensor:
         return ple_input_ids(inputs, self.eos_token_id)

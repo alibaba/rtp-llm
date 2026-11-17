@@ -97,6 +97,106 @@ class PleReadBlocksTest(unittest.TestCase):
             ):
                 torch.testing.assert_close(a, b, rtol=0, atol=0)
 
+    def test_decode_graph_gathers_and_commits_tag_local_strided_pools(self):
+        from rtp_llm.models_py.kernels.cuda.qwen4_ple.commit import (
+            prepare_decode_graph,
+            try_store_decode_state,
+        )
+
+        state = torch.arange(5 * 24, device="cuda", dtype=torch.bfloat16)
+        state = state.view(5, 24)[:, :18].view(5, 3, 6)
+        context = torch.arange(20, device="cuda").view(5, 4)[:, :2]
+        state_table = torch.tensor([[1, 2], [3, 4]], device="cuda", dtype=torch.int32)
+        ctx_table = torch.tensor([[4, 3], [2, 1]], device="cuda", dtype=torch.int32)
+        lengths = torch.tensor([129, 1], device="cuda", dtype=torch.int32)
+        ids = torch.tensor([21, 22], device="cuda")
+        new_state = torch.full((2, 3, 6), 42, device="cuda", dtype=torch.bfloat16)
+
+        def step():
+            buf, history, state_dest, ctx_dest = prepare_decode_graph(
+                lengths, ids, state_table, ctx_table, state, context, 128, 99
+            )
+            self.assertTrue(
+                try_store_decode_state(
+                    state, context, state_dest, ctx_dest, new_state, history
+                )
+            )
+            return buf, history, state_dest, ctx_dest
+
+        step()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = step()
+        for seq, st, ct, current in (
+            ([129, 1], [[1, 2], [3, 4]], [[4, 3], [2, 1]], [21, 22]),
+            ([2, 385], [[-1, 3], [4, 3]], [[1, 5], [2, 3]], [31, 32]),
+            ([1, 129], [[2, 4], [3, 4]], [[4, 1], [2, 1]], [41, 42]),
+        ):
+            lengths.copy_(torch.tensor(seq, device="cuda"))
+            ids.copy_(torch.tensor(current, device="cuda"))
+            state_table.copy_(torch.tensor(st, device="cuda"))
+            ctx_table.copy_(torch.tensor(ct, device="cuda"))
+            before_state, before_context = state.clone(), context.clone()
+            expected_buffer, expected_history, expected_sd, expected_cd = [], [], [], []
+            for i, length in enumerate(seq):
+                read, write = (length - 2) // 128, (length - 1) // 128
+
+                def physical(table, page):
+                    block = table[i][page] if length > 1 and 0 <= page < 2 else 0
+                    return block if 0 < block < 5 else 0
+
+                sb, cb = physical(st, read), physical(ct, read)
+                sw, cw = physical(st, write), physical(ct, write)
+                expected_sd.append(sw)
+                expected_cd.append(cw)
+                expected_buffer.append(
+                    before_state[sb] if length > 1 else torch.zeros_like(state[0])
+                )
+                hist = before_context[cb].tolist() if length > 1 else [99, 99]
+                expected_history.append([*hist, current[i]])
+            graph.replay()
+            torch.testing.assert_close(
+                actual[0], torch.stack(expected_buffer), atol=0, rtol=0
+            )
+            for tensor, expected in zip(
+                actual[1:], (expected_history, expected_sd, expected_cd)
+            ):
+                self.assertEqual(tensor.tolist(), expected)
+            for i, (sw, cw) in enumerate(zip(expected_sd, expected_cd)):
+                if sw:
+                    before_state[sw] = new_state[i]
+                if cw:
+                    before_context[cw] = torch.tensor(
+                        expected_history[i][-2:], device="cuda"
+                    )
+            torch.testing.assert_close(state, before_state, atol=0, rtol=0)
+            torch.testing.assert_close(context, before_context, atol=0, rtol=0)
+
+    def test_prefill_commits_paired_pages_and_partial_tail(self):
+        from rtp_llm.models_py.kernels.cuda.qwen4_ple.commit import (
+            try_store_prefill_state,
+        )
+
+        normed = torch.arange(108, device="cuda", dtype=torch.bfloat16).view(1, 18, 6)
+        history = torch.arange(20, device="cuda").view(1, 20)
+        state = torch.zeros((5, 24), device="cuda", dtype=torch.bfloat16)
+        state = state[:, :18].view(5, 3, 6)
+        ctx = torch.zeros((5, 4), device="cuda", dtype=torch.long)[:, :2]
+        state_ids = torch.tensor([3, 2, 1], device="cuda", dtype=torch.int32)
+        ctx_ids = torch.tensor([2, 0, 4], device="cuda", dtype=torch.long)
+
+        self.assertTrue(
+            try_store_prefill_state(state, ctx, normed, history, state_ids, ctx_ids, 8)
+        )
+        expected_state = torch.zeros_like(state)
+        expected_ctx = torch.zeros_like(ctx)
+        expected_state[3] = normed[0, 5:8]
+        expected_state[1] = normed[0, 15:18]
+        expected_ctx[2] = history[0, 8:10]
+        expected_ctx[4] = history[0, 18:20]
+        torch.testing.assert_close(state, expected_state, atol=0, rtol=0)
+        torch.testing.assert_close(ctx, expected_ctx, atol=0, rtol=0)
+
     def test_cpu_and_empty_inputs_keep_fallback(self):
         self.assertIsNone(
             resolve_read_blocks(
