@@ -90,7 +90,7 @@ class SGLangTransport:
             self._fail_stream(
                 response.request_id,
                 stream,
-                RuntimeError(response.error_message or "SGLang target failed"),
+                self.codec.decode_error(response.error_message),
             )
             return
         try:

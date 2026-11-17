@@ -29,6 +29,7 @@ class _Client:
         self.reject = False
         self.fallback = 0
         self.allocated = 0
+        self.error = None
 
     def has_master_biz(self):
         return self.master
@@ -49,7 +50,15 @@ class _Client:
 
     def submit_schedule(self, request, target_biz, **kwargs):
         self.scheduled.append(request)
-        if self.respond and not self.reject:
+        if self.error is not None:
+            self.responses.append(
+                SimpleNamespace(
+                    request_id=request.request_id,
+                    kind=KINDS.ERROR,
+                    error_message=self.codec.encode_error(self.error),
+                )
+            )
+        elif self.respond and not self.reject:
             obj = self.codec.decode_request(request.forward_payload)
             self.responses.append(
                 SimpleNamespace(
@@ -151,6 +160,27 @@ class SGLangTransportTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.fallback, 1)
         self.assertEqual(self.local_calls, 1)
         self.assertEqual(self.client.allocated, 0)
+
+    async def test_remote_validation_failure_releases_state_and_recovers(self):
+        self.client.error = ValueError("invalid temperature")
+        with self.assertRaisesRegex(ValueError, "invalid temperature"):
+            [
+                value
+                async for value in self.transport.generate(
+                    GenerateReqInput(text="test", rid="retry"), None, self.original
+                )
+            ]
+        self.assertEqual(self.transport._streams, {})
+        self.assertEqual(self.manager.rid_to_state, {})
+        self.client.error = None
+        result = [
+            value
+            async for value in self.transport.generate(
+                GenerateReqInput(text="test", rid="retry"), None, self.original
+            )
+        ]
+        self.assertEqual(result[0]["text"], "result")
+        self.assertEqual(self.local_calls, 0)
 
     async def test_rejection_does_not_execute_a_second_copy(self):
         self.client.reject = True

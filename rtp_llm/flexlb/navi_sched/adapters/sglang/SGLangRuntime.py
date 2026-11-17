@@ -229,7 +229,9 @@ class SGLangRuntime:
             self.bridge.fail_forward_response(request_id, "SGLang request cancelled")
             raise
         except Exception as error:
-            self.bridge.fail_forward_response(request_id, str(error))
+            self.bridge.fail_forward_response(
+                request_id, self.codec.encode_error(error)
+            )
         finally:
             if obj is not None:
                 self.manager.abort_request(obj.rid)

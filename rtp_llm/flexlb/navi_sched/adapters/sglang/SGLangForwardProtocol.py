@@ -10,6 +10,7 @@ PROTOCOL_VERSION = 1
 MAX_PAYLOAD_BYTES = 16 * 1024 * 1024
 _IMAGE_REFERENCE = 41
 _VIDEO_REFERENCE = 42
+_ERROR_PREFIX = "sglang-error-v1:"
 _LOCAL_REQUEST_FIELDS = frozenset(
     {
         "http_worker_ipc",
@@ -160,3 +161,45 @@ class SGLangForwardCodec:
 
     def decode_response(self, payload: bytes) -> dict:
         return self._decode(payload, "response")
+
+    def encode_error(self, error: Exception) -> str:
+        status = getattr(error, "status_code", 400)
+        if (
+            not isinstance(status, int)
+            or isinstance(status, bool)
+            or not 400 <= status <= 599
+        ):
+            status = 400
+        return (
+            _ERROR_PREFIX
+            + msgspec.json.encode(
+                {
+                    "type": (
+                        "value_error"
+                        if isinstance(error, ValueError)
+                        else "runtime_error"
+                    ),
+                    "message": str(error),
+                    "status_code": status,
+                }
+            ).decode()
+        )
+
+    def decode_error(self, message: str) -> Exception:
+        if message.startswith(_ERROR_PREFIX):
+            try:
+                body = msgspec.json.decode(message[len(_ERROR_PREFIX) :])
+            except msgspec.DecodeError:
+                body = None
+            if isinstance(body, dict) and isinstance(body.get("message"), str):
+                status = body.get("status_code")
+                if (
+                    body.get("type") == "value_error"
+                    and type(status) is int
+                    and 400 <= status <= 599
+                ):
+                    error = ValueError(body["message"])
+                    error.status_code = status
+                    return error
+                return RuntimeError(body["message"])
+        return RuntimeError(message or "SGLang target failed")

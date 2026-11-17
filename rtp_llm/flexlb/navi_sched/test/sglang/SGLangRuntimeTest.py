@@ -114,10 +114,15 @@ class SGLangRuntimeTest(unittest.IsolatedAsyncioTestCase):
             await runtime._execute(
                 7, runtime.codec.encode_request(GenerateReqInput(text="test")), state
             )
+            event, message = runtime.bridge.events[0]
+            self.assertEqual(event, "error")
+            error = runtime.codec.decode_error(message)
+            self.assertIsInstance(error, ValueError)
+            self.assertEqual(str(error), "bad request")
+            self.assertEqual(error.status_code, 400)
             self.assertEqual(
-                runtime.bridge.events,
+                runtime.bridge.events[1:],
                 [
-                    ("error", "bad request"),
                     ("abort", [7]),
                     ("prefill", [(8, 8, 4)]),
                     ("release", 1),

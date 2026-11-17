@@ -12,6 +12,30 @@ class SGLangProtocolTest(unittest.TestCase):
     def setUp(self):
         self.codec = SGLangForwardCodec()
 
+    def test_remote_validation_error_preserves_http_status(self):
+        original = ValueError("invalid temperature")
+        original.status_code = 422
+        error = self.codec.decode_error(self.codec.encode_error(original))
+        self.assertIsInstance(error, ValueError)
+        self.assertEqual(str(error), "invalid temperature")
+        self.assertEqual(error.status_code, 422)
+
+    def test_remote_internal_error_remains_server_error(self):
+        error = self.codec.decode_error(
+            self.codec.encode_error(RuntimeError("backend failed"))
+        )
+        self.assertIsInstance(error, RuntimeError)
+        self.assertEqual(str(error), "backend failed")
+
+    def test_unrecognized_remote_errors_are_not_client_errors(self):
+        for message in (
+            "legacy target error",
+            "sglang-error-v1:{",
+            "sglang-error-v1:{}",
+        ):
+            with self.subTest(message=message):
+                self.assertIsInstance(self.codec.decode_error(message), RuntimeError)
+
     def test_media_references_round_trip_without_fetch(self):
         image = ImageData(
             "https://invalid.example/image.png",
