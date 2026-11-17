@@ -186,6 +186,7 @@ def _worker_initializer(
     preprocess_params: dict,
     preprocess_func: Callable,
     inspection_args=None,
+    url_cache_handle=None,
 ) -> None:
     """
     每个工作进程启动时调用的初始化函数。
@@ -204,9 +205,7 @@ def _worker_initializer(
         if inspection_args is not None
         else None
     )
-    # Spawned workers import fresh module-level caches; parent-only resizing
-    # does not propagate. Apply the operator's capacities once per worker.
-    url_data_cache_.resize_cache(vit_config.url_cache_item_num)
+    url_data_cache_.attach(url_cache_handle, vit_config.url_cache_item_num)
     vit_emb_cache_.resize_cache(vit_config.mm_cache_item_num)
     logging.info(f"Worker process {os.getpid()} initialized.")
 
@@ -488,6 +487,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
         preprocess_func: Callable,
         inspection_factory=None,
     ):
+        self._url_cache_handle = url_data_cache_.share(vit_config.url_cache_item_num)
         self.mp_context = mp_context
         self.vit_config = vit_config
         self.preprocess_params = preprocess_params
@@ -545,6 +545,7 @@ class MultiprocessPreprocessExecutor(PreprocessExecutor):
                     if self._inspection_channel is not None
                     else None
                 ),
+                self._url_cache_handle,
             ),
         )
 

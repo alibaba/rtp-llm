@@ -289,7 +289,7 @@ def init_vit_group_args(parser, vit_config):
         bind_to=(vit_config, "url_cache_item_num"),
         type=int,
         default=100,
-        help="多模态开启的用于URL的Cache的大小",
+        help="同一 ViT 服务的所有预处理进程共享的原始 URL 内容缓存条数，0 表示关闭",
     )
     vit_group.add_argument(
         "--use_igraph_cache",

@@ -139,7 +139,7 @@ class V41ImageDownloadTimingTest(unittest.TestCase):
     def setUp(self):
         from rtp_llm.multimodal import multimodal_util
 
-        self.cache = multimodal_util.MMDataCache(cache_size=2)
+        self.cache = multimodal_util.URLDataCache(cache_size=2)
         cache_patch = patch.object(multimodal_util, "url_data_cache_", self.cache)
         cache_patch.start()
         self.addCleanup(cache_patch.stop)
@@ -270,7 +270,7 @@ class V41ImageDownloadTimingTest(unittest.TestCase):
         )
 
         url = "https://example.invalid/image.png"
-        self.cache.insert_cache(url, io.BytesIO(b"x" * 1025))
+        self.cache.get_or_load(url, "", lambda: io.BytesIO(b"x" * 1025))
         cancelled = threading.Event()
         cancelled.set()
         with patch("rtp_llm.multimodal.multimodal_util.request_get") as get:

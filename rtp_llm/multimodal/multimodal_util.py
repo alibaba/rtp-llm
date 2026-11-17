@@ -26,6 +26,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MultimodalOutputPB,
 )
 from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
+from rtp_llm.multimodal.url_cache import URLDataCache
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.telemetry import vit_media
 from rtp_llm.utils.base_model_datatypes import MMUrlType
@@ -393,8 +394,8 @@ def get_bytes_io_from_url(
 
     _check_download(deadline, cancellation_event)
     check_download_urls((url,))
-    cached_res = url_data_cache_.check_cache(url)
-    if cached_res is None:
+
+    def load():
         headers = _get_http_heads(download_headers)
         load_start = time.monotonic()
         try:
@@ -429,15 +430,19 @@ def get_bytes_io_from_url(
             raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
         finally:
             _record_download_time(load_start)
-        url_data_cache_.insert_cache(url, res)
         return res
-    else:
-        # Each caller needs an independent cursor because cache hits may be read
-        # concurrently by different preprocessing workers.
+
+    source, hit = url_data_cache_.get_or_load(
+        url,
+        download_headers,
+        load,
+        deadline,
+    )
+    if hit:
+        _check_download(deadline, cancellation_event)
+        _validate_file_size(source.getbuffer().nbytes, max_file_size_kb)
         vit_media.download_cache_hit()
-        cached_bytes = cached_res.getvalue()
-        _validate_file_size(len(cached_bytes), max_file_size_kb)
-        return BytesIO(cached_bytes)
+    return source
 
 
 class MMDataCache(object):
@@ -475,7 +480,7 @@ class MMDataCache(object):
 
 # Global cache instance for VIT embeddings
 vit_emb_cache_ = MMDataCache(cache_size=10)
-url_data_cache_ = MMDataCache(cache_size=10)
+url_data_cache_ = URLDataCache(cache_size=10)
 
 
 def trans_config(mm_process_config_pb: MMPreprocessConfigPB):

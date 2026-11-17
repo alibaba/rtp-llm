@@ -79,10 +79,7 @@ def load_image_source(
     """
     from rtp_llm.multimodal.multimodal_util import (
         _check_download,
-        _get_http_heads,
-        _record_download_time,
         get_bytes_io_from_url,
-        request_get,
         url_data_cache_,
     )
 
@@ -99,8 +96,16 @@ def load_image_source(
             cancellation_event=cancellation_event,
         )
     check_download_urls((url,))
-    cached = url_data_cache_.check_cache(url)
-    if cached is not None:
+
+    content, hit = url_data_cache_.get_or_load(
+        url,
+        download_headers,
+        lambda: _download_image_source(
+            url, download_headers, max_bytes, deadline, cancellation_event
+        ),
+        deadline,
+    )
+    if hit:
         try:
             _check_download(deadline, cancellation_event)
         except TimeoutError as error:
@@ -108,13 +113,23 @@ def load_image_source(
                 ExceptionType.MM_DOWNLOAD_FAILED,
                 "Temporary multimodal download failure",
             ) from error
-        source = cached.getvalue()
-        if len(source) > max_bytes:
+        if content.getbuffer().nbytes > max_bytes:
             raise FtRuntimeException(
                 ExceptionType.INVALID_PARAMS, "Multimodal file size is too large"
             )
         vit_media.download_cache_hit()
-        return BytesIO(source)
+    return content
+
+
+def _download_image_source(
+    url, download_headers, max_bytes, deadline, cancellation_event
+):
+    from rtp_llm.multimodal.multimodal_util import (
+        _check_download,
+        _get_http_heads,
+        _record_download_time,
+        request_get,
+    )
 
     for attempt in range(3):
         started = time.monotonic()
@@ -144,9 +159,7 @@ def load_image_source(
                     content.write(chunk)
                 _check_download(deadline, cancellation_event)
                 content.seek(0)
-            # A caller may close or mutate its stream; retain a private cache buffer.
-            url_data_cache_.insert_cache(url, content)
-            return BytesIO(content.getvalue())
+            return content
         except (
             requests.RequestException,
             ReadTimeoutError,
