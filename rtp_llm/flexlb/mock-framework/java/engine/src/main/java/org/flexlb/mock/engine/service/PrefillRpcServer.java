@@ -12,6 +12,7 @@ import org.flexlb.mock.protocol.grpc.MockDecodeServiceGrpc;
 import org.flexlb.mock.engine.scheduler.AbstractRtpScheduler.RtpControl;
 import org.flexlb.mock.protocol.Role;
 import org.flexlb.mock.engine.*;
+import org.flexlb.mock.engine.cache.KvcmRemoteCache;
 import org.flexlb.mock.engine.execution.EngineLoop;
 import org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure;
 import org.flexlb.mock.engine.scheduler.RequestState;
@@ -32,6 +33,7 @@ final class PrefillRpcServer implements AutoCloseable {
     private final Runnable recordCancellation;
     private final java.util.function.Supplier<Runnable> trackRequest;
     private final EngineLoop engine;
+    private final KvcmRemoteCache remoteCache;
     private final TaskHistory finished;
     // Local request lifetime; output/Fetch sessions may outlive these entries. Guarded by executionLock.
     private final Map<Long, PrefillSession> sessions = new LinkedHashMap<>();
@@ -48,8 +50,10 @@ final class PrefillRpcServer implements AutoCloseable {
     private volatile boolean closed;
 
     PrefillRpcServer(RtpRpcService.Config config, Object executionLock, TaskHistory finished, EngineLoop engine,
-                     Runnable recordCancellation, java.util.function.Supplier<Runnable> trackRequest) {
+                     Runnable recordCancellation, java.util.function.Supplier<Runnable> trackRequest,
+                     KvcmRemoteCache remoteCache) {
         this.trackRequest=trackRequest;
+        this.remoteCache = remoteCache;
         this.config = config;
         this.executionLock = executionLock;
         this.finished = finished;
@@ -69,7 +73,8 @@ final class PrefillRpcServer implements AutoCloseable {
             preparing = sessions.values().stream().filter(session -> session.request == null).toList();
         }
         for (var session : preparing) session.finish(Status.UNAVAILABLE.withDescription("Prefill node closed"), 0);
-        workers.shutdownNow(); deadlines.shutdownNow(); vision.close(); channels.close(); engine.close();
+        workers.shutdownNow(); deadlines.shutdownNow(); vision.close(); channels.close();
+        try { engine.close(); } finally { if (remoteCache != null) remoteCache.close(); }
     }
 
     RequestState.Use beginTransfer(PrefillSession session) {
@@ -108,11 +113,18 @@ final class PrefillRpcServer implements AutoCloseable {
             if (context.getDeadline() != null && context.getDeadline().isExpired()) session.expire();
             else session.cancel();
         });
-        try {
-            if (response.isCancelled()) session.cancel();
-            else submit(session, vision.prepare(input, session.deadline));
-        } catch (RuntimeException error) {
-            session.fail(error);
+        Runnable admission = () -> {
+            try {
+                if (response.isCancelled()) session.cancel();
+                else submit(session, vision.prepare(input, session.deadline));
+            } catch (RuntimeException error) {
+                session.fail(error);
+            }
+        };
+        if (remoteCache == null) admission.run();
+        else {
+            try { workers.execute(context.wrap(admission)); }
+            catch (RejectedExecutionException error) { session.fail(error); }
         }
         session.completion().thenAccept(result -> {
             completed.run();
@@ -263,12 +275,17 @@ final class PrefillRpcServer implements AutoCloseable {
     }
 
     private EngineScheduler.Input schedulerInput(PrefillSession session, MultimodalProtocol.Prepared prepared) {
+        return session.preparedInput != null ? session.preparedInput : prepareInput(session, prepared);
+    }
+
+    private EngineScheduler.Input prepareInput(PrefillSession session, MultimodalProtocol.Prepared prepared) {
         var sequence = session.prefillCacheKeys;
         session.prefillCacheKeys = null;
         if (sequence == null)
             sequence = MultimodalProtocol.computePromptKeys(prepared, config.physicalBlockSize(), config.cacheKeySeed(), config.cpSize());
-        return RpcMessages.toSchedulerInput(prepared.input(), Long.toString(session.id), session.started,
+        var input = RpcMessages.toSchedulerInput(prepared.input(), Long.toString(session.id), session.started,
             session.deadline, session.retained, sequence);
+        return remoteCache == null ? input : remoteCache.lookup(input);
     }
 
     private void requirePending(PrefillSession session, GenerateInputPB input) {
@@ -407,6 +424,7 @@ final class PrefillRpcServer implements AutoCloseable {
 
         EngineScheduler.Request request;
         PromptCacheKeys prefillCacheKeys;
+        EngineScheduler.Input preparedInput;
 
         PrefillSession(GenerateInputPB input, boolean retained, long started, long deadline) {
             this.input = input; this.retained = retained; this.started = started; this.deadline = deadline;
@@ -430,6 +448,7 @@ final class PrefillRpcServer implements AutoCloseable {
                 ended = true;
                 sessions.remove(id, this);
             }
+            if (failure == null && remoteCache != null) remoteCache.publish(request.input());
             complete(request, failure);
         }
 
@@ -465,7 +484,8 @@ final class PrefillRpcServer implements AutoCloseable {
         }
 
         private Result success(EngineScheduler.Request request, boolean finished) {
-            return new Result(RpcMessages.token(input, RpcMessages.sampledToken(input), 1, 1, request.reused(), System.nanoTime() - request.input().started(), finished, false), Status.OK, 0);
+            return new Result(RpcMessages.token(input, RpcMessages.sampledToken(input), 1, 1, request.reused(), request.remoteReused(),
+                System.nanoTime() - request.input().started(), finished, false), Status.OK, 0);
         }
     }
 
@@ -580,6 +600,10 @@ final class PrefillRpcServer implements AutoCloseable {
                 allocation.setPrompt(sequence.toDecodePrompt());
                 if (layout.getBlockSize() == config.physicalBlockSize() && layout.getCacheKeySeed() == config.cacheKeySeed())
                     prefill.prefillCacheKeys = sequence.toPrefillKeys(config.cpSize());
+                if (remoteCache != null) {
+                    prefill.preparedInput = prepareInput(prefill, media);
+                    checkActive();
+                }
                 allocationInput.getGenerateConfigBuilder().clearGroupTimeout();
                 if (deadline != Long.MAX_VALUE) allocationInput.getGenerateConfigBuilder().setTimeoutMs((int) Math.min(Integer.MAX_VALUE,
                     Math.max(1, TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()))));
@@ -611,7 +635,7 @@ final class PrefillRpcServer implements AutoCloseable {
                 var prefillAux = first.output().getFlattenOutput().getAuxInfo(0);
                 int prefillReuse = prefillAux.getTotalReuseLen();
                 send(RpcMessages.token(input, RpcMessages.sampledToken(input), 1, 1,
-                    prefillReuse, ttft, prefillFinished, true));
+                    prefillReuse, prefillAux.getRemoteReuseLen(), ttft, prefillFinished, true));
                 var loaded = inbox.next();
                 if (loaded == null || !loaded.hasErrorInfo() || loaded.getErrorInfo().getErrorCodeValue() != 0)
                     throw Status.DATA_LOSS.withDescription("Invalid LOAD acknowledgement").asRuntimeException();
@@ -633,9 +657,9 @@ final class PrefillRpcServer implements AutoCloseable {
                         aux.setDecodeTotalReuseLen(aux.getTotalReuseLen()).setDecodeLocalReuseLen(aux.getLocalReuseLen())
                             .setDecodeRemoteReuseLen(aux.getRemoteReuseLen())
                             .setPrefillTotalReuseLen(prefillReuse).setPrefillLocalReuseLen(prefillAux.getLocalReuseLen())
-                            .clearPrefillRemoteReuseLen()
+                            .setPrefillRemoteReuseLen(prefillAux.getRemoteReuseLen())
                             .setTotalReuseLen(prefillReuse).setLocalReuseLen(prefillAux.getLocalReuseLen())
-                            .clearRemoteReuseLen().setPrefixLen(prefillReuse)
+                            .setRemoteReuseLen(prefillAux.getRemoteReuseLen()).setPrefixLen(prefillReuse)
                             .setFirstTokenCostTimeUs((int) Math.min(Integer.MAX_VALUE, ttft / 1000)).setPdSep(true);
                     }
                     finished = output.getFlattenOutput().getFinished(0); send(merged.build());
