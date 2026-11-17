@@ -110,8 +110,9 @@ void logReleased(const FrozenTask& task) noexcept {
 
 }  // namespace
 
-FrozenTaskRecovery::FrozenTaskRecovery(TaskSource source, Query query, Cleanup cleanup):
-    source_(std::move(source)), query_(std::move(query)), cleanup_(std::move(cleanup)) {}
+FrozenTaskRecovery::FrozenTaskRecovery(TaskSource source, Query query, Cleanup cleanup, OnReleased on_released):
+    source_(std::move(source)), query_(std::move(query)), cleanup_(std::move(cleanup)),
+    on_released_(std::move(on_released)) {}
 
 FrozenTaskRecovery::~FrozenTaskRecovery() {
     stop();
@@ -248,6 +249,14 @@ FrozenTaskRecovery::runOnce(int query_timeout_ms, const std::function<bool()>& s
                 break;
             if (task->unfreeze()) {
                 ++summary.released;
+                try {
+                    if (on_released_)
+                        on_released_(task->execution());
+                } catch (const std::exception& error) {
+                    RTP_LLM_LOG_WARNING("FrozenTask release observer failed: %s", error.what());
+                } catch (...) {
+                    RTP_LLM_LOG_WARNING("FrozenTask release observer failed: unknown exception");
+                }
                 logReleased(*task);
             }
         }
