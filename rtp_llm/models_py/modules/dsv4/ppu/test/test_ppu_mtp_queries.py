@@ -23,7 +23,7 @@ class Metadata:
 
 class QuerySliceTest(unittest.TestCase):
     def test_request_order_and_padding_survive_each_query_slice(self):
-        for width in (2, 3, 4):
+        for width in (2, 3, 4, 5, 6):
             for start in (127, 255, 511):
                 with self.subTest(width=width, start=start):
                     self._check_query_slices(width, start)
@@ -59,6 +59,7 @@ class QuerySliceTest(unittest.TestCase):
                 ],
             )
             self.assertTrue(step.positions.is_contiguous())
+            self.assertIs(step.seq_start_per_req, step.positions)
             self.assertFalse(step.is_batched)
         self.assertTrue(torch.equal(torch.stack(columns, dim=1), positions))
         self.assertTrue(meta.is_batched)
