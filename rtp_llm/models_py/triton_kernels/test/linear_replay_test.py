@@ -17,7 +17,6 @@ from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
 from rtp_llm.models_py.triton_kernels.kda import fused_recurrent_kda
 from rtp_llm.models_py.triton_kernels.linear_replay import (
     LinearReplay,
-    finalize_linear_replay,
     linear_serial_replay,
 )
 
@@ -36,18 +35,11 @@ class LinearReplayInputContractTest(unittest.TestCase):
                 u=empty((8, steps, value_heads, dim)),
                 g=empty((8, steps, value_heads, 1)),
                 conv_inputs=empty((8, steps, channels), torch.bfloat16),
-                slot_generations=empty((8,), torch.int64),
-                log_epochs=empty((8,), torch.int64),
-                valid_counts=empty((8,), torch.int32),
-                error_flags=empty((8,), torch.int32),
             )
             inputs = SimpleNamespace(
                 slot_ids=empty((batch,), torch.int32),
-                slot_generations=empty((batch,), torch.int64),
                 prev_accept_lengths=empty((batch,), torch.int32),
                 history_valid_lengths=empty((batch,), torch.int32),
-                history_epochs=empty((batch,), torch.int64),
-                verify_epochs=empty((batch,), torch.int64),
                 init_kinds=empty((batch,), torch.int32),
                 state_read_block_ids=empty((3, batch + 2), torch.int32)[:, :batch],
                 active_block_ids=empty((3, batch + 2), torch.int32)[:, :batch],
@@ -84,8 +76,16 @@ class LinearReplayInputContractTest(unittest.TestCase):
             verify.__getitem__.return_value.assert_called_once()
             with self.assertRaisesRegex(ValueError, "cache group"):
                 linear_serial_replay(*args, group_id=3, vector_gate=False)
-            with self.assertRaisesRegex(ValueError, "log capacity"):
-                finalize_linear_replay(cache, inputs, steps + 1)
+            short_cache = SimpleNamespace(
+                **{
+                    name: tensor[:, : steps - 1].contiguous()
+                    for name, tensor in vars(cache).items()
+                }
+            )
+            with self.assertRaisesRegex(ValueError, "capacity"):
+                linear_serial_replay(
+                    *args[:10], short_cache, inputs, group_id=2, vector_gate=False
+                )
 
             attention = SimpleNamespace(
                 conv_weights=args[5],
@@ -141,18 +141,11 @@ class LinearReplayTest(unittest.TestCase):
             u=zeros((slots, steps, value_heads, value_dim)),
             g=zeros((slots, steps, value_heads, gate_dim)),
             conv_inputs=zeros((slots, steps, channels), torch.bfloat16),
-            slot_generations=zeros((slots,), torch.int64),
-            log_epochs=zeros((slots,), torch.int64),
-            valid_counts=zeros((slots,), torch.int32),
-            error_flags=zeros((slots,), torch.int32),
         )
         inputs = SimpleNamespace(
             slot_ids=torch.tensor([4, 1, 3, 2, -1], device="cuda", dtype=torch.int32),
-            slot_generations=torch.ones(batch, device="cuda", dtype=torch.int64),
             prev_accept_lengths=zeros((batch,), torch.int32),
             history_valid_lengths=zeros((batch,), torch.int32),
-            history_epochs=zeros((batch,), torch.int64),
-            verify_epochs=torch.ones(batch, device="cuda", dtype=torch.int64),
             init_kinds=torch.ones(batch, device="cuda", dtype=torch.int32),
             state_read_block_ids=zeros((2, batch + 3), torch.int32)[:, :batch],
             active_block_ids=zeros((2, batch + 3), torch.int32)[:, :batch],
@@ -273,19 +266,29 @@ class LinearReplayTest(unittest.TestCase):
             cache,
             group_id=1,
             vector_gate=vector_gate,
+            state_v_first=not vector_gate,
             lower_bound=lower_bound,
         )
-        reference_state = ssm[inputs.state_read_block_ids[1].long()].clone()
+
+        def value_key(state):
+            return state.transpose(-1, -2) if vector_gate else state
+
+        reference_state = value_key(ssm[inputs.state_read_block_ids[1].long()]).clone()
         reference_conv = conv[inputs.state_read_block_ids[1].long()].clone()
+        replay_state = reference_state.clone()
+        prefilled_state = reference_state[0].clone()
+        prefilled_conv = reference_conv[0].clone()
+        previous_records = None
         previous_states = previous_histories = None
         graph = graph_output = None
         graph_raw = graph_a = graph_b = None
         graph_addresses = None
-        for round_id in range(3):
+        for round_id in range(4):
             if round_id == 2:
                 order = torch.tensor([2, 0, 3, 1, 4], device="cuda")
                 previous_states = [state[order] for state in previous_states]
                 previous_histories = [history[order] for history in previous_histories]
+                replay_state = replay_state[order]
                 inputs.slot_ids.copy_(inputs.slot_ids[order])
                 inputs.active_block_ids.copy_(inputs.active_block_ids[:, order])
             if round_id:
@@ -303,12 +306,40 @@ class LinearReplayTest(unittest.TestCase):
                     torch.tensor(accepted, device="cuda", dtype=torch.int32)
                 )
                 inputs.history_valid_lengths.fill_(steps)
-                inputs.history_epochs.fill_(round_id)
-                inputs.verify_epochs.fill_(round_id + 1)
                 inputs.init_kinds.zero_()
                 inputs.state_read_block_ids.copy_(inputs.active_block_ids)
                 if round_id == 1:
                     inputs.active_block_ids[1] += batch
+                if round_id == 3:
+                    # Reuse occupied record slots for new requests. Their old
+                    # records must be ignored for both empty and prefilled starts.
+                    inputs.init_kinds[:2] = torch.tensor(
+                        [2, 1], device="cuda", dtype=torch.int32
+                    )
+                    inputs.prev_accept_lengths[:2].zero_()
+                    inputs.history_valid_lengths[:2].zero_()
+                    inputs.state_read_block_ids[1, 0] = -1
+                    inputs.state_read_block_ids[1, 1] = 1
+                    reference_state[0].zero_()
+                    reference_conv[0].zero_()
+                    reference_state[1].copy_(prefilled_state)
+                    reference_conv[1].copy_(prefilled_conv)
+                    replay_state[0].zero_()
+                    replay_state[1].copy_(prefilled_state)
+                # Replay consumes the producer's rounded records. Keep this
+                # checkpoint oracle independent of the Torch verify reference,
+                # whose SiLU/BF16 rounding may differ from the producer.
+                slots = inputs.slot_ids.clamp_min(0).long()
+                old_k, old_u, old_g = (records[slots] for records in previous_records)
+                for t in range(steps):
+                    key = old_k[:, t].repeat_interleave(value_heads // heads, dim=1)
+                    updated = replay_state * torch.exp(old_g[:, t]).unsqueeze(-2)
+                    updated = updated + old_u[:, t].unsqueeze(-1) * key.unsqueeze(-2)
+                    replay_state = torch.where(
+                        (inputs.prev_accept_lengths > t)[:, None, None, None],
+                        updated,
+                        replay_state,
+                    )
             raw = torch.randn(
                 batch, steps, channels + 7, dtype=torch.bfloat16, device="cuda"
             )[:, :, :channels]
@@ -370,7 +401,6 @@ class LinearReplayTest(unittest.TestCase):
                     b.flatten(0, 1),
                     replay_inputs=inputs,
                 )
-                finalize_linear_replay(cache, inputs, steps)
                 return output
 
             if use_cuda_graph:
@@ -401,13 +431,19 @@ class LinearReplayTest(unittest.TestCase):
             )
             destination = inputs.active_block_ids[1, :-1].long()
             torch.testing.assert_close(
-                ssm[destination], reference_state[:-1], rtol=2e-4, atol=2e-5
+                value_key(ssm[destination]),
+                replay_state[:-1],
+                rtol=2e-4,
+                atol=2e-5,
+                msg=f"replay checkpoint round={round_id}, vector_gate={vector_gate}",
             )
             torch.testing.assert_close(
                 conv[destination], reference_conv[:-1], rtol=0, atol=0
             )
-            self.assertEqual(cache.valid_counts[4].item(), steps)
-            self.assertEqual(cache.log_epochs[4].item(), round_id + 1)
+            # The next verify overwrites these slots; snapshot before that use.
+            previous_records = tuple(
+                getattr(cache, name).clone() for name in ("k", "u", "g")
+            )
 
     def test_kda_all_accept_lengths_cross_page_and_in_place(self):
         self._run_rounds(True, 4, 4, 128, 128)
@@ -506,7 +542,6 @@ class LinearReplayTest(unittest.TestCase):
                     torch.testing.assert_close(
                         actual.reshape_as(expected), expected, rtol=0, atol=0
                     )
-                    finalize_linear_replay(cache, inputs, steps)
                     snapshots = {
                         name: tensor.clone()
                         for name, tensor in vars(cache).items()
@@ -522,8 +557,6 @@ class LinearReplayTest(unittest.TestCase):
                     inputs.state_read_block_ids[1].copy_(anchors)
                     inputs.active_block_ids[1].copy_(destination)
                     inputs.history_valid_lengths.fill_(steps)
-                    inputs.history_epochs.fill_(1)
-                    inputs.verify_epochs.fill_(2)
                     inputs.init_kinds.zero_()
                     for accepted in range(1, steps + 1):
                         for name, tensor in snapshots.items():
@@ -579,7 +612,9 @@ class LinearReplayTest(unittest.TestCase):
         source = inputs.state_read_block_ids[1].long()
         destination = inputs.active_block_ids[1].long()
         raw = torch.randn(batch, 4, channels, device="cuda", dtype=torch.bfloat16)
-        gate = torch.randn(batch, 4, value_heads, 128, device="cuda", dtype=torch.bfloat16)
+        gate = torch.randn(
+            batch, 4, value_heads, 128, device="cuda", dtype=torch.bfloat16
+        )
         beta = torch.randn(batch, 4, value_heads, device="cuda", dtype=torch.bfloat16)
 
         # Production decode operators require a block map. Give every verify
@@ -602,9 +637,7 @@ class LinearReplayTest(unittest.TestCase):
             ),
             dim=1,
         ).to(torch.int32)
-        sequence_lengths = torch.full(
-            (batch,), 2, device="cuda", dtype=torch.int32
-        )
+        sequence_lengths = torch.full((batch,), 2, device="cuda", dtype=torch.int32)
         convolved = causal_conv1d_update(
             raw.transpose(1, 2),
             reference_conv.transpose(1, 2),

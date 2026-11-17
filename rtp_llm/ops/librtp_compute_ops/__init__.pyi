@@ -124,12 +124,9 @@ class CacheGroupType:
 class LinearReplayInputs:
     def __init__(self) -> None: ...
     slot_ids: torch.Tensor
-    slot_generations: torch.Tensor
     active_block_ids: torch.Tensor
     prev_accept_lengths: torch.Tensor
     history_valid_lengths: torch.Tensor
-    history_epochs: torch.Tensor
-    verify_epochs: torch.Tensor
     init_kinds: torch.Tensor
     state_read_block_ids: torch.Tensor
     anchor_processed_lengths: torch.Tensor
@@ -140,10 +137,6 @@ class LinearReplayLayerCache:
     u: torch.Tensor
     g: torch.Tensor
     conv_inputs: torch.Tensor
-    slot_generations: torch.Tensor
-    log_epochs: torch.Tensor
-    valid_counts: torch.Tensor
-    error_flags: torch.Tensor
 
 class LayerKVCache:
     """Per-layer KV cache view. Returned by KVCache.get_layer_cache()."""

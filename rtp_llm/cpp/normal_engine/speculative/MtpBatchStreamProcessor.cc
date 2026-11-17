@@ -960,15 +960,12 @@ MtpBatchStreamProcessor::gatherLinearReplayInputs(const StreamGroups&           
         }
         auto round                                     = std::move(round_status.value());
         host.slot_ids.data_ptr<int32_t>()[row]         = round.lease->slot_id;
-        host.slot_generations.data_ptr<int64_t>()[row] = round.lease->generation;
-        host.verify_epochs.data_ptr<int64_t>()[row]    = round.verify_epoch;
         if (round.previous_window) {
             const auto& previous = *round.previous_window;
             if (previous.device_ready) {
                 previous.device_ready->block(cuda_graph::graphGetCurrentStream());
             }
             host.history_valid_lengths.data_ptr<int32_t>()[row] = previous.produced_steps;
-            host.history_epochs.data_ptr<int64_t>()[row]        = previous.verify_epoch;
             history_rows.push_back(row);
             accepts.push_back(previous.accept_len_gpu.reshape({1}));
             anchors.push_back(previous.anchor_block_ids_gpu);

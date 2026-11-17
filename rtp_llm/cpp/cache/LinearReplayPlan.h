@@ -59,8 +59,7 @@ struct LinearReplayPlan {
         plan.g_shape          = {slots, steps, value_dims[0], vector_gate ? key_dims[1] : 1};
         plan.conv_input_shape = {slots, steps, static_cast<int64_t>(channels)};
         plan.conv_dtype       = conv_type;
-        const size_t headers  = checkedMultiply(static_cast<size_t>(slots), 2 * sizeof(int64_t) + 2 * sizeof(int32_t));
-        plan.reserve_bytes    = checkedAdd(headers, checkedMultiply(plan.layerLogBytes(), layer_count));
+        plan.reserve_bytes    = checkedMultiply(plan.layerLogBytes(), layer_count);
         return plan;
     }
 

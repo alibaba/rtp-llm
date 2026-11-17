@@ -1080,18 +1080,6 @@ void PyWrappedModel::updateKVCacheKernelBlockId(const GptModelInputs& inputs) {
     }
 }
 
-void PyWrappedModel::finalizeLinearReplay(const GptModelInputs& inputs) {
-    const auto* replay = inputs.targetLinearReplay();
-    if (!replay) {
-        return;
-    }
-    const auto batch = replay->slot_ids.numel();
-    RTP_LLM_CHECK_WITH_INFO(batch > 0 && inputs.combo_tokens.numel() % batch == 0,
-                            "LINEAR replay metadata requires a uniform target verification batch");
-    py::gil_scoped_acquire gil;
-    py_model_.attr("finalize_linear_replay")(*replay, inputs.combo_tokens.numel() / batch);
-}
-
 PyModelInputs PyWrappedModel::buildPyModelInputs(const GptModelInputs& inputs) {
     const auto to_cuda = [this](const torch::Tensor& tensor) {
         if (tensor.is_cuda()) {
@@ -1266,7 +1254,6 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& raw_inputs) {
             // the recurrent features consumed by the speculative executor.
             mtp_hidden = mtp_hidden.clone();
         }
-        finalizeLinearReplay(post_inputs);
         cache_store_write_cycle.finish();
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");

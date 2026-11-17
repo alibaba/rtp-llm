@@ -21,7 +21,6 @@ class GenerateStream;
 struct MallocResult;
 
 struct LinearReplayWindow {
-    int64_t                                verify_epoch   = 0;
     int32_t                                produced_steps = 0;
     torch::Tensor                          accept_len_gpu;
     torch::Tensor                          anchor_block_ids_gpu;
@@ -32,7 +31,6 @@ struct LinearReplayWindow {
 };
 
 struct LinearReplayRound {
-    int64_t                                   verify_epoch = 0;
     std::shared_ptr<LinearReplayLease>        lease;
     std::shared_ptr<const LinearReplayWindow> previous_window;
     std::shared_ptr<LinearReplayBlockHold>    state_block_hold;
@@ -198,7 +196,6 @@ private:
         std::shared_ptr<LinearReplayBlockHold>    initial_state_hold;
         std::vector<int32_t>                      initial_block_ids;
         std::shared_ptr<const LinearReplayWindow> window;
-        int64_t                                   epoch = 0;
 
         void clearInitialState() {
             initial_block_ids.clear();

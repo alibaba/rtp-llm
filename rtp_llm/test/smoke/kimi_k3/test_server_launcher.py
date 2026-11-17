@@ -16,6 +16,31 @@ spec.loader.exec_module(launch)
 
 
 class CheckpointSourceTest(unittest.TestCase):
+    def test_decode_runs_sync_and_async_with_replay_and_graph(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target, draft = Path(temporary) / "target", Path(temporary) / "draft"
+            target.mkdir()
+            draft.mkdir()
+            (target / "config.json").write_text('{"num_hidden_layers":93}')
+            args = SimpleNamespace(
+                checkpoint=target,
+                draft_checkpoint=draft,
+                start_port=28000,
+                peer_port=29000,
+                peer_ip="127.0.0.1",
+                role="DECODE",
+                server=sys.executable,
+            )
+            for enabled in ("0", "1"):
+                with self.subTest(async_enabled=enabled), patch.dict(
+                    launch.os.environ, {"RTP_LLM_STREAM_ASYNC": enabled}, clear=True
+                ):
+                    environment, command = launch.launch_config(args)
+                options = dict(zip(command[1::2], command[2::2]))
+                self.assertEqual(environment["RTP_LLM_STREAM_ASYNC"], enabled)
+                self.assertEqual(options["--enable_linear_replay"], "1")
+                self.assertEqual(options["--enable_cuda_graph"], "1")
+
     def test_all_pd_profiles_pass_retired_environment_options_by_cli(self):
         retired = {
             "ENABLE_LINEAR_REPLAY": "0",

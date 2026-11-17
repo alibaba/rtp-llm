@@ -45,12 +45,9 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<rtp_llm::LinearReplayInputs>(m, "LinearReplayInputs")
         .def(pybind11::init<>())
         .def_readwrite("slot_ids", &rtp_llm::LinearReplayInputs::slot_ids)
-        .def_readwrite("slot_generations", &rtp_llm::LinearReplayInputs::slot_generations)
         .def_readwrite("active_block_ids", &rtp_llm::LinearReplayInputs::active_block_ids)
         .def_readwrite("prev_accept_lengths", &rtp_llm::LinearReplayInputs::prev_accept_lengths)
         .def_readwrite("history_valid_lengths", &rtp_llm::LinearReplayInputs::history_valid_lengths)
-        .def_readwrite("history_epochs", &rtp_llm::LinearReplayInputs::history_epochs)
-        .def_readwrite("verify_epochs", &rtp_llm::LinearReplayInputs::verify_epochs)
         .def_readwrite("init_kinds", &rtp_llm::LinearReplayInputs::init_kinds)
         .def_readwrite("state_read_block_ids", &rtp_llm::LinearReplayInputs::state_read_block_ids)
         .def_readwrite("anchor_processed_lengths", &rtp_llm::LinearReplayInputs::anchor_processed_lengths);
@@ -60,11 +57,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("k", &LinearReplayLayerCache::k)
         .def_readwrite("u", &LinearReplayLayerCache::u)
         .def_readwrite("g", &LinearReplayLayerCache::g)
-        .def_readwrite("conv_inputs", &LinearReplayLayerCache::conv_inputs)
-        .def_readwrite("slot_generations", &LinearReplayLayerCache::slot_generations)
-        .def_readwrite("log_epochs", &LinearReplayLayerCache::log_epochs)
-        .def_readwrite("valid_counts", &LinearReplayLayerCache::valid_counts)
-        .def_readwrite("error_flags", &LinearReplayLayerCache::error_flags);
+        .def_readwrite("conv_inputs", &LinearReplayLayerCache::conv_inputs);
 
     pybind11::class_<LayerKVCache>(m, "LayerKVCache")
         .def(pybind11::init<>())

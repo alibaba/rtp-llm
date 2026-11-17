@@ -135,7 +135,6 @@ private:
                                     buildBertEmbeddingInputs(const GptModelInputs& inputs,
                                                              const torch::Tensor&  prepared_position_ids = torch::Tensor());
     PyModelInputs                   buildPyModelInputs(const GptModelInputs& inputs);
-    void                            finalizeLinearReplay(const GptModelInputs& inputs);
     torch_ext::AttentionInputsByTag setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_attn_inputs,
                                                                    const GptModelInputs&         inputs);
     GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,

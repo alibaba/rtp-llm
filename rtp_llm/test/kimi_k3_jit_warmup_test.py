@@ -13,10 +13,7 @@ from rtp_llm.models_py.modules.kimi_k3.kernel_jit_warmup import (
     _inactive_replay_inputs,
     _warmup_replay,
 )
-from rtp_llm.models_py.triton_kernels.linear_replay import (
-    finalize_linear_replay,
-    linear_serial_replay,
-)
+from rtp_llm.models_py.triton_kernels.linear_replay import linear_serial_replay
 
 
 class KimiK3JitWarmupTest(unittest.TestCase):
@@ -44,10 +41,6 @@ class KimiK3JitWarmupTest(unittest.TestCase):
             u=zeros((slots, capacity, 1, dim)),
             g=zeros((slots, capacity, 1, dim)),
             conv_inputs=zeros((slots, capacity, channels), torch.bfloat16),
-            slot_generations=zeros((slots,), torch.int64),
-            log_epochs=zeros((slots,), torch.int64),
-            valid_counts=zeros((slots,), torch.int32),
-            error_flags=zeros((slots,), torch.int32),
         )
         # Bind the production attention through its shared KDA constructor so
         # warmup follows the same projection/decode attributes as the model.
@@ -117,9 +110,6 @@ class KimiK3JitWarmupTest(unittest.TestCase):
             for batch in (2, 3):
                 inputs = SimpleNamespace(
                     slot_ids=torch.arange(batch, device=device, dtype=torch.int32),
-                    slot_generations=torch.ones(
-                        batch, device=device, dtype=torch.int64
-                    ),
                     state_read_block_ids=torch.ones(
                         (3, batch), device=device, dtype=torch.int32
                     ),
@@ -128,8 +118,6 @@ class KimiK3JitWarmupTest(unittest.TestCase):
                     ),
                     prev_accept_lengths=zeros((batch,), torch.int32),
                     history_valid_lengths=zeros((batch,), torch.int32),
-                    history_epochs=zeros((batch,), torch.int64),
-                    verify_epochs=torch.ones(batch, device=device, dtype=torch.int64),
                     init_kinds=torch.ones(batch, device=device, dtype=torch.int32),
                 )
                 inputs.active_block_ids[2] = torch.arange(
@@ -157,19 +145,14 @@ class KimiK3JitWarmupTest(unittest.TestCase):
                         state_v_first=False,
                         lower_bound=-5.0,
                     )
-                    finalize_linear_replay(replay, inputs, steps)
                     self.assertTrue(torch.isfinite(result).all().item())
                     self.assertGreater(torch.count_nonzero(result).item(), 0)
-                    torch.testing.assert_close(
-                        replay.valid_counts[:batch],
-                        torch.full((batch,), steps, device=device, dtype=torch.int32),
-                    )
+
         self.assertEqual(
             compilations,
             [],
             f"active batches must reuse prepared replay kernels; prepared={prepared}",
         )
-        self.assertEqual(torch.count_nonzero(replay.error_flags).item(), 0)
 
     def test_inactive_production_shape_replay_does_not_change_pool(self):
         if not torch.cuda.is_available():
@@ -186,10 +169,6 @@ class KimiK3JitWarmupTest(unittest.TestCase):
             u=tensor((slots, capacity, 1, dim)),
             g=tensor((slots, capacity, 1, dim)),
             conv_inputs=tensor((slots, capacity, channels), torch.bfloat16),
-            slot_generations=tensor((slots,), torch.int64),
-            log_epochs=tensor((slots,), torch.int64),
-            valid_counts=tensor((slots,), torch.int32),
-            error_flags=torch.zeros((slots,), device=device, dtype=torch.int32),
         )
         state = tensor((blocks, 1, dim, dim))
         conv = tensor((blocks, width - 1, channels), torch.bfloat16)
@@ -218,7 +197,6 @@ class KimiK3JitWarmupTest(unittest.TestCase):
                 state_v_first=False,
                 lower_bound=-5.0,
             )
-            finalize_linear_replay(cache, inputs, steps)
             self.assertEqual(tuple(result.shape), (steps, 1, dim))
             self.assertEqual(torch.count_nonzero(result).item(), 0)
         torch.cuda.synchronize(device)

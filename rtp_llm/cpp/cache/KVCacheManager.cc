@@ -659,8 +659,7 @@ void KVCacheManager::initLinearReplayPool() {
     const auto& plan = config_.linear_replay;
     RTP_LLM_CHECK(plan.slotCount() > 0 && plan.maxSteps() > 0);
     const auto layout = coordinator_manager_->allLayerCacheBase();
-    const auto    slots  = plan.slotCount();
-    torch::Device log_device(torch::kCUDA);
+    const auto slots  = plan.slotCount();
     for (const int group_id : config_.linear_replay.group_ids) {
         const auto& group = config_.groups().at(static_cast<size_t>(group_id));
         auto& layers = linear_replay_by_tag_[group.tag];
@@ -672,8 +671,7 @@ void KVCacheManager::initLinearReplayPool() {
             const auto& base = layout.at(group.tag, static_cast<size_t>(layer_id)).kv_addr;
             RTP_LLM_CHECK_WITH_INFO(base.defined(), "LINEAR replay layer %d tag=%s has no cache buffer",
                                     layer_id, group.tag.c_str());
-            log_device = base.device();
-            auto f32 = torch::TensorOptions().device(log_device).dtype(torch::kFloat32);
+            auto                              f32 = torch::TensorOptions().device(base.device()).dtype(torch::kFloat32);
             torch_ext::LinearReplayLayerCache replay;
             replay.k = torch::empty(c10::IntArrayRef(plan.k_shape.data(), plan.k_shape.size()), f32);
             replay.u = torch::empty(c10::IntArrayRef(plan.u_shape.data(), plan.u_shape.size()), f32);
@@ -682,21 +680,6 @@ void KVCacheManager::initLinearReplayPool() {
                 torch::empty(c10::IntArrayRef(plan.conv_input_shape.data(), plan.conv_input_shape.size()),
                              f32.dtype(dataTypeToTorchType(plan.conv_dtype)));
             layers[static_cast<size_t>(layer_id)] = std::move(replay);
-        }
-    }
-    const auto i64 = torch::TensorOptions().device(log_device).dtype(torch::kInt64);
-    const auto generations = torch::zeros({slots}, i64);
-    const auto epochs = torch::zeros({slots}, i64);
-    const auto counts = torch::zeros({slots}, i64.dtype(torch::kInt32));
-    const auto errors = torch::zeros({slots}, i64.dtype(torch::kInt32));
-    for (auto& [tag, layers] : linear_replay_by_tag_) {
-        for (auto& layer : layers) {
-            if (layer) {
-                layer->slot_generations = generations;
-                layer->log_epochs = epochs;
-                layer->valid_counts = counts;
-                layer->error_flags = errors;
-            }
         }
     }
     linear_replay_slots_ = std::make_shared<LinearReplaySlotPool>(static_cast<size_t>(slots));

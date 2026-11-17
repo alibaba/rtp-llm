@@ -32,8 +32,7 @@ private:
 };
 
 struct LinearReplayLease: LinearReplayGpuHold {
-    int32_t slot_id    = -1;
-    int64_t generation = 0;
+    int32_t slot_id = -1;
 };
 
 struct LinearReplayBlockHold: LinearReplayGpuHold {
@@ -124,7 +123,7 @@ using LinearReplayRetirementQueue = LinearReplayRetirementQueueT<torch::Event>;
 
 class LinearReplaySlotPool: public std::enable_shared_from_this<LinearReplaySlotPool> {
 public:
-    explicit LinearReplaySlotPool(size_t slots): generations_(slots, 0), in_use_(slots, false) {}
+    explicit LinearReplaySlotPool(size_t slots): in_use_(slots, false) {}
 
     std::shared_ptr<LinearReplayLease> acquire() {
         retirement_.reap();
@@ -133,10 +132,9 @@ public:
             if (in_use_[slot]) {
                 continue;
             }
-            in_use_[slot]     = true;
-            auto* lease       = new LinearReplayLease;
-            lease->slot_id    = static_cast<int32_t>(slot);
-            lease->generation = ++generations_[slot];
+            in_use_[slot]  = true;
+            auto* lease    = new LinearReplayLease;
+            lease->slot_id = static_cast<int32_t>(slot);
             return std::shared_ptr<LinearReplayLease>(lease, [self = shared_from_this()](LinearReplayLease* value) {
                 const auto slot  = value->slot_id;
                 const auto event = value->lastUse();
@@ -151,7 +149,6 @@ public:
     }
 
 private:
-    std::vector<int64_t>        generations_;
     std::vector<bool>           in_use_;
     std::mutex                  mutex_;
     LinearReplayRetirementQueue retirement_;

@@ -435,7 +435,10 @@ TEST_F(StreamCacheResourceTest, CancelledReplayRoundRetainsLeaseUntilBookkeeping
     auto round = stream_->prepareLinearReplayRound();
     ASSERT_TRUE(round.ok()) << round.status();
     ASSERT_NE(round->state_block_hold, nullptr);
-    const auto generation = round->lease->generation;
+    const auto slot                                 = round->lease->slot_id;
+    auto       late_window                          = std::make_shared<GenerateStream::LinearReplayWindow>();
+    late_window->lease                              = round->lease;
+    std::weak_ptr<LinearReplayLease> previous_lease = round->lease;
 
     ASSERT_TRUE(stream_->prepareMtpCacheForNextStep());
     EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
@@ -444,12 +447,42 @@ TEST_F(StreamCacheResourceTest, CancelledReplayRoundRetainsLeaseUntilBookkeeping
     pending_guard.reset();
     EXPECT_TRUE(resource.isResourceReleased());
     EXPECT_FALSE(stream_->prepareLinearReplayRound().ok());
+    stream_->publishLinearReplayWindow(late_window);
+    EXPECT_EQ(resource.linear_replay_.window, nullptr);
     EXPECT_EQ(cache_manager_->acquireLinearReplaySlot(), nullptr);
 
     round            = absl::FailedPreconditionError("round ownership released");
+    EXPECT_EQ(cache_manager_->acquireLinearReplaySlot(), nullptr);
+    late_window.reset();
+    EXPECT_TRUE(previous_lease.expired());
     auto replacement = cache_manager_->acquireLinearReplaySlot();
     ASSERT_NE(replacement, nullptr);
-    EXPECT_GT(replacement->generation, generation);
+    EXPECT_EQ(replacement->slot_id, slot);
+}
+
+TEST_F(StreamCacheResourceTest, ReplayWindowRequiresTheCurrentRequestLease) {
+    auto config          = test::makeSimpleHybridMhaCacheConfig(4, 16, 2, DataType::TYPE_FP16, 2);
+    config.linear_replay = LinearReplayPlan::create({0}, 2, 4, {1, 1}, {1, 1}, false, DataType::TYPE_FP16, 1);
+    prepareResourceWithCacheConfig(config, {1, 2, 3, 4, 5, 6}, false, RoleType::DECODE);
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    stream_->setSeqLength(7);
+    stream_->setIsContextStream(false);
+    ASSERT_TRUE(resource.incrKVBlock().ok());
+
+    auto other = cache_manager_->acquireLinearReplaySlot();
+    ASSERT_NE(other, nullptr);
+    auto window   = std::make_shared<GenerateStream::LinearReplayWindow>();
+    window->lease = other;
+    stream_->publishLinearReplayWindow(window);
+    EXPECT_EQ(resource.linear_replay_.window, nullptr);
+
+    window->lease = resource.linearReplayLease();
+    stream_->publishLinearReplayWindow(window);
+    EXPECT_EQ(resource.linear_replay_.window, window);
+    auto round = stream_->prepareLinearReplayRound();
+    ASSERT_TRUE(round.ok()) << round.status();
+    EXPECT_EQ(round->previous_window, window);
 }
 
 TEST_F(StreamCacheResourceTest, PendingReplayBookkeepingRetainsFutureDestinationPages) {

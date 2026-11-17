@@ -589,9 +589,7 @@ TEST(CacheConfigCreatorTest, ReplayRequiresCudaAndSelectsTargetLinearGroups) {
             // Both target LINEAR layers need logs; FULL and draft layers do not.
             const size_t values_per_step = key_heads * 128 + value_heads * 128 + value_heads * gate_dim;
             EXPECT_EQ(plan.reserve_bytes,
-                      5u
-                          * (2u * sizeof(int64_t) + 2u * sizeof(int32_t)
-                             + 2u * 4u * (values_per_step * sizeof(float) + channels * sizeof(uint16_t))));
+                      5u * 2u * 4u * (values_per_step * sizeof(float) + channels * sizeof(uint16_t)));
         }
     }
 }

@@ -94,7 +94,7 @@ def launch_config(args):
         "GRAMMAR_COMPILE_TIMEOUT_MS": "30000",
         **(
             {
-                "RTP_LLM_STREAM_ASYNC": "1",
+                "RTP_LLM_STREAM_ASYNC": os.environ.get("RTP_LLM_STREAM_ASYNC", "1"),
                 "RTP_LLM_DROP_BROAD_SYNC": "1",
                 "RTP_LLM_DEVICE_INPUT": "1",
                 "RTP_LLM_MTP_ASYNC_PREPARE": "1",

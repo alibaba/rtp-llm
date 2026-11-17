@@ -3468,7 +3468,6 @@ void MtpExecutor::publishLinearReplayWindows(const StreamGroups&                
         const auto& round = rounds[static_cast<size_t>(row)];
         if (round.lease) {
             auto window                      = std::make_shared<GenerateStream::LinearReplayWindow>();
-            window->verify_epoch             = round.verify_epoch;
             window->produced_steps           = static_cast<int32_t>(propose_step_ + 1);
             window->accept_len_gpu           = accept_lengths.narrow(0, row, 1);
             window->anchor_block_ids_gpu     = anchors.narrow(1, row, 1);

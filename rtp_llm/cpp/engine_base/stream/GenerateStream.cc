@@ -1548,8 +1548,7 @@ absl::StatusOr<GenerateStream::LinearReplayRound> GenerateStream::prepareLinearR
         return absl::FailedPreconditionError("target LINEAR replay requires a live log lease");
     }
     LinearReplayRound round;
-    round.verify_epoch = ++replay.epoch;
-    round.lease        = lease;
+    round.lease = lease;
     if (replay.window && replay.window->lease == lease) {
         round.previous_window = replay.window;
     }
@@ -1566,8 +1565,8 @@ void GenerateStream::publishLinearReplayWindow(std::shared_ptr<const LinearRepla
         return;
     }
     auto& replay = stream_cache_resource_->linear_replay_;
-    if (window && window->lease == replay.lease && window->verify_epoch == replay.epoch
-        && (!replay.window || window->verify_epoch > replay.window->verify_epoch)) {
+    // The executor publishes in step order, before launching async bookkeeping.
+    if (window && window->lease == replay.lease) {
         replay.window = std::move(window);
         replay.clearInitialState();
     }

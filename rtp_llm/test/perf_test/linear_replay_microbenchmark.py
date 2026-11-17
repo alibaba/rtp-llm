@@ -1,13 +1,14 @@
-"""Compare replay precision fixes using production kernels and native operators.
+"""Measure the complete replay path, optionally against a previous source file.
 
-The three variants differ only in convolution operand casts and explicit FMA.
-CUDA-event samples time captured kernel launches, excluding allocation, input
-preparation, compilation, capture, and host validation. Synthetic local-head
-workloads do not measure model TPOT or distributed communication.
+The default protocol mode includes rebuild, convolution, verify, and the old
+header finalize when --baseline-source is provided. Precision mode retains the
+convolution/FMA comparison. Synthetic local-head workloads do not measure TPOT
+or distributed communication.
 """
 
 import argparse
 import ast
+import base64
 import hashlib
 import importlib.util
 import inspect
@@ -18,6 +19,7 @@ import re
 import statistics
 import subprocess
 import sys
+import time
 from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
@@ -109,22 +111,15 @@ def make_case(family, batch, steps, accepted, weight_dtype):
         u=random((batch, steps, hv, dim)),
         g=-torch.rand(batch, steps, hv, dim if family == "kda" else 1, device="cuda"),
         conv_inputs=raw.clone(),
-        slot_generations=torch.ones(batch, device="cuda", dtype=torch.int64),
-        log_epochs=torch.ones(batch, device="cuda", dtype=torch.int64),
-        valid_counts=torch.full((batch,), steps, device="cuda", dtype=torch.int32),
-        error_flags=zeros((batch,), torch.int32),
     )
     inputs = SimpleNamespace(
         slot_ids=torch.arange(batch, device="cuda", dtype=torch.int32),
-        slot_generations=torch.ones(batch, device="cuda", dtype=torch.int64),
         prev_accept_lengths=torch.full(
             (batch,), accepted, device="cuda", dtype=torch.int32
         ),
         history_valid_lengths=torch.full(
             (batch,), steps, device="cuda", dtype=torch.int32
         ),
-        history_epochs=torch.ones(batch, device="cuda", dtype=torch.int64),
-        verify_epochs=torch.full((batch,), 2, device="cuda", dtype=torch.int64),
         init_kinds=zeros((batch,), torch.int32),
         state_read_block_ids=torch.arange(
             1, batch + 1, device="cuda", dtype=torch.int32
@@ -166,14 +161,16 @@ class Launch:
 
 
 class Recorder:
-    def __init__(self, kernel, calls, sink=None, checkpoints=None):
+    def __init__(self, kernel, calls, sink=None, checkpoints=None, replacements=None):
         self.kernel, self.calls, self.sink = kernel, calls, sink
         self.checkpoints = checkpoints
+        self.replacements = replacements or {}
 
     def __getitem__(self, grid):
         def record(*args, **kwargs):
             if self.sink is not None:
                 args = (*args[:7], *self.sink, *args[10:])
+            args = tuple(self.replacements.get(i, arg) for i, arg in enumerate(args))
             if self.checkpoints is not None:
                 args = (*args[:7], self.checkpoints, *args[7:])
             self.calls.append(Launch(self.kernel, grid, args, kwargs))
@@ -181,18 +178,35 @@ class Recorder:
         return record
 
 
-def capture_launches(case, kernels, frozen=False, checkpoints=None):
+def capture_launches(
+    case,
+    kernels,
+    frozen=False,
+    checkpoints=None,
+    *,
+    module=replay,
+    finalize=False,
+    scratch=None,
+):
     calls = []
-    with patch.object(replay, KERNELS[0], Recorder(kernels[0], calls)), patch.object(
-        replay, KERNELS[1], Recorder(kernels[1], calls)
+    with patch.object(module, KERNELS[0], Recorder(kernels[0], calls)), patch.object(
+        module,
+        KERNELS[1],
+        Recorder(kernels[1], calls, replacements={6: scratch[0]} if scratch else None),
     ), patch.object(
-        replay,
+        module,
         KERNELS[2],
-        Recorder(kernels[2], calls, case.sink if frozen else None, checkpoints),
+        Recorder(
+            kernels[2],
+            calls,
+            case.sink if frozen else None,
+            checkpoints,
+            replacements={0: scratch[0], 6: scratch[1]} if scratch else None,
+        ),
     ):
         sizes = [case.h * case.dim, case.h * case.dim, case.hv * case.dim]
         q, k, v = torch.split(case.raw.flatten(0, 1), sizes, dim=-1)
-        output = replay.linear_serial_replay(
+        output = module.linear_serial_replay(
             q,
             k,
             v,
@@ -211,7 +225,252 @@ def capture_launches(case, kernels, frozen=False, checkpoints=None):
             lower_bound=-5.0 if case.family == "kda" else None,
         )
     assert len(calls) == 3
+    if finalize:
+        with patch.object(
+            module, "_finalize_kernel", Recorder(module._finalize_kernel, calls)
+        ):
+            module.finalize_linear_replay(case.cache, case.inputs, case.steps)
     return calls, output
+
+
+def protocol_modules(baseline_source):
+    modules = {"candidate": replay}
+    if baseline_source is not None:
+        spec = importlib.util.spec_from_file_location(
+            "linear_replay_protocol_baseline", baseline_source
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        assert hasattr(module, "finalize_linear_replay"), "baseline must retain headers"
+        modules["baseline"] = module
+    return modules
+
+
+def protocol_case(module, family, batch, steps, accepted):
+    case = make_case(family, batch, steps, accepted, torch.bfloat16)
+    if hasattr(module, "finalize_linear_replay"):
+        # Fixed windows make repeated launches identical. Baseline finalize
+        # republishes the same version rather than advancing the workload.
+        for obj, names in (
+            (case.cache, ("slot_generations", "log_epochs")),
+            (case.inputs, ("slot_generations", "history_epochs", "verify_epochs")),
+        ):
+            for name in names:
+                setattr(obj, name, torch.ones(batch, device="cuda", dtype=torch.int64))
+        case.cache.valid_counts = torch.full(
+            (batch,), steps, device="cuda", dtype=torch.int32
+        )
+        case.cache.error_flags = torch.zeros(batch, device="cuda", dtype=torch.int32)
+    return case
+
+
+def measure_protocol(modules, family, batch, steps, accepted, args):
+    launches, outputs, graphs = {}, {}, {}
+    correctness, samples = {}, {}
+    for name, module in modules.items():
+        case = protocol_case(module, family, batch, steps, accepted)
+        kernels = tuple(getattr(module, kernel) for kernel in KERNELS)
+        finalize = hasattr(module, "finalize_linear_replay")
+        calls, output = capture_launches(
+            case, kernels, module=module, finalize=finalize
+        )
+        for call in calls:
+            call()
+        torch.cuda.synchronize()
+        outputs[name] = (output.clone(), case)
+        samples[name] = {
+            mode: {"cuda_us": [], "host_enqueue_us": []} for mode in ("eager", "graph")
+        }
+    reference, reference_case = outputs["candidate"]
+    for name, (output, case) in outputs.items():
+        checks = [("output", output, reference), ("ssm", case.ssm, reference_case.ssm)]
+        checks += [("conv", case.conv, reference_case.conv)]
+        checks += [
+            (key, getattr(case.cache, key), getattr(reference_case.cache, key))
+            for key in ("k", "u", "g", "conv_inputs")
+        ]
+        correctness[name] = {}
+        for key, actual, expected in checks:
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+            correctness[name][key] = difference(actual, expected)
+    shared_case = protocol_case(
+        modules.get("baseline", replay), family, batch, steps, accepted
+    )
+    scratch = (
+        torch.empty_like(shared_case.raw.flatten(0, 1)),
+        shared_case.raw.new_empty((batch * steps, shared_case.hv, shared_case.dim)),
+    )
+    bindings = {}
+    for name, module in modules.items():
+        launches[name], _ = capture_launches(
+            shared_case,
+            tuple(getattr(module, kernel) for kernel in KERNELS),
+            frozen=True,
+            module=module,
+            finalize=hasattr(module, "finalize_linear_replay"),
+            scratch=scratch,
+        )
+        bindings[name] = shared_tensor_bindings(launches[name])
+        # Older verify kernels also receive replay-only metadata. Require every
+        # candidate binding to alias, while ignoring those unused old arguments.
+        expected_bindings = bindings["candidate"]
+        assert expected_bindings.keys() <= bindings[name].keys()
+        assert all(
+            bindings[name][parameter] == pointer
+            for parameter, pointer in expected_bindings.items()
+        ), "timing buffers must alias"
+        graphs[name] = graph_for(launches[name], args.inner_repeats)
+        torch.testing.assert_close(scratch[1], reference, rtol=0, atol=0)
+        for key in ("ssm", "conv"):
+            torch.testing.assert_close(
+                getattr(shared_case, key), getattr(reference_case, key), rtol=0, atol=0
+            )
+        for key, sink in zip(("k", "u", "g"), shared_case.sink):
+            torch.testing.assert_close(
+                sink, getattr(reference_case.cache, key), rtol=0, atol=0
+            )
+
+    for repeat in range(args.rounds):
+        occupancy()
+        order = list(modules) if repeat % 2 == 0 else list(reversed(modules))
+        for name in modules:
+            for mode in samples[name].values():
+                for raw in mode.values():
+                    raw.append([])
+        for _ in range(args.samples):
+            for name in order:
+                for mode in ("eager", "graph"):
+                    start = torch.cuda.Event(enable_timing=True)
+                    end = torch.cuda.Event(enable_timing=True)
+                    start.record()
+                    begin = time.perf_counter_ns()
+                    if mode == "graph":
+                        graphs[name].replay()
+                        divisor = args.inner_repeats
+                    else:
+                        for call in launches[name]:
+                            call()
+                        divisor = 1
+                    host_us = (time.perf_counter_ns() - begin) / 1000 / divisor
+                    end.record()
+                    end.synchronize()
+                    raw = samples[name][mode]
+                    raw["cuda_us"][-1].append(start.elapsed_time(end) * 1000 / divisor)
+                    raw["host_enqueue_us"][-1].append(host_us)
+    result = {
+        "family": family,
+        "batch": batch,
+        "steps": steps,
+        "accepted": accepted,
+        "correctness": correctness,
+        "timing_buffer_alias_verified": True,
+        "timing_tensor_addresses": bindings,
+        "kernel_sequence": {
+            name: [call.kernel.fn.__name__ for call in calls]
+            for name, calls in launches.items()
+        },
+        "samples_us": samples,
+        "p50_us": {
+            name: {
+                mode: {
+                    metric: statistics.median(x for row in rounds for x in row)
+                    for metric, rounds in metrics.items()
+                }
+                for mode, metrics in modes.items()
+            }
+            for name, modes in samples.items()
+        },
+    }
+    if args.profile_stages:
+        result["profile_stages"] = profile_protocol_stages(
+            launches,
+            graphs,
+            args,
+            f"protocol_{family}_bs{batch}_steps{steps}_accept{accepted}",
+        )
+    return result
+
+
+def shared_tensor_bindings(calls):
+    headers = {
+        "Generation",
+        "HistoryEpoch",
+        "PoolGeneration",
+        "PoolEpoch",
+        "PoolCount",
+        "Error",
+    }
+    return {
+        f"{stage}:{parameter}": tensor.data_ptr()
+        for stage, call in zip(STAGES[:3], calls)
+        for parameter, tensor in zip(
+            inspect.signature(call.kernel.fn).parameters, call.args
+        )
+        if isinstance(tensor, torch.Tensor) and parameter not in headers
+    }
+
+
+def kernel_codegen(call, path):
+    ptx = call.compiled.asm["ptx"]
+    path.write_text(ptx)
+    return {
+        "ptx_file": path.name,
+        "ptx_sha256": hashlib.sha256(ptx.encode()).hexdigest(),
+        "fma_f32": len(re.findall(r"\bfma(?:\.[a-z]+)*\.f32\b", ptx)),
+        "mul_f32": len(re.findall(r"\bmul\.(?:rn\.)?f32\b", ptx)),
+        "bf16_conversions": len(re.findall(r"\bcvt\.[^\s;]*bf16[^\s;]*", ptx)),
+        "registers": call.compiled.n_regs,
+        "spills": call.compiled.n_spills,
+        "shared_bytes": call.compiled.metadata.shared,
+    }
+
+
+def profile_protocol_stages(launches, pipelines, args, prefix):
+    graphs, codegen, samples = {}, {}, {}
+    for name, calls in launches.items():
+        codegen[name], samples[name] = {}, {}
+        for stage, call in zip((*STAGES[:3], "finalize"), calls):
+            graphs[name, stage] = graph_for([call], args.inner_repeats)
+            codegen[name][stage] = kernel_codegen(
+                call, args.output / f"{prefix}_{name}_{stage}.ptx"
+            )
+            samples[name][stage] = []
+        graphs[name, "pipeline"] = pipelines[name]
+        samples[name]["pipeline"] = []
+    for repeat in range(args.rounds):
+        occupancy()
+        order = list(launches) if repeat % 2 == 0 else list(reversed(launches))
+        for stages in samples.values():
+            for rounds in stages.values():
+                rounds.append([])
+        for _ in range(args.samples):
+            for stage in (*STAGES[:3], "finalize", "pipeline"):
+                for name in order:
+                    if (name, stage) not in graphs:
+                        continue
+                    start = torch.cuda.Event(enable_timing=True)
+                    end = torch.cuda.Event(enable_timing=True)
+                    start.record()
+                    graphs[name, stage].replay()
+                    end.record()
+                    end.synchronize()
+                    samples[name][stage][-1].append(
+                        start.elapsed_time(end) * 1000 / args.inner_repeats
+                    )
+    occupancy()
+    return {
+        "timing": "CUDA events around each stage graph or the unchanged full pipeline graph; microseconds",
+        "samples_us": samples,
+        "p50_us": {
+            name: {
+                stage: statistics.median(x for row in rounds for x in row)
+                for stage, rounds in stages.items()
+            }
+            for name, stages in samples.items()
+        },
+        "codegen": codegen,
+    }
 
 
 def difference(actual, expected):
@@ -323,10 +582,9 @@ def native_check(family, steps, weight_dtype, kernels, output_dir):
     results, convolutions = {}, {}
     for name, selected in kernels.items():
         case = make_case(family, 1, steps, 1, weight_dtype)
-        for field in ("prev_accept_lengths", "history_valid_lengths", "history_epochs"):
+        for field in ("prev_accept_lengths", "history_valid_lengths"):
             getattr(case.inputs, field).zero_()
         case.inputs.init_kinds.fill_(1)
-        case.inputs.verify_epochs.fill_(1)
         checkpoints = torch.empty((1, steps, case.hv, 128, 128), device="cuda")
         instrumented = (*selected[:2], checkpoint_kernel(selected[2], output_dir))
         calls, output = capture_launches(case, instrumented, checkpoints=checkpoints)
@@ -339,13 +597,10 @@ def native_check(family, steps, weight_dtype, kernels, output_dir):
             "output": difference(output.reshape_as(expected), expected),
         }
         convolutions[name] = calls[1].args[6].clone()
-        replay.finalize_linear_replay(case.cache, case.inputs, steps)
         snapshot = {key: value.clone() for key, value in vars(case.cache).items()}
         case.inputs.state_read_block_ids.fill_(2)
         case.inputs.active_block_ids.fill_(1)
         case.inputs.history_valid_lengths.fill_(steps)
-        case.inputs.history_epochs.fill_(1)
-        case.inputs.verify_epochs.fill_(2)
         case.inputs.init_kinds.zero_()
         row["accepted_prefixes"] = []
         for accepted in range(1, steps + 1):
@@ -454,17 +709,9 @@ def measure(case, kernels, output, args, index):
             graphs[name, stage] = graph_for(group, args.inner_repeats)
         codegen[name] = {}
         for stage, call in zip(STAGES, calls):
-            ptx = call.compiled.asm["ptx"]
-            path = output / f"case_{index}_{name}_{stage}.ptx"
-            path.write_text(ptx)
-            codegen[name][stage] = {
-                "ptx_sha256": hashlib.sha256(ptx.encode()).hexdigest(),
-                "fma_f32": len(re.findall(r"\bfma(?:\.[a-z]+)*\.f32\b", ptx)),
-                "mul_f32": len(re.findall(r"\bmul\.(?:rn\.)?f32\b", ptx)),
-                "bf16_conversions": len(re.findall(r"\bcvt\.[^\s;]*bf16[^\s;]*", ptx)),
-                "registers": call.compiled.n_regs,
-                "spills": call.compiled.n_spills,
-            }
+            codegen[name][stage] = kernel_codegen(
+                call, output / f"case_{index}_{name}_{stage}.ptx"
+            )
     samples = {name: {stage: [] for stage in STAGES} for name in kernels}
     for repeat in range(args.rounds):
         occupancy()
@@ -502,6 +749,9 @@ def measure(case, kernels, output, args, index):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=("protocol", "precision"), default="protocol")
+    parser.add_argument("--baseline-source", type=Path)
+    parser.add_argument("--profile-stages", action="store_true")
     parser.add_argument("--batches", default="1,16,128")
     parser.add_argument("--accept-lengths", default="1,5")
     parser.add_argument("--steps", type=int, default=5)
@@ -518,12 +768,28 @@ def main():
         ),
     )
     args = parser.parse_args()
+    if args.profile_stages and args.mode != "protocol":
+        parser.error("--profile-stages requires --mode=protocol")
     assert args.rounds >= 2 and args.samples > 0 and args.inner_repeats > 0
     batches = [int(x) for x in args.batches.split(",")]
     accepts = [int(x) for x in args.accept_lengths.split(",")]
     assert all(x > 0 for x in batches) and all(1 <= x <= args.steps for x in accepts)
     args.output.mkdir(parents=True, exist_ok=True)
-    selected = variants(args.output)
+    baseline_encoded = os.environ.get("RTP_LINEAR_REPLAY_BASELINE_SOURCE_BASE64")
+    if baseline_encoded:
+        if args.baseline_source is not None:
+            parser.error("pass only one baseline source: path or base64 environment")
+        try:
+            baseline_bytes = base64.b64decode(
+                "".join(baseline_encoded.split()), validate=True
+            )
+        except ValueError:
+            parser.error("RTP_LINEAR_REPLAY_BASELINE_SOURCE_BASE64 is invalid")
+        if not baseline_bytes:
+            parser.error("baseline source is empty")
+        args.baseline_source = args.output / "protocol_baseline.py"
+        args.baseline_source.write_bytes(baseline_bytes)
+    selected = variants(args.output) if args.mode == "precision" else None
     report = {
         "environment": {
             "public_revision": os.environ.get("RTP_BENCHMARK_REVISION", "unknown"),
@@ -541,6 +807,14 @@ def main():
             "replay_sha256": hashlib.sha256(
                 Path(replay.__file__).read_bytes()
             ).hexdigest(),
+            "baseline_sha256": (
+                hashlib.sha256(args.baseline_source.read_bytes()).hexdigest()
+                if args.baseline_source is not None
+                else None
+            ),
+            "baseline_revision": os.environ.get(
+                "RTP_BENCHMARK_BASELINE_REVISION", "unknown"
+            ),
             "command": sys.argv,
             "occupancy": occupancy(),
         },
@@ -552,15 +826,18 @@ def main():
             "activation_conv_dtype": "bfloat16",
             "ssm_log_dtype": "float32",
             "conv_width": 4,
-            "timing": "CUDA events around graph replay / inner_repeats; warm kernels; microseconds",
+            "mode": args.mode,
+            "profile_stages": args.profile_stages,
+            "timing": "CUDA events and host enqueue wall time; graph time / inner_repeats; microseconds",
             "excluded": [
                 "allocation",
                 "compilation",
                 "capture",
                 "host wrapper",
-                "finalize headers",
             ],
+            "baseline_finalize": "included in protocol mode when present",
             "frozen_logs": "verify writes separate sinks; inputs do not advance between repeats",
+            "protocol_timing_buffers": "baseline/candidate share all common inputs, state, records, sinks and scratch outputs; correctness uses independent buffers",
             "rounds": args.rounds,
             "samples": args.samples,
             "inner_repeats": args.inner_repeats,
@@ -569,6 +846,32 @@ def main():
         "cases": [],
     }
     destination = args.output / "linear_replay_microbenchmark.json"
+    if args.mode == "protocol":
+        modules = protocol_modules(args.baseline_source)
+        report["contract"]["weight_dtype"] = "bfloat16"
+        report["contract"]["timing_boundary"] = (
+            "production kernel launches including baseline header finalize; "
+            "host enqueue excludes wrapper validation and allocation"
+        )
+        for family in ("gdn", "kda"):
+            for batch in batches:
+                for accepted in accepts:
+                    result = measure_protocol(
+                        modules, family, batch, args.steps, accepted, args
+                    )
+                    report["cases"].append(result)
+                    destination.write_text(json.dumps(report, indent=2) + "\n")
+                    print(
+                        json.dumps(
+                            {
+                                key: result[key]
+                                for key in ("family", "batch", "accepted", "p50_us")
+                            }
+                        ),
+                        flush=True,
+                    )
+        print(f"Results: {destination}", flush=True)
+        return
     for family in ("gdn", "kda"):
         for dtype in (torch.bfloat16, torch.float32):
             correctness = native_check(family, args.steps, dtype, selected, args.output)

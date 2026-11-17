@@ -236,7 +236,7 @@ class LinearReplayMetadataModel:
         signature = (
             torch.where(valid, replay.slot_ids, 0).sum()
             + 10 * torch.where(valid, replay.active_block_ids[1], 0).sum()
-            + 100 * torch.where(valid, replay.verify_epochs, 0).sum()
+            + 100 * torch.where(valid, replay.history_valid_lengths, 0).sum()
             + torch.where(valid, replay.prev_accept_lengths, 0).sum()
         )
         return PyModelOutputs(inputs.input_hiddens + signature.to(torch.bfloat16))
@@ -1154,7 +1154,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             max_context_batch_size=4,
             linear_replay_group_count=2,
         )
-        for batch, first_block, epoch in ((4, 10, 1), (2, 20, 2), (3, 30, 3)):
+        for batch, first_block, history_length in ((4, 10, 1), (2, 20, 2), (3, 30, 3)):
             with self.subTest(batch=batch):
                 inputs = _build_target_verify_inputs(
                     GROUP_TAGS,
@@ -1168,9 +1168,6 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 replay.slot_ids = torch.arange(
                     1, batch + 1, dtype=torch.int32, device=device
                 )
-                replay.slot_generations = torch.ones(
-                    batch, dtype=torch.int64, device=device
-                )
                 replay.active_block_ids = torch.zeros(
                     (2, batch), dtype=torch.int32, device=device
                 )
@@ -1180,14 +1177,8 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 replay.prev_accept_lengths = torch.ones(
                     batch, dtype=torch.int32, device=device
                 )
-                replay.history_valid_lengths = torch.zeros(
-                    batch, dtype=torch.int32, device=device
-                )
-                replay.history_epochs = torch.zeros(
-                    batch, dtype=torch.int64, device=device
-                )
-                replay.verify_epochs = torch.full(
-                    (batch,), epoch, dtype=torch.int64, device=device
+                replay.history_valid_lengths = torch.full(
+                    (batch,), history_length, dtype=torch.int32, device=device
                 )
                 replay.init_kinds = torch.zeros(batch, dtype=torch.int32, device=device)
                 replay.state_read_block_ids = torch.zeros(
@@ -1206,7 +1197,7 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
                 expected = (
                     batch * (batch + 1) // 2
                     + 10 * (batch * first_block + batch * (batch - 1) // 2)
-                    + 100 * batch * epoch
+                    + 100 * batch * history_length
                     + batch
                 )
                 torch.cuda.synchronize()

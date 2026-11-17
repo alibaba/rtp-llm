@@ -1,8 +1,8 @@
 """Accepted-prefix replay for CUDA LINEAR attention implementations.
 
-State pages contain the committed anchor. A verify window only publishes its
-normalized keys, corrected values, activated gates, and raw convolution inputs.
-All request metadata remains on the device, including the acceptance length.
+State pages contain the committed anchor. Each leased request slot retains the
+last verify's keys, corrected values, gates, and raw convolution inputs until the
+next verify replays its accepted prefix before overwriting those records.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from rtp_llm.models_py.triton_kernels.fla.op import exp, softplus
 
 @triton.jit
 def _replay_trap():
-    # An invalid lease must fail execution even when TRITON_DEBUG is disabled.
+    # Invalid replay metadata must fail even when TRITON_DEBUG is disabled.
     tl.inline_asm_elementwise(
         "trap; mov.u32 $0, 0;", "=r", [], dtype=tl.int32, is_pure=False, pack=1
     )
@@ -28,17 +28,11 @@ def _replay_trap():
 @triton.jit
 def _replay_row(
     Slot,
-    Generation,
     Source,
     Destination,
     Accept,
     HistoryCount,
-    HistoryEpoch,
     InitKind,
-    PoolGeneration,
-    PoolEpoch,
-    PoolCount,
-    Error,
     row,
     NSLOT: tl.constexpr,
     NBLOCK: tl.constexpr,
@@ -48,7 +42,6 @@ def _replay_row(
     active = slot != -1
     slot_ok = (slot >= 0) & (slot < NSLOT)
     if active & ~slot_ok:
-        tl.atomic_or(Error, 1)
         _replay_trap()
     safe_slot = tl.where(slot_ok, slot, 0)
     source = tl.load(Source + row).to(tl.int64)
@@ -56,32 +49,15 @@ def _replay_row(
     accepted = tl.load(Accept + row)
     count = tl.load(HistoryCount + row)
     init = tl.load(InitKind + row)
-    generation = tl.load(Generation + row)
-    epoch = tl.load(HistoryEpoch + row)
-    old_generation = tl.load(PoolGeneration + safe_slot, mask=slot_ok, other=0)
-    old_epoch = tl.load(PoolEpoch + safe_slot, mask=slot_ok, other=0)
-    old_count = tl.load(PoolCount + safe_slot, mask=slot_ok, other=0)
-    old_error = tl.load(Error + safe_slot, mask=slot_ok, other=0)
-    normal = (
-        (init == 0)
-        & (generation == old_generation)
-        & (epoch == old_epoch)
-        & (count == old_count)
-        & (accepted >= 1)
-        & (accepted <= count)
-        & (count <= CAPACITY)
-    )
+    normal = (init == 0) & (accepted >= 1) & (accepted <= count) & (count <= CAPACITY)
     cold = ((init == 1) | (init == 2)) & (accepted == 0) & (count == 0)
     valid = (
-        (generation > 0)
-        & (old_error == 0)
-        & (destination > 0)
+        (destination > 0)
         & (destination < NBLOCK)
         & (((source > 0) & (source < NBLOCK)) | (init == 2))
         & (normal | cold)
     )
     if active & ~valid:
-        tl.atomic_or(Error + safe_slot, 1)
         _replay_trap()
     return active, safe_slot, source, destination, accepted, init
 
@@ -93,17 +69,11 @@ def _rebuild_state_kernel(
     ULog,
     GLog,
     Slot,
-    Generation,
     Source,
     Destination,
     Accept,
     HistoryCount,
-    HistoryEpoch,
     InitKind,
-    PoolGeneration,
-    PoolEpoch,
-    PoolCount,
-    Error,
     STATE_STRIDE: tl.constexpr,
     NSLOT: tl.constexpr,
     NBLOCK: tl.constexpr,
@@ -121,17 +91,11 @@ def _rebuild_state_kernel(
     tile_v = tl.program_id(1)
     active, slot, source, destination, accepted, init = _replay_row(
         Slot,
-        Generation,
         Source,
         Destination,
         Accept,
         HistoryCount,
-        HistoryEpoch,
         InitKind,
-        PoolGeneration,
-        PoolEpoch,
-        PoolCount,
-        Error,
         row,
         NSLOT,
         NBLOCK,
@@ -189,17 +153,11 @@ def _replay_conv_kernel(
     RawLog,
     Output,
     Slot,
-    Generation,
     Source,
     Destination,
     Accept,
     HistoryCount,
-    HistoryEpoch,
     InitKind,
-    PoolGeneration,
-    PoolEpoch,
-    PoolCount,
-    Error,
     Q_STRIDE: tl.constexpr,
     K_STRIDE: tl.constexpr,
     V_STRIDE: tl.constexpr,
@@ -220,17 +178,11 @@ def _replay_conv_kernel(
     row = tl.program_id(0)
     active, slot, source, destination, accepted, init = _replay_row(
         Slot,
-        Generation,
         Source,
         Destination,
         Accept,
         HistoryCount,
-        HistoryEpoch,
         InitKind,
-        PoolGeneration,
-        PoolEpoch,
-        PoolCount,
-        Error,
         row,
         NSLOT,
         NBLOCK,
@@ -317,22 +269,10 @@ def _serial_verify_kernel(
     ULog,
     GLog,
     Slot,
-    Generation,
-    Source,
     Destination,
-    Accept,
-    HistoryCount,
-    HistoryEpoch,
-    InitKind,
-    PoolGeneration,
-    PoolEpoch,
-    PoolCount,
-    Error,
     GATE_STRIDE: tl.constexpr,
     BETA_STRIDE: tl.constexpr,
     STATE_STRIDE: tl.constexpr,
-    NSLOT: tl.constexpr,
-    NBLOCK: tl.constexpr,
     CAPACITY: tl.constexpr,
     T: tl.constexpr,
     H: tl.constexpr,
@@ -347,30 +287,15 @@ def _serial_verify_kernel(
 ):
     row, hv = tl.program_id(0) // HV, tl.program_id(0) % HV
     tile_v = tl.program_id(1)
-    active, slot, source, destination, accepted, init = _replay_row(
-        Slot,
-        Generation,
-        Source,
-        Destination,
-        Accept,
-        HistoryCount,
-        HistoryEpoch,
-        InitKind,
-        PoolGeneration,
-        PoolEpoch,
-        PoolCount,
-        Error,
-        row,
-        NSLOT,
-        NBLOCK,
-        CAPACITY,
-    )
+    # Rebuild validated this immutable metadata earlier on the same stream.
+    slot = tl.load(Slot + row).to(tl.int64)
     ik = tl.arange(0, BK)
     iv = tile_v * BV + tl.arange(0, BV)
-    if not active:
+    if slot == -1:
         for t in tl.static_range(T):
             tl.store(Output + ((row * T + t) * HV + hv) * V + iv, 0, iv < V)
         return
+    destination = tl.load(Destination + row).to(tl.int64)
     hk = hv // (HV // H)
     c = 2 * H * K + HV * V
     if STATE_V_FIRST:
@@ -434,57 +359,6 @@ def _serial_verify_kernel(
                 )
 
 
-@triton.jit(do_not_specialize=["B"])
-def _finalize_kernel(
-    Slot,
-    Generation,
-    Epoch,
-    PoolGeneration,
-    PoolEpoch,
-    PoolCount,
-    Error,
-    B,
-    NSLOT: tl.constexpr,
-    T: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    slot = tl.load(Slot + row, row < B, other=-1).to(tl.int64)
-    valid = (row < B) & (slot >= 0) & (slot < NSLOT)
-    generation = tl.load(Generation + row, valid, other=0)
-    epoch = tl.load(Epoch + row, valid, other=0)
-    error = tl.load(Error + slot, valid, other=0)
-    bad = ((row < B) & (slot != -1) & ~valid) | (
-        valid & ((generation <= 0) | (epoch <= 0) | (error != 0))
-    )
-    if tl.sum(bad.to(tl.int32), 0) > 0:
-        _replay_trap()
-    tl.store(PoolGeneration + slot, generation, valid)
-    tl.store(PoolEpoch + slot, epoch, valid)
-    tl.store(PoolCount + slot, T, valid)
-
-
-def finalize_linear_replay(layer_cache: Any, replay_inputs: Any, steps: int) -> None:
-    """Publish shared log headers once, after every target layer has completed."""
-    if steps <= 0 or steps > layer_cache.k.shape[1]:
-        raise ValueError("LINEAR replay finalize length exceeds the log capacity")
-    batch = replay_inputs.slot_ids.numel()
-    _finalize_kernel[(triton.cdiv(batch, 128),)](
-        replay_inputs.slot_ids,
-        replay_inputs.slot_generations,
-        replay_inputs.verify_epochs,
-        layer_cache.slot_generations,
-        layer_cache.log_epochs,
-        layer_cache.valid_counts,
-        layer_cache.error_flags,
-        batch,
-        layer_cache.k.shape[0],
-        steps,
-        128,
-        num_warps=4,
-    )
-
-
 def _require_tensor(
     name: str,
     tensor: torch.Tensor,
@@ -541,10 +415,6 @@ class LinearReplay:
             ("u", (slots, capacity, hv, v), torch.float32),
             ("g", (slots, capacity, hv, gate_dim), torch.float32),
             ("conv_inputs", (slots, capacity, channels), conv_pool.dtype),
-            ("slot_generations", (slots,), torch.int64),
-            ("log_epochs", (slots,), torch.int64),
-            ("valid_counts", (slots,), torch.int32),
-            ("error_flags", (slots,), torch.int32),
         ):
             _require_tensor(name, getattr(layer_cache, name), shape, device, dtype)
         blocks = ssm_pool.shape[0]
@@ -688,19 +558,13 @@ def _linear_serial_replay(
         raise ValueError("LINEAR replay inputs must match the bound state pools")
     for name in (
         "slot_ids",
-        "slot_generations",
         "prev_accept_lengths",
         "history_valid_lengths",
-        "history_epochs",
-        "verify_epochs",
         "init_kinds",
     ):
-        dtype = (
-            torch.int64
-            if name in ("slot_generations", "history_epochs", "verify_epochs")
-            else torch.int32
+        _require_tensor(
+            name, getattr(replay_inputs, name), (batch,), device, torch.int32
         )
-        _require_tensor(name, getattr(replay_inputs, name), (batch,), device, dtype)
     for name in ("state_read_block_ids", "active_block_ids"):
         tensor = getattr(replay_inputs, name)
         if tensor.ndim != 2 or group_id < 0 or tensor.shape[0] <= group_id:
@@ -723,17 +587,11 @@ def _linear_serial_replay(
     destination = replay_inputs.active_block_ids[group_id]
     row_args = (
         replay_inputs.slot_ids,
-        replay_inputs.slot_generations,
         source,
         destination,
         replay_inputs.prev_accept_lengths,
         replay_inputs.history_valid_lengths,
-        replay_inputs.history_epochs,
         replay_inputs.init_kinds,
-        layer_cache.slot_generations,
-        layer_cache.log_epochs,
-        layer_cache.valid_counts,
-        layer_cache.error_flags,
     )
     tile_k = triton.next_power_of_2(k)
     tile_v = 32 if vector_gate else 8
@@ -799,12 +657,11 @@ def _linear_serial_replay(
         layer_cache.k,
         layer_cache.u,
         layer_cache.g,
-        *row_args,
+        replay_inputs.slot_ids,
+        destination,
         raw_gate.stride(0),
         raw_beta.stride(0),
         ssm_pool.stride(0),
-        slots,
-        blocks,
         capacity,
         steps,
         h,
@@ -862,4 +719,4 @@ def linear_serial_replay(
     )
 
 
-__all__ = ["LinearReplay", "finalize_linear_replay", "linear_serial_replay"]
+__all__ = ["LinearReplay", "linear_serial_replay"]

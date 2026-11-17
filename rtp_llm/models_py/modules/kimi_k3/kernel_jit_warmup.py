@@ -8,10 +8,7 @@ from types import SimpleNamespace
 
 import torch
 
-from rtp_llm.models_py.triton_kernels.linear_replay import (
-    finalize_linear_replay,
-    linear_serial_replay,
-)
+from rtp_llm.models_py.triton_kernels.linear_replay import linear_serial_replay
 from rtp_llm.utils.warmup import model_warm_up_enabled
 
 
@@ -20,7 +17,6 @@ def _inactive_replay_inputs(
 ) -> SimpleNamespace:
     """Use inactive leases with both reachable metadata pointer alignments."""
     i32 = lambda value: torch.full((batch,), value, device=device, dtype=torch.int32)
-    i64 = lambda: torch.zeros(batch, device=device, dtype=torch.int64)
     pitch = (batch + 3) // 4 * 4
     storage = torch.full(
         ((group_id + 1) * pitch + 1,), -1, device=device, dtype=torch.int32
@@ -30,13 +26,10 @@ def _inactive_replay_inputs(
     )
     return SimpleNamespace(
         slot_ids=i32(-1),
-        slot_generations=i64(),
         state_read_block_ids=blocks,
         active_block_ids=blocks,
         prev_accept_lengths=i32(0),
         history_valid_lengths=i32(0),
-        history_epochs=i64(),
-        verify_epochs=i64(),
         init_kinds=i32(0),
     )
 
@@ -45,8 +38,8 @@ def _inactive_replay_inputs(
 def _warmup_replay(model, init_resource) -> None:
     """Compile every reachable verify width against the actual replay pool.
 
-    Inactive rows write only scratch output. The production state, logs and
-    shared headers are never changed by this compile preparation.
+    Inactive rows write only scratch output. Production state and logs are
+    never changed by this compile preparation.
     """
     if not init_resource.is_decode_role or model.kv_cache is None:
         return
@@ -150,7 +143,6 @@ def _warmup_replay(model, init_resource) -> None:
                     state_v_first=False,
                     lower_bound=decoder.gate_lower_bound,
                 )
-                finalize_linear_replay(replay_cache, inputs, steps)
             torch.cuda.synchronize(device)
             logging.info(
                 "K3 LINEAR replay JIT prepared: layer=%d group=%d steps=1..%d "
