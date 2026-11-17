@@ -418,6 +418,18 @@ class AttnImplFactory(object):
             parallelism_config.get_attn_tp_size()
         )
         attn_inputs.headwise_config = getattr(model_config, "headwise_config", None)
+        if getattr(hw_kernel_config, "batch_invariant", False):
+            from .cuda_impl.batch_invariant import BatchInvariantAttention
+
+            if is_cuda_graph or not BatchInvariantAttention.support(
+                attn_configs, attn_inputs
+            ):
+                raise ValueError(
+                    "batch-invariant attention requires eager causal BF16 GQA"
+                )
+            attn_inputs.is_cuda_graph = False
+            return BatchInvariantAttention(attn_configs, attn_inputs)
+
         if (
             decode_cascade_max_requests > 0
             and not attn_inputs.is_prefill

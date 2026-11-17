@@ -8,7 +8,11 @@ from typing import Any, Dict, Optional, Type, Union
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
-from rtp_llm.config.engine_config import EngineConfig, finalize_scheduler_config
+from rtp_llm.config.engine_config import (
+    EngineConfig,
+    configure_batch_invariant_model,
+    finalize_scheduler_config,
+)
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.layer_partition import finalize_pp_partition, is_last_stage
 from rtp_llm.config.model_args import ModelArgs
@@ -443,6 +447,7 @@ class ModelFactory:
             engine_config: EngineConfig to update
             model_config: ModelConfig containing model information
         """
+        configure_batch_invariant_model(engine_config, model_config)
         finalize_pp_partition(engine_config.parallelism_config, model_config.num_layers)
 
         # Finalize scheduler config based on ModelConfig (only once, for main model)

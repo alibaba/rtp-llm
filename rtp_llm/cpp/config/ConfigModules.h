@@ -349,6 +349,7 @@ struct HWKernelConfig {
     bool             enable_fuse_kernels             = true;
     bool             glm5_cp_opt                     = false;
     bool             enable_glm5_cmp                 = false;
+    bool             batch_invariant                 = false;
     std::string      to_string() const;
 };
 

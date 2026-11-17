@@ -380,12 +380,37 @@ class HWKernelConfigPickleTest(unittest.TestCase):
                 self.assertFalse(restored.enable_dynamic_decode_backend)
 
     def test_unsupported_tuple_sizes_are_rejected(self):
-        for size in (6, 14, 16, 19, 20):
+        for size in (6, 14, 17, 19, 20):
             with self.subTest(size=size), self.assertRaisesRegex(
                 RuntimeError, "Invalid state"
             ):
                 config = _new_hw_kernel_config()
                 config.__setstate__(tuple(range(size)))
+
+    def test_batch_invariant_pickle_keeps_main_layout_when_disabled(self):
+        config = HWKernelConfig()
+        config.enable_dynamic_decode_backend = True
+        config.dyn_decode_gate_thresholds = ""
+        main_state = config.__getstate__()
+        self.assertEqual(len(main_state), 15)
+        self.assertFalse(pickle.loads(pickle.dumps(config)).batch_invariant)
+
+        config.batch_invariant = True
+        self.assertEqual(config.__getstate__(), main_state + (True,))
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertTrue(restored.batch_invariant)
+        self.assertTrue(restored.enable_dynamic_decode_backend)
+        self.assertEqual(restored.dyn_decode_gate_thresholds, "")
+
+    def test_legacy_batch_invariant_layout(self):
+        base = HWKernelConfig().__getstate__()[:8]
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                config = _new_hw_kernel_config()
+                config.__setstate__(base + (None, True, enabled))
+                self.assertEqual(config.batch_invariant, enabled)
+                self.assertTrue(config.enable_decode_cascade_attention)
+                self.assertTrue(config.enable_fuse_kernels)
 
     def test_current_layout_rejects_wrong_field_type(self):
         malformed_state = (

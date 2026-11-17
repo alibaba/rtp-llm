@@ -43,3 +43,12 @@ class CudaF16Linear(LinearBase):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return F.linear(input, self.weight, self.bias)
+
+
+class BatchInvariantLinear(CudaF16Linear):
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        from rtp_llm.models_py.triton_kernels.common.batch_invariant_linear import (
+            batch_invariant_linear,
+        )
+
+        return batch_invariant_linear(input, self.weight, self.bias)

@@ -229,6 +229,7 @@ std::string HybridAttentionConfig::to_string() const {
 std::string HWKernelConfig::to_string() const {
     std::ostringstream oss;
     oss << "use_swizzleA: " << use_swizzleA << "\n"
+        << "batch_invariant: " << batch_invariant << "\n"
         << "enable_cuda_graph: " << enable_cuda_graph << "\n"
         << "enable_dynamic_decode_backend: " << enable_dynamic_decode_backend << "\n"
         << "dyn_decode_gate_thresholds: " << dyn_decode_gate_thresholds.value_or("") << "\n"

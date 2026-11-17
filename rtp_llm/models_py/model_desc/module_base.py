@@ -159,7 +159,12 @@ class GptModelBase(nn.Module):
         cuda_graph_selection_mode: Optional[str] = None,
     ) -> AttentionImpl | dict[str, AttentionImpl]:
         attention_inputs = get_attention_inputs_value(inputs)
-        if getattr(self, "_dynamic_decode_enabled", False) and is_cuda_graph:
+        batch_invariant = getattr(self.py_hw_kernel_config, "batch_invariant", False)
+        if (
+            not batch_invariant
+            and getattr(self, "_dynamic_decode_enabled", False)
+            and is_cuda_graph
+        ):
             from rtp_llm.config.cuda_graph import CudaGraphSelectionMode
             from rtp_llm.models_py.modules.factory.attention.dispatch.backend_selector import (
                 instantiate_decode_backend,
