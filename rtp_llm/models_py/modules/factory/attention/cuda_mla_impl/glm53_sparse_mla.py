@@ -48,6 +48,7 @@ from rtp_llm.models_py.modules.indexer_grouping import (
     append_incomplete_tail_indices,
     expand_indexer_group_indices,
     fused_expand_indexer_groups_with_tail,
+    pad_empty_indexer_history,
 )
 from rtp_llm.models_py.triton_kernels.common.strided_slice_copy import (
     strided_slice_copy_,
@@ -313,6 +314,11 @@ class SparseMlaOp(object):
                 f"got shape={tuple(topk_indices.shape)}"
             )
         topk_2d = _topk_2d(topk_indices)
+        if self.indexer_group_size > 1:
+            # The compressed indexer emits [T, 0] before the first complete
+            # group (and during pool warmup). Preserve the raw live tail while
+            # padding the empty history to the configured selection width.
+            topk_2d = pad_empty_indexer_history(topk_2d, self.indexer_top_k)
         if self.indexer_group_size > 1 and int(topk_2d.shape[1]) == self.top_k:
             # GLM53 MTP reuse supplies the first step's frozen raw-token seed.
             # Re-expanding or appending the current tail changes its selection.

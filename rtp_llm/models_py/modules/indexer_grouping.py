@@ -192,6 +192,15 @@ def completed_group_lengths_i32(
     )
 
 
+def pad_empty_indexer_history(
+    group_indices: torch.Tensor, selection_topk: int
+) -> torch.Tensor:
+    """Give cold-start history its fixed sentinel width before tail expansion."""
+    if group_indices.shape[-1] == 0:
+        return group_indices.new_full((*group_indices.shape[:-1], selection_topk), -1)
+    return group_indices
+
+
 def expand_indexer_group_indices(
     group_indices: torch.Tensor,
     group_size: int,
