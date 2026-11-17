@@ -41,10 +41,7 @@ transferError(TransferResult result, size_t begin, size_t end, const char* trans
     return result;
 }
 
-void logBatchFailure(const std::vector<TransferDescriptor>& descriptors,
-                     size_t                                 begin,
-                     const char*                            transfer_name,
-                     const char*                            stage) {
+void logBatchFailure(DescriptorView descriptors, size_t begin, const char* transfer_name, const char* stage) {
     for (size_t index = 0; index < descriptors.size(); ++index) {
         RTP_LLM_LOG_WARNING("%s %s failed, index=%zu %s",
                             transfer_name,
@@ -166,9 +163,8 @@ DeviceDiskTransferExecutor::execute(TransferTask task, const std::vector<const G
     try {
         for (size_t begin = 0; begin < descriptors.size(); begin += capacity) {
             const size_t                    end = std::min(begin + capacity, descriptors.size());
-            std::vector<TransferDescriptor> sub_descriptors(descriptors.begin() + begin, descriptors.begin() + end);
             std::vector<const GroupSet*>    sub_group_sets(group_sets.begin() + begin, group_sets.begin() + end);
-            auto                            batch_task = task.subtask(std::move(sub_descriptors));
+            auto                            batch_task = task.subtask(begin, end);
             const auto                      deadline   = batch_task.deadline();
             std::vector<size_t> indices(end - begin);
             std::iota(indices.begin(), indices.end(), begin);

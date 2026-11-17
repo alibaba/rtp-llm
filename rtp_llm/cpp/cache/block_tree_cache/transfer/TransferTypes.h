@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <string>
@@ -390,10 +391,49 @@ private:
     }
 };
 
-// Shared task description across preparation, RPC transport and local batching.
-// Builders resolve descriptors before submission; execution entrances validate
-// their batch constraints. Executors own their copy and do not mutate it.
-// Results use the current descriptor order; PerRank owns the parent-index maps.
+// Non-owning, read-only access to a contiguous descriptor range. The caller
+// keeps the vector or TransferTask that owns the descriptors alive.
+class DescriptorView {
+public:
+    DescriptorView() = default;
+    DescriptorView(const std::vector<TransferDescriptor>& descriptors):
+        DescriptorView(descriptors.data(), descriptors.size()) {}
+    DescriptorView(const std::initializer_list<TransferDescriptor>& descriptors):
+        DescriptorView(descriptors.begin(), descriptors.size()) {}
+    DescriptorView(const TransferDescriptor* data, size_t size): data_(data), size_(size) {}
+
+    const TransferDescriptor* data() const {
+        return data_;
+    }
+    const TransferDescriptor* begin() const {
+        return data_;
+    }
+    const TransferDescriptor* end() const {
+        return size_ ? data_ + size_ : data_;
+    }
+    size_t size() const {
+        return size_;
+    }
+    bool empty() const {
+        return size_ == 0;
+    }
+    const TransferDescriptor& front() const {
+        return *data_;
+    }
+    const TransferDescriptor& back() const {
+        return data_[size_ - 1];
+    }
+    const TransferDescriptor& operator[](size_t index) const {
+        return data_[index];
+    }
+
+private:
+    const TransferDescriptor* data_{nullptr};
+    size_t                    size_{0};
+};
+
+// Task descriptors are immutable and shared across RPC transport and local batching.
+// Copies share storage; subtasks select a contiguous range without copying it.
 class TransferTask {
 public:
     using Clock = std::chrono::steady_clock;
@@ -401,7 +441,15 @@ public:
     TransferTask(std::vector<TransferDescriptor> descriptors,
                  std::chrono::milliseconds       timeout,
                  std::optional<int64_t>          request_id = {}):
-        descriptors_(std::move(descriptors)), deadline_(Clock::now() + timeout), request_id_(request_id) {}
+        descriptors_(makeDescriptors(std::move(descriptors))),
+        end_(descriptors_ ? descriptors_->size() : 0),
+        deadline_(Clock::now() + timeout),
+        request_id_(request_id) {}
+
+    TransferTask(const TransferTask&)                = default;
+    TransferTask& operator=(const TransferTask&)     = default;
+    TransferTask(TransferTask&&) noexcept            = default;
+    TransferTask& operator=(TransferTask&&) noexcept = default;
 
     std::optional<int64_t> requestId() const {
         return request_id_;
@@ -437,21 +485,30 @@ public:
         completion_proof_ = std::move(proof);
     }
 
-    const std::vector<TransferDescriptor>& descriptors() const {
-        return descriptors_;
+    DescriptorView descriptors() const {
+        return descriptors_ ? DescriptorView(descriptors_->data() + begin_, end_ - begin_) : DescriptorView{};
     }
 
     Clock::time_point deadline() const {
         return deadline_;
     }
 
-    void addDescriptor(TransferDescriptor descriptor) {
-        descriptors_.push_back(std::move(descriptor));
-    }
-
-    // Business task builders may fill or resolve descriptors before admission.
-    std::vector<TransferDescriptor>& mutableDescriptorsForPreparation() {
-        return descriptors_;
+    // Check the producer's contiguous-group contract once at the execution
+    // boundary. Slicing and descriptor access do not repeat these checks.
+    bool sanityCheck() const {
+        const auto descs = descriptors();
+        for (size_t begin = 0; begin < descs.size();) {
+            const auto& first      = descs[begin];
+            const auto  same_group = [&first](const TransferDescriptor& desc) {
+                return desc.group_set_id == first.group_set_id && desc.source_tier == first.source_tier
+                       && desc.target_tier == first.target_tier;
+            };
+            if (std::any_of(descs.begin(), descs.begin() + begin, same_group))
+                return false;
+            const auto end = std::find_if_not(descs.begin() + begin, descs.end(), same_group);
+            begin          = end - descs.begin();
+        }
+        return true;
     }
 
     std::optional<std::chrono::milliseconds> remainingTimeout() const {
@@ -469,11 +526,19 @@ public:
     TransferTask subtask(std::vector<TransferDescriptor> descriptors) const {
         // The proof covers this complete physical batch, not an arbitrary
         // subset or intermediate stage. Ownership must be transferred explicitly.
-        auto task      = TransferTask(std::move(descriptors), *this);
+        auto task = TransferTask(std::move(descriptors), *this);
         task.completion_proof_.reset();
-        task.trace_id_ = trace_id_;
+        task.trace_id_        = trace_id_;
         task.workflow_id_     = workflow_id_;
         task.parent_trace_id_ = parent_trace_id_;
+        return task;
+    }
+
+    TransferTask subtask(size_t begin, size_t end, std::shared_ptr<TransferBufferSafety> proof = {}) const {
+        auto task = *this;
+        task.begin_ += begin;
+        task.end_              = begin_ + end;
+        task.completion_proof_ = std::move(proof);
         return task;
     }
 
@@ -481,30 +546,47 @@ public:
     // as its execution identity. Nested worker batches inherit that trace ID
     // through subtask(), while the workflow links independent RPC batches.
     TransferTask rpcSubtask(std::vector<TransferDescriptor> descriptors) const {
-        auto task = TransferTask(std::move(descriptors), *this);
+        return subtask(std::move(descriptors)).rpcSubtask();
+    }
+
+    // Each independently submitted RPC has its own execution identity while
+    // retaining the descriptor range and the absolute deadline.
+    TransferTask rpcSubtask() const {
+        auto task = *this;
         task.completion_proof_.reset();
-        task.trace_id_ = next_trace_id_.fetch_add(1, std::memory_order_relaxed);
-        task.setWorkflow(workflow_id_, trace_id_);
+        task.trace_id_        = next_trace_id_.fetch_add(1, std::memory_order_relaxed);
+        task.workflow_id_     = workflow_id_;
+        task.parent_trace_id_ = trace_id_;
         return task;
     }
 
 private:
+    using Descriptors = std::vector<TransferDescriptor>;
+
+    static std::shared_ptr<const Descriptors> makeDescriptors(Descriptors descriptors) {
+        return descriptors.empty() ? std::shared_ptr<const Descriptors>{} :
+                                     std::make_shared<const Descriptors>(std::move(descriptors));
+    }
+
     TransferTask(std::vector<TransferDescriptor> descriptors, const TransferTask& parent):
-        descriptors_(std::move(descriptors)),
+        descriptors_(makeDescriptors(std::move(descriptors))),
+        end_(descriptors_ ? descriptors_->size() : 0),
         deadline_(parent.deadline_),
         request_id_(parent.request_id_),
         trace_id_(parent.trace_id_),
         workflow_id_(parent.workflow_id_),
         parent_trace_id_(parent.parent_trace_id_) {}
 
-    std::vector<TransferDescriptor>       descriptors_;
+    std::shared_ptr<const Descriptors>    descriptors_;
+    size_t                                begin_{0};
+    size_t                                end_{0};
     Clock::time_point                     deadline_;
     std::optional<int64_t>                request_id_;
     std::shared_ptr<TransferBufferSafety> completion_proof_;
-    inline static std::atomic<uint64_t> next_trace_id_{1};
-    uint64_t                            trace_id_{next_trace_id_.fetch_add(1, std::memory_order_relaxed)};
-    uint64_t                            workflow_id_{trace_id_};
-    uint64_t                            parent_trace_id_{0};
+    inline static std::atomic<uint64_t>   next_trace_id_{1};
+    uint64_t                              trace_id_{next_trace_id_.fetch_add(1, std::memory_order_relaxed)};
+    uint64_t                              workflow_id_{trace_id_};
+    uint64_t                              parent_trace_id_{0};
 };
 
 }  // namespace rtp_llm

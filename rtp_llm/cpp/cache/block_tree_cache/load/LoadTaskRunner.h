@@ -75,12 +75,12 @@ public:
     void    releaseTaskResources(const Task& task);
 
 private:
-    void reportStageFinished(const Task&                            task,
-                             BlockTreeCacheMetricsReporter&         metrics_reporter,
-                             Tier                                   source_tier,
-                             const std::vector<TransferDescriptor>& descriptors,
-                             int64_t                                begin_time_us,
-                             bool                                   success) const;
+    void reportStageFinished(const Task&                    task,
+                             BlockTreeCacheMetricsReporter& metrics_reporter,
+                             Tier                           source_tier,
+                             DescriptorView                 descriptors,
+                             int64_t                        begin_time_us,
+                             bool                           success) const;
 
     const std::vector<GroupSetPtr>& group_sets_;
     int                             host_timeout_ms_{0};

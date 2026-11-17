@@ -144,12 +144,12 @@ void LoadTaskRunner::runTransfer(TaskPtr                        task,
     transfers->finishSubmitting();
 }
 
-void LoadTaskRunner::reportStageFinished(const Task&                            task,
-                                         BlockTreeCacheMetricsReporter&         metrics_reporter,
-                                         Tier                                   source_tier,
-                                         const std::vector<TransferDescriptor>& descriptors,
-                                         int64_t                                begin_time_us,
-                                         bool                                   success) const {
+void LoadTaskRunner::reportStageFinished(const Task&                    task,
+                                         BlockTreeCacheMetricsReporter& metrics_reporter,
+                                         Tier                           source_tier,
+                                         DescriptorView                 descriptors,
+                                         int64_t                        begin_time_us,
+                                         bool                           success) const {
     static const std::vector<TransferDescriptor> empty_descriptors;
     metrics_reporter.reportTransferFinished(TransferOperation::LOAD,
                                             source_tier,

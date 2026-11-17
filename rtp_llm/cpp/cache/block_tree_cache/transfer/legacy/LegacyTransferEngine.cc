@@ -21,10 +21,20 @@ LegacyTransferEngine::LegacyTransferEngine(std::vector<GroupSetPtr> groups,
                    && (group->hostPool() || (enable_disk_cache && group->diskPool()));
         })) {
         const auto crc_groups = crcTransferGroups(group_sets_, enable_disk_cache);
-        load_crc_executor     = std::make_shared<CrcCopyExecutor>(
-            crc_groups, max_descriptors_per_batch, transfer_worker_count, world_rank, nullptr, false);
-        evict_crc_executor = std::make_shared<CrcCopyExecutor>(
-            crc_groups, max_descriptors_per_batch, transfer_worker_count, world_rank, nullptr, false);
+        load_crc_executor     = std::make_shared<CrcCopyExecutor>(crc_groups,
+                                                              CrcCopyDirection::LOAD,
+                                                              max_descriptors_per_batch,
+                                                              transfer_worker_count,
+                                                              world_rank,
+                                                              nullptr,
+                                                              false);
+        evict_crc_executor    = std::make_shared<CrcCopyExecutor>(crc_groups,
+                                                               CrcCopyDirection::EVICT,
+                                                               max_descriptors_per_batch,
+                                                               transfer_worker_count,
+                                                               world_rank,
+                                                               nullptr,
+                                                               false);
     }
     load_transfer_task_pool_ =
         std::make_unique<BlockTreeTaskPool>(transfer_worker_count, transfer_queue_max_size, "btc_load");

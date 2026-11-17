@@ -96,14 +96,14 @@ public:
     int64_t reportTransferStarted(TransferOperation operation, Tier source_tier, Tier target_tier);
     // Report once after all batches/ranks of a logical copy have completed.
     void maybeReportCopyError(Tier source_tier, Tier target_tier, const TransferResult& result) const;
-    void reportTransferFinished(TransferOperation                      operation,
-                                Tier                                   source_tier,
-                                Tier                                   target_tier,
-                                size_t                                 descriptors_per_transfer,
-                                int64_t                                begin_time_us,
-                                bool                                   success,
-                                const std::vector<TransferDescriptor>& successful_descriptors,
-                                const std::vector<GroupSetPtr>&        group_sets);
+    void reportTransferFinished(TransferOperation               operation,
+                                Tier                            source_tier,
+                                Tier                            target_tier,
+                                size_t                          descriptors_per_transfer,
+                                int64_t                         begin_time_us,
+                                bool                            success,
+                                DescriptorView                  successful_descriptors,
+                                const std::vector<GroupSetPtr>& group_sets);
     void reportQueueBacklog(const BlockTreeQueueSizes& queue_sizes, const char* pool_type) const;
 
 private:
@@ -130,9 +130,9 @@ private:
     void                                       accumulateTransferBytes(const TransferDescriptor& desc,
                                                                        const GroupSetPtr&        group_set,
                                                                        BlockTreeTransferBytes&   transfer_bytes) const;
-    void                                       accumulateTransferBytes(const std::vector<TransferDescriptor>& descs,
-                                                                       const std::vector<GroupSetPtr>&        group_sets,
-                                                                       BlockTreeTransferBytes&                transfer_bytes) const;
+    void                                       accumulateTransferBytes(DescriptorView                  descs,
+                                                                       const std::vector<GroupSetPtr>& group_sets,
+                                                                       BlockTreeTransferBytes&         transfer_bytes) const;
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter_;
     std::unique_ptr<CacheStageMetrics>         stage_metrics_;
     std::array<std::array<std::atomic<int64_t>, kDirectionCount>, kOperationCount> transfer_in_flight_{};

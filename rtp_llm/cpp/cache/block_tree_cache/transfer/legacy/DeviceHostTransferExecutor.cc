@@ -68,9 +68,9 @@ DeviceHostTransferExecutor::DeviceHostTransferExecutor(BlockTreeTaskPool&    tra
     }
 }
 
-TransferResult DeviceHostTransferExecutor::executeBatch(const std::vector<HostBufferView>&     hosts,
-                                                        const std::vector<TransferDescriptor>& descriptors,
-                                                        const std::vector<const GroupSet*>&    group_sets) {
+TransferResult DeviceHostTransferExecutor::executeBatch(const std::vector<HostBufferView>&  hosts,
+                                                        DescriptorView                      descriptors,
+                                                        const std::vector<const GroupSet*>& group_sets) {
     bool buffer_safe = true;
     try {
         auto unsubmitted = [](TransferStatus status) {
@@ -173,9 +173,9 @@ TransferResult DeviceHostTransferExecutor::executeBatch(const std::vector<HostBu
 }
 
 std::pair<TransferStatus, std::vector<DeviceHostCopyPlan>>
-DeviceHostTransferExecutor::generatePlan(const std::vector<HostBufferView>&     hosts,
-                                         const std::vector<TransferDescriptor>& descriptors,
-                                         const std::vector<const GroupSet*>&    group_sets) const {
+DeviceHostTransferExecutor::generatePlan(const std::vector<HostBufferView>&  hosts,
+                                         DescriptorView                      descriptors,
+                                         const std::vector<const GroupSet*>& group_sets) const {
     const bool                        device_to_host = descriptors.front().target_tier != Tier::DEVICE;
     std::map<int, DeviceHostCopyPlan> plans_by_device;
     for (size_t descriptor_index = 0; descriptor_index < descriptors.size(); ++descriptor_index) {

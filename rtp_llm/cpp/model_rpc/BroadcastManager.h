@@ -467,14 +467,49 @@ public:
                                                                       std::optional<int64_t> request_id = std::nullopt,
                                                                       std::string direction = "unknown",
                                                                       bool fatal_on_error = true) const {
-        const auto rpc_tag =
-            "request_id=" + (request_id ? std::to_string(*request_id) : "none") + " direction=" + direction;
         const auto worker_size = worker_addrs_.size();
         if (requests.size() != worker_size) {
             RTP_LLM_LOG_WARNING(
                 "broadcast failed, requests size mismatch, req: %zu, worker size: %zu", requests.size(), worker_size);
             return nullptr;
         }
+        return broadcastImpl<RequestPB, ResponsePB>(
+            [&requests](size_t rank) -> const RequestPB& { return requests.at(rank); },
+            timeout_ms,
+            rpc_call,
+            request_id,
+            std::move(direction),
+            fatal_on_error);
+    }
+
+    // All ranks receive the same payload. Each RPC context still owns its copy
+    // until its CQ event; callers need not build a temporary vector of copies.
+    template<typename RequestPB, typename ResponsePB, typename RpcCall>
+    std::shared_ptr<BroadcastResult<RequestPB, ResponsePB>> broadcast(const RequestPB&       request,
+                                                                      int                    timeout_ms,
+                                                                      const RpcCall&         rpc_call,
+                                                                      std::optional<int64_t> request_id = std::nullopt,
+                                                                      std::string            direction  = "unknown",
+                                                                      bool fatal_on_error               = true) const {
+        return broadcastImpl<RequestPB, ResponsePB>([&request](size_t) -> const RequestPB& { return request; },
+                                                    timeout_ms,
+                                                    rpc_call,
+                                                    request_id,
+                                                    std::move(direction),
+                                                    fatal_on_error);
+    }
+
+private:
+    template<typename RequestPB, typename ResponsePB, typename RequestAt, typename RpcCall>
+    std::shared_ptr<BroadcastResult<RequestPB, ResponsePB>> broadcastImpl(const RequestAt&       request_at,
+                                                                          int                    timeout_ms,
+                                                                          const RpcCall&         rpc_call,
+                                                                          std::optional<int64_t> request_id,
+                                                                          std::string            direction,
+                                                                          bool                   fatal_on_error) const {
+        const auto rpc_tag =
+            "request_id=" + (request_id ? std::to_string(*request_id) : "none") + " direction=" + direction;
+        const auto worker_size = worker_addrs_.size();
         if (!rpc_pool_ || !completion_queue_) {
             RTP_LLM_LOG_WARNING("broadcast failed, manager is not initialized");
             return nullptr;
@@ -500,7 +535,7 @@ public:
             contexts[rank]      = std::make_shared<CtxT>();
             auto& ctx           = contexts.at(rank);
             ctx->stub           = conn_status.value().stub;
-            ctx->request        = requests.at(rank);
+            ctx->request        = request_at(rank);
             ctx->server_addr    = addr;
             ctx->timeout_ms     = timeout_ms;
             ctx->client_context = std::make_shared<grpc::ClientContext>();
@@ -564,6 +599,7 @@ public:
         return result;
     }
 
+public:
     size_t workerNum() const {
         return worker_addrs_.size();
     }

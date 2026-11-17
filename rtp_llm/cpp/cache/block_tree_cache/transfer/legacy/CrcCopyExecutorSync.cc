@@ -21,10 +21,10 @@ bool validCopyBuffers(const HostBufferView& host, const TransferDescriptor& desc
 }
 }  // namespace
 
-TransferResult CrcCopyExecutor::execute(int                                    device,
-                                           const std::vector<CrcCopyItem>&        items,
-                                           CrcCopyDirection                       direction,
-                                           const std::vector<TransferDescriptor>& descriptors) {
+TransferResult CrcCopyExecutor::execute(int                             device,
+                                        const std::vector<CrcCopyItem>& items,
+                                        CrcCopyDirection                direction,
+                                        DescriptorView                  descriptors) {
     Slot* slot = nullptr;
     {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -57,12 +57,12 @@ TransferResult CrcCopyExecutor::execute(int                                    d
     return mapResult(result, direction, descriptors, failures);
 }
 
-TransferResult CrcCopyExecutor::copy(const std::vector<HostBufferView>&     hosts,
-                                        const std::vector<TransferDescriptor>& descriptors,
-                                        const std::vector<const GroupSet*>&    groups) try {
+TransferResult CrcCopyExecutor::copy(const std::vector<HostBufferView>&  hosts,
+                                     DescriptorView                      descriptors,
+                                     const std::vector<const GroupSet*>& groups) try {
     if (async_ || hosts.empty() || hosts.size() != descriptors.size() || hosts.size() != groups.size())
         return rejectedWithoutIo();
-    const bool               store = descriptors.front().source_tier == Tier::DEVICE;
+    const bool               store = direction_ == CrcCopyDirection::EVICT;
     std::vector<CrcCopyItem> items;
     items.reserve(hosts.size());
     for (size_t i = 0; i < hosts.size(); ++i) {
@@ -72,8 +72,7 @@ TransferResult CrcCopyExecutor::copy(const std::vector<HostBufferView>&     host
             return rejectedWithoutIo();
         items.push_back(makeItem(hosts[i], descriptors[i], group));
     }
-    return execute(
-        deviceFor(*groups.front()), items, store ? CrcCopyDirection::EVICT : CrcCopyDirection::LOAD, descriptors);
+    return execute(deviceFor(*groups.front()), items, direction_, descriptors);
 } catch (const std::exception& error) {
     // Preparation throws before submission; the synchronous CUDA primitive
     // drains all attempted work or terminates, and result mapping cannot throw.
