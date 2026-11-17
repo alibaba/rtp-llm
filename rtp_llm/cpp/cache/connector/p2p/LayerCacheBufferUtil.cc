@@ -242,7 +242,8 @@ LayerCacheBufferUtil::convertTagForRoute(KVCacheResource&           resource,
                                          const std::vector<size_t>& positions,
                                          int                        cp_rank,
                                          int                        cp_size,
-                                         size_t                     cache_key_tokens_per_block) {
+                                         size_t                     cache_key_tokens_per_block,
+                                         int                        layer_end) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> result;
     if (positions.empty()) {
         return std::move(result);
@@ -253,6 +254,9 @@ LayerCacheBufferUtil::convertTagForRoute(KVCacheResource&           resource,
         return conversionError("tag=" + cache_tag + ": non-empty route has no topology layers");
     }
     for (int layer_id : topology.layerIdsForGroup(cache_tag)) {
+        if (layer_id >= layer_end) {
+            continue;
+        }
         auto buffer = convertLayerTagForRoute(
             resource, *group, layer_id, positions, cp_rank, cp_size, cache_key_tokens_per_block);
         if (!buffer.ok()) {

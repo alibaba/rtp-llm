@@ -1201,6 +1201,12 @@ bool KVCacheManager::initP2PConnector() {
     p2p_config.worker_config.topology    = config_.topologyPtr();
     p2p_config.worker_config.global_layer_begin = config_.global_layer_begin;
     if (pd_sep_config_.role_type == RoleType::DECODE) {
+        if (config_.mtp_sub_configs.size() > 1) {
+            // Both MTP executors reuse module 0 for all proposal steps. The
+            // extra allocated modules have no Prefill KV to transfer.
+            p2p_config.scheduler_config.decode_transfer_layer_end =
+                config_.layer_num + config_.mtp_sub_configs.front()->layer_num;
+        }
         for (const auto& group : config_.topology().groups()) {
             p2p_config.scheduler_config.physical_block_bytes_by_group.emplace(
                 group.tag, config_.blockSizeBytesForGroup(group.tag));
