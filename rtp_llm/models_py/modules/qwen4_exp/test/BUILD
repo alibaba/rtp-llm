@@ -984,7 +984,8 @@ py_test(
 
 py_test(
     name = "gdn_sm90_candidates_test",
-    srcs = ["gdn_sm90_candidates_test.py"],
+    srcs = ["gdn_sm90_candidates_test.py", "gdn_composition_test.py"],
+    main = "gdn_sm90_candidates_test.py",
     deps = ["//rtp_llm:testlib"],
     env = {"GPU_COUNT": "1"},
     tags = ["H20_CU13"],

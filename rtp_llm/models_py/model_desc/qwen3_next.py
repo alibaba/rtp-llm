@@ -1,4 +1,5 @@
 import logging
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any, Dict, Optional
@@ -894,10 +895,12 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             mixed_qkv, attn_inputs, is_target_verify
         )
         packed_decode = getattr(self, "_packed_decode", None)
+        packed_steps = (
+            seq if not is_target_verify or getattr(self, "_packed_verify", False) else 0
+        )
         if (
             packed_decode is not None
-            and seq == 1
-            and not is_target_verify
+            and packed_steps in (1, 2, 3, 4)
             and precomputed_gates is None
         ):
             fused = packed_decode(
@@ -910,9 +913,12 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
                 attn_inputs.kv_cache_kernel_block_id_device,
                 attn_inputs.sequence_lengths_plus_1_device,
                 seq_size_per_block,
+                sequence_length=packed_steps,
             )
             if fused is not None:
-                return fused.reshape(batch, self.local_num_v_heads, self.head_v_dim)
+                return fused.reshape(
+                    batch * seq, self.local_num_v_heads, self.head_v_dim
+                )
         # asserr head_k_dim == head_v_dim
         mixed_qkv = mixed_qkv.reshape(
             batch,
@@ -1274,8 +1280,9 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         self.decode_gdn = Qwen3NextGatedDeltaNetDecode(
             linear_attn_config, parallelism_config, weights
         )
+        extended_gdn = os.environ.get("RTP_QWEN4_SM90_GDN_EXTENDED") == "1"
         if (
-            self._qkvz_ba_fused
+            (self._qkvz_ba_fused or extended_gdn)
             and norm_activation == "sigmoid"
             and (attn_tp_size, self.local_num_k_heads, self.local_num_v_heads)
             in ((1, 16, 48), (2, 8, 24), (4, 4, 12), (8, 2, 6))
@@ -1293,6 +1300,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
 
             if attn_tp_size == 2 and self.decode_gdn.ssm_state_dtype == torch.float32:
                 self.decode_gdn._packed_decode = try_packed_decode
+                self.decode_gdn._packed_verify = extended_gdn
         self.norm = RmsNormGated(
             weights[W.linear_attn_norm_w],
             eps=layernorm_eps,

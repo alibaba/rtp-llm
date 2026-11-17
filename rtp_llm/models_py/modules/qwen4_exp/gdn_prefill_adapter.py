@@ -5,6 +5,7 @@ not replace installed FlashInfer or the speculative Decode state owner.
 """
 
 import logging
+import os
 from functools import lru_cache
 
 import torch
@@ -162,6 +163,7 @@ class Qwen4Sm120GdnPrefill(Qwen3NextGatedDeltaNetPrefill):
         super().__init__(*args, **kwargs)
         self.sm90_cp_prefill = True
         self.sm90_grouped_prepare = True
+        self.sm90_cp_extended = os.environ.get("RTP_QWEN4_SM90_GDN_EXTENDED") == "1"
 
     def _fla(
         self,
@@ -178,8 +180,13 @@ class Qwen4Sm120GdnPrefill(Qwen3NextGatedDeltaNetPrefill):
             and mixed_qkv.is_cuda
             and torch.version.hip is None
             and torch.cuda.get_device_capability(mixed_qkv.device) == (9, 0)
-            and torch.cuda.get_device_properties(mixed_qkv.device).multi_processor_count
-            == 78
+            and (
+                self.sm90_cp_extended
+                or torch.cuda.get_device_properties(
+                    mixed_qkv.device
+                ).multi_processor_count
+                == 78
+            )
             and _sm90_cp_available()
         ):
             from .gdn_prefill_cp_sm90 import try_sm90_prefill
