@@ -31,6 +31,7 @@ from rtp_llm.utils.process_manager import (
     DEFER_FIRST_SIGTERM_SECONDS_ENV,
     DEFER_FIRST_SIGTERM_VALUE,
     ProcessManager,
+    StartupFailure,
 )
 from rtp_llm.utils.warmup import configure_warmup
 
@@ -175,7 +176,7 @@ def start_backend_server_impl(
             return True
 
         if startup_status["error"]:
-            raise Exception(startup_status["error"])
+            raise StartupFailure(startup_status["error"])
 
         # Non-blocking check if data is available
         if pipe_reader.poll(timeout=0):
@@ -198,12 +199,12 @@ def start_backend_server_impl(
                     error = f"Backend server start failed: {error_msg}"
                     startup_status["error"] = error
                     pipe_reader.close()
-                    raise Exception(error)
+                    raise StartupFailure(error)
             except EOFError:
                 error = "Backend server pipe closed unexpectedly"
                 startup_status["error"] = error
                 pipe_reader.close()
-                raise Exception(error)
+                raise StartupFailure(error)
 
         return False
 
@@ -310,7 +311,7 @@ def start_dash_sc_server_impl(
                     continue
                 status_msg = reader.recv()
             except EOFError:
-                raise Exception(
+                raise StartupFailure(
                     f"DashSc server rank_idx={idx} pipe closed unexpectedly"
                 )
             if status_msg.get("status") == "success":
@@ -324,7 +325,7 @@ def start_dash_sc_server_impl(
                 traceback_info = status_msg.get("traceback", "")
                 if traceback_info:
                     logging.error(f"DashSc server traceback: {traceback_info}")
-                raise Exception(
+                raise StartupFailure(
                     f"DashSc server rank_idx={idx} start failed: {error_msg}"
                 )
 
