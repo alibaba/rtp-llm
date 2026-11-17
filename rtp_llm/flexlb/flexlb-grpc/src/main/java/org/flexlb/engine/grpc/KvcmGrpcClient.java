@@ -9,6 +9,7 @@ import org.flexlb.config.KvcmCacheMatchingConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.discovery.ServiceDiscovery;
+import org.flexlb.engine.grpc.monitor.KvcmMetricsReporter;
 import org.flexlb.kvcm.grpc.CommonResponseHeader;
 import org.flexlb.kvcm.grpc.ErrorCode;
 import org.flexlb.kvcm.grpc.GetClusterInfoRequest;
@@ -46,6 +47,7 @@ public final class KvcmGrpcClient implements AutoCloseable {
     private final KvcmCacheMatchingConfig options;
     private final KvcmConfig topology;
     private final ServiceDiscovery discovery;
+    private final KvcmMetricsReporter metricsReporter;
     private final ScheduledExecutorService refreshExecutor;
     private final Map<String, ManagedChannel> channels = new LinkedHashMap<>();
     private final AtomicBoolean refreshQueued = new AtomicBoolean();
@@ -60,15 +62,18 @@ public final class KvcmGrpcClient implements AutoCloseable {
     private boolean standby;
 
     @Autowired
-    public KvcmGrpcClient(ConfigService config, ModelMetaConfig model, ServiceDiscovery discovery) {
+    public KvcmGrpcClient(ConfigService config, ModelMetaConfig model, ServiceDiscovery discovery,
+                          KvcmMetricsReporter metricsReporter) {
         this(config.loadBalanceConfig().getCacheMatching() instanceof KvcmCacheMatchingConfig kvcm
-                ? kvcm : null, model.getServiceRoute().getKvcm(), discovery);
+                ? kvcm : null, model.getServiceRoute().getKvcm(), discovery, metricsReporter);
     }
 
-    public KvcmGrpcClient(KvcmCacheMatchingConfig options, KvcmConfig topology, ServiceDiscovery discovery) {
+    KvcmGrpcClient(KvcmCacheMatchingConfig options, KvcmConfig topology, ServiceDiscovery discovery,
+                   KvcmMetricsReporter metricsReporter) {
         this.options = options;
         this.topology = topology;
         this.discovery = discovery;
+        this.metricsReporter = metricsReporter;
         if (options == null) {
             refreshExecutor = null;
             return;
@@ -108,23 +113,35 @@ public final class KvcmGrpcClient implements AutoCloseable {
                 .setEnableP2P(options.isEnableP2p())
                 .build();
         Deadline deadline = Deadline.after(options.getRequestTimeoutMs(), TimeUnit.MILLISECONDS);
+        int maxRetries = options.getMaxQueryRetryCount();
+        RuntimeException lastFailure = null;
         for (int attempt = 0; ; attempt++) {
+            ManagedChannel target = leader;
+            if (target == null || deadline.isExpired()) {
+                break;
+            }
+            if (attempt > 0) {
+                metricsReporter.reportQueryRetry(attempt);
+            }
             try {
-                ManagedChannel target = leader;
-                if (target == null || deadline.isExpired()) {
-                    throw new IllegalStateException("KVCM leader unavailable within the query budget");
-                }
                 Map<String, Integer> matches = query(target, request, deadline, candidates);
                 recordQuery(true);
                 return matches;
             } catch (RuntimeException failure) {
+                lastFailure = failure;
                 requestLeaderRefresh();
-                if (attempt >= options.getMaxQueryRetryCount() || deadline.isExpired() || leader == null) {
-                    recordQuery(false);
-                    throw failure;
+                if (attempt >= maxRetries) {
+                    break;
                 }
             }
         }
+        if (lastFailure == null) {
+            requestLeaderRefresh();
+            lastFailure = new IllegalStateException("KVCM leader unavailable within the query budget");
+        }
+        recordQuery(false);
+        metricsReporter.reportQueryFailure();
+        throw lastFailure;
     }
 
     public boolean enabled() {

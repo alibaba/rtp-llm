@@ -299,6 +299,9 @@ public class MetricConstant {
     public static final String CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS =
             "app.cache.routing.selected.match.total.tokens";
 
+    public static final String KVCM_QUERY_FAILURE_QPS = "app.cache.kvcm.query.failure.qps";
+    public static final String KVCM_QUERY_RETRY_QPS = "app.cache.kvcm.query.retry.qps";
+
     /**
      * Request-level maximum available-candidate cache-match hit tokens. Tagged by role.
      */
@@ -476,7 +479,6 @@ public class MetricConstant {
     public static final String GRPC_SERVER_PROCESS_MS = "app.grpc.server.process.ms";
 
     public static final String REQUEST_MESSAGE_BYTES = "app.request.message.bytes";
-
     public static final String JVM_GC_COLLECTION_COUNT = "app.jvm.gc.collection.count";
     public static final String JVM_GC_PAUSE_TOTAL_MS = "app.jvm.gc.pause.total.ms";
 
