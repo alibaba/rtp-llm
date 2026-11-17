@@ -109,7 +109,9 @@ def _fused_qkv_rope_cache_kernel(
         kv_base = kv + row * kv_stride.to(tl.int64)
         values = tl.load(kv_base + columns).to(tl.float32)
         w = tl.load(weight + columns).to(tl.float32)
-        rounded = norm_rope_bf16(values, w, cos, sin, EPS)
+        # The V4 cache uses the FP32 RMSNorm-to-RoPE path. V4.1's native
+        # cache materializes the norm in BF16 before rotation and quantization.
+        rounded = norm_rope_bf16(values, w, cos, sin, EPS, ROUND_NORM=not V4_CACHE)
         if V4_CACHE:
             decoded = rounded
         else:
@@ -130,16 +132,16 @@ def _fused_qkv_rope_cache_kernel(
             if TRAP_INVALID_KV_ACCESS:
                 _trap()
             return
-        position = slot % ENTRIES
-        page_base = pool + page * block_stride.to(tl.int64)
         if V4_CACHE:
             _store_v4_row(rounded, pool, slot, block_stride, ENTRIES)
-            return
-        tl.store(
-            page_base + position * 528 + columns,
-            payload.to(tl.uint8, bitcast=True),
-        )
-        tl.store(page_base + position * 528 + 512 + tl.arange(0, 16), encoded)
+        else:
+            position = slot % ENTRIES
+            page_base = pool + page * block_stride.to(tl.int64)
+            tl.store(
+                page_base + position * 528 + columns,
+                payload.to(tl.uint8, bitcast=True),
+            )
+            tl.store(page_base + position * 528 + 512 + tl.arange(0, 16), encoded)
 
 
 def is_supported(

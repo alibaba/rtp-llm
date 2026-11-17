@@ -14,11 +14,15 @@ import triton.language as tl
 
 
 @triton.jit
-def norm_rope_bf16(values, weight, cos, sin, EPS: tl.constexpr):
-    """One 512-channel KV row; preserve both reference BF16 boundaries."""
+def norm_rope_bf16(
+    values, weight, cos, sin, EPS: tl.constexpr, ROUND_NORM: tl.constexpr = True
+):
+    """Normalize and rotate one row with the selected cache's BF16 boundaries."""
     values = values.to(tl.float32)
     inv = tl.rsqrt(tl.sum(values * values, 0) / 512 + EPS)
-    normalized = (values * inv * weight.to(tl.float32)).to(tl.bfloat16)
+    normalized = values * inv * weight.to(tl.float32)
+    if ROUND_NORM:
+        normalized = normalized.to(tl.bfloat16)
     pair = tl.arange(0, 32)
     real = tl.gather(normalized, 448 + 2 * pair, 0).to(tl.float32)
     imag = tl.gather(normalized, 449 + 2 * pair, 0).to(tl.float32)
@@ -29,7 +33,7 @@ def norm_rope_bf16(values, weight, cos, sin, EPS: tl.constexpr):
     columns = tl.arange(0, 512)
     return tl.where(
         columns < 448,
-        normalized,
+        normalized.to(tl.bfloat16),
         tl.gather(tail, tl.maximum(columns - 448, 0), 0),
     )
 
