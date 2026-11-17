@@ -1658,7 +1658,7 @@ class BackendTest(JitCacheTestBase):
                 mock.patch.object(
                     backend,
                     "configure_kernel_tuning",
-                    side_effect=lambda: events.append("tuning"),
+                    side_effect=lambda *_: events.append("tuning"),
                 )
             )
             stack.enter_context(
