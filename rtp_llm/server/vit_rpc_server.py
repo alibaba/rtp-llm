@@ -41,6 +41,7 @@ from rtp_llm.multimodal.multimodal_util import (
     trans_mm_input,
 )
 from rtp_llm.multimodal.transport import create_mm_output_transport
+from rtp_llm.multimodal.transport.grpc.backend import GrpcInlineOutputBackend
 from rtp_llm.server.mm_cache_metadata import (
     MM_CACHE_SNAPSHOT_MAX_BYTES,
     get_mm_cache_keys,
@@ -354,7 +355,17 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                     service_name=headers.get("x-dashscope-service", ""),
                 )
                 res = merge_embedding_results(results)
-            if not res.embeddings:
+            # The typed engine has validated schema/model support before returning.
+            # Only the inline bytes backend has a defined empty-output contract.
+            typed_empty_bytes = (
+                isinstance(multimodal_inputs, MultimodalInputsPB)
+                and multimodal_inputs.HasField("v41_inputs")
+                and multimodal_inputs.v41_inputs.schema_version == 1
+                and not multimodal_inputs.v41_inputs.images
+                and not multimodal_inputs.multimodal_inputs
+                and isinstance(self._transport._backend, GrpcInlineOutputBackend)
+            )
+            if not res.embeddings and not typed_empty_bytes:
                 context.abort(
                     grpc.StatusCode.INTERNAL,
                     "VIT engine returned empty multimodal embeddings",

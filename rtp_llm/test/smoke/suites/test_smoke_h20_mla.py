@@ -181,7 +181,7 @@ SMOKE_CASES = {
     },
     "mla_glm4_moe_lite": {
         "task_info": "data/model/glm4_moe_lite/q_r_h20.json",
-        "smoke_args": "--warm_up 0 --seq_size_per_block 64 --act_type BF16 "
+        "smoke_args": "--warm_up 0 --seq_size_per_block 64 --prefill_chunk_size 64 --act_type BF16 "
         "--enable_cuda_graph 0 --tp_size 1 --world_size 1 --dp_size 1",
         "gpu_type": "H20",
         "platform": "cuda",

@@ -9,11 +9,20 @@ import pytest
 from rtp_llm.test.smoke_framework.manifest import build_smoke_params
 from rtp_llm.test.smoke_framework.runner import run_smoke_test
 
+# DEVICE insertion starts remote upload; immediate eviction forces remote reads.
+REMOTE_CACHE_DEVICE_STORE_ARGS = (
+    " --enable_device_cache 1 --enable_memory_cache 0 --enable_disk_cache 0"
+    " --test_block_num 500"
+    " --block_tree_device_evict_low_watermark_ratio 0.001"
+    " --block_tree_device_evict_high_watermark_ratio 0.002"
+)
+
 SMOKE_CASES = {
     "remote_cache_basic": {
+        "sleep_time_qr": 10,
         "task_info": "data/model/qwen25/q_r_l20_remote_cache.json",
         "smoke_args": "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 "
-        "--write_cache_sync 1 --enable_remote_cache true --enable_device_cache 0",
+        "--enable_remote_cache true" + REMOTE_CACHE_DEVICE_STORE_ARGS,
         "envs": ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
         "gpu_type": "L20",
         "platform": "cuda",
@@ -23,7 +32,7 @@ SMOKE_CASES = {
     "remote_cache_basic_async": {
         "task_info": "data/model/qwen25/q_r_l20_remote_cache.json",
         "smoke_args": "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 "
-        "--enable_remote_cache true --enable_device_cache 0",
+        "--enable_remote_cache true" + REMOTE_CACHE_DEVICE_STORE_ARGS,
         "envs": ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
         "gpu_type": "L20",
         "platform": "cuda",
@@ -34,7 +43,7 @@ SMOKE_CASES = {
     "remote_cache_kill": {
         "task_info": "data/model/qwen25/q_r_l20_remote_cache_kill_remote.json",
         "smoke_args": "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 "
-        "--enable_remote_cache true --enable_device_cache 0",
+        "--enable_remote_cache true" + REMOTE_CACHE_DEVICE_STORE_ARGS,
         "envs": ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
         "gpu_type": "L20",
         "platform": "cuda",
@@ -46,9 +55,10 @@ SMOKE_CASES = {
     "remote_cache_tp2": {
         "task_info": "data/model/qwen25/q_r_l20_remote_cache_tpsize_2.json",
         "smoke_args": "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 "
-        "--tp_size 2 --enable_remote_cache true --enable_device_cache 0 "
-        "--reco_put_timeout_ms 12000 --reco_get_timeout_ms 12000 "
-        "--reco_get_broadcast_timeout 15000 --reco_put_broadcast_timeout 15000",
+        "--tp_size 2 --enable_remote_cache true "
+        "--kvcm_put_timeout_ms 12000 --kvcm_get_timeout_ms 12000 "
+        "--kvcm_get_broadcast_timeout 15000 --kvcm_put_broadcast_timeout 15000"
+        + REMOTE_CACHE_DEVICE_STORE_ARGS,
         "envs": ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
         "gpu_type": "L20",
         "platform": "cuda",
@@ -61,14 +71,14 @@ SMOKE_CASES = {
         "smoke_args": {
             "prefill": "--warm_up 0  --reuse_cache 1 --role_type PREFILL --act_type "
             "FP16 --seq_size_per_block 8 --enable_remote_cache true "
-            "--enable_device_cache 0 --reco_put_timeout_ms 12000 "
-            "--reco_get_timeout_ms 12000 --reco_get_broadcast_timeout "
-            "15000 --reco_put_broadcast_timeout 15000",
+            "--kvcm_put_timeout_ms 12000 "
+            "--kvcm_get_timeout_ms 12000 --kvcm_get_broadcast_timeout "
+            "15000 --kvcm_put_broadcast_timeout 15000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
             "decode": "--warm_up 0  --reuse_cache 1 --role_type DECODE --act_type "
             "FP16 --seq_size_per_block 8 --enable_remote_cache true "
-            "--enable_device_cache 0 --reco_put_timeout_ms 12000 "
-            "--reco_get_timeout_ms 12000 --reco_get_broadcast_timeout 15000 "
-            "--reco_put_broadcast_timeout 15000",
+            "--kvcm_put_timeout_ms 12000 "
+            "--kvcm_get_timeout_ms 12000 --kvcm_get_broadcast_timeout 15000 "
+            "--kvcm_put_broadcast_timeout 15000" + REMOTE_CACHE_DEVICE_STORE_ARGS,
         },
         "envs": ["SEQ_SIZE_PER_BLOCK=8", "KVCM_LOG_LEVEL=DEBUG"],
         "gpu_type": "L20",
@@ -80,7 +90,7 @@ SMOKE_CASES = {
     "remote_cache_match_fail": {
         "task_info": "data/model/qwen25/q_r_l20_remote_cache_match_failure.json",
         "smoke_args": "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 "
-        "--enable_remote_cache true --enable_device_cache 0",
+        "--enable_remote_cache true" + REMOTE_CACHE_DEVICE_STORE_ARGS,
         "envs": [
             "SEQ_SIZE_PER_BLOCK=8",
             "KVCM_LOG_LEVEL=DEBUG",
@@ -96,8 +106,8 @@ SMOKE_CASES = {
     "remote_cache_write_start_fail": {
         "task_info": "data/model/qwen25/q_r_l20_remote_cache_start_and_finish_failure.json",
         "smoke_args": "--warm_up 0 --reuse_cache 1 --act_type FP16 "
-        "--seq_size_per_block 8 --enable_remote_cache true "
-        "--enable_device_cache 0",
+        "--seq_size_per_block 8 --enable_remote_cache true"
+        + REMOTE_CACHE_DEVICE_STORE_ARGS,
         "envs": [
             "SEQ_SIZE_PER_BLOCK=8",
             "KVCM_LOG_LEVEL=DEBUG",
@@ -113,8 +123,8 @@ SMOKE_CASES = {
     "remote_cache_write_finish_fail": {
         "task_info": "data/model/qwen25/q_r_l20_remote_cache_start_and_finish_failure.json",
         "smoke_args": "--warm_up 0 --reuse_cache 1 --act_type FP16 "
-        "--seq_size_per_block 8 --enable_remote_cache true "
-        "--enable_device_cache 0",
+        "--seq_size_per_block 8 --enable_remote_cache true"
+        + REMOTE_CACHE_DEVICE_STORE_ARGS,
         "envs": [
             "SEQ_SIZE_PER_BLOCK=8",
             "KVCM_LOG_LEVEL=DEBUG",
@@ -130,7 +140,7 @@ SMOKE_CASES = {
     "remote_cache_edge": {
         "task_info": "data/model/qwen25/q_r_l20_cache_edge_case_1_remote_cache.json",
         "smoke_args": "--warm_up 0  --reuse_cache 1 --act_type FP16 --seq_size_per_block 4 "
-        "--enable_remote_cache true --enable_device_cache 0",
+        "--enable_remote_cache true" + REMOTE_CACHE_DEVICE_STORE_ARGS,
         "envs": ["SEQ_SIZE_PER_BLOCK=4", "KVCM_LOG_LEVEL=DEBUG"],
         "gpu_type": "L20",
         "platform": "cuda",

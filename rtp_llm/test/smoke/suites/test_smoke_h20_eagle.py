@@ -12,7 +12,7 @@ from rtp_llm.test.smoke_framework.runner import run_smoke_test
 SMOKE_CASES = {
     "eagle_mtp_tp2": {
         "task_info": "data/model/qwen2_14b/q_r_mtp.json",
-        "smoke_args": "--max_seq_len 16384 --ft_disable_custom_ar 1 --sp_type eagle "
+        "smoke_args": "--max_seq_len 320 --seq_size_per_block 64 --prefill_chunk_size 64 --ft_disable_custom_ar 1 --sp_type eagle "
         "--gen_num_per_cycle 4 --act_type FP16 --sp_model_type qwen_2-mtp "
         "--sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/  --warm_up 0 "
         "--reserver_runtime_mem_mb 21954 --tp_size 2",
@@ -22,9 +22,10 @@ SMOKE_CASES = {
         "timeout": 600,
     },
     "eagle_mtp_reuse": {
+        "sleep_time_qr": 10,
         "task_info": "data/model/qwen2_14b/q_r_mtp_reuse_cache.json",
         "smoke_args": "--reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb 1024 "
-        "--write_cache_sync 1 --max_seq_len 16384 --ft_disable_custom_ar 1 --sp_type "
+        "--max_seq_len 16384 --ft_disable_custom_ar 1 --sp_type "
         "eagle --gen_num_per_cycle 4 --act_type FP16 --sp_model_type qwen_2-mtp "
         "--sp_checkpoint_path /mnt/nas1/mtp_reg/qwen2_14b_draft/  --warm_up 0 "
         "--reserver_runtime_mem_mb 21954 --tp_size 2",
@@ -94,10 +95,12 @@ SMOKE_CASES = {
         "/mnt/nas1/mtp_reg/qwen2_14b_draft/ --act_type FP16 --reuse_cache 1 "
         "--seq_size_per_block 8 --max_seq_len 16384 --ft_disable_custom_ar 1 "
         "--warm_up 0 --reserver_runtime_mem_mb 21954 --test_block_num 500 "
-        "--enable_remote_cache true --enable_device_cache 0 "
-        "--enable_memory_cache 0 --reco_put_timeout_ms 12000 "
-        "--reco_get_timeout_ms 12000 --reco_get_broadcast_timeout 15000 "
-        "--reco_put_broadcast_timeout 15000",
+        "--enable_remote_cache true --enable_device_cache 1 "
+        "--enable_memory_cache 0 --enable_disk_cache 0 "
+        "--block_tree_device_evict_low_watermark_ratio 0.001 "
+        "--block_tree_device_evict_high_watermark_ratio 0.002 --kvcm_put_timeout_ms 12000 "
+        "--kvcm_get_timeout_ms 12000 --kvcm_get_broadcast_timeout 15000 "
+        "--kvcm_put_broadcast_timeout 15000",
         "envs": ["KVCM_LOG_LEVEL=DEBUG"],
         "gpu_type": "H20",
         "platform": "cuda",

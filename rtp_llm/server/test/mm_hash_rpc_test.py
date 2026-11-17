@@ -404,5 +404,111 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
                 metadata_from_proto(response)
 
 
+class V41EmptyBytesRpcTest(unittest.TestCase):
+    """Loopback RPC with real typed validation/bytes backend, controlled compute.
+
+    This is CPU protocol coverage, not a vision model/GPU execution test.
+    """
+
+    def setUp(self):
+        from rtp_llm.config.py_config_modules import VitConfig
+        from rtp_llm.multimodal.mm_process_engine import MMProcessEngine
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
+            V41ImageProcessorConfig,
+        )
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_vision import (
+            DeepSeekV41VisionEmbedding,
+        )
+
+        self.vision = object.__new__(DeepSeekV41VisionEmbedding)
+        torch.nn.Module.__init__(self.vision)
+        self.vision.processor_config = V41ImageProcessorConfig()
+        # Initialize only the CPU state used by the real mm_embedding_rpc/submit_v41.
+        self.engine = object.__new__(MMProcessEngine)
+        self.engine.mm_part = self.vision
+        self.engine.vit_config = VitConfig()
+        self.engine._scheduler = SimpleNamespace(max_request_images=16)
+        self.engine.query_num_lock = threading.Lock()
+        self.engine.query_num = 0
+        compute_patch = patch.object(
+            self.engine,
+            "_compute_embeddings",
+            return_value=([torch.ones(2, 8)], None, None),
+        )
+        self.compute = compute_patch.start()
+        self.addCleanup(compute_patch.stop)
+        self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+        add_MultimodalRpcServiceServicer_to_server(
+            MultimodalRpcServer(self.engine), self.server
+        )
+        port = self.server.add_insecure_port("127.0.0.1:0")
+        self.server.start()
+        self.addCleanup(lambda: self.server.stop(0).wait())
+        self.channel = grpc.insecure_channel(f"127.0.0.1:{port}")
+        self.addCleanup(self.channel.close)
+        self.stub = MultimodalRpcServiceStub(self.channel)
+
+    def request(self, nonempty=False):
+        from rtp_llm.multimodal.multimodal_mixins.deepseek_v41.deepseek_v41_processor import (
+            image_token_types,
+        )
+        from rtp_llm.utils.grpc_util import trans_from_tensor
+
+        request = MultimodalInputsPB(request_id=41)
+        request.v41_inputs.schema_version = 1
+        if nonempty:
+            image = request.v41_inputs.images.add(
+                start=1,
+                n_vit_h=3,
+                n_vit_w=6,
+                content_sha256="a" * 64,
+                processor_identity=self.vision.processor_config.identity,
+            )
+            image.patches.CopyFrom(
+                trans_from_tensor(torch.zeros(18, 3, 14, 14, dtype=torch.bfloat16))
+            )
+            image.types.extend(image_token_types(1, 2).tolist())
+        return request
+
+    def test_typed_empty_request_returns_empty_bytes_without_compute(self):
+        output = self.stub.RemoteMultimodalEmbedding(self.request(), timeout=2)
+        self.assertEqual(output.ByteSize(), 0)
+        self.compute.assert_not_called()
+        self.assertEqual(self.engine.get_query_num(), 0)
+
+    def test_nonempty_typed_request_still_returns_embeddings(self):
+        output = self.stub.RemoteMultimodalEmbedding(self.request(True), timeout=2)
+        self.assertEqual(list(output.split_size), [2])
+        self.assertEqual(len(output.multimodal_embedding.fp32_data), 2 * 8 * 4)
+        self.compute.assert_called_once()
+        self.assertEqual(self.engine.get_query_num(), 0)
+
+    def test_invalid_schema_and_mixed_inputs_are_rejected_before_compute(self):
+        for invalid in ("schema", "mixed"):
+            with self.subTest(invalid=invalid):
+                request = self.request()
+                if invalid == "schema":
+                    request.v41_inputs.schema_version = 2
+                else:
+                    request.multimodal_inputs.add(url="https://example/image")
+                with self.assertRaises(grpc.RpcError) as error:
+                    self.stub.RemoteMultimodalEmbedding(request, timeout=2)
+                self.assertNotEqual(error.exception.code(), grpc.StatusCode.OK)
+                self.compute.assert_not_called()
+
+    def test_nonempty_input_with_unexpected_empty_output_still_fails(self):
+        self.compute.return_value = ([], None, None)
+        with self.assertRaises(grpc.RpcError) as error:
+            self.stub.RemoteMultimodalEmbedding(self.request(True), timeout=2)
+        self.assertEqual(error.exception.code(), grpc.StatusCode.INTERNAL)
+        self.compute.assert_called_once()
+
+    def test_generic_empty_request_still_fails(self):
+        with patch.object(self.engine, "get_embedding_result", return_value=[]):
+            with self.assertRaises(grpc.RpcError) as error:
+                self.stub.RemoteMultimodalEmbedding(MultimodalInputsPB(), timeout=2)
+        self.assertEqual(error.exception.code(), grpc.StatusCode.INTERNAL)
+
+
 if __name__ == "__main__":
     unittest.main()

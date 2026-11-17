@@ -40,11 +40,12 @@ SMOKE_CASES = {
         "timeout": 600,
     },
     "kimi_long_reuse_memcache": {
+        "sleep_time_qr": 10,
         "task_info": "data/model/kimi_linear/q_r_bf16_tp2_long_input_reuse_cache.json",
         "smoke_args": "--tp_size 2 --act_type BF16 --max_seq_len 16384 "
         "--seq_size_per_block 2048 --linear_step 2 --reuse_cache 1 "
         "--enable_memory_cache 1 --memory_cache_size_mb 2048 "
-        "--write_cache_sync 1 --ssm_state_dtype fp32 "
+        "--ssm_state_dtype fp32 "
         "--reserver_runtime_mem_mb 8192",
         "envs": ["TRITON_AUTOTUNE_CACHE_MODE=cached"],
         "gpu_type": "H20",

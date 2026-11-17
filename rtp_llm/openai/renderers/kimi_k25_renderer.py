@@ -70,9 +70,7 @@ class KimiK25Renderer(KimiK2Renderer):
                             get_preprocess_config(part.preprocess_config)
                         )
                     else:
-                        preprocess_configs.append(
-                            MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000)
-                        )
+                        preprocess_configs.append(MMPreprocessConfig())
                     new_parts.append({"type": "image", "image": part.image_url.url})
                 elif part.type == ContentPartTypeEnum.video_url:
                     raise ValueError(

@@ -62,7 +62,7 @@ SMOKE_CASES = {
     "dense_fp8pb_dynamic": {
         "task_info": "data/model/qwen3/q_r_h20.json",
         "smoke_args": "--disable_flash_infer 1 --quantization FP8_PER_BLOCK --act_type BF16 "
-        "--warm_up 0",
+        "--warm_up 0 --seq_size_per_block 64 --prefill_chunk_size 64",
         "gpu_type": "H20",
         "platform": "cuda",
         "markers": ["smoke", "cuda", "H20"],

@@ -102,21 +102,24 @@ SMOKE_CASES = {
         "timeout": 600,
     },
     "next_long_reuse_memcache": {
+        "sleep_time_qr": 10,
         "task_info": "data/model/qwen3_next/q_r_next_fp8_tp2_long_input_reuse_cache.json",
         "smoke_args": "--tp_size 2 --act_type BF16 --seq_size_per_block 2048 --linear_step "
         "2 --reuse_cache 1 --enable_memory_cache 1 --memory_cache_size_mb "
-        "1024 --write_cache_sync 1",
+        "1024",
         "gpu_type": "H20",
         "platform": "cuda",
         "markers": ["smoke", "cuda", "H20"],
         "timeout": 600,
     },
     "next_long_reuse_remote": {
+        "sleep_time_qr": 10,
         "task_info": "data/model/qwen3_next/q_r_next_fp8_tp2_long_input_reuse_remote_cache.json",
         "smoke_args": "--tp_size 2 --act_type BF16 --seq_size_per_block 2048 --linear_step 2 "
-        "--reuse_cache 1 --enable_remote_cache 1 --write_cache_sync 1 "
-        "--reco_put_timeout_ms 17000 --reco_get_timeout_ms 17000 "
-        "--reco_get_broadcast_timeout 20000 --reco_put_broadcast_timeout 20000",
+        "--reuse_cache 1 --enable_remote_cache 1 "
+        "--kvcm_put_timeout_ms 17000 --kvcm_get_timeout_ms 17000 "
+        "--kvcm_get_broadcast_timeout 20000 --kvcm_put_broadcast_timeout 20000 "
+        "--enable_device_cache 1 --enable_memory_cache 0 --enable_disk_cache 0 --test_block_num 500 --block_tree_device_evict_low_watermark_ratio 0.001 --block_tree_device_evict_high_watermark_ratio 0.002",
         "envs": ["KVCM_LOG_LEVEL=DEBUG"],
         "gpu_type": "H20",
         "platform": "cuda",
