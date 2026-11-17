@@ -1823,6 +1823,19 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                 || (role_type_ == RoleType::DECODE && params.model_config_.model_type == "glm_5")),
         params.model_config_.model_type == "hy_v4"));
 
+    if (adaptive_session_) {
+        auto*      target       = dynamic_cast<PyWrappedModel*>(model_.get());
+        auto*      draft        = dynamic_cast<PyWrappedModel*>(draft_model_.get());
+        const auto target_costs = target ? target->adaptiveGraphCosts() : std::vector<std::pair<int, double>>{};
+        const auto draft_costs  = draft ? draft->adaptiveGraphCosts() : std::vector<std::pair<int, double>>{};
+        if (!target_costs.empty() && !draft_costs.empty()) {
+            py::gil_scoped_acquire gil;
+            adaptive_session_->attr("seed_cost_curves")(target_costs, draft_costs);
+            RTP_LLM_LOG_INFO("[adaptive-profile] seeded target_buckets=%zu draft_buckets=%zu",
+                             target_costs.size(),
+                             draft_costs.size());
+        }
+    }
     RTP_LLM_LOG_INFO("[speculative decoding] d2t_map size: %ld", d2t_map_.defined() ? d2t_map_.numel() : 0);
 }
 

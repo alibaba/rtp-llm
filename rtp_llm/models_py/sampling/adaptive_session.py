@@ -10,6 +10,10 @@ from rtp_llm.models_py.sampling.adaptive_controller import AdaptiveDraftControll
 
 
 class AdaptiveVerificationSession:
+    # Fade unrefreshed exact samples back to the live-scaled startup curve.
+    # This changes estimates, never forces a verification budget.
+    _COST_MAX_AGE = 128
+
     def __init__(
         self,
         capacity: int,
@@ -28,6 +32,7 @@ class AdaptiveVerificationSession:
             raise ValueError(
                 "capture_rows must be sorted unique positive buckets ending at capacity * (steps + 1)"
             )
+        self._has_capture_buckets = bool(rows)
         self._execution_rows = np.arange(maximum + 1)
         if rows:
             self._execution_rows[1:] = np.asarray(rows)[
@@ -43,6 +48,10 @@ class AdaptiveVerificationSession:
         self.ids: list[int] = []
         self.registered: set[int] = set()
         self.round_costs: dict[int, dict[int, float]] = {}
+        self._cost_sample_round: dict[tuple[int, int], int] = {}
+        self._profile_target: dict[int, float] = {}
+        self._profile_draft: dict[int, float] = {}
+        self._profile_scale: dict[int, float] = {}
         self.events: list[torch.cuda.Event] | None = None
         self.pending_costs: list[tuple[int, int, list[torch.cuda.Event], float]] = []
         self.event_pool: list[list[torch.cuda.Event]] = []
@@ -117,6 +126,72 @@ class AdaptiveVerificationSession:
             )
         )
 
+    def seed_cost_curves(self, target_curve, draft_curve) -> None:
+        """Seed graph-body costs; online whole-round timing supplies the tail.
+
+        Both curves are measured graph replays, not assumed token-linear costs.
+        Sampling, LM head and CPU bookkeeping are not in these graphs and must
+        not be claimed as profiled. Whole-round observations calibrate the curve
+        in either direction for each batch, including shorter live KV contexts.
+        """
+
+        def validated(curve):
+            result = {}
+            for rows, cost in curve:
+                if (
+                    type(rows) is not int
+                    or rows <= 0
+                    or rows in result
+                    or not math.isfinite(cost)
+                    or cost <= 0
+                ):
+                    raise ValueError("invalid adaptive graph cost curve")
+                result[rows] = float(cost)
+            return result
+
+        target = validated(target_curve)
+        draft = validated(draft_curve)
+        required = set(int(n) for n in self._execution_rows[1:])
+        if not self._has_capture_buckets or set(target) != required or not draft:
+            raise ValueError(
+                "adaptive profiles must cover all target buckets and have draft samples"
+            )
+        self._profile_target, self._profile_draft = target, draft
+        self._profile_scale.clear()
+
+    def _has_profile_for(self, batch: int) -> bool:
+        return bool(batch and self._profile_draft and batch <= max(self._profile_draft))
+
+    def _profile_cost(self, batch: int, bucket: int) -> float:
+        draft_bucket = min(n for n in self._profile_draft if n >= batch)
+        return (
+            self._profile_target[bucket]
+            + self.steps * self._profile_draft[draft_bucket]
+        )
+
+    def _decision_costs(self, batch: int) -> dict[int, float]:
+        costs = {}
+        if self._has_profile_for(batch):
+            scale = self._profile_scale.get(batch, 1.0)
+            for bucket in set(
+                int(n)
+                for n in self._execution_rows[batch : batch * (self.steps + 1) + 1]
+            ):
+                costs[bucket] = self._profile_cost(batch, bucket) * scale
+        for bucket, measured in self.round_costs.setdefault(batch, {}).items():
+            if bucket in costs:
+                age = max(
+                    0,
+                    self.round
+                    - self._cost_sample_round.get((batch, bucket), self.round),
+                )
+                weight = max(0.0, 1.0 - age / self._COST_MAX_AGE)
+                costs[bucket] = weight * measured + (1.0 - weight) * costs[bucket]
+            else:
+                # Without a profile there is no defensible replacement estimate.
+                costs[bucket] = measured
+        return costs
+
     def _cost_key(self, total: int) -> int:
         return int(self._execution_rows[total])
 
@@ -130,10 +205,23 @@ class AdaptiveVerificationSession:
             # Include the whole round's GPU queue and the host submission cost,
             # rather than pricing only target forward and ignoring its tail.
             measured = max(events[0].elapsed_time(events[1]), cpu_ms, 1e-6)
+            if self._has_profile_for(batch):
+                scale = measured / self._profile_cost(batch, total)
+                old = self._profile_scale.get(batch)
+                self._profile_scale[batch] = (
+                    scale if old is None else 0.8 * old + 0.2 * scale
+                )
             costs = self.round_costs.setdefault(batch, {})
-            costs[total] = (
-                0.8 * costs[total] + 0.2 * measured if total in costs else measured
+            stale = self._has_profile_for(batch) and (
+                self.round - self._cost_sample_round.get((batch, total), self.round)
+                >= self._COST_MAX_AGE
             )
+            costs[total] = (
+                0.8 * costs[total] + 0.2 * measured
+                if total in costs and not stale
+                else measured
+            )
+            self._cost_sample_round[(batch, total)] = self.round
             self.event_pool.append(events)
         self.pending_costs = pending
 
@@ -179,29 +267,33 @@ class AdaptiveVerificationSession:
     def _prepare_plan(self) -> None:
         plan_start = time.perf_counter()
         batch = len(self.ids)
-        costs = self.round_costs.setdefault(batch, {})
+        costs = self._decision_costs(batch)
         cap = self.fixed_cap
+        calibration_budget = None
         if cap < 0:
             in_flight = {
                 total for size, total, _, _ in self.pending_costs if size == batch
             }
-            cap = next(
-                (
-                    n
-                    for n in range(self.steps, -1, -1)
-                    if self._cost_key(batch * (n + 1)) not in costs
-                    and self._cost_key(batch * (n + 1)) not in in_flight
-                ),
-                -1,
+            # Sample each reachable execution bucket, not just K+1 uniform
+            # request depths. Use the fullest logical shape in each bucket.
+            representatives = {}
+            sample_rows = (
+                range(batch, batch * (self.steps + 1) + 1)
+                if self._has_capture_buckets
+                else (batch * (depth + 1) for depth in range(self.steps + 1))
             )
-            if cap < 0 and any(
-                self._cost_key(batch * (n + 1)) not in costs
-                for n in range(self.steps + 1)
-            ):
-                cap = self.steps
+            for total in sample_rows:
+                representatives[self._cost_key(total)] = total
+            missing = [key for key in representatives if key not in costs]
+            available = [key for key in missing if key not in in_flight]
+            if available:
+                calibration_budget = representatives[max(available)] - batch
+            elif missing:
+                # GPU samples are still in flight. Do not wait on the host.
+                calibration_budget = batch * self.steps
         draft = np.zeros(batch + 1)
         verify = np.ones(batch * (self.steps + 1) + 1)
-        if cap < 0:
+        if cap < 0 and calibration_budget is None:
             points = sorted(costs)
             # Captured graphs execute discrete padded row counts. Interpolating
             # invents savings while replay can still use the larger graph.
@@ -222,20 +314,29 @@ class AdaptiveVerificationSession:
             verify[batch:] = np.where(exact, measured[buckets], ceiling)
         confidence = None
         snapshots = [self._host_predictions.get(request_id) for request_id in self.ids]
-        if snapshots and all(
-            snapshot is not None and self.round - snapshot[0] <= 16
+        fresh = [
+            snapshot is not None and 0 <= self.round - snapshot[0] <= 16
             for snapshot in snapshots
-        ):
-            confidence = np.stack([snapshot[1] for snapshot in snapshots])
+        ]
+        if any(fresh):
+            # A new or stale request must not discard other requests' learned
+            # predictions. Unknown rows use optimistic acceptance, as in vLLM;
+            # the cost model still decides the batch budget. Keep the existing
+            # full-width fallback when no request has a usable prediction.
+            confidence = np.ones((batch, self.steps), dtype=np.float64)
+            for index, (snapshot, ready) in enumerate(zip(snapshots, fresh)):
+                if ready:
+                    confidence[index] = snapshot[1]
         self._prepared = self.controller.prepare_from_host(
             self.ids,
             confidence=confidence,
             draft_cost_ms=draft,
             verify_cost_ms=verify,
             fixed_cap=cap if cap >= 0 else None,
+            fixed_budget=calibration_budget,
         )
         self.total = self._prepared[2]
-        self._calibration = self.fixed_cap < 0 and cap >= 0
+        self._calibration = calibration_budget is not None
         mode = (
             0
             if self.fixed_cap >= 0

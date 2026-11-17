@@ -114,7 +114,8 @@ cc_import(
             "RTP_LLM_DEVICE_INPUT": "1",
             "RTP_LLM_MTP_ASYNC_PREPARE": "0",
         },
-        exec_properties = {"gpu": "H20"},
+        tags = ["SM103_CU13"],
+        exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
     )
     for fusion in ["-1", "0", "1", "2"]
 ]
@@ -150,7 +151,8 @@ cc_import(
             "RTP_LLM_DEVICE_INPUT": "1",
             "RTP_LLM_MTP_ASYNC_PREPARE": "1",
         },
-        exec_properties = {"gpu": "H20"},
+        tags = ["SM103_CU13"],
+        exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
     )
     for fusion in ["1"]
 ]

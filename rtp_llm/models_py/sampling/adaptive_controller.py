@@ -230,6 +230,7 @@ class AdaptiveDraftController:
         draft_cost_ms: np.ndarray,
         verify_cost_ms: np.ndarray,
         fixed_cap: int | None = None,
+        fixed_budget: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
         """Plan from completed prior-round feedback, never read the GPU here.
 
@@ -241,7 +242,21 @@ class AdaptiveDraftController:
         slots = self._slots(request_ids)
         batch = len(slots)
         scheduled = np.full(batch, self.num_steps, dtype=np.int32)
-        if fixed_cap is not None:
+        if fixed_budget is not None:
+            if (
+                fixed_cap is not None
+                or type(fixed_budget) is not int
+                or not 0 <= fixed_budget <= batch * self.num_steps
+            ):
+                raise AdaptiveBudgetInputError(
+                    "fixed_budget", "invalid or conflicts with fixed_cap"
+                )
+            # Balanced prefixes visit any legal execution bucket, including
+            # buckets unreachable by a uniform per-request cap.
+            scheduled.fill(fixed_budget // batch if batch else 0)
+            if batch:
+                scheduled[: fixed_budget % batch] += 1
+        elif fixed_cap is not None:
             if type(fixed_cap) is not int or not 0 <= fixed_cap <= self.num_steps:
                 raise AdaptiveBudgetInputError(
                     "fixed_cap", "outside speculative positions"

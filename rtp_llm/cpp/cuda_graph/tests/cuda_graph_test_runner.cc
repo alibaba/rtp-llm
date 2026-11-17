@@ -45,9 +45,10 @@ public:
                      int64_t          tokens_per_block,
                      int64_t          kernel_tokens_per_block,
                      std::vector<int> decode_capture_batch_sizes,
-                     int              tokens_per_request    = 1,
-                     bool             adaptive_verification = false,
-                     int              concurrency_limit     = 128) {
+                     int              tokens_per_request     = 1,
+                     bool             adaptive_verification  = false,
+                     int              concurrency_limit      = 128,
+                     bool             profile_adaptive_costs = false) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph_debug_mode = false;
@@ -58,6 +59,7 @@ public:
         params.num_tokens_per_bs            = tokens_per_request;
         params.is_target_verify             = tokens_per_request > 1;
         params.adaptive_verification        = adaptive_verification;
+        params.profile_adaptive_costs       = profile_adaptive_costs;
         params.hidden_size                  = static_cast<size_t>(hidden_size);
         params.model_data_type              = c10::ScalarType::Half;
         params.max_context_batch_size       = concurrency_limit;
@@ -74,6 +76,10 @@ public:
 
     torch_ext::PyModelOutputs forward(torch_ext::PyModelInputs& inputs) {
         return runner_->forward(inputs, state_);
+    }
+
+    std::vector<std::pair<int, double>> adaptiveGraphCosts() const {
+        return runner_ ? runner_->adaptive_cost_curve_ : std::vector<std::pair<int, double>>{};
     }
 
     int getCurrentRealGraphSize() {
@@ -119,9 +125,11 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("tokens_per_block"),
              py::arg("kernel_tokens_per_block"),
              py::arg("decode_capture_batch_sizes"),
-             py::arg("tokens_per_request")    = 1,
-             py::arg("adaptive_verification") = false,
-             py::arg("concurrency_limit")     = 128)
+             py::arg("tokens_per_request")     = 1,
+             py::arg("adaptive_verification")  = false,
+             py::arg("concurrency_limit")      = 128,
+             py::arg("profile_adaptive_costs") = false)
+        .def("adaptiveGraphCosts", &CudaGraphTestRunner::adaptiveGraphCosts)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
         .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);

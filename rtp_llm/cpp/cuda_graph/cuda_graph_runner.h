@@ -25,6 +25,7 @@ public:
         is_prefill_cuda_graph_mode_(graph_params.is_prefill_cuda_graph_mode),
         is_target_verify_(graph_params.is_target_verify),
         adaptive_verification_(graph_params.adaptive_verification),
+        profile_adaptive_costs_(graph_params.profile_adaptive_costs),
         is_draft_extend_(graph_params.is_draft_extend),
         device_index_(cuda_graph::graphCurrentDeviceIndex()),
         capture_stream_(cuda_graph::graphGetStreamFromPool(true)),
@@ -104,6 +105,7 @@ private:
     void captureOneGraphInstance(int key, const char* key_type, bool needs_distributed_warmup = false);
     // Common replay and sync check logic
     void replayAndSyncCheck(int key, const char* key_type);
+    void profileAdaptiveGraph(int key, int rows);
     // Common input preparation logic for capture
     void prepareCaptureInputs(PyModelInputs& inputs, int batch_size, int seq_len_or_tokens);
     // Common memory hold creation logic
@@ -130,6 +132,7 @@ private:
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
     bool                    adaptive_verification_{false};
+    bool                    profile_adaptive_costs_{false};
     bool                    is_draft_extend_{false};
     int                     device_index_{0};
     cuda_graph::GraphStream capture_stream_;

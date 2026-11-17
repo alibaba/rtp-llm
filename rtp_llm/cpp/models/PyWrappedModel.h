@@ -81,7 +81,10 @@ public:
     void            prepareAttentionInputs(const GptModelInputs& inputs) override;
     void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
-    bool            cudaGraphEnabled() const override {
+    std::vector<std::pair<int, double>> adaptiveGraphCosts() const {
+        return graph_runner_ ? graph_runner_->adaptive_cost_curve_ : std::vector<std::pair<int, double>>{};
+    }
+    bool cudaGraphEnabled() const override {
         return enable_cuda_graph_;
     }
     bool prefillCudaGraphMode() const override {
@@ -223,16 +226,16 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                 "kernel_tokens_per_block=%zu",
                                 params.tokens_per_block,
                                 params.kernel_tokens_per_block);
-        kv_cache.seq_size_per_block        = params.tokens_per_block;
-        kv_cache.kernel_seq_size_per_block = params.kernel_tokens_per_block;
-        const auto& layout                 = params.kv_cache_layer_layout.value();
-        kv_cache.dsa_mla_resident_tokens = layout.dsa_mla_resident_tokens;
-        kv_cache.dsa_mla_hbm_blocks = layout.dsa_mla_hbm_blocks;
+        kv_cache.seq_size_per_block         = params.tokens_per_block;
+        kv_cache.kernel_seq_size_per_block  = params.kernel_tokens_per_block;
+        const auto& layout                  = params.kv_cache_layer_layout.value();
+        kv_cache.dsa_mla_resident_tokens    = layout.dsa_mla_resident_tokens;
+        kv_cache.dsa_mla_hbm_blocks         = layout.dsa_mla_hbm_blocks;
         kv_cache.dsa_prefill_staging_tokens = layout.dsa_prefill_staging_tokens;
         kv_cache.dsa_prefill_hbm_layers     = layout.dsa_prefill_hbm_layers;
         kv_cache.dsa_prefill_staging_layers = layout.dsa_prefill_staging_layers;
-        kv_cache.mla_hbm_cache_by_layer = layout.mla_hbm_cache_by_layer;
-        kv_cache.block_generations = layout.block_generations;
+        kv_cache.mla_hbm_cache_by_layer     = layout.mla_hbm_cache_by_layer;
+        kv_cache.block_generations          = layout.block_generations;
         kv_cache.kv_cache_base_by_layer.reserve(layout.layers_to_kv_buffer_ptrs.size());
         kv_cache.num_kv_heads  = params.description.attention_conf.kv_head_num;
         kv_cache.head_dim      = params.description.attention_conf.size_per_head;
@@ -370,7 +373,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         const char* adaptive_env      = std::getenv("RTP_LLM_ADAPTIVE_VERIFICATION");
         graph_params.adaptive_verification =
             is_target_verify_decode && adaptive_env && std::string(adaptive_env) == "1";
-        graph_params.is_draft_extend  = params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 0
+        const char* adaptive_cap = std::getenv("RTP_LLM_ADAPTIVE_VERIFY_CAP");
+        graph_params.profile_adaptive_costs =
+            adaptive_env && std::string(adaptive_env) == "1" && (!adaptive_cap || std::string(adaptive_cap) == "-1")
+            && !is_prefill_cuda_graph_mode && params.sp_config.type != SP_TYPE_NONE
+            && params.sp_config.gen_num_per_cycle > 0 && params.kv_cache_layer_layout.has_value();
+        graph_params.is_draft_extend = params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 0
                                        && params.model_id && is_prefill_cuda_graph_mode;
         if (params.sp_config.type != SP_TYPE_NONE) {
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;

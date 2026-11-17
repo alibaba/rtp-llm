@@ -136,7 +136,7 @@ class AdaptiveControllerTest(unittest.TestCase):
             session = AdaptiveVerificationSession(2, 2, "cuda")
         session.begin([10, 20])
         self.assertEqual(session.metrics_snapshot()[:3], (1, 0, 2))
-        session.round_costs[2] = {2: 1.0, 4: 2.0, 6: 3.0}
+        session.round_costs[2] = {2: 1.0, 3: 1.5, 4: 2.0, 5: 2.5, 6: 3.0}
         session._prepare_plan()
         self.assertEqual(session.metrics_snapshot()[:3], (3, 0, 2))
         session._host_predictions = {
@@ -146,6 +146,64 @@ class AdaptiveControllerTest(unittest.TestCase):
         self.assertEqual(session.metrics_snapshot()[0], 2)
         session.begin([])
         self.assertEqual(session.metrics_snapshot()[1:3], (0, 0))
+
+    def test_partial_predictions_do_not_force_whole_batch_full_width(self) -> None:
+        with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
+            session = AdaptiveVerificationSession(2, 2, "cuda")
+        session.begin([10, 20])
+        session.round = 20
+        session.round_costs[2] = {2: 2.0, 3: 2.2, 4: 2.4, 5: 3.0, 6: 4.0}
+        for missing in (None, (3, np.array([0.1, 0.1])), (21, np.array([0.1, 0.1]))):
+            with self.subTest(missing=missing):
+                session._host_predictions = {10: (20, np.array([0.01, 0.01]))}
+                if missing is not None:
+                    session._host_predictions[20] = missing
+                session._prepare_plan()
+                self.assertEqual(session.metrics_snapshot()[0], 2)
+                self.assertEqual(session.prepared_plan()[0].tolist(), [0, 2])
+                self.assertEqual(session.prepared_plan()[2], 4)
+
+    def test_five_step_request_churn_does_not_trigger_batch_wide_fallback(self) -> None:
+        with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
+            session = AdaptiveVerificationSession(
+                8, 5, "cuda", [1, 2, 4, 8, 12, 16, 24, 32, 48]
+            )
+        session.seed_cost_curves(
+            [(n, float(n)) for n in [1, 2, 4, 8, 12, 16, 24, 32, 48]],
+            [(n, 0.1) for n in [1, 2, 4, 8]],
+        )
+        modes = []
+        for turn in range(192):
+            # Keep established requests alongside one newly admitted request;
+            # alternate batch sizes and order, beyond the cost-aging horizon.
+            batch = (3, 8)[turn % 2]
+            ids = list(range(batch - 1)) + [1000 + turn]
+            if turn % 3 == 0:
+                ids.reverse()
+            session.begin(ids)
+            session.round = turn
+            session._host_predictions = {
+                request_id: (turn, np.full(5, 0.05))
+                for request_id in ids
+                if request_id < 1000
+            }
+            session._prepare_plan()
+            caps, rows, total = session.prepared_plan()
+            modes.append(session.metrics_snapshot()[0])
+            self.assertFalse(session._calibration)
+            self.assertLess(total, batch * 6)
+            counts = caps.tolist()
+            self.assertEqual(total, batch + sum(counts))
+            self.assertEqual(
+                rows.tolist(),
+                [i * 6 + j for i, count in enumerate(counts) for j in range(count + 1)],
+            )
+        self.assertEqual(set(modes), {2})
+        # Genuine all-missing predictions retain the explicit safety fallback.
+        session._host_predictions.clear()
+        session._prepare_plan()
+        self.assertEqual(session.metrics_snapshot()[0], 3)
+        self.assertEqual(session.total, len(session.ids) * 6)
 
     def test_dynamic_session_plan_does_not_wait_for_gpu(self) -> None:
         with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
@@ -164,7 +222,7 @@ class AdaptiveControllerTest(unittest.TestCase):
             run_round()
             torch.cuda.synchronize()
         # Force the learned-budget branch, independently of noisy GPU timing.
-        session.round_costs[2] = {2: 1.0, 4: 1.5, 6: 2.0}
+        session.round_costs[2] = {2: 1.0, 3: 1.25, 4: 1.5, 5: 1.75, 6: 2.0}
         session.pending_costs = []
         with torch.profiler.profile(
             activities=[
@@ -190,31 +248,198 @@ class AdaptiveControllerTest(unittest.TestCase):
         self.assertEqual(waits, [])
         self.assertFalse(session._calibration)
 
-    def test_unmeasured_rows_do_not_invent_fractional_graph_savings(self) -> None:
+    def test_calibration_visits_buckets_between_uniform_request_depths(self) -> None:
         with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
-            session = AdaptiveVerificationSession(2, 2, "cuda")
+            session = AdaptiveVerificationSession(2, 2, "cuda", [1, 2, 3, 4, 5, 6])
         session.begin([10, 20])
-        session.round_costs[2] = {2: 1.0, 4: 3.0, 6: 5.0}
-        with patch.object(
-            session.controller,
-            "prepare_from_host",
-            wraps=session.controller.prepare_from_host,
-        ) as prepare:
-            session._prepare_plan()
-        np.testing.assert_array_equal(
-            prepare.call_args.kwargs["verify_cost_ms"][2:], [1.0, 3.0, 3.0, 5.0, 5.0]
+        session.round_costs[2] = {2: 12.0, 4: 15.0, 6: 20.0}
+        session._host_predictions = {i: (0, np.array([0.9, 0.9])) for i in (10, 20)}
+        session._prepare_plan()
+        self.assertTrue(session._calibration)
+        self.assertEqual(session.prepared_plan()[2], 5)
+        self.assertEqual(session.prepared_plan()[0].tolist(), [2, 1])
+        session.round_costs[2][5] = 16.0
+        session._prepare_plan()
+        self.assertEqual(session.prepared_plan()[2], 3)
+        session.round_costs[2][3] = 14.0
+        session._prepare_plan()
+        self.assertFalse(session._calibration)
+        # The measured intermediate bucket wins; the old uniform-only samples
+        # priced five rows at 20ms and incorrectly selected all six rows.
+        self.assertEqual(session.prepared_plan()[2], 5)
+
+    def test_profile_seeding_covers_new_batches_and_preserves_measured_costs(
+        self,
+    ) -> None:
+        with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
+            session = AdaptiveVerificationSession(2, 2, "cuda", [1, 2, 4, 6])
+        session.seed_cost_curves(
+            [(1, 1.0), (2, 2.0), (4, 4.0), (6, 6.0)], [(1, 0.5), (2, 1.0)]
         )
-        # Preserve real nonmonotonic measurements; do not inflate full-cap costs.
-        session.round_costs[2][4] = 0.5
-        with patch.object(
-            session.controller,
-            "prepare_from_host",
-            wraps=session.controller.prepare_from_host,
-        ) as prepare:
+        session.begin([10, 20])
+        self.assertFalse(session._calibration)
+        self.assertEqual(session._decision_costs(2), {2: 4.0, 4: 6.0, 6: 8.0})
+        events = [Mock(spec=torch.cuda.Event), Mock(spec=torch.cuda.Event)]
+        events[1].query.return_value = True
+        events[0].elapsed_time.return_value = 10.0
+        session.pending_costs = [(2, 4, events, 8.0)]
+        session._collect_costs()
+        for key, expected in {2: 20 / 3, 4: 10.0, 6: 40 / 3}.items():
+            self.assertAlmostEqual(session._decision_costs(2)[key], expected)
+        session.begin([10])
+        self.assertFalse(session._calibration)
+        self.assertEqual(session._decision_costs(1), {1: 2.0, 2: 3.0, 4: 5.0})
+        events[1].synchronize.assert_not_called()
+
+    def test_partial_draft_profile_only_seeds_covered_batches(self) -> None:
+        with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
+            session = AdaptiveVerificationSession(2, 2, "cuda", [1, 2, 4, 6])
+        session.seed_cost_curves([(1, 1.0), (2, 2.0), (4, 4.0), (6, 6.0)], [(1, 0.5)])
+        session.begin([10])
+        self.assertFalse(session._calibration)
+        session.begin([10, 20])
+        self.assertTrue(session._calibration)
+        self.assertEqual(session._decision_costs(2), {})
+        events = [Mock(spec=torch.cuda.Event), Mock(spec=torch.cuda.Event)]
+        events[1].query.return_value = True
+        events[0].elapsed_time.return_value = 3.0
+        session.pending_costs = [(2, 6, events, 2.0)]
+        session._collect_costs()
+        self.assertEqual(session._decision_costs(2), {6: 3.0})
+
+    def test_shorter_live_context_does_not_lock_seeded_curve_at_full_width(
+        self,
+    ) -> None:
+        with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
+            session = AdaptiveVerificationSession(1, 2, "cuda", [1, 2, 3])
+        session.seed_cost_curves([(1, 10.0), (2, 20.0), (3, 30.0)], [(1, 0.5)])
+        session.begin([10])
+        events = [Mock(spec=torch.cuda.Event), Mock(spec=torch.cuda.Event)]
+        events[1].query.return_value = True
+        events[0].elapsed_time.return_value = 3.0
+        session.pending_costs = [(1, 3, events, 2.0)]
+        session._collect_costs()
+        session._host_predictions = {10: (session.round, np.array([0.1, 0.1]))}
+        session._prepare_plan()
+        self.assertEqual(session.prepared_plan()[0].tolist(), [0])
+        self.assertLess(session._decision_costs(1)[1], 2.0)
+
+    def test_stale_expensive_bucket_recovers_without_forcing_small_budget(self) -> None:
+        with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
+            session = AdaptiveVerificationSession(1, 2, "cuda", [1, 2, 3])
+        session.seed_cost_curves([(1, 1.0), (2, 2.0), (3, 3.0)], [(1, 0.5)])
+        session.begin([10])
+        session.round_costs[1] = {1: 100.0, 2: 100.0, 3: 4.0}
+        session._cost_sample_round = {(1, n): session.round for n in (1, 2, 3)}
+        session._host_predictions = {10: (session.round, np.array([0.1, 0.1]))}
+        session._prepare_plan()
+        self.assertEqual(session.total, 3)
+        session.round += session._COST_MAX_AGE // 2
+        self.assertAlmostEqual(session._decision_costs(1)[1], 51.0)
+        session.round += session._COST_MAX_AGE // 2
+        session._host_predictions = {10: (session.round, np.array([0.1, 0.1]))}
+        session._prepare_plan()
+        self.assertEqual(session.total, 1)
+        self.assertFalse(session._calibration)
+        # High confidence still selects full width; aging is not a cap heuristic.
+        session._host_predictions = {10: (session.round, np.ones(2))}
+        session._prepare_plan()
+        self.assertEqual(session.total, 3)
+        # A new observation immediately restores the measured cost, without waiting.
+        events = [Mock(spec=torch.cuda.Event), Mock(spec=torch.cuda.Event)]
+        events[1].query.return_value = True
+        events[0].elapsed_time.return_value = 8.0
+        session.pending_costs = [(1, 3, events, 7.0)]
+        session._collect_costs()
+        self.assertEqual(session._cost_sample_round[(1, 3)], session.round)
+        self.assertAlmostEqual(session._decision_costs(1)[3], 8.0)
+        events[1].synchronize.assert_not_called()
+
+    def test_cost_aging_does_not_invent_unprofiled_costs(self) -> None:
+        with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
+            session = AdaptiveVerificationSession(2, 2, "cuda", [1, 2, 4, 6])
+        session.seed_cost_curves([(1, 1.0), (2, 2.0), (4, 4.0), (6, 6.0)], [(1, 0.5)])
+        session.round_costs[2] = {6: 12.0}
+        session._cost_sample_round[(2, 6)] = 0
+        session.round = 10000
+        self.assertEqual(session._decision_costs(2), {6: 12.0})
+        self.assertEqual(session._decision_costs(1), {1: 2.0, 2: 3.0, 4: 5.0})
+
+    def test_invalid_profile_curves_fail_before_replacing_valid_state(self) -> None:
+        with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
+            session = AdaptiveVerificationSession(2, 2, "cuda", [1, 2, 4, 6])
+        good = [(1, 1.0), (2, 2.0), (4, 4.0), (6, 6.0)]
+        session.seed_cost_curves(good, [(2, 1.0)])
+        for target, draft in [
+            (good[:-1], [(2, 1.0)]),
+            (good + [(6, 7.0)], [(2, 1.0)]),
+            (good, []),
+            (good, [(2, float("nan"))]),
+            (good, [(2, 0.0)]),
+            (good, [(True, 1.0)]),
+        ]:
+            with (
+                self.subTest(target=target, draft=draft),
+                self.assertRaises(ValueError),
+            ):
+                session.seed_cost_curves(target, draft)
+        self.assertEqual(session._profile_target, dict(good))
+        self.assertEqual(session._profile_draft, {2: 1.0})
+
+    def test_eager_calibration_stays_bounded_by_draft_steps(self) -> None:
+        with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
+            session = AdaptiveVerificationSession(64, 5, "cuda")
+        session.begin(list(range(64)))
+        visited = []
+        for _ in range(6):
             session._prepare_plan()
-        np.testing.assert_array_equal(
-            prepare.call_args.kwargs["verify_cost_ms"][2:], [1.0, 1.0, 0.5, 5.0, 5.0]
-        )
+            self.assertTrue(session._calibration)
+            total = session.prepared_plan()[2]
+            visited.append(total)
+            session.round_costs[64][total] = float(total)
+        session._prepare_plan()
+        self.assertFalse(session._calibration)
+        self.assertEqual(visited, [384, 320, 256, 192, 128, 64])
+
+    def test_calibration_budget_rejects_invalid_inputs(self) -> None:
+        controller = ready_controller([10, 20])
+        for budget in (-1, 7, True, 1.5):
+            with (
+                self.subTest(budget=budget),
+                self.assertRaises(AdaptiveBudgetInputError),
+            ):
+                controller.prepare_from_host(
+                    [10, 20],
+                    confidence=None,
+                    draft_cost_ms=np.zeros(3),
+                    verify_cost_ms=np.ones(9),
+                    fixed_budget=budget,
+                )
+        with self.assertRaises(AdaptiveBudgetInputError):
+            controller.prepare_from_host(
+                [10, 20],
+                confidence=None,
+                draft_cost_ms=np.zeros(3),
+                verify_cost_ms=np.ones(9),
+                fixed_budget=2,
+                fixed_cap=1,
+            )
+        for budget in range(7):
+            caps, rows, total = controller.prepare_from_host(
+                [10, 20],
+                confidence=None,
+                draft_cost_ms=np.zeros(3),
+                verify_cost_ms=np.ones(9),
+                fixed_budget=budget,
+            )
+            counts = caps.tolist()
+            self.assertEqual(sum(counts), budget)
+            self.assertLessEqual(max(counts) - min(counts), 1)
+            self.assertEqual(total, budget + 2)
+            self.assertEqual(
+                rows.tolist(),
+                [i * 4 + j for i, count in enumerate(counts) for j in range(count + 1)],
+            )
 
     def test_sparse_bucket_costs_calibration_and_eager_fallback(self) -> None:
         grid = [1, 2, 4, 8, 10, 12]

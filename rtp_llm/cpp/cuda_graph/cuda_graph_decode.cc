@@ -85,6 +85,7 @@ void CudaGraphRunner::captureDecode() {
                 py_attn_pyobj_method_(graph_instances_[shape.rows].mem_hold_.py_model_inputs_, true);
             captureDecodeOneBatchSize(shape.rows, it == capture_range_.rbegin());
             replayAndSyncCheck(shape.rows, "adaptive verify rows");
+            profileAdaptiveGraph(shape.rows, shape.rows);
             RTP_LLM_LOG_INFO("capture adaptive verify rows=%d batch_capacity=%d", shape.rows, bs);
         }
         RTP_LLM_LOG_INFO("Capture adaptive Decode End: %zu sparse token-bucket graphs", graph_instances_.size());
@@ -133,6 +134,7 @@ void CudaGraphRunner::captureDecode() {
                 // kernel launch without restoring a standalone full forward.
                 captureDecodeOneBatchSize(key, i == capture_range_size - 1 && tokens == num_tokens_per_bs_);
                 replayAndSyncCheck(key, "batch size");
+                profileAdaptiveGraph(key, bs);
                 RTP_LLM_LOG_INFO(
                     "capture success for batch size: %d, tokens per request: %d, key: %d", bs, tokens, key);
             } catch (const std::exception& e) {

@@ -1340,6 +1340,35 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type, boo
     }
 }
 
+void CudaGraphRunner::profileAdaptiveGraph(int key, int rows) {
+    if (!profile_adaptive_costs_) {
+        return;
+    }
+    c10::DeviceGuard       graph_device_guard(cuda_graph::graphDevice(device_index_));
+    py::gil_scoped_acquire gil;
+    // The same prepared buffers just passed replayAndSyncCheck. Replay only at
+    // startup, before requests own any KV pages, and measure actual GPU time.
+    // torch.cuda.Event also supports the ROCm backend without CUDA-only types.
+    auto                event_type = py::module_::import("torch.cuda").attr("Event");
+    auto                begin      = event_type(py::arg("enable_timing") = true);
+    auto                end        = event_type(py::arg("enable_timing") = true);
+    std::vector<double> samples;
+    for (int repeat = 0; repeat < 5; ++repeat) {
+        begin.attr("record")();
+        replayGraph(key);
+        end.attr("record")();
+        end.attr("synchronize")();
+        samples.push_back(begin.attr("elapsed_time")(end).cast<double>());
+    }
+    std::sort(samples.begin(), samples.end());
+    adaptive_cost_curve_.emplace_back(rows, samples[2]);
+    RTP_LLM_LOG_INFO("[adaptive-profile] target=%d rows=%d graph_ms=%.6f samples=5 capture_context=%d",
+                     is_target_verify_,
+                     rows,
+                     samples[2],
+                     max_seq_len_);
+}
+
 void CudaGraphRunner::replayAndSyncCheck(int key, const char* key_type) {
     c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
     RTP_LLM_LOG_INFO("replay start check for %s %d", key_type, key);

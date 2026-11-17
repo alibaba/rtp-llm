@@ -142,6 +142,26 @@ def make_inputs(lengths, value):
 
 
 class AdaptiveGraphTest(unittest.TestCase):
+    def test_startup_profile_covers_captured_buckets_and_replay_stays_exact(self):
+        for profile in (False, True):
+            with self.subTest(profile=profile):
+                model = ShapeRecordingModel(check_padding=True)
+                runner = CudaGraphRunner()
+                runner.init_decode(model, 8, 64, 64, 64, [], 6, True, 4, profile)
+                costs = dict(runner.adaptiveGraphCosts())
+                self.assertEqual(sorted(costs), GRID24 if profile else [])
+                self.assertTrue(
+                    all(0 < value < float("inf") for value in costs.values())
+                )
+                inputs = make_inputs([3, 1], 7)
+                self.assertTrue(runner.canRun(inputs))
+                actual = runner.forward(inputs).hidden_states.clone()
+                expected = model.forward(
+                    inputs, model.prepare_fmha_impl(inputs)
+                ).hidden_states
+                # Graph row count is exactly4, so no shape-dependent bias differs.
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     def test_short_graph_and_ragged_replay(self):
         for enabled in (False, True):
             with self.subTest(enabled=enabled):
@@ -259,25 +279,32 @@ class AdaptiveGraphTest(unittest.TestCase):
                 result.hidden_states = inputs.input_hiddens + rows
                 return result
 
-        model = PlainModel()
-        runner = CudaGraphRunner()
-        runner.init_decode(model, 8, 64, 64, 64, [1, 4], 1, False, 4)
-        self.assertEqual(sorted(model.captured_rows), [1, 4])
-        for batch in (4, 2, 1, 3):
-            inputs = make_inputs([1] * batch, 2)
-            inputs.attention_inputs.is_prefill = False
-            inputs.attention_inputs.is_target_verify = False
-            inputs.attention_inputs.sequence_lengths = torch.full(
-                (batch,), 8, dtype=torch.int32
-            ).pin_memory()
-            self.assertTrue(runner.canRun(inputs))
-            actual = runner.forward(inputs).hidden_states.clone()
-            torch.testing.assert_close(
-                actual,
-                torch.full_like(inputs.input_hiddens, 3 if batch == 1 else 6),
-                rtol=0,
-                atol=0,
-            )
+        for profile in (False, True):
+            with self.subTest(profile=profile):
+                model = PlainModel()
+                runner = CudaGraphRunner()
+                runner.init_decode(model, 8, 64, 64, 64, [1, 4], 1, False, 4, profile)
+                costs = dict(runner.adaptiveGraphCosts())
+                self.assertEqual(sorted(costs), [1, 4] if profile else [])
+                self.assertTrue(
+                    all(0 < value < float("inf") for value in costs.values())
+                )
+                self.assertEqual(sorted(model.captured_rows), [1, 4])
+                for batch in (4, 2, 1, 3):
+                    inputs = make_inputs([1] * batch, 2)
+                    inputs.attention_inputs.is_prefill = False
+                    inputs.attention_inputs.is_target_verify = False
+                    inputs.attention_inputs.sequence_lengths = torch.full(
+                        (batch,), 8, dtype=torch.int32
+                    ).pin_memory()
+                    self.assertTrue(runner.canRun(inputs))
+                    actual = runner.forward(inputs).hidden_states.clone()
+                    torch.testing.assert_close(
+                        actual,
+                        torch.full_like(inputs.input_hiddens, 3 if batch == 1 else 6),
+                        rtol=0,
+                        atol=0,
+                    )
 
     def test_custom_buckets_capture_replay_and_cost_model_agree(self):
         from rtp_llm.models_py.sampling.adaptive_session import (

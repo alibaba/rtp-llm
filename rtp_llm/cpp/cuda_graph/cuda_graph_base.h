@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include <utility>
 
 namespace rtp_llm {
 
@@ -24,6 +25,7 @@ struct GraphParams {
     bool                 is_prefill_cuda_graph_mode   = false;
     bool                 is_target_verify             = false;
     bool                 adaptive_verification        = false;
+    bool                 profile_adaptive_costs       = false;
     bool                 is_draft_extend              = false;
     int                  max_seq_len                  = 0;
     int                  tokens_per_block             = 0;  // physical kv block size
@@ -62,6 +64,7 @@ public:
     // buffers after page-table changes. Other captured fields stay untouched.
     virtual void updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) {}
 
-    py::object py_instance_;
+    std::vector<std::pair<int, double>> adaptive_cost_curve_;
+    py::object                          py_instance_;
 };
 }  // namespace rtp_llm
