@@ -173,8 +173,8 @@ final class VitPreparation implements AutoCloseable {
                 identity=contentIdentity(bytes);
             }
             VitGeometry.dimensions(width,height);
-            var image=new VitGeometry.Image(requestKey,width,height,
-                VitGeometry.rows(width,height,config.patch(),config.merge(),config.minPixels(),config.maxTokens()),identity);
+            var grid = VitGeometry.plan(width, height, config.patch(), config.merge(), config.minPixels(), config.maxTokens());
+            var image = new VitGeometry.Image(requestKey, grid.width(), grid.height(), grid.rows(), identity);
             if (!config.skipDownload()) {
                 long elapsed=System.nanoTime()-started;
                 metrics.events.observe("py_rtp_vit_preprocess_rt",elapsed/1e6);

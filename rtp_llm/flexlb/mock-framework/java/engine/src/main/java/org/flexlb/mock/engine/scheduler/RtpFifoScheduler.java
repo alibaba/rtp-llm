@@ -9,9 +9,9 @@ import org.flexlb.mock.engine.config.RtpConfig;
  */
 public final class RtpFifoScheduler extends AbstractRtpScheduler {
 
-    RtpFifoScheduler(Object lock, RtpConfig config, KvCacheManager cache) { this(lock, config, cache, new TaskHistory()); }
-
-    RtpFifoScheduler(Object lock, RtpConfig config, KvCacheManager cache, TaskHistory finished) { super(lock, config, cache, finished); }
+    RtpFifoScheduler(Object lock, RtpConfig config, KvCacheManager cache, TaskHistory finished, RtpMetrics metrics) {
+        super(lock, config, cache, finished, metrics);
+    }
 
     @Override protected void selectPrefill(List<GenerateStream> selected) {
         admitPrefill(waiting, selected, config.maxUncachedBatchTokens());

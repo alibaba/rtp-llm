@@ -16,7 +16,7 @@ import org.flexlb.mock.engine.forward.ComputeModel;
 public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceBlocks, int totalCacheBlocks, int reserveBlocks,
                         boolean reuseCache, boolean deviceCache, boolean disableDecodeFirstReuse, int maxSeqLen, int maxBatchTokens,
                         int maxGenerateBatchSize, int maxInitedKvStreams, int maxUncachedBatchTokens, int cpSize,
-                        JsonNode business, ComputeModel compute, int imageToken, long cacheKeySeed) {
+                        JsonNode business, ComputeModel compute, int imageToken, long cacheKeySeed, long maxRpcTimeoutMs) {
     private static final String PREFILL_OVERHEAD_MS = "mock.engine.prefill.overhead.ms";
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final Map<String, String> KVCM_ENV_BINDINGS = Map.of(
@@ -106,7 +106,8 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
             nativeInt(config, "max_batch_tokens_without_cache", 0, 0, Integer.MAX_VALUE),
             cpSize,
             config, compute, nativeInt(config, "image_token_id", org.flexlb.mock.protocol.MultimodalProtocol.IMAGE_TOKEN, 0, Integer.MAX_VALUE),
-            ConfigInput.signedLong(config, "cache_key_hash_seed", 0));
+            ConfigInput.signedLong(config, "cache_key_hash_seed", 0),
+            ConfigInput.signedLong(config, "max_rpc_timeout_ms", 2 * 60 * 60 * 1000L));
     }
 
     public static int nativeInt(JsonNode config, String key, Integer fallback, int min, int max) {
@@ -156,7 +157,8 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
         }
         if (role == Role.prefill) {
             result.put("mock.scheduler.mode", groupScheduling() ? "group" : "fifo")
-                .put(PREFILL_OVERHEAD_MS, prefillOverheadMs());
+                .put(PREFILL_OVERHEAD_MS, prefillOverheadMs())
+                .put("max_rpc_timeout_ms", maxRpcTimeoutMs);
         }
         result.setAll((ObjectNode) compute.effectiveSettings());
         return result;
@@ -192,7 +194,8 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
 
     static Set<String> nativeNames(Role role) {
         var names = new HashSet<>(COMMON);
-        if (role == Role.prefill) names.addAll(Set.of("max_batch_tokens_without_cache", "max_inited_kv_cache_streams"));
+        if (role == Role.prefill)
+            names.addAll(Set.of("max_batch_tokens_without_cache", "max_inited_kv_cache_streams", "max_rpc_timeout_ms"));
         return Set.copyOf(names);
     }
 

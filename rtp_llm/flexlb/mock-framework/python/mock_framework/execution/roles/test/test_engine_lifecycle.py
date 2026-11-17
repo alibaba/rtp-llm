@@ -11,8 +11,8 @@ from mock_framework.config import ConfigError, compile_case
 from mock_framework.execution import ExecutionError
 from mock_framework.execution.launch import prepare_launch
 from mock_framework.execution.runner import run_case
-from mock_framework.execution.step.engine_scale import EngineScaleArgs, engine_scale
-from mock_framework.execution.step.master_list_engines import (
+from mock_framework.execution.step.engine import EngineScaleArgs, engine_scale
+from mock_framework.execution.step.master import (
     MasterListEnginesArgs,
     master_list_engines,
 )
@@ -68,7 +68,7 @@ def setup_case(tmp_path, operation, *, invalid=False, traffic=False):
             }
         )
         env["master"] = {"config": config}
-        env["client"] = {}
+        env["frontend"] = {}
     source = tmp_path / "case.yaml"
     source.write_text(
         yaml.safe_dump(
@@ -119,11 +119,11 @@ def setup_case(tmp_path, operation, *, invalid=False, traffic=False):
             "startup_timeout": "60s",
         }
         raw["zookeeper"] = {"command": zookeeper_command(ROOT, java)}
-        raw["components"]["client"] = {
+        raw["components"]["frontend"] = {
             "command": [
                 str(java),
                 "-jar",
-                str(ROOT / "java/client/target/mock-client-1.0-SNAPSHOT-all.jar"),
+                str(ROOT / "java/frontend/target/mock-frontend-1.0-SNAPSHOT-all.jar"),
             ]
         }
     return case, prepare_launch(raw, case, tmp_path)
@@ -346,9 +346,7 @@ def test_partial_scale_failure_is_not_replayed_or_reported_as_success(
             try:
                 await engine_scale(ctx, EngineScaleArgs(direction="in", count=2))
             except ExecutionError:
-                assert len(ctx.runtime.topology.list_active_endpoints("prefill")) == (
-                    0 if operation == "stop_after_exit" else 1
-                )
+                assert ctx.runtime.topology.list_active_endpoints("prefill") == []
                 raise
         raise AssertionError("Partial failure was swallowed")
 
@@ -368,7 +366,7 @@ def test_partial_scale_failure_is_not_replayed_or_reported_as_success(
     assert json.loads((output / "topology.json").read_text()) == []
 
 
-def test_real_master_routes_client_traffic_after_engine_scale(tmp_path):
+def test_real_master_routes_frontend_traffic_after_engine_scale(tmp_path, monkeypatch):
     source = tmp_path / "traffic.mckidx"
     write_inputs(
         source,
@@ -380,8 +378,8 @@ def test_real_master_routes_client_traffic_after_engine_scale(tmp_path):
     async def exercise(ctx, args: Args) -> bool:
         runtime = ctx.runtime
         (master,) = ctx.list_rpc_addresses()["masters"]
-        (client,) = runtime.topology.list_active_endpoints("client")
-        await runtime.clients.start_playback(
+        (frontend,) = runtime.topology.list_active_endpoints("frontend")
+        await runtime.frontends.start_playback(
             {
                 "requests_file": str(source),
                 "qps": 8,
@@ -395,7 +393,7 @@ def test_real_master_routes_client_traffic_after_engine_scale(tmp_path):
 
         async def state():
             value = await invoke(
-                client["control"], "worker/state", {"sequence": 1}, ctx.timeout
+                frontend["control"], "worker/state", {"sequence": 1}, ctx.timeout
             )
             assert not value["errors"], value
             return value
@@ -406,6 +404,28 @@ def test_real_master_routes_client_traffic_after_engine_scale(tmp_path):
 
             original = ctx.list_rpc_addresses()["prefill"]
             created = await engine_scale(ctx, EngineScaleArgs(direction="out"))
+            (master_process,) = runtime.supervisor.process_identities("master")
+            discovery_file = (
+                master_process.directory(ctx.records.directory) / "discovery.json"
+            )
+            stop_intentionally = runtime.supervisor.stop_intentionally
+            rpc_by_node = {
+                item["id"]: item["rpc"]
+                for item in runtime.topology.list_active_endpoints("prefill")
+            }
+
+            async def stop_after_unpublish(process_name):
+                discovered = json.loads(discovery_file.read_text())
+                assert all(
+                    rpc_by_node[process_name] not in addresses
+                    for addresses in discovered.values()
+                )
+                assert runtime.supervisor.child(process_name).returncode is None
+                return await stop_intentionally(process_name)
+
+            monkeypatch.setattr(
+                runtime.supervisor, "stop_intentionally", stop_after_unpublish
+            )
             removed = await engine_scale(
                 ctx, EngineScaleArgs(direction="in", targets=original)
             )

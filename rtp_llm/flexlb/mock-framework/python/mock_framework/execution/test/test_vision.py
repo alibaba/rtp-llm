@@ -83,7 +83,7 @@ def test_vision_playback_through_real_master(tmp_path):
             "prefill": engine,
             "decode": decode,
             "vit": vision,
-            "client": {
+            "frontend": {
                 "config": {"image_token_id": 1000},
                 "deployment": {"replicas": 2},
             },
@@ -97,7 +97,7 @@ def test_vision_playback_through_real_master(tmp_path):
                     {
                         "id": "start",
                         "describe": "Play image input",
-                        "interface": "client/start/playback",
+                        "interface": "frontend/start/playback",
                         "args": {
                             "requests_file": "requests.mckidx",
                             "replay_speed": 2,
@@ -112,7 +112,7 @@ def test_vision_playback_through_real_master(tmp_path):
                     {
                         "id": "stop",
                         "describe": "Collect playback result",
-                        "interface": "client/stop/playback",
+                        "interface": "frontend/stop/playback",
                     },
                 ],
             }
@@ -162,11 +162,11 @@ def test_vision_playback_through_real_master(tmp_path):
             ],
             "startup_timeout": "60s",
         },
-        "client": {
+        "frontend": {
             "command": [
                 java,
                 "-jar",
-                str(root / "java/client/target/mock-client-1.0-SNAPSHOT-all.jar"),
+                str(root / "java/frontend/target/mock-frontend-1.0-SNAPSHOT-all.jar"),
             ]
         },
     }
@@ -192,18 +192,21 @@ def test_vision_playback_through_real_master(tmp_path):
     result = asyncio.run(run_case(case, launch, output))
     assert result["status"] == "PASS", result
     summary = json.loads(
-        (output / "components/client-0/coordinator/1/result.json").read_text()
+        (output / "components/frontend-0/coordinator/1/result.json").read_text()
     )
     assert not summary["errors"], summary
-    clients = list(summary["clients"].values())
-    assert len(clients) == 2
-    for client in clients:
+    frontends = list(summary["frontends"].values())
+    assert len(frontends) == 2
+    for frontend in frontends:
         assert (
-            client["issued"] == client["finished"] == client["outcomes"]["success"] == 4
-        ), client
-    assert not (output / "components/client-0/coordinator/1/shards").exists()
+            frontend["issued"]
+            == frontend["finished"]
+            == frontend["outcomes"]["success"]
+            == 4
+        ), frontend
+    assert not (output / "components/frontend-0/coordinator/1/shards").exists()
     for index in range(2):
-        component = output / f"components/client-{index}"
+        component = output / f"components/frontend-{index}"
         plan = json.loads((component / "playback/1/plan.json").read_text())
         assert plan["requests_file"] == str(tmp_path / "requests.mckidx")
         assert any(

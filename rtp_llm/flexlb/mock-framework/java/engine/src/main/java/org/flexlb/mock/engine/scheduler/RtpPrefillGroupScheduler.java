@@ -14,12 +14,8 @@ final class RtpPrefillGroupScheduler extends AbstractRtpScheduler {
 
     private boolean preferGroup;
 
-    RtpPrefillGroupScheduler(Object lock, RtpConfig config, KvCacheManager cache) {
-        this(lock, config, cache, new TaskHistory());
-    }
-
-    RtpPrefillGroupScheduler(Object lock, RtpConfig config, KvCacheManager cache, TaskHistory finished) {
-        super(lock, config, cache, finished);
+    RtpPrefillGroupScheduler(Object lock, RtpConfig config, KvCacheManager cache, TaskHistory finished, RtpMetrics metrics) {
+        super(lock, config, cache, finished, metrics);
     }
 
     @Override public List<InputResult> enqueue(List<InputItem> batch) {

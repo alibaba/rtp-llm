@@ -12,7 +12,6 @@ import org.flexlb.mock.engine.cache.KvCacheManager.Ready;
 import org.flexlb.mock.engine.config.RtpConfig;
 import org.flexlb.mock.engine.execution.LLMMockEngine;
 import org.flexlb.mock.engine.scheduler.LLMMockEngineTest;
-import org.flexlb.mock.engine.scheduler.AbstractRtpScheduler;
 import org.flexlb.mock.engine.scheduler.RtpTestMetrics;
 import org.flexlb.mock.engine.scheduler.EngineScheduler;
 import org.flexlb.mock.protocol.MultimodalProtocol;
@@ -31,7 +30,7 @@ class PrefillAdmissionTest {
     @Test void singleAndBatchSubmissionRejectUnpreparedMediaWithoutAdmission() throws Exception {
         var config = config("1", true);
         try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0);
-             var engine = server(config, cache, AbstractRtpScheduler.factory(config))) {
+             var engine = server(config, cache, new RtpTestMetrics(config))) {
             var raw = input(1, 0, true).toBuilder()
                 .addMultimodalInputs(MultimodalInputPB.newBuilder().setMultimodalType(1).setMultimodalUrl("image")).build();
             var batch = engine.submit(List.of(new PrefillRpcServer.Submission(raw, Long.MAX_VALUE)));
@@ -60,7 +59,7 @@ class PrefillAdmissionTest {
 
     @Test void forwardsThenCommitsCompleteBlocksAndReportsCacheReuse() throws Exception {
         var config = config("totalComputeTokens");
-        try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, AbstractRtpScheduler.factory(config))) {
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, new RtpTestMetrics(config))) {
             assertTrue(engine.snapshot(-1).finished().isEmpty());
             var first = submit(engine, input(1, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
             assertTrue(first.status().isOk());
@@ -81,7 +80,7 @@ class PrefillAdmissionTest {
         var root = json.readTree(directory.resolve("config.json").toFile());
         ((ObjectNode) root.path("component").path("config")).put("concurrency_limit", 1);
         var config = RtpConfig.load(root);
-        try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, AbstractRtpScheduler.factory(config))) {
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, new RtpTestMetrics(config))) {
             var first = submit(engine, input(1, 0, true));
             var queued = submit(engine, input(2, 25, true));
             var result = queued.completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
@@ -97,7 +96,7 @@ class PrefillAdmissionTest {
 
     @Test void cancellationReleasesLeaseAndCannotCommitLaterOrCancelNewSameId() throws Exception {
         var config = config("500");
-        try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, AbstractRtpScheduler.factory(config))) {
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, new RtpTestMetrics(config))) {
             var old = submit(engine, input(1, 0, true)); old.cancel();
             assertEquals(Status.Code.CANCELLED, old.completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().getCode());
             assertEquals(0, cache.snapshot(-1, true).keys().length);
@@ -115,7 +114,7 @@ class PrefillAdmissionTest {
     @Test void runningTimeoutAndShutdownReleaseAllResources() throws Exception {
         var config = config("500");
         try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0)) {
-            var engine = server(config, cache, AbstractRtpScheduler.factory(config));
+            var engine = server(config, cache, new RtpTestMetrics(config));
             try {
                 var timed = submit(engine, input(1, 25, true));
                 assertEquals(Status.Code.DEADLINE_EXCEEDED, timed.completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().getCode());
@@ -132,7 +131,7 @@ class PrefillAdmissionTest {
 
     @Test void allocationAndFormulaFailureDoNotLeakOrBlockTheNextRequest() throws Exception {
         var config = config("sqrt(-1)");
-        try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, AbstractRtpScheduler.factory(config))) {
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, new RtpTestMetrics(config))) {
             assertEquals(Status.Code.INTERNAL, submit(engine, input(1, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().getCode());
             assertEquals(8, cache.snapshot(-1, false).availableBlocks());
             try (var owner = assertInstanceOf(Ready.class, cache.prepare(6L * config.physicalBlockSize(), List.of())).lease()) {
@@ -167,7 +166,7 @@ class PrefillAdmissionTest {
 
     @Test void noCacheReuseForLastPromptTokenAndPerRequestSwitchIsHonored() throws Exception {
         var config = config("0");
-        try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, AbstractRtpScheduler.factory(config))) {
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, new RtpTestMetrics(config))) {
             var exact = input(1, 0, true).toBuilder().clearTokenIds().addAllTokenIds(List.of(1, 2, 3, 4)).build();
             submit(engine, exact).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
             var reused = submit(engine, exact.toBuilder().setRequestId(2).build()).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
@@ -179,7 +178,7 @@ class PrefillAdmissionTest {
 
     @Test void disabledReuseDoesNotPublishNewCacheKeys() throws Exception {
         var config = config("0");
-        try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, AbstractRtpScheduler.factory(config))) {
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, new RtpTestMetrics(config))) {
             assertTrue(submit(engine, input(1, 0, false)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS).status().isOk());
             assertEquals(0, cache.snapshot(-1, true).keys().length);
             assertEquals(8, cache.snapshot(-1, false).freeBlocks());
@@ -188,7 +187,7 @@ class PrefillAdmissionTest {
 
     @Test void boundedFinishedHistoryDoesNotBlockCurrentStateOrCursorRecovery() throws Exception {
         var config = config("0");
-        try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, AbstractRtpScheduler.factory(config))) {
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, new RtpTestMetrics(config))) {
             for (int i = 0; i <= 1024; i++)
                 submit(engine, input(i, 0, true)).completion().toCompletableFuture().get(2, TimeUnit.SECONDS);
             var snapshot = engine.snapshot(0);
@@ -201,7 +200,7 @@ class PrefillAdmissionTest {
 
     @Test void duplicateIdsRejectButWaitingRequestsHaveNoInventedCapacity() throws Exception {
         var config = config("3600000");
-        try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, AbstractRtpScheduler.factory(config))) {
+        try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0); var engine = server(config, cache, new RtpTestMetrics(config))) {
             submit(engine, input(0, 0, true));
             var duplicate = assertThrows(io.grpc.StatusRuntimeException.class, () -> submit(engine, input(0, 0, true)));
             assertEquals(Status.Code.ALREADY_EXISTS, duplicate.getStatus().getCode());
@@ -215,7 +214,7 @@ class PrefillAdmissionTest {
     @Test void pendingCancellationAndSubmissionHaveOneOwnerAndCannotAffectReusedIdentity() throws Exception {
         var config = config("0");
         try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0);
-             var engine = server(config, cache, AbstractRtpScheduler.factory(config));
+             var engine = server(config, cache, new RtpTestMetrics(config));
              var workers = Executors.newVirtualThreadPerTaskExecutor()) {
             for (int i = 0; i < 30; i++) {
                 var raw = input(i, 0, true);
@@ -272,7 +271,7 @@ class PrefillAdmissionTest {
     @Test void closingPendingAdmissionPublishesOnceAndRejectsLateSubmission() throws Exception {
         var config = config("0");
         try (var cache = new KvCacheManager(config.physicalBlockSize(), 8, 0);
-             var admission = server(config, cache, AbstractRtpScheduler.factory(config))) {
+             var admission = server(config, cache, new RtpTestMetrics(config))) {
             var pending = admission.new PrefillSession(input(1, 0, true), false, System.nanoTime(), Long.MAX_VALUE);
             admission.close();
             assertEquals(Status.Code.UNAVAILABLE, pending.termination.get(2, TimeUnit.SECONDS).status().getCode());

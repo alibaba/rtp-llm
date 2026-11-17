@@ -10,7 +10,7 @@ environment:
   decode:
     engine: rtp
     config: configs/decode.yaml
-  client:
+  frontend:
     config: {}
 phases:
   - id: startup
@@ -27,9 +27,9 @@ phases:
     describe: 20 条请求按总 QPS=2 播放，收尾后检查完整结果。
     timeout: 35s
     steps:
-      - id: start_client
-        describe: Client 自行发现主 Master，开始单轮播放。
-        interface: client/start/playback
+      - id: start_frontend
+        describe: Frontend 自行发现主 Master，开始单轮播放。
+        interface: frontend/start/playback
         args:
           requests_file: data/traffic/basic.mckidx
           qps: 2
@@ -38,17 +38,17 @@ phases:
           request_timeout: 3s
           drain_timeout: 5s
         wait_after: 6s
-      - id: check_client_qps
+      - id: check_frontend_qps
         describe: 在持续播放中检查已发请求速率，容许采样误差。
-        interface: client/query/qps
+        interface: frontend/query/qps
         args: { range: [-4s, 0s] }
         expect: { gte: 1.5, lte: 2.5 }
         wait_after: 6s
-      - id: stop_client
+      - id: stop_frontend
         describe: 停止回放，收齐已发请求的终态。
-        interface: client/stop/playback
+        interface: frontend/stop/playback
       - id: check_total_success_rate
         describe: 整轮已发请求全部成功。
-        interface: client/query/success_rate
+        interface: frontend/query/success_rate
         args: { range: [-40s, 0s] }
         expect: { eq: 1.0 }

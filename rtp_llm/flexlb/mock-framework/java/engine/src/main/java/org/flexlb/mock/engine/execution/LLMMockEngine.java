@@ -11,37 +11,39 @@ import org.flexlb.mock.engine.cache.KvCacheManager;
 import org.flexlb.mock.engine.config.RtpConfig;
 import org.flexlb.mock.engine.scheduler.AbstractRtpScheduler;
 import org.flexlb.mock.engine.scheduler.EngineScheduler;
+import org.flexlb.mock.engine.scheduler.RtpMetrics;
 import org.flexlb.mock.engine.scheduler.TaskHistory;
 import org.flexlb.mock.engine.service.RtpRpcService;
 import org.flexlb.mock.metrics.MetricTags;
 import org.flexlb.mock.protocol.ControlHttpServer;
 
 /**
- * One LLM Mock P/D Engine with independent listeners and resources. Does not contain the case runner or a cluster controller.
+ * Owns one Mock Prefill or Decode instance, including its execution loop, RPC listeners and metrics.
  */
 public final class LLMMockEngine implements AutoCloseable {
     private final RtpConfig config;
     private final KvCacheManager cacheManager;
     private final RtpRpcService service;
     private final EngineLoop engine;
+    private final EngineScheduler scheduler;
+    private final RtpMetrics rtpMetrics;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final org.flexlb.mock.engine.EngineMain.Address address = org.flexlb.mock.engine.EngineMain.Address.local();
 
     private Server rpc;
     private ControlHttpServer api;
     private org.flexlb.mock.metrics.MetricsOutput metrics;
-    private java.util.function.Supplier<List<MetricFamilySamples>> metricSource;
 
     private LLMMockEngine(RtpConfig config, EngineScheduler.Factory schedulers) {
         this.config = Objects.requireNonNull(config);
-        Objects.requireNonNull(schedulers);
         cacheManager = new KvCacheManager(config.tokensPerCacheKey(), config.deviceBlocks(), config.totalCacheBlocks(), config.reserveBlocks(), config.deviceCache());
         var lock = new Object();
         var finished = new TaskHistory();
         try {
-            var scheduler = schedulers.create(lock, cacheManager, finished);
-            var samples = AbstractRtpScheduler.metricsFor(scheduler);
-            if (samples != null) metricSource = samples;
+            rtpMetrics = new RtpMetrics(config, lock, this::queues, cacheManager);
+            scheduler = schedulers == null
+                ? AbstractRtpScheduler.create(lock, config, cacheManager, finished, rtpMetrics)
+                : schedulers.create(lock, cacheManager, finished);
             engine = new EngineLoop(lock, scheduler, finished, cacheManager, config.compute(), config.role(),
                 config.id(), config.prefillOverheadMs());
             try {
@@ -61,29 +63,11 @@ public final class LLMMockEngine implements AutoCloseable {
     }
 
     public static LLMMockEngine start(RtpConfig config, int rpcPort, int controlPort) throws IOException {
-        return start(config, rpcPort, controlPort, AbstractRtpScheduler.factory(config));
+        return start(config, rpcPort, controlPort, null);
     }
 
     public static LLMMockEngine start(RtpConfig config, EngineScheduler.Factory schedulers) throws IOException {
-        return start(config, 0, 0, schedulers);
-    }
-
-    public static LLMMockEngine start(RtpConfig config, int rpcPort, int controlPort, EngineScheduler.Factory schedulers) throws IOException {
-        var node = new LLMMockEngine(config, schedulers);
-        try {
-            var builder = NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service);
-            if (config.role() == org.flexlb.mock.protocol.Role.decode) builder.addService(node.service.mockDecodeService());
-            node.rpc = builder.build().start();
-            node.metrics = org.flexlb.mock.metrics.MetricsOutput.start(node::collectMetrics);
-            node.api = new ControlHttpServer(node.address.listener(controlPort)).health(node::checkHealthy);
-            if (node.metrics.prometheus()) node.api.metrics(() -> MetricTags.scrape(node.collectMetrics()));
-            node.api.start();
-            node.cacheManager.startKvcmReporter(config, node.address.rpc(node.rpc.getPort() - 1));
-            return node;
-        } catch (IOException | RuntimeException | Error error) {
-            try { node.close(); } catch (RuntimeException cleanup) { error.addSuppressed(cleanup); }
-            throw error;
-        }
+        return start(config, 0, 0, Objects.requireNonNull(schedulers));
     }
 
     public void checkHealthy() {
@@ -147,10 +131,29 @@ public final class LLMMockEngine implements AutoCloseable {
         if (failure != null) throw failure;
     }
 
+    private static LLMMockEngine start(RtpConfig config, int rpcPort, int controlPort, EngineScheduler.Factory schedulers) throws IOException {
+        var node = new LLMMockEngine(config, schedulers);
+        try {
+            var builder = NettyServerBuilder.forAddress(node.address.listener(rpcPort)).addService(node.service);
+            if (config.role() == org.flexlb.mock.protocol.Role.decode) builder.addService(node.service.mockDecodeService());
+            node.rpc = builder.build().start();
+            node.metrics = org.flexlb.mock.metrics.MetricsOutput.start(node::collectMetrics);
+            node.api = new ControlHttpServer(node.address.listener(controlPort)).health(node::checkHealthy);
+            if (node.metrics.prometheus()) node.api.metrics(() -> MetricTags.scrape(node.collectMetrics()));
+            node.api.start();
+            node.cacheManager.startKvcmReporter(config, node.address.rpc(node.rpc.getPort() - 1));
+            return node;
+        } catch (IOException | RuntimeException | Error error) {
+            try { node.close(); } catch (RuntimeException cleanup) { error.addSuppressed(cleanup); }
+            throw error;
+        }
+    }
+
+    private EngineScheduler.QueueSnapshot queues() { return scheduler.queues(); }
+
     private List<MetricFamilySamples> collectMetrics() {
-        if (metricSource == null) return service.collectMetrics();
         service.checkHealthy();
-        var samples = new java.util.ArrayList<>(metricSource.get());
+        var samples = new ArrayList<>(rtpMetrics.collect());
         samples.addAll(service.collectMetrics());
         return samples;
     }

@@ -7,7 +7,7 @@ import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.engine.cache.KvCacheManager;
 import org.flexlb.mock.engine.config.RtpConfig;
 import org.flexlb.mock.engine.execution.EngineLoop;
-import org.flexlb.mock.engine.scheduler.AbstractRtpScheduler;
+import org.flexlb.mock.engine.scheduler.RtpTestMetrics;
 import org.flexlb.mock.engine.scheduler.LLMMockEngineTest;
 import org.flexlb.mock.engine.scheduler.TaskHistory;
 import org.junit.jupiter.api.Test;
@@ -20,7 +20,7 @@ class RtpRpcMetricsTest {
         var config = RtpConfig.load(new ObjectMapper().valueToTree(LLMMockEngineTest.configuration("prefill")));
         var lock = new Object(); var history = new TaskHistory();
         try (var cache = new KvCacheManager(config.physicalBlockSize(), config.deviceBlocks(), 0);
-             var engine = new EngineLoop(lock, AbstractRtpScheduler.factory(config), history, cache,
+             var engine = new EngineLoop(lock, new RtpTestMetrics(config), history, cache,
                  config.compute(), config.role(), config.id());
              var service = new RtpRpcService(RtpRpcService.Config.from(config), cache, lock, history, engine, false)) {
             service.getCacheStatus(CacheVersionPB.getDefaultInstance(), observer(service, "cache_status"));

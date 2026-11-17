@@ -3,7 +3,7 @@ package org.flexlb.mock.protocol;
 import java.util.*;
 
 /**
- * Cross-language test entry point; uses the same immutable input as Client and Engine.
+ * Cross-language test entry point; uses the same immutable input as Frontend and Engine.
  */
 public final class CacheKeyProbe {
     public static void main(String[] args) {

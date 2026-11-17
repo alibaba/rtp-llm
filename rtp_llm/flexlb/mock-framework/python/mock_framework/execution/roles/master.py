@@ -121,20 +121,19 @@ class MasterRole:
         self.supervisor, self.topology = supervisor, topology
         self.records, self.monitoring = records, monitoring
         self.election_env = {}
+        self.consistency_config = None
         self._next = 0
         self._instances = {}
         self._lock = asyncio.Lock()
 
     def configure_election(self, connect):
-        native = json.loads(self.role_config["config"]["FLEXLB_CONFIG"])
-        native["consistency"] = {
+        self.consistency_config = {
             "type": "ZOOKEEPER",
             "connectString": connect,
             "sessionTimeoutMs": 6000,
             "connectionTimeoutMs": 6000,
         }
         self.election_env = {
-            "FLEXLB_CONFIG": json.dumps(native, ensure_ascii=False),
             "SPECTRUM_WORKSPACE_ID": "mock",
             "SPECTRUM_APPLICATION_NAME": "flexlb",
             "SPECTRUM_DEPLOYMENT_NAME": uuid.uuid4().hex,
@@ -156,6 +155,11 @@ class MasterRole:
         if self.election_env:
             host = master_host(identity.index)
             check_master_ports(host, int(self.election_env["MOCK_MASTER_PORT"]))
+            behavior = json.loads(env.get("FLEXLB_CONFIG", "{}"))
+            if "consistency" in behavior:
+                raise ExecutionError("Local runner assigns FLEXLB_CONFIG.consistency")
+            behavior["consistency"] = self.consistency_config
+            env["FLEXLB_CONFIG"] = json.dumps(behavior)
             env.update(self.election_env, FLEXLB_ADVERTISED_IP=host)
         return env
 
@@ -398,7 +402,7 @@ def master_port(count):
         )
     for attempt in range(32):
         sockets = []
-        # Avoid client connections taking the selected port during JVM startup.
+        # Avoid frontend connections taking the selected port during JVM startup.
         port = 10000 + secrets.randbelow(20000)
         try:
             for index in range(count):

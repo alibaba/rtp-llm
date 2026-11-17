@@ -188,7 +188,6 @@ class PdGenerationTest {
                 response.onNext(DecodeLayout.newBuilder().setBlockSize(2).build());
                 response.onCompleted();
             }
-
             @Override public StreamObserver<DecodeFrame> remoteGenerate(StreamObserver<GenerateOutputsPB> response) {
                 return new StreamObserver<>() {
                     public void onNext(DecodeFrame input) { allocations.incrementAndGet(); }
@@ -419,6 +418,25 @@ class PdGenerationTest {
         }
     }
 
+    @Test void cancelDuringStreamingFencesDeferredAdmissionWithoutEndingTheStream() throws Exception {
+        try (var p = node("prefill", 8, 1); var d = node("decode", 8, 1);
+             var holder = assertInstanceOf(Ready.class, d.node.cacheManager().prepare(12, List.of())).lease()) {
+            var request = input(d, 2210, 5, 4, 5000, true);
+            try (var call = new Call(p, request)) {
+                await(() -> d.status().getRunningTaskInfoList().stream().anyMatch(
+                    task -> task.getRequestId() == request.getRequestId() && task.getIsWaiting()));
+                assertEquals(CancelStatusPB.CANCEL_STATUS_TOMBSTONED, cancel(p, request.getRequestId()));
+                var ack = enqueue(p, 1000, request);
+                assertEquals(0, ack.getSuccessesCount());
+                assertEquals(1, ack.getErrorsCount());
+                assertEquals(8429, ack.getErrors(0).getErrorInfo().getErrorCode());
+                holder.close();
+                call.completeOutput(4);
+                assertEquals(CancelStatusPB.CANCEL_STATUS_TOMBSTONED, cancel(p, request.getRequestId()));
+            }
+        }
+    }
+
     @Test void cancelUnattachedBatchReleasesBothOwnersAndLeavesPreemptionFence() throws Exception {
         try (var p = node("prefill", 8, 100); var d = node("decode", 8, 1)) {
             var request = input(d, 106, 5, 4, 2000, true); enqueue(p, 1500, request);
@@ -638,11 +656,14 @@ class PdGenerationTest {
         }
     }
 
-    @Test void cancellationDuringPComputeReleasesBothNodesWithoutOutput() throws Exception {
+    @Test void cancellationDuringPComputeFinishesForwardAndReleasesBothNodesWithoutOutput() throws Exception {
         try (var p = node("prefill", 8, 1000); var d = node("decode", 8, 1); var call = new Call(p, input(d, 1, 5, 4, 3000, true))) {
             await(() -> p.status().getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count() == 1 && d.status().getRunningTaskInfoList().stream().filter(task -> task.getIsWaiting()).count() == 1);
-            call.close(); await(() -> p.status().getAvailableKvCache() == 16 && d.status().getAvailableKvCache() == 16);
-            assertEquals(0, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
+            call.close();
+            await(() -> p.status().getAvailableKvCache() == 16 && d.status().getAvailableKvCache() == 16);
+            assertEquals(1, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
+            assertTrue(metric(p, "rtp_llm_model_forward_seconds_sum", "role=\"prefill\"") >= 1);
+            assertEquals(0, metric(p, "rtp_llm_forward_tokens_total", "kind=\"output\""));
         }
     }
 
@@ -755,14 +776,15 @@ class PdGenerationTest {
         }
     }
 
-    @Test void downstreamFailureDuringPrefillCancelsTheComputeAndReleasesKv() throws Exception {
+    @Test void downstreamFailureDuringPrefillFinishesForwardAndReleasesKv() throws Exception {
         try (var p = node("prefill", 8, 1000); var d = node("decode", 8, 1);
              var call = new Call(p, input(d, 2400, 3, 4, 3000, true))) {
             await(() -> p.status().getRunningTaskInfoList().stream().filter(task -> !task.getIsWaiting()).count() == 1);
             d.node.close();
             call.error(Status.Code.UNAVAILABLE);
             await(() -> p.status().getAvailableKvCache() == 16);
-            assertEquals(0, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
+            assertEquals(1, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
+            assertEquals(0, metric(p, "rtp_llm_forward_tokens_total", "kind=\"output\""));
         }
     }
 
@@ -831,6 +853,24 @@ class PdGenerationTest {
             await(() -> p.status().getFinishedTaskListCount() == 2 && d.status().getFinishedTaskListCount() == 1);
             assertEquals(1, metric(p, "rtp_llm_model_forward_seconds_count", "role=\"prefill\""));
             assertEquals(32, p.status().getAvailableKvCache()); assertEquals(16, d.status().getAvailableKvCache());
+        }
+    }
+
+    @Test void decodeRpcTimeoutReturnsBatchAndReleasesKvWithoutRequestTimeout() throws Exception {
+        var settings = Map.<String, Object>of("settings", Map.of("max_rpc_timeout_ms", 1000));
+        try (var p = node("prefill", 16, 10, settings); var d = node("decode", 8, 1);
+             var holder = assertInstanceOf(Ready.class, d.node.cacheManager().prepare(8, List.of())).lease();
+             var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+            var accepted = workers.submit(() -> enqueue(p, 2000,
+                input(d, 731, 5, 3, 0, true), input(d, 732, 7, 3, 0, true)));
+            await(() -> d.status().getRunningTaskInfoCount() == 2 && d.status().getAvailableKvCache() < 8);
+            assertFalse(accepted.isDone());
+
+            var response = accepted.get(3, TimeUnit.SECONDS);
+            assertEquals(2, response.getSuccessesCount() + response.getErrorsCount());
+            assertTrue(response.getErrorsList().stream()
+                .anyMatch(error -> error.getErrorInfo().getErrorCode() == Status.Code.DEADLINE_EXCEEDED.value()));
+            await(() -> d.status().getFinishedTaskListCount() == 2 && d.status().getAvailableKvCache() == 8);
         }
     }
 

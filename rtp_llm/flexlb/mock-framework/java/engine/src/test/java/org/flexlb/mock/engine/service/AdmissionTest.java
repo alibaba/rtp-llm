@@ -39,9 +39,11 @@ class AdmissionTest {
                      assertSame(lock, domain);
                      assertSame(cache, supplied);
                      assertNull(created.get(), "One scheduler per instance");
-                     var scheduler = new RejectingScheduler(domain); created.set(scheduler); return scheduler;
+                     var scheduler = new RejectingScheduler(domain);
+                     created.set(scheduler);
+                     return scheduler;
                  }, history, cache, compute, role, "test");
-                 var service = new RtpRpcService(new RtpRpcService.Config("test", role, 2, 4096, 0, compute, -200, 0L, 1),
+                 var service = new RtpRpcService(new RtpRpcService.Config("test", role, 2, 4096, 0, compute, -200, 0L, 1, 0),
                      cache, lock, history, engine, true)) {
                 var builder = io.grpc.netty.NettyServerBuilder.forPort(0).addService(service);
                 if (role == Role.decode) builder.addService(service.mockDecodeService());
@@ -122,8 +124,6 @@ class AdmissionTest {
         @Override public void processOutputs(Work work, SimulatedCompute.Outcome outcome) { fail("No admitted work"); }
 
         @Override public void failForward(Work work, RuntimeException error) { fail("No admitted work"); }
-
-        @Override public boolean isForwardCancelled(Work work) { throw new AssertionError("No admitted work"); }
 
         private void locked() { assertTrue(Thread.holdsLock(lock)); }
     }

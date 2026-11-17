@@ -11,14 +11,14 @@
   "panels": [
     {
       "id": 1,
-      "title": "Client · 请求结果",
+      "title": "Frontend · 请求结果",
       "type": "row",
       "collapsed": true,
       "panels": [
         {
           "id": 2,
           "type": "timeseries",
-          "title": "Client 总发送 QPS",
+          "title": "Frontend 总发送 QPS",
           "gridPos": {
             "x": 0,
             "y": 1,
@@ -32,8 +32,8 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${client_group})(rate(mock_client_requests_issued_total{instance=~\"${client_instance}\"}[$__rate_interval]))",
-              "legendFormat": "总发送 · {{${client_group}}}",
+              "expr": "sum by(${frontend_group})(rate(mock_frontend_requests_issued_total{instance=~\"${frontend_instance}\"}[$__rate_interval]))",
+              "legendFormat": "总发送 · {{${frontend_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -78,12 +78,12 @@
               "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "Client 开始原生调用的速率，不代表 Master 已接纳；所选 Client 求和。"
+          "description": "Frontend 开始原生调用的速率，不代表 Master 已接纳；所选 Frontend 求和。"
         },
         {
           "id": 22,
           "type": "timeseries",
-          "title": "Client 平均单实例发送 QPS",
+          "title": "Frontend 平均单实例发送 QPS",
           "gridPos": {
             "x": 12,
             "y": 1,
@@ -97,8 +97,8 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(${client_group})(rate(mock_client_requests_issued_total{instance=~\"${client_instance}\"}[$__rate_interval]))",
-              "legendFormat": "平均单 Client · {{${client_group}}}",
+              "expr": "avg by(${frontend_group})(rate(mock_frontend_requests_issued_total{instance=~\"${frontend_instance}\"}[$__rate_interval]))",
+              "legendFormat": "平均单 Frontend · {{${frontend_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -148,7 +148,7 @@
         {
           "id": 3,
           "type": "timeseries",
-          "title": "Client 终态 QPS",
+          "title": "Frontend 终态 QPS",
           "gridPos": {
             "x": 0,
             "y": 10,
@@ -162,8 +162,17 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${client_group},outcome)(rate(mock_client_requests_finished_total{instance=~\"${client_instance}\"}[$__rate_interval]))",
-              "legendFormat": "{{outcome}} · {{${client_group}}}",
+              "expr": "sum by(${frontend_group},outcome)(rate(mock_frontend_requests_finished_total{instance=~\"${frontend_instance}\",outcome!=\"success\"}[$__rate_interval]))",
+              "legendFormat": "{{outcome}} · {{${frontend_group}}}",
+              "datasource": {
+                "type": "prometheus",
+                "uid": "mock-prometheus"
+              }
+            },
+            {
+              "refId": "B",
+              "expr": "sum by(${frontend_group})(rate(py_rtp_success_qps_metric_total{instance=~\"${frontend_instance}\"}[$__rate_interval]))",
+              "legendFormat": "success · {{${frontend_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -208,12 +217,12 @@
               "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "所选 Client 的终态速率求和，按 success/error/timeout/cancelled 区分。"
+          "description": "所选 Frontend 的终态速率求和，按 success/error/timeout/cancelled 区分。"
         },
         {
           "id": 4,
           "type": "timeseries",
-          "title": "Client 终态成功率",
+          "title": "Frontend 终态成功率",
           "gridPos": {
             "x": 12,
             "y": 10,
@@ -227,8 +236,8 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${client_group})(rate(mock_client_requests_finished_total{instance=~\"${client_instance}\",outcome=\"success\"}[$__rate_interval])) / sum by(${client_group})(rate(mock_client_requests_finished_total{instance=~\"${client_instance}\"}[$__rate_interval]))",
-              "legendFormat": "成功 / 全部终态 · {{${client_group}}}",
+              "expr": "sum by(${frontend_group})(rate(mock_frontend_requests_finished_total{instance=~\"${frontend_instance}\",outcome=\"success\"}[$__rate_interval])) / sum by(${frontend_group})(rate(mock_frontend_requests_finished_total{instance=~\"${frontend_instance}\"}[$__rate_interval]))",
+              "legendFormat": "成功 / 全部终态 · {{${frontend_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -278,7 +287,7 @@
         {
           "id": 5,
           "type": "timeseries",
-          "title": "Client TTFT / TPOT",
+          "title": "Frontend TTFT / TPOT",
           "gridPos": {
             "x": 0,
             "y": 19,
@@ -292,8 +301,8 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${client_group})(rate(mock_client_ttft_seconds_sum{instance=~\"${client_instance}\"}[$__rate_interval])) / sum by(${client_group})(rate(mock_client_ttft_seconds_count{instance=~\"${client_instance}\"}[$__rate_interval]))",
-              "legendFormat": "TTFT 平均 · {{${client_group}}}",
+              "expr": "sum by(${frontend_group})(rate(mock_frontend_ttft_seconds_sum{instance=~\"${frontend_instance}\"}[$__rate_interval])) / sum by(${frontend_group})(rate(mock_frontend_ttft_seconds_count{instance=~\"${frontend_instance}\"}[$__rate_interval]))",
+              "legendFormat": "TTFT 平均 · {{${frontend_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -301,8 +310,8 @@
             },
             {
               "refId": "B",
-              "expr": "histogram_quantile(0.95,sum by(${client_group},le)(rate(mock_client_ttft_seconds_bucket{instance=~\"${client_instance}\"}[$__rate_interval])))",
-              "legendFormat": "TTFT P95 · {{${client_group}}}",
+              "expr": "histogram_quantile(0.95,sum by(${frontend_group},le)(rate(mock_frontend_ttft_seconds_bucket{instance=~\"${frontend_instance}\"}[$__rate_interval])))",
+              "legendFormat": "TTFT P95 · {{${frontend_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -310,8 +319,8 @@
             },
             {
               "refId": "C",
-              "expr": "histogram_quantile(0.99,sum by(${client_group},le)(rate(mock_client_ttft_seconds_bucket{instance=~\"${client_instance}\"}[$__rate_interval])))",
-              "legendFormat": "TTFT P99 · {{${client_group}}}",
+              "expr": "histogram_quantile(0.99,sum by(${frontend_group},le)(rate(mock_frontend_ttft_seconds_bucket{instance=~\"${frontend_instance}\"}[$__rate_interval])))",
+              "legendFormat": "TTFT P99 · {{${frontend_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -319,8 +328,8 @@
             },
             {
               "refId": "D",
-              "expr": "sum by(${client_group})(rate(mock_client_tpot_seconds_sum{instance=~\"${client_instance}\"}[$__rate_interval])) / sum by(${client_group})(rate(mock_client_tpot_seconds_count{instance=~\"${client_instance}\"}[$__rate_interval]))",
-              "legendFormat": "TPOT 平均 · {{${client_group}}}",
+              "expr": "sum by(${frontend_group})(rate(mock_frontend_tpot_seconds_sum{instance=~\"${frontend_instance}\"}[$__rate_interval])) / sum by(${frontend_group})(rate(mock_frontend_tpot_seconds_count{instance=~\"${frontend_instance}\"}[$__rate_interval]))",
+              "legendFormat": "TPOT 平均 · {{${frontend_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -370,7 +379,7 @@
         {
           "id": 6,
           "type": "timeseries",
-          "title": "Client 请求耗时",
+          "title": "Frontend 请求耗时",
           "gridPos": {
             "x": 12,
             "y": 19,
@@ -384,8 +393,8 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${client_group})(rate(mock_client_request_seconds_sum{instance=~\"${client_instance}\"}[$__rate_interval])) / sum by(${client_group})(rate(mock_client_request_seconds_count{instance=~\"${client_instance}\"}[$__rate_interval]))",
-              "legendFormat": "平均 · {{${client_group}}}",
+              "expr": "sum by(${frontend_group})(rate(mock_frontend_request_seconds_sum{instance=~\"${frontend_instance}\"}[$__rate_interval])) / sum by(${frontend_group})(rate(mock_frontend_request_seconds_count{instance=~\"${frontend_instance}\"}[$__rate_interval]))",
+              "legendFormat": "平均 · {{${frontend_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -393,8 +402,8 @@
             },
             {
               "refId": "B",
-              "expr": "histogram_quantile(0.95,sum by(${client_group},le)(rate(mock_client_request_seconds_bucket{instance=~\"${client_instance}\"}[$__rate_interval])))",
-              "legendFormat": "P95 · {{${client_group}}}",
+              "expr": "histogram_quantile(0.95,sum by(${frontend_group},le)(rate(mock_frontend_request_seconds_bucket{instance=~\"${frontend_instance}\"}[$__rate_interval])))",
+              "legendFormat": "P95 · {{${frontend_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -402,8 +411,8 @@
             },
             {
               "refId": "C",
-              "expr": "histogram_quantile(0.99,sum by(${client_group},le)(rate(mock_client_request_seconds_bucket{instance=~\"${client_instance}\"}[$__rate_interval])))",
-              "legendFormat": "P99 · {{${client_group}}}",
+              "expr": "histogram_quantile(0.99,sum by(${frontend_group},le)(rate(mock_frontend_request_seconds_bucket{instance=~\"${frontend_instance}\"}[$__rate_interval])))",
+              "legendFormat": "P99 · {{${frontend_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -453,7 +462,7 @@
         {
           "id": 7,
           "type": "timeseries",
-          "title": "Client 累计终态",
+          "title": "Frontend 累计终态",
           "gridPos": {
             "x": 0,
             "y": 28,
@@ -467,8 +476,8 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${client_group},outcome)(mock_client_requests_finished_total{instance=~\"${client_instance}\"})",
-              "legendFormat": "{{outcome}} · {{${client_group}}}",
+              "expr": "sum by(${frontend_group},outcome)(mock_frontend_requests_finished_total{instance=~\"${frontend_instance}\"})",
+              "legendFormat": "{{outcome}} · {{${frontend_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -518,7 +527,7 @@
         {
           "id": 65,
           "type": "timeseries",
-          "title": "Client 已发未终态",
+          "title": "Frontend 已发未终态",
           "gridPos": {
             "x": 12,
             "y": 28,
@@ -532,8 +541,8 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(${client_group})(mock_client_requests_issued_total{instance=~\"${client_instance}\"}) - sum by(${client_group})(mock_client_requests_finished_total{instance=~\"${client_instance}\"})",
-              "legendFormat": "调用计数差 · {{${client_group}}}",
+              "expr": "sum by(${frontend_group})(mock_frontend_requests_issued_total{instance=~\"${frontend_instance}\"}) - sum by(${frontend_group})(mock_frontend_requests_finished_total{instance=~\"${frontend_instance}\"})",
+              "legendFormat": "调用计数差 · {{${frontend_group}}}",
               "datasource": {
                 "type": "prometheus",
                 "uid": "mock-prometheus"
@@ -578,7 +587,7 @@
               "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "已发调用数减去已观察终态数；这是 Client 侧计数差，不等同于 Master 或 Engine 的 in-flight。"
+          "description": "已发调用数减去已观察终态数；这是 Frontend 侧计数差，不等同于 Master 或 Engine 的 in-flight。"
         }
       ],
       "gridPos": {
@@ -17560,7 +17569,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(role,error_code)(py_rtp_master_route_error_qps{instance=~\"${client_instance}\",role=~\"prefill|decode\"})",
+              "expr": "sum by(role,error_code)(py_rtp_master_route_error_qps{instance=~\"${frontend_instance}\",role=~\"prefill|decode\"})",
               "legendFormat": "路由异常 / 错误={{error_code}} | 部署角色=",
               "datasource": {
                 "type": "prometheus",
@@ -17631,7 +17640,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "sum by(role)(py_rtp_master_route_qps{instance=~\"${client_instance}\",role=~\"prefill|decode\"})",
+              "expr": "sum by(role)(py_rtp_master_route_qps{instance=~\"${frontend_instance}\",role=~\"prefill|decode\"})",
               "legendFormat": "成功取得路由 | 部署角色=",
               "datasource": {
                 "type": "prometheus",
@@ -17702,7 +17711,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "avg by(role)(py_rtp_master_route_rt{instance=~\"${client_instance}\",role=~\"prefill|decode\"})",
+              "expr": "avg by(role)(py_rtp_master_route_rt{instance=~\"${frontend_instance}\",role=~\"prefill|decode\"})",
               "legendFormat": "取得路由耗时·平均 | 部署角色=",
               "datasource": {
                 "type": "prometheus",
@@ -17711,7 +17720,7 @@
             },
             {
               "refId": "B",
-              "expr": "avg by(role)(py_rtp_master_route_rt{instance=~\"${client_instance}\",role=~\"prefill|decode\"})",
+              "expr": "avg by(role)(py_rtp_master_route_rt{instance=~\"${frontend_instance}\",role=~\"prefill|decode\"})",
               "legendFormat": "取得路由耗时·P99 | 部署角色=",
               "datasource": {
                 "type": "prometheus",
@@ -17782,7 +17791,7 @@
           "targets": [
             {
               "refId": "A",
-              "expr": "max by(role)(py_rtp_master_queue_length{instance=~\"${client_instance}\",role=~\"prefill|decode\"})",
+              "expr": "max by(role)(py_rtp_master_queue_length{instance=~\"${frontend_instance}\",role=~\"prefill|decode\"})",
               "legendFormat": "待选机＋待凑批请求数 | 部署角色=",
               "datasource": {
                 "type": "prometheus",
@@ -22925,7 +22934,7 @@
         {
           "id": 410325,
           "type": "timeseries",
-          "title": "Client gRPC 回调线程池：执行 / 排队 / 线程数",
+          "title": "出站 gRPC 回调线程池：执行 / 排队 / 线程数",
           "gridPos": {
             "x": 0,
             "y": 1802,
@@ -22996,7 +23005,7 @@
         {
           "id": 410326,
           "type": "timeseries",
-          "title": "Client gRPC EventLoop：线程数 / 待处理任务",
+          "title": "出站 gRPC EventLoop：线程数 / 待处理任务",
           "gridPos": {
             "x": 12,
             "y": 1802,
@@ -23067,7 +23076,7 @@
         {
           "id": 410329,
           "type": "timeseries",
-          "title": "Client RPC 成功耗时：平均 / 最大",
+          "title": "出站 RPC 成功耗时：平均 / 最大",
           "gridPos": {
             "x": 0,
             "y": 1811,
@@ -23147,7 +23156,7 @@
         {
           "id": 410331,
           "type": "timeseries",
-          "title": "Client RPC 成功 QPS：按操作 / 是否重试",
+          "title": "出站 RPC 成功 QPS：按操作 / 是否重试",
           "gridPos": {
             "x": 12,
             "y": 1811,
@@ -23218,7 +23227,7 @@
         {
           "id": 410330,
           "type": "timeseries",
-          "title": "Client 回调交付延迟：平均 / 最大 · 待埋点",
+          "title": "出站 回调交付延迟：平均 / 最大 · 待埋点",
           "gridPos": {
             "x": 0,
             "y": 1820,
@@ -23298,7 +23307,7 @@
         {
           "id": 410332,
           "type": "timeseries",
-          "title": "Client 重连前：旧 Channel 已存活多久",
+          "title": "出站 重连前：旧 Channel 已存活多久",
           "gridPos": {
             "x": 12,
             "y": 1820,
@@ -23778,7 +23787,7 @@
         {
           "id": 410611,
           "type": "timeseries",
-          "title": "Client 连接异常：传输事件 / 底层原因 · 待埋点",
+          "title": "出站 连接异常：传输事件 / 底层原因 · 待埋点",
           "gridPos": {
             "x": 12,
             "y": 1847,
@@ -23849,7 +23858,7 @@
         {
           "id": 410608,
           "type": "timeseries",
-          "title": "Client RPC 失败 QPS：原因 / gRPC 状态 · 待埋点",
+          "title": "出站 RPC 失败 QPS：原因 / gRPC 状态 · 待埋点",
           "gridPos": {
             "x": 0,
             "y": 1856,
@@ -23920,7 +23929,7 @@
         {
           "id": 410609,
           "type": "timeseries",
-          "title": "Client RPC 失败 QPS：已确认本地 / 原因未确认 · 待埋点",
+          "title": "出站 RPC 失败 QPS：已确认本地 / 原因未确认 · 待埋点",
           "gridPos": {
             "x": 12,
             "y": 1856,
@@ -23991,7 +24000,7 @@
         {
           "id": 410610,
           "type": "timeseries",
-          "title": "Client RPC 失败位置：本地阶段 / 传输进度 · 待埋点",
+          "title": "出站 RPC 失败位置：本地阶段 / 传输进度 · 待埋点",
           "gridPos": {
             "x": 0,
             "y": 1865,
@@ -28777,7 +28786,7 @@
               "calcs": ["mean", "max", "lastNotNull"]
             }
           },
-          "description": "逐目标保留 up；Engine/Client/Master 业务筛选不隐藏其他目标故障。目标从发现中移除后可能停止出样，缺失不等于 0。"
+          "description": "逐目标保留 up；Engine/Frontend/Master 业务筛选不隐藏其他目标故障。目标从发现中移除后可能停止出样，缺失不等于 0。"
         },
         {
           "id": 64,
@@ -29134,15 +29143,15 @@
         "current": {}
       },
       {
-        "name": "client_instance",
-        "label": "Client 地址",
+        "name": "frontend_instance",
+        "label": "Frontend 地址",
         "type": "query",
         "datasource": {
           "type": "prometheus",
           "uid": "mock-prometheus"
         },
-        "query": "label_values(mock_client_requests_issued_total, instance)",
-        "definition": "label_values(mock_client_requests_issued_total, instance)",
+        "query": "label_values(mock_frontend_requests_issued_total, instance)",
+        "definition": "label_values(mock_frontend_requests_issued_total, instance)",
         "refresh": 1,
         "multi": true,
         "includeAll": true,
@@ -29154,15 +29163,15 @@
         "options": []
       },
       {
-        "name": "client_group",
+        "name": "frontend_group",
         "type": "query",
         "hide": 2,
         "datasource": {
           "type": "prometheus",
           "uid": "mock-prometheus"
         },
-        "query": "query_result(label_replace(label_replace(label_replace(vector(1), \"selection\", \"${client_instance}\", \"\", \"\"), \"grouping\", \"instance\", \"\", \"\"), \"grouping\", \"role\", \"selection\", \"\\\\.\\\\*\"))",
-        "definition": "query_result(label_replace(label_replace(label_replace(vector(1), \"selection\", \"${client_instance}\", \"\", \"\"), \"grouping\", \"instance\", \"\", \"\"), \"grouping\", \"role\", \"selection\", \"\\\\.\\\\*\"))",
+        "query": "query_result(label_replace(label_replace(label_replace(vector(1), \"selection\", \"${frontend_instance}\", \"\", \"\"), \"grouping\", \"instance\", \"\", \"\"), \"grouping\", \"role\", \"selection\", \"\\\\.\\\\*\"))",
+        "definition": "query_result(label_replace(label_replace(label_replace(vector(1), \"selection\", \"${frontend_instance}\", \"\", \"\"), \"grouping\", \"instance\", \"\", \"\"), \"grouping\", \"role\", \"selection\", \"\\\\.\\\\*\"))",
         "regex": "/grouping=\"([^\"]+)\"/",
         "refresh": 1,
         "multi": false,

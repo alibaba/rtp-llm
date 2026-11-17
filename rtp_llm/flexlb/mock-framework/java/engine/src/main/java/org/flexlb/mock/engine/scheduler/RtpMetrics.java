@@ -8,11 +8,14 @@ import java.util.*;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import java.util.function.LongSupplier;
+import org.flexlb.mock.engine.cache.KvCacheManager;
+import org.flexlb.mock.engine.config.RtpConfig;
+import org.flexlb.mock.engine.scheduler.EngineScheduler.QueueSnapshot;
 
 /**
- * Defines RTP metric names and statistics from scheduler events and state.
+ * Defines the per-instance RTP metrics from request and Forward events, scheduler queues, and KV state.
  */
-final class RtpMetrics {
+public final class RtpMetrics {
     public static final String CACHE_LOOKUPS = "rtp_llm_cache_lookup_tokens_total";
     public static final String CACHE_HITS = "rtp_llm_cache_hit_tokens_total";
     public static final String FORWARD_TOKENS = "rtp_llm_forward_tokens_total";
@@ -43,7 +46,21 @@ final class RtpMetrics {
     private boolean computing;
     private boolean schedulingActive;
 
-    public RtpMetrics(String role, Supplier<State> state) { this(role, state, System::nanoTime); }
+    public RtpMetrics(RtpConfig config, Object lock, Supplier<QueueSnapshot> queues, KvCacheManager cache) {
+        this(config.role().name(), () -> {
+            synchronized (lock) {
+                var counts = queues.get();
+                var kv = cache.snapshot(0, false);
+                long block = config.tokensPerCacheKey();
+                return new State(counts.waiting(), counts.running(), counts.loading(), counts.ready(), kv.totalBlocks() * block,
+                    kv.availableBlocks() * block, kv.freeBlocks() * block, kv.heldBlocks() * block, config.tokensPerCacheKey());
+            }
+        }, System::nanoTime, cache::itemCount);
+        cache.onEviction(this::blockEvicted);
+        cache.onReclaim(this::blocksReclaimed);
+    }
+
+    RtpMetrics(String role, Supplier<State> state) { this(role, state, System::nanoTime); }
 
     RtpMetrics(String role, Supplier<State> state, LongSupplier clock) {
         this(role, state, clock, () -> 0);

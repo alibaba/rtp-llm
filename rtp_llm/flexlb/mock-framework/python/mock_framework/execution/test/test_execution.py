@@ -351,7 +351,7 @@ def test_step_lists_rpc_addresses_from_one_topology_snapshot():
         return_value=[
             {"role": "prefill", "rpc": "p:2"},
             {"role": "master", "rpc": "m:1"},
-            {"role": "client", "rpc": "c:1"},
+            {"role": "frontend", "rpc": "c:1"},
             {"role": "decode", "rpc": "d:1"},
             {"role": "prefill", "rpc": "p:1"},
         ]
@@ -748,7 +748,7 @@ def test_master_ports_reserved_before_engines_start(tmp_path):
         runtime.masters.configure_election = configure_election
         runtime.engines.start = start_engines
         runtime.masters.start = AsyncMock()
-        runtime.clients.start = AsyncMock()
+        runtime.frontends.start = AsyncMock()
         await runtime.start()
 
     asyncio.run(check())

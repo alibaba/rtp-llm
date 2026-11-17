@@ -79,7 +79,7 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
         if (input.hasRemoteRequest()) {
             var operation = input.getRemoteRequest().getOp();
             if (operation == RemoteOpType.REMOTE_OPERATION_READ || operation == RemoteOpType.REMOTE_OPERATION_WRITE) {
-                // No SDK or external I/O was submitted: failure is explicitly buffer-safe.
+                // Reject before submitting any payload I/O.
                 response.onNext(FunctionResponsePB.newBuilder().setRemoteResponse(RemoteOperationResponsePB.newBuilder()
                     .setTransferStatus(RemoteTransferStatusPB.REMOTE_TRANSFER_STATUS_FAILED_BUFFER_SAFE).setPayloadBufferSafe(true)).build());
                 response.onCompleted(); return;
@@ -228,7 +228,8 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
      * Validates the identity, limits, and cache-key layout of an RTP endpoint.
      */
     public record Config(String id, Role role, int physicalBlockSize, int maxSeqLen,
-                         int maxBatchTokens, ComputeModel compute, int imageToken, long cacheKeySeed, int cpSize) {
+                         int maxBatchTokens, ComputeModel compute, int imageToken, long cacheKeySeed, int cpSize,
+                         long maxRpcTimeoutMs) {
         public Config {
             if (id == null || id.isBlank() || (role != Role.prefill && role != Role.decode)
                     || physicalBlockSize < 1 || cpSize < 1 || maxSeqLen < 1 || maxBatchTokens < 0)
@@ -240,7 +241,8 @@ public final class RtpRpcService extends RpcServiceGrpc.RpcServiceImplBase imple
 
         public static Config from(RtpConfig config) {
             return new Config(config.id(), config.role(), config.physicalBlockSize(), config.maxSeqLen(),
-                config.maxBatchTokens(), config.compute(), config.imageToken(), config.cacheKeySeed(), config.cpSize());
+                config.maxBatchTokens(), config.compute(), config.imageToken(), config.cacheKeySeed(), config.cpSize(),
+                config.maxRpcTimeoutMs());
         }
     }
 

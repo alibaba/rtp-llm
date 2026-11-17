@@ -166,7 +166,23 @@ class VitTest {
         // Values evaluated from ba26ddf1dd plan_image_grid/num_image_tokens, not this Java implementation.
         int[][] vectors = {{1,1,184},{56,28,202},{512,512,184},{1024,1024,652},{1920,1080,968},
             {32768,1,1024},{1,32768,1024},{3840,2160,968},{513,777,268}};
-        for (int[] v : vectors) assertEquals(v[2],VitGeometry.rows(v[0],v[1],14,3,295936,1024));
+        for (int[] v : vectors) assertEquals(v[2],VitGeometry.plan(v[0],v[1],14,3,295936,1024).rows());
+    }
+
+    @Test void forwardCostUsesResizedImageDimensions() throws Exception {
+        var metrics = new VitMetrics();
+        try (var service = new VitNode.RpcService(config("totalImagePixels / 100000", 65536, 65536, 65536, 0), metrics)) {
+            for (int side : List.of(4096, 8192)) {
+                var request = input("square-" + side).toBuilder();
+                request.getMultimodalInputsBuilder(0).getMmPreprocessConfigBuilder().setWidth(side).setHeight(side);
+                var output = VitTest.<MultimodalOutputPB>response(out -> service.remoteMultimodalEmbedding(request.build(), out))
+                    .get(3, TimeUnit.SECONDS);
+                assertEquals(994, output.getSplitSize(0));
+            }
+            var text = service.metrics();
+            assertEquals(2, sample(text, "mock_vit_theoretical_forward_rt_count"));
+            assertEquals(2 * 1302 * 1302 / 100000.0, sample(text, "mock_vit_theoretical_forward_rt_sum"), 1e-6);
+        }
     }
 
     @Test void statusCountsUniqueMediaUntilPublicationCompletes() throws Exception {

@@ -103,7 +103,7 @@ def completed(tmp_path):
             "run_id": "run",
             "phase_id": "traffic",
             "step_id": "qps",
-            "interface": "client/query/qps",
+            "interface": "frontend/query/qps",
             "query_time": "2026-10-29T00:00:10Z",
             "args": {"range": ["-4s", "0s"]},
             "expect": {"gte": 2},
@@ -150,7 +150,7 @@ def completed(tmp_path):
         {
             "event": "step_finished",
             "step_id": "qps",
-            "interface": "client/query/qps",
+            "interface": "frontend/query/qps",
             "status": "FAIL",
             "recorded_at": "2026-10-29T00:00:12Z",
         },
@@ -662,7 +662,7 @@ def test_gate_annotations_include_saved_conditions_values_and_errors(completed):
         event["text"] for event in body["events"] if event["text"].startswith("门禁 ")
     ]
     assert (
-        "门禁 qps · client/query/qps · FAIL\n预期：≥ 2 requests/s\n实际：1 requests/s"
+        "门禁 qps · frontend/query/qps · FAIL\n预期：≥ 2 requests/s\n实际：1 requests/s"
         in texts
     )
     assert (
@@ -674,7 +674,7 @@ def test_gate_annotations_include_saved_conditions_values_and_errors(completed):
 def test_gate_annotation_formats_range_count_ratio_and_structured_results():
     gate = {
         "step_id": "qps",
-        "interface": "client/query/qps",
+        "interface": "frontend/query/qps",
         "status": "PASS",
         "unit": "requests/s",
         "expect": {"gte": 1.5, "lte": 2.5},
@@ -748,7 +748,7 @@ def test_annotations_merge_steps_and_gates_without_filtering_execution_records(
                 {
                     "event": "step_finished",
                     "step_id": "stop",
-                    "interface": "client/stop/playback",
+                    "interface": "frontend/stop/playback",
                     "status": "PASS",
                     "recorded_at": "2026-10-29T00:00:16Z",
                 }
@@ -866,7 +866,7 @@ def test_default_dashboard_variables_bind_and_freeze_full_experiment_choices(tmp
         "decode_instance": ["127.0.0.1:1003"],
         "vit_instance": [],
         "master_instance": ["127.0.0.1:2001"],
-        "client_instance": ["127.0.0.1:3001"],
+        "frontend_instance": ["127.0.0.1:3001"],
     }
     provision(
         tmp_path,
@@ -884,7 +884,7 @@ def test_default_dashboard_variables_bind_and_freeze_full_experiment_choices(tmp
             "decode_group",
             "vit_group",
             "master_group",
-            "client_group",
+            "frontend_group",
         ):
             assert variable["type"] == "query" and variable["hide"] == 2
             assert (
@@ -913,7 +913,7 @@ def test_default_dashboard_variables_bind_and_freeze_full_experiment_choices(tmp
                 "decode_group",
                 "vit_group",
                 "master_group",
-                "client_group",
+                "frontend_group",
                 "vit_instance",
             )
             else 0
@@ -966,9 +966,9 @@ def test_instance_choices_use_full_saved_series_and_separate_master_reporter_fro
             "application": "flexlb-api",
         },
         {
-            "__name__": "mock_client_requests_issued_total",
+            "__name__": "py_rtp_success_qps_metric_total",
             "instance": "10.0.3.1:9000",
-            "role": "client",
+            "role": "frontend",
         },
         {"__name__": "up", "instance": "unclassified:9000"},
     ]
@@ -995,7 +995,7 @@ def test_instance_choices_use_full_saved_series_and_separate_master_reporter_fro
         "decode_instance": ["10.0.1.2:9000"],
         "vit_instance": ["10.0.1.3:9000"] if include_vit else [],
         "master_instance": ["10.0.2.1:9000"],
-        "client_instance": ["10.0.3.1:9000"],
+        "frontend_instance": ["10.0.3.1:9000"],
     }
     from urllib.parse import parse_qs, urlsplit
 
@@ -1087,7 +1087,7 @@ def test_view_distinguishes_role_process_evidence_from_missing_roles(completed):
             "instance_id": "master-1",
             "pid": 43,
         },
-        {"event": "client_result", "result": {"clients": {}, "errors": []}},
+        {"event": "frontend_result", "result": {"frontends": {}, "errors": []}},
     ]
     with (completed / "events.jsonl").open("a") as stream:
         for event in rows:
@@ -1107,4 +1107,4 @@ def test_view_distinguishes_role_process_evidence_from_missing_roles(completed):
     )
     assert roles["prefill"]["state"] == "no_observation"
     assert roles["vit"]["state"] == "not_deployed"
-    assert roles["client"]["playback"][0]["result"]["errors"] == []
+    assert roles["frontend"]["playback"][0]["result"]["errors"] == []
