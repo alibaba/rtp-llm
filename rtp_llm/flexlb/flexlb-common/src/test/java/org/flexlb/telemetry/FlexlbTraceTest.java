@@ -39,9 +39,6 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * Verifies request trace attributes, lifecycle events, and exported spans.
- */
 class FlexlbTraceTest {
 
     private RecordingExporter exporter;

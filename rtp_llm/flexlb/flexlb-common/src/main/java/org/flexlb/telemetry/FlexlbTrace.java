@@ -43,6 +43,20 @@ public final class FlexlbTrace {
     public static final AttributeKey<String> PREFILL_ADDRESS = AttributeKey.stringKey("rtp_llm.prefill_address");
     public static final AttributeKey<String> DECODE_ADDRESS = AttributeKey.stringKey("rtp_llm.decode_address");
     public static final AttributeKey<String> VIT_ADDRESS = AttributeKey.stringKey("rtp_llm.vit_address");
+    public static final AttributeKey<Long> VIT_WORKER_GENERATION = AttributeKey.longKey("rtp_llm.vit.worker_generation");
+    public static final AttributeKey<String> VIT_VALIDATION_REASON = AttributeKey.stringKey("rtp_llm.vit.validation_reason");
+    public static final AttributeKey<String> VIT_POLICY_GROUP = AttributeKey.stringKey("rtp_llm.vit.policy_group");
+    public static final AttributeKey<String> VIT_SELECTED_GROUP = AttributeKey.stringKey("rtp_llm.vit.selected_group");
+    public static final AttributeKey<String> VIT_CURRENT_GROUP = AttributeKey.stringKey("rtp_llm.vit.current_group");
+    public static final AttributeKey<Long> VIT_CURRENT_GRPC_PORT = AttributeKey.longKey("rtp_llm.vit.current_grpc_port");
+    public static final AttributeKey<Long> VIT_CURRENT_GENERATION = AttributeKey.longKey("rtp_llm.vit.current_generation");
+    public static final AttributeKey<Boolean> VIT_ROUTE_ONLY = AttributeKey.booleanKey("rtp_llm.vit.route_only");
+    public static final AttributeKey<Boolean> VIT_CACHE_AFFINITY = AttributeKey.booleanKey("rtp_llm.vit.cache_affinity");
+    public static final AttributeKey<Long> VIT_KEY_COUNT = AttributeKey.longKey("rtp_llm.vit.key_count");
+    /** Raw worker sample, accompanied by freshness; never the routing MAX_VALUE sentinel. */
+    public static final AttributeKey<Long> VIT_MM_INFLIGHT_INPUTS = AttributeKey.longKey("rtp_llm.vit.mm_inflight_inputs");
+    public static final AttributeKey<Long> VIT_LOAD_SAMPLE_AGE_MS = AttributeKey.longKey("rtp_llm.vit.load_sample_age_ms");
+    public static final AttributeKey<String> VIT_LOAD_STATE = AttributeKey.stringKey("rtp_llm.vit.load_state");
     public static final AttributeKey<String> DISPATCH_REASON = AttributeKey.stringKey("rtp_llm.dispatch_reason");
     public static final AttributeKey<String> SCHEDULE_MODE = AttributeKey.stringKey("flexlb.schedule.mode");
     public static final AttributeKey<Long> SCHEDULE_CODE = AttributeKey.longKey("flexlb.schedule.code");
@@ -70,6 +84,7 @@ public final class FlexlbTrace {
      */
     public static final AttributeKey<String> SERVER_ADDRESS = AttributeKey.stringKey("server.address");
     public static final AttributeKey<Long> SERVER_PORT = AttributeKey.longKey("server.port");
+
     private static final TextMapSetter<Map<String, String>> MAP_SETTER =
             (carrier, key, value) -> carrier.put(key, value);
     private static final TextMapPropagator W3C_PROPAGATOR =
@@ -79,9 +94,7 @@ public final class FlexlbTrace {
     // strongly here would retain it forever.
     private static final Map<Span, BusinessError> BUSINESS_ERRORS =
             Collections.synchronizedMap(new WeakHashMap<>());
-
     private static volatile boolean enabled;
-
     private static volatile Tracer tracer = OpenTelemetry.noop().getTracer(INSTRUMENTATION_NAME);
 
     private FlexlbTrace() {
@@ -117,6 +130,10 @@ public final class FlexlbTrace {
 
     public static Span startServer(String name, Context parent) {
         return start(name, parent, SpanKind.SERVER);
+    }
+
+    public static Span startInternal(String name, Context parent) {
+        return start(name, parent, SpanKind.INTERNAL);
     }
 
     public static Span startClient(String name, Context parent) {
@@ -179,14 +196,6 @@ public final class FlexlbTrace {
         }
     }
 
-    public static void setScheduleDuration(Context context, AttributeKey<Long> key,
-                                            long startNanos, long endNanos) {
-        if (startNanos > 0 && endNanos >= startNanos) {
-            setScheduleAttribute(context, key,
-                    TimeUnit.NANOSECONDS.toMillis(endNanos - startNanos));
-        }
-    }
-
     /**
      * Adds an attribute to the already-created Schedule SERVER span. The
      * scheduling work is asynchronous, so this deliberately does not create
@@ -196,71 +205,12 @@ public final class FlexlbTrace {
         setAttribute(spanFromContext(context), key, value);
     }
 
-    /** Measures synchronous work without retaining a thread scope across asynchronous callbacks. */
-    public static <T> T stage(Context context, String name, Supplier<T> action) {
-        Span span = startInternal(name, context);
-        Throwable failure = null;
-        try {
-            return action.get();
-        } catch (RuntimeException | Error error) {
-            failure = error;
-            throw error;
-        } finally {
-            finish(span, failure);
+    public static void setScheduleDuration(Context context, AttributeKey<Long> key,
+                                            long startNanos, long endNanos) {
+        if (startNanos > 0 && endNanos >= startNanos) {
+            setScheduleAttribute(context, key,
+                    TimeUnit.NANOSECONDS.toMillis(endNanos - startNanos));
         }
-    }
-
-    public static Span startInternal(String name, Context parent) {
-        return start(name, parent, SpanKind.INTERNAL);
-    }
-
-    public static void finish(Span span) {
-        finish(span, null);
-    }
-
-    public static void finish(Span span, Throwable error) {
-        if (!enabled || span == null) {
-            return;
-        }
-        BusinessError expectedError = null;
-        try {
-            // Inside the guard: the marker map is a synchronized WeakHashMap keyed
-            // by Span, so it calls hashCode()/equals() on an implementation this
-            // class does not control.
-            expectedError = error == null ? BUSINESS_ERRORS.remove(span) : null;
-            if (error == null) {
-                if (expectedError == null) {
-                    span.setStatus(StatusCode.OK);
-                } else {
-                    setBusinessError(span, expectedError.code(), expectedError.type());
-                }
-            } else {
-                BUSINESS_ERRORS.remove(span);
-                span.recordException(error);
-                span.setStatus(StatusCode.ERROR, error.getClass().getSimpleName());
-            }
-        } catch (Throwable ignored) {
-            // Exporter/provider failures are explicitly fail-open.
-        } finally {
-            try {
-                span.end();
-            } catch (Throwable ignored) {
-                // Exporter/provider failures are explicitly fail-open.
-            }
-        }
-    }
-
-    /** Records the response ready for publication, including forwarded responses. */
-    public static void recordScheduleResponse(Context context, boolean success, int code,
-                                               String origin, String message) {
-        var attributes = Attributes.builder().put(SCHEDULE_CODE, (long) code)
-                .put("flexlb.response.success", success).put("flexlb.response.origin", origin);
-        if (!success && message != null && !message.isEmpty()) {
-            String detail = bounded(message);
-            attributes.put("flexlb.failure.message", detail);
-            setScheduleAttribute(context, AttributeKey.stringKey("flexlb.failure.message"), detail);
-        }
-        event(context, "flexlb.response.ready", attributes.build());
     }
 
     /** Records a timestamped point on the request context carried across scheduler threads. */
@@ -285,6 +235,33 @@ public final class FlexlbTrace {
         } catch (Throwable ignored) {
             // Observability cannot change scheduling or response publication.
         }
+    }
+
+    /** Measures synchronous work without retaining a thread scope across asynchronous callbacks. */
+    public static <T> T stage(Context context, String name, Supplier<T> action) {
+        Span span = startInternal(name, context);
+        Throwable failure = null;
+        try {
+            return action.get();
+        } catch (RuntimeException | Error error) {
+            failure = error;
+            throw error;
+        } finally {
+            finish(span, failure);
+        }
+    }
+
+    /** Records the response ready for publication, including forwarded responses. */
+    public static void recordScheduleResponse(Context context, boolean success, int code,
+                                               String origin, String message) {
+        var attributes = Attributes.builder().put(SCHEDULE_CODE, (long) code)
+                .put("flexlb.response.success", success).put("flexlb.response.origin", origin);
+        if (!success && message != null && !message.isEmpty()) {
+            String detail = bounded(message);
+            attributes.put("flexlb.failure.message", detail);
+            setScheduleAttribute(context, AttributeKey.stringKey("flexlb.failure.message"), detail);
+        }
+        event(context, "flexlb.response.ready", attributes.build());
     }
 
     /** Record on the existing request span carried explicitly across scheduler threads. */
@@ -340,6 +317,52 @@ public final class FlexlbTrace {
             span.addEvent("flexlb.schedule.failed", values);
         } catch (Throwable ignored) {
             // The response and existing PV failure log remain authoritative.
+        }
+    }
+
+    private static String diagnosticText(Map<String, Object> diagnostics, String key) {
+        Object value = diagnostics == null ? null : diagnostics.get(key);
+        return value instanceof String text ? bounded(text) : "UNKNOWN";
+    }
+
+    private static String bounded(String value) {
+        return value == null ? "UNKNOWN"
+                : value.substring(0, Math.min(MAX_DIAGNOSTIC_ATTRIBUTE_CHARS, value.length()));
+    }
+
+    public static void finish(Span span) {
+        finish(span, null);
+    }
+
+    public static void finish(Span span, Throwable error) {
+        if (!enabled || span == null) {
+            return;
+        }
+        BusinessError expectedError = null;
+        try {
+            // Inside the guard: the marker map is a synchronized WeakHashMap keyed
+            // by Span, so it calls hashCode()/equals() on an implementation this
+            // class does not control.
+            expectedError = error == null ? BUSINESS_ERRORS.remove(span) : null;
+            if (error == null) {
+                if (expectedError == null) {
+                    span.setStatus(StatusCode.OK);
+                } else {
+                    setBusinessError(span, expectedError.code(), expectedError.type());
+                }
+            } else {
+                BUSINESS_ERRORS.remove(span);
+                span.recordException(error);
+                span.setStatus(StatusCode.ERROR, error.getClass().getSimpleName());
+            }
+        } catch (Throwable ignored) {
+            // Exporter/provider failures are explicitly fail-open.
+        } finally {
+            try {
+                span.end();
+            } catch (Throwable ignored) {
+                // Exporter/provider failures are explicitly fail-open.
+            }
         }
     }
 
@@ -411,16 +434,6 @@ public final class FlexlbTrace {
         } catch (Throwable ignored) {
             // Trace must never affect routing or dispatch.
         }
-    }
-
-    private static String diagnosticText(Map<String, Object> diagnostics, String key) {
-        Object value = diagnostics == null ? null : diagnostics.get(key);
-        return value instanceof String text ? bounded(text) : "UNKNOWN";
-    }
-
-    private static String bounded(String value) {
-        return value == null ? "UNKNOWN"
-                : value.substring(0, Math.min(MAX_DIAGNOSTIC_ATTRIBUTE_CHARS, value.length()));
     }
 
     private static Span start(String name, Context parent, SpanKind kind) {

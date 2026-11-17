@@ -309,9 +309,6 @@ class GlobalQueueProgressTest {
         }
     }
 
-    /**
-     * Owns the scheduler and test dependencies for one queue scenario.
-     */
     private static final class Fixture implements AutoCloseable {
         private final FlexlbConfig config = twoPlannerConfig();
         private final PlacementAvailability availability = new PlacementAvailability();
@@ -325,12 +322,18 @@ class GlobalQueueProgressTest {
         private final List<Long> admissionOrder = new CopyOnWriteArrayList<>();
         private final Set<Long> admissionBlocked = ConcurrentHashMap.newKeySet();
         private final Set<Long> decodeBlocked = ConcurrentHashMap.newKeySet();
-
         private volatile LongConsumer onAdmission = ignored -> { };
         private volatile LongConsumer onSelection = ignored -> { };
-
         private final RequestScheduler scheduler;
         private final RoleType role;
+
+        private static FlexlbConfig twoPlannerConfig() {
+            FlexlbConfig config = spy(SchedulingTestConfig.batchConfig());
+            var runtime = spy(config.getInternalRuntime());
+            when(runtime.getQueuePlannerThreads()).thenReturn(2);
+            when(config.getInternalRuntime()).thenReturn(runtime);
+            return config;
+        }
 
         private Fixture(RoleType role) {
             this(role, false);
@@ -395,19 +398,6 @@ class GlobalQueueProgressTest {
                     mock(EvictionManager.class), lifecycle, availability);
         }
 
-        public void close() {
-            requests.values().forEach(future -> future.complete(new Response()));
-            scheduler.closePlacement();
-        }
-
-        private static FlexlbConfig twoPlannerConfig() {
-            FlexlbConfig config = spy(SchedulingTestConfig.batchConfig());
-            var runtime = spy(config.getInternalRuntime());
-            when(runtime.getQueuePlannerThreads()).thenReturn(2);
-            when(config.getInternalRuntime()).thenReturn(runtime);
-            return config;
-        }
-
         private void submit(long id, String group) {
             submit(id, group, 50);
         }
@@ -438,6 +428,11 @@ class GlobalQueueProgressTest {
 
         private void release(String group) {
             availability.capacityChanged(PlacementKey.exact(role, group, group + ":8000"));
+        }
+
+        public void close() {
+            requests.values().forEach(future -> future.complete(new Response()));
+            scheduler.closePlacement();
         }
 
         private static PrefillRoutingEntry endpoint(String group) {

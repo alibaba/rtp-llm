@@ -28,6 +28,7 @@ import java.util.concurrent.CompletableFuture;
  */
 @Component
 public final class RequestScheduler {
+
     private final DefaultRouter router;
     private final EndpointRegistry endpointRegistry;
     private final RequestRegistry requestRegistry;
@@ -99,43 +100,6 @@ public final class RequestScheduler {
         return future;
     }
 
-    public RequestState cancelRequest(
-            long requestId,
-            long expectedBatchId,
-            CancelReason reason) {
-        return requestRegistry.cancelRequest(requestId, expectedBatchId, reason);
-    }
-
-    public int getInflightSize() {
-        return requestRegistry.liveRequestCount();
-    }
-
-    public int getQueuedRequestCount() {
-        long queued = globalQueue == null ? 0L : globalQueue.size();
-        for (PrefillEndpoint endpoint
-                : endpointRegistry.snapshotPrefillEndpoints().values()) {
-            queued += endpoint.queuedRequestCount();
-            if (queued >= Integer.MAX_VALUE) {
-                return Integer.MAX_VALUE;
-            }
-        }
-        return (int) queued;
-    }
-
-    public List<RequestState> snapshotActiveRequests() {
-        return requestRegistry.snapshotActiveRequests();
-    }
-
-    public RequestState getRequestState(long requestId, long expectedBatchId) {
-        return requestRegistry.getRequestState(requestId, expectedBatchId);
-    }
-
-    public void closePlacement() {
-        if (globalQueue != null) {
-            globalQueue.close();
-        }
-    }
-
     private void submitDirect(BalanceContext context) {
         Response failure = Response.error(StrategyErrorType.DISPATCH_FAILED);
         long decisionStartedNanos = System.nanoTime();
@@ -175,6 +139,43 @@ public final class RequestScheduler {
             if (failure != null) {
                 requestRegistry.publishDecisionResponseAsync(context.getRequestId(), context.getFuture(), failure);
             }
+        }
+    }
+
+    public RequestState cancelRequest(
+            long requestId,
+            long expectedBatchId,
+            CancelReason reason) {
+        return requestRegistry.cancelRequest(requestId, expectedBatchId, reason);
+    }
+
+    public int getInflightSize() {
+        return requestRegistry.liveRequestCount();
+    }
+
+    public int getQueuedRequestCount() {
+        long queued = globalQueue == null ? 0L : globalQueue.size();
+        for (PrefillEndpoint endpoint
+                : endpointRegistry.snapshotPrefillEndpoints().values()) {
+            queued += endpoint.queuedRequestCount();
+            if (queued >= Integer.MAX_VALUE) {
+                return Integer.MAX_VALUE;
+            }
+        }
+        return (int) queued;
+    }
+
+    public List<RequestState> snapshotActiveRequests() {
+        return requestRegistry.snapshotActiveRequests();
+    }
+
+    public RequestState getRequestState(long requestId, long expectedBatchId) {
+        return requestRegistry.getRequestState(requestId, expectedBatchId);
+    }
+
+    public void closePlacement() {
+        if (globalQueue != null) {
+            globalQueue.close();
         }
     }
 

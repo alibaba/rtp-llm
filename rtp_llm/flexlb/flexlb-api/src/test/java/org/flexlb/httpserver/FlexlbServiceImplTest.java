@@ -59,13 +59,10 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
-/**
- * Verifies Master RPC routing, response handling, and tracing.
- */
 class FlexlbServiceImplTest {
+
     private final java.util.concurrent.ScheduledExecutorService deadlineTimer =
             java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
-
     private RouteService routeService;
     private LBStatusConsistencyService lbStatusConsistencyService;
     private EngineHealthReporter engineHealthReporter;
@@ -165,6 +162,14 @@ class FlexlbServiceImplTest {
             inbound.cancel(null);
             verify(routeService, never()).cancelRequest(anyLong(), anyLong(), any());
         }
+    }
+
+    private java.lang.ref.WeakReference<com.google.protobuf.ByteString> scheduleWithReferencedInput(
+            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) {
+        var input = com.google.protobuf.ByteString.copyFrom(new byte[1024 * 1024]);
+        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(99998L).setSeqLen(2048).setGenerateInput(input).build(), observer);
+        return new java.lang.ref.WeakReference<>(input);
     }
 
     @Test
@@ -397,6 +402,29 @@ class FlexlbServiceImplTest {
         pending.complete(found);
         verify(observer).onNext(found);
         verify(observer).onCompleted();
+    }
+
+    private static final class UnaryTransportCall extends io.grpc.ServerCall<
+            FlexlbScheduleProtocol.FlexlbScheduleRequestPB,
+            FlexlbScheduleProtocol.FlexlbScheduleResponsePB> {
+        boolean cancelled;
+        int deliveredResponses;
+        Runnable beforeSend;
+        Runnable onClose;
+        @Override public void request(int count) { }
+        @Override public void sendHeaders(io.grpc.Metadata headers) { }
+        @Override public void sendMessage(FlexlbScheduleProtocol.FlexlbScheduleResponsePB value) {
+            if (beforeSend != null) { beforeSend.run(); }
+            if (!cancelled) { deliveredResponses++; }
+        }
+        @Override public void close(io.grpc.Status status, io.grpc.Metadata trailers) {
+            if (onClose != null) { onClose.run(); }
+        }
+        @Override public boolean isCancelled() { return cancelled; }
+        @Override public io.grpc.MethodDescriptor<FlexlbScheduleProtocol.FlexlbScheduleRequestPB,
+                FlexlbScheduleProtocol.FlexlbScheduleResponsePB> getMethodDescriptor() {
+            return org.flexlb.schedule.grpc.FlexlbServiceGrpc.getScheduleMethod();
+        }
     }
 
     @Test
@@ -1148,6 +1176,11 @@ class FlexlbServiceImplTest {
         verify(routeService, never()).route(any());
     }
 
+    private static FlexlbScheduleProtocol.FlexlbScheduleResponsePB nodeRejected() {
+        return FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                .setCode(StrategyErrorType.NOT_MASTER.getErrorCode()).build();
+    }
+
     @Test
     void testSchedule_exceptionHandling() {
         // Given: route throws exception
@@ -1343,6 +1376,113 @@ class FlexlbServiceImplTest {
         verifyTraceAtResponse(false, false, false, true);
     }
 
+    private void verifyTraceAtResponse(boolean forwarded, boolean fusion, boolean success, boolean missingAck) {
+        RecordingExporter exporter = new RecordingExporter();
+        try (var provider = io.opentelemetry.sdk.trace.SdkTracerProvider.builder()
+                .addSpanProcessor(io.opentelemetry.sdk.trace.export.SimpleSpanProcessor.create(exporter)).build()) {
+            var span = provider.get("test").spanBuilder("schedule")
+                    .setSpanKind(io.opentelemetry.api.trace.SpanKind.SERVER).startSpan();
+            var traceContext = io.opentelemetry.context.Context.root().with(span);
+            var captured = new java.util.concurrent.atomic.AtomicReference<BalanceContext>();
+            org.mockito.Mockito.doAnswer(inv -> {
+                BalanceContext ctx = inv.getArgument(0);
+                captured.set(ctx);
+                long now = System.nanoTime();
+                ctx.setServiceStartNanos(now - 40_000_000L);
+                ctx.setRouteSubmittedNanos(now - 30_000_000L);
+                ctx.setBatchDispatchedNanos(now - 10_000_000L);
+                if (!missingAck) {
+                    ctx.setAckAtNanos(now - 1_000_000L);
+                }
+                return null;
+            }).when(engineHealthReporter).reportArriveDelayTime(any());
+            var wire = FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
+                    .setSuccess(success).setCode(success ? 200 : 500).setEnqueuedByMaster(true)
+                    .addServerStatus(FlexlbScheduleProtocol.FlexlbServerStatusPB.newBuilder()
+                            .setRole(fusion ? "PDFUSION" : "PREFILL").setServerIp("10.0.0.10").setHttpPort(8000));
+            if (!fusion) {
+                wire.addServerStatus(FlexlbScheduleProtocol.FlexlbServerStatusPB.newBuilder()
+                        .setRole("DECODE").setServerIp("10.0.0.20").setHttpPort(9000));
+            }
+            CompletableFuture<FlexlbGrpcForwarder.MasterForwardResult> remote = new CompletableFuture<>();
+            CompletableFuture<Response> local = new CompletableFuture<>();
+            when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(forwarded);
+            when(lbStatusConsistencyService.isMaster()).thenReturn(false);
+            when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(remote);
+            when(routeService.route(any())).thenReturn(local);
+            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = new StreamObserver<>() {
+                public void onNext(FlexlbScheduleProtocol.FlexlbScheduleResponsePB value) {
+                    org.flexlb.telemetry.FlexlbTrace.finishWithGrpcStatus(span, "OK", 0, true);
+                }
+                public void onError(Throwable error) { throw new AssertionError(error); }
+                public void onCompleted() { }
+            };
+            Context.current().withValue(org.flexlb.interceptor.GrpcTraceInterceptor.OTEL_CONTEXT_KEY, traceContext)
+                    .run(() -> service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                            .setRequestId(991L).build(), observer));
+            CompletableFuture.runAsync(() -> {
+                if (forwarded) {
+                    org.junit.jupiter.api.Assertions.assertNull(captured.get().getResponse());
+                    remote.complete(FlexlbGrpcForwarder.MasterForwardResult.forwarded(wire.build(), "10.0.0.2:7001"));
+                } else {
+                    Response response = new Response();
+                    response.setSuccess(success);
+                    response.setCode(success ? 200 : 500);
+                    response.setEnqueuedByMaster(true);
+                    response.setServerStatus(wire.getServerStatusList().stream().map(server -> {
+                        var status = new org.flexlb.dao.loadbalance.ServerStatus();
+                        status.setRole(org.flexlb.dao.route.RoleType.fromString(server.getRole()));
+                        status.setServerIp(server.getServerIp());
+                        status.setHttpPort(server.getHttpPort());
+                        return status;
+                    }).toList());
+                    local.complete(response);
+                }
+            }).join();
+            assertEquals(1, exporter.spans.size());
+            var data = exporter.spans.getFirst();
+            assertEquals(success ? io.opentelemetry.api.trace.StatusCode.OK
+                    : io.opentelemetry.api.trace.StatusCode.ERROR, data.getStatus().getStatusCode());
+            assertEquals(success ? "10.0.0.10:8000" : null, data.getAttributes().get(
+                    io.opentelemetry.api.common.AttributeKey.stringKey("rtp_llm.prefill_address")));
+            assertEquals(success && !fusion ? "10.0.0.20:9000" : null, data.getAttributes().get(
+                    io.opentelemetry.api.common.AttributeKey.stringKey("rtp_llm.decode_address")));
+            assertEquals(forwarded ? null : 20L, data.getAttributes().get(
+                    io.opentelemetry.api.common.AttributeKey.longKey("rtp_llm.batch_wait_ms")));
+            assertEquals(forwarded ? null : 10L, data.getAttributes().get(
+                    io.opentelemetry.api.common.AttributeKey.longKey("rtp_llm.route_submit_ms")));
+            if (forwarded || missingAck) {
+                org.junit.jupiter.api.Assertions.assertNull(data.getAttributes().get(
+                        io.opentelemetry.api.common.AttributeKey.longKey("rtp_llm.ack_to_response_ms")));
+            }
+            org.junit.jupiter.api.Assertions.assertNull(data.getAttributes().get(
+                    io.opentelemetry.api.common.AttributeKey.longKey("rtp_llm.enqueue_batch_ms")));
+        }
+    }
+
+    private static final class RecordingExporter
+            implements io.opentelemetry.sdk.trace.export.SpanExporter {
+        private final java.util.List<io.opentelemetry.sdk.trace.data.SpanData> spans =
+                new java.util.ArrayList<>();
+
+        @Override
+        public io.opentelemetry.sdk.common.CompletableResultCode export(
+                java.util.Collection<io.opentelemetry.sdk.trace.data.SpanData> batch) {
+            spans.addAll(batch);
+            return io.opentelemetry.sdk.common.CompletableResultCode.ofSuccess();
+        }
+
+        @Override
+        public io.opentelemetry.sdk.common.CompletableResultCode flush() {
+            return io.opentelemetry.sdk.common.CompletableResultCode.ofSuccess();
+        }
+
+        @Override
+        public io.opentelemetry.sdk.common.CompletableResultCode shutdown() {
+            return io.opentelemetry.sdk.common.CompletableResultCode.ofSuccess();
+        }
+    }
+
     @Test
     void testSchedule_observerFailureStillWritesPvRecord() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
@@ -1504,159 +1644,10 @@ class FlexlbServiceImplTest {
         assertFalse(captor.getValue().getFound());
     }
 
-    private java.lang.ref.WeakReference<com.google.protobuf.ByteString> scheduleWithReferencedInput(
-            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer) {
-        var input = com.google.protobuf.ByteString.copyFrom(new byte[1024 * 1024]);
-        service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                .setRequestId(99998L).setSeqLen(2048).setGenerateInput(input).build(), observer);
-        return new java.lang.ref.WeakReference<>(input);
-    }
-
-    private static FlexlbScheduleProtocol.FlexlbScheduleResponsePB nodeRejected() {
-        return FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
-                .setCode(StrategyErrorType.NOT_MASTER.getErrorCode()).build();
-    }
-
-    private void verifyTraceAtResponse(boolean forwarded, boolean fusion, boolean success, boolean missingAck) {
-        RecordingExporter exporter = new RecordingExporter();
-        try (var provider = io.opentelemetry.sdk.trace.SdkTracerProvider.builder()
-                .addSpanProcessor(io.opentelemetry.sdk.trace.export.SimpleSpanProcessor.create(exporter)).build()) {
-            var span = provider.get("test").spanBuilder("schedule")
-                    .setSpanKind(io.opentelemetry.api.trace.SpanKind.SERVER).startSpan();
-            var traceContext = io.opentelemetry.context.Context.root().with(span);
-            var captured = new java.util.concurrent.atomic.AtomicReference<BalanceContext>();
-            org.mockito.Mockito.doAnswer(inv -> {
-                BalanceContext ctx = inv.getArgument(0);
-                captured.set(ctx);
-                long now = System.nanoTime();
-                ctx.setServiceStartNanos(now - 40_000_000L);
-                ctx.setRouteSubmittedNanos(now - 30_000_000L);
-                ctx.setBatchDispatchedNanos(now - 10_000_000L);
-                if (!missingAck) {
-                    ctx.setAckAtNanos(now - 1_000_000L);
-                }
-                return null;
-            }).when(engineHealthReporter).reportArriveDelayTime(any());
-            var wire = FlexlbScheduleProtocol.FlexlbScheduleResponsePB.newBuilder()
-                    .setSuccess(success).setCode(success ? 200 : 500).setEnqueuedByMaster(true)
-                    .addServerStatus(FlexlbScheduleProtocol.FlexlbServerStatusPB.newBuilder()
-                            .setRole(fusion ? "PDFUSION" : "PREFILL").setServerIp("10.0.0.10").setHttpPort(8000));
-            if (!fusion) {
-                wire.addServerStatus(FlexlbScheduleProtocol.FlexlbServerStatusPB.newBuilder()
-                        .setRole("DECODE").setServerIp("10.0.0.20").setHttpPort(9000));
-            }
-            CompletableFuture<FlexlbGrpcForwarder.MasterForwardResult> remote = new CompletableFuture<>();
-            CompletableFuture<Response> local = new CompletableFuture<>();
-            when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(forwarded);
-            when(lbStatusConsistencyService.isMaster()).thenReturn(false);
-            when(grpcForwarder.forwardScheduleToMaster(any())).thenReturn(remote);
-            when(routeService.route(any())).thenReturn(local);
-            StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = new StreamObserver<>() {
-                public void onNext(FlexlbScheduleProtocol.FlexlbScheduleResponsePB value) {
-                    org.flexlb.telemetry.FlexlbTrace.finishWithGrpcStatus(span, "OK", 0, true);
-                }
-                public void onError(Throwable error) { throw new AssertionError(error); }
-                public void onCompleted() { }
-            };
-            Context.current().withValue(org.flexlb.interceptor.GrpcTraceInterceptor.OTEL_CONTEXT_KEY, traceContext)
-                    .run(() -> service.schedule(FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
-                            .setRequestId(991L).build(), observer));
-            CompletableFuture.runAsync(() -> {
-                if (forwarded) {
-                    org.junit.jupiter.api.Assertions.assertNull(captured.get().getResponse());
-                    remote.complete(FlexlbGrpcForwarder.MasterForwardResult.forwarded(wire.build(), "10.0.0.2:7001"));
-                } else {
-                    Response response = new Response();
-                    response.setSuccess(success);
-                    response.setCode(success ? 200 : 500);
-                    response.setEnqueuedByMaster(true);
-                    response.setServerStatus(wire.getServerStatusList().stream().map(server -> {
-                        var status = new org.flexlb.dao.loadbalance.ServerStatus();
-                        status.setRole(org.flexlb.dao.route.RoleType.fromString(server.getRole()));
-                        status.setServerIp(server.getServerIp());
-                        status.setHttpPort(server.getHttpPort());
-                        return status;
-                    }).toList());
-                    local.complete(response);
-                }
-            }).join();
-            assertEquals(1, exporter.spans.size());
-            var data = exporter.spans.getFirst();
-            assertEquals(success ? io.opentelemetry.api.trace.StatusCode.OK
-                    : io.opentelemetry.api.trace.StatusCode.ERROR, data.getStatus().getStatusCode());
-            assertEquals(success ? "10.0.0.10:8000" : null, data.getAttributes().get(
-                    io.opentelemetry.api.common.AttributeKey.stringKey("rtp_llm.prefill_address")));
-            assertEquals(success && !fusion ? "10.0.0.20:9000" : null, data.getAttributes().get(
-                    io.opentelemetry.api.common.AttributeKey.stringKey("rtp_llm.decode_address")));
-            assertEquals(forwarded ? null : 20L, data.getAttributes().get(
-                    io.opentelemetry.api.common.AttributeKey.longKey("rtp_llm.batch_wait_ms")));
-            assertEquals(forwarded ? null : 10L, data.getAttributes().get(
-                    io.opentelemetry.api.common.AttributeKey.longKey("rtp_llm.route_submit_ms")));
-            if (forwarded || missingAck) {
-                org.junit.jupiter.api.Assertions.assertNull(data.getAttributes().get(
-                        io.opentelemetry.api.common.AttributeKey.longKey("rtp_llm.ack_to_response_ms")));
-            }
-            org.junit.jupiter.api.Assertions.assertNull(data.getAttributes().get(
-                    io.opentelemetry.api.common.AttributeKey.longKey("rtp_llm.enqueue_batch_ms")));
-        }
-    }
-
     private void assertPvContains(String expected) {
         assertEquals(1, pvAppender.list.size());
         assertTrue(pvAppender.list.get(0).getFormattedMessage().contains(expected),
                 pvAppender.list.get(0).getFormattedMessage());
-    }
-
-    /**
-     * Captures the response and status delivered by a unary RPC.
-     */
-    private static final class UnaryTransportCall extends io.grpc.ServerCall<
-            FlexlbScheduleProtocol.FlexlbScheduleRequestPB,
-            FlexlbScheduleProtocol.FlexlbScheduleResponsePB> {
-        boolean cancelled;
-        int deliveredResponses;
-        Runnable beforeSend;
-        Runnable onClose;
-        @Override public void request(int count) { }
-        @Override public void sendHeaders(io.grpc.Metadata headers) { }
-        @Override public void sendMessage(FlexlbScheduleProtocol.FlexlbScheduleResponsePB value) {
-            if (beforeSend != null) { beforeSend.run(); }
-            if (!cancelled) { deliveredResponses++; }
-        }
-        @Override public void close(io.grpc.Status status, io.grpc.Metadata trailers) {
-            if (onClose != null) { onClose.run(); }
-        }
-        @Override public boolean isCancelled() { return cancelled; }
-        @Override public io.grpc.MethodDescriptor<FlexlbScheduleProtocol.FlexlbScheduleRequestPB,
-                FlexlbScheduleProtocol.FlexlbScheduleResponsePB> getMethodDescriptor() {
-            return org.flexlb.schedule.grpc.FlexlbServiceGrpc.getScheduleMethod();
-        }
-    }
-
-    /**
-     * Collects exported spans for trace assertions.
-     */
-    private static final class RecordingExporter
-            implements io.opentelemetry.sdk.trace.export.SpanExporter {
-        private final java.util.List<io.opentelemetry.sdk.trace.data.SpanData> spans =
-                new java.util.ArrayList<>();
-
-        @Override
-        public io.opentelemetry.sdk.common.CompletableResultCode export(
-                java.util.Collection<io.opentelemetry.sdk.trace.data.SpanData> batch) {
-            spans.addAll(batch);
-            return io.opentelemetry.sdk.common.CompletableResultCode.ofSuccess();
-        }
-
-        @Override
-        public io.opentelemetry.sdk.common.CompletableResultCode flush() {
-            return io.opentelemetry.sdk.common.CompletableResultCode.ofSuccess();
-        }
-
-        @Override
-        public io.opentelemetry.sdk.common.CompletableResultCode shutdown() {
-            return io.opentelemetry.sdk.common.CompletableResultCode.ofSuccess();
-        }
     }
 
 }
