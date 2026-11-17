@@ -58,6 +58,8 @@ public class BalanceContext {
     /** Monotonic counterpart of {@link #grpcEntryTime} for duration measurements. */
     private long grpcEntryNanos;
 
+    private Long requestMessageBytes;
+
     /** Monotonic timestamp immediately before the request enters its worker batcher. */
     private long routeSubmittedNanos;
 

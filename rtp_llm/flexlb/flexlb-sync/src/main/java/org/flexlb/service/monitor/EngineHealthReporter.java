@@ -67,6 +67,7 @@ import static org.flexlb.constant.MetricConstant.FORWARD_TO_MASTER_RESULT;
 import static org.flexlb.constant.MetricConstant.GRPC_SERVER_PROCESS_MS;
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_ESTIMATED_TTFT_MS;
 import static org.flexlb.constant.MetricConstant.PREFILL_SELECTED_EXECUTION_TIME_MS;
+import static org.flexlb.constant.MetricConstant.REQUEST_MESSAGE_BYTES;
 import static org.flexlb.constant.MetricConstant.REQUEST_NETWORK_DELAY_MS;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_EVENT;
 import static org.flexlb.constant.MetricConstant.ZK_MASTER_NODE;
@@ -154,6 +155,7 @@ public class EngineHealthReporter {
         this.monitor.register(CACHE_USED_KV_CACHE_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(REQUEST_NETWORK_DELAY_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(GRPC_SERVER_PROCESS_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(REQUEST_MESSAGE_BYTES, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
         this.monitor.register(FORWARD_TO_MASTER_RESULT, FlexMetricType.QPS, FlexPriorityType.PRECISE);
     }
 
@@ -457,6 +459,13 @@ public class EngineHealthReporter {
     public void reportRoutingCandidateMaxCacheMatchMetrics(RoleType roleType,
                                                            long hitTokens) {
         cacheMetricsReporter.reportRoutingCandidateMaxCacheMatchMetrics(roleType, hitTokens);
+    }
+
+    public void reportRequestMessageBytes(BalanceContext ctx) {
+        if (ctx.getRequestMessageBytes() != null) {
+            var tags = FlexMetricTags.of("success", String.valueOf(ctx.isSuccess()));
+            monitor.report(REQUEST_MESSAGE_BYTES, tags, ctx.getRequestMessageBytes());
+        }
     }
 
     public void reportArriveDelayTime(BalanceContext ctx) {

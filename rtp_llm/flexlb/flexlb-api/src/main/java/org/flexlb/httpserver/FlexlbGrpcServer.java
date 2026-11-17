@@ -147,6 +147,7 @@ public class FlexlbGrpcServer {
                 .directExecutor()
                 .callExecutor(receivingGuard)
                 .addStreamTracerFactory(receivingGuard)
+                .addStreamTracerFactory(grpcServerTimingInterceptor.requestSizeTracerFactory())
                 .intercept(new GrpcOverloadInterceptor(grpcExecutor, grpcControlExecutor))
                 .intercept(receivingGuard)
                 .addService(ServerInterceptors.intercept(flexlbServiceImpl,

@@ -569,6 +569,15 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             Throwable reportingFailure = observationFailure;
             try { serverLatencyRecorder.recordCompletion(ctx, System.nanoTime()); }
             catch (RuntimeException | Error failure) { reportingFailure = appendCompletionFailure(reportingFailure, failure); }
+            try {
+                if (ctx != null && origin != ScheduleOrigin.FORWARDED_TO_MASTER) {
+                    engineHealthReporter.reportRequestMessageBytes(ctx);
+                }
+            } catch (RuntimeException monitoringError) {
+                Logger.warn("Failed to report Schedule request message bytes", monitoringError);
+            } catch (Error failure) {
+                reportingFailure = appendCompletionFailure(reportingFailure, failure);
+            }
             try { if (ctx != null) { logPvRecord(ctx, response, origin); } }
             catch (RuntimeException | Error failure) { reportingFailure = appendCompletionFailure(reportingFailure, failure); }
             if (deliveryFailure != null) {
@@ -964,6 +973,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private BalanceContext buildContext(FlexlbScheduleProtocol.FlexlbScheduleRequestPB pb) {
         var config = configService.loadBalanceConfig();
         BalanceContext ctx = new BalanceContext(config);
+        ctx.setRequestMessageBytes(GrpcServerTimingInterceptor.getRequestMessageBytes());
         ctx.setTraceContext(entryTraceContext());
         Span span = Span.fromContext(ctx.getTraceContext());
         FlexlbTrace.setRequestAttributes(span, pb.getRequestId());

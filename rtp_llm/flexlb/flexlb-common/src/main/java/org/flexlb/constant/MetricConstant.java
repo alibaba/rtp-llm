@@ -475,6 +475,8 @@ public class MetricConstant {
      */
     public static final String GRPC_SERVER_PROCESS_MS = "app.grpc.server.process.ms";
 
+    public static final String REQUEST_MESSAGE_BYTES = "app.request.message.bytes";
+
     /**
      * Graceful online/offline lifecycle events
      */
