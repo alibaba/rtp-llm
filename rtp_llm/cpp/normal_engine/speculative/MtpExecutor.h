@@ -146,7 +146,8 @@ protected:
                               torch::Event&                                accept_len_ready_event,
                               const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
                               MtpMetricsCollector&                         metrics_collector,
-                              const VerificationMetrics&                   verification = {});
+                              const VerificationMetrics&                   verification      = {},
+                              const torch::Tensor&                         verification_caps = {});
     std::shared_ptr<MtpTargetLogprobs>
                  launchEarlyMtpTargetLogprobsFinalize(const StreamGroups&                          stream_groups,
                                                       const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
@@ -180,9 +181,10 @@ protected:
                                                    torch::Event&              accept_len_ready_event,
                                                    size_t                     stream_count,
                                                    std::vector<int32_t>       row_priorities,
-                                                   const torch::Tensor&       prepared_rows  = {},
-                                                   const torch::Tensor&       prepared_total = {},
-                                                   const VerificationMetrics& verification   = {});
+                                                   const torch::Tensor&       prepared_rows     = {},
+                                                   const torch::Tensor&       prepared_total    = {},
+                                                   const VerificationMetrics& verification      = {},
+                                                   const torch::Tensor&       verification_caps = {});
 
     void prepareStreams(const std::list<GenerateStreamPtr>& streams,
                         std::list<GenerateStreamPtr>&       prefill_streams,
@@ -302,6 +304,8 @@ private:
     std::vector<int32_t>          metrics_accept_len_row_priorities_;
     std::shared_ptr<torch::Event> metrics_accept_len_ready_event_;
     VerificationMetrics           metrics_verification_;
+    torch::Tensor                 metrics_verification_caps_gpu_;
+    torch::Tensor                 metrics_verification_caps_cpu_;
     int64_t                       metrics_accept_len_stream_num_        = 0;
     int64_t                       metrics_accept_len_propose_token_num_ = 0;
 

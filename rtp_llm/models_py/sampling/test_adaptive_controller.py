@@ -205,6 +205,109 @@ class AdaptiveControllerTest(unittest.TestCase):
         self.assertEqual(session.metrics_snapshot()[0], 3)
         self.assertEqual(session.total, len(session.ids) * 6)
 
+    def test_current_allocation_reverses_stale_ranking_at_online_batch_sizes(
+        self,
+    ) -> None:
+        for batch in (16, 24, 30):
+            with self.subTest(batch=batch):
+                controller = AdaptiveDraftController(batch, 5, torch.device("cuda"))
+                ids = list(range(100, 100 + batch))[::-1]
+                for request_id in ids:
+                    controller.register(request_id)
+                slots = controller._slots(ids)
+                stale = np.array(
+                    [[0.05] * 5] * (batch // 2) + [[0.99] * 5] * (batch // 2)
+                )
+                current = torch.tensor(
+                    stale[::-1].copy(), dtype=torch.float32, device="cuda"
+                )
+                controller.confidence_probs[list(slots)] = current
+                controller._ready[list(slots)] = True
+                with (
+                    patch.object(
+                        torch.Tensor, "cpu", side_effect=AssertionError("GPU read")
+                    ),
+                    patch.object(
+                        torch.Tensor, "item", side_effect=AssertionError("GPU read")
+                    ),
+                ):
+                    caps, rows, total = controller.reallocate_current(ids, batch * 4)
+                expected_caps = [5] * (batch // 2) + [1] * (batch // 2)
+                self.assertEqual(caps.tolist(), expected_caps)
+                self.assertEqual(total, batch * 4)
+                self.assertEqual(
+                    rows.tolist(),
+                    [
+                        i * 6 + j
+                        for i, c in enumerate(expected_caps)
+                        for j in range(c + 1)
+                    ],
+                )
+                # The compacted target writes exactly these valid KV positions;
+                # no suffix/padding position may leak into output or feedback.
+                dense = torch.arange(batch * 6, device="cuda")
+                compact = dense.index_select(0, rows)
+                restored = torch.full_like(dense, -1).index_copy_(0, rows, compact)
+                self.assertEqual(int((restored != -1).sum()), total)
+                controller.commit_prepared(ids, caps)
+                self.assertEqual(controller._pending.capacities.tolist(), expected_caps)
+                controller.observe(ids, caps, [False] * batch)
+
+    def test_current_allocation_incomplete_nonfinite_ties_and_boundary_budgets(
+        self,
+    ) -> None:
+        controller = AdaptiveDraftController(4, 5, torch.device("cuda"))
+        ids = [40, 10, 30, 20]
+        for request_id in ids:
+            controller.register(request_id)
+        slots = controller._slots(ids)
+        controller.confidence_probs[list(slots)] = 0.5
+        controller._ready[list(slots)] = True
+        # Stable ties must take request prefixes, including CAP=0/full edges.
+        for total in range(4, 25):
+            caps, rows, count = controller.reallocate_current(ids, total)
+            counts = caps.tolist()
+            self.assertEqual(sum(counts) + 4, total)
+            self.assertTrue(all(0 <= n <= 5 for n in counts))
+            self.assertEqual(
+                rows.tolist(),
+                [i * 6 + j for i, n in enumerate(counts) for j in range(n + 1)],
+            )
+        controller.confidence_probs[slots[0]] = float("nan")
+        controller._ready[slots[1], 0] = False
+        caps, rows, _ = controller.reallocate_current(ids, 14)
+        self.assertEqual(caps.tolist(), [5, 5, 0, 0])
+        for total in (3, 25):
+            with self.assertRaises(AdaptiveBudgetInputError):
+                controller.reallocate_current(ids, total)
+
+    def test_session_reallocates_only_learned_partial_budget(self) -> None:
+        with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
+            session = AdaptiveVerificationSession(2, 5, "cuda")
+        session.begin([10, 20])
+        slots = session.controller._slots([10, 20])
+        session.controller._ready[list(slots)] = True
+        session.controller.confidence_probs[list(slots)] = torch.tensor(
+            [[0.99] * 5, [0.01] * 5], device="cuda"
+        )
+        caps = torch.tensor([1, 5], dtype=torch.int32, device="cuda")
+        rows = torch.tensor([0, 1, 6, 7, 8, 9, 10, 11], device="cuda")
+        session._prepared = caps, rows, 8
+        session.total = 8
+        session._metrics = (2, 0, 1, 0.0)
+        self.assertTrue(session.needs_current_allocation())
+        actual, _, total = session.plan()
+        self.assertEqual(actual.tolist(), [5, 1])
+        self.assertEqual(total, 8)
+        self.assertEqual(session.controller._pending.capacities.tolist(), [5, 1])
+        for mode in (0, 1, 3):
+            session._metrics = (mode, 0, 1, 0.0)
+            self.assertFalse(session.needs_current_allocation())
+        session._metrics = (2, 0, 0, 0.0)
+        for total in (2, 12):
+            session.total = total
+            self.assertFalse(session.needs_current_allocation())
+
     def test_dynamic_session_plan_does_not_wait_for_gpu(self) -> None:
         with patch.dict(os.environ, {"RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1"}):
             session = AdaptiveVerificationSession(2, 2, "cuda")

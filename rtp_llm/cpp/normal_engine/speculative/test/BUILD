@@ -123,6 +123,48 @@ cc_import(
 # Separate processes are intentional: runtime optimization flags are cached.
 [
     cc_test(
+        name = "mtp_executor_adaptive_current_prepare_%s_test" % fusion,
+        srcs = ["MtpExecutorTest.cc"],
+        data = ["//rtp_llm/models_py/sampling:sampling"],
+        copts = test_copts,
+        deps = [
+            "//rtp_llm/models_py/bindings/cuda/kernels:mtp_token_gather",
+            "//rtp_llm/models_py/bindings/cuda/kernels:cuda_graph_prepare",
+            "//rtp_llm/models_py/bindings/cuda/kernels:mtp_target_verify_prepare",
+            "//rtp_llm/cpp/testing:device_test_utils",
+            "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+            "//rtp_llm/cpp/normal_engine:normal_engine",
+            "//rtp_llm/cpp/utils:mtp_fusion",
+            "//rtp_llm/cpp/models:models",
+            "//rtp_llm/cpp/config:config_modules",
+            "//rtp_llm/cpp/normal_engine/test:mock_engine",
+            "@com_google_googletest//:gtest",
+            "@com_google_googletest//:gtest_main",
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ] + torch_deps() + cuda13_torch_link_deps,
+        args = ["--gtest_filter=*ForwardOverlapMultiStepFusionMatchesBarrierPath"],
+        env = {
+            "TEST_USING_DEVICE": "CUDA",
+            "RTP_LLM_MTP_OPTIMIZE": "1",
+            "RTP_LLM_ADAPTIVE_VERIFICATION": "1",
+            "RTP_LLM_ADAPTIVE_VERIFY_CAP": "-1",
+            "TEST_ADAPTIVE_CURRENT_ALLOCATION": "1",
+            "RTP_LLM_USE_VLLM_REJECTION_SAMPLING": "1",
+            "RTP_LLM_MTP_FORWARD_OVERLAP": "1",
+            "RTP_LLM_STREAM_ASYNC": "1",
+            "RTP_LLM_DEVICE_INPUT": "1",
+            "RTP_LLM_MTP_ASYNC_PREPARE": fusion,
+        },
+        tags = ["SM103_CU13"],
+        exec_properties = {"gpu": "SM103_CU13", "gpu_count": "1"},
+    )
+    for fusion in ["0", "1"]
+]
+
+# Separate processes are intentional: runtime optimization flags are cached.
+[
+    cc_test(
         name = "mtp_executor_adaptive_prepare_%s_test" % fusion,
         srcs = ["MtpExecutorTest.cc"],
         copts = test_copts,

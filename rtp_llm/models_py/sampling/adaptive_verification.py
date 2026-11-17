@@ -101,8 +101,10 @@ def _assign_draft_token_budget_kernel(
     capacities_ptr,
     # [max_num_reqs * num_steps]
     survival_ptr,
+    known_ptr,
     num_reqs,
     draft_budget,
+    HAS_KNOWN: tl.constexpr,
     NUM_STEPS: tl.constexpr,
     BLOCK_REQS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -114,6 +116,9 @@ def _assign_draft_token_budget_kernel(
         mask = reqs < num_reqs
         req_state_idx = tl.load(idx_mapping_ptr + reqs, mask=mask, other=0)
         capacity = tl.load(capacities_ptr + reqs, mask=mask, other=0)
+        known = tl.full([BLOCK_REQS], True, tl.int1)
+        if HAS_KNOWN:
+            known = tl.load(known_ptr + reqs, mask=mask, other=False)
         survival = tl.full([BLOCK_REQS], 1.0, tl.float32)
         for step in tl.static_range(NUM_STEPS):
             prob = tl.load(
@@ -121,6 +126,9 @@ def _assign_draft_token_budget_kernel(
                 mask=mask,
                 other=0.0,
             )
+            # Unknown predictions are optimistic; sanitize in the ranking kernel
+            # rather than launching gather/where/isfinite kernels per round.
+            prob = tl.where(known & (prob >= 0.0) & (prob <= 1.0), prob, 1.0)
             survival *= prob
             bits = tl.where(step < capacity, survival.to(tl.int32, bitcast=True), -1)
             tl.store(survival_ptr + reqs * NUM_STEPS + step, bits, mask=mask)
@@ -165,6 +173,7 @@ def assign_draft_token_budget(
     capacities: torch.Tensor,
     draft_budget: int,
     survival: torch.Tensor,
+    known: torch.Tensor | None = None,
 ) -> None:
     """Admit the globally best `draft_budget` draft slots, in place.
 
@@ -178,6 +187,13 @@ def assign_draft_token_budget(
     when `draft_budget < capacities.sum()`, so every winner is a real draft slot.
     `survival` is int32 scratch with room for `num_reqs * num_steps` slots.
     """
+    if known is not None and (
+        known.shape != idx_mapping.shape
+        or known.dtype != torch.bool
+        or known.device != confidence_probs.device
+        or not known.is_contiguous()
+    ):
+        raise ValueError("known must be a contiguous boolean mask in request order")
     num_steps = confidence_probs.shape[1]
     _assign_draft_token_budget_kernel[(1,)](
         confidence_probs,
@@ -185,8 +201,10 @@ def assign_draft_token_budget(
         idx_mapping,
         capacities,
         survival,
+        known,
         idx_mapping.shape[0],
         draft_budget,
+        HAS_KNOWN=known is not None,
         NUM_STEPS=num_steps,
         BLOCK_REQS=256,
         BLOCK_SIZE=1024,

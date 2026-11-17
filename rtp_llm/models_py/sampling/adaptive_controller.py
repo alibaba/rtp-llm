@@ -291,6 +291,42 @@ class AdaptiveDraftController:
             len(rows),
         )
 
+    def reallocate_current(self, request_ids: Sequence[int], total_tokens: int):
+        """Use current draft confidences for a host-sized budget, without D2H.
+
+        Unknown/incomplete rows stay optimistic, as in vLLM. The host budget
+        remains unchanged, so tensor shapes and TP communication are fixed.
+        """
+        slots = self._slots(request_ids)
+        batch = len(slots)
+        if not batch <= total_tokens <= batch * (self.num_steps + 1):
+            raise AdaptiveBudgetInputError("total_tokens", "outside prefix bounds")
+        if self._pending is not None:
+            raise AdaptiveBudgetInputError("request_ids", "observe before reallocation")
+        caps = torch.full(
+            (batch,), self.num_steps, dtype=torch.int32, device=self.device
+        )
+        budget = total_tokens - batch
+        if budget == 0:
+            caps.zero_()
+        elif budget < batch * self.num_steps:
+            mapping = self._device_indices(slots)
+            ready = self._ready[list(slots)].all(axis=1)
+            known = None if ready.all() else self._device_indices(ready, torch.bool)
+            assign_draft_token_budget(
+                self.confidence_probs,
+                mapping,
+                caps,
+                budget,
+                self._survival,
+                known=known,
+            )
+        return (
+            caps,
+            pack_verification_rows(caps, self.num_steps, total_tokens),
+            total_tokens,
+        )
+
     def commit_prepared(
         self, request_ids: Sequence[int], capacities: torch.Tensor
     ) -> None:

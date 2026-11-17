@@ -5,7 +5,9 @@ import torch
 from rtp_llm.models_py.sampling.acceptance_estimator import OnlineAcceptanceEstimator
 
 
-def reference_features(logits: torch.Tensor, temperatures: torch.Tensor) -> torch.Tensor:
+def reference_features(
+    logits: torch.Tensor, temperatures: torch.Tensor
+) -> torch.Tensor:
     temperatures = temperatures.cpu().double()
     scale = torch.where(temperatures > 0, temperatures, 1.0)
     scaled = logits.cpu().double() / scale[:, None]
@@ -75,12 +77,20 @@ class AcceptanceEstimatorTest(unittest.TestCase):
                         steps.expand(mapping.numel()) if steps.dim() == 0 else steps
                     )
                     valid_steps, valid_slots = row_steps[valid], mapping[valid]
-                    features = reference_features(logits[valid], temperatures[valid_slots])
-                    probabilities = torch.sigmoid(
-                        estimator.slope.cpu().double() * features
-                        + estimator.intercepts[valid_steps].cpu().double()
-                    ).float().cuda()
-                    expected_features[valid_slots, valid_steps] = features.float().cuda()
+                    features = reference_features(
+                        logits[valid], temperatures[valid_slots]
+                    )
+                    probabilities = (
+                        torch.sigmoid(
+                            estimator.slope.cpu().double() * features
+                            + estimator.intercepts[valid_steps].cpu().double()
+                        )
+                        .float()
+                        .cuda()
+                    )
+                    expected_features[valid_slots, valid_steps] = (
+                        features.float().cuda()
+                    )
                     expected_predictions[valid_slots, valid_steps] = probabilities
                     batch = torch.arange(mapping.numel(), device="cuda")
                     batch = batch // 4 if block_steps else batch
@@ -92,11 +102,71 @@ class AcceptanceEstimatorTest(unittest.TestCase):
                         estimator.features, expected_features, atol=2e-4, rtol=2e-4
                     )
                     torch.testing.assert_close(
-                        estimator.predictions, expected_predictions, atol=2e-4, rtol=2e-4
+                        estimator.predictions,
+                        expected_predictions,
+                        atol=2e-4,
+                        rtol=2e-4,
                     )
                     torch.testing.assert_close(
                         confidence, expected_confidence, atol=2e-4, rtol=2e-4
                     )
+
+    def test_high_confidence_complement_across_blocks_and_ties(self) -> None:
+        # FP32 sum(exp(logits)) - 1 rounds to zero for a gap of 18.
+        # Include partial/all-padding blocks and maxima in different blocks.
+        for vocab in (2, 8193, 16385):
+            for dtype in (torch.float32, torch.float16, torch.bfloat16):
+                with self.subTest(vocab=vocab, dtype=dtype):
+                    estimator = OnlineAcceptanceEstimator(8, 5, torch.device("cuda"))
+                    logits = torch.full(
+                        (8, vocab), -torch.inf, device="cuda", dtype=dtype
+                    )
+                    for row, gap in enumerate((12, 16, 18, 20, 30, 40, 0, 0)):
+                        logits[row, 0] = 0
+                        logits[row, -1] = -gap
+                    # The max is not always in the first vocabulary block.
+                    logits[5, 0], logits[5, -1] = -40, 0
+                    if vocab > 2:
+                        logits[7, vocab // 2] = 0
+                    temperatures = torch.tensor(
+                        [1, 1, 1, 1, 1, 1, 0, 0.5], device="cuda"
+                    )
+                    slots = torch.arange(8, dtype=torch.int32, device="cuda")
+                    confidence = torch.full((8, 5), -99.0, device="cuda")
+                    estimator.predict(
+                        logits,
+                        slots,
+                        torch.tensor(2, device="cuda"),
+                        confidence,
+                        temperatures,
+                    )
+                    expected = reference_features(logits, temperatures)
+                    torch.testing.assert_close(
+                        estimator.features[:, 2].cpu().double(),
+                        expected,
+                        atol=2e-4,
+                        rtol=2e-4,
+                    )
+                    expected_prob = torch.sigmoid(0.5 * expected - 0.2)
+                    torch.testing.assert_close(
+                        confidence[:, 2].cpu().double(),
+                        expected_prob,
+                        atol=2e-6,
+                        rtol=2e-6,
+                    )
+                    self.assertTrue((confidence[:, :2] == -99).all().item())
+                    self.assertTrue((confidence[:, 3:] == -99).all().item())
+                    # Rejections of confident drafts must still produce finite
+                    # training statistics and update the acceptance model.
+                    estimator.step(
+                        slots,
+                        torch.full((8,), 3, dtype=torch.int32, device="cuda"),
+                        torch.ones(8, dtype=torch.int32, device="cuda"),
+                    )
+                    self.assertTrue(torch.isfinite(estimator.info).all().item())
+                    self.assertTrue(torch.isfinite(estimator.grad).all().item())
+                    self.assertEqual(estimator.counts[2].item(), 8)
+                    self.assertLess(estimator.grad[2, 1].item(), 0)
 
     def test_step_labels_only_observed_prefix(self) -> None:
         estimator, slots, grades = graded_fixture()
@@ -161,10 +231,16 @@ class AcceptanceEstimatorTest(unittest.TestCase):
         estimator.step(slots, sampled, rejected)
 
         torch.testing.assert_close(
-            estimator.slope.cpu().double(), initial_slope + slope_delta, atol=1e-5, rtol=1e-5
+            estimator.slope.cpu().double(),
+            initial_slope + slope_delta,
+            atol=1e-5,
+            rtol=1e-5,
         )
         torch.testing.assert_close(
-            estimator.intercepts.cpu().double(), initial_bias + bias_delta, atol=1e-5, rtol=1e-5
+            estimator.intercepts.cpu().double(),
+            initial_bias + bias_delta,
+            atol=1e-5,
+            rtol=1e-5,
         )
         self.assertEqual(estimator._refits, 1)
         self.assertEqual(estimator._steps_since_refit, 0)
@@ -223,7 +299,9 @@ class AcceptanceEstimatorTest(unittest.TestCase):
             eager.predict(logits, slots, step, eager_confidence, temperatures)
 
             torch.testing.assert_close(confidence, eager_confidence, atol=0, rtol=0)
-            torch.testing.assert_close(estimator.features, eager.features, atol=0, rtol=0)
+            torch.testing.assert_close(
+                estimator.features, eager.features, atol=0, rtol=0
+            )
             torch.testing.assert_close(
                 estimator.predictions, eager.predictions, atol=0, rtol=0
             )
@@ -236,7 +314,10 @@ class AcceptanceEstimatorTest(unittest.TestCase):
                 + estimator.intercepts[iteration + 1].cpu().double()
             )
             torch.testing.assert_close(
-                confidence[valid, iteration + 1].cpu().double(), expected, atol=2e-4, rtol=2e-4
+                confidence[valid, iteration + 1].cpu().double(),
+                expected,
+                atol=2e-4,
+                rtol=2e-4,
             )
             self.assertTrue((confidence[~valid] == -99).all().item())
 

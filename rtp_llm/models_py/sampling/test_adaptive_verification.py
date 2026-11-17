@@ -28,6 +28,50 @@ def reference_allocation(
 
 
 class BudgetSelectionTest(unittest.TestCase):
+    def test_draft5_workload_budget_prices_padded_rows_and_fixed_cost(self) -> None:
+        # Synthetic heterogeneous workload: about 3.175 output tokens/round.
+        # These are cost-model invariants, not measured GLM speedups.
+        for batch in (16, 24, 30):
+            confidence = np.array(
+                [[p] * 5 for p in [0.95] * (batch // 2) + [0.05] * (batch // 2)]
+            )
+            capacities = np.full(batch, 5, dtype=np.int32)
+            scores = np.sort(np.cumprod(confidence, axis=1).reshape(-1))[::-1]
+            expected = np.r_[batch, batch + np.cumsum(scores)]
+            self.assertAlmostEqual(expected[-1] / batch, 3.175396875)
+            padded = ((np.arange(6 * batch + 1) + 15) // 16) * 16
+            for draft_cost in (0.0, 5.0, 500.0):
+                target = 0.1 + padded * 0.1
+                actual = select_draft_token_budget(
+                    confidence,
+                    capacities,
+                    draft_cost_ms=np.full(batch + 1, draft_cost),
+                    verify_cost_ms=target,
+                    num_non_draft_tokens=batch,
+                    num_sampling_requests=batch,
+                )
+                ratios = expected / (draft_cost + target[batch:])
+                self.assertEqual(actual, int(np.argmax(ratios)))
+                self.assertGreaterEqual(ratios[actual], ratios[-1])
+                # There is no reason to leave a positive-value draft unverified
+                # when its row is free inside the selected execution bucket.
+                if actual < 5 * batch:
+                    self.assertNotEqual(
+                        padded[batch + actual], padded[batch + actual + 1]
+                    )
+            # If measured execution cost is flat, trimming cannot buy throughput.
+            self.assertEqual(
+                select_draft_token_budget(
+                    confidence,
+                    capacities,
+                    draft_cost_ms=np.ones(batch + 1),
+                    verify_cost_ms=np.ones(6 * batch + 1),
+                    num_non_draft_tokens=batch,
+                    num_sampling_requests=batch,
+                ),
+                5 * batch,
+            )
+
     def test_budget_matches_exhaustive_prefix_search(self) -> None:
         probabilities = np.array([[0.75, 0.5, 0.25], [0.5, 1.0, 0.75]])
         draft_costs = np.array([0.0, 0.1, 0.3])
@@ -234,6 +278,39 @@ class VerificationPackingTest(unittest.TestCase):
 
 
 class DraftAllocationTest(unittest.TestCase):
+    def test_fused_unknown_mask_and_nonfinite_with_remapped_slots(self) -> None:
+        for batch in (16, 24, 30, 257):
+            with self.subTest(batch=batch):
+                torch.manual_seed(batch)
+                state = torch.rand((batch * 2, 5), device="cuda")
+                mapping = torch.arange(batch - 1, -1, -1, device="cuda") * 2
+                known = torch.arange(batch, device="cuda") % 3 != 0
+                state[mapping[1], 2] = float("nan")
+                state[mapping[2], 1] = float("inf")
+                state[mapping[3], 0] = float("-inf")
+                state[mapping[4], 3] = -0.2
+                state[mapping[5], 4] = 1.2
+                initial = torch.full((batch,), 5, dtype=torch.int32, device="cuda")
+                scratch = torch.empty(batch * 5, dtype=torch.int32, device="cuda")
+                for mask in (None, known):
+                    probabilities = state[mapping].cpu()
+                    valid = (probabilities >= 0) & (probabilities <= 1)
+                    probabilities = torch.where(valid, probabilities, 1.0)
+                    if mask is not None:
+                        probabilities[~mask.cpu()] = 1.0
+                    for budget in (1, batch * 2, batch * 5 - 1):
+                        caps = initial.clone()
+                        assign_draft_token_budget(
+                            state, mapping, caps, budget, scratch, known=mask
+                        )
+                        expected = reference_allocation(probabilities, initial, budget)
+                        self.assertTrue(torch.equal(caps.cpu(), expected))
+                for invalid in (known.to(torch.int32), known[:-1], known.cpu()):
+                    with self.assertRaises(ValueError):
+                        assign_draft_token_budget(
+                            state, mapping, initial, 1, scratch, known=invalid
+                        )
+
     def test_allocation_matches_reference_including_zero_and_full(self) -> None:
         for requests in (1, 17, 300):
             generator = torch.Generator(device="cuda").manual_seed(20261109)

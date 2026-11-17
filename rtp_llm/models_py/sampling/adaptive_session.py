@@ -354,8 +354,16 @@ class AdaptiveVerificationSession:
             raise RuntimeError("begin must precede adaptive planning")
         return self._prepared
 
+    def needs_current_allocation(self) -> bool:
+        return self._metrics[0] == 2 and len(self.ids) < self.total < len(self.ids) * (
+            self.steps + 1
+        )
+
     def plan(self) -> tuple[torch.Tensor, torch.Tensor, int]:
         caps, rows, total = self.prepared_plan()
+        if self.needs_current_allocation():
+            caps, rows, total = self.controller.reallocate_current(self.ids, total)
+            self._prepared = caps, rows, total
         self.controller.commit_prepared(self.ids, caps)
         logging.debug(
             "[adaptive-verify] round=%d batch=%d draft_steps=%d target_rows=%d fixed_cap=%d calibration=%s",
