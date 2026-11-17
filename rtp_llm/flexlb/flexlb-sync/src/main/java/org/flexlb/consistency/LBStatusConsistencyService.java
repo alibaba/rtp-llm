@@ -13,6 +13,8 @@ import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -46,7 +48,11 @@ public class LBStatusConsistencyService implements MasterElectService {
 
     public void init() {
         log.info("start init LBStatusConsistencyService.");
-        localHostIp = ZookeeperMasterElectService.resolveLocalIp(environment);
+        try {
+            localHostIp = resolveLocalIp(environment);
+        } catch (UnknownHostException e) {
+            throw new IllegalStateException("Failed to retrieve local host address", e);
+        }
         // Read from Spring Environment to respect --server.port= CLI args;
         // fall back to JVM system property.
         serverPort = environment.getProperty("server.port");
@@ -158,5 +164,12 @@ public class LBStatusConsistencyService implements MasterElectService {
             return null;
         }
         return masterHostIp + ":" + serverPort;
+    }
+
+    /**
+     * Resolves the local address during construction, before subclass fields initialize.
+     */
+    protected String resolveLocalIp(Environment environment) throws UnknownHostException {
+        return InetAddress.getLocalHost().getHostAddress();
     }
 }

@@ -2,6 +2,7 @@ package org.flexlb.httpserver;
 
 import io.grpc.Server;
 import io.grpc.ServerInterceptors;
+import io.grpc.netty.NettyServerBuilder;
 import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -9,19 +10,19 @@ import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.util.concurrent.DefaultThreadFactory;
-import org.flexlb.metric.FlexMonitor;
-import org.flexlb.enums.FlexMetricType;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.constant.MetricConstant;
+import org.flexlb.enums.FlexMetricType;
 import org.flexlb.interceptor.GrpcQosHeaderInterceptor;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
 import org.flexlb.interceptor.GrpcTraceInterceptor;
+import org.flexlb.metric.FlexMonitor;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.env.Environment;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
@@ -33,9 +34,11 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
+/**
+ * Manages the FlexLB gRPC listener, request admission and graceful shutdown.
+ */
 @Component
 public class FlexlbGrpcServer {
-
     /**
      * Offset from HTTP port to gRPC port for FlexLB's own servers.
      * This is separate from CommonConstants.GRPC_PORT_OFFSET which applies
@@ -43,7 +46,6 @@ public class FlexlbGrpcServer {
      */
     static final int FLEXLB_GRPC_PORT_OFFSET = 2;
     private static final int DEFAULT_HTTP_PORT = 7001;
-    private final long quietPeriodNanos;
 
     /**
      * Metric prefix — matches {@code MicrometerFlexMonitor.METRIC_PREFIX} so that
@@ -51,6 +53,16 @@ public class FlexlbGrpcServer {
      * naming convention as those going through the FlexMonitor abstraction.
      */
     private static final String METRIC_PREFIX = "flexlb.";
+    private static final String[] RECEIVING_METRICS = {
+        "app.grpc.server.receiving.active", "app.grpc.server.receiving.control.active",
+        "app.grpc.server.receiving.rejected.total", "app.grpc.server.receiving.timed.out.total",
+        "app.grpc.server.receiving.timers.active", "app.grpc.server.executor.queue.size",
+        "app.grpc.server.executor.active.threads", "app.grpc.server.control.queue.size",
+        "app.grpc.server.control.active.threads", "app.grpc.server.receiving.budget.used.bytes",
+        "app.grpc.server.receiving.control.budget.used.bytes"
+    };
+
+    private final long quietPeriodNanos;
 
     private final FlexlbServiceImpl flexlbServiceImpl;
     private final ConfigService configService;
@@ -62,7 +74,6 @@ public class FlexlbGrpcServer {
 
     @Autowired(required = false)
     private FlexMonitor flexMonitor;
-
     private volatile Server server;
     private NioEventLoopGroup bossGroup;
     private ThreadPoolExecutor grpcExecutor;
@@ -137,7 +148,7 @@ public class FlexlbGrpcServer {
         registerMetrics();
         registerReceivingMetrics();
 
-        server = GrpcServerBinding.builder(environment, port)
+        server = createServerBuilder(port)
                 .channelType(NioServerSocketChannel.class)
                 .bossEventLoopGroup(bossGroup)
                 .workerEventLoopGroup(grpcServerEventLoopGroup)
@@ -158,6 +169,94 @@ public class FlexlbGrpcServer {
                 .start();
 
         Logger.info("FlexLB gRPC server started on port {}", port);
+    }
+
+    /** Report cumulative totals as gauges: query deltas across samples, not gauge sums. */
+    @Scheduled(fixedDelay = 1000)
+    public void reportReceivingMetrics() {
+        GrpcReceivingGuard guard = receivingGuard;
+        FlexMonitor monitor = flexMonitor;
+        if (guard == null || monitor == null) return;
+        double[] values = {guard.receiving(), guard.controlReceiving(), guard.rejected(), guard.timedOut(),
+            guard.pendingTimers(), grpcExecutor.getQueue().size(), grpcExecutor.getActiveCount(),
+            grpcControlExecutor.getQueue().size(), grpcControlExecutor.getActiveCount(),
+            guard.receivingBytes(), guard.controlReceivingBytes()};
+        for (int i = 0; i < RECEIVING_METRICS.length; i++) monitor.report(RECEIVING_METRICS[i], values[i]);
+    }
+
+    public boolean isServing() {
+        Server current = server;
+        return current != null && !current.isShutdown() && !current.isTerminated();
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        drain();
+        if (receivingGuard != null) {
+            receivingGuard.close();
+        }
+        if (grpcControlExecutor != null) {
+            grpcControlExecutor.shutdown();
+        }
+        if (bossGroup != null) {
+            bossGroup.shutdownGracefully();
+        }
+        if (grpcServerEventLoopGroup != null) {
+            grpcServerEventLoopGroup.shutdownGracefully();
+        }
+        if (grpcExecutor != null) {
+            grpcExecutor.shutdown();
+            try {
+                grpcExecutor.awaitTermination(5, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                // Preserve already accepted lifecycle callbacks even during interrupted shutdown.
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    /** Called before Spring destroys any serving resources. */
+    public synchronized void drain() {
+        if (server == null || server.isTerminated()) {
+            return;
+        }
+        boolean interrupted = false;
+        long startedAt = System.nanoTime();
+        Logger.info("keep serving until no new requests for {} ms",
+                TimeUnit.NANOSECONDS.toMillis(quietPeriodNanos));
+        try {
+            while (!server.isShutdown()) {
+                long lastArrival = Math.max(startedAt, grpcServerTimingInterceptor.getLastScheduleArrivalNanos());
+                long remaining = quietPeriodNanos - (System.nanoTime() - lastArrival);
+                if (remaining <= 0) {
+                    Logger.info("Schedule quiet period elapsed; shutting down gRPC and waiting for accepted RPCs");
+                    server.shutdown();
+                    break;
+                }
+                try {
+                    TimeUnit.NANOSECONDS.sleep(remaining);
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                }
+            }
+            while (!server.isTerminated()) {
+                try {
+                    server.awaitTermination();
+                } catch (InterruptedException e) {
+                    // An interrupt must not turn graceful drain into resource destruction.
+                    interrupted = true;
+                }
+            }
+            Logger.info("All accepted gRPC requests completed");
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    protected NettyServerBuilder createServerBuilder(int port) {
+        return NettyServerBuilder.forPort(port);
     }
 
     /**
@@ -217,102 +316,9 @@ public class FlexlbGrpcServer {
         Logger.info("FlexLB gRPC server executor metrics registered with MeterRegistry");
     }
 
-    private static final String[] RECEIVING_METRICS = {
-        "app.grpc.server.receiving.active", "app.grpc.server.receiving.control.active",
-        "app.grpc.server.receiving.rejected.total", "app.grpc.server.receiving.timed.out.total",
-        "app.grpc.server.receiving.timers.active", "app.grpc.server.executor.queue.size",
-        "app.grpc.server.executor.active.threads", "app.grpc.server.control.queue.size",
-        "app.grpc.server.control.active.threads", "app.grpc.server.receiving.budget.used.bytes",
-        "app.grpc.server.receiving.control.budget.used.bytes"
-    };
-
     private void registerReceivingMetrics() {
         if (flexMonitor != null) {
             for (String name : RECEIVING_METRICS) flexMonitor.register(name, FlexMetricType.GAUGE);
-        }
-    }
-
-    /** Report cumulative totals as gauges: query deltas across samples, not gauge sums. */
-    @Scheduled(fixedDelay = 1000)
-    public void reportReceivingMetrics() {
-        GrpcReceivingGuard guard = receivingGuard;
-        FlexMonitor monitor = flexMonitor;
-        if (guard == null || monitor == null) return;
-        double[] values = {guard.receiving(), guard.controlReceiving(), guard.rejected(), guard.timedOut(),
-            guard.pendingTimers(), grpcExecutor.getQueue().size(), grpcExecutor.getActiveCount(),
-            grpcControlExecutor.getQueue().size(), grpcControlExecutor.getActiveCount(),
-            guard.receivingBytes(), guard.controlReceivingBytes()};
-        for (int i = 0; i < RECEIVING_METRICS.length; i++) monitor.report(RECEIVING_METRICS[i], values[i]);
-    }
-
-    public boolean isServing() {
-        Server current = server;
-        return current != null && !current.isShutdown() && !current.isTerminated();
-    }
-
-    /** Called before Spring destroys any serving resources. */
-    public synchronized void drain() {
-        if (server == null || server.isTerminated()) {
-            return;
-        }
-        boolean interrupted = false;
-        long startedAt = System.nanoTime();
-        Logger.info("keep serving until no new requests for {} ms",
-                TimeUnit.NANOSECONDS.toMillis(quietPeriodNanos));
-        try {
-            while (!server.isShutdown()) {
-                long lastArrival = Math.max(startedAt, grpcServerTimingInterceptor.getLastScheduleArrivalNanos());
-                long remaining = quietPeriodNanos - (System.nanoTime() - lastArrival);
-                if (remaining <= 0) {
-                    Logger.info("Schedule quiet period elapsed; shutting down gRPC and waiting for accepted RPCs");
-                    server.shutdown();
-                    break;
-                }
-                try {
-                    TimeUnit.NANOSECONDS.sleep(remaining);
-                } catch (InterruptedException e) {
-                    interrupted = true;
-                }
-            }
-            while (!server.isTerminated()) {
-                try {
-                    server.awaitTermination();
-                } catch (InterruptedException e) {
-                    // An interrupt must not turn graceful drain into resource destruction.
-                    interrupted = true;
-                }
-            }
-            Logger.info("All accepted gRPC requests completed");
-        } finally {
-            if (interrupted) {
-                Thread.currentThread().interrupt();
-            }
-        }
-    }
-
-    @PreDestroy
-    public void shutdown() {
-        drain();
-        if (receivingGuard != null) {
-            receivingGuard.close();
-        }
-        if (grpcControlExecutor != null) {
-            grpcControlExecutor.shutdown();
-        }
-        if (bossGroup != null) {
-            bossGroup.shutdownGracefully();
-        }
-        if (grpcServerEventLoopGroup != null) {
-            grpcServerEventLoopGroup.shutdownGracefully();
-        }
-        if (grpcExecutor != null) {
-            grpcExecutor.shutdown();
-            try {
-                grpcExecutor.awaitTermination(5, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                // Preserve already accepted lifecycle callbacks even during interrupted shutdown.
-                Thread.currentThread().interrupt();
-            }
         }
     }
 
