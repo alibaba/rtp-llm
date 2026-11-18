@@ -761,9 +761,12 @@ PlanResult KVCacheTransferPlanner::planStages(const PipelineTransferLayout& pref
     const auto draftCount = [](const auto& stage) {
         return static_cast<int>(stage.layer_tags.size()) - stage.main_layer_count;
     };
-    const int draft_layers = draftCount(prefill.stages.back());
-    if (draft_layers > draftCount(decode.stages.back())) {
-        return {{}, planError("Decode is missing draft layers published by Prefill")};
+    const int draft_layers         = draftCount(decode.stages.back());
+    const int prefill_draft_layers = draftCount(prefill.stages.back());
+    if (prefill_draft_layers < draft_layers) {
+        return {{},
+                planError("Prefill is missing draft layers required by Decode: Prefill="
+                          + std::to_string(prefill_draft_layers) + " Decode=" + std::to_string(draft_layers))};
     }
 
     TransferPlan result;
