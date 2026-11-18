@@ -4,8 +4,8 @@ import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.discovery.ServiceHostListener;
-import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 
 import java.util.List;
@@ -19,6 +19,9 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+/**
+ * Verifies Engine address updates from discovery polls and subscriptions.
+ */
 class EngineAddressNameResolverTest {
 
     private static final String MODEL_CONFIG = """
@@ -95,6 +98,44 @@ class EngineAddressNameResolverTest {
         verify(listener).onAddressUpdate(List.of("10.0.0.2:9090"));
         subscription.getValue().onHostsChanged(List.of());
         verify(listener).onAddressUpdate(List.of());
+    }
+
+    @Test
+    void vipServerRetainsAddressesAcrossEmptyResultsWhileFileDiscoveryCanScaleToZero() {
+        String config = """
+                {
+                  "service_id": "aigc.text-generation.generation.test-service",
+                  "role_endpoints": [{
+                    "group": "test-group",
+                    "prefill_endpoint": {"address": "vip", "discovery": {"type": "vipserver"}},
+                    "decode_endpoint": {"address": "file", "discovery": {"type": "local-file"}}
+                  }]
+                }
+                """;
+        ServiceDiscovery discovery = mock(ServiceDiscovery.class);
+        when(discovery.getHosts("vip")).thenReturn(List.of(new WorkerHost("10.0.0.1", 8080)));
+        when(discovery.getHosts("file")).thenReturn(List.of(new WorkerHost("10.0.0.2", 8080)));
+        EngineAddressNameResolver resolver = new EngineAddressNameResolver(discovery, new ModelMetaConfig(config));
+        ArgumentCaptor<ServiceHostListener> vipSubscription = ArgumentCaptor.forClass(ServiceHostListener.class);
+        verify(discovery).listen(eq("vip"), vipSubscription.capture());
+        CustomNameResolver.Listener listener = mock(CustomNameResolver.Listener.class);
+        resolver.start(listener);
+        clearInvocations(listener);
+
+        when(discovery.getHosts("vip")).thenReturn(List.of()).thenReturn(null);
+        resolver.periodicHostUpdate();
+        resolver.periodicHostUpdate();
+        vipSubscription.getValue().onHostsChanged(List.of());
+        vipSubscription.getValue().onHostsChanged(null);
+        verify(listener, never()).onAddressUpdate(anyList());
+
+        when(discovery.getHosts("file")).thenReturn(List.of());
+        resolver.periodicHostUpdate();
+        verify(listener).onAddressUpdate(List.of("10.0.0.1:8080"));
+
+        when(discovery.getHosts("vip")).thenReturn(List.of(new WorkerHost("10.0.0.3", 8080)));
+        resolver.periodicHostUpdate();
+        verify(listener).onAddressUpdate(List.of("10.0.0.3:8080"));
     }
 
 }

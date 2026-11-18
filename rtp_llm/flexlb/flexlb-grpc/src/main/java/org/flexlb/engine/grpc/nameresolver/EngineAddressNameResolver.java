@@ -5,6 +5,7 @@ import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.ServiceDiscovery;
+import org.flexlb.discovery.ServiceDiscoveryType;
 import org.flexlb.discovery.ServiceHostListener;
 import org.flexlb.enums.BackendServiceProtocolEnum;
 import org.flexlb.util.Logger;
@@ -13,32 +14,44 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 /**
+ * Resolves Engine channel addresses and retains the last nonempty VIPServer result.
+ *
  * @author saichen.sm
  * date: 2025/9/19
  */
 @Slf4j
 @Component
 public class EngineAddressNameResolver implements CustomNameResolver {
-
     private final Map<String/*address*/, List<String/*ip:port*/>> domainHostsMap = new ConcurrentHashMap<>();
     private final ServiceDiscovery serviceDiscovery;
+
     private Listener listener;
     private List<String/*ip:port*/> allIpPortList = new ArrayList<>();
+
     private final Map<String/*address*/, String/*protocol*/> addressProtocols;
+    private final Set<String> vipServerAddresses;
 
     public EngineAddressNameResolver(
             ServiceDiscovery serviceDiscovery,
             ModelMetaConfig modelConfig) {
         this.serviceDiscovery = serviceDiscovery;
-        this.addressProtocols = addressProtocols(modelConfig.getServiceRoute());
+        ServiceRoute serviceRoute = modelConfig.getServiceRoute();
+        this.addressProtocols = addressProtocols(serviceRoute);
+        this.vipServerAddresses = serviceRoute.getAllEndpoints().stream()
+                .filter(endpoint -> endpoint.getAddress() != null && endpoint.getDiscovery() != null
+                        && endpoint.getDiscovery().getType() == ServiceDiscoveryType.VIPSERVER)
+                .map(endpoint -> endpoint.getAddress())
+                .collect(Collectors.toUnmodifiableSet());
         log.info("EngineAddressNameResolver start subscribe clusters:{} ", addressProtocols.keySet());
         fetchAllDomainsHosts();
         setupListeners();
@@ -49,42 +62,25 @@ public class EngineAddressNameResolver implements CustomNameResolver {
         fetchAllDomainsHosts();
     }
 
+    @Override
+    public void start(Listener listener) {
+        this.listener = listener;
+        listener.onAddressUpdate(allIpPortList);
+    }
+
+    @PreDestroy
+    public void destroy() {
+        if (serviceDiscovery != null) {
+            serviceDiscovery.shutdown();
+        }
+    }
+
     private void setupListeners() {
         // Create independent listener for each service address
         for (String serviceAddress : addressProtocols.keySet()) {
             ServiceHostListener addressListener = hosts -> updateDomainHosts(serviceAddress, hosts);
             serviceDiscovery.listen(serviceAddress, addressListener);
         }
-    }
-
-    private void fetchAllDomainsHosts() {
-        for (String serverAddress : addressProtocols.keySet()) {
-            try {
-                List<WorkerHost> hosts = serviceDiscovery.getHosts(serverAddress);
-                updateDomainHosts(serverAddress, hosts);
-            } catch (Exception e) {
-                Logger.error("Failed to fetch hosts for domain: {}, error: {}", serverAddress, e.getMessage(), e);
-            }
-        }
-    }
-
-    private static Map<String, String> addressProtocols(ServiceRoute serviceRoute) {
-        Map<String, String> protocols = new LinkedHashMap<>();
-        for (var endpoint : serviceRoute.getAllEndpoints()) {
-            if (endpoint.getAddress() != null) {
-                protocols.putIfAbsent(endpoint.getAddress(), null);
-                if (endpoint.getProtocol() != null) {
-                    protocols.put(endpoint.getAddress(), endpoint.getProtocol());
-                }
-            }
-        }
-        return Collections.unmodifiableMap(protocols);
-    }
-
-    @Override
-    public void start(Listener listener) {
-        this.listener = listener;
-        listener.onAddressUpdate(allIpPortList);
     }
 
     /**
@@ -95,6 +91,9 @@ public class EngineAddressNameResolver implements CustomNameResolver {
      */
     private synchronized void updateDomainHosts(String address, List<WorkerHost> hostList) {
         if (hostList == null || hostList.isEmpty()) {
+            if (vipServerAddresses.contains(address)) {
+                return;
+            }
             domainHostsMap.remove(address);
         } else {
             // VipServer registers the gRPC port (not httpPort) for GRPC-protocol deployments.
@@ -131,10 +130,27 @@ public class EngineAddressNameResolver implements CustomNameResolver {
         }
     }
 
-    @PreDestroy
-    public void destroy() {
-        if (serviceDiscovery != null) {
-            serviceDiscovery.shutdown();
+    private void fetchAllDomainsHosts() {
+        for (String serverAddress : addressProtocols.keySet()) {
+            try {
+                List<WorkerHost> hosts = serviceDiscovery.getHosts(serverAddress);
+                updateDomainHosts(serverAddress, hosts);
+            } catch (Exception e) {
+                Logger.error("Failed to fetch hosts for domain: {}, error: {}", serverAddress, e.getMessage(), e);
+            }
         }
+    }
+
+    private static Map<String, String> addressProtocols(ServiceRoute serviceRoute) {
+        Map<String, String> protocols = new LinkedHashMap<>();
+        for (var endpoint : serviceRoute.getAllEndpoints()) {
+            if (endpoint.getAddress() != null) {
+                protocols.putIfAbsent(endpoint.getAddress(), null);
+                if (endpoint.getProtocol() != null) {
+                    protocols.put(endpoint.getAddress(), endpoint.getProtocol());
+                }
+            }
+        }
+        return Collections.unmodifiableMap(protocols);
     }
 }
