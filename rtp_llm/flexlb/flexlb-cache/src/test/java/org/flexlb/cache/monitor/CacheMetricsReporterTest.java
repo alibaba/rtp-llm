@@ -3,6 +3,7 @@ package org.flexlb.cache.monitor;
 import org.flexlb.cache.core.RecentCacheKeyWindow;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
+import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.junit.jupiter.api.BeforeEach;
@@ -20,6 +21,9 @@ import static org.flexlb.constant.MetricConstant.CACHE_CLUSTER_RECENT_HIT_TOKENS
 import static org.flexlb.constant.MetricConstant.CACHE_CLUSTER_RECENT_INPUT_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_BYTES;
 import static org.flexlb.constant.MetricConstant.CACHE_ENGINE_LOCAL_COUNT;
+import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_BLOCK_SIZE;
+import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS;
+import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_MAPPING_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_TOTAL_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS;
@@ -35,6 +39,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Verifies the metric series, tags, and values emitted by the cache reporter.
+ */
 @ExtendWith(MockitoExtension.class)
 class CacheMetricsReporterTest {
 
@@ -53,6 +60,21 @@ class CacheMetricsReporterTest {
         } catch (Exception e) {
             fail("Failed to inject monitor: " + e.getMessage());
         }
+    }
+
+    @Test
+    void should_register_and_report_standby_capacity_metrics() {
+        reporter.init();
+        verify(monitor).register(CACHE_LOCAL_STANDBY_BLOCK_SIZE, FlexMetricType.GAUGE);
+        verify(monitor).register(CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        verify(monitor).register(CACHE_LOCAL_STANDBY_MAPPING_COUNT, FlexMetricType.GAUGE);
+
+        reporter.reportLocalStandbyBlockSize(RoleType.PREFILL, 16L);
+        reporter.reportLocalStandbyCapacityRejected();
+        reporter.reportLocalStandbyMappingCount(2L);
+        verify(monitor).report(CACHE_LOCAL_STANDBY_BLOCK_SIZE, FlexMetricTags.of("role", "PREFILL"), 16L);
+        verify(monitor).report(CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS, 1.0);
+        verify(monitor).report(CACHE_LOCAL_STANDBY_MAPPING_COUNT, 2L);
     }
 
     @Test

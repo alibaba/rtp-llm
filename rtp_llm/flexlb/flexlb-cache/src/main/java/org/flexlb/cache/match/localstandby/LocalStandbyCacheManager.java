@@ -34,8 +34,10 @@ public class LocalStandbyCacheManager {
     private final ThreadPoolExecutor updates;
     private final Map<String, WorkerStatus> workers = new ConcurrentHashMap<>();
     private final LocalStandbyComparisonService comparison;
+    private final CacheMetricsReporter metrics;
 
     public LocalStandbyCacheManager(ConfigService configService, CacheMetricsReporter metrics) {
+        this.metrics = metrics;
         this.comparison = new LocalStandbyComparisonService(metrics);
         var matching = configService.loadBalanceConfig().getCacheMatching();
         boolean enabled = matching instanceof KvcmCacheMatchingConfig;
@@ -120,6 +122,13 @@ public class LocalStandbyCacheManager {
 
     public Map<String, Integer> findMatchingEngines(List<Long> keys, RoleType role,
                                                     List<String> candidates, long blockSize) {
+        if (updates != null && blockSize > 0) {
+            try {
+                metrics.reportLocalStandbyBlockSize(role, blockSize);
+            } catch (RuntimeException failure) {
+                log.debug("Local standby block size reporting failed", failure);
+            }
+        }
         Map<String, WorkerStatus> remaining = new HashMap<>();
         for (String address : candidates) {
             WorkerStatus worker = workers.get(address);
@@ -183,11 +192,19 @@ public class LocalStandbyCacheManager {
         index.updateMaximumEntries(limit);
     }
 
+    @Scheduled(fixedRate = 20_000)
+    void reportMappingCount() {
+        if (updates != null) {
+            metrics.reportLocalStandbyMappingCount(index.mappingCount());
+        }
+    }
+
     private void addRoutedBlocks(WorkerStatus worker, long blockSize, List<Long> keys) {
         if (matchesGeneration(worker, blockSize)) {
             int rejected = index.addWorkerBlockMappings(identity(worker), keys);
             if (rejected > 0) {
                 log.debug("Local standby rejected {} block mappings at capacity", rejected);
+                metrics.reportLocalStandbyCapacityRejected();
             }
         }
     }

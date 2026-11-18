@@ -29,6 +29,42 @@ class LocalStandbyCacheManagerTest {
     private static final List<Long> KEYS = List.of(11L, 22L);
 
     @Test
+    void reportsMappingCountAndOneRejectionPerCapacityLimitedUpdate() {
+        ConfigService configService = mock(ConfigService.class);
+        FlexlbConfig config = new FlexlbConfig();
+        KvcmCacheMatchingConfig kvcm = new KvcmCacheMatchingConfig();
+        kvcm.getLocalStandby().setMaximumEntries(1);
+        config.setCacheMatching(kvcm);
+        when(configService.loadBalanceConfig()).thenReturn(config);
+        CacheMetricsReporter metrics = mock(CacheMetricsReporter.class);
+        LocalStandbyCacheManager manager = new LocalStandbyCacheManager(configService, metrics);
+        try {
+            manager.observe(worker(1));
+            Request request = new Request();
+            request.setBlockCacheKeys(List.of(11L, 22L, 33L));
+            request.setCacheKeyBlockSize(16L);
+            ServerStatus selected = new ServerStatus();
+            selected.setServerIp("127.0.0.1");
+            selected.setHttpPort(8080);
+            selected.setRole(RoleType.PREFILL);
+            selected.setWorkerGeneration(1);
+            selected.setSuccess(true);
+
+            manager.reportMappingCount();
+            verify(metrics).reportLocalStandbyMappingCount(0L);
+            manager.recordRoutedRequest(request, List.of(selected));
+            verify(metrics, timeout(1000)).reportLocalStandbyCapacityRejected();
+
+            assertEquals(Map.of(ADDRESS, 1), manager.findMatchingEngines(KEYS, RoleType.PREFILL, List.of(ADDRESS), 16));
+            verify(metrics).reportLocalStandbyBlockSize(RoleType.PREFILL, 16L);
+            manager.reportMappingCount();
+            verify(metrics).reportLocalStandbyMappingCount(1L);
+        } finally {
+            manager.shutdown();
+        }
+    }
+
+    @Test
     void replacementCannotInheritPredictedBlocks() throws InterruptedException {
         ConfigService configService = mock(ConfigService.class);
         FlexlbConfig config = new FlexlbConfig();

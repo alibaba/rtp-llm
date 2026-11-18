@@ -32,6 +32,9 @@ import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_KVCM_PREDI
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_RATIO;
+import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_BLOCK_SIZE;
+import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS;
+import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_MAPPING_COUNT;
 import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_PREDICTED_RATIO;
 import static org.flexlb.constant.MetricConstant.CACHE_LOCAL_STANDBY_PREDICTED_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_RECENT_KEY_HIT_COUNT;
@@ -88,6 +91,9 @@ public class CacheMetricsReporter {
      * Register all cache-related monitoring metrics
      */
     private void registerCacheMetrics() {
+        monitor.register(CACHE_LOCAL_STANDBY_BLOCK_SIZE, FlexMetricType.GAUGE);
+        monitor.register(CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(CACHE_LOCAL_STANDBY_MAPPING_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_LOCAL_STANDBY_PREDICTED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(CACHE_LOCAL_STANDBY_PREDICTED_RATIO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(CACHE_HIT_COMPARISON_ACTUAL_TOKENS, FlexMetricType.COUNTER, FlexPriorityType.PRECISE);
@@ -131,6 +137,20 @@ public class CacheMetricsReporter {
 
         // Engine view map size metrics
         monitor.register(CACHE_ENGINE_VIEWS_MAP_SIZE, FlexMetricType.GAUGE);
+    }
+
+    public void reportLocalStandbyBlockSize(RoleType role, long blockSize) {
+        if (role != null) {
+            monitor.report(CACHE_LOCAL_STANDBY_BLOCK_SIZE, FlexMetricTags.of("role", role.name()), blockSize);
+        }
+    }
+
+    public void reportLocalStandbyCapacityRejected() {
+        monitor.report(CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS, 1.0);
+    }
+
+    public void reportLocalStandbyMappingCount(long mappingCount) {
+        monitor.report(CACHE_LOCAL_STANDBY_MAPPING_COUNT, mappingCount);
     }
 
     public void reportLocalStandbyPrediction(RoleType role, String address, long hitTokens, long inputTokens) {
