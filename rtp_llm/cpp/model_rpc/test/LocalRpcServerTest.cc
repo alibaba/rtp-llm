@@ -205,6 +205,10 @@ public:
         return {std::vector<bool>(streams.size(), true), streams};
     }
 
+    absl::Status startLoop() override {
+        return absl::OkStatus();
+    }
+
     absl::Status stop() override {
         return absl::OkStatus();
     }
@@ -321,6 +325,10 @@ public:
         }
         return {{true, true}, streams};
     }
+    absl::Status startLoop() override {
+        return absl::OkStatus();
+    }
+
     absl::Status stop() override {
         return absl::OkStatus();
     }

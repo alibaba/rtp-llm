@@ -65,6 +65,10 @@ public:
         ++enqueue_multiple_calls;
         return {enqueue_successes, streams};
     }
+    absl::Status startLoop() override {
+        return absl::OkStatus();
+    }
+
     absl::Status stop() override {
         return absl::OkStatus();
     }

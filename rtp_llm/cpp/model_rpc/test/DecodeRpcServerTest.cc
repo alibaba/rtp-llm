@@ -150,6 +150,10 @@ public:
     void enqueue(GenerateStreamPtr&) override {
         ADD_FAILURE() << "failed allocation reached engine enqueue";
     }
+    absl::Status startLoop() override {
+        return absl::OkStatus();
+    }
+
     absl::Status stop() override {
         return absl::OkStatus();
     }
@@ -855,6 +859,10 @@ public:
         stream->reportEvent(StreamEvents::GenerateDone);
         stream->moveToNext();
     }
+    absl::Status startLoop() override {
+        return absl::OkStatus();
+    }
+
     absl::Status stop() override {
         return absl::OkStatus();
     }
