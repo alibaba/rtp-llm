@@ -49,10 +49,12 @@ TEST(TransferBufferSafetyTest, ConcurrentDuplicateProofsRunCallbackOnce) {
 TEST(TransferBufferSafetyTrackerTest, SynchronousProofsCannotFinishOpenSubmission) {
     size_t calls = 0;
     auto tracker = std::make_shared<TransferBufferSafetyTracker>([&] { ++calls; });
-    auto first = tracker->addBatch();
+    auto first = std::make_shared<TransferBufferSafety>([tracker] { tracker->completeBatch(); });
+    tracker->addBatch();
     first->report(true);
     EXPECT_EQ(calls, 0u);
-    auto second = tracker->addBatch();
+    auto second = std::make_shared<TransferBufferSafety>([tracker] { tracker->completeBatch(); });
+    tracker->addBatch();
     tracker->finishSubmitting();
     tracker->finishSubmitting();
     EXPECT_EQ(calls, 0u);
@@ -68,9 +70,11 @@ TEST(TransferBufferSafetyTrackerTest, SynchronousProofsCannotFinishOpenSubmissio
 TEST(TransferBufferSafetyTrackerTest, LostOrUnprovenBatchNeverCountsAsSafe) {
     size_t calls = 0;
     auto tracker = std::make_shared<TransferBufferSafetyTracker>([&] { ++calls; });
-    auto first = tracker->addBatch();
+    auto first = std::make_shared<TransferBufferSafety>([tracker] { tracker->completeBatch(); });
+    tracker->addBatch();
     {
-        auto abandoned = tracker->addBatch();
+        auto abandoned = std::make_shared<TransferBufferSafety>([tracker] { tracker->completeBatch(); });
+        tracker->addBatch();
         abandoned->report(false);
     }
     tracker->finishSubmitting();
@@ -102,7 +106,8 @@ TEST(TransferBufferSafetyTrackerTest, LastProofReportsOutsideTrackerLockAndKeeps
         active->finishSubmitting();
     });
     weak = tracker;
-    auto proof = tracker->addBatch();
+    auto proof = std::make_shared<TransferBufferSafety>([tracker] { tracker->completeBatch(); });
+    tracker->addBatch();
     tracker->finishSubmitting();
     tracker.reset();
     ASSERT_FALSE(weak.expired());
@@ -116,7 +121,9 @@ TEST(TransferBufferSafetyTrackerTest, SubmissionCloseRacingConcurrentProofsRepor
     auto tracker = std::make_shared<TransferBufferSafetyTracker>([&] { ++calls; });
     std::vector<std::shared_ptr<TransferBufferSafety>> proofs;
     for (size_t i = 0; i < 64; ++i) {
-        proofs.push_back(tracker->addBatch());
+        auto proof = std::make_shared<TransferBufferSafety>([tracker] { tracker->completeBatch(); });
+        tracker->addBatch();
+        proofs.push_back(std::move(proof));
     }
     std::atomic<bool> start{false};
     std::vector<std::thread> threads;

@@ -74,7 +74,7 @@ TEST(KVCMFrozenTaskTest, LocalUnknownIsRetainedBeforeCallbackAndKeepsOriginalTra
             if (record) {
                 EXPECT_EQ(record->snapshot().state, FrozenState::FROZEN);
                 EXPECT_EQ(record->snapshot().target_block_count, 1u);
-                EXPECT_EQ(std::get<std::string>(record->execution().trace_id), "block_tree_read_1");
+                EXPECT_EQ(record->execution().trace_id, "block_tree_read_1");
             }
             // Business pins have already been settled by the callback. The
             // independently owned frozen reference still protects the target.
@@ -90,31 +90,13 @@ TEST(KVCMFrozenTaskTest, LocalUnknownIsRetainedBeforeCallbackAndKeepsOriginalTra
         const auto record = onlyFrozenTask(*backend.backend);
         ASSERT_NE(record, nullptr);
         const auto& execution = record->execution();
-        EXPECT_EQ(execution.request_id, std::optional<int64_t>{912});
-        EXPECT_FALSE(execution.remote);
-        EXPECT_EQ(execution.expected_rank_count, 1u);
-        ASSERT_EQ(execution.descriptors.size(), 1u);
-        const auto& descriptor = execution.descriptors.front();
-        EXPECT_EQ(descriptor.rank, std::optional<size_t>{0});
-        EXPECT_EQ(descriptor.group_tag, "default");
-        EXPECT_EQ(descriptor.source_uri, "pace://read-destination");
-        EXPECT_EQ(descriptor.target_tier, Tier::DEVICE);
-        EXPECT_TRUE(descriptor.sources.empty());
-        ASSERT_EQ(descriptor.targets.size(), 1u);
-        EXPECT_EQ(descriptor.targets.front().pool.get(), environment.device_pool.get());
-        EXPECT_EQ(descriptor.targets.front().block, environment.block_id);
+        EXPECT_FALSE(execution.uses_rpc);
+        EXPECT_EQ(execution.participant_ranks.size(), 1u);
+        ASSERT_EQ(execution.target_blocks.size(), 1u);
+        EXPECT_EQ(execution.target_blocks.front().pool.get(), environment.device_pool.get());
+        EXPECT_EQ(execution.target_blocks.front().block, environment.block_id);
         EXPECT_EQ(record->failure().status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
         EXPECT_FALSE(record->failure().buffer_safe);
-        const auto diagnostic = record->failure().execution_diagnostics;
-        ASSERT_NE(diagnostic, nullptr);
-        EXPECT_EQ(std::get<std::string>(diagnostic->trace_id), "block_tree_read_1");
-        EXPECT_FALSE(diagnostic->failure_reason.empty());
-        ASSERT_EQ(diagnostic->ranks.size(), 1u);
-        const auto& rank = diagnostic->ranks.front();
-        EXPECT_EQ(rank.rank, 0u);
-        EXPECT_FALSE(rank.remote);
-        EXPECT_FALSE(rank.cq_received);
-        EXPECT_FALSE(rank.grpc_code.has_value());
         EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
     }
 }
@@ -186,48 +168,23 @@ TEST(KVCMFrozenTaskTest, RpcFailureRetainsOriginalParticipantsAndCompletedRankEv
         const auto record = onlyFrozenTask(*backend.backend);
         ASSERT_NE(record, nullptr);
         const auto& execution = record->execution();
-        EXPECT_TRUE(execution.remote);
-        EXPECT_EQ(execution.expected_rank_count, 2u);
-        ASSERT_EQ(execution.expected_peers.size(), 2u);
-        ASSERT_EQ(execution.descriptors.size(), 2u);
+        EXPECT_TRUE(execution.uses_rpc);
+        EXPECT_EQ(execution.participant_ranks.size(), 2u);
+        ASSERT_EQ(execution.participant_ranks.size(), 2u);
+        ASSERT_EQ(execution.target_blocks.size(), 2u);
         EXPECT_EQ(record->snapshot().target_block_count, 1u);
         EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
-        const auto trace = std::get<std::string>(execution.trace_id);
+        const auto trace = execution.trace_id;
         EXPECT_EQ(trace, "block_tree_read_1");
-        const auto diagnostic = record->failure().execution_diagnostics;
-        ASSERT_NE(diagnostic, nullptr);
-        EXPECT_EQ(std::get<std::string>(diagnostic->trace_id), trace);
-        EXPECT_EQ(diagnostic->failure_reason, code == grpc::StatusCode::DEADLINE_EXCEEDED ?
-                                                  "rpc_timeout" : "rpc_error");
-        ASSERT_EQ(diagnostic->ranks.size(), 2u);
         for (size_t rank = 0; rank < 2; ++rank) {
             const auto requests = snapshotRequests(rank == 0 ? healthy : failed);
             ASSERT_EQ(requests.size(), 1u);
             EXPECT_EQ(requests.front().trace_id(), trace);
-            EXPECT_EQ(execution.expected_peers[rank].rank, rank);
-            EXPECT_EQ(execution.expected_peers[rank].address, addresses[rank]);
-            const auto& snapshot = diagnostic->ranks[rank];
-            EXPECT_EQ(snapshot.rank, rank);
-            EXPECT_EQ(snapshot.server_address, addresses[rank]);
-            EXPECT_TRUE(snapshot.remote);
-            EXPECT_EQ(snapshot.dispatch_state, TransferRpcDispatchState::SUBMITTED);
-            EXPECT_TRUE(snapshot.cq_received);
-            EXPECT_TRUE(snapshot.cq_ok);
-            EXPECT_EQ(snapshot.grpc_code, std::optional<int>{rank == 0 ? grpc::StatusCode::OK : code});
-            EXPECT_EQ(snapshot.response_received, rank == 0);
-            EXPECT_EQ(snapshot.response_valid, rank == 0);
-            EXPECT_EQ(snapshot.buffer_safe, rank == 0 ? std::optional<bool>{true} : std::nullopt);
-            const auto& descriptor = execution.descriptors[rank];
-            EXPECT_EQ(descriptor.rank, std::optional<size_t>{rank});
-            EXPECT_EQ(descriptor.group_tag, "default");
-            EXPECT_EQ(descriptor.source_uri, "rank-" + std::to_string(rank) + "-uri");
+            EXPECT_EQ(execution.participant_ranks[rank].rank, rank);
+            EXPECT_EQ(execution.participant_ranks[rank].address, addresses[rank]);
+            EXPECT_EQ(execution.target_blocks[rank].pool.get(), environment.device_pool.get());
+            EXPECT_EQ(execution.target_blocks[rank].block, environment.block_id);
         }
-        EXPECT_EQ(diagnostic->ranks[0].worker_transfer_status,
-                  std::optional<int>{REMOTE_TRANSFER_STATUS_SUCCESS});
-        // The fake worker does not send sdk_failed; absence stays explicit.
-        EXPECT_FALSE(diagnostic->ranks[0].sdk_failed.has_value());
-        EXPECT_FALSE(diagnostic->ranks[1].worker_transfer_status.has_value());
-        EXPECT_FALSE(diagnostic->ranks[1].sdk_failed.has_value());
     }
 }
 
@@ -264,17 +221,13 @@ TEST(KVCMFrozenTaskTest, TargetsExcludeLocalPrefixFilteredLinearStateAndUnsentTa
     const auto record = onlyFrozenTask(*backend.backend);
     ASSERT_NE(record, nullptr);
     EXPECT_EQ(record->snapshot().target_block_count, 3u);
-    std::set<std::tuple<std::string, BlockIdxType, std::string>> targets;
-    for (const auto& descriptor : record->execution().descriptors) {
-        EXPECT_EQ(descriptor.rank, std::optional<size_t>{0});
-        ASSERT_EQ(descriptor.targets.size(), 1u);
-        const auto& target = descriptor.targets.front();
-        EXPECT_EQ(target.pool.get(), environment.pools_by_tag.at(descriptor.group_tag).get());
-        targets.emplace(descriptor.group_tag, target.block, descriptor.source_uri);
-    }
-    EXPECT_EQ(targets, (std::set<std::tuple<std::string, BlockIdxType, std::string>>{
-        {"full0", blocks[1], "full-102"}, {"full0", blocks[2], "full-103"},
-        {"linear0", blocks[2], "linear-103"}}));
+    std::set<std::pair<IBlockPool*, BlockIdxType>> targets;
+    for (const auto& target : record->execution().target_blocks)
+        targets.emplace(target.pool.get(), target.block);
+    EXPECT_EQ(targets, (std::set<std::pair<IBlockPool*, BlockIdxType>>{
+        {environment.pools_by_tag.at("full0").get(), blocks[1]},
+        {environment.pools_by_tag.at("full0").get(), blocks[2]},
+        {environment.pools_by_tag.at("linear0").get(), blocks[2]}}));
     for (const auto& tag : environment.cache_config.groupTags()) {
         const auto& pool = environment.pools_by_tag.at(tag);
         for (size_t i = 0; i < blocks.size(); ++i) {
@@ -286,6 +239,7 @@ TEST(KVCMFrozenTaskTest, TargetsExcludeLocalPrefixFilteredLinearStateAndUnsentTa
 }
 
 TEST(KVCMFrozenTaskTest, DistinctReadTracesOwnIndependentHoldsOnTheSameTarget) {
+    auto cleanup = std::make_shared<TransferCompletionCleanup>();
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
     auto environment = makeBackendEnvironment("kvcm_frozen_shared_target");
@@ -311,9 +265,9 @@ TEST(KVCMFrozenTaskTest, DistinctReadTracesOwnIndependentHoldsOnTheSameTarget) {
     const std::weak_ptr<FrozenTask> first = records[0];
     const std::weak_ptr<FrozenTask> second = records[1];
     const auto first_failure = records[0]->failure().status.ToString();
-    EXPECT_NE(std::get<std::string>(records[0]->execution().trace_id),
-              std::get<std::string>(records[1]->execution().trace_id));
-    records[0]->unfreeze();
+    EXPECT_NE(records[0]->execution().trace_id,
+              records[1]->execution().trace_id);
+    records[0]->completeRecovery(*cleanup);
     EXPECT_EQ(records[0]->snapshot().state, FrozenState::RELEASED);
     EXPECT_EQ(records[1]->snapshot().state, FrozenState::FROZEN);
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), before + 1);
@@ -327,10 +281,10 @@ TEST(KVCMFrozenTaskTest, DistinctReadTracesOwnIndependentHoldsOnTheSameTarget) {
     }
     // Removing table ownership does not invalidate an earlier observer's snapshot.
     EXPECT_EQ(records[0]->failure().status.ToString(), first_failure);
-    records[0]->unfreeze();
+    records[0]->completeRecovery(*cleanup);
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), before + 1);
     EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
-    records[1]->unfreeze();
+    records[1]->completeRecovery(*cleanup);
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), before);
     EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 0u);
     EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
@@ -343,6 +297,7 @@ TEST(KVCMFrozenTaskTest, DistinctReadTracesOwnIndependentHoldsOnTheSameTarget) {
 }
 
 TEST(KVCMFrozenTaskTest, EnumerationKeepsReleasingRecordUntilCapacityNotificationFinishes) {
+    auto cleanup = std::make_shared<TransferCompletionCleanup>();
     using block_tree_cache_test::BoundedThread;
     using namespace std::chrono_literals;
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
@@ -373,12 +328,11 @@ TEST(KVCMFrozenTaskTest, EnumerationKeepsReleasingRecordUntilCapacityNotificatio
     auto record = records.front();
     const std::weak_ptr<FrozenTask> observed = record;
     records.clear();
-    // Leave only the frozen hold so unfreeze actually grows pool capacity.
     environment->device_pool->decRef(environment->block_id);
-    BoundedThread<bool> releasing([record, environment, backend] {
+    BoundedThread<bool> releasing([record, environment, backend, cleanup] {
         (void)environment;
         (void)backend;
-        return record->unfreeze();
+        return record->completeRecovery(*cleanup);
     });
     ASSERT_EQ(entered_future.wait_for(5s), std::future_status::ready);
     EXPECT_EQ(record->snapshot().state, FrozenState::RELEASING);

@@ -67,6 +67,7 @@ public:
     void setCapacityChangeCallback(std::function<void()> callback);
 
     const std::string&  poolName() const;
+    BlockPoolType poolType() const { return config_->pool_type; }
     virtual std::string debugString() const;
     virtual size_t      blockSizeBytes() const = 0;
 
@@ -203,6 +204,7 @@ private:
     void          checkUniqueBlocksNoLock(const BlockIdList& blocks) const;
     static size_t treeRefTypeIndex(BlockTreeRefType ref_type);
     void          incTreeRefNoLock(BlockIdxType block, size_t ref_type_index, const char* abort_context = nullptr);
+    void          decTreeRefNoLock(BlockIdxType block, size_t ref_type_index);
     void          releaseFrozenReferences(const BlockIdList& blocks, const std::function<void()>& notify) noexcept;
 
     size_t       totalBlocksNumNoLock() const;

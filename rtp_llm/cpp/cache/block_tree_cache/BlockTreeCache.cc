@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 
 #include <algorithm>
@@ -56,6 +57,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                     tr
     storer_(tree_.get(), evictor_, *metrics_reporter_, storage_backend_, [this](bool check_watermark) {
         onWorkflowSettledLocked(check_watermark);
     }) {
+    reclaimer_ = std::make_unique<BlockTreeReclaimer>(*this);
     if (storage_backend_)
         storage_backend_->setStageMetricsReporter(metrics_reporter_);
 }
@@ -96,11 +98,18 @@ bool BlockTreeCache::init() {
                              config_.full_prefix_scan_interval_ms);
         }
     }
+    if (!reclaimer_->start())
+        return false;
     initialized_ = true;
     return true;
 }
 
+void BlockTreeCache::stopBackgroundTasks() {
+    reclaimer_->stop();
+}
+
 BlockTreeCache::~BlockTreeCache() {
+    stopBackgroundTasks();
     full_prefix_scanner_.reset();
     RTP_LLM_LOG_INFO("destroying, closing load tickets...");
     shutdownLoads();

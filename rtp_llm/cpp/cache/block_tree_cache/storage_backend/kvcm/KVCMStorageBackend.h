@@ -60,17 +60,17 @@ public:
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response);
     // Local READ completion evidence; this accessor does not issue a query RPC.
     const TransferTaskRegistry& taskRegistry() const;
-    void cleanupExpiredMissing();
+    void cleanupExpiredMissing() override;
 
     // Recovery query atomically prevents a previously unseen READ from starting.
-    TransferTaskRegistry::State queryReadCompletion(const std::string& trace_id) const;
+    TransferTaskRegistry::State queryReadCompletion(const std::string& trace_id) const override;
     // Removes only completed READ evidence. Running executions remain queryable.
-    TransferTaskRegistry::ForgetResult forgetReadCompletion(const std::string& trace_id);
+    TransferTaskRegistry::ForgetResult forgetReadCompletion(const std::string& trace_id) override;
     // Configure before serving READ requests; cleanup does not own their buffers.
-    void setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup);
+    void setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup) override;
     // Retained non-protected READ targets; enumeration removes only RELEASED
     // records. It never queries completion or releases frozen references.
-    std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
+    std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const override;
 
     // Optional EOS publication; true means handled/skipped, not committed.
     bool
