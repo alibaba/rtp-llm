@@ -113,9 +113,11 @@ class MMRemoteEmbeddingCache:
         if gdr_enabled is None:
             gdr_enabled = os.environ.get("MM_REMOTE_CACHE_GDR_ENABLE") == "1"
         self._transport_mode = "gdr" if gdr_enabled else "staging"
+        metadata_workers = 8
         self._executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=8, thread_name_prefix="mm-remote-metadata"
+            max_workers=metadata_workers, thread_name_prefix="mm-remote-metadata"
         )
+        self._metadata_slots = threading.BoundedSemaphore(metadata_workers)
         transfer_workers = 2
         self._transfer_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=transfer_workers, thread_name_prefix="mm-remote-cache"
@@ -1175,7 +1177,18 @@ class MMRemoteEmbeddingCache:
 
         queued_at = time.perf_counter()
         try:
-            future = self._executor.submit(lookup)
+            if not self._metadata_slots.acquire(blocking=False):
+                self._count("admission_skip")
+                outcome = "admission_skip"
+                self._report_skip("read", "metadata_admission")
+                return None
+            try:
+                future = self._executor.submit(lookup)
+            except BaseException:
+                self._metadata_slots.release()
+                raise
+            # Keep the slot until lookup completes, even when its caller times out.
+            future.add_done_callback(lambda _: self._metadata_slots.release())
             size = future.result(timeout=max(0, deadline - time.monotonic()))
             future = None
             if size is None:
