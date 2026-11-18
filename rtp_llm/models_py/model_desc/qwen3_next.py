@@ -1302,18 +1302,18 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             ).multi_processor_count
             == 78
         )
-        self._fp8_decode_project_pair = None
+        self._fp8_input_project_pair = None
         if self.use_sm90_gdn_fp8_decode:
             try:
-                from rtp_llm.models_py.modules.qwen4_exp.gdn_decode_fp8 import (
+                from rtp_llm.models_py.modules.qwen4_exp.gdn_fp8_input_projection import (
                     try_project_pair,
                 )
             except ImportError:
                 # Keep the separate projections on older Triton builds.
                 pass
             else:
-                self._fp8_decode_project_pair = try_project_pair
-                self._fp8_decode_ba_stream = torch.cuda.Stream(
+                self._fp8_input_project_pair = try_project_pair
+                self._fp8_input_ba_stream = torch.cuda.Stream(
                     device=self.in_proj_ba.weight.device
                 )
         extended_gdn = os.environ.get("RTP_QWEN4_SM90_GDN_EXTENDED", "1") == "1"
@@ -1416,28 +1416,18 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         self,
         hidden_states: torch.Tensor,
         *,
-        decode: bool = False,
         overlap_ba: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run the input projection and return (projected_qkvz, projected_ba).
-
-        Hides the fusion vs 2-GEMM dispatch from callers (forward + tests).
-        Both branches produce tensors with identical shape/semantics; the
-        fused branch slices a single GEMM output, the fallback runs two.
-        """
+        """Return QKVZ and BA projections using the available BF16 or FP8 path."""
         if self._qkvz_ba_fused:
             fused = self.in_proj_fused(hidden_states)
             return fused[..., : self._qkvz_size], fused[..., self._qkvz_size :]
-        if decode and self._fp8_decode_project_pair is not None:
-            projected = self._fp8_decode_project_pair(
+        if self._fp8_input_project_pair is not None:
+            projected = self._fp8_input_project_pair(
                 hidden_states,
                 self.in_proj_qkvz,
                 self.in_proj_ba,
-                ba_stream=(
-                    self._fp8_decode_ba_stream
-                    if overlap_ba and hidden_states.shape[0] in (16, 32, 64)
-                    else None
-                ),
+                ba_stream=self._fp8_input_ba_stream if overlap_ba else None,
             )
             if projected is not None:
                 return projected
@@ -1645,11 +1635,11 @@ class Qwen3NextGatedDeltaNet(nn.Module):
 
         return self._output_project(local_attn_out, z)
 
-    def _output_project(self, attn_output, gate, *, decode=False):
+    def _output_project(self, attn_output, gate):
         value = attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim)
         project = getattr(self.norm, "forward_project", None)
         if callable(project):
-            return project(value, gate, self.out_proj, decode=decode)
+            return project(value, gate, self.out_proj)
         return self.out_proj(self.norm(value, gate))
 
     def forward(
@@ -1670,10 +1660,8 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         is_prefill = attention_inputs.is_prefill and not attn_meta.is_target_verify
         projected_states_qkvz, projected_states_ba = self._input_project(
             hidden_states,
-            decode=not is_prefill,
-            overlap_ba=not (
-                attention_inputs.is_target_verify or attn_meta.is_target_verify
-            ),
+            overlap_ba=not is_prefill
+            and not (attention_inputs.is_target_verify or attn_meta.is_target_verify),
         )
         mixed_qkv, z, b, a = self.fix_query_key_value_ordering(
             projected_states_qkvz, projected_states_ba
@@ -1695,9 +1683,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 kv_cache,
                 attn_meta,
             )
-        attn_output = self._output_project(
-            attn_output, z, decode=not is_prefill and self.use_sm90_gdn_fp8_decode
-        )
+        attn_output = self._output_project(attn_output, z)
         if self.parallelism_config.get_attn_tp_size() > 1:
             reduce_output = getattr(self, "tp_all_reduce", all_reduce)
             if not is_prefill:

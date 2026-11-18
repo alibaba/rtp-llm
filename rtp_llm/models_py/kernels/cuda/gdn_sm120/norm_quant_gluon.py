@@ -34,6 +34,7 @@ def _gdn_norm_quant(
     GH: gl.constexpr,
     WARPS: gl.constexpr,
     UE8M0: gl.constexpr,
+    V2: gl.constexpr,
 ):
     layout: gl.constexpr = gl.BlockedLayout([1, 4], [1, 32], [WARPS, 1], [1, 0])
     flat = gl.program_id(0) * GH + gl.arange(0, GH, layout=gl.SliceLayout(1, layout))
@@ -63,6 +64,10 @@ def _gdn_norm_quant(
         )
         reciprocal = ((127 - exponent).to(gl.uint32) << 23).to(gl.float32, bitcast=True)
         scaled = rounded * reciprocal[:, None]
+    elif V2:
+        # Match the CUDA v2 FP32 scale and reciprocal computation.
+        scale_float = amax * (1.0 / 448.0)
+        scaled = rounded * gl.div_rn(448.0, amax)[:, None]
     else:
         # The legacy CUDA path rounds both divisions independently.
         scale_float = gl.div_rn(amax, 448.0)
@@ -105,7 +110,7 @@ def norm_quant(x, z, weight, eps, groups=8, warps=1):
     return _launch_norm_quant(x, z, weight, eps, groups, warps, scale_ue8m0=True)
 
 
-def _launch_norm_quant(x, z, weight, eps, groups=8, warps=1, *, scale_ue8m0):
+def _launch_norm_quant(x, z, weight, eps, groups=8, warps=1, *, scale_ue8m0, v2=False):
     """Launch after the public helper or model dispatch validates the layout."""
     rows, width = x.shape
     q = torch.empty_like(x, dtype=torch.float8_e4m3fn)
@@ -127,6 +132,7 @@ def _launch_norm_quant(x, z, weight, eps, groups=8, warps=1, *, scale_ue8m0):
         GH=groups,
         WARPS=warps,
         UE8M0=scale_ue8m0,
+        V2=v2,
         num_warps=warps,
     )
     return q, s

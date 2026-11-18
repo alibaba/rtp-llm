@@ -124,7 +124,6 @@ class GdnCompositionTest(unittest.TestCase):
                         None,
                         None,
                     ),
-                    use_sm90_gdn_fp8_decode=False,
                     fix_query_key_value_ordering=lambda *_: (mixed, z, b, a),
                     decode_gdn=partial(Qwen3NextGatedDeltaNetDecode.forward, decoder),
                     norm=norm,
