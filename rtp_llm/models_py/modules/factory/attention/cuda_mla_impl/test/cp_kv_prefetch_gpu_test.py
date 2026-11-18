@@ -702,8 +702,8 @@ def worker(rank, port):
 
 if __name__ == "__main__":
     size = int(os.environ.get("KV_TEST_WORLD_SIZE", "8"))
-    if size not in (4, 8) or torch.cuda.device_count() < size:
-        raise RuntimeError("requires four or eight allocated GPUs")
+    if size not in (2, 4, 8) or torch.cuda.device_count() < size:
+        raise RuntimeError("requires two, four or eight allocated GPUs")
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]

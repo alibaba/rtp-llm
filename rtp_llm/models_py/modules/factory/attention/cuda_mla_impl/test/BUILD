@@ -22,7 +22,7 @@ py_test(
 
 py_test(
     name = "history_remap_collective_test",
-    srcs = ["history_remap_collective_test.py"],
+    srcs = ["history_remap_collective_test.py", "cp_projection_benchmark.py"],
     deps = ["//rtp_llm/models_py/standalone:py_standalone_testlib"],
     env = {"WORLD_SIZE": "2"},
     tags = ["L20_CU13"],

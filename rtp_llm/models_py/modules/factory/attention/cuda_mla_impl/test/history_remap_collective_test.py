@@ -50,33 +50,55 @@ def _registered_worker(rank: int, world: int, port: int) -> None:
     stream = torch.cuda.Stream(device=device)
     stream.wait_stream(torch.cuda.current_stream(device))
     try:
+        if os.environ.get("GLM5_CP_PROJECTION_BENCHMARK") == "1":
+            from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.test.cp_projection_benchmark import (
+                benchmark_projection,
+            )
+
+            benchmark_projection(rank, world)
         with torch.cuda.stream(stream):
             local = torch.empty((256, 576), device=device, dtype=torch.bfloat16)
             independent = torch.empty(
                 (world * 256, 576), device=device, dtype=torch.bfloat16
             )
-            from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import cp_bounded_gather
+            from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl import (
+                cp_bounded_gather,
+            )
 
             # Force multiple chunks while retaining equal padded send shapes on
             # every rank, including a rank whose entire payload is padding.
-            projection = torch.arange(64, device=device, dtype=torch.bfloat16).view(8, 8)
+            projection = torch.arange(64, device=device, dtype=torch.bfloat16).view(
+                8, 8
+            )
             projection = projection + rank * 100
             if rank == world - 1:
                 projection.zero_()
-            full_projection = torch.empty((world * 8, 8), device=device, dtype=torch.bfloat16)
+            full_projection = torch.empty(
+                (world * 8, 8), device=device, dtype=torch.bfloat16
+            )
             pynccl_cp.all_gather_into_tensor(full_projection, projection, group=pg)
-            projection_map = torch.tensor([0, 9, 2, 15, 7], device=device, dtype=torch.int64)
+            projection_map = torch.tensor(
+                [0, 9, 2, 15, 7], device=device, dtype=torch.int64
+            )
 
             def gather_chunk(output, source, **kwargs):
                 pynccl_cp.all_gather_into_tensor(output, source, group=pg)
 
-            with patch.object(cp_bounded_gather, "_PROJECTION_SCRATCH_BYTES", (world + 1) * 3 * 8 * 2):
+            with patch.object(
+                cp_bounded_gather, "_PROJECTION_SCRATCH_BYTES", (world + 1) * 3 * 8 * 2
+            ):
                 for mapping in (None, projection_map):
                     actual_projection = cp_bounded_gather.gather_projection_chunks(
-                        projection[:, :4], projection[:, 4:], world, mapping, gather_chunk
+                        projection[:, :4],
+                        projection[:, 4:],
+                        world,
+                        mapping,
+                        gather_chunk,
                     )
                     expected_projection = (
-                        full_projection if mapping is None else full_projection.index_select(0, mapping)
+                        full_projection
+                        if mapping is None
+                        else full_projection.index_select(0, mapping)
                     )
                     _assert_bits(actual_projection, expected_projection)
 
@@ -85,15 +107,34 @@ def _registered_worker(rank: int, world: int, port: int) -> None:
             for rope_dtype in (torch.float32, torch.float64):
                 projection_rope = projection[:, :3].to(rope_dtype) + 0.000123
                 full_rope = torch.empty((world * 8, 3), device=device, dtype=rope_dtype)
-                scratch_budget = (world + 1) * 3 * max(4 * projection.element_size(), 3 * projection_rope.element_size())
-                with patch.object(cp_bounded_gather, "_PROJECTION_SCRATCH_BYTES", scratch_budget):
+                scratch_budget = (
+                    (world + 1)
+                    * 3
+                    * max(
+                        4 * projection.element_size(),
+                        3 * projection_rope.element_size(),
+                    )
+                )
+                with patch.object(
+                    cp_bounded_gather, "_PROJECTION_SCRATCH_BYTES", scratch_budget
+                ):
                     cp_bounded_gather.gather_projection_components(
-                        projection[:, :4], projection_rope, world, projection_map, gather_chunk
+                        projection[:, :4],
+                        projection_rope,
+                        world,
+                        projection_map,
+                        gather_chunk,
                     )
                     graph = torch.cuda.CUDAGraph()
                     with torch.cuda.graph(graph, stream=stream):
-                        captured_ckv, captured_rope = cp_bounded_gather.gather_projection_components(
-                            projection[:, :4], projection_rope, world, projection_map, gather_chunk
+                        captured_ckv, captured_rope = (
+                            cp_bounded_gather.gather_projection_components(
+                                projection[:, :4],
+                                projection_rope,
+                                world,
+                                projection_map,
+                                gather_chunk,
+                            )
                         )
                     pointers = (captured_ckv.data_ptr(), captured_rope.data_ptr())
                     for ids in ([0, 9, 2, 15, 7], [15, 0, 7, 9, 2]):
@@ -102,13 +143,27 @@ def _registered_worker(rank: int, world: int, port: int) -> None:
                         if rank == world - 1:
                             projection.zero_()
                             projection_rope.zero_()
-                        projection_map.copy_(torch.tensor(ids, device=device, dtype=torch.int64))
+                        projection_map.copy_(
+                            torch.tensor(ids, device=device, dtype=torch.int64)
+                        )
                         graph.replay()
-                        pynccl_cp.all_gather_into_tensor(full_projection, projection, group=pg)
-                        pynccl_cp.all_gather_into_tensor(full_rope, projection_rope, group=pg)
-                        _assert_bits(captured_ckv, full_projection[:, :4].index_select(0, projection_map))
-                        _assert_bits(captured_rope, full_rope.index_select(0, projection_map))
-                        assert pointers == (captured_ckv.data_ptr(), captured_rope.data_ptr())
+                        pynccl_cp.all_gather_into_tensor(
+                            full_projection, projection, group=pg
+                        )
+                        pynccl_cp.all_gather_into_tensor(
+                            full_rope, projection_rope, group=pg
+                        )
+                        _assert_bits(
+                            captured_ckv,
+                            full_projection[:, :4].index_select(0, projection_map),
+                        )
+                        _assert_bits(
+                            captured_rope, full_rope.index_select(0, projection_map)
+                        )
+                        assert pointers == (
+                            captured_ckv.data_ptr(),
+                            captured_rope.data_ptr(),
+                        )
 
             for empty_last_rank in (False, True):
                 rows = 0 if empty_last_rank and rank == world - 1 else 4

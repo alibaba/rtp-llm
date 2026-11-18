@@ -123,6 +123,7 @@ def run_case(rank, lengths, owner, fused, zero_queries, side, prologue=False):
     model.use_hadamard = True
     model.index_head_dim = 128
     model.index_topk = 2048
+    model.decode_ignores_prefill_cp = False
     model._kv_owner_tokens_per_block = owner
     model.parallelism_config = NS(prefill_cp_config=NS(is_enabled=lambda: True))
     model._fuse_logits_head_gate = False
@@ -319,7 +320,7 @@ def worker(rank, port, world_size):
 
 if __name__ == "__main__":
     world_size = int(os.environ.get("INDEXER_TEST_WORLD_SIZE", "8"))
-    assert world_size in (4, 8)
+    assert world_size in (2, 4, 8)
     assert (
         torch.cuda.device_count() == world_size
     ), "requires exactly allocated test GPUs"
