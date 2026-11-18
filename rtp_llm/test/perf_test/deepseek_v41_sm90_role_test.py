@@ -225,11 +225,17 @@ def validate_startup(text, role):
         for enabled, size in warmup
     ):
         raise AssertionError(f"unexpected optional CP warmup records: {warmup}")
-    if os.environ.get("SM90_PERF_MOE_STRATEGY", "mega_sm90") == "mega_sm90":
-        # The fused Hopper kernel owns dispatch and combine, so DeepEP V2 is
-        # never initialised on that path; assert its own startup marker instead.
+    strategy = os.environ.get("SM90_PERF_MOE_STRATEGY", "mega_sm90")
+    if strategy in ("mega_sm90", "mega_sm90_se"):
+        # Both native Hopper strategies own dispatch and combine; the fused
+        # shared expert inherits the same symmetric-buffer initialization.
         if "[DSV4 SM90 MegaMoE] allocated symm buffer" not in text:
             raise AssertionError("SM90 MegaMoE symmetric buffer was not allocated")
+        if (
+            strategy == "mega_sm90_se"
+            and "[SM90 MegaMoE] fused shared expert enabled" not in text
+        ):
+            raise AssertionError("SM90 MegaMoE fused shared expert was not initialized")
     elif f"SM90 DeepEP V2: role={role}" not in text:
         raise AssertionError("DeepEP V2 was not initialized for the selected role")
 

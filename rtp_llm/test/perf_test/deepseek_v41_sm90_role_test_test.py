@@ -184,6 +184,16 @@ class FixedRoleTest(unittest.TestCase):
             text("prefill", 1, 8).replace("cp_enabled=True cp_size=8", ""), "prefill"
         )
         validate_startup(text("decode", 8, 1), "decode")
+        with mock.patch.dict(os.environ, {"SM90_PERF_MOE_STRATEGY": "mega_sm90_se"}):
+            shared_marker = "[SM90 MegaMoE] fused shared expert enabled"
+            buffer_marker = "[DSV4 SM90 MegaMoE] allocated symm buffer"
+            for role, dp, cp in (("prefill", 1, 8), ("decode", 8, 1)):
+                fused_text = text(role, dp, cp) + "\n" + shared_marker
+                validate_startup(fused_text, role)
+                for missing in (buffer_marker, shared_marker):
+                    with self.subTest(role=role, missing=missing):
+                        with self.assertRaises(AssertionError):
+                            validate_startup(fused_text.replace(missing, ""), role)
         for bad in (
             text("prefill", 8, 1),
             text("prefill", 1, 1),
