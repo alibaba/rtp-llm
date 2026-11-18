@@ -114,8 +114,13 @@ class MMRemoteEmbeddingCache:
             gdr_enabled = os.environ.get("MM_REMOTE_CACHE_GDR_ENABLE") == "1"
         self._transport_mode = "gdr" if gdr_enabled else "staging"
         self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=8, thread_name_prefix="mm-remote-metadata"
+        )
+        self._transfer_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="mm-remote-cache"
         )
+        # Slow transfers leave admission capacity for new lookups.
+        self._transfer_pending = threading.BoundedSemaphore(max(2, max_pending // 2))
         self._write_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=2, thread_name_prefix="mm-remote-write"
         )
@@ -316,7 +321,10 @@ class MMRemoteEmbeddingCache:
 
     @staticmethod
     def _error_context(error):
-        return _safe_error_context(error)
+        fields = _safe_error_context(error)
+        if isinstance(error, KvMetaLookupError):
+            fields.update(error.rpc_timing)
+        return fields
 
     def record(self, event, *, key=None, trace_id=None, **fields):
         with self._stats_lock:
@@ -447,11 +455,13 @@ class MMRemoteEmbeddingCache:
         )
 
     def _report_queue_wait(self, operation, queued_at):
+        elapsed_ms = (time.perf_counter() - queued_at) * 1000
         self._report_metric(
             GaugeMetrics.VIT_REMOTE_EMB_QUEUE_WAIT_METRIC,
-            (time.perf_counter() - queued_at) * 1000,
+            elapsed_ms,
             {"operation": operation},
         )
+        return elapsed_ms
 
     def _lookup_object_size(self, client, key, trace_id, timeout_ms):
         outcome = "error"
@@ -1050,40 +1060,62 @@ class MMRemoteEmbeddingCache:
         future = None
         caller_timed_out = False
 
-        def read():
-            nonlocal cost
-            self._report_queue_wait("read", queued_at)
-            client = None
-            slot = None
+        transfer_admitted = False
+
+        def read_timings():
+            return {
+                key: timing[key]
+                for key in (
+                    "queue_ms",
+                    "lookup_budget_ms",
+                    "metadata_ms",
+                    "transfer_queue_ms",
+                )
+                if key in timing
+            }
+
+        def release():
+            if transfer_admitted:
+                self._transfer_pending.release()
+            self._release(cost)
+
+        def lookup():
+            timing["queue_ms"] = self._report_queue_wait("read", queued_at)
+            if time.monotonic() >= deadline:
+                raise TimeoutError("remote embedding queue deadline expired")
+            timing["stage"] = "client_acquire"
+            with self._observe_stage("read", "client_acquire"):
+                client = self._get_client()
             try:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("remote embedding queue deadline expired")
-                timing["stage"] = "client_acquire"
-                with self._observe_stage("read", "client_acquire"):
-                    client = self._get_client()
                 remaining_ms = int((deadline - time.monotonic()) * 1000)
                 if remaining_ms <= 0:
                     raise TimeoutError("remote embedding lookup deadline expired")
-                api_started = time.perf_counter()
                 timing["stage"] = "metadata"
-                # Pool.object_size uses the independent KvMetaLookup client;
-                # it neither leases an arena nor enters the SDK data-plane lock.
-                size = self._lookup_object_size(client, key, trace_id, remaining_ms)
+                timing["lookup_budget_ms"] = remaining_ms
+                api_started = time.perf_counter()
+                try:
+                    size = self._lookup_object_size(client, key, trace_id, remaining_ms)
+                finally:
+                    timing["metadata_ms"] = (time.perf_counter() - api_started) * 1000
+                    timing["sdk_api_ms"] = timing["metadata_ms"]
                 if size is None:
                     timing["outcome"] = "miss"
-                    timing["sdk_api_ms"] = (time.perf_counter() - api_started) * 1000
-                    return None
-                timing["nbytes"] = size
-                with self._lock:
-                    budget_exceeded = self._bytes + 3 * size > self.max_inflight_bytes
-                    if not budget_exceeded:
-                        cost = 3 * size
-                        self._bytes += cost
-                if budget_exceeded:
-                    self._count("admission_skip")
-                    timing["outcome"] = "admission_skip"
-                    self._report_skip("read", "payload_budget")
-                    return None
+                return size
+            finally:
+                self._release_client(client)
+
+        def read(size):
+            timing["transfer_queue_ms"] = self._report_queue_wait(
+                "read_transfer", transfer_queued_at
+            )
+            if time.monotonic() >= deadline:
+                raise TimeoutError("remote embedding transfer queue deadline expired")
+            client = None
+            slot = None
+            try:
+                timing["stage"] = "client_acquire"
+                with self._observe_stage("read", "client_acquire"):
+                    client = self._get_client()
                 if time.monotonic() >= deadline:
                     raise TimeoutError("remote embedding transfer deadline expired")
                 # unpack_object can return CPU views. Keep the result independent
@@ -1115,6 +1147,7 @@ class MMRemoteEmbeddingCache:
                         )
                 source = slot if slot is not None else client
                 timing["stage"] = "transfer"
+                api_started = time.perf_counter()
                 try:
                     with self._observe_stage("read", "transfer", size):
                         source.load_one(key, buffer, trace_id=trace_id)
@@ -1140,7 +1173,36 @@ class MMRemoteEmbeddingCache:
 
         queued_at = time.perf_counter()
         try:
-            future = self._executor.submit(read)
+            future = self._executor.submit(lookup)
+            size = future.result(timeout=max(0, deadline - time.monotonic()))
+            future = None
+            if size is None:
+                outcome = "miss"
+                self._count("miss")
+                self.record("load_miss", key=key, trace_id=trace_id)
+                return None
+
+            timing["nbytes"] = size
+            if not self._transfer_pending.acquire(blocking=False):
+                self._count("admission_skip")
+                outcome = "admission_skip"
+                self._report_skip("read", "transfer_admission")
+                return None
+            transfer_admitted = True
+            with self._lock:
+                budget_exceeded = self._bytes + 3 * size > self.max_inflight_bytes
+                if not budget_exceeded:
+                    cost = 3 * size
+                    self._bytes += cost
+            if budget_exceeded:
+                self._count("admission_skip")
+                outcome = "admission_skip"
+                self._report_skip("read", "payload_budget")
+                return None
+
+            timing["stage"] = "transfer_queue"
+            transfer_queued_at = time.perf_counter()
+            future = self._transfer_executor.submit(read, size)
             buffer = future.result(timeout=max(0, deadline - time.monotonic()))
             if buffer is None:
                 outcome = timing["outcome"]
@@ -1199,6 +1261,7 @@ class MMRemoteEmbeddingCache:
                 timeout_ms=timeout_ms,
                 elapsed_ms=(time.perf_counter() - started) * 1000,
                 caller_timed_out=caller_timed_out,
+                **read_timings(),
                 **self._error_context(error),
             )
             return None
@@ -1211,6 +1274,7 @@ class MMRemoteEmbeddingCache:
                 nbytes=timing["nbytes"],
                 timeout_ms=timeout_ms,
                 elapsed_ms=(time.perf_counter() - started) * 1000,
+                **read_timings(),
                 **self._error_context(error),
             )
             return None
@@ -1241,6 +1305,7 @@ class MMRemoteEmbeddingCache:
                                 timeout_ms=timeout_ms,
                                 caller_timed_out=True,
                                 elapsed_ms=(time.perf_counter() - started) * 1000,
+                                **read_timings(),
                                 **self._error_context(error),
                             )
                         else:
@@ -1256,6 +1321,7 @@ class MMRemoteEmbeddingCache:
                                 caller_timed_out=True,
                                 elapsed_ms=(time.perf_counter() - started) * 1000,
                                 sdk_api_ms=timing.get("sdk_api_ms"),
+                                **read_timings(),
                                 completion_outcome=(
                                     "cancelled"
                                     if cancelled
@@ -1263,10 +1329,10 @@ class MMRemoteEmbeddingCache:
                                 ),
                             )
                 finally:
-                    self._release(cost)
+                    release()
 
             if future is None or (future.done() and not caller_timed_out):
-                self._release(cost)
+                release()
             else:
                 future.add_done_callback(complete_read)
 
@@ -1285,6 +1351,7 @@ class MMRemoteEmbeddingCache:
             self._gdr_pool.stop_acquiring()
         self._write_executor.shutdown(wait=True, cancel_futures=True)
         self._executor.shutdown(wait=True, cancel_futures=True)
+        self._transfer_executor.shutdown(wait=True, cancel_futures=True)
         with self._client_lock:
             client, self._client = self._client, None
             if client is not None:
