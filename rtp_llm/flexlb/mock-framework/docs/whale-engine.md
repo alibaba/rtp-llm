@@ -9,12 +9,13 @@ P/D/V 共用一个 Mock Engine 镜像，每个 Pod 启动一个 JVM。Master 使
 
 ## 1. 构建 CI 镜像
 
-使用官方 `a1` CLI。将 `SOURCE_SHA` 设为已推送到开源仓的 40 位源码 SHA，`RECIPE_REF` 设为内部仓中承载构建配方的分支。在 Code 查看该分支的 `.aoneci/image.yaml`，确认含有 `mock-image` 和 `hangzhou-convert-dadi-image-mock-engine`，并确认 amd64 配方与目标节点架构一致。以下使用 `foundation_models/RTP-LLM` 的镜像流水线 `18410`。
+使用官方 `a1` CLI。将 `TARGET_ARCHITECTURE` 设为 `amd64` 或 `arm64`，将 `SOURCE_SHA` 设为已推送到开源仓的 40 位源码 SHA，`RECIPE_REF` 设为内部仓中承载构建配方的分支。在 Code 查看该分支的 `.aoneci/image.yaml`，确认含有 `image-mock-engine` 和 `hangzhou-convert-dadi-image-mock-engine`，构建参数 `mock-architecture` 选择目标架构：`amd64`（默认）或 `arm64`。配方统一选择构建平台、固定版本的 Java 基础镜像和镜像 tag；两种架构使用同一份源码及 Dockerfile，不需要切换提交。以下使用 `foundation_models/RTP-LLM` 的镜像流水线 `18410`。
 
 ```bash
 a1 ci pipeline run 18410 \
   --repo foundation_models/RTP-LLM --branch "${RECIPE_REF:?}" \
-  --param 'pre-jobs=["mock-image"]' --param "github_commit=${SOURCE_SHA:?}" \
+  --param 'pre-jobs=["mock-engine"]' --param "github_commit=${SOURCE_SHA:?}" \
+  --param "mock-architecture=${TARGET_ARCHITECTURE:?}" \
   --param 'github_source_repo=https://github.com/alibaba/rtp-llm.git' \
   --param 'cancel-in-progress=false' --param 'trigger_beta_downstream_sm9x=false' -f json
 
@@ -25,7 +26,7 @@ a1 ci job list --run "$RUN_ID" --repo foundation_models/RTP-LLM -f json
 a1 ci job summary "$DADI_JOB_ID" --run "$RUN_ID" --repo foundation_models/RTP-LLM -f json
 ```
 
-等整次运行结束且无失败，再从成功的 DADI Job 摘要取完整镜像地址。摘要可能同时列出 `_accelerated` 和 `_containerd_accelerated`，按目标模板的容器运行时选用对应产物。打开 `mock-image` Job 的 **Package Mock Engine** 步骤日志，核对 `source_sha`、`recipe_sha`、`internal_discovery=true`、`metrics_backend=kmonitor` 和 `service_startup_verified=true`。
+等整次运行结束且无失败，再从成功的 DADI Job 摘要取完整镜像地址。摘要可能同时列出 `_accelerated` 和 `_containerd_accelerated`，按目标模板的容器运行时选用对应产物。打开 `image-mock-engine` Job 的 **Package Mock Engine** 步骤日志，核对 `source_sha`、`recipe_sha`、`internal_discovery=true`、`metrics_backend=kmonitor` 和 `service_startup_verified=true`。构建日志还会列出目标架构与基础镜像；ARM 产物 tag 含 `_arm64`，x86 保持原有 tag 格式。
 
 ## 2. 创建模板
 
