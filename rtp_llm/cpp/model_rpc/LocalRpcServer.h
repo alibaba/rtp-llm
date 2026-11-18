@@ -31,6 +31,8 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
 namespace rtp_llm {
+class PDCancelRegistry;
+
 class LocalRpcServer {
 public:
     LocalRpcServer() {}
@@ -116,6 +118,11 @@ public:
     typedef grpc::internal::WriterInterface<GenerateOutputsPB> WriterInterface;
 
 protected:
+    grpc::Status generateLocalStream(grpc::ServerContext*    context,
+                                     const GenerateInputPB* request,
+                                     WriterInterface*       writer,
+                                     PDCancelRegistry*      cancel_registry);
+
     virtual bool isCancelled(grpc::ServerContext* context) const {
         return context && context->IsCancelled();
     }

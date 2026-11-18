@@ -14,7 +14,9 @@
 #include "rtp_llm/cpp/utils/TorchCudaOom.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/PDCancelRegistry.h"
 #include "rtp_llm/cpp/model_rpc/PDRequestUtils.h"
+#include "rtp_llm/cpp/model_rpc/RpcTimeoutUtils.h"
 #include "rtp_llm/cpp/multimodal_processor/MMProcessorConfig.h"
 #include "rtp_llm/cpp/model_rpc/BatchStreamOutputCollector.h"
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
@@ -592,7 +594,14 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
 
 grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*                   context,
                                                 const GenerateInputPB*                 request,
-                                                grpc::ServerWriter<GenerateOutputsPB>* writer) try {
+                                                grpc::ServerWriter<GenerateOutputsPB>* writer) {
+    return generateLocalStream(context, request, writer, nullptr);
+}
+
+grpc::Status LocalRpcServer::generateLocalStream(grpc::ServerContext*    context,
+                                                const GenerateInputPB* request,
+                                                WriterInterface*       writer,
+                                                PDCancelRegistry*      cancel_registry) try {
     RTP_LLM_PROFILE_SCOPE("rpc.generate_stream_call");
     c10::InferenceMode inference_guard(true);
     AtomicGuard        request_guard(onflight_requests_);
@@ -601,6 +610,8 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     }
     auto request_id = request->request_id();
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
+    PDCancelRegistry::Handle                   cancel_handle;
+    std::optional<PDCancelRegistry::CallGuard> cancel_guard;
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
     generate_context.onflight_requests    = &onflight_requests_;
@@ -623,6 +634,17 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     telemetry::PhaseSpanSynthesisScope phase_span_scope([&generate_context](bool exception_unwinding) {
         generate_context.synthesizeTracePhases(telemetry::PhaseRole::Fusion, exception_unwinding);
     });
+    if (cancel_registry) {
+        const auto timeout_ms = normalizeRpcTimeoutMs(request->generate_config().timeout_ms(),
+                                                      maga_init_params_.pd_sep_config.max_rpc_timeout_ms);
+        // A fallback has no P2P handoff key. Admission still fences a Cancel that arrived first.
+        const auto admission = cancel_registry->admit(*request, "", "", currentTimeMs() + timeout_ms, cancel_handle);
+        if (!admission.ok()) {
+            generate_context.recordRpcFailure(admission);
+            return generate_context.error_status;
+        }
+        cancel_guard.emplace(*cancel_registry, cancel_handle);
+    }
     std::shared_ptr<GenerateInput>     input;
     {
         auto mm_res = prepareInput(*request,
@@ -640,6 +662,9 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     if (input) {
         generate_context.request_info = input->request_info;
     }
+    if (cancel_handle && cancel_handle->canceled.load()) {
+        generate_context.recordRpcFailure(cancel_handle->cancel_reason);
+    }
     CHECK_ERROR_STATUS(generate_context);
     if (writer == nullptr) {
         generate_context.error_info = ErrorInfo(ErrorCode::INVALID_PARAMS, "generate response writer must not be null");
@@ -654,7 +679,18 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
     {
         RTP_LLM_PROFILE_SCOPE("rpc.enqueue_engine");
-        generate_context.setStream(engine_->enqueue(input));
+        if (cancel_handle) {
+            auto stream = engine_->makeStream(input);
+            generate_context.setStream(stream);
+            cancel_registry->attach(cancel_handle, stream);
+            if (stream->hasError()) {
+                stream->finishWithoutGenerate();
+            } else {
+                engine_->enqueue(stream);
+            }
+        } else {
+            generate_context.setStream(engine_->enqueue(input));
+        }
     }
     if (generate_context.getStream()->hasError()) {
         generate_context.error_status =

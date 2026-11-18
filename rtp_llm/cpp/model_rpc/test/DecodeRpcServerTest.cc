@@ -17,6 +17,7 @@
 #undef private
 #undef protected
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
+#include "rtp_llm/cpp/model_rpc/RemoteRpcServiceImpl.h"
 
 namespace rtp_llm::test {
 
@@ -320,6 +321,44 @@ TEST(DecodeRpcServerTest, InternalCancelRetainsCleanupProofBeyondWorkerStatusDel
 
 namespace rtp_llm {
 namespace {
+class FallbackPrefillEngine: public EngineBase {
+public:
+    FallbackPrefillEngine(): EngineBase(EngineInitParams()) {}
+
+    GenerateStreamPtr makeStream(const std::shared_ptr<GenerateInput>& input) override {
+        ModelConfig model_config;
+        model_config.max_seq_len = 4096;
+        model_config.vocab_size  = 32000;
+        ResourceContext resource_context;
+        resource_context.role_type = RoleType::PREFILL;
+        return std::make_shared<NormalGenerateStream>(input, model_config, RuntimeConfig{}, resource_context, nullptr);
+    }
+
+    GenerateStreamPtr enqueue(const std::shared_ptr<GenerateInput>& input) override {
+        auto stream = makeStream(input);
+        enqueue(stream);
+        return stream;
+    }
+
+    void enqueue(GenerateStreamPtr& stream) override {
+        enqueued.set_value(stream);
+    }
+
+    absl::Status stop() override {
+        return absl::OkStatus();
+    }
+
+    absl::StatusOr<GenerateStreamPtr> preRun(const std::shared_ptr<GenerateInput>&, preRunMode) override {
+        return absl::UnimplementedError("unused in fallback cancellation test");
+    }
+
+    KVCacheInfo getCacheStatusInfo(int64_t, bool) override {
+        return {};
+    }
+
+    std::promise<GenerateStreamPtr> enqueued;
+};
+
 class LocalPrefillCancelService: public RpcService::Service {
 public:
     std::atomic<int>      calls{0};
@@ -360,6 +399,87 @@ bool waitForCancel(Predicate predicate) {
     return predicate();
 }
 }  // namespace
+
+TEST(DecodeRpcServerTest, IndependentCancelStopsForwardedFallbackStream) {
+    auto prefill = std::make_shared<PrefillRpcServer>();
+    auto engine  = std::make_shared<FallbackPrefillEngine>();
+    prefill->maga_init_params_.pd_sep_config.role_type = RoleType::PREFILL;
+    prefill->engine_ = engine;
+    prefill->meta_ = std::make_shared<RpcServerRuntimeMeta>();
+    prefill->cancel_registry_ = std::make_shared<PDCancelRegistry>(prefill->meta_);
+    RemoteRpcServiceImpl prefill_service;
+    prefill_service.local_server_ = prefill;
+    prefill_service.prefill_server_ = prefill;
+    grpc::ServerBuilder prefill_builder;
+    int prefill_port = 0;
+    prefill_builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &prefill_port);
+    prefill_builder.RegisterService(&prefill_service);
+    auto prefill_rpc = prefill_builder.BuildAndStart();
+    ASSERT_NE(prefill_rpc, nullptr);
+
+    auto decode = std::make_shared<DecodeRpcServer>();
+    decode->maga_init_params_.pd_sep_config.role_type = RoleType::DECODE;
+    decode->meta_ = std::make_shared<RpcServerRuntimeMeta>();
+    decode->prefill_server_caller_ = std::make_shared<PrefillServerCaller>();
+    decode->initCancelRegistry();
+    RemoteRpcServiceImpl decode_service;
+    decode_service.local_server_ = decode;
+    decode_service.decode_server_ = decode;
+    grpc::ServerBuilder decode_builder;
+    int decode_port = 0;
+    decode_builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &decode_port);
+    decode_builder.RegisterService(&decode_service);
+    auto decode_rpc = decode_builder.BuildAndStart();
+    ASSERT_NE(decode_rpc, nullptr);
+    auto stub = RpcService::NewStub(
+        grpc::CreateChannel("127.0.0.1:" + std::to_string(decode_port), grpc::InsecureChannelCredentials()));
+
+    GenerateInputPB input;
+    input.set_request_id(203);
+    input.add_token_ids(1);
+    auto* config = input.mutable_generate_config();
+    config->set_timeout_ms(10000);
+    config->set_max_new_tokens(1);
+    config->set_num_beams(1);
+    config->set_num_return_sequences(1);
+    config->set_can_use_pd_separation(false);
+    auto* address = config->add_role_addrs();
+    address->set_role(RoleAddrPB::PREFILL);
+    address->set_ip("127.0.0.1");
+    address->set_grpc_port(prefill_port);
+    auto enqueued = engine->enqueued.get_future();
+    auto generate = std::async(std::launch::async, [&] {
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(10));
+        auto reader = stub->GenerateStreamCall(&context, input);
+        GenerateOutputsPB output;
+        while (reader->Read(&output)) {
+        }
+        return reader->Finish();
+    });
+    ASSERT_EQ(enqueued.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    auto stream = enqueued.get();
+    EXPECT_FALSE(stream->hasError());
+    EXPECT_EQ(generate.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+
+    // No Prefill address on Cancel: Decode must use the route of the active request.
+    grpc::ClientContext cancel_context;
+    cancel_context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(3));
+    CancelRequestPB cancel;
+    cancel.set_request_id(input.request_id());
+    CancelResponsePB response;
+    ASSERT_TRUE(stub->Cancel(&cancel_context, cancel, &response).ok());
+    EXPECT_EQ(response.status(), CANCEL_STATUS_ACCEPTED);
+    ASSERT_EQ(generate.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    EXPECT_EQ(errorInfoFromGrpcStatus(generate.get()).code(), ErrorCode::PRIORITY_PREEMPTED);
+    EXPECT_EQ(stream->statusInfo().code(), ErrorCode::PRIORITY_PREEMPTED);
+    EXPECT_TRUE(stream->finishWithoutGenerate());
+    const auto handle = decode->cancel_registry_->find(input.request_id());
+    ASSERT_NE(handle, nullptr);
+    EXPECT_TRUE(waitForCancel([&] {
+        return handle->terminal.load() && !decode->cancel_registry_->needsDownstreamCancel(handle);
+    }));
+}
 
 TEST(DecodeRpcServerTest, CancelBeforeDecodeAdmissionForwardsToSelectedPrefillAndFencesLateRequest) {
     for (auto code : {ErrorCode::PRIORITY_PREEMPTED, ErrorCode::CANCELLED, ErrorCode::GENERATE_TIMEOUT}) {
