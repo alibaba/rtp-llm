@@ -266,8 +266,11 @@ class EngineConfig:
 
 
 _BATCH_INVARIANT_QWEN_MODELS = {
-    (40, 2048, 256, 8, 512, 16, 2, 256): ("Qwen3.6-35B-A3B", 1),
-    (60, 4096, 512, 10, 1024, 32, 2, 256): ("Qwen3.5-397B-A17B", 4),
+    # Model type, layers, hidden size, Q heads, KV heads, head size, FFN shape.
+    ("qwen_3", 36, 4096, 32, 8, 128, (12288,)): ("Qwen3-8B", 1),
+    ("qwen_3_moe", 48, 2048, 32, 4, 128, (128, 8, 768)): ("Qwen3-30B-A3B", 1),
+    ("qwen35_moe", 40, 2048, 16, 2, 256, (256, 8, 512)): ("Qwen3.6-35B-A3B", 1),
+    ("qwen35_moe", 60, 4096, 32, 2, 256, (512, 10, 1024)): ("Qwen3.5-397B-A17B", 4),
 }
 
 
@@ -283,7 +286,9 @@ def configure_batch_invariant_model(
     cache = engine_config.kv_cache_config
     moe = engine_config.moe_config
     attn = model_config.attn_config
-    linear_attn = model_config.linear_attention_config
+    model_type = model_config.model_type
+    hybrid = model_type == "qwen35_moe"
+    uses_moe = hybrid or model_type == "qwen_3_moe"
     conflicts = []
     if not is_cuda() or torch.cuda.get_device_capability() != (10, 3):
         conflicts.append("requires an SM103 CUDA GPU")
@@ -291,19 +296,24 @@ def configure_batch_invariant_model(
         model_config.vit_separation != VitSeparation.VIT_SEPARATION_LOCAL
     ):
         conflicts.append("requires a colocated PDFUSION worker with no separate ViT")
+    ffn_shape = (
+        (model_config.expert_num, model_config.moe_k, model_config.moe_inter_size)
+        if uses_moe
+        else (model_config.inter_size,)
+    )
     geometry = (
+        model_type,
         model_config.num_layers,
         model_config.hidden_size,
-        model_config.expert_num,
-        model_config.moe_k,
-        model_config.moe_inter_size,
         attn.head_num,
         attn.kv_head_num,
         attn.size_per_head,
+        ffn_shape,
     )
     model = _BATCH_INVARIANT_QWEN_MODELS.get(geometry)
-    if model_config.model_type != "qwen35_moe" or model is None:
-        conflicts.append("requires the Qwen3.6-35B-A3B or Qwen3.5-397B-A17B architecture")
+    if model is None:
+        supported = ", ".join(name for name, _ in _BATCH_INVARIANT_QWEN_MODELS.values())
+        conflicts.append(f"requires one of these architectures: {supported}")
     else:
         name, tp = model
         if (
@@ -329,13 +339,18 @@ def configure_batch_invariant_model(
         conflicts.append(
             "requires unquantized BF16 weights and BF16 activations (ACT_TYPE=bf16)"
         )
-    if model_config.model_type == "qwen35_moe":
+    if model is not None:
         checkpoint_config = get_config_from_path(model_config.ckpt_path) or {}
-        text_config = checkpoint_config.get("text_config", {})
+        text_config = (
+            (checkpoint_config.get("text_config") or {})
+            if hybrid
+            else checkpoint_config
+        )
         checkpoint_dtype = text_config.get("dtype") or text_config.get("torch_dtype")
         if checkpoint_dtype not in ("bfloat16", "bf16"):
+            config_name = "text_config" if hybrid else "top-level config"
             conflicts.append(
-                f"requires a BF16 checkpoint (text_config.dtype is {checkpoint_dtype!r})"
+                f"requires a BF16 checkpoint ({config_name} has dtype {checkpoint_dtype!r})"
             )
     if model_config.task_type != TaskType.LANGUAGE_MODEL:
         conflicts.append("requires a text generation task")
@@ -349,8 +364,9 @@ def configure_batch_invariant_model(
         conflicts.append("speculative decoding and MTP must be disabled")
     if engine_config.runtime_config.use_batch_decode_scheduler:
         conflicts.append("USE_BATCH_DECODE_SCHEDULER must be disabled")
-    if moe.moe_strategy not in ("auto", "no_quant_cpp") or (
-        moe.use_deepep_moe
+    if uses_moe and (
+        moe.moe_strategy not in ("auto", "no_quant_cpp")
+        or moe.use_deepep_moe
         or moe.use_mori_ep
         or moe.fake_balance_expert
         or model_config.eplb_config.phy_exp_num(model_config.expert_num)
@@ -361,10 +377,14 @@ def configure_batch_invariant_model(
         )
     if attn.kv_cache_dtype != KvCacheDataType.BASE:
         conflicts.append("requires BF16 KV cache with FP8_KV_CACHE disabled")
-    if linear_attn.ssm_state_dtype != DataType.TYPE_FP32:
+    if (
+        hybrid
+        and model_config.linear_attention_config.ssm_state_dtype != DataType.TYPE_FP32
+    ):
         conflicts.append("requires FP32 SSM state (SSM_STATE_DTYPE=auto or fp32)")
     if attn.tokens_per_block != 64 or attn.kernel_tokens_per_block != 64:
-        conflicts.append("requires 64-token KV and SSM pages")
+        pages = "KV and SSM" if hybrid else "KV"
+        conflicts.append(f"requires 64-token {pages} pages")
     if (
         cache.reuse_cache
         or cache.enable_remote_cache
@@ -374,15 +394,15 @@ def configure_batch_invariant_model(
         or cache.multi_task_prompt_str
         or cache.multi_task_prompt_tokens
     ):
-        # A checkpoint produced by decode must never be restored as a prefill prefix.
         conflicts.append(
             "prefix reuse, task prompts and external KV caches must be disabled"
         )
     if conflicts:
         raise ValueError("RTP_BATCH_INVARIANT=1:\n" + "\n".join(conflicts))
 
-    # Keep the official text weights, with its partial MRoPE parameters.
-    model_config.mm_model_config.is_multimodal = False
+    if hybrid:
+        # Keep the text weights and partial MRoPE parameters of the hybrid checkpoint.
+        model_config.mm_model_config.is_multimodal = False
     # Keep the checkpoint's BF16 LM head and accumulate its products in FP32.
     model_config.enable_fp32_lm_head = False
 

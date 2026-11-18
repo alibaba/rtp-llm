@@ -1,12 +1,22 @@
 # Qwen BF16 batch-invariant inference
 
 The startup switch is `RTP_BATCH_INVARIANT=1`. An unset variable or `0`
-selects the regular engine paths. Both supported configurations use NVIDIA
-L20D (SM103), `DP_SIZE=EP_SIZE=PP_SIZE=1`, the official BF16 checkpoint,
-BF16 KV cache, 64-token pages, FP32 SSM state, CUDA eager and ordinary text
-generation. Qwen3.6-35B-A3B uses one GPU. Qwen3.5-397B-A17B uses four GPUs
-in one node with `WORLD_SIZE=LOCAL_WORLD_SIZE=TP_SIZE=4`. The engine loads
-the text weights from the multimodal checkpoint and keeps dynamic batching.
+selects the regular engine paths. Use NVIDIA L20D (SM103),
+`DP_SIZE=EP_SIZE=PP_SIZE=1`, the official BF16 checkpoint, BF16 KV cache,
+64-token pages, CUDA eager and ordinary text generation. Dynamic batching
+continues to run with the switch enabled.
+
+| Checkpoint | RTP model type | TP |
+| --- | --- | --- |
+| Qwen/Qwen3-8B | `qwen_3` | 1 |
+| Qwen/Qwen3-30B-A3B | `qwen_3_moe` | 1 |
+| Qwen/Qwen3.6-35B-A3B | `qwen35_moe` | 1 |
+| Qwen/Qwen3.5-397B-A17B | `qwen35_moe` | 4 |
+
+Set `WORLD_SIZE=LOCAL_WORLD_SIZE=TP_SIZE` for the selected topology.
+The hybrid models use FP32 SSM state and load the text weights from their
+multimodal checkpoints. The standard Qwen3 models use the top-level checkpoint
+dtype and full GQA attention throughout.
 
 GDN resumes from the existing FP32 cache at the scheduler's aligned prefill
 boundaries. Its Q/K normalization uses a fixed row kernel across the 128-row
@@ -61,8 +71,11 @@ tests="$repo/rtp_llm/test/batch_invariant"
 python3 "$tests/config_test.py"
 python3 "$tests/gdn_test.py"
 python3 "$tests/kernel_test.py" --trtllm-baseline
+python3 "$tests/kernel_test.py" --qwen3-8b --trtllm-baseline
 python3 "$tests/moe_test.py" --legacy
 python3 "$tests/moe_test.py"
+python3 "$tests/moe_test.py" --qwen3-30b --legacy
+python3 "$tests/moe_test.py" --qwen3-30b
 ```
 
 ## Serving comparison
@@ -71,17 +84,21 @@ Use the standard RTP launcher and the existing model RPC. The acceptance test
 checks the fixed continuation against the official tokenizer, counts all
 returned FP32 logit bits, applies FP32 log-softmax to the full returned
 vocabulary, and verifies the selected token's FP32 probability from RTP.
+The checkpoint config provides the vocabulary dimension for each RPC row.
 The batch log must prove co-batching, the target's row, and the target's prefill
 grants before a case passes. [vLLM serving checks](https://github.com/vllm-project/vllm/blob/4bd291dc3c3771af5a81a4b822c29391d5bf2ae7/tests/v1/determinism/test_batch_invariance.py)
 
 ```bash
 checkpoint=/mnt/fuse/Qwen/Qwen3.6-35B-A3B
+model_type=qwen35_moe
+start_port=19480
 export WORLD_SIZE=1 TP_SIZE=1 DP_SIZE=1 EP_SIZE=1 PP_SIZE=1
 export LOCAL_WORLD_SIZE=1 WORLD_RANK=0 LOCAL_RANK=0 ROLE_TYPE=PDFUSION
 export LOG_PATH=logs RTP_LLM_RECORD_DECODE_SAMPLE_RATE=1
 export FRONTEND_PRE_STOP_DRAIN_SECONDS=1 DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS=1
 
 run_case() (
+    set -eo pipefail
     mode="$1"
     budget="$2"
     shift 2
@@ -89,20 +106,118 @@ run_case() (
     cd "$work/mode-${mode}-budget-${budget}"
     unset ACT_TYPE
     act=()
-    if [ "$mode" = 0 ]; then act=(--act_type bf16); fi
+    if [ "$mode" = 0 ] && [ "$model_type" = qwen35_moe ]; then act=(--act_type bf16); fi
     RTP_BATCH_INVARIANT="$mode" python3 -m rtp_llm.start_server \
         --checkpoint_path "$checkpoint" --tokenizer_path "$checkpoint" \
-        --model_type qwen35_moe "${act[@]}" --max_seq_len 1024 --kv_cache_mem_mb 4096 \
-        --start_port 19480 --prefill_chunk_size "$budget" > server.log 2>&1 &
+        --model_type "$model_type" "${act[@]}" --max_seq_len 1024 --kv_cache_mem_mb 4096 \
+        --start_port "$start_port" --prefill_chunk_size "$budget" > server.log 2>&1 &
     server=$!
     trap 'kill "$server" 2>/dev/null; wait "$server" 2>/dev/null' EXIT
-    python3 "$tests/service_test.py" --checkpoint "$checkpoint" "$@"
+    if [ "$mode" = 1 ] && [ "$budget" = 0 ]; then
+        python3 "$tests/service_test.py" --checkpoint "$checkpoint" \
+            --address "127.0.0.1:$((start_port + 1))" --greedy-smoke | tee greedy.log
+    fi
+    python3 "$tests/service_test.py" --checkpoint "$checkpoint" \
+        --address "127.0.0.1:$((start_port + 1))" "$@" 2>&1 | tee rpc.log
 )
 
 run_case 1 0 --save "$work/solo.npz"
 run_case 1 192 --chunked --reference "$work/solo.npz"
-run_case 0 0 --off-smoke
+run_case 0 0 --greedy-smoke
 ```
+
+To reproduce the TP1 comparison on both standard Qwen3 checkpoints, use
+the same `run_case` function with a fresh directory for each model.
+
+```bash
+export CUDA_VISIBLE_DEVICES=0
+checkpoint=/mnt/fuse/Qwen/Qwen3-8B
+model_type=qwen_3
+work="$(mktemp -d)"
+run_case 1 0 --save "$work/solo.npz"
+run_case 1 192 --chunked --reference "$work/solo.npz"
+run_case 0 0 --greedy-smoke
+
+export CUDA_VISIBLE_DEVICES=1
+checkpoint=/mnt/fuse/Qwen/Qwen3-30B-A3B
+model_type=qwen_3_moe
+work="$(mktemp -d)"
+run_case 1 0 --save "$work/solo.npz"
+run_case 1 192 --chunked --reference "$work/solo.npz"
+run_case 0 0 --greedy-smoke
+```
+
+## Standard Qwen3 checkpoint revisions and regular-path comparison
+
+The service read these weights from `/mnt/fuse/Qwen` with `ACT_TYPE` unset.
+The revision comes from the mount metadata. Every tensor in the indexed
+safetensors shards was BF16.
+
+| Checkpoint | Revision | Vocabulary | GPU for serving |
+| --- | --- | --- | --- |
+| Qwen3-8B | [`b968826d9c46dd6066d109eabc6255188de91218`](https://huggingface.co/Qwen/Qwen3-8B/tree/b968826d9c46dd6066d109eabc6255188de91218) | 151936 | L20D 0, TP1 |
+| Qwen3-30B-A3B | [`ad44e777bcd18fa416d9da3bd8f70d33ebb85d39`](https://huggingface.co/Qwen/Qwen3-30B-A3B/tree/ad44e777bcd18fa416d9da3bd8f70d33ebb85d39) | 151936 | L20D 1, TP1 |
+
+The regular path was also sampled against the solo baseline with prefill
+budget 0 and the target first in the `193, 11, 321` batch. All four token IDs
+matched for both models. The first raw logit difference was at output step 0,
+vocabulary index 0. Indices in the RPC report are zero-based.
+
+| Checkpoint | Raw logit differences | Full-vocab logprob differences | Selected-token logprob differences | First raw logit bits, solo to mixed |
+| --- | --- | --- | --- | --- |
+| Qwen3-8B | 433271 | 444474 | 1 | `0x41133d58` → `0x41133d57` |
+| Qwen3-30B-A3B | 352864 | 70831 | 0 | `0x413f21fa` → `0x413f21fb` |
+
+Set `work="$(mktemp -d)"` and run `run_case 0 0 --save "$work/regular-solo.npz"`
+with either checkpoint above to reproduce the regular-path difference.
+The test verifies real prefill and decode co-batching and prints the first
+different index and bit patterns before exiting with an assertion.
+
+## Standard Qwen3 results with the switch enabled
+
+Both services ran CUDA eager on NVIDIA L20D (SM103, 275040 MiB) with CUDA
+13.2, PyTorch 2.11.0+cu130 and Triton 3.6.0. The tests used a 1024-token
+sequence limit and a 4096 MiB KV pool. Each comparison uses the unchunked solo
+request as its reference, with fixed output `[2518, 6303, 6176, 13753]`.
+Each of the four steps returned 151936 raw FP32 logits and one selected-token
+FP32 probability. The test computed FP32 logprobs over the full vocabulary
+and the logprob of the selected token from the returned probability.
+
+| Model | Prefill budget | Case | Target grants | Steps | Token IDs match | Logit diffs | Full logprob diffs | Selected logprob diffs |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Qwen3-8B | 0 | Target first, `193, 11, 321` | 193 | 4 | Yes | 0 | 0 | 0 |
+| Qwen3-8B | 0 | Target last, `321, 11, 193` | 193 | 4 | Yes | 0 | 0 | 0 |
+| Qwen3-8B | 192 | Solo | 192 + 1 | 4 | Yes | 0 | 0 | 0 |
+| Qwen3-8B | 192 | Target first, `193, 11` | 192 + 1 | 4 | Yes | 0 | 0 | 0 |
+| Qwen3-8B | 192 | Target last, `11, 193` | 128 + 65 | 4 | Yes | 0 | 0 | 0 |
+| Qwen3-30B-A3B | 0 | Target first, `193, 11, 321` | 193 | 4 | Yes | 0 | 0 | 0 |
+| Qwen3-30B-A3B | 0 | Target last, `321, 11, 193` | 193 | 4 | Yes | 0 | 0 | 0 |
+| Qwen3-30B-A3B | 192 | Solo | 192 + 1 | 4 | Yes | 0 | 0 | 0 |
+| Qwen3-30B-A3B | 192 | Target first, `193, 11` | 192 + 1 | 4 | Yes | 0 | 0 | 0 |
+| Qwen3-30B-A3B | 192 | Target last, `11, 193` | 128 + 65 | 4 | Yes | 0 | 0 | 0 |
+
+The execution recorder verified the actual target row and phase in each
+mixed prefill and decode case. Each model generated eight ordinary greedy
+tokens with the switch on and off. Qwen3-8B produced the same eight tokens
+in both states. On Qwen3-30B-A3B, the seventh token was `9934` with the
+switch off and `1467` with the switch on.
+
+The 8B operator checks found 8 BF16 differences in the regular attention
+output projection, up to 27 in the regular dense MLP and 150159 FP32
+differences in the regular LM head. The existing invariant kernels matched
+bitwise for these shapes. GQA prefill and decode, Q/K normalization, and
+the 30B router logits, top-k IDs, weights and expert output also matched
+bitwise across their batch and row changes. The configuration suites ran
+78 tests. A real 8B launch with `--act_type fp16` failed its startup
+BF16 validation.
+
+The container logs are under `/home/admin/rtp-bi-qwen3-1118`. The `runs`
+subdirectories for each model contain `off`, `on-budget0` and `on-budget192`
+runs with `server.log`, `rpc.log` and `logs/batch_schedule.*.log`.
+`operators` and `config-regression` contain the operator and config outputs.
+The Qwen3.6-35B-A3B TP1 comparison also passed with `[4, 248320]` logits.
+Qwen3.5-397B-A17B TP4 was checked in configuration and rank-local operator
+tests. Its service comparison is from the earlier TP4 run below.
 
 ## Qwen3.6-35B-A3B results
 
@@ -144,6 +259,7 @@ from the existing mount.
 
 ```bash
 checkpoint=/mnt/fuse/Qwen/Qwen3.5-397B-A17B
+model_type=qwen35_moe
 work="$(mktemp -d)"
 cd "$work"
 export CUDA_VISIBLE_DEVICES=0,1,2,3
@@ -156,7 +272,7 @@ python3 "$tests/moe_test.py" --tp4-397b
 
 run_case 1 0 --save "$work/solo.npz"
 run_case 1 192 --chunked --reference "$work/solo.npz"
-run_case 0 0 --off-smoke
+run_case 0 0 --greedy-smoke
 ```
 
 The 397B checkpoint's index contains 806,795,875,168 bytes of BF16 weights.
