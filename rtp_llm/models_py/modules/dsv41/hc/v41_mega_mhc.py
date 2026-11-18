@@ -74,11 +74,6 @@ def _is_dense_tensor(value, shape, dtype, device) -> bool:
     )
 
 
-from rtp_llm.models_py.modules.dsv41.hc.mhc_sm90_vllm_two_kernel import (
-    MAX_TOKENS as _TWO_KERNEL_MAX_TOKENS,
-)
-
-
 def _stream_key(device: torch.device) -> tuple[int, int]:
     stream = torch.cuda.current_stream(device)
     return stream.device.index, stream.cuda_stream
@@ -137,11 +132,15 @@ def _can_try_sm90_mega_mhc(attn_out: torch.Tensor) -> bool:
         or attn_out.device.type != "cuda"
         or attn_out.ndim != 3
         or attn_out.shape[-1] != 5120
-        # ``numel // dim`` is the token count the fused kernel consumes.
-        or not 0 < attn_out.numel() // attn_out.shape[-1] <= _TWO_KERNEL_MAX_TOKENS
     ):
         return False
-    return tuple(torch.cuda.get_device_capability(attn_out.device)) == (9, 0)
+    if tuple(torch.cuda.get_device_capability(attn_out.device)) != (9, 0):
+        return False
+    backend = _get_sm90_mega_mhc()
+    return (
+        backend is not None
+        and 0 < attn_out.numel() // attn_out.shape[-1] <= backend.MAX_TOKENS
+    )
 
 
 def _check_units(previous, next_hc, norm, device) -> bool:

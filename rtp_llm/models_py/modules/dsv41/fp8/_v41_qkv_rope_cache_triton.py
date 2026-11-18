@@ -12,7 +12,6 @@ import triton.language as tl
 from rtp_llm.models_py.modules.dsv41.fp8._trap_utils import (
     trap_invalid_kv_access_enabled,
 )
-from rtp_llm.models_py.modules.dsv41.fp8._v41_sm90_v4_cache import _store_v4_row
 from rtp_llm.models_py.modules.dsv41.fp8._v41_sm90_v4_cache import (
     is_supported as v4_swa_is_supported,
 )
@@ -63,7 +62,6 @@ def _fused_qkv_rope_cache_kernel(
     TRAP_INVALID_KV_ACCESS: tl.constexpr,
     USE_PDL: tl.constexpr = False,
     KV_READY: tl.constexpr = False,
-    V4_CACHE: tl.constexpr = False,
 ):
     tl.static_assert(not KV_READY or (not APPLY_Q_ROPE and HEADS == PADDED_HEADS))
     if USE_PDL and not KV_READY:
@@ -109,13 +107,8 @@ def _fused_qkv_rope_cache_kernel(
         kv_base = kv + row * kv_stride.to(tl.int64)
         values = tl.load(kv_base + columns).to(tl.float32)
         w = tl.load(weight + columns).to(tl.float32)
-        # The V4 cache uses the FP32 RMSNorm-to-RoPE path. V4.1's native
-        # cache materializes the norm in BF16 before rotation and quantization.
-        rounded = norm_rope_bf16(values, w, cos, sin, EPS, ROUND_NORM=not V4_CACHE)
-        if V4_CACHE:
-            decoded = rounded
-        else:
-            payload, encoded, decoded = quantize_swa_row(rounded)
+        rounded = norm_rope_bf16(values, w, cos, sin, EPS)
+        payload, encoded, decoded = quantize_swa_row(rounded)
         if USE_PDL and KV_READY:
             # QA supplied raw KV before QB started; keep stores after QB's wait.
             tl.extra.cuda.gdc_wait()
@@ -132,16 +125,13 @@ def _fused_qkv_rope_cache_kernel(
             if TRAP_INVALID_KV_ACCESS:
                 _trap()
             return
-        if V4_CACHE:
-            _store_v4_row(rounded, pool, slot, block_stride, ENTRIES)
-        else:
-            position = slot % ENTRIES
-            page_base = pool + page * block_stride.to(tl.int64)
-            tl.store(
-                page_base + position * 528 + columns,
-                payload.to(tl.uint8, bitcast=True),
-            )
-            tl.store(page_base + position * 528 + 512 + tl.arange(0, 16), encoded)
+        position = slot % ENTRIES
+        page_base = pool + page * block_stride.to(tl.int64)
+        tl.store(
+            page_base + position * 528 + columns,
+            payload.to(tl.uint8, bitcast=True),
+        )
+        tl.store(page_base + position * 528 + 512 + tl.arange(0, 16), encoded)
 
 
 def is_supported(
@@ -281,7 +271,13 @@ def try_fused_qkv_rope_cache(
             (positions.numel(), 32), dtype=torch.complex64, device=q.device
         )
     if positions.numel():
-        _fused_qkv_rope_cache_kernel[(positions.numel(), q_tiles + 1)](
+        kernel = _fused_qkv_rope_cache_kernel
+        kernel_options = {}
+        if pool_3d.shape[-1] == 584:
+            from ._v41_sm90_qkv_rope_cache_triton_kernels import _fused_qkv_rope_cache_kernel as kernel
+
+            kernel_options = {"V4_CACHE": True}
+        kernel[(positions.numel(), q_tiles + 1)](
             q,
             q_out,
             kv,
@@ -306,7 +302,7 @@ def try_fused_qkv_rope_cache(
             USE_PDL=use_pdl,
             KV_READY=kv_ready,
             launch_pdl=use_pdl,
-            V4_CACHE=pool_3d.shape[-1] == 584,
+            **kernel_options,
             num_warps=4,
             enable_fp_fusion=False,
         )

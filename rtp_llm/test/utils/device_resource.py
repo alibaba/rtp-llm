@@ -496,9 +496,10 @@ def _run_test_command():
 
 
 def main():
-    from jit_sys_path_setup import setup_nvidia_wheel_library_path
+    if os.environ.get("RTP_LLM_SM90_NVIDIA_WHEEL_PATH", "0") == "1":
+        from jit_sys_path_setup import setup_nvidia_wheel_library_path
 
-    setup_nvidia_wheel_library_path()
+        setup_nvidia_wheel_library_path()
 
     # CPU-only targets must not initialize CUDA or acquire GPU locks.
     if os.environ.get("GPU_COUNT") == "0":

@@ -33,12 +33,13 @@ def configured_max_tokens() -> int:
     return 512 if backend in ("", "auto", "deepgemm", "dg") else 64
 
 
-def max_supported_tokens(capability: tuple[int, int]) -> int:
-    """Return the standalone prenorm dispatch limit for this GPU."""
-    if capability[0] not in (9, 10):
-        return 0
-    device_limit = 256 if capability == (9, 0) else 64
-    return min(device_limit, configured_max_tokens())
+def max_supported_tokens(capability: tuple[int, int] | None = None) -> int:
+    """Keep the upstream SM100 limit; bound the separate Hopper kernel."""
+    if capability is None or capability[0] == 10:
+        return configured_max_tokens()
+    if tuple(capability) == (9, 0):
+        return min(256, configured_max_tokens())
+    return 0
 
 
 def is_supported(residual: torch.Tensor, fn: torch.Tensor) -> bool:
@@ -98,11 +99,7 @@ def _reduce_prenorm_kernel(
     partial,
     square_sum,
     output,
-    # Runtime, not constexpr: TOKENS is the per-chunk token count and changes on
-    # every chunk. As a constexpr it produced 224 cached variants on L20Z
-    # prefill, each costing a full Triton compilation. SPLITS must stay
-    # constexpr because it drives tl.static_range.
-    TOKENS,
+    TOKENS: tl.constexpr,
     SPLITS: tl.constexpr,
     EPS: tl.constexpr,
 ):
@@ -128,6 +125,10 @@ def prenorm(
     """Return FP32 [..., 24] mixes, or None for the original-path fallback."""
     if not is_supported(residual, fn):
         return None
+    if tuple(torch.cuda.get_device_capability(residual.device)) == (9, 0):
+        from rtp_llm.models_py.modules.dsv41.hc.sm90_prenorm import prenorm as sm90_prenorm
+
+        return sm90_prenorm(residual, fn, eps)
     tokens = residual.numel() // 20480
     output = torch.empty(
         (*residual.shape[:-2], 24), dtype=torch.float32, device=residual.device
@@ -137,9 +138,8 @@ def prenorm(
 
     from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import tf32_hc_prenorm_gemm
 
-    # Shorter K reductions keep large-batch cancellation within the same
-    # FP64-oracle tolerance. Preserve the established <=64-token path.
-    splits = 32 if tokens > 64 else 16
+    # vLLM bounds its small-token prenorm specialization to 16 K partitions.
+    splits = 16
     partial = torch.empty(
         (splits, tokens, 24), dtype=torch.float32, device=residual.device
     )

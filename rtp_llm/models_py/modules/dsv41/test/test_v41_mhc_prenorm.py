@@ -263,8 +263,7 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
     @patch.dict(os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "deepgemm"})
     def test_token_boundaries_and_3d_4d_layouts(self):
         supported = (1, 6, 24, 31, 64)
-        if is_sm90():
-            supported += (65, 128, 256)
+        supported += (65, 128, 256) if is_sm90() else (65, 128, 256, 512)
         for tokens in supported:
             residual, fn, base, scale = self._inputs(tokens)
             batch = 4 if tokens in (24, 64) else 1
@@ -273,7 +272,8 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
                     self.assertTrue(is_supported(layout, fn))
                     actual = self._check_mixes_and_coefficients(layout, fn, base, scale)
                     self.assertEqual(actual.shape, (*layout.shape[:-2], 24))
-        for tokens in (supported[-1] + 1, 384, 512):
+        unsupported = (257, 384, 512) if is_sm90() else (513, 768)
+        for tokens in unsupported:
             with self.subTest(tokens=tokens):
                 residual, fn, _, _ = self._inputs(tokens)
                 self.assertFalse(is_supported(residual, fn))

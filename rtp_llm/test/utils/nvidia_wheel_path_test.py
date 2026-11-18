@@ -24,6 +24,7 @@ class NvidiaWheelPathTest(unittest.TestCase):
                 os.environ,
                 {
                     "RUNFILES_DIR": directory,
+                    "RTP_LLM_SM90_NVIDIA_WHEEL_PATH": "1",
                     "LD_LIBRARY_PATH": "/usr/local/cuda/compat:/usr/local/nvidia/lib64",
                 },
             ):
@@ -36,6 +37,22 @@ class NvidiaWheelPathTest(unittest.TestCase):
                 )
                 setup_nvidia_wheel_library_path()
                 self.assertEqual(paths, os.environ["LD_LIBRARY_PATH"].split(":"))
+
+    def test_default_keeps_environment_even_with_wheel_libraries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            libraries = [
+                "pip_gpu_cuda13_torch_torch/site-packages/torch/lib",
+                "pip_gpu_cuda13_torch_nvidia_cudnn_cu13/site-packages/nvidia/cudnn/lib",
+            ]
+            for library in libraries:
+                (Path(directory) / library).mkdir(parents=True)
+            with patch.dict(
+                os.environ,
+                {"RUNFILES_DIR": directory, "LD_LIBRARY_PATH": "/existing"},
+                clear=True,
+            ):
+                setup_nvidia_wheel_library_path()
+                self.assertEqual(os.environ["LD_LIBRARY_PATH"], "/existing")
 
     def test_no_wheel_libraries_keeps_environment(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(

@@ -251,6 +251,7 @@ cc_library(
     hdrs = [
         "topk_v3.h",
         "topk_v3.cuh",
+        "topk_v3_sm90.cuh",
         "topk_v3_compat.cuh",
     ],
     deps = [
@@ -264,17 +265,18 @@ cc_library(
 
 filegroup(
     name = "topk_v3_jit_headers",
-    srcs = ["topk_v3.cuh", "topk_v3_compat.cuh"],
+    srcs = ["topk_v3.cuh", "topk_v3_sm90.cuh", "topk_v3_compat.cuh"],
     visibility = ["//visibility:public"],
 )
 
 # DSpARK uses Markov scaling on Hopper before the generic TopK fallback.
-# Build it with the platform architectures, independently of Blackwell DeepSelect.
+# Compile its new kernel only for Hopper; keep Blackwell DeepSelect unchanged.
 cc_library(
     name = "markov_scaled_logits",
     srcs = ["markov_scaled_logits.cu"],
     hdrs = ["markov_scaled_logits.h"],
-    copts = cuda_copts() + [
+    copts = copts() + cuda_default_copts_without_arch() + [
+        "--cuda-include-ptx=sm_90", "--cuda-gpu-arch=sm_90",
         "-O3",
         "-U__CUDA_NO_HALF_OPERATORS__",
         "-U__CUDA_NO_HALF_CONVERSIONS__",

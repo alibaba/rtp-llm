@@ -326,7 +326,13 @@ class BackendRPCServerVisitor:
                     block_cache_keys=[],
                     cache_key_block_size=self._cache_key_block_size(),
                     input=input,
-                    request_id=self._vit_probe_request_id(input.request_id),
+                    request_id=(
+                        self._vit_probe_request_id(input.request_id)
+                        if os.environ.get("DSV4_MOE_STRATEGY", "")
+                        in ("mega_sm90", "mega_sm90_se", "gc_sm90_se")
+                        or os.environ.get("RTP_LLM_SM90_VIT_PROBE_ID", "0") == "1"
+                        else input.request_id
+                    ),
                     cache_affinity_keys=keys,
                     vit_only=True,
                 )

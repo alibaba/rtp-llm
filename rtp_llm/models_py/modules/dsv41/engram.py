@@ -39,7 +39,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from rtp_llm.device.device_type import is_cuda
+from rtp_llm.device.device_type import is_cuda, is_sm90
 
 logger = logging.getLogger(__name__)
 DEAD_ID = -1
@@ -1145,8 +1145,12 @@ class HostEngramEmbedding:
         if out is not None:
             raise RuntimeError("Preallocated Engram lookup requires the CUDA UVA path")
         indices = indices.detach().to(device="cpu", dtype=torch.int64)
-        valid = (indices >= 0) & (indices < self.weight.shape[0])
-        flat = indices.masked_fill(~valid, 0).flatten()
+        if torch.device(device).type == "cuda" and is_sm90(device):
+            valid = (indices >= 0) & (indices < self.weight.shape[0])
+            flat = indices.masked_fill(~valid, 0).flatten()
+        else:
+            valid = indices >= 0
+            flat = indices.clamp_min(0).flatten()
         if self.weight.element_size() == 1:
             rows = (
                 self.weight.view(torch.uint8)

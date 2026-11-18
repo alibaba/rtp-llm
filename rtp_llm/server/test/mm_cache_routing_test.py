@@ -1,4 +1,5 @@
 import asyncio
+import os
 import struct
 import unittest
 from concurrent import futures
@@ -447,6 +448,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             status,
         )
 
+    @patch.dict(os.environ, {"DSV4_MOE_STRATEGY": "mega_sm90_se"})
     async def test_vit_preselection_still_routes_pd_and_sends_expanded_length(self):
         visitor, request, vit, prefill, status = (
             self.visitor,
@@ -494,6 +496,20 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
             wire.multimodal_inputs.multimodal_inputs[0].multimodal_url,
             request.mm_inputs[0].url,
         )
+
+    @patch.dict(
+        os.environ,
+        {"DSV4_MOE_STRATEGY": "mega_moe", "RTP_LLM_SM90_VIT_PROBE_ID": "0"},
+    )
+    async def test_non_sm90_vit_probe_keeps_upstream_request_id(self):
+        with patch.object(
+            BackendRPCServerVisitor, "_vit_probe_request_id"
+        ) as separate_id:
+            await self.visitor.get_master_route_addrs(self.request)
+        separate_id.assert_not_called()
+        calls = self.visitor.master_client.get_backend_role_addrs.call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([call.kwargs["request_id"] for call in calls], [123, 123])
 
     async def test_v41_route_keys_match_backend_canonical_tokens_and_identity(self):
         from rtp_llm.server.cache_key_routing import get_block_cache_keys
@@ -827,6 +843,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.request.token_ids.tolist(), [1, 99, 2])
         self.assertEqual(len(self.request.mm_inputs), 1)
 
+    @patch.dict(os.environ, {"DSV4_MOE_STRATEGY": "mega_sm90_se"})
     async def test_stale_vit_reselection_acquires_new_hashes_before_prefill(self):
         self.visitor.cache_key_seed = 12345
         self.visitor.mm_model_config.semantic_mm_token_id = 129264

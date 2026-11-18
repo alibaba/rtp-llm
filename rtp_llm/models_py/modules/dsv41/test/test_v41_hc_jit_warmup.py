@@ -284,7 +284,9 @@ class V41HCJitWarmupCPU(unittest.TestCase):
         for capability, backend, maximum in (
             ((9, 0), "auto", 256),
             ((9, 0), "tilelang_single", 64),
-            ((10, 3), "deepgemm", 64),
+            ((10, 3), "deepgemm", 512),
+            ((10, 0), "auto", 512),
+            ((10, 0), "tilelang_single", 64),
         ):
             with self.subTest(capability=capability, backend=backend), patch.dict(
                 os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": backend}

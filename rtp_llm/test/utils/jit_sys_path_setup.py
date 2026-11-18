@@ -31,8 +31,12 @@ def setup_nvidia_wheel_library_path():
     An explicit GPU-lock wrapper replaces the default nvidia_wheel_env shell
     wrapper. Resolve the same runfiles libraries before spawning the CUDA
     probe and test; do not replace the caller's compat/native driver ordering.
-    This only changes child-process loader paths, not an initialized runtime.
+    This is explicitly enabled by SM90 test jobs, preserving every other
+    architecture's loader environment. It only changes child-process loader
+    paths, not an initialized runtime.
     """
+    if os.environ.get("RTP_LLM_SM90_NVIDIA_WHEEL_PATH", "0") != "1":
+        return
     root = os.environ.get("RUNFILES_DIR") or os.environ.get("TEST_SRCDIR")
     if not root:
         return

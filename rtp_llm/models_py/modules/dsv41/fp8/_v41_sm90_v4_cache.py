@@ -115,6 +115,8 @@ def _gather_v4_bytes_kernel(
 def is_supported(pool_3d: torch.Tensor, slots: torch.Tensor) -> bool:
     return (
         pool_3d.is_cuda
+        and torch.version.hip is None
+        and tuple(torch.cuda.get_device_capability(pool_3d.device)) == (9, 0)
         and pool_3d.dtype == torch.uint8
         and pool_3d.ndim == 3
         and pool_3d.shape[1] > 0

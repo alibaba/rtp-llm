@@ -159,8 +159,8 @@ __global__ __launch_bounds__(kBlockSize,
         return;
     }
     __shared__ impl::MaxSmem<typename ClusterImpl::Smem> smem;
-    const auto                                           cluster = cooperative_groups::this_cluster();
 #if __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
+    const auto cluster = cooperative_groups::this_cluster();
     // Hopper writes disjoint prefixes directly to global output; shared-output
     // staging lost non-primary entries in the SM90 eager/graph regression.
     ClusterImpl::template forward<false, kAlignedInput>(problem, &smem);
@@ -169,9 +169,10 @@ __global__ __launch_bounds__(kBlockSize,
         finish_output<kFilterFinite>(problem);
     }
 #else
-    __shared__ int32_t indices[kMaxTopK];
-    auto*              destination = problem.out;
-    problem.out                    = cluster.map_shared_rank(indices, worker_rank);
+    __shared__ int32_t                                   indices[kMaxTopK];
+    auto*                                                destination = problem.out;
+    const auto                                           cluster     = cooperative_groups::this_cluster();
+    problem.out                                                      = cluster.map_shared_rank(indices, worker_rank);
     ClusterImpl::template forward<false, kAlignedInput>(problem, &smem);
     cluster.sync();
     if (blockIdx.y == worker_rank) {

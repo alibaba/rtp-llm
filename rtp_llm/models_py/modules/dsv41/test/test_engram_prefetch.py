@@ -609,10 +609,13 @@ class EngramPrefetchTest(unittest.TestCase):
                 engram, "EngramLayout", return_value=SimpleNamespace(layer_ids=(1,))
             ),
             patch.object(type(attachment), "bind", return_value=attachment) as bind,
+            patch("torch.cuda.get_device_capability", return_value=(10, 3)),
+            patch.object(engram, "create_engram_prefetch") as create_prefetch,
             self.assertLogs(level="INFO") as logged,
         ):
             model._load_extra_weights(None)
         bind.assert_called_once_with(model, model._engram_runtime, scale_group=None)
+        create_prefetch.assert_not_called()
         self.assertIn("Engram initialized on layers [1]", logged.output[-1])
 
     def test_model_real_attachment_guard_rejects_before_prefetch(self):

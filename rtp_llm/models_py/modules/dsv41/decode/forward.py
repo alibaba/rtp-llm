@@ -27,6 +27,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
+from rtp_llm.device.device_type import is_sm90
 from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv41 import _profiler
@@ -124,7 +125,9 @@ def build_paged_pool_specs(
     saved_kv: Dict[int, Any] = {}
     present_tags = set(map(str, getattr(kv_cache, "group_tags", ())))
     has_decoder_swa = DECODER_SWA_KV in present_tags
-    owned_groups = getattr(kv_cache, "get_layer_cache_groups", None)
+    owned_groups = (
+        getattr(kv_cache, "get_layer_cache_groups", None) if is_sm90() else None
+    )
     layer_tags: Dict[int, set[str]] = {}
     try:
         # #50: STATE pool block tables must also flow through metadata so

@@ -2,6 +2,9 @@
 #include <memory>
 #include <tuple>
 #include <vector>
+#if USING_CUDA
+#include <cuda_runtime.h>
+#endif
 #include "autil/EnvUtil.h"
 #include "autil/Log.h"
 #include "c10/util/intrusive_ptr.h"
@@ -389,8 +392,16 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
         // locally and accepts ordinary GenerateStreamCall requests. Keep the
         // engine's DECODE role (including decode-only model/graph setup), but
         // do not require the production P/D handoff RPC for this test mode.
-        const bool synthetic_decode_benchmark =
-            role_type == RoleType::DECODE && maga_init_params.runtime_config.use_batch_decode_scheduler;
+        bool synthetic_decode_benchmark = false;
+#if USING_CUDA
+        if (role_type == RoleType::DECODE && maga_init_params.runtime_config.use_batch_decode_scheduler) {
+            int            device = 0;
+            cudaDeviceProp properties{};
+            RTP_LLM_CHECK(cudaGetDevice(&device) == cudaSuccess);
+            RTP_LLM_CHECK(cudaGetDeviceProperties(&properties, device) == cudaSuccess);
+            synthetic_decode_benchmark = properties.major == 9 && properties.minor == 0;
+        }
+#endif
         if (synthetic_decode_benchmark) {
             RTP_LLM_LOG_INFO("Synthetic decode benchmark: local generation RPC, DECODE engine role; no P/D handoff");
         }

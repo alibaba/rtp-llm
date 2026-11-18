@@ -11,6 +11,7 @@ from typing import Callable, Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 
+from rtp_llm.device.device_type import is_sm90
 from rtp_llm.models_py.modules import RMSNorm
 from rtp_llm.models_py.modules.dsv41.fp8.attention import (
     AttentionFP8,
@@ -302,8 +303,15 @@ class Block(nn.Module):
     _FFN_DEFER_COMBINE_KW: Dict[str, bool] = {"defer_combine": True}
     _FFN_NO_KW: Dict[str, bool] = {}
 
-    def _ffn_extra_kwargs(self, defer_ffn_post: bool) -> Dict[str, bool]:
-        if defer_ffn_post and isinstance(self.ffn, MoE):
+    def _ffn_extra_kwargs(
+        self, defer_ffn_post: bool, x: torch.Tensor
+    ) -> Dict[str, bool]:
+        if (
+            defer_ffn_post
+            and x.is_cuda
+            and is_sm90(x.device)
+            and isinstance(self.ffn, MoE)
+        ):
             return self._FFN_DEFER_COMBINE_KW
         return self._FFN_NO_KW
 
@@ -498,7 +506,7 @@ class Block(nn.Module):
                 x_pre, input_ids, expert_load=expert_load, mhc_inputs=moe_inputs
             )
         else:
-            ffn_extra = self._ffn_extra_kwargs(_defer_ffn_post)
+            ffn_extra = self._ffn_extra_kwargs(_defer_ffn_post, x_pre)
             ffn_out = (
                 self.ffn(x_pre, input_ids, expert_load=expert_load, **ffn_extra)
                 if routing_metadata is None
@@ -649,9 +657,10 @@ class Block(nn.Module):
             if fused_mhc is None
             else fused_mhc[0]
         )
-        # HC post has submitted its last read of this attention output.
+        # On SM90, HC post has submitted its last read of this output.
         # Keep its full-prefill storage out of the subsequent FFN lifetime.
-        del attn_out
+        if attn_out.is_cuda and is_sm90(attn_out.device):
+            del attn_out
         self._sync_after_first_cp_prefill_attention()
 
         residual = x

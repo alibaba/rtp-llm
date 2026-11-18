@@ -21,9 +21,6 @@ import torch
 import triton
 import triton.language as tl
 
-from rtp_llm.models_py.modules.dsv41.fp8._swa_cp_byte_sliced import (
-    normalize_gather_row_offsets,
-)
 from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_kv import quantize_swa_row
 
 if TYPE_CHECKING:
@@ -268,6 +265,23 @@ def dequantize_swa_k_cache(
     return out
 
 
+def _normalize_gather_row_offsets(out, row_offsets, batch):
+    if row_offsets is None:
+        return None
+    if not (
+        out.ndim == 2
+        and out.shape[1] == HEAD_DIM
+        and out.stride(1) == 1
+        and out.stride(0) >= HEAD_DIM
+        and isinstance(row_offsets, torch.Tensor)
+        and row_offsets.device == out.device
+        and row_offsets.dtype in (torch.int32, torch.int64)
+        and row_offsets.shape == (batch,)
+    ):
+        raise ValueError("Packed SWA gather needs a row matrix and per-request offsets")
+    return row_offsets.contiguous()
+
+
 def dequantize_and_gather_k_cache_slots(
     out: torch.Tensor,
     k_cache: torch.Tensor,
@@ -283,7 +297,7 @@ def dequantize_and_gather_k_cache_slots(
     starts at its explicit row offset. Rows outside its gather length are
     untouched. Lengths and offsets stay on device during graph replay.
     """
-    out_row_offsets = normalize_gather_row_offsets(
+    out_row_offsets = _normalize_gather_row_offsets(
         out, out_row_offsets, slot_mapping.shape[0]
     )
     if slot_mapping.numel():
@@ -523,7 +537,7 @@ def dequantize_and_gather_k_cache_slots_cp_byte_sliced(
     out_row_offsets: Optional[torch.Tensor] = None,
 ) -> None:
     """All-gather byte slices and decode qualified rank-major storage directly."""
-    out_row_offsets = normalize_gather_row_offsets(
+    out_row_offsets = _normalize_gather_row_offsets(
         out, out_row_offsets, slot_mapping.shape[0]
     )
     if slot_mapping.numel() == 0:

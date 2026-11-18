@@ -96,7 +96,12 @@ def _collect_pool_layouts(attentions, kv_cache, cp_size, kv_cache_sharded):
         ratio = int(attn.compress_ratio)
         if getattr(attn, "is_kv_source", False):
             regions.extend(
-                (CSA_KV if ratio == 2 else HCA_KV, attn._indexer_region())
+                (
+                    CSA_KV if ratio == 2 else HCA_KV,
+                    attn._indexer_region()
+                    if getattr(attn, "_use_v4_kv_cache", False)
+                    else INDEXER_KV,
+                )
             )
             if ratio == 2:
                 regions.append(CSA_STATE)
@@ -1807,9 +1812,7 @@ def warmup_v41_attention_jit(
                     paired.setdefault(attn_key, {})[layout.region] = layout
                 for regions in paired.values():
                     main_layout = regions.get(CSA_KV, regions.get(HCA_KV))
-                    index_layout = regions.get(
-                        INDEXER_KV_2 if main_layout is not None and main_layout.ratio == 2 else INDEXER_KV
-                    )
+                    index_layout = regions.get(INDEXER_KV)
                     if main_layout is None or index_layout is None:
                         continue
                     producer_layouts = (main_layout, index_layout)

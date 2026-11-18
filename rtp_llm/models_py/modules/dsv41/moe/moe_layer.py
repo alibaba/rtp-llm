@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Dict, Optional
 import torch
 import torch.nn as nn
 
+from rtp_llm.device.device_type import is_sm90
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41.chunk_env import (
     DEFAULT_DSV4_CHUNK_TOKENS,
@@ -493,6 +494,7 @@ class MoE(nn.Module):
         inline, which retires the standalone add+cast kernel for that layer.
         Callers that cannot must call ``PendingCombine.materialize``.
         """
+        defer_combine = defer_combine and x.is_cuda and is_sm90(x.device)
         from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 
         _dbg = _rt.should_record_layer(self.layer_id)

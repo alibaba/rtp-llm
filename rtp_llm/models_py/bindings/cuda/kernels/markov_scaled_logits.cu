@@ -37,7 +37,7 @@ __global__ void markovScaledLogitsKernel(const float* __restrict__ logits,
 #endif
 
 torch::Tensor
-markov_scaled_logits(const torch::Tensor& logits, const torch::Tensor& markov_bias, const torch::Tensor& temperature) {
+markov_scaled_logits_sm90(const torch::Tensor& logits, const torch::Tensor& markov_bias, const torch::Tensor& temperature) {
     TORCH_CHECK(logits.is_cuda() && logits.scalar_type() == torch::kFloat32 && logits.dim() == 2
                     && logits.stride(1) == 1 && markov_bias.is_cuda() && markov_bias.is_contiguous()
                     && markov_bias.sizes() == logits.sizes()
@@ -49,6 +49,8 @@ markov_scaled_logits(const torch::Tensor& logits, const torch::Tensor& markov_bi
                 "DSpARK scaled logits require same-device FP32 logits [B,V], contiguous bias [B,V]"
                 " in FP32/BF16/FP16, and contiguous FP32 temperature [B]");
 #if !defined(USE_ROCM) && CUDART_VERSION >= 12090
+    const auto* properties = at::cuda::getDeviceProperties(logits.get_device());
+    TORCH_CHECK(properties->major == 9 && properties->minor == 0, "SM90 Markov scaling requires Hopper");
     auto output = torch::empty(logits.sizes(), logits.options());
     if (logits.numel() == 0) {
         return output;

@@ -1187,7 +1187,11 @@ class AttentionV41FP8(AttentionFP8):
     def _source_pool(self, region):
         if self._kv_cache is None:
             return None
-        physical_region = self._indexer_region() if region == INDEXER_KV else region
+        physical_region = (
+            self._indexer_region()
+            if region == INDEXER_KV and getattr(self, "_use_v4_kv_cache", False)
+            else region
+        )
         layer_id = self.layer_id if region == SWA_KV else self.kv_source_layer_id
         tag = (
             getattr(self, "_swa_cache_region", SWA_KV)
@@ -2018,11 +2022,13 @@ class AttentionV41FP8(AttentionFP8):
             fused_indexer = isinstance(
                 globals_by_req[0][1], prefill_indexer.PrefillIndexerKeys
             )
-            from ._v41_sm90_fp8_prefill import (
-                PrefillFP8IndexerKeys, score_fp8_prefill_chunk,
-            )
+            fp8_indexer = False
+            if getattr(self, "_indexer_mode", "fp4") == "fp8_dg":
+                from ._v41_sm90_fp8_prefill import (
+                    PrefillFP8IndexerKeys, score_fp8_prefill_chunk,
+                )
 
-            fp8_indexer = isinstance(globals_by_req[0][1], PrefillFP8IndexerKeys)
+                fp8_indexer = isinstance(globals_by_req[0][1], PrefillFP8IndexerKeys)
             # Both dense and sparse DeepGEMM FP4 scorers consume BF16 weights.
             # Round once after the same FP32 scale inside fused Q preparation.
             prepared = (
@@ -2069,10 +2075,11 @@ class AttentionV41FP8(AttentionFP8):
                     weights = weights.to(torch.bfloat16)
                 else:
                     q = fp8_roundtrip(q)
-            if fused_indexer or fp8_indexer:
-                # Fused scorers consume their independent quantized Q storage.
-                del q
-            del raw_weights
+            if getattr(self, "_use_v4_kv_cache", False):
+                if fused_indexer or fp8_indexer:
+                    # SM90 scorers consume their independent quantized Q storage.
+                    del q
+                del raw_weights
             dense_weights = weights
             pending = shared.pop("prefill_pool_ready", None)
             if pending is not None:
@@ -2844,10 +2851,30 @@ class AttentionV41FP8(AttentionFP8):
             )
             if fused_plan is not None:
                 indices, lens = fused_plan
-            else:
+            elif getattr(self, "_use_v4_kv_cache", False):
                 indices, lens = prefill_index_plan.build_index_plan_eager(
                     selected, positions, offsets, ns, swstart, self.window_size
                 )
+            else:
+                swpos = (
+                    positions[:, None]
+                    - self.window_size
+                    + 1
+                    + torch.arange(self.window_size, device=x.device)[None]
+                )
+                swidx = torch.where(
+                    swpos >= swstart, offsets + ns + swpos - swstart, -1
+                )
+                ordered = selected.sort(dim=-1).values
+                global_idx = torch.where(ordered >= 0, offsets + ordered, -1)
+                indices = torch.cat((global_idx, swidx), -1).int()
+                # FlashMLA's length bounds count a compact valid prefix.
+                indices = indices.gather(
+                    1, torch.argsort(indices < 0, dim=-1, stable=True)
+                )
+                lens = (indices >= 0).sum(-1).int()
+                if indices.shape[1] % 64:
+                    indices = F.pad(indices, (0, 64 - indices.shape[1] % 64), value=-1)
             self._shared_attention["prefill_index_plan"] = (selected, indices, lens)
         return self._prefill_sparse_attention(
             qkv,
