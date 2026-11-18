@@ -47,6 +47,24 @@ RdmaClientHostConnections::getConnection(const std::shared_ptr<::accl::barex::XC
         return rdma_connection;
     }
 
+#if defined(USING_ROCM) && USING_ROCM
+    // Cold GPU-memory registration and QP setup can take longer than a KV
+    // transfer. Let concurrent loads consume recycled QPs while one caller
+    // opens the next group for this peer.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(connect_timeout_ms_);
+    std::unique_lock<std::timed_mutex> setup_lock(connection_setup_mutex_, std::defer_lock);
+    while (!setup_lock.try_lock_for(std::chrono::milliseconds(1))) {
+        if (auto recycled = getRdmaConnectionFromConnectionPool(available_connections_, false)) {
+            return recycled;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return nullptr;
+        }
+    }
+    if (auto recycled = getRdmaConnectionFromConnectionPool(available_connections_, false)) {
+        return recycled;
+    }
+#endif
     // A connection callback may arrive after the request that initiated it has
     // timed out. Such connections stay in newly_connections_. Reuse them
     // before issuing more Connect calls. The timeout path in newRdmaConnection
