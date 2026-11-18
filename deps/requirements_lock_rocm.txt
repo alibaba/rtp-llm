@@ -531,7 +531,7 @@ filelock==3.20.0 \
     #   huggingface-hub
     #   torch
     #   transformers
-flydsl @ https://mirrors.aliyun.com/pypi/packages/3a/98/1be63b435e7116cf076e3bd631d1d7d390b2c2e83aa2fa78be8a70d0e0e0/flydsl-0.4.2-cp310-cp310-manylinux_2_27_x86_64.whl \
+flydsl==0.4.2 \
     --hash=sha256:7cc611464424c6949ef7c5b4839e85c0e567669016e653eae888ebe4a457a071
     # via
     #   -r internal_source/deps/requirements_rocm.txt

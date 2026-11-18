@@ -13,7 +13,7 @@ atom @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/atom
 # pin it explicitly rather than relying on AITER's transitive dependency.
 # The pinned amd-aiter 0.1.29 wheel requires FlyDSL 0.4.2.
 # requirements_lock_rocm.txt pins the artifact SHA-256.
-flydsl @ https://mirrors.aliyun.com/pypi/packages/3a/98/1be63b435e7116cf076e3bd631d1d7d390b2c2e83aa2fa78be8a70d0e0e0/flydsl-0.4.2-cp310-cp310-manylinux_2_27_x86_64.whl
+flydsl==0.4.2
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/rocm/amd_smi.tar ; platform_machine == "x86_64"
 pyrsmi==0.2.0
 pyyaml==6.0.2
