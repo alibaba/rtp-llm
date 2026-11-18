@@ -13,6 +13,7 @@ import org.flexlb.balance.scheduler.RequestSlot.AdmissionHandle;
 import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.PrefillQueueSheddingConfig;
 import org.flexlb.config.VictimStage;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
@@ -575,6 +576,34 @@ class GlobalQueueProgressTest {
         });
     }
 
+    @Test
+    void sheddingScanHasACadenceEvenWithRepeatedSchedulerWakeups() throws Exception {
+        var scanTimes = new CopyOnWriteArrayList<Long>();
+        var firstScan = new CountDownLatch(1);
+        try (Fixture f = new Fixture(RoleType.PREFILL, false, false, new PrefillQueueSheddingConfig())) {
+            when(f.router.estimateQueuedWork(any(), eq("a")))
+                    .thenReturn(new PrefillQueueShedding.Estimate(1024L, 0L, 5L, 1));
+            when(f.router.prefillPoolSnapshot("a")).thenAnswer(call -> {
+                scanTimes.add(System.nanoTime());
+                firstScan.countDown();
+                return null;
+            });
+            f.submit(2201L, "a");
+            assertTrue(firstScan.await(2, TimeUnit.SECONDS));
+            for (long id = 2202L; id < 2222L; id++) {
+                f.submit(id, "b");
+            }
+            awaitCondition(() -> f.admitted.size() == 20);
+            awaitCondition(() -> scanTimes.size() >= 2);
+            for (int index = 1, count = scanTimes.size(); index < count; index++) {
+                long gap = scanTimes.get(index) - scanTimes.get(index - 1);
+                // The snapshot is read just after the scan starts, outside the queue lock.
+                assertTrue(gap >= TimeUnit.MILLISECONDS.toNanos(75L),
+                        "scheduler wakeups must not trigger extra shedding scans; gap ns=" + gap);
+            }
+        }
+    }
+
     private static final class Fixture implements AutoCloseable {
         private final FlexlbConfig config = twoPlannerConfig();
         private final PlacementAvailability availability = new PlacementAvailability();
@@ -611,8 +640,14 @@ class GlobalQueueProgressTest {
         }
 
         private Fixture(RoleType role, boolean preempt, boolean prefillCostOrder) {
+            this(role, preempt, prefillCostOrder, null);
+        }
+
+        private Fixture(RoleType role, boolean preempt, boolean prefillCostOrder,
+                PrefillQueueSheddingConfig sheddingConfig) {
             this.role = role;
             SchedulingTestConfig.useFifoQueue(config);
+            config.queueScheduler().setPrefillQueueShedding(sheddingConfig);
             if (preempt) {
                 SchedulingTestConfig.usePriorityQueue(config);
                 SchedulingTestConfig.allowVictim(config, VictimStage.PREFILL_QUEUED);

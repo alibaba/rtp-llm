@@ -60,8 +60,7 @@ import java.util.concurrent.locks.ReentrantLock;
 final class GlobalQueueCoordinator implements AutoCloseable {
 
     private static final int MIN_PLANNER_THREADS = 1;
-    /** Decision-loop wake period while shedding is enabled; otherwise unbounded. */
-    private static final long SHED_WAKEUP_MS = 100L;
+    private static final long SHEDDING_SCAN_INTERVAL_MS = 100L;
 
     private final DefaultRouter router;
     private final BatchSchedulerReporter reporter;
@@ -76,6 +75,9 @@ final class GlobalQueueCoordinator implements AutoCloseable {
     private final ConfigService configService;
     /** Optional age-based shedding; null keeps the queue purely deadline-driven. */
     private final PrefillQueueSheddingConfig sheddingConfig;
+    private final long sheddingScanIntervalNanos;
+    // Only the decision thread advances this deadline.
+    private long nextSheddingScanNanos = System.nanoTime();
     // Decision-thread confined feedback state, keyed by routing group.
     private final Map<String, PrefillQueueShedding.Controller> sheddingControllers =
             new LinkedHashMap<>();
@@ -133,6 +135,9 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         this.priorityOrdering = resolvePriorityOrdering(checkedConfig);
         this.sheddingConfig = checkedConfig.loadBalanceConfig()
                 .queueScheduler().getPrefillQueueShedding();
+        this.sheddingScanIntervalNanos = TimeUnit.MILLISECONDS.toNanos(
+                sheddingConfig != null && sheddingConfig.getDeadlineBudget() != null
+                        ? PrefillQueueShedding.SOFT_INTERVAL_MS : SHEDDING_SCAN_INTERVAL_MS);
         this.orderedQueue = new OrderedRequestQueue(priorityOrdering);
         this.waitingRequests = new PlacementWaitQueue(priorityOrdering, availability);
         this.scanBudgetMultiplier = checkedConfig.loadBalanceConfig().queueScheduler().getScanBudgetMultiplier();
@@ -796,8 +801,12 @@ final class GlobalQueueCoordinator implements AutoCloseable {
         if (sheddingConfig == null) {
             return;
         }
-        long nowMs = System.currentTimeMillis();
         long nowNanos = System.nanoTime();
+        if (nowNanos - nextSheddingScanNanos < 0L) {
+            return;
+        }
+        nextSheddingScanNanos = nowNanos + sheddingScanIntervalNanos;
+        long nowMs = System.currentTimeMillis();
         drainArrivals();
         drainHardTimeouts();
         List<GlobalQueueEntry> expired = new ArrayList<>();
@@ -808,25 +817,25 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             if (closed.get()) {
                 return;
             }
-            for (GlobalQueueEntry entry : orderedQueue.entries()) {
+            orderedQueue.forEachEntry(entry -> {
                 if (entry.removed || entry.future.isDone()
                         || inFlight.contains(entry)) {
-                    continue;
+                    return;
                 }
                 if (entry.context.requestExpired(nowMs)) {
                     expired.add(entry);
-                    continue;
+                    return;
                 }
                 PrefillQueueShedding.Estimate estimate = entry.sheddingEstimate;
                 if (estimate == null) {
                     // Never blocked yet: only the hard deadline applies.
-                    continue;
+                    return;
                 }
                 long waitedMs = Math.max(0L, (nowNanos - entry.queuedAtNanos) / 1_000_000L);
                 pools.computeIfAbsent(entry.routingGroup, ignored -> new ArrayList<>())
                         .add(new PrefillQueueShedding.Candidate<>(
                                 entry, entry.priority, entry.sequence, estimate, waitedMs));
-            }
+            });
         } finally {
             lock.unlock();
         }
@@ -1001,7 +1010,7 @@ final class GlobalQueueCoordinator implements AutoCloseable {
             }
             // Shedding cadence needs periodic control rounds even
             // without arrivals, capacity events or completed plans.
-            changed.await(SHED_WAKEUP_MS, TimeUnit.MILLISECONDS);
+            changed.awaitNanos(nextSheddingScanNanos - System.nanoTime());
             return false;
         } catch (InterruptedException interruption) {
             if (closed.get()) {
