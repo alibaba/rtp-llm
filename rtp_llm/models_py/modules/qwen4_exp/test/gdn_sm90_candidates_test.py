@@ -1,3 +1,4 @@
+import os
 import sys
 import unittest
 from types import SimpleNamespace
@@ -45,7 +46,7 @@ class GdnSm90DispatchTest(unittest.TestCase):
         finally:
             _sm90_cp_available.cache_clear()
 
-    def test_extended_sm90_prefill_requires_opt_in(self):
+    def test_extended_sm90_prefill_default_and_override(self):
         from rtp_llm.models_py.model_desc.qwen3_next import (
             Qwen3NextGatedDeltaNetPrefill,
         )
@@ -56,13 +57,16 @@ class GdnSm90DispatchTest(unittest.TestCase):
         package = "rtp_llm.models_py.modules.qwen4_exp"
         packed = SimpleNamespace(is_cuda=True, device="cuda:0")
         inputs = SimpleNamespace(input_lengths=None, prefix_lengths=None)
-        for enabled in ("0", "1"):
+        for enabled in (None, "0", "1"):
             with self.subTest(enabled=enabled), mock.patch.dict(
-                "os.environ", {"RTP_QWEN4_SM90_GDN_EXTENDED": enabled}
+                "os.environ", {"RTP_QWEN4_SM90_GDN_EXTENDED": enabled or "1"}
             ), mock.patch.object(
                 Qwen3NextGatedDeltaNetPrefill, "__init__", return_value=None
             ):
+                if enabled is None:
+                    os.environ.pop("RTP_QWEN4_SM90_GDN_EXTENDED", None)
                 candidate = Qwen4Sm120GdnPrefill()
+            self.assertEqual(candidate.sm90_cp_extended, enabled != "0")
             output, fallback = object(), object()
             helper = mock.Mock(return_value=output)
             with (
@@ -88,8 +92,8 @@ class GdnSm90DispatchTest(unittest.TestCase):
                 ),
             ):
                 actual = candidate._fla(packed, None, None, None, 64, inputs, None)
-            self.assertIs(actual, output if enabled == "1" else fallback)
-            self.assertEqual(helper.call_count, int(enabled))
+            self.assertIs(actual, output if enabled != "0" else fallback)
+            self.assertEqual(helper.call_count, int(enabled != "0"))
 
     def test_cp_prefill_is_enabled_by_default(self):
         from rtp_llm.models_py.model_desc.qwen3_next import (
@@ -162,7 +166,8 @@ class GdnSm90CandidateTest(unittest.TestCase):
         )
 
         helper = GdnDecodeConvGateSM90Test
-        with mock.patch.dict("os.environ", {"RTP_QWEN4_SM90_GDN_EXTENDED": "1"}):
+        with mock.patch.dict("os.environ"):
+            os.environ.pop("RTP_QWEN4_SM90_GDN_EXTENDED", None)
             original_layer, candidate_layer = helper.make_pair(tp=2)
         candidate_layer.decode_gdn._packed_decode = try_packed_decode
         self.assertTrue(candidate_layer.decode_gdn._packed_verify)
@@ -235,10 +240,12 @@ class GdnSm90CandidateTest(unittest.TestCase):
             (20, 64), 0.02, device="cuda", dtype=torch.float32
         )
         layers = []
-        for enabled in ("0", "1"):
+        for enabled in ("0", None):
             with mock.patch.dict(
-                "os.environ", {"RTP_QWEN4_SM90_GDN_EXTENDED": enabled}
+                "os.environ", {"RTP_QWEN4_SM90_GDN_EXTENDED": enabled or "1"}
             ):
+                if enabled is None:
+                    os.environ.pop("RTP_QWEN4_SM90_GDN_EXTENDED", None)
                 layer = Qwen3NextGatedDeltaNet(
                     template.linear_attn_config,
                     template.parallelism_config,
@@ -372,7 +379,7 @@ class GdnSm90CandidateTest(unittest.TestCase):
         from rtp_llm.utils.model_weight import W
 
         reference, _ = GdnDecodeConvGateSM90Test.make_pair(tp=2)
-        for enabled in ("0", "1"):
+        for enabled in (None, "0", "1"):
             with self.subTest(enabled=enabled):
                 weights = dict(reference.weights)
                 weights[W.linear_attn_qkvz_s] = torch.ones(1, device="cuda")
@@ -385,8 +392,10 @@ class GdnSm90CandidateTest(unittest.TestCase):
                     ),
                 )
                 with mock.patch.dict(
-                    "os.environ", {"RTP_QWEN4_SM90_GDN_EXTENDED": enabled}
+                    "os.environ", {"RTP_QWEN4_SM90_GDN_EXTENDED": enabled or "1"}
                 ):
+                    if enabled is None:
+                        os.environ.pop("RTP_QWEN4_SM90_GDN_EXTENDED", None)
                     layer = Qwen3NextGatedDeltaNet(
                         reference.linear_attn_config,
                         reference.parallelism_config,
@@ -399,7 +408,7 @@ class GdnSm90CandidateTest(unittest.TestCase):
                 self.assertEqual(
                     getattr(layer.decode_gdn, "_packed_decode", None)
                     is try_packed_decode,
-                    enabled == "1",
+                    enabled != "0",
                 )
                 factory.create_linear.assert_not_called()
 
@@ -638,8 +647,39 @@ class GdnSm90CandidateTest(unittest.TestCase):
                     )
                 )
 
+    @torch.inference_mode()
+    def test_decode_shared_quantizer_preserves_both_scales(self):
+        from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+            scaled_fp8_per_tensor_quant,
+            sgl_per_token_group_quant_fp8,
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.gdn_decode_fp8 import _quantized_pair
+
+        with mock.patch.dict(os.environ, DSV4_FP8_QUANT_KERNEL="legacy"):
+            for batch in (16, 17, 32, 64):
+                x = torch.randn(batch, 2560, device="cuda", dtype=torch.bfloat16)
+                for gain in (1.0, 0.0, 1.0e-38, 1.0e-9, float("inf"), float("nan")):
+                    x.normal_().mul_(gain)
+                    q, scales = sgl_per_token_group_quant_fp8(
+                        x,
+                        128,
+                        eps=1e-4,
+                        column_major_scales=True,
+                        scale_tma_aligned=True,
+                    )
+                    padded = torch.empty(
+                        ((batch + 15) // 16 * 16, 2560),
+                        device=x.device,
+                        dtype=q.dtype,
+                    )
+                    ba_q, ba_scale = scaled_fp8_per_tensor_quant(x, output=padded)
+                    for actual, expected in zip(
+                        _quantized_pair(x), (q, scales, ba_q, ba_scale)
+                    ):
+                        self.assertBytesEqual(actual, expected)
+
     def test_decode_small_batch_value_tile(self):
-        for batch in (16, 32):
+        for batch in (16, 17, 32, 63, 64):
             with self.subTest(batch=batch):
                 qkv = torch.randn(batch, 5120, device="cuda", dtype=torch.bfloat16)
                 a = torch.randn(batch, 24, device="cuda", dtype=torch.bfloat16)
@@ -661,12 +701,22 @@ class GdnSm90CandidateTest(unittest.TestCase):
                     qkv, a, b, alog, bias, states, mapping, lengths, 64, value_tile=8
                 )
                 expected_state = states.clone()
-                states.copy_(initial)
-                output = try_packed_decode(
-                    qkv, a, b, alog, bias, states, mapping, lengths, 64
-                )
-                self.assertBytesEqual(output, expected)
-                self.assertBytesEqual(states, expected_state)
+                for tune_h20 in (False, True):
+                    states.copy_(initial)
+                    output = try_packed_decode(
+                        qkv,
+                        a,
+                        b,
+                        alog,
+                        bias,
+                        states,
+                        mapping,
+                        lengths,
+                        64,
+                        tune_h20=tune_h20,
+                    )
+                    self.assertBytesEqual(output, expected)
+                    self.assertBytesEqual(states, expected_state)
 
     def test_prefill_checkpoint_tail_and_prefix(self):
         for page, rows, prefix in (
@@ -832,9 +882,10 @@ class GdnSm90CandidateTest(unittest.TestCase):
         for rows, prefix, page in cases:
             with self.subTest(rows=rows, prefix=prefix, page=page):
                 with mock.patch.dict(
-                    "os.environ",
-                    {"RTP_QWEN4_SM90_GDN_EXTENDED": "1" if prefix else "0"},
+                    "os.environ", {"RTP_QWEN4_SM90_GDN_EXTENDED": "0"}
                 ):
+                    if prefix:
+                        os.environ.pop("RTP_QWEN4_SM90_GDN_EXTENDED", None)
                     owner = Qwen4Sm120GdnPrefill(
                         template.linear_attn_config,
                         template.parallelism_config,

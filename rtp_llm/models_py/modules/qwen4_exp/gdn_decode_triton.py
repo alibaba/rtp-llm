@@ -37,8 +37,12 @@ def _packed_decode(
     PAGE_SIZE: tl.constexpr,
     VALUE_TILE: tl.constexpr,
     SEQ: tl.constexpr,
+    HEADS_FIRST: tl.constexpr,
 ):
-    value_tile, row_head = tl.program_id(0), tl.program_id(1)
+    if HEADS_FIRST:
+        row_head, value_tile = tl.program_id(0), tl.program_id(1)
+    else:
+        value_tile, row_head = tl.program_id(0), tl.program_id(1)
     row, value_head = row_head // VALUE_HEADS, row_head % VALUE_HEADS
     head = value_head // (VALUE_HEADS // HEADS)
     feature = tl.arange(0, DIM)
@@ -121,6 +125,7 @@ def _run_packed_decode(
     value_tile=8,
     num_warps=1,
     sequence_length=1,
+    heads_first=False,
 ):
     tokens, features = qkv.shape
     batch = tokens // sequence_length
@@ -131,7 +136,8 @@ def _run_packed_decode(
         device=qkv.device,
         dtype=qkv.dtype,
     )
-    _packed_decode[(triton.cdiv(dimension, value_tile), batch * value_heads)](
+    grid = (triton.cdiv(dimension, value_tile), batch * value_heads)
+    _packed_decode[grid[::-1] if heads_first else grid](
         qkv,
         a,
         b,
@@ -152,6 +158,7 @@ def _run_packed_decode(
         page_size,
         value_tile,
         sequence_length,
+        heads_first,
         num_warps=num_warps,
         num_stages=3,
     )
@@ -159,7 +166,18 @@ def _run_packed_decode(
 
 
 def try_packed_decode(
-    qkv, a, b, alog, bias, states, block_map, lengths, page_size, sequence_length=1
+    qkv,
+    a,
+    b,
+    alog,
+    bias,
+    states,
+    block_map,
+    lengths,
+    page_size,
+    sequence_length=1,
+    *,
+    tune_h20=False,
 ):
     """TP2 decode/verify; native lengths use 0 padding or 2+ and per-step slots."""
     if qkv.ndim != 2 or block_map is None or lengths is None:
@@ -198,6 +216,8 @@ def try_packed_decode(
         and not any(tensor.requires_grad for tensor in (qkv, a, b, alog, bias))
     ):
         return None
+    # Spread the first wave of single-token CTAs across state heads.
+    heads_first = tune_h20 and sequence_length == 1 and 16 <= batch <= 64
     return _run_packed_decode(
         qkv,
         a,
@@ -208,6 +228,7 @@ def try_packed_decode(
         block_map,
         lengths,
         page_size,
-        value_tile=4 if batch in (16, 32) else 8,
+        value_tile=4 if heads_first or batch in (16, 32) else 8,
         sequence_length=sequence_length,
+        heads_first=heads_first,
     )

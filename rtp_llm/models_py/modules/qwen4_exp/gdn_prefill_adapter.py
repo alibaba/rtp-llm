@@ -163,7 +163,9 @@ class Qwen4Sm120GdnPrefill(Qwen3NextGatedDeltaNetPrefill):
         super().__init__(*args, **kwargs)
         self.sm90_cp_prefill = True
         self.sm90_grouped_prepare = True
-        self.sm90_cp_extended = os.environ.get("RTP_QWEN4_SM90_GDN_EXTENDED") == "1"
+        self.sm90_cp_extended = (
+            os.environ.get("RTP_QWEN4_SM90_GDN_EXTENDED", "1") == "1"
+        )
 
     def _fla(
         self,

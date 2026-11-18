@@ -48,6 +48,8 @@ class CudaFp8GEMMLinear(LinearBase):
         super().__init__(
             weight, weight_scales, input_scales, bias, quant_config, weight_scale_2
         )
+        # Model-local, measured M ranges. Configured once before inference.
+        self.flashinfer_m_ranges: tuple[tuple[int, int], ...] = ()
         self._deepgemm_linear = CudaFp8DeepGEMMLinear(
             weight=weight,
             weight_scales=weight_scales,
@@ -118,7 +120,13 @@ class CudaFp8GEMMLinear(LinearBase):
             return False
 
         m, k = input.shape
-        if m >= self.FLASHINFER_M_THRESHOLD or k != self.K:
+        if (
+            m >= self.FLASHINFER_M_THRESHOLD
+            and not any(
+                lower <= m <= upper
+                for lower, upper in getattr(self, "flashinfer_m_ranges", ())
+            )
+        ) or k != self.K:
             return False
         if input.dtype == torch.bfloat16:
             return True
@@ -133,8 +141,7 @@ class CudaFp8GEMMLinear(LinearBase):
     def forward(
         self, input: torch.Tensor, out: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        # DeepGEMM supports caller-provided output buffers; the small-M
-        # FlashInfer path currently does not.
+        # Caller-provided output buffers use DeepGEMM.
         if out is not None:
             return self._deepgemm_linear(input, out=out)
         if not self._should_use_flashinfer(input):

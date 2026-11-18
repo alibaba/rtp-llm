@@ -704,7 +704,14 @@ class Qwen4ExpDecoderLayer(Qwen3NextDecoderLayer):
             install_target_graph_all_reduce,
         )
 
-        install_target_graph_all_reduce(self.self_attn, self.mlp)
+        install_target_graph_all_reduce(
+            self.self_attn,
+            self.mlp,
+            fp8_gdn_decode=(
+                self.layer_type == HybridAttentionType.LINEAR
+                and getattr(self.self_attn, "use_sm90_gdn_fp8_decode", False)
+            ),
+        )
         # Full-attention layers only; linear-attention layers have no qk norm.
         # The checkpoint's q/k gamma is stored raw for this reason, so the fused
         # version would silently drop upstream's +1 -- see norm.py.
