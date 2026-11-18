@@ -230,6 +230,18 @@ def prepare_metadata(runtime, metadata, inputs):
         state_inputs = inputs.attention_inputs_by_tag["linear_ssm"]
         slots = state_inputs.kv_cache_block_id_device[:, 0].to(torch.int64)
         metadata.rtp_linear_prefill_slots = slots
+        attn = inputs.attention_inputs
+        prefixes, lengths = attn.prefix_lengths, attn.input_lengths
+        page_size = int(runtime.kv_cache.get_seq_size_per_block("linear"))
+        # Partial pages cannot be matched or used to resume a prefill chunk.
+        # If the batch has any complete tails, use the existing batched copy
+        # to avoid per-row gather and scatter launches in every GDN layer.
+        metadata.rtp_linear_prefill_save_tail = (
+            prefixes.device.type != "cpu"
+            or lengths.device.type != "cpu"
+            or any((prefix + length) % page_size == 0
+                   for prefix, length in zip(prefixes.tolist(), lengths.tolist()))
+        )
         metadata.rtp_linear_prefill_checkpoints = runtime._linear_db_checkpoints
         runtime._linear_db_transaction.clear()
         return
@@ -307,12 +319,14 @@ def prepare_metadata(runtime, metadata, inputs):
         metadata.rtp_hybrid_record_only = runtime._linear_db_transaction.in_place
         checkpoint = None
         if runtime._linear_db_fusion and runtime._rtp_model_config.atom_qwen4_exp_prefix_cache_enabled:
-            from atom.plugin.rtpllm.models.qwen4_exp import GDN_PREFIX_CHECKPOINT_STRIDE_BLOCKS
+            # Decode retains the most recent LINEAR pages for prefix reuse.
+            # Every accepted page boundary needs a recurrent state even when
+            # it is not a periodic checkpoint retained for the full request.
             paged = next(iter(runtime._linear_db_checkpoints.values()))
             checkpoint = (
                 runtime._linear_db_checkpoint_ptrs, metadata.spec_state_indices_tensor,
                 metadata.rtp_target_verify_sequence_lengths,
-                GDN_PREFIX_CHECKPOINT_STRIDE_BLOCKS * metadata.rtp_seq_size_per_block,
+                metadata.rtp_seq_size_per_block,
                 paged.stride(0),
             )
         runtime._linear_db_transaction.bind(
