@@ -204,10 +204,7 @@ cc_library(
         "RegisterBaseBindings.hpp",
     ],
     copts = copts(),
-    deps = select({
-        "@//:using_cuda13_x86": ["//rtp_llm/models_py/bindings/cuda/kernels:engram_transition"],
-        "//conditions:default": [],
-    }) + [
+    deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         "//rtp_llm/models_py/bindings/cuda/kernels:mla_quant_kernel",
         "//rtp_llm/models_py/bindings/cuda/kernels:deepselect_bf16",
@@ -238,10 +235,7 @@ cc_library(
     srcs = [
         "RegisterCudaOps.cc",
     ],
-    copts = copts() + ["-fno-strict-aliasing"] + select({
-        "@//:using_cuda13_x86": ["-DRTP_ENGRAM_TRANSITION_ENABLED"],
-        "//conditions:default": [],
-    }),
+    copts = copts() + ["-fno-strict-aliasing"],
     deps = [
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         "//rtp_llm/models_py/bindings/cuda/kernels:expert_load",

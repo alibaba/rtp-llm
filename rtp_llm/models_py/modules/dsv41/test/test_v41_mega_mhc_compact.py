@@ -9,6 +9,7 @@ import importlib.util
 import math
 import sys
 import unittest
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
@@ -63,19 +64,43 @@ def _units(device="cpu"):
     return previous, following, norm
 
 
-def _case(leading):
-    previous, following, norm = _units()
+def _case(leading, device="cpu"):
+    previous, following, norm = _units(device)
     tokens = math.prod(leading)
-    previous.pre_mix_out = torch.arange(tokens * 4).float().view(*leading, 4)
+    previous.pre_mix_out = (
+        torch.arange(tokens * 4, device=device).float().view(*leading, 4)
+    )
     return dict(
-        attn_out=torch.randn(*leading, 5120, dtype=torch.bfloat16),
-        residual=torch.randn(*leading, 4, 5120, dtype=torch.bfloat16),
-        post=torch.randn(*leading, 4, 1),
-        comb=torch.randn(*leading, 4, 4),
+        attn_out=torch.randn(*leading, 5120, dtype=torch.bfloat16, device=device),
+        residual=torch.randn(*leading, 4, 5120, dtype=torch.bfloat16, device=device),
+        post=torch.randn(*leading, 4, 1, device=device),
+        comb=torch.randn(*leading, 4, 4, device=device),
         previous=previous,
         next_hc=following,
         norm=norm,
     )
+
+
+@contextmanager
+def _blackwell():
+    gpu = SimpleNamespace(
+        operation=Mock(),
+        capability=Mock(return_value=(10, 0)),
+        capturing=Mock(return_value=False),
+        stream=Mock(return_value=(0, 47)),
+    )
+    with FakeTensorMode(), patch.multiple(
+        torch.cuda,
+        get_device_capability=gpu.capability,
+        device=nullcontext,
+        is_current_stream_capturing=gpu.capturing,
+    ), patch.multiple(
+        op,
+        _get_mega_mhc=Mock(return_value=gpu.operation),
+        _stream_key=gpu.stream,
+        _WARMED_STREAMS={(0, 47)},
+    ):
+        yield gpu
 
 
 class CompactMegaMHCContractTest(unittest.TestCase):
@@ -249,6 +274,213 @@ class CompactMegaMHCContractTest(unittest.TestCase):
                         self.assertFalse(eligible())
                 backend.return_value = None
                 self.assertFalse(eligible())
+
+    def test_serving_uses_prepared_positive_and_negative_decisions(self):
+        with _blackwell() as gpu:
+            case = _case((3,), "cuda:0")
+            previous, unit, norm = case["previous"], case["next_hc"], case["norm"]
+            unit.scale.requires_grad_(True)
+            with torch.enable_grad():
+                op.prepare_mega_mhc(previous, unit, norm)
+            self.assertIs(unit._mega_mhc_supported, True)
+            with torch.inference_mode():
+                with patch.object(op, "_check_units", side_effect=AssertionError):
+                    self.assertIsNotNone(
+                        op.try_fused_post_pre(**case, use_prepared=True)
+                    )
+                with torch.enable_grad():
+                    self.assertFalse(op.is_supported(**case, use_prepared=True))
+                original_scale = unit.scale
+                unit.scale = unit.scale.to(torch.float16)
+                op.prepare_mega_mhc(previous, unit, norm)
+                self.assertIs(unit._mega_mhc_supported, False)
+                with patch.object(op, "_check_units", side_effect=AssertionError):
+                    self.assertIsNone(op.try_fused_post_pre(**case, use_prepared=True))
+                unit.scale = original_scale
+                op.prepare_mega_mhc(previous, unit, norm)
+                self.assertTrue(op.is_supported(**case, use_prepared=True))
+            gpu.operation.assert_called_once()
+
+    def test_generic_entry_checks_live_weights_after_prepare(self):
+        with _blackwell(), torch.inference_mode():
+            case = _case((5,), "cuda:0")
+            previous, unit, norm = case["previous"], case["next_hc"], case["norm"]
+            op.prepare_mega_mhc(previous, unit, norm)
+            for owner, name in (
+                (unit, "fn"),
+                (unit, "scale"),
+                (unit, "base"),
+                (norm, "weight"),
+            ):
+                with self.subTest(weight=name):
+                    tensor = getattr(owner, name)
+                    with patch.object(owner, name, tensor.cpu()):
+                        self.assertFalse(op.is_supported(**case))
+                    original = tensor.data
+                    tensor.data = tensor.to(torch.float16)
+                    self.assertFalse(op.is_supported(**case))
+                    tensor.data = original
+                    tensor.unsqueeze_(0)
+                    self.assertFalse(op.is_supported(**case))
+                    tensor.squeeze_(0)
+                    self.assertTrue(op.is_supported(**case))
+
+    def test_prepared_units_keep_per_call_shape_and_stream_checks(self):
+        with _blackwell() as gpu, torch.inference_mode():
+            device = "cuda:0"
+            previous, following, norm = _units(device)
+            args = (previous, following, norm)
+
+            def compact_supported():
+                return op.can_preserve_compact_mhc(
+                    *args, original_tokens=4096, compact_tokens=32, use_prepared=True
+                )
+
+            # Independently constructed or JIT warmup modules use a live check.
+            self.assertTrue(compact_supported())
+            gpu.capability.assert_called_once()
+            op.prepare_mega_mhc(*args)
+            gpu.capability.reset_mock()
+            self.assertTrue(compact_supported())
+            for leading in ((1,), (5120,), (2, 5), (32, 7)):
+                with self.subTest(leading=leading):
+                    x = torch.empty(*leading, 5120, dtype=torch.bfloat16, device=device)
+                    residual = x.new_empty((*leading, 4, 5120))
+                    post = torch.empty(*leading, 4, 1, device=device)
+                    comb = torch.empty(*leading, 4, 4, device=device)
+                    previous.pre_mix_out = post.squeeze(-1)
+                    self.assertTrue(
+                        op.is_supported(
+                            x, residual, post, comb, *args, use_prepared=True
+                        )
+                    )
+                    self.assertFalse(
+                        op.is_supported(
+                            x,
+                            residual,
+                            post,
+                            comb.transpose(-1, -2),
+                            *args,
+                            use_prepared=True,
+                        )
+                    )
+            gpu.capturing.return_value = True
+            self.assertTrue(compact_supported())
+            gpu.stream.return_value = (0, 48)
+            self.assertFalse(compact_supported())
+            self.assertFalse(
+                op.is_supported(x, residual, post, comb, *args, use_prepared=True)
+            )
+            gpu.capturing.return_value = False
+            self.assertFalse(
+                op.is_supported(
+                    x,
+                    residual,
+                    post,
+                    comb,
+                    following,
+                    following,
+                    norm,
+                    use_prepared=True,
+                )
+            )
+            self.assertFalse(
+                op.is_supported(
+                    x,
+                    residual,
+                    post,
+                    comb,
+                    previous,
+                    following,
+                    RMSNorm(),
+                    use_prepared=True,
+                )
+            )
+            # Exercise a different input device without allocating on a second GPU.
+            self.assertFalse(
+                op._units_supported(*args, torch.device("cuda:1"), use_prepared=True)
+            )
+            gpu.capability.assert_not_called()
+
+    def test_eager_prefill_checks_the_stream_once_for_variable_inputs(self):
+        device = torch.device("cuda:0")
+        with _blackwell() as gpu, torch.inference_mode():
+            op._WARMED_STREAMS.clear()
+            cases = [_case(shape, device) for shape in ((1,), (13,), (4, 7))]
+            for case in cases:
+                op.prepare_mega_mhc(case["previous"], case["next_hc"], case["norm"])
+            with patch.object(torch.cuda, "device", wraps=nullcontext) as select_device:
+                with op.prefill_mhc_stream(device):
+                    for case in cases:
+                        self.assertIsNotNone(
+                            op.try_fused_post_pre(**case, use_prepared=True)
+                        )
+                    self.assertTrue(
+                        op.can_preserve_compact_mhc(
+                            case["previous"],
+                            case["next_hc"],
+                            case["norm"],
+                            original_tokens=4096,
+                            compact_tokens=32,
+                            use_prepared=True,
+                        )
+                    )
+                select_device.assert_called_once_with(device)
+            gpu.capturing.assert_called_once()
+            gpu.stream.assert_called_once_with(device)
+            self.assertEqual(gpu.operation.call_count, len(cases))
+            self.assertEqual(op._WARMED_STREAMS, {(0, 47)})
+            # A separate caller recording on this warmed stream can now fuse.
+            gpu.capturing.return_value = True
+            self.assertIsNotNone(op.try_fused_post_pre(**case))
+
+    def test_eager_prefill_registers_only_after_a_successful_fused_call(self):
+        device = torch.device("cuda:0")
+        with _blackwell() as gpu, torch.inference_mode():
+            case = _case((3,), device)
+            op.prepare_mega_mhc(case["previous"], case["next_hc"], case["norm"])
+            op._WARMED_STREAMS.clear()
+            with op.prefill_mhc_stream(device):
+                self.assertFalse(op._WARMED_STREAMS)
+                with patch.object(case["previous"], "pre_mix_out", None):
+                    self.assertIsNone(op.try_fused_post_pre(**case, use_prepared=True))
+                gpu.operation.assert_not_called()
+                self.assertFalse(op._WARMED_STREAMS)
+                gpu.operation.side_effect = RuntimeError("backend failure")
+                with self.assertRaisesRegex(RuntimeError, "backend failure"):
+                    op.try_fused_post_pre(**case, use_prepared=True)
+                self.assertFalse(op._WARMED_STREAMS)
+            gpu.capturing.return_value = True
+            self.assertIsNone(op.try_fused_post_pre(**case, use_prepared=True))
+
+    def test_prefill_scope_keeps_capture_and_other_devices_checked(self):
+        device = torch.device("cuda:0")
+        other = torch.device("cuda:1")
+        with _blackwell() as gpu, torch.inference_mode():
+            case = _case((3,), device)
+            op.prepare_mega_mhc(case["previous"], case["next_hc"], case["norm"])
+            gpu.capturing.return_value = True
+            with op.prefill_mhc_stream(device):
+                self.assertIsNotNone(op.try_fused_post_pre(**case, use_prepared=True))
+                gpu.stream.return_value = (0, 48)
+                self.assertIsNone(op.try_fused_post_pre(**case, use_prepared=True))
+
+            # The scope and stream queries for GPU 1 are mocked. Keep tensors
+            # on GPU 0 so this also runs with just one visible CUDA device.
+            op._WARMED_STREAMS.clear()
+            op._WARMED_STREAMS.add((1, 47))
+            gpu.stream.side_effect = lambda d: (d.index, 47)
+            gpu.capturing.return_value = False
+            with op.prefill_mhc_stream(other):
+                gpu.capturing.return_value = True
+                self.assertIsNone(op.try_fused_post_pre(**case, use_prepared=True))
+            gpu.capturing.return_value = False
+            with op.prefill_mhc_stream(device):
+                # A standalone caller still checks the current stream.
+                gpu.capturing.return_value = True
+                self.assertIsNone(op.try_fused_post_pre(**case))
+            gpu.operation.assert_called_once()
+            self.assertEqual(op._WARMED_STREAMS, {(1, 47)})
 
     @torch.inference_mode()
     def test_padding_zero_initialization_and_output_storage_without_base(self):
