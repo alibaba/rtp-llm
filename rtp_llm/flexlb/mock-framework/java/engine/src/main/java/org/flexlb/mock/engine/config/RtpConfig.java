@@ -22,14 +22,16 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
     private static final Map<String, String> KVCM_ENV_BINDINGS = Map.of(
         "RECO_ENABLE_VIPSERVER", "kvcm_enable_vipserver",
         "RECO_VIPSERVER_DOMAIN", "kvcm_vipserver_domain",
-        "RECO_SERVER_ADDRESS", "kvcm_server_address");
+        "RECO_SERVER_ADDRESS", "kvcm_server_address",
+        "RECO_INSTANCE_GROUP", "kvcm_instance_group",
+        "RECO_INSTANCE_ID_SALT", "kvcm_instance_id_salt");
     private static final Set<String> COMMON = Set.of(
         "prefill_cp_size", "image_token_id", "cache_key_hash_seed", "test_block_num", "reserve_block_ratio", "seq_size_per_block", "reuse_cache",
         "enable_device_cache", "disable_decode_first_malloc_device_reuse", "max_seq_len", "max_batch_tokens_size", "max_context_batch_size", "cp_force_single_prefill",
         "kv_cache_event_publisher_type", "kv_cache_event_manager_endpoint", "kv_cache_event_instance_id",
         "kv_cache_event_instance_group", "kv_cache_event_host_ip_port", "kv_cache_event_snapshot_interval_ms",
         "kvcm_enable_vipserver", "kvcm_vipserver_domain", "kvcm_server_address",
-        "enable_remote_cache", "model_name", "concurrency_limit", "enable_memory_cache");
+        "kvcm_instance_group", "kvcm_instance_id_salt", "enable_remote_cache", "model_name", "concurrency_limit", "enable_memory_cache");
 
     public RtpConfig {
         if (id == null || id.isBlank() || (role != Role.prefill && role != Role.decode)
@@ -78,8 +80,6 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
             if (role != Role.prefill || !nativeBool(config, "reuse_cache", false)
                     || !nativeBool(config, "enable_device_cache", true))
                 throw new IllegalArgumentException("Mock Remote requires Prefill with local reuse enabled");
-            if (config.path("mock.cache.remote.instance.id").asText().isBlank())
-                throw new IllegalArgumentException("Missing mock.cache.remote.instance.id");
             nativeInt(config, "mock.cache.remote.read.timeout.ms", 20, 1, 1000);
         }
         nativeInt(config, "kv_cache_event_snapshot_interval_ms", 600000, 1, Integer.MAX_VALUE);
@@ -170,7 +170,8 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
         }
         if (remoteCache()) {
             result.put("enable_remote_cache", true)
-                .put("mock.cache.remote.instance.id", business.path("mock.cache.remote.instance.id").asText())
+                .put("kvcm_instance_group", business.path("kvcm_instance_group").asText("default"))
+                .put("kvcm_instance_id_salt", business.path("kvcm_instance_id_salt").asText())
                 .put("mock.cache.remote.read.timeout.ms", nativeInt(business, "mock.cache.remote.read.timeout.ms", 20, 1, 1000));
         }
         result.setAll((ObjectNode) compute.effectiveSettings());
@@ -216,7 +217,7 @@ public record RtpConfig(String id, Role role, int physicalBlockSize, int deviceB
 
     static Set<String> mockNames() {
         var names = new HashSet<>(ComputeModel.settingNames());
-        names.addAll(Set.of("mock.scheduler.mode", "mock.cache.total.blocks", "mock.cache.remote.instance.id",
+        names.addAll(Set.of("mock.scheduler.mode", "mock.cache.total.blocks",
             PREFILL_OVERHEAD_MS, "mock.cache.remote.endpoint", "mock.cache.remote.read.timeout.ms"));
         return Set.copyOf(names);
     }
