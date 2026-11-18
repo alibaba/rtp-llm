@@ -26,6 +26,10 @@ public:
         pb->set_slice_mode(static_cast<int32_t>(route.src_slice.mode));
         pb->set_slice_count(route.src_slice.count);
         pb->set_slice_index(route.src_slice.index);
+        pb->set_slice_payload_bytes(route.src_slice_payload_bytes);
+        for (const auto& layer : route.layers) {
+            pb->add_prefill_layer_ids(layer.src_local_id);
+        }
     }
 
     /// @brief 编码给 decode worker：它需要 route_id、自己的 dst_partition / dst_slice，
@@ -38,6 +42,7 @@ public:
         pb->set_slice_mode(static_cast<int32_t>(route.dst_slice.mode));
         pb->set_slice_count(route.dst_slice.count);
         pb->set_slice_index(route.dst_slice.index);
+        pb->set_slice_payload_bytes(route.dst_slice_payload_bytes);
     }
 
     /// @brief 解码出「本侧」的执行参数。方向已在编码时确定，故这里无需再区分。

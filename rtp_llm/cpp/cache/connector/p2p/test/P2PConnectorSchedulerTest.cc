@@ -17,6 +17,8 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerPrefillRead.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/PipelineLayoutCodec.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
@@ -39,6 +41,31 @@ protected:
         size_t                                      free_blocks_before{0};
         size_t                                      held_blocks{0};
     };
+
+    ErrorInfo sendPrefillKV(const std::string&                                   unique_key,
+                            int64_t                                              request_id,
+                            const std::vector<std::pair<std::string, uint32_t>>& workers,
+                            int64_t                                              deadline_ms,
+                            std::function<bool()>                                is_cancelled,
+                            int64_t                                              request_deadline_ms) {
+        const int  tp_size = static_cast<int>(workers.size());
+        const auto plan    = prefill_scheduler_->planFor(tp_size, unique_key);
+        if (!plan->ok()) {
+            return plan->error;
+        }
+        const auto prepared =
+            prefill_scheduler_->preparePlan(tp_size, plan->plan.digest(), unique_key, workers.size(), {});
+        if (!prepared.ok()) {
+            return prepared.status();
+        }
+        return prefill_scheduler_->sendKVCache(unique_key,
+                                               request_id,
+                                               workers,
+                                               deadline_ms,
+                                               &prepared.value(),
+                                               std::move(is_cancelled),
+                                               request_deadline_ms);
+    }
 
     void SetUp() override {
         // 创建测试用的 RPC 服务器（用于 P2PBroadcastClient）
@@ -377,7 +404,7 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnOK_BroadcastSuccess) {
     auto deadline_ms = currentTimeMs() + 1000;
 
     ErrorInfo error_info =
-        prefill_scheduler_->sendKVCache("test_broadcast_success", 1001, decode_transfer_servers, deadline_ms, nullptr, false, deadline_ms);
+        sendPrefillKV("test_broadcast_success", 1001, decode_transfer_servers, deadline_ms, nullptr, deadline_ms);
 
     EXPECT_TRUE(error_info.ok());
 
@@ -388,29 +415,29 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnOK_BroadcastSuccess) {
     }
 }
 
-TEST_F(P2PConnectorSchedulerTest, HandleReadBroadcastsOnlyDecodeActiveRoutes) {
-    const std::string unique_key = "test_active_route_filter";
-    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers = {
-        {"127.0.0.1", 12345}, {"127.0.0.1", 12346}};
-    const auto plan = prefill_scheduler_->planFor(static_cast<int>(decode_transfer_servers.size()), unique_key);
+TEST_F(P2PConnectorSchedulerTest, HandleReadReusesPreparedPlanAndBroadcastsOnlyActiveRoutes) {
+    const std::string                             unique_key              = "test_active_route_filter";
+    std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers = {{"127.0.0.1", 12345},
+                                                                             {"127.0.0.1", 12346}};
+    auto plan = prefill_scheduler_->planFor(static_cast<int>(decode_transfer_servers.size()), unique_key);
     ASSERT_TRUE(plan->ok()) << plan->error.ToString();
     ASSERT_GT(plan->plan.routes.size(), 1u);
 
-    const int selected_route_id = plan->plan.routes.back().route_id;
-    const auto deadline_ms      = currentTimeMs() + 1000;
-    const auto error_info       = prefill_scheduler_->sendKVCache(unique_key,
-                                                            1011,
-                                                            decode_transfer_servers,
-                                                            deadline_ms,
-                                                            nullptr,
-                                                            false,
-                                                            deadline_ms,
-                                                            {selected_route_id});
+    const int  selected_route_id = plan->plan.routes.back().route_id;
+    const auto prepared = prefill_scheduler_->preparePlan(2, plan->plan.digest(), unique_key, 2, {selected_route_id});
+    ASSERT_TRUE(prepared.ok()) << prepared.status().ToString();
+    plan.reset();
+    prefill_scheduler_->plan_cache_.clear();
+    const auto deadline_ms = currentTimeMs() + 1000;
+    const auto error_info  = prefill_scheduler_->sendKVCache(
+        unique_key, 1011, decode_transfer_servers, deadline_ms, &prepared.value(), nullptr, deadline_ms);
     ASSERT_TRUE(error_info.ok()) << error_info.ToString();
+    EXPECT_TRUE(prefill_scheduler_->plan_cache_.empty());
 
     size_t broadcast_route_count = 0;
     for (const auto& server : tp_broadcast_servers_) {
         const auto request = server->service()->getLastBroadcastTpRequest();
+        EXPECT_EQ(request.plan_digest(), prepared.value().digest);
         for (const auto& route : request.routes()) {
             EXPECT_EQ(route.route_id(), selected_route_id);
             ++broadcast_route_count;
@@ -441,8 +468,8 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_FiltersLinearLayersByAttentionType)
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
 
-    ErrorInfo error_info =
-        prefill_scheduler_->sendKVCache("test_linear_filter", 1009, decode_transfer_servers, currentTimeMs() + 1000, nullptr, false, currentTimeMs() + 1000);
+    ErrorInfo error_info = sendPrefillKV(
+        "test_linear_filter", 1009, decode_transfer_servers, currentTimeMs() + 1000, nullptr, currentTimeMs() + 1000);
 
     ASSERT_TRUE(error_info.ok());
     const auto rank0_request = tp_broadcast_servers_[0]->service()->getLastBroadcastTpRequest();
@@ -471,7 +498,7 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnError_BroadcastPartialFailed)
     auto deadline_ms = currentTimeMs() + 1000;
 
     ErrorInfo error_info =
-        prefill_scheduler_->sendKVCache("test_broadcast_all_fail", 1003, decode_transfer_servers, deadline_ms, nullptr, false, deadline_ms);
+        sendPrefillKV("test_broadcast_all_fail", 1003, decode_transfer_servers, deadline_ms, nullptr, deadline_ms);
 
     EXPECT_TRUE(error_info.hasError());
 
@@ -494,7 +521,7 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnError_BroadcastTimeout) {
     auto deadline_ms = currentTimeMs() + 50;
 
     ErrorInfo error_info =
-        prefill_scheduler_->sendKVCache("test_broadcast_timeout", 1004, decode_transfer_servers, deadline_ms, nullptr, false, deadline_ms);
+        sendPrefillKV("test_broadcast_timeout", 1004, decode_transfer_servers, deadline_ms, nullptr, deadline_ms);
 
     EXPECT_TRUE(error_info.hasError());
     EXPECT_EQ(error_info.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT);
@@ -518,9 +545,14 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ExitsImmediately_AfterCancelDoneEve
     }
     const auto deadline = currentTimeMs() + 30000;
     std::atomic<bool> cancelled{false};
-    auto sending = std::async(std::launch::async, [&] {
-        return prefill_scheduler_->sendKVCache("test_exit_after_cancel_done", 4007,
-            {{"127.0.0.1", 12345}}, deadline, [&] { return cancelled.load(); }, false, deadline);
+    auto              sending = std::async(std::launch::async, [&] {
+        return sendPrefillKV(
+            "test_exit_after_cancel_done",
+            4007,
+            {{"127.0.0.1", 12345}},
+            deadline,
+            [&] { return cancelled.load(); },
+            deadline);
     });
     for (auto& ready : entered) {
         const auto state = ready.wait_for(std::chrono::seconds(5));
@@ -570,7 +602,8 @@ TEST_F(P2PConnectorSchedulerTest, HandleRead_ReturnFalse_BroadcastCancelled) {
         cancelled = true;
     });
 
-    ErrorInfo error_info = prefill_scheduler_->sendKVCache("test_broadcast_cancelled", 1005, decode_transfer_servers, deadline_ms, is_cancelled, false, request_deadline_ms);
+    ErrorInfo error_info = sendPrefillKV(
+        "test_broadcast_cancelled", 1005, decode_transfer_servers, deadline_ms, is_cancelled, request_deadline_ms);
 
     cancel_thread.join();
 
@@ -902,6 +935,105 @@ TEST_F(P2PConnectorSchedulerTest, AsyncReadCpSendsCompletePagesToEachDecodeWorke
     }
     const auto request = prefill_server_->service()->getLastStartLoadRequest();
     EXPECT_EQ(std::set<int>(request.active_route_ids().begin(), request.active_route_ids().end()), all_routes);
+}
+
+TEST_F(P2PConnectorSchedulerTest, AsymmetricPipelineProjectsSharedBlocksAndExactPrefillLayers) {
+    // Both Stage 0 allocators own both tags. Global layer 2 belongs to Prefill
+    // Stage 0 and Decode Stage 1, where local layer 0 uses a different tag
+    // from the allocator's own local layer 0.
+    const std::vector<std::vector<int>> layer_groups{{0}, {1}, {1}, {0}, {1}, {0}};
+    const auto                          make_layout = [&](const std::vector<int>& cuts, RoleType role) {
+        P2PPipelineLayoutPB layout;
+        layout.set_worker_count(cuts.size());
+        int begin = 0;
+        for (int count : cuts) {
+            auto* stage = layout.add_stages();
+            stage->set_main_layer_begin(begin);
+            stage->set_main_layer_count(count);
+            stage->add_worker_indices(layout.stages_size() - 1);
+            const std::vector<std::vector<int>> groups(layer_groups.begin() + begin,
+                                                       layer_groups.begin() + begin + count);
+            const auto                          topology = test::makeTestCacheTopology(2, count, groups);
+            encodeP2PShardLayout(ShardLayoutFactory::fromTopology(*topology, ParallelismConfig{}, role, 1),
+                                 stage->mutable_main_shards());
+            for (const auto& layer : topology->layers()) {
+                auto* layer_pb = stage->add_layers();
+                for (const auto& tag : layer.group_tags) {
+                    layer_pb->add_tags(tag);
+                }
+            }
+            begin += count;
+        }
+        return layout.SerializeAsString();
+    };
+    P2PConnectorSchedulerConfig decode_config;
+    decode_config.parallelism_config.pp_size = 2;
+    decode_config.topology                   = test::makeTestCacheTopology(2, 2, {{0}, {1}});
+    decode_config.pipeline_layout            = make_layout({2, 4}, RoleType::DECODE);
+    decode_config.worker_grpc_addrs          = tp_broadcast_addrs_;
+    for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
+        decode_config.worker_addrs.push_back("127.0.0.1:" + std::to_string(12345 + i) + ":"
+                                             + std::to_string(tp_broadcast_servers_[i]->listenPort()));
+    }
+    rebuildSchedulers(decode_config);
+    const auto prefill_layout = make_layout({3, 3}, RoleType::PREFILL);
+    auto       resource       = createValidKVCacheResource();
+    resource->mutableBlockIds("group0").assign({10, 11});
+    resource->mutableBlockIds("group1").assign({20, 21});
+    auto meta = createMockMeta(2013, "pp-shared-block-table", currentTimeMs() + 5000);
+    meta->setPrefillPipelineLayout(prefill_layout);
+    auto read = decode_scheduler_->asyncRead(resource, meta, {1, 1});
+    ASSERT_TRUE(read.ok()) << read.error_info.ToString();
+    ASSERT_NE(read.context, nullptr);
+    waitAsyncContextDone(read.context);
+    ASSERT_TRUE(read.context->success());
+
+    const auto request = prefill_server_->service()->getLastStartLoadRequest();
+    ASSERT_EQ(request.decode_pipeline_layout(), decode_config.pipeline_layout);
+    P2PConnectorSchedulerConfig prefill_config;
+    prefill_config.parallelism_config.pp_size = 2;
+    prefill_config.worker_grpc_addrs          = tp_broadcast_addrs_;
+    prefill_config.topology                   = test::makeTestCacheTopology(2, 3, {{0}, {1}, {1}});
+    prefill_config.pipeline_layout            = prefill_layout;
+    P2PSchedulerPrefillRead prefill(prefill_config, nullptr, nullptr);
+    const auto prepared = prefill.preparePlan(1,
+                                              request.plan_digest(),
+                                              request.unique_key(),
+                                              request.workers_size(),
+                                              {request.active_route_ids().begin(), request.active_route_ids().end()},
+                                              request.decode_pipeline_layout());
+    ASSERT_TRUE(prepared.ok()) << prepared.status().ToString();
+    const auto sends = prefill.buildPrefillRankRoutes(*prepared.value().plan, 2, prepared.value().active_route_ids);
+    std::map<std::pair<int, int>, std::pair<int, int>> endpoints;
+    for (int stage = 0; stage < 2; ++stage) {
+        for (const auto& route : sends[stage]) {
+            for (int local_layer : route.prefill_layer_ids()) {
+                EXPECT_TRUE(endpoints
+                                .emplace(std::make_pair(route.route_id(), 3 * stage + local_layer),
+                                         std::make_pair(stage, route.peer_index()))
+                                .second);
+            }
+        }
+    }
+    std::set<int> received_layers;
+    for (int stage = 0; stage < 2; ++stage) {
+        const auto rd = tp_broadcast_servers_[stage]->service()->getLastBroadcastTpRequest();
+        EXPECT_EQ(rd.plan_digest(), request.plan_digest());
+        for (const auto& route : rd.routes()) {
+            for (const auto& layer : route.layer_blocks()) {
+                const int  global_layer = 2 * stage + layer.layer_id();
+                const auto sender       = endpoints.find({route.route_id(), global_layer});
+                ASSERT_NE(sender, endpoints.end());
+                EXPECT_EQ(sender->second, std::make_pair(global_layer / 3, stage));
+                ASSERT_EQ(layer.cache_keys_size(), 1);
+                EXPECT_EQ(layer.cache_keys(0), 1001);
+                EXPECT_EQ(layer.block_ids(0), layer_groups.at(global_layer).front() == 0 ? 11 : 21);
+                EXPECT_TRUE(received_layers.insert(global_layer).second);
+            }
+        }
+    }
+    EXPECT_EQ(received_layers, (std::set<int>{0, 1, 2, 3, 4, 5}));
+    EXPECT_EQ(endpoints.size(), received_layers.size());
 }
 
 TEST_F(P2PConnectorSchedulerTest, DecodeCompactStateProjectsUsingPrefillCpSize) {
@@ -1258,7 +1390,8 @@ TEST_F(P2PConnectorSchedulerTest, SendKVCache_ReturnError_WhenBroadcastExceedsDe
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
 
     const int64_t deadline_ms = currentTimeMs() + 80;
-    ErrorInfo     error_info  = prefill_scheduler_->sendKVCache("test_prefill_broadcast_past_deadline", 4006, decode_transfer_servers, deadline_ms, nullptr, false, deadline_ms);
+    ErrorInfo     error_info  = sendPrefillKV(
+        "test_prefill_broadcast_past_deadline", 4006, decode_transfer_servers, deadline_ms, nullptr, deadline_ms);
 
     EXPECT_TRUE(error_info.hasError());
     EXPECT_EQ(error_info.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT);
@@ -1945,6 +2078,7 @@ TEST(P2PReplicaPlanTest, BothSchedulersRotateMirrorPlansAndBoundCacheBySourceRan
     P2PConnectorSchedulerConfig prefill_config;
     prefill_config.topology                   = topology;
     prefill_config.parallelism_config.tp_size = 8;
+    prefill_config.worker_grpc_addrs.resize(8);
     P2PConnectorSchedulerConfig decode_config;
     decode_config.topology                   = topology;
     decode_config.parallelism_config.tp_size = 1;
@@ -1960,17 +2094,20 @@ TEST(P2PReplicaPlanTest, BothSchedulersRotateMirrorPlansAndBoundCacheBySourceRan
         ASSERT_EQ(d_plan->plan.routes.size(), 1u);
         selected.insert(d_plan->plan.routes.front().src_rank);
         EXPECT_EQ(d_plan->plan.digest(), p_plan->plan.digest());
-        EXPECT_TRUE(prefill.checkPlanDigest(1, d_plan->plan.digest(), key).ok());
+        const auto prepared = prefill.preparePlan(1, d_plan->plan.digest(), key, 1, {});
+        ASSERT_TRUE(prepared.ok()) << prepared.status().ToString();
+        EXPECT_EQ(prepared.value().plan.get(), &p_plan->plan);
         EXPECT_EQ(decode.planFor(8, 1, key), d_plan);
         EXPECT_EQ(prefill.planFor(1, key), p_plan);
     }
     EXPECT_EQ(selected.size(), 8u);
     EXPECT_EQ(decode.plan_cache_.size(), 8u);
     EXPECT_EQ(prefill.plan_cache_.size(), 8u);
-    const auto first = decode.planFor(8, 1, "decode-dp-0");
-    const auto error = prefill.checkPlanDigest(1, first->plan.digest(), "decode-dp-1");
-    EXPECT_EQ(error.code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
-    EXPECT_NE(error.ToString().find("plan digest mismatch"), std::string::npos);
+    const auto first      = decode.planFor(8, 1, "decode-dp-0");
+    const auto mismatched = prefill.preparePlan(1, first->plan.digest(), "decode-dp-1", 1, {});
+    ASSERT_FALSE(mismatched.ok());
+    EXPECT_EQ(mismatched.status().code(), ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED);
+    EXPECT_NE(mismatched.status().ToString().find("plan digest mismatch"), std::string::npos);
     for (int peer_tp = 2; peer_tp <= 16; ++peer_tp) {
         ASSERT_TRUE(prefill.planFor(peer_tp, "decode-dp-0")->ok());
         EXPECT_LE(prefill.plan_cache_.size(), 8u);

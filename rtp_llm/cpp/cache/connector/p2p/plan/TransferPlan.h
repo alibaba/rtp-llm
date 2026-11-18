@@ -97,6 +97,8 @@ struct TransferRoute {
     size_t cache_key_tokens_per_block = 0;
     size_t group_tokens_per_block     = 0;
     std::vector<LayerMapping> layers                     = {};
+    size_t                    src_slice_payload_bytes    = 0;
+    size_t                    dst_slice_payload_bytes    = 0;
 };
 
 struct TransferPlan {

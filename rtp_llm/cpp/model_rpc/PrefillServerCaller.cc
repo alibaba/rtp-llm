@@ -334,8 +334,10 @@ grpc::Status PrefillServerCaller::callPrefillToAddr(grpc::ServerContext*        
     return status;
 }
 
-ErrorResult<PrefillPeerInfo>
-PrefillServerCaller::getPrefillPeerInfo(const std::string& ip, uint32_t port, int32_t request_timeout_ms) {
+ErrorResult<PrefillPeerInfo> PrefillServerCaller::getPrefillPeerInfo(const std::string& ip,
+                                                                     uint32_t           port,
+                                                                     int32_t            request_timeout_ms,
+                                                                     int                decode_pp_size) {
     std::string addr = formatGrpcHostPort(ip, port);
     if (addr.empty()) {
         RTP_LLM_LOG_WARNING("getPrefillPeerInfo: invalid prefill grpc address, ip: %s, port: %u", ip.c_str(), port);
@@ -356,6 +358,7 @@ PrefillServerCaller::getPrefillPeerInfo(const std::string& ip, uint32_t port, in
     ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(probe_timeout_ms));
 
     GetPeerInfoRequestPB  request;
+    request.set_requester_pp_size(decode_pp_size);
     GetPeerInfoResponsePB response;
     auto                  status = conn.value().stub->GetPeerInfo(&ctx, request, &response);
 
@@ -367,6 +370,7 @@ PrefillServerCaller::getPrefillPeerInfo(const std::string& ip, uint32_t port, in
     }
 
     PrefillPeerInfo info;
+    info.pipeline_layout = std::move(*response.mutable_pipeline_layout());
     info.tp_size = response.tp_size();
     if (info.tp_size <= 0) {
         RTP_LLM_LOG_ERROR("getPrefillPeerInfo: invalid tp_size=%d from %s", info.tp_size, addr.c_str());

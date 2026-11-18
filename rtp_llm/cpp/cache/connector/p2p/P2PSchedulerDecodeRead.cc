@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PSchedulerDecodeRead.h"
 
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/PipelineLayoutCodec.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/RouteCodec.h"
 #include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -118,10 +119,12 @@ ErrorInfo P2PSchedulerDecodeRead::checkPeerCpLayout(int prefill_tp_size, int pre
     return ErrorInfo::OkStatus();
 }
 
-std::shared_ptr<const PlanResult>
-P2PSchedulerDecodeRead::planFor(int prefill_tp_size, int prefill_cp_size, const std::string& unique_key) {
+std::shared_ptr<const PlanResult> P2PSchedulerDecodeRead::planFor(int                prefill_tp_size,
+                                                                  int                prefill_cp_size,
+                                                                  const std::string& unique_key,
+                                                                  const std::string& prefill_pipeline_layout) {
     const auto offset = KVCacheTransferPlanner::sourceReplicaOffset(unique_key, prefill_tp_size);
-    const auto key    = std::make_tuple(prefill_tp_size, prefill_cp_size, offset);
+    const auto key    = std::make_tuple(prefill_tp_size, prefill_cp_size, offset, prefill_pipeline_layout);
     {
         std::lock_guard<std::mutex> lock(plan_cache_mutex_);
         auto                        it = plan_cache_.find(key);
@@ -130,17 +133,20 @@ P2PSchedulerDecodeRead::planFor(int prefill_tp_size, int prefill_cp_size, const 
         }
     }
 
-    // Decode uses its local topology and derives the Prefill layout from the peer TP and CP widths.
-    auto dst_layout = ShardLayoutFactory::fromTopology(
-        *config_.topology, config_.parallelism_config, RoleType::DECODE, config_.cache_key_tokens_per_block);
-    dst_layout.use_group_cache_transfer_policy = config_.use_group_cache_transfer_policy;
-    dst_layout.use_mla                         = config_.use_mla;
-    const auto src_layout =
-        ShardLayoutFactory::peerOf(dst_layout, prefill_tp_size, prefill_cp_size > 1, RoleType::PREFILL);
-    const auto tags = ShardLayoutFactory::tagsOf(*config_.topology);
-
-    auto result =
-        std::make_shared<const PlanResult>(KVCacheTransferPlanner::plan(src_layout, dst_layout, tags, offset));
+    std::shared_ptr<const PlanResult> result;
+    if (config_.parallelism_config.pp_size > 1 || !prefill_pipeline_layout.empty()) {
+        result = std::make_shared<const PlanResult>(
+            planP2PPipelineTransfer(prefill_pipeline_layout, config_.pipeline_layout, unique_key));
+    } else {
+        auto dst_layout = ShardLayoutFactory::fromTopology(
+            *config_.topology, config_.parallelism_config, RoleType::DECODE, config_.cache_key_tokens_per_block);
+        dst_layout.use_group_cache_transfer_policy = config_.use_group_cache_transfer_policy;
+        dst_layout.use_mla                         = config_.use_mla;
+        const auto src_layout =
+            ShardLayoutFactory::peerOf(dst_layout, prefill_tp_size, prefill_cp_size > 1, RoleType::PREFILL);
+        result = std::make_shared<const PlanResult>(KVCacheTransferPlanner::plan(
+            src_layout, dst_layout, ShardLayoutFactory::tagsOf(*config_.topology), offset));
+    }
 
     if (!result->ok()) {
         return result;
@@ -199,6 +205,13 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&        plan,
 
     const auto layout = ShardLayoutFactory::fromTopology(
         *config_.topology, config_.parallelism_config, RoleType::DECODE, config_.cache_key_tokens_per_block);
+    for (const auto& route : plan.routes) {
+        if (route.dst_rank < 0 || static_cast<size_t>(route.dst_rank) >= worker_num
+            || !layout.hasGroup(route.cache_tag)) {
+            return ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
+                             "Decode route has no destination worker or shared cache tag=" + route.cache_tag);
+        }
+    }
     for (size_t worker_rank = 0; worker_rank < worker_num; ++worker_rank) {
         for (const auto* route : plan.forDecodeRank(static_cast<int>(worker_rank))) {
             auto positions = KVCacheTransferPlanner::resolveKeys(route->src_keys, logical_count);
@@ -213,26 +226,10 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&        plan,
             }
             const int cp_size = layout.physicalCpSize(route->cache_tag);
             // COMPACT keeps the same state slots on every Decode rank; FULL uses identity mapping.
-            const int worker_cp_rank = 0;
-            auto      layer_buffers  = LayerCacheBufferUtil::convertTagForRoute(resource,
-                                                                          *config_.topology,
-                                                                          route->cache_tag,
-                                                                          positions,
-                                                                          worker_cp_rank,
-                                                                          cp_size,
-                                                                          config_.cache_key_tokens_per_block,
-                                                                          config_.decode_transfer_layer_end);
-            if (!layer_buffers.ok()) {
-                return ErrorInfo(layer_buffers.status().code(),
-                                 "decode route=" + std::to_string(route->route_id) + " worker_rank="
-                                     + std::to_string(worker_rank) + ": " + layer_buffers.status().ToString());
-            }
-            if (layer_buffers.value().empty()) {
-                continue;
-            }
+            const int       worker_cp_rank = 0;
             TransferRoutePB pb;
             RouteCodec::encodeForDecode(*route, &pb);
-            for (const auto& buffer : layer_buffers.value()) {
+            const auto append_buffer = [&](const std::shared_ptr<LayerCacheBuffer>& buffer) {
                 auto* layer_block = pb.add_layer_blocks();
                 layer_block->set_layer_id(buffer->getLayerId());
                 layer_block->set_cache_tag(buffer->cacheTag());
@@ -240,8 +237,42 @@ P2PSchedulerDecodeRead::buildDecodeRankRoutes(const TransferPlan&        plan,
                     layer_block->add_cache_keys(key);
                     layer_block->add_block_ids(block_id);
                 }
+            };
+            if (route->layers.empty()) {
+                auto layer_buffers = LayerCacheBufferUtil::convertTagForRoute(resource,
+                                                                              *config_.topology,
+                                                                              route->cache_tag,
+                                                                              positions,
+                                                                              worker_cp_rank,
+                                                                              cp_size,
+                                                                              config_.cache_key_tokens_per_block,
+                                                                              config_.decode_transfer_layer_end);
+                if (!layer_buffers.ok()) {
+                    return layer_buffers.status();
+                }
+                for (const auto& buffer : layer_buffers.value()) {
+                    append_buffer(buffer);
+                }
+            } else {
+                const auto& group = config_.topology->group(route->cache_tag);
+                for (const auto& layer : route->layers) {
+                    auto buffer = LayerCacheBufferUtil::convertLayerTagForRoute(resource,
+                                                                                group,
+                                                                                layer.dst_local_id,
+                                                                                positions,
+                                                                                worker_cp_rank,
+                                                                                cp_size,
+                                                                                config_.cache_key_tokens_per_block,
+                                                                                /*shared_pp_block_table=*/true);
+                    if (!buffer.ok()) {
+                        return buffer.status();
+                    }
+                    append_buffer(buffer.value());
+                }
             }
-            rank_routes[worker_rank].push_back(std::move(pb));
+            if (!pb.layer_blocks().empty()) {
+                rank_routes[worker_rank].push_back(std::move(pb));
+            }
         }
     }
     return std::move(rank_routes);
@@ -305,6 +336,7 @@ P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
     const auto& prefill_addr    = routing->prefill_addr;
     const int   prefill_tp_size = routing->prefill_tp_size;
     const int   prefill_cp_size = routing->prefill_cp_size;
+    const bool    pipeline = config_.parallelism_config.pp_size > 1 || !routing->prefill_pipeline_layout.empty();
 
     if (unique_key.empty()) {
         RTP_LLM_LOG_WARNING("asyncRead: unique_key is empty");
@@ -333,7 +365,7 @@ P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
         return report_early_failure(
             ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "cache topology is null"));
     }
-    if (!no_transfer) {
+    if (!no_transfer && !pipeline) {
         // 漂移断言（设计文档 §3.2.4）：这是「对端 layout 由本端推导」唯一的保护，
         // 把配置漂移从传输期的疑难杂症变成入口处的确定性报错。
         const auto drift = checkPeerCpLayout(prefill_tp_size, prefill_cp_size);
@@ -350,12 +382,16 @@ P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
     uint64_t                       plan_digest = 0;
     const size_t                   worker_num  = config_.worker_grpc_addrs.size();
     if (!no_transfer) {
-        if (worker_num == 0) {
+        const auto& pc = config_.parallelism_config;
+        if (worker_num == 0
+            || (pipeline
+                && (config_.worker_addrs.size() != worker_num
+                    || worker_num != static_cast<size_t>(pc.pp_size * pc.tp_size)))) {
             return report_early_failure(
-                ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "worker list is empty"));
+                ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "invalid Decode worker list"));
         }
         const auto plan_start_us     = currentTimeUs();
-        auto       plan                              = planFor(prefill_tp_size, prefill_cp_size, unique_key);
+        auto       plan = planFor(prefill_tp_size, prefill_cp_size, unique_key, routing->prefill_pipeline_layout);
         collector->decode_schedule_plan_cost_time_us = currentTimeUs() - plan_start_us;
         if (!plan->ok()) {
             RTP_LLM_LOG_WARNING("asyncRead: transfer plan failed, unique_key=%s, error=%s",
@@ -416,6 +452,7 @@ P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
          async_context,
          prefill_tp_size,
          no_transfer,
+         pipeline,
          enqueue_time_us]() mutable {
             collector->decode_schedule_kickoff_queue_time_us = currentTimeUs() - enqueue_time_us;
             if (async_context->expireTransferDeadlineIfNeeded() || !async_context->beginKickoff()) {
@@ -424,18 +461,19 @@ P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
 
             try {
                 auto async_calls = startAsyncReadCalls(request_id,
-                                                      prefill_ip,
-                                                      prefill_port,
-                                                      unique_key,
-                                                      request_deadline_ms,
-                                                      transfer_deadline_ms,
-                                                      collector,
-                                                      *async_context,
-                                                      prefill_tp_size,
-                                                      no_transfer,
-                                                      std::move(rank_routes),
-                                                      std::move(active_route_ids),
-                                                      plan_digest);
+                                                       prefill_ip,
+                                                       prefill_port,
+                                                       unique_key,
+                                                       request_deadline_ms,
+                                                       transfer_deadline_ms,
+                                                       collector,
+                                                       *async_context,
+                                                       prefill_tp_size,
+                                                       no_transfer,
+                                                       std::move(rank_routes),
+                                                       std::move(active_route_ids),
+                                                       plan_digest,
+                                                       pipeline);
                 if (!async_calls) {
                     return;
                 }
@@ -487,19 +525,20 @@ P2PSchedulerDecodeRead::AsyncReadResult P2PSchedulerDecodeRead::asyncRead(
 }
 
 std::optional<P2PSchedulerDecodeRead::AsyncReadCallResults>
-P2PSchedulerDecodeRead::startAsyncReadCalls(int64_t            request_id,
-                                                 const std::string& prefill_ip,
-                                                 uint32_t           prefill_port,
-                                                 const std::string& unique_key,
-                                                 int64_t            request_deadline_ms,
-                                                 int64_t            transfer_deadline_ms,
-                                                 const std::shared_ptr<P2PConnectorMetricsCollector>& collector,
-                                                 P2PConnectorAsyncReadContext&                        context,
-                                                 int                                                  prefill_tp_size,
-                                                 bool                                                 no_transfer,
-                                                 P2PBroadcastClient::RankRoutes                       rank_routes,
-                                                 std::vector<int>                                     active_route_ids,
-                                                 uint64_t                                             plan_digest) {
+P2PSchedulerDecodeRead::startAsyncReadCalls(int64_t                                              request_id,
+                                            const std::string&                                   prefill_ip,
+                                            uint32_t                                             prefill_port,
+                                            const std::string&                                   unique_key,
+                                            int64_t                                              request_deadline_ms,
+                                            int64_t                                              transfer_deadline_ms,
+                                            const std::shared_ptr<P2PConnectorMetricsCollector>& collector,
+                                            P2PConnectorAsyncReadContext&                        context,
+                                            int                                                  prefill_tp_size,
+                                            bool                                                 no_transfer,
+                                            P2PBroadcastClient::RankRoutes                       rank_routes,
+                                            std::vector<int>                                     active_route_ids,
+                                            uint64_t                                             plan_digest,
+                                            bool                                                 pipeline) {
 
     const int64_t entry_us = currentTimeUs();
     RTP_LLM_LOG_DEBUG("[PD-DIAG] startAsyncReadCalls entry, unique_key=%s, prefill=%s:%u, timestamp_us=%ld",
@@ -513,7 +552,7 @@ P2PSchedulerDecodeRead::startAsyncReadCalls(int64_t            request_id,
     // channel creation can still delay kickoff publication. Cancellation must
     // progress on the independent control pool during that delay.
     const int64_t server_load_start_us = currentTimeUs();
-    auto server_call_result = server_caller_->load(request_id,
+    auto          server_call_result                 = server_caller_->load(request_id,
                                                    prefill_ip,
                                                    prefill_port,
                                                    unique_key,
@@ -522,7 +561,8 @@ P2PSchedulerDecodeRead::startAsyncReadCalls(int64_t            request_id,
                                                    config_.load_cache_timeout_ms,
                                                    no_transfer,
                                                    plan_digest,
-                                                   active_route_ids);
+                                                   active_route_ids,
+                                                   pipeline && !no_transfer ? config_.pipeline_layout : std::string{});
     const int64_t server_load_cost_us                = currentTimeUs() - server_load_start_us;
     collector->decode_schedule_server_submit_time_us = server_load_cost_us;
     if (server_load_cost_us >= 100000) {

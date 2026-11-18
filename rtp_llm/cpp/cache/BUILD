@@ -417,6 +417,8 @@ cc_library(
         "//rtp_llm/cpp/cache/connector/p2p:components",
         "//rtp_llm/cpp/cache/connector/p2p:connector",
         "//rtp_llm/cpp/cache/connector/p2p:layer_block_converter",
+        "//rtp_llm/cpp/cache/connector/p2p/plan:transfer_plan_glue",
+        ":pp_topology_validator",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
         "//rtp_llm/cpp/utils:profiling_scope",
     ] + torch_deps() + select({

@@ -9,6 +9,7 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <tuple>
 #include <utility>
 #include <memory>
 #include <string>
@@ -24,26 +25,37 @@ public:
     ~P2PSchedulerPrefillRead() = default;
 
 public:
+    struct PreparedPlan {
+        std::shared_ptr<const TransferPlan> plan;
+        uint64_t                            digest = 0;
+        std::set<int>                       active_route_ids;
+    };
+
+    // A null prepared plan is a result-only handoff.
     ErrorInfo sendKVCache(const std::string&                                   unique_key,
                           int64_t                                              request_id,
                           const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
                           int64_t                                              deadline_ms,
-                          std::function<bool()>                                is_cancelled = nullptr,
-                          bool                                                 no_transfer = false,
-                          int64_t                                              request_deadline_ms = 0,
-                          const std::set<int>&                                 active_route_ids = {},
-                          int64_t                                              communication_timeout_ms = 0,
-                          int                                                  decode_tp_size = 0);
+                          const PreparedPlan*                                  prepared_plan,
+                          std::function<bool()>                                is_cancelled             = nullptr,
+                          int64_t                                              request_deadline_ms      = 0,
+                          int64_t                                              communication_timeout_ms = 0);
 
     /// @brief 与 decode 侧用**同一个 planner 函数**算镜像 plan。
     /// Decode TP width comes from StartLoad. Decode CP is inferred from the local sharding configuration.
-    std::shared_ptr<const PlanResult> planFor(int decode_tp_size, const std::string& unique_key);
+    std::shared_ptr<const PlanResult>
+    planFor(int decode_tp_size, const std::string& unique_key, const std::string& decode_pipeline_layout = {});
 
-    /// @brief StartLoad 建立前核对 Decode 传来的计划摘要，避免 plan 分歧退化为传输超时。
-    ErrorInfo checkPlanDigest(int decode_tp_size, uint64_t decode_plan_digest, const std::string& unique_key);
+    /// Retain the validated plan across the StartLoad resource wait.
+    ErrorResult<PreparedPlan> preparePlan(int                decode_tp_size,
+                                          uint64_t           decode_plan_digest,
+                                          const std::string& unique_key,
+                                          size_t             decode_worker_count,
+                                          std::set<int>      active_route_ids,
+                                          const std::string& decode_pipeline_layout = {});
 
     /// @brief 把 plan 投影成每个 prefill worker 的 route 列表。
-    /// Prefill 方向不带 layer_blocks，worker 按 tag 将每次发布的本地块交给对应的 route。
+    /// Prefill routes name the destination worker and, for PP, the local layers to send.
     P2PBroadcastClient::RankRoutes buildPrefillRankRoutes(const TransferPlan&  plan,
                                                           size_t               worker_num,
                                                           const std::set<int>& active_route_ids = {}) const;
@@ -62,7 +74,7 @@ private:
 
 private:
     mutable std::mutex                                       plan_cache_mutex_;
-    std::map<std::pair<int, size_t>, std::shared_ptr<const PlanResult>> plan_cache_;
+    std::map<std::tuple<int, size_t, std::string>, std::shared_ptr<const PlanResult>> plan_cache_;
     const P2PConnectorSchedulerConfig   config_;
     kmonitor::MetricsReporterPtr        metrics_reporter_;
     std::shared_ptr<P2PBroadcastClient> tp_broadcast_client_;

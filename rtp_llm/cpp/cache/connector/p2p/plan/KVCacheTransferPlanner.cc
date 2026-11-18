@@ -701,7 +701,10 @@ ErrorInfo validatePipeline(const PipelineTransferLayout& side, int& main_layers,
                     return planError("invalid head shard count for PP stage " + std::to_string(s) + " tag=" + tag);
                 }
                 digest.mixString(tag);
-                digest.mixString(group.policy.policyFingerprint());
+                digest.mix(static_cast<int>(group.policy.group_type));
+                digest.mix(static_cast<int>(group.policy.cp_mapping));
+                digest.mix(static_cast<int>(group.policy.cp_slice));
+                digest.mix(group.policy.active_tail_blocks);
                 digest.mix(group.spec_type);
                 digest.mix(group.kv_block_stride_bytes);
                 digest.mix(group.kv_scale_stride_bytes);
@@ -719,13 +722,17 @@ ErrorInfo validatePipeline(const PipelineTransferLayout& side, int& main_layers,
                 layer < static_cast<size_t>(stage.main_layer_count) ? stage.main_shards : stage.draft_shards;
             const auto&                 tags = stage.layer_tags[layer];
             const std::set<std::string> ordered(tags.begin(), tags.end());
-            if (ordered.size() != tags.size()) {
-                return planError("duplicate tag for PP stage " + std::to_string(s));
+            if (ordered.empty() || ordered.size() != tags.size()) {
+                return planError("empty or duplicate layer tags for PP stage " + std::to_string(s)
+                                 + " local_layer=" + std::to_string(layer));
             }
             digest.mix(ordered.size());
             for (const auto& tag : ordered) {
                 if (tag.empty() || !shards.hasGroup(tag)) {
                     return planError("missing layout for PP stage " + std::to_string(s) + " tag=" + tag);
+                }
+                if (!side.stages.front().main_shards.hasGroup(tag)) {
+                    return planError("PP cache tag has no Stage 0 block table: " + tag);
                 }
                 digest.mixString(tag);
             }
@@ -790,7 +797,9 @@ PlanResult KVCacheTransferPlanner::planStages(const PipelineTransferLayout& pref
                 if (!shards.ok()) {
                     return shards.error;
                 }
+                std::set<int> covered_lanes;
                 for (auto& route : shards.plan.routes) {
+                    covered_lanes.insert(route.dst_rank);
                     const size_t src_scale = src_shards.group(tag).kv_scale_stride_bytes;
                     const size_t dst_scale = dst_shards.group(tag).kv_scale_stride_bytes;
                     const auto   src_parts = static_cast<size_t>(route.src_partition.count);
@@ -806,10 +815,16 @@ PlanResult KVCacheTransferPlanner::planStages(const PipelineTransferLayout& pref
                     route.route_id = static_cast<int>(result.routes.size());
                     route.src_rank = src.worker_indices[route.src_rank];
                     route.dst_rank = dst.worker_indices[route.dst_rank];
+                    route.src_slice_payload_bytes = src_shards.group(tag).k_block_payload_bytes;
+                    route.dst_slice_payload_bytes = dst_shards.group(tag).k_block_payload_bytes;
                     for (int layer : layers) {
                         route.layers.push_back({layer, layer - src.main_layer_begin, layer - dst.main_layer_begin});
                     }
                     result.routes.push_back(std::move(route));
+                }
+                if (covered_lanes.size() != dst.worker_indices.size()) {
+                    return planError("incomplete PP route coverage for global layer " + std::to_string(layers.front())
+                                     + " tag=" + tag);
                 }
             }
             return ErrorInfo::OkStatus();
@@ -847,6 +862,8 @@ uint64_t TransferPlan::digest() const {
                 mix(layer.src_local_id);
                 mix(layer.dst_local_id);
             }
+            mix(r.src_slice_payload_bytes);
+            mix(r.dst_slice_payload_bytes);
         }
         for (char c : r.cache_tag) {
             mix(static_cast<uint64_t>(static_cast<unsigned char>(c)));

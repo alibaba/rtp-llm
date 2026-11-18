@@ -31,15 +31,15 @@ std::string describeRoutes(const P2PWorkerRoutePlan& worker_plan) {
     return result + "]";
 }
 
-void buildExpectedBufferMetadata(const CacheTopology& topology,
-                                 std::set<std::string>* expected_keys,
-                                 std::vector<std::string>* expected_tags) {
+void buildExpectedBufferMetadata(const CacheTopology&                      topology,
+                                 std::set<std::string>*                    expected_keys,
+                                 std::vector<std::pair<int, std::string>>* expected_layers) {
     expected_keys->clear();
-    expected_tags->clear();
+    expected_layers->clear();
     for (const auto& layer : topology.layers()) {
         for (const auto& tag : layer.group_tags) {
             if (expected_keys->insert(std::to_string(layer.layer_id) + ":" + tag).second) {
-                expected_tags->push_back(tag);
+                expected_layers->emplace_back(layer.layer_id, tag);
             }
         }
     }
@@ -80,7 +80,7 @@ bool P2PWorkerPrefillRead::init() {
     store_wait_context_checker_ = std::make_shared<StoreWaitContextChecker>(metrics_reporter_, computed_buffers_);
 
     if (config_.topology) {
-        buildExpectedBufferMetadata(*config_.topology, &expected_buffer_keys_, &expected_buffer_tags_);
+        buildExpectedBufferMetadata(*config_.topology, &expected_buffer_keys_, &expected_buffer_layers_);
     }
 
     store_wait_check_thread_ = std::thread([this] {
@@ -365,7 +365,7 @@ int P2PWorkerPrefillRead::dispatchPendingLayerTransfers(
             }
             const auto count = sendLayerToPartitions(
                 buffer, worker_plan, unique_key, return_deadline_ms, cancel_flag, transfer_result);
-            const auto expected_count = worker_plan.routeCountForTag(buffer->cacheTag());
+            const auto expected_count = worker_plan.routeCountForLayer(buffer->getLayerId(), buffer->cacheTag());
             if (count != expected_count) {
                 std::lock_guard<std::mutex> lock(transfer_result->result_mutex);
                 if (transfer_result->all_success.exchange(false)) {
@@ -462,14 +462,14 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
         }
     };
 
-    const size_t payload_bytes =
-        config_.topology ? config_.topology->group(layer_cache_buffer->cacheTag()).spec->k_block_payload_bytes() : 0;
-
     for (const auto& route : worker_plan.routes) {
-        // route 与 layer 无关：只发本 buffer 所属 tag 的那些 route。
-        if (route.cache_tag != layer_cache_buffer->cacheTag()) {
+        if (!route.sendsLayer(layer_id, layer_cache_buffer->cacheTag())) {
             continue;
         }
+        const size_t payload_bytes =
+            route.slice_payload_bytes != 0 ?
+                route.slice_payload_bytes :
+                (config_.topology ? config_.topology->group(route.cache_tag).spec->k_block_payload_bytes() : 0);
 
         // partition / slice 均来自 route（本侧那一半）。§2.3 的修正就在这里生效：
         // NP1D 下 planner 给源端的是 {1,0}（整块），不再对本地 block 二次切分。
@@ -504,7 +504,7 @@ int P2PWorkerPrefillRead::sendLayerToPartitions(const std::shared_ptr<LayerCache
                                   "sendKVCache: layer dispatch deadline exceeded, unique_key=" + unique_key
                                       + " buffer=" + buffer_key + " chunk_id=" + std::to_string(chunk_id)
                                       + " sent=" + std::to_string(count) + " expected="
-                                      + std::to_string(worker_plan.routeCountForTag(layer_cache_buffer->cacheTag())));
+                                      + std::to_string(worker_plan.routeCountForLayer(layer_id, route.cache_tag)));
             return count;
         }
 
@@ -776,11 +776,11 @@ P2PWorkerPrefillRead::sendKVCache(int64_t                   request_id,
     // buffer metadata 在 worker 初始化时预计算，CacheTopology 生命周期内不变。
     const auto& expected_buffer_keys = expected_buffer_keys_;
 
-    // 每个 (layer, tag) 上的传输数 = 该 tag 的 route 数，故按 tag 逐个累加，
-    // 不能再用「buffer_key 数 × 单一 partition 数」。
+    // A tag can span multiple target stages. Count only the routes covering
+    // each local layer, while still draining publications for unused layers.
     int total_transfers = 0;
-    for (const auto& tag : expected_buffer_tags_) {
-        total_transfers += worker_plan.routeCountForTag(tag);
+    for (const auto& [layer_id, tag] : expected_buffer_layers_) {
+        total_transfers += worker_plan.routeCountForLayer(layer_id, tag);
     }
     if (total_transfers == 0) {
         computed_buffers_->removeBuffer(request_id, request_deadline_ms);
