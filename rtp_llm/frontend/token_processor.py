@@ -151,15 +151,12 @@ class TokenProcessorPerStream:
             texts_to_process = all_texts_batch
             all_texts_for_stop_words = all_texts_batch
         else:
-            for i, tokens in enumerate(batch_token_ids):
-                decoding_state = self.decoding_states[i]
-                new_text, all_text = self.tokenids_decode(
-                    tokens, decoding_state, return_incremental=True
+            for i, tokens in enumerate(tokens_to_decode_batch):
+                text, all_text = self.tokenids_decode(
+                    tokens, self.decoding_states[i], return_incremental
                 )
-                new_text = all_text[len(decoding_state.all_text) :]
-            text_for_stop_processing = new_text if return_incremental else all_text
-            texts_to_process.append(text_for_stop_processing)
-            all_texts_for_stop_words.append(all_text)
+                texts_to_process.append(text)
+                all_texts_for_stop_words.append(all_text)
 
         for i in range(len(batch_token_ids)):
             final_text, self.token_buffers[i] = self.process_stop_str(

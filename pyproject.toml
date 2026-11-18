@@ -859,8 +859,8 @@ ignore_paths = ["rtp_llm/models_py/kernels/ppu", "rtp_llm/models_py/modules/fact
 description = "Frontend Python UT (py-ut-frontend)"
 gpu_type = "A10"
 minimum_count = 1
-# Original 63 cases plus eight allocator-dump endpoint/guard cases from mainline.
-expected_count = 71
+# 78 existing cases plus the batch incremental decoding regression.
+expected_count = 79
 forbid_skips = true
 paths = [
     "rtp_llm/frontend/test",
