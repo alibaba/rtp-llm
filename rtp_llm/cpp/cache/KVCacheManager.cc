@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/cache/CacheTier.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/PrefillCacheHitMetricsReporter.h"
+#include "rtp_llm/cpp/cache/PPTopologyValidator.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/KVCMStorageBackend.h"
@@ -25,6 +26,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/PipelineLayoutCodec.h"
+#include "rtp_llm/cpp/cache/connector/p2p/plan/ShardLayoutFactory.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/KVCacheMetrics.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
@@ -1182,6 +1185,46 @@ bool KVCacheManager::initP2PConnector() {
         return true;
     }
 
+    const auto&                pc = parallelism_config_;
+    P2PPipelineLayoutPB::Stage local_stage;
+    local_stage.set_main_layer_begin(config_.global_layer_begin);
+    local_stage.set_main_layer_count(config_.layer_num);
+    for (int lane = 0; lane < pc.tp_size; ++lane) {
+        local_stage.add_worker_indices(pc.pp_rank * pc.tp_size + lane);
+    }
+    const auto append_layout = [&](const CacheConfig& cfg, uint32_t layers, P2PShardLayoutPB* out) {
+        auto shards =
+            ShardLayoutFactory::fromTopology(cfg.topology(), pc, pd_sep_config_.role_type, cfg.seq_size_per_block);
+        shards.use_group_cache_transfer_policy = config_.usesGroupCacheTransferPolicy();
+        shards.use_mla                         = cfg.use_mla;
+        encodeP2PShardLayout(shards, out);
+        for (uint32_t i = 0; i < layers; ++i) {
+            auto* layer = local_stage.add_layers();
+            for (const auto& tag : cfg.topology().layer(i).group_tags) {
+                layer->add_tags(tag);
+            }
+        }
+    };
+    append_layout(config_, config_.layer_num, local_stage.mutable_main_shards());
+    if (!config_.mtp_sub_configs.empty()) {
+        // The active proposal module is shared across steps. Extra modules have no Prefill KV.
+        const auto& draft = *config_.mtp_sub_configs.front();
+        append_layout(draft, draft.layer_num, local_stage.mutable_draft_shards());
+    }
+    P2PPipelineLayoutPB pipeline;
+    pipeline.set_worker_count(pc.pp_size * pc.tp_size);
+    if (pc.pp_size > 1) {
+        for (const auto& payload : collectPPStagePayloads(local_stage.SerializeAsString(), pc.pp_size)) {
+            if (!pipeline.add_stages()->ParseFromString(payload)) {
+                RTP_LLM_LOG_ERROR("P2P connector init failed to decode PP stage layout");
+                return false;
+            }
+        }
+    } else {
+        *pipeline.add_stages() = std::move(local_stage);
+    }
+    p2p_pipeline_layout_ = pipeline.SerializeAsString();
+
     RTP_LLM_LOG_INFO("KVCacheManager: initializing P2PConnector, role_type=%d, "
                      "pd_rdma_mode=%d, cache_store_rdma_mode=%d, listen_port=%ld",
                      static_cast<int>(pd_sep_config_.role_type),
@@ -1196,6 +1239,7 @@ bool KVCacheManager::initP2PConnector() {
                                                  static_cast<uint32_t>(config_.layer_all_num()),
                                                  config_.totalGroupBlockSizeBytes());
     p2p_config.scheduler_config.topology = config_.topologyPtr();
+    p2p_config.scheduler_config.pipeline_layout                 = p2p_pipeline_layout_;
     p2p_config.scheduler_config.use_group_cache_transfer_policy = config_.usesGroupCacheTransferPolicy();
     p2p_config.scheduler_config.use_mla                         = config_.use_mla;
     p2p_config.worker_config.topology    = config_.topologyPtr();

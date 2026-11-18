@@ -67,6 +67,7 @@ public:
             routing.prefill_addr    = stream->prefillAddr();
             routing.prefill_tp_size = stream->getPrefillTpSize();
             routing.prefill_cp_size = stream->getPrefillCpSize();
+            routing.prefill_pipeline_layout = stream->prefillPipelineLayout();
             routing.decode_needs_compute = stream->needsDecodeAfterPrefill();
         }
     }

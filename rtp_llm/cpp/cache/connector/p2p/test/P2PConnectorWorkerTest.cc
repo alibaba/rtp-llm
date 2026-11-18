@@ -1420,6 +1420,62 @@ TEST_F(P2PConnectorWorkerTest, Read_TracksCopiedKeysUntilWindowIsComplete) {
     EXPECT_TRUE(result.get().ok());
 }
 
+TEST_F(P2PConnectorWorkerTest, PipelineWorkersRendezvousUsingGlobalLayer) {
+    auto prefill_config               = worker_config_;
+    prefill_config.global_layer_begin = 3;
+    prefill_config.topology           = makeTestCacheTopology(1, 2, {{0}, {0}});
+    auto decode_config                = prefill_config;
+    decode_config.global_layer_begin  = 4;
+    P2PWorkerPrefillRead prefill(prefill_config, mock_layer_block_converter_, nullptr, mock_sender_);
+    P2PWorkerDecodeRead  decode(decode_config, mock_layer_block_converter_, nullptr, mock_receiver_);
+    ASSERT_TRUE(prefill.init());
+
+    const int64_t     request_id = 3000;
+    const auto        deadline   = currentTimeMs() + 5000;
+    const std::string key        = "pp-layer-rendezvous";
+    auto              computed   = prefill.getComputedBuffersStore();
+    computed->registerRequestHorizon(request_id, deadline, deadline);
+    for (int layer = 0; layer < 2; ++layer) {
+        auto buffer = std::make_shared<LayerCacheBuffer>(layer, "group0");
+        buffer->addBlockId(123, 1);
+        computed->addBuffer(request_id, buffer, deadline);
+    }
+    prefill.finishPublication(request_id, deadline);
+
+    P2PWorkerRoutePlan send_plan;
+    send_plan.plan_digest   = 19;
+    auto& route             = send_plan.routes.emplace_back();
+    route.route_id          = 7;
+    route.cache_tag         = "group0";
+    route.dst_ip            = "127.0.0.1";
+    route.dst_port          = 12345;
+    route.prefill_layer_ids = {1};
+    const auto send         = prefill.sendKVCache(request_id, key, deadline, send_plan, deadline);
+    ASSERT_TRUE(send.ok()) << send.ToString();
+    const auto sends = mock_sender_->getTransferCalls();
+    ASSERT_EQ(sends.size(), 1u);
+    EXPECT_EQ(sends.front().layer_key, P2PKeyUtil::makeRouteLayerKey(key, 4, "group0", 7, 19));
+
+    P2PWorkerRoutePlan read_plan;
+    read_plan.plan_digest = send_plan.plan_digest;
+    auto& receive         = read_plan.routes.emplace_back();
+    receive.route_id      = route.route_id;
+    receive.cache_tag     = route.cache_tag;
+    auto dst_buffer       = std::make_shared<LayerCacheBuffer>(0, "group0");
+    dst_buffer->addBlockId(123, 2);
+    receive.layer_buffers.push_back(dst_buffer);
+    auto result = std::async(std::launch::async, [&] { return decode.read(request_id, key, deadline, read_plan); });
+    const auto wait_until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!mock_receiver_->batchCopiedCallback(sends.front().layer_key)
+           && std::chrono::steady_clock::now() < wait_until) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_TRUE(mock_receiver_->batchCopiedCallback(sends.front().layer_key));
+    mock_receiver_->setTaskDone(sends.front().layer_key, true);
+    const auto read = result.get();
+    EXPECT_TRUE(read.ok()) << read.ToString();
+}
+
 TEST_F(P2PConnectorWorkerTest, Read_ReturnTrue_AllLayersSuccess) {
     std::string unique_key  = "test_read_success";
     int64_t     request_id  = 3001;

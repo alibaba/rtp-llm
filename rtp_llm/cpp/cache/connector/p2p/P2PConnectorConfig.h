@@ -24,6 +24,7 @@ struct P2PConnectorSchedulerConfig {
     int64_t load_cache_timeout_ms = 5000;
     std::vector<std::string> worker_grpc_addrs;
     std::vector<std::string> worker_addrs;
+    std::string                          pipeline_layout;
     int64_t                  p2p_lease_query_timeout_ms                   = 20 * 1000;
     int                      p2p_kv_leak_exit_threshold_min_percent        = 30;
     int                      p2p_kv_leak_exit_threshold_max_percent        = 70;
@@ -38,9 +39,8 @@ struct P2PConnectorSchedulerConfig {
     int                                  cp_rank = 0;
     int                                  cp_size = 1;
 
-    // 编排层（KVCacheTransferPlanner）需要完整的并行度与角色来构造本端 ShardLayout，
-    // 并由 ShardLayoutFactory::peerOf 推导对端布局 —— 这是「跨端协议零改动」的前提。
-    // cp_rank / cp_size 是它的投影，保留是为了旧执行路径。
+    // TP-only planning mirrors the peer layout. PP planning uses the actual
+    // stage descriptions carried by GetPeerInfo and StartLoad.
     ParallelismConfig parallelism_config;
     RoleType          role_type = RoleType::PDFUSION;
 

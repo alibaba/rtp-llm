@@ -94,7 +94,9 @@ ErrorInfo P2PWorkerDecodeRead::buildRecvTasks(const P2PWorkerRoutePlan&         
                                      + " has no layer buffers, unique_key=" + unique_key);
         }
         const size_t payload_bytes =
-            config_.topology ? config_.topology->group(route.cache_tag).spec->k_block_payload_bytes() : 0;
+            route.slice_payload_bytes != 0 ?
+                route.slice_payload_bytes :
+                (config_.topology ? config_.topology->group(route.cache_tag).spec->k_block_payload_bytes() : 0);
 
         for (const auto& layer_cache_buffer : route.layer_buffers) {
             if (!layer_cache_buffer) {
@@ -136,8 +138,11 @@ ErrorInfo P2PWorkerDecodeRead::buildRecvTasks(const P2PWorkerRoutePlan&         
             }
 
             // key 由编排层签发的 route_id + plan digest 命名 —— 两侧不做任何独立推导。
-            const std::string route_layer_key = P2PKeyUtil::makeRouteLayerKey(
-                unique_key, layer_id, layer_cache_buffer->cacheTag(), route.route_id, worker_plan.plan_digest);
+            const std::string route_layer_key = P2PKeyUtil::makeRouteLayerKey(unique_key,
+                                                                              config_.global_layer_begin + layer_id,
+                                                                              layer_cache_buffer->cacheTag(),
+                                                                              route.route_id,
+                                                                              worker_plan.plan_digest);
 
             transfer::RecvRequest recv_req;
             recv_req.unique_key  = route_layer_key;

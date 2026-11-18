@@ -3,6 +3,7 @@
 
 #include <set>
 #include <limits>
+#include <optional>
 
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
@@ -219,14 +220,18 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
     }
     // Older Decode peers did not send their TP width.
     const int decode_tp_size = request.decode_tp_size() == 0 ? request.workers_size() : request.decode_tp_size();
+    std::optional<P2PSchedulerPrefillRead::PreparedPlan> prepared_plan;
     if (!request.no_transfer()) {
         const auto check_plan_start_us = currentTimeUs();
-        const auto plan_error = decode_tp_size < 0 || decode_tp_size > request.workers_size()
-                                    ? ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED,
-                                                "invalid StartLoad Decode TP width for the worker list")
-                                    : scheduler_->checkPlanDigest(decode_tp_size, request.plan_digest(), unique_key);
+        auto       plan = scheduler_->preparePlan(decode_tp_size,
+                                            request.plan_digest(),
+                                            unique_key,
+                                            decode_transfer_servers.size(),
+                                            {request.active_route_ids().begin(), request.active_route_ids().end()},
+                                            request.decode_pipeline_layout());
         collector.prefill_scheduler_check_plan_time_us = currentTimeUs() - check_plan_start_us;
-        if (plan_error.hasError()) {
+        if (!plan.ok()) {
+            const auto& plan_error = plan.status();
             RTP_LLM_LOG_WARNING("handleRead rejected StartLoad, unique_key=%s, error=%s",
                                 unique_key.c_str(),
                                 plan_error.ToString().c_str());
@@ -237,6 +242,7 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
             report_process_metrics();
             return;
         }
+        prepared_plan.emplace(std::move(plan.value()));
     }
 
     const int64_t request_deadline_ms =
@@ -310,18 +316,15 @@ void P2PConnectorPrefill::processRead(const P2PConnectorStartLoadRequestPB& requ
         }
         return false;
     };
-    const std::set<int> active_route_ids(request.active_route_ids().begin(), request.active_route_ids().end());
     auto      send_start_us = currentTimeUs();
-    ErrorInfo error_info = scheduler_->sendKVCache(unique_key,
-                                                   request_id,
-                                                   decode_transfer_servers,
-                                                   transfer_deadline_ms,
-                                                   direct_cancel,
-                                                   request.no_transfer(),
-                                                   request_deadline_ms,
-                                                   active_route_ids,
-                                                   communication_timeout_ms,
-                                                   decode_tp_size);
+    ErrorInfo error_info    = scheduler_->sendKVCache(unique_key,
+                                                     request_id,
+                                                     decode_transfer_servers,
+                                                     transfer_deadline_ms,
+                                                     prepared_plan ? &*prepared_plan : nullptr,
+                                                     direct_cancel,
+                                                     request_deadline_ms,
+                                                     communication_timeout_ms);
     auto send_cost_us = currentTimeUs() - send_start_us;
     if (error_info.hasError()) {
         RTP_LLM_LOG_ERROR("[PD-DIAG] handleRead sendKVCache failed, unique_key=%s, send_cost_us=%ld, error=%s",
@@ -433,6 +436,25 @@ bool P2PConnectorPrefill::processReadPerRank(int64_t                            
         worker_route.cache_tag = local.cache_tag;
         worker_route.partition = local.partition;
         worker_route.slice     = local.slice;
+        worker_route.slice_payload_bytes = route_pb.slice_payload_bytes();
+        for (auto layer_id : route_pb.prefill_layer_ids()) {
+            if (!config_.worker_config.topology || layer_id >= config_.worker_config.topology->layers().size()
+                || !worker_route.prefill_layer_ids.insert(layer_id).second) {
+                const ErrorInfo error(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+                                      "HANDLE_READ route contains an invalid or duplicate Prefill layer");
+                worker_->cancelRequest(request_id, unique_key, deadline_ms, p2p_request.request_deadline_ms());
+                setP2PResponse(response, error);
+                return false;
+            }
+            const auto& tags = config_.worker_config.topology->layer(layer_id).group_tags;
+            if (std::find(tags.begin(), tags.end(), local.cache_tag) == tags.end()) {
+                const ErrorInfo error(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+                                      "HANDLE_READ route cache tag is not owned by its Prefill layer");
+                worker_->cancelRequest(request_id, unique_key, deadline_ms, p2p_request.request_deadline_ms());
+                setP2PResponse(response, error);
+                return false;
+            }
+        }
         if (local.peer_index < 0 || static_cast<size_t>(local.peer_index) >= decode_transfer_servers.size()) {
             ErrorInfo error_info(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
                                  "HANDLE_READ route peer_index out of range: " + std::to_string(local.peer_index));

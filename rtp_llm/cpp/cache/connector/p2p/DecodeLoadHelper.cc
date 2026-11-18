@@ -131,16 +131,17 @@ DecodeLoadHelper::DecodeLoadHelper(const std::vector<std::string>& worker_addrs,
     }
 }
 
-std::shared_ptr<DecodeLoadHelper::Result> DecodeLoadHelper::load(int64_t            request_id,
-                                                                   const std::string& prefill_ip,
-                                                                   uint32_t           prefill_port,
-                                                                   const std::string& unique_key,
-                                                                   int64_t            request_deadline_ms,
-                                                                   int64_t            transfer_deadline_ms,
-                                 int64_t            load_timeout_ms,
-                                                                   bool               no_transfer,
-                                                                   uint64_t           plan_digest,
-                                                                   const std::vector<int>& active_route_ids) {
+std::shared_ptr<DecodeLoadHelper::Result> DecodeLoadHelper::load(int64_t                 request_id,
+                                                                 const std::string&      prefill_ip,
+                                                                 uint32_t                prefill_port,
+                                                                 const std::string&      unique_key,
+                                                                 int64_t                 request_deadline_ms,
+                                                                 int64_t                 transfer_deadline_ms,
+                                                                 int64_t                 load_timeout_ms,
+                                                                 bool                    no_transfer,
+                                                                 uint64_t                plan_digest,
+                                                                 const std::vector<int>& active_route_ids,
+                                                                 const std::string&      decode_pipeline_layout) {
     auto result        = std::make_shared<Result>();
     result->request_id = request_id;
     result->unique_key = unique_key;
@@ -204,7 +205,8 @@ std::shared_ptr<DecodeLoadHelper::Result> DecodeLoadHelper::load(int64_t        
                                request_id,
                                no_transfer,
                                plan_digest,
-                               active_route_ids)) {
+                               active_route_ids,
+                               decode_pipeline_layout)) {
         if (result->status.ok())
             result->status = grpcStatusFromErrorInfo(
                 ErrorInfo(ErrorCode::RPC_FINISH_FAILED,
@@ -232,17 +234,19 @@ std::shared_ptr<DecodeLoadHelper::Result> DecodeLoadHelper::load(int64_t        
 }
 
 bool DecodeLoadHelper::buildAndStartAsyncRpc(const std::shared_ptr<Result>& result,
-                                              const std::string&             unique_key,
-                                              int64_t                        request_deadline_ms,
-                                              int64_t                        transfer_deadline_ms,
-                               int64_t                        load_timeout_ms,
-                                              int64_t                        request_id,
-                                              bool                           no_transfer,
-                                              uint64_t                       plan_digest,
-                                              const std::vector<int>&        active_route_ids) {
+                                             const std::string&             unique_key,
+                                             int64_t                        request_deadline_ms,
+                                             int64_t                        transfer_deadline_ms,
+                                             int64_t                        load_timeout_ms,
+                                             int64_t                        request_id,
+                                             bool                           no_transfer,
+                                             uint64_t                       plan_digest,
+                                             const std::vector<int>&        active_route_ids,
+                                             const std::string&             decode_pipeline_layout) {
     result->request.set_unique_key(unique_key);
     result->request.set_no_transfer(no_transfer);
     result->request.set_plan_digest(plan_digest);
+    result->request.set_decode_pipeline_layout(decode_pipeline_layout);
     for (int route_id : active_route_ids) {
         result->request.add_active_route_ids(route_id);
     }

@@ -156,6 +156,9 @@ public:
 
     bool hasActiveConnectors() const;
     bool hasP2PConnector() const;
+    const std::string& p2pPipelineLayout() const {
+        return p2p_pipeline_layout_;
+    }
     int64_t           prefillRequestDeadline(const std::string& unique_key, int64_t timeout_ms, ErrorInfo* error);
     void              cancelPrefillRequest(const std::string& unique_key, int64_t request_deadline_ms);
     void              expirePrefillRequest(const std::string& unique_key, int64_t request_deadline_ms);
@@ -230,6 +233,7 @@ private:
     mutable std::mutex                 cache_status_snapshot_mutex_;
     std::shared_ptr<const KVCacheInfo> cache_status_snapshot_;
     std::shared_ptr<P2PConnector> p2p_connector_;
+    std::string                        p2p_pipeline_layout_;
 
     mutable std::mutex          cache_store_mutex_;
     std::shared_ptr<CacheStore> cache_store_;

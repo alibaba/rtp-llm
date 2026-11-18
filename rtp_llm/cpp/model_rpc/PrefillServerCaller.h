@@ -19,6 +19,7 @@ class PrefillServerCallerTest;
 struct PrefillPeerInfo {
     int tp_size = -1;
     int cp_size = -1;
+    std::string pipeline_layout;
 };
 
 class PrefillServerCaller {
@@ -49,7 +50,8 @@ public:
                                       const std::function<bool()>& is_cancelled);
 
     // Fetch once for each PD request; only the RPC connection is reused.
-    ErrorResult<PrefillPeerInfo> getPrefillPeerInfo(const std::string& ip, uint32_t port, int32_t request_timeout_ms);
+    ErrorResult<PrefillPeerInfo>
+    getPrefillPeerInfo(const std::string& ip, uint32_t port, int32_t request_timeout_ms, int decode_pp_size = 1);
 
 private:
     grpc::Status callPrefill(grpc::ServerContext*                   server_context,

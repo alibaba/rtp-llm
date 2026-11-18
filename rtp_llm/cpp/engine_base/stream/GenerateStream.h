@@ -921,6 +921,12 @@ public:
     void setPrefillCpSize(int prefill_cp_size) {
         prefill_cp_size_ = prefill_cp_size;
     }
+    const std::string& prefillPipelineLayout() const {
+        return prefill_pipeline_layout_;
+    }
+    void setPrefillPipelineLayout(std::string layout) {
+        prefill_pipeline_layout_ = std::move(layout);
+    }
 
 public:
     struct TimeInfo {
@@ -1112,6 +1118,7 @@ protected:
     int prefill_tp_size_ = -1;
     // Effective Prefill KV-cache CP size; independent from TP size.
     int prefill_cp_size_ = -1;
+    std::string prefill_pipeline_layout_;
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;
