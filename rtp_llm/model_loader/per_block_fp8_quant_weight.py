@@ -897,9 +897,18 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         processed_res = super()._postprocess(tensor, device, load_config)
         kernel_weight = processed_res[self.kernel.name]
 
+        from rtp_llm.models_py.utils.arch import is_sm120
+        from rtp_llm.utils.sm120_fp8_backend import resolve_sm120_fp8_backend
+
+        layout_device = None if torch.cuda.is_available() else torch.device(device)
+        use_cutlass = (
+            is_sm120(layout_device) and resolve_sm120_fp8_backend() == "cutlass"
+        )
+        use_e8m0 = is_deep_gemm_e8m0_used() and not use_cutlass
+
         # e8m0 not reshape, weight scale need be non contiguous
         # TODO: rm reshape all time
-        if not is_deep_gemm_e8m0_used():
+        if not use_e8m0:
             kernel_weight = (
                 kernel_weight.reshape(kernel_weight.shape[-1], -1)
                 if kernel_weight.dim() == 2
@@ -909,7 +918,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         if self.scale is not None:
             scale_weight = processed_res[self.scale.name]
             native_e8m0_dtype = getattr(torch, "float8_e8m0fnu", None)
-            if not is_deep_gemm_e8m0_used():
+            if not use_e8m0:
                 if (
                     native_e8m0_dtype is not None
                     and scale_weight.dtype == native_e8m0_dtype
@@ -936,7 +945,7 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
                 W.moe_w1,
                 W.moe_w2,
             ) and load_config.moe_strategy in ("mega_moe_fp8", "mega_moe_fp8_se")
-            if is_deep_gemm_e8m0_used() and not skip_moe_scale_repack:
+            if use_e8m0 and not skip_moe_scale_repack:
                 if (
                     native_e8m0_dtype is not None
                     and scale_weight.dtype == native_e8m0_dtype
@@ -1065,16 +1074,29 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
             is_deep_gemm_e8m0_used,
         )
+        from rtp_llm.models_py.utils.arch import is_sm120
+        from rtp_llm.utils.sm120_fp8_backend import resolve_sm120_fp8_backend
 
         is_dense_weight = self.kernel.name not in (W.moe_w1, W.moe_w2)
         direct_ue8m0 = (
-            self.scale is not None and is_dense_weight and is_deep_gemm_e8m0_used()
+            self.scale is not None
+            and is_dense_weight
+            and is_deep_gemm_e8m0_used()
+            and not (is_sm120(None) and resolve_sm120_fp8_backend() == "cutlass")
         )
         if direct_ue8m0 and self.group_size != 128:
             raise ValueError(
                 "SM100/SM120 DeepGEMM packed UE8M0 requires group_size=128, "
                 f"got {self.group_size} for {self.kernel.name}"
             )
+
+        if (
+            is_dense_weight
+            and is_sm120(None)
+            and resolve_sm120_fp8_backend() == "cutlass"
+            and self.group_size != 128
+        ):
+            raise ValueError("SM120 CUTLASS dense weights require 128x128 blocks")
 
         res = {}
         scale = None
@@ -1114,7 +1136,7 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         if self.scale:
             scale = scale.T if scale.dim() == 2 and not direct_ue8m0 else scale
             # Packed UE8M0 scales intentionally use a non-contiguous TMA
-            # layout (stride(-2) == 1).  Do not normalize that layout here.
+            # layout; do not normalize it before DeepGEMM consumes it.
             scale = scale.to(device) if direct_ue8m0 else scale.contiguous().to(device)
             res.update({self.scale.name: scale})
 

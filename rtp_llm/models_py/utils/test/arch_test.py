@@ -24,11 +24,33 @@ class ArchTest(TestCase):
             ) as get_device_capability,
         ):
             self.assertEqual(arch.get_sm(), (12, 0))
+            self.assertTrue(arch.is_sm120())
             self.assertFalse(arch.is_sm10x())
             self.assertTrue(arch.is_sm12x())
             self.assertFalse(arch.is_sm90())
             self.assertTrue(arch.is_blackwell())
             get_device_capability.assert_called_once_with(1)
+
+    def test_is_sm120_rejects_other_sm12x_minors(self):
+        with (
+            patch("rtp_llm.models_py.utils.arch.is_cuda", return_value=True),
+            patch("torch.cuda.get_device_capability", return_value=(12, 1)),
+        ):
+            self.assertTrue(arch.is_sm12x(0))
+            self.assertFalse(arch.is_sm120(0))
+
+    def test_is_sm120_rejects_non_cuda_device(self):
+        with patch("rtp_llm.models_py.utils.arch.is_cuda", return_value=True):
+            for probe in (
+                arch.is_sm90,
+                arch.is_sm10x,
+                arch.is_sm12x,
+                arch.is_sm120,
+                arch.is_blackwell,
+            ):
+                self.assertFalse(probe(torch.device("cpu")))
+            with self.assertRaisesRegex(ValueError, "expected a CUDA device"):
+                arch.get_sm(torch.device("cpu"))
 
     def test_arch_helpers_cache_by_resolved_device_id(self):
         queried_devices = []
