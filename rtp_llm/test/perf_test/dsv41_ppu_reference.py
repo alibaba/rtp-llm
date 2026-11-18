@@ -94,13 +94,16 @@ def case_config(phase, point, prefill_profile=PREFILL_PROFILES[0], *, prefill_sa
             point_unit="fresh_tokens_per_group" if legacy_prefill else "fresh_tokens_per_ppu",
         )
     if prefill_sampling == "sglang-gist":
-        if phase != "prefill" or not dp_prefill or point != 4096:
-            raise ValueError("SGLang gist sampling currently requires DP8 Prefill at 4096 tokens/rank")
+        if phase != "prefill" or not (
+            (dp_prefill and point == 4096) or (legacy_prefill and point == 32768)
+        ):
+            raise ValueError("SGLang gist sampling requires DP8 B1 or CP8 global B8 cached Prefill")
         case.update(
             prefill_sampling=prefill_sampling, warmup_steps=8, measure_steps=496,
-            fake_balance_expert=True, window_fractions=[0.2, 0.9],
+            dspark_gamma=0, fake_balance_expert=True, window_fractions=[0.2, 0.9],
             requests_per_rank=496,
-            sampling_transport="eight balanced RPC batches; native rank receipts verified",
+            requests_per_owner=496 * batch,
+            sampling_transport="queued RPC batches; native executor owners and all model ranks verified",
         )
     elif prefill_sampling != "waves":
         raise ValueError(f"unknown Prefill sampling: {prefill_sampling}")
@@ -157,7 +160,7 @@ def role_env(config):
         MAX_CONTEXT_BATCH_SIZE=str(1 if decode else p_batch),
         MAX_BATCH_TOKENS_SIZE=str(result.CONTEXT * (1 if decode else p_batch) + 1),
         CONCURRENCY_LIMIT=str(batch if decode else max(
-            16, case["global_requests"], case.get("requests_per_rank", 0)
+            16, case["global_requests"], case.get("requests_per_owner", case.get("requests_per_rank", 0))
         )),
         **dict.fromkeys(ASYNC_FLAGS, str(int(decode))),
         RTP_V41_PPU_MHC_BACKEND="mega", RTP_V41_PPU_GRAPH_MEGA_MHC="1",
@@ -502,14 +505,14 @@ async def load(config):
                     )
                 save(output, dict(experiment, priming=priming, requests=measured))
             if gist_sampling:
-                # Queue eight whole measurement batches. Frontend owner IDs
+                # Queue whole measurement batches. Frontend owner IDs
                 # need not equal backend ranks; native receipts validate all
-                # eight ranks received the same number of complete steps. The native
-                # scheduler remains fixed at one request/4096 fresh tokens per
-                # rank, so the central window contains no client wave gates.
+                # DP owners received the same number of complete steps. CP8 has
+                # one executor owner and keeps eight requests per native step.
+                # The central window contains no client wave gates.
                 # Eight warmup requests + 496 measured requests on eight ranks
                 # fit the existing 12-bit suffix salt without any repetition.
-                queued = case["requests_per_rank"]
+                queued = case["requests_per_owner"]
                 payloads = [json.dumps({
                     "prompt_batch": [prompt(case["warmup_steps"] * count + rank * queued + index)
                                      for index in range(queued)],
@@ -720,9 +723,11 @@ def main(argv=None):
                                     or not set(args.points) <= set(result.POINTS[args.phase])):
         parser.error("--points selects a unique subset of the chosen single-phase sweep")
     if args.prefill_sampling == "sglang-gist" and (
-        args.phase != "prefill" or args.prefill_profile != "dp8-compact140" or args.points != (4096,)
+        args.phase != "prefill" or (
+            args.prefill_profile, args.points
+        ) not in (("dp8-compact140", (4096,)), ("cp8-compact140", (32768,)))
     ):
-        parser.error("--prefill-sampling sglang-gist requires prefill --prefill-profile dp8-compact140 --points 4096")
+        parser.error("--prefill-sampling sglang-gist requires DP8 --points 4096 or CP8 --points 32768")
     cases = [case_config(phase, point, args.prefill_profile, prefill_sampling=args.prefill_sampling)
              for phase in phases for point in result.POINTS[phase]
              if args.points is None or point in args.points]

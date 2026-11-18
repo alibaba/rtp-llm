@@ -137,13 +137,14 @@ def gist_prefill_result(path, chunk, case):
     mean_ms = sum(per_rank) / len(per_rank)
     return {
         "steps": len(sample_steps[0]), "step_ms": mean_ms,
-        "throughput_per_ppu": chunk * 1000 / mean_ms,
+        "throughput_per_ppu": chunk * len(ranks) / WORLD * 1000 / mean_ms,
         "step_ms_per_rank": per_rank, "active_step_ms_per_rank": active,
         "sample_steps": sample_steps[0], "sample_steps_by_rank": sample_steps,
         "completion_windows": windows, "measurement_kind": "native_step_end_wall_time",
         "global_completion_window": [global_start, global_end], "rank0_anchors": anchors,
         "http_cache_checked": True, "http_timing_crosscheck": False,
         "warmup_steps": warmup, "requests_per_rank": count,
+        "executor_owners": len(ranks), "batch_per_owner": case["batch"],
         "window_fractions": [low, high], "fake_balance_expert": True,
     }
 

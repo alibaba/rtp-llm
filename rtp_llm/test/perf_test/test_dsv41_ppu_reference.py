@@ -77,6 +77,34 @@ def write_rows(path, rows):
 
 
 class ReferenceProtocolTest(unittest.TestCase):
+    def test_cp8_queued_sampling_preserves_global_batch_and_request_accounting(self):
+        cp = driver.case_config("prefill", 32768, "cp8-compact140", prefill_sampling="sglang-gist")
+        self.assertEqual((cp["batch"], cp["global_requests"], cp["prefill_dp"], cp["prefill_cp"]), (8, 8, 1, 8))
+        self.assertEqual((cp["warmup_steps"], cp["measure_steps"], cp["requests_per_owner"]), (8, 496, 3968))
+        self.assertEqual(cp["fresh_tokens_total"], 32768)
+        self.assertEqual(cp["dspark_gamma"], 0)
+        self.assertTrue(cp["fake_balance_expert"])
+        dp = driver.case_config("prefill", 4096, "dp8-compact140", prefill_sampling="sglang-gist")
+        self.assertEqual((dp["batch"], dp["prefill_dp"], dp["requests_per_owner"]), (1, 8, 496))
+        self.assertEqual(dp["dspark_gamma"], 0)
+        for phase, point, profile in (("prefill", 4096, "cp8-compact140"),
+                                      ("prefill", 4096, "cp8-yoco-off"),
+                                      ("decode", 8, "cp8-compact140")):
+            with self.subTest(phase=phase, point=point, profile=profile), self.assertRaises(ValueError):
+                driver.case_config(phase, point, profile, prefill_sampling="sglang-gist")
+
+    def test_cp8_queued_window_counts_one_owner_and_eight_devices(self):
+        case = driver.case_config("prefill", 32768, "cp8-compact140", prefill_sampling="sglang-gist")
+        rows = [dict(step=index + 1, start_ns=index * 300000000,
+                     end_ns=(index + 1) * 300000000) for index in range(504)]
+        with patch.object(result, "prefill_owner_steps", return_value=rows) as owner:
+            metrics = result.gist_prefill_result(Path("unused"), 32768, case)
+        owner.assert_called_once_with(Path("unused"), 0, 32768, required_steps=504)
+        self.assertEqual(metrics["step_ms"], 300.0)
+        self.assertAlmostEqual(metrics["throughput_per_ppu"], 4096 / 0.3)
+        self.assertEqual(metrics["executor_owners"], 1)
+        self.assertEqual(metrics["batch_per_owner"], 8)
+
     def test_first_dp_admission_gate_is_bounded_and_preserves_later_waves(self):
         case = driver.case_config("prefill", 4096, "dp8-compact140")
         env = {driver.DP_PREQUEUE_ENV: "1500", driver.DP_FIRST_PREQUEUE_ENV: "5000"}

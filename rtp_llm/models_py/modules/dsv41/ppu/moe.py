@@ -589,10 +589,10 @@ def _get_triton_kernels():
         @triton.jit
         def _mask_fake_routes_kernel(
             original_ids, pattern_ids, output_ids, output_weights, M,
-            BLOCK: tl.constexpr,
+            BLOCK: tl.constexpr, SLOTS: tl.constexpr = 8,
         ):
             offset = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-            row, slot = offset // 8, offset % 8
+            row, slot = offset // SLOTS, offset % SLOTS
             real_slot = (row < M) & (slot < 6)
             original = tl.load(original_ids + offset, real_slot, other=-1)
             live = real_slot & (original >= 0)
@@ -2057,12 +2057,20 @@ class PPUMoE:
         ``[T, 8]`` slot weights (zero on padding slots).
         """
         dp_preparation = None
+        from rtp_llm.models_py.modules.dsv41.ppu import cp_prefill_fake_routes as cp_fake
+
+        cp_preparation = None
+        if isinstance(prepared_buffer, cp_fake.CPForwardMegaBuffer):
+            cp_fake.validate(self, prepared_buffer, x.shape[0], x.device)
+            cp_preparation, prepared_buffer = prepared_buffer, prepared_buffer.buffer
         if isinstance(prepared_buffer, _DPForwardMegaBuffer):
             self._validate_dp_preparation(prepared_buffer, x.shape[0])
             dp_preparation = prepared_buffer
             prepared_buffer = prepared_buffer.buffer
         fake_routes = (self._try_prefill_fake_balance(expert_ids, expert_weights, dp_preparation)
                        if dp_preparation is not None else None)
+        if cp_preparation is not None:
+            fake_routes = cp_fake.try_balance(self, expert_ids, expert_weights, cp_preparation)
         expert_ids, expert_weights = (fake_routes if fake_routes is not None else
                                      self._apply_fake_balance(expert_ids, expert_weights, layer_id=layer_id))
         expert_ids = self._map_expert_ids(expert_ids, expert_weights, layer_id)
@@ -2281,7 +2289,10 @@ class PPUMoE:
             or self.group is not dist.group.WORLD
         ):
             return None
-        return self._ensure_mega_capacity(device, rows, uniform_rows=True)
+        buffer = self._ensure_mega_capacity(device, rows, uniform_rows=True)
+        from rtp_llm.models_py.modules.dsv41.ppu.cp_prefill_fake_routes import prepare
+
+        return prepare(self, buffer, device, rows)
 
     def _ensure_mega_capacity(self, device, row_count, *, uniform_rows=False):
         import torch.distributed as dist
@@ -2462,6 +2473,7 @@ class PPUMoE:
         # readers. A new capacity generation must build its own native pattern.
         self._prefill_fake_pattern = None
         self._prefill_fake_pattern_generation = None
+        self._cp_fake_active = None
 
     @classmethod
     def close_mega_resources(cls):

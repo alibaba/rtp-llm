@@ -337,6 +337,15 @@ def set_cp_info(
 
 def _shared_prefill_meta_inputs_required(v4, input_ids, cp_ctx):
     """Generic builders require metadata unless every consumer opts out."""
+    if (getattr(v4, "_ppu_runtime", None) is not None
+            and cp_ctx is not None and getattr(cp_ctx, "cp_size", None) == 8):
+        # The optional PPU probe checks one existing CP birth and every closed
+        # empty-stub consumer once. Generic/non-PPU callers keep this loop and
+        # do not import the PPU implementation.
+        from rtp_llm.models_py.modules.dsv41.ppu.attention_layer import _cp_prefill_meta_stub_inputs_unused
+
+        if _cp_prefill_meta_stub_inputs_unused(v4, input_ids, cp_ctx):
+            return False
     found_consumer = False
     for layer in v4.layers:
         attn = getattr(layer, "attn", None)
@@ -376,6 +385,15 @@ def _ppu_local_hc_expand_enabled(v4, hidden, input_ids):
         and is_ppu()
         and torch.cuda.get_device_capability(hidden.device) == (8, 9)
     )
+
+
+def _ppu_cp_hc_expand_enabled(v4, hidden, input_ids):
+    """Keep the CP embedding proof independent from the local/DP predicate."""
+    if getattr(v4, "_ppu_runtime", None) is None:
+        return False
+    from rtp_llm.models_py.modules.dsv41.ppu.cp_prefill_hc_expand import enabled
+
+    return enabled(v4, hidden, input_ids)
 
 
 def forward_layers(
@@ -538,7 +556,8 @@ def forward_layers(
                 and h.shape[1] == 5120
                 and v4.hc_mult == 4
                 and not torch.cuda.is_current_stream_capturing()
-                and (h.shape[0] >= 8192 or _ppu_local_hc_expand_enabled(v4, h, input_ids))
+                and (h.shape[0] >= 8192 or _ppu_local_hc_expand_enabled(v4, h, input_ids)
+                     or _ppu_cp_hc_expand_enabled(v4, h, input_ids))
             ):
                 from rtp_llm.models_py.modules.dsv41.prefill._hc_expand_triton import (
                     expand_hc,

@@ -17,6 +17,17 @@ import torch
 
 from rtp_llm.models_py.modules.dsv41.kv_cache_utils import as_attention_inputs_by_tag
 from rtp_llm.models_py.modules.dsv41.ppu.kv_codec import PoolDescriptor
+from rtp_llm.models_py.modules.dsv41.ppu.cp_prefill_shared_global import (
+    SharedGlobalBank,
+    SharedGlobalSlice,
+    global_rows as _materialize_global_rows,
+)
+from rtp_llm.models_py.modules.dsv41.ppu.cp_prefill_shared_indexer import (
+    IndexerReadbackPages,
+    SharedIndexerBank,
+    SharedIndexerSlice,
+    materialize_indexer,
+)
 from rtp_llm.models_py.modules.dsv41.ppu.native_cache import (
     NativeCacheBridge,
     _FULL,
@@ -226,6 +237,22 @@ class SharedNativeCache(NativeCacheBridge):
         self._swa_fresh_lengths = None
         self._source_reads = {}
         self._local_source_reads = {}
+        self._cp_shared_global_reads = {}
+        self._cp_shared_indexer_reads = {}
+        self._cp_shared_indexer_consumer_ready = False
+        self._cp_shared_global_epoch = 0
+        self._cp_shared_prefix_proofs = {}
+        self._cp_shared_global_stats = dict(
+            enabled=False, banks=0, logical_rows=0, packed_rows=0,
+            prefix_copy_bytes_avoided=0, legacy_materializations=0,
+            dequant_launches=0, dequant_rows=0, workspace_hits=0, invalidations=0,
+        )
+        self._cp_shared_indexer_stats = dict(
+            enabled=False, enable_calls=0, banks=0, read_hits=0, pages=0,
+            prefix_rows=0, tail_rows=0, restore_rows=0, page_padding_rows=0, logical_rows=0,
+            prefix_copy_bytes_avoided=0, materializations=0, materialized_rows=0,
+            materialized_bytes=0, invalidations=0,
+        )
         self.shared_prefix_stripes = None
         self.prefill_plans = None
         self.gather_receive = None
@@ -479,7 +506,7 @@ class SharedNativeCache(NativeCacheBridge):
 
     def _copy_rows(self, key, request_row, positions, rows=None):
         if rows is not None and key[1] in _FULL:
-            self._invalidate_local_source_reads()
+            self._invalidate_source_readbacks()
         positions = positions.to(device=self.device, dtype=torch.int64)
         placement = self.placements.get(key)
         if placement is None:
@@ -581,7 +608,7 @@ class SharedNativeCache(NativeCacheBridge):
         if key[1] in _FULL:
             # Native direct stores do not update Tensor version counters.
             # Clear before launch, including writes through aliased requests.
-            self._invalidate_local_source_reads()
+            self._invalidate_source_readbacks()
         if (
             not self.cp8_row_prep_enabled()
             or start < 0
@@ -650,6 +677,25 @@ class SharedNativeCache(NativeCacheBridge):
             # invalidate only the nominal writer's (source, request) pair.
             self._source_reads.clear()
             self._local_source_reads.clear()
+
+    def _invalidate_source_readbacks(self):
+        """Before any full-pool write, invalidate even CP source aliases.
+
+        Local eligibility checks must not call this: an ordinary CP read is
+        ineligible for the separate local-cache route, but owns valid CP banks.
+        """
+        self._cp_shared_global_epoch = getattr(self, "_cp_shared_global_epoch", 0) + 1
+        banks = getattr(self, "_cp_shared_global_reads", None)
+        indexers = getattr(self, "_cp_shared_indexer_reads", None)
+        if indexers:
+            indexers.clear()
+            self._source_reads.clear()
+            self._cp_shared_indexer_stats["invalidations"] += 1
+        if banks:
+            banks.clear()
+            self._source_reads.clear()
+            self._cp_shared_global_stats["invalidations"] += 1
+        self._invalidate_local_source_reads()
 
     def _local_source_native_read_business(self):
         # Independent of the payload-cache switch; keep its existing business
@@ -952,7 +998,7 @@ class SharedNativeCache(NativeCacheBridge):
         if (any(block < 0 or block >= pool.tensor.shape[0] for block in physical)
                 or len(set(physical)) != len(physical)):
             return decline("physical")
-        self._invalidate_local_source_reads()
+        self._invalidate_source_readbacks()
         stats["launches"] += 1
         kernels.store_cp_prefill_rows[(count,)](
             pool.tensor, pool.table[request], rows, first, first, pool.tensor.stride(0),
@@ -1115,6 +1161,10 @@ class SharedNativeCache(NativeCacheBridge):
     @staticmethod
     def _source_bank_tensors(saved):
         global_rows, indexer = saved
+        if isinstance(global_rows, SharedGlobalSlice):
+            global_rows = global_rows.bank.packed
+        if isinstance(indexer, SharedIndexerSlice):
+            indexer = indexer.bank.pages
         return (global_rows, *indexer) if isinstance(indexer, tuple) else (global_rows, indexer)
 
     def _check_local_source_reads(self):
@@ -1203,6 +1253,9 @@ class SharedNativeCache(NativeCacheBridge):
         key = source, int(request)
         if saved is not None:
             global_rows, indexer = saved
+            if isinstance(indexer, SharedIndexerSlice):
+                indexer = materialize_indexer(indexer, global_entries, split=False,
+                                               stats=self._cp_shared_indexer_stats)
             if isinstance(indexer, tuple):
                 # The BF16 scorer still consumes the original byte layout.
                 payload, scales = indexer
@@ -1211,7 +1264,8 @@ class SharedNativeCache(NativeCacheBridge):
                      scales[:global_entries].view(torch.uint8).reshape(-1, 4)),
                     dim=1,
                 )
-            return global_rows[:global_entries], indexer[:global_entries]
+            return _materialize_global_rows(global_rows, global_entries,
+                                            stats=getattr(self, "_cp_shared_global_stats", None)), indexer[:global_entries]
         # Publish only AFTER both old packed reads and all their native checks
         # succeed. Never fill inactive requests or read beyond this call's count.
         packed = self._read_source_rows(source, request, global_entries)
@@ -1234,7 +1288,8 @@ class SharedNativeCache(NativeCacheBridge):
             return banks[0][:global_entries]
         _, saved = self._cached_source_read(source, request, global_entries)
         if saved is not None:
-            return saved[0][:global_entries]
+            return _materialize_global_rows(saved[0], global_entries,
+                                            stats=getattr(self, "_cp_shared_global_stats", None))
         return self.read_source(source, request, global_entries=global_entries)[0]
 
     def read_indexer_fp4(self, source, request, *, global_entries):
@@ -1244,6 +1299,9 @@ class SharedNativeCache(NativeCacheBridge):
         if banks is not None:
             return banks[1][0][:global_entries], banks[1][1][:global_entries]
         _, saved = self._cached_source_read(source, request, global_entries)
+        if saved is not None and isinstance(saved[1], SharedIndexerSlice):
+            return materialize_indexer(saved[1], global_entries, split=True,
+                                       stats=self._cp_shared_indexer_stats)
         if saved is not None and isinstance(saved[1], tuple):
             payload, scales = saved[1]
             return payload[:global_entries], scales[:global_entries]
@@ -1270,9 +1328,108 @@ class SharedNativeCache(NativeCacheBridge):
                     source, rid, global_entries=length // self.geometry.ratio(source),
                 )
 
+    def _cp_shared_prefix_signature(self, key):
+        pool, placement = self.pools.get(key), self.placements.get(key)
+        if pool is None or placement is None or pool.framework_tag not in self.inputs:
+            return None
+        meta = self.inputs[pool.framework_tag]
+        owners = (getattr(meta, "kv_cache_block_id", None),
+                  getattr(meta, "kv_cache_block_id_device", None), placement.table, pool.table)
+        if not all(isinstance(value, torch.Tensor) for value in owners):
+            return None
+        raw = pool.tensor, pool.handle.kv_cache_base
+        if not all(isinstance(value, torch.Tensor) for value in raw):
+            return None
+        return (
+            self.lengths, self.geometry.ratio(key[0]), id(pool), id(pool.handle), id(placement), id(meta),
+            tuple(_source_tensor_key(value) for value in owners),
+            # Fresh native writes are expected; pool identity/layout, not the
+            # data Tensor version, belongs to the prefix page-alias proof.
+            tuple(_source_tensor_key(value)[:-1] for value in raw),
+            placement.size, placement.rank, placement.physical_span, placement.pages,
+        ), (*owners, *raw, pool, pool.handle, placement, meta)
+
+    def _cp_shared_global_eligible(self, key):
+        if not (
+            type(self) is SharedNativeCache and self._is_prefill and self.sharded
+            and self.cp.get("size") == 8 and self.cp8_row_prep_enabled()
+            and len(self.lengths) > 1 and len(set(self.lengths)) == 1
+            and torch.device(self.device).type == "cuda"
+            and not torch.is_grad_enabled()
+            and os.environ.get("RTP_V41_PPU_CP8_YOCO_Q8_ATTENTION", "0") != "1"
+            and not any(getattr(meta, "is_cuda_graph", False) or getattr(meta, "is_target_verify", False)
+                        for meta in self.inputs.values())
+            and (self.shared_prefix_stripes or {}).get(key, 0) > 0
+            and key in self._cp_shared_prefix_proofs
+        ):
+            return False
+        from rtp_llm.models_py.modules.dsv41.ppu import _quant
+
+        if not _quant.is_ppu() or torch.cuda.is_current_stream_capturing():
+            return False
+        current = self._cp_shared_prefix_signature(key)
+        if current is None or current[0] != self._cp_shared_prefix_proofs[key][0]:
+            raise RuntimeError("CP shared prefix placement changed after collective admission")
+        return True
+
+    def read_shared_global(self, source):
+        """Read an already prepared immutable bank; never initiate a collective."""
+        entry = getattr(self, "_cp_shared_global_reads", {}).get(source)
+        if entry is None:
+            return None
+        bank, epoch, signature, stamp, owners = entry
+        key = source, "global_kv_2" if self.geometry.ratio(source) == 2 else "global_kv_1"
+        current = self._cp_shared_prefix_signature(key)
+        if (epoch != self._cp_shared_global_epoch or current is None or current[0] != signature
+                or _source_tensor_key(bank.packed) != stamp):
+            raise RuntimeError("stale CP shared global readback")
+        return bank
+
+    def enable_shared_indexer(self):
+        """Record a forward-local consumer capability; no device work or collective."""
+        self._cp_shared_indexer_consumer_ready = True
+        self._cp_shared_indexer_stats["enabled"] = True
+        self._cp_shared_indexer_stats["enable_calls"] += 1
+
+    def _cp_shared_indexer_eligible(self, key):
+        if (not getattr(self, "_cp_shared_indexer_consumer_ready", False)
+                or not self._cp_shared_global_eligible(key)):
+            return False
+        placement = self.placements[key]
+        shared_rows = self.shared_prefix_stripes[key] * placement.size * placement.physical_span // placement.ratio
+        return shared_rows % 256 == 0
+
+    @staticmethod
+    def _shared_indexer_metadata(bank):
+        return (bank.prefix_rows, bank.request_counts, bank.tail_page_bases, bank.request_table_host,
+                bank.source, bank.epoch, _source_tensor_key(bank.pages), _source_tensor_key(bank.request_table))
+
+    def _valid_shared_indexer(self, bank):
+        if type(bank) is not SharedIndexerBank or bank.cache is not self:
+            return False
+        entry = getattr(self, "_cp_shared_indexer_reads", {}).get(bank.source)
+        if entry is None or entry[0] is not bank or bank.epoch != self._cp_shared_global_epoch:
+            return False
+        key = bank.source, "indexer_kv"
+        current = self._cp_shared_prefix_signature(key)
+        return (current is not None and current[0] == entry[1]
+                and self._shared_indexer_metadata(bank) == entry[2])
+
+    def read_shared_indexer(self, source):
+        """Read a prepared page bank without changing collective participation."""
+        entry = getattr(self, "_cp_shared_indexer_reads", {}).get(source)
+        if entry is None:
+            return None
+        bank = entry[0]
+        if not self._valid_shared_indexer(bank):
+            raise RuntimeError("stale CP shared Indexer readback")
+        self._cp_shared_indexer_stats["read_hits"] += 1
+        return bank
+
     def bind_shared_source_prefix(self, prefixes):
         """Agree on full stripes whose physical pages alias across requests."""
         self.shared_prefix_stripes = {}
+        self._cp_shared_prefix_proofs = {}
         if len(self.lengths) < 2 or len(set(self.lengths)) != 1 or min(prefixes) <= 0:
             return
         keys, candidates = [], []
@@ -1300,6 +1457,10 @@ class SharedNativeCache(NativeCacheBridge):
                 stripes = 0
             keys.append(key)
             candidates.append(stripes)
+            if stripes:
+                proof = self._cp_shared_prefix_signature(key)
+                if proof is not None:
+                    self._cp_shared_prefix_proofs[key] = proof
         if not keys:
             return
         import torch.distributed as dist
@@ -1320,6 +1481,8 @@ class SharedNativeCache(NativeCacheBridge):
         split_indexer = os.environ.get("RTP_V41_PPU_CP8_SPLIT_INDEXER_READBACK", "0") == "1"
         for kind in (tag, "indexer_kv"):
             key = source, kind
+            compact = kind == tag and self._cp_shared_global_eligible(key)
+            paged_indexer = kind == "indexer_kv" and self._cp_shared_indexer_eligible(key)
             packed.append(
                 gather_pool(
                     self.pools[key],
@@ -1331,12 +1494,66 @@ class SharedNativeCache(NativeCacheBridge):
                     plans=getattr(self, "prefill_plans", None),
                     receive=getattr(self, "gather_receive", None),
                     shared_prefix_stripes=(self.shared_prefix_stripes or {}).get(key, 0),
+                    compact_shared_prefix=compact,
+                    page_planar_indexer=paged_indexer,
                 )
             )
+        bank = packed[0] if isinstance(packed[0], SharedGlobalBank) else None
+        if bank is not None:
+            packed[0] = tuple(SharedGlobalSlice(bank, rid) for rid in range(len(counts)))
+        indexer = packed[1] if isinstance(packed[1], IndexerReadbackPages) else None
+        if indexer is not None:
+            from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_metadata import _upload
+
+            layout = indexer.layout
+            key = ("shared_indexer_table", source, layout.prefix_rows, layout.request_counts,
+                   layout.request_table_host, indexer.pages.device)
+            plans = getattr(self, "prefill_plans", None)
+            cached = plans.get(key) if plans is not None else None
+            table = cached[0] if cached is not None else None
+            # A consumer can retain a table alias after release. Never stamp
+            # a mutated cached table as a newly trusted host-generated map.
+            if table is None or _source_tensor_key(table) != cached[1]:
+                with torch.inference_mode(False):
+                    table = _upload(layout.request_table_host, indexer.pages.device, torch.int32)
+                if plans is not None:
+                    plans[key] = table, _source_tensor_key(table)
+            indexer_signature, owners = self._cp_shared_prefix_signature((source, "indexer_kv"))
+            indexer_bank = SharedIndexerBank.from_readback(
+                indexer, self, source, self._cp_shared_global_epoch, table, owners=owners,
+            )
+            packed[1] = tuple(SharedIndexerSlice(indexer_bank, rid) for rid in range(len(counts)))
         rows = tuple(zip(*packed))
         if verify:
             self._verify_source_readback(source, counts, rows)
         self._source_reads.update(((source, rid), row) for rid, row in enumerate(rows))
+        if bank is not None:
+            signature, owners = self._cp_shared_prefix_signature((source, tag))
+            self._cp_shared_global_reads[source] = (
+                bank, self._cp_shared_global_epoch, signature, _source_tensor_key(bank.packed), owners,
+            )
+            stats = self._cp_shared_global_stats
+            stats["enabled"] = True
+            stats["banks"] += 1
+            stats["logical_rows"] += sum(counts)
+            stats["packed_rows"] += bank.packed.shape[0]
+            stats["prefix_copy_bytes_avoided"] += (len(counts) - 1) * bank.prefix_rows * 288
+        if indexer is not None:
+            self._cp_shared_indexer_reads[source] = (
+                indexer_bank, indexer_signature, self._shared_indexer_metadata(indexer_bank),
+            )
+            stats = self._cp_shared_indexer_stats
+            prefix = indexer_bank.prefix_rows
+            tails = sum(count - prefix for count in counts)
+            restored = indexer_bank.pages.shape[0] * 256
+            stats["banks"] += 1
+            stats["pages"] += indexer_bank.pages.shape[0]
+            stats["prefix_rows"] += prefix
+            stats["tail_rows"] += tails
+            stats["restore_rows"] += restored
+            stats["page_padding_rows"] += restored - prefix - tails
+            stats["logical_rows"] += sum(counts)
+            stats["prefix_copy_bytes_avoided"] += (len(counts) - 1) * prefix * 68
 
     def _verify_source_readback(self, source, counts, rows):
         from rtp_llm.models_py.distributed.collective_torch import Group, all_gather
@@ -1345,6 +1562,10 @@ class SharedNativeCache(NativeCacheBridge):
         for rid, (count, actual) in enumerate(zip(counts, rows)):
             expected = self.read_source(source, rid, global_entries=count)
             for kind, new, old in zip(("global", "indexer"), actual, expected):
+                if isinstance(new, SharedGlobalSlice):
+                    new = new.bank.materialize(new.request, count)
+                if isinstance(new, SharedIndexerSlice):
+                    new = new.bank.materialize(new.request, count)
                 if isinstance(new, tuple):
                     payload, scales = new
                     match = torch.equal(payload.view(torch.uint8), old[:, :64]) and torch.equal(
@@ -1915,6 +2136,8 @@ class SharedNativeCache(NativeCacheBridge):
                 del self._fresh_swa[key]
         if not self._check_local_source_reads():
             self._source_reads.clear()
+            self._cp_shared_global_reads.clear()
+            getattr(self, "_cp_shared_indexer_reads", {}).clear()
 
     def placement_evidence(self):
         result = []

@@ -1167,7 +1167,12 @@ def engram_lookup(
     adapter = _resolve_group(group, layout)
     record = None
     if round_schedule is not None:
-        if not isinstance(round_schedule, LocalPrefillEngramSchedule) or uniform_rank_rows:
+        from rtp_llm.models_py.modules.dsv41.ppu.cp_prefill_engram_rounds import CP8PrefillEngramSchedule
+
+        if type(round_schedule) is CP8PrefillEngramSchedule:
+            if not uniform_rank_rows:
+                raise RuntimeError("CP8 Prefill Engram requires its independent uniform schedule")
+        elif not isinstance(round_schedule, LocalPrefillEngramSchedule) or uniform_rank_rows:
             raise RuntimeError("local Prefill Engram requires its independent padded schedule")
         record = round_schedule.claim(adapter, shard, layout, rows, layer_id)
         max_rows_per_round = round_schedule.round_cap

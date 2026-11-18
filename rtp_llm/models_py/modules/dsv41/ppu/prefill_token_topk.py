@@ -1,8 +1,10 @@
-"""Disposable BF16 token K512 selection for local eager PPU Prefill.
+"""Disposable BF16 token K512 selection for eager PPU Prefill score tiles.
 
-The caller must finish candidate publication/masking first and exclude
-Decode, CP, diagnostics and idle execution. Exact ties and output order have
-the existing Prefill selector's unspecified membership/order contract.
+The caller must finish candidate publication/masking first, prove the tile's
+request-local visible interval and exclude Decode, diagnostics and idle work.
+Qualified CP8 callers use the same private score-tile contract; the selector
+does not access CP state or alter padding/remap behavior. Exact ties and output
+order have the existing Prefill selector's unspecified membership/order contract.
 NaN/+inf consume slots before the unchanged finite filter; no slot is refilled.
 """
 

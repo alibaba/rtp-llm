@@ -6,7 +6,7 @@ Attention/MoE/Engram below are deterministic branch fixtures; HC units, Block
 dispatch, delayed carry, RMSNorm, bounded CED transport and head are real.
 """
 
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from dataclasses import fields
 import gc
 import json
@@ -179,7 +179,8 @@ def _fixture(inputs, ops, *, count=4, enabled="1", birth=True, prefill=True, idl
     attn = NS(cu_seqlens=torch.tensor([0, rows], dtype=torch.int32, device=device),
               input_lengths=torch.tensor([rows], dtype=torch.int32),
               prefix_lengths=torch.tensor([PREFIX], dtype=torch.int32), is_cuda_graph=False)
-    with patch.dict(os.environ, {ENV: enabled}):
+    with (nullcontext() if os.environ.get(ENV) == enabled
+          else patch.dict(os.environ, {ENV: enabled})):
         state = SharedForwardState(runtime, token_inputs, attn, cache, prefill=prefill, idle=idle,
                                    prefixes=(PREFIX,), lengths=(rows,))
     runtime.current, runtime._cross_mhc_evidence = state, state._cross_mhc_evidence
@@ -232,7 +233,9 @@ def _install_plan(state):
 
 
 def _run_chain(state, blocks, residual, *, split=True):
-    with patch.dict(os.environ, {"RTP_V41_PPU_LOCAL_PREFILL_SPLIT_L20": str(int(split))}):
+    key, value = "RTP_V41_PPU_LOCAL_PREFILL_SPLIT_L20", str(int(split))
+    with (nullcontext() if os.environ.get(key) == value
+          else patch.dict(os.environ, {key: value})):
         for block in blocks:
             residual = block(residual, state.inputs.input_ids, state.inputs.combo_position_ids,
                              state.attn.cu_seqlens, expert_load=None)

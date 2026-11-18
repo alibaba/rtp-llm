@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import weakref
+from dataclasses import dataclass
 from typing import Callable, Dict, NamedTuple, Optional, Tuple
 
 import torch
@@ -271,10 +273,125 @@ def _local_prefill_workspace_bounds(cache, context, cp, *, full_layout=False):
             for rid, (p, n, s) in enumerate(zip(prefixes, lengths, starts)) if n > s]
 
 
+def _cp8_swa_spans(lengths, prefixes, rank, chunks, window):
+    """Host geometry of the two native zigzag pieces; no tensor-value proof."""
+    if (type(rank) is not int or not 0 <= rank < 8 or type(window) is not int or window <= 0
+            or not lengths or len(lengths) != len(prefixes) or len(lengths) != len(chunks)
+            or any(type(value) is not int for value in (*lengths, *prefixes, *chunks))
+            or any(n <= 0 or n % 16 or p < 0 or chunk != n // 8
+                   for n, p, chunk in zip(lengths, prefixes, chunks))):
+        return None
+    result, legacy = [], 0
+    for prefix, chunk in zip(prefixes, chunks):
+        half = chunk // 2
+        spans = ((max(0, prefix + rank * half - window + 1), prefix + (rank + 1) * half),
+                 (max(0, prefix + (15 - rank) * half - window + 1), prefix + (16 - rank) * half))
+        legacy += spans[1][1] - spans[0][0]
+        if spans[1][0] <= spans[0][1]:
+            spans = ((spans[0][0], spans[1][1]),)
+        result.append(spans)
+    return tuple(result), legacy
+
+
+def _cp_swa_positions_alias(positions, cp):
+    original = cp.global_positions
+    return (
+        type(positions) is torch.Tensor and type(original) is torch.Tensor
+        and positions.layout == original.layout == torch.strided
+        and not positions.is_neg() and not positions.is_conj()
+        and positions.is_contiguous() and positions.dtype == torch.int64
+        and torch._C._is_alias_of(positions, original)
+        and _source_tensor_key(positions)[1:] == _source_tensor_key(original)[1:]
+    )
+
+
+@dataclass(frozen=True, eq=False)
+class CP8SegmentedSwaPlan:
+    """Forward-local permission to omit unreferenced SWA workspace holes."""
+    state_ref: object
+    cache: object
+    cp: object
+    birth: tuple
+    spans: tuple
+    legacy_rows: int
+    decoded_rows: int
+    window: int
+    keys: tuple
+    owners: tuple
+
+    def current(self, context=None):
+        state, cp = self.state_ref(), self.cp
+        if (state is None or state.shared.get("_cp_segmented_swa_plan") is not self
+                or state.cache is not self.cache or state.context is not cp
+                or state.original_context is not cp or state.compacted
+                or state._cp_full_rows_birth is not self.birth or not self.birth[2]
+                or not state._cp_rows_phase() or not state._cp_full_rows_valid()
+                or self.keys != tuple(_source_tensor_key(value) for value in
+                                      (cp.global_positions, cp.req_id_per_token, cp.local_is_real))):
+            return False
+        return context is None or (
+            _cp_swa_positions_alias(context.positions, cp)
+            and context.valid_mask is cp.local_is_real
+            and context.parallel_context is None
+        )
+
+
+def prepare_cp8_segmented_swa(state, cp, context, *, window, starts, q8=False):
+    """Admit only the existing all-live full CP8 birth, before workspace work.
+
+    Host zigzag geometry alone never certifies device rows. The original
+    native context's bind-time proof remains authoritative on every use.
+    Compact/local/Graph/Q8/unknown or padded contexts keep their old path.
+    """
+    from rtp_llm.models_py.modules.dsv41.ppu.prefill_runtime import SharedForwardState
+
+    if (type(state) is not SharedForwardState or q8 or window != 128 or starts
+            or state.compacted or cp is not state.context or cp is not state.original_context
+            or not state._cp_rows_phase() or not state._cp_full_rows_valid()
+            or state._cp_full_rows_birth is None or not state._cp_full_rows_birth[2]
+            or not state.cache.cp8_row_prep_enabled()
+            or getattr(getattr(state.cache, "geometry", None), "head_dim", None) != _quant.KV_DIM
+            or not _cp_swa_positions_alias(context.positions, cp)
+            or context.valid_mask is not cp.local_is_real or context.parallel_context is not None):
+        return None
+    cached = state.shared.get("_cp_segmented_swa_plan")
+    if cached is not None:
+        return cached if type(cached) is CP8SegmentedSwaPlan and cached.current(context) else None
+    layout = _cp8_swa_spans(state.lengths, state.query_prefixes, cp.cp_rank,
+                          cp.chunk_lengths_per_req, window)
+    if layout is None:
+        return None
+    spans, legacy = layout
+    owners = cp.global_positions, cp.req_id_per_token, cp.local_is_real
+    birth = state._cp_full_rows_birth
+    plan = CP8SegmentedSwaPlan(
+        weakref.ref(state), state.cache, cp, birth, spans, legacy,
+        sum(stop - first for request in spans for first, stop in request), window,
+        tuple(_source_tensor_key(value) for value in owners),
+        # Retain every native payload/metadata owner, but do not make a
+        # state.shared -> plan -> state cycle retain whole GPU workspaces.
+        (state.cache, cp, birth, *birth[1], *owners),
+    )
+    state.shared["_cp_segmented_swa_plan"] = plan
+    stats = getattr(state.cache, "_cp_segmented_swa_stats", None)
+    if stats is None:
+        stats = state.cache._cp_segmented_swa_stats = dict(
+            enabled=True, plans=0, workspace_hits=0, refreshes=0, requests=0, segments=0,
+            legacy_rows=0, decoded_rows=0, avoided_rows=0, dequant_calls=0,
+            fused_decode_hits=0, codec_fallbacks=0,
+        )
+    stats["plans"] += 1
+    return plan
+
+
 class _CPPrefillWorkspace:
     """One CP query layout and immutable global bank within a forward."""
 
-    def __init__(self, ops, cache, geometry, context, cp, source, ratio, window, starts, *, full_local_layout=False):
+    def __init__(self, ops, cache, geometry, context, cp, source, ratio, window, starts, *, full_local_layout=False,
+                 allow_shared_global=True, swa_plan=None):
+        self._swa_plan = swa_plan
+        if swa_plan is not None and not swa_plan.current(context):
+            raise RuntimeError("stale CP segmented SWA plan")
         positions = context.positions
         cp8 = isinstance(cache, SharedNativeCache) and cache.cp8_row_prep_enabled()
         local = _local_prefill_workspace_fusion_supported(cache, geometry, context, cp)
@@ -310,8 +427,51 @@ class _CPPrefillWorkspace:
             self.swa_ranges.append((rid, swa_offset, swa_first, swa_count, swa_rows))
             offset = swa_offset + swa_count
 
+        self._shared_global = None
+        if source is not None:
+            # The existing uniformly reached source-preparation boundary still
+            # owns every collective. Reading a published bank below is local.
+            cache.prepare_source(source)
+            reader = getattr(cache, "read_shared_global", None)
+            bank = reader(source) if allow_shared_global and cp8 and callable(reader) else None
+            if (bank is not None and geometry.head_dim == _quant.KV_DIM
+                    and tuple(rid for rid, _, _ in self.global_ranges) == tuple(range(len(bank.counts)))
+                    and tuple(count for _, _, count in self.global_ranges) == bank.counts):
+                self._shared_global = bank
+                offset = bank.packed.shape[0]
+                layout = [(0, 0, 0, 0, 0, 0)] * len(cp.chunk_lengths_per_req)
+                swa_ranges = []
+                for rid, _, first, count, swa_rows in self.swa_ranges:
+                    layout[rid] = (0, bank.counts[rid], offset, first, bank.prefix_rows, bank.tail_offsets[rid])
+                    swa_ranges.append((rid, offset, first, count, swa_rows))
+                    offset += count
+                self.swa_ranges = swa_ranges
+        if swa_plan is not None:
+            # Keep the existing source-preparation collective above in place.
+            # Only the BF16 temporary layout omits holes between query pieces.
+            layout, swa_ranges, global_ranges = [], [], []
+            offset = self._shared_global.packed.shape[0] if self._shared_global is not None else 0
+            for rid, spans in enumerate(swa_plan.spans):
+                count = cache.request_length(rid) // ratio if ratio else 0
+                gbase, prefix, tail = offset, 0, offset
+                if self._shared_global is None:
+                    if count:
+                        global_ranges.append((rid, offset, count))
+                    offset += count
+                else:
+                    gbase, prefix, tail = 0, self._shared_global.prefix_rows, self._shared_global.tail_offsets[rid]
+                pieces = []
+                for first, stop in spans:
+                    pieces.append((offset, first, stop))
+                    swa_ranges.append((rid, offset, first, stop - first, None))
+                    offset += stop - first
+                base0, first0, stop0 = pieces[0]
+                base1, first1, stop1 = pieces[1] if len(pieces) == 2 else (0, 0, 0)
+                layout.append((gbase, count, base0, first0, prefix, tail, stop0, base1, first1, stop1))
+            self.swa_ranges, self.global_ranges = swa_ranges, global_ranges
         self.kv = torch.empty((offset, geometry.head_dim), dtype=torch.bfloat16, device=positions.device)
         self.kv8 = None
+        fields = 10 if swa_plan is not None else 6 if self._shared_global is not None else 4
         plans = getattr(cache, "prefill_plans", None)
         if plans is None:
             if (local and type(cache) is SharedNativeCache and not torch.is_grad_enabled()
@@ -323,53 +483,85 @@ class _CPPrefillWorkspace:
 
                 # Same request layout on the same stream. The pinned allocator
                 # retains the host storage until its asynchronous copy finishes.
-                meta = _upload(layout, positions.device, torch.int64).reshape(-1, 4)
+                meta = _upload(layout, positions.device, torch.int64).reshape(-1, fields)
             else:
-                meta = torch.tensor(layout, dtype=torch.int64, device=positions.device).reshape(-1, 4)
+                meta = torch.tensor(layout, dtype=torch.int64, device=positions.device).reshape(-1, fields)
         else:
             from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_metadata import _upload
 
-            key = ("workspace_layout", tuple(layout), positions.device)
+            key = ("workspace_layout", fields, tuple(layout), positions.device)
             meta = plans.get(key)
             if meta is None:
-                meta = _upload(layout, positions.device, torch.int64).reshape(-1, 4)
+                meta = _upload(layout, positions.device, torch.int64).reshape(-1, fields)
                 plans[key] = meta
-        self.row_meta = meta.index_select(0, context.request_ids.long())
+        # The segmented path uses the native request owner authenticated by
+        # the full-row birth, not a later unregistered int64 cast of that owner.
+        request_ids = cp.req_id_per_token if swa_plan is not None else context.request_ids
+        self.row_meta = meta.index_select(0, request_ids.long())
         self.selection = None
         self.index_plan = None
         if source is not None:
-            cache.prepare_source(source)
             tag = "global_kv_2" if ratio == 2 else "global_kv_1"
             descriptor = cache.descriptors(source)[tag]
-            for rid, begin, count in self.global_ranges:
-                packed = (
-                    cache.read_global(source, rid, global_entries=count)
-                    if isinstance(cache, SharedNativeCache)
-                    else cache.read_source(source, rid, global_entries=count)[0]
-                )
-                out = self.kv[begin:begin + count]
-                if not (self.fused_dequant and _quant.try_dequantize_prefill_rows(packed, out, global_pool=True)):
+            if self._shared_global is not None:
+                packed = self._shared_global.packed
+                out = self.kv[:packed.shape[0]]
+                if not _quant.try_dequantize_prefill_rows(packed, out, global_pool=True):
                     ops.decode_kv(packed, pool_tag=tag, descriptor=descriptor, out=out)
+                stats = cache._cp_shared_global_stats
+                stats["dequant_launches"] += 1
+                stats["dequant_rows"] += packed.shape[0]
+            else:
+                for rid, begin, count in self.global_ranges:
+                    packed = (
+                        cache.read_global(source, rid, global_entries=count)
+                        if isinstance(cache, SharedNativeCache)
+                        else cache.read_source(source, rid, global_entries=count)[0]
+                    )
+                    out = self.kv[begin:begin + count]
+                    if not (self.fused_dequant and _quant.try_dequantize_prefill_rows(packed, out, global_pool=True)):
+                        ops.decode_kv(packed, pool_tag=tag, descriptor=descriptor, out=out)
 
     def indices(self, positions, selected, ratio, window):
+        if self._swa_plan is not None and (
+            not self._swa_plan.current() or not _cp_swa_positions_alias(positions, self._swa_plan.cp)
+        ):
+            raise RuntimeError("stale CP segmented SWA indices")
         if self.index_plan is None or self.selection is not selected:
             if self.fused_indices:
-                from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import try_assemble_cp_prefill_indices
+                if self._shared_global is not None or self._swa_plan is not None:
+                    from rtp_llm.models_py.modules.dsv41.ppu.cp_prefill_shared_global import assemble_indices
 
-                result = try_assemble_cp_prefill_indices(
-                    self.row_meta, positions, selected, ratio, window, COMBINED_WIDTH,
-                )
+                    result = assemble_indices(self.row_meta, positions, selected, ratio, window, COMBINED_WIDTH)
+                else:
+                    from rtp_llm.models_py.modules.dsv41.ppu.graph_cache_kernels import try_assemble_cp_prefill_indices
+
+                    result = try_assemble_cp_prefill_indices(
+                        self.row_meta, positions, selected, ratio, window, COMBINED_WIDTH,
+                    )
                 if result is not None:
                     self.index_plan, self.selection = result, selected
                     return result
-            gbase, count, sbase, swa_first = self.row_meta.unbind(dim=1)
+            gbase, count, sbase, swa_first = self.row_meta[:, :4].unbind(dim=1)
             swpos = positions[:, None] - window + 1 + torch.arange(window, device=positions.device)
             swa = torch.where(swpos >= swa_first[:, None], sbase[:, None] + swpos - swa_first[:, None], -1)
+            if self._swa_plan is not None:
+                stop0, base1, first1, stop1 = self.row_meta[:, 6:].unbind(dim=1)
+                in0 = (swpos >= swa_first[:, None]) & (swpos < stop0[:, None])
+                in1 = (swpos >= first1[:, None]) & (swpos < stop1[:, None])
+                swa = torch.where(in0, sbase[:, None] + swpos - swa_first[:, None],
+                                  torch.where(in1, base1[:, None] + swpos - first1[:, None], -1))
             if selected is not None:
                 columns = torch.arange(selected.shape[1], device=positions.device)
                 live = (columns < ((positions + 1) // ratio)[:, None])
                 live = live & (selected >= 0) & (selected < count[:, None])
-                global_indices = torch.where(live, gbase[:, None] + selected, -1)
+                if self._shared_global is not None or self._swa_plan is not None:
+                    prefix, tail = self.row_meta[:, 4:6].unbind(dim=1)
+                    mapped = torch.where(selected < prefix[:, None], selected,
+                                         tail[:, None] + selected - prefix[:, None])
+                else:
+                    mapped = gbase[:, None] + selected
+                global_indices = torch.where(live, mapped, -1)
                 swa = torch.cat((global_indices, swa), dim=1)
             indices, lengths = compact_prefix(swa.int())
             self.index_plan = F.pad(indices, (0, COMBINED_WIDTH - indices.shape[-1]), value=-1), lengths
@@ -377,17 +569,36 @@ class _CPPrefillWorkspace:
         return self.index_plan
 
     def refresh_swa(self, ops, cache, layer_id):
+        stats = None
+        if self._swa_plan is not None:
+            if not self._swa_plan.current():
+                raise RuntimeError("stale CP segmented SWA refresh")
+            stats = cache._cp_segmented_swa_stats
+            stats["refreshes"] += 1
+            stats["requests"] += len(self._swa_plan.spans)
+            stats["segments"] += len(self.swa_ranges)
+            stats["legacy_rows"] += self._swa_plan.legacy_rows
+            stats["decoded_rows"] += self._swa_plan.decoded_rows
+            stats["avoided_rows"] += self._swa_plan.legacy_rows - self._swa_plan.decoded_rows
         descriptor = cache.descriptors(layer_id)["swa_kv"]
         for index, (rid, begin, first, count, positions) in enumerate(self.swa_ranges):
+            if stats is not None:
+                stats["dequant_calls"] += 1
             out = self.kv[begin:begin + count]
             if self.fused_dequant and cache.try_decode_swa_range(layer_id, rid, first, out):
+                if stats is not None:
+                    stats["fused_decode_hits"] += 1
                 continue
             if positions is None:
                 positions = torch.arange(first, first + count, device=out.device)
                 self.swa_ranges[index] = (rid, begin, first, count, positions)
             packed = cache.read_swa(layer_id, rid, positions)
             if not (self.fused_dequant and _quant.try_dequantize_prefill_rows(packed, out, global_pool=False)):
+                if stats is not None:
+                    stats["codec_fallbacks"] += 1
                 ops.decode_kv(packed, pool_tag="swa_kv", descriptor=descriptor, out=out)
+            elif stats is not None:
+                stats["fused_decode_hits"] += 1
 
     def q8_kv(self):
         # The global bank stays immutable until the workspace changes source.
@@ -439,22 +650,36 @@ def _full_cp_workspace_bounds(cp, positions):
 
 def build_cp_prefill_workspace(
     *, ops, cache, layer_id, geometry, context, selected_blocks, window, swa_starts, cp, shared,
-    q8=False,
+    q8=False, swa_plan=None,
 ):
     """Reuse global rows and indices, refreshing only this layer's SWA rows."""
     ratio = geometry.ratio(layer_id)
     source = geometry.kv_source_for(layer_id) if ratio else None
     starts = swa_starts or {}
-    layout = (source, ratio, window, starts)
+    if swa_plan is not None and (
+        type(swa_plan) is not CP8SegmentedSwaPlan or swa_plan.cache is not cache or swa_plan.cp is not cp
+        or q8 or geometry.head_dim != _quant.KV_DIM or window != swa_plan.window or starts
+        or not swa_plan.current(context)
+    ):
+        raise RuntimeError("stale or unsupported CP segmented SWA workspace")
+    layout = (source, ratio, window, starts, bool(q8))
+    if swa_plan is not None:
+        layout += (swa_plan,)
     cached = shared.get("prefill_kv_workspace")
     if cached is None or cached[0] is not cp or cached[1] != layout:
         workspace = _CPPrefillWorkspace(
             ops, cache, geometry, context, cp, source, ratio, window, starts,
             full_local_layout=shared.get("local_prefill_workspace_layout") is cp,
+            allow_shared_global=not q8,
+            swa_plan=swa_plan,
         )
         shared["prefill_kv_workspace"] = (cp, layout, workspace)
     else:
         workspace = cached[2]
+        if swa_plan is not None:
+            cache._cp_segmented_swa_stats["workspace_hits"] += 1
+        if workspace._shared_global is not None:
+            cache._cp_shared_global_stats["workspace_hits"] += 1
     workspace.refresh_swa(ops, cache, layer_id)
     indices, lengths = workspace.indices(context.positions, selected_blocks, ratio, window)
     kv = workspace.q8_kv() if q8 else workspace.kv

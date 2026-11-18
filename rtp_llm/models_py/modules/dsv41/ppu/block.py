@@ -195,9 +195,21 @@ class SharedPPUBlock(Block):
             )
             schedule = getattr(state, "engram_round_schedule", None)
             gate = _local_prefill_engram_gate_enabled(state)
+            cp_gate_receipt = None
+            if not gate:
+                from rtp_llm.models_py.modules.dsv41.ppu import cp_prefill_engram_gate as cp_gate
+
+                if cp_gate.enabled(state, self, x):
+                    cp_gate_receipt = cp_gate.prefetch_receipt(state, self, x)
+                    gate = True
             self.engram.prefetch(self.engram_hashes, uniform_rank_rows=uniform_rows,
                                  **({"round_schedule": schedule} if schedule is not None else {}),
                                  **({"local_fused_mask": True} if gate else {}))
+            if cp_gate_receipt is not None:
+                cp_gate.check_prefetch(state, self, x, cp_gate_receipt)
+                state.shared.setdefault("cp_engram_gate_admissions", []).append(
+                    (self.layer_id, x.shape[0], tuple(self.engram_token_mask.shape))
+                )
         if (
             self.layer_id == 20 and state.plan is not None
             and (

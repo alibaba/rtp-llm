@@ -215,6 +215,7 @@ class SharedForwardState:
         self._local_metadata_invalid = False
         self._local_compact_row_proof = None
         self._l20_query_projection_proof = None
+        self._cp_l20_projection_proof = None
         self._local_compact_full_rows = None
         self.original_context = self.context = None
         self._entry_plan_stamp = None
@@ -241,6 +242,21 @@ class SharedForwardState:
         self._cross_mhc_invalid = False
         self._cross_mhc_full_stamp = None
         self._cross_mhc_compact_stamp = None
+        self._cp_full_rows_birth = None
+        self._cp_full_rows_invalid = False
+        self._cp_full_rows_bound = False
+        self._cp_metadata_invalid = False
+        self._cp_metadata_stream = None
+        self._cp_metadata_compact_birth = None
+        self._cp_row_records = {}
+        self._cp_metadata_entries = {}
+        self._cp_metadata_evidence = {
+            "row_constructs": 0, "row_hits": 0, "step_constructs": 0, "step_hits": 0,
+            "positions32_constructs": 0, "positions32_hits": 0,
+            "window_all_live_checks": 0, "invalidations": 0,
+        }
+        # The receipt retains scalar counters only, never the forward/state.
+        runtime._cp_metadata_evidence = self._cp_metadata_evidence
         self._cross_mhc_initial = self._cross_mhc_original() if self._cross_mhc_enabled else None
         self._cross_mhc_evidence = {
             "enabled": self._cross_mhc_enabled,
@@ -318,10 +334,161 @@ class SharedForwardState:
 
         policy = self.runtime.policy
         return (
-            _local_prefill_business_phase(self)
+            (_local_prefill_business_phase(self)
+             or (self._cp_rows_phase() and self._cp_full_rows_valid()))
             and policy.mode == "compact" and policy.keep_tokens == 140 and policy.window == 128
             and policy.max_rollback_tokens == 0 and not policy.encoder_replay
         )
+
+    def _cp_rows_phase(self):
+        """The CP8 rowwise seam has its own phase proof, not the local B1 guard."""
+        if (not self.prefill or self.idle or torch.is_grad_enabled()
+                or type(self.cache) is not SharedNativeCache or not self.cache._is_prefill
+                or not self.cache.sharded or getattr(self.runtime, "current", None) is not self
+                or any(getattr(owner, flag, False) for owner in (self, self.inputs, self.attn)
+                       for flag in ("is_graph", "is_graph_commit", "verify", "proposal", "is_proposal",
+                                    "is_speculative_decode", "is_cuda_graph", "is_target_verify",
+                                    "is_packed_target_verify"))):
+            return False
+        model, policy = self.runtime.model, self.runtime.policy
+        if (getattr(model, "_is_decode_role", True) or getattr(model, "_is_speculative", False)
+                or getattr(model, "_prefill_cp_size", None) != 8
+                or getattr(getattr(model, "parallelism_config", None), "tp_size", None) != 8
+                or (policy.mode, policy.keep_tokens, policy.window,
+                    policy.max_rollback_tokens, policy.encoder_replay) != ("compact", 140, 128, 0, False)
+                or getattr(self.cache, "lengths", None)
+                != tuple(p + n for p, n in zip(self.query_prefixes, self.lengths))):
+            return False
+        from rtp_llm.models_py.modules.dsv41.ppu._quant import is_ppu
+        from rtp_llm.models_py.modules.dsv41.ppu.attention_layer import optimized_diagnostics_enabled
+        from rtp_llm.models_py.modules.dsv4 import _record_tensor, _forward_tensor_debug
+
+        return (not _record_tensor.ENABLED and not _forward_tensor_debug.enabled()
+                and not optimized_diagnostics_enabled() and is_ppu()
+                and not torch.cuda.is_current_stream_capturing())
+
+    def _cp_full_rows_descriptor(self):
+        """Snapshot the actual native context at its existing bind boundary.
+
+        Native original tensors follow the framework's read-only-within-forward
+        contract, including inference tensors without counters. Strong owners,
+        rebinding, geometry and every available version are checked. No device
+        values or hypothetical contiguous request-local order certify CP rows.
+        """
+        cp = self.original_context
+        lengths, prefixes = self.lengths, self.query_prefixes
+        if (not isinstance(cp, CPContext) or cp.cp_size != 8 or not cp.kv_cache_sharded
+                or type(cp.cp_rank) is not int or not 0 <= cp.cp_rank < 8
+                or not lengths or len(lengths) != len(prefixes)
+                or any(n <= 0 for n in lengths) or any(p < 0 for p in prefixes)
+                or cp.input_lengths_global_host != lengths or cp.prefix_lengths_host != prefixes
+                or cp.chunk_lengths_per_req != tuple((n + 15) // 16 * 2 for n in lengths)
+                or cp.chunk_length != sum(cp.chunk_lengths_per_req)
+                or cp.padded_seq_len != cp.chunk_length * 8 or cp.seq_len_full != sum(lengths)
+                or cp.gather_restore_positions is not None
+                or not is_plain_tensor(self.inputs.input_ids)
+                or self.inputs.input_ids.numel() != cp.chunk_length):
+            return None
+        sources = tuple(getattr(cp, name, None) for name in (
+            "global_positions", "req_id_per_token", "local_is_real", "unpad_restore",
+            "relative_positions", "prefix_lengths", "input_lengths_global", "cu_seqlens_global",
+        ))
+        sizes = ((cp.chunk_length,) * 3 + (sum(lengths), cp.chunk_length,
+                                         len(lengths), len(lengths), len(lengths) + 1))
+        dtypes = ((torch.int64,), (torch.int32, torch.int64), (torch.bool,), (torch.int64,),
+                  (torch.int64,), (torch.int32, torch.int64), (torch.int32, torch.int64),
+                  (torch.int32, torch.int64))
+        device = self.inputs.input_ids.device
+        if any(not is_plain_tensor(value) or value.shape != (size,) or value.dtype not in dtype
+               or value.device != device for value, size, dtype in zip(sources, sizes, dtypes)):
+            return None
+        original = self._cross_mhc_original()
+        if original is None:
+            return None
+        owners = (self.inputs, self.attn, self.cache, self.runtime.model, cp, cp.cp_info,
+                  *sources, *original[1])
+        key = (tuple(id(owner) for owner in owners[:6]), original[0],
+               lengths, prefixes, cp.cp_rank, cp.chunk_lengths_per_req,
+               cp.chunk_length, cp.padded_seq_len, cp.seq_len_full,
+               tuple(_row_tensor_key(value) for value in sources))
+        return key, owners, sum(lengths) == cp.padded_seq_len
+
+    def _remember_cp_full_rows(self):
+        # A cache hit, changed context or a later consumer cannot mint a birth.
+        if (self._cp_full_rows_bound or not isinstance(self.original_context, CPContext)
+                or self.original_context.cp_size != 8):
+            return
+        self._cp_full_rows_bound = True
+        if (self._cp_full_rows_birth is not None or self._cp_full_rows_invalid
+                or self.compacted or self.context is not self.original_context
+                or not self._cp_rows_phase()):
+            return
+        descriptor = self._cp_full_rows_descriptor()
+        if descriptor is None:
+            return
+        self._cp_full_rows_birth = descriptor
+        cp = self.original_context
+        # Bind the native source stream at the original context boundary.
+        # A later consumer cannot certify an unknown source stream for itself.
+        if cp.global_positions.is_cuda:
+            stream = torch.cuda.current_stream(cp.global_positions.device)
+            if stream.device == cp.global_positions.device:
+                self._cp_metadata_stream = ((stream.device, int(stream.cuda_stream)), stream)
+        self._cross_mhc_evidence["cp_row_proof"] = {
+            "full_rows": cp.chunk_length, "full_real_rows_global": sum(self.lengths),
+            "full_padded_rows_global": cp.padded_seq_len, "full_all_live": descriptor[2],
+            "compact_rows": None, "compact_real_rows_local": None, "compact_all_live": None,
+            "full_mask_omitted": 0, "compact_mask_omitted": 0, "compact_mask_kept": 0,
+        }
+
+    def _cp_full_rows_valid(self):
+        birth = self._cp_full_rows_birth
+        if birth is None or self._cp_full_rows_invalid:
+            return False
+        current = self._cp_full_rows_descriptor()
+        if (current is None or current[0] != birth[0]
+                or any(old is not new for old, new in zip(birth[1], current[1]))):
+            self._cp_full_rows_invalid = True
+            return False
+        return True
+
+    def _cp_compact_rows_descriptor(self):
+        if not self.compacted or not self._cp_full_rows_valid():
+            return None
+        from rtp_llm.models_py.modules.dsv41.ppu.local_prefill_qkv import CP8QueryPlanBirth
+
+        plan, cp = self.plan, self.context
+        birth = getattr(plan, "_ppu_cp8_query_birth", None)
+        ids = self.compact_ids
+        if (not isinstance(birth, CP8QueryPlanBirth) or not birth.current()
+                or birth.original is not self.original_context or birth.plan is not plan
+                or birth.compact is not cp or not is_plain_tensor(ids)
+                or ids.shape != (cp.chunk_length,) or ids.dtype not in (torch.int32, torch.int64)
+                or ids.device != cp.global_positions.device):
+            return None
+        # Actual compact activation ids are read-only within this epoch. The
+        # replacement map/context tensors themselves have strict birth versions.
+        key = (id(cp), id(plan), id(birth), birth.geometry, birth.keys,
+               _row_tensor_key(ids), _row_tensor_key(plan.cu_seqlens))
+        return key, (cp, plan, birth, ids, plan.cu_seqlens, *birth.transport, *birth.original_sources)
+
+    def _cp_cross_mhc_epoch(self, rows):
+        if not self._cross_mhc_original_valid() or not self._cp_full_rows_valid():
+            return None
+        full = self._cp_full_rows_birth
+        host = self._cross_mhc_initial[0], full[0]
+        if not self.compacted:
+            if self.context is not self.original_context or rows != self.original_context.chunk_length:
+                return None
+            # L19's future plan is deliberately absent from the full-row epoch.
+            return (host, False, id(self.original_context)), (*self._cross_mhc_initial[1], *full[1])
+        current, stamp = self._cp_compact_rows_descriptor(), self._cross_mhc_compact_stamp
+        if stamp is None or current is None or current[0] != stamp[0]:
+            self._cross_mhc_invalid = True
+            return None
+        if rows != self.context.chunk_length:
+            return None
+        return ((host, True, current[0]), (*self._cross_mhc_initial[1], *full[1], *stamp[1]))
 
     def _cross_mhc_original(self):
         owners = (self.inputs.input_ids, getattr(self.inputs, "combo_position_ids", None),
@@ -342,6 +509,8 @@ class SharedForwardState:
         return not self._cross_mhc_invalid
 
     def _cross_mhc_compact_descriptor(self):
+        if self._cp_full_rows_birth is not None:
+            return self._cp_compact_rows_descriptor()
         if not self.compacted:
             return None
         cp, plan, proof = self.context, self.plan, self._local_compact_row_proof
@@ -366,6 +535,8 @@ class SharedForwardState:
         return key, (cp, plan, proof, ids, cu, *current[1])
 
     def _cross_mhc_full_valid(self):
+        if self._cp_full_rows_birth is not None:
+            return self._cross_mhc_original_valid() and self._cp_full_rows_valid()
         if not self._cross_mhc_original_valid() or self._cross_mhc_full_stamp is None:
             return False
         keys, owners = self._cross_mhc_full_stamp
@@ -377,6 +548,8 @@ class SharedForwardState:
         return True
 
     def _cross_mhc_epoch(self, rows):
+        if self._cp_full_rows_birth is not None:
+            return self._cp_cross_mhc_epoch(rows)
         if not self._cross_mhc_full_valid():
             return None
         full_keys, full_owners = self._cross_mhc_full_stamp
@@ -508,6 +681,7 @@ class SharedForwardState:
                 if layer.engram is not None and layer.engram_token_mask is not None:
                     layer.engram_token_mask = layer.engram_token_mask & context.local_is_real
         self.context = context
+        self._remember_cp_full_rows()
         if isinstance(self.cache, SharedNativeCache):
             from rtp_llm.models_py.modules.dsv41.ppu.layers import cp8_yoco_fast_prefill_enabled
 
@@ -1002,6 +1176,244 @@ class SharedForwardState:
             raise
         return self._local_metadata_remember(entry, context, rows, "positions32", value)
 
+    def _invalidate_cp_metadata(self):
+        if not self._cp_metadata_invalid:
+            self._cp_metadata_evidence["invalidations"] += 1
+        self._cp_metadata_invalid = True
+
+    def _cp_metadata_epoch(self, context):
+        """Separate CP admission; neither local B1 guard is widened here."""
+        if type(self) is not SharedForwardState or self._cp_metadata_invalid:
+            return None
+        if self._cp_full_rows_birth is None:
+            return None
+        if (os.environ.get("RTP_V41_PPU_CP8_REUSE_LOCAL_ROWS", "0") != "1"
+                or not self._cp_rows_phase() or not self._cp_full_rows_valid()
+                or context is not self.context or not isinstance(context, CPContext)
+                or not context.global_positions.is_cuda or self._cp_metadata_stream is None):
+            self._invalidate_cp_metadata()
+            return None
+        stream = torch.cuda.current_stream(context.global_positions.device)
+        if (stream.device != context.global_positions.device
+                or (stream.device, int(stream.cuda_stream)) != self._cp_metadata_stream[0]):
+            self._invalidate_cp_metadata()
+            return None
+        full = self._cp_full_rows_birth[0]
+        if not self.compacted:
+            if context is not self.original_context:
+                self._invalidate_cp_metadata()
+                return None
+            # A CED plan created at L19 has not changed any full-row owner.
+            return (False, full), (context,)
+        current = self._cp_compact_rows_descriptor()
+        birth = self._cp_metadata_compact_birth
+        if birth is None or current is None or current[0] != birth[0]:
+            self._invalidate_cp_metadata()
+            return None
+        return (True, full, current[0]), current[1]
+
+    @staticmethod
+    def _cp_metadata_current_stream(rows):
+        if (type(rows) is not tuple or len(rows) != 4
+                or any(type(value) is not torch.Tensor or not is_plain_tensor(value)
+                       or not value.is_contiguous() or value.requires_grad for value in rows)
+                or not rows[0].is_cuda):
+            return None
+        stream = torch.cuda.current_stream(rows[0].device)
+        if stream.device != rows[0].device:
+            return None
+        return (rows[0].device, int(stream.cuda_stream)), stream
+
+    def _cp_metadata_stream_valid(self, rows):
+        current = self._cp_metadata_current_stream(rows)
+        if current is None:
+            self._invalidate_cp_metadata()
+            return False
+        if self._cp_metadata_stream is None or self._cp_metadata_stream[0] != current[0]:
+            self._invalidate_cp_metadata()
+            return False
+        return True
+
+    def _remember_cp_rows(self, context, rows, epoch):
+        """Only the original long()/cu construction may certify derived rows.
+
+        Original native CP positions/masks may be inference tensors under the
+        existing read-only contract. New long-request/cu owners are versioned;
+        no cache hit or consumer certifies an unknown versionless replacement.
+        """
+        if epoch is None or self._cp_metadata_invalid:
+            return
+        count, requests = context.chunk_length, context.req_id_per_token
+        if (tuple(value.shape for value in rows) != ((count,), (count,),
+                                                     (len(self.lengths) + 1,), (count,))
+                or rows[0] is not context.global_positions or rows[3] is not context.local_is_real
+                or rows[1].dtype != torch.int64 or rows[2].dtype not in (torch.int32, torch.int64)
+                or rows[2].is_inference()
+                or any(value.device != rows[0].device for value in rows)
+                or (requests.dtype == torch.int64 and rows[1] is not requests)
+                or (requests.dtype != torch.int64 and (
+                    rows[1].is_inference() or torch._C._is_alias_of(rows[1], requests)))
+                or not self._cp_metadata_stream_valid(rows)):
+            self._invalidate_cp_metadata()
+            return
+        slot = bool(self.compacted)
+        if slot in self._cp_row_records:
+            self._invalidate_cp_metadata()
+            return
+        # No state/runtime/model object is retained by these additional caches.
+        self._cp_row_records[slot] = SimpleNamespace(
+            context=context, epoch=epoch[0], owners=epoch[1], rows=rows,
+            keys=tuple(_row_tensor_key(value) for value in rows),
+        )
+        self._cp_metadata_evidence["row_constructs"] += 1
+
+    def _cp_row_record(self, context, rows=None, *, epoch=None):
+        epoch = self._cp_metadata_epoch(context) if epoch is None else epoch
+        if epoch is None:
+            return None
+        record = self._cp_row_records.get(bool(self.compacted))
+        if record is None:
+            return None
+        if (record.context is not context or record.epoch != epoch[0]
+                or record.keys != tuple(_row_tensor_key(value) for value in record.rows)
+                or (rows is not None and (type(rows) is not tuple or len(rows) != 4
+                    or any(old is not new for old, new in zip(record.rows, rows))))
+                or not self._cp_metadata_stream_valid(record.rows)):
+            self._invalidate_cp_metadata()
+            return None
+        return record
+
+    @staticmethod
+    def _cp_metadata_result_key(value, rows, *, step):
+        if step:
+            from rtp_llm.models_py.modules.dsv41.backend import V41StepContext
+
+            if type(value) is not V41StepContext or vars(value).get("parallel_context", object()) is not None:
+                return None
+            tensors = tuple(vars(value).get(name) for name in (
+                "positions", "valid_mask", "request_ids", "owner_ranks", "request_offsets",
+            ))
+            sizes = (rows[0].numel(),) * 4 + (rows[2].numel(),)
+            dtypes = (torch.int64, torch.bool, torch.int64, torch.int64, torch.int64)
+            if any(type(t) is not torch.Tensor or not is_plain_tensor(t) or not t.is_contiguous()
+                   or t.shape != (n,) or t.dtype != dtype or t.device != rows[0].device
+                   or t.requires_grad for t, n, dtype in zip(tensors, sizes, dtypes)):
+                return None
+            # The standard builder borrows precisely these native/derived row
+            # owners. Only those known aliases may remain inference tensors.
+            for tensor, source in zip(tensors[:3], (rows[0], rows[3], rows[1])):
+                if (not torch._C._is_alias_of(tensor, source)
+                        or _row_tensor_key(tensor)[1:] != _row_tensor_key(source)[1:]):
+                    return None
+            if (any(t.is_inference() for t in tensors[3:])
+                    or any(torch._C._is_alias_of(tensors[3], source) for source in rows)):
+                return None
+        else:
+            tensors = (value,)
+            if (type(value) is not torch.Tensor or not is_plain_tensor(value) or value.is_inference()
+                    or value.dtype != torch.int32 or value.shape != rows[0].shape
+                    or value.device != rows[0].device or not value.is_contiguous() or value.requires_grad
+                    or any(torch._C._is_alias_of(value, source) for source in rows)):
+                return None
+        return type(value), id(value), tuple((id(tensor), _row_tensor_key(tensor)) for tensor in tensors)
+
+    def _cp_metadata_entry(self, context, rows):
+        record = self._cp_row_record(context, rows)
+        if record is None:
+            return None
+        slot = bool(self.compacted)
+        entry = self._cp_metadata_entries.get(slot)
+        if entry is None:
+            entry = SimpleNamespace(record=record, values={}, retained=[], builder=None)
+            self._cp_metadata_entries[slot] = entry
+        elif entry.record is not record or any(
+            self._cp_metadata_result_key(value, record.rows, step=kind == "step") != key
+            for kind, (value, key) in entry.values.items()
+        ):
+            self._invalidate_cp_metadata()
+            return None
+        return entry
+
+    def _remember_cp_metadata(self, entry, context, rows, kind, value):
+        tensors = tuple(vars(value).values()) if kind == "step" else (value,)
+        entry.retained.extend(tensor for tensor in tensors if isinstance(tensor, torch.Tensor))
+        key = self._cp_metadata_result_key(value, entry.record.rows, step=kind == "step")
+        entry.values[kind] = value, key
+        if key is None or self._cp_row_record(context, rows) is not entry.record:
+            self._invalidate_cp_metadata()
+        # The first real construction has already dispatched. Return it once,
+        # even if a custom builder changed a source; never trigger a retry.
+        return value
+
+    def cp_prefill_step_context(self, context, rows, *, builder):
+        """Called only by the authenticated read-only CP main-context consumer."""
+        entry = self._cp_metadata_entry(context, rows)
+        if entry is None:
+            return None
+        if entry.builder is not None and entry.builder is not builder:
+            self._invalidate_cp_metadata()
+            return None
+        if "step" in entry.values:
+            self._cp_metadata_evidence["step_hits"] += 1
+            return entry.values["step"][0]
+        entry.builder = builder
+        try:
+            with torch.inference_mode(False), torch.no_grad():
+                value = builder(*rows[:3], valid_mask=rows[3])
+        except BaseException:
+            self._invalidate_cp_metadata()
+            raise
+        self._cp_metadata_evidence["step_constructs"] += 1
+        return self._remember_cp_metadata(entry, context, rows, "step", value)
+
+    def cp_prefill_positions32(self, context, rows):
+        """A same-stream private cast for the authenticated all-live Mega reader."""
+        entry = self._cp_metadata_entry(context, rows)
+        if entry is None:
+            return None
+        # Padding retains the existing masked positions/where/cast path.
+        all_live = (self._cp_full_rows_birth[2] if not self.compacted else
+                    sum(self.plan.exchange.receive_sizes) == context.chunk_length)
+        if not all_live:
+            return None
+        if "positions32" in entry.values:
+            self._cp_metadata_evidence["positions32_hits"] += 1
+            return entry.values["positions32"][0]
+        try:
+            with torch.inference_mode(False), torch.no_grad():
+                value = rows[0].to(torch.int32)
+        except BaseException:
+            self._invalidate_cp_metadata()
+            raise
+        self._cp_metadata_evidence["positions32_constructs"] += 1
+        return self._remember_cp_metadata(entry, context, rows, "positions32", value)
+
+    def _cp_window_all_live_rows(self, ids, window, comparison_ids, mask):
+        cp = self.original_context
+        if (self.compacted or self.context is not cp or self._cp_full_rows_birth is None
+                or not self._cp_full_rows_birth[2] or not self._cp_rows_phase()
+                or not self._cp_full_rows_valid() or mask is not cp.local_is_real):
+            return False
+        if any(type(value) is not torch.Tensor or not is_plain_tensor(value)
+               or value.ndim != 1 or value.shape != (cp.chunk_length,)
+               or value.dtype not in (torch.int32, torch.int64) or not value.is_contiguous()
+               or value.device != cp.global_positions.device for value in (ids, comparison_ids)):
+            return False
+        # The native Engram frame retains windows[:, 0], a read-only column
+        # view (normally stride3). An all-live mask selects every logical row,
+        # so torch.equal(window.long(), ...) preserves its ordering and cast
+        # semantics without first gathering that column into another tensor.
+        # Keep the native row operands contiguous and unknown window layouts
+        # on the existing masked path; no new owner or transport is certified.
+        if (window is not getattr(self, "window_current_tokens", None)
+                or type(window) is not torch.Tensor or not is_plain_tensor(window)
+                or window.ndim != 1 or window.shape != (cp.chunk_length,)
+                or window.dtype not in (torch.int32, torch.int64)
+                or window.device != cp.global_positions.device or window.stride(0) <= 0):
+            return False
+        self._cp_metadata_evidence["window_all_live_checks"] += 1
+        return True
+
     def _compact_host_geometry(self):
         """Return the exact B1 compact row geometry only while its birth holds.
 
@@ -1093,6 +1505,8 @@ class SharedForwardState:
         No device values, host transfers or expanded compact-layout proof are
         consulted here. Versionless external/inference masks fail closed.
         """
+        if self._cp_full_rows_birth is not None:
+            return self._cp_mega_attention_valid_mask(context, mask, query_rows)
         if not self._mega_all_live_phase():
             return mask
         stamp = self._mega_all_live_masks.get(id(context))
@@ -1123,6 +1537,30 @@ class SharedForwardState:
             return mask
         return None
 
+    def _cp_mega_attention_valid_mask(self, context, mask, query_rows):
+        if (not self._cp_rows_phase() or not self._cp_full_rows_valid()
+                or context is not self.context or not isinstance(context, CPContext)
+                or mask is not context.local_is_real or not is_plain_tensor(mask)
+                or mask.shape != (query_rows,) or context.chunk_length != query_rows):
+            return mask
+        evidence = self._cross_mhc_evidence["cp_row_proof"]
+        if not self.compacted:
+            if context is self.original_context and self._cp_full_rows_birth[2]:
+                evidence["full_mask_omitted"] += 1
+                return None
+            return mask
+        current = self._cp_compact_rows_descriptor()
+        if current is None:
+            return mask
+        # CP8's140 retained rows pad to144 for B8. Rank0 receives112 real
+        # rows; other ranks receive144. Only the actual private transport's
+        # complete receive layout certifies an all-live compact mask.
+        if sum(self.plan.exchange.receive_sizes) != query_rows:
+            evidence["compact_mask_kept"] += 1
+            return mask
+        evidence["compact_mask_omitted"] += 1
+        return None
+
     def _rows_legacy(self, context=None):
         local = self._local_row_cache_key(context)
         slot = id(context)
@@ -1132,6 +1570,12 @@ class SharedForwardState:
                 return cached[1]
         if context is not None:
             chunks = context.chunk_lengths_per_req
+            cp_epoch = self._cp_metadata_epoch(context)
+            if cp_epoch is not None:
+                record = self._cp_row_record(context, epoch=cp_epoch)
+                if record is not None:
+                    self._cp_metadata_evidence["row_hits"] += 1
+                    return record.rows
             reuse = (
                 self.prefill
                 and context.cp_size == 8
@@ -1145,7 +1589,7 @@ class SharedForwardState:
             if reuse and self._local_cp_rows is not None and self._local_cp_rows[0] is context:
                 return self._local_cp_rows[1]
             compact_lookup = self._indexer_lookup_compact_valid(context)
-            with torch.inference_mode(False) if compact_lookup else nullcontext():
+            with torch.inference_mode(False) if compact_lookup or cp_epoch is not None else nullcontext():
                 if compact_lookup and self.inputs.input_ids.is_cuda:
                     from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_metadata import _upload
 
@@ -1159,6 +1603,7 @@ class SharedForwardState:
                     )
                 requests = context.req_id_per_token.long()
             rows = context.global_positions, requests, cu, context.local_is_real
+            self._remember_cp_rows(context, rows, cp_epoch)
             if compact_lookup and self._indexer_lookup_compact_rows is None:
                 self._indexer_lookup_compact_rows = context, rows, tuple(_row_tensor_key(value) for value in rows)
             self._remember_sg_rows(context, rows)
@@ -1587,6 +2032,15 @@ class SharedForwardState:
             self._l20_query_projection_proof = (
                 (self.plan, self.plan.context, proof[0], proof[1]) if proof is not None else None
             )
+        if self.plan is not None and getattr(self.plan, "_ppu_cp8_query_birth", None) is not None:
+            from rtp_llm.models_py.modules.dsv41.ppu.local_prefill_qkv import (
+                CP8L20ProjectionProof, _cp8_l20_host_domain,
+            )
+
+            if _cp8_l20_host_domain(self):
+                self._cp_l20_projection_proof = CP8L20ProjectionProof(
+                    self, self.plan._ppu_cp8_query_birth,
+                )
 
     def before_block(self, block, hidden, ids, positions, cu):
         layer = block.layer_id
@@ -1612,7 +2066,8 @@ class SharedForwardState:
             ):
                 comparison_ids = self.runtime.model._engram_input_ids(ids, image_rows)
             window = self.window_current_tokens
-            if unmasked and all(
+            cp_all_live = self._cp_window_all_live_rows(ids, window, comparison_ids, real)
+            if (unmasked or cp_all_live) and all(
                 plain_ids(value) and value.shape == ids.shape and value.device == ids.device
                 for value in (window, comparison_ids)
             ):
@@ -1688,7 +2143,8 @@ class SharedForwardState:
             last = original.local_is_real & (original.global_positions == ends[original.req_id_per_token.long()])
             if not bool(self.valid_output_rows[last].all()):
                 raise RuntimeError("YOCO removed a framework first-token output row")
-        logging.info("PPU shared YOCO compact %s", self.evidence())
+        if logging.getLogger().isEnabledFor(logging.INFO):
+            logging.info("PPU shared YOCO compact %s", self.evidence())
         if optimization_env_value(LOCAL_PREFILL_COMPACT_ROWS_ENV, "0") == "1":
             proof = self._local_compact_rows_key(self.context)
             self._local_compact_row_proof = (
@@ -1700,6 +2156,17 @@ class SharedForwardState:
                 and self._cross_mhc_full_valid()):
             # A compact epoch is born only here, never at a cache consumer.
             self._cross_mhc_compact_stamp = self._cross_mhc_compact_descriptor()
+        if self._cp_full_rows_birth is not None:
+            current = self._cp_compact_rows_descriptor()
+            if current is not None:
+                if self._cp_metadata_compact_birth is None:
+                    self._cp_metadata_compact_birth = current
+                elif self._cp_metadata_compact_birth[0] != current[0]:
+                    self._invalidate_cp_metadata()
+                evidence = self._cross_mhc_evidence["cp_row_proof"]
+                real = sum(self.plan.exchange.receive_sizes)
+                evidence.update(compact_rows=self.context.chunk_length, compact_real_rows_local=real,
+                                compact_all_live=real == self.context.chunk_length)
 
     def publication(self, layer):
         return self.plan.candidate_publication(self.shared) if layer == 20 and self.plan is not None else nullcontext()
@@ -1710,7 +2177,8 @@ class SharedForwardState:
             reduced = self.plan.restore_rows(reduced)
             self.restore_aux()
             self.head_restored = True
-            logging.info("PPU shared YOCO restored %s", self.evidence())
+            if logging.getLogger().isEnabledFor(logging.INFO):
+                logging.info("PPU shared YOCO restored %s", self.evidence())
         return reduced
 
     def restore_aux(self):

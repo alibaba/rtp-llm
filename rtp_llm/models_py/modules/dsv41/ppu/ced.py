@@ -60,10 +60,13 @@ def bounded_plan(v4, context, attn_inputs, kv_cache, policy):
         and len(context.input_lengths_global_host) == 1
         and context.input_lengths_global_host[0] > policy.keep_tokens
     )
+    cp8_layout = (
+        context.cp_size == 8 and context.kv_cache_sharded and policy.keep_tokens == 140
+    )
     options = {
         "bounded_replay_keep_tokens": policy.keep_tokens,
         "versioned_metadata": True,
-    } if single_layout else {}
+    } if single_layout or cp8_layout else {}
     admitted = CEDPlan.create(
         v4, context, attn_inputs, kv_cache, bounded_replay=True, **options
     )
@@ -72,6 +75,14 @@ def bounded_plan(v4, context, attn_inputs, kv_cache, policy):
     if single_layout:
         exchange = _LocalRowExchange(**{**vars(admitted.exchange), "group": None})
         return replace(admitted, exchange=exchange), "compact140"
+    if cp8_layout:
+        from rtp_llm.models_py.modules.dsv41.ppu.local_prefill_qkv import CP8QueryPlanBirth
+
+        # The public planner already supports the requested140 rows. Keep
+        # this exact normal/versioned creation rather than allocating an
+        # unconsumed128 plan followed by another140 transport.
+        admitted._ppu_cp8_query_birth = CP8QueryPlanBirth(admitted)
+        return admitted, "compact140"
     lengths = context.input_lengths_global_host
     starts = tuple(max(n - policy.keep_tokens, 0) for n in lengths)
     selected = _bounded_replay_selected(lengths, starts)

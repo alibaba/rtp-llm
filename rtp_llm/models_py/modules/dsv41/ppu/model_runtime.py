@@ -125,6 +125,11 @@ class SharedNativeRuntime:
         engram_flag = optimization_env_value(LOCAL_PREFILL_ENGRAM_ROUNDS_ENV, "0")
         self._engram_requested = engram_flag == "1"
         self._engram_flag_valid = engram_flag in ("0", "1")
+        from rtp_llm.models_py.modules.dsv41.ppu.cp_prefill_engram_rounds import CP8_ENGRAM_ROUNDS_ENV
+
+        cp_engram_flag = os.environ.get(CP8_ENGRAM_ROUNDS_ENV, "0")
+        self._cp_engram_requested = cp_engram_flag == "1"
+        self._cp_engram_flag_valid = cp_engram_flag in ("0", "1")
         self._engram_epoch = 0
         self._engram_incomplete = False
         self._engram_evidence = {}
@@ -242,6 +247,11 @@ class SharedNativeRuntime:
             layer = self.model.v4.layers[layer_id]
             layer.engram_hashes = hashes[:, index].contiguous()
             layer.engram_token_mask = mask
+            from rtp_llm.models_py.modules.dsv41.ppu.cp_prefill_engram_rounds import CP8PrefillEngramSchedule
+
+            schedule = getattr(self.current, "engram_round_schedule", None)
+            if type(schedule) is CP8PrefillEngramSchedule:
+                schedule.publish(layer_id, layer.engram_hashes)
 
     def _prepare_engram_rounds(self, state):
         from rtp_llm.models_py.modules.dsv41.ppu import engram
@@ -261,6 +271,13 @@ class SharedNativeRuntime:
         if graph or (self.device.type == "cuda" and torch.cuda.is_current_stream_capturing()):
             return None
         self._engram_epoch += 1
+        if (getattr(model, "_prefill_cp_size", None) == 8 and state.prefill and not state.idle
+                and getattr(state.attn, "context_parallel_info", None) is not None):
+            from rtp_llm.models_py.modules.dsv41.ppu.cp_prefill_engram_rounds import prepare_cp8_prefill_engram_schedule
+
+            return prepare_cp8_prefill_engram_schedule(
+                self, state, epoch=self._engram_epoch, evidence=self._engram_evidence,
+            )
         args, parallel = model._v4_args, model.parallelism_config
         ops = model._shared_ops
         bindings = getattr(ops, "_engram", {})
