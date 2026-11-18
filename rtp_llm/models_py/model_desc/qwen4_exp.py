@@ -876,11 +876,10 @@ class Qwen4ExpModel(Qwen35Model):
             for layer in self.layers:
                 layer.mlp.prepare_reduce_gate_overlap()
             if getattr(config.quant_config, "decode_shared_gemm_nk", False):
+                from rtp_llm.models_py.distributed import collective_torch
                 from rtp_llm.models_py.modules.qwen4_exp.moe.shared_gemm import (
                     prepare_shared_gemm,
                 )
-
-                from rtp_llm.models_py.distributed import collective_torch
 
                 prepare_shared_gemm(
                     self.layers,
@@ -1404,8 +1403,10 @@ class Qwen4ExpModel(Qwen35Model):
         try:
             from .qwen4_exp_runtime.prefill_preflight import prefill_geometry_scope
 
-            with prefill_geometry_scope(self, inputs, fmha_impl):
-                outputs = self._forward_with_ple_prefetch(inputs, fmha_impl)
+            with prefill_geometry_scope(self, inputs, fmha_impl) as share_qsa_metadata:
+                outputs = self._forward_with_ple_prefetch(
+                    inputs, fmha_impl, share_qsa_metadata=share_qsa_metadata
+                )
             return outputs
         finally:
             if target_reduce is not None:
@@ -1417,7 +1418,11 @@ class Qwen4ExpModel(Qwen35Model):
                     finish()
 
     def _forward_with_ple_prefetch(
-        self, inputs: PyModelInputs, fmha_impl: Any = None
+        self,
+        inputs: PyModelInputs,
+        fmha_impl: Any = None,
+        *,
+        share_qsa_metadata: bool = True,
     ) -> PyModelOutputs:
         if (
             self.ple_layers
@@ -1521,7 +1526,8 @@ class Qwen4ExpModel(Qwen35Model):
             and hyper_states.dtype == torch.bfloat16
             and torch.cuda.get_device_capability(hyper_states.device) == (12, 0)
         )
-        qsa_metadata_cache = {}
+        metadata_cache = {}
+        qsa_metadata_cache = metadata_cache if share_qsa_metadata else None
         for i, decoder_layer in enumerate(self.layers):
             if str(i) in self.ple_layers:
                 if pending_injection is not None:
@@ -1538,7 +1544,7 @@ class Qwen4ExpModel(Qwen35Model):
                     hyper_states,
                     ple_input_ids,
                     attention_inputs,
-                    metadata_cache=qsa_metadata_cache,
+                    metadata_cache=metadata_cache,
                     **({"prefetch": ple_prefetch[i]} if i in ple_prefetch else {}),
                 )
             if self.kv_cache is None:
