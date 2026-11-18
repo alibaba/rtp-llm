@@ -141,6 +141,20 @@ public:
         py_after_warmup_method_  = py::getattr(py_instance_, "on_cuda_graph_warmup", py::none());
         py_after_capture_method_ = py::getattr(py_instance_, "on_cuda_graph_capture", py::none());
         py_after_replay_method_  = py::getattr(py_instance_, "on_cuda_graph_replay", py::none());
+        if (is_target_verify_ && (py_after_warmup_method_.is_none() || py_after_capture_method_.is_none()
+                                  || py_after_replay_method_.is_none())
+            && py::hasattr(py_instance_, "clear_speculative_target_graph_capture")
+            && py::hasattr(py_instance_, "save_speculative_target_graph_capture")
+            && py::hasattr(py_instance_, "activate_speculative_target_graph_replay")) {
+            // The pinned ATOM transaction callbacks take only the graph key.
+            py::object clear = py_instance_.attr("clear_speculative_target_graph_capture");
+            py_after_warmup_method_ = py::cpp_function([clear](const PyModelInputs&) { clear(); });
+            auto keyed_hook = [](py::object hook) {
+                return py::cpp_function([hook](int key, const PyModelInputs&) { hook(key); });
+            };
+            py_after_capture_method_ = keyed_hook(py_instance_.attr("save_speculative_target_graph_capture"));
+            py_after_replay_method_ = keyed_hook(py_instance_.attr("activate_speculative_target_graph_replay"));
+        }
         options_cuda_int32_ = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
         options_cpu_int32_  = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU).requires_grad(false);
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);

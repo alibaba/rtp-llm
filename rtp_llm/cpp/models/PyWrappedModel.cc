@@ -1286,17 +1286,17 @@ torch::Tensor PyWrappedModel::computeLogits(const torch::Tensor& hidden) {
             } else
 #endif
             {
-            logits = torch::mm(hidden.to(kernel.dtype()), kernel.t());
+                logits = torch::mm(hidden.to(kernel.dtype()), kernel.t());
 #if USING_ROCM
-            // TP all-gather only copies logits. Keep native BF16 values until
-            // after the collective to halve communication for a BF16 LM head.
-            if (device_props_.tp_size == 1 || kernel.scalar_type() != torch::kBFloat16) {
-                logits = logits.to(torch::kFloat32);
-            }
+                // TP all-gather only copies logits. Keep native BF16 values until
+                // after the collective to halve communication for a BF16 LM head.
+                if (device_props_.tp_size == 1 || kernel.scalar_type() != torch::kBFloat16) {
+                    logits = logits.to(torch::kFloat32);
+                }
 #else
-            logits = logits.to(torch::kFloat32);
+                logits = logits.to(torch::kFloat32);
 #endif
-        }
+            }
         }
     }
     if (device_props_.tp_size > 1) {

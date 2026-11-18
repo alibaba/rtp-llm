@@ -659,6 +659,11 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                               0,
                                               dst_inputs.kv_cache_kernel_block_id_device.numel(),
                                               0);
+                addCudaGraphPrepareFillRegion(fill_params,
+                                              dst_inputs.kv_cache_block_id_device,
+                                              0,
+                                              dst_inputs.kv_cache_block_id_device.numel(),
+                                              0);
             }
         }
         if (is_target_verify_ && has_padded_rows) {
@@ -767,6 +772,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         for (auto& [tag, dst_inputs] : py_model_inputs_.attention_inputs_by_tag) {
             (void)tag;
             dst_inputs.kv_cache_kernel_block_id_device.fill_(0);
+            dst_inputs.kv_cache_block_id_device.fill_(0);
         }
     }
     if (isGenerationPrefillCudaGraph() && position_id_len_factor_ > 0) {
@@ -871,6 +877,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
 #endif
             tryAddStridedD2DCopy(src_inputs.kv_cache_kernel_block_id_device,
                                  dst_inputs.kv_cache_kernel_block_id_device);
+            tryAddStridedD2DCopy(src_inputs.kv_cache_block_id_device,
+                                 dst_inputs.kv_cache_block_id_device);
         }
     }
 
@@ -1184,6 +1192,7 @@ void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, Cu
                                     "CUDA graph capture has no attention input for tag=%s",
                                     tag.c_str());
             add_block_table(src_inputs.kv_cache_kernel_block_id_device, dst_it->second.kv_cache_kernel_block_id_device);
+            add_block_table(src_inputs.kv_cache_block_id_device, dst_it->second.kv_cache_block_id_device);
         }
     }
     fusedCopy(d2d_copies);
@@ -1752,6 +1761,11 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     // kv_cache_kernel_block_id_device [batch_size, block_num]
     inputs.attention_inputs.kv_cache_kernel_block_id_device =
         torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
+
+    if (kv_cache_group_tags_.size() > 1) {
+        inputs.attention_inputs.kv_cache_block_id_device =
+            torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
+    }
 
     inputs.attention_inputs.kv_cache_kernel_block_id =
         torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();

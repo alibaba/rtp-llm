@@ -93,6 +93,7 @@ public:
         params.model_data_type          = c10::ScalarType::BFloat16;
         params.position_id_len_factor   = 1;
         params.kv_cache_group_tags      = {"full"};
+        params.decode_capture_batch_sizes = std::move(decode_capture_batch_sizes);
         runner_ = CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance)));
     }
 

@@ -427,9 +427,13 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                     "Python target status reducer capability requires its reduce hook");
         }
         if (has_speculative_target_commit_hooks_ && enable_cuda_graph_) {
-            RTP_LLM_CHECK_WITH_INFO(py::hasattr(py_model_, "on_cuda_graph_warmup")
-                                        && py::hasattr(py_model_, "on_cuda_graph_capture")
-                                        && py::hasattr(py_model_, "on_cuda_graph_replay"),
+            const bool lifecycle = py::hasattr(py_model_, "on_cuda_graph_warmup")
+                                   && py::hasattr(py_model_, "on_cuda_graph_capture")
+                                   && py::hasattr(py_model_, "on_cuda_graph_replay");
+            const bool target_hooks = py::hasattr(py_model_, "clear_speculative_target_graph_capture")
+                                      && py::hasattr(py_model_, "save_speculative_target_graph_capture")
+                                      && py::hasattr(py_model_, "activate_speculative_target_graph_replay");
+            RTP_LLM_CHECK_WITH_INFO(lifecycle || target_hooks,
                                     "speculative target CUDA Graph requires capture, save and replay transaction "
                                     "hooks to preserve side-state across graph instances");
         }
