@@ -1369,7 +1369,7 @@ TEST(LocalRpcServerTest, PollKeepsTerminalLogitsWhenSelectionCannotMatch) {
         input->generate_config->max_new_tokens   = 3;
         input->generate_config->ignore_eos       = true;
         input->generate_config->return_logits    = true;
-        input->generate_config->logits_index     = aux_info ? 2 : 1;
+        input->generate_config->logits_index     = 4;
         input->generate_config->aux_info         = aux_info;
         input->generate_config->select_tokens_id = {3, 1};
 
