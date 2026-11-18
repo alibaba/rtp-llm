@@ -1109,8 +1109,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::pickle(
             [](const CacheStoreConfig& self) {
                 return py::make_tuple(self.cache_store_rdma_mode,
-                                      self.wrr_available_ratio,
-                                      self.rank_factor,
                                       self.thread_count,
                                       self.rdma_connect_timeout_ms,
                                       self.rdma_qp_count_per_connection,
@@ -1166,42 +1164,38 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     return c;
                 }
-                if (t.size() != 25 && t.size() != 30) {
+                if (t.size() != 28) {
                     throw std::runtime_error("Invalid CacheStoreConfig state");
                 }
                 CacheStoreConfig c;
                 c.cache_store_rdma_mode = t[0].cast<bool>();
-                c.wrr_available_ratio = t[1].cast<int>();
-                c.rank_factor = t[2].cast<int>();
-                c.thread_count = t[3].cast<int>();
-                c.rdma_connect_timeout_ms = t[4].cast<int>();
-                c.rdma_qp_count_per_connection = t[5].cast<int>();
-                c.rdma_io_thread_count = t[6].cast<int>();
-                c.rdma_worker_thread_count = t[7].cast<int>();
-                c.messager_io_thread_count = t[8].cast<int>();
-                c.messager_worker_thread_count = t[9].cast<int>();
-                c.rdma_max_block_pairs_per_connection = t[10].cast<int>();
-                c.p2p_transfer_not_done_resource_hold_ms = t[11].cast<int64_t>();
-                c.p2p_lease_query_timeout_ms = t[12].cast<int64_t>();
-                c.p2p_cancel_broadcast_timeout_ms = t[13].cast<int64_t>();
-                c.p2p_cancelled_keys_ttl_ms = t[14].cast<int64_t>();
-                c.cache_store_tcp_anet_rpc_thread_num = t[15].cast<int>();
-                c.cache_store_tcp_anet_rpc_queue_num = t[16].cast<int>();
-                c.cache_store_tcp_worker_queue_size = t[17].cast<int>();
-                c.rdma_transfer_worker_thread_count = t[18].cast<int>();
-                c.rdma_transfer_worker_queue_size = t[19].cast<int>();
-                c.p2p_rdma_enable_h2d_copy = t[20].cast<bool>();
-                c.p2p_rdma_staging_total_bytes = t[21].cast<int64_t>();
-                c.p2p_prefill_sender_thread_count = t[22].cast<int>();
-                c.p2p_prefill_sender_queue_size = t[23].cast<int>();
-                c.p2p_kv_leak_exit_threshold_percent = t[24].cast<int>();
-                if (t.size() == 30) {
-                    c.rdma_transfer_wait_timeout_ms = t[25].cast<int64_t>();
-                    c.p2p_read_steal_before_deadline_ms = t[26].cast<int64_t>();
-                    c.p2p_read_return_before_deadline_ms = t[27].cast<int64_t>();
-                    c.p2p_resource_store_timeout_check_interval_ms = t[28].cast<int>();
-                    c.p2p_layer_cache_buffer_store_timeout_ms = t[29].cast<int64_t>();
-                }
+                c.thread_count = t[1].cast<int>();
+                c.rdma_connect_timeout_ms = t[2].cast<int>();
+                c.rdma_qp_count_per_connection = t[3].cast<int>();
+                c.rdma_io_thread_count = t[4].cast<int>();
+                c.rdma_worker_thread_count = t[5].cast<int>();
+                c.messager_io_thread_count = t[6].cast<int>();
+                c.messager_worker_thread_count = t[7].cast<int>();
+                c.rdma_max_block_pairs_per_connection = t[8].cast<int>();
+                c.p2p_transfer_not_done_resource_hold_ms = t[9].cast<int64_t>();
+                c.p2p_lease_query_timeout_ms = t[10].cast<int64_t>();
+                c.p2p_cancel_broadcast_timeout_ms = t[11].cast<int64_t>();
+                c.p2p_cancelled_keys_ttl_ms = t[12].cast<int64_t>();
+                c.cache_store_tcp_anet_rpc_thread_num = t[13].cast<int>();
+                c.cache_store_tcp_anet_rpc_queue_num = t[14].cast<int>();
+                c.cache_store_tcp_worker_queue_size = t[15].cast<int>();
+                c.rdma_transfer_worker_thread_count = t[16].cast<int>();
+                c.rdma_transfer_worker_queue_size = t[17].cast<int>();
+                c.p2p_rdma_enable_h2d_copy = t[18].cast<bool>();
+                c.p2p_rdma_staging_total_bytes = t[19].cast<int64_t>();
+                c.p2p_prefill_sender_thread_count = t[20].cast<int>();
+                c.p2p_prefill_sender_queue_size = t[21].cast<int>();
+                c.p2p_kv_leak_exit_threshold_percent = t[22].cast<int>();
+                c.rdma_transfer_wait_timeout_ms = t[23].cast<int64_t>();
+                c.p2p_read_steal_before_deadline_ms = t[24].cast<int64_t>();
+                c.p2p_read_return_before_deadline_ms = t[25].cast<int64_t>();
+                c.p2p_resource_store_timeout_check_interval_ms = t[26].cast<int>();
+                c.p2p_layer_cache_buffer_store_timeout_ms = t[27].cast<int64_t>();
                 return c;
             }));
 
