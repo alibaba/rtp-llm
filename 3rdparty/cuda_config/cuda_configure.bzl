@@ -92,6 +92,7 @@ def verify_build_defines(params):
         "host_compiler_path",
         "host_compiler_prefix",
         "host_compiler_warnings",
+        "supports_interference_size",
         "linker_bin_path",
         "compiler_deps",
         "msvc_cl_path",
@@ -1275,6 +1276,21 @@ def _create_local_cuda_repository(repository_ctx):
 
     cuda_defines.update(_get_win_cuda_defines(repository_ctx))
 
+    # Some CUDA 13 x86 images use a GCC that predates this parameter.
+    # Probe the same compiler that the generated C++ toolchain will invoke.
+    cuda_defines["%{supports_interference_size}"] = str(
+        cuda_config.cpu_value == "Linux" and
+        cuda_config.cuda_version_major == "13" and
+        repository_ctx.execute([
+            cc_fullpath,
+            "-Werror",
+            "--param=destructive-interference-size=64",
+            "-x",
+            "c++",
+            "-fsyntax-only",
+            "/dev/null",
+        ]).return_code == 0,
+    )
     verify_build_defines(cuda_defines)
 
     # Only expand template variables in the BUILD file

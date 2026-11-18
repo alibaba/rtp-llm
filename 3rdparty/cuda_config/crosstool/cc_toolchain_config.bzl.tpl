@@ -301,6 +301,13 @@ def _features(cpu, compiler, ctx):
         return [
             feature(name = "no_legacy_features"),
             feature(
+                name = "fixed_destructive_interference_size",
+                flag_sets = [flag_set(
+                    actions = all_cpp_compile_actions(),
+                    flag_groups = [flag_group(flags = ["--param=destructive-interference-size=64"])],
+                )] if ctx.attr.supports_interference_size else [],
+            ),
+            feature(
                 name = "all_compile_flags",
                 enabled = True,
                 flag_sets = [
@@ -1089,6 +1096,7 @@ cc_toolchain_config = rule(
         "builtin_include_directories": attr.string_list(),
         "extra_no_canonical_prefixes_flags": attr.string_list(),
         "host_compiler_path": attr.string(),
+        "supports_interference_size": attr.bool(),
         "host_compiler_prefix": attr.string(),
         "host_compiler_warnings": attr.string_list(),
         "host_unfiltered_compile_flags": attr.string_list(),

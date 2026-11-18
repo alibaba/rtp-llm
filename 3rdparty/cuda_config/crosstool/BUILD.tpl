@@ -68,6 +68,7 @@ cc_toolchain_config(
     linker_bin_path = "%{linker_bin_path}",
     builtin_sysroot = "%{builtin_sysroot}",
     cuda_path = "%{cuda_toolkit_path}",
+    supports_interference_size = %{supports_interference_size},
     compiler = "%{compiler}",
 )
 
