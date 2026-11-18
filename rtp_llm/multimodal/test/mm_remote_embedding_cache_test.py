@@ -711,6 +711,39 @@ class RemoteCacheTest(unittest.TestCase):
         remote._executor.shutdown(wait=True)
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
 
+    def test_read_waits_briefly_for_metadata_admission(self):
+        store = Store({})
+        remote = self.remote(store, max_pending=16)
+        for _ in range(8):
+            self.assertTrue(remote._metadata_slots.acquire(blocking=False))
+        acquire = remote._metadata_slots.acquire
+
+        def release_one_slot(**kwargs):
+            if "timeout" in kwargs:
+                remote._metadata_slots.release()
+            return acquire(**kwargs)
+
+        with (
+            patch.object(
+                remote._metadata_slots, "acquire", side_effect=release_one_slot
+            ) as admission,
+            patch.object(store, "object_size", wraps=store.object_size) as lookup,
+            patch.object(remote, "_report_skip") as skip,
+        ):
+            self.assertIsNone(remote.load("key"))
+            self.assertEqual(admission.call_count, 2)
+            self.assertEqual(admission.call_args_list[0], call(blocking=False))
+            wait_seconds = admission.call_args_list[1].kwargs["timeout"]
+            self.assertGreater(wait_seconds, 0)
+            self.assertLessEqual(wait_seconds, 0.05)
+            lookup.assert_called_once()
+            skip.assert_not_called()
+        for _ in range(7):
+            remote._metadata_slots.release()
+        self.assertTrue(remote._metadata_slots.acquire(blocking=False))
+        remote._metadata_slots.release()
+        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+
     def test_timed_out_queued_reads_keep_admission_until_consumed(self):
         remote, (slot,) = self.slot_cache(1, max_pending=2)
         gate = threading.Event()
