@@ -21,7 +21,13 @@ class Qwen4ExpPLEForwardPreparationTest(TestCase):
     def test_each_forward_shares_fresh_text_ids_between_prefetch_and_ple(self):
         model = qwen4_exp.Qwen4ExpModel.__new__(qwen4_exp.Qwen4ExpModel)
         nn.Module.__init__(model)
-        model.config = SimpleNamespace(special_tokens=SimpleNamespace(eos_token_id=7))
+        model.layer_num = 1
+        model.config = SimpleNamespace(
+            is_mtp=False,
+            num_layers=1,
+            special_tokens=SimpleNamespace(eos_token_id=7),
+        )
+        model.parallelism_config = SimpleNamespace(pp_size=1)
         model.ple_layers = {"0": object()}
         model.layers = [lambda hidden, *args, **kwargs: hidden]
         model.kv_cache = SimpleNamespace(get_layer_cache=lambda *args: object())

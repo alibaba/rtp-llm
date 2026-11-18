@@ -788,6 +788,7 @@ class Qwen4ExpModel(Qwen35Model):
         )
         fp8_embedding = (
             getattr(self.config, "_qwen4_full_fp8_nvfp4", False)
+            and self.owns_model_input
             and self.embed_tokens.weight.dtype == torch.float8_e4m3fn
         )
         if fp8_embedding:
@@ -916,6 +917,16 @@ class Qwen4ExpModel(Qwen35Model):
         self._closed = True
 
     def initialize(self, init_resource) -> bool:
+        if (
+            int(getattr(self.parallelism_config, "pp_size", 1)) > 1
+            and bool(init_resource.is_speculative)
+            and bool(self.ple_layers)
+            and not bool(getattr(self.config, "is_mtp", False))
+        ):
+            raise RuntimeError(
+                "qwen4_exp PP with speculative decoding is not supported yet: "
+                "the PP executor does not commit PLE target state across stages"
+            )
         initialized = super().initialize(init_resource)
         # The target and the draft both export their wide post-block residual:
         # target -> first draft step, draft -> subsequent draft steps.  Draft
@@ -988,6 +999,18 @@ class Qwen4ExpModel(Qwen35Model):
             )
         return hidden_states.repeat(*(1,) * (hidden_states.dim() - 1), self.hc_mult)
 
+    def make_empty_intermediate_tensors(
+        self, hidden_template: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        """Build the materialized HyperConnection boundary used by Qwen4 PP."""
+        expected = int(self.config.hidden_size)
+        if hidden_template.dim() != 2 or int(hidden_template.shape[-1]) != expected:
+            raise RuntimeError(
+                "qwen4_exp PP warmup template must be [T, hidden_size], got "
+                f"shape={tuple(hidden_template.shape)}, hidden_size={expected}"
+            )
+        return {"hidden_states": self._initial_hyper_states(hidden_template)}
+
     def _build_ple_layers(self) -> None:
         layer_ids = list(getattr(self.config, "_qwen4_ple_layer_ids", []))
         total_shards = int(getattr(self.config, "_qwen4_split_ngram_parts", 0))
@@ -1006,12 +1029,22 @@ class Qwen4ExpModel(Qwen35Model):
         per_rank = total_shards // tp_size
         expected_shards = set(range(tp_rank * per_rank, (tp_rank + 1) * per_rank))
         prefix = W.qwen4_ple_ngram_shards + "."
+        global_to_local = {
+            global_layer_idx: local_layer_idx
+            for local_layer_idx, global_layer_idx in enumerate(self.layer_ids())
+        }
 
         for upstream_layer_id in layer_ids:
-            layer_idx = int(upstream_layer_id) - 1
-            if not 0 <= layer_idx < len(self.layers):
-                raise RuntimeError(f"qwen4_exp PLE layer {layer_idx} is out of range")
-            layer_weights = self.weight.weights[layer_idx]
+            global_layer_idx = int(upstream_layer_id) - 1
+            if not 0 <= global_layer_idx < self.layer_num:
+                raise RuntimeError(
+                    "qwen4_exp PLE global layer "
+                    f"{global_layer_idx} is outside [0, {self.layer_num})"
+                )
+            local_layer_idx = global_to_local.get(global_layer_idx)
+            if local_layer_idx is None:
+                continue
+            layer_weights = self.weight.weights[global_layer_idx]
             shard_pairs = sorted(
                 (
                     (int(name[len(prefix) :]), tensor)
@@ -1023,7 +1056,7 @@ class Qwen4ExpModel(Qwen35Model):
             shard_indices = [index for index, _ in shard_pairs]
             if set(shard_indices) != expected_shards:
                 raise RuntimeError(
-                    f"qwen4_exp PLE layer {layer_idx} expected local shards "
+                    f"qwen4_exp PLE global layer {global_layer_idx} expected local shards "
                     f"{sorted(expected_shards)}, got {shard_indices}"
                 )
             required = (
@@ -1040,7 +1073,8 @@ class Qwen4ExpModel(Qwen35Model):
             missing = [name for name in required if name not in layer_weights]
             if missing:
                 raise RuntimeError(
-                    f"qwen4_exp PLE layer {layer_idx} is missing weights {missing}"
+                    "qwen4_exp PLE global layer "
+                    f"{global_layer_idx} is missing weights {missing}"
                 )
             embedding = Qwen4ExpNGramEmbedding(
                 [tensor for _, tensor in shard_pairs],
@@ -1060,9 +1094,9 @@ class Qwen4ExpModel(Qwen35Model):
             for (index, _), shard in zip(shard_pairs, embedding.shards):
                 layer_weights[prefix + str(index)] = shard
                 storage = getattr(self.weight, "_fp8_storage_owner", self.weight)
-                storage.weights[layer_idx][prefix + str(index)] = shard
+                storage.weights[global_layer_idx][prefix + str(index)] = shard
             conv_weight = layer_weights[W.qwen4_ple_conv_w]
-            self.ple_layers[str(layer_idx)] = Qwen4ExpPLELayer(
+            self.ple_layers[str(local_layer_idx)] = Qwen4ExpPLELayer(
                 embedding,
                 layer_weights[W.qwen4_ple_key_proj_w],
                 layer_weights[W.qwen4_ple_value_proj_w],
@@ -1080,7 +1114,7 @@ class Qwen4ExpModel(Qwen35Model):
                 norm_eps=self.config.layernorm_eps,
             )
 
-            unit = self.ple_layers[str(layer_idx)]
+            unit = self.ple_layers[str(local_layer_idx)]
             mark_projection_for_restart(layer_weights, unit.key_projection)
             mark_projection_for_restart(layer_weights, unit.value_projection)
 
@@ -1283,6 +1317,9 @@ class Qwen4ExpModel(Qwen35Model):
         self, model_config: ModelConfig, weights: ModelWeights
     ) -> None:
         self.hc_mult = model_config.hc_mult
+        self.hyper_connection_mixer = None
+        if not self.owns_model_output:
+            return
         self.hyper_connection_mixer = GatedResidual(
             weights.get_global_weight(W.qwen4_hc_mixer_norm),
             weights.get_global_weight(W.qwen4_hc_mixer_mix_down),
@@ -1362,16 +1399,28 @@ class Qwen4ExpModel(Qwen35Model):
                 raise RuntimeError(
                     "qwen4_exp side caches are required outside prefill warmup"
                 )
-            hidden = self.word_embedding(inputs)
-            target_hidden = (
-                self._initial_hyper_states(hidden)
-                if getattr(self, "_capture_mtp_target_hidden", False)
-                else None
+            capture_target_hidden = bool(
+                getattr(self, "_capture_mtp_target_hidden", False)
             )
+            if self.owns_model_input:
+                hidden_states = self.word_embedding(inputs)
+                if self.owns_model_output and not capture_target_hidden:
+                    return PyModelOutputs(hidden_states)
+                hyper_states = self._initial_hyper_states(hidden_states)
+            else:
+                hyper_states = inputs.pp_intermediates["hidden_states"]
+
+            if not self.owns_model_output:
+                outputs = PyModelOutputs(hyper_states)
+                outputs.pp_intermediates = {"hidden_states": hyper_states}
+                return outputs
+
+            if not self.owns_model_input:
+                hidden_states = hyper_states[:, : int(self.config.hidden_size)]
             return (
-                PyModelOutputs(hidden, target_hidden)
-                if target_hidden is not None
-                else PyModelOutputs(hidden)
+                PyModelOutputs(hidden_states, hyper_states)
+                if capture_target_hidden
+                else PyModelOutputs(hidden_states)
             )
         attention_inputs = prepare_state_cache_inputs(attention_inputs, self.kv_cache)
         side_cache_writers = (
@@ -1405,10 +1454,17 @@ class Qwen4ExpModel(Qwen35Model):
             if prefetch_after_embedding
             else self._start_eager_ple_prefetch(inputs, attention_inputs, ple_input_ids)
         )
-        prepared_hyper = self._try_fp8_hyper_embedding(inputs)
-        hidden_states = (
-            self.word_embedding(inputs) if prepared_hyper is None else prepared_hyper
-        )
+        if self.owns_model_input:
+            prepared_hyper = self._try_fp8_hyper_embedding(inputs)
+            if prepared_hyper is None:
+                layer_input_states = self.word_embedding(inputs)
+                needs_hyper_materialization = True
+            else:
+                layer_input_states = prepared_hyper
+                needs_hyper_materialization = False
+        else:
+            layer_input_states = inputs.pp_intermediates["hidden_states"]
+            needs_hyper_materialization = False
         if prefetch_after_embedding:
             ple_input_ids = self._ple_input_ids(inputs)
             ple_prefetch = self._start_eager_ple_prefetch(
@@ -1416,7 +1472,9 @@ class Qwen4ExpModel(Qwen35Model):
             )
 
         is_cuda_graph = _is_cuda_graph_forward(inputs, fmha_impl)
-        attn_meta = self._build_attn_meta(inputs, hidden_states.device, is_cuda_graph)
+        attn_meta = self._build_attn_meta(
+            inputs, layer_input_states.device, is_cuda_graph
+        )
 
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
@@ -1425,9 +1483,9 @@ class Qwen4ExpModel(Qwen35Model):
         # hook because its input projection has already produced one distinct
         # hidden vector per hyper-connection branch.
         hyper_states = (
-            self._initial_hyper_states(hidden_states)
-            if prepared_hyper is None
-            else prepared_hyper
+            self._initial_hyper_states(layer_input_states)
+            if needs_hyper_materialization
+            else layer_input_states
         )
 
         pending_injection = None
@@ -1520,6 +1578,12 @@ class Qwen4ExpModel(Qwen35Model):
         if pending_injection is not None:
             hyper_states = inject_into_residual(hyper_states, *pending_injection)
 
+        if not self.owns_model_output:
+            self._mtp_target_hidden_states = None
+            outputs = PyModelOutputs(hyper_states)
+            outputs.pp_intermediates = {"hidden_states": hyper_states}
+            return outputs
+
         if getattr(self, "_capture_mtp_target_hidden", False):
             # The pre-collapse stream is the MTP input. Return it as a
             # first-class output: graph replay does not rerun Python, so a
@@ -1527,6 +1591,8 @@ class Qwen4ExpModel(Qwen35Model):
             self._mtp_target_hidden_states = hyper_states
         else:
             self._mtp_target_hidden_states = None
+        if self.hyper_connection_mixer is None:
+            raise RuntimeError("qwen4_exp output stage is missing the HC mixer")
         hidden_states, _, _ = self.hyper_connection_mixer(hyper_states)
         if self._mtp_target_hidden_states is not None:
             return PyModelOutputs(hidden_states, self._mtp_target_hidden_states)

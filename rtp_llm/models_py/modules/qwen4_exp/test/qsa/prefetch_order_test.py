@@ -32,6 +32,8 @@ class PrefetchOrderTest(unittest.TestCase):
         cls = DerivedModel if derived else qwen4_exp.Qwen4ExpModel
         model = cls.__new__(cls)
         torch.nn.Module.__init__(model)
+        model.config = SimpleNamespace(is_mtp=False, num_layers=1)
+        model.parallelism_config = SimpleNamespace(pp_size=1)
         model.layers = torch.nn.ModuleList()
         model.ple_layers = torch.nn.ModuleDict(
             {"0": torch.nn.Identity()} if has_ple else {}

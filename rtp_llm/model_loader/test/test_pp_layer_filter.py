@@ -528,15 +528,19 @@ class LayerScopedLoadingTest(unittest.TestCase):
 
 class GlobalWeightScopeTest(unittest.TestCase):
     def test_global_scope_follows_boundary_layers(self):
+        output_only = "model.output_only"
+        output_names = OUTPUT_NAMES | {output_only}
+        global_names = GLOBAL_NAMES | {output_only}
         for scope, expected in (
             (range(2), EMBEDDING_NAMES | OTHER_GLOBAL_NAMES),
             (range(2, 5), OTHER_GLOBAL_NAMES),
-            (range(5, 7), OUTPUT_NAMES | OTHER_GLOBAL_NAMES),
-            (range(7), GLOBAL_NAMES),
+            (range(5, 7), output_names | OTHER_GLOBAL_NAMES),
+            (range(7), global_names),
         ):
             with self.subTest(scope=scope):
                 loader = make_loader(make_load_config(7, scope))
-                for name in GLOBAL_NAMES:
+                loader.model_config.pp_output_weight_names = {output_only}
+                for name in global_names:
                     self.assertEqual(
                         loader.is_global_weight_local(name), name in expected
                     )

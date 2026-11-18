@@ -237,6 +237,9 @@ class Qwen4ExpMTPInputProjectionTest(unittest.TestCase):
         embedding = torch.arange(8, dtype=torch.float32).reshape(2, 4)
         wide = torch.cat((embedding, embedding + 10), dim=-1)
         fields = dict(
+            layer_num=1,
+            config=SimpleNamespace(is_mtp=False, num_layers=1),
+            parallelism_config=SimpleNamespace(pp_size=1),
             ple_layers={},
             layers=[],
             kv_cache=None,

@@ -15,6 +15,7 @@ from rtp_llm.config.quant_config import (
     init_quant_config,
 )
 from rtp_llm.ops import DataType, KvCacheDataType
+from rtp_llm.utils.model_weight import W
 
 
 def ple_eos_token_id(config):
@@ -26,6 +27,13 @@ def ple_eos_token_id(config):
 
 
 class Qwen4ModelConfig(ModelConfig):
+    pp_output_weight_names = frozenset(
+        {
+            W.qwen4_hc_mixer_norm,
+            W.qwen4_hc_mixer_mix_down,
+            W.qwen4_hc_mixer_mix_up,
+        }
+    )
     _python_fields = ModelConfig._python_fields | {
         "qwen4_ple_prefetch_mb",
         "linear_attn_norm_activation",

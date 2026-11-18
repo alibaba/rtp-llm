@@ -195,7 +195,7 @@ class Qwen4ExpModelConstructionTest(TestCase):
                 W.qwen4_hc_mixer_mix_up: mix_up,
             }
             self.global_weights = self._globals
-            self.weights: list = []
+            self.weights: list = [{}]
 
         def get_global_weight(self, name):
             return self._globals[name]
@@ -204,7 +204,7 @@ class Qwen4ExpModelConstructionTest(TestCase):
         hidden, vocab = _HIDDEN, 16
         hc_hidden = _HC * hidden
         config = ModelConfig()
-        config.num_layers = 0
+        config.num_layers = 1
         config.hidden_size = hidden
         config.vocab_size = vocab
         config.hc_mult = _HC
@@ -218,9 +218,14 @@ class Qwen4ExpModelConstructionTest(TestCase):
             mix_up,
         )
 
-        model = qwen4_exp.Qwen4ExpModel(
-            config, ParallelismConfig(), weights, MoeConfig(), 0
-        )
+        with patch.object(
+            qwen4_exp.Qwen4ExpModel,
+            "_decoder_layer_cls",
+            return_value=nn.Module(),
+        ):
+            model = qwen4_exp.Qwen4ExpModel(
+                config, ParallelismConfig(), weights, MoeConfig(), 0
+            )
 
         self.assertIsNone(model._mtp_target_hidden_states)
         self.assertFalse(model._capture_mtp_target_hidden)

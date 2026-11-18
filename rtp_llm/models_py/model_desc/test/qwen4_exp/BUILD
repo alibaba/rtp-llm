@@ -70,6 +70,13 @@ models_py_test(
 )
 
 models_py_test(
+    name = "pp_test",
+    src = "pp_test.py",
+    gpu = "L20_CU13",
+    deps = _FIXTURE_DEPS,
+)
+
+models_py_test(
     name = "qsa_cache_test",
     src = "qsa_cache_test.py",
     gpu = "L20_CU13",
@@ -119,6 +126,7 @@ test_suite(
         ":ple_graph_test",
         ":ple_host_test",
         ":ple_prefetch_test",
+        ":pp_test",
         ":qsa_cache_test",
         ":qsa_graph_test",
         ":qsa_mtp_test",
