@@ -374,6 +374,42 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         self.assertIsNone(slot._client)
         self.assertTrue(all(s._buffer is None for s in pool._slots))
 
+    def test_closed_pool_counts_every_slot_after_staggered_expiry(self):
+        pool = self.pool(slots=2)
+        client = pool._client
+        first, second = pool._slots
+        with self.assertLogs(level="ERROR"):
+            first._quarantine(
+                TimeoutError("first"), stage="sdk_transfer", operation="read"
+            )
+            second._quarantine(
+                TimeoutError("second"), stage="sdk_transfer", operation="write"
+            )
+        pool.close()
+        first._quarantine_started -= 301
+        pool._gc_tick()
+        client.close.assert_not_called()
+        self.assertEqual(pool._pending_gc_success, ["read"])
+        self.assertNotIn(
+            "gc_success", [c.args[1] for c in pool._observe_hold.call_args_list]
+        )
+        second._quarantine_started -= 301
+        pool._gc_tick()
+        client.close.assert_called_once()
+        self.assertEqual(pool._pending_gc_success, [])
+        self.assertEqual(
+            [
+                c.args[0]
+                for c in pool._observe_hold.call_args_list
+                if c.args[1] == "gc_success"
+            ],
+            ["read", "write"],
+        )
+        pool._gc_tick()
+        self.assertEqual(
+            sum(c.args[1] == "gc_success" for c in pool._observe_hold.call_args_list), 2
+        )
+
     def test_background_gc_honors_configured_ttl(self):
         pool = self.pool(ttl=1)
         slot = pool._slots[0]
