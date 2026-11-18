@@ -140,22 +140,19 @@ def sm120_prefill_prepared(
 def _sm90_cp_available():
     try:
         import cutlass
-        import flashinfer
+
+        if cutlass.__version__ == "4.4.2":
+            from . import gdn_prefill_cp_sm90  # noqa: F401
+
+            return True
     except ImportError:
-        logging.warning("H20 CP dependencies unavailable, using native Prefill")
+        logging.warning("SM90 CP wheel unavailable, using native Prefill")
         return False
-    available = (flashinfer.__version__.split("+")[0], cutlass.__version__) in (
-        ("0.6.9", "4.4.2"),
-        ("0.7.3", "4.8.0"),
+    logging.warning(
+        "SM90 CP wheel requires CUTLASS DSL 4.4.2; found %s, using native Prefill",
+        cutlass.__version__,
     )
-    if not available:
-        logging.warning(
-            "SM90 CP Prefill supports FlashInfer/CUTLASS DSL 0.6.9/4.4.2 or 0.7.3/4.8.0; "
-            "found %s and %s, using native Prefill",
-            flashinfer.__version__,
-            cutlass.__version__,
-        )
-    return available
+    return False
 
 
 class Qwen4Sm120GdnPrefill(Qwen3NextGatedDeltaNetPrefill):
