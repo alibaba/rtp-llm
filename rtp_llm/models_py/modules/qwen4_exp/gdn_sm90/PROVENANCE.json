@@ -11,7 +11,8 @@
     "Use warpgroup.OperandMajorMode and CopyUniversalOp for the CUTLASS DSL 4.4.2 APIs, preserving operand layout and 64-bit copy width",
     "Omit unused public non-CP and CP host wrappers; retain the CP kernel classes and precompute/fixup launchers",
     "RTP paged checkpoint addressing is provided by gdn_prefill_cp_sm90.py",
-    "Use native NVVM named barriers on the frozen SM90 path to retain convergence under CUTLASS DSL 4.4.2; pass that barrier explicitly to the shared inverse collective"
+    "Use native NVVM named barriers on the frozen SM90 path to retain convergence under CUTLASS DSL 4.4.2; pass that barrier explicitly to the shared inverse collective",
+    "Wait for state WGMMA to finish reading shared memory before notifying the peer math warpgroup at the end of an MN block"
   ],
   "files": [
     {
@@ -24,7 +25,7 @@
       "name": "delta_rule_cp_sm90.py",
       "source_path": "flashinfer/gdn_kernels/delta_rule_dsl/delta_rule_cp_sm90.py",
       "source_sha256": "e99b237f2ffd9c5b1b2589568760fe597625a308ae662eb455507861e7e2c68c",
-      "adapted_sha256": "c2a970d08c12313bf329713cb9fa03aba7f1e1e627229b9113c2922f76e8580f"
+      "adapted_sha256": "2caa82815f39f034ffee4b35772d37bdac5fa48631e847aa253262e7da11bdf0"
     }
   ],
   "local_support_files": [

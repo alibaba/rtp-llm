@@ -991,8 +991,9 @@ class CPDeltaRuleMNPrecomputeSm90(KeyedCompileMixin):
         self._math_order_wait(wg_idx)
         SM90.wgmma_gemm(state_tiled_mma, tStateT, tSTATErY, tSTATErX, True)
         cute.nvgpu.warpgroup.commit_group()
-        self._math_order_notify(wg_idx)
+        # The next block reuses sX_DS across both math warpgroups.
         cute.nvgpu.warpgroup.wait_group(0)
+        self._math_order_notify(wg_idx)
 
         k_pipeline.consumer_release(k_consumer_state)
         k_consumer_state.advance()

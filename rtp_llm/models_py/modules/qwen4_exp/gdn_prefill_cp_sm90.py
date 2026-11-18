@@ -2,8 +2,9 @@
 # Reuses frozen SM90 CP kernels with project-standard dependencies.
 """SM90 CP Prefill with direct RTP checkpoint writes.
 
-Reuses the upstream SM90 precompute, fixup and prefill kernels. Only checkpoint
-addressing changes; Q/K and beta rounding follow the native RTP contract.
+Uses the model-local MN precompute for both dependency pairs so they share
+the cross-warpgroup synchronization fix. Q/K and beta rounding follow the
+native RTP contract.
 """
 
 from functools import lru_cache
@@ -31,6 +32,8 @@ from rtp_llm.models_py.triton_kernels.common.scatter_qkv import (
 )
 from rtp_llm.models_py.triton_kernels.fla.block import load_initial_state_from_block_map
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import _gdn_gate_values
+
+from .gdn_sm90.delta_rule_cp_sm90 import cp_delta_rule_mn_precompute_dsl_sm90
 
 
 class _PagedCP(upstream.CPDeltaRulePrefillSm90):
@@ -132,7 +135,7 @@ def _run(
         _device=device,
         _stream=stream,
     )
-    local_transfer, local_state = upstream.cp_delta_rule_mn_precompute_dsl_sm90(
+    local_transfer, local_state = cp_delta_rule_mn_precompute_dsl_sm90(
         k,
         v,
         t,
