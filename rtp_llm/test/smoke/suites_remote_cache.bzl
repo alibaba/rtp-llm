@@ -21,7 +21,6 @@ def _pace_suites():
     tests = []
     for suffix, task, args, config in [
         ("basic", "q_r_l20_remote_cache.json", "", []),
-        ("backend", "q_r_l20_remote_cache.json", " --kvcm_read_backend_type 3 --kvcm_min_replica_count 1", []),
         ("tp2", "q_r_l20_remote_cache_tpsize_2.json", " --tp_size 2", []),
         ("edge", "q_r_l20_cache_edge_case_1_remote_cache.json", " --seq_size_per_block 4", []),
         ("match_fail", "q_r_l20_remote_cache_match_failure.json", "", ["ENABLE_DEBUG_SERVICE=true", "TEST_MATCH_FAILURE=1"]),

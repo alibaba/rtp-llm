@@ -240,8 +240,6 @@ class GenerateConfigTest(TestCase):
             "DISK_CACHE_PATHS": "/tmp/cache-a,/tmp/cache-b",
             "DISK_CACHE_SIZE_MB": "4096",
             "DISK_CACHE_BUFFERED_IO": "0",
-            "DISK_CACHE_READ_THREAD_COUNT": "3",
-            "DISK_CACHE_WRITE_THREAD_COUNT": "5",
             "DISK_CACHE_SYNC_TIMEOUT_MS": "12345",
             "DISK_CACHE_EVICT_TIMEOUT_MS": "45000",
             "DISK_CACHE_STAGING_BLOCK_COUNT": "8",
@@ -251,13 +249,9 @@ class GenerateConfigTest(TestCase):
             "BLOCK_TREE_FULL_PREFIX_SCAN_INTERVAL_MS": "5000",
             "BLOCK_TREE_TASK_POOL_SIZE": "6",
             "BLOCK_TREE_TRANSFER_WORKER_COUNT": "7",
-            "BTC_CRC_SLOT_COUNT": "3",
-            "BTC_TRANSFER_ENGINE_ASYNC": "false",
             "BLOCK_TREE_BUSINESS_QUEUE_MAX_SIZE": "211",
             "BLOCK_TREE_TRANSFER_QUEUE_MAX_SIZE": "307",
             "DISK_CACHE_EVICT_MAX_PENDING_BYTES": "83886080",
-            "BLOCK_TREE_FROZEN_RECOVERY_INTERVAL_MS": "2500",
-            "BLOCK_TREE_FROZEN_RECOVERY_QUERY_TIMEOUT_MS": "750",
             "BLOCK_TREE_DEVICE_EVICT_LOW_WATERMARK_RATIO": "0.71",
             "BLOCK_TREE_DEVICE_EVICT_HIGH_WATERMARK_RATIO": "0.81",
             "BLOCK_TREE_MEMORY_EVICT_LOW_WATERMARK_RATIO": "0.72",
@@ -275,8 +269,6 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.disk_cache_paths, "/tmp/cache-a,/tmp/cache-b")
         self.assertEqual(config.disk_cache_size_mb, 4096)
         self.assertFalse(config.disk_cache_buffered_io)
-        self.assertEqual(config.disk_cache_read_thread_count, 3)
-        self.assertEqual(config.disk_cache_write_thread_count, 5)
         self.assertEqual(config.disk_cache_sync_timeout_ms, 12345)
         self.assertEqual(config.disk_cache_evict_timeout_ms, 45000)
         self.assertEqual(config.disk_cache_staging_block_count, 8)
@@ -286,13 +278,9 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.block_tree_full_prefix_scan_interval_ms, 5000)
         self.assertEqual(config.block_tree_task_pool_size, 6)
         self.assertEqual(config.block_tree_transfer_worker_count, 7)
-        self.assertEqual(config.btc_crc_slot_count, 3)
-        self.assertFalse(config.btc_transfer_engine_async)
         self.assertEqual(config.block_tree_business_queue_max_size, 211)
         self.assertEqual(config.block_tree_transfer_queue_max_size, 307)
         self.assertEqual(config.disk_cache_evict_max_pending_bytes, 80 * 1024 * 1024)
-        self.assertEqual(config.block_tree_frozen_recovery_interval_ms, 2500)
-        self.assertEqual(config.block_tree_frozen_recovery_query_timeout_ms, 750)
         self.assertEqual(config.block_tree_device_evict_low_watermark_ratio, 0.71)
         self.assertEqual(config.block_tree_device_evict_high_watermark_ratio, 0.81)
         self.assertEqual(config.block_tree_memory_evict_low_watermark_ratio, 0.72)
@@ -375,7 +363,7 @@ class GenerateConfigTest(TestCase):
                 0,
             )
 
-    def test_async_transfer_defaults_and_cli_override(self):
+    def test_async_transfer_defaults_and_worker_cli_overrides(self):
         with patch.dict("os.environ", _jit_env(), clear=True):
             config = setup_args([]).kv_cache_config
             self.assertTrue(config.btc_transfer_engine_async)
@@ -388,8 +376,6 @@ class GenerateConfigTest(TestCase):
         with patch.dict(
             "os.environ",
             _jit_env(
-                BTC_TRANSFER_ENGINE_ASYNC="true",
-                BTC_CRC_SLOT_COUNT="11",
                 BLOCK_TREE_TASK_POOL_SIZE="6",
                 BLOCK_TREE_TRANSFER_WORKER_COUNT="7",
             ),
@@ -397,20 +383,16 @@ class GenerateConfigTest(TestCase):
         ):
             config = setup_args(
                 [
-                    "--btc_transfer_engine_async=false",
-                    "--btc_crc_slot_count=3",
                     "--block_tree_task_pool_size=8",
                     "--block_tree_transfer_worker_count=2",
-                    "--disk_cache_read_thread_count=4",
-                    "--disk_cache_write_thread_count=6",
                 ]
             ).kv_cache_config
-            self.assertFalse(config.btc_transfer_engine_async)
-            self.assertEqual(config.btc_crc_slot_count, 3)
+            self.assertTrue(config.btc_transfer_engine_async)
+            self.assertEqual(config.btc_crc_slot_count, 8)
             self.assertEqual(config.block_tree_task_pool_size, 8)
             self.assertEqual(config.block_tree_transfer_worker_count, 2)
-            self.assertEqual(config.disk_cache_read_thread_count, 4)
-            self.assertEqual(config.disk_cache_write_thread_count, 6)
+            self.assertEqual(config.disk_cache_read_thread_count, 16)
+            self.assertEqual(config.disk_cache_write_thread_count, 16)
 
     def test_disabled_crc_survives_worker_pickle_and_engine_config(self):
         import pickle

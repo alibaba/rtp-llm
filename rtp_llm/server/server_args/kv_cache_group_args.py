@@ -16,14 +16,6 @@ def _frozen_recovery_ms(value, minimum, name):
     return duration
 
 
-def _frozen_recovery_interval_ms(value):
-    return _frozen_recovery_ms(value, 0, "block_tree_frozen_recovery_interval_ms")
-
-
-def _frozen_recovery_query_timeout_ms(value):
-    return _frozen_recovery_ms(value, 1, "block_tree_frozen_recovery_query_timeout_ms")
-
-
 def _frozen_force_release_timeout_ms(value):
     return _frozen_recovery_ms(value, 0, "block_tree_frozen_force_release_timeout_ms")
 
@@ -387,22 +379,6 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="磁盘 KV cache 是否使用 buffered I/O。默认开启。",
     )
     kv_cache_group.add_argument(
-        "--disk_cache_read_thread_count",
-        env_name="DISK_CACHE_READ_THREAD_COUNT",
-        bind_to=(kv_cache_config, "disk_cache_read_thread_count"),
-        type=int,
-        default=16,
-        help="每个磁盘 backing file 的异步读线程数，必须为正数，默认 16。",
-    )
-    kv_cache_group.add_argument(
-        "--disk_cache_write_thread_count",
-        env_name="DISK_CACHE_WRITE_THREAD_COUNT",
-        bind_to=(kv_cache_config, "disk_cache_write_thread_count"),
-        type=int,
-        default=16,
-        help="每个磁盘 backing file 的异步写线程数，必须为正数，默认 16。",
-    )
-    kv_cache_group.add_argument(
         "--disk_cache_sync_timeout_ms",
         env_name="DISK_CACHE_SYNC_TIMEOUT_MS",
         bind_to=(kv_cache_config, "disk_cache_sync_timeout_ms"),
@@ -463,24 +439,6 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="单个 DEVICE/HOST/DISK pool 的冻结 block abort 阈值下限，默认 0.3。实际阈值在 [下限, 上限) 均匀采样，进程内固定；上下限相等时使用固定值。下限为 0 关闭保护，否则冻结占比严格超过实际阈值时 core。要求 0 <= 下限 <= 上限 <= 1；启动时配置。",
     )
     kv_cache_group.add_argument(
-        "--block_tree_frozen_recovery_interval_ms",
-        env_name="BLOCK_TREE_FROZEN_RECOVERY_INTERVAL_MS",
-        bind_to=(kv_cache_config, "block_tree_frozen_recovery_interval_ms"),
-        type=_frozen_recovery_interval_ms,
-        default=1000,
-        help="冻结任务恢复与完成记录清理的轮询间隔，单位毫秒，默认 1000；0 暂停两者，范围 [0, 2147483647]。"
-        "原参与者均确认 buffer safe 或达到强制解冻超时后释放冻结引用。",
-    )
-    kv_cache_group.add_argument(
-        "--block_tree_frozen_recovery_query_timeout_ms",
-        env_name="BLOCK_TREE_FROZEN_RECOVERY_QUERY_TIMEOUT_MS",
-        bind_to=(kv_cache_config, "block_tree_frozen_recovery_query_timeout_ms"),
-        type=_frozen_recovery_query_timeout_ms,
-        default=1000,
-        help="单个冻结任务查询或一批完成记录清理的超时预算，单位毫秒，默认 1000；范围 [1, 2147483647]。"
-        "查询失败或缺少安全证明时，在强制解冻超时前保留冻结引用。",
-    )
-    kv_cache_group.add_argument(
         "--block_tree_frozen_force_release_timeout_ms",
         env_name="BLOCK_TREE_FROZEN_FORCE_RELEASE_TIMEOUT_MS",
         bind_to=(kv_cache_config, "block_tree_frozen_force_release_timeout_ms"),
@@ -496,25 +454,6 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=_frozen_abort_ratio,
         default=0.4,
         help="DEVICE/HOST/DISK pool 的冻结 block abort 阈值上限，默认 0.4，必须不小于 block_pool_frozen_abort_lower_ratio 且不超过 1。上下限不相等时实际阈值严格小于上限。",
-    )
-    kv_cache_group.add_argument(
-        "--btc_transfer_engine_async",
-        env_name="BTC_TRANSFER_ENGINE_ASYNC",
-        bind_to=(kv_cache_config, "btc_transfer_engine_async"),
-        type=str2bool,
-        default=True,
-        help="默认开启，按最终布局选择 WorkLoop，每方向数量由 block_tree_transfer_worker_count 控制；不支持的合法布局回退 legacy；设为 false 使用 legacy。",
-    )
-    kv_cache_group.add_argument(
-        "--btc_crc_slot_count",
-        env_name="BTC_CRC_SLOT_COUNT",
-        bind_to=(kv_cache_config, "btc_crc_slot_count"),
-        type=int,
-        default=8,
-        help=(
-            "每个 WorkLoop 的独立 CRC service 在每个 device 上的 slot 数，默认 8；"
-            "每 device 总数为 2 * block_tree_transfer_worker_count * btc_crc_slot_count。"
-        ),
     )
     kv_cache_group.add_argument(
         "--block_tree_task_pool_size",
@@ -629,22 +568,6 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=int,
         default=20000,
         help="Remote读写整体任务超时预算（毫秒，包含排队）",
-    )
-    kv_cache_group.add_argument(
-        "--kvcm_read_backend_type",
-        env_name="KVCM_READ_BACKEND_TYPE",
-        bind_to=(kv_cache_config, "kvcm_read_backend_type"),
-        type=int,
-        default=0,
-        help="Single KVCM backend: 0=normal match, 1=3fs, 2=mooncake, 3=pace, 4=file, 5=vcns3fs",
-    )
-    kv_cache_group.add_argument(
-        "--kvcm_min_replica_count",
-        env_name="KVCM_MIN_REPLICA_COUNT",
-        bind_to=(kv_cache_config, "kvcm_min_replica_count"),
-        type=int,
-        default=0,
-        help="Minimum readable replicas before StartWrite skips a key; 0 means 1",
     )
     kv_cache_group.add_argument(
         "--kvcm_meta_channel_retry_time",
