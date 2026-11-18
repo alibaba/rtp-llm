@@ -12,6 +12,7 @@ from rtp_llm.aios.kmonitor.python_client.kmonitor.report_worker import report_wo
 class MetricTypes:
     GAUGE_METRIC = "GaugeMetric"
     ACC_METRIC = "AccMetric"
+    HISTOGRAM_METRIC = "HistogramMetric"
 
 
 # this is the only class that user should import.
@@ -25,11 +26,11 @@ class KMonitor(object):
         self.lock: Lock = Lock()
 
     def register_metric(
-        self, type: str, name: str, tags: Dict[str, str] = {}
+        self, type: str, name: str, tags: Dict[str, str] = {}, **kwargs
     ) -> MetricBase:
         metric_tags = self.default_tags.copy()
         metric_tags.update(tags)
-        metric = MetricFactory.create_metric(type, name, metric_tags)
+        metric = MetricFactory.create_metric(type, name, metric_tags, **kwargs)
         self.report_worker.register_metric(metric)
         with self.lock:
             self.metrics[name] = metric
@@ -41,6 +42,13 @@ class KMonitor(object):
 
     def register_acc_metric(self, name: str, tags: Dict[str, str] = {}) -> MetricBase:
         return self.register_metric(MetricTypes.ACC_METRIC, name, tags)
+
+    def register_histogram_metric(
+        self, name, buckets, tags: Dict[str, str] = {}
+    ) -> MetricBase:
+        return self.register_metric(
+            MetricTypes.HISTOGRAM_METRIC, name, tags, buckets=buckets
+        )
 
     def report_metric(
         self, metric_name: str, value: float = 1, extra_tags: Dict[str, str] = {}

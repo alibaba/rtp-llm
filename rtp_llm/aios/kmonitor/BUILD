@@ -19,7 +19,14 @@ py_library(
 
 py_test(
     name = "kmon_py_test",
-    srcs = glob(["python_client/test/*.py"]),
+    srcs = ["python_client/test/kmon_test.py"],
     main = "python_client/test/kmon_test.py",
+    deps = [":kmonitor_py"],
+)
+
+py_test(
+    name = "histogram_py_test",
+    srcs = ["python_client/test/histogram_test.py"],
+    main = "python_client/test/histogram_test.py",
     deps = [":kmonitor_py"],
 )
