@@ -53,6 +53,10 @@ from rtp_llm.models_py.modules.dsv4.forward_metadata import (
     tensor_key,
 )
 from rtp_llm.models_py.modules.dsv4.hc import build_hc_unit
+from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_wrapper import (
+    MegaMoeWrapper,
+    glm_prefill_moe_chunk_plan,
+)
 from rtp_llm.models_py.modules.glm53.norm import Glm53RMSNorm as RMSNorm
 from rtp_llm.models_py.modules.glm53.norm import Glm53RMSResNorm as RMSResNorm
 from rtp_llm.models_py.modules.glm53_mega_mhc import (
@@ -60,9 +64,6 @@ from rtp_llm.models_py.modules.glm53_mega_mhc import (
     fused_post_pre_rms,
 )
 from rtp_llm.models_py.modules.glm53_mhc import fused_post_pre as glm53_fused_post_pre
-from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_wrapper import (
-    glm_prefill_moe_chunk_plan,
-)
 from rtp_llm.models_py.modules.hybrid.glm53_mla_attention import MlaAttention
 from rtp_llm.models_py.triton_kernels.causal_conv1d.glm53_causal_conv1d import (
     CausalConv1dMetadata,
@@ -1750,6 +1751,16 @@ class Glm53FlashModel(GptModelBase):
                 for idx in range(self.layer_num)
             ]
         )
+        # PDFUSION can mix eager prefill and decode on EP peers in one round.
+        # Both phases must take the same path at the graph/eager boundary.
+        self.synchronize_cuda_graph_choice = (
+            parallelism_config.role_type == RoleType.PDFUSION
+            and parallelism_config.dp_size > 1
+            and any(
+                isinstance(getattr(layer.mlp, "fused_moe", None), MegaMoeWrapper)
+                for layer in self.layers
+            )
+        )
         self.hc_enabled = model_config.glm53_hc_mult > 1
         self.enable_kda_reuse_fusion = False
         self.kda_chunk_size = get_kda_chunk_size()
@@ -1910,7 +1921,8 @@ class Glm53FlashModel(GptModelBase):
                 hidden_states.device,
                 token_sharded=attn_meta.token_shard is not None,
             )
-            if attention_inputs.is_prefill and not is_target_verify
+            if self.synchronize_cuda_graph_choice
+            or (attention_inputs.is_prefill and not is_target_verify)
             else nullcontext()
         )
         with moe_chunk_plan:

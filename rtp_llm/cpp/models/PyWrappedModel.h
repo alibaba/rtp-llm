@@ -179,6 +179,7 @@ private:
     // the normal main-generation wrapper can own this secondary runner.
     const bool                       owns_generation_prefill_cuda_graph_{false};
     bool                             enable_cuda_graph_{false};
+    bool                             synchronize_cuda_graph_choice_{false};
     bool                             is_prefill_cuda_graph_mode_{false};
     MtpIndexerRole                   mtp_indexer_role_{MtpIndexerRole::NORMAL};
     GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_init_status_{
@@ -364,6 +365,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
     py::object py_init_result;
     // Always initialize py_model_ so it can be used as fallback when CUDA graph cannot run
     py_model_ = py_instance;
+    synchronize_cuda_graph_choice_ = enable_cuda_graph_ && py::hasattr(py_model_, "synchronize_cuda_graph_choice")
+                                     && py_model_.attr("synchronize_cuda_graph_choice").cast<bool>();
     // MtpExecutor passes use_spec_decoding only to its target wrapper. The
     // normal and draft wrappers may share the same Python class, but must not
     // activate target transactions.

@@ -1015,8 +1015,15 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             && generation_prefill_graph_runner_ != nullptr && !is_generation_prefill_runner) {
             generation_prefill_cuda_graph_status = GenerationPrefillCudaGraphStatus::MIXED_PREFILL_DECODE_NOT_SUPPORTED;
         }
-        const bool can_run_graph = !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr
-                                   && graph_runner->canRun(py_model_inputs, graph_state);
+        bool can_run_graph = !capture_hidden_states && enable_cuda_graph_ && graph_runner != nullptr
+                             && graph_runner->canRun(py_model_inputs, graph_state);
+        if (synchronize_cuda_graph_choice_) {
+            // The eager forward plans MegaMoE chunks on WORLD. Every rank
+            // must enter that collective before any rank launches MegaMoE.
+            auto graph_ok = torch::full({1}, can_run_graph ? 1 : 0, token_ids.options().dtype(torch::kInt32));
+            can_run_graph =
+                execAllReduce({graph_ok, ReduceOp::Min, ParallelMode::WORLD, {}}).buffer.item<int32_t>() != 0;
+        }
         const bool fixed_mtp_role = mtp_indexer_role_ != MtpIndexerRole::NORMAL;
         const bool graph_required = enable_cuda_graph_ && fixed_mtp_role
                                     && (!py_model_inputs.attention_inputs.is_prefill || inputs.is_draft_extend);
