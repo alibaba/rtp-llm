@@ -38,8 +38,8 @@ public:
         bool   cleanup_failed{false};
     };
 
-    FrozenTaskRecovery(TaskSource source, Query query, Cleanup cleanup = {}, OnReleased on_released = {},
-                       int force_release_timeout_ms = 60000);
+    FrozenTaskRecovery(TransferCompletionCleanup& cleanup_queue, TaskSource source, Query query, Cleanup cleanup = {}, OnReleased on_released = {},
+                       int force_release_timeout_ms = 300000);
     ~FrozenTaskRecovery();
 
     // The owner serializes start/stop/destruction outside the recovery thread.
@@ -47,10 +47,6 @@ public:
     // A valid attempt is single-use, including thread-creation failure; stop
     // also prevents a later start. Failure returns false without throwing.
     bool start(int interval_ms, int query_timeout_ms) noexcept;
-    // Wake interval waits and join after any current query returns. No further
-    // background callbacks or releases run after stop returns. Does not force unfreeze.
-    // The owner must finish any concurrent explicit runOnce calls before stop
-    // or destruction; stop only joins the worker owned by this instance.
     void stop() noexcept;
 
     // Only FROZEN tasks are queried. Stop is checked before/after each query and
@@ -63,6 +59,7 @@ private:
     void backgroundLoop(int interval_ms, int query_timeout_ms) noexcept;
     void logPending(const Summary& summary) noexcept;
 
+    TransferCompletionCleanup& cleanup_queue_;
     TaskSource source_;
     Query      query_;
     Cleanup    cleanup_;

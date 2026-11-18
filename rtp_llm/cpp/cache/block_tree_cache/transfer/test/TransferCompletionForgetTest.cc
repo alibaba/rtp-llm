@@ -18,7 +18,7 @@ namespace rtp_llm {
 namespace {
 
 using Outcome = TransferTaskRegistry::ForgetResult;
-using Trace = TransferExecutionTrace;
+using Trace = TransferCompletionKey;
 using block_tree_cache_test::BoundedThread;
 using namespace std::chrono_literals;
 using Handler = std::function<grpc::Status(size_t, const FunctionRequestPB&, FunctionResponsePB&)>;
@@ -102,16 +102,17 @@ TEST(TransferCompletionForgetTest, LocalBatchPreservesNamespacesAndRetriesRunnin
     size_t calls = 0;
     TransferCompletionForget forget(nullptr, [&](const Trace& trace) {
         ++calls;
-        if (const auto* numeric = std::get_if<uint64_t>(&trace))
-            return ordinary.forget(*numeric);
-        return kvcm.forget(std::get<std::string>(trace));
+        if (trace.registry_type == RegistryType::BLOCK_TRANSFER)
+            return ordinary.forget(trace.numericId());
+        return kvcm.forget(trace.trace_id);
     });
     const std::vector<Trace> traces{uint64_t{71}, std::string("71"), uint64_t{72}, uint64_t{0}, std::string{}};
     const auto first = forget.forget(target({"local"}, false), traces, 1000);
     ASSERT_EQ(first.entries.size(), traces.size());
     const std::vector<Outcome> expected{Outcome::RUNNING, Outcome::DONE, Outcome::DONE, Outcome::INVALID, Outcome::INVALID};
     for (size_t index = 0; index < traces.size(); ++index) {
-        EXPECT_EQ(first.entries[index].trace_id, traces[index]);
+        EXPECT_EQ(first.entries[index].trace_id, traces[index].trace_id);
+        EXPECT_EQ(first.entries[index].registry_type, traces[index].registry_type);
         ASSERT_EQ(first.entries[index].ranks.size(), 1u);
         EXPECT_EQ(first.entries[index].ranks[0].result, expected[index]);
         EXPECT_EQ(first.entries[index].all_done, expected[index] == Outcome::DONE);
@@ -133,7 +134,7 @@ TEST(TransferCompletionForgetTest, LocalFailuresDoNotPreventLaterKeysFromComplet
     size_t calls = 0;
     TransferCompletionForget forget(nullptr, [&](const Trace& trace) -> Outcome {
         ++calls;
-        switch (std::get<uint64_t>(trace)) {
+        switch (trace.numericId()) {
             case 1: throw std::runtime_error("local erase failed");
             case 2: return static_cast<Outcome>(99);
             case 3: return Outcome::FAILED;

@@ -12,7 +12,7 @@ import re
 
 _TIMEOUT_PATTERNS = {
     "local_business_queue": re.compile(
-        r"(?:load|store) expired in business queue|store business queue timeout"
+        r"(?:load|eviction|store) expired in business queue|store business queue timeout"
     ),
     "local_workloop_queue": re.compile(r"transfer expired in WorkLoop queue"),
     "local_worker_queue": re.compile(r"transfer expired in TE worker queue"),

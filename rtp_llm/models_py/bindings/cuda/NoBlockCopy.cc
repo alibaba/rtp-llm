@@ -64,11 +64,13 @@ cudaError_t copyCudaResult(const char* phase, cudaError_t result) {
     std::abort();
 }
 
+#if CUDART_VERSION >= 12080
 [[noreturn]] void failCopyStreams(const DeviceHostCopyExecutionContext& context, const char* phase,
                                  size_t tile_num, cudaError_t error) noexcept {
     failCopyStreams(context.deviceIndex(), context.direction == DeviceHostCopyDirection::H2D ? "H2D" : "D2H",
                     reinterpret_cast<cudaStream_t>(context.stream()), phase, tile_num, error);
 }
+#endif
 
 class CudaDeviceHostCopyStreams final: public DeviceHostCopyStreams {
 public:
