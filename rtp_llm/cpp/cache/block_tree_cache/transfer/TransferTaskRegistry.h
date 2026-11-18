@@ -61,7 +61,7 @@ public:
             logEvent("begin", trace_id, State::UNKNOWN, "invalid");
             return false;
         }
-        std::unique_lock<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         const auto inserted = records_.emplace(trace_id, State::RUNNING);
         if (!inserted.second && inserted.first->second == State::REJECTED) {
             // The fence has intercepted its sole possible late execution. Consume
@@ -71,15 +71,11 @@ public:
             missing_.erase(missing);
             records_.erase(inserted.first);
             logged_query_states_.erase(trace_id);
-            lock.unlock();
             logEvent("begin", trace_id, State::REJECTED, "late_execution_rejected_and_removed");
             return false;
         }
-        const auto state = inserted.first->second;
-        const bool admitted = inserted.second;
-        lock.unlock();
-        logEvent("begin", trace_id, state, admitted ? "inserted" : "duplicate");
-        return admitted;
+        logEvent("begin", trace_id, inserted.first->second, inserted.second ? "inserted" : "duplicate");
+        return inserted.second;
     }
 
     bool begin(uint64_t trace_id) {
@@ -90,26 +86,22 @@ public:
     // False preserves the last known state. A true proof is monotonic and can
     // describe a safely drained failure. The return value only reports ID presence.
     bool finish(const std::string& trace_id, bool buffer_safe) {
-        std::unique_lock<std::mutex> lock(mutex_);
-        const auto it = records_.find(trace_id);
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto                  it = records_.find(trace_id);
         if (it == records_.end()) {
-            lock.unlock();
             logEvent("finish", trace_id, State::UNKNOWN, "missing");
             return false;
         }
         if (it->second == State::REJECTED) {
-            const auto warning = touchMissing(trace_id);
-            lock.unlock();
-            logMissingWarning(trace_id, "finish", warning);
-            logEvent("finish", trace_id, State::REJECTED, "rejection_retained");
+            // A late completion must not turn a missing record into a safety proof.
+            touchMissing(trace_id, "finish");
+            logEvent("finish", trace_id, it->second, "rejection_retained");
             return true;
         }
         if (buffer_safe) {
             it->second = State::BUFFER_SAFE;
         }
-        const auto state = it->second;
-        lock.unlock();
-        logEvent("finish", trace_id, state, buffer_safe ? "safe_proof" : "no_safe_proof");
+        logEvent("finish", trace_id, it->second, buffer_safe ? "safe_proof" : "no_safe_proof");
         return true;
     }
 
@@ -126,26 +118,21 @@ public:
             logEvent("forget", trace_id, State::UNKNOWN, "invalid");
             return ForgetResult::INVALID;
         }
-        std::unique_lock<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> lock(mutex_);
         const auto                  it = records_.find(trace_id);
         if (it == records_.end()) {
-            lock.unlock();
             logEvent("forget", trace_id, State::UNKNOWN, "already_missing");
             return ForgetResult::DONE;
         }
         if (it->second == State::REJECTED) {
-            lock.unlock();
             logEvent("forget", trace_id, State::REJECTED, "fence_retained_cleanup_acknowledged");
             return ForgetResult::DONE;
         }
         if (it->second != State::BUFFER_SAFE) {
-            const auto state = it->second;
-            lock.unlock();
-            logEvent("forget", trace_id, state, "retained");
+            logEvent("forget", trace_id, it->second, "retained");
             return ForgetResult::RUNNING;
         }
         records_.erase(it);
-        lock.unlock();
         logEvent("forget", trace_id, State::BUFFER_SAFE, "removed");
         return ForgetResult::DONE;
     }
@@ -160,27 +147,19 @@ public:
     // Ordinary diagnostic queryLocal() remains read-only.
     std::vector<State> queryAndBlockMissing(const std::vector<std::string>& trace_ids) {
         std::vector<State> states(trace_ids.size(), State::UNKNOWN);
-        std::vector<QueryLog> logs(trace_ids.size());
-        const bool log_queries = queryLoggingEnabled();
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            for (size_t i = 0; i < trace_ids.size(); ++i) {
-                if (!trace_ids[i].empty()) {
-                    const auto inserted = records_.emplace(trace_ids[i], State::REJECTED);
-                    states[i] = inserted.first->second;
-                    if (states[i] == State::REJECTED)
-                        logs[i].warning = touchMissing(trace_ids[i]);
-                    logs[i].rejected = inserted.second;
-                }
-                logs[i].query = log_queries && recordQueryLogLocked(trace_ids[i], states[i]);
-            }
-        }
+        std::lock_guard<std::mutex> lock(mutex_);
         for (size_t i = 0; i < trace_ids.size(); ++i) {
-            logMissingWarning(trace_ids[i], "query", logs[i].warning);
-            if (logs[i].rejected)
+            if (trace_ids[i].empty()) {
+                logQuery(trace_ids[i], states[i]);
+                continue;
+            }
+            const auto inserted = records_.emplace(trace_ids[i], State::REJECTED);
+            states[i] = inserted.first->second;
+            if (states[i] == State::REJECTED)
+                touchMissing(trace_ids[i], "query");
+            if (inserted.second)
                 logEvent("reject", trace_ids[i], states[i], "missing_admission_closed");
-            if (logs[i].query)
-                logEvent("query", trace_ids[i], states[i], states[i] == State::UNKNOWN ? "missing" : "found");
+            logQuery(trace_ids[i], states[i]);
         }
         return states;
     }
@@ -197,21 +176,13 @@ public:
     // instance preserve request order and never create missing records.
     std::vector<State> queryLocal(const std::vector<std::string>& trace_ids) const {
         std::vector<State> states(trace_ids.size(), State::UNKNOWN);
-        std::vector<bool> log_queries(trace_ids.size(), false);
-        const bool log_enabled = queryLoggingEnabled();
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            for (size_t i = 0; i < trace_ids.size(); ++i) {
-                const auto it = records_.find(trace_ids[i]);
-                if (it != records_.end()) {
-                    states[i] = it->second;
-                }
-                log_queries[i] = log_enabled && recordQueryLogLocked(trace_ids[i], states[i]);
-            }
-        }
+        std::lock_guard<std::mutex> lock(mutex_);
         for (size_t i = 0; i < trace_ids.size(); ++i) {
-            if (log_queries[i])
-                logEvent("query", trace_ids[i], states[i], states[i] == State::UNKNOWN ? "missing" : "found");
+            const auto it = records_.find(trace_ids[i]);
+            if (it != records_.end()) {
+                states[i] = it->second;
+            }
+            logQuery(trace_ids[i], states[i]);
         }
         return states;
     }
@@ -271,18 +242,8 @@ private:
         std::list<std::string>::iterator position;
     };
 
-    struct MissingWarning {
-        uint64_t count{0};
-        int64_t remaining_seconds{0};
-    };
-
-    struct QueryLog {
-        MissingWarning warning;
-        bool rejected{false};
-        bool query{false};
-    };
-
-    MissingWarning touchMissing(const std::string& trace_id) {
+    // Caller holds mutex_. Diagnostic reads do not extend retention.
+    void touchMissing(const std::string& trace_id, const char* source) {
         const auto now = now_();
         auto inserted = missing_.try_emplace(trace_id);
         auto& record = inserted.first->second;
@@ -300,24 +261,19 @@ private:
             && (!record.warned || now - record.last_warning_time >= std::chrono::hours(1))) {
             record.warned = true;
             record.last_warning_time = now;
-            return {record.count,
-                    std::chrono::duration_cast<std::chrono::seconds>(record.expire_time - now).count()};
-        }
-        return {};
-    }
-
-    void logMissingWarning(const std::string& trace_id, const char* source, MissingWarning warning) const noexcept {
-        if (warning.count == 0)
-            return;
-        try {
-            RTP_LLM_LOG_WARNING(
-                "transfer missing repeatedly accessed trace=%s registry=%s source=%s count=%lu remaining_seconds=%ld",
-                trace_id.c_str(), epoch_.c_str(), source, static_cast<unsigned long>(warning.count),
-                static_cast<long>(warning.remaining_seconds));
-        } catch (...) {
+            try {
+                RTP_LLM_LOG_WARNING(
+                    "transfer missing repeatedly accessed trace=%s registry=%s source=%s count=%lu remaining_seconds=%ld",
+                    trace_id.c_str(), epoch_.c_str(), source, static_cast<unsigned long>(record.count),
+                    static_cast<long>(std::chrono::duration_cast<std::chrono::seconds>(record.expire_time - now).count()));
+            } catch (...) {
+                // Diagnostics must not affect admission or completion evidence.
+            }
         }
     }
 
+    // Log under the registry lock so begin/finish/forget/query ordering is
+    // unambiguous. Diagnostics must never affect completion evidence.
     void logEvent(const char* event, const std::string& trace_id, State state, const char* result) const noexcept {
         try {
             const char* state_name = state == State::BUFFER_SAFE ? "BUFFER_SAFE" :
@@ -330,19 +286,14 @@ private:
         }
     }
 
-    static bool queryLoggingEnabled() noexcept {
+    void logQuery(const std::string& trace_id, State state) const noexcept {
         try {
-            return Logger::getEngineLogger().isLevelEnabled(alog::LOG_LEVEL_INFO);
-        } catch (...) {
-            return false;
-        }
-    }
-
-    bool recordQueryLogLocked(const std::string& trace_id, State state) const noexcept {
-        try {
+            if (!Logger::getEngineLogger().isLevelEnabled(alog::LOG_LEVEL_INFO)) {
+                return;
+            }
             const auto previous = logged_query_states_.find(trace_id);
             if (previous != logged_query_states_.end() && previous->second == state) {
-                return false;
+                return;
             }
             // Emit the first observation and state changes, not every recovery
             // poll. Bound diagnostic memory even for queries of unknown traces.
@@ -350,9 +301,8 @@ private:
                 logged_query_states_.clear();
             }
             logged_query_states_[trace_id] = state;
-            return true;
+            logEvent("query", trace_id, state, state == State::UNKNOWN ? "missing" : "found");
         } catch (...) {
-            return false;
         }
     }
 

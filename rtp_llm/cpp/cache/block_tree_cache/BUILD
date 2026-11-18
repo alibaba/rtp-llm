@@ -229,7 +229,6 @@ cc_library(
     srcs = [
         "BlockTree.cc",
         "BlockTreeCache.cc",
-        "BlockTreeReclaimer.cc",
         "diagnostic/FullPrefixInvariantScanner.cc",
         "storage_backend/StorageBackend.cc",
         "storage_backend/StorageBackendExecutor.cc",
@@ -252,7 +251,6 @@ cc_library(
     ],
     hdrs = [
         "BlockTreeCache.h",
-        "BlockTreeReclaimer.h",
         "diagnostic/FullPrefixInvariantScanner.h",
         "BlockTreeCacheFactory.h",
         "evict/EvictionTaskRunner.h",

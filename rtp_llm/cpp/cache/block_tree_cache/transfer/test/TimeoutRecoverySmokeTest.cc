@@ -1,4 +1,3 @@
-#include <unordered_map>
 #include <gtest/gtest.h>
 #include <grpcpp/grpcpp.h>
 #include <cuda_runtime.h>
@@ -330,14 +329,12 @@ protected:
         unreleased_evidence_.clear();
         for (const auto& record : records) {
             if (record->snapshot().state == FrozenTask::State::RELEASED) continue;
-            const auto found = request_by_trace_.find(std::stoull(record->execution().trace_id));
-            const std::optional<int64_t> request = found == request_by_trace_.end() ?
-                std::nullopt : std::optional<int64_t>{found->second};
+            const auto request = record->execution().request_id;
             if (!request || *request < first_request || *request >= first_request + static_cast<int64_t>(kRequests)) {
-                ADD_FAILURE() << "cannot map diagnostic trace to this round's disk blocks: " << record->execution().trace_id;
+                ADD_FAILURE() << "cannot map diagnostic trace to this round's disk blocks: " << record->debugString();
                 continue;
             }
-            unreleased_evidence_.push_back({std::stoull(record->execution().trace_id), *request,
+            unreleased_evidence_.push_back({std::get<uint64_t>(record->execution().trace_id), *request,
                                            static_cast<size_t>(*request - first_request), write});
         }
     }
@@ -397,7 +394,6 @@ protected:
     void submit(bool write, size_t request, int64_t request_id, std::chrono::milliseconds timeout,
                 const std::shared_ptr<BusinessCompletion>& completion) {
         TransferTask task(workers_[0]->descriptors(write, request), timeout, request_id);
-        request_by_trace_[task.traceId()] = request_id;
         coordinator_->runTransfer(
             std::move(task),
             [completion](TransferResult result) {
@@ -409,20 +405,9 @@ protected:
             }, write ? "evict" : "load");
     }
     size_t recover(const std::vector<std::shared_ptr<FrozenTask>>& records) {
-        TransferCompletionCleanup cleanup;
-        FrozenTaskRecovery recovery(cleanup,
+        FrozenTaskRecovery recovery(
             [this] { return coordinator_->frozenTasks(); },
-            [this](const auto& execution, int timeout) {
-                TransferCompletionIdentity identity;
-                identity.registry_type = execution.registry_type;
-                identity.trace_id = execution.trace_id;
-
-                identity.remote = execution.uses_rpc;
-                identity.expected_rank_count = execution.participant_ranks.size();
-                for (const auto& peer : execution.participant_ranks)
-                    identity.expected_peers.push_back({peer.rank, peer.address});
-                return TransferCompletionQuery(broadcast_).query(identity, timeout);
-            });
+            [this](const auto& execution, int timeout) { return TransferCompletionQuery(broadcast_).query(execution, timeout); });
         EXPECT_TRUE(recovery.start(10, 1000));
         const auto deadline = Clock::now() + 10s;
         // This waits only for production completion/recovery; no producer is
@@ -437,11 +422,11 @@ protected:
         size_t released = 0;
         for (const auto& record : records) {
             if (record->snapshot().state == FrozenTask::State::RELEASED) ++released;
-            EXPECT_EQ(record->snapshot().state, FrozenTask::State::RELEASED) << record->execution().trace_id;
+            EXPECT_EQ(record->snapshot().state, FrozenTask::State::RELEASED) << record->debugString();
             const auto query = record->recoverySnapshot().last_query;
             EXPECT_NE(query, nullptr);
             if (query) {
-                EXPECT_TRUE(query->all_safe) << record->execution().trace_id;
+                EXPECT_TRUE(query->all_safe) << record->debugString();
             }
             EXPECT_EQ(record->failure().status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
         }
@@ -530,7 +515,7 @@ protected:
                 }
                 for (const auto& record : records) {
                     if (record->snapshot().state == FrozenTask::State::RELEASED) {
-                        const auto trace = std::stoull(record->execution().trace_id);
+                        const auto trace = std::get<uint64_t>(record->execution().trace_id);
                         const auto state = workers_[rank]->dispatcher->taskRegistry()
                                                .queryLocal(std::vector<uint64_t>{trace}).front();
                         // A fenced request may never enter the handler. Its registry
@@ -557,13 +542,12 @@ protected:
                     }
                 }
                 for (const auto& record : records) {
-                    const auto found = request_by_trace_.find(std::stoull(record->execution().trace_id));
-                    ASSERT_NE(found, request_by_trace_.end());
-                    const auto request = static_cast<size_t>(found->second - first_request);
+                    ASSERT_TRUE(record->execution().request_id.has_value());
+                    const auto request = static_cast<size_t>(*record->execution().request_id - first_request);
                     ASSERT_LT(request, kRequests);
                     const auto first_offset = workers_[rank]->disk->blockOffset(workers_[rank]->disks[request * kBlocksPerRequest]);
                     const auto end_offset = first_offset + kBlocksPerRequest * kBytes;
-                    const auto trace = std::stoull(record->execution().trace_id);
+                    const auto trace = std::get<uint64_t>(record->execution().trace_id);
                     if (workers_[rank]->dispatcher->taskRegistry()
                             .queryLocal(std::vector<uint64_t>{trace}).front() == State::REJECTED) {
                         EXPECT_FALSE(std::any_of(events.begin(), events.end(), [&](const auto& event) {
@@ -577,6 +561,11 @@ protected:
                             return event.write == write && event.offset >= first_offset && event.offset < end_offset
                                    && event.begin < done->rpc_deadline && done->rpc_deadline < event.end;
                         })) ++io_timeouts;
+                    const auto diagnostics = record->failure().execution_diagnostics;
+                    ASSERT_NE(diagnostics, nullptr);
+                    EXPECT_TRUE(std::any_of(diagnostics->ranks.begin(), diagnostics->ranks.end(), [](const auto& row) {
+                        return row.grpc_code && *row.grpc_code == grpc::StatusCode::DEADLINE_EXCEEDED;
+                    })) << record->debugString();
                 }
             }
             std::cout << "natural local timeout smoke: engine=" << (GetParam() ? "workloop" : "legacy")
@@ -612,7 +601,6 @@ protected:
     std::vector<std::unique_ptr<SmokeServer>> servers_;
     std::shared_ptr<BroadcastManager> broadcast_;
     std::unique_ptr<BlockTransferDispatcher> coordinator_;
-    std::unordered_map<uint64_t, int64_t> request_by_trace_;
     std::vector<EvidenceRequest> unreleased_evidence_;
 };
 

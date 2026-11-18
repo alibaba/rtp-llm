@@ -194,21 +194,15 @@ class TimeoutRecoveryChecksTest(unittest.TestCase):
                 )
 
     def test_untouched_queue_timeout_does_not_require_freeze(self):
-        cases = [
-            ("local_business_queue", "load expired in business queue, descriptor_count=4"),
-            (
-                "local_business_queue",
-                "eviction expired in business queue, source=DEVICE target=HOST descriptors=4",
-            ),
-            ("local_business_queue", "store expired in business queue"),
-            ("local_business_queue", "store business queue timeout"),
-            ("local_workloop_queue", "transfer expired in WorkLoop queue"),
-            ("local_worker_queue", "transfer expired in TE worker queue"),
-            ("local_resource_wait", "staging admission timed out"),
-            ("local_pre_submit", "transfer deadline exceeded before dispatch"),
-        ]
-        for category, text in cases:
-            with self.subTest(category=category, text=text):
+        cases = {
+            "local_business_queue": "load expired in business queue, descriptor_count=4",
+            "local_workloop_queue": "transfer expired in WorkLoop queue",
+            "local_worker_queue": "transfer expired in TE worker queue",
+            "local_resource_wait": "staging admission timed out",
+            "local_pre_submit": "transfer deadline exceeded before dispatch",
+        }
+        for category, text in cases.items():
+            with self.subTest(category=category):
                 check_timeout_recovery(
                     text, backend="local", required_evidence=[category]
                 )

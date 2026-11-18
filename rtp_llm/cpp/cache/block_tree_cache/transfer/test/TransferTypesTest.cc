@@ -32,49 +32,53 @@ TEST(TransferTaskTest, SubtasksPreserveQueryIdAndDeadline) {
     EXPECT_EQ(grandchild.requestId(), 73);
 }
 
-TEST(TransferTaskTest, NewTasksHaveDistinctExecutionTracesWithinWorkflow) {
+TEST(TransferTaskTest, RpcBatchesHaveDistinctExecutionTracesWithinWorkflow) {
     TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::seconds(10), 73);
-    TransferTask first({TransferDescriptor::hostToDevice(1, 3, {4})}, std::chrono::seconds(10), 73);
-    TransferTask second({TransferDescriptor::hostToDevice(2, 5, {6})}, std::chrono::seconds(10), 73);
-    first.setWorkflow(task.workflowId(), task.traceId());
-    second.setWorkflow(task.workflowId(), task.traceId());
+    auto first  = task.rpcSubtask({TransferDescriptor::hostToDevice(1, 3, {4})});
+    auto second = task.rpcSubtask({TransferDescriptor::hostToDevice(2, 5, {6})});
 
-    EXPECT_NE(task.traceId(), 0u);
     EXPECT_NE(first.traceId(), 0u);
     EXPECT_NE(second.traceId(), 0u);
     EXPECT_NE(first.traceId(), task.traceId());
     EXPECT_NE(second.traceId(), task.traceId());
     EXPECT_NE(first.traceId(), second.traceId());
+    EXPECT_EQ(first.deadline(), task.deadline());
+    EXPECT_EQ(second.deadline(), task.deadline());
     EXPECT_EQ(first.requestId(), task.requestId());
     EXPECT_EQ(second.requestId(), task.requestId());
     EXPECT_EQ(first.workflowId(), task.workflowId());
     EXPECT_EQ(second.workflowId(), task.workflowId());
     EXPECT_EQ(first.parentTraceId(), task.traceId());
     EXPECT_EQ(second.parentTraceId(), task.traceId());
+
+    auto nested_rpc = first.rpcSubtask(first.descriptors());
+    EXPECT_NE(nested_rpc.traceId(), first.traceId());
+    EXPECT_EQ(nested_rpc.workflowId(), task.workflowId());
+    EXPECT_EQ(nested_rpc.parentTraceId(), first.traceId());
 }
 
 TEST(TransferTaskTest, WorkerSubtasksPreserveReceivedExecutionTrace) {
     TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::seconds(10), 73);
-    task.setWorkflow(1234, 5678);
-    TransferTask worker(task.descriptors(), std::chrono::seconds(10), task.requestId());
-    worker.setTraceId(task.traceId());
-    worker.setWorkflow(task.workflowId(), task.parentTraceId());
+    const auto rpc = task.rpcSubtask(task.descriptors());
+    TransferTask worker(rpc.descriptors(), std::chrono::seconds(10), rpc.requestId());
+    worker.setTraceId(rpc.traceId());
+    worker.setWorkflow(rpc.workflowId(), rpc.parentTraceId());
 
     auto child  = worker.subtask({TransferDescriptor::hostToDevice(1, 3, {4})});
     auto nested = child.subtask({TransferDescriptor::hostToDevice(2, 5, {6})});
 
-    EXPECT_EQ(worker.traceId(), task.traceId());
-    EXPECT_EQ(child.traceId(), task.traceId());
-    EXPECT_EQ(nested.traceId(), task.traceId());
+    EXPECT_EQ(worker.traceId(), rpc.traceId());
+    EXPECT_EQ(child.traceId(), rpc.traceId());
+    EXPECT_EQ(nested.traceId(), rpc.traceId());
     EXPECT_EQ(nested.workflowId(), task.workflowId());
-    EXPECT_EQ(nested.parentTraceId(), task.parentTraceId());
+    EXPECT_EQ(nested.parentTraceId(), task.traceId());
     EXPECT_EQ(nested.deadline(), worker.deadline());
     EXPECT_EQ(nested.requestId(), worker.requestId());
 }
 
 TEST(TransferTaskTest, CopyAndMovePreserveExecutionTrace) {
-    TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::seconds(10), 73);
-    task.setWorkflow(1234, 5678);
+    TransferTask parent({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::seconds(10), 73);
+    const auto task = parent.rpcSubtask(parent.descriptors());
     auto copied = task;
     auto moved  = std::move(copied);
     EXPECT_EQ(moved.traceId(), task.traceId());
@@ -101,6 +105,7 @@ TEST(TransferTaskTest, CompletionProofFollowsOwnershipButNotNewSubtasks) {
     auto moved = std::move(copied);
     EXPECT_EQ(moved.completionProof(), proof);
     EXPECT_EQ(task.subtask(task.descriptors()).completionProof(), nullptr);
+    EXPECT_EQ(task.rpcSubtask(task.descriptors()).completionProof(), nullptr);
 
     auto owned = task.subtask(task.descriptors());
     owned.setCompletionProof(task.completionProof());

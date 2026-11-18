@@ -19,7 +19,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
 
 namespace rtp_llm {
-class BlockTreeReclaimer;
 
 class BlockTreeTaskPool;
 class BlockTransferDispatcher;
@@ -147,8 +146,6 @@ public:
 
     ~BlockTreeCache();
     bool init();
-    BlockTreeReclaimer& reclaimer() const { return *reclaimer_; }
-    void stopBackgroundTasks();
     // Reject pending loads and wait for allocator callbacks before its members are destroyed.
     void shutdownLoads();
 
@@ -242,8 +239,6 @@ private:
     BlockTreeLoader                                loader_;
     BlockTreeStorer                                storer_;
     std::unique_ptr<FullPrefixInvariantScanner>    full_prefix_scanner_;
-    std::unique_ptr<BlockTreeReclaimer> reclaimer_;
-
 };
 
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;

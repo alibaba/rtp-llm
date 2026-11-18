@@ -14,18 +14,18 @@ namespace {
 using Outcome = TransferTaskRegistry::ForgetResult;
 using Clock = std::chrono::steady_clock;
 
-void encodeKey(const TransferCompletionKey& trace, TransferCompletionKeyPB& key) {
-    if (trace.registry_type == RegistryType::BLOCK_TRANSFER)
-        key.set_transfer_trace_id(trace.numericId());
+void encodeKey(const TransferExecutionTrace& trace, TransferCompletionKeyPB& key) {
+    if (const auto* numeric = std::get_if<uint64_t>(&trace))
+        key.set_transfer_trace_id(*numeric);
     else
-        key.set_kvcm_trace_id(trace.trace_id);
+        key.set_kvcm_trace_id(std::get<std::string>(trace));
 }
 
-bool sameKey(const TransferCompletionKeyPB& key, const TransferCompletionKey& trace) {
-    if (trace.registry_type == RegistryType::BLOCK_TRANSFER)
-        return key.trace_case() == TransferCompletionKeyPB::kTransferTraceId && key.transfer_trace_id() == trace.numericId();
+bool sameKey(const TransferCompletionKeyPB& key, const TransferExecutionTrace& trace) {
+    if (const auto* numeric = std::get_if<uint64_t>(&trace))
+        return key.trace_case() == TransferCompletionKeyPB::kTransferTraceId && key.transfer_trace_id() == *numeric;
     return key.trace_case() == TransferCompletionKeyPB::kKvcmTraceId
-           && key.kvcm_trace_id() == trace.trace_id;
+           && key.kvcm_trace_id() == std::get<std::string>(trace);
 }
 
 int remainingTimeout(Clock::time_point deadline) {
@@ -63,7 +63,7 @@ void setOutcome(TransferCompletionForgetRankResult& row, Outcome outcome) {
     }
 }
 
-void decodeEntry(const TransferCompletionForgetEntryPB& wire, const TransferCompletionKey& trace,
+void decodeEntry(const TransferCompletionForgetEntryPB& wire, const TransferExecutionTrace& trace,
                  TransferCompletionForgetRankResult& row) {
     if (!sameKey(wire.key(), trace)) {
         row.error = "completion forget key identity mismatch";
@@ -98,7 +98,7 @@ TransferCompletionForget::TransferCompletionForget(std::shared_ptr<BroadcastMana
 
 TransferCompletionForgetResult
 TransferCompletionForget::forget(const TransferCompletionTarget& target,
-                                  const std::vector<TransferCompletionKey>& traces, int timeout_ms) const {
+                                  const std::vector<TransferExecutionTrace>& traces, int timeout_ms) const {
     TransferCompletionForgetResult result;
     if (traces.size() > kTransferCompletionForgetBatchSize) {
         result.error = "completion forget batch exceeds the maximum size";
@@ -107,8 +107,7 @@ TransferCompletionForget::forget(const TransferCompletionTarget& target,
     result.entries.resize(traces.size());
     for (size_t index = 0; index < traces.size(); ++index) {
         auto& entry = result.entries[index];
-        entry.registry_type = traces[index].registry_type;
-        entry.trace_id = traces[index].trace_id;
+        entry.trace_id = traces[index];
         entry.ranks.resize(target.peers.size());
         for (size_t rank = 0; rank < entry.ranks.size(); ++rank)
             entry.ranks[rank].rank = rank;
@@ -154,7 +153,7 @@ TransferCompletionForget::forget(const TransferCompletionTarget& target,
     std::vector<size_t> valid_indices;
     valid_indices.reserve(traces.size());
     for (size_t index = 0; index < traces.size(); ++index) {
-        if (validTransferCompletionKey(traces[index])) {
+        if (validTransferExecutionTrace(traces[index])) {
             valid_indices.push_back(index);
         } else {
             for (auto& row : result.entries[index].ranks) {

@@ -153,7 +153,7 @@ class KVCacheConfigPickleTest(TestCase):
                 restored.__setstate__(previous)
                 self.assertEqual(restored.block_tree_transfer_worker_count, 7)
                 self.assertEqual(
-                    restored.block_tree_frozen_force_release_timeout_ms, 300000
+                    restored.block_tree_frozen_force_release_timeout_ms, 60000
                 )
                 self.assertEqual(
                     restored.disk_cache_evict_max_pending_bytes,
@@ -228,7 +228,7 @@ class KVCacheConfigPickleTest(TestCase):
     def test_frozen_force_release_timeout_defaults_boundaries_and_validation(self):
         name = "block_tree_frozen_force_release_timeout_ms"
         config = KVCacheConfig()
-        self.assertEqual(getattr(config, name), 300000)
+        self.assertEqual(getattr(config, name), 60000)
         for timeout in (0, 1, 120000, 1200000, 2**31 - 1):
             with self.subTest(timeout=timeout):
                 setattr(config, name, timeout)

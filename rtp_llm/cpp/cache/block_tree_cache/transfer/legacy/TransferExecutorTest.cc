@@ -155,8 +155,8 @@ TEST(TransferExecutorTest, PerRankValidationRejectsBeforeBufferAccess) {
         for (const auto& descriptors : std::vector<std::vector<TransferDescriptor>>{{}, {descriptor(0)}}) {
             size_t proofs = 0;
             TransferTask task(descriptors, std::chrono::seconds(30));
-            auto safety = std::make_shared<TransferBufferSafetyTracker>([&] { ++proofs; });
-            auto context = engine.execute(std::move(task), std::move(safety));
+            task.setCompletionProof(std::make_shared<TransferBufferSafety>([&] { ++proofs; }));
+            auto context = engine.execute(std::move(task));
             EXPECT_TRUE(context->done());
             EXPECT_EQ(context->errorInfo().code(), ErrorCode::INVALID_PARAMS);
             EXPECT_EQ(context->result().copy_error, CacheCopyError::INVALID_REQUEST);

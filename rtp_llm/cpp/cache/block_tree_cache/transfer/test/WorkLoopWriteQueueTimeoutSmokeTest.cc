@@ -97,6 +97,9 @@ private:
     std::vector<Event> events_;
 };
 
+// runTransfer creates an independent execution trace below the caller's task.
+// Each request has one producer and one descriptor, so recording its actual
+// child trace needs no shared hot-path lock. All execution delegates to base.
 class QueueSmokeEngine final: public PerRankBlockTransferEngine {
 public:
     struct Observation {

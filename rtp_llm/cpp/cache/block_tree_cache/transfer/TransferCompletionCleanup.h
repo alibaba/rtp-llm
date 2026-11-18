@@ -13,16 +13,16 @@ namespace rtp_llm {
 
 // Pending worker-record deletion only. Nodes never own pools, FrozenTasks or
 // business callbacks; the owner supplies the transport for each drain call.
-class TransferCompletionCleanup {
+class TransferCompletionCleanup: public std::enable_shared_from_this<TransferCompletionCleanup> {
 private:
     struct Entry {
         TransferCompletionTarget target;
-        TransferCompletionKey   key;
+        TransferExecutionTrace   trace_id;
     };
 
 public:
     using Forget = std::function<TransferCompletionForgetResult(
-        const TransferCompletionTarget&, const std::vector<TransferCompletionKey>&, int)>;
+        const TransferCompletionTarget&, const std::vector<TransferExecutionTrace>&, int)>;
 
     class Prepared {
     public:
@@ -32,13 +32,17 @@ public:
         Prepared(const Prepared&)                = delete;
         Prepared& operator=(const Prepared&)     = delete;
 
+        // Transfers the preallocated node at most once. Destruction alone never
+        // submits cleanup, including when the operation has not become safe.
+        void submit() noexcept;
         bool empty() const noexcept {
             return node_.empty();
         }
 
     private:
         friend class TransferCompletionCleanup;
-        std::list<Entry> node_;
+        std::shared_ptr<TransferCompletionCleanup> owner_;
+        std::list<Entry>                          node_;
     };
 
     struct Summary {
@@ -49,9 +53,9 @@ public:
         bool   failed{false};
     };
 
-    Prepared prepare(TransferCompletionTarget target, TransferCompletionKey key);
-
-    void enqueue(Prepared&& prepared) noexcept;
+    // Call before submission, while allocation and validation can still fail.
+    // This queue must be shared-owned. Routing is normalized by original rank.
+    Prepared prepare(TransferCompletionTarget target, TransferExecutionTrace trace_id);
 
     // Includes queued and currently draining entries until deletion is confirmed.
     size_t size() const;
@@ -65,6 +69,7 @@ public:
 private:
     void logFailure(const char* reason, const Entry* entry = nullptr,
                     const TransferCompletionForgetEntryResult* response = nullptr) noexcept;
+    void submit(std::list<Entry>& node) noexcept;
     void requeue(std::list<Entry>& entries) noexcept;
 
     mutable std::mutex mutex_;

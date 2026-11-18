@@ -13,7 +13,7 @@ class BroadcastManager;
 // frozen references, business results or a worker's RUNNING execution.
 class TransferCompletionForget {
 public:
-    using LocalForget = std::function<TransferTaskRegistry::ForgetResult(const TransferCompletionKey&)>;
+    using LocalForget = std::function<TransferTaskRegistry::ForgetResult(const TransferExecutionTrace&)>;
 
     explicit TransferCompletionForget(std::shared_ptr<BroadcastManager> broadcast_manager,
                                        LocalForget local_forget = {});
@@ -22,7 +22,7 @@ public:
     // Entries preserve input order; rows are indexed by original rank. Invalid
     // keys are rejected individually without preventing other keys from finishing.
     TransferCompletionForgetResult forget(const TransferCompletionTarget& target,
-                                            const std::vector<TransferCompletionKey>& traces,
+                                            const std::vector<TransferExecutionTrace>& traces,
                                             int timeout_ms) const;
 
 private:

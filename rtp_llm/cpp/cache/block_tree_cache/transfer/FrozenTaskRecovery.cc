@@ -19,21 +19,23 @@ struct Proof {
     const char* error{nullptr};
 };
 
+// Validate the semantic query result independently of its injectable producer.
+// No allocation is needed to validate a complete proof. Both trace alternatives
+// and every original rank/address must match, with no duplicates or omissions.
 Proof validate(const FrozenTask::ExecutionInfo& execution, const TransferCompletionQueryResult& query) noexcept {
-    if (!validTransferCompletionKey(execution.registry_type, execution.trace_id)
-        || query.registry_type != execution.registry_type || query.trace_id != execution.trace_id)
+    if (!validTransferExecutionTrace(execution.trace_id) || query.trace_id != execution.trace_id)
         return {false, false, "recovery query trace does not match frozen execution"};
-    const auto count = execution.participant_ranks.size();
-    if (count == 0 || query.ranks.size() != count
-        || (!execution.uses_rpc && count != 1))
+    const auto count = execution.expected_rank_count;
+    if (count == 0 || execution.expected_peers.size() != count || query.ranks.size() != count
+        || (!execution.remote && count != 1))
         return {false, false, "recovery query does not cover the original participants"};
     if (!query.error.empty())
         return {false, false, nullptr};
     bool all_safe = true;
     for (size_t rank = 0; rank < count; ++rank) {
-        const FrozenTask::TransferParticipant* peer = nullptr;
+        const FrozenTask::ExpectedPeer* peer = nullptr;
         const TransferCompletionRankResult* row = nullptr;
-        for (const auto& candidate : execution.participant_ranks) {
+        for (const auto& candidate : execution.expected_peers) {
             if (candidate.rank == rank) {
                 if (peer)
                     return {false, false, "frozen execution has duplicate participant ranks"};
@@ -49,7 +51,7 @@ Proof validate(const FrozenTask::ExecutionInfo& execution, const TransferComplet
         }
         if (!peer || !row || peer->address.empty() || peer->address != row->server_address)
             return {false, false, "recovery query rank or address does not match frozen execution"};
-        if (execution.uses_rpc && (!row->cq_received || !row->cq_ok || !row->grpc_code))
+        if (execution.remote && (!row->cq_received || !row->cq_ok || !row->grpc_code))
             return {false, false, "remote recovery query has no successful CQ and gRPC evidence"};
         if (!row->error.empty() || (row->grpc_code && *row->grpc_code != 0)
             || (row->cq_received && !row->cq_ok))
@@ -77,10 +79,9 @@ void recordQuery(const std::shared_ptr<FrozenTask>& task, TransferCompletionQuer
 void recordException(const std::shared_ptr<FrozenTask>& task, const char* error) noexcept {
     try {
         TransferCompletionQueryResult failure;
-        failure.registry_type = task->execution().registry_type;
         failure.trace_id = task->execution().trace_id;
         failure.error = error;
-        for (const auto& peer : task->execution().participant_ranks) {
+        for (const auto& peer : task->execution().expected_peers) {
             TransferCompletionRankResult row;
             row.rank = peer.rank;
             row.server_address = peer.address;
@@ -96,12 +97,13 @@ void logReleased(const FrozenTask& task, bool forced) noexcept {
     const auto snapshot = task.snapshot();
     const auto duration_ms = std::max<int64_t>(0, snapshot.released_at_us - snapshot.frozen_at_us) / 1000;
     try {
+        const auto description = task.debugString();
         if (forced) {
-            RTP_LLM_LOG_WARNING("FrozenTask recovery forced release after timeout frozen_duration_ms=%lld",
-                                static_cast<long long>(duration_ms));
+            RTP_LLM_LOG_WARNING("FrozenTask recovery forced release after timeout frozen_duration_ms=%lld %s",
+                                static_cast<long long>(duration_ms), description.c_str());
         } else {
-            RTP_LLM_LOG_INFO("FrozenTask recovery released frozen_duration_ms=%lld",
-                             static_cast<long long>(duration_ms));
+            RTP_LLM_LOG_INFO("FrozenTask recovery released frozen_duration_ms=%lld %s",
+                             static_cast<long long>(duration_ms), description.c_str());
         }
     } catch (const std::exception& error) {
         std::fprintf(stderr, "FrozenTask release logging failed: forced=%d frozen_duration_ms=%lld error=%s\n",
@@ -114,9 +116,9 @@ void logReleased(const FrozenTask& task, bool forced) noexcept {
 
 }  // namespace
 
-FrozenTaskRecovery::FrozenTaskRecovery(TransferCompletionCleanup& cleanup_queue, TaskSource source, Query query, Cleanup cleanup, OnReleased on_released,
+FrozenTaskRecovery::FrozenTaskRecovery(TaskSource source, Query query, Cleanup cleanup, OnReleased on_released,
                                      int force_release_timeout_ms):
-    cleanup_queue_(cleanup_queue), source_(std::move(source)), query_(std::move(query)), cleanup_(std::move(cleanup)),
+    source_(std::move(source)), query_(std::move(query)), cleanup_(std::move(cleanup)),
     on_released_(std::move(on_released)),
     force_release_timeout_us_(static_cast<int64_t>(force_release_timeout_ms) * 1000) {
     if (force_release_timeout_ms < 0) {
@@ -262,7 +264,7 @@ FrozenTaskRecovery::runOnce(int query_timeout_ms, const std::function<bool()>& s
         if ((safe || expired) && snapshot.state == FrozenTask::State::FROZEN) {
             if (stop())
                 break;
-            if (task->completeRecovery(cleanup_queue_)) {
+            if (task->unfreeze()) {
                 ++summary.released;
                 try {
                     if (on_released_)

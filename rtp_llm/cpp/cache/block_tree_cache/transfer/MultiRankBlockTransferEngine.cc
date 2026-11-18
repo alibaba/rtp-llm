@@ -43,10 +43,22 @@ public:
         context->completion_identity_ = identity;
         if (completion_operation)
             context->completion_identity_.operation = completion_operation;
+        auto diagnostics      = std::make_shared<TransferExecutionDiagnostics>();
+        diagnostics->trace_id = transfer_id;
+        diagnostics->ranks.reserve(worker_addresses.size());
+        for (size_t rank = 0; rank < worker_addresses.size(); ++rank) {
+            TransferRankSnapshot snapshot;
+            snapshot.rank           = rank;
+            snapshot.server_address = worker_addresses[rank];
+            snapshot.dispatch_state = TransferRpcDispatchState::POSSIBLY_SUBMITTED;
+            snapshot.dispatch_error = "broadcast dispatch, subscription, or result publication failed";
+            diagnostics->ranks.push_back(std::move(snapshot));
+        }
         context->unknown_result_ = TransferResult(
             ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "transfer broadcast completion could not be established"),
             CacheCopyError::RPC_FAILED);
         context->unknown_result_.expandBlockErrors(block_count);
+        context->unknown_result_.execution_diagnostics = std::move(diagnostics);
         context->unknown_publication_                 = context->unknown_result_;
         context->prepareCallback();
         return context;
@@ -76,6 +88,16 @@ public:
             fallback_started_ = true;
         }
         completion_callback_ = {};
+        if (broadcast_result_) {
+            try {
+                auto diagnostics = collectDiagnostics();
+                unknown_result_.execution_diagnostics      = diagnostics;
+                unknown_publication_.execution_diagnostics = std::move(diagnostics);
+            } catch (...) {
+                // The preallocated snapshot conservatively marks every rank
+                // possibly submitted if collecting diagnostics also fails.
+            }
+        }
         publish(std::move(unknown_result_), std::move(unknown_publication_));
     }
 
@@ -114,6 +136,11 @@ public:
         return completion_.result();
     }
 
+    std::shared_ptr<const TransferExecutionDiagnostics> executionDiagnostics() const override {
+        if (completion_.done())
+            return completion_.result().execution_diagnostics;
+        return broadcast_result_ ? collectDiagnostics() : unknown_result_.execution_diagnostics;
+    }
 
 private:
     MultiRankTransferAsyncContext(size_t                                   worker_count,
@@ -172,7 +199,7 @@ private:
                                  "coordinator_completion",
                                  transfer_id_,
                                  completion_identity_);
-        aggregateRankResults(result);
+        result.execution_diagnostics = collectDiagnostics(&result);
         // Copy before claiming completion: allocation failure must leave the
         // context retryable. Once claimed, publication cannot allocate.
         if (auto probe =
@@ -183,43 +210,97 @@ private:
         return publish(std::move(result), std::move(published_result));
     }
 
-    void aggregateRankResults(TransferResult& result) const {
+    std::shared_ptr<const TransferExecutionDiagnostics> collectDiagnostics(TransferResult* aggregate = nullptr) const {
+        auto ignored = TransferResult::emptyAggregate();
+        auto& result = aggregate ? *aggregate : ignored;
         const auto snapshots = broadcast_result_->rankSnapshots();
+        auto diagnostics = std::make_shared<TransferExecutionDiagnostics>();
+        diagnostics->trace_id = transfer_id_;
+        diagnostics->ranks.reserve(snapshots.size());
         if (snapshots.size() != worker_count_) {
             result.merge({ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "multi-rank transfer response count mismatch"),
                           CacheCopyError::RPC_FAILED});
         }
         result.expandBlockErrors(block_count_);
         for (const auto& snapshot : snapshots) {
+            TransferRankSnapshot rank_snapshot;
+            rank_snapshot.rank           = snapshot.rank;
+            rank_snapshot.server_address = snapshot.server_address;
+            switch (snapshot.dispatch_state) {
+                case BroadcastDispatchState::NOT_SUBMITTED:
+                    rank_snapshot.dispatch_state = TransferRpcDispatchState::NOT_SUBMITTED;
+                    break;
+                case BroadcastDispatchState::POSSIBLY_SUBMITTED:
+                    rank_snapshot.dispatch_state = TransferRpcDispatchState::POSSIBLY_SUBMITTED;
+                    break;
+                case BroadcastDispatchState::SUBMITTED:
+                    rank_snapshot.dispatch_state = TransferRpcDispatchState::SUBMITTED;
+                    break;
+            }
+            rank_snapshot.dispatch_error = snapshot.dispatch_error;
+            rank_snapshot.cq_received    = snapshot.cq_received;
+            rank_snapshot.cq_ok          = snapshot.cq_ok;
+            rank_snapshot.grpc_code      = snapshot.grpc_code;
+            rank_snapshot.grpc_message   = snapshot.grpc_message;
             if (!snapshot.cq_received || !snapshot.cq_ok || !snapshot.grpc_code
                 || *snapshot.grpc_code != grpc::StatusCode::OK || !snapshot.response) {
+                diagnostics->ranks.push_back(std::move(rank_snapshot));
                 continue;
             }
+            rank_snapshot.response_received = true;
             const auto& response = *snapshot.response;
             TransferResult rank_result{
                 ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "invalid transfer response"),
                 CacheCopyError::RPC_FAILED};
             if (response.has_mem_response()) {
                 const auto& memory_response = response.mem_response();
+                if (memory_response.has_error_info()) {
+                    rank_snapshot.worker_error_code    = memory_response.error_info().error_code();
+                    rank_snapshot.worker_error_message = memory_response.error_info().error_message();
+                }
                 bool valid = MemoryOperationResponsePB::Code_IsValid(memory_response.code())
                              && static_cast<size_t>(memory_response.block_errors_size()) == block_count_;
+                if (!MemoryOperationResponsePB::Code_IsValid(memory_response.code())) {
+                    rank_snapshot.response_error = "invalid worker copy error code: "
+                                                   + std::to_string(memory_response.code());
+                } else {
+                    rank_snapshot.worker_copy_error = BlockTransferRequestConverter::decodeCode(memory_response.code());
+                    if (static_cast<size_t>(memory_response.block_errors_size()) != block_count_) {
+                        rank_snapshot.response_error = "worker block error count mismatch: expected="
+                                                       + std::to_string(block_count_) + " actual="
+                                                       + std::to_string(memory_response.block_errors_size());
+                    }
+                }
                 for (int index = 0; valid && index < memory_response.block_errors_size(); ++index) {
                     valid = MemoryOperationResponsePB::Code_IsValid(memory_response.block_errors(index));
+                    if (!valid) {
+                        rank_snapshot.response_error = "invalid worker block error code at index="
+                                                       + std::to_string(index) + " code="
+                                                       + std::to_string(memory_response.block_errors(index));
+                    }
                 }
                 if (valid) {
                     try {
                         rank_result = BlockTransferRequestConverter::decodeTransferResult(memory_response, block_count_);
+                        rank_snapshot.block_errors   = rank_result.block_errors;
+                        rank_snapshot.buffer_safe    = rank_result.buffer_safe;
+                        rank_snapshot.response_valid = true;
                     } catch (const std::exception& error) {
+                        rank_snapshot.response_error = "transfer response decode failed: " + std::string(error.what());
                         rank_result = {ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN,
-                                                 "transfer response decode failed: " + std::string(error.what())),
+                                                 rank_snapshot.response_error),
                                        CacheCopyError::RPC_FAILED};
                     } catch (...) {
+                        rank_snapshot.response_error = "unknown transfer response decode failure";
                         rank_result = {
                             ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "unknown transfer response decode failure"),
                             CacheCopyError::RPC_FAILED};
                     }
                 }
+            } else {
+                rank_snapshot.response_error = "transfer response contains no memory response";
             }
+            diagnostics->ranks.push_back(std::move(rank_snapshot));
             for (size_t index = 0; index < block_count_; ++index) {
                 result.block_errors[index] = std::max(result.block_errors[index], rank_result.blockError(index));
             }
@@ -230,6 +311,7 @@ private:
             }
             result.merge(std::move(rank_result));
         }
+        return diagnostics;
     }
 
     bool publish(TransferResult result, TransferResult published_result) {

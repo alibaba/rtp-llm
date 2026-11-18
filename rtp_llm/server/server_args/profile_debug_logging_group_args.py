@@ -30,11 +30,7 @@ def init_profile_debug_logging_group_args(parser, profiling_debug_config):
         bind_to=(profiling_debug_config, "ft_core_dump_on_exception"),
         type=str2bool,
         default=False,
-        help=(
-            "控制在发生特定异常或断言失败时是否强制执行core dump (程序中止并生成核心转储文件)。"
-            "CUDA 拷贝无法确认缓冲区访问已结束时会直接中止进程，不受此开关控制。"
-            "可选值: True (启用), False (禁用)。"
-        ),
+        help="控制在发生特定异常或断言失败时是否强制执行core dump (程序中止并生成核心转储文件)。可选值: True (启用), False (禁用)。",
     )
     profile_debug_logging_group.add_argument(
         "--ft_alog_conf_path",

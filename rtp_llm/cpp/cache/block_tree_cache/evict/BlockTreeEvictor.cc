@@ -528,7 +528,7 @@ BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t
 void BlockTreeEvictor::runEvictionTask(std::shared_ptr<const EvictionTransferTask> task) noexcept {
     try {
         task_runner_->runTransfer(task, *metrics_reporter_, [this, task](ErrorInfo error) noexcept {
-            scheduleEvictionSettlement(task, error.ok());
+            completeEvictionTask(task, std::move(error));
         });
         return;
     } catch (const std::exception& error) {
@@ -536,7 +536,12 @@ void BlockTreeEvictor::runEvictionTask(std::shared_ptr<const EvictionTransferTas
     } catch (...) {
         RTP_LLM_LOG_ERROR("eviction copy failed with unknown exception");
     }
-    scheduleEvictionSettlement(std::move(task), false);
+    completeEvictionTask(std::move(task), ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "eviction task runner exception"));
+}
+
+void BlockTreeEvictor::completeEvictionTask(std::shared_ptr<const EvictionTransferTask> task,
+                                            ErrorInfo                                   error) noexcept {
+    scheduleEvictionSettlement(std::move(task), error.ok());
 }
 
 void BlockTreeEvictor::scheduleEvictionSettlement(std::shared_ptr<const EvictionTransferTask> task,

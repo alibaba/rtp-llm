@@ -1,4 +1,3 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTaskRecovery.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionForget.h"
@@ -283,8 +282,8 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
 KVCacheManager::~KVCacheManager() {
     // Queries, cleanup and capacity notifications must finish while the cache, RPC
     // manager and allocation wait state are still alive. Never join under a lock.
-    if (block_tree_cache_)
-        block_tree_cache_->stopBackgroundTasks();
+    stopFrozenTaskRecovery();
+    stopMissingCleanup();
     {
         std::lock_guard<std::mutex> lock(allocation_wait_state_->mutex);
         allocation_wait_state_->stopped.store(true, std::memory_order_release);
@@ -307,9 +306,12 @@ bool KVCacheManager::init() {
     RTP_LLM_CHECK_WITH_INFO(!coordinator_manager_ && !block_tree_cache_ && !metrics_reporter_thread_.joinable(),
                             "KVCacheManager::init called more than once");
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "cache specs must not be empty");
-    if (!BlockTreeReclaimer::validConfig(kv_cache_config_.block_tree_frozen_recovery_interval_ms,
-                                         kv_cache_config_.block_tree_frozen_recovery_query_timeout_ms,
-                                         kv_cache_config_.block_tree_frozen_force_release_timeout_ms)) {
+    if (kv_cache_config_.block_tree_frozen_recovery_interval_ms < 0
+        || kv_cache_config_.block_tree_frozen_recovery_interval_ms > std::numeric_limits<int>::max()
+        || kv_cache_config_.block_tree_frozen_recovery_query_timeout_ms <= 0
+        || kv_cache_config_.block_tree_frozen_recovery_query_timeout_ms > std::numeric_limits<int>::max()
+        || kv_cache_config_.block_tree_frozen_force_release_timeout_ms < 0
+        || kv_cache_config_.block_tree_frozen_force_release_timeout_ms > std::numeric_limits<int>::max()) {
         RTP_LLM_LOG_ERROR("invalid frozen recovery interval/query timeout; interval must be in [0, INT_MAX] "
                           "and query timeout in [1, INT_MAX], force release timeout in [0, INT_MAX]");
         return false;
@@ -378,14 +380,75 @@ bool KVCacheManager::init() {
         RTP_LLM_LOG_ERROR("KVCacheManager::init: failed to create BlockTreeCache");
         return false;
     }
+    transfer_broadcast_manager_ = std::move(broadcast_manager);
+    if (parallelism_config_.tp_rank == 0) {
+        completion_cleanup_ = std::make_shared<TransferCompletionCleanup>();
+        block_tree_cache_->setCompletionCleanup(completion_cleanup_);
+#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
+        if (auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend()))
+            backend->setCompletionCleanup(completion_cleanup_);
+#endif
+    }
     coordinator_manager_->attachBlockTreeCache(block_tree_cache_);
     initCacheEventPublisher();
 
+    missing_cleanup_thread_ = std::thread(&KVCacheManager::missingCleanupLoop, this);
 
     stop_.store(false, std::memory_order_relaxed);
     metrics_reporter_thread_ = std::thread(&KVCacheManager::reportMetricsLoop, this);
 
-    return true;
+    return startFrozenTaskRecovery();
+}
+
+bool KVCacheManager::startFrozenTaskRecovery() {
+    if (parallelism_config_.tp_rank != 0 || kv_cache_config_.block_tree_frozen_recovery_interval_ms == 0) {
+        return true;
+    }
+    if (!block_tree_cache_) {
+        return false;
+    }
+    if (frozen_task_recovery_) {
+        return true;
+    }
+    try {
+        auto recovery = std::make_unique<FrozenTaskRecovery>(
+            [this] { return frozenTasks(); },
+            [this](const FrozenTask::ExecutionInfo& execution, int timeout_ms) {
+                return queryTransferCompletion(execution, timeout_ms);
+            },
+            [this](int timeout_ms, const std::function<bool()>& stopped) {
+                if (completion_cleanup_) {
+                    return completion_cleanup_->drain(
+                        [this](const auto& target, const auto& traces, int timeout) {
+                            return forgetTransferCompletion(target, traces, timeout);
+                        }, timeout_ms, stopped);
+                }
+                return TransferCompletionCleanup::Summary{};
+            },
+            [this](const FrozenTask::ExecutionInfo& execution, bool forced) {
+                block_tree_cache_->reportUnfreezeMetrics(execution, forced);
+            },
+            static_cast<int>(kv_cache_config_.block_tree_frozen_force_release_timeout_ms));
+        if (!recovery->start(static_cast<int>(kv_cache_config_.block_tree_frozen_recovery_interval_ms),
+                             static_cast<int>(kv_cache_config_.block_tree_frozen_recovery_query_timeout_ms))) {
+            RTP_LLM_LOG_ERROR("failed to start frozen task recovery thread");
+            return false;
+        }
+        frozen_task_recovery_ = std::move(recovery);
+        return true;
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_ERROR("failed to initialize frozen task recovery: %s", error.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("failed to initialize frozen task recovery");
+    }
+    return false;
+}
+
+void KVCacheManager::stopFrozenTaskRecovery() noexcept {
+    if (frozen_task_recovery_) {
+        frozen_task_recovery_->stop();
+        frozen_task_recovery_.reset();
+    }
 }
 
 std::shared_ptr<BroadcastManager> KVCacheManager::createMultiRankBlockTransferManager() const {
@@ -750,26 +813,150 @@ KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysT
 }
 
 std::vector<std::shared_ptr<FrozenTask>> KVCacheManager::frozenTasks() const {
-    return block_tree_cache_ ? block_tree_cache_->reclaimer().frozenTasks() : std::vector<std::shared_ptr<FrozenTask>>{};
+    if (!block_tree_cache_) {
+        return {};
+    }
+    auto tasks = block_tree_cache_->frozenTasks();
+#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
+    auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend());
+    if (backend) {
+        const auto remote_tasks = backend->frozenTasks();
+        tasks.insert(tasks.end(), remote_tasks.begin(), remote_tasks.end());
+    }
+#endif
+    return tasks;
 }
-TransferTaskRegistry::State KVCacheManager::localTransferCompletion(const TransferCompletionKey& trace) const {
-    return block_tree_cache_ ? block_tree_cache_->reclaimer().localTransferCompletion(trace) : TransferTaskRegistry::State::UNKNOWN;
+
+TransferTaskRegistry::State KVCacheManager::localTransferCompletion(const TransferExecutionTrace& trace_id) const {
+    if (!validTransferExecutionTrace(trace_id) || !block_tree_cache_) {
+        return TransferTaskRegistry::State::UNKNOWN;
+    }
+    if (const auto* transfer_trace = std::get_if<uint64_t>(&trace_id)) {
+        return block_tree_cache_->localTransferCompletion(*transfer_trace);
+    }
+#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
+    auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend());
+    if (backend) {
+        return backend->queryReadCompletion(std::get<std::string>(trace_id));
+    }
+#endif
+    return TransferTaskRegistry::State::UNKNOWN;
 }
-TransferTaskRegistry::ForgetResult KVCacheManager::localForgetTransferCompletion(const TransferCompletionKey& trace) const {
-    return block_tree_cache_ ? block_tree_cache_->reclaimer().localForgetTransferCompletion(trace) : TransferTaskRegistry::ForgetResult::FAILED;
+
+TransferTaskRegistry::ForgetResult
+KVCacheManager::localForgetTransferCompletion(const TransferExecutionTrace& trace_id) const {
+    using Result = TransferTaskRegistry::ForgetResult;
+    if (!validTransferExecutionTrace(trace_id)) {
+        RTP_LLM_LOG_WARNING("completion forget requires a nonempty execution trace");
+        return Result::INVALID;
+    }
+    if (!block_tree_cache_)
+        return Result::FAILED;
+    if (const auto* trace = std::get_if<uint64_t>(&trace_id))
+        return block_tree_cache_->forgetLocalTransferCompletion(*trace);
+#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
+    auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend());
+    if (backend)
+        return backend->forgetReadCompletion(std::get<std::string>(trace_id));
+#endif
+    return Result::FAILED;
 }
-TransferCompletionQueryResult KVCacheManager::queryTransferCompletion(const FrozenTask::ExecutionInfo& execution, int timeout) const {
-    return block_tree_cache_->reclaimer().queryTransferCompletion(execution, timeout);
+
+TransferCompletionForgetResult
+KVCacheManager::forgetTransferCompletion(const TransferCompletionTarget& target,
+                                        const std::vector<TransferExecutionTrace>& traces, int timeout_ms) const {
+    return TransferCompletionForget(transfer_broadcast_manager_,
+                                    [this](const TransferExecutionTrace& trace) {
+                                        return localForgetTransferCompletion(trace);
+                                    }).forget(target, traces, timeout_ms);
 }
-TransferCompletionForgetResult KVCacheManager::forgetTransferCompletion(const TransferCompletionTarget& target,
-    const std::vector<TransferCompletionKey>& traces, int timeout) const {
-    return block_tree_cache_->reclaimer().forgetTransferCompletion(target, traces, timeout);
+
+TransferCompletionQueryResult KVCacheManager::queryTransferCompletion(const FrozenTask::ExecutionInfo& execution,
+                                                                    int timeout_ms) const {
+    return TransferCompletionQuery(transfer_broadcast_manager_,
+                                   [this](const TransferExecutionTrace& trace_id) {
+                                       return localTransferCompletion(trace_id);
+                                   })
+        .query(execution, timeout_ms);
 }
 
 bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
-    if (request.has_completion_query() || request.has_completion_forget()) {
-        return BlockTreeReclaimer::executeFunction(block_tree_cache_ ? &block_tree_cache_->reclaimer() : nullptr,
-                                                   parallelism_config_.tp_rank, request, response);
+    if (request.has_completion_forget()) {
+        auto* forget_response = response.mutable_completion_forget();
+        forget_response->Clear();
+        forget_response->set_rank(static_cast<uint32_t>(parallelism_config_.tp_rank));
+        const auto& keys = request.completion_forget().keys();
+        if (static_cast<size_t>(keys.size()) > kTransferCompletionForgetBatchSize) {
+            RTP_LLM_LOG_WARNING("completion forget batch exceeds limit: %d", keys.size());
+            return false;
+        }
+        for (const auto& key : keys) {
+            auto* entry = forget_response->add_entries();
+            entry->mutable_key()->CopyFrom(key);
+            auto result = TransferTaskRegistry::ForgetResult::INVALID;
+            switch (key.trace_case()) {
+                case TransferCompletionKeyPB::kTransferTraceId:
+                    result = localForgetTransferCompletion(TransferExecutionTrace{key.transfer_trace_id()});
+                    break;
+                case TransferCompletionKeyPB::kKvcmTraceId:
+                    result = localForgetTransferCompletion(TransferExecutionTrace{key.kvcm_trace_id()});
+                    break;
+                default:
+                    RTP_LLM_LOG_WARNING("completion forget key has no trace namespace");
+                    break;
+            }
+            switch (result) {
+                case TransferTaskRegistry::ForgetResult::DONE:
+                    entry->set_status(TRANSFER_FORGET_DONE);
+                    break;
+                case TransferTaskRegistry::ForgetResult::RUNNING:
+                    entry->set_status(TRANSFER_FORGET_RUNNING);
+                    break;
+                case TransferTaskRegistry::ForgetResult::INVALID:
+                    entry->set_status(TRANSFER_FORGET_INVALID);
+                    break;
+                default:
+                    entry->set_status(TRANSFER_FORGET_FAILED);
+                    break;
+            }
+        }
+        return true;
+    }
+    if (request.has_completion_query()) {
+        auto* query_response = response.mutable_completion_query();
+        query_response->Clear();
+        query_response->set_rank(static_cast<uint32_t>(parallelism_config_.tp_rank));
+        for (const auto& key : request.completion_query().keys()) {
+            auto* entry = query_response->add_entries();
+            entry->mutable_key()->CopyFrom(key);
+            auto state = TransferTaskRegistry::State::UNKNOWN;
+            switch (key.trace_case()) {
+                case TransferCompletionKeyPB::kTransferTraceId:
+                    state = localTransferCompletion(TransferExecutionTrace{key.transfer_trace_id()});
+                    break;
+                case TransferCompletionKeyPB::kKvcmTraceId:
+                    state = localTransferCompletion(TransferExecutionTrace{key.kvcm_trace_id()});
+                    break;
+                default:
+                    break;
+            }
+            switch (state) {
+                case TransferTaskRegistry::State::REJECTED:
+                    entry->set_state(TRANSFER_COMPLETION_UNKNOWN);
+                    entry->set_admission_closed(true);
+                    break;
+                case TransferTaskRegistry::State::RUNNING:
+                    entry->set_state(TRANSFER_COMPLETION_RUNNING);
+                    break;
+                case TransferTaskRegistry::State::BUFFER_SAFE:
+                    entry->set_state(TRANSFER_COMPLETION_BUFFER_SAFE);
+                    break;
+                default:
+                    entry->set_state(TRANSFER_COMPLETION_UNKNOWN);
+                    break;
+            }
+        }
+        return true;
     }
     if (request.has_remote_request()) {
 #ifdef RTP_LLM_USE_REMOTE_KV_CACHE
@@ -1077,6 +1264,33 @@ void KVCacheManager::stopCacheEventPublisher() {
         block_tree_cache_->setEventPublisher(nullptr, {});
     }
     cache_event_publisher_.reset();
+}
+
+void KVCacheManager::stopMissingCleanup() {
+    {
+        std::lock_guard<std::mutex> lock(missing_cleanup_mutex_);
+        missing_cleanup_stopped_ = true;
+    }
+    missing_cleanup_cv_.notify_all();
+    if (missing_cleanup_thread_.joinable()) {
+        missing_cleanup_thread_.join();
+    }
+}
+
+void KVCacheManager::missingCleanupLoop() {
+    pthread_setname_np(pthread_self(), "kv_missing_gc");
+    std::unique_lock<std::mutex> lock(missing_cleanup_mutex_);
+    while (!missing_cleanup_cv_.wait_for(lock, std::chrono::minutes(1),
+                                         [this] { return missing_cleanup_stopped_; })) {
+        lock.unlock();
+        block_tree_cache_->cleanupExpiredMissing();
+#ifdef RTP_LLM_USE_REMOTE_KV_CACHE
+        if (auto backend = std::dynamic_pointer_cast<KVCMStorageBackend>(block_tree_cache_->storageBackend())) {
+            backend->cleanupExpiredMissing();
+        }
+#endif
+        lock.lock();
+    }
 }
 
 void KVCacheManager::reportMetricsLoop() {
