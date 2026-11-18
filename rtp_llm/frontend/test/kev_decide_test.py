@@ -8,9 +8,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import torch
 from fastapi import Request
 from fastapi.testclient import TestClient
-
 from rtp_llm.frontend.frontend_app import FrontendApp
-from rtp_llm.frontend.frontend_server import FrontendServer
+from rtp_llm.frontend.frontend_server import (
+    ConcurrencyException,
+    ExceptionType,
+    FrontendServer,
+    FtRuntimeException,
+)
 from rtp_llm.frontend.frontend_worker import FrontendWorker
 from rtp_llm.frontend.shutdown_manager import FrontendShutdownManager
 from rtp_llm.metrics import AccMetrics, GaugeMetrics
@@ -496,6 +500,7 @@ class KevDecideTest(unittest.TestCase):
 
     def systemone_server(self):
         server = object.__new__(FrontendServer)
+        server._embedding_endpoint = None
         server._frontend_worker = self.worker
         server._global_controller = MagicMock()
         server._global_controller.max_concurrency = 4
@@ -504,6 +509,121 @@ class KevDecideTest(unittest.TestCase):
         server.server_id = "0"
         server.is_embedding = False
         return server
+
+    def custom_systemone_server(self):
+        server = self.systemone_server()
+        server._embedding_endpoint = SimpleNamespace(
+            renderer=SimpleNamespace(supports_systemone=True),
+            embedding=AsyncMock(return_value=({"answers": {}, "usage": {}}, None)),
+        )
+        server._global_controller.increment.return_value = 1
+        server.py_env_configs = SimpleNamespace(
+            server_config=SimpleNamespace(ip="127.0.0.1", server_port=8000)
+        )
+        server._handle_exception = MagicMock(return_value="legacy error")
+        return server
+
+    def test_custom_systemone_dispatch_preserves_request_and_releases_admission(self):
+        server = self.custom_systemone_server()
+        request = dict(self.systemone_request(), model="custom")
+        original = copy.deepcopy(request)
+        response = asyncio.run(server.systemone(request))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(json.loads(response.body)["answers"], {})
+        self.assertEqual(request, original)
+        server._embedding_endpoint.embedding.assert_awaited_once()
+        server._global_controller.increment.assert_called_once_with()
+        server._global_controller.decrement.assert_called_once_with()
+        self.enqueue.assert_not_awaited()
+
+    def test_custom_systemone_missing_fields_never_acquires_admission(self):
+        for field in ("model", "state", "questions"):
+            server = self.custom_systemone_server()
+            request = dict(self.systemone_request(), model="custom")
+            del request[field]
+            with self.subTest(field=field):
+                response = asyncio.run(server.systemone(request))
+                self.assertEqual(response.status_code, 422)
+                server._global_controller.increment.assert_not_called()
+                server._embedding_endpoint.embedding.assert_not_awaited()
+
+    def test_custom_systemone_input_error_releases_admission(self):
+        for kind in (
+            ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+            ExceptionType.LONG_PROMPT_ERROR,
+            ExceptionType.MM_LONG_PROMPT_ERROR,
+        ):
+            server = self.custom_systemone_server()
+            error = FtRuntimeException(kind, "invalid input")
+            server._embedding_endpoint.embedding.side_effect = error
+            with self.subTest(kind=kind):
+                response = asyncio.run(
+                    server.systemone(dict(self.systemone_request(), model="custom"))
+                )
+                self.assertEqual(response.status_code, 422)
+                server._global_controller.decrement.assert_called_once_with()
+                self.assertEqual(
+                    server._embedding_exception({}, error, False), "legacy error"
+                )
+
+    def test_custom_systemone_concurrency_error_does_not_release_unowned_slot(self):
+        server = self.custom_systemone_server()
+        server._global_controller.increment.side_effect = ConcurrencyException("busy")
+        response = asyncio.run(
+            server.systemone(dict(self.systemone_request(), model="custom"))
+        )
+        self.assertEqual(response.status_code, 429)
+        server._global_controller.decrement.assert_not_called()
+        server._embedding_endpoint.embedding.assert_not_awaited()
+
+    def test_custom_systemone_disconnect_and_cancel_release_admission(self):
+        for mode in ("before", "during", "cancel"):
+            server = self.custom_systemone_server()
+
+            async def run():
+                entered, disconnected, cancelled = (
+                    asyncio.Event(),
+                    asyncio.Event(),
+                    asyncio.Event(),
+                )
+
+                async def infer(request):
+                    entered.set()
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        cancelled.set()
+
+                async def receive():
+                    await disconnected.wait()
+                    return {"type": "http.disconnect"}
+
+                raw = SimpleNamespace(
+                    is_disconnected=AsyncMock(return_value=mode == "before"),
+                    receive=receive,
+                )
+                server._embedding_endpoint.embedding.side_effect = infer
+                task = asyncio.create_task(
+                    server.systemone(
+                        dict(self.systemone_request(), model="custom"), raw
+                    )
+                )
+                if mode != "before":
+                    await asyncio.wait_for(entered.wait(), timeout=1)
+                    if mode == "during":
+                        disconnected.set()
+                    else:
+                        task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=1)
+                if mode != "before":
+                    self.assertTrue(cancelled.is_set())
+                else:
+                    server._embedding_endpoint.embedding.assert_not_awaited()
+
+            with self.subTest(mode=mode):
+                asyncio.run(run())
+                server._global_controller.decrement.assert_called_once_with()
 
     def test_systemone_three_types_match_raw_rows_and_logical_usage(self):
         request = self.systemone_request()

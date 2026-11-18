@@ -10,7 +10,6 @@ from fastapi import Request
 from fastapi import Request as RawRequest
 from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
-
 from rtp_llm.access_logger.access_logger import AccessLogger
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.log_config import get_log_path
@@ -245,7 +244,9 @@ class FrontendServer(object):
         if self._frontend_worker is not None:
             self._frontend_worker.stop()
 
-    async def embedding(self, request: Dict[str, Any], raw_request: Request):
+    async def embedding(
+        self, request: Dict[str, Any], raw_request: Request, *, systemone=False
+    ):
         start_time = time.time()
         try:
             if isinstance(request, str):
@@ -264,13 +265,20 @@ class FrontendServer(object):
                 sequence,
             )
         except Exception as e:
-            return self._handle_exception(request, e)
+            return self._embedding_exception(request, e, systemone)
 
         try:
             assert (
                 self._embedding_endpoint is not None
             ), "embedding pipeline should not be None"
-            result, logable_result = await self._embedding_endpoint.embedding(request)
+            if systemone:
+                result, logable_result = await self._await_inference_result(
+                    lambda: self._embedding_endpoint.embedding(request), raw_request
+                )
+            else:
+                result, logable_result = await self._embedding_endpoint.embedding(
+                    request
+                )
             # do not log result since too big
             if logable_result is not None:
                 self._access_logger.log_success_access(request, logable_result)
@@ -288,9 +296,25 @@ class FrontendServer(object):
                 usage = {}
             return ORJSONResponse(result, headers={USAGE_HEADER: json.dumps(usage)})
         except BaseException as e:
-            return self._handle_exception(request, e)
+            if systemone and isinstance(e, asyncio.CancelledError):
+                self._handle_exception(request, e)
+                raise
+            return self._embedding_exception(request, e, systemone)
         finally:
             self._global_controller.decrement()
+
+    def _embedding_exception(self, request, error, systemone):
+        response = self._handle_exception(request, error)
+        if systemone:
+            if isinstance(error, ConcurrencyException):
+                return ORJSONResponse({"detail": str(error)}, status_code=429)
+            if isinstance(error, FtRuntimeException) and error.exception_type in (
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                ExceptionType.LONG_PROMPT_ERROR,
+                ExceptionType.MM_LONG_PROMPT_ERROR,
+            ):
+                return ORJSONResponse({"detail": str(error)}, status_code=422)
+        return response
 
     # use asyncio.sleep(0) to correctly exit when client closed https://github.com/tiangolo/fastapi/issues/4146
     async def stream_response(
@@ -552,14 +576,26 @@ class FrontendServer(object):
         *,
         request_id: str | None = None,
     ):
+        if self._embedding_endpoint is not None and getattr(
+            self._embedding_endpoint.renderer, "supports_systemone", False
+        ):
+            if (
+                not isinstance(req, dict)
+                or not {"model", "state", "questions"} <= req.keys()
+            ):
+                return ORJSONResponse(
+                    {"detail": "SystemOne requires model, state and questions"},
+                    status_code=422,
+                )
+            return await self.embedding(dict(req), raw_request, systemone=True)
         return await self._kev_request(
             req, raw_request, "systemone", 422, "detail", request_id=request_id
         )
 
     @staticmethod
-    async def _await_kev_result(
-        call: Callable[[], Awaitable[dict]], raw_request: RawRequest | None
-    ) -> dict:
+    async def _await_inference_result(
+        call: Callable[[], Awaitable[Any]], raw_request: RawRequest | None
+    ) -> Any:
         if raw_request is None:
             return await call()
         if await raw_request.is_disconnected():
@@ -620,7 +656,7 @@ class FrontendServer(object):
             admitted = True
             self._access_logger.log_query_access(log_request)
             assert self._frontend_worker is not None
-            result = await self._await_kev_result(
+            result = await self._await_inference_result(
                 lambda: getattr(self._frontend_worker, method)(req, headers=headers),
                 raw_request,
             )
