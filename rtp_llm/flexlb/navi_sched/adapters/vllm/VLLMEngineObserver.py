@@ -2194,10 +2194,13 @@ class VLLMEngineObserver:
         )
 
     def _report_v6d_job_failure(self, job, groups) -> None:
+        reporters = getattr(job, "_navi_sched_publication_reporter", ())
+        if not reporters:
+            return
         reported = getattr(job, "_navi_sched_reported_publication_failures", None)
         if reported is None:
             reported = job._navi_sched_reported_publication_failures = {}
-        for reporter, interested, request_id in job._navi_sched_publication_reporter:
+        for reporter, interested, request_id in reporters:
             prior = reported.setdefault(request_id, {})
             failed = {
                 group: set(hashes)
@@ -2342,9 +2345,13 @@ class VLLMEngineObserver:
                         group: hashes for group, hashes in shared.items() if hashes
                     }
                     if shared:
-                        job._navi_sched_publication_reporter.append(
-                            (reporter, shared, request_id)
+                        publication_reporters = getattr(
+                            job, "_navi_sched_publication_reporter", None
                         )
+                        if publication_reporters is None:
+                            publication_reporters = []
+                            job._navi_sched_publication_reporter = publication_reporters
+                        publication_reporters.append((reporter, shared, request_id))
                         for group, hashes in shared.items():
                             groups[group].difference_update(hashes)
                 groups = {group: hashes for group, hashes in groups.items() if hashes}
