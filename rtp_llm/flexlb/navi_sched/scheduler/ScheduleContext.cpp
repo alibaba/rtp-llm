@@ -556,6 +556,9 @@ NaviSchedPeerCacheSuffixLookup::build(const std::vector<NaviSchedScheduleItem> &
 
 void NaviSchedScheduleContext::preparePeerCacheCounts()
 {
+    _peerCacheSupplierGroups.clear();
+    _peerCacheSupplierStates.clear();
+    _peerCacheRequestKeyIndexes.clear();
     if (!_peerCacheEnabled || _requests.empty()) {
         return;
     }
@@ -591,6 +594,7 @@ void NaviSchedScheduleContext::preparePeerCacheCounts()
     };
     std::unordered_map<std::string, ReadyGroup> groups;
     std::vector<std::string> keys(_scheduleNodes.size());
+    _peerCacheSupplierStates.resize(_scheduleNodes.size());
     std::vector<uint8_t> states;
     for (size_t n = 0; n < _scheduleNodes.size(); ++n) {
         auto &node = _scheduleNodes[n];
@@ -615,6 +619,7 @@ void NaviSchedScheduleContext::preparePeerCacheCounts()
                    std::to_string(p.mambaAlign) + ":" +
                    std::to_string(p.fullAttentionQueryDropTokens);
         keys[n] = key;
+        _peerCacheSupplierStates[n] = states;
         auto it = groups.find(key);
         if (it == groups.end()) {
             groups.emplace(key, ReadyGroup{p, states, nullptr});
@@ -644,6 +649,57 @@ void NaviSchedScheduleContext::preparePeerCacheCounts()
             getCacheHitBlockCountsSnapshot(n);
         }
     }
+    _peerCacheSupplierGroups = std::move(keys);
+    _peerCacheRequestKeyIndexes = std::move(requestKeyIndexes);
+}
+
+std::vector<NaviSchedTarget> NaviSchedScheduleContext::getCacheTouchTargets(
+    size_t requestIndex, int64_t hitTokenCount) const
+{
+    std::vector<NaviSchedTarget> targets;
+    if (requestIndex >= _selectedNodeIndexes.size() ||
+        requestIndex >= _peerCacheRequestKeyIndexes.size() || hitTokenCount <= 0) {
+        return targets;
+    }
+    const auto receiver = _selectedNodeIndexes[requestIndex];
+    if (receiver >= _scheduleNodes.size() ||
+        receiver >= _peerCacheSupplierGroups.size() ||
+        !_scheduleNodes[receiver]._peerCacheSuffixLookup) {
+        return targets;
+    }
+    const auto local = std::atomic_load(&_scheduleNodes[receiver]._localCacheBlockCounts);
+    const auto blockSize = _requests[requestIndex].request.blockSize;
+    if (!local || requestIndex >= local->size() || blockSize <= 0) {
+        return targets;
+    }
+    const auto &indexes = _peerCacheRequestKeyIndexes[requestIndex];
+    const auto end = std::min<size_t>(hitTokenCount / blockSize, indexes.size());
+    const auto begin = static_cast<size_t>(std::max<int64_t>(0, (*local)[requestIndex]));
+    if (begin >= end) {
+        return targets;
+    }
+    const auto &group = _peerCacheSupplierGroups[receiver];
+    for (size_t n = 0; n < _scheduleNodes.size(); ++n) {
+        if (_peerCacheSupplierGroups[n] != group) {
+            continue;
+        }
+        const auto &states = _peerCacheSupplierStates[n];
+        bool contributes = indexes[end - 1] < states.size() &&
+                           (states[indexes[end - 1]] & 2) != 0;
+        for (size_t h = begin; h < end && !contributes; ++h) {
+            contributes = indexes[h] < states.size() && (states[indexes[h]] & 1) != 0;
+        }
+        const auto &info = _scheduleNodes[n]._info;
+        if (contributes && info && !info->bizName.empty() &&
+            !info->collectorAddress.empty()) {
+            NaviSchedTarget target;
+            target.bizName = info->bizName;
+            target.address = info->serverAddress;
+            target.agentAddress = info->collectorAddress;
+            targets.push_back(std::move(target));
+        }
+    }
+    return targets;
 }
 
 size_t NaviSchedScheduleContext::requestCount() const
@@ -1670,6 +1726,8 @@ MasterResponseToClientDataPtr NaviSchedScheduleContext::makeResponse(
     response->latencyPrediction = decision.latencyPrediction;
     response->latencyTrainingPhase = decision.latencyTrainingPhase;
     response->target = decision.target;
+    response->cacheTouchTargets =
+        getCacheTouchTargets(requestIndex, decision.predictedCacheHitTokenCount);
     if (requestIndex < _dispatchHandles.size()) {
         response->dispatchHandle = _dispatchHandles[requestIndex];
     }

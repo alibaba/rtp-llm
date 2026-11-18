@@ -331,6 +331,8 @@ private:
     void setReplay(const std::shared_ptr<NaviSchedScheduleReplay> &replay);
     bool prepare();
     void preparePeerCacheCounts();
+    std::vector<NaviSchedTarget> getCacheTouchTargets(size_t requestIndex,
+                                                    int64_t hitTokenCount) const;
     bool activateScheduleView(const std::vector<size_t> &requestIndexes,
                               const std::vector<size_t> &nodeIndexes);
     void clearScheduleView();
@@ -357,6 +359,10 @@ private:
     uint64_t _scheduleId = 0;
     double _timeCompression = 1.0;
     bool _peerCacheEnabled = false;
+    // Supplier observations are frozen with the cache counts used by this decision.
+    std::vector<std::string> _peerCacheSupplierGroups;
+    std::vector<std::vector<uint8_t>> _peerCacheSupplierStates;
+    std::vector<std::vector<size_t>> _peerCacheRequestKeyIndexes;
     std::shared_ptr<const std::unordered_set<std::string>> _peerCacheReadyAgents;
     double _scheduleLoss = 0.0;
     int64_t _scheduleLatencyUs = 0;

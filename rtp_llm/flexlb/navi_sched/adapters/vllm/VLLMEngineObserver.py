@@ -2385,7 +2385,40 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
         self._v6d_publication_restore.clear()
         self._v6d_unpublished_candidates.clear()
 
+    def _drain_v6d_cache_touches(self) -> None:
+        if self._forward_stop.is_set() or self._v6d_scheduler is None:
+            return
+        take = getattr(self._bridge, "take_v6d_cache_touches", None)
+        if take is None:
+            return
+        try:
+            touches = take()
+            if not touches:
+                return
+            hashes = tuple(dict.fromkeys(
+                block_hash for _, block_hashes in touches for block_hash in block_hashes
+            ))
+            if not hashes:
+                return
+            future = self._v6d_scheduler.submit_local_cache_touches(hashes)
+            future.add_done_callback(self._on_v6d_cache_touch_done)
+        except Exception:
+            # A best-effort eviction hint must never reject or delay inference.
+            logger.exception("failed to submit V6D resident cache touch")
+
+    @staticmethod
+    def _on_v6d_cache_touch_done(future) -> None:
+        try:
+            results = future.result()
+            failures = sum(isinstance(result, BaseException) for result in results)
+            if failures:
+                logger.warning("V6D resident touch failed on %d/%d storage nodes",
+                               failures, len(results))
+        except Exception:
+            logger.exception("failed to complete V6D resident cache touch")
+
     def _poll_v6d_cache_source(self) -> None:
+        self._drain_v6d_cache_touches()
         if self._forward_stop.is_set() or self._v6d_scheduler is None:
             return
         future = self._v6d_snapshot_future
@@ -2525,6 +2558,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
         pending = set()
         try:
             while not self._forward_stop.is_set():
+                self._poll_v6d_cache_source()
                 continuation = self._render_continuation
                 log_progress = getattr(continuation, "log_progress", None)
                 if log_progress is not None:

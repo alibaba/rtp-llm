@@ -1,4 +1,7 @@
 #include "aios/navi_sched/data/ClientRequestToMasterData.h"
+#include "aios/navi_sched/data/V6dCacheTouchData.h"
+#include <tuple>
+#include <unordered_set>
 #include "aios/navi_sched/data/AgentResponseToClientData.h"
 #include "aios/navi_sched/data/MasterResponseToClientData.h"
 #include "aios/navi_sched/data/NaviSchedRequestTrace.h"
@@ -25,7 +28,8 @@ private:
     static bool parseAgentAddress(const std::string &address, std::string &host,
                                   int32_t &port);
     static std::unique_ptr<navi::GraphDef> buildAgentGraph(const NaviSchedTarget &target,
-                                                           navi::GraphId &graphId);
+        const std::vector<NaviSchedTarget> &touchTargets, const std::string &clientBizName,
+        navi::GraphId &graphId, navi::GraphId &touchSourceGraphId);
     navi::ErrorCode outputDecision(navi::KernelComputeContext &ctx,
                                    const MasterResponseToClientDataPtr &decision) const;
     navi::ErrorCode closeOutputs(navi::KernelComputeContext &ctx) const;
@@ -37,6 +41,7 @@ private:
     KERNEL_NAMED_DATA(ClientRequestToMasterData, _request,
                       CLIENT_REQUEST_TO_MASTER_DATA_NAME);
     bool _collectMetric = false;
+    std::string _clientBizName;
 };
 
 bool ClientForwardKernel::parseAgentAddress(const std::string &address, std::string &host,
@@ -56,7 +61,9 @@ bool ClientForwardKernel::parseAgentAddress(const std::string &address, std::str
 }
 
 std::unique_ptr<navi::GraphDef> ClientForwardKernel::buildAgentGraph(
-    const NaviSchedTarget &target, navi::GraphId &graphId)
+    const NaviSchedTarget &target, const std::vector<NaviSchedTarget> &touchTargets,
+    const std::string &clientBizName, navi::GraphId &graphId,
+    navi::GraphId &touchSourceGraphId)
 {
     std::string host;
     int32_t port = 0;
@@ -70,6 +77,35 @@ std::unique_ptr<navi::GraphDef> ClientForwardKernel::buildAgentGraph(
     auto request = builder.node(AGENT_REQUEST_NODE).kernel("navi_sched.agent_request_k");
     request.out("decision").toForkNodeOutput("decision").require(true);
     request.out("response").toForkNodeOutput("response").require(true);
+
+    std::vector<std::tuple<NaviSchedTarget, std::string, int32_t>> suppliers;
+    std::unordered_set<std::string> addresses;
+    if (!clientBizName.empty()) {
+        for (const auto &supplier : touchTargets) {
+            if (!supplier.bizName.empty() &&
+                parseAgentAddress(supplier.agentAddress, host, port) &&
+                addresses.insert(supplier.agentAddress).second) {
+                suppliers.emplace_back(supplier, host, port);
+            }
+        }
+    }
+    if (!suppliers.empty()) {
+        touchSourceGraphId = builder.newSubGraph(clientBizName);
+        builder.subGraph(touchSourceGraphId).location(clientBizName, 1, 0).inlineMode(true)
+            .errorHandleStrategy(navi::EHS_ERROR_AS_EOF);
+        auto source = builder.node("navi_sched_cache_touch_source")
+                          .kernel("navi_sched.client_cache_touch_source_k");
+        for (const auto &[supplier, supplierHost, supplierPort] : suppliers) {
+            const auto supplierGraph = builder.newSubGraph(supplier.bizName);
+            // Cache protection is best effort and cannot hold an inference graph open.
+            builder.subGraph(supplierGraph)
+                .directLocation(supplier.bizName, supplierHost, supplierPort)
+                .errorHandleStrategy(navi::EHS_ERROR_AS_EOF).subGraphTimeoutMs(100);
+            auto touch = builder.node("navi_sched_agent_cache_touch")
+                             .kernel("navi_sched.agent_cache_touch_k");
+            source.out("touch").to(touch.in("request")).require(false);
+        }
+    }
     if (!builder.ok()) {
         return nullptr;
     }
@@ -88,6 +124,7 @@ void ClientForwardKernel::def(navi::KernelDefBuilder &builder) const
 bool ClientForwardKernel::config(navi::KernelConfigContext &ctx)
 {
     NAVI_JSONIZE(ctx, "collect_metric", _collectMetric, _collectMetric);
+    NAVI_JSONIZE(ctx, "client_biz_name", _clientBizName, _clientBizName);
     return true;
 }
 
@@ -122,8 +159,23 @@ navi::ErrorCode ClientForwardKernel::compute(navi::KernelComputeContext &ctx)
                         forwardBeginTimeUs, request->forwardPayload.size(),
                         decision->target.agentAddress.c_str());
     }
+    std::shared_ptr<V6dCacheTouchData> touchRequest;
+    if (!decision->cacheTouchTargets.empty() && request->blockHashes &&
+        request->blockSize > 0 && decision->predictedCacheHitTokenCount > 0) {
+        const auto count = std::min<size_t>(request->blockHashes->size(),
+            decision->predictedCacheHitTokenCount / request->blockSize);
+        if (count > 0) {
+            touchRequest = std::make_shared<V6dCacheTouchData>();
+            touchRequest->requestId = request->requestId;
+            touchRequest->blockHashes.assign(request->blockHashes->begin(),
+                                             request->blockHashes->begin() + count);
+        }
+    }
     navi::GraphId graphId = navi::INVALID_GRAPH_ID;
-    auto graphDef = buildAgentGraph(decision->target, graphId);
+    navi::GraphId touchSourceGraphId = navi::INVALID_GRAPH_ID;
+    auto graphDef = buildAgentGraph(decision->target,
+        touchRequest ? decision->cacheTouchTargets : std::vector<NaviSchedTarget>{},
+        _clientBizName, graphId, touchSourceGraphId);
     if (!graphDef) {
         NAVI_KERNEL_LOG(
             ERROR, "invalid agent endpoint, requestId [%lu], bizName [%s], address [%s]",
@@ -144,6 +196,13 @@ navi::ErrorCode ClientForwardKernel::compute(navi::KernelComputeContext &ctx)
     decisionData.name = "navi_sched.master_response";
     decisionData.data = decision;
     param.namedDataVec.emplace_back(std::move(decisionData));
+    if (touchSourceGraphId != navi::INVALID_GRAPH_ID) {
+        navi::NamedData touchData;
+        touchData.graphId = touchSourceGraphId;
+        touchData.name = V6D_CACHE_TOUCH_DATA_NAME;
+        touchData.data = touchRequest;
+        param.namedDataVec.emplace_back(std::move(touchData));
+    }
     const auto forkBeginTimeUs = tracing ? autil::TimeUtility::currentTime() : 0;
     auto ec = ctx.fork(graphDef.release(), param);
     if (tracing) {
