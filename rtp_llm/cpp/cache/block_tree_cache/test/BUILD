@@ -91,6 +91,17 @@ test_suite(
 )
 
 cc_library(
+    name = "completion_rpc_test_server",
+    testonly = True,
+    hdrs = ["CompletionRpcTestServer.h"],
+    visibility = ["//rtp_llm/cpp/cache/block_tree_cache:__subpackages__"],
+    deps = [
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "@grpc//:grpc++",
+    ],
+)
+
+cc_library(
     name = "bounded_thread_test_utils",
     testonly = True,
     hdrs = ["BoundedThreadTestUtils.h"],

@@ -30,6 +30,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferWorkLoop.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/AsyncProfileTrace.h"
@@ -127,6 +128,8 @@ public:
         cv.notify_all();
         if (!cv.wait_for(lock, 10s, [&] { return !blocked; }))
             return DiskBlockIOStatus::IO_ERROR;
+        if (throw_access)
+            throw std::runtime_error("injected disk worker exception");
         if (write && writes == fail_write)
             return DiskBlockIOStatus::PARTIAL_FAILURE;
         if (write)
@@ -138,6 +141,7 @@ public:
     std::mutex              mutex;
     std::condition_variable cv;
     bool                    blocked{false};
+    bool                    throw_access{false};
     size_t                  writes{0}, reads{0}, fail_write{0};
     std::thread::id         worker;
     std::vector<uint8_t>    data;
@@ -628,7 +632,14 @@ TEST_F(TransferWorkLoopDeathTest, BeforeCompleteCallbackBadAllocIsFatal) {
 
 TEST_F(TransferWorkLoopTest, OrdinaryEntryExceptionCompletesOnlyThatTask) {
     TransferWorkLoop owner({group}, nullptr, direct_disk_executor.get(), TransferDirection::EVICT, 1, 8, {});
-    auto             context = owner.execute(writes());
+    TransferTaskRegistry registry;
+    auto task = writes();
+    const auto trace = std::to_string(task.traceId());
+    ASSERT_TRUE(registry.begin(trace));
+    task.setCompletionProof(std::make_shared<TransferBufferSafety>([&registry, trace] {
+        registry.finish(trace, true);
+    }));
+    auto context = owner.execute(std::move(task));
     owner.entries_.splice(owner.entries_.end(), owner.incoming_);
     auto& entry    = **owner.entries_.begin();
     entry.position = owner.entries_.begin();
@@ -636,6 +647,8 @@ TEST_F(TransferWorkLoopTest, OrdinaryEntryExceptionCompletesOnlyThatTask) {
     owner.withEntry(entry, [] { throw std::runtime_error("batch preparation failed"); });
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
+    EXPECT_TRUE(context->result().buffer_safe);
+    EXPECT_EQ(registry.queryLocal(std::vector<std::string>{trace}).front(), TransferTaskRegistry::State::BUFFER_SAFE);
     EXPECT_EQ(context->errorInfo().ToString(), "batch preparation failed");
     EXPECT_EQ(owner.outstandingBatches(), 0u);
 }
@@ -714,6 +727,7 @@ TEST_F(TransferWorkLoopTest, PureDiskResultsAndCallbacksBelongToOwner) {
     std::thread::id callback_thread;
     context->onDone([&](TransferResult result) {
         EXPECT_TRUE(result.ok());
+        EXPECT_TRUE(result.buffer_safe);
         callback_thread = std::this_thread::get_id();
     });
     io->release();
@@ -965,6 +979,7 @@ TEST_F(TransferWorkLoopTest, AdmissionAndQueueTimeoutsDoNotStartIo) {
         {group}, nullptr, direct_disk_executor.get(), TransferDirection::EVICT, 5, 3, {}, reporter, 3);
     const auto       expect_timeout = [](const std::shared_ptr<TransferAsyncContext>& context) {
         EXPECT_TRUE(context->done());
+        EXPECT_TRUE(context->result().buffer_safe);
         EXPECT_EQ(context->errorInfo().code(), ErrorCode::DEADLINE_EXCEEDED);
         EXPECT_EQ(context->result().block_errors, std::vector<CacheCopyError>(5, CacheCopyError::NOT_EXECUTED));
     };
@@ -1143,6 +1158,7 @@ TEST_F(TransferWorkLoopTest, DiskRejectionHasNoCallbackAndIsNotRetried) {
     ASSERT_TRUE(await(context));
     engine->shutdown();
     EXPECT_EQ(context->result().copy_error, CacheCopyError::IO_FAILED);
+    EXPECT_TRUE(context->result().buffer_safe);
     EXPECT_EQ(context->result().status.ToString(), "disk block transfer failed");
     EXPECT_EQ(io->writes, 0u);
     reporter->flushStageMetrics();
@@ -1160,6 +1176,7 @@ TEST_F(TransferWorkLoopTest, RequestJoinsIndependentBatchFailuresInOriginalOrder
     auto context   = executeRequest(writes(5));
     ASSERT_TRUE(await(context));
     engine->shutdown();
+    EXPECT_TRUE(context->result().buffer_safe);
     EXPECT_EQ(context->result().block_errors,
               (std::vector<CacheCopyError>{CacheCopyError::NONE,
                                            CacheCopyError::NONE,
@@ -1194,6 +1211,7 @@ TEST_F(TransferWorkLoopTest, PartiallyAdmittedRequestWaitsForAcceptedBatchBefore
     EXPECT_EQ(calls, 1u);
     EXPECT_EQ(engine->queueSizes().background, 0u);
     EXPECT_FALSE(context->success());
+    EXPECT_TRUE(context->result().buffer_safe);
     EXPECT_EQ(context->result().block_errors,
               (std::vector<CacheCopyError>{CacheCopyError::NONE,
                                            CacheCopyError::NONE,

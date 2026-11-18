@@ -16,11 +16,15 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/store/BlockTreeStorer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
 
 namespace rtp_llm {
+class BlockTreeReclaimer;
 
 class BlockTreeTaskPool;
 class BlockTransferDispatcher;
+class FrozenTask;
+class TransferCompletionCleanup;
 class FullPrefixInvariantScanner;
 struct CacheStats {
     size_t tree_node_count{0};
@@ -143,6 +147,8 @@ public:
 
     ~BlockTreeCache();
     bool init();
+    BlockTreeReclaimer& reclaimer() const { return *reclaimer_; }
+    void stopBackgroundTasks();
     // Reject pending loads and wait for allocator callbacks before its members are destroyed.
     void shutdownLoads();
 
@@ -169,6 +175,8 @@ public:
     CacheStats                                getStats() const;
     std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
     void                                      reportMetrics() const;
+    void reportUnfreezeMetrics(const FrozenTask::ExecutionInfo& execution, bool forced) const;
+    void reportUnfreezeZeroMetrics(const std::vector<BlockTreePoolMetricsSnapshot>& pools) const;
     BlockTreeKeySnapshot                      getKeySnapshot(int64_t latest_version = -1) const;
     void setEventPublisher(KVCacheEventPublisherPtr publisher, const std::vector<std::string>& required_group_tags);
     KVCacheSnapshot logicalCacheSnapshot() const;
@@ -178,6 +186,12 @@ public:
                                            const std::vector<MultiNodeResource>& matched_resources) const;
 
     TransferResult executeTransfer(TransferTask task);
+    TransferTaskRegistry::State localTransferCompletion(uint64_t trace_id) const;
+    TransferTaskRegistry::ForgetResult forgetLocalTransferCompletion(uint64_t trace_id) const;
+    void cleanupExpiredMissing() const;
+    // Configure before accepting coordinator work.
+    void setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup> cleanup);
+    std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const;
 
     // Accessors
     BlockTree* tree() const {
@@ -228,6 +242,8 @@ private:
     BlockTreeLoader                                loader_;
     BlockTreeStorer                                storer_;
     std::unique_ptr<FullPrefixInvariantScanner>    full_prefix_scanner_;
+    std::unique_ptr<BlockTreeReclaimer> reclaimer_;
+
 };
 
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;

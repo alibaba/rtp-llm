@@ -46,7 +46,11 @@ cc_test(
         "//rtp_llm/cpp/cache/block_tree_cache/transfer/legacy:TransferExecutorTest.cc",
     ],
     copts = test_copts,
-    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils"],
+    deps = test_deps + [
+        ":block_transfer_engine_test_utils",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
+        "@grpc//:grpc++",
+    ],
     tags = ["L20_CU13"],
 )
 
@@ -146,6 +150,71 @@ cc_test(
 )
 
 cc_test(
+    name = "transfer_task_registry_test",
+    srcs = ["TransferTaskRegistryTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache:transfer_task_registry",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "transfer_completion_query_test",
+    testonly = True,
+    exec_properties = {"gpu": "L20_CU13"},
+    srcs = ["TransferCompletionQueryTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/block_tree_cache:transfer_task_registry",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:completion_rpc_test_server",
+        "//rtp_llm/cpp/model_rpc:broadcast_manager",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "@grpc//:grpc++",
+    ],
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "transfer_completion_forget_test",
+    testonly = True,
+    exec_properties = {"gpu": "L20_CU13"},
+    srcs = ["TransferCompletionForgetTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/block_tree_cache:transfer_task_registry",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:completion_rpc_test_server",
+        "//rtp_llm/cpp/model_rpc:broadcast_manager",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "@grpc//:grpc++",
+    ],
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "frozen_task_recovery_test",
+    testonly = True,
+    exec_properties = {"gpu": "L20_CU13"},
+    srcs = ["FrozenTaskRecoveryTest.cc"],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/block_tree_cache:transfer_task_registry",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
+    ],
+    tags = ["L20_CU13"],
+)
+
+cc_test(
+    name = "frozen_task_test",
+    exec_properties = {"gpu": "L20_CU13"},
+    srcs = ["FrozenTaskTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    tags = ["L20_CU13"],
+)
+
+cc_test(
     name = "transfer_batch_async_context_test",
     exec_properties = {"gpu": "L20_CU13"},
     srcs = ["TransferBatchAsyncContextTest.cc"],
@@ -201,4 +270,14 @@ cc_test(
         "//conditions:default": {"gpu": "H20_CU13"},
     }),
     tags = ["exclusive-if-local"],
+)
+
+
+cc_test(
+    name = "worker_transfer_registry_test",
+    srcs = ["WorkerTransferRegistryTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    exec_properties = {"gpu": "L20_CU13"},
+    tags = ["L20_CU13"],
 )

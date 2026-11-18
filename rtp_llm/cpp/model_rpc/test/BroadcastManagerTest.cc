@@ -1,3 +1,4 @@
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <thread>
@@ -49,6 +50,25 @@ TEST(BroadcastDiagnosticsTest, CompletionTimesAreRecordedOncePerRankAndOnlyWhenF
     EXPECT_GE(result.completionTimesUs()[0], times[1]);
     EXPECT_TRUE(result.done());
 }
+
+namespace {
+struct CopyObservedResponse {
+    std::shared_ptr<std::atomic<size_t>> copies;
+    CopyObservedResponse() = default;
+    CopyObservedResponse(const CopyObservedResponse& other): copies(other.copies) {
+        if (copies) {
+            ++*copies;
+        }
+    }
+    CopyObservedResponse& operator=(const CopyObservedResponse& other) {
+        copies = other.copies;
+        if (copies) {
+            ++*copies;
+        }
+        return *this;
+    }
+};
+}  // namespace
 
 TEST(BroadcastDiagnosticsTest, OtherRpcFailuresAreNotConnectFailures) {
     for (const auto& status : {grpc::Status(grpc::StatusCode::UNAVAILABLE, "server temporarily busy"),

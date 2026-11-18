@@ -436,6 +436,12 @@ public:
     }
 
     bool completeBatch(size_t batch_index, bool success) {
+        return completeBatchResult(batch_index,
+                                   success ? ErrorInfo::OkStatus() :
+                                             ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected failure"));
+    }
+
+    bool completeBatchResult(size_t batch_index, TransferResult result) {
         std::shared_ptr<TransferBatchAsyncContext> context;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -444,8 +450,7 @@ public:
             }
             context = contexts_[batch_index];
         }
-        context->complete(success ? ErrorInfo::OkStatus() :
-                                    ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected failure"));
+        context->complete(std::move(result));
         return true;
     }
 

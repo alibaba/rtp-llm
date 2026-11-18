@@ -48,7 +48,8 @@ GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
 
 DeviceBlockPoolPtr makeTestDevicePool(const std::vector<std::pair<size_t, size_t>>& layer_bytes,
                                       size_t                                        usable_count,
-                                      const std::string&                            pool_name);
+                                      const std::string&                            pool_name,
+                                      bool                                          disable_frozen_abort = false);
 
 std::shared_ptr<HostBlockPool> makeHostPool(size_t payload_bytes, size_t usable_count, bool enable_crc = false);
 

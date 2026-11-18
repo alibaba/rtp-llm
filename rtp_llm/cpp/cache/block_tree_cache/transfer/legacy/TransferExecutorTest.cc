@@ -1,8 +1,15 @@
 #include <gtest/gtest.h>
 #include <chrono>
 #include <future>
+#include <stdexcept>
+#include <vector>
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/DeviceDiskTransferExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/DeviceHostTransferExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/HostDiskTransferExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/TransferExecutor.h"
 
 namespace rtp_llm {
@@ -12,16 +19,22 @@ TransferDescriptor descriptor(size_t group_id) {
 }
 class RecordingTransferExecutor final: public TransferExecutor {
 public:
-    explicit RecordingTransferExecutor(BlockTreeTaskPool& pool): TransferExecutor(pool, 8, nullptr) {}
+    explicit RecordingTransferExecutor(BlockTreeTaskPool& pool, size_t batch_size = 8):
+        TransferExecutor(pool, batch_size, nullptr) {}
     size_t         calls{0};
     TransferStatus status{TransferStatus::OK};
+    bool           throw_on_execute{false};
+    std::vector<TransferResult> results;
 
 private:
     TransferResult executeBatch(const std::vector<HostBufferView>&,
                                 const std::vector<TransferDescriptor>&,
                                 const std::vector<const GroupSet*>&) override {
         ++calls;
-        return status;
+        if (throw_on_execute) {
+            throw std::runtime_error("injected executing copy exception");
+        }
+        return results.empty() ? TransferResult(status) : results.at(calls - 1);
     }
 };
 
@@ -30,10 +43,14 @@ TEST(TransferExecutorTest, WorkerQueueTimeoutDoesNotExecuteBlocks) {
     ASSERT_TRUE(pool.start());
     RecordingTransferExecutor executor(pool);
     TransferTask              task({descriptor(0), descriptor(0)}, std::chrono::seconds(1));
+    size_t                    proofs = 0;
+    task.setCompletionProof(std::make_shared<TransferBufferSafety>([&] { ++proofs; }));
     task.deadline_ = TransferTask::Clock::now() - std::chrono::milliseconds(1);
     auto context   = executor.execute(std::move(task), {HostBufferView{}, HostBufferView{}}, {nullptr, nullptr});
     context->waitDone();
     EXPECT_EQ(executor.calls, 0u);
+    EXPECT_TRUE(context->result().buffer_safe);
+    EXPECT_EQ(proofs, 1u);
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::DEADLINE_EXCEEDED);
     EXPECT_EQ(context->result().copy_error, CacheCopyError::NOT_EXECUTED);
     EXPECT_EQ(context->result().block_errors,
@@ -62,6 +79,7 @@ TEST(TransferExecutorTest, FullQueueDoesNotExecuteRejectedBlocks) {
                                     {nullptr, nullptr});
     context->waitDone();
     EXPECT_EQ(executor.calls, 0u);
+    EXPECT_TRUE(context->result().buffer_safe);
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
     EXPECT_NE(context->errorInfo().ToString().find("queue is full or stopped"), std::string::npos);
     EXPECT_EQ(context->result().copy_error, CacheCopyError::NOT_EXECUTED);
@@ -78,6 +96,7 @@ TEST(TransferExecutorTest, ExecutedCopyFailureKeepsCopyFailedClassification) {
         executor.execute(TransferTask({descriptor(0)}, std::chrono::seconds(30)), {HostBufferView{}}, {nullptr});
     context->waitDone();
     EXPECT_EQ(executor.calls, 1u);
+    EXPECT_FALSE(context->result().buffer_safe);
     EXPECT_EQ(context->result().copy_error, CacheCopyError::COPY_FAILED);
     EXPECT_EQ(context->result().block_errors, (std::vector<CacheCopyError>{CacheCopyError::COPY_FAILED}));
 }

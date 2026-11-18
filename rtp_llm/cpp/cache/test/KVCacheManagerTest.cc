@@ -1,3 +1,5 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include <gtest/gtest.h>
 #include <unordered_map>
 #include "rtp_llm/cpp/cache/test/TestLayoutSpec.h"
@@ -28,6 +30,9 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionQuery.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionCleanup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/FrozenTaskRecovery.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
@@ -2205,7 +2210,8 @@ static void appendValidGroupedTransfer(const std::shared_ptr<KVCacheManager>& ma
 
 class RecordingBatchTransferEngine final: public PerRankBlockTransferEngine {
 public:
-    RecordingBatchTransferEngine(): PerRankBlockTransferEngine(std::vector<GroupSetPtr>{}) {}
+    explicit RecordingBatchTransferEngine(std::vector<GroupSetPtr> groups = {}):
+        PerRankBlockTransferEngine(std::move(groups)) {}
 
     std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
         ++submitted_batch_count;
@@ -2215,14 +2221,127 @@ public:
         for (const auto error : copy_errors) {
             result.merge({completion_error, error});
         }
-        return std::make_shared<CompletedTransferAsyncContext>(std::move(result), task.descriptors().size());
+        result.buffer_safe = buffer_safe;
+        last_trace = task.traceId();
+        last_proof = task.completionProof();
+        return std::make_shared<CompletedTransferAsyncContext>(
+            std::move(result), task.descriptors().size(), task.completionProof());
     }
 
     size_t                      submitted_batch_count{0};
     size_t                      submitted_descriptor_count{0};
     std::vector<CacheCopyError> copy_errors;
     ErrorInfo                   completion_error{ErrorInfo::OkStatus()};
+    bool                        buffer_safe{false};
+    uint64_t                    last_trace{0};
+    std::shared_ptr<TransferBufferSafety> last_proof;
 };
+
+TEST_F(KVCacheManagerTest, FrozenForceReleaseTimeoutReachesRecoveryWorker) {
+    const auto cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
+    for (const int timeout_ms : {1000, 1200000, 0}) {
+        SCOPED_TRACE(timeout_ms);
+        KVCacheConfig config;
+        config.enable_memory_cache = true;
+        config.memory_cache_size_mb = 1;
+        config.block_tree_frozen_force_release_timeout_ms = timeout_ms;
+        auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, config);
+        ASSERT_TRUE(manager->init());
+        ASSERT_NE(manager->block_tree_cache_->reclaimer().frozen_task_recovery_, nullptr);
+        auto recovery = std::move(manager->block_tree_cache_->reclaimer().frozen_task_recovery_);
+        recovery->stop();
+        manager->block_tree_cache_->stopBackgroundTasks();
+        const auto& groups = manager->blockTreeCache()->groupSets();
+        auto engine = std::make_shared<RecordingBatchTransferEngine>(groups);
+        engine->completion_error = ErrorInfo(ErrorCode::TRANSFER_COMPLETION_UNKNOWN, "local I/O outcome unknown");
+        manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
+        manager->block_tree_cache_->setCompletionCleanup(manager->block_tree_cache_->reclaimer().completion_cleanup_);
+        auto pool = groups.front()->hostPool();
+        ASSERT_NE(pool, nullptr);
+        const auto block = pool->malloc();
+        ASSERT_TRUE(block.has_value());
+        pool->incTreeRef(*block, BlockTreeRefType::EVICT);
+        manager->block_tree_cache_->transfer_dispatcher_->runTransfer(
+            TransferTask({TransferDescriptor::deviceToHost(0, {1}, *block)}, std::chrono::seconds(30)),
+            [&](TransferResult result) {
+                EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
+                pool->decTreeRef(*block, BlockTreeRefType::EVICT);
+            }, "evict");
+        const auto records = manager->frozenTasks();
+        ASSERT_EQ(records.size(), 1u);
+        ASSERT_NE(engine->last_proof, nullptr);
+        const auto& dispatcher = manager->block_tree_cache_->transfer_dispatcher_;
+        auto& queue = *manager->block_tree_cache_->reclaimer().completion_cleanup_;
+        auto drain = [&] {
+            return queue.drain([&](const auto& target, const auto& traces, int timeout) {
+                return manager->forgetTransferCompletion(target, traces, timeout);
+            }, 1000);
+        };
+        FrozenTask other(FrozenTask::prepare(records.front()->execution()), records.front()->failure());
+        other.freeze();
+        auto age = [&](std::chrono::seconds elapsed) {
+            records.front()->frozen_at_us_ -= std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
+        };
+        age(std::chrono::seconds(2));
+        EXPECT_EQ(recovery->runOnce(1000).released, timeout_ms == 1000 ? 1u : 0u);
+        age(std::chrono::minutes(10));
+        EXPECT_EQ(recovery->runOnce(1000).released, 0u);
+        age(std::chrono::minutes(10));
+        EXPECT_EQ(recovery->runOnce(1000).released, timeout_ms == 1200000 ? 1u : 0u);
+        EXPECT_EQ(drain().pending, timeout_ms == 0 ? 0u : 1u);
+        EXPECT_EQ(dispatcher->taskRegistry().size(), 1u);
+        engine->last_proof->report(true);
+        EXPECT_EQ(recovery->runOnce(1000).released, timeout_ms == 0 ? 1u : 0u);
+        EXPECT_EQ(drain().forgotten, 1u);
+        EXPECT_EQ(dispatcher->taskRegistry().size(), 0u);
+        EXPECT_TRUE(pool->isFrozen(*block));
+        EXPECT_EQ(pool->treeRefCount(*block), 1u);
+        EXPECT_TRUE(other.completeRecovery(queue));
+        EXPECT_FALSE(pool->isAllocated(*block));
+    }
+}
+
+TEST_F(KVCacheManagerTest, ForgetProgressesWithRecoveryDisabledAndWhileItsWorkerIsBlocked) {
+    auto cache_config = makeSimpleMhaCacheConfig(1, 4, 2, DataType::TYPE_INT8);
+    KVCacheConfig config;
+    config.block_tree_frozen_recovery_interval_ms = 0;
+    KVCacheManager manager(cache_config, false, nullptr, config);
+    ASSERT_TRUE(manager.init());
+    auto& reclaimer = manager.block_tree_cache_->reclaimer();
+    ASSERT_EQ(reclaimer.frozen_task_recovery_, nullptr);
+    auto check_cleanup = [&](uint64_t trace) {
+        auto& registry = *manager.block_tree_cache_->transfer_dispatcher_->task_registry_;
+        ASSERT_TRUE(registry.begin(trace));
+        ASSERT_TRUE(registry.finish(trace, true));
+        reclaimer.completion_cleanup_->enqueue(reclaimer.completion_cleanup_->prepare({false, {{0, "local"}}}, trace));
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (reclaimer.completion_cleanup_->size() != 0 && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        EXPECT_EQ(reclaimer.completion_cleanup_->size(), 0u);
+        EXPECT_EQ(registry.size(), 0u);
+    };
+    ASSERT_NO_FATAL_FAILURE(check_cleanup(1001));
+    std::promise<void> entered;
+    auto entered_future = entered.get_future();
+    std::promise<void> release;
+    auto released = release.get_future();
+    std::atomic<bool> first{true};
+    reclaimer.frozen_task_recovery_ = std::make_unique<FrozenTaskRecovery>(
+        *reclaimer.completion_cleanup_, [&] {
+            if (first.exchange(false)) {
+                entered.set_value();
+                released.wait_for(std::chrono::seconds(5));
+            }
+            return std::vector<std::shared_ptr<FrozenTask>>{};
+        }, FrozenTaskRecovery::Query{});
+    ASSERT_TRUE(reclaimer.frozen_task_recovery_->start(1000, 1000));
+    block_tree_cache_detail::ScopeRollback stop([&] {
+        release.set_value();
+        reclaimer.stopFrozenTaskRecovery();
+    });
+    ASSERT_EQ(entered_future.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+    ASSERT_NO_FATAL_FAILURE(check_cleanup(1002));
+}
 
 TEST_F(KVCacheManagerTest, ExecuteFunctionValidatesTimeoutBeforeSubmittingTransfer) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
@@ -2232,6 +2351,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionValidatesTimeoutBeforeSubmittingTransf
     auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     ASSERT_TRUE(manager->init());
     auto engine                                      = std::make_shared<RecordingBatchTransferEngine>();
+    manager->block_tree_cache_->stopBackgroundTasks();
     manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
     FunctionRequestPB request;
     appendValidGroupedTransfer(manager, request);
@@ -2246,6 +2366,8 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionValidatesTimeoutBeforeSubmittingTransf
     }
     size_t submitted = 0;
     for (const int64_t timeout : {int64_t{0}, int64_t{-1}, static_cast<int64_t>(std::numeric_limits<int>::max())}) {
+        request.clear_mem_request();
+        appendValidGroupedTransfer(manager, request);
         request.mutable_mem_request()->set_timeout_ms(timeout);
         FunctionResponsePB response;
         EXPECT_TRUE(manager->executeFunction(request, response));
@@ -2278,6 +2400,7 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionSubmitsAllMemoryItemsAsOneBatch) {
     auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     ASSERT_TRUE(manager->init());
     auto engine                                      = std::make_shared<RecordingBatchTransferEngine>();
+    manager->block_tree_cache_->stopBackgroundTasks();
     manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
     FunctionRequestPB                     request;
     const std::vector<TransferDescriptor> descriptors = {
@@ -2304,13 +2427,18 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionReportsHighestRankErrorWithoutRecordIn
     ASSERT_TRUE(manager->init());
     auto engine              = std::make_shared<RecordingBatchTransferEngine>();
     engine->completion_error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "injected batch failure");
+    manager->block_tree_cache_->stopBackgroundTasks();
     manager->block_tree_cache_->transfer_dispatcher_ = std::make_unique<BlockTransferDispatcher>(engine);
     FunctionRequestPB request;
-    ASSERT_TRUE(BlockTransferRequestConverter::encodeTransfer(
-        *request.mutable_mem_request(),
-        TransferTask({TransferDescriptor::deviceToHost(0, {1}, 1), TransferDescriptor::deviceToHost(0, {2}, 2)},
-                     std::chrono::seconds(30)),
-        manager->blockTreeCache()->groupSets()));
+    const auto prepare_request = [&] {
+        request.clear_mem_request();
+        return BlockTransferRequestConverter::encodeTransfer(
+            *request.mutable_mem_request(),
+            TransferTask({TransferDescriptor::deviceToHost(0, {1}, 1), TransferDescriptor::deviceToHost(0, {2}, 2)},
+                         std::chrono::seconds(30)),
+            manager->blockTreeCache()->groupSets());
+    };
+    ASSERT_TRUE(prepare_request());
 
     engine->copy_errors = {CacheCopyError::IO_FAILED, CacheCopyError::COPY_FAILED};
     FunctionResponsePB response;
@@ -2321,10 +2449,12 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionReportsHighestRankErrorWithoutRecordIn
     EXPECT_EQ(response.mem_response().block_errors(1), MemoryOperationResponsePB::COPY_FAILED);
 
     engine->copy_errors = {CacheCopyError::CRC_MISMATCH, CacheCopyError::IO_FAILED};
+    ASSERT_TRUE(prepare_request());
     ASSERT_TRUE(manager->executeFunction(request, response));
     EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::CRC_MISMATCH);
 
     engine->copy_errors.clear();
+    ASSERT_TRUE(prepare_request());
     ASSERT_TRUE(manager->executeFunction(request, response));
     EXPECT_EQ(response.mem_response().code(), MemoryOperationResponsePB::COPY_FAILED);
     EXPECT_EQ(engine->submitted_batch_count, 3u);

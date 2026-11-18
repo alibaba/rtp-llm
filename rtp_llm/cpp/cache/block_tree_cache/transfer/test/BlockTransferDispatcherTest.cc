@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <grpcpp/grpcpp.h>
 #include <algorithm>
 
 #include <atomic>
@@ -14,9 +15,14 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionCleanup.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionForget.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
+#include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 
 namespace rtp_llm {
 namespace {
@@ -53,8 +59,9 @@ class ScriptedPerRankEngine final: public PerRankBlockTransferEngine {
 public:
     explicit ScriptedPerRankEngine(std::deque<std::shared_ptr<TransferAsyncContext>> contexts  = {},
                                    size_t                                            max_batch = 8,
-                                   bool                                              async     = true):
-        PerRankBlockTransferEngine({}, false, {}, 128, max_batch, 4, 10000, nullptr, 0, 4, async),
+                                   bool                                              async     = true,
+                                   std::vector<GroupSetPtr>                          groups    = {}):
+        PerRankBlockTransferEngine(std::move(groups), false, {}, 128, max_batch, 4, 10000, nullptr, 0, 4, async),
         contexts_(std::move(contexts)) {}
 
     std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
@@ -63,6 +70,7 @@ public:
         submitted_batches_.push_back(descriptors);
         submitted_deadlines_.push_back(task.deadline());
         submitted_trace_ids_.push_back(task.traceId());
+        submitted_proofs_.push_back(task.completionProof());
         if (contexts_.empty()) {
             return okContext();
         }
@@ -85,6 +93,7 @@ private:
     std::vector<std::vector<TransferDescriptor>>      submitted_batches_;
     std::vector<TransferTask::Clock::time_point>      submitted_deadlines_;
     std::vector<uint64_t>                             submitted_trace_ids_;
+    std::vector<std::shared_ptr<TransferBufferSafety>> submitted_proofs_;
 };
 
 TransferDescriptor descriptor(size_t group_id) {
@@ -121,6 +130,7 @@ TEST(BlockTransferDispatcherTest, ExpiredTaskFailsBeforePerRankExecution) {
 
     EXPECT_FALSE(context->success());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::DEADLINE_EXCEEDED);
+    EXPECT_TRUE(context->result().buffer_safe);
     EXPECT_EQ(context->result().copy_error, CacheCopyError::NOT_EXECUTED);
     EXPECT_EQ(context->result().block_errors,
               (std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED, CacheCopyError::NOT_EXECUTED}));
@@ -171,6 +181,7 @@ TEST(BlockTransferDispatcherTest, EmptyTaskFailsBeforeDispatch) {
     size_t    callback_count = 0;
     ErrorInfo final_error    = ErrorInfo::OkStatus();
     dispatcher.runTransfer(TransferTask({}, std::chrono::milliseconds(100)), [&](TransferResult error) {
+        EXPECT_TRUE(error.buffer_safe);
         ++callback_count;
         final_error = std::move(error.status);
     });
@@ -489,6 +500,7 @@ TEST(BlockTransferDispatcherTest, ExpiredTaskFailsWithoutSubmittingABatch) {
     dispatcher.runTransfer(std::move(task), [&](TransferResult error) {
         ++callback_count;
         EXPECT_EQ(error.copy_error, CacheCopyError::NOT_EXECUTED);
+        EXPECT_TRUE(error.buffer_safe);
         EXPECT_EQ(error.block_errors,
                   (std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED, CacheCopyError::NOT_EXECUTED}));
         final_error = std::move(error.status);
@@ -597,6 +609,76 @@ TEST(BlockTransferDispatcherTest, OverlappingTasksKeepIndependentResults) {
     EXPECT_TRUE(healthy_result.ok());
     EXPECT_EQ(healthy_result.copy_error, CacheCopyError::NONE);
 }
+
+TransferCompletionCleanup::Forget localCleanupForget(const BlockTransferDispatcher& dispatcher) {
+    return [&dispatcher](const TransferCompletionTarget& target,
+                         const std::vector<TransferCompletionKey>& traces, int timeout_ms) {
+        TransferCompletionForget forget(nullptr, [&dispatcher](const TransferCompletionKey& trace) {
+            return dispatcher.forgetLocalCompletion(trace.numericId());
+        });
+        return forget.forget(target, traces, timeout_ms);
+    };
+}
+
+class CleanupWorkerService final: public RpcService::Service {
+public:
+    explicit CleanupWorkerService(size_t rank): rank_(rank) {}
+    grpc::Status ExecuteFunction(grpc::ServerContext*, const FunctionRequestPB* request,
+                                 FunctionResponsePB* response) override {
+        if (request->has_mem_request()) {
+            const auto trace = request->mem_request().transfer_trace_id();
+            if (!registry.begin(trace))
+                return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "duplicate test execution");
+            registry.finish(trace, true);
+            executed_trace.store(trace);
+            TransferResult result(TransferStatus::OK);
+            result.buffer_safe = true;
+            result.expandBlockErrors(request->mem_request().copy_items_size());
+            BlockTransferRequestConverter::encodeTransferResult(*response->mutable_mem_response(), result);
+            return grpc::Status::OK;
+        }
+        if (request->has_completion_forget()) {
+            auto* reply = response->mutable_completion_forget();
+            reply->set_rank(rank_);
+            for (const auto& key : request->completion_forget().keys()) {
+                auto* entry = reply->add_entries();
+                *entry->mutable_key() = key;
+                const auto result = registry.forget(key.transfer_trace_id());
+                entry->set_status(result == TransferTaskRegistry::ForgetResult::DONE ? TRANSFER_FORGET_DONE :
+                                                                                      TRANSFER_FORGET_RUNNING);
+            }
+            return grpc::Status::OK;
+        }
+        return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "unexpected test request");
+    }
+    TransferTaskRegistry registry;
+    std::atomic<uint64_t> executed_trace{0};
+private:
+    size_t rank_;
+};
+
+class CleanupWorkerServer {
+public:
+    explicit CleanupWorkerServer(size_t rank): service(rank) {}
+    ~CleanupWorkerServer() {
+        if (server_) {
+            server_->Shutdown(std::chrono::system_clock::now() + std::chrono::seconds(2));
+            server_->Wait();
+        }
+    }
+    bool start() {
+        grpc::ServerBuilder builder;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port_);
+        builder.RegisterService(&service);
+        server_ = builder.BuildAndStart();
+        return server_ != nullptr && port_ > 0;
+    }
+    std::string address() const { return "127.0.0.1:" + std::to_string(port_); }
+    CleanupWorkerService service;
+private:
+    std::unique_ptr<grpc::Server> server_;
+    int port_{0};
+};
 
 }  // namespace
 }  // namespace rtp_llm

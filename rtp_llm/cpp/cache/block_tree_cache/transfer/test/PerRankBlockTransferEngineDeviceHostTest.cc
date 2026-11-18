@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <condition_variable>
 #include <cstring>
 #include <cstdlib>
@@ -15,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <sys/resource.h>
 #include <utility>
 #include <vector>
 
@@ -491,19 +493,72 @@ TEST_F(CopyBoundsTest, RejectsLogicalCopyLargerThanPhysicalBufferButAllowsPrefix
     }
 }
 
-TEST_F(CopyBoundsTest, InvalidStagedParametersAllowFallbackBeforeCudaAccess) {
+TEST_F(CopyBoundsTest, StagedLayoutCanFallbackButInvalidPointersAndSizesCannot) {
     StagedMemoryCopyParams params;
     params.device_index = 0;
     params.host_base    = reinterpret_cast<void*>(0x1000);
     params.host_bytes   = 32;
     params.tiles.push_back({reinterpret_cast<void*>(0x2000), 16, 32});
     EXPECT_FALSE(execStagedMemoryCopy(params));
+    // Invalid pointers must not be hidden by a simultaneous layout mismatch.
+    params.tiles[0].gpu = nullptr;
+    EXPECT_THROW(execStagedMemoryCopy(params), std::invalid_argument);
     params.tiles[0] = {nullptr, 0, 32};
-    EXPECT_FALSE(execStagedMemoryCopy(params));
+    EXPECT_THROW(execStagedMemoryCopy(params), std::invalid_argument);
     params.tiles[0] = {reinterpret_cast<void*>(0x2000), 0, 0};
-    EXPECT_FALSE(execStagedMemoryCopy(params));
+    EXPECT_THROW(execStagedMemoryCopy(params), std::invalid_argument);
     params.host_base = nullptr;
-    EXPECT_FALSE(execStagedMemoryCopy(params));
+    EXPECT_THROW(execStagedMemoryCopy(params), std::invalid_argument);
+}
+
+class CopyCompletionFailureTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        previous_core_dump_ = StaticConfig::user_ft_core_dump_on_exception;
+        previous_death_style_ = ::testing::FLAGS_gtest_death_test_style;
+        StaticConfig::user_ft_core_dump_on_exception = false;
+        // Re-exec the death-test child: do not fork and reuse a CUDA context.
+        ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+        ASSERT_TRUE(torch::cuda::is_available());
+        host_ = torch::empty({64}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU).pinned_memory(true));
+        device_ = torch::empty({64}, torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA));
+        streams_ = acquireDeviceHostCopyStreams(device_.get_device());
+    }
+    void TearDown() override {
+        StaticConfig::user_ft_core_dump_on_exception = previous_core_dump_;
+        ::testing::FLAGS_gtest_death_test_style = previous_death_style_;
+    }
+    static void disableCoreFile() {
+        const rlimit limit{0, 0};
+        if (setrlimit(RLIMIT_CORE, &limit) != 0)
+            std::_Exit(10);
+    }
+    torch::Tensor host_, device_;
+    std::shared_ptr<DeviceHostCopyStreams> streams_;
+    bool previous_core_dump_{false};
+    std::string previous_death_style_;
+};
+
+TEST_F(CopyCompletionFailureTest, GenericUnconfirmedDrainAbortsDespiteCatchAndCoreDumpDisabled) {
+    EXPECT_EXIT(([&] {
+        disableCoreFile();
+        no_block_copy_detail::cuda_result_for_test = [](const char* phase, int actual) -> int {
+            if (actual == cudaSuccess && std::strcmp(phase, "generic_submit") == 0)
+                return cudaErrorInvalidValue;
+            if (actual == cudaSuccess && std::strcmp(phase, "generic_exception_drain") == 0)
+                return cudaErrorUnknown;
+            return actual;
+        };
+        DeviceHostCopyPlan plan{false, 0, {host_.data_ptr(), 64, 64},
+                                {{host_.data_ptr(), device_.data_ptr(), 64, device_.get_device(), 0, 0}}};
+        try {
+            GenericMultiCopyDeviceHostCopyStrategy generic;
+            (void)generic.tryExecute(plan, {}, {streams_, DeviceHostCopyDirection::H2D});
+        } catch (...) {
+            std::_Exit(11);
+        }
+        std::_Exit(12);
+    }()), ::testing::KilledBySignal(SIGABRT), "completion unconfirmed phase=generic_exception_drain");
 }
 
 TEST_F(LegacyPerRankBlockTransferEngineTest, DirectionStreamsAreDistinctAndSharedBetweenExecutors) {
@@ -572,6 +627,38 @@ private:
     std::condition_variable cv_;
     bool                    released_{false};
 };
+
+TEST_F(LegacyPerRankBlockTransferEngineTest, CopyPublishesBufferSafeAfterTheSelectedStreamFinishes) {
+    BlockTreeTaskPool task_pool(1, 8, "buffer_safe");
+    DeviceHostCopyOptions options;
+    options.cuda_batch_copy_enabled = false;
+    options.staged_sm_copy_enabled = false;
+    DeviceHostTransferExecutor executor(task_pool, 8, options);
+    const auto host_block = poolMalloc(*host_pool_);
+    ASSERT_NE(host_block, NULL_BLOCK_IDX);
+    const auto buffer = host_pool_->blockBuffer(host_block);
+    const HostBufferView host{buffer.addr, buffer.payload_bytes, buffer.stride_bytes};
+    std::memset(buffer.addr, 0xa5, buffer.payload_bytes);
+    const auto descriptor = makeDescriptor(Tier::HOST, Tier::DEVICE, device_blocks_, host_block);
+    auto streams = acquireDeviceHostCopyStreams(device_pool_->deviceIndex());
+    CopyStreamGate gate(reinterpret_cast<cudaStream_t>(streams->h2d_stream));
+    std::promise<void> entered;
+    auto started = entered.get_future();
+    auto copied = std::async(std::launch::async, [&] {
+        entered.set_value();
+        return executor.executeBatch({host}, {descriptor}, {group_set_.get()});
+    });
+    started.wait();
+    const auto blocked = copied.wait_for(std::chrono::milliseconds(100));
+    gate.release();
+    EXPECT_EQ(blocked, std::future_status::timeout);
+    const auto result = copied.get();
+    ASSERT_TRUE(result.ok());
+    EXPECT_TRUE(result.buffer_safe);
+    const auto data = readDeviceLayer(device_pool_, 0, device_block_);
+    EXPECT_EQ(data, std::vector<uint8_t>(data.size(), 0xa5));
+    releasePoolBlock(*host_pool_, host_block);
+}
 
 TEST_F(LegacyPerRankBlockTransferEngineTest, BatchAndGenericSubmitToSelectedDirectionStreams) {
     const int          device        = device_pool_->deviceIndex();

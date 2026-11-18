@@ -54,7 +54,8 @@ double snapshotMetric(kmonitor::MutableMetric* metric, const kmonitor::MetricsTa
     return std::stod(record.Values().front()->Value());
 }
 
-GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id = 0, bool enable_crc = false) {
+GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id = 0, bool enable_crc = false,
+                                     size_t device_block_count = 1, bool disable_frozen_abort = false) {
     using namespace block_transfer_engine_test;
 
     auto policy                                             = defaultCacheGroupPolicy(CacheGroupType::FULL);
@@ -64,8 +65,8 @@ GroupSetPtr makeTaskRunnerTestGroupSet(size_t group_set_id = 0, bool enable_crc 
     const auto                                 scale_bytes  = group_config.group.kvScaleStrideBytes();
     const std::shared_ptr<const CacheTopology> topology     = makeTestTopology({group_config});
     DeviceBlockPoolPtr                         pool         = makeTestDevicePool({{kv_bytes, scale_bytes}},
-                                                 /*usable_count=*/1,
-                                                 "load_task_runner_" + std::to_string(group_set_id));
+                                                 device_block_count,
+                                                 "load_task_runner_" + std::to_string(group_set_id), disable_frozen_abort);
     auto                                       host_pool    = makeHostPool(kv_bytes, /*usable_count=*/2);
     auto                                       disk_pool    = makeDiskPool(kv_bytes,
                                   /*usable_count=*/2,
@@ -119,7 +120,8 @@ public:
 
 class PendingPerRankEngine final: public PerRankBlockTransferEngine {
 public:
-    PendingPerRankEngine(): PerRankBlockTransferEngine(std::vector<GroupSetPtr>{}) {}
+    explicit PendingPerRankEngine(std::vector<GroupSetPtr> groups = {}):
+        PerRankBlockTransferEngine(std::move(groups)) {}
 
     std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
         auto context  = std::make_shared<TransferBatchAsyncContext>();
@@ -531,13 +533,20 @@ TEST(LoadTaskRunnerTest, SimultaneousCompletionsReportExactlyOneDirectionalWait)
 TEST(LoadTaskRunnerTest, ConcurrentFailuresPreserveUnknownCompletionAndCorruption) {
     for (bool host_unknown : {false, true}) {
         for (bool host_first : {false, true}) {
-            const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet()};
+            const std::vector<GroupSetPtr> group_sets{makeTaskRunnerTestGroupSet(0, false, 2, true)};
+            // Unknown completion now retains physical targets in the coordinator.
+            auto device_pool = group_sets.front()->devicePools().front();
+            const auto host_target = block_transfer_engine_test::poolMalloc(*device_pool);
+            const auto disk_target = block_transfer_engine_test::poolMalloc(*device_pool);
+            ASSERT_NE(host_target, NULL_BLOCK_IDX);
+            ASSERT_NE(disk_target, NULL_BLOCK_IDX);
             LoadTaskRunner                 runner(group_sets, 30'000, 30'000);
-            auto                           engine = std::make_shared<PendingPerRankEngine>();
+            auto                           engine = std::make_shared<PendingPerRankEngine>(group_sets);
             BlockTransferDispatcher        dispatcher(engine);
             BlockTreeCacheMetricsReporter  metrics_reporter{nullptr};
             auto                           task = makeLoadTask(
-                {TransferDescriptor::hostToDevice(0, 1, {1}), TransferDescriptor::diskToDevice(0, 2, {2})});
+                {TransferDescriptor::hostToDevice(0, 1, {host_target}),
+                 TransferDescriptor::diskToDevice(0, 2, {disk_target})});
             std::optional<ErrorInfo>               result;
             block_tree_cache_detail::ScopeRollback drain([&] { engine->completeAll(); });
             runner.runTransfer(task, dispatcher, metrics_reporter, [&](ErrorInfo error) { result = std::move(error); });
@@ -558,6 +567,8 @@ TEST(LoadTaskRunnerTest, ConcurrentFailuresPreserveUnknownCompletionAndCorruptio
             EXPECT_NE(result->ToString().find("completion unknown"), std::string::npos);
             EXPECT_EQ((host_unknown ? task->disk_result : task->host_result).blockError(0),
                       CacheCopyError::CRC_MISMATCH);
+            EXPECT_TRUE(device_pool->isFrozen(host_unknown ? host_target : disk_target));
+            EXPECT_FALSE(device_pool->isFrozen(host_unknown ? disk_target : host_target));
         }
     }
 }

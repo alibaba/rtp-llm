@@ -6,12 +6,16 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
+#include <charconv>
+#include <stdexcept>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSetResource.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBufferSafety.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 
@@ -105,6 +109,56 @@ inline ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
     }
     return ErrorInfo(ErrorCode::UNKNOWN_ERROR, "unknown block transfer status");
 }
+enum class RegistryType { BLOCK_TRANSFER, KVCM_READ };
+
+// Routing key for completion query/forget APIs, including mixed-registry batches.
+// Execution records store registry_type and the string trace_id independently.
+struct TransferCompletionKey {
+    RegistryType registry_type{RegistryType::BLOCK_TRANSFER};
+    std::string trace_id;
+
+    TransferCompletionKey() = default;
+    TransferCompletionKey(uint64_t id):
+        registry_type(RegistryType::BLOCK_TRANSFER), trace_id(std::to_string(id)) {}
+    TransferCompletionKey(std::string id):
+        registry_type(RegistryType::KVCM_READ), trace_id(std::move(id)) {}
+    TransferCompletionKey(RegistryType type, std::string id):
+        registry_type(type), trace_id(std::move(id)) {}
+
+    // Only needed at boundaries that still accept the numeric transfer ID.
+    bool numericId(uint64_t& id) const noexcept {
+        if (registry_type != RegistryType::BLOCK_TRANSFER || trace_id.empty())
+            return false;
+        const auto parsed = std::from_chars(trace_id.data(), trace_id.data() + trace_id.size(), id);
+        return parsed.ec == std::errc{} && parsed.ptr == trace_id.data() + trace_id.size()
+               && id != 0 && trace_id.front() != '0';
+    }
+    uint64_t numericId() const {
+        uint64_t id = 0;
+        if (!numericId(id))
+            throw std::invalid_argument("invalid numeric transfer registry key");
+        return id;
+    }
+    bool operator==(const TransferCompletionKey& other) const {
+        return registry_type == other.registry_type && trace_id == other.trace_id;
+    }
+    bool operator!=(const TransferCompletionKey& other) const { return !(*this == other); }
+};
+
+inline bool validTransferCompletionKey(RegistryType registry_type, const std::string& trace_id) noexcept {
+    if (registry_type == RegistryType::KVCM_READ)
+        return !trace_id.empty();
+    if (registry_type != RegistryType::BLOCK_TRANSFER || trace_id.empty() || trace_id.front() == '0')
+        return false;
+    uint64_t id = 0;
+    const auto parsed = std::from_chars(trace_id.data(), trace_id.data() + trace_id.size(), id);
+    return parsed.ec == std::errc{} && parsed.ptr == trace_id.data() + trace_id.size() && id != 0;
+}
+
+inline bool validTransferCompletionKey(const TransferCompletionKey& key) noexcept {
+    return validTransferCompletionKey(key.registry_type, key.trace_id);
+}
+
 // Results are ordered like the task's descriptors; NONE means the target copy completed,
 // and NOT_EXECUTED means no target was committed to the caller. The copy may
 // have been skipped or discarded after a batch CRC failure; target bytes can change.
@@ -123,13 +177,38 @@ struct TransferResult {
                                                                 CacheCopyError::COPY_FAILED) {}
     TransferResult(ErrorInfo error, CacheCopyError copy_error): status(std::move(error)), copy_error(copy_error) {}
 
+    // Identity for combining independent operations, not proof for an executed
+    // operation. Every contributing result must explicitly prove buffer safety.
+    static TransferResult emptyAggregate(size_t block_count = 0) {
+        TransferResult result(block_count);
+        result.buffer_safe = true;
+        return result;
+    }
+
     bool ok() const {
         return status.ok();
+    }
+
+    // Completion evidence must survive failure to allocate the diagnostic itself.
+    static TransferResult executionException(bool safe, const char* message = nullptr) noexcept {
+        TransferResult result;
+        result.status.setErrorCode(ErrorCode::EXECUTION_EXCEPTION);
+        result.copy_error = CacheCopyError::COPY_FAILED;
+        result.buffer_safe = safe;
+        if (message) {
+            try {
+                result.status = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, message);
+            } catch (...) {}
+        }
+        return result;
     }
 
     // Append every failure message; keep unknown completion ahead of known failures
     // without losing higher-priority copy diagnostics such as confirmed CRC errors.
     void merge(TransferResult other) {
+        // A successful business result can still lack completion proof. Merge
+        // safety before either early return, independently of error precedence.
+        buffer_safe = buffer_safe && other.buffer_safe;
         if (other.ok()) {
             return;
         }
@@ -143,7 +222,11 @@ struct TransferResult {
             || other.status.code() == ErrorCode::TRANSFER_COMPLETION_UNKNOWN) {
             code = ErrorCode::TRANSFER_COMPLETION_UNKNOWN;
         }
-        status          = ErrorInfo(code, status.ToString() + "; " + other.status.ToString());
+        try {
+            status = ErrorInfo(code, status.ToString() + "; " + other.status.ToString());
+        } catch (...) {
+            status.setErrorCode(code);
+        }
         copy_error      = std::max(copy_error, other.copy_error);
     }
 
@@ -160,6 +243,10 @@ struct TransferResult {
     ErrorInfo                   status{ErrorInfo::OkStatus()};
     CacheCopyError              copy_error{CacheCopyError::NONE};
     std::vector<CacheCopyError> block_errors;
+    // True only when this operation can no longer access any of its buffers.
+    // False means unproven, not necessarily in-flight. Business success, error
+    // codes and NOT_EXECUTED diagnostics never implicitly grant this proof.
+    bool buffer_safe{false};
 };
 
 struct HostBufferView {
@@ -332,6 +419,13 @@ public:
         }
     }
 
+    const std::shared_ptr<TransferBufferSafety>& completionProof() const noexcept {
+        return completion_proof_;
+    }
+    void setCompletionProof(std::shared_ptr<TransferBufferSafety> proof) noexcept {
+        completion_proof_ = std::move(proof);
+    }
+
     const std::vector<TransferDescriptor>& descriptors() const {
         return descriptors_;
     }
@@ -362,7 +456,14 @@ public:
     }
 
     TransferTask subtask(std::vector<TransferDescriptor> descriptors) const {
-        return TransferTask(std::move(descriptors), *this);
+        // The proof covers this complete physical batch, not an arbitrary
+        // subset or intermediate stage. Ownership must be transferred explicitly.
+        auto task      = TransferTask(std::move(descriptors), *this);
+        task.completion_proof_.reset();
+        task.trace_id_ = trace_id_;
+        task.workflow_id_     = workflow_id_;
+        task.parent_trace_id_ = parent_trace_id_;
+        return task;
     }
 
 private:
@@ -374,9 +475,10 @@ private:
         workflow_id_(parent.workflow_id_),
         parent_trace_id_(parent.parent_trace_id_) {}
 
-    std::vector<TransferDescriptor>     descriptors_;
-    Clock::time_point                   deadline_;
-    std::optional<int64_t>              request_id_;
+    std::vector<TransferDescriptor>       descriptors_;
+    Clock::time_point                     deadline_;
+    std::optional<int64_t>                request_id_;
+    std::shared_ptr<TransferBufferSafety> completion_proof_;
     inline static std::atomic<uint64_t> next_trace_id_{1};
     uint64_t                            trace_id_{next_trace_id_.fetch_add(1, std::memory_order_relaxed)};
     uint64_t                            workflow_id_{trace_id_};

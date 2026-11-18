@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheLayout.h"
@@ -842,7 +843,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(
-            group_sets, std::move(broadcast_manager), cache_metrics_reporter);
+            group_sets, broadcast_manager, cache_metrics_reporter);
     }
     auto transfer_dispatcher =
         std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine), std::move(multi_rank_engine));
@@ -880,6 +881,10 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
                 }),
             "StorageBackend init failed");
     }
+    result->reclaimer().configure(parallelism_config.tp_rank,
+        kv_cache_config.block_tree_frozen_recovery_interval_ms,
+        kv_cache_config.block_tree_frozen_recovery_query_timeout_ms,
+        kv_cache_config.block_tree_frozen_force_release_timeout_ms, broadcast_manager);
     if (!result->init()) {
         RTP_LLM_LOG_ERROR("BlockTreeCache init failed");
         return nullptr;
