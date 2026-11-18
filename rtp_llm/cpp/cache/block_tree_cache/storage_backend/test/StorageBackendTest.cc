@@ -2492,10 +2492,10 @@ TEST(StorageBackendTest, HeldReadTargetsSkipLegacyFreezeAndPreserveUnknownResult
             pool->freezeBlock(target);
             if (timeout) {
                 throw StorageOperationTimeout("held read target timed out", reason,
-                                               StorageTargetProtection::PROTECTED_BY_BACKEND);
+                                               StorageLocalTargetProtection::TARGETS_HELD);
             }
             throw StorageOperationCompletionUnknown("held read target completion unknown", reason,
-                                                     StorageTargetProtection::PROTECTED_BY_BACKEND);
+                                                     StorageLocalTargetProtection::TARGETS_HELD);
         };
         auto request = makeRequest(target, 2);
         request.handles.back().front().block = untouched;
@@ -2544,10 +2544,10 @@ TEST(StorageBackendTest, UnknownWriteWithoutLocalTargetsReleasesPinsButStillCoun
         backend.write_action = [reason, timeout] {
             if (timeout) {
                 throw StorageOperationTimeout("write timed out without local targets", reason,
-                                               StorageTargetProtection::NO_LOCAL_TARGETS);
+                                               StorageLocalTargetProtection::NO_LOCAL_TARGETS);
             }
             throw StorageOperationCompletionUnknown("write completion unknown without local targets", reason,
-                                                     StorageTargetProtection::NO_LOCAL_TARGETS);
+                                                     StorageLocalTargetProtection::NO_LOCAL_TARGETS);
         };
         auto request = makeRequest(block, 2);
         std::weak_ptr<const CacheKeysType> request_keys = request.keys;
@@ -2571,8 +2571,8 @@ TEST(StorageBackendTest, UnknownWriteWithoutLocalTargetsReleasesPinsButStillCoun
 }
 
 TEST(StorageBackendTest, ProtectedUnknownIgnoresLocalTargetProtectionMarkers) {
-    for (const auto protection : {StorageTargetProtection::PROTECTED_BY_BACKEND,
-                                  StorageTargetProtection::NO_LOCAL_TARGETS}) {
+    for (const auto protection : {StorageLocalTargetProtection::TARGETS_HELD,
+                                  StorageLocalTargetProtection::NO_LOCAL_TARGETS}) {
         SCOPED_TRACE(static_cast<int>(protection));
         for (const bool is_write : {false, true}) {
             SCOPED_TRACE(is_write);

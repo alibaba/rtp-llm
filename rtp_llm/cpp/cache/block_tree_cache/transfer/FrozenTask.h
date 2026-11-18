@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -17,24 +18,45 @@ namespace rtp_llm {
 
 struct TransferCompletionQueryResult;
 
+// One coordinator execution trace owns one hold for each distinct target slot.
+// Sources are immutable diagnostics only. No tree node or business settlement
+// callback survives here, and destruction never releases frozen references.
 class FrozenTask {
 public:
-    struct TransferParticipant {
+    struct ExpectedPeer {
         size_t      rank{0};
         std::string address;
     };
 
-    struct TargetBlock {
+    struct BlockInfo {
         std::shared_ptr<IBlockPool> pool;
-        BlockIdxType block{NULL_BLOCK_IDX};
+        BlockIdxType                block{NULL_BLOCK_IDX};
+        size_t                      member_index{0};
+        std::string                 pool_name;
+    };
+
+    struct DescriptorInfo {
+        size_t                 group_set_id{0};
+        size_t                 path_index{0};
+        Tier                   source_tier{Tier::NONE};
+        Tier                   target_tier{Tier::NONE};
+        std::vector<BlockInfo> sources;
+        std::vector<BlockInfo> targets;
+        std::optional<size_t>  rank{};
+        std::string            group_tag{};
+        std::string            source_uri{};
     };
 
     struct ExecutionInfo {
-        RegistryType registry_type{RegistryType::BLOCK_TRANSFER};
-        std::string trace_id;
-        bool uses_rpc{false};
-        std::vector<TransferParticipant> participant_ranks;
-        std::vector<TargetBlock> target_blocks;
+        TransferExecutionTrace      trace_id{uint64_t{0}};
+        std::string                 operation;
+        std::optional<int64_t>      request_id;
+        uint64_t                    workflow_id{0};
+        uint64_t                    parent_trace_id{0};
+        bool                        remote{false};
+        size_t                      expected_rank_count{0};
+        std::vector<ExpectedPeer>   expected_peers;
+        std::vector<DescriptorInfo> descriptors;
     };
 
     enum class State { PREPARED, FROZEN, RELEASING, RELEASED };
@@ -90,8 +112,12 @@ public:
     FrozenTask(const FrozenTask&)            = delete;
     FrozenTask& operator=(const FrozenTask&) = delete;
 
+    // Idempotent, single-use lifecycle. freeze after RELEASED is a no-op.
+    // Concurrent unfreeze callers do not repeat decrements; RELEASING remains
+    // visible until the owner finishes. Notifications run without this mutex.
+    // Only the caller completing FROZEN -> RELEASED returns true.
     void freeze() noexcept;
-    bool completeRecovery(TransferCompletionCleanup& cleanup_queue) noexcept;
+    bool unfreeze() noexcept;
 
     // Construct immutable query results before calling this method. Recording
     // does not change the original failure or release any target references.
@@ -106,6 +132,7 @@ public:
         return failure_;
     }
     Snapshot    snapshot() const noexcept;
+    std::string debugString() const;
 
 private:
     const ExecutionInfo           execution_;

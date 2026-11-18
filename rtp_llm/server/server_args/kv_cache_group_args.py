@@ -473,8 +473,8 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         env_name="BLOCK_TREE_FROZEN_FORCE_RELEASE_TIMEOUT_MS",
         bind_to=(kv_cache_config, "block_tree_frozen_force_release_timeout_ms"),
         type=_frozen_force_release_timeout_ms,
-        default=300000,
-        help="冻结任务强制解冻超时，单位毫秒，默认 300000（5 分钟）；0 关闭超时兜底，范围 [0, 2147483647]。"
+        default=60000,
+        help="冻结任务强制解冻超时，单位毫秒，默认 60000（1 分钟）；0 关闭超时兜底，范围 [0, 2147483647]。"
         "启用恢复轮询时生效；超时后即使缺少 buffer safe 证明也释放冻结引用，不会取消底层 I/O。",
     )
     kv_cache_group.add_argument(

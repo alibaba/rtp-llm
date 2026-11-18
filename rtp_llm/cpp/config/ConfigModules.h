@@ -202,7 +202,7 @@ struct KVCacheConfig {
     // Query/forget timeout is positive; both durations must fit int milliseconds.
     int64_t block_tree_frozen_recovery_interval_ms       = 1000;
     int64_t block_tree_frozen_recovery_query_timeout_ms  = 1000;
-    int64_t block_tree_frozen_force_release_timeout_ms   = 300000;
+    int64_t block_tree_frozen_force_release_timeout_ms   = 60000;
     double  block_pool_frozen_abort_lower_ratio          = kDefaultBlockPoolFrozenAbortLowerRatio;
     double  block_pool_frozen_abort_upper_ratio          = kDefaultBlockPoolFrozenAbortUpperRatio;
     double  block_tree_device_evict_low_watermark_ratio  = kDefaultDeviceLowWatermarkRatio;

@@ -683,18 +683,20 @@ TEST(BlockTreeCacheMetricsTest, UnfreezeMetricsCountUniqueTargetsPerPoolAndBacke
     };
     expect_zero_metrics();
     FrozenTask::ExecutionInfo execution;
-    execution.trace_id = "1";
-    execution.uses_rpc = true;
-    execution.target_blocks = {{first, 1}, {first, 2}, {first, 1}, {second, 1}};
+    execution.trace_id = uint64_t{1};
+    execution.remote = true;
+    execution.descriptors.push_back({0, 0, Tier::DEVICE, Tier::HOST,
+                                     {{source, 1, 0, "source"}},
+                                     {{first, 1, 0, "first"}, {first, 2, 0, "first"}}});
+    execution.descriptors.push_back({1, 0, Tier::DEVICE, Tier::HOST, {},
+                                     {{first, 1, 0, "first"}, {second, 1, 0, "second"}}});
     metrics_reporter.reportUnfreezeMetrics(execution, false);
-    execution.registry_type = RegistryType::KVCM_READ;
-    execution.trace_id = "kvcm-1";
-    execution.uses_rpc = false;
-    execution.target_blocks.resize(2);
+    execution.trace_id = std::string("kvcm-1");
+    execution.remote = false;
+    execution.descriptors.pop_back();
     metrics_reporter.reportUnfreezeMetrics(execution, false);
     metrics_reporter.reportUnfreezeMetrics(execution, true);
-    execution.registry_type = RegistryType::BLOCK_TRANSFER;
-    execution.trace_id = "2";
+    execution.trace_id = uint64_t{2};
     metrics_reporter.reportUnfreezeMetrics(execution, true);
     metrics_reporter.reportUnfreezeZeroMetrics(pools);
     EXPECT_DOUBLE_EQ(snapshot_unfreeze_blocks("first", Tier::HOST, "kvcm", true), 2);

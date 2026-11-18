@@ -1427,7 +1427,6 @@ TEST(BlockTreeEvictorAsyncTest, SameNodeGroupSetsSettleSuccessAndFailureIndepend
 }
 
 TEST(BlockTreeEvictorAsyncTest, UnknownCompletionPreservesOnlyTargetAndReadmitsSource) {
-    auto cleanup = std::make_shared<TransferCompletionCleanup>();
     MultiGroupAsyncEvictionEnvironment environment;
     ASSERT_TRUE(environment.init());
     TreeNode* node = environment.insertDeviceNode();
@@ -1474,7 +1473,7 @@ TEST(BlockTreeEvictorAsyncTest, UnknownCompletionPreservesOnlyTargetAndReadmitsS
     EXPECT_FALSE(environment.host_pools_[0]->isAllocated(retry_target));
     EXPECT_EQ(environment.host_pools_[0]->treeRefCount(target), 1u);
     EXPECT_EQ(environment.transfer_dispatcher_->frozenTasks().size(), 1u);
-    frozen_tasks.front()->completeRecovery(*cleanup);
+    frozen_tasks.front()->unfreeze();
     EXPECT_FALSE(environment.host_pools_[0]->isAllocated(target));
 }
 

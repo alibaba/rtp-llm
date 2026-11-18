@@ -87,7 +87,7 @@ private:
     std::shared_ptr<TransferAsyncContext> executeMultiRank(TransferTask task,
                                                            const char*  completion_operation = nullptr) const;
     void submitCoordinated(TransferTask task, TransferDoneCallback done, const char* completion_operation) const;
-    FrozenTask::ExecutionInfo describeExecution(const TransferTask& task) const;
+    FrozenTask::ExecutionInfo buildExecutionInfo(const TransferTask& task, const char* completion_operation) const;
     void retainFrozenTask(std::list<std::shared_ptr<FrozenTask>>& prepared_slot) const noexcept;
 
     std::shared_ptr<PerRankBlockTransferEngine>   per_rank_engine_;

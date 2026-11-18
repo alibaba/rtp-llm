@@ -634,9 +634,9 @@ TEST(BlockTransferDispatcherTest, OverlappingTasksKeepIndependentResults) {
 
 TransferCompletionCleanup::Forget localCleanupForget(const BlockTransferDispatcher& dispatcher) {
     return [&dispatcher](const TransferCompletionTarget& target,
-                         const std::vector<TransferCompletionKey>& traces, int timeout_ms) {
-        TransferCompletionForget forget(nullptr, [&dispatcher](const TransferCompletionKey& trace) {
-            return dispatcher.forgetLocalCompletion(trace.numericId());
+                         const std::vector<TransferExecutionTrace>& traces, int timeout_ms) {
+        TransferCompletionForget forget(nullptr, [&dispatcher](const TransferExecutionTrace& trace) {
+            return dispatcher.forgetLocalCompletion(std::get<uint64_t>(trace));
         });
         return forget.forget(target, traces, timeout_ms);
     };
@@ -661,8 +661,8 @@ TEST(BlockTransferDispatcherTest, CoordinatorCleanupRetainsKnownFailureUntilLate
             EXPECT_EQ(cleanup->size(), 1u);
         }, "load");
         ASSERT_EQ(engine->submitted_trace_ids_.size(), 1u);
-        const auto execution_trace = engine->submitted_trace_ids_.front();
-        EXPECT_EQ(execution_trace, parent_trace);
+        const auto child_trace = engine->submitted_trace_ids_.front();
+        EXPECT_NE(child_trace, parent_trace);
         EXPECT_EQ(cleanup->size(), 0u);
         ASSERT_NE(engine->submitted_proofs_.front(), nullptr);
         engine->submitted_proofs_.front()->report(initially_safe);
@@ -674,21 +674,21 @@ TEST(BlockTransferDispatcherTest, CoordinatorCleanupRetainsKnownFailureUntilLate
         EXPECT_EQ(business_result.ok(), initially_safe);
         EXPECT_EQ(business_result.buffer_safe, initially_safe);
         const auto forget = [&](const TransferCompletionTarget& target,
-                                const std::vector<TransferCompletionKey>& traces, int timeout_ms) {
+                                const std::vector<TransferExecutionTrace>& traces, int timeout_ms) {
             EXPECT_FALSE(target.remote);
             EXPECT_EQ(target.peers.size(), 1u);
             if (target.peers.size() == 1) {
                 EXPECT_EQ(target.peers[0].rank, 0u);
                 EXPECT_EQ(target.peers[0].address, "local");
             }
-            EXPECT_EQ(traces, (std::vector<TransferCompletionKey>{parent_trace}));
+            EXPECT_EQ(traces, (std::vector<TransferExecutionTrace>{child_trace}));
             return localCleanupForget(dispatcher)(target, traces, timeout_ms);
         };
         const auto first = cleanup->drain(forget, 1000);
         EXPECT_EQ(first.forgotten, initially_safe ? 1u : 0u);
         EXPECT_EQ(cleanup->size(), initially_safe ? 0u : 1u);
         if (!initially_safe) {
-            EXPECT_EQ(dispatcher.taskRegistry().queryLocal(std::vector<uint64_t>{parent_trace}).front(),
+            EXPECT_EQ(dispatcher.taskRegistry().queryLocal(std::vector<uint64_t>{child_trace}).front(),
                       TransferTaskRegistry::State::RUNNING);
             engine->submitted_proofs_.front()->report(true);
             EXPECT_EQ(cleanup->drain(forget, 1000).forgotten, 1u);
@@ -775,17 +775,25 @@ TEST(BlockTransferDispatcherTest, DelayedFreezePreservesOriginalBlocksAcrossCall
     const auto records = dispatcher.frozenTasks();
     ASSERT_EQ(records.size(), 1u);
     const auto& execution = records.front()->execution();
-    EXPECT_EQ(execution.trace_id, std::to_string(parent_trace));
-    EXPECT_EQ(execution.trace_id, std::to_string(engine->submitted_trace_ids_.front()));
-    ASSERT_EQ(execution.target_blocks.size(), 2u);
-    for (size_t index = 0; index < execution.target_blocks.size(); ++index) {
-        EXPECT_EQ(execution.target_blocks[index].block, index == 0 ? *first : *second);
-        EXPECT_EQ(execution.target_blocks[index].pool.get(), host.get());
+    EXPECT_EQ(std::get<uint64_t>(execution.trace_id), engine->submitted_trace_ids_.front());
+    EXPECT_EQ(execution.operation, "load");
+    EXPECT_EQ(execution.request_id, 91);
+    EXPECT_EQ(execution.workflow_id, 73u);
+    EXPECT_EQ(execution.parent_trace_id, parent_trace);
+    ASSERT_EQ(execution.descriptors.size(), 2u);
+    for (size_t index = 0; index < execution.descriptors.size(); ++index) {
+        const auto& descriptor = execution.descriptors[index];
+        ASSERT_EQ(descriptor.sources.size(), 1u);
+        ASSERT_EQ(descriptor.targets.size(), 1u);
+        EXPECT_EQ(descriptor.sources.front().block, index == 0 ? 7 : 8);
+        EXPECT_EQ(descriptor.targets.front().block, index == 0 ? *first : *second);
+        EXPECT_EQ(descriptor.targets.front().pool.get(), host.get());
+        EXPECT_EQ(descriptor.targets.front().pool_name, host->poolName());
     }
     for (const auto& proof : engine->submitted_proofs_)
         proof->report(true);
     EXPECT_EQ(cleanup->size(), 0u);
-    EXPECT_TRUE(records.front()->completeRecovery(*cleanup));
+    EXPECT_TRUE(records.front()->unfreeze());
     EXPECT_FALSE(host->isAllocated(*first));
     EXPECT_FALSE(host->isAllocated(*second));
     EXPECT_TRUE(host->isAllocated(*replacement));
@@ -794,7 +802,7 @@ TEST(BlockTransferDispatcherTest, DelayedFreezePreservesOriginalBlocksAcrossCall
     dispatcher.waitForTransfers();
 }
 
-TEST(BlockTransferDispatcherTest, FrozenExecutionTransfersCleanupOwnershipUntilRecoveryCompletes) {
+TEST(BlockTransferDispatcherTest, FrozenExecutionTransfersCleanupOwnershipUntilUnfreezeCompletes) {
     using namespace block_transfer_engine_test;
     auto host = makeHostPool(16, 8);
     auto groups = std::vector<GroupSetPtr>{
@@ -826,8 +834,8 @@ TEST(BlockTransferDispatcherTest, FrozenExecutionTransfersCleanupOwnershipUntilR
     ASSERT_NE(engine->submitted_proofs_.front(), nullptr);
     engine->submitted_proofs_.front()->report(true);
     EXPECT_EQ(cleanup->size(), 0u);  // SAFE evidence alone does not retire a frozen owner.
-    EXPECT_TRUE(records.front()->completeRecovery(*cleanup));
-    EXPECT_FALSE(records.front()->completeRecovery(*cleanup));
+    EXPECT_TRUE(records.front()->unfreeze());
+    EXPECT_FALSE(records.front()->unfreeze());
     EXPECT_EQ(records.front()->snapshot().state, FrozenTask::State::RELEASED);
     EXPECT_FALSE(host->isAllocated(*block));
     EXPECT_EQ(cleanup->size(), 1u);
@@ -925,19 +933,19 @@ TEST(BlockTransferDispatcherTest, MultiRankCleanupKeepsOriginalParticipantsAndAc
     EXPECT_TRUE(result.buffer_safe);
     const auto trace = first.service.executed_trace.load();
     EXPECT_NE(trace, 0u);
-    EXPECT_EQ(trace, parent_trace);
+    EXPECT_NE(trace, parent_trace);
     EXPECT_EQ(second.service.executed_trace.load(), trace);
     EXPECT_EQ(local->submittedBatchCount(), 0u);
     EXPECT_EQ(cleanup->size(), 1u);
     size_t batches = 0;
     const auto summary = cleanup->drain(
-        [&](const TransferCompletionTarget& target, const std::vector<TransferCompletionKey>& traces, int timeout_ms) {
+        [&](const TransferCompletionTarget& target, const std::vector<TransferExecutionTrace>& traces, int timeout_ms) {
             ++batches;
             EXPECT_TRUE(target.remote);
             EXPECT_EQ(target.peers.size(), 2u);
             for (const auto& peer : target.peers)
                 EXPECT_EQ(peer.address, addresses.at(peer.rank));
-            EXPECT_EQ(traces, (std::vector<TransferCompletionKey>{trace}));
+            EXPECT_EQ(traces, (std::vector<TransferExecutionTrace>{trace}));
             return TransferCompletionForget(manager).forget(target, traces, timeout_ms);
         }, 2000);
     EXPECT_EQ(summary.forgotten, 1u);

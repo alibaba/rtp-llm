@@ -194,11 +194,29 @@ bool CrcCopyExecutor::trySubmit(const std::vector<HostBufferView>& hosts,
                                 const GroupSetPtr&                 group,
                                 DoneCallback                       done,
                                 Timing*                            timing) {
-    if (!accepting_) {
+    if (!done)
+        throw std::invalid_argument("CRC stage callback is required");
+    const auto reject = [&] {
         TransferResult result(TransferStatus::INVALID_ARGS);
         result.buffer_safe = true;  // This request has not submitted any CUDA access.
         done(std::move(result));
         return true;
+    };
+    if (!accepting_ || !async_ || !group || hosts.empty() || hosts.size() != descriptors.size()) {
+        return reject();
+    }
+    const bool evict = direction_ == CrcCopyDirection::EVICT;
+    if (!group->crcEnabled() || groups_.find(group.get()) == groups_.end())
+        return reject();
+    for (size_t i = 0; i < descriptors.size(); ++i) {
+        const auto& blocks = descriptors[i].blocksAt(Tier::DEVICE);
+        if ((descriptors[i].source_tier == Tier::DEVICE) != evict
+            || !isValidHostBufferView(hosts[i], group->payloadBytes(), group->storageBytes())
+            || blocks.size() != group->devicePools().size())
+            return reject();
+        for (size_t member = 0; member < blocks.size(); ++member)
+            if (!group->devicePools()[member]->validBlock(blocks[member]))
+                return reject();
     }
     Slot* slot = nullptr;
     for (auto& candidate : slots_.at(deviceFor(*group)))

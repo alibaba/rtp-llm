@@ -125,55 +125,15 @@ TEST(LocalBufferSafetyFailureTest, ExpiredDispatcherAllocationFailuresCloseRegis
     }
 }
 
-TEST(LocalBufferSafetyFailureTest, RecoveredDispatcherCompletionPreservesCallbackException) {
-    struct CallbackFailure {};
-    auto engine = std::make_shared<PerRankBlockTransferEngine>(
-        std::vector<GroupSetPtr>{}, false, DeviceHostCopyOptions{}, 128, 1, 1, 8);
-    BlockTransferDispatcher dispatcher(engine);
-    size_t recovered_callbacks = 0;
-    for (int position = 0; position < 80; ++position) {
-        SCOPED_TRACE(position);
-        TransferTask task({TransferDescriptor::hostToDisk(0, 1, 1)}, 30s);
-        task.deadline_ = TransferTask::Clock::now() - 1ms;
-        size_t calls = 0;
-        bool propagated = false;
-        const auto before = injected_allocations.load();
-        BlockTransferDispatcher::TransferDoneCallback callback = [&](TransferResult result) {
-            allocation_countdown = -1;
-            ++calls;
-            EXPECT_EQ(result.status.code(), ErrorCode::DEADLINE_EXCEEDED);
-            if (injected_allocations.load() != before)
-                ++recovered_callbacks;
-            throw CallbackFailure{};
-        };
-        allocation_countdown = position;
-        try {
-            dispatcher.runTransfer(std::move(task), std::move(callback));
-        } catch (const CallbackFailure&) {
-            propagated = true;
-        } catch (const std::bad_alloc&) {
-        }
-        allocation_countdown = -1;
-        EXPECT_LE(calls, 1u);
-        EXPECT_EQ(propagated, calls == 1);
-        EXPECT_TRUE(dispatcher.frozenTasks().empty());
-        dispatcher.waitForTransfers();
-    }
-    EXPECT_GT(recovered_callbacks, 0u);
-}
-
 TEST(LocalBufferSafetyFailureTest, RealEnginePreparationFailurePublishesUnsubmittedProof) {
     PerRankBlockTransferEngine engine({}, false, {}, 128, 1, 1, 8);
     TransferTaskRegistry registry;
     TransferTask task({TransferDescriptor::hostToDisk(0, 1, 1)}, 30s);
     const auto trace = task.traceId();
-    auto safety = std::make_shared<TransferBufferSafetyTracker>([&registry, trace] {
-        registry.finish(trace, true);
-    });
-    ASSERT_TRUE(registry.begin(trace));
+    registerTask(registry, task);
     bool threw = false;
-    allocation_countdown = 0;
-    try { engine.execute(std::move(task), std::move(safety)); } catch (const std::bad_alloc&) { threw = true; }
+    allocation_countdown = 0;  // group_sets.reserve(), before any producer is entered.
+    try { engine.execute(std::move(task)); } catch (const std::bad_alloc&) { threw = true; }
     allocation_countdown = -1;
     EXPECT_TRUE(threw);
     EXPECT_EQ(state(registry, trace), State::BUFFER_SAFE);

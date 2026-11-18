@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <utility>
@@ -33,17 +34,22 @@ private:
 
 // One local execution may submit several physical batches. Even synchronously
 // completed batches cannot publish safety while more batches can still start.
-class TransferBufferSafetyTracker {
+class TransferBufferSafetyTracker: public std::enable_shared_from_this<TransferBufferSafetyTracker> {
 public:
     explicit TransferBufferSafetyTracker(std::function<void()> safe_callback):
         safe_callback_(std::move(safe_callback)) {}
 
-    void addBatch() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (submitting_finished_) {
-            throw std::logic_error("cannot add a transfer batch after submission finished");
+    std::shared_ptr<TransferBufferSafety> addBatch() {
+        // Complete all allocation before changing the number of required proofs.
+        auto proof = std::make_shared<TransferBufferSafety>([self = shared_from_this()] { self->completeBatch(); });
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (submitting_finished_) {
+                throw std::logic_error("cannot add a transfer batch after submission finished");
+            }
+            ++remaining_;
         }
-        ++remaining_;
+        return proof;
     }
 
     void finishSubmitting() noexcept {
@@ -63,6 +69,7 @@ public:
         }
     }
 
+private:
     void completeBatch() noexcept {
         std::function<void()> callback;
         {
@@ -77,7 +84,6 @@ public:
         }
     }
 
-private:
     std::mutex            mutex_;
     size_t                remaining_{0};
     bool                  submitting_finished_{false};

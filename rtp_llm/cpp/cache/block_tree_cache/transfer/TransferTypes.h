@@ -11,8 +11,7 @@
 #include <optional>
 #include <string>
 #include <utility>
-#include <charconv>
-#include <stdexcept>
+#include <variant>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
@@ -117,52 +116,49 @@ inline ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
     }
     return ErrorInfo(ErrorCode::UNKNOWN_ERROR, "unknown block transfer status");
 }
-enum class RegistryType { BLOCK_TRANSFER, KVCM_READ };
+enum class TransferRpcDispatchState { NOT_SUBMITTED, POSSIBLY_SUBMITTED, SUBMITTED };
 
-struct TransferCompletionKey {
-    RegistryType registry_type{RegistryType::BLOCK_TRANSFER};
-    std::string trace_id;
+// Preserve the existing execution identity and its namespace: ordinary transfer
+// uses a numeric trace, while KVCM READ uses the original string from its request.
+using TransferExecutionTrace = std::variant<uint64_t, std::string>;
 
-    TransferCompletionKey() = default;
-    TransferCompletionKey(uint64_t id):
-        registry_type(RegistryType::BLOCK_TRANSFER), trace_id(std::to_string(id)) {}
-    TransferCompletionKey(std::string id):
-        registry_type(RegistryType::KVCM_READ), trace_id(std::move(id)) {}
-    TransferCompletionKey(RegistryType type, std::string id):
-        registry_type(type), trace_id(std::move(id)) {}
+inline bool validTransferExecutionTrace(const TransferExecutionTrace& trace) noexcept {
+    if (const auto* numeric = std::get_if<uint64_t>(&trace)) {
+        return *numeric != 0;
+    }
+    const auto* remote = std::get_if<std::string>(&trace);
+    return remote && !remote->empty();
+}
 
-    bool numericId(uint64_t& id) const noexcept {
-        if (registry_type != RegistryType::BLOCK_TRANSFER || trace_id.empty())
-            return false;
-        const auto parsed = std::from_chars(trace_id.data(), trace_id.data() + trace_id.size(), id);
-        return parsed.ec == std::errc{} && parsed.ptr == trace_id.data() + trace_id.size()
-               && id != 0 && trace_id.front() != '0';
-    }
-    uint64_t numericId() const {
-        uint64_t id = 0;
-        if (!numericId(id))
-            throw std::invalid_argument("invalid numeric transfer registry key");
-        return id;
-    }
-    bool operator==(const TransferCompletionKey& other) const {
-        return registry_type == other.registry_type && trace_id == other.trace_id;
-    }
-    bool operator!=(const TransferCompletionKey& other) const { return !(*this == other); }
+// A snapshot of one participant in one actual execution. A missing status is
+// unknown, never an implicit successful RPC. Local executions have remote=false.
+struct TransferRankSnapshot {
+    size_t                   rank{0};
+    std::string              server_address;
+    bool                     remote{true};
+    TransferRpcDispatchState dispatch_state{TransferRpcDispatchState::NOT_SUBMITTED};
+    std::string              dispatch_error;
+    bool                     cq_received{false};
+    bool                     cq_ok{false};
+    std::optional<int>       grpc_code;
+    std::string              grpc_message;
+    bool                     response_received{false};
+    bool                     response_valid{false};
+    std::string              response_error;
+    std::optional<int64_t>   worker_error_code;
+    std::string              worker_error_message;
+    std::optional<CacheCopyError> worker_copy_error;
+    std::vector<CacheCopyError>   block_errors;
+    std::optional<bool>           buffer_safe;
+    std::optional<int>            worker_transfer_status;
+    std::optional<bool>           sdk_failed;
 };
 
-inline bool validTransferCompletionKey(RegistryType registry_type, const std::string& trace_id) noexcept {
-    if (registry_type == RegistryType::KVCM_READ)
-        return !trace_id.empty();
-    if (registry_type != RegistryType::BLOCK_TRANSFER || trace_id.empty() || trace_id.front() == '0')
-        return false;
-    uint64_t id = 0;
-    const auto parsed = std::from_chars(trace_id.data(), trace_id.data() + trace_id.size(), id);
-    return parsed.ec == std::errc{} && parsed.ptr == trace_id.data() + trace_id.size() && id != 0;
-}
-
-inline bool validTransferCompletionKey(const TransferCompletionKey& key) noexcept {
-    return validTransferCompletionKey(key.registry_type, key.trace_id);
-}
+struct TransferExecutionDiagnostics {
+    TransferExecutionTrace            trace_id{uint64_t{0}};
+    std::string                       failure_reason;
+    std::vector<TransferRankSnapshot> ranks;
+};
 
 // Results are ordered like the task's descriptors; NONE means the target copy completed,
 // and NOT_EXECUTED means no target was committed to the caller. The copy may
@@ -252,6 +248,10 @@ struct TransferResult {
     // False means unproven, not necessarily in-flight. Business success, error
     // codes and NOT_EXECUTED diagnostics never implicitly grant this proof.
     bool buffer_safe{false};
+    // Leaf execution diagnostics belong to this exact trace. The coordinator
+    // captures them before merging into a parent task; merge() never conflates
+    // snapshots belonging to different executions.
+    std::shared_ptr<const TransferExecutionDiagnostics> execution_diagnostics;
 };
 
 struct HostBufferView {
@@ -539,6 +539,24 @@ public:
         task.begin_ += begin;
         task.end_              = begin_ + end;
         task.completion_proof_ = std::move(proof);
+        return task;
+    }
+
+    // Construction gives each independently submitted RPC batch a new trace ID
+    // as its execution identity. Nested worker batches inherit that trace ID
+    // through subtask(), while the workflow links independent RPC batches.
+    TransferTask rpcSubtask(std::vector<TransferDescriptor> descriptors) const {
+        return subtask(std::move(descriptors)).rpcSubtask();
+    }
+
+    // Each independently submitted RPC has its own execution identity while
+    // retaining the descriptor range and the absolute deadline.
+    TransferTask rpcSubtask() const {
+        auto task = *this;
+        task.completion_proof_.reset();
+        task.trace_id_        = next_trace_id_.fetch_add(1, std::memory_order_relaxed);
+        task.workflow_id_     = workflow_id_;
+        task.parent_trace_id_ = trace_id_;
         return task;
     }
 

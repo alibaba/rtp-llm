@@ -1,4 +1,3 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 // Native SDK + file I/O + production queues/RPC/recovery, without loading a model.
 // Only metadata discovery is a fixture. Payload results and completion proofs
 // always come from the selected KVCM SDK, never from the test.
@@ -171,7 +170,7 @@ struct NativeWorker {
     std::shared_ptr<KVCacheManager> manager;
     ~NativeWorker() {
         if (manager)
-            manager->block_tree_cache_->stopBackgroundTasks();
+            manager->stopFrozenTaskRecovery();
         if (backend)
             backend->shutdown();
     }
@@ -212,13 +211,10 @@ struct NativeWorker {
         auto full = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{environment.device_pool}, nullptr, nullptr);
         full->initialize(0, environment.cache_config.topologyPtr(), {"default"});
         manager->block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest({full});
-        manager->block_tree_cache_->stopBackgroundTasks();
         manager->block_tree_cache_->storage_backend_ = backend;
-        manager->block_tree_cache_->reclaimer().configure(parallel.tp_rank,
-            config.block_tree_frozen_recovery_interval_ms, config.block_tree_frozen_recovery_query_timeout_ms,
-            config.block_tree_frozen_force_release_timeout_ms, std::move(broadcast));
-        manager->block_tree_cache_->reclaimer().completion_cleanup_ = std::make_shared<TransferCompletionCleanup>();
-        backend->setCompletionCleanup(manager->block_tree_cache_->reclaimer().completion_cleanup_);
+        manager->transfer_broadcast_manager_ = std::move(broadcast);
+        manager->completion_cleanup_ = std::make_shared<TransferCompletionCleanup>();
+        backend->setCompletionCleanup(manager->completion_cleanup_);
         return true;
     }
 
@@ -488,7 +484,7 @@ TEST_F(KVCMTimeoutRecoverySmokeTest, NaturalRpcDeadlineDuringNativeSdkIoAutomati
     ASSERT_EQ(targets0.get(), targets1.get());
     auto meta = worker0.matched(targets0.get());
     ASSERT_NE(meta, nullptr);
-    ASSERT_TRUE(worker0.manager->block_tree_cache_->reclaimer().start());
+    ASSERT_TRUE(worker0.manager->startFrozenTaskRecovery());
     bool exercised_inflight_timeout = false;
     size_t frozen_count = 0;
     for (int budget : {1, 2, 5, 10, 20, 50}) {
@@ -502,7 +498,7 @@ TEST_F(KVCMTimeoutRecoverySmokeTest, NaturalRpcDeadlineDuringNativeSdkIoAutomati
         RecordProperty("rpc_sdk_inflight", sdk_inflight ? 1 : 0);
         frozen_count += records.size();
         for (const auto& record : records) {
-            EXPECT_EQ(record->execution().participant_ranks.size(), 2u);
+            EXPECT_EQ(record->execution().expected_rank_count, 2u);
             EXPECT_GT(record->snapshot().target_block_count, 0u);
             ASSERT_TRUE(waitFor([&] { return record->snapshot().state == FrozenTask::State::RELEASED; }, 30s));
             const auto proof = record->recoverySnapshot().last_query;
@@ -546,7 +542,7 @@ TEST_F(KVCMTimeoutRecoverySmokeTest, NativeSdkDeadlineHonorsItsReportedBufferSaf
         ScopedReferencedBlocks targets(worker.environment.device_pool, kBatchBlocks);
         auto meta = worker.matched(targets.get());
         ASSERT_NE(meta, nullptr);
-        ASSERT_TRUE(worker.manager->block_tree_cache_->reclaimer().start());
+        ASSERT_TRUE(worker.manager->startFrozenTaskRecovery());
         const auto result = readResult(*worker.backend, worker.request(30s, targets.get()), meta);
         const auto code = static_cast<Code>(worker.observation->last_code.load());
         ASSERT_GT(worker.observation->started.load(), 0u);
