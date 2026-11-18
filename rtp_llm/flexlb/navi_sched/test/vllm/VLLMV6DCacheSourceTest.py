@@ -69,6 +69,9 @@ class VLLMV6DCacheSourceTest(unittest.TestCase):
         observer.on_v6d_cache_snapshots = MethodType(
             self.function("on_v6d_cache_snapshots"), observer
         )
+        observer._drain_v6d_cache_touches = MethodType(
+            self.function("_drain_v6d_cache_touches"), observer
+        )
         return observer
 
     @staticmethod
@@ -97,6 +100,7 @@ class VLLMV6DCacheSourceTest(unittest.TestCase):
         namespace = {"_WorkloadContribution": SimpleNamespace}
         exec(compile(ast.fix_missing_locations(module), str(SOURCE), "exec"), namespace)
         observer = namespace["Observer"]()
+        observer._pp_capacity_unified = False
         observer._predicted_cache_hit_for_request = lambda request: 48
         observer._forward_request_state = lambda request_id: SimpleNamespace(batch_id=77)
         cases = [
@@ -150,6 +154,7 @@ class VLLMV6DCacheSourceTest(unittest.TestCase):
         ]:
             with self.subTest(fields=fields):
                 observer = namespace["Observer"]()
+                observer._pp_capacity_unified = False
                 observer._predicted_cache_hit_for_request = lambda r: 48
                 observer._forward_request_state = lambda rid: SimpleNamespace(batch_id=77)
                 observer._workload_contributions = {}

@@ -27,6 +27,7 @@ MasterResponseToClientDataPtr MasterResponseToClientData::makeCopy() const
     output->latencyPrediction = latencyPrediction;
     output->latencyTrainingPhase = latencyTrainingPhase;
     output->target = target;
+    output->cacheTouchTargets = cacheTouchTargets;
     output->latencyModelGlobal = latencyModelGlobal;
     output->replay = replay;
     output->requestTiming = requestTiming;
@@ -38,6 +39,7 @@ MasterResponseToClientDataPtr MasterResponseToClientData::makeForwardResponse() 
 {
     auto output = makeCopy();
     output->target.agentAddress.clear();
+    output->cacheTouchTargets.clear();
     output->latencyModelGlobal = {};
     output->dispatchHandle = {};
     return output;
@@ -67,6 +69,7 @@ navi::SummaryErrorCode MasterResponseToClientData::getSummary(
         table, "latency_training_phase",
         static_cast<int32_t>(latencyTrainingPhase));
     TABLE_ADD_COLUMN_VALUE(table, "has_target", !target.address.empty());
+    TABLE_ADD_COLUMN_VALUE(table, "cache_touch_target_count", cacheTouchTargets.size());
     TABLE_ADD_COLUMN_VALUE(table, "latency_model_global_valid",
                            latencyModelGlobal.valid());
     TABLE_ADD_COLUMN_VALUE(table, "latency_model_global_epoch",
@@ -112,6 +115,7 @@ void MasterResponseToClientData::serialize(autil::DataBuffer &dataBuffer) const
         replay->serialize(dataBuffer);
     }
     dataBuffer.write(requestTiming);
+    dataBuffer.write(cacheTouchTargets);
 }
 
 void MasterResponseToClientData::deserialize(autil::DataBuffer &dataBuffer)
@@ -147,6 +151,7 @@ void MasterResponseToClientData::deserialize(autil::DataBuffer &dataBuffer)
         replay = std::move(output);
     }
     dataBuffer.read(requestTiming);
+    dataBuffer.read(cacheTouchTargets);
 }
 
 class MasterResponseToClientType : public navi::Type {

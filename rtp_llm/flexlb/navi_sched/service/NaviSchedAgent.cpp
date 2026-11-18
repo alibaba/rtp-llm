@@ -1629,6 +1629,11 @@ bool NaviSchedAgentImpl::failForwardResponse(uint64_t requestId,
     return _agentResponseR && _agentResponseR->fail(requestId, errorMessage);
 }
 
+void NaviSchedAgentImpl::setV6dCacheTouchHandler(const std::function<bool(uint64_t, const NaviSchedBlockHashes &)> &handler) const
+{
+    _agentRequestR->setV6dCacheTouchHandler(handler);
+}
+
 void NaviSchedAgentImpl::setForwardCancelHandler(
     const std::function<void(uint64_t)> &handler) const
 {
@@ -1973,6 +1978,7 @@ NaviSchedBatchFinishReporterPtr NaviSchedAgentImpl::makeBatchFinishReporter(
 void NaviSchedAgentImpl::stop()
 {
     stopSnapshot();
+    setV6dCacheTouchHandler({});
     setForwardBatchHandler({});
     _agentResponseR->finishAll("agent stopped");
     _agentRequestR->finish();
@@ -2860,6 +2866,13 @@ bool NaviSchedAgent::failForwardResponse(uint64_t requestId,
 bool NaviSchedAgent::recordAbortEvent(const std::string &stage, uint64_t count) const
 {
     return _impl && _impl->recordAbortEvent(stage, count);
+}
+
+void NaviSchedAgent::setV6dCacheTouchHandler(const std::function<bool(uint64_t, const NaviSchedBlockHashes &)> &handler)
+{
+    if (_impl) {
+        _impl->setV6dCacheTouchHandler(handler);
+    }
 }
 
 void NaviSchedAgent::setForwardCancelHandler(const std::function<void(uint64_t)> &handler)

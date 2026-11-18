@@ -102,6 +102,7 @@ public:
     bool failForwardResponse(uint64_t requestId, const std::string &errorMessage);
     void setForwardCancelHandler(const std::function<void(uint64_t)> &handler);
     bool recordAbortEvent(const std::string &stage, uint64_t count) const;
+    void setV6dCacheTouchHandler(const std::function<bool(uint64_t, const NaviSchedBlockHashes &)> &handler);
     bool enableObservedExecutionWindowTraining() const;
     bool recordObservedExecutionSample(const std::vector<NaviSchedRequestStats> &requests,
                                        double latencyMs, int64_t executionStepCount,

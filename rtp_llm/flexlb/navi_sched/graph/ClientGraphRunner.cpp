@@ -125,7 +125,8 @@ std::unique_ptr<navi::GraphDef> ClientGraphRunner::buildScheduleGraph(
     clientGraphId = builder.newSubGraph(clientBizName);
     builder.subGraph(clientGraphId).location(clientBizName, 1, 0).inlineMode(true);
     auto forwardNode = builder.node(clientGraphId, "navi_sched_forward")
-                           .kernel("navi_sched.client_forward_k");
+                           .kernel("navi_sched.client_forward_k")
+                           .attr("client_biz_name", clientBizName);
     auto responseNode = builder.node(clientGraphId, "navi_sched_response")
                             .kernel("navi_sched.client_response_k");
     scheduleNode.jsonAttrs("{\"fused_dispatch_guard\":true}")

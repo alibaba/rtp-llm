@@ -39,6 +39,7 @@ public:
     NaviSchedLatencyTrainingPhase latencyTrainingPhase =
         NaviSchedLatencyTrainingPhase::NORMAL;
     NaviSchedTarget target;
+    std::vector<NaviSchedTarget> cacheTouchTargets;
     LatencyModelGlobalData latencyModelGlobal;
     NaviSchedScheduleReplayPtr replay;
     NaviSchedRequestTimingPtr requestTiming;
