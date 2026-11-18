@@ -255,9 +255,7 @@ class MagaServerManager(object):
 
         if server_process is not None and server_process.pid is not None:
             try:
-                # REBASE CONFLICT CONTEXT(cdc1b18b6): keep the new base's
-                # state-lock guarded server_process snapshot and source branch's
-                # staged parent-then-children shutdown.
+
                 # 如果只kill start_server，会残留 backend/frontend 占用显存。
                 # 部署时容器整体会回收，但测试时需要自己递归 kill
                 # 不适用 setsid/killpg 是因为 setsid 可能会在 test 父进程意外退出的情况遗留 start_server 占用测试资源

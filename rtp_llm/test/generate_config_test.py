@@ -376,6 +376,12 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(generate_config.in_think_mode, True)
         self.assertEqual(generate_config.end_think_token_ids, [151649, 271])
 
+    def test_min_new_tokens_preserves_base_scalar_and_list_support(self):
+        self.assertEqual(GenerateConfig(min_new_tokens=3).min_new_tokens, 3)
+        self.assertEqual(GenerateConfig(min_new_tokens=[1, 2]).min_new_tokens, [1, 2])
+        with self.assertRaisesRegex(ValueError, "min_new_tokens"):
+            GenerateConfig(max_new_tokens=0, min_new_tokens=[0, 1])
+
 
 class OpenaiGenerateConfigTest(TestCase):
     def __init__(self, *args: Any, **kwargs: Any):

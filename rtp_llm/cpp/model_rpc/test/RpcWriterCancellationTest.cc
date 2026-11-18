@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <stdexcept>
 
+#include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
 
@@ -84,6 +86,51 @@ public:
     int writes_done_calls = 0;
     int finish_calls      = 0;
 };
+
+TEST(RpcWriterCancellationTest, InvalidInputsReturnStructuredErrorsWithoutAnEngine) {
+    LocalRpcServer   local;
+    PrefillRpcServer prefill;
+    for (const bool use_prefill : {false, true}) {
+        for (const int tokens : {-1, 0, 1}) {
+            SCOPED_TRACE(use_prefill);
+            SCOPED_TRACE(tokens);
+            GenerateInputPB request;
+            request.set_request_id(40);
+            request.add_token_ids(1);
+            auto* config = request.mutable_generate_config();
+            config->set_max_new_tokens(tokens);
+            config->set_prefill_only(tokens == 1);
+            config->set_can_use_pd_separation(true);
+            const auto status = use_prefill ? prefill.GenerateStreamCall(nullptr, &request, nullptr) :
+                                              local.GenerateStreamCall(nullptr, &request, nullptr);
+            EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+            ErrorDetailsPB details;
+            ASSERT_TRUE(details.ParseFromString(status.error_details()));
+            EXPECT_EQ(details.error_code(), static_cast<int>(ErrorCode::INVALID_PARAMS));
+            EXPECT_NE(details.error_message().find(tokens == 0 ? "writer" : "max_new_tokens"), std::string::npos);
+        }
+        const auto status = use_prefill ? prefill.GenerateStreamCall(nullptr, nullptr, nullptr) :
+                                          local.GenerateStreamCall(nullptr, nullptr, nullptr);
+        EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    }
+    EXPECT_EQ(local.onflightRequestNum(), 0u);
+    EXPECT_EQ(prefill.onflightRequestNum(), 0u);
+}
+
+TEST(RpcWriterCancellationTest, DecodeRejectsPrefillBeforeAllocatingResources) {
+    DecodeRpcServer              server;
+    DecodeRpcContext             rpc_context{nullptr};
+    kmonitor::MetricsReporterPtr metrics_reporter;
+    auto                         meta = std::make_shared<RpcServerRuntimeMeta>();
+    for (const bool explicit_prefill : {false, true}) {
+        DecodeGenerateContext context(rpc_context, 0, nullptr, metrics_reporter, meta);
+        auto*                 request = context.allocate_request.mutable_input();
+        request->add_token_ids(1);
+        request->mutable_generate_config()->set_prefill_only(explicit_prefill);
+        EXPECT_THROW(server.allocateResource(context), std::invalid_argument);
+        EXPECT_EQ(context.getStream(), nullptr);
+    }
+}
 
 TEST(RpcWriterCancellationTest, LocalWriteFailureCancelsStreamAndReturnsCancelled) {
     LocalRpcServer                  server;

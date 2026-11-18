@@ -6,6 +6,7 @@
 #include <torch/extension.h>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
@@ -368,10 +369,15 @@ struct PyModelInputs {
     torch::Tensor       input_hiddens;
     PyAttentionInputs   attention_inputs;
     BertEmbeddingInputs bert_embedding_inputs;
+    // Admission-approved homogeneous-batch signal, synchronized across ranks.
+    bool capture_hidden_states = false;
 };
 
 struct PyModelOutputs {
+    // Canonical final hidden states, independent of the optional training payload.
     torch::Tensor          hidden_states;
+    std::optional<torch::Tensor> captured_hidden_states;
+    std::optional<std::string>   capture_error;
     rtp_llm::ParamsBasePtr params_ptr{nullptr};
     py::object             py_attn_params{py::none()};
 

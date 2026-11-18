@@ -1,3 +1,13 @@
+py_test(
+    name = "backend_shutdown_rendezvous_test",
+    srcs = ["backend_shutdown_rendezvous_test.py"],
+    deps = [
+        "//rtp_llm:testlib",
+        "//rtp_llm/distribute:distribute",
+    ],
+    timeout = "short",
+)
+
 filegroup(
     name = "testdata",
     srcs = glob([

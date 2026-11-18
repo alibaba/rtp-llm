@@ -106,7 +106,8 @@ void NormalCacheStore::store(const std::shared_ptr<RequestBlockBuffer>& request_
                              CacheStoreStoreDoneCallback                callback) {
     if (request_block_buffer == nullptr || !request_block_buffer->isValid()) {
         RTP_LLM_LOG_WARNING("normal cache store call store failed, request block is invalid");
-        callback(false, CacheStoreErrorCode::InvalidParams);
+        // Block descriptors are built by the engine, not supplied by the inference caller.
+        callback(false, CacheStoreErrorCode::StoreFailed);
         return;
     }
 
@@ -170,13 +171,15 @@ void NormalCacheStore::load(const std::shared_ptr<RequestBlockBuffer>& request_b
                             int                                        partition_id) {
     if (request_block_buffer == nullptr || !request_block_buffer->isValid() || ip.empty()) {
         RTP_LLM_LOG_WARNING("normal cache store run load failed, invalid params");
-        callback(false, CacheStoreErrorCode::InvalidParams);
+        // Invalid engine buffers/peer metadata are internal cache-load failures,
+        // not request validation errors (INVALID_PARAMS is exposed as HTTP 400).
+        callback(false, CacheStoreErrorCode::LoadErrorUnknown);
         return;
     }
 
     if (port == 0 || (memory_util_->isRdmaMode() && rdma_port == 0)) {
         RTP_LLM_LOG_WARNING("normal cache store run load failed, port is 0");
-        callback(false, CacheStoreErrorCode::InvalidParams);
+        callback(false, CacheStoreErrorCode::LoadErrorUnknown);
         return;
     }
 

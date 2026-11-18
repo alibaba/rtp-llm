@@ -3,7 +3,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <stdexcept>
 #include <unordered_set>
+#include <vector>
+#include <c10/core/InferenceMode.h>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -21,6 +24,41 @@ using namespace std;
 namespace rtp_llm {
 
 namespace {
+
+constexpr int64_t kBatchOutputPollIntervalMs = 500;
+
+class BatchStreamCleanupGuard {
+public:
+    explicit BatchStreamCleanupGuard(std::vector<GenerateStreamPtr>& streams): streams_(streams) {}
+
+    ~BatchStreamCleanupGuard() {
+        for (size_t i = handled_; i < streams_.size(); ++i) {
+            const auto& stream = streams_[i];
+            if (!stream) {
+                continue;
+            }
+            try {
+                if (stream->getStatus() != StreamState::FINISHED && !stream->hasError()
+                    && !stream->hasEvent(StreamEvents::GenerateDone)
+                    && !stream->hasEvent(StreamEvents::NeedRemoteGenerate)) {
+                    stream->reportError(ErrorCode::CANCELLED, "batch call exited before all streams finished");
+                }
+            } catch (const std::exception& error) {
+                RTP_LLM_LOG_ERROR("failed to cancel batch stream [%ld]: %s", stream->streamId(), error.what());
+            } catch (...) {
+                RTP_LLM_LOG_ERROR("failed to cancel batch stream [%ld]", stream->streamId());
+            }
+        }
+    }
+
+    void markHandled(size_t index) noexcept {
+        handled_ = index + 1;
+    }
+
+private:
+    std::vector<GenerateStreamPtr>& streams_;
+    size_t                          handled_ = 0;
+};
 
 std::string formatRequestLogTag(const std::string& request_key, const RequestInfo& request_info) {
     std::string tag = "request [" + request_key + "]";
@@ -144,8 +182,6 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                                               WriterInterface*                 writer,
                                               std::shared_ptr<GenerateStream>& stream) {
     RTP_LLM_PROFILE_FUNCTION();
-    // 需要检查 !hasError(): 之前 finished() 表示完成且无错，现在 FINISHED 状态可能包含错误
-    // 如果流有错误，应该停止消费输出
     while (stream->isActive() || stream->hasOutput()) {
         const auto result = stream->nextOutput();
         if (!result.ok()) {
@@ -178,6 +214,11 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
             break;
         }
     }
+    // Check after draining: pending business/metric frames retain nextOutput()'s ordering.
+    const auto terminal_status = stream->statusInfo();
+    if (!terminal_status.ok()) {
+        return serializeErrorMsg(request_key, stream->generateInput()->request_info, terminal_status);
+    }
     RTP_LLM_LOG_DEBUG("request [%s] local generate done", request_key.c_str());
 
     return grpc::Status::OK;
@@ -188,43 +229,211 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
                                                 grpc::ServerWriter<GenerateOutputsPB>* writer) {
     RTP_LLM_PROFILE_SCOPE("rpc.generate_stream_call");
     AtomicGuard request_guard(onflight_requests_);
+    if (request == nullptr) {
+        return serializeErrorMsg("unknown", ErrorInfo(ErrorCode::INVALID_PARAMS, "generate request must not be null"));
+    }
     auto        request_id = request->request_id();
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
-    auto input                    = QueryConverter::transQuery(request);
-    generate_context.request_info = input->request_info;
-    if (applyTimelineGate(generate_context.request_key,
-                          input->generate_config->gen_timeline,
-                          input->generate_config->profile_step,
-                          input->generate_config->profile_trace_name)) {
-        input->generate_config->gen_timeline = true;
-    }
+    try {
+        generate_context.request_info = QueryConverter::transRequestInfo(request->request_info());
+        auto input                    = QueryConverter::transQuery(request);
+        generate_context.request_info = input->request_info;
+        if (writer == nullptr) {
+            throw std::invalid_argument("generate response writer must not be null");
+        }
+        if (!engine_) {
+            throw std::runtime_error("LocalRpcServer engine is not initialized");
+        }
+        if (applyTimelineGate(generate_context.request_key,
+                              input->generate_config->gen_timeline,
+                              input->generate_config->profile_step,
+                              input->generate_config->profile_trace_name)) {
+            input->generate_config->gen_timeline = true;
+        }
 
-    // need to check client has buffer at first
-    if (mm_processor_ != nullptr && input->multimodal_inputs) {
-        RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
-        auto mm_res = mm_processor_->updateMultimodalFeatures(input);
-        if (!mm_res.ok()) {
-            generate_context.error_info = mm_res;
-            generate_context.error_status =
-                serializeErrorMsg(generate_context.request_key, generate_context.request_info, mm_res);
+        // need to check client has buffer at first
+        if (mm_processor_ != nullptr && input->multimodal_inputs) {
+            RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
+            auto mm_res = mm_processor_->updateMultimodalFeatures(input);
+            if (!mm_res.ok()) {
+                generate_context.error_info = mm_res;
+                generate_context.error_status =
+                    serializeErrorMsg(generate_context.request_key, generate_context.request_info, mm_res);
+            }
+        }
+        CHECK_ERROR_STATUS(generate_context);
+
+        RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
+        {
+            RTP_LLM_PROFILE_SCOPE("rpc.enqueue_engine");
+            generate_context.setStream(engine_->enqueue(input));
+        }
+
+        RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", request_id);
+        generate_context.error_status =
+            pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream());
+        meta_->dequeue(generate_context.request_id, generate_context.getStream());
+        return generate_context.error_status;
+    } catch (const std::invalid_argument& e) {
+        generate_context.error_info = ErrorInfo(ErrorCode::INVALID_PARAMS, e.what());
+    } catch (const std::exception& e) {
+        generate_context.error_info = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                                                "GenerateStreamCall failed with exception: " + std::string(e.what()));
+    } catch (...) {
+        generate_context.error_info =
+            ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "GenerateStreamCall failed with unknown exception");
+    }
+    // Set the context before destruction so failures retain request metrics and stream cleanup.
+    generate_context.error_status =
+        serializeErrorMsg(generate_context.request_key, generate_context.request_info, generate_context.error_info);
+    return generate_context.error_status;
+}
+
+ErrorInfo LocalRpcServer::prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output) {
+    output.reset();
+    try {
+        output = QueryConverter::transQuery(&input_pb);
+        if (mm_processor_ && output->multimodal_inputs) {
+            RTP_LLM_PROFILE_SCOPE("rpc.mm_update_features");
+            return mm_processor_->updateMultimodalFeatures(output);
+        }
+    } catch (const std::invalid_argument& error) {
+        return ErrorInfo(ErrorCode::INVALID_PARAMS, error.what());
+    } catch (const std::exception& error) {
+        return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what());
+    } catch (...) {
+        return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "input preparation failed with an unknown exception");
+    }
+    return ErrorInfo::OkStatus();
+}
+
+ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*     context,
+                                              const GenerateStreamPtr& stream,
+                                              GenerateOutputs&         last_outputs) {
+    while (true) {
+        if (context && context->IsCancelled()) {
+            stream->reportError(ErrorCode::CANCELLED, "request cancelled by client");
+            return ErrorInfo(ErrorCode::CANCELLED, "request cancelled by client");
+        }
+        const auto result = stream->nextOutputForRpc(kBatchOutputPollIntervalMs);
+        if (context && context->IsCancelled()) {
+            stream->reportError(ErrorCode::CANCELLED, "request cancelled by client");
+            return ErrorInfo(ErrorCode::CANCELLED, "request cancelled by client");
+        }
+        if (!result.ok()) {
+            if (result.status().code() == ErrorCode::OUTPUT_QUEUE_IS_EMPTY) {
+                // A terminal error may race the idle return; never reinterpret
+                // that error (including a real queue-empty failure) as a retry.
+                const auto status = stream->statusInfo();
+                if (!status.ok()) {
+                    return status;
+                }
+                continue;
+            }
+            return result.status().code() == ErrorCode::FINISHED ? ErrorInfo::OkStatus() : result.status();
+        }
+        // Frontend-metric frames may follow the terminal business output.
+        if (!result.value().frontend_metric_only && !result.value().generate_outputs.empty()) {
+            last_outputs = result.value();
         }
     }
-    CHECK_ERROR_STATUS(generate_context);
+}
 
-    RTP_LLM_LOG_DEBUG("request [%ld] trans to stream success", request_id);
-    {
-        RTP_LLM_PROFILE_SCOPE("rpc.enqueue_engine");
-        generate_context.setStream(engine_->enqueue(input));
+grpc::Status LocalRpcServer::BatchGenerateCall(grpc::ServerContext*        context,
+                                               const BatchGenerateInputPB* request,
+                                               BatchGenerateOutputsPB*     response) {
+    RTP_LLM_PROFILE_SCOPE("rpc.batch_generate_call");
+    c10::InferenceMode inference_guard(true);
+    AtomicGuard        request_guard(onflight_requests_);
+    if (!request || !response) {
+        return serializeErrorMsg(
+            "unknown", ErrorInfo(ErrorCode::INVALID_PARAMS, "batch generate request and response must not be null"));
     }
-
-    RTP_LLM_LOG_DEBUG("request [%ld] enqueue success", request_id);
-
-    generate_context.error_status =
-        pollStreamOutput(context, generate_context.request_key, writer, generate_context.getStream());
-    meta_->dequeue(generate_context.request_id, generate_context.getStream());
-    return generate_context.error_status;
+    response->clear_results();
+    const int batch_size = request->inputs_size();
+    if (batch_size == 0) {
+        return grpc::Status::OK;
+    }
+    std::vector<GenerateStreamPtr> streams;
+    BatchStreamCleanupGuard        cleanup(streams);
+    const auto set_error = [](BatchGenerateResultPB* result, ErrorCode code, const std::string& message) {
+        result->mutable_error_info()->set_error_code(transErrorCodeToRPC(code));
+        result->mutable_error_info()->set_error_message(message);
+        result->mutable_error_details()->set_error_code(static_cast<int64_t>(code));
+        result->mutable_error_details()->set_error_message(message);
+    };
+    const auto                     fail_batch = [&](ErrorCode code, const std::string& message) {
+        response->clear_results();
+        for (int i = 0; i < batch_size; ++i) {
+            set_error(response->add_results(), code, message);
+        }
+    };
+    try {
+        std::vector<std::shared_ptr<GenerateInput>> inputs;
+        inputs.reserve(batch_size);
+        for (int i = 0; i < batch_size; ++i) {
+            std::shared_ptr<GenerateInput> input;
+            const auto                     error = prepareInput(request->inputs(i), input);
+            if (!error.ok()) {
+                for (int j = 0; j < batch_size; ++j) {
+                    set_error(response->add_results(),
+                              error.code(),
+                              j == i ? error.ToString() :
+                                       "batch aborted due to input preparation failure at index " + std::to_string(i));
+                }
+                return grpc::Status::OK;
+            }
+            // Unary batch retains only the terminal business output. Normalize
+            // the owned config even for direct RPC callers requesting deltas.
+            input->generate_config->is_streaming = false;
+            inputs.push_back(std::move(input));
+        }
+        if (!engine_) {
+            fail_batch(ErrorCode::EXECUTION_EXCEPTION, "LocalRpcServer engine is not initialized");
+            return grpc::Status::OK;
+        }
+        auto        enqueue_result = engine_->enqueueMultiple(inputs);
+        const auto& accepted       = enqueue_result.first;
+        streams                    = std::move(enqueue_result.second);
+        if (accepted.size() != inputs.size() || streams.size() != inputs.size()) {
+            throw std::runtime_error("enqueueMultiple result size mismatch");
+        }
+        for (int i = 0; i < batch_size; ++i) {
+            if (!streams[i]) {
+                throw std::runtime_error("enqueueMultiple returned a null stream at index " + std::to_string(i));
+            }
+            auto* result = response->add_results();
+            if (!accepted[i]) {
+                const auto error = streams[i]->hasError() ?
+                                       streams[i]->statusInfo() :
+                                       ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
+                                                 "enqueueMultiple rejected input at index " + std::to_string(i));
+                set_error(result, error.code(), error.ToString());
+                cleanup.markHandled(i);
+                continue;
+            }
+            GenerateOutputs last_outputs{};
+            const auto      error = collectStreamOutput(context, streams[i], last_outputs);
+            cleanup.markHandled(i);
+            if (!error.ok()) {
+                set_error(result, error.code(), error.ToString());
+            } else {
+                QueryConverter::transResponse(result->mutable_final_output(),
+                                              &last_outputs,
+                                              inputs[i]->generate_config->aux_info,
+                                              maga_init_params_.misc_config.aux_string,
+                                              streams[i]->specialTokens().eos_token_id);
+            }
+        }
+    } catch (const std::exception& error) {
+        fail_batch(ErrorCode::EXECUTION_EXCEPTION,
+                   "BatchGenerateCall failed with exception: " + std::string(error.what()));
+    } catch (...) {
+        fail_batch(ErrorCode::EXECUTION_EXCEPTION, "BatchGenerateCall failed with unknown exception");
+    }
+    return grpc::Status::OK;
 }
 
 bool LocalRpcServer::applyTimelineGate(const std::string& request_key,
@@ -422,7 +631,22 @@ grpc::Status LocalRpcServer::UpdateSchedulerInfo(grpc::ServerContext*           
                                                  const UpdateSchedulerInfoRequestPB* request,
                                                  EmptyPB*                            response) {
     const std::string scheduler_info = request->scheduler_info();
-    engine_->getScheduler().updateSchedulerInfo(scheduler_info);
+    // Translate argument/JSON errors only; resource and internal failures must propagate.
+    try {
+        engine_->getScheduler().updateSchedulerInfo(scheduler_info);
+    } catch (const std::invalid_argument& error) {
+        return serializeErrorMsg("UpdateSchedulerInfo", ErrorInfo(ErrorCode::INVALID_PARAMS, error.what()));
+    } catch (const autil::legacy::ParameterInvalidException& error) {
+        return serializeErrorMsg("UpdateSchedulerInfo", ErrorInfo(ErrorCode::INVALID_PARAMS, error.what()));
+    } catch (const autil::legacy::BadAnyCast& error) {
+        return serializeErrorMsg("UpdateSchedulerInfo", ErrorInfo(ErrorCode::INVALID_PARAMS, error.what()));
+    } catch (const autil::legacy::NotJsonizableException& error) {
+        return serializeErrorMsg("UpdateSchedulerInfo", ErrorInfo(ErrorCode::INVALID_PARAMS, error.what()));
+    } catch (const autil::legacy::TypeNotMatchException& error) {
+        return serializeErrorMsg("UpdateSchedulerInfo", ErrorInfo(ErrorCode::INVALID_PARAMS, error.what()));
+    } catch (const autil::legacy::WrongFormatJsonException& error) {
+        return serializeErrorMsg("UpdateSchedulerInfo", ErrorInfo(ErrorCode::INVALID_PARAMS, error.what()));
+    }
     return grpc::Status::OK;
 }
 

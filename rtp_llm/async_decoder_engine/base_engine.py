@@ -27,7 +27,7 @@ class BaseEngine:
         """Stop engine work while keeping process-wide resources alive."""
 
     def completed_steps(self) -> int:
-        """Return a conservative completed-step snapshot for shutdown coordination."""
+        """Return an MTP step snapshot, -1 if unsupported, or -2 for terminal stop."""
         return -1
 
     def arm_stop(self, target_step: int) -> None:

@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/observability/ExecutionRecorder.h"
 #include <algorithm>
 #include <charconv>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdlib>
@@ -59,6 +60,33 @@ std::optional<int64_t> hackMaxNewTokens() {
 
 }  // namespace
 
+bool GenerateStream::requiresFullContextForHiddenStateCapture() const {
+    const auto  role   = stream_cache_resource_->resourceContext().role_type;
+    const auto& config = *generateConfig();
+    return (role == RoleType::PREFILL || role == RoleType::PDFUSION)
+           && (config.isPrefillOnly() || (config.capture_hidden_states && !stream_cache_resource_->reuseCache()));
+}
+
+bool GenerateStream::isHiddenStateCaptureCandidate() const {
+    return requiresFullContextForHiddenStateCapture() && !hasError() && !isFakeStream() && !generate_input_->fake_query
+           && isContextStream() && !hasNumBeams() && maxBatchSize() == 1 && currentBatchSize() == 1 && iterCount() == 0
+           && inputLength() > 0 && seqLength() == inputLength() && reuseLength() == 0;
+}
+
+bool GenerateStream::hasHiddenStateCaptureReservation() const {
+    return hidden_state_capture_reservation_ && hidden_state_capture_reservation_->active();
+}
+
+void GenerateStream::setHiddenStateCaptureReservation(HiddenStateCaptureReservationPtr reservation) {
+    hidden_state_capture_reservation_ = std::move(reservation);
+}
+
+void GenerateStream::cancelHiddenStateCapture() const {
+    if (hidden_state_capture_reservation_) {
+        hidden_state_capture_reservation_->cancel();
+    }
+}
+
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                const ModelConfig&               model_config,
                                const RuntimeConfig&             runtime_config,
@@ -82,6 +110,7 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
     dtype_(model_config.data_type),
     hidden_size_(model_config.hidden_size) {
     RTP_LLM_PROFILE_FUNCTION();
+    generate_input_->generate_config->validatePrefillOnly();
     if (!updatePrefix(resource_context.system_prompt)) {
         return;
     }
@@ -139,6 +168,15 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                      runtime_config.fifo_scheduler_config.max_batch_tokens_size);
     if (!input->fake_query && chunk_size > 0
         && (resource_context.role_type == RoleType::PREFILL || resource_context.role_type == RoleType::PDFUSION)) {
+        // The capture reservation covers the full prompt, whereas a chunk publishes only its
+        // window. Reject this combination just like the other full-context output modes below;
+        // disabling chunking here alone would let the FIFO chunk scheduler split it again.
+        if (requiresFullContextForHiddenStateCapture()) {
+            reportEvent(StreamEvents::Error,
+                        ErrorCode::INVALID_PARAMS,
+                        "chunked prefill incompatible: full-context hidden-state capture");
+            return;
+        }
         const auto& config = *generateConfig();
         const char* reason = isGroup()                       ? "force_batch" :
                              hasNumBeams()                   ? "num_beams" :
@@ -282,6 +320,7 @@ void GenerateStream::releaseResource() {
     // Earlier release could let a worker write into blocks owned by another stream.
     for (;;) {
         waitPendingAsyncBookkeeping();
+        cancelHiddenStateCapture();
         std::lock_guard<std::mutex> lock(*mutex_);
         // A forward may acquire a claim after the count reached zero but before
         // this lock was taken. Never wait while holding the stream update lock.
@@ -879,8 +918,47 @@ int64_t GenerateStream::contextExecuteTimeWithCacheUs() const {
     return context_execute_time_with_cache_us_;
 }
 
+ErrorResult<GenerateOutputs> GenerateStream::nextOutputForRpc(int64_t wait_timeout_ms) {
+    RTP_LLM_CHECK_WITH_INFO(wait_timeout_ms >= 0, "RPC output wait interval must be non-negative");
+    std::unique_lock<std::mutex> lock(*mutex_);
+    const auto                   ready = [this] { return hasError() || isFinished() || hasOutput(); };
+    if (!ready()) {
+        const auto now                = std::chrono::steady_clock::now();
+        const auto request_timeout_ms = getTimeoutMs();
+        auto       request_deadline   = std::chrono::steady_clock::time_point::max();
+        if (request_timeout_ms > 0) {
+            const auto elapsed_us   = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+            const auto remaining_us = std::max<int64_t>(request_timeout_ms * 1000 - elapsed_us, 0);
+            request_deadline        = now + std::chrono::microseconds(remaining_us);
+        }
+        const auto wait_deadline = wait_timeout_ms > 0 ?
+                                       std::min(request_deadline, now + std::chrono::milliseconds(wait_timeout_ms)) :
+                                       request_deadline;
+        if (wait_deadline == std::chrono::steady_clock::time_point::max()) {
+            cv_->wait(lock, ready);
+        } else if (!cv_->wait_until(lock, wait_deadline, ready)) {
+            if (request_timeout_ms <= 0 || std::chrono::steady_clock::now() < request_deadline) {
+                return {ErrorCode::OUTPUT_QUEUE_IS_EMPTY, "RPC output poll interval elapsed"};
+            }
+            reportEventWithoutLock(
+                StreamEvents::Error, ErrorCode::GENERATE_TIMEOUT, "request timed out while waiting for RPC output");
+        }
+    }
+    // Only this consumer removes output. Producers cannot turn a ready queue
+    // back into an empty, active stream; terminal state is likewise monotonic.
+    // Keep GLM's metric-frame/error precedence and legacy nextOutput unchanged.
+    lock.unlock();
+    return nextOutput();
+}
+
 int64_t GenerateStream::getTimeoutMs() const {
     return generate_input_->generate_config->timeout_ms;
+}
+
+bool GenerateStream::checkTimeoutAndHasError() {
+    checkTimeout();
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return hasError();
 }
 
 void GenerateStream::checkTimeout() {
@@ -902,6 +980,7 @@ void GenerateStream::reportEvent(StreamEvents::EventType event, ErrorCode error_
         recordCanRunTime();
     }
     generate_status_->reportEvent(event, error_code, error_msg);
+    cv_->notify_all();
 }
 
 // 无锁版本，供已持有 mutex_ 的内部调用路径使用（如 update/specUpdate/moveToNext 链路）。
@@ -912,11 +991,13 @@ void GenerateStream::reportEventWithoutLock(StreamEvents::EventType event,
         recordCanRunTime();
     }
     generate_status_->reportEvent(event, error_code, error_msg);
+    cv_->notify_all();
 }
 
 void GenerateStream::reportError(ErrorCode error_code, const std::string& error_msg) {
     std::lock_guard<std::mutex> lock(*mutex_);
     generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
+    cv_->notify_all();
 }
 
 bool GenerateStream::hasEvent(StreamEvents::EventType event) const {
@@ -950,9 +1031,9 @@ StreamState GenerateStream::moveToNext() {
     }
     StreamState                 state = generate_status_->moveToNext();
 
-    // notify one thread waiting for stream completion
+    // RPC output and remote-generation waiters share this condition variable.
     if (getStatus() == StreamState::FINISHED) {
-        cv_->notify_one();
+        cv_->notify_all();
     }
     return state;
 }
@@ -1109,6 +1190,9 @@ size_t GenerateStream::maxTokenNum() const {
 }
 
 bool GenerateStream::needFinish(int num_new_tokens) {
+    if (generateConfig()->isPrefillOnly() && num_new_tokens == 0) {
+        return true;
+    }
     return needFinishBySPTokens(num_new_tokens) || seqLength() >= maxTokenNum();
 }
 
@@ -1362,6 +1446,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                   top_logprobs,
                   old_seq_length,
                   logprobs_offset});
+    cv_->notify_all();
 
     // needFinish(), called by updateOutput(), can trim a speculative packet at
     // EOS/stop words. Advance the cached phase only from tokens that survived
@@ -1400,21 +1485,32 @@ void GenerateStream::update(const StreamUpdateInfo& update_info, RecordedTokenTi
     auto        num_new_tokens = update_info.num_new_tokens;
 
     const int old_seq_length = seqLength();
-    int       error_token_id = 0;
-    if (!complete_token_ids_->update(new_tokens,
-                                     begin_time_us_,
-                                     num_new_tokens,
-                                     generate_input_->inputLength(),
-                                     maxTokenNum(),
-                                     vocab_size_,
-                                     hasNumBeams(),
-                                     streamId(),
-                                     error_token_id)) {
-        reportEventWithoutLock(StreamEvents::Error,
-                               ErrorCode::OUT_OF_VOCAB_RANGE,
-                               "output token id:" + std::to_string(error_token_id)
-                                   + " out of vocab size: " + std::to_string(vocab_size_));
+    const bool prefill_only_update = num_new_tokens == 0 && generateConfig()->isPrefillOnly();
+    if (prefill_only_update && generate_status_->hasEvent(StreamEvents::GenerateDone)
+        && !update_info.force_update_info) {
         return;
+    }
+    if (prefill_only_update) {
+        RTP_LLM_CHECK(new_tokens.dim() == 2);
+        RTP_LLM_CHECK(new_tokens.size(0) == currentBatchSize());
+        RTP_LLM_CHECK(new_tokens.size(1) == 0);
+    } else {
+        int error_token_id = 0;
+        if (!complete_token_ids_->update(new_tokens,
+                                         begin_time_us_,
+                                         num_new_tokens,
+                                         generate_input_->inputLength(),
+                                         maxTokenNum(),
+                                         vocab_size_,
+                                         hasNumBeams(),
+                                         streamId(),
+                                         error_token_id)) {
+            reportEventWithoutLock(StreamEvents::Error,
+                                   ErrorCode::OUT_OF_VOCAB_RANGE,
+                                   "output token id:" + std::to_string(error_token_id)
+                                       + " out of vocab size: " + std::to_string(vocab_size_));
+            return;
+        }
     }
 
     resizeSubGenerateStatus(update_info.new_tokens.size(0));
@@ -1440,6 +1536,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info, RecordedTokenTi
                   update_info.top_logprobs,
                   old_seq_length,
                   update_info.logprobs_offset});
+    cv_->notify_all();
 
     // Freeze request-level TTFT after output trimming, under the same stream
     // lock. Non-final prefill chunks / failed updates do not invent a TTFT.
@@ -1847,6 +1944,8 @@ StreamCacheResource& GenerateStream::streamCacheResource() {
 
 void GenerateStream::CopyOnWrite(const GenerateStream& other_stream, bool copy_loss, bool share) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("GenerateStream::CopyOnWrite(copy_loss=%d, share=%d)", copy_loss, share);
+    // Draft/score stream copies do not own the target request's reservation.
+    hidden_state_capture_reservation_.reset();
     complete_token_ids_ = make_shared<CompleteTokenIds>(*other_stream.complete_token_ids_, share);
     grpc_normal_device_state_pending_ =
         std::make_shared<std::atomic<bool>>(other_stream.hasGrpcNormalDeviceStatePending());

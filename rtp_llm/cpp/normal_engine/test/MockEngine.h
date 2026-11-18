@@ -29,6 +29,9 @@ public:
 
     GptModelOutputs forward(const GptModelInputs& inputs) override {
         GptModelOutputs outputs;
+        if (inputs.skip_lm_head) {
+            return outputs;
+        }
         // lm_output_indexes tells us how many logits rows to produce
         int64_t num_tokens = inputs.lm_output_indexes.defined() ? inputs.lm_output_indexes.size(0) : 1;
         outputs.logits     = torch::randn({num_tokens, (int64_t)vocab_size_},
@@ -41,6 +44,7 @@ private:
 };
 
 struct CustomConfig {
+    RoleType                                role_type          = RoleType::PDFUSION;
     bool                                    reuse_cache        = false;
     DataType                                kv_cache_data_type = DataType::TYPE_FP16;
     std::map<std::string, std::vector<int>> multi_task_prompt_tokens;
@@ -136,6 +140,8 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     rtp_llm::FfnDisAggregateConfig       ffn_disaggregate_config;
     rtp_llm::VitConfig                   vit_config;
 
+    pd_sep_config.role_type = config.role_type;
+
     rtp_llm::EngineInitParams rtp_llm_params(0,
                                              model_config,
                                              parallelism_config,
@@ -160,7 +166,7 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     return rtp_llm_params;
 }
 
-std::shared_ptr<NormalEngine> createMockEngine(const CustomConfig& config) {
+std::shared_ptr<NormalEngine> createMockEngine(const CustomConfig& config, bool defer_loop_start = false) {
     rtp_llm::ModelConfig   model_config;
     rtp_llm::RuntimeConfig runtime_config;
     rtp_llm::KVCacheConfig kv_cache_config;
@@ -170,7 +176,7 @@ std::shared_ptr<NormalEngine> createMockEngine(const CustomConfig& config) {
     NormalExecutor::test_model_factory = [vocab](const GptModelInitParams&) {
         return std::make_unique<MockModel>(vocab);
     };
-    std::shared_ptr<NormalEngine> engine = make_shared<NormalEngine>(rtp_llm_params, nullptr);
+    std::shared_ptr<NormalEngine> engine = make_shared<NormalEngine>(rtp_llm_params, nullptr, defer_loop_start);
     NormalExecutor::test_model_factory   = nullptr;
     return engine;
 }

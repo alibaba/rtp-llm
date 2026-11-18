@@ -14,6 +14,7 @@ TEST(QueryConverterLogprobsTest, TranslatesGenerateConfig) {
     GenerateInputPB input;
     input.add_token_ids(1);
     auto* config = input.mutable_generate_config();
+    config->set_max_new_tokens(1);
     config->set_return_logprobs(true);
     config->set_top_logprobs(2);
 
@@ -110,6 +111,7 @@ TEST(QueryConverterLogprobsTest, PreservesZeroTopKLogprobSubmessages) {
     GenerateInputPB input;
     input.add_token_ids(1);
     auto* config = input.mutable_generate_config();
+    config->set_max_new_tokens(1);
     config->set_return_logprobs(true);
     config->set_top_logprobs(0);
 

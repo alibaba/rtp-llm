@@ -132,9 +132,7 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     pd_sep_config_(pd_sep_config),
     cache_store_config_(cache_store_config),
     use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool) {
-    // REBASE CONFLICT CONTEXT(2413e8e03): keep new base DSV4 fixed-pool backing
-    // configuration; source branch only adds cudaMalloc backing when RDMA cache
-    // store requests it.
+
     if (config_.state_block_size_bytes > 0 || config_.swa_block_size_bytes > 0) {
         config_.fixed_pool_uses_pinned_cpu = kv_cache_config_.dsv4_fixed_pool_use_memory;
     }
@@ -219,9 +217,7 @@ bool KVCacheManager::init(bool defer_connector_start) {
 
     const bool is_hybrid = config_.groupNums() > 1;
     if (config_.use_independent_block_pools) {
-        // REBASE CONFLICT CONTEXT(2413e8e03): preserve the new base role-aware
-        // HybridPool allocator constructor while later setting the source branch's
-        // cudaMalloc block-pool flag through KVCacheAllocator.
+
         allocator_ = std::make_shared<rtp_llm::HybridPoolKVCacheAllocator>(config_,
                                                                            AllocationType::DEVICE,
                                                                            metrics_reporter_,
@@ -240,8 +236,6 @@ bool KVCacheManager::init(bool defer_connector_start) {
         allocator_->setUseCudaMallocBlockPool(true);
     }
 
-    // REBASE CONFLICT CONTEXT(2413e8e03): keep new base SharedBlockCache and CP
-    // slot mapper wiring, then initialize with source branch cudaMalloc setting if enabled.
     allocator_->setCPSlotMapper(cp_slot_mapper_);
     allocator_->setSharedBlockCache(shared_cache);
     RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "KVCacheAllocator init failed");
@@ -877,8 +871,7 @@ void KVCacheManager::allocateAndSync() {
 void KVCacheManager::reportMetricsLoop() {
     RTP_LLM_PROFILE_FUNCTION();
     kmonitor::MetricsTags tags;
-    // REBASE CONFLICT CONTEXT(2413e8e03): source branch logged HybridPool metrics
-    // via a local dynamic_cast; new base centralizes that in poolMetricsSnapshots().
+
     constexpr auto kLogInterval  = std::chrono::minutes(1);
     auto           last_log_time = std::chrono::steady_clock::now() - kLogInterval;
     while (!stop_.load(std::memory_order_relaxed)) {

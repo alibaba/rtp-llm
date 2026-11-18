@@ -222,6 +222,7 @@ def forward_layers(
     block_tables_by_type: Optional[Dict[int, torch.Tensor]],
     attn_inputs: Optional[PyAttentionInputs] = None,
     prepare_hidden_fn: Optional[Any] = None,
+    capture_context: Optional[Any] = None,
 ) -> torch.Tensor:
     """Flat per-layer loop — vLLM-aligned layout.
 
@@ -427,6 +428,8 @@ def forward_layers(
                 kv_cache=kv_cache,
                 block_tables_by_type=block_tables_by_type,
             )  # [T, hc, dim]
+            if capture_context is not None:
+                capture_context.capture_layer(layer_idx, h)
             if _rt_on:
                 _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
             if write_cache_store_impl is not None:
@@ -561,7 +564,7 @@ def forward_layers(
     # forward (which runs right after the main model on a near-full card) can
     # borrow it. No explicit reset needed — the per-layer ``common.workspace``
     # references were cleared by ``clear_prefill_meta_shared_fp8`` above.
-    return h  # [T, dim]
+    return h  # [T, dim], canonical final; packing belongs to the output boundary.
 
 
 def forward_prefill(
@@ -570,6 +573,7 @@ def forward_prefill(
     parallelism_config: Optional[ParallelismConfig],
     inputs: PyModelInputs,
     prepare_hidden_fn: Optional[Any] = None,
+    capture_context: Optional[Any] = None,
 ) -> PyModelOutputs:
     """Prefill dispatcher — single :func:`forward_layers` call on the full
     flat ``[T_total]`` batch (vLLM-aligned).
@@ -631,5 +635,8 @@ def forward_prefill(
         block_tables_by_type,
         attn_inputs=attn,
         prepare_hidden_fn=prepare_hidden_fn,
+        capture_context=capture_context,
     )  # [T_total, dim]
+    if capture_context is not None:
+        return capture_context.finalize(hidden)
     return PyModelOutputs(hidden)

@@ -27,6 +27,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/utils:error_code",
     ],
 )
 
@@ -104,6 +105,8 @@ cc_library(
         "//rtp_llm/cpp/engine_base:profiler",
         "//rtp_llm/cpp/engine_base/stream:generate_types",
         "//rtp_llm/cpp/metrics",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/multimodal_processor",
         "//rtp_llm/cpp/normal_engine",
         "//rtp_llm/cpp/utils:atomic_util",
@@ -111,7 +114,7 @@ cc_library(
         "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/cpp/utils:profiling_scope",
         "//rtp_llm/models_py/bindings/core:runtime_device_hdr",
-    ],
+    ] + torch_deps(),
 )
 
 py_library(

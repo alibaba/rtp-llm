@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <iterator>
 #include <memory>
 #include <mutex>
@@ -168,6 +169,12 @@ public:
         return stream_magic_ == STREAM_MAGIC;
     }
 
+    bool requiresFullContextForHiddenStateCapture() const;
+    bool isHiddenStateCaptureCandidate() const;
+    bool hasHiddenStateCaptureReservation() const;
+    void setHiddenStateCaptureReservation(HiddenStateCaptureReservationPtr reservation);
+    void cancelHiddenStateCapture() const;
+
 public:
     void setIsFakeStream(bool is_fake) {
         is_fake_stream_ = is_fake;
@@ -182,6 +189,11 @@ public:
     }
 
     virtual ErrorResult<GenerateOutputs> nextOutput() = 0;
+    // Single-consumer RPC wait over the existing output queue. A positive interval
+    // returns OUTPUT_QUEUE_IS_EMPTY without changing stream state when idle;
+    // zero waits until output/termination or the request deadline. hasOutput()
+    // must be nonblocking and callable while mutex_ is held.
+    virtual ErrorResult<GenerateOutputs> nextOutputForRpc(int64_t wait_timeout_ms = 0);
     virtual bool                         hasOutput() {
         return false;
     }
@@ -334,6 +346,7 @@ public:
     torch::Tensor              multimodalLocations() const;
 
     int64_t getTimeoutMs() const;
+    bool    checkTimeoutAndHasError();
     void    checkTimeout();
 
     void reportEvent(StreamEvents::EventType event,
@@ -619,9 +632,6 @@ public:
         return sp_output_buffer_;
     }
 
-    // REBASE CONFLICT CONTEXT(518707c73): source branch added an opaque CUDA
-    // event for linear-attention KV swaps; keep accessors with the new base
-    // async device-state fields so MtpExecutor can order the next target verify.
     void setPendingSwapDoneEvent(std::shared_ptr<void> event) {
         std::lock_guard<std::mutex> lk(*pending_swap_done_event_mutex_);
         pending_swap_done_event_ = std::move(event);
@@ -801,7 +811,8 @@ public:
     }
 
     bool reuseCache() const {
-        return generate_input_->generate_config->reuse_cache;
+        const auto& config = *generate_input_->generate_config;
+        return config.reuse_cache && !config.isPrefillOnly();
     }
 
     bool enableDeviceCache() const {
@@ -862,6 +873,8 @@ protected:
     void reportCacheReuseMetrics() const;
 
 protected:
+    HiddenStateCaptureReservationPtr hidden_state_capture_reservation_;
+
     uint64_t                              stream_magic_ = STREAM_MAGIC;
     std::shared_ptr<GenerateInput>        generate_input_;
     std::shared_ptr<GenerateStateMachine> generate_status_;

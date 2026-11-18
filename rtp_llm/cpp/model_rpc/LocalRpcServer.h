@@ -51,6 +51,10 @@ public:
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer);
 
+    virtual grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
+                                           const BatchGenerateInputPB* request,
+                                           BatchGenerateOutputsPB*     response);
+
     grpc::Status CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response);
 
     grpc::Status UpdateWeights(grpc::ServerContext* context, const UpdateWeightsRequestPB* request, EmptyPB* response);
@@ -144,6 +148,10 @@ public:
     typedef grpc::internal::WriterInterface<GenerateOutputsPB> WriterInterface;
 
 protected:
+    ErrorInfo prepareInput(const GenerateInputPB& input_pb, std::shared_ptr<GenerateInput>& output);
+    ErrorInfo
+    collectStreamOutput(grpc::ServerContext* context, const GenerateStreamPtr& stream, GenerateOutputs& last_outputs);
+
     grpc::Status serializeErrorMsg(const std::string& request_key, ErrorInfo error_info);
     grpc::Status
          serializeErrorMsg(const std::string& request_key, const RequestInfo& request_info, ErrorInfo error_info);
@@ -160,7 +168,7 @@ protected:
     std::shared_ptr<EngineBase>           engine_;
     std::shared_ptr<MultimodalProcessor>  mm_processor_;
     EngineInitParams                      maga_init_params_;
-    ProposeModelEngineInitParams*         propose_maga_init_params_;
+    ProposeModelEngineInitParams*         propose_maga_init_params_{nullptr};
     kmonitor::MetricsReporterPtr          metrics_reporter_;
     std::atomic<size_t>                   onflight_requests_{0};
     std::shared_ptr<RpcServerRuntimeMeta> meta_;

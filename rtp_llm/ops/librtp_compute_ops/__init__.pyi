@@ -296,6 +296,14 @@ class PyModelInitResources:
     def max_context_batch_size(self) -> int: ...
 
 class PyModelInputs:
+    @property
+    def capture_hidden_states(self) -> bool:
+        """
+        Capture configured hidden states for this homogeneous target-prefill batch
+        """
+
+    @capture_hidden_states.setter
+    def capture_hidden_states(self, arg0: bool) -> None: ...
     @typing.overload
     def __init__(self) -> None: ...
     @typing.overload
@@ -353,27 +361,58 @@ class PyModelOutputs:
         """
 
     @typing.overload
-    def __init__(self, hidden_states: torch.Tensor, params_ptr: typing.Any) -> None:
+    def __init__(
+        self,
+        hidden_states: torch.Tensor,
+        params_ptr: typing.Any = None,
+        captured_hidden_states: torch.Tensor | None = None,
+        capture_error: str | None = None,
+    ) -> None:
         """
-        Initialize with hidden states tensor and params pointer
+        Initialize with canonical hidden states and native or Python attention parameters,
+        plus optional training capture
         """
 
     @property
     def hidden_states(self) -> torch.Tensor:
         """
-        Hidden states output tensor
+        Canonical final hidden states output tensor
         """
 
     @hidden_states.setter
     def hidden_states(self, arg0: torch.Tensor) -> None: ...
     @property
-    def params_ptr(self) -> ParamsBase:
+    def captured_hidden_states(self) -> torch.Tensor | None:
+        """
+        Optional packed training hidden states
+        """
+
+    @captured_hidden_states.setter
+    def captured_hidden_states(self, arg0: torch.Tensor | None) -> None: ...
+    @property
+    def capture_error(self) -> str | None:
+        """
+        Recoverable training capture diagnostic
+        """
+
+    @capture_error.setter
+    def capture_error(self, arg0: str | None) -> None: ...
+    @property
+    def params_ptr(self) -> ParamsBase | None:
         """
         Parameters pointer
         """
 
     @params_ptr.setter
-    def params_ptr(self, arg0: ParamsBase) -> None: ...
+    def params_ptr(self, arg0: ParamsBase | None) -> None: ...
+    @property
+    def py_attn_params(self) -> typing.Any:
+        """
+        Python attention parameters
+        """
+
+    @py_attn_params.setter
+    def py_attn_params(self, arg0: typing.Any) -> None: ...
 
 class PyPrefillCudaGaphCopyParams:
     cuda_graph_prefill_batch_size: torch.Tensor

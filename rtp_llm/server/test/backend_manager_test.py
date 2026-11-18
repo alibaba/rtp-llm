@@ -3,7 +3,12 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from rtp_llm.distribute.distributed_server import BackendStopConsensusError
+from torch.distributed import HashStore
+
+from rtp_llm.distribute.distributed_server import (
+    BackendStopConsensusError,
+    DistributedServer,
+)
 from rtp_llm.ops import TaskType
 from rtp_llm.server.backend_manager import BackendManager
 
@@ -215,12 +220,82 @@ class BackendManagerStopTest(unittest.TestCase):
             manager._distributed_server.waited, ["drained", "engine_stopped"]
         )
 
+    def test_terminal_target_is_propagated_as_coordinated_stop(self):
+        engine = _FakeEngine()
+        engine.completed_steps = lambda: -2
+        manager = self._manager(engine)
+        nfs_manager = _FakeNfsManager()
+
+        def choose(timeout, local_step, arm_stop, cancel_armed_stop):
+            self.assertEqual(local_step, -2)
+            arm_stop(0)
+            return 0
+
+        manager._distributed_server.choose_backend_stop_step = choose
+        with patch("rtp_llm.server.backend_manager._nfs_manager", nfs_manager), patch(
+            "rtp_llm.server.backend_manager.BaseEngine", _FakeEngine
+        ):
+            manager.stop()
+        self.assertTrue(engine.coordinated)
+        self.assertEqual(engine.armed_target, 0)
+        self.assertEqual(engine.target_step, 0)
+        self.assertEqual(
+            manager._distributed_server.waited, ["drained", "engine_stopped"]
+        )
+        self.assertTrue(engine.stopped)
+        self.assertTrue(nfs_manager.unmounted)
+
+    def test_engine_stopped_rendezvous_error_is_raised_after_cleanup(self):
+        engine = _FakeEngine()
+        manager = self._manager(engine)
+        nfs_manager = _FakeNfsManager()
+        failure = TimeoutError("engine_stopped: 7 pending")
+
+        def rendezvous(timeout, phase):
+            if phase == "engine_stopped":
+                raise failure
+
+        manager._distributed_server.wait_for_backend_shutdown = rendezvous
+        with patch("rtp_llm.server.backend_manager._nfs_manager", nfs_manager), patch(
+            "rtp_llm.server.backend_manager.BaseEngine", _FakeEngine
+        ):
+            with self.assertRaises(TimeoutError) as raised:
+                manager.stop()
+        self.assertIs(raised.exception, failure)
+        self.assertTrue(engine.prepared)
+        self.assertTrue(engine.stopped)
+        self.assertTrue(nfs_manager.unmounted)
+
+    def test_original_training_error_wins_over_shutdown_rendezvous_error(self):
+        engine = _FakeEngine(RuntimeError("cleanup failed"))
+        manager = self._manager(engine)
+        nfs_manager = _FakeNfsManager(RuntimeError("unmount failed"))
+        original = ValueError("training failed")
+
+        def rendezvous(timeout, phase):
+            if phase == "engine_stopped":
+                raise TimeoutError("engine_stopped: 7 pending")
+
+        manager._distributed_server.wait_for_backend_shutdown = rendezvous
+        with patch("rtp_llm.server.backend_manager._nfs_manager", nfs_manager), patch(
+            "rtp_llm.server.backend_manager.BaseEngine", _FakeEngine
+        ):
+            with self.assertRaises(ValueError) as raised:
+                try:
+                    raise original
+                finally:
+                    manager.stop()
+        self.assertIs(raised.exception, original)
+        self.assertTrue(engine.stopped)
+        self.assertTrue(nfs_manager.unmounted)
+
     def test_rendezvous_failure_still_stops_engine(self):
         engine = _FakeEngine()
         manager = self._manager(engine)
 
         def fail_rendezvous(timeout, phase):
-            raise TimeoutError("rendezvous failed")
+            if phase == "drained":
+                raise TimeoutError("rendezvous failed")
 
         manager._distributed_server.wait_for_backend_shutdown = fail_rendezvous
         nfs_manager = _FakeNfsManager()
@@ -238,7 +313,8 @@ class BackendManagerStopTest(unittest.TestCase):
         manager = self._manager(engine)
 
         def fail_rendezvous(timeout, phase):
-            raise RuntimeError("store unavailable")
+            if phase == "drained":
+                raise RuntimeError("store unavailable")
 
         manager._distributed_server.wait_for_backend_shutdown = fail_rendezvous
         nfs_manager = _FakeNfsManager()
@@ -250,6 +326,59 @@ class BackendManagerStopTest(unittest.TestCase):
 
         self.assertTrue(engine.stopped)
         self.assertTrue(nfs_manager.unmounted)
+
+    def test_real_chooser_rejections_park_manager_without_force_stop(self):
+        # Exercise the actual chooser -> manager exception boundary, including
+        # old engines whose cancel of an absent target is a successful no-op.
+        for local_step, peer_step, reject_topology in (
+            (-2, 64, False),
+            (64, -2, False),
+            (-2, -1, False),
+            (-1, -2, False),
+            (-2, -2, True),
+        ):
+            with self.subTest(
+                local_step=local_step,
+                peer_step=peer_step,
+                reject_topology=reject_topology,
+            ):
+                engine = _FakeEngine()
+                engine.completed_steps = lambda: local_step
+                engine.cancel_armed_stop = (
+                    Mock()
+                )  # would succeed without proving safety
+                if reject_topology:
+                    engine.arm_stop = Mock(
+                        side_effect=RuntimeError("topology rejected")
+                    )
+                manager = self._manager(engine)
+                server = DistributedServer.__new__(DistributedServer)
+                server.rank = 1
+                server.world_size = 2
+                server.store = HashStore()
+                server.store.set(server.BACKEND_SHUTDOWN_STEP_KEY + "0", str(peer_step))
+                server.store.set(server.BACKEND_SHUTDOWN_STEP_CANCEL_KEY + "0", "ready")
+                manager._distributed_server = server
+                nfs_manager = _FakeNfsManager()
+                with patch.object(manager, "_rendezvous_backend_ranks"), patch(
+                    "rtp_llm.server.backend_manager._nfs_manager", nfs_manager
+                ), patch(
+                    "rtp_llm.server.backend_manager.BaseEngine", _FakeEngine
+                ), patch(
+                    "rtp_llm.server.backend_manager.time.sleep",
+                    side_effect=SystemExit("parked"),
+                ) as sleep:
+                    with self.assertRaisesRegex(SystemExit, "parked"):
+                        manager.stop()
+                sleep.assert_called_once_with(60.0)
+                engine.cancel_armed_stop.assert_not_called()
+                self.assertFalse(engine.prepared)
+                self.assertFalse(engine.stopped)
+                self.assertFalse(nfs_manager.unmounted)
+                self.assertFalse(
+                    server.store.check([server.BACKEND_SHUTDOWN_STEP_CANCEL_KEY + "1"])
+                )
+                self.assertIs(manager.engine, engine)
 
     def test_indeterminate_stop_consensus_parks_without_cleanup(self):
         engine = _FakeEngine()

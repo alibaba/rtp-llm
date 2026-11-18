@@ -56,6 +56,14 @@ public:
 
 private:
     void                            initScheduler();
+    bool                            usesTerminalStop() const;
+    absl::Status                    validateTerminalStop() const;
+    absl::Status                    armTerminalStop(int64_t target_step, int64_t timeout_ms);
+    std::shared_ptr<GenerateStream> createStream(const std::shared_ptr<GenerateInput>& input);
+    bool                            validateStreamForScheduling(const GenerateStreamPtr& stream) const;
+    static size_t                   reserveStepForStream(size_t configured_reserve_step, bool is_prefill_only);
+    static bool shouldEarlyReturnEmptyBatch(bool streams_empty, int64_t tp_size, bool terminal_stop_requested);
+    static bool shouldAddMtpFakePrefill(bool has_prefill, bool use_batch_decode_scheduler, int64_t dp_size);
     std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens);
     WarmUpResult                    warmUp(const EngineInitParams& params);
     WarmUpResult                    prefillWarmUp(const EngineInitParams& params);
@@ -87,7 +95,8 @@ private:
     std::atomic<bool>                             armed_stop_cancel_requested_{false};
     std::atomic<bool>                             armed_stop_cancel_observed_{false};
     std::atomic<int64_t>                          stop_target_step_{-1};
-    std::unique_ptr<Executor>                     executor_;
+    std::atomic<bool>                             terminal_stop_observed_{false};
+    std::shared_ptr<Executor>                     executor_;
     ModelConfig                                   model_config_;
     ParallelismConfig                             parallelism_config;
     RuntimeConfig                                 runtime_config;
