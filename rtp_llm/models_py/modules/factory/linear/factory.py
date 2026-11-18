@@ -102,13 +102,30 @@ class LinearFactory:
         input_scale: Optional[torch.Tensor] = None,
     ):
         if getattr(hw_kernel_config, "batch_invariant", False):
-            from .impl.cuda.f16_linear import BatchInvariantLinear
+            if (
+                weight.dtype == torch.bfloat16
+                and weight_scales is None
+                and weight_scale_2 is None
+                and input_scale is None
+            ):
+                from .impl.cuda.f16_linear import BatchInvariantLinear
 
-            if quant_config is not None or weight_scales is not None:
+                return BatchInvariantLinear(weight, bias=bias)
+            if not (
+                quant_config is not None
+                and quant_config.get_method() == "FP8_PER_BLOCK"
+                and quant_config.group_size() == 128
+                and weight.dtype == torch.float8_e4m3fn
+                and weight_scales is not None
+                and weight_scales.dtype == torch.int32
+                and weight_scale_2 is None
+                and input_scale is None
+            ):
                 raise ValueError(
-                    "batch-invariant linear requires unquantized BF16 weights"
+                    "batch-invariant linear requires unscaled BF16 or E4M3 "
+                    "FP8_PER_BLOCK weights with packed UE8M0 scales"
                 )
-            return BatchInvariantLinear(weight, bias=bias)
+            # Keep the existing DeepGEMM strategy and per-row activation scales.
 
         candidates = [
             strategy_class

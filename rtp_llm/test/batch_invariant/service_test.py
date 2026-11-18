@@ -47,7 +47,7 @@ def make_prompt(tokenizer, length, lead):
     return prompt
 
 
-def start_request(stub, ids, steps, *, measure=False):
+def start_request(stub, ids, steps, *, measure=False, fixed=True):
     generate = pb.GenerateConfigPB(
         max_new_tokens=steps,
         num_beams=1,
@@ -64,7 +64,7 @@ def start_request(stub, ids, steps, *, measure=False):
         return_softmax_probs=measure,
     )
     generate.aux_info.value = measure
-    if measure:
+    if measure and fixed:
         generate.regex.value = CONTINUATION
     request = pb.GenerateInputPB(
         request_id=time.time_ns(), token_ids=ids, generate_config=generate
@@ -214,7 +214,9 @@ def main():
     parser.add_argument("--save", type=Path)
     parser.add_argument("--reference", type=Path)
     parser.add_argument("--chunked", action="store_true")
-    parser.add_argument("--greedy-smoke", "--off-smoke", action="store_true")
+    smoke = parser.add_mutually_exclusive_group()
+    smoke.add_argument("--greedy-smoke", "--off-smoke", action="store_true")
+    smoke.add_argument("--greedy-logits", action="store_true")
     args = parser.parse_args()
     tokenizer = Tokenizer.from_file(str(args.checkpoint / "tokenizer.json"))
     vocab_size = read_vocab_size(args.checkpoint)
@@ -227,6 +229,24 @@ def main():
     with grpc.insecure_channel(args.address) as channel:
         grpc.channel_ready_future(channel).result(timeout=600)
         stub = RpcServiceStub(channel)
+        if args.greedy_logits:
+            output = collect(
+                start_request(stub, target, 8, measure=True, fixed=False), 8, vocab_size
+            )
+            if args.save:
+                np.savez(args.save, **vars(output))
+            print(
+                json.dumps(
+                    dict(
+                        tokens=output.tokens.tolist(),
+                        shape=output.logits.shape,
+                        dtype=str(output.logits.dtype),
+                        finite=output.logits.size,
+                    )
+                ),
+                flush=True,
+            )
+            return
         if args.greedy_smoke:
             tokens = []
             for response in start_request(stub, target, 8):
