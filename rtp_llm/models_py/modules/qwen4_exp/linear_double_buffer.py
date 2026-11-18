@@ -230,9 +230,10 @@ def _partial_replay(
     CHECKPOINT_PERIOD: tl.constexpr = 0,
     CHECKPOINT_STRIDE: tl.constexpr = 0,
     PAGED_WRITE_STRIDE: tl.constexpr = 0,
+    HEAD_FIRST: tl.constexpr = False,
 ):
-    row = tl.program_id(0)
-    layer_head = tl.program_id(1)
+    row = tl.program_id(1) if HEAD_FIRST else tl.program_id(0)
+    layer_head = tl.program_id(0) if HEAD_FIRST else tl.program_id(1)
     layer = layer_head // HEADS
     head = layer_head % HEADS
     count = tl.load(ACCEPT + row * ACCEPT_STRIDE)
@@ -297,7 +298,22 @@ def replay_partial_acceptance(stage: LinearDoubleBufferStage, accept: torch.Tens
         stage.checkpoint if stage.checkpoint is not None
         else (stage.state_ptrs, stage.writes, stage.reads, 0, 0)
     )
-    _partial_replay[(accept.numel(), len(stage.states) * state.shape[1], 4)](
+    rows = accept.numel()
+    layer_heads = len(stage.states) * state.shape[1]
+    # The gfx942 non-PD MTP2 batch visits 36 layers of 24 heads per rank.
+    head_first = (
+        rows == 16
+        and stage.in_place
+        and stage.query == 3
+        and period > 0
+        and len(stage.states) == 36
+        and state.shape[1] == 24
+        and torch.version.hip is not None
+        and torch.cuda.get_device_properties(state.device).gcnArchName.split(":")[0] == "gfx942"
+    )
+    tile_v = 8 if head_first else 32
+    grid = (layer_heads, rows, 128 // tile_v) if head_first else (rows, layer_heads, 128 // tile_v)
+    _partial_replay[grid](
         stage.state_ptrs,
         stage.record_ptrs,
         stage.reads,
@@ -314,13 +330,14 @@ def replay_partial_acceptance(stage: LinearDoubleBufferStage, accept: torch.Tens
         records.shape[0],
         state.stride(0),
         records.stride(0),
-        32,
+        tile_v,
         ACCEPT_STRIDE=accept.stride(0),
         IN_PLACE=stage.in_place,
         CHECKPOINT_PERIOD=period,
         CHECKPOINT_STRIDE=stride,
         PAGED_WRITE_STRIDE=paged_writes.stride(0),
-        num_warps=4,
+        HEAD_FIRST=head_first,
+        num_warps=1 if head_first else 4,
     )
 
 
