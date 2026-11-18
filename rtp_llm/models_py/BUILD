@@ -439,13 +439,3 @@ exports_files(
     ["model_desc/cp_mtp_hidden_handoff.py"],
     visibility = ["//rtp_llm/models_py/model_desc/test:__pkg__"],
 )
-
-# Torch-only UQI numerical modules for CPU and real AITER parity tests.
-filegroup(
-    name = "bert_uqi_numerical_sources",
-    srcs = [
-        "modules/factory/attention/bert_uqi_schedule.py",
-        "modules/factory/attention/rocm_impl/bert_uqi_two_pass_core.py",
-    ],
-    visibility = ["//visibility:public"],
-)

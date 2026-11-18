@@ -934,6 +934,7 @@ class LinearAttentionConfig:
     def to_string(self) -> str:
         ...
 class MMModelConfig:
+    hash_embedding_features: bool
     include_sep_tokens: bool
     is_multimodal: bool
     mm_position_ids_style: int

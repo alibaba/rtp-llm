@@ -301,6 +301,28 @@ TEST_F(MultimodalProcessorTest, testGetMMFeatures) {
     EXPECT_EQ(res.expanded_ids.numel(), 6);
 }
 
+TEST_F(MultimodalProcessorTest, EmbeddingInputAndFeatureRoutesRespectHashPolicy) {
+    MMModelConfig config;
+    config.mm_sep_tokens           = {{1, 2}};
+    config.hash_embedding_features = false;
+    FakeMultimodalProcessor      processor(py::none(), config, 10);
+    auto                         ids = torch::tensor({0, 1, 2, 3}, torch::kInt32);
+    std::vector<MultimodalInput> features;
+    features.emplace_back("2");
+
+    auto direct = processor.getMultimodalFeatures(ids, features);
+    ASSERT_TRUE(direct.ok());
+    auto input = std::make_shared<EmbeddingInput>(ids, torch::zeros_like(ids), torch::tensor({4}, torch::kInt32), 1);
+    ASSERT_TRUE(processor.updateMultimodalFeatures(input, features, "").ok());
+    ASSERT_TRUE(input->multimodal_features.has_value());
+    const auto& mask = direct.value().text_tokens_mask;
+    EXPECT_TRUE(torch::equal(mask, input->multimodal_features->text_tokens_mask));
+    EXPECT_TRUE(torch::equal(direct.value().expanded_ids, input->token_ids));
+    auto image_rows = direct.value().expanded_ids.masked_select(mask.eq(0));
+    ASSERT_EQ(image_rows.numel(), 2);
+    EXPECT_TRUE(torch::equal(image_rows, torch::full_like(image_rows, -1)));
+}
+
 TEST(MultimodalErrorTest, validatesMultimodalErrorCodes) {
     EXPECT_EQ(parseMultimodalErrorCode(static_cast<int>(ErrorCode::MM_WRONG_FORMAT_ERROR)),
               ErrorCode::MM_WRONG_FORMAT_ERROR);

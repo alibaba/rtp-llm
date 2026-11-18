@@ -68,3 +68,9 @@ py_test(
     deps = ["//rtp_llm:testlib"],
     env = {"GPU_COUNT": "0"},
 )
+
+py_test(
+    name = "vision_bert_test",
+    srcs = ["vision_bert_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)

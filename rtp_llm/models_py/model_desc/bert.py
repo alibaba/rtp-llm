@@ -229,6 +229,11 @@ class BertModel(GptModelBase):
 
         if fmha_impl is None:
             fmha_impl = self.prepare_fmha_impl(inputs)
+        return PyModelOutputs(self.forward_encoder(hidden_states, fmha_impl))
+
+    def forward_encoder(
+        self, hidden_states: torch.Tensor, fmha_impl: FMHAImplBase
+    ) -> torch.Tensor:
         quantized_hidden_states = None
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             next_layer_uses_quantized_input = (
@@ -244,4 +249,4 @@ class BertModel(GptModelBase):
                 quantized_hidden_states=quantized_hidden_states,
                 quantize_output=next_layer_uses_quantized_input,
             )
-        return PyModelOutputs(hidden_states)
+        return hidden_states

@@ -1075,6 +1075,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                                               attention_inputs_by_tag_,
                                               bert_embedding_inputs});
 
+        if (inputs.combo_tokens.device().is_cpu()) {
+            py_model_inputs.input_ids_host = inputs.combo_tokens;
+        }
+        if (inputs.text_tokens_mask.defined() && inputs.text_tokens_mask.device().is_cpu()) {
+            py_model_inputs.text_tokens_mask_host = inputs.text_tokens_mask;
+        }
         py_model_inputs.capture_hidden_states  = capture_hidden_states;
         py_model_inputs.need_all_logits        = inputs.need_all_logits;
         py_model_inputs.need_all_hidden_states = inputs.need_all_hidden_states;
