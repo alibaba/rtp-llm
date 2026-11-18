@@ -1428,8 +1428,11 @@ TEST_F(P2PGenerateStreamSmokeTest, PromptScoringBatchFallsBackAndReturnsSingleTo
     batchRoundTrips(true);
 }
 
-TEST_F(P2PGenerateStreamSmokeTest, BatchAttachesMasterAdmissionsWithoutEnqueueingAgain) {
+TEST_F(P2PGenerateStreamSmokeTest, MultiDPBatchAttachesMasterAdmissionsWithoutEnqueueingAgain) {
     initialize(DataType::TYPE_FP16);
+    // This fixture serves one local Decode rank. Set the RPC-level topology
+    // so the batch takes the same admission branch as a multi-DP deployment.
+    decode_.maga_init_params_.parallelism_config.dp_size = 2;
     BatchGenerateInputPB batch;
     batch.add_inputs()->CopyFrom(request(1801, 8));
     batch.add_inputs()->CopyFrom(request(1802, 11));
@@ -1457,6 +1460,10 @@ TEST_F(P2PGenerateStreamSmokeTest, BatchAttachesMasterAdmissionsWithoutEnqueuein
     const auto             status = stub->BatchGenerateCall(&context, batch, &response);
     ASSERT_TRUE(status.ok()) << status.error_message();
     ASSERT_EQ(response.results_size(), 2);
+    for (const auto& result : response.results()) {
+        EXPECT_FALSE(result.has_error_info());
+        EXPECT_TRUE(result.has_final_output());
+    }
     EXPECT_EQ(decode_engine_->checked_requests.load(), 2);
     ASSERT_NO_FATAL_FAILURE(expectReleased());
 }
