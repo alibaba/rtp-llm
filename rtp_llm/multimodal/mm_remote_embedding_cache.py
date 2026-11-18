@@ -1070,6 +1070,7 @@ class MMRemoteEmbeddingCache:
             return {
                 key: timing[key]
                 for key in (
+                    "metadata_admission_wait_ms",
                     "queue_ms",
                     "lookup_budget_ms",
                     "metadata_ms",
@@ -1175,14 +1176,25 @@ class MMRemoteEmbeddingCache:
                     # thread; its task/byte budget remains held until done.
                     self._release_client(client)
 
-        queued_at = time.perf_counter()
         try:
-            if not self._metadata_slots.acquire(blocking=False):
+            admitted = self._metadata_slots.acquire(blocking=False)
+            if not admitted:
+                admission_started = time.perf_counter()
+                # Give short bursts time to drain while keeping executor queues
+                # independent of the caller's full deadline.
+                admitted = self._metadata_slots.acquire(
+                    timeout=min(0.05, max(0.0, deadline - time.monotonic()))
+                )
+                timing["metadata_admission_wait_ms"] = self._report_queue_wait(
+                    "read_metadata_admission", admission_started
+                )
+            if not admitted:
                 self._count("admission_skip")
                 outcome = "admission_skip"
                 self._report_skip("read", "metadata_admission")
                 return None
             try:
+                queued_at = time.perf_counter()
                 future = self._executor.submit(lookup)
             except BaseException:
                 self._metadata_slots.release()
