@@ -110,7 +110,7 @@ class QsaPackedCountTest(unittest.TestCase):
                     selected.copy_(selected.flip(0))
                 packed.copy_(compact_qsa_selection(selected))
                 graph.replay()
-                # Existing compensated-BF16 numerical contract remains intact.
+                # Packed and unpacked selections share the single-PV contract.
                 expected = run(selected, False, False)
                 torch.testing.assert_close(result, expected, atol=2e-2, rtol=2e-2)
                 table[:, 0] = 0

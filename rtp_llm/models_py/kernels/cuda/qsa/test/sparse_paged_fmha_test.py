@@ -425,6 +425,20 @@ class SparsePagedOnlineSplitTest(unittest.TestCase):
 
 
 class GroupedSparsePagedAttentionTest(unittest.TestCase):
+    def assert_attention_close(self, actual, expected):
+        # Match the single-BF16-PV contract used by chunk QSA, including rows
+        # with near-zero elements where pointwise relative error is unstable.
+        self.assertEqual(actual.shape, expected.shape)
+        self.assertEqual(actual.dtype, expected.dtype)
+        self.assertEqual(actual.device, expected.device)
+        self.assertTrue(bool(actual.isfinite().all()))
+        self.assertTrue(bool(expected.isfinite().all()))
+        a, b = actual.double(), expected.double()
+        norm = b.norm(dim=-1)
+        error = (a - b).norm(dim=-1) / norm.clamp_min(1e-30)
+        self.assertLess(float(error.max()), 8e-3)
+        torch.testing.assert_close(a[norm == 0], b[norm == 0], atol=0, rtol=0)
+
     @classmethod
     def setUpClass(cls):
         if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (
@@ -486,12 +500,12 @@ class GroupedSparsePagedAttentionTest(unittest.TestCase):
                 )
             self.assertEqual(invoked.call_count, 2)
         graph.replay()
-        torch.testing.assert_close(actual, self.original(inputs), atol=2e-3, rtol=1e-2)
+        self.assert_attention_close(actual, self.original(inputs))
         packed[:, :width].normal_()
         q.normal_()
         table.copy_(table.flip(1))
         graph.replay()
-        torch.testing.assert_close(actual, self.original(inputs), atol=2e-3, rtol=1e-2)
+        self.assert_attention_close(actual, self.original(inputs))
         self.assertTrue(torch.isnan(packed[:, width:]).all())
 
     def test_grouped_live_graph_inputs_and_invalid_pages(self):
@@ -508,7 +522,7 @@ class GroupedSparsePagedAttentionTest(unittest.TestCase):
             ) as invoked:
                 actual = sparse_paged_gqa_attn(*inputs, page_size=128, kv_head_num=1)
                 self.assertEqual(invoked.call_count, 1)
-            torch.testing.assert_close(actual, expected, atol=2e-3, rtol=1e-2)
+            self.assert_attention_close(actual, expected)
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 actual = sparse_paged_gqa_attn(
@@ -518,17 +532,13 @@ class GroupedSparsePagedAttentionTest(unittest.TestCase):
                 q.normal_().mul_(scale)
                 cache.normal_()
                 graph.replay()
-                torch.testing.assert_close(
-                    actual, self.original(inputs), atol=2e-3, rtol=1e-2
-                )
+                self.assert_attention_close(actual, self.original(inputs))
             lengths.fill_(97)
             selected.fill_(-1)
             selected[:, :, :65].copy_(torch.arange(65, device="cuda")[None, None, :])
             table.copy_(table.flip(1))
             graph.replay()
-            torch.testing.assert_close(
-                actual, self.original(inputs), atol=2e-3, rtol=1e-2
-            )
+            self.assert_attention_close(actual, self.original(inputs))
             for invalid in (0, cache.shape[0] + 7):
                 table.fill_(invalid)
                 graph.replay()
@@ -538,7 +548,7 @@ class GroupedSparsePagedAttentionTest(unittest.TestCase):
             graph.replay()
             torch.testing.assert_close(actual, torch.zeros_like(actual))
 
-    def test_unsupported_geometry_uses_existing_kernel(self):
+    def test_general_geometry_uses_grouped_tensor_core_kernel(self):
         import rtp_llm.models_py.kernels.cuda.qsa.grouped_sparse_paged_fmha as candidate
 
         heads = list(self.inputs())
@@ -555,14 +565,15 @@ class GroupedSparsePagedAttentionTest(unittest.TestCase):
         for name, inputs, kv_heads, block, splits in cases:
             with self.subTest(name=name):
                 options = dict(page_size=128, kv_head_num=kv_heads, block_k=block)
-                expected = sparse_paged_gqa_attn(*inputs, **options)
+                expected = self.original(inputs)
                 with patch.object(
                     candidate,
                     "grouped_sparse_paged_split",
-                    side_effect=AssertionError("unsupported path launched"),
-                ):
+                    wraps=candidate.grouped_sparse_paged_split,
+                ) as called:
                     actual = sparse_paged_gqa_attn(*inputs, **options)
-                torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+                self.assertEqual(called.call_count, 1)
+                self.assert_attention_close(actual, expected)
 
     def test_tail_only_selection_and_zero_length_graph_replay(self):
         inputs = self.inputs()
@@ -580,14 +591,12 @@ class GroupedSparsePagedAttentionTest(unittest.TestCase):
             selected.fill_(-1)
             selected[:, :, slot] = 0
             graph.replay()
-            torch.testing.assert_close(
-                actual, self.original(inputs), atol=2e-3, rtol=1e-2
-            )
+            self.assert_attention_close(actual, self.original(inputs))
         selected.fill_(-1)
         selected[:, :, 2048:].copy_(torch.arange(3, device="cuda")[None, None, :])
         graph.replay()
         expected = self.original(inputs)
-        torch.testing.assert_close(actual, expected, atol=2e-3, rtol=1e-2)
+        self.assert_attention_close(actual, expected)
         # Keep selected entries valid-looking while length changes. Replay
         # must read the new device length and overwrite old split states.
         lengths.zero_()
@@ -595,7 +604,7 @@ class GroupedSparsePagedAttentionTest(unittest.TestCase):
         torch.testing.assert_close(actual, torch.zeros_like(actual))
         lengths.fill_(3)
         graph.replay()
-        torch.testing.assert_close(actual, expected, atol=2e-3, rtol=1e-2)
+        self.assert_attention_close(actual, expected)
 
 
 if __name__ == "__main__":

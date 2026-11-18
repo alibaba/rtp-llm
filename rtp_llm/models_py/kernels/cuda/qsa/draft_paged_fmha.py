@@ -5,9 +5,11 @@ import triton
 import triton.language as tl
 from triton.language.extra.cuda import libdevice
 
+from rtp_llm.models_py.kernels.cuda.qsa.chunk_paged_gqa import _can_use_direct_fp8
 from rtp_llm.models_py.kernels.cuda.qsa.draft_layout_triton import _enabled
 from rtp_llm.models_py.kernels.cuda.qsa.grouped_sparse_paged_fmha import (
     _grouped_sparse_paged_split_kernel,
+    _short_config,
 )
 from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import main_kv_scale_view
 
@@ -68,12 +70,14 @@ def try_draft_paged_attention(
     page_size,
     kv_scale=None,
     gate=None,
+    kv_scale_is_unity=False,
 ):
     """Return None outside the measured domain, before launching any work.
 
     Request lengths and cumulative offsets are validated by the owner.
     Address fusion keeps the same
-    grouped split policy, compensated BF16 PV and BF16 output/gate boundaries.
+    grouped split policy and BF16 output/gate boundaries. FP8 uses single PV;
+    skipping scales requires a promise covering the whole visible cache.
     """
     if not (
         _enabled(qkv)
@@ -154,10 +158,18 @@ def try_draft_paged_attention(
         return None
     if scales.stride(0) < 256:
         return None
+    direct_fp8 = kv_scale_is_unity and _can_use_direct_fp8(qkv.device)
     batch = lengths.numel()
     rows = batch * 4
     splits = 32 if batch in (1, 4) else 8
     block_k = 128 if batch == 1 else 64
+    num_warps, num_stages = 4, 2
+    rotate_tiles = False
+    tuned = batch in (1, 2, 4, 8)
+    if tuned:
+        splits, block_k, num_warps, num_stages, rotate_tiles = _short_config(
+            batch, 4, 1
+        )
     partial = torch.empty(
         (batch, 12, 4, splits, 258), device=qkv.device, dtype=torch.float32
     )
@@ -194,15 +206,17 @@ def try_draft_paged_attention(
         SKV=scales.stride(1),
         SH=scales.stride(2),
         ST=scales.stride(3),
-        ROTATE_TILES=batch in (1, 4),
+        ROTATE_TILES=rotate_tiles,
         FP16_PV=False,
+        DIRECT_FP8=direct_fp8,
+        UNIT_SCALE=kv_scale_is_unity,
         DRAFT_CU=cu,
         DRAFT_LENGTHS=lengths,
         DRAFT_PREFIX=prefixes,
         DRAFT_INPUT=True,
         DRAFT_QS=qkv.stride(0),
-        num_warps=4,
-        num_stages=2,
+        num_warps=num_warps,
+        num_stages=num_stages,
         enable_fp_fusion=False,
     )
     _merge_draft_metadata_splits[(rows, 12)](

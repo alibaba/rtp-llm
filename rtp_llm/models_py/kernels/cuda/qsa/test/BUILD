@@ -61,11 +61,25 @@ models_py_test(
 )
 
 models_py_test(
+    name = "chunk_optimizations_test",
+    src = "chunk_optimizations_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    testlib = "//rtp_llm/models_py/standalone:auto_model",
+)
+
+models_py_test(
     name = "chunk_paged_gqa_test",
     src = "chunk_paged_gqa_test.py",
     gpu = "RTX_5000_PRO_CU13",
     testlib = "//rtp_llm/models_py/standalone:auto_model",
     deps = ["//rtp_llm/models_py/kernels/cuda/qsa/test/reference:sparse_paged_reference"],
+)
+
+models_py_test(
+    name = "grouped_decode_optimizations_test",
+    src = "grouped_decode_optimizations_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    testlib = "//rtp_llm/models_py/standalone:auto_model",
 )
 
 models_py_test(
@@ -146,4 +160,10 @@ models_py_test(
     deps = [
         "//rtp_llm/models_py/kernels/cuda/qsa/test/reference:math_references",
     ],
+)
+
+models_py_test(
+    name = "tensor_core_dispatch_test",
+    src = "tensor_core_dispatch_test.py",
+    gpu = "RTX_5000_PRO_CU13",
 )

@@ -18,6 +18,10 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.kernels.cuda.qsa.chunk_paged_gqa import (
+    _supports_tensor_core_arch,
+)
+
 _BLOCK_K = 64
 
 
@@ -84,8 +88,9 @@ def main_kv_scale_view(cache, scale, *, kv_heads, page_size):
     """Validate the native per-token/head K/V dequant scale layout.
 
     The fused native writer currently casts to E4M3 and writes unit scales.
-    Readers consume the stored scale rather than assuming that value, so PD
-    copies and future scaled writers preserve the same cache contract.
+    Generic readers consume the stored scale, preserving scaled cache support.
+    The native prefill caller can explicitly declare unity for the whole cache
+    to specialize away scale reads in the SM10x/SM120 chunk kernel.
     No tensor contents are read back during capture.
     """
     if cache.dtype == torch.bfloat16:
@@ -113,132 +118,6 @@ def main_kv_scale_view(cache, scale, *, kv_heads, page_size):
 
 
 @triton.jit
-def _sparse_paged_online_split_kernel(
-    q_ptr,
-    cache_ptr,
-    cache_scale_ptr,
-    block_table_ptr,
-    kv_lens_ptr,
-    selected_ptr,
-    partial_ptr,
-    stride_q_b,
-    stride_q_h,
-    stride_q_s,
-    stride_cache_page,
-    stride_cache_kv,
-    stride_cache_h,
-    stride_cache_token,
-    stride_scale_page,
-    stride_scale_kv,
-    stride_scale_h,
-    stride_scale_token,
-    stride_bt_b,
-    stride_bt_block,
-    stride_len_b,
-    stride_len_s,
-    stride_sel_b,
-    stride_sel_s,
-    selected_width,
-    max_blocks,
-    cache_blocks,
-    HAS_COUNT: tl.constexpr,
-    FP8_CACHE: tl.constexpr,
-    H_Q: tl.constexpr,
-    H_KV: tl.constexpr,
-    QUERY_LEN: tl.constexpr,
-    PAGE_SIZE: tl.constexpr,
-    D: tl.constexpr,
-    SCALE: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-    NUM_SPLITS: tl.constexpr,
-    BLOCKS_PER_SPLIT: tl.constexpr,
-):
-    batch = tl.program_id(1).to(tl.int64)
-    head = tl.program_id(2)
-    query = tl.program_id(0).to(tl.int64) // NUM_SPLITS
-    split = tl.program_id(0) % NUM_SPLITS
-    kv_head = head // (H_Q // H_KV)
-    rd = tl.arange(0, D)
-    q = tl.load(
-        q_ptr + batch * stride_q_b + head * stride_q_h + query * stride_q_s + rd
-    ).to(tl.float32)
-    row = selected_ptr + batch * stride_sel_b + query * stride_sel_s
-    kv_len = tl.load(kv_lens_ptr + batch * stride_len_b + query * stride_len_s)
-    maximum = tl.full((), float("-inf"), tl.float32)
-    normalizer = tl.zeros((), tl.float32)
-    acc = tl.zeros((D,), tl.float32)
-    count = (
-        tl.minimum(tl.maximum(tl.load(row + selected_width), 0), selected_width)
-        if HAS_COUNT
-        else selected_width
-    )
-    limit = tl.maximum(
-        0,
-        tl.minimum(
-            BLOCKS_PER_SPLIT, tl.cdiv(count - split * BLOCK_K, NUM_SPLITS * BLOCK_K)
-        ),
-    )
-    for block in range(limit):
-        # Interleave chunks so a short valid prefix is not concentrated in
-        # one partition when the selected tensor has a fixed wide capacity.
-        offset = (block * NUM_SPLITS + split) * BLOCK_K + tl.arange(0, BLOCK_K)
-        index = tl.load(row + offset, mask=offset < count, other=-1)
-        logical = index // PAGE_SIZE
-        candidate = (offset < count) & (index >= 0) & (index < kv_len)
-        physical = tl.load(
-            block_table_ptr + batch * stride_bt_b + logical * stride_bt_block,
-            mask=candidate & (logical < max_blocks),
-            other=0,
-        ).to(tl.int64)
-        valid = (
-            candidate
-            & (logical < max_blocks)
-            & (physical > 0)
-            & (physical < cache_blocks)
-        )
-        key_ptr = (
-            cache_ptr
-            + physical[:, None] * stride_cache_page
-            + kv_head * stride_cache_h
-            + (index % PAGE_SIZE)[:, None] * stride_cache_token
-            + rd[None, :]
-        )
-        key = tl.load(key_ptr, mask=valid[:, None], other=0.0).to(tl.float32)
-        if FP8_CACHE:
-            scale_ptr = (
-                cache_scale_ptr
-                + physical * stride_scale_page
-                + kv_head * stride_scale_h
-                + (index % PAGE_SIZE) * stride_scale_token
-            )
-            key *= tl.load(scale_ptr, mask=valid, other=1.0)[:, None]
-        score = tl.sum(q[None, :] * key, axis=1) * SCALE
-        score = tl.where(valid, score, float("-inf"))
-        next_max = tl.maximum(maximum, tl.max(score, axis=0))
-        alpha = tl.where(next_max == float("-inf"), 0.0, tl.exp(maximum - next_max))
-        weights = tl.where(valid, tl.exp(score - next_max), 0.0)
-        value = tl.load(key_ptr + stride_cache_kv, mask=valid[:, None], other=0.0).to(
-            tl.float32
-        )
-        if FP8_CACHE:
-            value *= tl.load(scale_ptr + stride_scale_kv, mask=valid, other=1.0)[
-                :, None
-            ]
-        acc = acc * alpha + tl.sum(weights[:, None] * value, axis=0)
-        normalizer = normalizer * alpha + tl.sum(weights)
-        maximum = next_max
-    output_row = (batch * H_Q + head) * QUERY_LEN + query
-    if NUM_SPLITS == 1:
-        out = tl.where(normalizer > 0, acc / normalizer, 0.0)
-        tl.store(partial_ptr + output_row * D + rd, out.to(q_ptr.dtype.element_ty))
-    else:
-        base = partial_ptr + (output_row * NUM_SPLITS + split) * (D + 2)
-        tl.store(base + rd, acc)
-        tl.store(base + D, maximum)
-        tl.store(base + D + 1, normalizer)
-
-
-@triton.jit
 def _merge_sparse_paged_splits_kernel(
     partial_ptr,
     out_ptr,
@@ -248,31 +127,35 @@ def _merge_sparse_paged_splits_kernel(
     HEADS: tl.constexpr,
     QUERIES: tl.constexpr,
     WITH_GATE: tl.constexpr,
+    TOTAL_ROWS: tl.constexpr = 0,
 ):
     row = tl.program_id(0).to(tl.int64)
-    splits = tl.arange(0, NUM_SPLITS)
-    rd = tl.arange(0, D)
-    base = partial_ptr + row * NUM_SPLITS * (D + 2)
-    maxima = tl.load(base + splits * (D + 2) + D)
-    sums = tl.load(base + splits * (D + 2) + D + 1)
-    maximum = tl.max(maxima, axis=0)
-    # Empty partitions contribute exactly zero, including an all-empty row.
-    scale = tl.where(sums > 0, tl.exp(maxima - maximum), 0.0)
-    partial = tl.load(base + splits[:, None] * (D + 2) + rd[None, :])
-    numerator = tl.sum(partial * scale[:, None], axis=0)
-    denominator = tl.sum(sums * scale, axis=0)
-    out = tl.where(denominator > 0, numerator / denominator, 0.0)
-    if WITH_GATE:
-        batch = row // (HEADS * QUERIES)
-        head = (row // QUERIES) % HEADS
-        query = row % QUERIES
-        offset = ((batch * QUERIES + query) * HEADS + head) * D + rd
-        gate = tl.load(gate_ptr + offset).to(tl.float32)
-        sigmoid = tl.sigmoid(gate).to(tl.bfloat16).to(tl.float32)
-        out = out.to(tl.bfloat16).to(tl.float32) * sigmoid
-    else:
-        offset = row * D + rd
-    tl.store(out_ptr + offset, out.to(out_ptr.dtype.element_ty))
+    if TOTAL_ROWS:
+        row += tl.program_id(1).to(tl.int64) * tl.num_programs(0)
+    if TOTAL_ROWS == 0 or row < TOTAL_ROWS:
+        splits = tl.arange(0, NUM_SPLITS)
+        rd = tl.arange(0, D)
+        base = partial_ptr + row * NUM_SPLITS * (D + 2)
+        maxima = tl.load(base + splits * (D + 2) + D)
+        sums = tl.load(base + splits * (D + 2) + D + 1)
+        maximum = tl.max(maxima, axis=0)
+        # Empty partitions contribute exactly zero, including an all-empty row.
+        scale = tl.where(sums > 0, tl.exp(maxima - maximum), 0.0)
+        partial = tl.load(base + splits[:, None] * (D + 2) + rd[None, :])
+        numerator = tl.sum(partial * scale[:, None], axis=0)
+        denominator = tl.sum(sums * scale, axis=0)
+        out = tl.where(denominator > 0, numerator / denominator, 0.0)
+        if WITH_GATE:
+            batch = row // (HEADS * QUERIES)
+            head = (row // QUERIES) % HEADS
+            query = row % QUERIES
+            offset = ((batch * QUERIES + query) * HEADS + head) * D + rd
+            gate = tl.load(gate_ptr + offset).to(tl.float32)
+            sigmoid = tl.sigmoid(gate).to(tl.bfloat16).to(tl.float32)
+            out = out.to(tl.bfloat16).to(tl.float32) * sigmoid
+        else:
+            offset = row * D + rd
+        tl.store(out_ptr + offset, out.to(out_ptr.dtype.element_ty))
 
 
 def sparse_paged_gqa_attn(
@@ -291,6 +174,7 @@ def sparse_paged_gqa_attn(
     selected_has_count: bool = False,
     fp16_pv: bool = False,
     validate_selected: bool = True,
+    kv_scale_is_unity: bool = False,
     _validated_plan=None,
 ) -> torch.Tensor:
     """Attend to request-local token indices in a paged main MHA cache.
@@ -312,10 +196,18 @@ def sparse_paged_gqa_attn(
         validate_selected: eager value checks. The model's trusted indexer
             path may skip these after its paged-geometry preflight; shape,
             dtype, strides and device checks still run here.
+        kv_scale_is_unity: producer guarantee that the whole FP8 cache,
+            including reused prefixes, was directly cast without scaling.
+            The SM10x/SM120 chunk and grouped kernels can omit scale reads and multiplies.
     """
     if q.dim() != 4 or q.dtype != torch.bfloat16 or not q.is_cuda:
         raise ValueError("q must be a rank-4 BF16 CUDA tensor")
     batch, q_heads, query_len, head_dim = q.shape
+    if (
+        torch.version.hip is not None
+        or torch.cuda.get_device_capability(q.device)[0] < 8
+    ):
+        raise RuntimeError("QSA BF16 Tensor Cores require NVIDIA SM80 or newer")
     if output_gate is not None and not (
         output_gate.shape == (batch, query_len, q_heads, head_dim)
         and output_gate.dtype == torch.bfloat16
@@ -394,8 +286,6 @@ def sparse_paged_gqa_attn(
     scale_view = main_kv_scale_view(
         kv_cache, kv_scale, kv_heads=kv_heads, page_size=page_size
     )
-    scale_pointer = kv_cache if scale_view is None else scale_view
-    scale_strides = (0, 0, 0, 0) if scale_view is None else scale_view.stride()
     expected_inner_strides = (
         kv_heads * page_size * head_dim,
         page_size * head_dim,
@@ -471,7 +361,7 @@ def sparse_paged_gqa_attn(
         and q_heads // kv_heads in (3, 6, 12)
         and selected_width == 2051
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(q.device) == (12, 0)
+        and _supports_tensor_core_arch(torch.cuda.get_device_capability(q.device))
     ):
         from rtp_llm.models_py.kernels.cuda.qsa.chunk_paged_gqa import chunk_paged_gqa
 
@@ -484,6 +374,7 @@ def sparse_paged_gqa_attn(
             scale=scale_view,
             selected_has_count=selected_has_count,
             output_gate=output_gate,
+            unit_scale=kv_scale_is_unity,
         )
     splits = min(8, triton.next_power_of_2(triton.cdiv(selected_width, block_k)))
     from rtp_llm.models_py.kernels.cuda.qsa.grouped_sparse_paged_fmha import (
@@ -505,13 +396,12 @@ def sparse_paged_gqa_attn(
         if splits > 1
         else output
     )
-    grouped = False
     from rtp_llm.models_py.kernels.cuda.qsa.grouped_sparse_paged_fmha import (
+        _row_grid,
         grouped_sparse_paged_split,
-        is_supported,
     )
 
-    grouped = is_supported(
+    grouped_sparse_paged_split(
         q,
         kv_cache,
         block_table,
@@ -520,54 +410,12 @@ def sparse_paged_gqa_attn(
         partial,
         page_size=page_size,
         splits=splits,
-        block_k=block_k,
         scale=scale_view,
         selected_has_count=selected_has_count,
+        fp16_pv=fp16_pv,
+        unit_scale=kv_scale_is_unity,
+        block_k=block_k,
     )
-    if grouped:
-        grouped_sparse_paged_split(
-            q,
-            kv_cache,
-            block_table,
-            kv_lens,
-            selected,
-            partial,
-            page_size=page_size,
-            splits=splits,
-            scale=scale_view,
-            selected_has_count=selected_has_count,
-            fp16_pv=fp16_pv,
-        )
-    if not grouped:
-        _sparse_paged_online_split_kernel[(query_len * splits, batch, q_heads)](
-            q,
-            kv_cache,
-            scale_pointer,
-            block_table,
-            kv_lens,
-            selected,
-            partial,
-            *q.stride()[:3],
-            *kv_cache.stride()[:4],
-            *scale_strides,
-            *block_table.stride(),
-            *kv_lens.stride(),
-            *selected.stride()[:2],
-            selected_width,
-            int(block_table.shape[1]),
-            cache_blocks,
-            HAS_COUNT=selected_has_count,
-            FP8_CACHE=scale_view is not None,
-            H_Q=q_heads,
-            H_KV=kv_heads,
-            QUERY_LEN=query_len,
-            PAGE_SIZE=page_size,
-            D=head_dim,
-            SCALE=1.0 / float(head_dim) ** 0.5,
-            BLOCK_K=block_k,
-            NUM_SPLITS=splits,
-            BLOCKS_PER_SPLIT=triton.cdiv(selected_width, block_k * splits),
-        )
     if splits > 1:
         if output_gate is not None:
             # The owner consumes [B,S,H,D]. Store that layout directly, while
@@ -575,15 +423,23 @@ def sparse_paged_gqa_attn(
             output = torch.empty(
                 (batch, query_len, q_heads, head_dim), device=q.device, dtype=q.dtype
             ).transpose(1, 2)
-        _merge_sparse_paged_splits_kernel[(batch * q_heads * query_len,)](
+        merge_grid = _row_grid(batch * q_heads * query_len)
+        _merge_sparse_paged_splits_kernel[merge_grid](
             partial,
             output,
             output_gate if output_gate is not None else output,
             D=head_dim,
             NUM_SPLITS=splits,
+            TOTAL_ROWS=batch * q_heads * query_len if merge_grid[1] > 1 else 0,
             HEADS=q_heads,
             QUERIES=query_len,
             WITH_GATE=output_gate is not None,
+            # Disable contraction across SM10x to keep the same BF16 attention
+            # rounding in both gated and ungated reductions.
+            enable_fp_fusion=(
+                torch.version.hip is not None
+                or torch.cuda.get_device_capability(q.device)[0] != 10
+            ),
         )
     elif output_gate is not None:
         output = output * torch.sigmoid(output_gate.transpose(1, 2))
