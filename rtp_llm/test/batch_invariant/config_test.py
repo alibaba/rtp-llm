@@ -11,6 +11,20 @@ from rtp_llm.ops import CPRotateMethod, DataType, TaskType
 from rtp_llm.server.server_args.server_args import setup_args
 
 
+def make_engine():
+    env = {
+        "RTP_BATCH_INVARIANT": "1",
+        "WORLD_SIZE": "1",
+        "LOCAL_WORLD_SIZE": "1",
+        "TP_SIZE": "1",
+        "DP_SIZE": "1",
+        "EP_SIZE": "1",
+        "PP_SIZE": "1",
+    }
+    with patch.dict(os.environ, env, clear=True):
+        return EngineConfig.create(setup_args([]))
+
+
 class BatchInvariantConfigTest(unittest.TestCase):
     def test_switch_defaults_off_and_survives_spawn(self):
         with patch.dict(os.environ):
@@ -31,17 +45,7 @@ class BatchInvariantConfigTest(unittest.TestCase):
                 setup_args([])
 
     def test_model_conflicts(self):
-        env = {
-            "RTP_BATCH_INVARIANT": "1",
-            "WORLD_SIZE": "1",
-            "LOCAL_WORLD_SIZE": "1",
-            "TP_SIZE": "1",
-            "DP_SIZE": "1",
-            "EP_SIZE": "1",
-            "PP_SIZE": "1",
-        }
-        with patch.dict(os.environ, env, clear=True):
-            engine = EngineConfig.create(setup_args([]))
+        engine = make_engine()
         engine.kv_cache_config.reuse_cache = True
         model = ModelConfig()
         model.model_type = "qwen35_moe"
@@ -71,6 +75,11 @@ class BatchInvariantConfigTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "requires a BF16 checkpoint"):
                 configure_batch_invariant_model(engine, model)
             read_config.return_value["text_config"]["dtype"] = "bfloat16"
+            read_config.return_value["torch_dtype"] = "float16"
+            model.linear_attention_config.ssm_state_dtype = DataType.TYPE_BF16
+            with self.assertRaisesRegex(ValueError, "requires FP32 SSM state"):
+                configure_batch_invariant_model(engine, model)
+            model.linear_attention_config.ssm_state_dtype = DataType.TYPE_FP32
             model.mm_model_config.is_multimodal = True
             configure_batch_invariant_model(engine, model)
             model.num_layers = 60
@@ -96,6 +105,68 @@ class BatchInvariantConfigTest(unittest.TestCase):
                 configure_batch_invariant_model(engine, model)
         self.assertFalse(model.mm_model_config.is_multimodal)
         self.assertFalse(model.enable_fp32_lm_head)
+
+    def test_standard_qwen3_constraints(self):
+        for model_type in ("qwen_3", "qwen_3_moe"):
+            with self.subTest(model_type=model_type):
+                engine = make_engine()
+                model = ModelConfig()
+                model.model_type = model_type
+                model.task_type = TaskType.LANGUAGE_MODEL
+                model.data_type = "bf16"
+                model.linear_attention_config.ssm_state_dtype = DataType.TYPE_BF16
+                attn = model.attn_config
+                attn.head_num = 32
+                attn.size_per_head = 128
+                attn.tokens_per_block = attn.kernel_tokens_per_block = 64
+                if model_type == "qwen_3":
+                    model.num_layers = 36
+                    model.hidden_size = 4096
+                    model.inter_size = 12288
+                    attn.kv_head_num = 8
+                else:
+                    model.num_layers = 48
+                    model.hidden_size = 2048
+                    model.expert_num = 128
+                    model.moe_k = 8
+                    model.moe_inter_size = 768
+                    attn.kv_head_num = 4
+                with (
+                    patch("rtp_llm.config.engine_config.is_cuda", return_value=True),
+                    patch("torch.cuda.get_device_capability", return_value=(10, 3)),
+                    patch(
+                        "rtp_llm.config.engine_config.get_config_from_path"
+                    ) as read_config,
+                ):
+                    read_config.return_value = {
+                        "torch_dtype": "bfloat16",
+                        "text_config": {"dtype": "float16"},
+                    }
+                    configure_batch_invariant_model(engine, model)
+                    self.assertFalse(model.enable_fp32_lm_head)
+                    engine.moe_config.use_deepep_moe = True
+                    if model_type == "qwen_3_moe":
+                        with self.assertRaisesRegex(ValueError, "local Triton MoE"):
+                            configure_batch_invariant_model(engine, model)
+                    else:
+                        configure_batch_invariant_model(engine, model)
+                    engine.moe_config.use_deepep_moe = False
+                    read_config.return_value["dtype"] = "float16"
+                    with self.assertRaisesRegex(
+                        ValueError, "requires a BF16 checkpoint"
+                    ):
+                        configure_batch_invariant_model(engine, model)
+                    read_config.return_value["dtype"] = "bf16"
+                    configure_batch_invariant_model(engine, model)
+                    engine.parallelism_config.tp_size = 2
+                    with self.assertRaisesRegex(ValueError, "TP_SIZE=1"):
+                        configure_batch_invariant_model(engine, model)
+                    engine.parallelism_config.tp_size = 1
+                    attn.kv_head_num = 2
+                    with self.assertRaisesRegex(
+                        ValueError, "requires one of these architectures"
+                    ):
+                        configure_batch_invariant_model(engine, model)
 
 
 if __name__ == "__main__":
