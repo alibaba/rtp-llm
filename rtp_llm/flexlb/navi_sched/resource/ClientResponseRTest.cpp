@@ -364,3 +364,36 @@ TEST_F(ClientResponseRTest, testAbortBeforeAttachIsRemembered)
     EXPECT_EQ("aborted before attach", result.errorMessage);
     EXPECT_EQ(0, resource.requestCount());
 }
+
+TEST_F(ClientResponseRTest, testRemoteErrorsCountOnceAfterAcceptance)
+{
+    for (bool expectStream : {false, true}) {
+        ClientResponseR resource;
+        ASSERT_TRUE(resource.begin(71, false, expectStream));
+        auto error = std::make_shared<AgentResponseToClientData>();
+        error->requestId = 71;
+        error->kind = AgentResponseKind::ERROR;
+        error->terminal = true;
+        EXPECT_FALSE(resource.publishResponse(71, error));
+        EXPECT_EQ(0, resource.remoteErrorCount());
+        error->errorMessage = "remote execution failed";
+        EXPECT_FALSE(resource.publishResponse(72, error));
+        EXPECT_TRUE(resource.publishResponse(71, error));
+        EXPECT_FALSE(resource.publishResponse(71, error));
+        EXPECT_EQ(1, resource.remoteErrorCount());
+        resource.finishGraph(71, navi::EC_NONE, "");
+        EXPECT_EQ(0, resource.streamErrorCount());
+    }
+}
+
+TEST_F(ClientResponseRTest, testStreamFailureIsSeparateFromRemoteError)
+{
+    ClientResponseR resource;
+    ASSERT_TRUE(resource.begin(72, false));
+    ASSERT_TRUE(resource.publishDecision(72, makeDecision(72)));
+    ASSERT_TRUE(resource.takeDecision(72));
+    resource.finishGraph(72, navi::EC_ABORT, "agent disconnected");
+    ASSERT_TRUE(resource.takeNextResponse(0));
+    EXPECT_EQ(1, resource.streamErrorCount());
+    EXPECT_EQ(0, resource.remoteErrorCount());
+}

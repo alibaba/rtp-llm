@@ -5,6 +5,7 @@
 #include "aios/navi_sched/resource/AsyncNotification.h"
 #include "navi/engine/NaviUserResult.h"
 #include "navi/engine/Resource.h"
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -48,6 +49,8 @@ public:
     void finishClosureCompletion(uint64_t requestId);
     void finishAll();
     size_t requestCount() const;
+    uint64_t remoteErrorCount() const { return _remoteErrorCount.load(std::memory_order_relaxed); }
+    uint64_t streamErrorCount() const { return _streamErrorCount.load(std::memory_order_relaxed); }
     navi::SummaryErrorCode getSummary(const std::string &query,
                                       navi::SummaryBuilder &builder) const override;
 
@@ -88,6 +91,8 @@ private:
     bool _stopped = false;
     bool _finishCompleted = false;
     AsyncNotification _notification;
+    std::atomic<uint64_t> _remoteErrorCount{0};
+    std::atomic<uint64_t> _streamErrorCount{0};
 };
 
 NAVI_TYPEDEF_PTR(ClientResponseR);

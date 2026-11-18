@@ -684,6 +684,17 @@ void NaviSchedClient::reportMetrics() const
     const auto noDecisionCount = _masterNoDecisionCount.load(std::memory_order_relaxed);
     const auto otherErrorCount = _masterOtherErrorCount.load(std::memory_order_relaxed);
     const auto localFallbackCount = _localFallbackCount.load(std::memory_order_relaxed);
+    if (_responseR) {
+        for (const auto &entry : {
+                 std::make_pair("client.remote_error", _responseR->remoteErrorCount()),
+                 std::make_pair("client.response_stream_error", _responseR->streamErrorCount())}) {
+            const std::string prefix = entry.first;
+            reportMetric(prefix + "_total", entry.second);
+            if (reportCounterQpsMetric(prefix + "_qps", entry.second) == 0) {
+                reportSampleMetric(prefix + "_qps", 0.0);
+            }
+        }
+    }
     reportMetric("client.schedule_total", scheduleCount);
     reportMetric("client.schedule_success_total", successCount);
     reportMetric("client.schedule_error_total", errorCount);
