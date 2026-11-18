@@ -115,16 +115,22 @@ def init_cache_store_group_args(parser, cache_store_config):
         help="Decode：单轮 lease 查询的超时上限（毫秒），内部最多等待 500ms；未确认停止则继续持有 KV 并重试。",
     )
     cache_store_group.add_argument(
-        "--p2p_kv_leak_exit_threshold_percent",
-        env_name="P2P_KV_LEAK_EXIT_THRESHOLD_PERCENT",
-        bind_to=(cache_store_config, "p2p_kv_leak_exit_threshold_percent"),
+        "--p2p_kv_leak_exit_threshold_min_percent",
+        env_name="P2P_KV_LEAK_EXIT_THRESHOLD_MIN_PERCENT",
+        bind_to=(cache_store_config, "p2p_kv_leak_exit_threshold_min_percent"),
         type=_kv_leak_threshold_percent,
         choices=range(101),
         default=30,
-        help=(
-            "Decode：滞留目标 KV 的进程退出阈值，取值 0~100。设为默认值 30 时，"
-            "实例启动时从 30%~70% 均匀抽取一次。其他正值为固定百分比，0 仅关闭阈值退出。"
-        ),
+        help="Decode：滞留 KV 退出阈值的随机区间下界。上下界均设为 0 时关闭阈值退出。",
+    )
+    cache_store_group.add_argument(
+        "--p2p_kv_leak_exit_threshold_max_percent",
+        env_name="P2P_KV_LEAK_EXIT_THRESHOLD_MAX_PERCENT",
+        bind_to=(cache_store_config, "p2p_kv_leak_exit_threshold_max_percent"),
+        type=_kv_leak_threshold_percent,
+        choices=range(101),
+        default=70,
+        help="Decode：滞留 KV 退出阈值的随机区间上界。上下界相同时使用固定阈值。",
     )
 
     cache_store_group.add_argument(
