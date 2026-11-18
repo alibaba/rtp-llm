@@ -124,14 +124,20 @@ void TorchProfile::start() {
                          prefix_.c_str());
         return;
     } catch (const std::exception& e) {
-        RTP_LLM_LOG_ERROR("ascend profiler start failed, no profiling this window: %s", e.what());
-        try {
-            // best-effort cleanup of any half-built python object
+        // Copy the message while the GIL is still held: the caught exception
+        // (possibly pybind11::error_already_set) must be destroyed before the
+        // gil_scoped_acquire goes out of scope, otherwise its Python
+        // references would be released without the GIL.
+        std::string msg = e.what();
+        {
             py::gil_scoped_acquire gil;
-            ascend_impl_.reset();
-        } catch (...) {
-            ascend_impl_.release();
+            try {
+                ascend_impl_.reset();
+            } catch (...) {
+                ascend_impl_.release();
+            }
         }
+        RTP_LLM_LOG_ERROR("ascend profiler start failed, no profiling this window: %s", msg.c_str());
         stopped_ = true;
         return;
     }
@@ -156,13 +162,17 @@ std::pair<std::unique_ptr<tap::ProfilerResult>, std::string> TorchProfile::stopA
             ascend_impl_->stop();   // on_trace_ready writes *_ascend_pt/
             ascend_impl_.reset();   // safe under GIL
         } catch (const std::exception& e) {
-            RTP_LLM_LOG_ERROR("ascend profiler stop failed: %s", e.what());
-            try {
+            // Copy the message while the GIL is still held (see start()).
+            std::string msg = e.what();
+            {
                 py::gil_scoped_acquire gil;
-                ascend_impl_.reset();
-            } catch (...) {
-                ascend_impl_.release();
+                try {
+                    ascend_impl_.reset();
+                } catch (...) {
+                    ascend_impl_.release();
+                }
             }
+            RTP_LLM_LOG_ERROR("ascend profiler stop failed: %s", msg.c_str());
         }
         // torch_npu wrote the trace itself; no ProfilerResult to enqueue to
         // the async save worker (StepWindowProfiler already skips nullptr).

@@ -24,7 +24,10 @@ def _npu_runtime() -> bool:
     try:
         import torch_npu  # noqa: F401
         return torch.npu.is_available()
-    except ImportError:
+    except (ImportError, OSError):
+        # (ImportError, OSError) matches the repo-wide torch_npu import
+        # contract (device_type.py:31): some hosts raise OSError from
+        # torch_npu's C extension loader instead of ImportError.
         return False
 
 
