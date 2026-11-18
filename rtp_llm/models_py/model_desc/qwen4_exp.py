@@ -207,7 +207,13 @@ class Qwen4ExpAttention(Qwen3NextAttention):
             and hidden_states.is_cuda
             and torch.version.hip is None
             and hidden_states.dtype == torch.bfloat16
-            and torch.cuda.get_device_capability(hidden_states.device) == (12, 0)
+            and (
+                torch.cuda.get_device_capability(hidden_states.device) == (12, 0)
+                or (
+                    bool(qsa_runtime.main_inputs.is_target_verify)
+                    and torch.cuda.get_device_capability(hidden_states.device) == (9, 0)
+                )
+            )
         )
 
         def _prefix_present(inputs) -> bool:

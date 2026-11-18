@@ -10,8 +10,8 @@ from rtp_llm.models_py.modules.qwen4_exp.qsa.target_metadata_triton import (
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class TargetMetadataTest(unittest.TestCase):
     def setUp(self):
-        if torch.cuda.get_device_capability() != (12, 0):
-            self.skipTest("SM120 fast path")
+        if torch.cuda.get_device_capability() not in ((9, 0), (12, 0)):
+            self.skipTest("SM90/SM120 fast path")
 
     def reference(self, prefixes, q):
         visible = (

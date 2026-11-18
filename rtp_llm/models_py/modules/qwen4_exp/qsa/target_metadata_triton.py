@@ -30,7 +30,7 @@ def try_target_metadata(prefixes, query_len, ratio):
     if not (
         prefixes.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(prefixes.device) == (12, 0)
+        and torch.cuda.get_device_capability(prefixes.device) in ((9, 0), (12, 0))
         and prefixes.dtype == torch.int32
         and prefixes.ndim == 1
         and prefixes.is_contiguous()

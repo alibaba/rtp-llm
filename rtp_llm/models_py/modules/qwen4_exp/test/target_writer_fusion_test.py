@@ -1,4 +1,5 @@
 import unittest
+from itertools import product
 from unittest.mock import patch
 
 import torch
@@ -16,13 +17,13 @@ MODULE = "rtp_llm.models_py.modules.qwen4_exp.qsa.target_writer_triton"
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class TargetWriterFusionTest(unittest.TestCase):
     def setUp(self):
-        if torch.cuda.get_device_capability() != (12, 0):
-            self.skipTest("SM120 fast path")
+        if torch.cuda.get_device_capability() not in ((9, 0), (12, 0)):
+            self.skipTest("SM90/SM120 fast path")
         torch.manual_seed(613)
 
-    def case(self, prefixes, query, strided=False):
+    def case(self, prefixes, query, strided=False, page_size=128):
         batch = len(prefixes)
-        columns = max(prefixes) // 128 + 2
+        columns = max(prefixes) // page_size + 2
         device = "cuda"
         raw = torch.randn(
             batch * query, 640 if strided else 128, device=device, dtype=torch.bfloat16
@@ -33,10 +34,12 @@ class TargetWriterFusionTest(unittest.TestCase):
         gamma = torch.randn(128, device=device, dtype=torch.bfloat16) * 0.1
         table = torch.zeros(batch, columns, device=device, dtype=torch.int32)
         for b, prefix in enumerate(prefixes):
-            table[b, prefix // 128 : prefix // 128 + 2] = torch.tensor(
+            table[b, prefix // page_size : prefix // page_size + 2] = torch.tensor(
                 [1 + 2 * b, 2 + 2 * b], device=device, dtype=torch.int32
             )
-        kv = torch.randn(1 + 2 * batch, 32, 128, device=device, dtype=torch.bfloat16)
+        kv = torch.randn(
+            1 + 2 * batch, page_size // 4, 128, device=device, dtype=torch.bfloat16
+        )
         state = torch.randn(1 + 2 * batch, 8, 128, device=device).bfloat16().float()
         return [raw, p, cos, sin, gamma, kv, table, state, table.clone()]
 
@@ -66,26 +69,31 @@ class TargetWriterFusionTest(unittest.TestCase):
         self.assertTrue(torch.equal(args[7], original_state))
 
     def test_snapshots_writes_and_undo_are_exact(self):
-        for query in (1, 2, 3, 4):
+        for page_size, query in product((64, 128), (1, 2, 3, 4)):
             for prefixes in (
                 [4],
                 [5],
                 [6],
                 [7],
-                [127],
-                [128],
+                [page_size - 1],
+                [page_size],
                 [4093],
                 [32749],
-                [5, 127, 4093],
-                [124, 125, 126, 127, 128, 129, 130],
+                [5, page_size - 1, 4093],
+                list(range(page_size - 4, page_size + 3)),
             ):
                 for strided in (False, True):
-                    with self.subTest(query=query, prefixes=prefixes, strided=strided):
-                        self.compare(self.case(prefixes, query, strided))
+                    with self.subTest(
+                        page_size=page_size,
+                        query=query,
+                        prefixes=prefixes,
+                        strided=strided,
+                    ):
+                        self.compare(self.case(prefixes, query, strided, page_size))
 
     def test_dummy_and_invalid_physical_slots_match_reference(self):
-        for query in (1, 2, 3, 4):
-            args = self.case([5, 127, 128], query)
+        for page_size, query in product((64, 128), (1, 2, 3, 4)):
+            args = self.case([5, page_size - 1, page_size], query, page_size=page_size)
             args[6][0].zero_()
             args[8][1].zero_()
             args[8][2].fill_(args[7].shape[0] + 1)
@@ -102,8 +110,8 @@ class TargetWriterFusionTest(unittest.TestCase):
             self.assertIsNone(try_write_target_window(*args, norm_eps=1e-6))
 
     def test_graph_refreshes_prefix_pages_keys_and_gamma(self):
-        for query in (1, 2, 3, 4):
-            args = self.case([5, 125, 126], query, True)
+        for page_size, query in product((64, 128), (1, 2, 3, 4)):
+            args = self.case([5, page_size - 3, page_size - 2], query, True, page_size)
             self.write(args, True)
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
@@ -111,7 +119,7 @@ class TargetWriterFusionTest(unittest.TestCase):
             for residue in (0, 1, 2, 3):
                 args[1].copy_(
                     torch.tensor(
-                        [4 + residue, 124 + residue, 128 + residue],
+                        [4 + residue, page_size - 4 + residue, page_size + residue],
                         device="cuda",
                         dtype=torch.int32,
                     )

@@ -1,4 +1,5 @@
 import unittest
+from itertools import product
 from types import SimpleNamespace
 
 import torch
@@ -21,8 +22,8 @@ from rtp_llm.models_py.modules.qwen4_exp.test import (
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class QsaTargetPrepareTest(unittest.TestCase):
     def setUp(self):
-        if torch.cuda.get_device_capability() != (12, 0):
-            self.skipTest("SM120 target preparation")
+        if torch.cuda.get_device_capability() not in ((9, 0), (12, 0)):
+            self.skipTest("SM90/SM120 target preparation")
         torch.manual_seed(163201)
         self.writer = fixture.TargetWriterFusionTest()
         self.config = SimpleNamespace(
@@ -38,8 +39,8 @@ class QsaTargetPrepareTest(unittest.TestCase):
             scale=1.0,
         )
 
-    def tensors(self, prefixes, query, dtype=torch.float32):
-        args = self.writer.case(prefixes, query, True)
+    def tensors(self, prefixes, query, dtype=torch.float32, page_size=128):
+        args = self.writer.case(prefixes, query, True, page_size)
         rows = len(prefixes) * query
         projected = torch.randn(rows, 640, device="cuda", dtype=torch.bfloat16)
         q = projected[:, :512].view(rows, 4, 128)
@@ -89,7 +90,7 @@ class QsaTargetPrepareTest(unittest.TestCase):
             inv_freq=frequency,
         )
         args[2], args[3] = cosine, sine
-        undo = self.writer.write(args, True)
+        undo = self.writer.write(args, False)
         return try_indexer_norm_rope(q, query_cos, query_sin, gamma, 1e-6), undo
 
     def compare(self, tensors):
@@ -116,36 +117,42 @@ class QsaTargetPrepareTest(unittest.TestCase):
         torch.testing.assert_close(args[7], original_state, rtol=0, atol=0)
 
     def test_native_q_cache_snapshots_and_undo_on_every_tail_and_cross_page(self):
-        for query in (1, 2, 3, 4):
+        for page_size, query in product((64, 128), (1, 2, 3, 4)):
             for prefixes in (
                 [4],
                 [5],
                 [6],
                 [7],
-                [127],
-                [128],
+                [page_size - 1],
+                [page_size],
                 [4093],
                 [32749],
-                [5, 127, 4093],
-                [124, 125, 126, 127, 128, 129, 130],
+                [5, page_size - 1, 4093],
+                list(range(page_size - 4, page_size + 3)),
             ):
                 for dtype in (torch.bfloat16, torch.float32):
-                    with self.subTest(query=query, prefixes=prefixes, dtype=dtype):
-                        self.compare(self.tensors(prefixes, query, dtype))
+                    with self.subTest(
+                        page_size=page_size, query=query, prefixes=prefixes, dtype=dtype
+                    ):
+                        self.compare(self.tensors(prefixes, query, dtype, page_size))
 
     def test_nonunit_rope_scale_and_invalid_physical_slots_match_old_path(self):
-        for scale in (0.5, 1.731, 4.0):
+        for page_size, scale in product((64, 128), (0.5, 1.731, 4.0)):
             self.config.scale = scale
             for query in (1, 4):
-                tensors = self.tensors([5, 127, 128], query)
+                tensors = self.tensors(
+                    [5, page_size - 1, page_size], query, page_size=page_size
+                )
                 tensors[-1][6][0].zero_()
                 tensors[-1][8][1].zero_()
                 tensors[-1][8][2].fill_(tensors[-1][7].shape[0] + 1)
                 self.compare(tensors)
 
     def test_two_graphs_refresh_queries_gains_frequency_positions_and_pages(self):
-        for query in (1, 4):
-            tensors = self.tensors([5, 125, 126], query)
+        for page_size, query in product((64, 128), (1, 4)):
+            tensors = self.tensors(
+                [5, page_size - 3, page_size - 2], query, page_size=page_size
+            )
             q, gamma, positions, starts, frequency, args = tensors
             for _ in range(3):
                 self.call(tensors, True)
@@ -155,7 +162,7 @@ class QsaTargetPrepareTest(unittest.TestCase):
             for residue in range(4):
                 args[1].copy_(
                     torch.tensor(
-                        [4 + residue, 124 + residue, 128 + residue],
+                        [4 + residue, page_size - 4 + residue, page_size + residue],
                         device="cuda",
                         dtype=torch.int32,
                     )
