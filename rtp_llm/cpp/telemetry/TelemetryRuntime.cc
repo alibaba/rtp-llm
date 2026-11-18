@@ -65,9 +65,13 @@ RuntimeGlobals& globals() {
 // Export-failure accounting wrapper around the OTLP exporter. Queue overflow
 // is already reported by the upstream BSP; this wrapper covers the separate
 // exporter-side failure channel with rate-limited cumulative diagnostics.
+// It also warns when one export call exceeds the configured HTTP timeout
+// (DNS stall, connect stall or retry backoff) - the condition that used to
+// precede the cross-thread SIGALRM/siglongjmp abort.
 class DiagnosticSpanExporter final: public trace_sdk::SpanExporter {
 public:
-    explicit DiagnosticSpanExporter(std::unique_ptr<trace_sdk::SpanExporter> inner): inner_(std::move(inner)) {}
+    DiagnosticSpanExporter(std::unique_ptr<trace_sdk::SpanExporter> inner, int64_t timeout_ms)
+        : inner_(std::move(inner)), timeout_ms_(timeout_ms) {}
 
     std::unique_ptr<trace_sdk::Recordable> MakeRecordable() noexcept override {
         return inner_->MakeRecordable();
@@ -75,8 +79,31 @@ public:
 
     opentelemetry::sdk::common::ExportResult
     Export(const nostd::span<std::unique_ptr<trace_sdk::Recordable>>& spans) noexcept override {
-        auto result = inner_->Export(spans);
+        auto started    = std::chrono::steady_clock::now();
+        auto result     = inner_->Export(spans);
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - started)
+                              .count();
         total_batches_.fetch_add(1, std::memory_order_relaxed);
+        if (timeout_ms_ > 0 && elapsed_ms >= timeout_ms_) {
+            auto    timeout_batches = timeout_batches_.fetch_add(1, std::memory_order_relaxed) + 1;
+            int64_t now_s =
+                std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch())
+                    .count();
+            int64_t last_s = last_timeout_log_s_.load(std::memory_order_relaxed);
+            if (now_s - last_s >= kLogIntervalS
+                && last_timeout_log_s_.compare_exchange_strong(last_s, now_s, std::memory_order_relaxed)) {
+                RTP_LLM_LOG_WARNING("telemetry span export exceeded http_timeout_ms: elapsed=%ldms timeout=%ldms "
+                                    "spans=%ld result=%d (cumulative %ld timeout batches; next warning suppressed for "
+                                    "%lds)",
+                                    (long)elapsed_ms,
+                                    (long)timeout_ms_,
+                                    (long)spans.size(),
+                                    (int)result,
+                                    (long)timeout_batches,
+                                    (long)kLogIntervalS);
+            }
+        }
         if (result != opentelemetry::sdk::common::ExportResult::kSuccess) {
             auto failed_batches = failed_batches_.fetch_add(1, std::memory_order_relaxed) + 1;
             auto failed_spans =
@@ -111,16 +138,24 @@ public:
                                 (long)total_batches_.load(std::memory_order_relaxed),
                                 (long)failed_spans_.load(std::memory_order_relaxed));
         }
+        auto timeout_batches = timeout_batches_.load(std::memory_order_relaxed);
+        if (timeout_batches > 0) {
+            RTP_LLM_LOG_WARNING("telemetry exporter shutdown: %ld batches exceeded http_timeout_ms",
+                                (long)timeout_batches);
+        }
         return inner_->Shutdown(timeout);
     }
 
 private:
     static constexpr int64_t                 kLogIntervalS = 60;
     std::unique_ptr<trace_sdk::SpanExporter> inner_;
+    int64_t                                  timeout_ms_;
     std::atomic<int64_t>                     total_batches_{0};
     std::atomic<int64_t>                     failed_batches_{0};
     std::atomic<int64_t>                     failed_spans_{0};
     std::atomic<int64_t>                     last_log_s_{0};
+    std::atomic<int64_t>                     timeout_batches_{0};
+    std::atomic<int64_t>                     last_timeout_log_s_{0};
 };
 
 std::string getEnvString(const char* name, const std::string& default_value) {
@@ -359,7 +394,7 @@ bool TelemetryRuntime::init(
         exporter = otlp::OtlpHttpExporterFactory::Create(exporter_options);
         // Production wire path only; initWithExporter (test injection) stays
         // unwrapped so tests assert against their exporter directly.
-        exporter = std::make_unique<DiagnosticSpanExporter>(std::move(exporter));
+        exporter = std::make_unique<DiagnosticSpanExporter>(std::move(exporter), config.http_timeout_ms);
     } catch (const std::exception&) {
         g.state = TelemetryState::INIT_FAILURE;
         RTP_LLM_LOG_WARNING("telemetry disabled: field=sdk reason=exporter_failed role=%s", role.c_str());
