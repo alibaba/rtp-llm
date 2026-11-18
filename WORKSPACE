@@ -11,7 +11,10 @@ http_archive(
     patch_args = ["-p1"],
     # See the patch header for the trace-only compatibility contract and the
     # conditions under which the upstream metrics inputs must be restored.
-    patches = ["//patches/opentelemetry_cpp:0001-trace-only-otlp-recordable.patch"],
+    patches = [
+        "//patches/opentelemetry_cpp:0001-trace-only-otlp-recordable.patch",
+        "//patches/opentelemetry_cpp:0002-curl-disable-sigalrm-timeout.patch",
+    ],
     repo_mapping = {
         "@zlib": "@zlib_archive",
     },

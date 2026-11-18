@@ -1,0 +1,34 @@
+# RTP-LLM: libcurl's blocking resolver implements the DNS timeout with
+# alarm()/SIGALRM + siglongjmp into a process-global jmp_buf (curl_jmpenv).
+# In a multi-threaded process the process-directed SIGALRM can be delivered to
+# a thread other than the one that called sigsetjmp, so alarmfunc's siglongjmp
+# crosses thread stacks and glibc's fortify check aborts the whole process:
+#   *** longjmp causes uninitialized stack frame ***
+# Disable libcurl's signal-based timeout handling for the OTLP HTTP client.
+# DNS resolution is then bounded by the system resolver timeouts
+# (resolv.conf timeout/attempts) instead of CURLOPT_TIMEOUT_MS.
+diff --git a/ext/src/http/client/curl/http_operation_curl.cc b/ext/src/http/client/curl/http_operation_curl.cc
+--- a/ext/src/http/client/curl/http_operation_curl.cc
++++ b/ext/src/http/client/curl/http_operation_curl.cc
+@@ -1046,7 +1046,19 @@
+   rc = SetCurlLongOption(CURLOPT_TIMEOUT_MS, static_cast<long>(http_conn_timeout_.count()));
+   if (rc != CURLE_OK)
+   {
+     return rc;
+   }
+ 
++  // RTP-LLM: do not use libcurl's SIGALRM-based DNS timeout. With the
++  // blocking resolver, curl arms a process-wide alarm() and longjmps out of
++  // the SIGALRM handler; in a multi-threaded process the signal can land on
++  // another thread, making the longjmp cross thread stacks and abort on
++  // glibc's fortify check ("longjmp causes uninitialized stack frame").
++  // DNS is bounded by the system resolver timeouts instead.
++  rc = SetCurlLongOption(CURLOPT_NOSIGNAL, 1L);
++  if (rc != CURLE_OK)
++  {
++    return rc;
++  }
++
+   // abort if slower than 4kb/sec during 30 seconds
+   rc = SetCurlLongOption(CURLOPT_LOW_SPEED_TIME, 30L);
+   if (rc != CURLE_OK)
