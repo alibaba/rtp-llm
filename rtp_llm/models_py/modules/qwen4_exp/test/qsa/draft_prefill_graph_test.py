@@ -163,9 +163,19 @@ class DraftPrefillGraphTest(unittest.TestCase):
         positions.fill_(999)
         hook.prepare_cuda_graph(groups)
         self.assertIs(hook._workspace, workspace)
-        self.assertEqual(workspace.positions.dtype, torch.int64)
+        self.assertEqual(positions.dtype, torch.int64)
         torch.testing.assert_close(positions, expected)
         self.assertEqual(delegate.prepare_cuda_graph.call_count, 2)
+
+    def test_replay_stages_host_reference_with_cuda_default_device(self):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        replay, groups, delegate = self._replay(device=device)
+        with torch.device("cuda"):
+            replay.prepare_cuda_graph(groups)
+        reference = replay._workspace.reference_host
+        self.assertEqual(reference.device.type, "cpu")
+        self.assertEqual(reference.is_pinned(), device == "cuda")
+        delegate.prepare_cuda_graph.assert_called_once_with(groups["full"])
 
     def test_replay_checks_all_pools_before_delegate(self):
         hook, groups, delegate = self._replay()
@@ -325,14 +335,7 @@ class DraftPrefillGraphTest(unittest.TestCase):
         anchor = groups["full"]
         hook.prepare_cuda_graph(groups)
         workspace = hook._workspace
-        buffers = (
-            workspace.positions_host,
-            workspace.positions,
-            workspace.cu_host,
-            workspace.cu,
-            workspace.canonical,
-        )
-        pointers = [value.data_ptr() for value in buffers]
+        pointers = (workspace.reference_host.data_ptr(), workspace.reference.data_ptr())
         # Shrink the live tokens without changing this bucket's storage.
         anchor.input_lengths.copy_(torch.tensor([2, 0, 0], dtype=torch.int32))
         anchor.prefix_lengths.copy_(torch.tensor([9, 0, 0], dtype=torch.int32))
@@ -340,7 +343,10 @@ class DraftPrefillGraphTest(unittest.TestCase):
         anchor.combo_position_ids.fill_(999)
         hook.prepare_cuda_graph(groups)
         self.assertIs(hook._workspace, workspace)
-        self.assertEqual([value.data_ptr() for value in buffers], pointers)
+        self.assertEqual(
+            (workspace.reference_host.data_ptr(), workspace.reference.data_ptr()),
+            pointers,
+        )
         torch.testing.assert_close(
             anchor.combo_position_ids,
             torch.tensor([9, 10] + [0] * 10, dtype=torch.int32).repeat_interleave(3),
@@ -348,25 +354,25 @@ class DraftPrefillGraphTest(unittest.TestCase):
         other, other_groups, _ = self._replay()
         other.prepare_cuda_graph(other_groups)
         self.assertIsNot(other._workspace, workspace)
-        self.assertNotEqual(other._workspace.canonical.data_ptr(), pointers[-1])
+        self.assertNotEqual(other._workspace.reference.data_ptr(), pointers[-1])
 
     def test_replay_busy_workspace_uses_independent_scratch(self):
         hook, groups, _ = self._replay()
         hook.prepare_cuda_graph(groups)
         workspace = hook._workspace
-        before = workspace.canonical.clone()
+        before = workspace.reference.clone()
         groups["full"].prefix_lengths[0] = 11
         hook._workspace_lock.acquire()
         try:
             hook.prepare_cuda_graph(groups)
         finally:
             hook._workspace_lock.release()
-        torch.testing.assert_close(workspace.canonical, before)
+        torch.testing.assert_close(workspace.reference, before)
         self.assertIs(hook._workspace, workspace)
         self.assertEqual(int(groups["full"].combo_position_ids[0]), 11)
         hook.prepare_cuda_graph(groups)
         self.assertIs(hook._workspace, workspace)
-        self.assertEqual(int(workspace.canonical[0, 0]), 11)
+        self.assertEqual(int(workspace.reference[1, 0]), 11)
 
     def test_replay_discards_workspace_and_releases_lock_after_failure(self):
         for defect in ("host", "verdict", "delegate"):
@@ -418,63 +424,61 @@ class DraftPrefillGraphTest(unittest.TestCase):
             second = hook._workspace
         torch.cuda.current_stream().wait_stream(stream)
         self.assertIsNot(recovered, second)
-        self.assertNotEqual(recovered.canonical.data_ptr(), second.canonical.data_ptr())
+        self.assertNotEqual(recovered.reference.data_ptr(), second.reference.data_ptr())
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA staging requires a GPU")
     def test_replay_failure_before_verdict_preserves_pending_copies(self):
         hook, groups, delegate = self._replay(device="cuda")
-        hook.prepare_cuda_graph(groups)  # Warm kernels and allocate the workspace.
-        # Keep only device outputs alive so invalidation can release pinned storage.
-        old_positions = hook._workspace.positions
-        old_cu = hook._workspace.cu
-        old_host_pointers = (
-            hook._workspace.positions_host.data_ptr(),
-            hook._workspace.cu_host.data_ptr(),
-        )
-        # Make later allocations cache hits, avoiding cudaHostAlloc synchronization.
+        hook.prepare_cuda_graph(groups)
         spares = [
-            torch.empty(size, dtype=torch.int32, pin_memory=True)
-            for size in (12, 4, 12, 4)
+            torch.empty((2, 3), dtype=torch.int64, pin_memory=True) for _ in range(2)
         ]
         del spares
-        delegate.reset_mock()
 
         def fail_before_verdict(tensor):
             self.assertTrue(tensor.is_cuda)
             raise RuntimeError("injected failure before verdict")
 
-        torch.cuda._sleep(200_000_000)
-        with patch.object(torch.Tensor, "item", fail_before_verdict):
-            with self.assertRaisesRegex(RuntimeError, "injected failure"):
-                hook.prepare_cuda_graph(groups)
         pending = torch.cuda.Event()
-        pending.record()
-        self.assertIsNone(hook._workspace)
-        delegate.prepare_cuda_graph.assert_not_called()
-        poisoned = [
-            torch.empty(size, dtype=torch.int32, pin_memory=True).fill_(-1)
-            for size in (12, 4)
-        ]
-        for staging in poisoned:
-            self.assertNotIn(staging.data_ptr(), old_host_pointers)
+        for _ in range(3):
+            self.assertIsNotNone(hook._workspace.invalid)
+            old_reference = hook._workspace.reference
+            old_host_pointer = hook._workspace.reference_host.data_ptr()
+            delegate.reset_mock()
+
+            torch.cuda._sleep(200_000_000)
+            # A pending event ahead of the copy proves the old host buffer
+            # is still in use when the allocator supplies another buffer.
+            pending.record()
+            with patch.object(torch.Tensor, "item", fail_before_verdict):
+                with self.assertRaisesRegex(RuntimeError, "injected failure"):
+                    hook.prepare_cuda_graph(groups)
+            self.assertIsNone(hook._workspace)
+            self.assertFalse(hook._workspace_lock.locked())
+            delegate.prepare_cuda_graph.assert_not_called()
+            poisoned = torch.empty((2, 3), dtype=torch.int64, pin_memory=True)
+            if not pending.query():
+                self.assertNotEqual(poisoned.data_ptr(), old_host_pointer)
+                poisoned.fill_(-1)
+                break
+            hook.prepare_cuda_graph(groups)
+        else:
+            self.skipTest("CUDA delay ended before pinned allocation could be checked")
 
         anchor = groups["full"]
         anchor.input_lengths.copy_(torch.tensor([2, 0, 0], dtype=torch.int32))
         anchor.prefix_lengths.copy_(torch.tensor([9, 0, 0], dtype=torch.int32))
-        anchor.input_lengths_device.zero_()
-        anchor.input_lengths_device[:1].fill_(2)
-        anchor.prefix_lengths_device.zero_()
-        anchor.prefix_lengths_device[:1].fill_(9)
-        anchor.cu_seqlens_device[1:].fill_(2)
-        self.assertFalse(pending.query(), "failure must leave real CUDA work pending")
-        # Retry immediately; no explicit synchronization may protect the old staging.
+        for inputs in groups.values():
+            inputs.input_lengths_device.zero_()
+            inputs.input_lengths_device[:1].fill_(2)
+            inputs.prefix_lengths_device.zero_()
+            inputs.prefix_lengths_device[:1].fill_(9)
+            inputs.cu_seqlens_device.zero_()
+            inputs.cu_seqlens_device[1:].fill_(2)
         hook.prepare_cuda_graph(groups)
         torch.testing.assert_close(
-            old_positions[:5],
-            torch.tensor([7, 127, 128, 129, 130], device="cuda", dtype=torch.int32),
-        )
-        torch.testing.assert_close(
-            old_cu, torch.tensor([0, 1, 5, 5], device="cuda", dtype=torch.int32)
+            old_reference,
+            torch.tensor([[1, 4, 0], [7, 127, 0]], device="cuda", dtype=torch.int64),
         )
         torch.testing.assert_close(
             anchor.combo_position_ids,
@@ -570,6 +574,127 @@ class DraftPrefillGraphTest(unittest.TestCase):
         groups[INDEXER_STATE_TAG].kv_cache_block_id_device[1, 1] = 0
         with self.assertRaisesRegex(RuntimeError, "raw-state pages"):
             hook.prepare_cuda_graph(groups)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA replay metadata is required")
+    def test_device_prepare_refreshes_independent_group_positions_and_padding(self):
+        hook, groups, delegate = self._replay(device="cuda")
+        media_positions = groups["full"].combo_position_ids.clone().fill_(999)
+        for inputs in groups.values():
+            inputs.combo_position_ids = media_positions.clone()
+        pointers = [inputs.combo_position_ids.data_ptr() for inputs in groups.values()]
+        for lengths, prefixes in (
+            ([1, 4, 0], [7, 127, 0]),
+            ([2, 0, 0], [9, 0, 0]),
+            ([0, 0, 0], [0, 0, 0]),
+        ):
+            cu = [0]
+            for length in lengths:
+                cu.append(cu[-1] + length)
+            for inputs in groups.values():
+                inputs.input_lengths.copy_(torch.tensor(lengths, dtype=torch.int32))
+                inputs.prefix_lengths.copy_(torch.tensor(prefixes, dtype=torch.int32))
+                inputs.input_lengths_device.copy_(inputs.input_lengths)
+                inputs.prefix_lengths_device.copy_(inputs.prefix_lengths)
+                inputs.cu_seqlens_device.copy_(torch.tensor(cu, dtype=torch.int32))
+            incoming_cu = groups["full"].cu_seqlens_device.clone()
+            hook.prepare_cuda_graph(groups)
+            expected = [p + i for p, n in zip(prefixes, lengths) for i in range(n)]
+            expected += [0] * (12 - len(expected))
+            for inputs in groups.values():
+                torch.testing.assert_close(
+                    inputs.combo_position_ids,
+                    torch.tensor(
+                        expected, dtype=torch.int32, device="cuda"
+                    ).repeat_interleave(3),
+                )
+            torch.testing.assert_close(groups["full"].cu_seqlens_device, incoming_cu)
+            self.assertIsNotNone(hook._workspace.invalid)
+            delegate.reset_mock()
+        self.assertEqual(
+            [inputs.combo_position_ids.data_ptr() for inputs in groups.values()],
+            pointers,
+        )
+        self.assertTrue(torch.all(media_positions == 999))
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA replay metadata is required")
+    def test_device_prepare_fallback_uses_current_host_mirrors(self):
+        for defect in ("strided_table", "length_dtype", "page_size"):
+            with self.subTest(defect=defect):
+                hook, groups, delegate = self._replay(device="cuda")
+                anchor = groups["full"]
+                expected = anchor.combo_position_ids.clone()
+                if defect == "strided_table":
+                    state = groups[INDEXER_STATE_TAG]
+                    table = state.kv_cache_block_id_device
+                    state.kv_cache_block_id_device = table.T.contiguous().T
+                elif defect == "length_dtype":
+                    anchor.input_lengths_device = anchor.input_lengths_device.long()
+                else:
+                    hook.bounds[-1] = (INDEXER_STATE_TAG, 12, 127, False)
+                anchor.combo_position_ids.fill_(999)
+                hook.prepare_cuda_graph(groups)
+                self.assertIsNone(hook._workspace.invalid)
+                torch.testing.assert_close(
+                    hook._workspace.reference.cpu(),
+                    torch.stack((anchor.input_lengths, anchor.prefix_lengths)).long(),
+                )
+                torch.testing.assert_close(anchor.combo_position_ids, expected)
+                delegate.prepare_cuda_graph.assert_called_once_with(anchor)
+                delegate.reset_mock()
+                anchor.cu_seqlens_device[1] = 999
+                with self.assertRaisesRegex(RuntimeError, "cu_seqlens"):
+                    hook.prepare_cuda_graph(groups)
+                delegate.prepare_cuda_graph.assert_not_called()
+
+    def test_replay_rejects_host_device_mismatch_before_delegate(self):
+        layouts = ["cpu"]
+        if torch.cuda.is_available():
+            layouts += ["cuda", "cuda_strided"]
+        for layout in layouts:
+            for field, values in (
+                ("input_lengths_device", [2, 3, 0]),
+                ("prefix_lengths_device", [8, 127, 0]),
+                ("cu_seqlens_device", [0, 2, 5, 5]),
+            ):
+                with self.subTest(layout=layout, field=field):
+                    device = "cpu" if layout == "cpu" else "cuda"
+                    hook, groups, delegate = self._replay(device=device)
+                    if layout == "cuda_strided":
+                        state = groups[INDEXER_STATE_TAG]
+                        state.kv_cache_block_id_device = (
+                            state.kv_cache_block_id_device.T.contiguous().T
+                        )
+                    setattr(
+                        groups["full"],
+                        field,
+                        torch.tensor(values, device=device, dtype=torch.int32),
+                    )
+                    with self.assertRaisesRegex(
+                        RuntimeError, "raw-state pages, cu_seqlens"
+                    ):
+                        hook.prepare_cuda_graph(groups)
+                    delegate.prepare_cuda_graph.assert_not_called()
+
+    def test_replay_checks_interior_raw_state_pages(self):
+        for page_size in (1, 2, 3):
+            with self.subTest(page_size=page_size):
+                hook, groups, delegate = self._replay()
+                anchor = groups["full"]
+                anchor.input_lengths.copy_(torch.tensor([4, 0, 0]))
+                anchor.prefix_lengths.copy_(torch.tensor([7, 0, 0]))
+                anchor.cu_seqlens_device.copy_(torch.tensor([0, 4, 4, 4]))
+                state = groups[INDEXER_STATE_TAG]
+                table = state.kv_cache_block_id_device = torch.ones(
+                    3, 11, dtype=torch.int32
+                )
+                hook.bounds[-1] = (INDEXER_STATE_TAG, 12, page_size, False)
+                hook.prepare_cuda_graph(groups)
+                delegate.reset_mock()
+                # The raw-state window spans positions 4 through 10 inclusive.
+                table[0, 4 // page_size + 1] = 0
+                with self.assertRaisesRegex(RuntimeError, "raw-state pages"):
+                    hook.prepare_cuda_graph(groups)
+                delegate.prepare_cuda_graph.assert_not_called()
 
 
 if __name__ == "__main__":
