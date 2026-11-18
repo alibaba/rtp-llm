@@ -1,7 +1,9 @@
 """Dimension-derived adapter for FlashInfer static b12x NVFP4 MoE."""
 
+from dis import get_instructions
 from functools import cache
 from hashlib import sha256
+import logging
 from pathlib import Path
 from types import FunctionType
 from weakref import WeakValueDictionary
@@ -9,6 +11,8 @@ from weakref import WeakValueDictionary
 import torch
 
 _WORKSPACE_POOLS = WeakValueDictionary()
+_STATIC_BACKEND = "static"
+logger = logging.getLogger(__name__)
 
 # Reference sources from the SM120-tested FlashInfer 0.7.3 wheel. Static
 # dispatch, workspace reset and -1 route handling depend on private code.
@@ -51,13 +55,24 @@ class B12xNvfp4MoE:
                 "b12x NVFP4 requires the verified FlashInfer static sources "
                 "from 0.7.3 (7fa5c3b909a7)."
             )
+        launch = moe_dispatch.launch_sm120_static_moe
+        # In the pinned dispatcher this function reads the flag directly in
+        # both micro-selection branches. Its callees do not arbitrate either
+        # branch again. Reject wrappers with a different binding contract.
+        if not isinstance(launch, FunctionType) or not any(
+            op.opname == "LOAD_GLOBAL" and op.argval == "_FORCED_BACKEND"
+            for op in get_instructions(launch)
+        ):
+            raise RuntimeError("Unrecognized FlashInfer static MoE launcher")
         return utils.convert_sf_to_mma_layout, moe_dispatch
 
     @classmethod
+    @cache
     def is_available(cls):
         try:
             cls._runtime()
-        except (ImportError, RuntimeError, OSError, AttributeError, TypeError):
+        except (ImportError, RuntimeError, OSError, AttributeError, TypeError) as error:
+            logger.info("SM120 b12x unavailable: %s", error)
             return False
         return True
 
@@ -68,7 +83,7 @@ class B12xNvfp4MoE:
         # the override private so other FlashInfer callers keep their dispatch.
         self.launch = FunctionType(
             launch.__code__,
-            dict(launch.__globals__, _FORCED_BACKEND="static"),
+            dict(launch.__globals__, _FORCED_BACKEND=_STATIC_BACKEND),
             launch.__name__,
             launch.__defaults__,
             launch.__closure__,
@@ -107,8 +122,9 @@ class B12xNvfp4MoE:
         self.states = pool.states
 
         def mma_scale(scale, rows, cols):
-            # FlashInfer expects the existing CUTLASS swizzled storage and
-            # exposes it as a strided MMA view.
+            # FlashInfer 7fa5c3b909a7, cute_dsl/utils.py:
+            # convert_sf_to_mma_layout consumes already-swizzled block16
+            # storage and returns a strided view over those bytes.
             return convert_sf_to_mma_layout(
                 scale.contiguous().view(torch.float8_e4m3fn),
                 m=rows,
@@ -157,13 +173,15 @@ class B12xNvfp4MoE:
                 num_topk=self.top_k,
                 device=self.device,
                 quant_mode="nvfp4",
-                backend="static",
+                backend=_STATIC_BACKEND,
             )
             self.states[rows] = state
         local_ids = torch.empty(
             (rows, self.top_k), device=self.device, dtype=torch.int32
         )
-        output = torch.empty_like(x)
+        # A rank can own none of a token's routes. Its contribution starts
+        # at zero even if the external launcher elides that output row.
+        output = torch.zeros_like(x)
         map_local_routes[(triton.cdiv(rows * self.top_k, 128),)](
             ids,
             local_ids,

@@ -37,9 +37,12 @@ def config_for(
     intermediate=640,
     experts=512,
     top_k=10,
+    model_recipe=QWEN4_FP8_NVFP4_RECIPE,
     **tuning,
 ):
-    quant = ModelOptFp4Config(bits=4, group_size=16, is_quanted=False, **tuning)
+    quant = ModelOptFp4Config(
+        bits=4, group_size=16, is_quanted=False, model_recipe=model_recipe, **tuning
+    )
     pc = SimpleNamespace(
         role_type=role,
         tp_size=ep,
@@ -134,7 +137,11 @@ class Nvfp4HybridExecutorTest(unittest.TestCase):
                     )
             with patch.dict(os.environ):
                 os.environ.pop("RTP_NVFP4_HYBRID_MOE", None)
-                self.assertIs(registry.get_strategy(config_for()), baseline)
+                self.assertIs(registry.get_strategy(config_for(model_recipe=None)), baseline)
+                self.assertIs(
+                    registry.get_strategy(config_for(model_recipe=None, decode_b12x_max_rows=16)),
+                    baseline,
+                )
                 config = config_for(model_recipe=QWEN4_FP8_NVFP4_RECIPE)
                 self.assertIs(registry.get_strategy(config), hybrid)
                 with patch(f"{MODULE}.B12xNvfp4MoE.is_available", return_value=False):
@@ -315,7 +322,7 @@ class B12xNvfp4GpuTest(unittest.TestCase):
         return logical, packed
 
     @staticmethod
-    def packed_weights(experts, hidden, intermediate, device):
+    def packed_weights(experts, hidden, intermediate, device, *, nonuniform=False):
         packed = 0x2222222222222222
         w1 = torch.full(
             (experts, 2 * intermediate, hidden // 16),
@@ -337,6 +344,20 @@ class B12xNvfp4GpuTest(unittest.TestCase):
         )
         alpha = torch.ones(experts, device=device)
         inverse_act_scale = torch.ones((), device=device)
+        if nonuniform:
+            def fill_codes(weight, offset):
+                expert = torch.arange(weight.shape[0], device=device)[:, None, None]
+                row = torch.arange(weight.shape[1], device=device)[None, :, None]
+                column = torch.arange(weight.shape[2], device=device)[None, None, :]
+                weight.zero_()
+                for lane in range(16):
+                    codes = (expert + 2 * row + column + row // intermediate + lane + offset) % 5 + 1
+                    weight.bitwise_or_(codes << (4 * lane))
+
+            fill_codes(w1, 0)
+            fill_codes(w2, 2)
+            alpha = torch.linspace(0.75, 1.25, experts, device=device)
+            inverse_act_scale = torch.full((), 1.25, device=device)
         return (
             w1,
             w2,
@@ -344,9 +365,9 @@ class B12xNvfp4GpuTest(unittest.TestCase):
                 inverse_act_scale,
                 scale1.view(torch.int32),
                 alpha,
-                inverse_act_scale,
+                inverse_act_scale * 0.75 if nonuniform else inverse_act_scale,
                 scale2.view(torch.int32),
-                alpha,
+                alpha.flip(0) if nonuniform else alpha,
             ],
         )
 
@@ -359,7 +380,9 @@ class B12xNvfp4GpuTest(unittest.TestCase):
         device = torch.device("cuda", torch.cuda.current_device())
         experts, hidden, intermediate, top_k = 4, 256, 256, 2
         rows = 4
-        w1, w2, scales = self.packed_weights(experts, hidden, intermediate, device)
+        w1, w2, scales = self.packed_weights(
+            experts, hidden, intermediate, device, nonuniform=True
+        )
         model = object()
         adapters = []
         layer_scales = []
@@ -398,27 +421,30 @@ class B12xNvfp4GpuTest(unittest.TestCase):
 
         for layer in adapters:
             layer.launch = poison_output(layer.launch)
-        x = torch.full((rows, hidden), 0.125, dtype=torch.bfloat16, device=device)
+        x = (
+            torch.arange(rows * hidden, device=device).view(rows, hidden)
+            .remainder(53).add(7).div(256).to(torch.bfloat16)
+        )
         local_ids = torch.tensor([4, 5], dtype=torch.int32, device=device).repeat(
             rows, 1
         )
         remote_ids = local_ids - experts
         mixed_ids = local_ids.clone()
         mixed_ids[::2].copy_(remote_ids[::2])
+        mixed_slots = local_ids.clone()
+        mixed_slots[:, 1].copy_(remote_ids[:, 1])
         routes = local_ids.clone()
         routing_weights = torch.full((rows, top_k), 0.5, device=device)
         expected_local = adapter(x, routes, routing_weights)
         second_expected = second_layer(x, routes, routing_weights)
-        for expected, quant_scales in zip(
-            (expected_local, second_expected), layer_scales
-        ):
+        def cutlass_reference(selected, quant_scales):
             from flashinfer import ActivationType
             from flashinfer.fused_moe import cutlass_fused_moe
 
             reference = cutlass_fused_moe(
                 input=x,
                 input_sf=None,
-                token_selected_experts=routes,
+                token_selected_experts=selected,
                 token_final_scales=routing_weights,
                 fc1_expert_weights=w1,
                 fc2_expert_weights=w2,
@@ -431,9 +457,20 @@ class B12xNvfp4GpuTest(unittest.TestCase):
                 activation_type=ActivationType.Swiglu,
                 enable_pdl=False,
             )
-            if isinstance(reference, list):
-                reference = reference[0]
-            torch.testing.assert_close(expected, reference, atol=0.01, rtol=0.02)
+            return reference[0] if isinstance(reference, list) else reference
+
+        for expected, quant_scales in zip(
+            (expected_local, second_expected), layer_scales
+        ):
+            torch.testing.assert_close(
+                expected, cutlass_reference(local_ids, quant_scales), atol=0.01, rtol=0.02
+            )
+        routes.copy_(mixed_slots)
+        expected_mixed_slots = adapter(x, routes, routing_weights)
+        torch.testing.assert_close(
+            expected_mixed_slots, cutlass_reference(mixed_slots, layer_scales[0]),
+            atol=0.01, rtol=0.02,
+        )
         self.assertTrue(torch.isfinite(second_expected).all().item())
         self.assertFalse(torch.equal(expected_local, second_expected))
         self.assertTrue(torch.isfinite(expected_local).all().item())
@@ -445,6 +482,7 @@ class B12xNvfp4GpuTest(unittest.TestCase):
         for ids, expected in (
             (remote_ids, expected_remote),
             (mixed_ids, expected_mixed),
+            (mixed_slots, expected_mixed_slots),
         ):
             routes.copy_(ids)
             torch.testing.assert_close(
@@ -461,6 +499,7 @@ class B12xNvfp4GpuTest(unittest.TestCase):
             (local_ids, expected_local),
             (remote_ids, expected_remote),
             (mixed_ids, expected_mixed),
+            (mixed_slots, expected_mixed_slots),
             (remote_ids, expected_remote),
         ):
             routes.copy_(ids)

@@ -3,6 +3,7 @@
 import json
 import os
 import statistics
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -11,6 +12,7 @@ from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
+import torch.multiprocessing as mp
 
 from rtp_llm.models_py.modules.qwen4_exp.moe.reduce_gate import (
     prepare_model_reduce,
@@ -22,18 +24,31 @@ from rtp_llm.models_py.triton_kernels.common.moe_gating import (
 
 
 def main():
-    rank = int(os.environ["LOCAL_RANK"])
+    if "LOCAL_RANK" in os.environ:
+        run_worker(int(os.environ["LOCAL_RANK"]))
+    else:
+        if torch.cuda.device_count() < 2:
+            raise RuntimeError("The LSA regression requires two CUDA devices")
+        with tempfile.TemporaryDirectory() as tmp:
+            mp.spawn(run_worker, args=(f"file://{tmp}/rendezvous",), nprocs=2)
+
+
+def run_worker(rank, rendezvous=None):
     torch.cuda.set_device(rank)
+    group_options = (
+        {} if rendezvous is None else dict(init_method=rendezvous, rank=rank, world_size=2)
+    )
     if os.environ.get("RTP_TEST_LSA_MISSING_PEER") == "1":
-        run_missing_peer(rank)
+        run_missing_peer(rank, group_options)
         return
-    dist.init_process_group("nccl")
+    dist.init_process_group("nccl", **group_options)
     device = torch.device("cuda", rank)
     results = []
     for hidden_size in (8, 264, 2048, 2560, 4096, 8192):
         results.extend(run_hidden_size(device, rank, hidden_size))
-    if rank == 0:
-        Path(os.environ["RTP_QWEN4_MOE_LSA_RESULTS"]).write_text(
+    result_path = os.environ.get("RTP_QWEN4_MOE_LSA_RESULTS")
+    if rank == 0 and result_path:
+        Path(result_path).write_text(
             json.dumps(results, indent=2) + "\n"
         )
     dist.destroy_process_group()
@@ -41,10 +56,10 @@ def main():
         print("LSA_MODEL_ENTRY_DONE", flush=True)
 
 
-def run_missing_peer(rank):
+def run_missing_peer(rank, group_options):
     from rtp_llm.ops import rtp_llm_ops
 
-    dist.init_process_group("gloo")
+    dist.init_process_group("gloo", **group_options)
     ops = rtp_llm_ops._qwen38_lsa
     ids = [ops.unique_id() if rank == 0 else None]
     dist.broadcast_object_list(ids, src=0)
@@ -113,6 +128,15 @@ def run_hidden_size(device, rank, hidden_size):
         get_ffn_tp_size=lambda: 1,
     )
     with patch.object(collective_torch, "_get_group", return_value=dist.group.WORLD):
+        if hidden_size == 2560:
+            with patch.dict(os.environ, {"NCCL_P2P_DISABLE": str(rank)}):
+                assert prepare_model_reduce(model, config, parallelism) is None
+            # Decline before native communicator creation on either rank.
+            if rank == 1:
+                with patch("torch.cuda.mem_get_info", return_value=(0, 0)):
+                    assert prepare_model_reduce(model, config, parallelism) is None
+            else:
+                assert prepare_model_reduce(model, config, parallelism) is None
         # A single rank declining must prevent either from creating a communicator.
         parallelism.ep_size = 4 if rank == 1 else 2
         assert prepare_model_reduce(model, config, parallelism) is None

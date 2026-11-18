@@ -8,6 +8,7 @@ import torch
 from flashinfer import ActivationType
 from flashinfer.fused_moe import cutlass_fused_moe
 
+from rtp_llm.config.quant_config import QWEN4_FP8_NVFP4_RECIPE
 from rtp_llm.models_py.modules.factory.fused_moe.defs.fused_moe import (
     CombineForwardPayload,
     FusedMoeExpertExecutor,
@@ -78,7 +79,8 @@ class Nvfp4HybridExecutor(FusedMoeExpertExecutor):
         checker.check(0 < config.moe_k <= config.expert_num)
         checker.check(config.moe_w1_layout == "up_gate")
         if checker.all_passed():
-            rows, profiles = decode_tuning(config.model_config.quant_config)
+            quant = config.model_config.quant_config
+            rows, profiles = decode_tuning(quant)
             if not checker.check(bool(rows or profiles is not None)):
                 return
             checker.check(
@@ -86,7 +88,12 @@ class Nvfp4HybridExecutor(FusedMoeExpertExecutor):
                 or "profile_ids" in inspect.signature(cutlass_fused_moe).parameters
             )
             checker.check(
-                rows == 0 or (pc.ep_size == 2 and B12xNvfp4MoE.is_available())
+                rows == 0
+                or (
+                    getattr(quant, "model_recipe", None) == QWEN4_FP8_NVFP4_RECIPE
+                    and pc.ep_size == 2
+                    and B12xNvfp4MoE.is_available()
+                )
             )
 
     def __init__(self, config, quant_config, weights):
@@ -94,6 +101,12 @@ class Nvfp4HybridExecutor(FusedMoeExpertExecutor):
         self.max_b12x_rows, self.cutlass_profiles = decode_tuning(
             config.model_config.quant_config
         )
+        if self.max_b12x_rows and (
+            getattr(config.model_config.quant_config, "model_recipe", None)
+            != QWEN4_FP8_NVFP4_RECIPE
+            or config.parallelism_config.ep_size != 2
+        ):
+            raise ValueError("b12x Decode requires the Qwen4 FP8-to-NVFP4 recipe and EP2")
         if (
             self.cutlass_profiles is not None
             and "profile_ids" not in inspect.signature(cutlass_fused_moe).parameters
