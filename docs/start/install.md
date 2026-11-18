@@ -100,12 +100,16 @@ Explicit tactic IDs are specific to the FlashInfer build and GPU shape, so
 validate them on the deployment wheel.
 
 The CUDA 13 native extension includes the SM120 TP2 shared-expert LSA
-fusion. Both Decode ranks check the packaged NCCL API, model layout,
-CUDA peer access and free memory before constructing the communicator.
-An explicit NCCL P2P or cuMem disable, or any other failed preflight,
-selects the standard routed collective on both ranks. Once both ranks
-enter communicator creation, a native failure aborts startup for the TP
-group. A unilateral fallback at that point could split the collective.
+fusion. Both Decode ranks check the packaged NCCL API, model layout, CUDA
+peer access and free memory. They allocate their local window storage
+before entering communicator initialization. After initialization, both
+ranks agree on NCCL's device LSA capabilities before registering the
+symmetric window. A failed preflight, local window allocation or capability
+query selects the standard routed collective on both ranks. Both ranks
+confirm activation before installing the epilogue. Failures inside NCCL
+communicator initialization, symmetric-window registration or device
+communicator creation can leave a peer in a native collective and require
+the TP group to restart.
 Both ranks use the same logical batch shape to select the epilogue and size
 its grid. The grid has at most 64 CTAs. Each CTA uses its block index as
 one of the 64 reserved barrier slots, and the final barrier protects the
@@ -119,8 +123,7 @@ requires a restart of the TP group.
 [NCCL 2.30.4 timed LSA barrier](https://github.com/NVIDIA/nccl/blob/v2.30.4-1/src/include/nccl_device/impl/lsa_barrier__funcs.h#L168)
 
 Run `//rtp_llm/models_py/modules/qwen4_exp/test:reduce_gate_integration_test`
-on CUDA 13. The test reserves two local SM120 GPUs, and it is included in
-`qwen4_moe`. The source-runtime invocation is:
+on CUDA 13. The test reserves two local SM120 GPUs and includes one-rank\nallocation and capability failures before evaluating the fused result. It is included in\n`qwen4_moe`. The source-runtime invocation is:
 
 ```bash
 NCCL_P2P_DISABLE=0 python -m \
