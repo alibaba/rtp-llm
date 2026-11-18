@@ -62,7 +62,6 @@ def _configure_atom_ssm_replay(model_config: ModelConfig, engine_config: EngineC
         and not cp.is_prefill_enabled()
         and not cp.kv_cache_sharded
         and cp.prefill_cp_size <= 1
-        and not parallel.ffn_disaggregate_config.enable_ffn_disaggregate
         and not cache.enable_remote_cache
         and not sp.tree_decode_config
         and 1 <= sp.gen_num_per_cycle <= 3
