@@ -45,6 +45,12 @@ public final class RoutingConfig {
         private Long engineQueueAdmissionThreshold = 10L;
         /** Consecutive observed time above the watermark before sustained overload; actual waiting gates dispatch immediately. */
         private long engineQueueOverloadDurationMs = 5_000L;
+        /** Maximum hotspot migrations per second per Master. Zero disables rescue. */
+        private int hotspotRescue;
+
+        public long hotspotRescueIntervalNanos() {
+            return hotspotRescue == 0 ? 0L : Math.ceilDiv(1_000_000_000L, hotspotRescue);
+        }
     }
 
     @Getter

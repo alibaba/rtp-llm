@@ -132,7 +132,9 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                 decodeCapacity, "decodeCapacity");
         this.availability = Objects.requireNonNull(availability, "availability");
         this.orderedQueue = new OrderedRequestQueue(queueSettings.priorityOrdering());
-        this.waitingRequests = new PlacementCapacityWaitQueue(queueSettings.priorityOrdering(), availability);
+        var tokenBalance = config.getRouter().getRoles().getPrefill().getTokenBalance();
+        this.waitingRequests = new PlacementCapacityWaitQueue(queueSettings.priorityOrdering(), availability,
+                tokenBalance == null ? 0L : tokenBalance.hotspotRescueIntervalNanos());
         this.scanBudgetMultiplier = config.queueScheduler().getScanBudgetMultiplier();
 
         this.plannerCount = Math.max(MIN_PLANNER_THREADS,
@@ -436,6 +438,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                 if (closed.get() && !drained) { drainOnClose(); drained = true; }
                 Plan completed;
                 List<GlobalQueueEntry> candidates;
+                GlobalQueueEntry probe;
                 lock.lock();
                 try {
                     if (closed.get() && inFlight.isEmpty() && pendingPreemptions.isEmpty()) { break; }
@@ -468,10 +471,16 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                         controls.add(new ControlAction(controlled, entry));
                     }
                     int slots = plannerCount - inFlight.size();
+                    probe = closed.get() || slots == 0 ? null : waitingRequests.pollProbe();
+                    if (probe != null) {
+                        inFlight.add(probe);
+                        slots--;
+                    }
                     candidates = closed.get() || slots == 0 ? List.of() : planningCandidates(slots);
                     if (!prefillCostOrder) { inFlight.addAll(candidates); }
                 } finally { lock.unlock(); }
                 runControlActions(controls);
+                if (probe != null) { submitPlan(probe, true); }
                 if (prefillCostOrder) { candidates = rankCostCandidates(candidates); }
                 candidates.forEach(this::submitPlan);
                 lock.lock();
@@ -485,7 +494,11 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                                 || (!orderedQueue.hasUnscannedRequests() && !waitingRequests.hasReadyRequests()
                                     && (!prefillCostOrder || costOrderPending.isEmpty())))) {
                         try {
-                            changed.await();
+                            long wait = closed.get() || inFlight.size() == plannerCount
+                                    ? Long.MAX_VALUE : waitingRequests.nanosUntilProbe();
+                            if (wait <= 0) { break; }
+                            if (wait == Long.MAX_VALUE) { changed.await(); }
+                            else { changed.awaitNanos(wait); }
                         }
                         catch (InterruptedException interruption) {
                             if (closed.get()) { Thread.currentThread().interrupt(); }
@@ -503,6 +516,10 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
     }
 
     private void submitPlan(GlobalQueueEntry entry) {
+        submitPlan(entry, false);
+    }
+
+    private void submitPlan(GlobalQueueEntry entry, boolean probe) {
         try {
             planners.execute(() -> {
                 Plan plan = new Plan(entry, availability.sequence());
@@ -516,7 +533,9 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                         } else {
                             plan.handle = claimAdmissionHandle(entry.context.data().getRequestId(), entry.context.data().getFuture());
                             if (plan.handle != null) {
-                                plan.result = Objects.requireNonNull(router.select(entry.context, entry.routingGroup), "placement result");
+                                plan.result = Objects.requireNonNull(probe
+                                        ? entry.context.withHotspotProbe(() -> router.select(entry.context, entry.routingGroup))
+                                        : router.select(entry.context, entry.routingGroup), "placement result");
                                 plan.handle.recordDiagnostics(plan.result.diagnostics());
                                 plan.waitKey = plan.result.blocker();
                                 if (plan.result.status() == PlacementResult.Status.SUCCESS) {
@@ -525,6 +544,9 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
                                         && plan.waitKey.role().supportsPrefill()) {
                                     try {
                                         TokenEstimate tokens = router.estimateQueuedTokens(entry.context, entry.routingGroup);
+                                        if (tokens != null && tokens.hitTokens() > 0) {
+                                            plan.hitFraction = tokens.hitTokens() / (double) tokens.inputTokens();
+                                        }
                                         plan.knownColdRequest = tokens != null && tokens.inputTokens() > 0 && tokens.hitTokens() == 0;
                                     } catch (RuntimeException unavailable) {
                                         Logger.debug("Prefill token estimate unavailable; retaining ordinary capacity retry", unavailable);
@@ -983,7 +1005,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         lock.lock();
         try {
             if (!(!plan.entry.removed && !plan.entry.context.data().getFuture().isDone())) { return true; }
-            parked = waitingRequests.park(plan.entry, plan.waitKey, plan.availabilitySequence);
+            parked = waitingRequests.park(plan.entry, plan.waitKey, plan.availabilitySequence, plan.hitFraction);
             depth = orderedQueue.size();
             counts = orderedQueue.priorityCounts();
         } finally {
@@ -1132,6 +1154,7 @@ public final class QueuedRequestScheduler extends AbstractRequestScheduler imple
         // Retained after selection pins close so the request can be parked.
         private PlacementKey waitKey;
         private boolean knownColdRequest;
+        private double hitFraction = Double.NaN;
 
         private Plan(GlobalQueueEntry entry, long availabilitySequence) {
             this.entry = entry;

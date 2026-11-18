@@ -13,6 +13,8 @@ final class GlobalQueueEntry {
     final RequestContext context;
     final String routingGroup;
     boolean knownColdRequest;
+    double rescueHitFraction;
+    int rescueAttempts;
     long sequence;
     volatile boolean removed = true;
     GlobalQueueEntry previous;

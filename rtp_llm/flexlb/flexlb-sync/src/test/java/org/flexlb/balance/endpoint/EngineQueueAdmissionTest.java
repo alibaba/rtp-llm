@@ -22,6 +22,21 @@ class EngineQueueAdmissionTest {
         assertEquals(UNKNOWN, policy.state());
     }
 
+    @Test void rescueRequiresContinuousFreshFullObservationsAndHasARecoveryBand() {
+        var policy = new EngineQueueAdmission(80, 5000, 1000);
+        policy.observe(80, 0);
+        policy.observe(80, 5000);
+        assertEquals(false, policy.freshPressure(true, 5000, Long.MIN_VALUE));
+        for (long ms = 6000; ms <= 10000; ms += 1000) { policy.observe(80, ms); }
+        assertEquals(true, policy.freshPressure(true, 10000, Long.MIN_VALUE));
+        assertEquals(false, policy.freshPressure(true, 11001, Long.MIN_VALUE));
+        assertEquals(false, policy.freshPressure(true, 10001, 10000));
+        policy.observe(78, 10500);
+        assertEquals(true, policy.freshPressure(true, 10500, Long.MIN_VALUE));
+        policy.observe(60, 10600);
+        assertEquals(false, policy.freshPressure(true, 10600, Long.MIN_VALUE));
+    }
+
     @Test void dispatchWatermarkDoesNotWaitForOverloadTimer() {
         var policy = new EngineQueueAdmission(10, 5000);
         assertEquals(false, policy.dispatchBlocked());

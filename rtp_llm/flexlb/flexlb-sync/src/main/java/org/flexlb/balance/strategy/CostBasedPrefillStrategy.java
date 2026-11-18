@@ -58,6 +58,7 @@ public class CostBasedPrefillStrategy {
     private final String deliveryMode;
     private final int maxInflightBatches;
     private final RoutingConfig.TokenBalanceConfig tokenBalance;
+    private long lastRescueNanos = Long.MIN_VALUE;
     private final Object tokenSelectionLock = new Object();
 
     public CostBasedPrefillStrategy(EndpointRegistry endpointRegistry,
@@ -176,7 +177,8 @@ public class CostBasedPrefillStrategy {
                     roleType, discovery.registeredCount(), rejections);
         }
 
-        if (hot && survivors.maximumCacheHit < fleetMaxHit) {
+        boolean probe = hot && tokenBalance.getHotspotRescue() > 0 && route.ctx().isHotspotProbe();
+        if (hot && survivors.maximumCacheHit < fleetMaxHit && !probe) {
             return PlacementResult.blocked(roleType);
         }
         route.setColdTokenBalance(tokenBalance != null && !hot);
@@ -188,6 +190,16 @@ public class CostBasedPrefillStrategy {
             // Only scoring + soft reservation are serialized; cache lookup/projection stay parallel.
             synchronized (tokenSelectionLock) {
                 selectedIndex = selectTokenBalancedCandidate(survivors, roleType, group, seqLen, fleetMaxHit);
+                if (selectedIndex < 0 && probe) {
+                    selectedIndex = selectRescueTarget(discovery, cacheWorkers, survivors, seqLen, fleetMaxHit);
+                    if (selectedIndex >= 0) {
+                        if (route.ctx().claimHotspotRescue()) {
+                            lastRescueNanos = System.nanoTime();
+                        } else {
+                            selectedIndex = -1;
+                        }
+                    }
+                }
                 if (selectedIndex >= 0) {
                     route.reserveTokenPlan(survivors.endpoint(selectedIndex).ownership.planTokenWork(
                             Math.max(0L, seqLen - survivors.cacheHit(selectedIndex))));
@@ -203,6 +215,11 @@ public class CostBasedPrefillStrategy {
             return PlacementResult.blocked(roleType);
         }
 
+        if (probe && survivors.cacheHit(selectedIndex) < fleetMaxHit) {
+            Logger.info("Prefill hotspot rescue plan request={} leaders={} target={} input={} leaderHit={} targetHit={}",
+                    requestId, cacheWorkers, survivors.endpointAddress(selectedIndex), seqLen, fleetMaxHit,
+                    survivors.cacheHit(selectedIndex));
+        }
         PrefillEndpoint best = survivors.endpoint(selectedIndex);
         long bestCacheHit = survivors.cacheHit(selectedIndex);
         long selectedPrefillMs = survivors.prefillMs(selectedIndex);
@@ -409,6 +426,37 @@ public class CostBasedPrefillStrategy {
         double selectedScore = minimum;
         return tieRotation.next(role, group, candidates.size(), i -> scores[i] == selectedScore,
                 candidates::endpointAddress);
+    }
+
+    /** Called under tokenSelectionLock; a failed later admission still consumes the probe budget. */
+    private int selectRescueTarget(EndpointDiscovery discovery, java.util.Set<String> leaders,
+                                   PrefillCandidateSet candidates, long input, long leaderHit) {
+        long nowNanos = System.nanoTime();
+        if (lastRescueNanos != Long.MIN_VALUE && nowNanos - lastRescueNanos < tokenBalance.hotspotRescueIntervalNanos()) {
+            return -1;
+        }
+        long now = nowNanos / 1_000_000L;
+        long lastRescueMs = lastRescueNanos == Long.MIN_VALUE ? Long.MIN_VALUE : lastRescueNanos / 1_000_000L;
+        var groups = new java.util.HashSet<String>();
+        for (var entry : discovery.cacheCandidates()) {
+            if (!leaders.contains(entry.address())) { continue; }
+            if (!entry.endpoint().permitsHotspotRescue(true, now, lastRescueMs)) { return -1; }
+            groups.add(entry.endpoint().getStatus().topologySnapshot().group());
+        }
+        int best = -1;
+        for (int i = 0; i < candidates.size(); i++) {
+            long hit = candidates.cacheHit(i);
+            // Bound extra compute to one quarter of the original uncached work.
+            if (hit >= leaderHit || leaderHit - hit > (input - leaderHit) / 4L) { continue; }
+            var ep = candidates.endpoint(i);
+            if (!groups.contains(ep.getStatus().topologySnapshot().group())
+                    || !ep.permitsHotspotRescue(false, now, lastRescueMs)) { continue; }
+            if (best < 0 || hit > candidates.cacheHit(best)
+                    || hit == candidates.cacheHit(best) && candidates.ttftRank(i) < candidates.ttftRank(best)) {
+                best = i;
+            }
+        }
+        return best;
     }
 
     private static double normalizedHitRate(double configuredRate) {

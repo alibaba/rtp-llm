@@ -136,6 +136,11 @@ final class FlexlbConfigValidator {
         config.getDispatcher().validateFor(config.getScheduler());
         requiredPositive(config.getDispatchTimeoutMs(), "dispatchTimeoutMs");
         validateRouting(config.getRouter());
+        var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
+        if (balance != null && balance.getHotspotRescue() > 0) {
+            require(config.isQueue() && balance.getEngineQueueAdmissionThreshold() != null,
+                    "router.roles.prefill.tokenBalance.hotspotRescue", "requires QUEUE and Engine waiting telemetry");
+        }
         validateWorkerRegistry(config.getWorkerRegistry());
         validateObservability(config.getObservability());
         FlexlbConfig.GrpcServerConfig grpc = config.getGrpcServer();
@@ -220,6 +225,7 @@ final class FlexlbConfigValidator {
         if (balance != null) {
             range(balance.getMinPrefixHitPercent(), 0, RoutingConfig.PERCENTAGE_SCALE,
                     "router.roles.prefill.tokenBalance.minPrefixHitPercent");
+            nonNegative(balance.getHotspotRescue(), "router.roles.prefill.tokenBalance.hotspotRescue");
             nonNegative(balance.getEngineQueueOverloadDurationMs(),
                     "router.roles.prefill.tokenBalance.engineQueueOverloadDurationMs");
             if (balance.getEngineQueueAdmissionThreshold() != null) {

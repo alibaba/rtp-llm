@@ -109,7 +109,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.ownership = new PrefillState(new ReentrantLock(), PrefillActiveIndex.disabled(), System::currentTimeMillis);
         var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
         this.engineQueueAdmission = balance == null || balance.getEngineQueueAdmissionThreshold() == null ? null
-                : new EngineQueueAdmission(balance.getEngineQueueAdmissionThreshold(), balance.getEngineQueueOverloadDurationMs());
+                : new EngineQueueAdmission(balance.getEngineQueueAdmissionThreshold(), balance.getEngineQueueOverloadDurationMs(),
+                        Math.max(1000L, com.google.common.math.LongMath.saturatedMultiply(3L,
+                                config.getWorkerRegistry().getHealth().getStatusPollIntervalMs())));
         if (engineQueueAdmission != null) {
             observeEngineQueue();
             ownership.configureEngineQueueAdmission(this::engineQueueAdmissionState);
@@ -148,6 +150,21 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public EngineQueueAdmission.State engineQueueAdmissionState() {
         return engineQueueAdmission == null || isGenerationRetiringOrRetired()
                 ? EngineQueueAdmission.State.UNKNOWN : engineQueueAdmission.state();
+    }
+
+    /** Rescue uses only recent, generation-local Engine evidence, including heartbeats. */
+    public boolean permitsHotspotRescue(boolean source, long nowMs, long observedAfterMs) {
+        ownership.lock.lock();
+        try {
+            if (engineQueueAdmission == null || isGenerationRetiringOrRetired()
+                    || !engineQueueAdmission.freshPressure(source, nowMs, observedAfterMs)) {
+                return false;
+            }
+            return source || (engineQueueAllowsAdmission() && ownership.progress().outstandingRequests() == 0
+                    && ownership.tokenWorkload().score() == 0);
+        } finally {
+            ownership.lock.unlock();
+        }
     }
 
     private void observeEngineQueue() {

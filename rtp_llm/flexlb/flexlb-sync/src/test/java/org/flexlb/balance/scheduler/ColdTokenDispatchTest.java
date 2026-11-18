@@ -1044,6 +1044,110 @@ class ColdTokenDispatchTest {
         }
     }
 
+    @Test
+    void staggeredCompletionCanConcentrateColdRequestsEvenWithExactLocalReservations() throws Exception {
+        try (var f = new Fixture(false, false, false, true)) {
+            var reported = org.flexlb.engine.grpc.EngineRpcService.TaskInfoPB.newBuilder()
+                    .setRequestId(990000).setInputLength(8000)
+                    .setPhase(org.flexlb.engine.grpc.EngineRpcService.TaskPhase.TASK_PHASE_RUNNING).build();
+            f.observeTaskSnapshot(f.a, List.of(reported), List.of());
+            f.observeTaskSnapshot(f.b, List.of(reported.toBuilder().setRequestId(990001).build()), List.of());
+            // Both Engines can finish together while only A's completion has reached the Master.
+            f.observeTaskSnapshot(f.a, List.of(), List.of());
+            for (int i = 1; i <= 8; i++) {
+                var request = f.context(990100 + i);
+                assertTrue(f.scheduler.submit(request).get(2, TimeUnit.SECONDS).isSuccess());
+                assertSame(f.a, request.snapshot().route().prefillEp());
+                assertEquals(i * 1000L, f.a.ownership.tokenWorkload().score());
+            }
+            f.observeTaskSnapshot(f.b, List.of(), List.of());
+            var next = f.context(990200);
+            assertTrue(f.scheduler.submit(next).get(2, TimeUnit.SECONDS).isSuccess());
+            assertSame(f.b, next.snapshot().route().prefillEp());
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(ints = {0, 1, 3})
+    void sustainedHotspotRescuesLowestHitWaiterAndStopsOnRecovery(int rate) throws Exception {
+        try (var f = new Fixture(false, false, true, true, config -> {
+            config.getDispatcher().setMaxInflightPerPrefillWorker(256);
+            config.getScheduler().getOrdering().setPrefillCostOrder(true);
+            var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
+            balance.setEngineQueueAdmissionThreshold(80L);
+            balance.setEngineQueueOverloadDurationMs(250L);
+            balance.setHotspotRescue(rate);
+        })) {
+            var c = (PrefillEndpoint) f.publish(RoleType.PREFILL, "127.0.0.3");
+            var high = f.context(60001L);
+            var medium = f.context(60002L);
+            var low = f.context(60003L);
+            setCachedRequest(high, 180);
+            setCachedRequest(medium, 40);
+            setCachedRequest(low, 20);
+            when(f.cache.findMatchingEngines(any(), any(), any())).thenAnswer(call -> {
+                List<Long> keys = call.getArgument(0);
+                return Map.of(f.a.ipPort(), (int) (keys.getFirst() / 10));
+            });
+            f.updateWaiting(f.a, 81L, 1_000_000L);
+            var requests = List.of(high, medium, low);
+            var responses = requests.stream().map(f.scheduler::submit).toList();
+            awaitParked(f, requests);
+            long start = System.nanoTime();
+            while (System.nanoTime() - start < TimeUnit.MILLISECONDS.toNanos(1550)) {
+                f.updateWaiting(f.a, 81L, 1_000_000L);
+                f.updateWaiting(f.b, 0, 1_000_000L);
+                f.updateWaiting(c, 0, 1_000_000L);
+                Thread.sleep(80);
+            }
+            assertEquals(rate > 0, responses.get(2).isDone());
+            if (rate > 0) {
+                assertTrue(responses.get(2).join().isSuccess());
+                assertNotSame(f.a, low.snapshot().route().prefillEp());
+                assertEquals(0L, low.snapshot().route().hitCache());
+            }
+            assertEquals(rate == 3, responses.get(1).isDone());
+            assertFalse(responses.get(0).isDone());
+            f.updateWaiting(f.a, 0L, 1_000_000L);
+            for (int i = 0; i < requests.size(); i++) {
+                assertTrue(responses.get(i).get(3, TimeUnit.SECONDS).isSuccess());
+                boolean rescued = (rate > 0 && i == 2) || (rate == 3 && i == 1);
+                assertEquals(!rescued, requests.get(i).snapshot().route().prefillEp() == f.a);
+            }
+        }
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"short", "stale", "busy", "expensive"})
+    void hotspotGuardsKeepWaitersOnTheLeader(String scenario) throws Exception {
+        try (var f = new Fixture(false, false, false, true, config -> {
+            var balance = config.getRouter().getRoles().getPrefill().getTokenBalance();
+            balance.setEngineQueueAdmissionThreshold(80L);
+            balance.setEngineQueueOverloadDurationMs(scenario.equals("short") ? 5000L : 0L);
+            balance.setHotspotRescue(1);
+        })) {
+            int hits = scenario.equals("expensive") ? 9 : 1;
+            when(f.cache.findMatchingEngines(any(), any(), any())).thenReturn(Map.of(f.a.ipPort(), hits));
+            f.updateWaiting(f.b, 0L, 1_000_000L);
+            f.updateWaiting(f.a, 81L, 1_000_000L);
+            var request = f.context(70001);
+            var result = f.scheduler.submit(request);
+            awaitParked(f, List.of(request));
+            long start = System.nanoTime();
+            while (System.nanoTime() - start < TimeUnit.MILLISECONDS.toNanos(1450)) {
+                f.updateWaiting(f.a, 81L, 1_000_000L);
+                if (!scenario.equals("stale")) {
+                    f.updateWaiting(f.b, scenario.equals("busy") ? 1L : 0L, 1_000_000L);
+                }
+                Thread.sleep(80);
+            }
+            assertFalse(result.isDone(), scenario);
+            f.updateWaiting(f.a, 0L, 1_000_000L);
+            assertTrue(result.get(3, TimeUnit.SECONDS).isSuccess());
+            assertSame(f.a, request.snapshot().route().prefillEp());
+        }
+    }
+
     private static void setCachedRequest(RequestContext ctx, long keyBase) {
         ctx.data().setRequest(ctx.data().getRequest().toBuilder().seqLen(100_000L).cacheKeyBlockSize(5000L)
                 .blockCacheKeys(java.util.stream.LongStream.range(keyBase, keyBase + 20).boxed().toList()).build());

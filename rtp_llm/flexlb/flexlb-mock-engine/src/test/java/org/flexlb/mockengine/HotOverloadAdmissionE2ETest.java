@@ -94,8 +94,76 @@ class HotOverloadAdmissionE2ETest {
         }
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({"false,false", "true,false", "true,true"})
+    @Timeout(45)
+    void oneHotWorkerDrainsWithBoundedExtraCompute(boolean enabled, boolean shared) throws Exception {
+        var config = new FlexlbConfig();
+        config.getDispatcher().setType(DispatcherConfig.Type.NON_BATCH);
+        config.getDispatcher().setMaxInflightPerPrefillWorker(256);
+        config.queueScheduler().getDecision().setType(DecisionPolicyConfig.Type.SINGLE);
+        config.setDispatchTimeoutMs(30_000L);
+        var balance = new RoutingConfig.TokenBalanceConfig();
+        balance.setEngineQueueAdmissionThreshold(4L);
+        balance.setEngineQueueOverloadDurationMs(100L);
+        balance.setHotspotRescue(enabled ? 1 : 0);
+        config.getRouter().getRoles().getPrefill().setTokenBalance(balance);
+        String formula = "sum(computeTokens) / 300";
+        config.getRouter().getRoles().getPrefill().getExecutionTimeEstimator().setExpression(formula);
+        var performance = Map.<String, Object>of("test_pool_blocks", 65_536, "jitter_pct", 0,
+                "prefill", Map.of("max_batch_requests", 1, "max_batch_tokens", 102400));
+        try (var h = new AutoTpmE2EHarness(64420, 2, 1, formula, 1, false, false,
+                config.queueScheduler().getDecision(), true, config, 20, performance)) {
+            var cache = (MockLruBlockCache) org.springframework.test.util.ReflectionTestUtils
+                    .getField(h.prefillEngines.getFirst(), "cache");
+            var secondCache = (MockLruBlockCache) org.springframework.test.util.ReflectionTestUtils
+                    .getField(h.prefillEngines.get(1), "cache");
+            var requests = new ArrayList<List<Long>>();
+            for (int i = 0; i < 36; i++) {
+                long base = 1_000_000L + 200L * i;
+                long prefixBase = shared ? 100L : base;
+                var keys = new ArrayList<>(LongStream.range(prefixBase, prefixBase + 20).boxed().toList());
+                keys.addAll(LongStream.range(base + 20, base + 190).boxed().toList());
+                if (!shared || i == 0) { assertTrue(MockEngineTestSupport.seedCache(cache, keys.subList(0, 20))); }
+                requests.add(keys);
+            }
+            when(h.cache.findMatchingEngines(any(), any(), any())).thenAnswer(call ->
+                    Map.of(h.prefillEndpoint(0).ipPort(), cache.prefixHitBlocks(call.getArgument(0)),
+                            h.prefillEndpoint(1).ipPort(), secondCache.prefixHitBlocks(call.getArgument(0))));
+            h.startAutoPump(20L);
+            var completed = new AtomicInteger();
+            var counts = new AtomicInteger[]{new AtomicInteger(), new AtomicInteger()};
+            var failure = new AtomicReference<Throwable>();
+            long start = System.nanoTime();
+            var coldTargetSelections = new AtomicInteger();
+            for (int i = 0; i < requests.size(); i++) {
+                submit(h, i, requests.get(i), completed, counts, failure, coldTargetSelections);
+            }
+            AutoTpmE2EHarness.await(() -> completed.get() == requests.size() || failure.get() != null,
+                    30_000L, "all requests should drain");
+            long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+            assertNull(failure.get());
+            assertEquals(requests.size(), counts[0].get() + counts[1].get());
+            assertEquals(enabled, counts[1].get() > 0);
+            long probes = coldTargetSelections.get();
+            assertEquals(enabled, probes > 0);
+            assertTrue(probes <= 1L + elapsed / 1000L);
+            if (shared) { assertTrue(counts[1].get() > probes, "subsequent arrivals should reuse the warmed prefix"); }
+            h.assertAutoPumpHealthy();
+            System.out.println("HOTSPOT_RESCUE_AB enabled=" + enabled + " shared=" + shared + " leader=" + counts[0]
+                    + " target=" + counts[1] + " probes=" + probes + " elapsed_ms=" + elapsed
+                    + " extra_prefill_tokens=" + probes * 20L * 512L);
+        }
+    }
+
     private static void submit(AutoTpmE2EHarness h, int sequence, List<Long> prefix,
                                AtomicInteger completed, AtomicInteger[] completedByWorker, AtomicReference<Throwable> failure) {
+        submit(h, sequence, prefix, completed, completedByWorker, failure, null);
+    }
+
+    private static void submit(AutoTpmE2EHarness h, int sequence, List<Long> prefix, AtomicInteger completed,
+                               AtomicInteger[] completedByWorker, AtomicReference<Throwable> failure,
+                               AtomicInteger coldTargetSelections) {
         long id = 980_000L + sequence;
         var keys = new ArrayList<>(prefix);
         keys.addAll(LongStream.range(10_000L + sequence * 10, 10_010L + sequence * 10).boxed().toList());
@@ -106,6 +174,9 @@ class HotOverloadAdmissionE2ETest {
         h.scheduler.submit(context).thenAccept(response -> {
             if (!response.isSuccess()) { failure.compareAndSet(null, new AssertionError(response.getErrorMessage())); return; }
             int index = context.snapshot().route().prefillEp() == h.prefillEndpoint(0) ? 0 : 1;
+            if (coldTargetSelections != null && index == 1 && context.snapshot().route().hitCache() == 0L) {
+                coldTargetSelections.incrementAndGet();
+            }
             var input = MockEngineTestSupport.inputWithBlockKeys(id, 102_400, keys).toBuilder();
             input.getGenerateConfigBuilder().addRoleAddrs(EngineRpcService.RoleAddrPB.newBuilder()
                     .setRole(EngineRpcService.RoleAddrPB.RoleType.DECODE).setRoleStr("DECODE")

@@ -31,6 +31,20 @@ final class PlacementCapacityWaitQueue {
     private final Map<GlobalQueueEntry, Domain> membership = new IdentityHashMap<>();
     private final NavigableSet<Domain> ready;
     PlacementCapacityWaitQueue(boolean priorityOrdering, PlacementAvailability availability) {
+        this(priorityOrdering, availability, 0L);
+    }
+
+    private final NavigableSet<GlobalQueueEntry> rescueWaiters;
+    private long nextProbeNanos;
+    private final long probeIntervalNanos;
+
+    PlacementCapacityWaitQueue(boolean priorityOrdering, PlacementAvailability availability, long probeIntervalNanos) {
+        this.probeIntervalNanos = probeIntervalNanos;
+        var rescueOrder = Comparator.comparingInt((GlobalQueueEntry e) -> priorityOrdering ? -e.priority() : 0)
+                .thenComparingInt(e -> e.rescueAttempts)
+                .thenComparingDouble(e -> e.rescueHitFraction)
+                .thenComparing(GlobalQueueEntry.SEQUENCE_ORDER);
+        rescueWaiters = probeIntervalNanos > 0 ? new TreeSet<>(rescueOrder) : null;
         this.availability = Objects.requireNonNull(availability, "availability");
         order = priorityOrdering ? GlobalQueueEntry.PRIORITY_ORDER : GlobalQueueEntry.SEQUENCE_ORDER;
         ready = new TreeSet<>((left, right) -> order.compare(left.entries.first(), right.entries.first()));
@@ -43,6 +57,10 @@ final class PlacementCapacityWaitQueue {
 
     /** The only park boundary: do not sleep through an edge published during planning. */
     boolean park(GlobalQueueEntry entry, PlacementKey blocker, long observedSequence) {
+        return park(entry, blocker, observedSequence, Double.NaN);
+    }
+
+    boolean park(GlobalQueueEntry entry, PlacementKey blocker, long observedSequence, double hitFraction) {
         Objects.requireNonNull(blocker, "blocker");
         if (availability.lastChangedSequence(blocker.capacityDomain()) > observedSequence) {
             return false;
@@ -53,9 +71,27 @@ final class PlacementCapacityWaitQueue {
         Domain domain = domains.computeIfAbsent(key, this::newDomain);
         unindex(domain);
         domain.entries.add(entry);
+        if (rescueWaiters != null && !blocker.cacheWorkers().isEmpty() && Double.isFinite(hitFraction)) {
+            entry.rescueHitFraction = hitFraction;
+            if (rescueWaiters.isEmpty()) { nextProbeNanos = System.nanoTime() + probeIntervalNanos; }
+            rescueWaiters.add(entry);
+        }
         membership.put(entry, domain);
         index(domain);
         return true;
+    }
+
+    long nanosUntilProbe() {
+        return rescueWaiters == null || rescueWaiters.isEmpty() ? Long.MAX_VALUE : nextProbeNanos - System.nanoTime();
+    }
+
+    GlobalQueueEntry pollProbe() {
+        if (nanosUntilProbe() > 0) { return null; }
+        var entry = rescueWaiters.first();
+        remove(entry, false);
+        entry.rescueAttempts++;
+        nextProbeNanos = System.nanoTime() + probeIntervalNanos;
+        return entry;
     }
 
     /** Wake only the cohorts whose cache candidates include this worker. */
@@ -120,6 +156,7 @@ final class PlacementCapacityWaitQueue {
         for (int count = 0; count < limit && !ready.isEmpty(); count++) {
             Domain domain = ready.pollFirst();
             GlobalQueueEntry entry = domain.entries.pollFirst();
+            if (rescueWaiters != null) { rescueWaiters.remove(entry); }
             domain.retry = entry;
             domain.available = false;
             // Even completed entries need an owner-side cleanup opportunity.
@@ -133,6 +170,7 @@ final class PlacementCapacityWaitQueue {
     }
 
     void clear() {
+        if (rescueWaiters != null) { rescueWaiters.clear(); }
         domains.clear();
         affinityDomains.clear();
         ready.clear();
@@ -140,6 +178,7 @@ final class PlacementCapacityWaitQueue {
     }
 
     private void remove(GlobalQueueEntry entry, boolean progress) {
+        if (rescueWaiters != null) { rescueWaiters.remove(entry); }
         Domain domain = membership.remove(entry);
         if (domain == null) { return; }
         unindex(domain);

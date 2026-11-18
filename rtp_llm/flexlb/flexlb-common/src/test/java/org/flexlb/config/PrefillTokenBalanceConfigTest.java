@@ -31,8 +31,22 @@ class PrefillTokenBalanceConfigTest {
         assertThrows(RuntimeException.class, () -> parse("{\"engineQueueOverloadDurationMs\":-1}"));
     }
 
+    @Test void hotspotRescueRateIsANonNegativeInteger() {
+        var defaults = parse("{}").getRouter().getRoles().getPrefill().getTokenBalance();
+        assertEquals(0, defaults.getHotspotRescue());
+        assertEquals(0L, defaults.hotspotRescueIntervalNanos());
+        var balance = parse("""
+                {"hotspotRescue":3}
+                """).getRouter().getRoles().getPrefill().getTokenBalance();
+        assertEquals(3, balance.getHotspotRescue());
+        assertEquals(333_333_334L, balance.hotspotRescueIntervalNanos());
+        for (String value : new String[]{"-1", "1.5", "true", "{\"enabled\":true}"}) {
+            assertThrows(ConfigValidationException.class, () -> parse("{\"hotspotRescue\":" + value + "}"));
+        }
+    }
+
     @Test void removedRescueAndHistoryOptionsAreRejected() {
-        for (String value : new String[]{"{\"hotspotRescue\":{}}", "{\"enableWindow\":false}",
+        for (String value : new String[]{"{\"hotspotRescue\":{\"minWaitMs\":5000}}", "{\"enableWindow\":false}",
                 "{\"enableWindow\":true}", "{\"windowMs\":10000}"}) {
             assertThrows(ConfigValidationException.class, () -> parse(value));
         }

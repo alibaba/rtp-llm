@@ -274,6 +274,17 @@ The prefix percentage uses predictor-effective reusable tokens; the final cache 
 remains compute work. Omit `cacheAffinity` to disable that preference.
 The projection uses a frozen snapshot of current work and cannot predict future arrivals.
 
+Set `tokenBalance.hotspotRescue` to the maximum number of hotspot migrations per second per Master.
+Omitting it or setting it to `0` disables rescue. For example, `"hotspotRescue": 4` allows
+one migration every 250 ms. Normal hot routes keep maximum prefix affinity. QUEUE paces retries of parked hot requests, preferring
+business priority, fewer previous probes, then lower observed hit fraction. All current cache
+leaders must have reported sustained full Engine waiting queues for `engineQueueOverloadDurationMs`.
+Pressure clears at three quarters of the watermark. The target must be idle, have fresh feedback,
+and belong to a leader's group. Extra uncached tokens are capped at a quarter of the original
+uncached work. Each request can select a rescue destination once. Existing Engine-owned work drains
+in place. The legacy rescue tuning fields, `maxPendingComputeTokens`, `enableWindow` and `windowMs`
+are rejected by the configuration parser.
+
 Decode freezes each route attempt's request identity, priority, complete prompt-plus-output
 demand, capacity limits and admission mode before selecting workers. DIRECT requires
 immediately available dispatch capacity. QUEUE without reclamation can retain a physically

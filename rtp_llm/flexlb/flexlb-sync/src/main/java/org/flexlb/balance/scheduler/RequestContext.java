@@ -43,6 +43,23 @@ public final class RequestContext {
     private long lastWorkerAtMs;
     private long absoluteDeadline;
     private boolean requestDeadlineConsumed;
+    private boolean hotspotRescueUsed;
+    private volatile boolean hotspotProbe;
+
+    public boolean isHotspotProbe() { return hotspotProbe; }
+
+    /** The exclusive admission handle scopes this permission to one synchronous route selection. */
+    <T> T withHotspotProbe(java.util.function.Supplier<T> select) {
+        hotspotProbe = true;
+        try { return select.get(); }
+        finally { hotspotProbe = false; }
+    }
+
+    public synchronized boolean claimHotspotRescue() {
+        if (hotspotRescueUsed) { return false; }
+        hotspotRescueUsed = true;
+        return true;
+    }
     private long inactivityMs;
     public RequestContext(FlexlbConfig config) {
         data = new RequestData(Objects.requireNonNull(config));
