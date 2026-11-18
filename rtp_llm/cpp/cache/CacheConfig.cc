@@ -466,12 +466,13 @@ uint32_t CacheConfig::blockWeight(const std::string& tag) const {
 uint32_t CacheConfig::blockNumForGroup(const GroupBase& group, uint32_t baseline) const {
     const auto weight = blockWeight(group.tag);
     RTP_LLM_CHECK_WITH_INFO(weight > 0, "cache pool '%s' block weight must be positive", group.tag.c_str());
-    // Main's #1574 rule: a group either pins its own explicit block count or
-    // follows the global baseline; pool weights scale the baseline share.
+    // The baseline counts logical blocks. Project it to each pool's physical
+    // block units before applying that pool's weight.
     const uint64_t blocks =
         group.policy.explicit_block_num > 0 ?
             group.policy.explicit_block_num :
-            static_cast<uint64_t>(baseline) * weight;
+            static_cast<uint64_t>(projectCacheBlockCount(baseline, group.blockCountDivisor(seq_size_per_block)))
+                * weight;
     RTP_LLM_CHECK_WITH_INFO(
         blocks <= static_cast<uint64_t>(std::numeric_limits<int32_t>::max()),
         "cache pool '%s' block count exceeds int32 block ID range: baseline=%u weight=%u blocks=%lu",
@@ -494,8 +495,8 @@ uint32_t CacheConfig::maxBaselineBlockNum() const {
         }
         const auto weight = blockWeight(group.tag);
         RTP_LLM_CHECK_WITH_INFO(weight > 0, "cache pool '%s' block weight must be positive", group.tag.c_str());
-        // Baseline * weight must stay inside the int32 block-ID range.
-        const uint64_t limit = static_cast<uint64_t>(std::numeric_limits<int32_t>::max()) / weight;
+        const uint64_t limit = static_cast<uint64_t>(std::numeric_limits<int32_t>::max()) / weight
+                               * group.blockCountDivisor(seq_size_per_block);
         maximum = std::min(maximum, limit);
     }
     return static_cast<uint32_t>(maximum);
@@ -529,7 +530,8 @@ void CacheConfig::finalizeBlockNums(uint32_t                   global_block_num,
             const auto it = pp_overrides->find(group.tag);
             RTP_LLM_CHECK_WITH_INFO(
                 it != pp_overrides->end(), "cache group [%s] is missing from PP block overrides", group.tag.c_str());
-            RTP_LLM_CHECK_WITH_INFO(it->second > 0, "cache group [%s] requires positive block count", group.tag.c_str());
+            RTP_LLM_CHECK_WITH_INFO(
+                it->second > 0, "cache group [%s] requires positive block count", group.tag.c_str());
             group.block_num = it->second;
         } else {
             group.block_num = blockNumForGroup(group, global_block_num);

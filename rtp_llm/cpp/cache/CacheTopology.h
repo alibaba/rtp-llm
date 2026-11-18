@@ -23,13 +23,14 @@ struct GroupBase {
 
     uint32_t block_num = 0;
 
-    size_t seqSizePerBlock() const;
-    size_t kernelSeqSizePerBlock() const;
-    size_t kernelBlocksPerKvBlock() const;
-    size_t kvBlockStrideBytes() const;
-    size_t kvScaleStrideBytes() const;
-    size_t cacheKeyTokenStride() const;
-    size_t reuseBlockCount(size_t matched_block_count) const;
+    size_t   seqSizePerBlock() const;
+    uint32_t blockCountDivisor(size_t base_tokens_per_block) const;
+    size_t   kernelSeqSizePerBlock() const;
+    size_t   kernelBlocksPerKvBlock() const;
+    size_t   kvBlockStrideBytes() const;
+    size_t   kvScaleStrideBytes() const;
+    size_t   cacheKeyTokenStride() const;
+    size_t   reuseBlockCount(size_t matched_block_count) const;
     // Zero keeps the ordinary table; otherwise reserve distinct native banks for chunk execution.
     size_t   chunkCacheBlockCount(int prompt_tokens, int chunk_tokens, bool reuse_cache, int reserve_tokens = 0) const;
     uint32_t localKvHeadNum() const;

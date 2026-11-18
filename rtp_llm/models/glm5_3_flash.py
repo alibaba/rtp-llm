@@ -32,6 +32,7 @@ from rtp_llm.models.glm53_prefill_parallel import (
 )
 from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
 from rtp_llm.ops import (
+    CacheCapacityPolicyDesc,
     CacheCpPolicyDesc,
     CpBlockSliceMode,
     CpPrefillSliceLayout,
@@ -652,6 +653,9 @@ class Glm53Flash(BaseModel):
         indexer_state.entry_count_mode = OpaqueBlockEntryCountMode.STATE_RING
         indexer_state.compression_ratio = attn.indexer_compress_ratio
         indexer_state.state_ring_include_gen_num_per_cycle = True
+        capacity = CacheCapacityPolicyDesc()
+        capacity.match_decode_token_capacity = True
+        indexer_state.capacity = capacity
         cp = CacheCpPolicyDesc()
         cp.scale_seq_size = True
         cp.align_payload = True

@@ -13,6 +13,20 @@ size_t GroupBase::seqSizePerBlock() const {
     return spec->seq_size_per_block;
 }
 
+uint32_t GroupBase::blockCountDivisor(size_t base_tokens_per_block) const {
+    if (!policy.match_base_token_capacity) {
+        return 1;
+    }
+    const auto group_tokens = seqSizePerBlock();
+    RTP_LLM_CHECK_WITH_INFO(policy.group_type == CacheGroupType::SWA && base_tokens_per_block > 0
+                                && group_tokens >= base_tokens_per_block && group_tokens % base_tokens_per_block == 0,
+                            "cache tag=%s requires an integral Decode state page span (state=%zu base=%zu)",
+                            tag.c_str(),
+                            group_tokens,
+                            base_tokens_per_block);
+    return static_cast<uint32_t>(group_tokens / base_tokens_per_block);
+}
+
 size_t GroupBase::kernelSeqSizePerBlock() const {
     RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CacheTopology tag=%s has null spec", tag.c_str());
     return spec->kernel_seq_size_per_block;

@@ -2064,6 +2064,56 @@ TEST(CacheConfigTest, ExactBlockBudgetHandlesIndependentPools) {
     EXPECT_EQ(maxKVCacheBlockNumForBudget(9, KVCacheBlockBudget{10, 0, 0}), 0u);
 }
 
+TEST(CacheConfigTest, ExactBlockBudgetAccountsForProjectedStatePageBoundaries) {
+    const KVCacheBlockBudget budget{10, 3, 5, {{16, 8}}};
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(33, budget), 0u);
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(34, budget), 1u);
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(113, budget), 8u);
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(114, budget), 9u);
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(137, budget), 9u);
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(138, budget), 10u);
+}
+
+TEST(CacheConfigCreatorTest, DecodeProjectsOptInStatePoolAcrossTargetAndDraft) {
+    auto model                         = makeHybridAttentionModelConfig();
+    model.attn_config.tokens_per_block = 128;
+    setHybridAttentionKvCacheSpecs(model);
+    auto state = makeDsv4Desc("indexer_state", "fixed_state", 256, DataType::TYPE_FP32);
+    state.capacity.emplace();
+    state.capacity->match_decode_token_capacity = true;
+    model.kv_cache_spec_descs[1].push_back(state);
+    model.kv_cache_spec_descs[3].push_back(state);
+
+    auto draft                                           = model;
+    draft.num_layers                                     = 1;
+    draft.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::NONE};
+    draft.kv_cache_spec_descs                            = {model.kv_cache_spec_descs[1]};
+
+    SpeculativeExecutionConfig speculative;
+    speculative.gen_num_per_cycle = 4;
+    ParallelismConfig parallelism;
+    parallelism.role_type                          = RoleType::DECODE;
+    parallelism.prefill_cp_config.method           = CPRotateMethod::PREFILL_CP;
+    parallelism.prefill_cp_config.kv_cache_sharded = true;
+    parallelism.prefill_cp_config.prefill_cp_size  = 8;
+    KVCacheConfig options;
+    options.linear_pool_blocks = 7;
+    auto decode                = CacheConfigCreator::createConfig(model, parallelism, options, speculative, &draft);
+    decode.finalizeBlockNums(18, RuntimeConfig{});
+    EXPECT_EQ(decode.group("indexer_state").seqSizePerBlock(), 1024u);
+    EXPECT_EQ(decode.group("indexer_state").block_num, 4u);
+    EXPECT_EQ(decode.group("linear").block_num, 7u);
+    ASSERT_EQ(decode.mtp_sub_configs.size(), 1u);
+    EXPECT_EQ(decode.mtp_sub_configs[0]->group("indexer_state").block_num, 4u);
+
+    parallelism.role_type = RoleType::PREFILL;
+    parallelism.tp_size   = 2;
+    auto prefill          = CacheConfigCreator::createConfig(model, parallelism, options, speculative, &draft);
+    prefill.finalizeBlockNums(18, RuntimeConfig{});
+    EXPECT_EQ(prefill.group("indexer_state").seqSizePerBlock(), 256u);
+    EXPECT_EQ(prefill.group("indexer_state").block_num, 18u);
+}
+
 TEST(CacheConfigTest, FinalizeBlockNumsUpdatesHybridPerGroupBlockNums) {
     RuntimeConfig runtime_config;
     runtime_config.max_generate_batch_size                      = 8;
