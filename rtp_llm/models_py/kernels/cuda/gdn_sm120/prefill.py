@@ -29,8 +29,19 @@ def sm120_dsl_available():
 
 
 def sm120_prefill_prepared(
-    q, k, v, alpha, beta_fp32, initial, cu_seqlens, lengths, page_size=128
+    q,
+    k,
+    v,
+    alpha,
+    beta_fp32,
+    initial,
+    cu_seqlens,
+    lengths=None,
+    page_size=128,
+    *,
+    prepared=None
 ):
+    """Run SM120 GDN; prepared mode may zero caller-owned Q/K/V padding."""
     from rtp_llm.models_py.triton_kernels.fla.gdn_prefill_prepare import (
         checkpoint_starts as make_checkpoint_starts,
     )
@@ -38,16 +49,56 @@ def sm120_prefill_prepared(
     heads = max(q.shape[1], v.shape[1])
     if page_size != 128:
         raise ValueError("SM120 prefill checkpoint pages must contain 128 tokens")
-    checkpoint_starts = make_checkpoint_starts(cu_seqlens, len(lengths))
-    checkpoints = torch.empty(
-        (sum(n // page_size for n in lengths), heads, 128, 128),
-        device=q.device,
-        dtype=torch.float32,
-    )
-    final = torch.empty(
-        (len(lengths), heads, 128, 128), device=q.device, dtype=torch.float32
-    )
-    output = torch.empty((q.shape[0], heads, 128), device=q.device, dtype=q.dtype)
+    if prepared is None:
+        checkpoint_starts = make_checkpoint_starts(cu_seqlens, len(lengths))
+        checkpoints = torch.empty(
+            (sum(n // page_size for n in lengths), heads, 128, 128),
+            device=q.device,
+            dtype=torch.float32,
+        )
+        final = torch.empty(
+            (len(lengths), heads, 128, 128), device=q.device, dtype=torch.float32
+        )
+        output = torch.empty((q.shape[0], heads, 128), device=q.device, dtype=q.dtype)
+        max_seqlen = max(lengths)
+    else:
+        if (
+            q.shape[0] != prepared.token_capacity
+            or cu_seqlens.data_ptr() != prepared.cu_seqlens.data_ptr()
+        ):
+            raise ValueError(
+                "SM120 prepared GDN requires its fixed token capacity and cu buffer"
+            )
+        prepared.bind_sm120_cp(heads)
+        from rtp_llm.models_py.triton_kernels.fla.gdn_prefill_prepare import (
+            clear_sm120_prefill_padding,
+        )
+
+        # TMA descriptors cover capacity, so NaN padding would enter partial
+        # tiles before arithmetic masking. Restore eager's zero OOB values;
+        # live rows are never written, and this launch/grid is capture-stable.
+        clear_sm120_prefill_padding(q, k, v, prepared.num_tokens)
+        checkpoint_starts = prepared.checkpoint_starts
+        checkpoints = prepared.get_workspace(
+            "gdn_sm120_checkpoints",
+            (prepared.token_capacity // page_size, heads, 128, 128),
+            torch.float32,
+            q.device,
+        )
+        final = prepared.get_workspace(
+            "gdn_sm120_final",
+            (prepared.batch_capacity, heads, 128, 128),
+            torch.float32,
+            q.device,
+        )
+        output = prepared.get_workspace(
+            "gdn_sm120_output", (q.shape[0], heads, 128), q.dtype, q.device
+        )
+        # The DSL writes every live row. Other callers retain zero padding;
+        # segmented Qwen slices live rows before exposing this output.
+        if not prepared.output_live_only:
+            output.zero_()
+        max_seqlen = prepared.token_capacity
     initial_fp32 = initial.float().contiguous() if initial is not None else None
     from .delta_rule_cp_sm120 import cp_delta_rule_dsl_sm120
 
@@ -65,6 +116,7 @@ def sm120_prefill_prepared(
         state_checkpoints=checkpoints,
         checkpoint_cu_starts=checkpoint_starts,
         checkpoint_every_n_tokens=page_size,
-        max_seqlen=max(lengths),
+        max_seqlen=max_seqlen,
+        workspace=prepared,
     )
     return output.unsqueeze(0), checkpoints, final, checkpoint_starts

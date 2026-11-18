@@ -93,6 +93,150 @@ class Qwen4ExpPLEForwardPreparationTest(TestCase):
 
 
 class Qwen4ExpPLEPrefetchTest(PLERuntimeFixture, TestCase):
+    def test_native_decode_prefetch_replays_current_history_and_commits_original_states(
+        self,
+    ):
+        embedding = self._enable_async_cpu_ple()
+        execution = self.model._ple_execution()
+        state_table, ctx_table = self.state_blocks.clone(), self.ctx_blocks.clone()
+        graph_stream = torch.cuda.Stream()
+        graphs = []
+        try:
+            for batch in (1, 2):
+                self.state_blocks = state_table[:batch].clone()
+                self.ctx_blocks = ctx_table[:batch].clone()
+                host_lengths = torch.full((batch,), 7, dtype=torch.int32)
+                device_lengths = (host_lengths + 1).cuda()
+                attention = self._inputs_by_tag(
+                    is_prefill=False,
+                    input_lengths=torch.ones(batch, dtype=torch.int32),
+                    prefix_lengths=torch.empty(0, dtype=torch.int32),
+                    sequence_lengths=host_lengths,
+                )
+                for item in attention.values():
+                    item.is_cuda_graph = item.is_s_padded = True
+                    item.sequence_lengths_plus_1_device = device_lengths
+                ids = torch.arange(batch, device="cuda", dtype=torch.long) + 2
+                hyper = torch.randn(
+                    batch, _HC * _HIDDEN, device="cuda", dtype=torch.bfloat16
+                )
+                frame = SimpleNamespace(input_ids=ids)
+                if batch == 1:
+                    ctx_inputs = attention[PLE_NGRAM_CTX_TAG]
+                    for flag in ("is_prefill", "is_target_verify"):
+                        setattr(ctx_inputs, flag, True)
+                        with self.assertRaisesRegex(
+                            RuntimeError, "ordinary decode only"
+                        ):
+                            execution._start_graph_ple_prefetch(frame, attention)
+                        setattr(ctx_inputs, flag, False)
+                    ctx_inputs.sequence_lengths_plus_1_device = None
+                    with self.assertRaisesRegex(RuntimeError, "device decode metadata"):
+                        execution._start_graph_ple_prefetch(frame, attention)
+                    ctx_inputs.sequence_lengths_plus_1_device = device_lengths
+
+                def run():
+                    plans = execution._start_graph_ple_prefetch(frame, attention)
+                    output = self.model._apply_ple(
+                        1, hyper, ids, attention, prefetch=plans[1]
+                    )
+                    return output, plans[1][0].bank.rows.clone()
+
+                # Warmup owns all bank allocations; early lookup is read-only.
+                before_state, before_ctx = (
+                    self.state_base.clone(),
+                    self.ctx_base.clone(),
+                )
+                plans = execution._start_graph_ple_prefetch(frame, attention)
+                embedding.consume_prefetch(plans[1][0])
+                torch.testing.assert_close(
+                    self.state_base, before_state, atol=0, rtol=0
+                )
+                torch.testing.assert_close(self.ctx_base, before_ctx, atol=0, rtol=0)
+                run()
+                embedding.finish_graph_warmup()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph, stream=graph_stream):
+                    actual, actual_rows = run()
+                graphs.append(graph)
+                for step, positions in enumerate(
+                    ((7, 8), (8, 15), (15, 16), (0, 7), (7, 0), (0, 0))
+                ):
+                    positions = positions[:batch]
+                    self.state_base.normal_()
+                    self.ctx_base.random_(1, 8)
+                    self.state_blocks.copy_(state_table[:batch].roll(step, dims=1))
+                    self.ctx_blocks.copy_(ctx_table[:batch].roll(step + 1, dims=1))
+                    ids.random_(1, 10)
+                    hyper.normal_()
+                    device_lengths.copy_(
+                        torch.tensor(positions, device="cuda", dtype=torch.int32) + 1
+                    )
+                    expected_state, expected_ctx = (
+                        self.state_base.clone(),
+                        self.ctx_base.clone(),
+                    )
+                    expected = hyper.clone()
+                    expected_rows = torch.zeros_like(actual_rows)
+                    for row, position in enumerate(positions):
+                        if position == 0:
+                            self.state_blocks[row].zero_()
+                            self.ctx_blocks[row].zero_()
+                            continue
+                        read_page = (position - 1) // self._PAGE
+                        write_page = position // self._PAGE
+                        state_read = int(self.state_blocks[row, read_page])
+                        ctx_read = int(self.ctx_blocks[row, read_page])
+                        history = torch.cat(
+                            (
+                                expected_ctx[ctx_read : ctx_read + 1],
+                                ids[row : row + 1, None],
+                            ),
+                            dim=1,
+                        )
+                        # Independent dense CPU lookup for this ngram=2 fixture.
+                        mixed = history[:, -1:].cpu() * 3 ^ (
+                            history[:, -2:-1].cpu() * 5
+                        )
+                        hashed = mixed[:, :, None].remainder(
+                            torch.tensor([5, 7])
+                        ) + torch.tensor([0, 5])
+                        rows = embedding.shards[0][hashed].cuda()
+                        expected_rows[row : row + 1] = rows
+                        output, new_state = self.ple.decode_step(
+                            hyper[row : row + 1, None],
+                            history,
+                            expected_state[state_read : state_read + 1].view(
+                                1, self.ple.short_conv_state_len, -1
+                            ),
+                            embeddings=rows.flatten(-2),
+                        )
+                        expected[row] += output[0, 0]
+                        expected_state[self.state_blocks[row, write_page].long()] = (
+                            new_state.flatten()
+                        )
+                        expected_ctx[self.ctx_blocks[row, write_page].long()] = ids[row]
+                    graph.replay()
+                    live = torch.tensor(positions, device="cuda").gt(0)
+                    torch.testing.assert_close(
+                        actual[live], expected[live], atol=0, rtol=0
+                    )
+                    torch.testing.assert_close(
+                        actual_rows, expected_rows, atol=0, rtol=0
+                    )
+                    torch.testing.assert_close(
+                        self.state_base, expected_state, atol=0, rtol=0
+                    )
+                    torch.testing.assert_close(
+                        self.ctx_base, expected_ctx, atol=0, rtol=0
+                    )
+                    self.assertTrue(torch.all(host_lengths == 7))
+            self.assertFalse(embedding._prefetcher._active_slots)
+        finally:
+            for graph in graphs:
+                graph.reset()
+            embedding.close()
+
     def test_async_prefetch_ragged_prefill_preserves_every_page_and_prefix(self):
         embedding = self._enable_async_cpu_ple()
         device = torch.device("cuda")

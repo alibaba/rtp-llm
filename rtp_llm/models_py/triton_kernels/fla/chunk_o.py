@@ -60,7 +60,11 @@ def chunk_fwd_kernel_o(
     IS_LOG2: tl.constexpr,
     V_HEAD_MAJOR: tl.constexpr,
     G_HEAD_MAJOR: tl.constexpr,
+    live_count=None,
 ):
+    if live_count is not None:
+        if tl.program_id(1) >= tl.load(live_count):
+            return
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
     i_b64, i_h64 = i_b.to(tl.int64), i_h.to(tl.int64)
@@ -199,12 +203,15 @@ def chunk_fwd_o(
     scale: float | None = None,
     cu_seqlens: torch.LongTensor | None = None,
     chunk_size: int = 64,
+    prepared=None,
 ) -> torch.Tensor:
     B, T, Hg, K, V = *q.shape, v.shape[-1]
     H = v.shape[-2]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
     chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
+        prepared.chunk_indices[BT]
+        if prepared is not None
+        else prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     )
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     if scale is None:
@@ -237,6 +244,7 @@ def chunk_fwd_o(
         IS_LOG2=is_amd,
         V_HEAD_MAJOR=False,
         G_HEAD_MAJOR=False,
+        live_count=None if prepared is None else prepared.live_counts[BT],
         num_warps=(4 if h.dtype == torch.float32 else 1) if is_amd else 4,
         num_stages=1 if is_amd_cdna3 else 2,
     )

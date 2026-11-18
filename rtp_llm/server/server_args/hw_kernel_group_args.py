@@ -72,20 +72,29 @@ def validate_hw_kernel_group_args(
     # A retained child config must not prevent operators from rolling back by
     # disabling the master switch. The parser above still validates each
     # option's own syntax/range; only active graphs need cross-option checks.
-    if not hw_kernel_config.enable_cuda_graph or not buckets:
+    backend = hw_kernel_config.effective_generation_prefill_graph_backend
+    if backend == "disabled":
         return
 
-    # Match the configuration-visible part of the C++ secondary-runner
-    # ownership predicate. Generation runner capacity constraints do not apply
-    # to PD/VIT/frontend processes or non-language wrappers.
-    if role_type != RoleType.PDFUSION or task_type != TaskType.LANGUAGE_MODEL:
+    # Match the C++ secondary-runner scope; legacy full remains PDFUSION-only.
+    owns_generation = role_type == RoleType.PDFUSION or (
+        backend == "segmented" and role_type == RoleType.PREFILL
+    )
+    if not owns_generation or task_type != TaskType.LANGUAGE_MODEL:
+        if backend == "segmented":
+            raise ValueError(
+                "Segmented prefill graph requires PDFUSION/PREFILL language generation"
+            )
         return
 
-    # Within PDFUSION, NormalEngine rejects an explicitly enabled generation-
-    # prefill graph with speculative execution before warmup and runner creation.
-    # Leave that check to C++, which also knows whether a propose model exists.
-    # Returning here only defers validation; it does not permit the service to
-    # start or ignore the conflicting configuration.
+    if not buckets:
+        raise ValueError(
+            "Generation prefill graph requires generation_prefill_capture_config"
+        )
+
+    # Leave speculative admission to C++, which also knows whether a propose
+    # model exists. Legacy full conflicts are rejected before runner creation.
+    # This does not bypass native model/topology validation.
     if speculative_type != SpeculativeType.NONE:
         return
 
@@ -116,6 +125,20 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
     # 硬件/Kernel 特定优化
     ##############################################################################################################
     hw_kernel_group = parser.add_argument_group("硬件/Kernel 特定优化")
+
+    hw_kernel_group.add_argument(
+        "--generation_prefill_graph_backend",
+        env_name="",
+        bind_to=(hw_kernel_config, "generation_prefill_graph_backend"),
+        choices=("disabled", "full", "segmented"),
+        default="",
+        help=(
+            "Prefill graph backend; omitted preserves the legacy capture-bucket opt-in. "
+            "Experimental segmented supports SM120 Qwen4 BF16 TP2/4/8 EP1 or ordinary "
+            "PDFUSION EP2; TP4/8 requires a single node. FIFO text chunks and one sequence per request. "
+            "Multimodal prompts must fit the complete prefill token budget."
+        ),
+    )
 
     hw_kernel_group.add_argument(
         "--enable_cuda_graph",
@@ -157,9 +180,9 @@ def init_hw_kernel_group_args(parser, hw_kernel_config):
         help=(
             "Generation Prefill CUDA Graph capture token buckets. A non-empty value, "
             "together with ENABLE_CUDA_GRAPH=1, enables this graph role. "
-            "Only PDFUSION uses this graph role; other roles ignore the configuration. "
-            "C++ engine initialization on PDFUSION rejects combining it with speculative "
-            "execution (including MTP/DSpARK). Uses the same "
+            "The full backend is limited to ordinary PDFUSION generation. "
+            "The explicit segmented backend supports admitted PDFUSION/PREFILL "
+            "main or MTP-target models. Uses the same "
             "file/list/range syntax as PREFILL_CAPTURE_CONFIG and is limited to "
             f"{GENERATION_PREFILL_CUDA_GRAPH_MAX_CAPTURE_BUCKETS} buckets."
         ),

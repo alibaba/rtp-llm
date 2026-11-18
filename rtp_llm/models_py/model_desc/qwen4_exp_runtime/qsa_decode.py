@@ -352,6 +352,13 @@ def select_decode_tokens(
         qsa_paged_indexer_score,
     )
 
+    # Frozen context metadata selects both sides during capture. Replay only
+    # refreshes device lengths; changing this mode requires a new graph.
+    uninitialized_score_tail = (
+        graph_decode
+        and not self.is_mtp_draft
+        and self.qsa_decode_uninitialized_score_tail
+    )
     block_logits = qsa_paged_indexer_score(
         rotated_q.unsqueeze(1).contiguous(),
         score_weights,
@@ -363,6 +370,7 @@ def select_decode_tokens(
         # the score kernel also masks invalid IDs before reading the pool.
         validate_block_table=False,
         max_ctx_len=host_max_compressed,
+        **({"initialize_score_tail": False} if uninitialized_score_tail else {}),
     )
     return select_qsa_paged_tokens(
         block_logits,
@@ -373,7 +381,10 @@ def select_decode_tokens(
         # above; repeating the device-to-host check per sparse layer adds
         # a synchronization to every decode step.
         validate_lengths=False,
-        scores_are_masked=True,
+        # False restores the length mask in native/generic fallbacks and
+        # keeps the premasked-only packed selector outside this contract.
+        scores_are_masked=not uninitialized_score_tail,
+        **({"device_length_buckets": True} if uninitialized_score_tail else {}),
     )
 
 

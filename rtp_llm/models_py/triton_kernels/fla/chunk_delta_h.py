@@ -79,7 +79,11 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     SAVE_NEW_VALUE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     IS_LOG2: tl.constexpr,
+    request_live=None,
 ):
+    if request_live is not None:
+        if not tl.load(request_live + tl.program_id(1) // H):
+            return
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
     if IS_VARLEN:
@@ -434,6 +438,7 @@ def chunk_gated_delta_rule_fwd_h(
     save_new_value: bool = True,
     cu_seqlens: torch.LongTensor | None = None,
     state_dtype: torch.dtype | None = None,
+    prepared=None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Args:
@@ -454,7 +459,7 @@ def chunk_gated_delta_rule_fwd_h(
     except ImportError:
         _gluon_available = False
 
-    if _gluon_available:
+    if _gluon_available and prepared is None:
         H = u.shape[-2]
         T = k.shape[1]
         K = k.shape[-1]
@@ -490,9 +495,13 @@ def chunk_gated_delta_rule_fwd_h(
     BT = chunk_size
 
     chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, chunk_size)
-        if cu_seqlens is not None
-        else None
+        prepared.chunk_indices[chunk_size]
+        if prepared is not None
+        else (
+            prepare_chunk_indices(cu_seqlens, chunk_size)
+            if cu_seqlens is not None
+            else None
+        )
     )
     # N: the actual number of sequences in the batch with either equal or variable lengths
     if cu_seqlens is None:
@@ -501,7 +510,11 @@ def chunk_gated_delta_rule_fwd_h(
         N, NT, chunk_offsets = (
             len(cu_seqlens) - 1,
             len(chunk_indices),
-            prepare_chunk_offsets(cu_seqlens, BT),
+            (
+                prepared.chunk_offsets
+                if prepared is not None
+                else prepare_chunk_offsets(cu_seqlens, BT)
+            ),
         )
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
@@ -538,6 +551,7 @@ def chunk_gated_delta_rule_fwd_h(
         ht=final_state,
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
+        request_live=None if prepared is None else prepared.request_live,
         T=T,
         H=H,
         Hg=Hg,

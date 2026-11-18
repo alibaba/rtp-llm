@@ -56,6 +56,7 @@ private:
     std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens);
     WarmUpResult                    warmUp(const EngineInitParams& params);
     WarmUpResult                    prefillWarmUp(const EngineInitParams& params);
+    WarmUpResult                      segmentedPrefillWarmUp(const EngineInitParams& params);
     WarmUpResult                    decodeWarmUp(const EngineInitParams& params);
     absl::StatusOr<GenerateStreamPtr> runPrefillWarmupShape(const std::shared_ptr<GenerateInput>& generate_input,
                                                             const ResourceContext& resource_context,
@@ -95,6 +96,7 @@ private:
     py::object                                    custom_output_selector_;
     ParallelismConfig                             parallelism_config;
     RuntimeConfig                                 runtime_config;
+    const bool                                    segmented_prefill_;
     EPLBConfig                                    eplb_config;
     PDSepConfig                                   pd_sep_config;
     ProfilingDebugLoggingConfig                   profiling_debug_logging_config;

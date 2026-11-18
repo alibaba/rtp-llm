@@ -70,6 +70,13 @@ models_py_test(
 )
 
 models_py_test(
+    name = "ple_prefetch_test_sm120",
+    src = "ple_prefetch_test.py",
+    gpu = "RTX_5000_PRO_CU13",
+    deps = _FIXTURE_DEPS,
+)
+
+models_py_test(
     name = "qsa_cache_test",
     src = "qsa_cache_test.py",
     gpu = "L20_CU13",

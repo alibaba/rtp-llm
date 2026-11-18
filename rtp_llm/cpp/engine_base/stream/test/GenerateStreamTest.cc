@@ -2053,3 +2053,36 @@ TEST_F(GenerateStreamTest, terminalSnapshotRetainsCompatibilityForStreamingAndOp
 }
 
 }  // namespace rtp_llm
+
+namespace rtp_llm {
+
+TEST_F(GenerateStreamTest, speculativeStopRespectsMinimumAcrossCommit) {
+    autil::EnvGuard stream_async("RTP_LLM_STREAM_ASYNC", "0");
+    for (const bool eos : {false, true}) {
+        for (const int max_new_tokens : {4, 8}) {
+            SCOPED_TRACE(eos);
+            SCOPED_TRACE(max_new_tokens);
+            auto stream = GenerateStreamBuilder().createContextStream({1, 2});
+            stream->generate_status_->status.store(StreamState::RUNNING);
+            auto config                          = stream->generateConfig();
+            config->min_new_tokens               = 4;
+            config->max_new_tokens               = max_new_tokens;
+            config->ignore_eos                   = !eos;
+            stream->special_tokens_.eos_token_id = eos ? 7 : 1023;
+            config->stop_words_list = eos ? std::vector<std::vector<int>>{} : std::vector<std::vector<int>>{{7}};
+            stream->update({torch::tensor({{3, 4}}, torch::kInt32), 2}, false);
+            ASSERT_EQ(stream->outputTokenLen(), 2u);
+            ASSERT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
+
+            // A speculative commit crosses the minimum. The stop at output 3
+            // is too early; the next stop at output 5 is eligible when max=8.
+            stream->update({torch::tensor({{7, 5, 7, 6}}, torch::kInt32), 4}, false);
+            const auto expected = max_new_tokens == 4 ? std::vector<int>{3, 4, 7, 5} : std::vector<int>{3, 4, 7, 5, 7};
+            EXPECT_EQ(stream->outputTokenLen(), expected.size());
+            EXPECT_EQ(stream->getLatestTokens(expected.size()), expected);
+            EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+        }
+    }
+}
+
+}  // namespace rtp_llm

@@ -551,6 +551,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     wall_tps_reporter_(WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
         params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
     warm_up_(warm_up),
+    joint_graph_warmup_(warm_up && params.hw_kernel_config.effectiveGenerationPrefillGraphBackend() == "segmented"),
     role_type_(params.pd_sep_config.role_type),
     collect_metrics_stream_(cuda_graph::graphGetStreamFromPool(true)),
     target_verify_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
@@ -706,6 +707,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          cache_manager,
          std::nullopt,
          params.model_config_.hc_mult});
+    if (params.hw_kernel_config.effectiveGenerationPrefillGraphBackend() == "segmented") {
+        model_init_params.owns_py_model = !warm_up_;
+    }
     model_init_params.metrics_reporter               = metrics_reporter_;
     model_init_params.hidden_state_capture_layer_ids = selectHiddenStateCaptureLayerIds(
         HiddenStateCaptureModelRole::TARGET, role_type_, warm_up_, params.model_config_.hidden_state_capture_layer_ids);
@@ -785,6 +789,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 cache_manager,
                                 std::make_optional(0),
                                 mtp_params->model_config_.hc_mult});
+        if (params.hw_kernel_config.effectiveGenerationPrefillGraphBackend() == "segmented") {
+            // Draft wrappers share this local config but keep their existing
+            // short-prefill/decode graphs and transaction semantics.
+            model_params.hw_kernel_config.generation_prefill_graph_backend = "disabled";
+            model_params.owns_py_model                                     = !warm_up_;
+        }
         model_params.metrics_reporter = metrics_reporter_;
         model_params.hidden_state_capture_layer_ids =
             selectHiddenStateCaptureLayerIds(HiddenStateCaptureModelRole::DRAFT,
@@ -1222,7 +1232,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         return absl::OkStatus();
     }
 
-    if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
+    if (!isTpRank0() || (warm_up_ && !joint_graph_warmup_) || streams.size() == 0 || model_input.is_fake_stream) {
         cudaSyncAndCheck();
         releaseAllModelBuffers();
         return absl::OkStatus();
@@ -1843,7 +1853,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
-    if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
+    if (!isTpRank0() || (warm_up_ && !joint_graph_warmup_) || streams.size() == 0 || model_input.is_fake_stream) {
         cudaSyncAndCheck();
         releaseAllModelBuffers();
         return absl::OkStatus();

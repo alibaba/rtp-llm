@@ -172,6 +172,10 @@ public:
         return runner_ != nullptr && runner_->canRun(inputs, state_, CudaGraphCheckMode::PREPARE);
     }
 
+    void setRequireExactDecodeBatchSize(bool required) {
+        runner_->setRequireExactDecodeBatchSize(required);
+    }
+
     void clearInputIds(torch_ext::PyModelInputs& inputs) {
         inputs.input_ids = torch::Tensor();
     }
@@ -311,6 +315,7 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
         .def("updateBlockTables", &CudaGraphTestRunner::updateBlockTables)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("canPrepare", &CudaGraphTestRunner::canPrepare)
+        .def("setRequireExactDecodeBatchSize", &CudaGraphTestRunner::setRequireExactDecodeBatchSize)
         .def("clear_input_ids", &CudaGraphTestRunner::clearInputIds)
         .def("make_input_lengths_scalar", &CudaGraphTestRunner::makeInputLengthsScalar)
         .def("make_input_ids_scalar", &CudaGraphTestRunner::makeInputIdsScalar)

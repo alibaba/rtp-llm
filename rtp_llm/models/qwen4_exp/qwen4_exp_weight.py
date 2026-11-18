@@ -2,6 +2,7 @@ from typing import Any, Collection, Dict, List, Optional, Union
 
 import torch
 
+from rtp_llm.device.device_type import DeviceType
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.tensor_source import TensorSource
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
@@ -155,6 +156,13 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
             if not self.preserve_fp8:
                 scale = scale.to(device=device, dtype=convert_type)
         result: Dict[str, torch.Tensor] = {}
+        exported_device = getattr(load_config, "exported_device", None)
+        device_type = getattr(exported_device, "get_device_type", None)
+        pin_shards = (
+            device_type is not None
+            and device_type() == DeviceType.Cuda
+            and not getattr(load_config, "force_cpu_load_weights", False)
+        )
         if self.preserve_fp8:
             if scale is None:
                 raise ValueError("FP8 PLE storage requires its checkpoint global scale")
@@ -175,6 +183,11 @@ class Qwen4ExpPleNgramWeight(AtomicWeight):
             # This preserves existing PLE gather and graph replay consumers.
             if scale is not None and not self.preserve_fp8:
                 shard = shard * scale
+            # Pin one shard at a time. Waiting until module construction keeps
+            # the entire source table alive while making a second pinned table.
+            # The UVA consumer reuses these owners without another allocation.
+            if pin_shards and not shard.is_pinned():
+                shard = shard.pin_memory()
             result[f"{self.name}.{shard_index}"] = shard
         return result
 

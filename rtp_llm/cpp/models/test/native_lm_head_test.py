@@ -204,7 +204,7 @@ class NativeLmHeadTest(unittest.TestCase):
         gc.collect()
 
 
-def _tp_worker(rank, rendezvous):
+def _tp_worker(rank, rendezvous, fp8_shape=None):
     torch.cuda.set_device(rank)
     torch.backends.cuda.matmul.allow_tf32 = False
     dist.init_process_group(
@@ -221,25 +221,32 @@ def _tp_worker(rank, rendezvous):
     def gather(recv, mode, send, inplace):
         assert mode == 0 and len(recv) == 1 and not send
         dest = recv[0].view(-1)
+        expected_dtype = (
+            torch.bfloat16 if dtype == torch.float8_e4m3fn else torch.float32
+        )
+        assert dest.dtype == expected_dtype, (dest.dtype, expected_dtype)
         size = dest.numel() // 2
         local = dest[rank * size : (rank + 1) * size].clone()
         dist.all_gather_into_tensor(dest, local)
 
     _extension.register_comm_ops(unexpected, unexpected, gather, unexpected, unexpected)
     try:
-        for dtype in (
-            torch.bfloat16,
-            torch.float16,
-            torch.float32,
-            torch.float8_e4m3fn,
-        ):
+        dtypes = (
+            (torch.float8_e4m3fn,)
+            if fp8_shape is not None
+            else (torch.bfloat16, torch.float16, torch.float32, torch.float8_e4m3fn)
+        )
+        rows, vocab, width = fp8_shape or (7, 32, 32)
+        for dtype in dtypes:
             torch.manual_seed(1543)
-            hidden = torch.randn(7, 32, device="cuda", dtype=torch.bfloat16)
-            shards = [torch.randn(32, 32, device="cuda").to(dtype) for _ in range(2)]
+            hidden = torch.randn(rows, width, device="cuda", dtype=torch.bfloat16)
+            shards = [
+                torch.randn(vocab, width, device="cuda").to(dtype) for _ in range(2)
+            ]
             scales = [torch.tensor([value], device="cuda") for value in (0.02, 0.07)]
             scale = scales[rank] if dtype == torch.float8_e4m3fn else None
             runner = make_head(
-                shards[rank], scale, tp_size=2, tp_rank=rank, vocab_size=61
+                shards[rank], scale, tp_size=2, tp_rank=rank, vocab_size=2 * vocab - 3
             )
             selected = torch.tensor([5, 0, 2], dtype=torch.int64).pin_memory()
             for need_all in (False, True):
@@ -254,19 +261,40 @@ def _tp_worker(rank, rendezvous):
                         for i in range(2)
                     ],
                     dim=1,
-                )[:, :61]
+                )[:, : 2 * vocab - 3]
                 outputs = runner(hidden, selected, need_all_logits=need_all)
+                assert outputs["logits"].dtype == torch.float32
+                tolerance = 0 if dtype == torch.float8_e4m3fn else 1e-5
                 torch.testing.assert_close(
                     outputs["logits"],
                     expected[selected.cuda()] if need_all else expected,
-                    rtol=1e-5,
-                    atol=1e-5,
+                    rtol=tolerance,
+                    atol=tolerance,
                 )
                 if need_all:
+                    assert outputs["all_logits"].dtype == torch.float32
                     torch.testing.assert_close(
-                        outputs["all_logits"], expected, rtol=1e-5, atol=1e-5
+                        outputs["all_logits"], expected, rtol=tolerance, atol=tolerance
                     )
             del runner
+            compact_runner = make_head(shards[rank], scale, tp_size=2, tp_rank=rank)
+            compact = compact_runner(hidden, indexes(rows), compact=True)["logits"]
+            assert compact.dtype == torch.float32
+            compact_reference = torch.cat(
+                [
+                    reference(
+                        hidden,
+                        shards[i],
+                        scales[i] if dtype == torch.float8_e4m3fn else None,
+                    )
+                    for i in range(2)
+                ],
+                dim=1,
+            )
+            torch.testing.assert_close(
+                compact, compact_reference, rtol=tolerance, atol=tolerance
+            )
+            del compact_runner
         dist.barrier()
     finally:
         _extension.clear_comm_ops()
@@ -289,6 +317,16 @@ class NativeLmHeadTpTest(unittest.TestCase):
                 nprocs=2,
                 join=True,
             )
+
+    def test_fp8_tp_transport_preserves_target_rows_and_unaligned_heads(self):
+        for shape in ((64, 128, 2560), (17, 33, 30)):
+            with self.subTest(shape=shape), tempfile.TemporaryDirectory() as directory:
+                mp.spawn(
+                    _tp_worker,
+                    args=(str(Path(directory) / "rendezvous"), shape),
+                    nprocs=2,
+                    join=True,
+                )
 
 
 if __name__ == "__main__":

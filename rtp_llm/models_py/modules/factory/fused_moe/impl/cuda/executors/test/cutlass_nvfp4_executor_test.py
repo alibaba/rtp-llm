@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
+
 from rtp_llm.config.quant_config import QWEN4_FP8_NVFP4_RECIPE
 from rtp_llm.config.qwen4_exp_config import resolve_qwen4_parallelism
 from rtp_llm.device.device_impl import CudaImpl
@@ -228,7 +229,12 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
                         [CkptWeightInfo("unused")],
                         config=MoeConfig(expert_num=experts),
                     ),
-                    ModelOptFp4Config(bits=4, group_size=16, is_quanted=False),
+                    ModelOptFp4Config(
+                        bits=4,
+                        group_size=16,
+                        is_quanted=False,
+                        model_recipe=QWEN4_FP8_NVFP4_RECIPE,
+                    ),
                 )
             )
 
@@ -252,90 +258,127 @@ class CutlassNvfp4ExecutorTest(unittest.TestCase):
             qc,
             prepared(raw),
         )
-        parts = []
-        for rank in range(2):
-            lc = SimpleNamespace(
-                tp_size=2,
-                tp_rank=rank,
-                ep_size=1,
-                ep_rank=0,
-                dp_size=1,
-                dp_rank=0,
-                ffn_tp_size=2,
-                ffn_tp_rank=rank,
-                hidden_size=hidden,
-                head_num=24,
-                head_num_kv=2,
-                size_per_head=256,
-                moe_pure_tp_mode=True,
-                bit=4,
-            )
-            local = {}
-            for descriptor in descriptors:
-                local.update(descriptor._split(raw, lc))
-            self.assertEqual(local[W.moe_w1].shape, (experts, inter, hidden // 2))
-            self.assertEqual(local[W.moe_w2].shape, (experts, hidden, inter // 4))
-            self.assertTrue(torch.equal(local[W.moe_w1_s2], raw[W.moe_w1_s2]))
-            self.assertTrue(torch.equal(local[W.moe_w2_s2], raw[W.moe_w2_s2]))
-            pc = ParallelismConfig()
-            pc.tp_size = 2
-            pc.tp_rank = rank
-            pc.ep_size = 1
-            pc.world_size = 2
-            pc.local_world_size = 2
-            pc.world_rank = rank
-            set_parallelism_config(pc)
-            parts.append(
-                CutlassNvfp4Executor(
-                    SimpleNamespace(
+        for tp_size in (2, 4, 8):
+            with self.subTest(tp_size=tp_size):
+                parts = []
+                for rank in range(tp_size):
+                    lc = SimpleNamespace(
+                        tp_size=tp_size,
+                        tp_rank=rank,
                         ep_size=1,
                         ep_rank=0,
-                        parallelism_config=pc,
-                        model_config=SimpleNamespace(enable_qwen4_qsa=False),
-                    ),
-                    qc,
-                    prepared(local),
+                        dp_size=1,
+                        dp_rank=0,
+                        ffn_tp_size=tp_size,
+                        ffn_tp_rank=rank,
+                        hidden_size=hidden,
+                        head_num=24,
+                        head_num_kv=2,
+                        size_per_head=256,
+                        moe_pure_tp_mode=True,
+                        bit=4,
+                    )
+                    local = {}
+                    for descriptor in descriptors:
+                        local.update(descriptor._split(raw, lc))
+                    local_inter = (inter // tp_size + 31) // 32 * 32
+                    self.assertEqual(
+                        local[W.moe_w1].shape,
+                        (experts, 2 * local_inter, hidden // 2),
+                    )
+                    self.assertEqual(
+                        local[W.moe_w2].shape, (experts, hidden, local_inter // 2)
+                    )
+                    for name in (W.moe_w1, W.moe_s1):
+                        expected = raw[name].reshape(experts, 2, inter, -1)
+                        expected = expected.chunk(tp_size, dim=2)[rank]
+                        value = local[name].reshape(experts, 2, local_inter, -1)
+                        self.assertTrue(
+                            torch.equal(
+                                value[:, :, : inter // tp_size].view(torch.uint8),
+                                expected.view(torch.uint8),
+                            )
+                        )
+                        self.assertFalse(
+                            value[:, :, inter // tp_size :].view(torch.uint8).any()
+                        )
+                    for name in (W.moe_w2, W.moe_s2):
+                        expected = raw[name].chunk(tp_size, dim=-1)[rank]
+                        value = local[name]
+                        self.assertTrue(
+                            torch.equal(
+                                value[..., : expected.shape[-1]].view(torch.uint8),
+                                expected.view(torch.uint8),
+                            )
+                        )
+                        self.assertFalse(
+                            value[..., expected.shape[-1] :].view(torch.uint8).any()
+                        )
+                    self.assertTrue(torch.equal(local[W.moe_w1_s2], raw[W.moe_w1_s2]))
+                    self.assertTrue(torch.equal(local[W.moe_w2_s2], raw[W.moe_w2_s2]))
+                    pc = ParallelismConfig()
+                    pc.tp_size = tp_size
+                    pc.tp_rank = rank
+                    pc.ep_size = 1
+                    pc.world_size = tp_size
+                    pc.local_world_size = tp_size
+                    pc.world_rank = rank
+                    set_parallelism_config(pc)
+                    parts.append(
+                        CutlassNvfp4Executor(
+                            SimpleNamespace(
+                                ep_size=1,
+                                ep_rank=0,
+                                parallelism_config=pc,
+                                model_config=SimpleNamespace(enable_qwen4_qsa=False),
+                            ),
+                            qc,
+                            prepared(local),
+                        )
+                    )
+                    self.assertEqual(parts[-1].tp_size, tp_size)
+                    self.assertEqual(parts[-1].tp_rank, rank)
+
+                x = torch.randn(8, hidden, device="cuda", dtype=torch.bfloat16) * 0.2
+                ids = (
+                    torch.tensor([0, 1, 3], device="cuda", dtype=torch.int32)
+                    .expand(8, -1)
+                    .contiguous()
                 )
-            )
-            self.assertEqual(parts[-1].tp_size, 2)
-            self.assertEqual(parts[-1].tp_rank, rank)
+                weights = (
+                    torch.tensor([0.2, 0.3, 0.5], device="cuda")
+                    .expand(8, -1)
+                    .contiguous()
+                )
+                payload = ExpertForwardPayload(
+                    expert_x=x,
+                    expert_x_origin_dtype=torch.bfloat16,
+                    expert_topk_ids=ids,
+                    expert_topk_weights=weights,
+                )
 
-        x = torch.randn(8, hidden, device="cuda", dtype=torch.bfloat16) * 0.2
-        ids = (
-            torch.tensor([0, 1, 3], device="cuda", dtype=torch.int32)
-            .expand(8, -1)
-            .contiguous()
-        )
-        weights = (
-            torch.tensor([0.2, 0.3, 0.5], device="cuda").expand(8, -1).contiguous()
-        )
-        payload = ExpertForwardPayload(
-            expert_x=x,
-            expert_x_origin_dtype=torch.bfloat16,
-            expert_topk_ids=ids,
-            expert_topk_weights=weights,
-        )
+                def run(executor):
+                    return executor.execute(
+                        payload, "SiGLU", None, None, False, None
+                    ).fused_expert_output
 
-        def run(executor):
-            return executor.execute(
-                payload, "SiGLU", None, None, False, None
-            ).fused_expert_output
+                def combined():
+                    return torch.stack([run(part).float() for part in parts]).sum(0)
 
-        def combined():
-            return run(parts[0]).float() + run(parts[1]).float()
-
-        for _ in range(3):
-            combined()
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            got = combined()
-        for _ in range(3):
-            x.mul_(0.8)
-            ids.add_(1).remainder_(experts)
-            graph.replay()
-            torch.cuda.synchronize()
-            torch.testing.assert_close(got, combined(), atol=0, rtol=0)
-            torch.testing.assert_close(got, run(full).float(), atol=0.0005, rtol=0.02)
+                for _ in range(3):
+                    combined()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    got = combined()
+                for _ in range(3):
+                    x.mul_(0.8)
+                    ids.add_(1).remainder_(experts)
+                    graph.replay()
+                    torch.cuda.synchronize()
+                    torch.testing.assert_close(got, combined(), atol=0, rtol=0)
+                    torch.testing.assert_close(
+                        got, run(full).float(), atol=0.0005, rtol=0.02
+                    )
 
     def test_tensor_parallel_selection_uses_format_and_rejects_ffn_tp_and_world_mismatch(
         self,

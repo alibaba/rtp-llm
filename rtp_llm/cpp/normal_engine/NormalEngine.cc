@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/engine_base/schedulers/SchedulerUtils.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/cache/PPTopologyValidator.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
@@ -112,17 +113,91 @@ private:
     std::shared_ptr<KVCacheManager> previous_cache_manager_;
 };
 
-std::shared_ptr<KVCacheManager> createGenerationPrefillCudaGraphWarmUpCacheManager(const EngineInitParams& params) {
-    auto cache_config = CacheConfigCreator::createWarmupConfig(
-        params.model_config_, params.parallelism_config, params.kv_cache_config, /*gen_num_per_cycle=*/0);
+using PrefillWarmupShapes = std::vector<std::vector<std::pair<int64_t, int64_t>>>;
+
+std::shared_ptr<KVCacheManager> createGenerationPrefillCudaGraphWarmUpCacheManager(
+    const EngineInitParams& params, const PrefillWarmupShapes& shapes = {}, const ModelConfig* draft_model = nullptr) {
+    auto cache_config =
+        draft_model ?
+            CacheConfigCreator::createConfig(params.model_config_,
+                                             params.parallelism_config,
+                                             params.kv_cache_config,
+                                             params.sp_config,
+                                             draft_model,
+                                             /*is_mtp=*/true) :
+            CacheConfigCreator::createWarmupConfig(
+                params.model_config_, params.parallelism_config, params.kv_cache_config, /*gen_num_per_cycle=*/0);
 
     RTP_LLM_CHECK_WITH_INFO(cache_config.seq_size_per_block > 0,
                             "generation prefill CUDA graph warmup requires a positive KV block size");
 
+    if (!shapes.empty()) {
+        const auto& buckets = params.hw_kernel_config.generation_prefill_capture_token_buckets;
+        RTP_LLM_CHECK_WITH_INFO(!buckets.empty(), "segmented prefill requires token buckets");
+        const int64_t max_bucket = *std::max_element(buckets.begin(), buckets.end());
+        const int64_t rows       = params.runtime_config.max_generate_batch_size;
+        RTP_LLM_CHECK_WITH_INFO(rows > 0 && max_bucket > 0 && params.model_config_.max_seq_len > 0,
+                                "segmented prefill requires positive warmup dimensions");
+        auto                groups = cache_config.topology().groups();
+        PPBlockNumOverrides capacities;
+        const size_t        speculative_reserve = draft_model ? params.sp_config.speculativeReserveStep() : 0;
+        size_t              bytes               = 0;
+        for (auto& group : groups) {
+            const size_t span = group.seqSizePerBlock();
+            RTP_LLM_CHECK_WITH_INFO(span > 0, "segmented prefill requires positive tag page spans");
+            uint64_t live_pages = 0;
+            for (const auto& shape : shapes) {
+                uint64_t pages = 0;
+                for (const auto& [live, prefix] : shape) {
+                    RTP_LLM_CHECK_WITH_INFO(live > 0 && prefix >= 0
+                                                && live + prefix <= params.model_config_.max_seq_len,
+                                            "segmented prefill adapter returned an invalid warmup shape");
+                    // A speculative token may need its own LINEAR tail state.
+                    pages += (live + prefix + speculative_reserve + span - 1) / span + speculative_reserve + 1;
+                }
+                live_pages = std::max(live_pages, pages);
+            }
+            // All plans coexist with one measured shape. The adapter selects
+            // the backend boundaries; the framework only budgets real pages.
+            const uint64_t count = 1 + (max_bucket + span - 1) / span + live_pages;
+            RTP_LLM_CHECK_WITH_INFO(count <= std::numeric_limits<uint32_t>::max(),
+                                    "segmented prefill temporary tag capacity exceeds uint32");
+            capacities[group.tag] = static_cast<uint32_t>(count);
+            bytes += count * cache_config.blockSizeBytesForGroup(group.tag);
+        }
+        const size_t free    = getGpuExecStatus().device_memory_status.available_bytes;
+        const size_t reserve = MemoryEvaluationHelper::getDefaultRuntimeMemorySize(
+            params.runtime_config, params.parallelism_config, params.model_config_, params.sp_config);
+        RTP_LLM_CHECK_WITH_INFO(free > reserve && bytes < free - reserve,
+                                "segmented prefill temporary pools need %zu MiB plus runtime reserve %zu MiB; "
+                                "available %zu MiB; reduce the configured context capacity",
+                                bytes / 1024 / 1024,
+                                reserve / 1024 / 1024,
+                                free / 1024 / 1024);
+        // Finalize main and draft views with the same per-tag capacities.
+        cache_config.finalizeBlockNums(2, params.runtime_config, &capacities);
+        RTP_LLM_LOG_INFO(
+            "segmented prefill temporary cache=%zu MiB rows=%ld max_bucket=%ld", bytes / 1024 / 1024, rows, max_bucket);
+    }
+
     // This temporary pool only supplies the KV tensor bound into the captured
     // model. The warmup config publishes complete per-group capacities before
     // KVCacheManager allocates the reserved block 0, as in decode warmup.
-    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true);
+    KVCacheConfig warmup_kv_config;
+    if (!shapes.empty()) {
+        // This private startup pool has no scheduler competitors. Its exact
+        // capacity already includes all graph pages and one measured batch.
+        warmup_kv_config.reserve_block_ratio = 0;
+    }
+    auto cache_manager = draft_model ?
+                             std::make_shared<KVCacheManager>(cache_config,
+                                                              /*warmup=*/true,
+                                                              nullptr,
+                                                              warmup_kv_config,
+                                                              params.parallelism_config,
+                                                              params.runtime_config,
+                                                              params.sp_config) :
+                             std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true, nullptr, warmup_kv_config);
     RTP_LLM_CHECK_WITH_INFO(cache_manager->init(), "init generation prefill CUDA graph warmup KV cache manager failed");
     return cache_manager;
 }
@@ -151,6 +226,23 @@ public:
         const size_t allocated_peak  = positive_delta(stats.allocated_bytes[0].peak, baseline_allocated_);
         const size_t reserved_peak   = positive_delta(stats.reserved_bytes[0].peak, baseline_reserved_);
         return std::max({driver_consumed, allocated_peak, reserved_peak});
+    }
+
+    size_t fragmentationBytes() const {
+        const auto stats        = c10::cuda::CUDACachingAllocator::getDeviceStats(device_);
+        const auto peak_gap     = std::max<int64_t>(0, stats.reserved_bytes[0].peak - stats.allocated_bytes[0].peak);
+        const auto baseline_gap = std::max<int64_t>(0, baseline_reserved_ - baseline_allocated_);
+        return peak_gap > baseline_gap ? static_cast<size_t>(peak_gap - baseline_gap) : 0;
+    }
+
+    size_t residentBytes() const {
+        const auto stats = c10::cuda::CUDACachingAllocator::getDeviceStats(device_);
+        const auto delta = [](int64_t current, int64_t baseline) -> size_t {
+            return current > baseline ? static_cast<size_t>(current - baseline) : 0;
+        };
+        return std::max({positiveDelta(baseline_free_bytes_, getGpuExecStatus().device_memory_status.free_bytes),
+                         delta(stats.allocated_bytes[0].current, baseline_allocated_),
+                         delta(stats.reserved_bytes[0].current, baseline_reserved_)});
     }
 
 private:
@@ -187,6 +279,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     model_config_(params.model_config_),
     parallelism_config(params.parallelism_config),
     runtime_config(params.runtime_config),
+    segmented_prefill_(params.hw_kernel_config.effectiveGenerationPrefillGraphBackend() == "segmented"),
     eplb_config(params.eplb_config),
     pd_sep_config(params.pd_sep_config),
     profiling_debug_logging_config(params.profiling_debug_logging_config),
@@ -207,6 +300,12 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     };
     std::unique_ptr<NormalEngine, decltype(cleanup_on_failure)> construction_guard(this, cleanup_on_failure);
     resource_context_.defer_grammar_to_pp_tail = parallelism_config.pp_size > 1 && parallelism_config.pp_rank == 0;
+    RTP_LLM_CHECK_WITH_INFO(!segmented_prefill_
+                                || ((parallelism_config.role_type == RoleType::PDFUSION
+                                     || parallelism_config.role_type == RoleType::PREFILL)
+                                    && supportsGenerationPrefillCudaGraphExecutionMode(
+                                        sp_config.type, propose_params_ != nullptr, /*segmented=*/true)),
+                            "segmented prefill requires ordinary or MTP PDFUSION/PREFILL generation");
     if (params.py_model && !params.py_model.is_none()) {
         py::gil_scoped_acquire gil;
         if (py::hasattr(params.py_model, "custom_output_handler")) {
@@ -220,7 +319,8 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     // PDFUSION conflict. Python defers this execution-mode check to C++.
     if (isGenerationPrefillCudaGraphRequested(params.hw_kernel_config, parallelism_config.role_type)) {
         RTP_LLM_CHECK_WITH_INFO(
-            supportsGenerationPrefillCudaGraphExecutionMode(sp_config.type, propose_params_ != nullptr),
+            supportsGenerationPrefillCudaGraphExecutionMode(
+                sp_config.type, propose_params_ != nullptr, segmented_prefill_),
             "GENERATION_PREFILL_CAPTURE_CONFIG does not support speculative execution in the first version; "
             "remove the generation-prefill configuration when using speculative execution on PDFUSION (type=%s)",
             SpeculativeExecutionConfig::to_string(sp_config.type).c_str());
@@ -277,7 +377,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
 
     std::optional<WarmUpResult> warm_up_result = std::nullopt;
 #if USING_CUDA
-    if (runtime_config.warm_up && (!model_config_.mm_model_config.is_multimodal)) {
+    if (segmented_prefill_ || (runtime_config.warm_up && !model_config_.mm_model_config.is_multimodal)) {
         // warm up
         RTP_LLM_LOG_INFO("warm up (max_context_batch_size %d, max_seq_len %d calculate_loss %d) query begin",
                          runtime_config.fifo_scheduler_config.max_context_batch_size,
@@ -299,7 +399,34 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     initCacheManager(warm_up_result);
     RTP_LLM_LOG_INFO("create cache manager done");
 
+#if USING_CUDA
+    std::unique_ptr<WarmupMemoryTracker> formal_tracker;
+    if (segmented_prefill_) {
+        RTP_LLM_CHECK_WITH_INFO(warm_up_result.has_value(), "segmented prefill requires a measured runtime budget");
+        const size_t free = getGpuExecStatus().device_memory_status.available_bytes;
+        RTP_LLM_CHECK_WITH_INFO(free >= warm_up_result->max_used_memory,
+                                "segmented prefill formal pools leave %zu MiB; runtime budget requires %zu MiB",
+                                free / 1024 / 1024,
+                                warm_up_result->max_used_memory / 1024 / 1024);
+        formal_tracker = std::make_unique<WarmupMemoryTracker>();
+    }
+#endif
     initExecutor(params);
+#if USING_CUDA
+    if (formal_tracker) {
+        cudaDeviceSynchronize();
+        const size_t measured = formal_tracker->maxConsumedBytes();
+        RTP_LLM_CHECK_WITH_INFO(measured <= warm_up_result->max_used_memory,
+                                "segmented prefill formal capture exceeded measured budget: %zu > %zu bytes",
+                                measured,
+                                warm_up_result->max_used_memory);
+        RTP_LLM_LOG_INFO("segmented prefill formal capture peak=%zu MiB budget=%zu MiB free=%zu MiB",
+                         measured / 1024 / 1024,
+                         warm_up_result->max_used_memory / 1024 / 1024,
+                         getGpuExecStatus().device_memory_status.available_bytes / 1024 / 1024);
+        formal_tracker.reset();
+    }
+#endif
 
     RTP_LLM_LOG_INFO("create normal executor done");
 
@@ -557,6 +684,9 @@ int64_t NormalEngine::getLastScheduleTime() {
 }
 
 WarmUpResult NormalEngine::warmUp(const EngineInitParams& params) {
+    if (segmented_prefill_) {
+        return segmentedPrefillWarmUp(params);
+    }
     if (runtime_config.use_batch_decode_scheduler) {
         RTP_LLM_CHECK_WITH_INFO(parallelism_config.pp_size == 1,
                                 "batch decode scheduler warmup does not support pipeline parallelism");
@@ -601,6 +731,154 @@ size_t NormalEngine::getWarmUpInputLength() const {
                          input_len);
     }
     return input_len;
+}
+
+WarmUpResult NormalEngine::segmentedPrefillWarmUp(const EngineInitParams& params) {
+#if !USING_CUDA
+    RTP_LLM_FAIL("segmented prefill requires NVIDIA CUDA");
+    return {};
+#else
+    c10::InferenceMode inference_guard(true);
+    const int64_t      longest      = static_cast<int64_t>(getWarmUpInputLength());
+    const int64_t      token_budget = runtime_config.fifo_scheduler_config.prefill_chunk_size;
+    RTP_LLM_CHECK_WITH_INFO(!runtime_config.use_batch_decode_scheduler && token_budget > 0 && token_budget <= longest,
+                            "segmented prefill requires FIFO with 0 < prefill_chunk_size < max_seq_len");
+    RTP_LLM_CHECK_WITH_INFO(runtime_config.max_generate_batch_size > 0,
+                            "segmented prefill requires positive batch capacity");
+    const int64_t       live_limit = token_budget;
+    const int           rows = static_cast<int>(std::min<int64_t>(live_limit, runtime_config.max_generate_batch_size));
+    PrefillWarmupShapes shapes;
+    {
+        py::gil_scoped_acquire gil;
+        shapes = params.py_model
+                     .attr("segmented_prefill_warmup_shapes")(
+                         longest, live_limit, rows, model_config_.attn_config.tokens_per_block)
+                     .cast<PrefillWarmupShapes>();
+    }
+    RTP_LLM_CHECK_WITH_INFO(!shapes.empty(), "segmented prefill requires model-provided budget shapes");
+    const bool mtp = sp_config.type == SP_TYPE_MTP;
+    RTP_LLM_CHECK_WITH_INFO(!mtp || (params.py_sp_model && !params.py_sp_model.is_none()),
+                            "segmented MTP prefill requires the loaded draft Python model");
+    auto manager = createGenerationPrefillCudaGraphWarmUpCacheManager(
+        params, shapes, mtp ? &propose_params_->getEngineInitParams().model_config_ : nullptr);
+    ResourceContext context = resource_context_;
+    context.cache_manager   = manager;
+    // Materialize legal prefix checkpoints without looking up or publishing a
+    // cache entry. Serving keeps its configured per-request reuse behavior.
+    context.reuse_cache         = true;
+    context.enable_device_cache = false;
+    context.enable_memory_cache = false;
+    context.enable_disk_cache   = false;
+    context.enable_remote_cache = false;
+    {
+        py::gil_scoped_acquire gil;
+        params.py_model.attr("initialize_segmented_prefill_warmup_cache")(
+            torch_ext::KVCache(manager->getMainModelGroupedCacheLayerLayout()));
+        if (mtp) {
+            params.py_sp_model.attr("initialize_segmented_prefill_warmup_cache")(
+                torch_ext::KVCache(manager->getMTPModuleGroupedCacheLayerLayout(0)));
+        }
+    }
+    cudaDeviceSynchronize();
+    auto tracker = std::make_unique<WarmupMemoryTracker>();
+    // Construction captures every enabled native-decode and segmented-prefill
+    // bucket against the same legal pools, including their PLE banks/bridges.
+    if (mtp) {
+        executor_.reset(new MtpExecutor(params, propose_params_, manager, manager->cacheConfig().groupNums(), true));
+    } else {
+        executor_.reset(new NormalExecutor(params, manager, true, false, 0));
+    }
+    cudaDeviceSynchronize();
+    const size_t resident = tracker->residentBytes();
+    for (const auto& shape : shapes) {
+        RuntimeConfig warmup_runtime                            = runtime_config;
+        warmup_runtime.fifo_scheduler_config.prefill_chunk_size = 0;
+        std::list<GenerateStreamPtr> streams;
+        for (const auto& [live, prefix] : shape) {
+            auto input                          = makeFakeInput(static_cast<size_t>(prefix + live));
+            input->generate_config->reuse_cache = true;
+            if (mtp) {
+                input->generate_config->max_new_tokens = reserve_step_ + 2;
+            }
+            auto stream =
+                std::make_shared<NormalGenerateStream>(input, model_config_, warmup_runtime, context, nullptr, 0, true);
+            // MTP must execute sampling and the real positive-page commit
+            // path; results stay in these private startup streams.
+            stream->setIsFakeStream(!mtp);
+            if (mtp) {
+                stream->setReserveStep(reserve_step_);
+            }
+            THROW_IF_STATUS_ERROR(stream->initKVBlock());
+            stream->setNeedReleaseResource(true);
+            stream->setReuseLength(prefix);
+            streams.push_back(std::move(stream));
+        }
+        THROW_IF_STATUS_ERROR(executor_->process(ScheduleOutput{streams}));
+        if (mtp) {
+            // Joint warmup dispatches the real prefill proposal into these
+            // private streams, then runs verify/commit/draft with those states.
+            // The serving scheduler extends pages before each verify round.
+            for (const auto& stream : streams) {
+                THROW_IF_STATUS_ERROR(stream->incrKVBlock());
+            }
+            THROW_IF_STATUS_ERROR(executor_->process(ScheduleOutput{streams}));
+        }
+        // MTP bookkeeping owns stream references independently of GPU work.
+        // Retire both before the next shape allocates from these private pools.
+        for (const auto& stream : streams) {
+            stream->waitPendingAsyncBookkeeping();
+        }
+        cudaDeviceSynchronize();
+        for (const auto& stream : streams) {
+            stream->releaseResource();
+        }
+    }
+    cudaDeviceSynchronize();
+    size_t extra = 0;
+    {
+        py::gil_scoped_acquire gil;
+        extra = params.py_model
+                    .attr("segmented_prefill_extra_memory_bytes")(
+                        live_limit, rows, longest, model_config_.attn_config.tokens_per_block)
+                    .cast<size_t>();
+    }
+    const size_t sampler =
+        static_cast<size_t>(runtime_config.max_generate_batch_size) * model_config_.vocab_size * 4 * 8;
+    const size_t joint = std::max(tracker->maxConsumedBytes(), resident + sampler) + extra;
+    // Keep an explicit additional allowance equal to the observed increase in
+    // allocator slack; no percentage or duplicate cache reservation is added.
+    const size_t headroom = tracker->fragmentationBytes();
+    tracker.reset();
+    executor_.reset();
+    {
+        py::gil_scoped_acquire gil;
+        // EP2 targets retain pool-bound owners without an ordinary decode graph
+        // plan, so target cleanup must not depend on that plan or MTP mode.
+        params.py_model.attr("release_segmented_prefill_warmup")();
+        if (mtp) {
+            params.py_sp_model.attr("release_segmented_prefill_warmup")();
+            params.py_sp_model.attr("initialize")(torch_ext::PyModelInitResources{});
+        }
+        params.py_model.attr("initialize")(torch_ext::PyModelInitResources{});
+    }
+    context.cache_manager.reset();
+    manager.reset();
+    cudaDeviceSynchronize();
+    c10::cuda::CUDACachingAllocator::emptyCache();
+    const auto free = getGpuExecStatus().device_memory_status.available_bytes;
+    RTP_LLM_LOG_INFO(
+        "segmented prefill joint runtime=%zu MiB unmeasured extension bound=%zu MiB allocator headroom=%zu MiB "
+        "after-release free=%zu MiB live_limit=%ld rows=%d",
+        joint / 1024 / 1024,
+        extra / 1024 / 1024,
+        headroom / 1024 / 1024,
+        free / 1024 / 1024,
+        live_limit,
+        rows);
+    RTP_LLM_CHECK_WITH_INFO(joint <= std::numeric_limits<size_t>::max() - headroom && free > joint + headroom,
+                            "segmented prefill measured runtime budget exceeds available memory");
+    return WarmUpResult({free, joint + headroom});
+#endif
 }
 
 WarmUpResult NormalEngine::prefillWarmUp(const EngineInitParams& params) {
@@ -867,6 +1145,22 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
     } else {
         config.finalizeBlockNums(confirmed_block_num, runtime_config);
     }
+    if (segmented_prefill_) {
+        // Explicit cache/test capacities bypass the old automatic sizing. They
+        // still have to coexist with this extension's measured runtime budget.
+        auto automatic            = kv_cache_config;
+        automatic.kv_cache_mem_mb = 0;
+        const size_t allowed      = MemoryEvaluationHelper::getKVCacheMemorySize(
+            runtime_config, automatic, model_config_, parallelism_config, warm_up_result, sp_config);
+        size_t requested = 0;
+        for (const auto& group : config.topology().groups()) {
+            requested += group.block_num * config.blockSizeBytesForGroup(group.tag);
+        }
+        RTP_LLM_CHECK_WITH_INFO(requested <= allowed,
+                                "segmented prefill cache capacity %zu MiB exceeds runtime-safe limit %zu MiB",
+                                requested / 1024 / 1024,
+                                allowed / 1024 / 1024);
+    }
     auto cache_manager = make_shared<KVCacheManager>(config,
                                                      false,
                                                      metrics_reporter_,
@@ -970,6 +1264,16 @@ bool NormalEngine::validateStreamForScheduling(const GenerateStreamPtr& stream) 
     if (stream->hasError()) {
         return false;
     }
+    if (segmented_prefill_ && stream->maxBatchSize() != 1) {
+        stream->reportError(ErrorCode::INVALID_PARAMS, "segmented prefill currently supports one sequence per request");
+        return false;
+    }
+    if (segmented_prefill_ && stream->multimodalFeaturesLength() != 0
+        && stream->inputLength() > runtime_config.fifo_scheduler_config.prefill_chunk_size) {
+        stream->reportError(ErrorCode::INVALID_PARAMS,
+                            "segmented prefill requires the complete multimodal prompt to fit prefill_chunk_size");
+        return false;
+    }
     if (pd_sep_config.role_type != RoleType::DECODE || !stream->generateConfig()->isPrefillOnly()) {
         return true;
     }
@@ -1015,8 +1319,19 @@ std::shared_ptr<GenerateStream> NormalEngine::createStream(const std::shared_ptr
             selection_error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, error.what());
         }
     }
-    std::shared_ptr<GenerateStream> stream = std::make_shared<NormalGenerateStream>(
-        input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+    std::shared_ptr<GenerateStream> stream;
+    if (segmented_prefill_ && pd_sep_config.role_type == RoleType::PDFUSION && input->multimodal_features
+        && !input->multimodal_features->empty()) {
+        // Preserve the existing embedding/position contract: a media request
+        // must stay whole, while text requests keep the normal chunk window.
+        auto whole_request_runtime                                     = runtime_config;
+        whole_request_runtime.fifo_scheduler_config.prefill_chunk_size = 0;
+        stream                                                         = std::make_shared<NormalGenerateStream>(
+            input, model_config_, whole_request_runtime, resource_context_, metrics_reporter_);
+    } else {
+        stream = std::make_shared<NormalGenerateStream>(
+            input, model_config_, runtime_config, resource_context_, metrics_reporter_);
+    }
     if (selection_error.hasError()) {
         stream->reportError(selection_error.code(), selection_error.ToString());
     }

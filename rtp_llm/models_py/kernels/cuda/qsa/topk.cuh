@@ -23,6 +23,120 @@ union QsaSortStorage {
     typename FullSort::TempStorage     full;
     typename SelectedSort::TempStorage selected;
 };
+template<int N, int Threads, bool UseMerge>
+__device__ __forceinline__ void qsaCubStableTopKBody(const float*                          scores,
+                                                     const int32_t*                        lengths,
+                                                     int32_t*                              output,
+                                                     int                                   columns,
+                                                     bool                                  finite_only,
+                                                     int                                   row,
+                                                     int                                   output_row,
+                                                     QsaSortStorage<N, Threads, UseMerge>& storage,
+                                                     uint32_t*                             chosen,
+                                                     uint32_t&                             cutoff) {
+    constexpr int Items    = N / Threads;
+    using FullSort         = std::conditional_t<UseMerge,
+                                                cub::BlockMergeSort<uint32_t, Threads, Items, uint32_t>,
+                                                cub::BlockRadixSort<uint32_t, Threads, Items, uint32_t>>;
+    using SelectedSort     = cub::BlockRadixSort<uint32_t, Threads, 512 / Threads, uint32_t>;
+    const int64_t length   = lengths[row];
+    const int64_t complete = (length - (length < 0 ? 3 : 0)) / 4;
+    uint32_t      key[Items], index[Items];
+    bool          special = false;
+#pragma unroll
+    for (int i = 0; i < Items; ++i) {
+        uint32_t col = threadIdx.x * Items + i;
+        uint32_t bits =
+            (col < columns && col < complete) ?
+                (col < columns && col < complete ? __float_as_uint(scores[row * columns + col]) : 0xff800000u) :
+                0xff800000u;
+        uint32_t ordered = (bits & 0x80000000u) ? ~bits : bits ^ 0x80000000u;
+        bool     isnan   = (bits & 0x7f800000u) == 0x7f800000u && (bits & 0x007fffffu);
+        special |= isnan || bits == 0x80000000u;
+        key[i]   = isnan ? 0xffffffffu : ordered;
+        index[i] = col;
+    }
+    bool any_special = __syncthreads_or(special);
+    if constexpr (UseMerge) {
+        FullSort(storage.full).StableSort(key, index, QsaGreater{});
+    } else {
+        FullSort(storage.full).SortDescending(key, index);
+    }
+    if (any_special) {
+        // Torch first gathers values strictly above the selected radix, then
+        // its equal boundary, in column order. Its float radix sort treats
+        // signed zeros as equal. Recreate that order only for NaNs/-0.
+
+#pragma unroll
+        for (int i = 0; i < Items; ++i) {
+            int rank = threadIdx.x * Items + i;
+            if (rank < 512)
+                chosen[rank] = index[i];
+            if (rank == 511)
+                cutoff = key[i];
+        }
+        __syncthreads();
+        uint32_t raw_key[512 / Threads], raw_index[512 / Threads];
+#pragma unroll
+        for (int i = 0; i < 512 / Threads; ++i) {
+            uint32_t rank = threadIdx.x * (512 / Threads) + i;
+            uint32_t col  = chosen[rank];
+            uint32_t bits =
+                (col < columns && col < complete ? __float_as_uint(scores[row * columns + col]) : 0xff800000u);
+            uint32_t ordered   = (bits & 0x80000000u) ? ~bits : bits ^ 0x80000000u;
+            bool     isnan     = (bits & 0x7f800000u) == 0x7f800000u && (bits & 0x007fffffu);
+            uint32_t selection = isnan ? 0xffffffffu : ordered;
+            raw_key[i]         = 2 * N - ((selection == cutoff ? N : 0) + col);
+            raw_index[i]       = col;
+        }
+        SelectedSort(storage.selected).SortDescending(raw_key, raw_index);
+        __syncthreads();
+#pragma unroll
+        for (int i = 0; i < 512 / Threads; ++i) {
+            uint32_t col = raw_index[i];
+            uint32_t bits =
+                (col < columns && col < complete ? __float_as_uint(scores[row * columns + col]) : 0xff800000u);
+            // CUB float keys canonicalize -0/+0; payloads retain original IDs.
+            if ((bits & 0x7fffffffu) == 0)
+                bits = 0;
+            raw_key[i] = (bits & 0x80000000u) ? ~bits : bits ^ 0x80000000u;
+        }
+        SelectedSort(storage.selected).SortDescending(raw_key, raw_index);
+#pragma unroll
+        for (int i = 0; i < 512 / Threads; ++i) {
+            uint32_t rank = threadIdx.x * (512 / Threads) + i;
+            uint32_t col  = raw_index[i];
+            uint32_t bits =
+                (col < columns && col < complete ? __float_as_uint(scores[row * columns + col]) : 0xff800000u);
+            bool valid = ((bits & 0x7f800000u) != 0x7f800000u || (!finite_only && bits == 0x7f800000u)) && col < columns
+                         && col < complete;
+#pragma unroll
+            for (int j = 0; j < 4; ++j)
+                output[output_row * 2051 + rank * 4 + j] = valid ? static_cast<int32_t>(col * 4 + j) : -1;
+        }
+    } else {
+#pragma unroll
+        for (int i = 0; i < Items; ++i) {
+            uint32_t rank = threadIdx.x * Items + i;
+            if (rank < 512) {
+                uint32_t col = index[i];
+                uint32_t bits =
+                    (col < columns && col < complete ? __float_as_uint(scores[row * columns + col]) : 0xff800000u);
+                bool valid = ((bits & 0x7f800000u) != 0x7f800000u || (!finite_only && bits == 0x7f800000u))
+                             && col < columns && col < complete;
+#pragma unroll
+                for (int j = 0; j < 4; ++j)
+                    output[output_row * 2051 + rank * 4 + j] = valid ? static_cast<int32_t>(col * 4 + j) : -1;
+            }
+        }
+    }
+    if (threadIdx.x == 0) {
+#pragma unroll
+        for (int j = 0; j < 3; ++j)
+            output[output_row * 2051 + 2048 + j] = j < length - complete * 4 ? complete * 4 + j : -1;
+    }
+}
+
 template<int N, int Threads, bool UseMerge = false, bool DraftPacked = false>
 __global__ __launch_bounds__(Threads) void qsaCubStableTopK(const float*   scores,
                                                             const int32_t* lengths,
@@ -163,6 +277,31 @@ __global__ __launch_bounds__(Threads) void qsaCubStableTopK(const float*   score
             output[output_row * 2051 + 2048 + j] = j < length - complete * 4 ? complete * 4 + j : -1;
     }
 }
+
+union QsaLengthBucketSortStorage {
+    QsaSortStorage<4096, 512, false> small;
+    QsaSortStorage<8192, 512, false> large;
+};
+
+__global__ __launch_bounds__(512) void qsaCubStableTopKLengthBuckets(
+    const float* scores, const int32_t* lengths, int32_t* output, int columns, bool finite_only) {
+    extern __shared__ __align__(16) unsigned char dynamic_storage[];
+    auto&               storage = *reinterpret_cast<QsaLengthBucketSortStorage*>(dynamic_storage);
+    __shared__ uint32_t chosen[512];
+    __shared__ uint32_t cutoff;
+    const int           row      = blockIdx.x;
+    const int64_t       length   = lengths[row];
+    const int64_t       complete = (length - (length < 0 ? 3 : 0)) / 4;
+    // Metadata stays fixed during a launch, so the whole CTA takes one branch.
+    // Keep columns as the physical row stride, including in the smaller sort.
+    if (complete >= 0 && complete <= 4096) {
+        qsaCubStableTopKBody<4096, 512, false>(
+            scores, lengths, output, columns, finite_only, row, row, storage.small, chosen, cutoff);
+    } else {
+        qsaCubStableTopKBody<8192, 512, false>(
+            scores, lengths, output, columns, finite_only, row, row, storage.large, chosen, cutoff);
+    }
+}
 }  // namespace rtp_llm
 
 void qsa_cub_init() {
@@ -172,6 +311,33 @@ void qsa_cub_init() {
     C10_CUDA_CHECK(cudaFuncSetAttribute(rtp_llm::qsaCubStableTopK<16384, 512>,
                                         cudaFuncAttributeMaxDynamicSharedMemorySize,
                                         sizeof(rtp_llm::QsaSortStorage<16384, 512, false>)));
+}
+
+void qsa_cub_init_length_buckets() {
+    C10_CUDA_CHECK(cudaFuncSetAttribute(rtp_llm::qsaCubStableTopKLengthBuckets,
+                                        cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                        sizeof(rtp_llm::QsaLengthBucketSortStorage)));
+}
+
+void qsa_cub_topk_length_buckets(torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, bool finite_only) {
+    TORCH_CHECK(scores.is_cuda() && lengths.is_cuda() && output.is_cuda());
+    TORCH_CHECK(scores.scalar_type() == at::kFloat && lengths.scalar_type() == at::kInt
+                && output.scalar_type() == at::kInt);
+    TORCH_CHECK(scores.dim() == 2 && lengths.dim() == 1 && output.dim() == 2);
+    TORCH_CHECK(scores.is_contiguous() && lengths.is_contiguous() && output.is_contiguous());
+    TORCH_CHECK(scores.device() == lengths.device() && scores.device() == output.device());
+    TORCH_CHECK(scores.size(0) >= 1 && scores.size(0) <= 32 && (scores.size(1) == 8191 || scores.size(1) == 8192));
+    TORCH_CHECK(scores.size(0) == lengths.numel() && output.size(0) == scores.size(0) && output.size(1) == 2051);
+    c10::cuda::CUDAGuard guard(scores.device());
+    auto                 stream = at::cuda::getCurrentCUDAStream().stream();
+    rtp_llm::
+        qsaCubStableTopKLengthBuckets<<<scores.size(0), 512, sizeof(rtp_llm::QsaLengthBucketSortStorage), stream>>>(
+            scores.data_ptr<float>(),
+            lengths.data_ptr<int32_t>(),
+            output.data_ptr<int32_t>(),
+            scores.size(1),
+            finite_only);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void qsa_cub_topk(

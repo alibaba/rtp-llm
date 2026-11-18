@@ -33,17 +33,22 @@ def topology(tp, ep, rank=0):
 
 class Qwen4ParallelismTest(unittest.TestCase):
     def test_nvfp4_tensor_parallel_uses_native_topology(self):
-        pc = topology(2, 1)
-        config = SimpleNamespace(
-            parallelism_config=pc,
-            model_config=SimpleNamespace(quant_config=recipe()),
-            tp_size=2,
-            ep_size=1,
-        )
-        self.assertTrue(use_nvfp4_tensor_parallel(config))
+        for tp in (2, 4, 8):
+            with self.subTest(tp=tp):
+                pc = topology(tp, 1)
+                quant = recipe()
+                config = SimpleNamespace(
+                    parallelism_config=pc,
+                    model_config=SimpleNamespace(quant_config=quant),
+                    tp_size=tp,
+                    ep_size=1,
+                )
+                self.assertTrue(use_nvfp4_tensor_parallel(config))
+                quant.model_recipe = None
+                self.assertEqual(use_nvfp4_tensor_parallel(config), tp == 2)
 
     def test_effective_layout_is_model_owned_and_repeatable(self):
-        for tp, ep in ((1, 1), (2, 1), (2, 2), (8, 8)):
+        for tp, ep in ((1, 1), (2, 1), (4, 1), (8, 1), (2, 2), (8, 8)):
             for rank in range(tp):
                 with self.subTest(tp=tp, ep=ep, rank=rank):
                     original = topology(tp, ep, rank)
@@ -80,7 +85,14 @@ class Qwen4ParallelismTest(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 resolve_qwen4_parallelism(config, pc)
         with self.assertRaises(ValueError):
-            resolve_qwen4_parallelism(config, topology(8, 1))
+            resolve_qwen4_parallelism(config, topology(4, 4))
+        source = SimpleNamespace(
+            quant_config=ModelOptFp4Config(bits=4, group_size=16, is_quanted=True),
+            _qwen4_nvfp4_source=True,
+        )
+        for tp in (4, 8):
+            with self.subTest(prequantized_tp=tp), self.assertRaises(ValueError):
+                resolve_qwen4_parallelism(source, topology(tp, 1))
 
     def test_layout_is_resolved_before_snapshot_and_loader(self):
         from rtp_llm.models.qwen3_next.qwen3_next import Qwen35Moe

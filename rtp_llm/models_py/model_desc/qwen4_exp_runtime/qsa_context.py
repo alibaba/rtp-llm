@@ -54,6 +54,8 @@ class Qwen4ExpQSARuntimeContext:
     metadata_cache: dict | None = field(default=None, repr=False, compare=False)
     position_state_cache: LayerKVCache | None = None
     position_state_inputs: PyAttentionInputs | None = None
+    # Capture-time producer/consumer contract, admitted only for ordinary decode.
+    qsa_decode_uninitialized_score_tail: bool = False
     _position_state: Any = field(default=None, init=False, repr=False, compare=False)
     _side_cache_undo: IndexerCacheUndo | None = field(
         default=None, init=False, repr=False, compare=False

@@ -122,6 +122,7 @@ class Qwen3NextMetadata(object):
         aiter_gdn_prefill_metadata: (
             dict[int, tuple[torch.Tensor, object]] | None
         ) = None,
+        gdn_prefill_prepared=None,
     ):
         self.prefill_conv1d_meta = prefill_conv1d_meta
         self.is_target_verify = is_target_verify
@@ -132,6 +133,7 @@ class Qwen3NextMetadata(object):
         self.cp_local_valid_mask = cp_local_valid_mask
         self.is_cuda_graph = is_cuda_graph
         self.aiter_gdn_prefill_metadata = aiter_gdn_prefill_metadata or {}
+        self.gdn_prefill_prepared = gdn_prefill_prepared
         # One metadata instance is shared by all layers in a model forward.
         # Decode state indices are layer-independent, so cache them by the
         # backing block-table/length storage and reuse them across GDN layers.
@@ -497,11 +499,16 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
         metadata: Optional[CausalConv1dMetadata] = None,
+        prepared=None,
     ) -> torch.Tensor:
         # cu_seqlen_without_padding = attn_inputs.cu_seqlens_device[
         #     : attn_inputs.input_lengths.size(0) + 1
         # ]
-        cu_seqlen_without_padding = attn_inputs.cu_seqlens_device
+        cu_seqlen_without_padding = (
+            attn_inputs.cu_seqlens_device if prepared is None else prepared.cu_seqlens
+        )
+        if prepared is not None:
+            metadata = prepared.conv_metadata
         conv_states = (
             self._get_conv_states(kv_cache_tensor).transpose(1, 2)
             if kv_cache_tensor is not None
@@ -515,7 +522,11 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             query_start_loc=cu_seqlen_without_padding,
             block_map=attn_inputs.kv_cache_kernel_block_id_device,
             seq_size_per_block=seq_size_per_block,
-            prefix_lengths=attn_inputs.prefix_lengths_device,
+            prefix_lengths=(
+                attn_inputs.prefix_lengths_device
+                if prepared is None
+                else prepared.prefix_lengths
+            ),
             metadata=metadata,
         ).transpose(0, 1)
         return out
@@ -530,15 +541,27 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         attn_inputs: PyAttentionInputs,
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
+        prepared = getattr(attn_meta, "gdn_prefill_prepared", None)
         g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
         ssm_states = (
             self._get_ssm_states(kv_cache_tensor)
             if kv_cache_tensor is not None
             else None
         )
-        context_batch_size = attn_inputs.input_lengths.shape[0]
+        context_batch_size = (
+            attn_inputs.input_lengths.shape[0]
+            if prepared is None
+            else prepared.batch_capacity
+        )
         # cu_seqlens_without_padding = attn_inputs.cu_seqlens_device[: context_batch_size + 1]
-        cu_seqlens_without_padding = attn_inputs.cu_seqlens_device
+        cu_seqlens_without_padding = (
+            attn_inputs.cu_seqlens_device if prepared is None else prepared.cu_seqlens
+        )
+        prefix_lengths = (
+            attn_inputs.prefix_lengths_device
+            if prepared is None
+            else prepared.prefix_lengths
+        )
         initial_states: Optional[torch.Tensor] = None
         if ssm_states is not None:
             initial_states = torch.empty(
@@ -551,11 +574,12 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             )
 
             load_initial_state_from_block_map(
-                attn_inputs.prefix_lengths_device,
+                prefix_lengths,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,
                 initial_states,
                 seq_size_per_block,
+                prepared=prepared,
             )
         # M >= 2048: scatter_qkv (Triton, SGLang port) avoids the .view() ->
         # .contiguous() copies that torch.split + view triggers. Below 2048,
@@ -660,17 +684,19 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
                 output_final_state=True,
                 cu_seqlens=cu_seqlens_without_padding,
                 use_qk_l2norm_in_kernel=True,
+                prepared=prepared,
             )
         if ssm_states is not None and not use_flydsl_chunk_gdn:
             store_ssm_state_to_block_map(
                 h,
                 final_state,
-                attn_inputs.prefix_lengths_device,
+                prefix_lengths,
                 cu_seqlens_without_padding,
                 attn_inputs.kv_cache_kernel_block_id_device,
                 ssm_states,
                 seq_size_per_block,
                 chunk_size=64,
+                prepared=prepared,
             )
         return attn_out.squeeze_(0)
 
@@ -683,6 +709,31 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         kv_cache: Optional[LayerKVCache],
         attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
+        prepared = getattr(attn_meta, "gdn_prefill_prepared", None)
+        if prepared is not None:
+            if (
+                torch.version.hip is not None
+                or not mixed_qkv.is_cuda
+                or getattr(attn_meta, "is_target_verify", False)
+                or getattr(attn_meta, "is_cp_linear_attn", False)
+            ):
+                raise ValueError(
+                    "prepared GDN requires ordinary NVIDIA prefill without CP"
+                )
+            if prepared.device != mixed_qkv.device:
+                raise ValueError("prepared GDN device does not match projection")
+            if mixed_qkv.shape[0] != prepared.token_capacity:
+                raise ValueError(
+                    "prepared GDN token capacity does not match projection"
+                )
+            table = attn_inputs.kv_cache_kernel_block_id_device
+            if table is not None and table.shape[0] != prepared.batch_capacity:
+                raise ValueError(
+                    "prepared GDN request capacity does not match cache table"
+                )
+            alignment = getattr(self, "_prepared_prefix_alignment", None)
+            if alignment is not None:
+                prepared.require_prefix_alignment(alignment)
         kv_cache_tensor: Optional[torch.Tensor] = None
         seq_size_per_block = 1
         if kv_cache is not None:
@@ -696,6 +747,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
             seq_size_per_block,
             attn_inputs,
             metadata=attn_meta.get_prefill_conv1d_meta(),
+            prepared=prepared,
         )
         attn_out = self._fla(
             mixed_qkv,
@@ -1741,6 +1793,7 @@ class Qwen3NextModel(GptModelBase):
         device: torch.device,
         is_cuda_graph: bool = False,
         linear_attention_inputs: Optional[PyAttentionInputs] = None,
+        gdn_prefill_prepared=None,
     ) -> Qwen3NextMetadata:
         attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
         linear_layer_idx = next(
@@ -1773,6 +1826,18 @@ class Qwen3NextModel(GptModelBase):
             # normalize only that impossible speculative shape.
             is_target_verify = False
         is_cp = self.parallelism_config.prefill_cp_config.is_enabled()
+        if gdn_prefill_prepared is not None:
+            if (
+                torch.version.hip is not None
+                or torch.device(device).type != "cuda"
+                or not attention_inputs.is_prefill
+                or is_target_verify
+                or is_cp
+            ):
+                raise ValueError(
+                    "prepared GDN metadata requires ordinary NVIDIA prefill without CP"
+                )
+            prefill_conv1d_meta = gdn_prefill_prepared.conv_metadata
 
         full_prefill_conv1d_meta = None
         full_prefill_cu_seqlens = None
@@ -1786,6 +1851,7 @@ class Qwen3NextModel(GptModelBase):
             linear_layer_idx is not None
             and attention_inputs.is_prefill
             and not is_target_verify
+            and gdn_prefill_prepared is None
         ):
             if is_cp:
                 (
@@ -1825,6 +1891,7 @@ class Qwen3NextModel(GptModelBase):
             attention_inputs.is_prefill
             and not is_target_verify
             and not is_cp
+            and gdn_prefill_prepared is None
             and _is_aiter_flydsl_gdn_prefill_enabled()
         ):
             for layer_idx, layer in enumerate(self.layers):
@@ -1865,6 +1932,7 @@ class Qwen3NextModel(GptModelBase):
             cp_local_valid_mask=cp_local_valid_mask,
             is_cuda_graph=is_cuda_graph,
             aiter_gdn_prefill_metadata=aiter_gdn_prefill_metadata,
+            gdn_prefill_prepared=gdn_prefill_prepared,
         )
 
     def _layer_fmha_impl(self, decoder_layer, fmha_impl, layer_idx: int):

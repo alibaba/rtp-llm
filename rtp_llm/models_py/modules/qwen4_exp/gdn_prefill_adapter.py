@@ -15,6 +15,8 @@ from rtp_llm.models_py.triton_kernels.fla.block import (
 
 
 class Qwen4Sm120GdnPrefill(Qwen3NextGatedDeltaNetPrefill):
+    _prepared_prefix_alignment = 128
+
     def _fla(
         self,
         mixed_qkv,
@@ -25,6 +27,31 @@ class Qwen4Sm120GdnPrefill(Qwen3NextGatedDeltaNetPrefill):
         attn_inputs,
         attn_meta,
     ):
+        prepared = getattr(attn_meta, "gdn_prefill_prepared", None)
+        if prepared is not None:
+            supported = (
+                mixed_qkv.is_cuda
+                and torch.version.hip is None
+                and torch.cuda.get_device_capability(mixed_qkv.device) == (12, 0)
+                and mixed_qkv.dtype == torch.bfloat16
+                and 2048 <= mixed_qkv.shape[0] <= 32768
+                and self.head_k_dim == self.head_v_dim == 128
+                and seq_size_per_block == 128
+                and sm120_dsl_available()
+            )
+            if supported:
+                return self._fla_prepared(
+                    mixed_qkv, b, a, kv_cache_tensor, attn_inputs, prepared
+                )
+            return super()._fla(
+                mixed_qkv,
+                b,
+                a,
+                kv_cache_tensor,
+                seq_size_per_block,
+                attn_inputs,
+                attn_meta,
+            )
         host_lengths = attn_inputs.input_lengths
         host_prefixes = attn_inputs.prefix_lengths
         supported = (
@@ -139,5 +166,70 @@ class Qwen4Sm120GdnPrefill(Qwen3NextGatedDeltaNetPrefill):
                 HEADS=self.local_num_v_heads,
                 PAGE=128,
                 BLOCK=1024,
+            )
+        return output.squeeze(0)
+
+    def _fla_prepared(self, mixed_qkv, b, a, kv_cache_tensor, attn_inputs, prepared):
+        """Fixed-capacity SM120 path; the graph owner supplies live metadata."""
+        from rtp_llm.models_py.triton_kernels.fla.gdn_prefill_prepare import (
+            prepare_sm120_prefill,
+        )
+
+        # This admission is retained by refresh(), including future replays.
+        prepared.require_prefix_alignment(128)
+        states = (
+            self._get_ssm_states(kv_cache_tensor)
+            if kv_cache_tensor is not None
+            else None
+        )
+        initial = None
+        if states is not None:
+            initial = prepared.get_workspace(
+                "gdn_sm120_initial",
+                (prepared.batch_capacity, self.local_num_v_heads, 128, 128),
+                self.ssm_state_dtype,
+                mixed_qkv.device,
+            )
+            load_initial_state_from_block_map(
+                prepared.prefix_lengths,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                states,
+                initial,
+                128,
+                prepared=prepared,
+            )
+        q, k, v, alpha, beta = prepare_sm120_prefill(
+            mixed_qkv,
+            a,
+            b,
+            self.alog,
+            self.dt_bias,
+            self.local_num_k_heads,
+            self.local_num_v_heads,
+        )
+        output, checkpoints, final, starts = sm120_prefill_prepared(
+            q, k, v, alpha, beta, initial, prepared.cu_seqlens, prepared=prepared
+        )
+        if states is not None:
+            store_page_checkpoints_kernel[
+                (
+                    prepared.batch_capacity,
+                    triton.cdiv(prepared.token_capacity, 128),
+                    triton.cdiv(self.local_num_v_heads * 128 * 128, 1024),
+                )
+            ](
+                checkpoints,
+                final,
+                starts,
+                prepared.cu_seqlens,
+                prepared.prefix_lengths,
+                attn_inputs.kv_cache_kernel_block_id_device,
+                states,
+                TABLE_STRIDE=attn_inputs.kv_cache_kernel_block_id_device.stride(0),
+                CACHE_STRIDE=states.stride(0),
+                HEADS=self.local_num_v_heads,
+                PAGE=128,
+                BLOCK=1024,
+                request_live=prepared.request_live,
             )
         return output.squeeze(0)

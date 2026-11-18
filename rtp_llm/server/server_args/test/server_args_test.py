@@ -1057,6 +1057,50 @@ class ServerArgsSetTest(TestCase):
         )
         validate_resolved_config(configs)
 
+        for backend in ("disabled", "full", "segmented"):
+            with self.subTest(backend=backend):
+                explicit = server_args.setup_args(
+                    [
+                        "--enable_cuda_graph",
+                        "1",
+                        "--generation_prefill_graph_backend",
+                        backend,
+                        "--generation_prefill_capture_config",
+                        "128",
+                    ]
+                )
+                self.assertEqual(
+                    explicit.py_hw_kernel_config.effective_generation_prefill_graph_backend,
+                    backend,
+                )
+                validate_resolved_config(explicit)
+                if backend == "segmented":
+                    engine = EngineConfig.create(explicit)
+                    engine.parallelism_config.role_type = RoleType.PREFILL
+                    for speculative in (
+                        hw_kernel_group_args.SpeculativeType.NONE,
+                        hw_kernel_group_args.SpeculativeType.MTP,
+                    ):
+                        engine.sp_config.type = speculative
+                        validate_resolved_config(explicit, engine_config=engine)
+                    for role in (RoleType.DECODE, RoleType.FRONTEND):
+                        engine.parallelism_config.role_type = role
+                        with self.assertRaisesRegex(ValueError, "PDFUSION/PREFILL"):
+                            validate_resolved_config(explicit, engine_config=engine)
+                    engine.parallelism_config.role_type = RoleType.PREFILL
+                    with self.assertRaisesRegex(ValueError, "language generation"):
+                        validate_resolved_config(
+                            explicit,
+                            task_type=TaskType.DENSE_EMBEDDING,
+                            engine_config=engine,
+                        )
+                explicit.py_hw_kernel_config.enable_cuda_graph = False
+                self.assertEqual(
+                    explicit.py_hw_kernel_config.effective_generation_prefill_graph_backend,
+                    "disabled",
+                )
+                validate_resolved_config(explicit)
+
         # The shipped defaults are internally usable: the default reachable
         # context capacity is one, so enabling only the master switch and a
         # capture bucket must not fail startup.
@@ -1106,8 +1150,8 @@ class ServerArgsSetTest(TestCase):
                 )
                 validate_resolved_config(configs, task_type=task_type)
 
-        # P/D roles ignore retained generation-prefill configuration with or
-        # without speculative execution, including its capacity constraints.
+        # Legacy full is ignored by P/D roles, including capacity constraints
+        # and speculative conflicts; only explicit segmented admits PREFILL.
         for role_type in ("PREFILL", "DECODE"):
             for speculative_type in (None, "mtp", "dspark"):
                 with self.subTest(

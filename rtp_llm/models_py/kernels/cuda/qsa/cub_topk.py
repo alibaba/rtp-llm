@@ -18,6 +18,8 @@ _MODULE = None
 _BUILD_FAILED = False
 _BUILD_LOCK = threading.Lock()
 _INITIALIZED_DEVICES = set()
+_LENGTH_BUCKET_DEVICES = set()
+_LENGTH_BUCKET_FAILED_DEVICES = set()
 _LOGGER = logging.getLogger(__name__)
 
 _CUDA_SOURCE = Path(__file__).with_name("topk.cuh").read_text()
@@ -85,9 +87,18 @@ def _load_module(device):
                 ).hexdigest()[:16]
                 _MODULE = load_inline(
                     name="qwen4_qsa_topk_" + identity,
-                    cpp_sources="void qsa_cub_init(); void qsa_cub_topk(torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, int64_t threads, bool finite_only, bool merge); void qsa_cub_topk_draft(torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, torch::Tensor row_lengths, torch::Tensor cu);",
+                    cpp_sources=(
+                        "void qsa_cub_init(); void qsa_cub_topk(torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, int64_t threads, bool finite_only, bool merge); void qsa_cub_topk_draft(torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, torch::Tensor row_lengths, torch::Tensor cu);"
+                        "void qsa_cub_init_length_buckets(); void qsa_cub_topk_length_buckets(torch::Tensor scores, torch::Tensor lengths, torch::Tensor output, bool finite_only);"
+                    ),
                     cuda_sources=_CUDA_SOURCE,
-                    functions=["qsa_cub_init", "qsa_cub_topk", "qsa_cub_topk_draft"],
+                    functions=[
+                        "qsa_cub_init",
+                        "qsa_cub_topk",
+                        "qsa_cub_topk_draft",
+                        "qsa_cub_init_length_buckets",
+                        "qsa_cub_topk_length_buckets",
+                    ],
                     extra_cflags=["-O2"],
                     extra_cuda_cflags=flags,
                     with_cuda=True,
@@ -105,23 +116,61 @@ def _load_module(device):
             return _MODULE
 
 
-def try_cub_qsa_tokens(scores, lengths, *, finite_only=True):
+def _initialize_length_buckets(module, device):
+    with torch.cuda.device(device):
+        index = torch.cuda.current_device()
+        if index in _LENGTH_BUCKET_DEVICES:
+            return True
+        if (
+            index in _LENGTH_BUCKET_FAILED_DEVICES
+            or torch.cuda.is_current_stream_capturing()
+        ):
+            return False
+        with _BUILD_LOCK:
+            if index in _LENGTH_BUCKET_FAILED_DEVICES:
+                return False
+            if index not in _LENGTH_BUCKET_DEVICES:
+                try:
+                    module.qsa_cub_init_length_buckets()
+                except Exception:
+                    _LENGTH_BUCKET_FAILED_DEVICES.add(index)
+                    _LOGGER.warning(
+                        "QSA length-bucket initialization unavailable; using original CUB selection",
+                        exc_info=True,
+                    )
+                    return False
+                _LENGTH_BUCKET_DEVICES.add(index)
+        return True
+
+
+def try_cub_qsa_tokens(
+    scores, lengths, *, finite_only=True, device_length_buckets=False
+):
     if not is_supported(scores, lengths):
         return None
     module = _load_module(scores.device)
     if module is None:
         return None
+    use_length_buckets = (
+        device_length_buckets
+        and 1 <= scores.shape[0] <= 32
+        and scores.shape[1] in (8191, 8192)
+        and _initialize_length_buckets(module, scores.device)
+    )
     output = torch.empty(
         (scores.shape[0], 2051), device=scores.device, dtype=torch.int32
     )
-    module.qsa_cub_topk(
-        scores,
-        lengths,
-        output,
-        256,
-        finite_only,
-        True,
-    )
+    if use_length_buckets:
+        module.qsa_cub_topk_length_buckets(scores, lengths, output, finite_only)
+    else:
+        module.qsa_cub_topk(
+            scores,
+            lengths,
+            output,
+            256,
+            finite_only,
+            True,
+        )
     return output
 
 

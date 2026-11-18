@@ -1,5 +1,6 @@
 import threading
 import unittest
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -808,6 +809,67 @@ class CollectiveAgreementTest(unittest.TestCase):
             )
             self.assertEqual(
                 collective_utils.exchange_group_state(group, True, "probe"), [True]
+            )
+
+    def test_explicit_startup_deadline_preserves_peer_order(self):
+        from rtp_llm.models_py.distributed import collective_utils
+
+        store = torch.distributed.HashStore()
+        prefix = "rtp_llm/collectives/cold_start_unit_test/1/probe/"
+        errors = []
+
+        def arrive():
+            try:
+                store.wait([prefix + "0"], timedelta(seconds=5))
+                store.set(prefix + "1", b"false")
+            except Exception as error:
+                errors.append(error)
+
+        peer = threading.Thread(target=arrive)
+        peer.start()
+        try:
+            with (
+                patch.object(
+                    collective_utils.dist.distributed_c10d,
+                    "_get_default_store",
+                    return_value=store,
+                ),
+                patch.object(collective_utils.dist, "get_world_size", return_value=2),
+                patch.object(collective_utils.dist, "get_rank", return_value=0),
+            ):
+                self.assertEqual(
+                    collective_utils.exchange_group_state(
+                        SimpleNamespace(group_name="cold_start_unit_test"),
+                        True,
+                        "probe",
+                        timeout=timedelta(seconds=5),
+                    ),
+                    [True, False],
+                )
+        finally:
+            peer.join(timeout=10)
+        self.assertFalse(peer.is_alive())
+        self.assertEqual(errors, [])
+
+    def test_explicit_deadline_still_fails_for_missing_peer(self):
+        from rtp_llm.models_py.distributed import collective_utils
+
+        store = torch.distributed.HashStore()
+        with (
+            patch.object(
+                collective_utils.dist.distributed_c10d,
+                "_get_default_store",
+                return_value=store,
+            ),
+            patch.object(collective_utils.dist, "get_world_size", return_value=2),
+            patch.object(collective_utils.dist, "get_rank", return_value=0),
+            self.assertRaises(torch.distributed.DistStoreError),
+        ):
+            collective_utils.exchange_group_state(
+                SimpleNamespace(group_name="bounded_startup_unit_test"),
+                True,
+                "probe",
+                timeout=timedelta(milliseconds=50),
             )
 
     def test_missing_rank_timeout_propagates_without_gpu_collective(self):

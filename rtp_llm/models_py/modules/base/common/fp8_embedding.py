@@ -1,5 +1,7 @@
 """GPU-resident FP8 vocabulary lookup with BF16 output and TP ordering."""
 
+from datetime import timedelta
+
 import torch
 from torch import nn
 
@@ -65,7 +67,12 @@ class Fp8VocabEmbedding(nn.Module):
         eligible = torch.cuda.get_device_capability(self.device) == (12, 0)
         if not all(
             exchange_group_state(
-                _get_group(Group.TP), eligible, "vocabulary_byte_gather"
+                _get_group(Group.TP),
+                eligible,
+                "vocabulary_byte_gather",
+                # Cold checkpoint loading can leave TP peers minutes apart.
+                # Keep this startup wait bounded without widening runtime gates.
+                timeout=timedelta(minutes=10),
             )
         ):
             return

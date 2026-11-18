@@ -13,6 +13,7 @@ from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import (
     is_deep_gemm_e8m0_used,
 )
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+    create_per_token_group_quant_fp8_output_scale,
     per_block_cast_to_fp8,
     quant_weight_ue8m0_packed,
     requant_weight_ue8m0,
@@ -28,6 +29,7 @@ from rtp_llm.models_py.modules.factory.linear.impl.cuda.test.fp8_linear_test imp
     CudaFp8GEMMLinearTestBase,
     init_quant_config,
 )
+from rtp_llm.models_py.modules.qwen4_exp.sm120_fp8_linear import Qwen4Sm120Fp8Linear
 from rtp_llm.models_py.utils.arch import is_sm12x
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
@@ -377,6 +379,61 @@ class OnlineFp8LoaderTestBase(CudaFp8GEMMLinearTestBase):
 
 
 class CudaFp8DeepGEMMLinearSM120Test(OnlineFp8LoaderTestBase, unittest.TestCase):
+    def test_direct_weight_runs_deepgemm(self):
+        super().test_direct_weight_runs_deepgemm()
+        # Distinct K-group scales expose the SM120 Split-K error seen when
+        # TP8 QKVZ switches from a complete prompt to a short prefix-hit tail.
+        weight = torch.ones((2048, 2560), device="cuda").to(torch.float8_e4m3fn)
+        weight_scale = create_per_token_group_quant_fp8_output_scale(
+            x_shape=weight.shape,
+            device=weight.device,
+            group_size=128,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            scale_ue8m0=True,
+        )
+        weight_scale.fill_(0x7F7F7F7F)
+        linear = Qwen4Sm120Fp8Linear(
+            CudaFp8DeepGEMMLinear(weight, weight_scale),
+            torch.zeros(128, device="cuda", dtype=torch.int32),
+        )
+        exponents = torch.tensor(
+            [125] * 5 + [126] * 5 + [127] * 5 + [128] * 5,
+            device="cuda",
+            dtype=torch.int64,
+        ).view(5, 4)
+        packed = sum(exponents[:, i] << (8 * i) for i in range(4)).int()
+        for m in (4223, 127, 1):
+            with self.subTest(m=m):
+                inputs = torch.ones((m, 2560), device="cuda").to(torch.float8_e4m3fn)
+                _, scales = linear.quantize_input(inputs)
+                scales.copy_(packed.unsqueeze(0).expand(m, -1))
+                actual = linear.forward_quantized(inputs, scales)
+                torch.testing.assert_close(
+                    actual.float(),
+                    torch.full_like(actual.float(), 2400),
+                    rtol=0,
+                    atol=0,
+                )
+                output = torch.empty_like(actual)
+                torch.cuda.synchronize()
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    self.assertIs(
+                        linear.forward_quantized(inputs, scales, out=output), output
+                    )
+                for value in (2, 3):
+                    inputs.copy_(
+                        torch.full(inputs.shape, value, device="cuda").to(inputs.dtype)
+                    )
+                    graph.replay()
+                    torch.testing.assert_close(
+                        output.float(),
+                        torch.full_like(output.float(), 2400 * value),
+                        rtol=0,
+                        atol=0,
+                    )
+
     def test_sm120(self):
         self.assertTrue(is_sm12x())
         self.assertTrue(has_deep_gemm())

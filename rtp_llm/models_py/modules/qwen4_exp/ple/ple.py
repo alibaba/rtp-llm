@@ -191,12 +191,16 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             for shard in self.shards
             if shard.device.type == "cpu"
         }
-        retained = (
+        eager_retained = (
             self._prefetcher.retained_eager_bytes if self._prefetcher is not None else 0
+        )
+        graph_retained = (
+            self._prefetcher.retained_graph_bytes if self._prefetcher is not None else 0
         )
         return {
             "cpu_table_bytes": sum(storage.nbytes() for storage in storages.values()),
-            "eager_retained_bytes": retained,
+            "eager_retained_bytes": eager_retained,
+            "graph_retained_bytes": graph_retained,
         }
 
     def close(self) -> None:
@@ -227,6 +231,26 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         if not self.supports_prefetch:
             return None
         return self._prefetcher.start(ids, slot=slot)
+
+    def start_graph_prefetch(self, ids: torch.Tensor):
+        if not self.supports_prefetch:
+            return None
+        return self._prefetcher.start_graph(ids)
+
+    def finish_graph_warmup(self) -> None:
+        if self._prefetcher is not None:
+            self._prefetcher.finish_graph_warmup()
+
+    def clear_graph_banks(self, *, clear_eager=False) -> None:
+        if self._prefetcher is not None:
+            self._prefetcher.clear_graph_banks(clear_eager=clear_eager)
+
+    def remaining_prefetch_budget_bytes(self) -> int:
+        return (
+            self._prefetcher.remaining_budget_bytes()
+            if self._prefetcher is not None
+            else 0
+        )
 
     def consume_prefetch(self, prefetch):
         if self._prefetcher is None or prefetch.owner is not self._prefetcher:

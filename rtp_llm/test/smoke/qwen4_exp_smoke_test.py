@@ -1,4 +1,4 @@
-"""Real-model scenarios sharing one server per mixed FP8/NVFP4 TP2 profile.
+"""Real-model scenarios sharing one server per mixed FP8/NVFP4 TP profile.
 
 Every cache restore scenario establishes its own fill/hit sequence. Uncached
 requests provide references without relying on unittest method ordering.
@@ -77,25 +77,14 @@ def validate_generation(actual, expected_ids, output_tokens, vocab_size, specula
         ), "Non-speculative generation ran speculation"
 
 
-def execution_modes(smoke_args):
-    """Read the same explicit flags passed to the server, including plain decode."""
-    tokens = shlex.split(smoke_args)
-
-    def option(name, default):
-        return tokens[tokens.index(name) + 1] if name in tokens else default
-
-    return (
-        option("--enable_cuda_graph", "0") == "1",
-        option("--sp_type", "none") == "mtp",
-    )
-
-
 class Qwen4SM120ScenariosTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import requests
         from transformers import AutoTokenizer
 
+        from rtp_llm.ops import SpeculativeType
+        from rtp_llm.server.server_args.server_args import setup_args
         from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
         fixture = (
@@ -120,13 +109,21 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
         cls.output_dir = Path(os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "."))
         cls.output_dir.mkdir(parents=True, exist_ok=True)
         cls.observed = []
-        cls.graph_batches = []
+        cls.graph_coverage = {}
         cls.baseline = None
         cls.session = requests.Session()
         cls.session.trust_env = False
         cls.addClassCleanup(cls.session.close)
         smoke_args = os.environ["SMOKE_ARGS"]
-        cls.graph_enabled, cls.mtp_enabled = execution_modes(smoke_args)
+        configs = setup_args(shlex.split(smoke_args))
+        cls.graph_enabled = configs.py_hw_kernel_config.enable_cuda_graph
+        cls.segmented = (
+            configs.py_hw_kernel_config.generation_prefill_graph_backend == "segmented"
+        )
+        cls.mtp_enabled = configs.sp_config.type == SpeculativeType.MTP
+        cls.prefill_chunk_size = (
+            configs.runtime_config.fifo_scheduler_config.prefill_chunk_size
+        )
         if cls.mtp_enabled:
             smoke_args += " --sp_checkpoint_path " + shlex.quote(cls.model_path)
         cls.server = MagaServerManager(
@@ -138,6 +135,13 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
             role_name="qwen4_sm120_scenarios",
             smoke_args_str=smoke_args,
         )
+        # These profiles launch all ranks locally. Reuse the server's parsed
+        # port layout, including an explicitly configured rank stride.
+        configs.server_config.start_port = cls.server.port
+        cls.backend_http_ports = {}
+        for rank in range(configs.parallelism_config.world_size):
+            configs.server_config.set_local_rank(rank)
+            cls.backend_http_ports[rank] = configs.server_config.http_port
         cls.addClassCleanup(cls.server.stop_server)
         if not cls.server.start_server(
             model_path=cls.model_path, model_type="qwen4_exp", timeout=900
@@ -167,7 +171,7 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
         try:
             children = psutil.Process(pid).children(recursive=True)
             log = Path(cls.server.log_file_path).read_text(errors="replace")
-            ranks = set(re.findall(r"\[(\d+):\d+\] \[RANK [01]\]", log))
+            ranks = set(re.findall(r"\[(\d+):\d+\] \[RANK \d+\]", log))
             for process in children:
                 if str(process.pid) not in ranks or not process.is_running():
                     continue
@@ -203,9 +207,13 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
         (cls.output_dir / "qwen4_sm120_coverage.json").write_text(
             json.dumps(
                 {
-                    "profile": {"mtp": cls.mtp_enabled, "graph": cls.graph_enabled},
+                    "profile": {
+                        "mtp": cls.mtp_enabled,
+                        "graph": cls.graph_enabled,
+                        "segmented": cls.segmented,
+                    },
                     "requests": cls.observed,
-                    "target_graph_batches": cls.graph_batches,
+                    "graph_replay": cls.graph_coverage,
                 },
                 indent=2,
             )
@@ -244,6 +252,7 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
             "prompt": prompt,
             "generate_config": {
                 "max_new_tokens": output_tokens,
+                "min_new_tokens": output_tokens,
                 "ignore_eos": True,
                 "top_k": 1,
                 "top_p": 1.0,
@@ -271,6 +280,11 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
             self.assertEqual(set(words), {"MAP"})
         if not reuse:
             self.assertEqual(actual["aux_info"]["reuse_len"], 0)
+            if self.segmented and 2048 <= len(expected_ids) <= 8192:
+                self.assertEqual(
+                    actual["aux_info"]["generation_prefill_cuda_graph_status"],
+                    "replayed",
+                )
         self.observed.append(
             {
                 "label": label,
@@ -378,40 +392,161 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
             self.text_config["vocab_size"],
             self.mtp_enabled,
         )
+        if self.segmented:
+            response = self.session.post(
+                f"http://127.0.0.1:{self.server.port}",
+                json={
+                    "prompt": "Return MAP.",
+                    "generate_config": {
+                        "max_new_tokens": 1,
+                        "num_return_sequences": 2,
+                        "do_sample": True,
+                    },
+                },
+                timeout=60,
+            )
+            error = response.json()
+            if self.mtp_enabled:
+                self.assertEqual(error["error_code_str"], "515_UNSUPPORTED_OPERATION")
+                self.assertEqual(
+                    error["message"],
+                    "speculative decoding does not support num_return_sequences > 1 or num_beams > 1",
+                )
+            else:
+                self.assertEqual(error["error_code_str"], "605_INVALID_PARAMS")
+                self.assertIn(
+                    error["message"],
+                    (
+                        "chunked prefill incompatible: force_batch",
+                        "segmented prefill currently supports one sequence per request",
+                    ),
+                )
+            first, _ = self.long_prompts()
+            self.request("after_fanout_rejection", first, False, output_tokens=1)
 
-    def set_log_level(self, level):
+    def set_log_level(self, rank, level):
         response = self.session.post(
-            f"http://127.0.0.1:{self.server.port}/set_log_level",
+            f"http://127.0.0.1:{self.backend_http_ports[rank]}/set_log_level",
             json={"log_level": level},
             timeout=10,
         )
         response.raise_for_status()
+        self.assertEqual(response.json(), {"status": "ok"})
 
     def test_05_graph_execution_mode(self):
         # Observe this request only: warmup and earlier scenarios cannot satisfy it.
         offset = Path(self.server.log_file_path).stat().st_size
         first, _ = self.long_prompts()
-        # Only the replay observation needs DEBUG; all correctness and timing
-        # scenarios run at INFO without the debug kernel synchronization.
-        self.set_log_level("DEBUG")
+        # The frontend endpoint changes only its connected rank. Set each
+        # backend directly, and confine DEBUG kernel synchronization to this probe.
+        changed_ranks = []
         try:
-            self.request("graph_probe", first, False)
+            for rank in self.backend_http_ports:
+                # A timeout can occur after the backend applies the change.
+                changed_ranks.append(rank)
+                self.set_log_level(rank, "DEBUG")
+            probe = self.request("graph_probe", first, False)
         finally:
-            self.set_log_level("INFO")
+            probe_failed = sys.exc_info()[0] is not None
+            cleanup_error = None
+            for rank in reversed(changed_ranks):
+                try:
+                    self.set_log_level(rank, "INFO")
+                except Exception as error:
+                    logging.exception("Could not restore rank %s log level", rank)
+                    if cleanup_error is None:
+                        cleanup_error = error
+            if cleanup_error is not None and not probe_failed:
+                raise cleanup_error
         with Path(self.server.log_file_path).open("rb") as reader:
             reader.seek(offset)
             runtime = reader.read().decode(errors="replace")
         replay = re.findall(
-            r"\[PyWrappedModel\] using CUDA graph forward, is_target_verify=1, is_prefill=[01], graph_bs=(\d+)",
+            r"\[RANK (\d+)\][^\n]*\[PyWrappedModel\] CUDA graph forward completed, "
+            r"is_target_verify=([01]), is_prefill=([01]), logical_bs=(\d+), graph_bs=(\d+)",
             runtime,
         )
-        type(self).graph_batches.extend(replay)
-        if self.graph_enabled and self.mtp_enabled:
-            self.assertIn(
-                "1", replay, "No real MTP target CUDA graph replay after startup"
+        eager = re.findall(
+            r"\[RANK (\d+)\][^\n]*\[PyWrappedModel\] using normal forward, "
+            r"is_target_verify=([01]), is_prefill=([01])",
+            runtime,
+        )
+        expected_steps = OUTPUT_TOKENS - 1 if not self.mtp_enabled else 0
+        coverage = {}
+        for rank in self.backend_http_ports:
+            rank_replay = [entry[1:] for entry in replay if int(entry[0]) == rank]
+            ordinary = [
+                entry
+                for entry in rank_replay
+                if not self.mtp_enabled and entry[:3] == ("0", "0", "1")
+            ]
+            verify = [entry for entry in rank_replay if entry[0] == "1"]
+            eager_ordinary = (
+                sum(
+                    int(entry[0]) == rank and entry[1:] == ("0", "0") for entry in eager
+                )
+                if not self.mtp_enabled
+                else 0
             )
-        else:
-            self.assertFalse(replay, "Eager target replayed an MTP CUDA graph")
+            coverage[str(rank)] = {
+                "generation_prefill": {
+                    # Non-verify MTP graphs also include draft-prefill work.
+                    "replay_successes": (
+                        None
+                        if self.mtp_enabled
+                        else sum(entry[:2] == ("0", "1") for entry in rank_replay)
+                    ),
+                    "status": probe["aux_info"]["generation_prefill_cuda_graph_status"],
+                },
+                "ordinary_decode": {
+                    "eligible_steps": expected_steps if self.graph_enabled else 0,
+                    "replay_successes": len(ordinary),
+                    "eager_steps": eager_ordinary,
+                    "graph_buckets": [int(entry[3]) for entry in ordinary],
+                },
+                "target_verify": {
+                    "replay_successes": len(verify),
+                    "graph_buckets": [int(entry[3]) for entry in verify],
+                },
+                # MTP non-target graphs include draft work; they must never
+                # count toward ordinary decode coverage.
+                "other_replay_successes": len(rank_replay)
+                - len(ordinary)
+                - len(verify),
+            }
+        type(self).graph_coverage = coverage
+        self.assertLessEqual(
+            {int(entry[0]) for entry in replay}, set(self.backend_http_ports)
+        )
+        for rank, observed in coverage.items():
+            with self.subTest(rank=rank):
+                if not self.graph_enabled:
+                    self.assertFalse(
+                        [entry for entry in replay if entry[0] == rank],
+                        "Graph-disabled request replayed a CUDA graph",
+                    )
+                elif self.mtp_enabled:
+                    self.assertIn(
+                        1,
+                        observed["target_verify"]["graph_buckets"],
+                        "No successful MTP target CUDA graph replay after startup",
+                    )
+                else:
+                    if self.segmented:
+                        self.assertEqual(
+                            observed["generation_prefill"]["replay_successes"], 1
+                        )
+                    ordinary = observed["ordinary_decode"]
+                    self.assertEqual(
+                        ordinary["replay_successes"],
+                        expected_steps,
+                        "Ordinary decode steps did not all replay CUDA graphs",
+                    )
+                    self.assertEqual(
+                        ordinary["eager_steps"],
+                        0,
+                        "Eligible ordinary decode unexpectedly fell back to eager",
+                    )
 
     @staticmethod
     def image_part(color):
@@ -433,7 +568,7 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
     def media_request(
         self, label, parts, question, *, reuse=False, max_tokens=64, ignore_eos=False
     ):
-        return self.post(
+        actual = self.post(
             label,
             "/v1/chat/completions",
             {
@@ -447,9 +582,21 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
                 "enable_thinking": False,
                 "temperature": 0,
                 "max_tokens": max_tokens,
-                "extra_configs": {"reuse_cache": reuse, "ignore_eos": ignore_eos},
+                "extra_configs": {
+                    "reuse_cache": reuse,
+                    "ignore_eos": ignore_eos,
+                    **({"min_new_tokens": max_tokens} if ignore_eos else {}),
+                },
             },
         )
+        self.observed.append(
+            {
+                "label": label,
+                "input_len": actual["aux_info"]["input_len"],
+                "aux_info": actual["aux_info"],
+            }
+        )
+        return actual
 
     @staticmethod
     def answer(actual):
@@ -527,6 +674,10 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
         self.assertEqual(set(self.answer(actual).split()), {"RED"})
         self.assertGreater(actual["aux_info"]["input_len"], budget)
         self.assertEqual(actual["aux_info"]["output_len"], OUTPUT_TOKENS)
+        if self.segmented:
+            self.assertEqual(
+                actual["aux_info"]["generation_prefill_cuda_graph_status"], "replayed"
+            )
         if self.mtp_enabled:
             self.assertGreater(
                 sum(actual["aux_info"]["speculative_accepted_tokens_per_pos"]), 0
@@ -542,6 +693,32 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
         )
         self.assertGreaterEqual(reused["aux_info"]["reuse_len"], PAGE_SIZE)
         self.assertEqual(self.answer(reused), self.answer(actual))
+        if self.segmented:
+            self.assertGreater(self.prefill_chunk_size, 0)
+            line_tokens = len(self.tokenizer.encode(line, add_special_tokens=False))
+            oversized = line * (self.prefill_chunk_size // line_tokens + 2)
+            response = self.session.post(
+                self.url("/v1/chat/completions"),
+                json={
+                    "model": "qwen4_exp",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [*parts, {"type": "text", "text": oversized}],
+                        }
+                    ],
+                    "enable_thinking": False,
+                    "max_tokens": 1,
+                    "extra_configs": {"reuse_cache": False},
+                },
+                timeout=60,
+            )
+            self.assertEqual(response.status_code, 500)
+            error = response.json()
+            self.assertEqual(error["error_code_str"], "605_INVALID_PARAMS")
+            self.assertIn(
+                "complete multimodal prompt to fit prefill_chunk_size", error["message"]
+            )
 
     def test_10_concurrent_text_image_and_repeated_new_media(self):
         from concurrent.futures import ThreadPoolExecutor
@@ -552,7 +729,7 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
             "What is the color of this image? Answer with one English color word only."
         )
         # Make the image ready before overlapping its request with long text.
-        self.media_request("warm_red", [red], question)
+        self.media_request("warm_red", [red], question, reuse=True, max_tokens=1)
         reference = self.uncached_baseline()
         prompt, _ = self.long_prompts()
         barrier = Barrier(2)
@@ -563,13 +740,15 @@ class Qwen4SM120ScenariosTest(unittest.TestCase):
 
         def image_request():
             barrier.wait(timeout=30)
-            return self.media_request("concurrent_image", [red], question)
+            return self.media_request("concurrent_image", [red], question, reuse=True)
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             text = pool.submit(text_request)
             image = pool.submit(image_request)
             self.assert_same_tokens(reference, text.result(timeout=600))
-            self.assertEqual(self.answer(image.result(timeout=600)).strip(". "), "RED")
+            reused = image.result(timeout=600)
+            self.assertEqual(self.answer(reused).strip(". "), "RED")
+            self.assertGreaterEqual(reused["aux_info"]["reuse_len"], PAGE_SIZE)
         actual = self.media_request(
             "repeated_red_new_green",
             [red, self.image_part("green")],

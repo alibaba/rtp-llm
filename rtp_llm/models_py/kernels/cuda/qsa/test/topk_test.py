@@ -138,6 +138,164 @@ class QsaTopkTritonTest(unittest.TestCase):
             )
             self.assertTrue(torch.equal(actual, expected))
 
+    def test_paged_producer_replay_respects_score_tail_contract(self):
+        from rtp_llm.models_py.kernels.cuda.qsa.indexer_paged_score import (
+            qsa_paged_indexer_score,
+        )
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection import (
+            select_qsa_paged_tokens,
+        )
+
+        # Cover native/packed/CUB/histogram dispatches where available, plus
+        # the generic fallback. Multi-query rows share a request block table.
+        geometries = (
+            (2, 1, 513),
+            (2, 1, 1024),
+            (2, 3, 2048),
+            (4, 1, 8192),
+            (11, 3, 8192),
+            (2, 1, 16385),
+        )
+        for batch, queries, columns, initialize_tail in (
+            (*shape, mode) for shape in geometries for mode in (True, False)
+        ):
+            with self.subTest(
+                batch=batch,
+                queries=queries,
+                columns=columns,
+                initialize_tail=initialize_tail,
+            ):
+                rows = batch * queries
+                pages = (columns + 63) // 64 - 1
+                gains = torch.arange(1, rows + 1, device="cuda")
+                q = torch.ones(
+                    batch, queries, 4, 128, device="cuda", dtype=torch.bfloat16
+                )
+                q *= gains.view(batch, queries, 1, 1)
+                weights = torch.full((rows, 4), 0.25, device="cuda")
+                weights[1, 0] = float("nan")
+                entry_gain = torch.arange(1, 65, device="cuda", dtype=torch.bfloat16)
+                pool = (
+                    (
+                        torch.arange(3, device="cuda", dtype=torch.bfloat16)[
+                            :, None, None
+                        ]
+                        * entry_gain[None, :, None]
+                    )
+                    .expand(3, 64, 128)
+                    .reshape(-1, 128)
+                    .contiguous()
+                )
+                table = torch.ones(batch, pages, device="cuda", dtype=torch.int32)
+                table[1::2] = 2
+                table[0, 1:4] = torch.tensor([0, -1, 3], device="cuda")
+                compressed = torch.full(
+                    (batch, queries), columns, device="cuda", dtype=torch.int32
+                )
+                lengths = torch.full(
+                    (rows,), columns * 4, device="cuda", dtype=torch.int32
+                )
+
+                def select():
+                    scores = qsa_paged_indexer_score(
+                        q,
+                        weights,
+                        pool,
+                        table,
+                        compressed,
+                        block_size=64,
+                        max_ctx_len=columns,
+                        validate_block_table=False,
+                        initialize_score_tail=initialize_tail,
+                    )
+                    return scores, select_qsa_paged_tokens(
+                        scores,
+                        lengths,
+                        compress_ratio=4,
+                        token_budget=2048,
+                        validate_lengths=False,
+                        scores_are_masked=initialize_tail,
+                        **(
+                            {"device_length_buckets": True}
+                            if not initialize_tail and columns == 8192 and rows <= 32
+                            else {}
+                        ),
+                    )
+
+                stream = torch.cuda.Stream()
+                stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(stream):
+                    select()
+                torch.cuda.current_stream().wait_stream(stream)
+                graph = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(graph):
+                    scores, selected = select()
+                boundary = torch.tensor(
+                    [0, 1, 63, 64, 65, 511, 512, 513], device="cuda", dtype=torch.int32
+                )[torch.arange(rows, device="cuda") % 8].view(batch, queries)
+                for context, poison in (
+                    (torch.full_like(compressed, columns), 1.0e30),
+                    (boundary, float("nan")),
+                    (torch.zeros_like(compressed), "random"),
+                    (torch.full_like(compressed, columns), None),
+                ):
+                    compressed.copy_(context)
+                    tails = torch.arange(rows, device="cuda", dtype=torch.int32) % 4
+                    lengths.copy_(
+                        context.view(-1) * 4
+                        + torch.where(context.view(-1) > 0, tails, 0)
+                    )
+                    table.copy_(table.roll(1, dims=0))
+                    if poison == "random":
+                        scores.normal_()
+                    elif poison is not None:
+                        scores.fill_(poison)
+                    previous = scores.clone()
+                    selected.fill_(-99)
+                    graph.replay()
+                    physical = torch.cat(
+                        (
+                            table.repeat_interleave(64, dim=1),
+                            table.new_zeros(batch, columns - pages * 64),
+                        ),
+                        dim=1,
+                    ).repeat_interleave(queries, dim=0)
+                    valid = (physical > 0) & (physical < 3)
+                    valid &= torch.arange(columns, device="cuda")[None] < context.view(
+                        -1, 1
+                    )
+                    expected = physical.float() * (
+                        (torch.arange(columns, device="cuda") % 64 + 1)
+                        * (128 * gains[:, None])
+                    )
+                    expected[1] = float("nan")
+                    expected.masked_fill_(~valid, float("-inf"))
+                    if initialize_tail:
+                        torch.testing.assert_close(
+                            scores, expected, rtol=0, atol=0, equal_nan=True
+                        )
+                    else:
+                        columns_device = torch.arange(columns, device="cuda")[None]
+                        complete = context.view(-1, 1)
+                        visible_scores = scores.masked_fill(
+                            columns_device >= complete, -torch.inf
+                        )
+                        torch.testing.assert_close(
+                            visible_scores, expected, rtol=0, atol=0, equal_nan=True
+                        )
+                        unwritten = columns_device // 64 * 64 >= complete
+                        torch.testing.assert_close(
+                            scores[unwritten],
+                            previous[unwritten],
+                            rtol=0,
+                            atol=0,
+                            equal_nan=True,
+                        )
+                    torch.testing.assert_close(
+                        selected, self.reference(expected, lengths), rtol=0, atol=0
+                    )
+                graph.reset()
+
     def test_premasked_radix_key_preserves_float_bits_and_native_indices(self):
         for rows in (1, 3, 4, 8, 16, 20, 24, 28, 32):
             for columns in (1024, 2048):

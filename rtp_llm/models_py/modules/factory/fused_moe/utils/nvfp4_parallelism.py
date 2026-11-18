@@ -1,5 +1,7 @@
 """Topology admission for block128 FP8-source, contiguous online NVFP4 experts."""
 
+from rtp_llm.config.quant_config import QWEN4_FP8_NVFP4_RECIPE
+
 
 def use_nvfp4_tensor_parallel(config) -> bool:
     pc = config.parallelism_config
@@ -14,12 +16,18 @@ def use_nvfp4_tensor_parallel(config) -> bool:
         and quant.require_contiguous_experts
         and quant.activation_amax == 32.0
         and not quant.mixed_attention
-        and config.tp_size == 2
+        and (
+            config.tp_size == 2
+            or (
+                config.tp_size in (4, 8)
+                and getattr(quant, "model_recipe", None) == QWEN4_FP8_NVFP4_RECIPE
+            )
+        )
         and config.ep_size == 1
-        and pc.world_size == 2
+        and pc.world_size == config.tp_size
         and pc.dp_size == 1
         and pc.pp_size == 1
         and not pc.prefill_cp_config.is_enabled()
         and not pc.prefill_cp_config.is_prefill_enabled()
-        and pc.get_ffn_tp_size() == 2
+        and pc.get_ffn_tp_size() == config.tp_size
     )

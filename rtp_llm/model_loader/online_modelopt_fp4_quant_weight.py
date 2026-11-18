@@ -19,7 +19,11 @@ from typing import Any, Optional
 
 import torch
 
-from rtp_llm.config.quant_config import ModelOptFp4Config, QuantizationConfig
+from rtp_llm.config.quant_config import (
+    QWEN4_FP8_NVFP4_RECIPE,
+    ModelOptFp4Config,
+    QuantizationConfig,
+)
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.tensor_source import StackSplitTensorSource, TensorSource
@@ -374,6 +378,37 @@ class OnlineModelOptFp4MoeWeight(CompositeWeight, QuantWeight):
             output[self.scale_2.name][expert_index].copy_(scale_2)
             del weight, kernel_dict, packed, scale, scale_2
         return output
+
+    def _split(self, tensor, load_config: LoadConfig):
+        result = super()._split(tensor, load_config)
+        if not (
+            self.quant_config.model_recipe == QWEN4_FP8_NVFP4_RECIPE
+            and load_config.ep_size == 1
+            and load_config.ffn_tp_size in (4, 8)
+        ):
+            return result
+        # CUTLASS requires a 32-aligned local intermediate. Pad after quantizing
+        # and sharding so every real FP4 byte and scale retains its old value.
+        w1 = self.kernel.name == W.moe_w1
+        kernel = result[self.kernel.name]
+        inter = kernel.shape[1] // 2 if w1 else kernel.shape[2] * 2
+        padding = -inter % 32
+        if padding:
+            for name, divisor in ((self.kernel.name, 2), (self.scale.name, 16)):
+                value = result[name]
+                if w1:
+                    shape = (value.shape[0], 2, inter + padding, value.shape[2])
+                    padded = value.new_zeros(shape)
+                    padded[:, :, :inter].copy_(
+                        value.reshape(value.shape[0], 2, inter, -1)
+                    )
+                    result[name] = padded.flatten(1, 2)
+                else:
+                    shape = (*value.shape[:-1], value.shape[-1] + padding // divisor)
+                    padded = value.new_zeros(shape)
+                    padded[..., : value.shape[-1]].copy_(value)
+                    result[name] = padded
+        return result
 
     def _postprocess(
         self,

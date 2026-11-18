@@ -8,6 +8,7 @@
 #include <string>
 #include <cctype>
 #include <regex>
+#include <stdexcept>
 
 namespace rtp_llm {
 
@@ -213,11 +214,24 @@ std::string HybridAttentionConfig::to_string() const {
 }
 
 // HWKernelConfig
+std::string HWKernelConfig::effectiveGenerationPrefillGraphBackend() const {
+    const auto& backend = generation_prefill_graph_backend;
+    if (!backend.empty() && backend != "disabled" && backend != "full" && backend != "segmented") {
+        throw std::invalid_argument("generation_prefill_graph_backend must be disabled, full or segmented");
+    }
+    if (!enable_cuda_graph) {
+        return "disabled";
+    }
+    return backend.empty() ? (generation_prefill_capture_token_buckets.empty() ? "disabled" : "full") : backend;
+}
+
 std::string HWKernelConfig::to_string() const {
     std::ostringstream oss;
     oss << "use_swizzleA: " << use_swizzleA << "\n"
         << "enable_cuda_graph: " << enable_cuda_graph << "\n"
         << "enable_cuda_graph_debug_mode: " << enable_cuda_graph_debug_mode << "\n"
+        << "generation_prefill_graph_backend: " << generation_prefill_graph_backend << "\n"
+        << "effective_generation_prefill_graph_backend: " << effectiveGenerationPrefillGraphBackend() << "\n"
         << "generation_prefill_cuda_graph_max_requests: " << generation_prefill_cuda_graph_max_requests << "\n"
         << "generation_prefill_capture_token_buckets size: " << generation_prefill_capture_token_buckets.size() << "\n"
         << "prefill_capture_seq_lens size: " << prefill_capture_seq_lens.size() << "\n"

@@ -52,6 +52,48 @@ class DraftCapacityModel(PackedDraftCapacityModel):
 
 
 class MtpGraphCapacityTest(unittest.TestCase):
+    def test_exact_decode_batch_requirement_preserves_legacy_and_verify(self):
+        tags = ["full", "aux"]
+        values = {"full": 2, "aux": 1}
+        for verify in (False, True):
+            with self.subTest(verify=verify):
+                model = fixtures.TaggedBlockTableModel()
+                runner = CudaGraphRunner()
+                runner.init_decode(
+                    model,
+                    4,
+                    64,
+                    1,
+                    [2, 4],
+                    tags,
+                    is_target_verify=verify,
+                    num_tokens_per_bs=2 if verify else 1,
+                    max_context_batch_size=4,
+                )
+
+                def inputs(batch):
+                    if verify:
+                        return fixtures._build_target_verify_inputs(
+                            tags, values, batch_size=batch, query_len=2
+                        )
+                    return fixtures._build_decode_inputs(tags, values, batch_size=batch)
+
+                padded = inputs(3)
+                self.assertTrue(runner.canPrepare(padded))
+                self.assertTrue(runner.canRun(padded))
+                runner.setRequireExactDecodeBatchSize(True)
+                self.assertEqual(runner.canPrepare(padded), verify)
+                self.assertEqual(runner.canRun(padded), verify)
+                for batch in (2, 4):
+                    live = inputs(batch)
+                    self.assertTrue(runner.canPrepare(live))
+                    self.assertTrue(runner.canRun(live))
+                    output = runner.forward(live).hidden_states.clone()
+                    torch.cuda.synchronize()
+                    torch.testing.assert_close(
+                        output, model.forward(live).hidden_states, rtol=0, atol=0
+                    )
+
     def test_request_capacity_shrink_and_grow_with_variable_acceptance(self):
         # HC width and speculative request lanes are independent dimensions.
         for lanes, hc_mult in ((1, 4), (2, 4), (3, 1), (4, 4)):

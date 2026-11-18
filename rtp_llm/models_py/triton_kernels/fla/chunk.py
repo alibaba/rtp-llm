@@ -174,6 +174,7 @@ def chunk_gated_delta_rule_fwd(
     initial_state: Optional[torch.Tensor],
     output_final_state: bool,
     cu_seqlens: Optional[torch.LongTensor] = None,
+    prepared=None,
 ):
     # AMD: scale g to log2 domain (multiply cumsum by 1/ln2) so AMD-side
     # downstream kernels can use the single-instruction exp2.
@@ -198,7 +199,9 @@ def chunk_gated_delta_rule_fwd(
         # The public API must return per-chunk h/v_new. The production FlyDSL
         # path is Qwen3Next's direct-store helper, which skips materialized h.
     else:
-        g = chunk_local_cumsum(g, chunk_size=64, cu_seqlens=cu_seqlens)
+        g = chunk_local_cumsum(
+            g, chunk_size=64, cu_seqlens=cu_seqlens, prepared=prepared
+        )
         # Original pipeline: separate kkt -> solve_tril -> recompute_w_u
         A = chunk_scaled_dot_kkt_fwd(
             k=k,
@@ -206,8 +209,11 @@ def chunk_gated_delta_rule_fwd(
             g_cumsum=g,
             cu_seqlens=cu_seqlens,
             output_dtype=torch.float32,
+            prepared=prepared,
         )
-        A = solve_tril(A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype)
+        A = solve_tril(
+            A=A, cu_seqlens=cu_seqlens, output_dtype=k.dtype, prepared=prepared
+        )
         w, u = recompute_w_u_fwd(
             k=k,
             v=v,
@@ -215,6 +221,7 @@ def chunk_gated_delta_rule_fwd(
             A=A,
             g_cumsum=g,
             cu_seqlens=cu_seqlens,
+            prepared=prepared,
         )
 
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
@@ -225,6 +232,7 @@ def chunk_gated_delta_rule_fwd(
         initial_state=initial_state,
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
+        prepared=prepared,
     )
     o = chunk_fwd_o(
         q=q,
@@ -234,6 +242,7 @@ def chunk_gated_delta_rule_fwd(
         g=g,
         scale=scale,
         cu_seqlens=cu_seqlens,
+        prepared=prepared,
     )
     return g, o, A, final_state, w, h, v_new
 
@@ -404,6 +413,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         output_final_state: bool,
         cu_seqlens: Optional[torch.LongTensor] = None,
         use_qk_l2norm_in_kernel: bool = False,
+        prepared=None,
     ):
         q_orig = q
         k_orig = k
@@ -427,6 +437,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
+            prepared=prepared,
         )
         return o.to(q.dtype), h, final_state
 
@@ -444,6 +455,7 @@ def chunk_gated_delta_rule(
     cu_seqlens: Optional[torch.LongTensor] = None,
     head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
+    prepared=None,
 ):
     r"""
     Args:
@@ -508,6 +520,18 @@ def chunk_gated_delta_rule(
             cu_seqlens=cu_seqlens
         )
     """
+    if prepared is not None:
+        if torch.version.hip is not None or not q.is_cuda:
+            raise ValueError("prepared GDN currently requires NVIDIA CUDA")
+        if any(tensor.device != prepared.device for tensor in (q, k, v)):
+            raise ValueError("prepared GDN device does not match q/k/v")
+        if q.shape[:2] != (1, prepared.token_capacity):
+            raise ValueError("prepared GDN token capacity does not match input")
+        if (
+            cu_seqlens is None
+            or cu_seqlens.data_ptr() != prepared.cu_seqlens.data_ptr()
+        ):
+            raise ValueError("prepared GDN requires its refreshed cu_seqlens buffer")
     assert q.dtype == k.dtype == v.dtype
     assert (
         q.dtype != torch.float32
@@ -579,6 +603,7 @@ def chunk_gated_delta_rule(
         output_final_state,
         cu_seqlens,
         use_qk_l2norm_in_kernel,
+        prepared,
     )
     if head_first:
         o = rearrange(o, "b t h ... -> b h t ...")

@@ -591,6 +591,7 @@ class HWKernelConfig:
     prefill_capture_seq_lens: list[int]
     generation_prefill_capture_token_buckets: list[int]
     generation_prefill_cuda_graph_max_requests: int
+    generation_prefill_graph_backend: str
     use_swizzleA: bool
     def __getstate__(self) -> tuple:
         ...
@@ -599,6 +600,9 @@ class HWKernelConfig:
     def __setstate__(self, arg0: tuple) -> None:
         ...
     def to_string(self) -> str:
+        ...
+    @property
+    def effective_generation_prefill_graph_backend(self) -> str:
         ...
 class HiddenStateCaptureDtype:
     """

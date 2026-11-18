@@ -144,6 +144,7 @@ def try_select_qsa_tokens(
     scores_are_masked=False,
     finite_only=True,
     packed_count=False,
+    device_length_buckets=False,
 ):
     if not (
         scores.is_cuda
@@ -177,7 +178,12 @@ def try_select_qsa_tokens(
             return output
         from rtp_llm.models_py.kernels.cuda.qsa.cub_topk import try_cub_qsa_tokens
 
-        output = try_cub_qsa_tokens(scores, lengths, finite_only=finite_only)
+        output = try_cub_qsa_tokens(
+            scores,
+            lengths,
+            finite_only=finite_only,
+            **({"device_length_buckets": True} if device_length_buckets else {}),
+        )
         if output is not None:
             return output
     if (

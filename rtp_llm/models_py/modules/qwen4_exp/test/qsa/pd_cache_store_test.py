@@ -109,6 +109,36 @@ class Qwen4PDCacheStoreTest(unittest.TestCase):
         publish_layer_side_caches(kv, 0, {})
         self.assertEqual(self.events, [])
 
+    def test_segmented_gdn_publishes_after_replay(self):
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.segmented_prefill import (
+            _GdnRegion,
+        )
+
+        cache = SimpleNamespace(tag="linear", payload=torch.zeros(3))
+        inputs = self.inputs("linear")
+        output = torch.ones(2, 4)
+
+        def replay(index, original, arguments, live_cache):
+            self.assertEqual(index, 7)
+            self.assertIs(live_cache, cache)
+            live_cache.payload.fill_(19)
+            return output
+
+        region = _GdnRegion(nn.Identity(), 7)
+        result = region(
+            None,
+            None,
+            None,
+            inputs,
+            cache,
+            SimpleNamespace(segmented_prefill=SimpleNamespace(gdn=replay)),
+        )
+        self.assertIs(result, output)
+        self.assertEqual(len(self.events), 1)
+        planned, actual, snapshot = self.events[0]
+        self.assertEqual((planned, actual), ("linear", "linear"))
+        torch.testing.assert_close(snapshot, torch.full_like(snapshot, 19))
+
     def test_model_forward_publishes_after_decoder_completed(self):
         from rtp_llm.models_py.model_desc import qwen4_exp
 

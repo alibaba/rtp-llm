@@ -2,6 +2,7 @@
 
 import math
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -79,6 +80,276 @@ class IndexerPrefillScoreTest(unittest.TestCase):
             torch.testing.assert_close(
                 actual, self.reference(q, k), atol=5e-6, rtol=5e-6
             )
+        if torch.version.hip is None and torch.cuda.get_device_capability() == (12, 0):
+            with torch.inference_mode():
+                self._check_prefill_score_core()
+
+    def _check_prefill_score_core(self):
+        from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpAttention
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime.segmented_prefill import (
+            GraphSegment,
+            _qsa_prefill_model_supported,
+            _qsa_prefill_request_supported,
+            _QsaPrefillScoreCore,
+        )
+
+        device = torch.device("cuda", torch.cuda.current_device())
+        torch.manual_seed(91)
+        indexers = tuple(
+            Qwen4ExpQSAIndexer(
+                torch.randn(640, 8, device=device, dtype=torch.bfloat16),
+                torch.randn(128, device=device, dtype=torch.bfloat16) * 0.02,
+                torch.randn(128, device=device, dtype=torch.bfloat16) * 0.02,
+                n_heads=4,
+                kv_heads=1,
+                head_dim=128,
+                token_budget=2048,
+                compress_ratio=4,
+                norm_eps=1e-6,
+            )
+            for _ in range(2)
+        )
+        owner = SimpleNamespace(
+            device=device,
+            current=None,
+            executing=True,
+            recording=True,
+            qsa_prefill_active=True,
+            qsa_epoch=0,
+            pool=torch.cuda.graph_pool_handle(),
+            capture_stream=torch.cuda.Stream(device=device),
+        )
+        core = _QsaPrefillScoreCore(owner, indexers)
+        for indexer in indexers:
+            self.assertIsNone(indexer._prefill_score_core)
+            indexer._prefill_score_core = core
+            self.assertNotIn("forward_causal_from_projected", indexer.__dict__)
+        contexts = {
+            length: SimpleNamespace(
+                capacity=length, live_tokens=length, qsa_regions={}, qsa_captured=set()
+            )
+            for length in (2048, 8192)
+        }
+
+        def inputs(length):
+            return SimpleNamespace(
+                input_ids=torch.zeros(length, dtype=torch.int32),
+                input_hiddens=None,
+                multimodal_inputs=SimpleNamespace(
+                    multimodal_features=[],
+                    mm_extra_input=[],
+                    mm_features_spans=None,
+                    mm_features_locs=None,
+                ),
+                embedding_inputs=SimpleNamespace(
+                    text_tokens_mask=None, combo_tokens_type_ids=None
+                ),
+                attention_inputs={
+                    "full": SimpleNamespace(
+                        is_prefill=True,
+                        is_target_verify=False,
+                        is_cuda_graph=False,
+                        is_s_padded=False,
+                        context_parallel_info=None,
+                        cache_store_inputs=None,
+                        input_lengths=torch.tensor([length], dtype=torch.int32),
+                        prefix_lengths=torch.tensor([0], dtype=torch.int32),
+                    )
+                },
+            )
+
+        def cat_count(spy):
+            return sum(
+                len(call.args[0]) == 1 and call.kwargs.get("dim") == 0
+                for call in spy.call_args_list
+            )
+
+        def poison(context):
+            for region in context.qsa_regions.values():
+                for tensor in region.arguments[:2]:
+                    tensor.fill_(float("nan"))
+                region.arguments[2].fill_(-1)
+                region.output.fill_(-913)
+
+        def eager_region(region):
+            region.output.copy_(region._qsa_function(*region.arguments))
+            return region.output
+
+        for length, seed in (
+            (8192, 73),
+            (2048, 97),
+            (8192, 101),
+            (2048, 0),
+            (8192, 103),
+        ):
+            owner.current = context = contexts[length]
+            owner.recording = not context.qsa_regions
+            owner.qsa_epoch += 1
+            owner.qsa_prefill_active = _qsa_prefill_request_supported(
+                inputs(length), length
+            )
+            self.assertTrue(owner.qsa_prefill_active)
+            torch.manual_seed(seed)
+            hidden = torch.randn(length, 8, device=device, dtype=torch.bfloat16)
+            if seed == 0:
+                hidden.zero_()
+            angle = torch.randn(1, length, 32, device=device).repeat(1, 1, 2)
+            cosine, sine = angle.cos().bfloat16(), angle.sin().bfloat16()
+            references = []
+            for indexer in indexers:
+                q, raw = indexer.project_raw(hidden)
+                keys = indexer.pooled_block_keys_all(raw.unsqueeze(0), cosine, sine)
+                attention = SimpleNamespace(
+                    qsa_indexer=indexer, qsa_rope_config=None, is_mtp_draft=False
+                )
+                runtime = SimpleNamespace(
+                    main_inputs=inputs(length).attention_inputs["full"],
+                    host_values=lambda tensor: tensor.tolist(),
+                    write_prefill_indexer_cache=lambda *args, **kwargs: (
+                        [length],
+                        cosine,
+                        sine,
+                        {"block_keys": keys},
+                    ),
+                )
+
+                def call():
+                    return Qwen4ExpAttention._qsa_selected_indices(
+                        attention, hidden, runtime, projected=(q, raw)
+                    )
+
+                with (
+                    patch.object(indexer, "_prefill_score_core", None),
+                    patch.object(torch, "cat", wraps=torch.cat) as cat,
+                ):
+                    expected = call()
+                self.assertEqual(cat_count(cat), 1)
+                references.append(expected)
+                poison(context)
+                with patch.object(torch, "cat", wraps=torch.cat) as cat:
+                    actual = call()
+                self.assertEqual(cat_count(cat), 0)
+                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+                # Stand in for a consumer which finishes before the next replay.
+                actual.fill_(-317)
+                poison(context)
+                with patch.object(core, "_execute", side_effect=eager_region):
+                    prepared = call()
+                torch.testing.assert_close(prepared, expected, rtol=0, atol=0)
+                prepared.fill_(-319)
+                poison(context)
+                torch.testing.assert_close(call(), expected, rtol=0, atol=0)
+            if seed:
+                self.assertFalse(torch.equal(*references))
+            self.assertEqual(len(context.qsa_regions), 1)
+            self.assertEqual(
+                context.qsa_captured, {id(indexer) for indexer in indexers}
+            )
+            owner.recording = False
+        self.assertNotEqual(
+            next(iter(contexts[2048].qsa_regions.values())).output.data_ptr(),
+            next(iter(contexts[8192].qsa_regions.values())).output.data_ptr(),
+        )
+
+        # A borrowed view is one-use and tied to the current owner epoch/context.
+        selected = indexer.forward_causal_from_projected(
+            indexer.project(hidden)[0].unsqueeze(0),
+            raw.unsqueeze(0),
+            cosine,
+            sine,
+            precomputed_block_keys=keys,
+        ).squeeze(0)
+        self.assertFalse(core.borrowed_selection(indexer, selected.t()))
+        region = next(iter(context.qsa_regions.values()))
+        core._borrowed = context, owner.qsa_epoch, indexer, region.output
+        self.assertTrue(core.borrowed_selection(indexer, selected))
+        self.assertFalse(core.borrowed_selection(indexer, selected))
+        core._borrowed = context, owner.qsa_epoch - 1, indexer, region.output
+        self.assertFalse(core.borrowed_selection(indexer, selected))
+        core._borrowed = contexts[2048], owner.qsa_epoch, indexer, region.output
+        self.assertFalse(core.borrowed_selection(indexer, selected))
+        core._borrowed = context, owner.qsa_epoch, indexer, region.output
+        self.assertFalse(core.borrowed_selection(indexers[0], selected))
+        core._borrowed = context, owner.qsa_epoch, indexer, region.output
+        self.assertFalse(core.borrowed_selection(indexer, selected.clone()))
+        core.check_bindings()
+
+        # No capture-time construction during a live request; original cat remains.
+        owner.current = SimpleNamespace(
+            capacity=length, live_tokens=length, qsa_regions={}, qsa_captured=set()
+        )
+        with (
+            patch.object(
+                GraphSegment, "__init__", side_effect=AssertionError("late capture")
+            ),
+            patch.object(torch, "cat", wraps=torch.cat) as cat,
+        ):
+            torch.testing.assert_close(call(), expected, rtol=0, atol=0)
+        self.assertEqual(cat_count(cat), 1)
+        self.assertFalse(owner.current.qsa_regions)
+
+        pc = SimpleNamespace(
+            role_type="PDFUSION",
+            tp_size=2,
+            ep_size=1,
+            dp_size=1,
+            pp_size=1,
+            get_attn_tp_size=lambda: pc.tp_size,
+            get_ffn_tp_size=lambda: pc.tp_size,
+        )
+        model = SimpleNamespace(
+            _ordinary_decode_graph_plan=True,
+            _capture_mtp_target_hidden=False,
+            config=SimpleNamespace(is_mtp=False, _qwen4_full_fp8_nvfp4=True),
+            parallelism_config=pc,
+        )
+        for tp_size in (2, 4, 8):
+            with self.subTest(tp_size=tp_size), patch.object(pc, "tp_size", tp_size):
+                self.assertTrue(_qsa_prefill_model_supported(model))
+        for target, field, value in (
+            (pc, "role_type", "PREFILL"),
+            (pc, "role_type", "DECODE"),
+            (pc, "tp_size", 1),
+            (pc, "tp_size", 3),
+            (pc, "tp_size", 16),
+            (pc, "get_attn_tp_size", lambda: 4),
+            (pc, "get_ffn_tp_size", lambda: 4),
+            (pc, "ep_size", 2),
+            (model, "_ordinary_decode_graph_plan", False),
+            (model, "_capture_mtp_target_hidden", True),
+            (model.config, "is_mtp", True),
+        ):
+            with patch.object(target, field, value):
+                self.assertFalse(_qsa_prefill_model_supported(model))
+        bad = inputs(length)
+        meta = bad.attention_inputs["full"]
+        for target, field, value in (
+            (bad, "input_ids", torch.empty(0, dtype=torch.int32)),
+            (bad, "input_hiddens", torch.ones(1)),
+            (meta, "input_lengths", torch.tensor([length // 2] * 2, dtype=torch.int32)),
+            (meta, "input_lengths", torch.tensor([length // 4] * 4, dtype=torch.int32)),
+            (meta, "input_lengths", torch.tensor([length - 1, 1], dtype=torch.int32)),
+            (meta, "prefix_lengths", torch.tensor([1], dtype=torch.int32)),
+            (meta, "is_s_padded", True),
+            (meta, "is_target_verify", True),
+            (meta, "is_prefill", False),
+            (meta, "is_cuda_graph", True),
+            (meta, "context_parallel_info", object()),
+            (meta, "cache_store_inputs", object()),
+            (bad.multimodal_inputs, "multimodal_features", [torch.ones(1)]),
+            (bad.multimodal_inputs, "mm_extra_input", [torch.ones(1)]),
+            (bad.multimodal_inputs, "mm_features_spans", torch.ones(1)),
+            (bad.multimodal_inputs, "mm_features_locs", torch.ones(1)),
+            (bad.embedding_inputs, "text_tokens_mask", torch.ones(length)),
+            (bad.embedding_inputs, "combo_tokens_type_ids", torch.ones(length)),
+        ):
+            with patch.object(target, field, value):
+                self.assertFalse(_qsa_prefill_request_supported(bad, length))
+        owner.current = context
+        owner.qsa_prefill_active = False
+        with patch.object(torch, "cat", wraps=torch.cat) as cat:
+            torch.testing.assert_close(call(), expected, rtol=0, atol=0)
+        self.assertEqual(cat_count(cat), 1)
 
     def test_automatic_selection_and_unsupported_inputs_fall_back(self):
         q, k = self.inputs()
