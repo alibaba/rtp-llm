@@ -110,7 +110,6 @@ public final class KvcmRemoteCache implements AutoCloseable {
             Thread.currentThread().interrupt();
             return input;
         } catch (IOException | RuntimeException error) {
-            registeredEndpoint = null;
             metrics.increment("mock_remote_cache_read_failure");
             return input;
         } finally {
@@ -202,6 +201,8 @@ public final class KvcmRemoteCache implements AutoCloseable {
         var body = JSON.readTree(response.body());
         if (body == null) throw new IOException("Empty KVCM response");
         String code = body.path("header").path("status").path("code").asText();
+        if (java.util.Set.of("8", "9", "10", "INSTANCE_NOT_EXIST", "SERVER_NOT_LEADER", "NODE_NOT_REGISTERED").contains(code))
+            registeredEndpoint = null;
         if (code.equals("9") || code.equals("SERVER_NOT_LEADER")) endpoint.invalidate(target);
         if (!code.equals("1") && !code.equals("OK")) throw new IOException("KVCM status " + code);
         return body;
@@ -234,7 +235,6 @@ public final class KvcmRemoteCache implements AutoCloseable {
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
         } catch (IOException | RuntimeException error) {
-            registeredEndpoint = null;
             metrics.increment("mock_remote_cache_write_failure");
         }
     }
