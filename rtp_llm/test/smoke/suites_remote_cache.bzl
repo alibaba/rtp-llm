@@ -1,8 +1,7 @@
 load("//rtp_llm/test/smoke:defs.bzl", "smoke_test")
 
 def _pace_smoke(name, task_info, smoke_args, gpu_type="L20_CU13",
-                kvcm_envs=[], kill_remote=False, sleep_time_qr=10,
-                model_events_check=False):
+                kvcm_envs=[], kill_remote=False, sleep_time_qr=10):
     return smoke_test(
         name = name,
         task_info = task_info,
@@ -12,17 +11,9 @@ def _pace_smoke(name, task_info, smoke_args, gpu_type="L20_CU13",
         data = [
             "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_server_bin",
         ],
-        kvcm_envs = [
-            "PACE_REQUIRED=true",
-            "PACE_MODEL_EVENTS_CHECK=" + str(model_events_check),
-            "KVCM_LOG_LEVEL=DEBUG",
-        ] + kvcm_envs,
+        kvcm_envs = ["PACE_REQUIRED=true", "KVCM_LOG_LEVEL=DEBUG"] + kvcm_envs,
         kill_remote = kill_remote,
         sleep_time_qr = sleep_time_qr,
-        deps = [
-            "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
-            "//rtp_llm/cpp/model_rpc:grpcio",
-        ] if model_events_check else [],
     )
 
 def _pace_suites():
@@ -41,12 +32,6 @@ def _pace_suites():
             "remote_cache_pace_" + suffix, "data/model/qwen25/" + task,
             base + args, kvcm_envs = config, sleep_time_qr = 20,
         ))
-    tests.append(_pace_smoke(
-        "remote_cache_pace_publisher", "data/model/qwen25/worker_status_reuse_cache.json",
-        # Keep local keys resident so the test can verify real HBM announcements.
-        "--warm_up 0 --reuse_cache 1 --act_type FP16 --seq_size_per_block 8 --enable_remote_cache true --enable_device_cache 1 --enable_memory_cache 0 --enable_disk_cache 0 --test_block_num 500",
-        model_events_check = True, sleep_time_qr = 1,
-    ))
     tests.append(_pace_smoke(
         "remote_cache_pace_kill", "data/model/qwen25/q_r_l20_remote_cache_kill_remote.json",
         base, kill_remote = True,

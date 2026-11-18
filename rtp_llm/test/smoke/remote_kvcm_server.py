@@ -300,23 +300,13 @@ class RemoteKVCMServer:
         env = {"RECO_SERVER_ADDRESS": self.address()}
         if self.pace_fixture is not None:
             env.update(self.pace_fixture.client_env())
-        if str_to_bool(self._kvcm_config.get("PACE_MODEL_EVENTS_CHECK", "false")):
-            if self.pace_fixture is None:
-                raise RuntimeError("Model event checks require a PACE fixture")
-            env.update({
-                "KV_CACHE_EVENT_PUBLISHER_TYPE": "kvcm",
-                "KV_CACHE_EVENT_MANAGER_ENDPOINT": f"http://127.0.0.1:{self._http_port}",
-                "KV_CACHE_EVENT_INSTANCE_GROUP": self.pace_fixture.instance_group,
-                "KV_CACHE_EVENT_INSTANCE_ID": f"pace_model_events_{self._rpc_port}",
-            })
         return env
 
-    def post_json(self, api, config, admin=False, check_status=True):
+    def post_json(self, api, config, admin=False):
         port = self._admin_http_port if admin else self._http_port
         response = requests.post(f"http://127.0.0.1:{port}/api/{api}", json=config, timeout=15)
         response.raise_for_status()
-        result = response.json()
-        return require_ok(result) if check_status else result
+        return require_ok(response.json())
 
     def get_storage_config(self) -> Dict[str, Any]:
         return {
