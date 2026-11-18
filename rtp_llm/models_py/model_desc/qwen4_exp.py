@@ -834,6 +834,15 @@ class Qwen4ExpModel(Qwen35Model):
         )
 
         self._moe_reduce_gate = prepare_model_reduce(self, config, parallelism_config)
+        if self._moe_reduce_gate is not None:
+            for layer in self.layers:
+                layer.mlp.prepare_reduce_gate_overlap()
+            if getattr(config.quant_config, "decode_shared_gemm_nk", False):
+                from rtp_llm.models_py.modules.qwen4_exp.moe.shared_gemm import (
+                    prepare_shared_gemm,
+                )
+
+                prepare_shared_gemm(self.layers, weights.weights)
 
     def _ple_coordinator(self) -> PLETransactionCoordinator:
         coordinator = self.__dict__.get("_ple_transaction_coordinator")

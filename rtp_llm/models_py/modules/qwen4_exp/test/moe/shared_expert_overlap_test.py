@@ -47,6 +47,40 @@ def make_layer():
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
 class SharedExpertOverlapTest(unittest.TestCase):
+    def test_bf16_shared_gemm_layout_dispatch_and_source_ownership(self):
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.f16_linear import (
+            CudaF16Linear,
+        )
+        from rtp_llm.models_py.modules.qwen4_exp.moe.shared_gemm import prepare_shared_gemm
+        from rtp_llm.utils.model_weight import W
+
+        device = torch.device("cuda", torch.cuda.current_device())
+        source = {
+            W.ffn_w13: torch.randn(2560, 1280, dtype=torch.bfloat16, device=device),
+            W.ffn_w2: torch.randn(640, 2560, dtype=torch.bfloat16, device=device),
+        }
+        original_up = CudaF16Linear(source[W.ffn_w13])
+        original_down = CudaF16Linear(source[W.ffn_w2])
+        shared = SimpleNamespace(up_proj=original_up, down_proj=original_down)
+        layer = SimpleNamespace(mlp=SimpleNamespace(shared_expert=shared))
+        prepare_shared_gemm([layer], [source])
+        self.assertTrue(all(w._rtp_requires_restart_for_update for w in source.values()))
+        for original, current, k, low, high in (
+            (original_up, shared.up_proj, 2560, 1, 16),
+            (original_down, shared.down_proj, 640, 2, 32),
+        ):
+            self.assertTrue(current.packed_weight.is_contiguous())
+            self.assertTrue(torch.equal(original.weight, current.packed_weight))
+            for rows in (1, 2, 8, 16, 32, 33):
+                x = torch.randn(rows, k, dtype=torch.bfloat16, device=device)
+                reference = original(x)
+                actual = current(x)
+                if low <= rows <= high:
+                    delta = (actual.float() - reference.float()).norm()
+                    self.assertLess((delta / reference.float().norm()).item(), 0.006)
+                else:
+                    self.assertTrue(torch.equal(actual, reference))
+
     def test_shared_dense_mlp_fuses_activation_and_quant_before_down_gemm(self):
         import flashinfer
 
