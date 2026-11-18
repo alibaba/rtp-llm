@@ -1619,8 +1619,21 @@ void NaviSchedAgentImpl::setForwardCancelHandler(
     const std::function<void(uint64_t)> &handler) const
 {
     if (_agentResponseR) {
-        _agentResponseR->setCancelHandler(handler);
+        if (!handler) {
+            _agentResponseR->setCancelHandler(handler);
+            return;
+        }
+        const auto metrics = _abortMetrics;
+        _agentResponseR->setCancelHandler([metrics, handler](uint64_t requestId) {
+            metrics->record("received", 1);
+            handler(requestId);
+        });
     }
+}
+
+bool NaviSchedAgentImpl::recordAbortEvent(const std::string &stage, uint64_t count) const
+{
+    return _abortMetrics->record(stage, count);
 }
 
 bool NaviSchedAgentImpl::enableObservedExecutionWindowTraining() const
@@ -2149,6 +2162,14 @@ std::string NaviSchedAgentImpl::makeSnapshot() const
 void NaviSchedAgentImpl::reportMetrics() const
 {
     NaviSchedRole::reportMetrics();
+    for (size_t i = 0; i < AbortMetrics::STAGE_COUNT; ++i) {
+        const auto prefix = std::string("agent.abort.") + AbortMetrics::stages()[i];
+        const auto count = _abortMetrics->count(i);
+        reportMetric(prefix + "_total", count);
+        if (reportCounterQpsMetric(prefix + "_qps", count) == 0) {
+            reportSampleMetric(prefix + "_qps", 0.0);
+        }
+    }
     reportMetric("agent.pd_separated", _pdSeparated ? 1 : 0);
     reportMetric("agent.collector_count",
                  _agentReportR ? _agentReportR->getSubscriberCount() : 0);
@@ -2820,6 +2841,11 @@ bool NaviSchedAgent::failForwardResponse(uint64_t requestId,
                                          const std::string &errorMessage)
 {
     return _impl && _impl->failForwardResponse(requestId, errorMessage);
+}
+
+bool NaviSchedAgent::recordAbortEvent(const std::string &stage, uint64_t count) const
+{
+    return _impl && _impl->recordAbortEvent(stage, count);
 }
 
 void NaviSchedAgent::setForwardCancelHandler(const std::function<void(uint64_t)> &handler)

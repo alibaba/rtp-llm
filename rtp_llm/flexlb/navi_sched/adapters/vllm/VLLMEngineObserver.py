@@ -3178,12 +3178,23 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 if request_id in self._response_request_ids:
                     self._inactive_response_request_ids.add(request_id)
 
+    def _report_abort_event(self, stage: str, count: int) -> None:
+        # Telemetry failure must never interrupt cancellation or older bridges.
+        report = getattr(self._bridge, "record_abort_event", None)
+        if count <= 0 or not callable(report):
+            return
+        try:
+            report(stage, count)
+        except Exception:
+            logger.exception("failed to report abort metric: stage=%s", stage)
+
     def _abort_engine_requests(self, external_request_ids, request_type) -> None:
         request_ids = list(dict.fromkeys(external_request_ids))
         engine_core = self._engine_core
         if not request_ids:
             return
         if engine_core is None:
+            self._report_abort_event("engine_unbound", len(request_ids))
             logger.warning(
                 "[navi-vllm-abort-not-delivered] reason=engine_core_unbound "
                 "vllm_request_ids=%s",
@@ -3192,6 +3203,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
             return
         engine_core.aborts_queue.put_nowait(request_ids)
         engine_core.input_queue.put_nowait((request_type.ABORT, request_ids))
+        self._report_abort_event("enqueued", len(request_ids))
         logger.info(
             "[navi-vllm-abort-enqueued] vllm_request_ids=%s "
             "queues=aborts_queue,input_queue",
@@ -3205,6 +3217,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
         try:
             self._abort_engine_requests(request_ids, request_type)
         except Exception:
+            self._report_abort_event("enqueue_failed", len(request_ids))
             with self._response_lock:
                 self._pending_engine_abort_request_ids = list(
                     dict.fromkeys(self._pending_engine_abort_request_ids + request_ids)
@@ -3250,6 +3263,8 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                         )
                         entry[1].add(request_id)
         if request_ids:
+            self._report_abort_event("mapped", len(mapped_request_ids))
+            self._report_abort_event("deferred", len(deferred_request_ids))
             logger.info(
                 "[navi-vllm-abort-mapped] request_id_map=%s "
                 "deferred_navi_request_ids=%s",
@@ -6375,6 +6390,7 @@ class VLLMEngineObserver(VLLMCoreCallbacks):
                 event.get("event") == "terminal"
                 and event.get("status") == "FINISHED_ABORTED"
             ):
+                self._report_abort_event("vllm_applied", 1)
                 logger.info(
                     "[navi-vllm-abort-applied] vllm_request_id=%s "
                     "batch_id=%s schedule_batch_id=%s status=FINISHED_ABORTED",

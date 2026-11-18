@@ -1305,6 +1305,11 @@ public:
         AUTIL_LOG(INFO, "[navi-cache-lifecycle-audit] %s", audit.c_str());
     }
 
+    bool recordAbortEvent(const std::string &stage, uint64_t count) const
+    {
+        return _agent->recordAbortEvent(stage, count);
+    }
+
     void logRequestLifecycleAudit(const std::string &audit) const
     {
         AUTIL_LOG(INFO, "[navi-request-lifecycle-audit] %s", audit.c_str());
@@ -1614,6 +1619,7 @@ void bindNaviSchedData(py::module_ &m)
              py::call_guard<py::gil_scoped_release>())
         .def("log_cache_lifecycle_audit", &VLLMAgentBridge::logCacheLifecycleAudit,
              py::call_guard<py::gil_scoped_release>())
+        .def("record_abort_event", &VLLMAgentBridge::recordAbortEvent)
         .def("log_request_lifecycle_audit", &VLLMAgentBridge::logRequestLifecycleAudit,
              py::call_guard<py::gil_scoped_release>())
         .def("report_execution_step", &VLLMAgentBridge::reportExecutionStep,

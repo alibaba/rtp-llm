@@ -1828,3 +1828,16 @@ py_test(
     main = "test/vllm/VLLMAdapterCallbacksTest.py",
     python_version = "PY3",
 )
+
+cc_test(
+    name = "abort_metrics_test",
+    srcs = ["test/AbortMetricsTest.cpp", "service/AbortMetrics.h"],
+    linkopts = ["-pthread"],
+)
+
+py_test(
+    name = "vllm_abort_logging_test",
+    srcs = ["test/vllm/VLLMAbortLoggingTest.py", "adapters/vllm/VLLMEngineObserver.py"],
+    main = "test/vllm/VLLMAbortLoggingTest.py",
+    python_version = "PY3",
+)

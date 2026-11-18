@@ -100,6 +100,7 @@ public:
                                 bool terminal);
     bool failForwardResponse(uint64_t requestId, const std::string &errorMessage);
     void setForwardCancelHandler(const std::function<void(uint64_t)> &handler);
+    bool recordAbortEvent(const std::string &stage, uint64_t count) const;
     bool enableObservedExecutionWindowTraining() const;
     bool recordObservedExecutionSample(const std::vector<NaviSchedRequestStats> &requests,
                                        double latencyMs, int64_t executionStepCount,

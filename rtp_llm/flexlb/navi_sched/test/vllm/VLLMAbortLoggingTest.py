@@ -36,6 +36,7 @@ class VLLMAbortLoggingTest(unittest.TestCase):
             _bridge=SimpleNamespace(
                 take_cancelled_requests=lambda: list(cancelled),
                 log_request_lifecycle_audit=mock.Mock(),
+                record_abort_event=mock.Mock(),
             ),
             _engine_core=SimpleNamespace(
                 aborts_queue=queue.Queue(), input_queue=queue.Queue()
@@ -53,6 +54,7 @@ class VLLMAbortLoggingTest(unittest.TestCase):
             _request_audit_failures=0,
         )
         for name in (
+            "_report_abort_event",
             "_abort_engine_requests",
             "_deliver_engine_aborts",
             "_drain_cancelled_requests",
@@ -181,6 +183,42 @@ class VLLMAbortLoggingTest(unittest.TestCase):
         self.assertIn("[navi-vllm-abort-applied]", logs.output[0])
         self.assertEqual(1, obj._request_audit_failures)
 
+
+    def test_stage_metrics_count_requests_and_distinguish_deferred(self):
+        obj = self.observer((123, 456), {123: "external-request"})
+        self.assertTrue(obj._drain_cancelled_requests(SimpleNamespace(ABORT="abort")))
+        self.assertEqual(
+            [mock.call("mapped", 1), mock.call("deferred", 1), mock.call("enqueued", 1)],
+            obj._bridge.record_abort_event.call_args_list,
+        )
+
+    def test_retry_failure_and_unbound_are_separate_metrics(self):
+        obj = self.observer()
+        obj._engine_core.input_queue.put_nowait = mock.Mock(side_effect=RuntimeError("full"))
+        self.assertFalse(obj._deliver_engine_aborts(["request", "request"], SimpleNamespace(ABORT="abort")))
+        obj._bridge.record_abort_event.assert_called_once_with("enqueue_failed", 1)
+        obj._bridge.record_abort_event.reset_mock()
+        obj._engine_core = None
+        obj._abort_engine_requests(["request"], SimpleNamespace(ABORT="abort"))
+        obj._bridge.record_abort_event.assert_called_once_with("engine_unbound", 1)
+
+    def test_metric_failure_does_not_block_abort_delivery(self):
+        obj = self.observer()
+        obj._bridge.record_abort_event.side_effect = RuntimeError("telemetry failed")
+        self.assertTrue(obj._deliver_engine_aborts(["request"], SimpleNamespace(ABORT="abort")))
+        self.assertEqual(["request"], obj._engine_core.aborts_queue.get_nowait())
+        self.assertEqual(("abort", ["request"]), obj._engine_core.input_queue.get_nowait())
+
+    def test_older_bridge_without_metric_method_still_delivers(self):
+        obj = self.observer()
+        del obj._bridge.record_abort_event
+        self.assertTrue(obj._deliver_engine_aborts(["request"], SimpleNamespace(ABORT="abort")))
+
+    def test_applied_metric_only_for_aborted_terminal(self):
+        obj = self.observer()
+        for event in [dict(event="start", status="RUNNING"), dict(event="terminal", status="FINISHED_STOPPED"), dict(event="terminal", status="FINISHED_ABORTED")]:
+            obj.on_request_lifecycle_event(dict(request_id="request", **event))
+        obj._bridge.record_abort_event.assert_called_once_with("vllm_applied", 1)
 
 if __name__ == "__main__":
     unittest.main()
