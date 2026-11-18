@@ -17,6 +17,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.mega_moe im
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.input_packer import (
     FusedMegaMoEInputPacker,
+    TorchMegaMoEInputPacker,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.utils.mega_moe.shared_fp8_scale import (
     shared_fp8_scale_row_indices,
@@ -46,7 +47,6 @@ class WeightScaleTest(unittest.TestCase):
             prepared.pack_inputs.keywords,
             dict(
                 sanitize_non_finite=False,
-                use_block_m_env=False,
                 allow_int32_indices=True,
             ),
         )
@@ -242,7 +242,7 @@ class InputPackPolicyTest(unittest.TestCase):
                 torch.testing.assert_close(prepared.topk_idx, ids)
                 torch.testing.assert_close(prepared.topk_weights, weights)
 
-    def test_launch_policy_keeps_glm_fixed_and_native_environment_controls(self):
+    def test_launch_policy_uses_shared_tile_size_and_recipe_specific_inputs(self):
         module = "rtp_llm.models_py.triton_kernels.moe.mega_moe_input_pack"
         for tokens in (1, 2049):
             x = torch.ones(tokens, 256, dtype=torch.bfloat16, device="cuda")
@@ -252,14 +252,7 @@ class InputPackPolicyTest(unittest.TestCase):
                 with self.subTest(tokens=tokens, prepared=prepared):
                     buf = self.buffer(tokens)
                     indices = ids.int() if prepared else ids
-                    env = {
-                        "MEGA_MOE_INPUT_PACKER": "fused",
-                        "MEGA_MOE_INPUT_PACKER_IMPL": (
-                            "legacy" if prepared else "optimized"
-                        ),
-                        "MEGA_MOE_PACK_BLOCK_M": "invalid" if prepared else "4",
-                    }
-                    with patch.dict(os.environ, env), patch(
+                    with patch(
                         module + "._pack_mega_moe_inputs_optimized_kernel"
                     ) as kernel:
                         executor_packer(prepared=prepared).pack(
@@ -268,25 +261,15 @@ class InputPackPolicyTest(unittest.TestCase):
                     launch = kernel.__getitem__.return_value
                     launch.assert_called_once()
                     self.assertEqual(
-                        launch.call_args.kwargs["BLOCK_M"],
-                        (8 if tokens >= 2048 else 2) if prepared else 4,
+                        launch.call_args.kwargs["BLOCK_M"], 8 if tokens >= 2048 else 2
                     )
                     self.assertEqual(
                         launch.call_args.kwargs["SANITIZE_NON_FINITE"], not prepared
                     )
                     self.assertIs(launch.call_args.args[2], indices)
                     self.assertEqual(buf.topk_idx.dtype, torch.int64)
-        with patch.dict(
-            os.environ,
-            {
-                "MEGA_MOE_INPUT_PACKER": "fused",
-                "MEGA_MOE_INPUT_PACKER_IMPL": "optimized",
-            },
-        ):
-            with self.assertRaisesRegex(ValueError, "indices must be torch.int64"):
-                executor_packer().pack(
-                    x, weights, ids.int(), self.buffer(tokens), tokens
-                )
+        with self.assertRaisesRegex(ValueError, "indices must be torch.int64"):
+            executor_packer().pack(x, weights, ids.int(), self.buffer(tokens), tokens)
 
     def test_non_finite_policy_is_preserved(self):
         x = torch.ones(1, 256, dtype=torch.bfloat16, device="cuda")
@@ -305,10 +288,8 @@ class InputPackPolicyTest(unittest.TestCase):
             ordinary.x.view(torch.uint8), reference.x.view(torch.uint8)
         )
         torch_reference = self.buffer(1)
-        with patch.dict(
-            os.environ, {"MEGA_MOE_INPUT_PACKER": "torch", "MOE_STRICT_FUSED": "0"}
-        ):
-            executor_packer().pack(x, weights, ids, torch_reference, 1)
+        with patch.dict(os.environ, {"MOE_STRICT_FUSED": "0"}):
+            TorchMegaMoEInputPacker().pack(x, weights, ids, torch_reference, 1)
         torch.testing.assert_close(
             torch_reference.x.view(torch.uint8), reference.x.view(torch.uint8)
         )

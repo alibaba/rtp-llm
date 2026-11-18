@@ -581,11 +581,18 @@ class MetaCacheIntegrationTest(unittest.TestCase):
                 calls.append(path)
                 return original(path)
 
-            with patch.object(database_module, "_parse_index_json", wrapper):
+            with (
+                patch.object(database_module, "_parse_index_json", wrapper),
+                patch.object(
+                    database_module,
+                    "_read_hf_index",
+                    wraps=database_module._read_hf_index,
+                ) as read_index,
+            ):
                 db_first = CkptDatabase(shard_dir)
                 db_second = CkptDatabase(shard_dir)
-            # load_hf_meta + _parse_weight_style per construction: only the
-            # first parse is real, everything after hits the index cache.
+            self.assertEqual(read_index.call_count, 2)
+            # The second database reuses the first database's parsed index.
             self.assertEqual(len(calls), 1)
             self.assertEqual(len(db_second.pretrain_file_list), 2)
 

@@ -144,25 +144,28 @@ def get_mla_impl(
             )
         except Exception:
             allow_cuda_graph_prefill_absorb = False
+    use_fast_path = None
+    cos_sin_cache = None
     for impl in mla_impls:
         if not _implementation_allows_cuda_graph_selection_mode(impl, selection_mode):
             continue
-        # Check support before creating instance
-        impl_name = impl.__name__
         if not impl.support(attn_configs, attn_inputs):
             continue
 
-        cos_sin_cache = weight.get_global_weight_or_none(W.rope_cos_sin_cache)
-        # TODO: support fast path for cp prefill
-        use_fast_path = (
-            attn_inputs.is_prefill
-            and not use_decode_mla
-            and attn_inputs.cu_kv_seqlens_device.max().item()
-            <= attn_configs.indexer_topk
-            and not (
-                parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
+        if use_fast_path is None:
+            # The layout and prefix lengths do not depend on the backend. In
+            # particular, do the device-to-host max() read only once.
+            cos_sin_cache = weight.get_global_weight_or_none(W.rope_cos_sin_cache)
+            use_fast_path = bool(
+                attn_inputs.is_prefill
+                and not use_decode_mla
+                and not (
+                    parallelism_config
+                    and parallelism_config.prefill_cp_config.is_enabled()
+                )
+                and attn_inputs.cu_kv_seqlens_device.max().item()
+                <= attn_configs.indexer_topk
             )
-        )
 
         if not use_fast_path and not impl.support_parallelism_config(
             parallelism_config

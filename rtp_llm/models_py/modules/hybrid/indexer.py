@@ -12,10 +12,14 @@ from rtp_llm.utils.model_weight import W
 
 _DEVICE_TYPE = get_device_type()
 if _DEVICE_TYPE == DeviceType.Cuda:
+    from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
+        CudaFp8GEMMLinear,
+    )
     from rtp_llm.models_py.triton_kernels.sparse_mla.fused_logits_head_gate import (
         fused_logits_head_gate,
     )
 else:
+    CudaFp8GEMMLinear = None  # type: ignore
     fused_logits_head_gate = None  # type: ignore
 
 
@@ -50,10 +54,7 @@ class Indexer(nn.Module):
         self.layer_idx = layer_idx
         from rtp_llm.models_py.utils.fuse_config import fuse_kernels_enabled
 
-        # Resolve once at init: HWKernelConfig.enable_fuse_kernels (or env
-        # ``ENABLE_FUSE_KERNELS``) → ``self._fuse_logits_head_gate``. Keep it
-        # out of the forward path so it's free at decode (no env / config
-        # lookup per token).
+        # Resolve the fusion policy once so forward does not read the config.
         self._fuse_kernels_enabled = fuse_kernels_enabled(hw_kernel_config)
         self._fuse_logits_head_gate = (
             self._fuse_kernels_enabled and fused_logits_head_gate is not None
@@ -189,6 +190,39 @@ class Indexer(nn.Module):
         weights = weights.unsqueeze(-1) * q_scale * scale
         return weights
 
+    @staticmethod
+    def _project_with_fp8(
+        projection: nn.Module,
+        activation: torch.Tensor,
+        fp8_activation: Optional[torch.Tensor],
+        scales: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        # The MLA projections that produced these activations may use a
+        # different backend or scale format than the indexer's projections.
+        if (
+            fp8_activation is not None
+            and scales is not None
+            and CudaFp8GEMMLinear is not None
+            and isinstance(projection, CudaFp8GEMMLinear)
+            and scales.dtype
+            == (torch.int32 if projection.scale_ue8m0 else torch.float32)
+        ):
+            return projection(fp8_activation, input_scales=scales)
+        return projection(activation)
+
+    def _project_q_k(
+        self,
+        q_lora: torch.Tensor,
+        x: torch.Tensor,
+        x_fp8: Optional[torch.Tensor],
+        x_scale: Optional[torch.Tensor],
+        q_c_fp8: Optional[torch.Tensor],
+        q_c_scale: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        q = self._project_with_fp8(self.wq_b, q_lora, q_c_fp8, q_c_scale)
+        k = self._project_with_fp8(self.wk, x, x_fp8, x_scale)
+        return q.view(-1, self.index_n_heads, self.index_head_dim), self.k_norm(k)
+
     def _fused_forward_decode(
         self,
         q_lora: torch.Tensor,
@@ -204,17 +238,7 @@ class Indexer(nn.Module):
 
         Returns (q_fp8, q_scale).
         """
-        if q_c_fp8 is not None and q_c_scale is not None:
-            q = self.wq_b(q_c_fp8, input_scales=q_c_scale)
-        else:
-            q = self.wq_b(q_lora)
-        q = q.view(-1, self.index_n_heads, self.index_head_dim)
-
-        if x_fp8 is not None and x_scale is not None:
-            k = self.wk(x_fp8, input_scales=x_scale)
-        else:
-            k = self.wk(x)
-        k = self.k_norm(k)
+        q, k = self._project_q_k(q_lora, x, x_fp8, x_scale, q_c_fp8, q_c_scale)
 
         q_fp8, q_scale, key = self.indexer_op.fused_rope_quant_qk(
             q, k, fmha_params.positions_d
@@ -235,17 +259,7 @@ class Indexer(nn.Module):
         q_c_fp8: Optional[torch.Tensor] = None,
         q_c_scale: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if q_c_fp8 is not None and q_c_scale is not None:
-            q = self.wq_b(q_c_fp8, input_scales=q_c_scale)
-        else:
-            q = self.wq_b(q_lora)
-        q = q.view(-1, self.index_n_heads, self.index_head_dim)
-
-        if x_fp8 is not None and x_scale is not None:
-            k = self.wk(x_fp8, input_scales=x_scale)
-        else:
-            k = self.wk(x)
-        k = self.k_norm(k)
+        q, k = self._project_q_k(q_lora, x, x_fp8, x_scale, q_c_fp8, q_c_scale)
 
         q_fp8, q_scale, key = self.indexer_op.fused_rope_quant_qk(
             q,
@@ -276,17 +290,7 @@ class Indexer(nn.Module):
         q_c_fp8: Optional[torch.Tensor] = None,
         q_c_scale: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        if q_c_fp8 is not None and q_c_scale is not None:
-            q = self.wq_b(q_c_fp8, input_scales=q_c_scale)
-        else:
-            q = self.wq_b(q_lora)
-        q = q.view(-1, self.index_n_heads, self.index_head_dim)
-
-        if x_fp8 is not None and x_scale is not None:
-            k = self.wk(x_fp8, input_scales=x_scale)
-        else:
-            k = self.wk(x)
-        k = self.k_norm(k)
+        q, k = self._project_q_k(q_lora, x, x_fp8, x_scale, q_c_fp8, q_c_scale)
 
         if cp_params is not None:
             query, key = self.indexer_op.apply_rope_and_rotate_q_k_cp(

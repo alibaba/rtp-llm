@@ -457,6 +457,7 @@ class GrammarConfig:
 
 class FMHAConfig:
     absorb_opt_len: int
+    deterministic_gemm: bool
     disable_flashinfer_hybrid_prefill: bool
     disable_flashinfer_native: bool
     enable_flashinfer_trtllm_gen: bool
@@ -619,10 +620,12 @@ class HWKernelConfig:
     decode_capture_batch_sizes: list[int]
     enable_decode_cascade_attention: bool
     deterministic_attn: bool
-    deterministic_gemm: bool
     enable_cuda_graph: bool
     enable_cuda_graph_debug_mode: bool
+    enable_fuse_kernels: bool
+    enable_glm5_cmp: bool
     enable_stable_scatter_add: bool
+    glm5_cp_opt: bool
     prefill_capture_seq_lens: list[int]
     generation_prefill_capture_token_buckets: list[int]
     generation_prefill_cuda_graph_max_requests: int

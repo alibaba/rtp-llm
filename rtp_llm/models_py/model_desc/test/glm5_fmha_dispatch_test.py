@@ -1,4 +1,3 @@
-import os
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -254,11 +253,8 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
             with self.subTest(enabled=enabled, hidden_size=hidden_size):
                 hw = HWKernelConfig()
                 hw.enable_fuse_kernels = enabled
+                hw.enable_glm5_cmp = False
                 with (
-                    patch.dict(
-                        os.environ,
-                        {"ENABLE_FUSE_KERNELS": "1", "RTP_LLM_GLM5_CMP": "0"},
-                    ),
                     patch(
                         "rtp_llm.models_py.model_desc.glm5.CausalAttention", Attention
                     ),
@@ -284,6 +280,77 @@ class Glm5FmhaDispatchTest(unittest.TestCase):
                 self.assertEqual(
                     layer._fuse_post_norm_quant, enabled and hidden_size % 512 == 0
                 )
+
+    def test_decoder_attention_preserves_quantized_input_and_topk(self):
+        class FakeMla(nn.Module):
+            def forward(self, **kwargs):
+                return attention(**kwargs), topk
+
+        class FakeCausal(nn.Module):
+            def forward(self, **kwargs):
+                return attention(**kwargs)
+
+        hidden = torch.ones(2, 4)
+        residual = torch.zeros_like(hidden)
+        normalized = torch.full_like(hidden, 2)
+        normalized_residual = torch.full_like(hidden, 3)
+        fp8, scale = object(), object()
+        topk = torch.tensor([[1], [2]])
+        prev_topk = torch.tensor([[3], [4]])
+        fmha, kv = object(), object()
+
+        for fused in (False, True):
+            for mla in (False, True):
+                with self.subTest(fused=fused, mla=mla):
+                    attention = Mock(return_value=hidden)
+                    layer = Glm5MoeDecoderLayer.__new__(Glm5MoeDecoderLayer)
+                    nn.Module.__init__(layer)
+                    layer.self_attn = FakeMla() if mla else FakeCausal()
+                    layer._fuse_input_norm_quant = fused
+                    layer._fuse_input_scale_ue8m0 = False
+                    layer.input_layernorm = Mock(
+                        weight=SimpleNamespace(data=torch.ones(4)),
+                        variance_epsilon=1e-6,
+                        return_value=(normalized, normalized_residual),
+                    )
+                    layer._fwd_mlp_or_moe = Mock(side_effect=lambda x, r: (x, r))
+                    with (
+                        patch(
+                            "rtp_llm.models_py.model_desc.glm5.MlaAttention", FakeMla
+                        ),
+                        patch(
+                            "rtp_llm.models_py.model_desc.glm5.fused_add_rmsnorm_fp8_quant_with_bf16_output",
+                            return_value=(normalized, fp8, scale),
+                        ),
+                    ):
+                        out = layer(
+                            hidden,
+                            residual,
+                            fmha,
+                            kv,
+                            prev_topk,
+                            force_reuse_topk_indices=True,
+                        )
+                    kwargs = attention.call_args.kwargs
+                    self.assertIs(kwargs["hidden_states"], normalized)
+                    self.assertIs(kwargs["fmha_impl"], fmha)
+                    self.assertIs(kwargs["kv_cache"], kv)
+                    if fused:
+                        self.assertIs(kwargs["x_fp8"], fp8)
+                        self.assertIs(kwargs["x_scale"], scale)
+                    else:
+                        self.assertNotIn("x_fp8", kwargs)
+                        self.assertNotIn("x_scale", kwargs)
+                    if mla:
+                        self.assertIs(kwargs["prev_topk_indices"], prev_topk)
+                        self.assertTrue(kwargs["force_reuse_topk_indices"])
+                        self.assertTrue(kwargs["return_topk"])
+                    else:
+                        self.assertNotIn("prev_topk_indices", kwargs)
+                    self.assertIs(out.topk_indices, topk if mla else None)
+                    self.assertIs(
+                        out.residual, residual if fused else normalized_residual
+                    )
 
     def test_factory_fallback_respects_shared_expert_ownership(self):
         for gated in (False, True):

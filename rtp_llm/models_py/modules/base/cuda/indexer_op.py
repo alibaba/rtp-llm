@@ -1,6 +1,5 @@
 """CUDA-specific indexer operations for DeepSeek-V3.2 DSA mechanism."""
 
-import os
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -149,20 +148,6 @@ def _fp8_mqa_logits_chunk_rows(num_rows: int, num_keys: int) -> int:
     columns = max(256, (int(num_keys) + 255) // 256 * 256)
     budget_rows = max(1, (256 * 1024 * 1024) // (4 * columns))
     return min(max(int(num_rows), 1), budget_rows)
-
-
-def _fp8_prefill_topk_force_radix_sort() -> bool:
-    """Keep shared indexer prefill TopK aligned with the DSV4 implementation."""
-    return os.environ.get("DSV4_PREFILL_TOPK_FORCE_RADIX", "1") != "0"
-
-
-def _fp8_prefill_topk_canonicalize() -> bool:
-    return os.environ.get("DSV4_INDEXER_TOPK_CANONICALIZE", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-        "on",
-    )
 
 
 def _canonicalize_topk_indices(indices: torch.Tensor) -> torch.Tensor:
@@ -409,7 +394,7 @@ class IndexerOp(nn.Module):
             logits.stride(0),
             logits.stride(1),
             self.index_topk,
-            _fp8_prefill_topk_force_radix_sort(),
+            True,  # force radix sort
         )
 
     def apply_rope_and_rotate_q_k(
@@ -998,11 +983,6 @@ class IndexerOp(nn.Module):
                 topk_part,
                 prefill_max_kv_len,
             )
-            if (
-                self._prefill_topk_backend != "topk_v3_tie_break"
-                and _fp8_prefill_topk_canonicalize()
-            ):
-                topk_part = _canonicalize_topk_indices(topk_part)
             topk_result[row_start:row_end] = torch.where(
                 topk_part >= 0,
                 topk_part
@@ -1202,11 +1182,6 @@ class IndexerOp(nn.Module):
                     topk_part,
                     prefill_max_kv_len,
                 )
-                if (
-                    self._prefill_topk_backend != "topk_v3_tie_break"
-                    and _fp8_prefill_topk_canonicalize()
-                ):
-                    topk_part = _canonicalize_topk_indices(topk_part)
                 topk_result[row_start:row_end] = torch.where(
                     topk_part >= 0,
                     topk_part + topk_off[row_start:row_end].unsqueeze(1),
