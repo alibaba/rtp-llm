@@ -35,7 +35,7 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.type import RouterType
 
 
 class AscendW8A8MXFP8MoeRouter(FusedMoeDataRouter):
-    """Flat router for the MXFP8 CANN executor (single GPU / tp==ep).
+    """Flat router for the MXFP8 CANN executor (ep_size == 1, any TP).
 
     ``prepare`` only validates and forwards the flat ``[tokens, hidden]``
     activations with the top-k ids/weights; the fused dispatch/combine and
@@ -123,7 +123,9 @@ class AscendW8A8MXFP8MoeRouter(FusedMoeDataRouter):
         checker.check(
             resolver.get_quant_method(config) in ("ASCEND_W8A8_MXFP8",)
         )
-        checker.check(resolver.is_single_gpu(config) or resolver.is_tp_equal_ep(config))
+        # ep==tp>1 lacks expert-id localization (CUDA pure_tp_router's
+        # recompute_topk is not ported); let the registry fail explicitly.
+        checker.check(resolver.is_single_gpu(config))
 
 
 class AscendW8A8MXFP8MoeStrategy(MoeStrategy):
