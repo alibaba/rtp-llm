@@ -6,6 +6,7 @@ import java.nio.*;
 import java.util.concurrent.TimeUnit;
 import org.flexlb.engine.grpc.EngineRpcService.*;
 import org.flexlb.mock.engine.scheduler.EngineScheduler;
+import org.flexlb.mock.engine.scheduler.EngineScheduler.RequestFailure;
 import org.flexlb.mock.protocol.PromptCacheKeys;
 
 /**
@@ -49,6 +50,9 @@ final class RpcMessages {
             .setIterateCount(task.iterations()).setWaitingTimeMs(task.waitingMillis())
             .setExecutionTimeMs(task.executionMillis()).setEndTimeMs(task.endTimeMillis());
         if (task.failure() != null) {
+            if (task.failure().reason() == RequestFailure.Reason.PREEMPTED) {
+                result.setPriorityPreemptionProgress(PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_CANCELED);
+            }
             long code = RpcErrors.code(task.failure());
             if (code == 0) code = RpcErrors.status(task.failure()).getCode().value();
             result.setErrorInfo(ErrorDetailsPB.newBuilder().setErrorCode(code).setErrorMessage(java.util.Objects.toString(task.failure().getMessage(), "")));

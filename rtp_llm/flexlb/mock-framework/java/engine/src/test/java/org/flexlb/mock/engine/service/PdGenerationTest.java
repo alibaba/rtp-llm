@@ -487,10 +487,16 @@ class PdGenerationTest {
     }
 
     @Test void cancelUnattachedBatchReleasesBothOwnersAndLeavesPreemptionFence() throws Exception {
-        try (var p = node("prefill", 8, 100); var d = node("decode", 8, 1)) {
+        try (var p = node("prefill", 8, 1000); var d = node("decode", 8, 1)) {
             var request = input(d, 106, 5, 4, 2000, true); enqueue(p, 1500, request);
             assertEquals(CancelStatusPB.CANCEL_STATUS_ACCEPTED, cancel(p, 106));
             await(() -> p.status().getRunningTaskInfoCount() == 0 && d.status().getRunningTaskInfoCount() == 0);
+            var terminal = p.status().getFinishedTaskListList().stream()
+                .filter(task -> task.getRequestId() == request.getRequestId())
+                .findFirst().orElseThrow();
+            assertEquals(8429, terminal.getErrorInfo().getErrorCode());
+            assertEquals(PriorityPreemptionProgressPB.PRIORITY_PREEMPTION_CANCELED,
+                terminal.getPriorityPreemptionProgress());
             assertEquals(16, p.status().getAvailableKvCache()); assertEquals(16, d.status().getAvailableKvCache());
             try (var fetch = new Call(p, request, true)) { assertEquals(8429, code(fetch.error(Status.Code.RESOURCE_EXHAUSTED))); }
             assertEquals(8429, enqueue(p, 1000, request).getErrors(0).getErrorInfo().getErrorCode());
