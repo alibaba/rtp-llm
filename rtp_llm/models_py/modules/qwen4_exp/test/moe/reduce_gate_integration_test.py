@@ -174,17 +174,21 @@ def run_hidden_size(device, rank, hidden_size):
         class Shared(torch.nn.Module):
             def forward(self, value, *, skip_allreduce):
                 assert skip_allreduce
-                return shared
+                return shared.clone()
 
         class Gate(torch.nn.Module):
+            weight = gate
+
             def forward(self, value):
-                return gate
+                return gate.clone()
 
         layer = Qwen4MoeLayer.__new__(Qwen4MoeLayer)
         torch.nn.Module.__init__(layer)
         layer.shared_expert = Shared()
         layer.shared_expert_gate = Gate()
         layer._reduce_shared_gate = owner
+        layer.parallelism_config = parallelism
+        layer.prepare_reduce_gate_overlap()
 
         def routed(self, value, *, skip_tp_allreduce=False):
             assert skip_tp_allreduce

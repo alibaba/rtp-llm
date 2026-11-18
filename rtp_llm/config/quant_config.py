@@ -872,6 +872,9 @@ class ModelOptFp4Config(QuantizationConfig):
             "decode_b12x_max_rows", 16 if qwen4_recipe else 0
         )
         self.decode_cutlass_profile_ids = kwargs.get("decode_cutlass_profile_ids", None)
+        self.decode_shared_gemm_nk = kwargs.get("decode_shared_gemm_nk", False)
+        if type(self.decode_shared_gemm_nk) is not bool:
+            raise ValueError("decode_shared_gemm_nk must be a boolean")
         self.prefill_library = kwargs.get("prefill_library", None)
         self.prefill_library_sha256 = kwargs.get("prefill_library_sha256", None)
         self.source_fp8_block_size = kwargs.get(
