@@ -115,6 +115,72 @@ class DraftPrefillGraphTest(unittest.TestCase):
             hook.prepare_cuda_graph(groups)
         delegate.prepare_cuda_graph.assert_not_called()
 
+    def test_replay_revalidates_visible_pages_changed_in_place(self):
+        for tag, column in (("full", 1), (INDEXER_KV_TAG, 0)):
+            for invalid in (0, -1, 12, 13):
+                with self.subTest(tag=tag, invalid=invalid):
+                    hook, groups, delegate = self._replay()
+                    table = groups[tag].kv_cache_kernel_block_id
+                    storage = table.data_ptr()
+                    hook.prepare_cuda_graph(groups)
+                    delegate.reset_mock()
+                    original = int(table[1, column])
+                    table[1, column] = invalid
+                    with self.assertRaisesRegex(RuntimeError, "physical block"):
+                        hook.prepare_cuda_graph(groups)
+                    self.assertEqual(table.data_ptr(), storage)
+                    delegate.prepare_cuda_graph.assert_not_called()
+                    table[1, column] = original
+                    hook.prepare_cuda_graph(groups)
+                    delegate.prepare_cuda_graph.assert_called_once()
+
+    def test_replay_checks_only_visible_pages_at_full_and_compressed_boundaries(self):
+        for tag, prefix in (("full", 127), (INDEXER_KV_TAG, 130)):
+            with self.subTest(tag=tag):
+                hook, groups, delegate = self._replay()
+                table = groups[tag].kv_cache_kernel_block_id
+                # Keep a non-contiguous host table, including invalid padding
+                # and a second page that is not visible until the next step.
+                backing = torch.zeros(3, 4, dtype=torch.int32)
+                backing[:, ::2].copy_(table)
+                table = backing[:, ::2]
+                groups[tag].kv_cache_kernel_block_id = table
+                table[0, 1] = 0
+                groups["full"].prefix_lengths[0] = prefix
+                hook.prepare_cuda_graph(groups)
+                delegate.reset_mock()
+                groups["full"].prefix_lengths[0] += 1
+                with self.assertRaisesRegex(RuntimeError, "physical block"):
+                    hook.prepare_cuda_graph(groups)
+                delegate.prepare_cuda_graph.assert_not_called()
+
+    def test_replay_visible_tail_checks_short_and_long_strided_rows(self):
+        for tag in ("full", INDEXER_KV_TAG):
+            for pages in (0, 1, 64, 65, 256):
+                if tag == "full" and pages == 0:
+                    continue
+                with self.subTest(tag=tag, pages=pages):
+                    hook, groups, delegate = self._replay()
+                    width = pages + 2
+                    for name in ("full", INDEXER_KV_TAG):
+                        storage = torch.ones(3, 2 * width, dtype=torch.int32)
+                        table = storage[:, ::2]
+                        table[2].fill_(-1)  # Inactive rows are outside visibility.
+                        groups[name].kv_cache_kernel_block_id = table
+                    groups[INDEXER_STATE_TAG].kv_cache_block_id_device = torch.ones(
+                        3, width, dtype=torch.int32
+                    )
+                    groups[tag].kv_cache_kernel_block_id[0, pages] = 0
+                    prefix = pages * 128 - 1 if tag == "full" else pages * 128 + 2
+                    groups["full"].prefix_lengths[0] = prefix
+                    hook.prepare_cuda_graph(groups)
+                    delegate.prepare_cuda_graph.assert_called_once()
+                    delegate.reset_mock()
+                    groups["full"].prefix_lengths[0] += 1
+                    with self.assertRaisesRegex(RuntimeError, "physical block"):
+                        hook.prepare_cuda_graph(groups)
+                    delegate.prepare_cuda_graph.assert_not_called()
+
     def test_replay_resolves_state_pages_from_refreshed_kernel_table(self):
         hook, groups, delegate = self._replay()
         state = groups[INDEXER_STATE_TAG]

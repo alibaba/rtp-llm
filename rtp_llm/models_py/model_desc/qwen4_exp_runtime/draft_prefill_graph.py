@@ -129,18 +129,25 @@ class DraftPrefillGraphReplay(Mapping):
                 if not length:
                     continue
                 if compressed:
-                    first = 0
                     end = ((prefix + length) // 4 + page_size - 1) // page_size
                 else:
-                    first = 0
                     end = (prefix + length + page_size - 1) // page_size
                 if end > table.shape[1]:
                     raise RuntimeError(
                         "QSA draft graph block table does not cover the visible tail"
                     )
-                if any(
-                    not 0 < int(block) < pool_size for block in values[row, first:end]
-                ):
+                # Check this replay's visible pages in native array code. The
+                # graph-owned table may change in place between prepares.
+                visible = values[row, :end]
+                if end <= 64:
+                    # Small rows avoid allocating NumPy comparison masks.
+                    pages = visible.tolist()
+                    invalid = bool(pages) and (
+                        min(pages) <= 0 or max(pages) >= pool_size
+                    )
+                else:
+                    invalid = ((visible <= 0) | (visible >= pool_size)).any()
+                if invalid:
                     raise RuntimeError(
                         "QSA draft graph live row resolves to an unallocated or out-of-range physical block"
                     )
