@@ -8,6 +8,7 @@ import torch
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.step_metadata import (
     cached_indexer_padding,
     cached_main_padded_lengths,
+    cached_prefill_geometry,
     cached_query_geometry,
     cached_step_value,
 )
@@ -97,6 +98,75 @@ class StepMetadataTest(unittest.TestCase):
                     )
                 graph.reset()
 
+    def check_prefill(self, device):
+        device = torch.device(device)
+        inputs = SimpleNamespace(
+            input_lengths=torch.tensor([5, 2], dtype=torch.int32),
+            prefix_lengths=torch.tensor([128, 256], dtype=torch.int32),
+        )
+        cache = {}
+        contexts = [
+            SimpleNamespace(main_inputs=inputs, metadata_cache=cache) for _ in range(12)
+        ]
+        values = [
+            cached_prefill_geometry(ctx, [5, 2], [128, 256], 4, device)
+            for ctx in contexts
+        ]
+        self.assertTrue(all(value is values[0] for value in values))
+        geometry = values[0]
+        self.assertEqual(geometry.cu_seqlens.tolist(), [0, 5, 7])
+        self.assertEqual(geometry.cu_kv_seqlens.tolist(), [0, 133, 391])
+        self.assertEqual(
+            geometry.logical_positions.tolist(), [128, 129, 130, 131, 132, 256, 257]
+        )
+        self.assertEqual(
+            geometry.visible_lengths.tolist(),
+            [[129, 130, 131, 132, 133], [257, 258, 0, 0, 0]],
+        )
+        self.assertEqual(
+            geometry.compressed_lengths.tolist(),
+            [[32, 32, 32, 33, 33], [64, 64, 0, 0, 0]],
+        )
+        self.assertEqual(geometry.final_compressed_lengths.tolist(), [33, 64])
+        self.assertEqual(geometry.prefixes.dtype, torch.int64)
+        self.assertEqual(geometry.prefixes.tolist(), [128, 256])
+        context = contexts[0]
+        other_ratio = cached_prefill_geometry(context, [5, 2], [128, 256], 8, device)
+        self.assertIsNot(other_ratio, geometry)
+        self.assertEqual(other_ratio.final_compressed_lengths.tolist(), [16, 32])
+
+        # Each host value snapshot must distinguish an entry at the same address.
+        inputs.input_lengths.copy_(torch.tensor([2, 1], dtype=torch.int32))
+        shorter = cached_prefill_geometry(context, [2, 1], [128, 256], 4, device)
+        self.assertIsNot(shorter, geometry)
+        self.assertEqual(shorter.cu_seqlens.tolist(), [0, 2, 3])
+        self.assertEqual(shorter.logical_positions.tolist(), [128, 129, 256])
+
+        inputs.prefix_lengths.add_(128)
+        shifted = cached_prefill_geometry(context, [2, 1], [256, 384], 4, device)
+        self.assertIsNot(shifted, shorter)
+        self.assertEqual(shifted.prefixes.tolist(), [256, 384])
+        self.assertEqual(shifted.logical_positions.tolist(), [256, 257, 384])
+
+        next_context = SimpleNamespace(main_inputs=inputs, metadata_cache={})
+        fresh = cached_prefill_geometry(next_context, [2, 1], [256, 384], 4, device)
+        self.assertIsNot(fresh, shifted)
+        self.assertEqual(
+            fresh.logical_positions.tolist(), shifted.logical_positions.tolist()
+        )
+        uncached = SimpleNamespace(main_inputs=inputs, metadata_cache=None)
+        self.assertIsNot(
+            cached_prefill_geometry(uncached, [2, 1], [256, 384], 4, device),
+            cached_prefill_geometry(uncached, [2, 1], [256, 384], 4, device),
+        )
+
+    def test_prefill_request_geometry_cpu(self):
+        self.check_prefill("cpu")
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_prefill_request_geometry_cuda(self):
+        self.check_prefill("cuda")
+
     def assert_geometry(self, actual, prefix, query, ratio):
         visible = prefix[:, None] + torch.arange(1, query + 1, device=prefix.device)
         torch.testing.assert_close(actual[0], visible.to(torch.int32), rtol=0, atol=0)
@@ -156,6 +226,9 @@ class StepMetadataTest(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
     def test_graph_replay_refreshes_shared_values(self):
+        expect_triton = torch.version.hip is None and (
+            torch.cuda.get_device_capability() == (12, 0)
+        )
         for batch in (2, 4, 8, 16):
             for query in (1, 2, 3, 4):
                 prefix = torch.zeros(batch, device="cuda", dtype=torch.int32)
@@ -173,6 +246,11 @@ class StepMetadataTest(unittest.TestCase):
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph):
                     actual = forward()
+                if expect_triton:
+                    self.assertIsNotNone(
+                        actual[2], "SM120 must produce query positions"
+                    )
+                    self.assertIsNotNone(actual[3], "SM120 must produce group starts")
                 for length in (0, 127, 8191, 10239, 32768):
                     prefix.copy_(
                         torch.arange(batch, device="cuda", dtype=torch.int32) + length

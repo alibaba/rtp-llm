@@ -1,10 +1,12 @@
 """Invocation-local reuse of layer-independent QSA metadata.
 
-The model creates a new dictionary for each forward. During CUDA graph capture,
-the first layer records the producer kernels and later layers consume the same
-tensors. Every graph replay therefore refreshes values from the current inputs.
-No dictionary is retained across eager forwards or different MTP phases.
+The model creates a new dictionary for each forward. Captured query geometry
+reads live device prefixes on replay. Incremental prefill geometry uses host
+lengths and prefixes and its callers restrict it to eager execution.
 """
+
+from dataclasses import dataclass
+from typing import NamedTuple
 
 import torch
 
@@ -26,6 +28,75 @@ def cached_step_value(context, key, factory):
     if key not in cache:
         cache[key] = factory()
     return cache[key]
+
+
+@dataclass(frozen=True)
+class PrefillRequestGeometry:
+    prefixes: torch.Tensor
+    cu_seqlens: torch.Tensor
+    cu_kv_seqlens: torch.Tensor
+    logical_positions: torch.Tensor
+    visible_lengths: torch.Tensor
+    compressed_lengths: torch.Tensor
+    final_compressed_lengths: torch.Tensor
+
+
+class _PrefillGeometryEntry(NamedTuple):
+    source_lengths: torch.Tensor
+    source_prefixes: torch.Tensor
+    geometry: PrefillRequestGeometry
+
+
+def cached_prefill_geometry(context, lengths, prefixes, ratio, device):
+    """Share eager prefill geometry from validated request lengths and prefixes."""
+    inputs = context.main_inputs
+    source_lengths, source_prefixes = inputs.input_lengths, inputs.prefix_lengths
+
+    def materialize():
+        device_prefixes = source_prefixes.to(
+            device=device, dtype=torch.int64, non_blocking=True
+        ).contiguous()
+        device_lengths = torch.tensor(lengths, dtype=torch.int64, device=device)
+        cu = torch.zeros(len(lengths) + 1, dtype=torch.int32, device=device)
+        cu[1:] = device_lengths.cumsum(0)
+        visible_ends = device_prefixes + device_lengths
+        cu_kv = torch.zeros_like(cu)
+        cu_kv[1:] = visible_ends.to(torch.int32).cumsum(0)
+        logical = torch.cat(
+            [
+                torch.arange(prefix, prefix + length, dtype=torch.int64, device=device)
+                for prefix, length in zip(prefixes, lengths)
+            ]
+        )
+        offsets = torch.arange(max(lengths), dtype=torch.int64, device=device)
+        valid = offsets[None, :] < device_lengths[:, None]
+        visible = torch.where(valid, device_prefixes[:, None] + offsets[None, :] + 1, 0)
+        geometry = PrefillRequestGeometry(
+            device_prefixes,
+            cu,
+            cu_kv,
+            logical,
+            visible,
+            (visible // ratio).to(torch.int32),
+            (visible_ends // ratio).to(torch.int32),
+        )
+        # Retain native tensor owners along with derived values for this
+        # invocation, even if a layer-local context is released first.
+        return _PrefillGeometryEntry(source_lengths, source_prefixes, geometry)
+
+    return cached_step_value(
+        context,
+        (
+            "prefill_geometry",
+            tensor_signature(source_lengths),
+            tensor_signature(source_prefixes),
+            tuple(lengths),
+            tuple(prefixes),
+            ratio,
+            device,
+        ),
+        materialize,
+    ).geometry
 
 
 def cached_query_geometry(context, prefixes, query_len, ratio):

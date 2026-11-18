@@ -4,13 +4,40 @@ from unittest.mock import patch
 
 import torch
 
+from rtp_llm.config.qwen4_exp_config import Qwen4ModelConfig
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.prefill_preflight import (
     MainGeometryReceipt,
     main_geometry_preflight,
+    prefill_geometry_scope,
 )
 from rtp_llm.models_py.modules.qwen4_exp.qsa import fmha_validation
 from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import SparseGqaFmhaImpl
 from rtp_llm.models_py.modules.qwen4_exp.qsa.validation import DeviceChecks
+from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
+
+
+class PrefillGeometryScopeTest(unittest.TestCase):
+    def test_hook_checks_only_apply_to_eager_qsa(self):
+        model = torch.nn.Sequential(torch.nn.Identity())
+        model.kv_cache = object()
+        model.config = Qwen4ModelConfig()
+        attn = PyAttentionInputs()
+        attn.is_prefill = True
+        inputs = PyModelInputs()
+        inputs.attention_inputs = attn
+
+        with patch.object(
+            model, "modules", side_effect=AssertionError("unexpected module scan")
+        ):
+            with prefill_geometry_scope(model, inputs, None) as share:
+                self.assertFalse(share)
+
+        model.config._qwen4_indexer_head_dim = 128
+        with prefill_geometry_scope(model, inputs, None) as share:
+            self.assertTrue(share)
+        with model[0].register_forward_pre_hook(lambda *_: None):
+            with prefill_geometry_scope(model, inputs, None) as share:
+                self.assertFalse(share)
 
 
 class PrefillPreflightTest(unittest.TestCase):

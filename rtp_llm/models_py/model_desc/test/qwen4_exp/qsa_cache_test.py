@@ -1,10 +1,16 @@
+import json
+import tempfile
+from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase, main, skipUnless
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
+from torch import nn
 
 from rtp_llm.models.qwen4_exp.qwen4_exp_kv_cache import INDEXER_KV_TAG
+from rtp_llm.models_py.model_desc.module_base import AttnImplFactory
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
     _same_tensor_metadata,
     _validate_required_blocks,
@@ -12,13 +18,15 @@ from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_cache_views import (
 from rtp_llm.models_py.model_desc.qwen4_exp_runtime.qsa_selection import (
     select_qsa_paged_tokens,
 )
+from rtp_llm.models_py.model_desc.test.qwen4_exp.fixtures import _bare_model
 from rtp_llm.models_py.model_desc.test.qwen4_exp.qsa_fixtures import QSARuntimeFixture
 from rtp_llm.models_py.modules.qwen4_exp.qsa.indexer import (
     apply_partial_rope,
     build_interleaved_mrope,
 )
-from rtp_llm.ops import RopeStyle
+from rtp_llm.ops import HybridAttentionType, RopeStyle
 from rtp_llm.ops.compute_ops import PyCacheStoreInputs
+from rtp_llm.utils import hot_hook_runtime
 
 
 class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
@@ -145,6 +153,7 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
             lengths=[16],
             is_mtp_draft=False,
         )
+        context = replace(context, metadata_cache={})
         options = dict(
             indexer=self._decode_indexer(),
             token_count=16,
@@ -154,6 +163,9 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
         )
         expected = context._draft_incremental_prefill_geometry(**options)
         actual = context._draft_incremental_prefill_geometry(**options)
+        self.assertIs(actual.cu_seqlens, expected.cu_seqlens)
+        self.assertIs(actual.visible_lengths, expected.visible_lengths)
+        self.assertIs(actual.compressed_lengths, expected.compressed_lengths)
         for name in (
             "visible_lengths",
             "compressed_lengths",
@@ -169,6 +181,184 @@ class Qwen4ExpQSACacheTest(QSARuntimeFixture, TestCase):
             context._draft_incremental_prefill_geometry(**options)
         torch.testing.assert_close(self.kv_base, kv_before, rtol=0, atol=0)
         torch.testing.assert_close(self.state_base, state_before, rtol=0, atol=0)
+
+    @torch.inference_mode()
+    def test_prefill_forward_shares_geometry_and_keeps_layer_pool_validation(self):
+        context = self._draft_incremental_context(
+            self.kv_base,
+            self.state_base,
+            prefixes=[8],
+            lengths=[16],
+            kv_table=torch.tensor([[1, 2, 3, 4]], dtype=torch.int32),
+            state_table=torch.tensor([[4, 5, 6, 7]], dtype=torch.int32),
+            is_mtp_draft=False,
+        )
+        indexer = self._decode_indexer()
+        options = dict(
+            indexer=indexer,
+            token_count=16,
+            device=self.kv_base.device,
+            rope_config=self.rope_config,
+            draft=False,
+        )
+        other_kv = SimpleNamespace(
+            tag=INDEXER_KV_TAG,
+            kv_cache_base=self.kv_base.clone(),
+            seq_size_per_block=self.KV_TOKENS_PER_BLOCK,
+        )
+        layer_caches = [
+            (context.main_cache, context.indexer_kv_cache, context.indexer_state_cache),
+            (context.main_cache, other_kv, context.indexer_state_cache),
+        ]
+        contexts, plans = [], []
+
+        class PlanLayer(nn.Module):
+            layer_type = HybridAttentionType.NONE
+            self_attn = SimpleNamespace(qsa_indexer=indexer)
+
+            def forward(self, hidden, fmha_impl, *, qsa_runtime, **kwargs):
+                contexts.append(qsa_runtime)
+                plans.append(qsa_runtime._draft_incremental_prefill_geometry(**options))
+                return hidden
+
+        model = _bare_model(layer_caches)
+        nn.Module.__init__(model)
+        model.kv_cache.layers = layer_caches
+        model.config = SimpleNamespace()
+        model.ple_layers = {}
+        model.parallelism_config = None
+        model.weight = None
+        model.fmha_config = None
+        model.py_hw_kernel_config = None
+        model.layers = nn.ModuleList(PlanLayer() for _ in layer_caches)
+        model.word_embedding = lambda inputs: torch.zeros(inputs.input_ids.numel(), 4)
+        model._initial_hyper_states = lambda hidden: hidden
+        model._build_attn_meta = Mock(return_value=None)
+        model.hyper_connection_mixer = lambda hidden: (hidden, None, None)
+
+        inputs = SimpleNamespace(
+            input_ids=torch.zeros(16, dtype=torch.int32),
+            attention_inputs={
+                "full": context.main_inputs,
+                INDEXER_KV_TAG: context.indexer_kv_inputs,
+                context.indexer_state_cache.tag: context.indexer_state_inputs,
+            },
+        )
+        # FMHA owns its own wrapper around the current request tensors.
+        fmha_inputs = SimpleNamespace(**vars(context.main_inputs))
+        fmha = SimpleNamespace(attn_inputs=fmha_inputs)
+        with patch.object(
+            AttnImplFactory,
+            "get_fmha_impl",
+            return_value=fmha,
+        ) as prepare:
+            model(inputs)
+        prepare.assert_called_once()
+
+        context, second = contexts
+        first, plan = plans
+        self.assertIs(context.main_inputs, fmha_inputs)
+        self.assertIs(second.main_inputs, fmha_inputs)
+        self.assertIs(plan.visible_lengths, first.visible_lengths)
+        self.assertEqual(plan.kv_pool.data_ptr(), other_kv.kv_cache_base.data_ptr())
+        self.assertNotEqual(plan.kv_pool.data_ptr(), first.kv_pool.data_ptr())
+        small_pool = replace(
+            second,
+            indexer_state_cache=SimpleNamespace(
+                tag="indexer_state",
+                kv_cache_base=self.state_base[:5],
+                seq_size_per_block=self.STATE_TOKENS_PER_BLOCK,
+            ),
+        )
+        with self.assertRaisesRegex(RuntimeError, "incremental tail resolves"):
+            small_pool._draft_incremental_prefill_geometry(**options)
+        recovered = context._draft_incremental_prefill_geometry(**options)
+        self.assertIs(recovered.visible_lengths, first.visible_lengths)
+        for tensor, delta, error, message in (
+            (
+                fmha_inputs.prefix_lengths,
+                self.KV_TOKENS_PER_BLOCK,
+                RuntimeError,
+                "cu_kv_seqlens do not match",
+            ),
+            (fmha_inputs.combo_position_ids, 1, ValueError, "logical cache positions"),
+        ):
+            self.assertTrue(tensor.is_inference())
+            original = tensor.clone()
+
+            def change_metadata(_layer, _args):
+                tensor.add_(delta)
+
+            try:
+                with model.layers[1].register_forward_pre_hook(change_metadata):
+                    with self.assertRaisesRegex(error, message):
+                        model(inputs, fmha)
+            finally:
+                tensor.copy_(original)
+        with tempfile.TemporaryDirectory() as tmp:
+            hook_file = Path(tmp) / "hooks.py"
+            hook_file.write_text(
+                "def change_positions(ctx):\n"
+                "    if ctx.args[1] == 1:\n"
+                "        ctx.result.main_inputs.combo_position_ids.add_(1)\n"
+            )
+            config_file = Path(tmp) / "config.json"
+            target = (
+                f"{type(model).__module__}.{type(model).__name__}._qsa_runtime_context"
+            )
+            config_file.write_text(
+                json.dumps(
+                    {
+                        "hook_file": str(hook_file),
+                        "function_hooks": [
+                            {"target": target, "after": "change_positions"}
+                        ],
+                    }
+                )
+            )
+            positions = fmha_inputs.combo_position_ids.clone()
+            try:
+                self.assertTrue(hot_hook_runtime.install_from_config(str(config_file)))
+                with self.assertRaisesRegex(ValueError, "logical cache positions"):
+                    model(inputs, fmha)
+            finally:
+                hot_hook_runtime.reset_for_test()
+                fmha_inputs.combo_position_ids.copy_(positions)
+        context.main_inputs.cu_seqlens_device[1] -= 1
+        with self.assertRaisesRegex(
+            RuntimeError, "cu_seqlens do not match input_lengths"
+        ):
+            context._draft_incremental_prefill_geometry(**options)
+        torch.testing.assert_close(
+            self.kv_base, torch.zeros_like(self.kv_base), rtol=0, atol=0
+        )
+        torch.testing.assert_close(
+            self.state_base, torch.zeros_like(self.state_base), rtol=0, atol=0
+        )
+
+    def test_draft_incremental_geometry_reuses_eager_cache_and_rejects_graph(self):
+        context = replace(
+            self._draft_incremental_context(
+                self.kv_base,
+                self.state_base,
+                prefixes=[7],
+                lengths=[3],
+            ),
+            metadata_cache={},
+        )
+        options = dict(
+            indexer=self._decode_indexer(),
+            token_count=3,
+            device=self.kv_base.device,
+            rope_config=self._base_rope_config(3),
+            draft=True,
+        )
+        first = context._draft_incremental_prefill_geometry(**options)
+        again = context._draft_incremental_prefill_geometry(**options)
+        self.assertIs(again.visible_lengths, first.visible_lengths)
+        context.main_inputs.is_cuda_graph = True
+        with self.assertRaisesRegex(RuntimeError, "does not support CUDA Graph"):
+            context._draft_incremental_prefill_geometry(**options)
 
     def test_metadata_alias_fast_path_preserves_distinct_tensor_validation(self):
         values = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
