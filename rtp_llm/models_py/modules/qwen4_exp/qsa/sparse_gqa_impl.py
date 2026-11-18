@@ -87,6 +87,17 @@ class SparseGqaFmhaImpl(FMHAImplBase):
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
+    def _can_skip_main_kv_scales(self, cache, *, prefix):
+        # Only the current writer's complete visible range is certified. Reused
+        # and remote prefixes retain scale reads until their format is known.
+        return (
+            prefix == 0
+            and cache.kv_cache_base.dtype == torch.float8_e4m3fn
+            and getattr(
+                getattr(self, "rope_kvcache_impl", None), "fp8_kv_scale_is_unity", False
+            )
+        )
+
     def _paged_kv_scale_args(self, cache):
         from rtp_llm.models_py.kernels.cuda.qsa.sparse_paged_fmha import (
             main_kv_scale_view,
@@ -899,6 +910,9 @@ class SparseGqaFmhaImpl(FMHAImplBase):
                     page_size=page_size,
                     kv_head_num=self.kv_head_num,
                     validate_selected=not trusted_selected,
+                    kv_scale_is_unity=self._can_skip_main_kv_scales(
+                        kv_cache, prefix=request.prefix
+                    ),
                     **self._paged_kv_scale_args(kv_cache),
                 )
             outputs.append(

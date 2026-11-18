@@ -14,7 +14,7 @@ Contract::
     selected [B, S, K] int32   (-1 = padded)
     -> o [B, H_q, S, D]
 
-Kernel: one program per (b, h_q, s) triplet.  K entries are processed in
+Kernel: one program per (batch, KV head, query, query-head tile).  K entries are processed in
 BLK_K-sized chunks so that programs with large K do not exhaust registers.
 """
 
@@ -23,85 +23,6 @@ import triton
 import triton.language as tl
 
 _BLK_K = 64
-
-
-@triton.jit
-def _sparse_prefill_online_kernel(
-    q_ptr,
-    k_ptr,
-    v_ptr,
-    idx_ptr,
-    out_ptr,
-    stride_q_b,
-    stride_q_h,
-    stride_q_s,
-    stride_out_b,
-    stride_out_h,
-    stride_out_s,
-    stride_k_b,
-    stride_k_h,
-    stride_k_t,
-    stride_v_b,
-    stride_v_h,
-    stride_v_t,
-    stride_idx_b,
-    stride_idx_s,
-    K,
-    T,
-    D: tl.constexpr,
-    SCALE: tl.constexpr,
-    q_per_kv: tl.constexpr,
-    MAX_BLKS: tl.constexpr,
-    BLK_K: tl.constexpr,
-):
-    pid_b = tl.program_id(1).to(tl.int64)
-    pid_h = tl.program_id(2).to(tl.int64)
-    pid_s = tl.program_id(0).to(tl.int64)
-    h_kv = pid_h // q_per_kv
-    rd = tl.arange(0, D)
-    q = tl.load(
-        q_ptr + pid_b * stride_q_b + pid_h * stride_q_h + pid_s * stride_q_s + rd
-    ).to(tl.float32)
-    idx_base = idx_ptr + pid_b * stride_idx_b + pid_s * stride_idx_s
-    k_base = k_ptr + pid_b * stride_k_b + h_kv * stride_k_h
-    v_base = v_ptr + pid_b * stride_v_b + h_kv * stride_v_h
-
-    max_score = tl.full((1,), float("-inf"), dtype=tl.float32)
-    sum_exp = tl.zeros((1,), dtype=tl.float32)
-    acc_o = tl.zeros((D,), dtype=tl.float32)
-    for blk in range(MAX_BLKS):
-        tr = blk * BLK_K + tl.arange(0, BLK_K)
-        in_range = tr < K
-        idx = tl.load(idx_base + tr, mask=in_range, other=-1)
-        valid = in_range & (idx >= 0) & (idx < T)
-        offsets = idx[:, None] * stride_k_t + rd[None, :]
-        k_chunk = tl.load(k_base + offsets, mask=valid[:, None], other=0.0).to(
-            tl.float32
-        )
-        score = tl.sum(q[None, :] * k_chunk, axis=1) * SCALE
-        score = tl.where(valid, score, float("-inf"))
-        next_max = tl.maximum(max_score, tl.max(score, axis=0))
-        # All-masked chunks have next_max=-inf. Avoid -inf - -inf and keep
-        # their numerator and denominator exactly zero.
-        rescale = tl.where(next_max == float("-inf"), 0.0, tl.exp(max_score - next_max))
-        weights = tl.where(valid, tl.exp(score - next_max), 0.0)
-        v_offsets = idx[:, None] * stride_v_t + rd[None, :]
-        v_chunk = tl.load(v_base + v_offsets, mask=valid[:, None], other=0.0).to(
-            tl.float32
-        )
-        acc_o = acc_o * rescale + tl.sum(weights[:, None] * v_chunk, axis=0)
-        sum_exp = sum_exp * rescale + tl.sum(weights)
-        max_score = next_max
-
-    out = tl.where(sum_exp > 0, acc_o / sum_exp, 0.0)
-    tl.store(
-        out_ptr
-        + pid_b * stride_out_b
-        + pid_h * stride_out_h
-        + pid_s * stride_out_s
-        + rd,
-        out.to(q_ptr.dtype.element_ty),
-    )
 
 
 @triton.jit
@@ -133,26 +54,27 @@ def _sparse_prefill_grouped_kernel(
     MAX_BLKS: tl.constexpr,
     BLK_K: tl.constexpr,
     BLK_H: tl.constexpr,
-    SM120_GQA_PV: tl.constexpr,
+    SM120_GQA: tl.constexpr,
 ):
     """Share selected K/V across GQA heads and use tensor-core reductions."""
     pid_b = tl.program_id(1).to(tl.int64)
-    pid_kv = tl.program_id(2).to(tl.int64)
+    head_tile = tl.program_id(2).to(tl.int64)
+    pid_kv = head_tile // tl.cdiv(q_per_kv, BLK_H)
     pid_s = tl.program_id(0).to(tl.int64)
-    if SM120_GQA_PV:
+    if SM120_GQA:
         # Causal selections grow with the query position. Schedule the longer
         # rows first so the last wave is not dominated by the most expensive
         # queries.
         pid_s = tl.num_programs(0) - 1 - pid_s
-    rh = tl.arange(0, BLK_H)
-    rd = tl.arange(0, D)
+    rh = (head_tile % tl.cdiv(q_per_kv, BLK_H)) * BLK_H + tl.arange(0, BLK_H)
+    rd = tl.arange(0, max(16, D))
     q = tl.load(
         q_ptr
         + pid_b * stride_q_b
         + (pid_kv * q_per_kv + rh[:, None]) * stride_q_h
         + pid_s * stride_q_s
         + rd[None, :],
-        mask=rh[:, None] < q_per_kv,
+        mask=(rh[:, None] < q_per_kv) & (rd[None, :] < D),
         other=0.0,
     )
     idx_base = idx_ptr + pid_b * stride_idx_b + pid_s * stride_idx_s
@@ -160,15 +82,15 @@ def _sparse_prefill_grouped_kernel(
     v_base = v_ptr + pid_b * stride_v_b + pid_kv * stride_v_h
     max_score = tl.full((BLK_H,), float("-inf"), tl.float32)
     sum_exp = tl.zeros((BLK_H,), tl.float32)
-    acc = tl.zeros((BLK_H, D), tl.float32)
+    acc = tl.zeros((BLK_H, max(16, D)), tl.float32)
     for blk in range(MAX_BLKS):
         tr = blk * BLK_K + tl.arange(0, BLK_K)
         idx = tl.load(idx_base + tr, mask=tr < K, other=-1)
         valid = (tr < K) & (idx >= 0) & (idx < T)
-        if not SM120_GQA_PV or tl.sum(valid.to(tl.int32), 0) > 0:
+        if not SM120_GQA or tl.sum(valid.to(tl.int32), 0) > 0:
             k = tl.load(
                 k_base + idx[:, None] * stride_k_t + rd[None, :],
-                mask=valid[:, None],
+                mask=valid[:, None] & (rd[None, :] < D),
                 other=0.0,
             )
             score = tl.dot(q, tl.trans(k)) * SCALE
@@ -180,24 +102,11 @@ def _sparse_prefill_grouped_kernel(
             weights = tl.where(valid[None, :], tl.exp(score - next_max[:, None]), 0.0)
             v = tl.load(
                 v_base + idx[:, None] * stride_v_t + rd[None, :],
-                mask=valid[:, None],
+                mask=valid[:, None] & (rd[None, :] < D),
                 other=0.0,
             )
-            # The SM120 specialization uses two BF16 probability components;
-            # both products accumulate in FP32. Other hardware and geometries
-            # retain the FP32-probability tensor-core product.
-            if SM120_GQA_PV:
-                # Preserve the first BF16 component's rounding residual in
-                # the second component (approximately 14 mantissa bits).
-                high = weights.to(tl.bfloat16)
-                low = (weights - high.to(tl.float32)).to(tl.bfloat16)
-                acc = acc * rescale[:, None]
-                acc = tl.dot(high, v, acc)
-                acc = tl.dot(low, v, acc)
-            else:
-                acc = acc * rescale[:, None] + tl.dot(
-                    weights, v.to(tl.float32), input_precision="tf32x3"
-                )
+            # Match the paged kernels: one BF16 PV with FP32 accumulation.
+            acc = tl.dot(weights.to(tl.bfloat16), v, acc * rescale[:, None])
             sum_exp = sum_exp * rescale + tl.sum(weights, axis=1)
             max_score = next_max
     out = tl.where(sum_exp[:, None] > 0, acc / sum_exp[:, None], 0.0)
@@ -208,7 +117,7 @@ def _sparse_prefill_grouped_kernel(
         + pid_s * stride_out_s
         + rd[None, :],
         out.to(q_ptr.dtype.element_ty),
-        mask=rh[:, None] < q_per_kv,
+        mask=(rh[:, None] < q_per_kv) & (rd[None, :] < D),
     )
 
 
@@ -293,35 +202,16 @@ def sparse_prefill_attn(
     stride_v_b, stride_v_h, stride_v_t = _s("v", v)
     stride_idx_b, stride_idx_s = selected.stride(0), selected.stride(1)
 
-    grid = (S, B, H_q)
-    grouped = (
-        ((S >= 128 and K >= 256 and q_per_kv >= 3))
-        and D >= 32
-        and blk_k >= 32
-        and q_per_kv <= 16
-    )
-    capability = None
-    if grouped and torch.version.hip is None:
-        capability = torch.cuda.get_device_capability(dev)
-    grouped = grouped and capability is not None and capability[0] >= 8
-    kernel = (
-        _sparse_prefill_grouped_kernel if grouped else (_sparse_prefill_online_kernel)
-    )
-    if grouped:
-        grid = (S, B, H_kv)
-        # The FP32 PV product needs three tensor-core products. A 32-key tile
-        # fits the shared-memory budget and avoids padding work for TP8's
-        # three query heads per KV head.
-        blk_k = 32
-    # This is the measured SM120 prefill support domain. It selects the
-    # adopted implementation without exposing a runtime tuning switch.
-    sm120_gqa_pv = (
-        grouped and capability == (12, 0) and D == 256 and q_per_kv in (6, 12)
-    )
-    grouped_options = {"BLK_H": 16, "SM120_GQA_PV": sm120_gqa_pv} if grouped else {}
-    if sm120_gqa_pv:
+    capability = torch.cuda.get_device_capability(dev)
+    if torch.version.hip is not None or capability[0] < 8:
+        raise RuntimeError("QSA BF16 Tensor Cores require NVIDIA SM80 or newer")
+    grid = (S, B, H_kv * triton.cdiv(q_per_kv, 16))
+    blk_k = 32
+    sm120_gqa = capability == (12, 0) and D == 256 and q_per_kv in (6, 12)
+    grouped_options = {"BLK_H": 16, "SM120_GQA": sm120_gqa}
+    if sm120_gqa or D > 256:
         grouped_options["num_stages"] = 1
-    kernel[grid](
+    _sparse_prefill_grouped_kernel[grid](
         q,
         k,
         v,

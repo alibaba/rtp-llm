@@ -43,8 +43,7 @@ def _value_half(
 
 @g.jit
 def _packed_pv(
-    hi,
-    lo,
+    probability,
     Smem,
     acc,
     S,
@@ -59,11 +58,9 @@ def _packed_pv(
     left = gl.convert_layout(left, mma, assert_trivial=True)
     right = gl.convert_layout(right, mma, assert_trivial=True)
     value = _value_half(Smem, 0, S, kt, KN, mma, rhs, CHECK_LENGTH)
-    left = mma_v2(hi, value, left)
-    left = mma_v2(lo, value, left)
+    left = mma_v2(probability, value, left)
     value = _value_half(Smem, 128, S, kt, KN, mma, rhs, CHECK_LENGTH)
-    right = mma_v2(hi, value, right)
-    right = mma_v2(lo, value, right)
+    right = mma_v2(probability, value, right)
     # Splitting accumulator columns only renames registers in this MMA layout.
     return gl.convert_layout(
         gl.join(left, right).permute((0, 2, 1)).reshape((QM, 256)),
@@ -185,11 +182,7 @@ def _attention_step(
     safe_max = gl.where(next_max == -float("inf"), 0.0, next_max)
     alpha = gl.exp2(maximum - safe_max)
     p = gl.exp2(scores - safe_max[:, None])
-    # Retain the BF16 rounding residual while using warp MMA for both PV terms.
-    hi = p.to(gl.bfloat16)
-    lo = (p - hi.to(gl.float32)).to(gl.bfloat16)
-    hi = gl.convert_layout(hi, lhs)
-    lo = gl.convert_layout(lo, lhs)
+    probability = gl.convert_layout(p.to(gl.bfloat16), lhs)
     acc = acc * alpha[:, None]
     if EARLY:
         normalizer = normalizer * alpha + gl.sum(p, 1)
@@ -197,7 +190,7 @@ def _attention_step(
     mbarrier.wait(full.index(vs), vp, deps=[buf])
     if TAIL == 2 and QM == 32:
         acc = _packed_pv(
-            hi, lo, buf.index(vs), acc, S, kt, QM, KN, mma, rhs, CHECK_LENGTH
+            probability, buf.index(vs), acc, S, kt, QM, KN, mma, rhs, CHECK_LENGTH
         )
     else:
         if CHECK_LENGTH and TAIL == 2:
@@ -209,8 +202,7 @@ def _attention_step(
             if CHECK_LENGTH and TAIL == 1:
                 vr = gl.arange(0, KN, layout=SliceLayout(1, rhs))
                 v = gl.where((kt * KN + vr < S)[:, None], v, 0.0)
-        acc = mma_v2(hi, v, acc)
-        acc = mma_v2(lo, v, acc)
+        acc = mma_v2(probability, v, acc)
     gl.thread_barrier()
     fence_async_shared()
     if PIPE:
