@@ -2112,8 +2112,8 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
         if (defer_publication) drain_publications();
         if (glm5_target_ && propose_step_ > 1 && !warm_up_) {
-            fenceFakeModelBufferRelease();
             releaseAllModelBuffers();
+            fenceFakeModelBufferRelease();
         } else {
             cudaSyncAndCheck();
         }
@@ -2489,8 +2489,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             if (useAsyncPrepare()) {
                 target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
             }
-            fenceFakeModelBufferRelease();
             releaseAllModelBuffers();
+            fenceFakeModelBufferRelease();
             return absl::OkStatus();
         }
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
@@ -2596,8 +2596,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     {
         if (shouldSkipFakeStreamForStop(model_input, "target verify forward")) {
-            fenceFakeModelBufferRelease();
             releaseAllModelBuffers();
+            fenceFakeModelBufferRelease();
             return absl::OkStatus();
         }
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -2895,8 +2895,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         }
         if (shouldSkipFakeStreamForStop(model_input, "draft prefill forward")) {
             model_input.is_draft_extend = false;
-            fenceFakeModelBufferRelease();
             releaseAllModelBuffers();
+            fenceFakeModelBufferRelease();
             return absl::OkStatus();
         }
 
@@ -2939,8 +2939,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
         finishEarlyMtpTargetLogprobsFinalize(early_target_logprobs_finalize_state, target_logprobs);
-        fenceFakeModelBufferRelease();
         releaseAllModelBuffers();
+        fenceFakeModelBufferRelease();
         return absl::OkStatus();
     }
 
@@ -3732,6 +3732,10 @@ void MtpExecutor::fenceFakeModelBufferRelease() {
 }
 
 void MtpExecutor::releaseAllModelBuffers() {
+    if (buffer_release_event_) {
+        buffer_release_event_->synchronize();
+        buffer_release_event_.reset();
+    }
     // TensorHolder release point (MtpExecutor phase boundary): after the current
     // TP sync/model-input preparation has consumed staged H2D sources, advance
     // the hold window for executor-owned model/sampler staging tensors.

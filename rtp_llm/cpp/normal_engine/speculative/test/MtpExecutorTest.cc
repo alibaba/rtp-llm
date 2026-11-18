@@ -2,6 +2,7 @@
 #include <memory>
 #include <limits>
 #include <chrono>
+#include <future>
 #include "torch/all.h"
 #include "autil/EnvUtil.h"
 #include "gtest/gtest.h"
@@ -1712,6 +1713,60 @@ TEST_F(MtpExecutorTest, testForwardOverlapDynamicRoundsMatchBarrierPath) {
     checkTensorEqual(overlap.logprobs, barrier.logprobs);
     checkTensorEqual(overlap.top_ids, barrier.top_ids);
     checkTensorEqual(overlap.top_logprobs, barrier.top_logprobs);
+}
+
+TEST_F(MtpExecutorTest, testFakeForwardLeaseSurvivesOrdinaryRelease) {
+    auto  components             = createMtpExecutorComponents(MtpExecutorTestConfig{});
+    auto& executor               = *components.executor;
+    executor.model_              = std::move(components.fake_target_model);
+    executor.draft_model_        = std::move(components.fake_draft_model);
+    executor.glm5_target_        = true;
+    executor.warm_up_            = false;
+    auto                   lease = std::make_shared<int32_t>(7);
+    std::weak_ptr<int32_t> weak  = lease;
+    auto                   held  = torch::from_blob(lease.get(), {1}, [lease](void*) {}, torch::kInt32);
+    executor.buffer_holder_.hold_host(held);
+    held = torch::Tensor();
+    lease.reset();
+    struct CallbackState {
+        std::promise<void>       entered;
+        std::promise<void>       proceed;
+        std::shared_future<void> gate;
+        std::weak_ptr<int32_t>   lease;
+        bool                     observed_alive = false;
+    } state;
+    state.gate        = state.proceed.get_future().share();
+    state.lease       = weak;
+    const auto device = at::cuda::current_device();
+    const auto stream = at::cuda::getCurrentCUDAStream();
+    ASSERT_EQ(cudaLaunchHostFunc(
+                  stream.stream(),
+                  [](void* ptr) {
+                      auto& state = *static_cast<CallbackState*>(ptr);
+                      state.entered.set_value();
+                      state.gate.wait();
+                      state.observed_alive = !state.lease.expired();
+                  },
+                  &state),
+              cudaSuccess);
+    state.entered.get_future().wait();
+    executor.releaseAllModelBuffers();
+    executor.fenceFakeModelBufferRelease();
+    std::promise<void> releaser_entered;
+    auto               release = std::async(std::launch::async, [&] {
+        c10::cuda::CUDAGuard guard(device);
+        releaser_entered.set_value();
+        executor.releaseAllModelBuffers();
+        executor.releaseAllModelBuffers();
+    });
+    releaser_entered.get_future().wait();
+    const auto status = release.wait_for(std::chrono::milliseconds(100));
+    state.proceed.set_value();
+    release.get();
+    stream.synchronize();
+    EXPECT_EQ(status, std::future_status::timeout);
+    EXPECT_TRUE(state.observed_alive);
+    EXPECT_TRUE(weak.expired());
 }
 
 TEST_F(MtpExecutorTest, testFakeDecodeHiddenWidthDistinguishesHy4AndCompressedResiduals) {
