@@ -843,9 +843,11 @@ public class CostBasedPrefillStrategy {
                     var capacity = worker.prefillChunkCapacity();
                     long remaining = capacity.remainingTokens(inputTokens, System.currentTimeMillis(), deadline);
                     boolean immediate = remaining != Long.MAX_VALUE && capacity.definition().dispatchImmediate();
+                    long chunkDeadline =
+                            remaining != Long.MAX_VALUE ? capacity.definition().dispatchDeadlineMs() : Long.MAX_VALUE;
                     if (remaining != Long.MAX_VALUE && (best == null || immediate && !bestImmediate
-                            || immediate == bestImmediate && (remaining < bestRemaining
-                            || remaining == bestRemaining && capacity.definition().dispatchDeadlineMs() < bestDeadline))) {
+                            || immediate == bestImmediate && (chunkDeadline < bestDeadline
+                                    || chunkDeadline == bestDeadline && remaining < bestRemaining))) {
                         best = endpoint;
                         bestImmediate = immediate;
                         bestRemaining = remaining;

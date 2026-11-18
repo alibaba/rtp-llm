@@ -87,6 +87,45 @@ class PrefillChunkSelectionTest {
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
+    void selectsEarlierDeadlineBeforeTighterCapacity(boolean prepared) {
+        publish("10.0.0.1", 150L, 3, dispatchDeadline);
+        publish("10.0.0.2", 500L, 3, dispatchDeadline - 10_000L);
+        try (SelectedRole selected = select(prepared).value()) {
+            assertNotNull(selected);
+            assertEquals("10.0.0.2", selected.serverStatus().getServerIp());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void skipsEarlierChunksWithoutEnoughTokensOrSlots(boolean prepared) {
+        publish("10.0.0.1", 99L, 3, dispatchDeadline - 20_000L);
+        publish("10.0.0.2", 500L, 0, dispatchDeadline - 15_000L);
+        publish("10.0.0.3", 500L, 3, dispatchDeadline - 10_000L);
+        publish("10.0.0.4", 150L, 3, dispatchDeadline);
+        try (SelectedRole selected = select(prepared).value()) {
+            assertNotNull(selected);
+            assertEquals("10.0.0.3", selected.serverStatus().getServerIp());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void movesToNextDeadlineAfterEarlierChunkIsConsumed(boolean prepared) {
+        publish("10.0.0.1", 200L, 2, dispatchDeadline - 10_000L);
+        publish("10.0.0.2", 150L, 1, dispatchDeadline);
+        for (int requestIndex = 0; requestIndex < 3; requestIndex++) {
+            context.getRequest().setRequestId("chunk-selection-" + requestIndex);
+            try (SelectedRole selected = select(prepared).value()) {
+                assertNotNull(selected);
+                assertEquals(requestIndex < 2 ? "10.0.0.1" : "10.0.0.2", selected.serverStatus().getServerIp());
+                selected.takeUnpublishedChunkRefund();
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     void repeatedStatusDoesNotReplenishCommittedGrant(boolean prepared) {
         PrefillEndpoint endpoint = publish("10.0.0.1", 150L, 1, dispatchDeadline);
         try (SelectedRole selected = select(prepared).value()) {

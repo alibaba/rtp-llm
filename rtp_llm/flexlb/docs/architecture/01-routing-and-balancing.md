@@ -72,8 +72,9 @@ Prefill engine 通过 WorkerStatus 上报原始输入 token 额度、请求槽�
 大于预算的请求走 NORMAL。PDFusion、Decode 和 Encoder 不携带 Prefill 预约。
 
 Chunk 的身份由逻辑 engine、P 启动 `engine_epoch` 和 `chunk_id` 共同确定。
-Master 在可容纳请求且未到分配截止时间的候选中选择剩余 token 额度最小者，
-同等条件优先截止更早者。在选中 worker 的 generation 锁内再次校验并原子扣减
+Master 在 token 额度和请求槽位足够且未过期的候选中，优先选择可立即发送的空闲 P；
+同类候选优先选择分配截止时间最早的 Chunk，截止时间相同时选择剩余 token 额度最小者。
+较早的 Chunk 容量不足时继续选择下一个可容纳请求的候选。在选中 worker 的 generation 锁内再次校验并原子扣减
 tokens 与一个槽位，防止并发超发和旧端点复用。重复上报同一 Chunk 保留已消费
 余额，失效或已清除的预约不能通过重报重新开放。
 
