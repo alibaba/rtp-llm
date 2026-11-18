@@ -1,9 +1,9 @@
 """Merge worker reports without hiding missing or incomplete test execution."""
 
 import argparse
-from pathlib import Path
+import json
 import xml.etree.ElementTree as ET
-
+from pathlib import Path
 
 _REPORT_CASE_KIND = "rtp_report_case_kind"
 _INTEGRITY_ERROR_KIND = "synthetic-integrity-error"
@@ -42,13 +42,96 @@ def count_report_integrity_errors(root):
     return count
 
 
+def remove_replayed_zero_execution_error(root, cached_cases):
+    """Reconcile empty entries only against their complete worker selection proof.
+
+    Return whether every selected instance is accounted for by fresh execution
+    or validated cache replay, including mixed sessions.
+    """
+    evidence = root.find("./properties/property[@name='rtp_cache_collection']")
+    if evidence is None or count_report_integrity_errors(root) != 1:
+        return False
+    try:
+        reports = json.loads(evidence.get("value"))
+        cached = {
+            case.find("./properties/property[@name='nodeid']").get("value")
+            for case in cached_cases
+        }
+        fresh = {
+            prop.get("value")
+            for prop in root.findall(".//testcase/properties/property[@name='nodeid']")
+        }
+        available = cached | fresh
+        selected = set()
+        complete = bool(reports)
+        covered_empty_entries = set()
+        for report in reports:
+            workers = report["workers"]
+            if not workers:
+                complete = False
+                continue
+            expected = set(workers[0]["selected"])
+            claimed = set(workers[0]["cached"])
+            valid = (
+                all(
+                    set(worker["selected"]) == expected
+                    and set(worker["cached"]) == claimed
+                    for worker in workers
+                )
+                and claimed <= expected
+                and claimed <= cached
+            )
+            valid = valid and (expected - claimed) <= fresh
+            if report["required"] and not expected:
+                valid = False
+            complete = complete and valid
+            selected.update(expected)
+            if valid and expected and claimed == expected:
+                covered_empty_entries.add(
+                    report["path"] + ": required test entry collected zero cases"
+                )
+        complete = complete and bool(selected) and selected == available
+    except (ValueError, KeyError, TypeError, AttributeError, IndexError):
+        return False
+    for suite in root.findall("testsuite"):
+        if suite.get("name") != "report-integrity":
+            continue
+        error = suite.find("testcase/error")
+        problems = (error.text or "").splitlines() if error is not None else []
+        remaining = [
+            problem
+            for problem in problems
+            if problem not in covered_empty_entries
+            and not (complete and problem == "remote session executed zero testcases")
+        ]
+        if remaining:
+            error.text = "\n".join(remaining)
+            return False
+        if problems:
+            root.remove(suite)
+            return complete
+    return False
+
+
 def merge_reports(paths, output, *, required=(), forbid_skips=False):
     required = {str(path) for path in required}
     paths = [str(path) for path in paths]
     root = ET.Element("testsuites")
     problems = []
+    collection_reports = []
     total = 0
     for path in paths:
+        workers = []
+        for evidence in sorted(
+            Path(path).parent.glob(Path(path).name + ".collection.*.json")
+        ):
+            try:
+                workers.append(json.loads(evidence.read_text()))
+            except (OSError, ValueError):
+                workers.append({})
+        collection_reports.append(
+            {"path": path, "required": path in required, "workers": workers}
+        )
         try:
             report = ET.parse(path).getroot()
             if report.tag not in {"testsuite", "testsuites"}:
@@ -68,6 +151,13 @@ def merge_reports(paths, output, *, required=(), forbid_skips=False):
             problems.append(f"{path}: {exc}")
     for path in sorted(required - set(paths)):
         problems.append(f"{path}: required report was not supplied")
+    properties = ET.SubElement(root, "properties")
+    ET.SubElement(
+        properties,
+        "property",
+        name="rtp_cache_collection",
+        value=json.dumps(collection_reports),
+    )
     if total == 0:
         problems.append("remote session executed zero testcases")
     if problems:

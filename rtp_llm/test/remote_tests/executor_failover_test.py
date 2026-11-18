@@ -1703,7 +1703,6 @@ def test_collect_session_files_requires_staged_runtime_libs(tmp_path):
         raise AssertionError("collect_session_files should require staged runtime libs")
 
 
-
 _PPU_SESSION_FIXTURE_LIBS = (
     "libcudart.so.13", "libcublas.so.13", "libcublasLt.so.13", "libcupti.so.13",
     "libhgml.so", "libuki.so", "libnccl.so.2", "libpccl.so.2", "libcusparse.so.12",
@@ -1722,7 +1721,7 @@ def test_session_input_collection_receives_the_resolved_gpu_request(
     controller._gpu_request = remote_exec_rtp.GPURequest(gpu_type, 4)
     controller.rootdir = tmp_path
     controller.cas = object()
-    controller.config = SimpleNamespace()
+    controller.config = SimpleNamespace(option=SimpleNamespace(collectonly=False))
     controller._ensure_remote_clients = lambda: None
     observed = []
 
@@ -1809,7 +1808,8 @@ def test_cas_find_missing_retries_transient_unavailable(monkeypatch):
     class _Stub:
         calls = 0
 
-        def FindMissingBlobs(self, request, metadata):
+        def FindMissingBlobs(self, request, metadata, timeout):
+            assert 0 < timeout <= 300
             self.calls += 1
             if self.calls == 1:
                 raise _TransientRpcError()

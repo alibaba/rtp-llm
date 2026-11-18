@@ -115,6 +115,12 @@ class ExecutionResult:
     failover_attempts: int = 0
     # Set only after receiving Operation.done, not from stage metadata alone.
     operation_done: bool = False
+    submission_state: str = "unknown"
+    attempt_receipt: Optional[str] = None
+
+    @property
+    def safe_to_retry(self) -> bool:
+        return self.operation_done or self.submission_state == "not_sent"
 
 
 class RemoteExecutor:
@@ -279,6 +285,7 @@ class RemoteExecutor:
                 return ExecutionResult(
                     exit_code=-1,
                     stderr_raw=b"REMOTE_GLOBAL_DEADLINE_EXCEEDED before Execute submit",
+                    submission_state="not_sent",
                     executor_endpoint=self.grpc_uri,
                     infra_category="watchdog_timeout",
                 )
@@ -464,7 +471,29 @@ class RemoteExecutor:
             if _EXECUTION_STAGE_ORDER.get(stage, 0) > _EXECUTION_STAGE_ORDER["QUEUED"]:
                 _cancel_queued_watchdog()
 
+        receipt_parent = stream_stdout_file.parent if stream_stdout_file else None
+        receipt = {
+            "executor_endpoint": self.grpc_uri,
+            "action_digest": action_digest.hash,
+            "input_root_digest": input_root_digest.hash,
+            "submission_state": "unknown",
+            "operation_name": None,
+        }
+
+        def write_receipt():
+            temporary = receipt_path.with_suffix(".tmp")
+            with temporary.open("w") as stream:
+                json.dump(receipt, stream, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary.replace(receipt_path)
+
         try:
+            receipt_dir = Path(
+                tempfile.mkdtemp(prefix="execute-attempt-", dir=receipt_parent)
+            )
+            receipt_path = receipt_dir / "submission.json"
+            write_receipt()
             execute_call = self.stub.Execute(
                 request, metadata=self.metadata, timeout=rpc_timeout_seconds
             )
@@ -474,6 +503,8 @@ class RemoteExecutor:
                     _op_name_holder[0] = op.name
                 if op.name:
                     _last_op_name_holder[0] = op.name
+                    receipt["operation_name"] = op.name
+                    write_receipt()
                 meta = self._try_unpack_execute_metadata(op)
                 if meta is not None:
                     w = (meta.partial_execution_metadata.worker or "").strip()
@@ -551,6 +582,10 @@ class RemoteExecutor:
                     result.operation_name = op.name
                     result.last_stage = last_stage
                     result.operation_done = True
+                    result.submission_state = "terminal"
+                    result.attempt_receipt = str(receipt_path)
+                    receipt["submission_state"] = "terminal"
+                    write_receipt()
                     self._write_final_stream_files(
                         stream_stdout_file,
                         stream_stderr_file,
@@ -607,6 +642,7 @@ class RemoteExecutor:
                             operation_name=op.name,
                             last_stage=stage,
                             infra_category="executor_stage_regressed",
+                            attempt_receipt=str(receipt_path),
                         )
                 last_stage = stage
                 _ensure_queued_watchdog(stage)
@@ -642,6 +678,7 @@ class RemoteExecutor:
                 operation_name=_last_op_name_holder[0],
                 last_stage=last_stage,
                 infra_category=category,
+                attempt_receipt=str(receipt_path),
             )
         finally:
             # Unregister cancel handlers — action completed or errored
@@ -677,6 +714,7 @@ class RemoteExecutor:
             operation_name=_last_op_name_holder[0],
             last_stage=last_stage,
             infra_category=infra_category,
+            attempt_receipt=str(receipt_path),
         )
 
     def _write_final_stream_files(
@@ -1113,6 +1151,8 @@ class FailoverRemoteExecutor:
                         "infra_category",
                         "failover_attempts",
                         "operation_done",
+                        "submission_state",
+                        "attempt_receipt",
                     )
                 }
                 report["result"].update(
@@ -1187,6 +1227,7 @@ class FailoverRemoteExecutor:
                 return ExecutionResult(
                     exit_code=-1,
                     stderr_raw=b"REMOTE_GLOBAL_DEADLINE_EXCEEDED before retry submit",
+                    submission_state="not_sent",
                     executor_endpoint=endpoint,
                     infra_category="watchdog_timeout",
                 )
@@ -1246,18 +1287,19 @@ class FailoverRemoteExecutor:
                 old_operation = result.operation_name
                 if old_operation:
                     executor.cancel_operation(old_operation)
-                    if not result.operation_done and not executor.wait_operation_done(
+                    if not result.safe_to_retry and executor.wait_operation_done(
                         old_operation
                     ):
-                        log.warning(
-                            "[EXECUTOR_FAILOVER] refusing retry: prior operation "
-                            "is not confirmed terminal endpoint=%s operation=%s "
-                            "last_stage=%s will_rerun=false",
-                            endpoint,
-                            old_operation,
-                            result.last_stage or "n/a",
-                        )
-                        return result
+                        result.operation_done = True
+                        result.submission_state = "terminal"
+                if not result.safe_to_retry:
+                    log.warning(
+                        "[EXECUTOR_FAILOVER] refusing retry: prior submission "
+                        "is not confirmed terminal operation=%s receipt=%s",
+                        old_operation or "unknown",
+                        result.attempt_receipt,
+                    )
+                    return result
                 endpoint = next_endpoint
                 attempts += 1
                 log.warning(

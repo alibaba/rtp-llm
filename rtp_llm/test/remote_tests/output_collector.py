@@ -31,17 +31,23 @@ log = logging.getLogger(__name__)
 
 def _safe_extract(tar: tarfile.TarFile, dest: Path) -> None:
     """Extract tar members safely, rejecting path traversal attempts."""
+    root = dest.resolve()
     for member in tar.getmembers():
-        member_path = os.path.normpath(member.name)
-        if member_path.startswith("..") or os.path.isabs(member_path):
-            log.warning("Skipping unsafe tar member: %s", member.name)
-            continue
-        # Resolve to ensure no symlink tricks
-        target = (dest / member_path).resolve()
-        if not str(target).startswith(str(dest.resolve())):
+        target = (root / member.name).resolve()
+        if not target.is_relative_to(root) or Path(member.name).is_absolute():
             log.warning("Skipping tar member escaping dest: %s", member.name)
             continue
-        tar.extract(member, dest)
+        if not (member.isfile() or member.isdir() or member.issym()):
+            log.warning("Skipping unsupported tar member: %s", member.name)
+            continue
+        if member.issym():
+            base = target.parent
+            link = Path(member.linkname)
+            if link.is_absolute() or not (base / link).resolve().is_relative_to(root):
+                log.warning("Skipping tar link escaping dest: %s", member.name)
+                continue
+        member.mode &= 0o777
+        tar.extract(member, root)
 
 
 # Bazel-compatible env var name — existing code already writes to this.

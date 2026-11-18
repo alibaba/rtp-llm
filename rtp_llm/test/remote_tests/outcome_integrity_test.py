@@ -4,9 +4,9 @@ import hashlib
 import importlib.metadata
 import json
 import shlex
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import SimpleNamespace
-import xml.etree.ElementTree as ET
 
 import pytest
 
@@ -15,8 +15,8 @@ from rtp_llm.test.remote_tests.executor import ExecutionResult
 from rtp_llm.test.remote_tests.remote_exec_rtp import RemoteRuntimeConfig
 from rtp_llm.test.remote_tests.remote_timeout_policy import select_remote_timeout_policy
 from rtp_llm.test.smoke_framework.runs_plugin import (
-    RepeatExecution,
     _REPEAT_EXECUTION,
+    RepeatExecution,
     repeat_execution,
 )
 
@@ -116,7 +116,22 @@ def test_session_cache_count_is_validated_after_no_tests_normalization(tmp_path,
             '</properties></testcase>'
         )) for i in range(count)
     }
-    assert controller._parse_remote_output(_result('<testsuites><testsuite tests="0"/></testsuites>', exit_code=5), None) == (0 if count == expected else 4)
+    import json
+
+    from rtp_llm.test.remote_tests.junit_merge import merge_reports
+
+    worker = tmp_path / "worker.xml"
+    worker.write_text('<testsuite tests="0"/>')
+    nodeids = [f"pkg/test.py::test_{i}" for i in range(count)]
+    Path(str(worker) + ".collection.local.json").write_text(
+        json.dumps({"selected": nodeids, "cached": nodeids})
+    )
+    merged = tmp_path / "merged.xml"
+    with pytest.raises(ValueError):
+        merge_reports([worker], merged, required=[worker])
+    assert controller._parse_remote_output(
+        _result(merged.read_text(), exit_code=5), None
+    ) == (0 if count == expected else 4)
 
 
 @pytest.mark.parametrize("failure", ["missing", "malformed", "failure", "error"])

@@ -42,6 +42,11 @@ from rtp_llm.test.smoke.comparer_registry import (
     resolve_comparer,
     set_default_comparer,
 )
+from rtp_llm.test.smoke.dash_grpc_comparer import DASH_ENDPOINT, DashGrpcComparer
+from rtp_llm.test.smoke.dash_sc_grpc_comparer import (
+    DASH_SC_GRPC_ENDPOINT,
+    DashScGrpcComparer,
+)
 from rtp_llm.test.smoke.embedding_comparer import EmbeddingComparer
 from rtp_llm.test.smoke.gpu_diagnostics import (
     ExceptionType,
@@ -52,18 +57,13 @@ from rtp_llm.test.smoke.gpu_diagnostics import (
     scan_process_log,
     snapshot_dmesg,
 )
-from rtp_llm.test.smoke.dash_grpc_comparer import DASH_ENDPOINT, DashGrpcComparer
-from rtp_llm.test.smoke.dash_sc_grpc_comparer import (
-    DASH_SC_GRPC_ENDPOINT,
-    DashScGrpcComparer,
-)
 from rtp_llm.test.smoke.normal_comparer import NormalComparer
 from rtp_llm.test.smoke.openai_comparer import OpenaiComparer
 from rtp_llm.test.smoke.remote_kvcm_server import RemoteKVCMServer
 from rtp_llm.test.smoke.reranker_comparer import RerankerComparer
 from rtp_llm.test.smoke.similarity_comparer import SimilarityComparer
-from rtp_llm.test.smoke.tau2_bench_comparer import Tau2BenchComparer
 from rtp_llm.test.smoke.task_info import TaskInfo, TaskStates
+from rtp_llm.test.smoke.tau2_bench_comparer import Tau2BenchComparer
 from rtp_llm.test.smoke.worker_status_comparer import WorkerStatusComparer
 from rtp_llm.test.utils.coredump_util import (
     summarize_and_cleanup_coredumps as _summarize_and_cleanup_coredumps,
@@ -1095,13 +1095,23 @@ class CaseRunner(object):
         def stop_registered_servers(failed_role_name: str) -> None:
             with server_managers_lock:
                 registered_managers = list(server_managers_by_role.items())
+            errors = []
             for role_name, server_manager in registered_managers:
                 logging.info(
                     "Stopping %s server after %s startup failure",
                     role_name,
                     failed_role_name,
                 )
-                server_manager.stop_server()
+                try:
+                    server_manager.stop_server()
+                except Exception as exc:
+                    errors.append(exc)
+                    logging.exception("Failed to stop owned server %s", role_name)
+
+            if errors:
+                raise RuntimeError("Failed to stop owned startup services") from errors[
+                    0
+                ]
 
         def start_single_server(config):
             env_dict = config["env_dict"]
@@ -1147,47 +1157,54 @@ class CaseRunner(object):
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=len(server_configs)
         ) as executor:
-            # 提交所有任务
-            future_to_config = {
-                executor.submit(start_single_server, config): config
-                for config in server_configs
-            }
-
-            # 收集结果
+            future_to_config = {}
             results = {}
-            for future in concurrent.futures.as_completed(future_to_config, timeout=3600):
-                config = future_to_config[future]
-                try:
-                    server_manager, task_states = future.result()
-                    results[config["role_name"]] = (server_manager, task_states)
-                except concurrent.futures.CancelledError:
-                    task_states = TaskStates()
-                    task_states.ret = False
-                    task_states.err_msg = f"{config['role_name']} server start cancelled because another server failed"
-                    results[config["role_name"]] = (None, task_states)
-                except Exception as e:
-                    logging.exception(
-                        "Unexpected exception starting server %s",
-                        config["role_name"],
+            try:
+                for config in server_configs:
+                    future_to_config[executor.submit(start_single_server, config)] = (
+                        config
                     )
-                    task_states = TaskStates()
-                    task_states.ret = False
-                    task_states.err_msg = (
-                        f"Failed to start server {config['role_name']}: {str(e)}"
-                    )
-                    results[config["role_name"]] = (None, task_states)
-
-                if results[config["role_name"]][1].ret != True:
-                    if not failure_event.is_set():
-                        logging.error(
-                            "Parallel server %s startup failed, cancelling siblings",
+                for future in concurrent.futures.as_completed(
+                    future_to_config, timeout=3600
+                ):
+                    config = future_to_config[future]
+                    try:
+                        server_manager, task_states = future.result()
+                        results[config["role_name"]] = (server_manager, task_states)
+                    except concurrent.futures.CancelledError:
+                        task_states = TaskStates()
+                        task_states.ret = False
+                        task_states.err_msg = f"{config['role_name']} server start cancelled because another server failed"
+                        results[config["role_name"]] = (None, task_states)
+                    except Exception as e:
+                        logging.exception(
+                            "Unexpected exception starting server %s",
                             config["role_name"],
                         )
-                        failure_event.set()
-                    for pending_future in future_to_config:
-                        if pending_future is not future:
-                            pending_future.cancel()
-                    stop_registered_servers(config["role_name"])
+                        task_states = TaskStates()
+                        task_states.ret = False
+                        task_states.err_msg = (
+                            f"Failed to start server {config['role_name']}: {str(e)}"
+                        )
+                        results[config["role_name"]] = (None, task_states)
+
+                    if results[config["role_name"]][1].ret != True:
+                        if not failure_event.is_set():
+                            logging.error(
+                                "Parallel server %s startup failed, cancelling siblings",
+                                config["role_name"],
+                            )
+                            failure_event.set()
+                        for pending_future in future_to_config:
+                            if pending_future is not future:
+                                pending_future.cancel()
+                        stop_registered_servers(config["role_name"])
+            except BaseException:
+                failure_event.set()
+                for pending_future in future_to_config:
+                    pending_future.cancel()
+                stop_registered_servers("parallel startup interrupted")
+                raise
 
             # 按照原始顺序返回结果
             for config in server_configs:
