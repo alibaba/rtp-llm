@@ -3,6 +3,10 @@ import time
 from multiprocessing import Lock, Value
 from typing import Optional
 
+from rtp_llm.frontend.request_id_generator import (
+    EPOCH_2020_MS,
+    REQUEST_ID_TIMESTAMP_LIMIT_MS,
+)
 
 class ConcurrencyException(Exception):
     pass
@@ -28,8 +32,19 @@ class ConcurrencyController:
                     f"Concurrency limit {self.max_concurrency} reached"
                 )
             # A logical slot contains the wall-clock millisecond and a 12-bit sequence.
-            sequence = max(self.request_counter.value + 1, (time.time_ns() // 1_000_000) << 12)
-            self.request_counter.value = sequence + request_count - 1
+            next_slot = self.request_counter.value + 1
+            # Preserve the rotating sequence used by request-ID-based DP routing
+            # when advancing to a new wall-clock millisecond.
+            now_ms = time.time_ns() // 1_000_000
+            sequence = next_slot
+            if EPOCH_2020_MS <= now_ms < REQUEST_ID_TIMESTAMP_LIMIT_MS:
+                sequence = max(next_slot, (now_ms << 12) | (next_slot & 0xFFF))
+            last_slot = sequence + request_count - 1
+            if (sequence >> 12) < EPOCH_2020_MS or (
+                last_slot >> 12
+            ) >= REQUEST_ID_TIMESTAMP_LIMIT_MS:
+                raise RuntimeError("Cannot allocate request IDs within the signed 64-bit range")
+            self.request_counter.value = last_slot
             self.current_concurrency.value += 1
             return sequence
 

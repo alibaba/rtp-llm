@@ -1283,22 +1283,36 @@ class ModelRpcClient(object):
     async def close(self) -> None:
         await self._channel_pool.close()
 
-    def _get_explicit_target_address(self, input_py: GenerateInput) -> str | None:
+    def _get_explicit_target(self, input_py: GenerateInput) -> RoleAddr | None:
+        prefill = None
         for role_addr in input_py.generate_config.role_addrs:
             if role_addr.role in (RoleType.DECODE, RoleType.PDFUSION) and role_addr.ip:
-                try:
-                    return _format_host_port(role_addr.ip, role_addr.grpc_port)
-                except (TypeError, ValueError) as error:
-                    logging.warning(
-                        "Invalid explicit backend route, request_id=%s: %s",
-                        input_py.request_id,
-                        error,
-                    )
-                    raise FtRuntimeException(
-                        ExceptionType.INVALID_PARAMS,
-                        f"request_id={input_py.request_id} has an invalid explicit backend route",
-                    ) from None
+                return role_addr
+            if role_addr.role == RoleType.PREFILL and role_addr.ip and prefill is None:
+                prefill = role_addr
+        if self._role_type in (RoleType.FRONTEND, RoleType.PDFUSION):
+            if not _selected_pd_separation(
+                RoleType.DECODE, input_py.generate_config, input_py.enqueued_by_master
+            ):
+                return prefill
         return None
+
+    def _get_explicit_target_address(self, input_py: GenerateInput) -> str | None:
+        role_addr = self._get_explicit_target(input_py)
+        if role_addr is None:
+            return None
+        try:
+            return _format_host_port(role_addr.ip, role_addr.grpc_port)
+        except (TypeError, ValueError) as error:
+            logging.warning(
+                "Invalid explicit backend route, request_id=%s: %s",
+                input_py.request_id,
+                error,
+            )
+            raise FtRuntimeException(
+                ExceptionType.INVALID_PARAMS,
+                f"request_id={input_py.request_id} has an invalid explicit backend route",
+            ) from None
 
     def _build_response_role_addrs(
         self, input_py: GenerateInput, target_address: str
@@ -1530,10 +1544,9 @@ class ModelRpcClient(object):
         address_list, target_address, response_role_addrs = (
             self._select_address_and_response_role_addrs(input_py)
         )
-        for role_addr in input_py.generate_config.role_addrs:
-            if role_addr.role in (RoleType.DECODE, RoleType.PDFUSION) and role_addr.ip:
-                selected_role = role_addr.role
-                break
+        explicit_target = self._get_explicit_target(input_py)
+        if explicit_target is not None:
+            selected_role = explicit_target.role
         if selected_role == RoleType.PREFILL:
             # A directly submitted request has no Decode peer to attach to a handoff.
             # Keep any business unique_key, but prevent it from enabling a handoff.
@@ -1816,17 +1829,8 @@ class ModelRpcClient(object):
         """Return results in input order, optionally preserving per-item RPC errors."""
         if not inputs:
             return []
-        selected_roles = [
-            next(
-                (
-                    addr.role
-                    for addr in inp.generate_config.role_addrs
-                    if addr.ip and addr.role in (RoleType.DECODE, RoleType.PDFUSION)
-                ),
-                None,
-            )
-            for inp in inputs
-        ]
+        selected_targets = [self._get_explicit_target(inp) for inp in inputs]
+        selected_roles = [target.role if target is not None else None for target in selected_targets]
         if any(
             (role is None and self._requires_explicit_target(inp))
             or (role == RoleType.PDFUSION and getattr(inp, "enqueued_by_master", False))
@@ -1853,7 +1857,9 @@ class ModelRpcClient(object):
             if effective_ms > 0:
                 config.timeout_ms = int(effective_ms)
                 effective_timeouts_ms.append(int(effective_ms))
-            batch_inputs.append(replace(inp, generate_config=config))
+            batch_input = replace(inp, generate_config=config)
+            batch_input.greennet_verified_vit = inp.greennet_verified_vit
+            batch_inputs.append(batch_input)
 
         # A mixed batch with no service fallback has no safe finite batch deadline:
         # the finite item must not terminate the unlimited item.
@@ -1910,6 +1916,8 @@ class ModelRpcClient(object):
                 input_pb = trans_input(inp)
                 if input_pb.multimodal_inputs:
                     await self._wait_greennet_verdict(inp, input_pb)
+                if selected_roles[i] == RoleType.PREFILL:
+                    input_pb.generate_config.can_use_pd_separation = False
                 carrier = dict(item_metadata)
                 if carrier.get("traceparent"):
                     input_pb.request_info.trace_context.traceparent = carrier[

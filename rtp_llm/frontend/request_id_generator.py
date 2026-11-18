@@ -7,6 +7,9 @@ snowflake-like algorithm that combines timestamp, machine ID, and sequence numbe
 import hashlib
 import time
 
+EPOCH_2020_MS = 1577836800000  # 2020-01-01 00:00:00 UTC
+REQUEST_ID_TIMESTAMP_LIMIT_MS = EPOCH_2020_MS + (1 << 39)
+
 
 def generate_request_id(
     ip: str,
@@ -33,7 +36,6 @@ def generate_request_id(
         A unique 64-bit integer request ID
     """
     # This allows us to use fewer bits while maintaining millisecond precision
-    EPOCH_2020_MS = 1577836800000  # 2020-01-01 00:00:00 UTC in milliseconds
     current_timestamp_ms = int(time.time() * 1000) if timestamp_ms is None else timestamp_ms
     relative_timestamp = (
         current_timestamp_ms - EPOCH_2020_MS

@@ -45,14 +45,24 @@ PrefillServerCallerContext::PrefillServerCallerContext(const std::string& prefil
 }
 
 PrefillServerCallerContext::~PrefillServerCallerContext() {
-    {
+    try {
         std::unique_lock<std::shared_mutex> lock(state_mutex_);
         if (!rpc_started_ || !async_state_ || !async_state_->reader) {
             finished_ = true;
         }
+    } catch (...) {
+        // Continue to cancel any outstanding operation before draining.
     }
-    cancel();
-    wait();
+    try {
+        cancel();
+    } catch (...) {
+        // Continue to wait and drain if cancellation setup failed.
+    }
+    try {
+        wait();
+    } catch (...) {
+        // Completion queue shutdown still owns outstanding tags.
+    }
     try {
         std::unique_lock<std::shared_mutex> lock(state_mutex_);
         if (async_state_ && async_state_->trace_status.ok()) {

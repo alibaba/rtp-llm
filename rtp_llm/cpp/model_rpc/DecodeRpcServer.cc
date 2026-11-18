@@ -422,45 +422,60 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
         size_t                                        enqueued_stream_count = 0;
         bool                                          completed = false;
         ~BatchContextGuard() {
+            const auto cleanup = [](auto&& operation) noexcept {
+                try {
+                    operation();
+                } catch (...) {
+                    // Continue cleanup for the other items and stages.
+                }
+            };
             if (!completed) {
-                auto reason = errorInfoFromGrpcStatus(status);
-                if (!reason.hasError())
-                    reason = {ErrorCode::CANCELLED, "batch generation abandoned"};
+                ErrorInfo reason(ErrorCode::CANCELLED, "");
+                cleanup([&] {
+                    reason = status.ok() ? ErrorInfo(ErrorCode::CANCELLED, "batch generation abandoned") :
+                                           errorInfoFromGrpcStatus(status);
+                });
                 // Also cancel attempted admissions when the EnqueueBatch ACK was lost.
                 for (const auto& handle : handles) {
-                    const auto request_id = handle->identity.request_id;
-                    if (submitted_prefill.count(request_id)) {
-                        const auto cancellation = registry.cancel(request_id, reason);
-                        if (!cancellation.ok()) {
-                            RTP_LLM_LOG_WARNING("PD batch cleanup cancel failed, request_id=%ld status=%s",
-                                                request_id,
-                                                cancellation.status().ToString().c_str());
+                    cleanup([&] {
+                        const auto request_id = handle->identity.request_id;
+                        if (submitted_prefill.count(request_id)) {
+                            const auto cancellation = registry.cancel(request_id, reason);
+                            if (!cancellation.ok()) {
+                                RTP_LLM_LOG_WARNING("PD batch cleanup cancel failed, request_id=%ld status=%s",
+                                                    request_id,
+                                                    cancellation.status().ToString().c_str());
+                            }
+                        } else {
+                            registry.finishDownstream(handle);
                         }
-                    } else {
-                        registry.finishDownstream(handle);
-                    }
+                    });
                 }
                 for (const auto& stream : streams) {
-                    if (!stream->hasError() && stream->getStatus() != StreamState::FINISHED)
-                        stream->reportError(reason.code(), reason.ToString());
+                    cleanup([&] {
+                        if (!stream->hasError() && stream->getStatus() != StreamState::FINISHED)
+                            stream->reportError(reason.code(), reason.ToString());
+                    });
                 }
                 for (auto& ctx : contexts) {
-                    ctx->error_info   = reason;
-                    ctx->error_status = grpcStatusFromErrorInfo(reason);
+                    cleanup([&] {
+                        ctx->error_info   = reason;
+                        ctx->error_status = grpcStatusFromErrorInfo(reason);
+                    });
                 }
                 // Canceled streams still need the engine's terminal/resource cleanup.
                 // Resume after any partial submission without enqueueing a stream twice.
                 for (size_t i = enqueued_stream_count; i < streams.size(); ++i)
-                    engine.enqueue(streams[i]);
+                    cleanup([&] { engine.enqueue(streams[i]); });
             }
             for (auto& ctx : contexts) {
-                ctx->markRpcHandlingCompleted();
+                cleanup([&] { ctx->markRpcHandlingCompleted(); });
             }
             contexts.clear();
             for (const auto& handle : handles) {
                 if (completed && !handle->canceled.load())
-                    registry.finishDownstream(handle);
-                registry.finishLocal(handle);
+                    cleanup([&] { registry.finishDownstream(handle); });
+                cleanup([&] { registry.finishLocal(handle); });
             }
         }
     } guard{*cancel_registry_, *engine_, {}, {}, {}, {}, grpc::Status::OK};
@@ -521,11 +536,9 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
 
             const bool multimodal =
                 item.multimodal_inputs_size() != 0 || item.has_v41_inputs() || item.has_multimodal_token_layout();
-            if (!single_dp || multimodal) {
+            if (multimodal) {
                 fail_item(item.request_id(),
-                          {ErrorCode::INVALID_PARAMS,
-                           !single_dp ? "P2P batch inference requires single-DP mode" :
-                                        "P2P batch inference cannot attach this multimodal item"});
+                          {ErrorCode::INVALID_PARAMS, "P2P batch inference cannot attach this multimodal item"});
                 continue;
             }
 
@@ -704,6 +717,7 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
     if (!request) {
         return serializeErrorMsg("unknown", ErrorInfo(ErrorCode::INVALID_PARAMS, "null generate request"));
     }
+    AtomicGuard request_guard(onflight_requests_);
     struct PrefillContextGuard {
         std::shared_ptr<PrefillServerCallerContext> context;
 
@@ -711,10 +725,18 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
             if (!context) {
                 return;
             }
-            if (!context->done()) {
-                context->cancel();
+            try {
+                if (!context->done()) {
+                    context->cancel();
+                }
+            } catch (...) {
+                // Waiting is still necessary once the call has been started.
             }
-            context->wait();
+            try {
+                context->wait();
+            } catch (...) {
+                // PrefillServerCallerContext owns completion queue shutdown.
+            }
         }
     };
 
@@ -803,7 +825,6 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
                             error.ToString().c_str());
     };
 
-    AtomicGuard request_guard(onflight_requests_);
     auto        request_id = request->request_id();
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     PDCancelRegistry::Handle cancel_handle;
