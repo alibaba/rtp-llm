@@ -142,6 +142,19 @@ def git_deps():
         ],
     )
 
+    # Asynchronous DNS resolver wired into @curl via USE_ARES in
+    # 3rdparty/curl/curl.BUILD. Snapshot and vendored config headers
+    # (3rdparty/cares) are the pairing grpc@109c5707 builds against.
+    http_archive(
+        name = "cares",
+        build_file = clean_dep("@rtp_llm//3rdparty/cares:cares.BUILD"),
+        sha256 = "e69e33fd40a254fcf00d76efa76776d45f960e34307bd9cea9df93ef79a933f1",
+        strip_prefix = "c-ares-3be1924221e1326df520f8498d704a5c4c8d0cce",
+        urls = [
+            "https://github.com/c-ares/c-ares/archive/3be1924221e1326df520f8498d704a5c4c8d0cce.tar.gz",
+        ],
+    )
+
     git_repository(
         name = "grpc",
         remote = "https://github.com/grpc/grpc.git",

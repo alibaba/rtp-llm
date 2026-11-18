@@ -270,6 +270,7 @@ cc_library(
     deps = [
         "@zlib_archive//:zlib",
         "//external:libssl",
+        "@cares//:ares",
     ],
 )
 
@@ -449,6 +450,13 @@ genrule(
         "#  define OS \"x86_64-pc-linux-gnu\"",
         "#  define RANDOM_FILE \"/dev/urandom\"",
         "#  define USE_OPENSSL 1",
+        # Asynchronous c-ares resolver: bounds name resolution by the
+        # transfer/connect deadline inside the curl event loop and compiles
+        # out curl 7.60's synchronous-DNS alarm()+siglongjmp timeout path
+        # (USE_ALARM_TIMEOUT requires CURLRES_SYNCH). OTLP HTTP export then
+        # stays signal-free without CURLOPT_NOSIGNAL, which the locked OTel
+        # C++ v1.21 http client does not set.
+        "#  define USE_ARES 1",
         "#endif",
         "",
         "#if !defined(_WIN32)",
