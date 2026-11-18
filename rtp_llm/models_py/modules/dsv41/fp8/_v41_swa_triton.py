@@ -22,6 +22,7 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._prefill_stream import prefill_stream_is_capturing
 from rtp_llm.models_py.modules.dsv41.fp8._v41_swa_kv import quantize_swa_row
 
 if TYPE_CHECKING:
@@ -547,7 +548,7 @@ def _try_all_gather_cp4_bytes(local: torch.Tensor) -> Optional[torch.Tensor]:
         or not local.is_contiguous()
         or local.numel() == 0
         or torch.version.hip is not None
-        or torch.cuda.is_current_stream_capturing()
+        or prefill_stream_is_capturing()
         or not torch.distributed.is_initialized()
     ):
         return None

@@ -28,6 +28,7 @@ import torch.nn.functional as F
 
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group
+from rtp_llm.models_py.modules.dsv41._prefill_stream import prefill_stream_is_capturing
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41.attn_type import DECODER_SWA_KV, SWA_KV
 from rtp_llm.models_py.modules.dsv41.cp import CPContext, cp_swa_replay_starts
@@ -763,7 +764,7 @@ class CEDPlan:
             or bool(getattr(attn_inputs, "is_cuda_graph", False))
             or not _supported_model(v4)
             or not torch.distributed.is_initialized()
-            or torch.cuda.is_current_stream_capturing()
+            or prefill_stream_is_capturing()
         ):
             return None
         lengths = cp_ctx.input_lengths_global_host

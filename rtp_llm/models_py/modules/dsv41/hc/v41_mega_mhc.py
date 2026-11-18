@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Callable
 
 import torch
 
+from rtp_llm.models_py.modules.dsv41._prefill_stream import default_eager_prefill
 from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCUnit
 
 if TYPE_CHECKING:
@@ -77,7 +78,7 @@ _PREFILL_STREAM: ContextVar[_PrefillMHCStream | None] = ContextVar(
 
 
 @contextmanager
-def prefill_mhc_stream(device: torch.device):
+def prefill_mhc_stream(device: torch.device, *, reuse_capture: bool = False):
     """The prefill layer loop submits mHC on its caller's stream.
 
     Attention and CP side streams restore that stream before returning. Keep
@@ -91,7 +92,10 @@ def prefill_mhc_stream(device: torch.device):
         )
         token = _PREFILL_STREAM.set(stream)
         try:
-            yield
+            with default_eager_prefill(
+                reuse_capture and stream is not None and stream.key[1] == 0
+            ):
+                yield
         finally:
             _PREFILL_STREAM.reset(token)
 

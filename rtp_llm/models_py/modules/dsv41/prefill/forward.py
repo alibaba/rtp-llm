@@ -103,6 +103,7 @@ import torch
 from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv41 import _profiler
+from rtp_llm.models_py.modules.dsv41._prefill_stream import prefill_stream_is_capturing
 from rtp_llm.models_py.modules.dsv41.cp import (
     build_cp_context_for_forward,
     cp_gather_last_by_request,
@@ -510,7 +511,7 @@ def forward_layers(
                 and h.shape[0] > 0
                 and h.shape[1] == 5120
                 and v4.hc_mult == 4
-                and not torch.cuda.is_current_stream_capturing()
+                and not prefill_stream_is_capturing()
             ):
                 from rtp_llm.models_py.modules.dsv41.prefill._hc_expand_triton import (
                     expand_hc,
@@ -1097,7 +1098,16 @@ def forward_prefill(
     # mHC stream setup to this prefill so variable batches share it across layers.
     from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import prefill_mhc_stream
 
-    with prefill_mhc_stream(input_ids.device) if input_ids.is_cuda else nullcontext():
+    with (
+        prefill_mhc_stream(
+            input_ids.device,
+            reuse_capture=prepare_hidden_fn is None
+            and not _rt.ENABLED
+            and not _fwd_dbg.enabled(),
+        )
+        if input_ids.is_cuda
+        else nullcontext()
+    ):
         hidden = forward_layers(
             v4,
             kv_cache,

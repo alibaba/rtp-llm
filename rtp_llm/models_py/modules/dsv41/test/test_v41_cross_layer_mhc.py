@@ -2,16 +2,91 @@
 
 import os
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
+from rtp_llm.models_py.modules.dsv41 import _prefill_stream
 from rtp_llm.models_py.modules.dsv41.block import Block
 from rtp_llm.models_py.modules.dsv41.hc import decode_transition as transition
 from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCHead, DelayedHCUnit
 
 _ENV = {"DSV41_FUSED_CROSS_LAYER_MHC": "1", "DSV41_MEGA_MHC": "1"}
+
+
+class PrefillStreamTest(unittest.TestCase):
+    def test_only_the_proven_thread_device_and_stream_borrow_eager(self):
+        check = _prefill_stream.prefill_stream_is_capturing
+        main = (0, 0, 1)
+        with patch.object(
+            _prefill_stream, "_current_stream", return_value=main
+        ) as current, patch.object(
+            torch.cuda, "is_current_stream_capturing", return_value=True
+        ) as capture:
+            self.assertTrue(check())
+            with _prefill_stream.default_eager_prefill(True):
+                self.assertFalse(check())
+                with ThreadPoolExecutor(1) as worker:
+                    self.assertTrue(worker.submit(check).result())
+                for other in ((0, 1, 1), (17, 0, 1)):
+                    current.return_value = other
+                    self.assertTrue(check())
+                current.return_value = main
+                with self.assertRaisesRegex(ValueError, "nested"):
+                    with _prefill_stream.default_eager_prefill(False):
+                        self.assertTrue(check())
+                        raise ValueError("nested")
+                self.assertFalse(check())
+            self.assertTrue(check())
+            self.assertEqual(capture.call_count, 6)
+        with patch.object(_prefill_stream, "_current_stream", None), patch.object(
+            torch.cuda, "is_current_stream_capturing", return_value=True
+        ):
+            with _prefill_stream.default_eager_prefill(True):
+                self.assertTrue(check())
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA required")
+    def test_real_capture_on_a_side_stream_inside_default_prefill(self):
+        from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import prefill_mhc_stream
+
+        device = torch.device("cuda", torch.cuda.current_device())
+        main = torch.cuda.default_stream(device)
+        side = torch.cuda.Stream(device=device)
+        out = torch.zeros(1, device=device)
+        graph = torch.cuda.CUDAGraph()
+        check = _prefill_stream.prefill_stream_is_capturing
+        with torch.cuda.stream(main), prefill_mhc_stream(device, reuse_capture=True):
+            with patch.object(
+                torch.cuda,
+                "is_current_stream_capturing",
+                wraps=torch.cuda.is_current_stream_capturing,
+            ) as native:
+                self.assertFalse(check())
+                native.assert_not_called()
+                with torch.cuda.stream(side):
+                    self.assertFalse(check())
+                native.assert_called_once_with()
+                native.reset_mock()
+                if torch.cuda.device_count() > 1:
+                    other = (device.index + 1) % torch.cuda.device_count()
+                    with torch.cuda.device(other):
+                        self.assertFalse(check())
+                    native.assert_called_once_with()
+            with torch.cuda.stream(side), prefill_mhc_stream(
+                device, reuse_capture=True
+            ):
+                self.assertFalse(check())
+                with torch.cuda.graph(graph, stream=side):
+                    self.assertTrue(check())
+                    with prefill_mhc_stream(device, reuse_capture=True):
+                        self.assertTrue(check())
+                    out.add_(1)
+            self.assertFalse(check())
+        graph.replay()
+        torch.cuda.synchronize(device)
+        self.assertEqual(out.item(), 1)
 
 
 class ReferenceNorm(torch.nn.Module):

@@ -18,6 +18,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import (
     cp_kv_slot_mapping,
     cp_state_slot_mapping,
 )
+from rtp_llm.models_py.modules.dsv41._prefill_stream import prefill_stream_is_capturing
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41._rope_only_triton import rope_only_inplace
 from rtp_llm.models_py.modules.dsv41.attn_type import (
@@ -230,7 +231,7 @@ def _prefill_projected_x_cohorts(x, cp_ctx, cohorts, weights, *, direct_map=Fals
 
     # Project the first group on the compute stream, then overlap its
     # AllGather with QKV/SWA. Later groups overlap current-group compression.
-    asynchronous = not torch.cuda.is_current_stream_capturing()
+    asynchronous = not prefill_stream_is_capturing()
     if asynchronous:
         first_send, first_gathered = project(groups[0])
 
@@ -1741,7 +1742,7 @@ class AttentionV41FP8(AttentionFP8):
                 and cp is not None
                 and cp.cp_size > 1
                 and cp.kv_cache_sharded
-                and not torch.cuda.is_current_stream_capturing()
+                and not prefill_stream_is_capturing()
             ):
                 from ._v41_cp_async import launch
 
@@ -2502,7 +2503,7 @@ class AttentionV41FP8(AttentionFP8):
             and common.cp_ctx.cp_size > 1
             and common.cp_ctx.kv_cache_sharded
             and self._source_pool(CSA_STATE) is not None
-            and not torch.cuda.is_current_stream_capturing()
+            and not prefill_stream_is_capturing()
         ):
             from ._v41_cp_async import launch
 
