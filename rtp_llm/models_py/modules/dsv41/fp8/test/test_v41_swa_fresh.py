@@ -24,7 +24,7 @@ def load_attention():
         if isinstance(n, ast.ClassDef) and n.name == "AttentionV41FP8"
     )
     names = {
-        "_can_fuse_swa_fresh",
+        "_prepare_swa_fresh_store",
         "_swa_prefill_workspace",
         "_swa_prefill_concat",
         "_prefill_write_swa_fp8_paged",
@@ -125,7 +125,7 @@ class SwaWorkspaceViewTest(unittest.TestCase):
             owner._begin_forward = lambda: calls.append("begin")
             owner._prefill_common_setup = lambda *args: common
             owner._prefill_compute_qkv = lambda *args, **kw: qkv
-            owner._can_fuse_swa_fresh = lambda *args: False
+            owner._prepare_swa_fresh_store = lambda *args: None
             owner._swa_prefill_workspace = lambda *args, **kw: (
                 calls.append("read") or swa,
                 starts,
@@ -241,6 +241,16 @@ class SwaFreshGpuTest(unittest.TestCase):
             codec.is_supported_fresh_store(k, raw, slots, 136, 0, 4, comp, dst[::2])
         )
 
+    def test_prepared_empty_write_does_not_launch(self):
+        k, raw, slots, comp, dst, out = fixture(
+            lengths=(0,), prefixes=(1,), all_negative=True
+        )
+        store = codec.prepare_fresh_store(k, raw, slots, 136, 0, 4, comp, dst)
+        self.assertIsNotNone(store)
+        with patch.object(codec, "_quantize_and_insert_swa_kernel") as kernel:
+            store(out)
+        kernel.__getitem__.assert_not_called()
+
     def test_graph_changed_bits_slots_and_side_stream(self):
         k, raw, slots, comp, dst, out = fixture()
         producer, consumer = torch.cuda.Stream(), torch.cuda.Stream()
@@ -315,7 +325,7 @@ class SwaFreshGpuTest(unittest.TestCase):
                 a._prefill_compute_qkv = lambda *args, **kw: qkv
                 events = []
                 before = raw.clone()
-                original = codec.quantize_and_insert_k_cache_cp_byte_sliced
+                original = codec._store_cp_direct
                 full = torch.zeros((1, 72192), device="cuda", dtype=torch.uint8)
                 verify_prefix = True
 
@@ -338,11 +348,17 @@ class SwaFreshGpuTest(unittest.TestCase):
 
                 with patch.object(
                     codec, "dequantize_and_gather_k_cache_slots_cp_byte_sliced", gather
-                ), patch.object(
-                    codec, "quantize_and_insert_k_cache_cp_byte_sliced", writer
-                ):
+                ), patch.object(codec, "_store_cp_direct", writer), patch.object(
+                    codec,
+                    "_cp_addressing_supported",
+                    wraps=codec._cp_addressing_supported,
+                ) as addressing, patch.object(
+                    codec, "_valid_keys", wraps=codec._valid_keys
+                ) as keys:
                     result = a._prefill_produce(k, None)
                 self.assertEqual(events, ["prefix", "write"])
+                self.assertEqual(addressing.call_count, 1)
+                self.assertEqual(keys.call_count, 1)
                 offset = 0
                 for sw, p, n in zip(result[2], [127, 0, 5], [139, 37, 1]):
                     self.assertTrue(torch.equal(sw[:p], torch.zeros_like(sw[:p])))
@@ -376,7 +392,7 @@ class SwaFreshGpuTest(unittest.TestCase):
                         self.assertTrue(torch.all(sw[p:].view(torch.int16) == 0x7F81))
                     # Force a rejected capability gate and exercise the original
                     # zero/index_copy/write route with identical valid outputs.
-                    with patch.object(a, "_can_fuse_swa_fresh", return_value=False):
+                    with patch.object(a, "_prepare_swa_fresh_store", return_value=None):
                         legacy = a._prefill_produce(k, None)
                     for got, want in zip(captured[2], legacy[2]):
                         self.assertTrue(
@@ -388,10 +404,10 @@ class SwaFreshGpuTest(unittest.TestCase):
                 ):
                     old = getattr(a, name)
                     setattr(a, name, value)
-                    self.assertFalse(a._can_fuse_swa_fresh(qkv, common))
+                    self.assertFalse(a._prepare_swa_fresh_store(qkv, common))
                     setattr(a, name, old)
                 cp.swa_replay_start = 0
-                self.assertFalse(a._can_fuse_swa_fresh(qkv, common))
+                self.assertFalse(a._prepare_swa_fresh_store(qkv, common))
 
 
 if __name__ == "__main__":

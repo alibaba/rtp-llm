@@ -5,6 +5,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._prefill_stream import prefill_stream_is_capturing
+
 from ._swa_cp_byte_sliced import CPByteSlicedSlotCompaction
 
 
@@ -218,7 +220,7 @@ def try_host_slot_metadata(
         or request_ids.shape != positions.shape
     ):
         return None
-    if torch.cuda.is_current_stream_capturing():
+    if prefill_stream_is_capturing():
         return None
     for name, count in (
         ("prefix_lengths", len(lengths)),

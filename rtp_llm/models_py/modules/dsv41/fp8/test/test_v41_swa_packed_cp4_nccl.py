@@ -57,6 +57,7 @@ def _worker(rank, rendezvous):
     )
     try:
         from rtp_llm.models_py.distributed import collective_torch
+        from rtp_llm.models_py.modules.dsv41.hc.v41_mega_mhc import prefill_mhc_stream
 
         check = unittest.TestCase()
         # Only route TP to this test's real process group; no collective/kernel
@@ -64,20 +65,23 @@ def _worker(rank, rendezvous):
         with patch.object(
             collective_torch, "_get_group", return_value=dist.group.WORLD
         ):
-            with torch.no_grad():
+            with torch.no_grad(), prefill_mhc_stream(
+                torch.device("cuda", rank), reuse_capture=True
+            ):
                 for ratio in (1, 2):
                     case = CONTRACTS.make_fixture(cp_size=4, rank=rank)
                     gather_fresh(case, rank)
                     case.owner.compress_ratio = ratio
-                    check.assertTrue(
-                        case.owner._can_fuse_swa_fresh(case.qkv, case.common)
+                    fresh_store = case.owner._prepare_swa_fresh_store(
+                        case.qkv, case.common
                     )
+                    check.assertIsNotNone(fresh_store)
                     unfused, starts = case.owner._swa_prefill_workspace(
                         case.qkv, case.common
                     )
                     CONTRACTS.assert_packed(check, case, unfused.flat)
                     fused, fused_starts = case.owner._swa_prefill_workspace(
-                        case.qkv, case.common, fuse_cache_write=True
+                        case.qkv, case.common, fresh_store=fresh_store
                     )
                     check.assertEqual(starts, fused_starts)
                     CONTRACTS.assert_packed(check, case, fused.flat)

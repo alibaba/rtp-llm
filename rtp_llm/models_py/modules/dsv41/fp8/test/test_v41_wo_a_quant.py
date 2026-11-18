@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest import mock
@@ -449,6 +449,47 @@ class WoAQuantCPUContractTest(unittest.TestCase):
             self.assertTrue(op.is_supported(a, w))
             self.assertIsNone(op.try_grouped_quant(a, w))
         load.assert_not_called()
+
+    def test_ready_device_checks_live_layout_and_queries_capture_only_on_miss(self):
+        api = SimpleNamespace(get_jit_config_fingerprint=mock.Mock(return_value=(1,)))
+        entry = dict(context=7, api=api, prepared=set())
+        out = (object(), object())
+        with mock.patch.dict(op._READY, {0: entry}, clear=True), mock.patch.object(
+            op, "_device_supported", side_effect=AssertionError("device re-probed")
+        ), mock.patch.object(
+            torch.cuda, "device", return_value=nullcontext()
+        ), mock.patch.object(
+            op, "_context", return_value=7
+        ), mock.patch.object(
+            torch.cuda, "is_current_stream_capturing", return_value=True
+        ) as capture, mock.patch.object(
+            op, "_check_output"
+        ) as check, mock.patch.object(
+            op, "_launch"
+        ) as launch:
+            for rows, row_major in ((1, False), (33, True), (128, False), (259, True)):
+                a, weight = _metadata(rows, row_major=row_major)
+                capture.return_value = True
+                self.assertIsNone(op.try_grouped_quant(a, weight, out=out))
+                capture.return_value = False
+                self.assertIs(op.try_grouped_quant(a, weight, out=out), out)
+                capture.reset_mock()
+                capture.return_value = True
+                self.assertIs(op.try_grouped_quant(a, weight, out=out), out)
+                capture.assert_not_called()
+
+            self.assertEqual(launch.call_count, 8)
+            self.assertEqual(check.call_count, 8)
+            api.get_jit_config_fingerprint.return_value = (2,)
+            self.assertIsNone(op.try_grouped_quant(a, weight, out=out))
+            capture.assert_called_once_with()
+            api.get_jit_config_fingerprint.return_value = (1,)
+            _, changed = _metadata(259, row_major=True)
+            changed[1].stride = lambda: (32768, 32, 1)
+            self.assertIsNone(op.try_grouped_quant(a, changed, out=out))
+            weight[0].data_ptr = lambda: 257
+            self.assertIsNone(op.try_grouped_quant(a, weight, out=out))
+            self.assertEqual(launch.call_count, 8)
 
     def test_sm103_148_sms_is_supported_but_cold_calls_cannot_compile(self):
         a, w = _metadata()

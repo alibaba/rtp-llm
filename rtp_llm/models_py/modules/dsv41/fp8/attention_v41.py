@@ -18,6 +18,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._cp_slot_mapping import (
     cp_kv_slot_mapping,
     cp_state_slot_mapping,
 )
+from rtp_llm.models_py.modules.dsv41._prefill_stream import prefill_stream_is_capturing
 from rtp_llm.models_py.modules.dsv41._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv41._rope_only_triton import rope_only_inplace
 from rtp_llm.models_py.modules.dsv41.attn_type import (
@@ -230,7 +231,7 @@ def _prefill_projected_x_cohorts(x, cp_ctx, cohorts, weights, *, direct_map=Fals
 
     # Project the first group on the compute stream, then overlap its
     # AllGather with QKV/SWA. Later groups overlap current-group compression.
-    asynchronous = not torch.cuda.is_current_stream_capturing()
+    asynchronous = not prefill_stream_is_capturing()
     if asynchronous:
         first_send, first_gathered = project(groups[0])
 
@@ -764,7 +765,7 @@ class AttentionV41FP8(AttentionFP8):
                 kv.reshape(-1, self.head_dim), pool, slots[: bsz * q_len]
             )
 
-    def _prefill_write_swa_fp8_paged(self, common, kv_full, *, fresh_out=None):
+    def _prefill_write_swa_fp8_paged(self, common, kv_full):
         from rtp_llm.models_py.modules.dsv41.cp import cp_swa_replay_starts
 
         meta = common.swa_meta
@@ -823,8 +824,6 @@ class AttentionV41FP8(AttentionFP8):
                     cp_rank=common.cp_ctx.cp_rank,
                     cp_size=common.cp_ctx.cp_size,
                     compaction=compaction,
-                    fresh_out=fresh_out,
-                    fresh_slots=meta.slot_in_flat if fresh_out is not None else None,
                 )
         else:
             pool = self._pool_view_3d_fp8(SWA_KV)
@@ -1743,7 +1742,7 @@ class AttentionV41FP8(AttentionFP8):
                 and cp is not None
                 and cp.cp_size > 1
                 and cp.kv_cache_sharded
-                and not torch.cuda.is_current_stream_capturing()
+                and not prefill_stream_is_capturing()
             ):
                 from ._v41_cp_async import launch
 
@@ -2195,7 +2194,7 @@ class AttentionV41FP8(AttentionFP8):
             return cp.prefix_lengths_host
         return common.prefix_lengths.detach().tolist()
 
-    def _can_fuse_swa_fresh(self, qkv, common):
+    def _prepare_swa_fresh_store(self, qkv, common):
         meta = common.swa_meta
         if (
             self.compress_ratio not in (1, 2)
@@ -2210,8 +2209,8 @@ class AttentionV41FP8(AttentionFP8):
             or meta.cache_gather_lens is None
             or not self._swa_cp_byte_sliced()
         ):
-            return False
-        return swa_codec.is_supported_fresh_store(
+            return None
+        return swa_codec.prepare_fresh_store(
             qkv.kv_full,
             self._pool_raw_u8(SWA_KV),
             meta.slot_mapping,
@@ -2222,7 +2221,7 @@ class AttentionV41FP8(AttentionFP8):
             meta.slot_in_flat,
         )
 
-    def _swa_prefill_workspace(self, qkv, common, *, fuse_cache_write=False):
+    def _swa_prefill_workspace(self, qkv, common, *, fresh_store=None):
         """Return BF16 [request, prefix tail + new tokens] for sparse prefill."""
         from rtp_llm.models_py.modules.dsv41.cp import cp_swa_replay_starts
 
@@ -2246,7 +2245,7 @@ class AttentionV41FP8(AttentionFP8):
             return prefill_kv_workspace.split_swa_rows(qkv.kv_full, lengths_host), [
                 0
             ] * len(lengths_host)
-        buf = self._swa_prefill_concat(qkv, common, fuse_cache_write=fuse_cache_write)
+        buf = self._swa_prefill_concat(qkv, common, fresh_store=fresh_store)
         prefixes_host = self._host_prefill_prefixes(common)
         tails = [min(int(p), self.window_size - 1) for p in prefixes_host]
         packed_lengths = getattr(
@@ -2273,14 +2272,14 @@ class AttentionV41FP8(AttentionFP8):
             for b in range(common.batch_size)
         ], [int(p) - t for p, t in zip(prefixes_host, tails)]
 
-    def _swa_prefill_concat(self, qkv, common, *, fuse_cache_write=False):
+    def _swa_prefill_concat(self, qkv, common, *, fresh_store=None):
         """Pack prefix tails and fresh BF16 rows before overwriting the SWA ring."""
         meta = common.swa_meta
         B, D = common.batch_size, self.head_dim
         row_offsets = getattr(meta, "packed_row_offsets", None)
         row_lengths = getattr(meta, "packed_row_lengths", None)
         shape = (sum(row_lengths), D) if row_lengths is not None else (B, meta.M, D)
-        allocate = torch.empty if fuse_cache_write else torch.zeros
+        allocate = torch.empty if fresh_store is not None else torch.zeros
         buf = allocate(shape, dtype=torch.bfloat16, device=qkv.kv_full.device)
         if meta.prefix_len_max > 0:
             if self._swa_cp_byte_sliced():
@@ -2305,10 +2304,10 @@ class AttentionV41FP8(AttentionFP8):
                     offset=0,
                     out_row_offsets=row_offsets,
                 )
-        if fuse_cache_write:
+        if fresh_store is not None:
             # Prefix reads finish first; all visible fresh rows are then stored
             # even when the SWA ring masks their cache slots. Padding is unused.
-            self._prefill_write_swa_fp8_paged(common, qkv.kv_full, fresh_out=buf)
+            fresh_store(buf)
         else:
             buf.view(-1, D).index_copy_(0, meta.slot_in_flat, qkv.kv_full)
         return buf
@@ -2459,11 +2458,11 @@ class AttentionV41FP8(AttentionFP8):
             qkv = self._prefill_compute_qkv(
                 x, common, shared_input_quant=shared_input_quant
             )
-            fuse_swa_fresh = self._can_fuse_swa_fresh(qkv, common)
+            fresh_store = self._prepare_swa_fresh_store(qkv, common)
             swa, swa_starts = self._swa_prefill_workspace(
-                qkv, common, fuse_cache_write=fuse_swa_fresh
+                qkv, common, fresh_store=fresh_store
             )
-            if not fuse_swa_fresh:
+            if fresh_store is None:
                 self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
             return common, qkv, swa, swa_starts, None
         previous_state = None
@@ -2504,7 +2503,7 @@ class AttentionV41FP8(AttentionFP8):
             and common.cp_ctx.cp_size > 1
             and common.cp_ctx.kv_cache_sharded
             and self._source_pool(CSA_STATE) is not None
-            and not torch.cuda.is_current_stream_capturing()
+            and not prefill_stream_is_capturing()
         ):
             from ._v41_cp_async import launch
 
@@ -2542,11 +2541,11 @@ class AttentionV41FP8(AttentionFP8):
             x, common, shared_input_quant=shared_input_quant
         )
         # Read old SWA tails before writes wrap over them in long prefill chunks.
-        fuse_swa_fresh = self._can_fuse_swa_fresh(qkv, common)
+        fresh_store = self._prepare_swa_fresh_store(qkv, common)
         swa, swa_starts = self._swa_prefill_workspace(
-            qkv, common, fuse_cache_write=fuse_swa_fresh
+            qkv, common, fresh_store=fresh_store
         )
-        if not fuse_swa_fresh:
+        if fresh_store is None:
             self._prefill_write_swa_fp8_paged(common, qkv.kv_full)
         starts = common.prefix_lengths
         lengths = (

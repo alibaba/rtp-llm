@@ -127,6 +127,20 @@ class PrefillDeepSelectCPU(unittest.TestCase):
                     capability in ((10, 0), (10, 3)),
                 )
 
+    def test_dense_topk_checks_native_availability_once(self):
+        logits, ends, out = metadata_fixture()
+        ops = SimpleNamespace(
+            deepselect_fp32_available=Mock(return_value=True),
+            deepselect_fp32=Mock(),
+        )
+        with patch.object(selector, "rtp_llm_ops", ops), patch.object(
+            selector, "_device_supported", return_value=True
+        ):
+            selected = topk._select_tokens(logits, ends, bounds=(None, ends), out=out)
+        self.assertIs(selected, out)
+        ops.deepselect_fp32_available.assert_called_once_with()
+        ops.deepselect_fp32.assert_called_once_with(logits, ends, out, True)
+
     def test_missing_or_disabled_native_binding_falls_back(self):
         modules = (
             SimpleNamespace(),

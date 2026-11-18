@@ -9,6 +9,8 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._prefill_stream import prefill_stream_is_capturing
+
 # Per-score allocation budget, fixed at import; not a total forward-memory cap.
 try:
     _MAX_LOGITS_BYTES = int(
@@ -434,7 +436,7 @@ class _GroupedScores:
         # beyond this forward. Keep the existing device-only path for capture.
         if (
             _MIN_BOUNDS_GROUPS <= len(self.layout) <= _MAX_BOUNDS_GROUPS
-            and not torch.cuda.is_current_stream_capturing()
+            and not prefill_stream_is_capturing()
         ):
             bounds = self._fused_bounds(self.layout)
             if bounds is not None:
@@ -540,7 +542,7 @@ class _GroupedScores:
             chunk = self.layout[first : first + _MAX_BOUNDS_GROUPS]
             bounds = (
                 self._fused_bounds(chunk)
-                if len(chunk) >= 2 and not torch.cuda.is_current_stream_capturing()
+                if len(chunk) >= 2 and not prefill_stream_is_capturing()
                 else None
             )
             if bounds is not None:

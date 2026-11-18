@@ -23,7 +23,7 @@ class PendingDecodePost(NamedTuple):
         return self.previous.post(self.output, self.residual, self.post, self.comb)
 
 
-def _enabled() -> bool:
+def cross_layer_mhc_enabled() -> bool:
     return (
         os.environ.get("DSV41_FUSED_CROSS_LAYER_MHC", "1") == "1"
         and os.environ.get("DSV41_MEGA_MHC", "1") != "0"
@@ -38,19 +38,25 @@ def _plain_decode_block(layer) -> bool:
     )
 
 
-def can_defer_decode_post(layer, next_layer, preserve_output: bool) -> bool:
+def has_delayed_post_connection(layer, next_layer) -> bool:
     if (
-        preserve_output
-        or not _enabled()
-        or not _plain_decode_block(layer)
-        or not _plain_decode_block(next_layer)
-        or next_layer.engram is not None
+        next_layer.engram is not None
         or type(layer.ffn_hc) is not DelayedHCUnit
         or type(next_layer.attn_hc) is not DelayedHCUnit
     ):
         return False
     previous = next_layer.attn_hc._previous_ref
     return previous is not None and previous() is layer.ffn_hc
+
+
+def can_defer_decode_post(layer, next_layer, preserve_output: bool) -> bool:
+    return (
+        not preserve_output
+        and cross_layer_mhc_enabled()
+        and _plain_decode_block(layer)
+        and _plain_decode_block(next_layer)
+        and has_delayed_post_connection(layer, next_layer)
+    )
 
 
 def _can_quantize_attention_input(layer, x, attn_fn) -> bool:
@@ -86,7 +92,11 @@ def forward_decode_layer(
     """
     prepared = None
     if isinstance(hidden, PendingDecodePost):
-        if _enabled() and _plain_decode_block(layer) and layer.engram is None:
+        if (
+            cross_layer_mhc_enabled()
+            and _plain_decode_block(layer)
+            and layer.engram is None
+        ):
             prepared = try_fused_post_pre(
                 hidden.output,
                 hidden.residual,

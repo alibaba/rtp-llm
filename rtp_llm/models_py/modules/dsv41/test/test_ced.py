@@ -139,7 +139,7 @@ def _swa_owner(bounded):
         _swa_prefill_concat=mock.Mock(
             side_effect=AssertionError("unexpected cached prefix read")
         ),
-        _can_fuse_swa_fresh=mock.Mock(return_value=False),
+        _prepare_swa_fresh_store=mock.Mock(return_value=None),
         _prefill_write_swa_fp8_paged=mock.Mock(),
         _prefill_sparse_attention=mock.Mock(),
         _prefill_output_buffer=mock.Mock(return_value=None),
@@ -2875,8 +2875,8 @@ class CedEncoderSplitTest(_SingleThreadTest):
         owner._prefill_compute_qkv = mock.Mock(return_value=qkv)
         old_prefix = torch.full((127, 2), 7.0)
 
-        def snapshot(qkv, common, *, fuse_cache_write=False):
-            self.assertFalse(fuse_cache_write)
+        def snapshot(qkv, common, *, fresh_store=None):
+            self.assertIsNone(fresh_store)
             events.append("read-prefix")
             return [torch.cat((old_prefix, qkv.kv_full))], [16384 - 127]
 
@@ -3324,14 +3324,14 @@ class BoundedSwaConsumerTest(_SingleThreadTest):
         for length in (128, 256):
             owner, common, qkv = self.fixture(length=length, compact=False)
             buffers, starts = owner._swa_prefill_workspace(qkv, common)
-            self.assertEqual(starts, [common.cp_ctx.prefix_length])
+            self.assertSequenceEqual(starts, [common.cp_ctx.prefix_length])
             self.assertEqual(buffers[0].data_ptr(), qkv.kv_full.data_ptr())
             self.assertEqual(buffers[0].shape[0], length)
             owner._swa_prefill_concat.assert_not_called()
         for length in (127, 128):
             cold, common, qkv = self.fixture(length=length, prefix=0, compact=False)
             buffers, starts = cold._swa_prefill_workspace(qkv, common)
-            self.assertEqual(starts, [0])
+            self.assertSequenceEqual(starts, [0])
             self.assertEqual(len(buffers[0]), length)
             cold._swa_prefill_concat.assert_not_called()
 
@@ -3343,9 +3343,7 @@ class BoundedSwaConsumerTest(_SingleThreadTest):
         buffers, starts = owner._swa_prefill_workspace(qkv, common)
         self.assertEqual(starts, [prefix - 127])
         self.assertEqual(buffers[0].shape[0], 385 + 127)
-        owner._swa_prefill_concat.assert_called_once_with(
-            qkv, common, fuse_cache_write=False
-        )
+        owner._swa_prefill_concat.assert_called_once_with(qkv, common, fresh_store=None)
         cold, common, qkv = self.fixture(prefix=0, compact=False, bounded=False)
         buffers, starts = cold._swa_prefill_workspace(qkv, common)
         self.assertEqual(starts, [0])

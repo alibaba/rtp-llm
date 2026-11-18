@@ -31,6 +31,7 @@ import torch
 import triton
 import triton.language as tl
 
+from rtp_llm.models_py.modules.dsv41._prefill_stream import prefill_stream_is_capturing
 from rtp_llm.models_py.modules.dsv41.fp8._v41_prefill_indexer import PrefillIndexerKeys
 
 MAX_CHUNK_ROWS = 4096
@@ -369,8 +370,8 @@ def prepare_plan(
             return None
     stream = torch.cuda.current_stream(candidates.device)
     stream_key = (stream.device.index, stream.cuda_stream)
-    capturing = torch.cuda.is_current_stream_capturing()
-    if capturing and stream_key not in _WARMED_STREAMS:
+    cold_stream = stream_key not in _WARMED_STREAMS
+    if cold_stream and prefill_stream_is_capturing():
         return None
     rows, count = candidates.shape
     batched = lookup or row_key_offsets is not None
@@ -435,7 +436,7 @@ def prepare_plan(
         block_size,
         use_unaligned_ks=True,
     )
-    if not capturing:
+    if cold_stream:
         _WARMED_STREAMS.add(stream_key)
     return SparsePrefillPlan(
         row_ks, row_ke, indices, sparse_end, metadata, key_count, block_size, offsets
@@ -792,10 +793,8 @@ def try_batched_sparse(
     if not deepselect.is_available(q.device):
         return False
     stream = torch.cuda.current_stream(q.device)
-    if (
-        torch.cuda.is_current_stream_capturing()
-        and (stream.device.index, stream.cuda_stream) not in _WARMED_STREAMS
-    ):
+    stream_key = (stream.device.index, stream.cuda_stream)
+    if stream_key not in _WARMED_STREAMS and prefill_stream_is_capturing():
         return False
     prepared_groups = []
     for pieces, slab, offsets in groups:

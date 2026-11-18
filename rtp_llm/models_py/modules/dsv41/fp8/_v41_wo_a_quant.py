@@ -34,6 +34,10 @@ def _device_supported(device):
 
 
 def _weight_supported(weight, scale):
+    return _weight_layout_supported(weight, scale) and _device_supported(weight.device)
+
+
+def _weight_layout_supported(weight, scale):
     return (
         weight.is_cuda
         and weight.shape == (8, 1024, 4096)
@@ -43,22 +47,25 @@ def _weight_supported(weight, scale):
         and scale.dtype == torch.int32
         and scale.shape == (8, 1024, 32)
         and scale.stride() == (32768, 1, 1024)
-        and all(not t.requires_grad and t.data_ptr() % 16 == 0 for t in (weight, scale))
-        and _device_supported(weight.device)
+        and not weight.requires_grad
+        and not scale.requires_grad
+        and weight.data_ptr() % 16 == 0
+        and scale.data_ptr() % 16 == 0
     )
 
 
-def is_supported(a, weight):
+def _layout_supported(a, weight):
     aq, sa = a
     w, sw = weight
-    if aq.ndim != 3 or not 0 < aq.shape[0] < 2**31 - 128:
+    shape = aq.shape
+    if len(shape) != 3 or not 0 < shape[0] < 2**31 - 128:
         return False
-    m = aq.shape[0]
+    m = shape[0]
     stride = (m + 3) // 4 * 4
     return (
         aq.device == sa.device == w.device
         and aq.dtype == torch.float8_e4m3fn
-        and aq.shape == (m, 8, 4096)
+        and shape == (m, 8, 4096)
         # DeepGEMM encodes both runtime strides in its A-side TMA map.
         # The inverse-RoPE quantizer emits group-major [G,M,K]; native mega
         # attention emits token-major [M,G,K]. Both keep K contiguous and
@@ -68,9 +75,16 @@ def is_supported(a, weight):
         and sa.dtype == torch.int32
         and sa.shape == (m, 8, 32)
         and sa.stride() == (1, stride * 32, stride)
-        and all(not t.requires_grad and t.data_ptr() % 16 == 0 for t in (aq, sa))
-        and _weight_supported(w, sw)
+        and not aq.requires_grad
+        and not sa.requires_grad
+        and aq.data_ptr() % 16 == 0
+        and sa.data_ptr() % 16 == 0
+        and _weight_layout_supported(w, sw)
     )
+
+
+def is_supported(a, weight):
+    return _layout_supported(a, weight) and _device_supported(weight[0].device)
 
 
 def _external_api():
@@ -167,22 +181,25 @@ def try_grouped_quant(a, weight, *, out=None):
     Output quantization always uses legacy, independent of global quant knobs.
     Inputs must be finite. Outputs are caller-owned and may be reused.
     """
-    if not is_supported(a, weight) or a[0].device.index not in _READY:
-        return None
     aq, _ = a
-    entry = _READY[aq.device.index]
-    with torch.cuda.device(aq.device):
+    device = aq.device
+    entry = _READY.get(device.index)
+    # Warmup publishes an entry only for a supported device. Operand layouts
+    # and storage can still change across calls and weight reloads.
+    if entry is None or not _layout_supported(a, weight):
+        return None
+    with torch.cuda.device(device):
         if entry["context"] != _context():
             return None
         signature = _signature(a, entry["api"])
-        capturing = torch.cuda.is_current_stream_capturing()
-        if capturing and signature not in entry["prepared"]:
+        missing = signature not in entry["prepared"]
+        if missing and torch.cuda.is_current_stream_capturing():
             return None
         if out is None:
-            out = _output(aq.shape[0], aq.device)
-        _check_output(out, aq.shape[0], aq.device, (*a, *weight))
+            out = _output(aq.shape[0], device)
+        _check_output(out, aq.shape[0], device, (*a, *weight))
         _launch(entry, a, weight, out)
-        if not capturing:
+        if missing:
             entry["prepared"].add(signature)
     return out
 
