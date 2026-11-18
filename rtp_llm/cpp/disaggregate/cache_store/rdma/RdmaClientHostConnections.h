@@ -1,5 +1,8 @@
 #pragma once
 
+#include <chrono>
+#include <mutex>
+
 #include "aios/network/accl-barex/include/accl/barex/highlevel/xconnection.h"
 #include "aios/network/accl-barex/include/accl/barex/highlevel/xclient_transport.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/MemoryUtil.h"
@@ -41,6 +44,9 @@ private:
     uint32_t                    qp_count_per_rdma_connection_;
     uint32_t                    connect_timeout_ms_;
 
+#if defined(USING_ROCM) && USING_ROCM
+    std::timed_mutex connection_setup_mutex_;
+#endif
     std::mutex                                            mutex_;
     std::set<std::shared_ptr<::accl::barex::XConnection>> newly_connections_;      // 新建连接已被预订
     std::set<std::shared_ptr<::accl::barex::XConnection>> available_connections_;  // 可复用
