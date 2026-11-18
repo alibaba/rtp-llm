@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTaskRegistry.h"
 #include <atomic>
 #include <unordered_map>
 
@@ -28,6 +29,8 @@
 
 namespace rtp_llm {
 
+class FrozenTask;
+class TransferCompletionCleanup;
 class BatchKVCacheResource;
 class BlockTreeCacheMetricsReporter;
 enum class AsyncProfileKind;
@@ -65,10 +68,10 @@ using StorageQuarantineBreakdown = std::array<std::array<StorageQuarantineCounts
 
 // Describes who protects local targets after UNKNOWN, not whether I/O is safe.
 // Protected completion ownership always takes precedence over this marker.
-enum class StorageLocalTargetProtection {
-    LEGACY,            // StorageBackend retains its existing freeze behavior.
-    TARGETS_HELD,      // The backend already owns protection for every local target.
-    NO_LOCAL_TARGETS,  // The operation only reads local sources.
+enum class StorageTargetProtection {
+    FREEZE_REQUEST_BLOCKS,
+    PROTECTED_BY_BACKEND,
+    NO_LOCAL_TARGETS,
 };
 
 // The backend accepted an operation but cannot prove that DMA/RDMA has
@@ -79,20 +82,20 @@ public:
     StorageOperationCompletionUnknown(
         const std::string& message,
         StorageQuarantineReason reason,
-        StorageLocalTargetProtection local_target_protection = StorageLocalTargetProtection::LEGACY):
+        StorageTargetProtection local_target_protection = StorageTargetProtection::FREEZE_REQUEST_BLOCKS):
         std::runtime_error(message), reason_(reason), local_target_protection_(local_target_protection) {}
 
     StorageQuarantineReason reason() const noexcept {
         return reason_;
     }
 
-    StorageLocalTargetProtection localTargetProtection() const noexcept {
+    StorageTargetProtection localTargetProtection() const noexcept {
         return local_target_protection_;
     }
 
 private:
-    StorageQuarantineReason      reason_;
-    StorageLocalTargetProtection local_target_protection_;
+    StorageQuarantineReason reason_;
+    StorageTargetProtection local_target_protection_;
 };
 
 // The transport reported an explicit timeout. Buffer ownership is still
@@ -168,6 +171,12 @@ private:
 // before derived backend state starts destruction.
 class StorageBackend {
 public:
+    virtual void setCompletionCleanup(std::shared_ptr<TransferCompletionCleanup>) {}
+    virtual void cleanupExpiredMissing() {}
+    virtual std::vector<std::shared_ptr<FrozenTask>> frozenTasks() const { return {}; }
+    virtual TransferTaskRegistry::State queryReadCompletion(const std::string&) const { return TransferTaskRegistry::State::UNKNOWN; }
+    virtual TransferTaskRegistry::ForgetResult forgetReadCompletion(const std::string&) { return TransferTaskRegistry::ForgetResult::FAILED; }
+
     class ExternalIoGuard {
     public:
         ExternalIoGuard() = default;
@@ -313,7 +322,7 @@ private:
     void quarantineTask(const std::shared_ptr<storage_backend_detail::StorageTaskState>& state,
                         bool                                                             is_write,
                         StorageQuarantineReason                                          reason,
-                        StorageLocalTargetProtection local_target_protection = StorageLocalTargetProtection::LEGACY);
+                        StorageTargetProtection local_target_protection = StorageTargetProtection::FREEZE_REQUEST_BLOCKS);
     std::shared_ptr<const CacheTopology> topology_;
     std::atomic<bool>                    remote_cache_enabled_{true};
     PoolsByTag                           pools_by_tag_;

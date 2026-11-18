@@ -174,7 +174,8 @@ DeviceDiskTransferExecutor::execute(TransferTask task, const std::vector<const G
             std::vector<size_t> indices(end - begin);
             std::iota(indices.begin(), indices.end(), begin);
             auto completed = std::make_shared<std::atomic<bool>>(false);
-            auto batch_proof = safety->addBatch();
+            auto batch_proof = std::make_shared<TransferBufferSafety>([safety] { safety->completeBatch(); });
+            safety->addBatch();
             auto complete_batch = [stage_state, indices = std::move(indices), completed, batch_proof](TransferResult result) {
                 batch_proof->report(result.buffer_safe);
                 if (!completed->exchange(true, std::memory_order_acq_rel))

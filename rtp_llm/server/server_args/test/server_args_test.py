@@ -548,8 +548,8 @@ class CacheConfigArgumentsTest(TestCase):
         name = "block_tree_frozen_force_release_timeout_ms"
         env_name = name.upper()
         for args, env, expected in (
-            ([], {}, 60000),
-            (None, {}, 60000),
+            ([], {}, 300000),
+            (None, {}, 300000),
             ([], {env_name: "120000"}, 120000),
             (None, {env_name: "1200000"}, 1200000),
             ([f"--{name}", "0"], {env_name: "120000"}, 0),

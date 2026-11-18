@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeReclaimer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 
 #include <condition_variable>
@@ -59,8 +60,11 @@ std::shared_ptr<KVCacheManager> makeQueryManager(const BackendEnvironment& envir
     manager->block_tree_cache_ = block_tree_cache_test::makeBlockTreeCacheForTest({full});
     if (!manager->block_tree_cache_)
         return nullptr;
+    manager->block_tree_cache_->stopBackgroundTasks();
     manager->block_tree_cache_->storage_backend_ = backend;
-    manager->transfer_broadcast_manager_ = std::move(broadcast);
+    manager->block_tree_cache_->reclaimer().configure(parallel.tp_rank,
+        config.block_tree_frozen_recovery_interval_ms, config.block_tree_frozen_recovery_query_timeout_ms,
+            config.block_tree_frozen_force_release_timeout_ms, std::move(broadcast));
     return manager;
 }
 
@@ -313,9 +317,9 @@ TEST(KVCMCompletionQueryTest, QueryNamespacesStaySeparateAndObserveReadCompletio
     query->add_keys()->set_kvcm_trace_id("write-71");
     query->add_keys()->set_kvcm_trace_id("missing-metadata-id");
     FrozenTask::ExecutionInfo local_execution;
+    local_execution.registry_type = RegistryType::KVCM_READ;
     local_execution.trace_id = std::string("71");
-    local_execution.expected_rank_count = 1;
-    local_execution.expected_peers = {{0, "local"}};
+    local_execution.participant_ranks = {{0, "local"}};
     for (const bool completed : {false, true}) {
         if (completed) {
             gate->release();
@@ -520,12 +524,9 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
     const auto frozen = coordinator->frozenTasks();
     ASSERT_EQ(frozen.size(), 1u);
     const auto record = frozen.front();
-    ASSERT_EQ(record->execution().expected_peers.size(), 2u);
-    EXPECT_EQ(std::get<std::string>(record->execution().trace_id), "block_tree_read_1");
+    ASSERT_EQ(record->execution().participant_ranks.size(), 2u);
+    EXPECT_EQ(record->execution().trace_id, "block_tree_read_1");
     const auto failure_message = record->failure().status.ToString();
-    const auto failure_diagnostics = record->failure().execution_diagnostics;
-    ASSERT_NE(failure_diagnostics, nullptr);
-    const auto original_ranks = failure_diagnostics->ranks;
     const auto references = environment.device_pool->refCount(environment.block_id);
     auto forget_rank_zero = [&] {
         auto stub = RpcService::NewStub(grpc::CreateChannel(addresses.front(), grpc::InsecureChannelCredentials()));
@@ -533,7 +534,7 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
         context.set_deadline(std::chrono::system_clock::now() + 2s);
         FunctionRequestPB forget;
         forget.mutable_completion_forget()->add_keys()->set_kvcm_trace_id(
-            std::get<std::string>(record->execution().trace_id));
+            record->execution().trace_id);
         FunctionResponsePB response;
         const auto status = stub->ExecuteFunction(&context, forget, &response);
         EXPECT_TRUE(status.ok());
@@ -547,7 +548,7 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
     EXPECT_EQ(record->snapshot().state, FrozenTask::State::FROZEN);
     EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), references);
-    FrozenTaskRecovery recovery([coordinator] { return coordinator->frozenTasks(); },
+    FrozenTaskRecovery recovery(*cleanup, [coordinator] { return coordinator->frozenTasks(); },
                                 [coordinator](const auto& execution, int timeout_ms) {
                                     return coordinator->queryTransferCompletion(execution, timeout_ms);
                                 });
@@ -556,7 +557,6 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
             gate->release();
             ASSERT_TRUE(server0.waitReadCompleted());
         }
-        const auto before_query = record->debugString();
         const auto observed = coordinator->queryTransferCompletion(record->execution(), 2000);
         ASSERT_EQ(observed.ranks.size(), 2u);
         EXPECT_TRUE(observed.error.empty()) << observed.error;
@@ -571,7 +571,6 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
         EXPECT_EQ(record->snapshot().state, FrozenTask::State::FROZEN);
         EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
         EXPECT_EQ(environment.device_pool->refCount(environment.block_id), references);
-        EXPECT_EQ(record->debugString(), before_query);
         EXPECT_EQ(coordinator->frozenTasks().size(), 1u);
         EXPECT_EQ(cleanup->size(), 0u);
         const auto recovered = recovery.runOnce(2000);
@@ -584,20 +583,13 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
     }
     EXPECT_EQ(record->failure().status.ToString(), failure_message);
     EXPECT_FALSE(record->failure().buffer_safe);
-    EXPECT_EQ(record->failure().execution_diagnostics, failure_diagnostics);
-    ASSERT_EQ(failure_diagnostics->ranks.size(), original_ranks.size());
-    for (size_t rank = 0; rank < original_ranks.size(); ++rank) {
-        EXPECT_EQ(failure_diagnostics->ranks[rank].grpc_code, original_ranks[rank].grpc_code);
-        EXPECT_EQ(failure_diagnostics->ranks[rank].buffer_safe, original_ranks[rank].buffer_safe);
-        EXPECT_EQ(failure_diagnostics->ranks[rank].worker_transfer_status, original_ranks[rank].worker_transfer_status);
-    }
     const auto replay = recovery.runOnce(2000);
     EXPECT_EQ(replay.queried, 0u);
     EXPECT_EQ(replay.released, 0u);
     EXPECT_TRUE(coordinator->frozenTasks().empty());
     for (const auto& worker : {worker0, worker1}) {
         EXPECT_EQ(worker->backend->taskRegistry().size(), 1u);
-        const auto trace = std::get<std::string>(record->execution().trace_id);
+        const auto trace = record->execution().trace_id;
         const auto duplicate = payloadRequest(*worker->environment, trace);
         FunctionResponsePB response;
         ASSERT_TRUE(worker->manager->executeFunction(duplicate, response));
@@ -607,7 +599,6 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
         EXPECT_EQ(worker->backend->taskRegistry().queryLocal(std::vector<std::string>{trace}).front(),
                   RegistryState::BUFFER_SAFE);
     }
-    const auto released_debug = record->debugString();
     const auto first_forget = forget_rank_zero();
     ASSERT_EQ(first_forget.completion_forget().entries_size(), 1);
     EXPECT_EQ(first_forget.completion_forget().entries(0).status(), TRANSFER_FORGET_DONE);
@@ -648,15 +639,13 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
         EXPECT_EQ(worker0->backend->taskRegistry().size(), 1u);
         EXPECT_EQ(worker1->backend->taskRegistry().size(), 1u);
         EXPECT_EQ(record->snapshot().state, FrozenTask::State::RELEASED);
-        EXPECT_EQ(record->debugString(), released_debug);
         EXPECT_EQ(record->failure().status.ToString(), failure_message);
-        EXPECT_EQ(record->failure().execution_diagnostics, failure_diagnostics);
         EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
         EXPECT_EQ(environment.device_pool->refCount(environment.block_id), references - 1);
     }
     // The late request is rejected before SDK admission and consumes its fence.
     for (const auto& worker : {worker0, worker1}) {
-        const auto trace = std::get<std::string>(record->execution().trace_id);
+        const auto trace = record->execution().trace_id;
         const auto late = payloadRequest(*worker->environment, trace);
         FunctionResponsePB response;
         ASSERT_TRUE(worker->manager->executeFunction(late, response));
@@ -679,11 +668,11 @@ TEST(KVCMCompletionQueryTest, QueryDoesNotThawAndRecoveryWaitsForAllOriginalRpcP
     EXPECT_EQ(cleanup->size(), 0u);
     EXPECT_EQ(worker0->backend->taskRegistry().size(), 0u);
     EXPECT_EQ(worker1->backend->taskRegistry().size(), 0u);
-    EXPECT_EQ(record->debugString(), released_debug);
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), references - 1);
 }
 
 TEST(KVCMCompletionQueryTest, LocalSdkFailuresRecoverOnlyProvenHoldsOnSharedTargets) {
+    auto cleanup = std::make_shared<TransferCompletionCleanup>();
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
     auto worker = std::make_shared<QueryWorker>();
@@ -708,20 +697,17 @@ TEST(KVCMCompletionQueryTest, LocalSdkFailuresRecoverOnlyProvenHoldsOnSharedTarg
     ASSERT_EQ(environment.device_pool->treeRefCount(environment.block_id), 2u);
     std::vector<std::string> messages;
     for (const auto& record : records) {
-        EXPECT_FALSE(record->execution().remote);
-        ASSERT_NE(record->failure().execution_diagnostics, nullptr);
-        EXPECT_NE(record->failure().execution_diagnostics->failure_reason, "rpc_error");
-        EXPECT_NE(record->failure().execution_diagnostics->failure_reason, "rpc_timeout");
+        EXPECT_FALSE(record->execution().uses_rpc);
         messages.push_back(record->failure().status.ToString());
     }
-    FrozenTaskRecovery recovery([manager = worker->manager] { return manager->frozenTasks(); },
+    FrozenTaskRecovery recovery(*cleanup, [manager = worker->manager] { return manager->frozenTasks(); },
                                 [manager = worker->manager](const auto& execution, int timeout_ms) {
                                     return manager->queryTransferCompletion(execution, timeout_ms);
                                 });
     EXPECT_EQ(recovery.runOnce(2000).released, 0u);
     for (size_t index = 0; index < records.size(); ++index) {
         const auto& record = records[index];
-        const auto& trace = std::get<std::string>(record->execution().trace_id);
+        const auto& trace = record->execution().trace_id;
         // Test injection of a subsequent explicit safety proof. This does not
         // claim that the SDK currently exposes a late-completion callback.
         auto& registry = const_cast<TransferTaskRegistry&>(worker->backend->taskRegistry());
@@ -787,10 +773,10 @@ TEST(KVCMCompletionQueryTest, BackgroundRecoveryWaitsForProofAndStopKeepsLatePro
         recovery_config.block_tree_frozen_recovery_query_timeout_ms = 1000;
         auto coordinator = makeQueryManager(environment, backend, parallel, broadcast, recovery_config);
         ASSERT_NE(coordinator, nullptr);
-        coordinator->completion_cleanup_ = std::make_shared<TransferCompletionCleanup>();
-        backend->setCompletionCleanup(coordinator->completion_cleanup_);
-        ASSERT_TRUE(coordinator->startFrozenTaskRecovery());
-        block_tree_cache_detail::ScopeRollback stop([coordinator] { coordinator->stopFrozenTaskRecovery(); });
+        coordinator->block_tree_cache_->reclaimer().completion_cleanup_ = std::make_shared<TransferCompletionCleanup>();
+        backend->setCompletionCleanup(coordinator->block_tree_cache_->reclaimer().completion_cleanup_);
+        ASSERT_TRUE(coordinator->block_tree_cache_->reclaimer().start());
+        block_tree_cache_detail::ScopeRollback stop([coordinator] { coordinator->block_tree_cache_->stopBackgroundTasks(); });
 
         const kv_cache_manager::Locations locations{{{"tp0_Fdefault", "pace://background-0"},
                                                      {"tp1_Fdefault", "pace://background-1"}}};
@@ -815,9 +801,6 @@ TEST(KVCMCompletionQueryTest, BackgroundRecoveryWaitsForProofAndStopKeepsLatePro
         ASSERT_EQ(records.size(), 1u);
         const auto record = records.front();
         const auto failure_message = record->failure().status.ToString();
-        const auto diagnostics = record->failure().execution_diagnostics;
-        ASSERT_NE(diagnostics, nullptr);
-        const auto failed_ranks = diagnostics->ranks;
         ASSERT_TRUE(waitUntil([record] { return record->recoverySnapshot().query_count >= 2; }));
         const auto pending = record->recoverySnapshot();
         ASSERT_NE(pending.last_query, nullptr);
@@ -826,10 +809,10 @@ TEST(KVCMCompletionQueryTest, BackgroundRecoveryWaitsForProofAndStopKeepsLatePro
         EXPECT_EQ(pending.last_query->ranks[1].state, RegistryState::BUFFER_SAFE);
         EXPECT_EQ(record->snapshot().state, FrozenTask::State::FROZEN);
         EXPECT_EQ(environment.device_pool->refCount(environment.block_id), original_references + 1);
-        EXPECT_EQ(coordinator->completion_cleanup_->size(), 0u);
+        EXPECT_EQ(coordinator->block_tree_cache_->reclaimer().completion_cleanup_->size(), 0u);
 
         if (stop_before_safe)
-            coordinator->stopFrozenTaskRecovery();
+            coordinator->block_tree_cache_->stopBackgroundTasks();
         const auto queries_before_safe = record->recoverySnapshot().query_count;
         gate->release();
         ASSERT_TRUE(server0.waitReadCompleted());
@@ -844,9 +827,9 @@ TEST(KVCMCompletionQueryTest, BackgroundRecoveryWaitsForProofAndStopKeepsLatePro
             ASSERT_TRUE(waitUntil([worker0, worker1, coordinator] {
                 return worker0->backend->taskRegistry().size() == 0
                        && worker1->backend->taskRegistry().size() == 0
-                       && coordinator->completion_cleanup_->size() == 0;
+                       && coordinator->block_tree_cache_->reclaimer().completion_cleanup_->size() == 0;
             }));
-            coordinator->stopFrozenTaskRecovery();
+            coordinator->block_tree_cache_->stopBackgroundTasks();
             EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
             EXPECT_EQ(environment.device_pool->refCount(environment.block_id), original_references);
         }
@@ -854,16 +837,10 @@ TEST(KVCMCompletionQueryTest, BackgroundRecoveryWaitsForProofAndStopKeepsLatePro
         EXPECT_EQ(coordinator->frozenTasks().size(), stop_before_safe ? 1u : 0u);
         EXPECT_EQ(record->failure().status.ToString(), failure_message);
         EXPECT_FALSE(record->failure().buffer_safe);
-        EXPECT_EQ(record->failure().execution_diagnostics, diagnostics);
-        ASSERT_EQ(diagnostics->ranks.size(), failed_ranks.size());
-        for (size_t rank = 0; rank < failed_ranks.size(); ++rank) {
-            EXPECT_EQ(diagnostics->ranks[rank].grpc_code, failed_ranks[rank].grpc_code);
-            EXPECT_EQ(diagnostics->ranks[rank].buffer_safe, failed_ranks[rank].buffer_safe);
-        }
         for (const auto& worker : {worker0, worker1}) {
             EXPECT_EQ(worker->backend->taskRegistry().size(), stop_before_safe ? 1u : 0u);
             EXPECT_EQ(worker->backend->taskRegistry().queryLocal(
-                          std::vector<std::string>{std::get<std::string>(record->execution().trace_id)}).front(),
+                          std::vector<std::string>{record->execution().trace_id}).front(),
                       stop_before_safe ? RegistryState::BUFFER_SAFE : RegistryState::UNKNOWN);
         }
     }

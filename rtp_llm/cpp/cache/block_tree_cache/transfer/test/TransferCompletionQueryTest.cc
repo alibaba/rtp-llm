@@ -1,3 +1,4 @@
+#include <limits>
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferCompletionQuery.h"
 
 #include <algorithm>
@@ -79,16 +80,34 @@ void answer(size_t rank, const FunctionRequestPB& request, FunctionResponsePB& r
     }
 }
 
-FrozenTask::ExecutionInfo execution(TransferExecutionTrace trace,
+TransferCompletionIdentity execution(TransferCompletionKey trace,
                                     const std::vector<std::string>& addresses,
                                     bool remote = true) {
-    FrozenTask::ExecutionInfo info;
-    info.trace_id = std::move(trace);
+    TransferCompletionIdentity info;
+    info.registry_type = trace.registry_type;
+    info.trace_id = std::move(trace.trace_id);
     info.remote = remote;
     info.expected_rank_count = addresses.size();
     for (size_t rank = 0; rank < addresses.size(); ++rank)
         info.expected_peers.push_back({rank, addresses[rank]});
     return info;
+}
+
+TEST(TransferCompletionQueryTest, StringKeysPreserveRegistryNamespaceAndNumericWireIdentity) {
+    const TransferCompletionKey transfer{RegistryType::BLOCK_TRANSFER, "71"};
+    const TransferCompletionKey kvcm{RegistryType::KVCM_READ, "71"};
+    EXPECT_NE(transfer, kvcm);
+    EXPECT_EQ(transfer, TransferCompletionKey(uint64_t{71}));
+    EXPECT_EQ(kvcm, TransferCompletionKey(std::string("71")));
+    EXPECT_TRUE(validTransferCompletionKey(transfer));
+    EXPECT_TRUE(validTransferCompletionKey(kvcm));
+    EXPECT_EQ(transfer.numericId(), 71u);
+    for (const auto* invalid : {"", "0", "071", "-1", "71x", "18446744073709551616"}) {
+        EXPECT_FALSE(validTransferCompletionKey({RegistryType::BLOCK_TRANSFER, invalid}));
+    }
+    const TransferCompletionKey maximum{RegistryType::BLOCK_TRANSFER, "18446744073709551615"};
+    EXPECT_TRUE(validTransferCompletionKey(maximum));
+    EXPECT_EQ(maximum.numericId(), std::numeric_limits<uint64_t>::max());
 }
 
 TEST(TransferCompletionQueryTest, LocalReadPreservesNamespacesAndOnlyObservesExistingRecords) {
@@ -98,11 +117,11 @@ TEST(TransferCompletionQueryTest, LocalReadPreservesNamespacesAndOnlyObservesExi
     ASSERT_TRUE(kvcm.begin(std::string("71")));
     ASSERT_TRUE(kvcm.finish(std::string("71"), true));
     size_t calls = 0;
-    TransferCompletionQuery query(nullptr, [&](const TransferExecutionTrace& trace) {
+    TransferCompletionQuery query(nullptr, [&](const TransferCompletionKey& trace) {
         ++calls;
-        if (const auto* numeric = std::get_if<uint64_t>(&trace))
-            return ordinary.query(ordinary.epoch(), std::vector<uint64_t>{*numeric}).front();
-        return kvcm.query(kvcm.epoch(), std::vector<std::string>{std::get<std::string>(trace)}).front();
+        if (trace.registry_type == RegistryType::BLOCK_TRANSFER)
+            return ordinary.query(ordinary.epoch(), std::vector<uint64_t>{trace.numericId()}).front();
+        return kvcm.query(kvcm.epoch(), std::vector<std::string>{trace.trace_id}).front();
     });
     auto numeric = execution(uint64_t{71}, {"local"}, false);
     auto text = execution(std::string("71"), {"local"}, false);
@@ -139,10 +158,11 @@ TEST(TransferCompletionQueryTest, InvalidLocalInputAndReaderFailuresCannotProveS
         EXPECT_EQ(result.ranks[0].state, State::UNKNOWN);
         EXPECT_FALSE(result.error.empty());
     }
-    for (const TransferExecutionTrace& trace : {TransferExecutionTrace{uint64_t{0}},
-                                              TransferExecutionTrace{std::string{}}}) {
+    for (const TransferCompletionKey& trace : {TransferCompletionKey{uint64_t{0}},
+                                              TransferCompletionKey{std::string{}}}) {
         auto invalid = valid;
-        invalid.trace_id = trace;
+        invalid.registry_type = trace.registry_type;
+        invalid.trace_id = trace.trace_id;
         EXPECT_FALSE(query.query(invalid, 1000).all_safe);
     }
     auto missing = valid;
@@ -182,8 +202,8 @@ TEST(TransferCompletionQueryTest, RemoteAllSafeRequiresEveryOriginalRankForBothT
     auto manager = std::make_shared<BroadcastManager>(addresses);
     ASSERT_TRUE(manager->init());
     TransferCompletionQuery query(manager);
-    for (const TransferExecutionTrace& trace : {TransferExecutionTrace{uint64_t{77}},
-                                              TransferExecutionTrace{std::string("77")}}) {
+    for (const TransferCompletionKey& trace : {TransferCompletionKey{uint64_t{77}},
+                                              TransferCompletionKey{std::string("77")}}) {
         for (const auto state : {TRANSFER_COMPLETION_BUFFER_SAFE, TRANSFER_COMPLETION_RUNNING,
                                 TRANSFER_COMPLETION_UNKNOWN}) {
             second_state->store(state);
@@ -191,7 +211,8 @@ TEST(TransferCompletionQueryTest, RemoteAllSafeRequiresEveryOriginalRankForBothT
             // Validation uses rank identities rather than the vector's order.
             std::reverse(info.expected_peers.begin(), info.expected_peers.end());
             const auto result = query.query(info, 2000);
-            EXPECT_EQ(result.trace_id, trace);
+            EXPECT_EQ(result.trace_id, trace.trace_id);
+            EXPECT_EQ(result.registry_type, trace.registry_type);
             EXPECT_EQ(result.all_safe, state == TRANSFER_COMPLETION_BUFFER_SAFE);
             EXPECT_TRUE(result.error.empty());
             ASSERT_EQ(result.ranks.size(), 2u);
@@ -214,8 +235,8 @@ TEST(TransferCompletionQueryTest, RemoteAllSafeRequiresEveryOriginalRankForBothT
 
 TEST(TransferCompletionQueryTest, LocalMissingFenceConfirmsSafetyAndRejectsLateAdmission) {
     TransferTaskRegistry registry;
-    TransferCompletionQuery query(nullptr, [&](const TransferExecutionTrace& trace) {
-        return registry.queryAndBlockMissing(std::vector<uint64_t>{std::get<uint64_t>(trace)}).front();
+    TransferCompletionQuery query(nullptr, [&](const TransferCompletionKey& trace) {
+        return registry.queryAndBlockMissing(std::vector<uint64_t>{trace.numericId()}).front();
     });
     const auto result = query.query(execution(uint64_t{81}, {"local"}, false), 1000);
     ASSERT_TRUE(result.all_safe);
@@ -267,7 +288,7 @@ TEST(TransferCompletionQueryTest, ParticipantMismatchRejectsBeforeAnyRpcOrLocalF
     size_t local_calls = 0;
     TransferCompletionQuery query(manager, [&](const auto&) { ++local_calls; return State::BUFFER_SAFE; });
     const auto valid = execution(uint64_t{88}, {server.address()});
-    std::vector<FrozenTask::ExecutionInfo> invalid;
+    std::vector<TransferCompletionIdentity> invalid;
     invalid.push_back(execution(uint64_t{88}, {}));
     invalid.push_back(execution(uint64_t{88}, {server.address(), server.address()}));
     invalid.push_back(valid);
@@ -337,8 +358,8 @@ TEST(TransferCompletionQueryTest, MalformedRankKeyAndStateResponsesNeverProveSaf
     auto manager = std::make_shared<BroadcastManager>(std::vector<std::string>{server.address()});
     ASSERT_TRUE(manager->init());
     TransferCompletionQuery query(manager);
-    for (const TransferExecutionTrace& trace : {TransferExecutionTrace{uint64_t{91}},
-                                              TransferExecutionTrace{std::string("91")}}) {
+    for (const TransferCompletionKey& trace : {TransferCompletionKey{uint64_t{91}},
+                                              TransferCompletionKey{std::string("91")}}) {
         for (int malformed = 0; malformed < 9; ++malformed) {
             SCOPED_TRACE(malformed);
             mode->store(malformed);

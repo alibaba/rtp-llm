@@ -24,16 +24,9 @@ bool sameTarget(const TransferCompletionTarget& first, const TransferCompletionT
 
 }  // namespace
 
-void TransferCompletionCleanup::Prepared::submit() noexcept {
-    if (node_.empty())
-        return;
-    auto owner = std::move(owner_);
-    owner->submit(node_);
-}
-
 TransferCompletionCleanup::Prepared
-TransferCompletionCleanup::prepare(TransferCompletionTarget target, TransferExecutionTrace trace_id) {
-    if (!validTransferExecutionTrace(trace_id))
+TransferCompletionCleanup::prepare(TransferCompletionTarget target, TransferCompletionKey key) {
+    if (!validTransferCompletionKey(key))
         throw std::invalid_argument("completion cleanup requires a nonempty execution trace");
     if (target.peers.empty() || (!target.remote && target.peers.size() != 1))
         throw std::invalid_argument("completion cleanup requires the original participants");
@@ -44,8 +37,7 @@ TransferCompletionCleanup::prepare(TransferCompletionTarget target, TransferExec
             throw std::invalid_argument("completion cleanup requires unique original ranks and addresses");
     }
     Prepared prepared;
-    prepared.owner_ = shared_from_this();
-    prepared.node_.push_back(Entry{std::move(target), std::move(trace_id)});
+    prepared.node_.push_back(Entry{std::move(target), std::move(key)});
     return prepared;
 }
 
@@ -54,7 +46,10 @@ size_t TransferCompletionCleanup::size() const {
     return outstanding_;
 }
 
-void TransferCompletionCleanup::submit(std::list<Entry>& node) noexcept {
+void TransferCompletionCleanup::enqueue(Prepared&& prepared) noexcept {
+    auto& node = prepared.node_;
+    if (node.empty())
+        return;
     size_t count = 0;
     size_t threshold = 0;
     {
@@ -102,7 +97,7 @@ void TransferCompletionCleanup::logFailure(
         std::ostringstream context;
         if (entry) {
             context << " remote=" << entry->target.remote << " trace=";
-            std::visit([&](const auto& trace) { context << trace; }, entry->trace_id);
+            context << entry->key.trace_id;
             for (const auto& peer : entry->target.peers)
                 context << " peer=" << peer.rank << "@" << peer.address;
         }
@@ -172,10 +167,10 @@ TransferCompletionCleanup::drain(const Forget& forget, int timeout_ms,
                 batch.splice(batch.end(), work, current);
         }
         try {
-            std::vector<TransferExecutionTrace> traces;
+            std::vector<TransferCompletionKey> traces;
             traces.reserve(batch.size());
             for (const auto& entry : batch)
-                traces.push_back(entry.trace_id);
+                traces.push_back(entry.key);
             if (stopped())
                 break;
             summary.attempted += batch.size();
@@ -192,12 +187,14 @@ TransferCompletionCleanup::drain(const Forget& forget, int timeout_ms,
                 size_t forgotten = 0;
                 for (auto it = batch.begin(); it != batch.end(); ++index) {
                     const auto& response = result.entries[index];
-                    if (response.trace_id == it->trace_id && response.all_done) {
+                    const bool same_key = response.registry_type == it->key.registry_type
+                                          && response.trace_id == it->key.trace_id;
+                    if (same_key && response.all_done) {
                         it = batch.erase(it);
                         ++forgotten;
                     } else {
                         summary.failed = true;
-                        logFailure(response.trace_id != it->trace_id ? "forget acknowledgement trace mismatch" :
+                        logFailure(!same_key ? "forget acknowledgement trace mismatch" :
                                    (result.error.empty() ? "forget entry not done" : result.error.c_str()),
                                    &*it, &response);
                         ++it;

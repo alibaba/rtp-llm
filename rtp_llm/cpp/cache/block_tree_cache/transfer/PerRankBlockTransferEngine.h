@@ -37,9 +37,8 @@ public:
     PerRankBlockTransferEngine() = delete;
     virtual ~PerRankBlockTransferEngine();
 
-    // Group a logical request by direction and GroupSet, then submit bounded batches.
-    std::shared_ptr<TransferAsyncContext> execute(TransferTask task);
-    // Maximum physical batch for this route, precomputed during initialization.
+    std::shared_ptr<TransferAsyncContext> execute(
+        TransferTask task, std::shared_ptr<TransferBufferSafetyTracker> safety = nullptr);
     size_t batchLimit(Tier source, Tier target) const noexcept {
         return async_ && source == Tier::DISK && target == Tier::DEVICE ? staging_batch_limit_ :
                                                                           max_descriptors_per_batch_;

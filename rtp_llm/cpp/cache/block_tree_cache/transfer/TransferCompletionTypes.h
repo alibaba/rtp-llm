@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -16,6 +17,15 @@ inline constexpr size_t kTransferCompletionForgetBatchSize = 1024;
 struct TransferCompletionPeer {
     size_t      rank{0};
     std::string address;
+};
+
+struct TransferCompletionIdentity {
+    RegistryType registry_type{RegistryType::BLOCK_TRANSFER};
+    std::string trace_id;
+    std::optional<int64_t>              request_id;
+    bool                                remote{false};
+    size_t                              expected_rank_count{0};
+    std::vector<TransferCompletionPeer> expected_peers;
 };
 
 struct TransferCompletionTarget {
@@ -40,7 +50,8 @@ struct TransferCompletionRankResult {
 };
 
 struct TransferCompletionQueryResult {
-    TransferExecutionTrace                    trace_id{uint64_t{0}};
+    RegistryType registry_type{RegistryType::BLOCK_TRANSFER};
+    std::string trace_id;
     std::vector<TransferCompletionRankResult> ranks;
     bool                                      all_safe{false};
     std::string                               error;
@@ -57,7 +68,8 @@ struct TransferCompletionForgetRankResult {
 };
 
 struct TransferCompletionForgetEntryResult {
-    TransferExecutionTrace                         trace_id{uint64_t{0}};
+    RegistryType registry_type{RegistryType::BLOCK_TRANSFER};
+    std::string trace_id;
     std::vector<TransferCompletionForgetRankResult> ranks;
     bool                                           all_done{false};
 };
