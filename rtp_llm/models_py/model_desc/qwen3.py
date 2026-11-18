@@ -1,3 +1,4 @@
+import os
 from collections.abc import Mapping
 from typing import Any, Dict, Optional
 
@@ -114,6 +115,17 @@ class Qwen3Model(GptModelBase):
         self._eager_prefill_plan = None
         self._eager_prefill_failure = None
         self._eager_prefill_fallback_reasons = set()
+        self._rocm_decode_forward = None
+        self._rocm_decode_rounding_state = None
+        self._rocm_decode_fallback_reasons = set()
+        self._rocm_decode_active_logged = False
+        if (
+            torch.version.hip is not None
+            and os.environ.get("RTP_LLM_ROCM_DECODE_ADD_NORM", "0") == "1"
+        ):
+            from rtp_llm.models_py.model_desc.rocm_decode_qwen3 import forward_decode
+
+            self._rocm_decode_forward = forward_decode
         self.embed_tokens = (
             Embedding(
                 config, parallelism_config, weights.get_global_weight(W.embedding)
@@ -155,6 +167,9 @@ class Qwen3Model(GptModelBase):
         self._eager_prefill_failure = None
         self._eager_prefill_fallback_reasons = set()
         initialized = super().initialize(init_resource)
+        self._rocm_decode_rounding_state = None
+        self._rocm_decode_fallback_reasons = set()
+        self._rocm_decode_active_logged = False
         self._get_cached_layer_kv_caches()
         return initialized
 
@@ -198,6 +213,10 @@ class Qwen3Model(GptModelBase):
         Later target stages require the hidden-state boundary supplied by
         the upstream stage; stage-local warmup supplies the same boundary with zeros.
         """
+        if self._rocm_decode_forward is not None:
+            outputs = self._rocm_decode_forward(self, inputs, fmha_impl)
+            if outputs is not None:
+                return outputs
         if self.embed_tokens is not None:
             hidden_states = self.embed_tokens(inputs.input_ids)
         else:

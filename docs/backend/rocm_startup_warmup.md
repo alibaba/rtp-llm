@@ -71,6 +71,37 @@ microbenchmark or CPU unit tests.
 
 ## Regression checks
 
+### Opt-in Qwen3 Decode residual fusion
+
+`RTP_LLM_ROCM_DECODE_ADD_NORM=1` enables a narrowly scoped Decode optimization;
+the default is `0`. It does not enable Prefill graph or change eager Prefill.
+The supported configuration is plain 36-layer, hidden-size-2560 BF16 Qwen3,
+single-rank gfx942, native KV cache and Decode graph batches 1 through 8.
+Tagged attention, hidden-state capture, module/global hooks, other projections,
+parallel layouts, dtypes and shapes retain the existing forward path.
+
+Residual sums retain the standalone BF16 add's rounding boundary. The fused
+RMSNorm matches the inspected AITER native BF16 RTZ output conversion, not a
+generic round-to-nearest RMSNorm. A small compatibility probe runs outside
+capture and rejects incompatible output rounding. Reduction order can still
+produce a one-BF16-ULP difference; this is not a bitwise-equivalence guarantee.
+Perform model-level precision acceptance on a canary before production use.
+
+The fast path carries residuals across layers and fuses each add into the next
+normalization, removing 72 standalone add kernels for the supported 36 layers.
+Scratch remains forward-/graph-owned. Activation and deduplicated fallback
+reasons are logged; `normalization_rounding_or_unwarmed_capture` means the graph
+warmup did not establish the compatible path. Initialization clears the probe
+state. Keep startup real-request warmup enabled so compilation is excluded from
+external readiness and steady-state latency measurements.
+
+Compare the same prompts, input/output lengths, reuse lengths and graph batch
+sizes with the flag disabled/enabled. Measure per-request TPOT from first/last
+token arrival, and report TTFT/RT separately. Do not infer a TTFT improvement
+from Decode kernel fusion or treat `rtp_llm_step_latency_us` as pure Decode TPOT.
+
+### Existing warmup and metadata checks
+
 Tensor-only and warmup-plan tests run without a GPU:
 
 ```sh

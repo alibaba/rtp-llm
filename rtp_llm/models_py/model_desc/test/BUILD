@@ -3,6 +3,18 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "rocm_decode_residual_fusion_test",
+    srcs = ["rocm_decode_residual_fusion_test.py"],
+    deps = py_test_deps + ["//rtp_llm/models_py:models"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["rocm"],
+    exec_properties = {
+        "gpu": "MI308X-ROCM7",
+        "gpu_count": "1",
+    },
+)
+
+py_test(
     name = "rocm_eager_prefill_plan_test",
     srcs = ["rocm_eager_prefill_plan_test.py"],
     deps = py_test_deps + ["//rtp_llm/models_py:models"],
