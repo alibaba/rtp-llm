@@ -73,24 +73,26 @@ public:
         runner_ = CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance)));
     }
 
-    void init_mtp_draft_prefill(py::object py_instance,
-                                int64_t    max_requests,
-                                int64_t    hidden_size,
-                                int64_t    num_tokens_per_request,
-                                int64_t    hc_mult) {
+    void init_mtp_draft_prefill(py::object               py_instance,
+                                int64_t                  max_requests,
+                                int64_t                  hidden_size,
+                                int64_t                  num_tokens_per_request,
+                                int64_t                  hc_mult,
+                                std::vector<std::string> group_tags,
+                                int64_t                  kernel_block_table_width) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph        = true;
         params.role                     = CudaGraphRole::MTP_DRAFT_PREFILL;
         params.max_seq_len              = 64;
-        params.kernel_block_table_width = 1;
+        params.kernel_block_table_width = kernel_block_table_width;
         params.num_tokens_per_bs        = static_cast<int>(num_tokens_per_request);
         params.max_context_batch_size   = static_cast<size_t>(max_requests);
         params.hidden_size              = static_cast<size_t>(hidden_size);
         params.input_hidden_size        = static_cast<size_t>(hidden_size * hc_mult);
         params.model_data_type          = c10::ScalarType::BFloat16;
         params.position_id_len_factor   = 1;
-        params.kv_cache_group_tags      = {"full"};
+        params.kv_cache_group_tags      = std::move(group_tags);
         runner_ = CudaGraphRunner::initializeCapture(std::make_unique<CudaGraphRunner>(params, std::move(py_instance)));
     }
 
@@ -281,8 +283,10 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("py_instance"),
              py::arg("max_requests"),
              py::arg("hidden_size"),
-             py::arg("num_tokens_per_request") = 4,
-             py::arg("hc_mult")                = 4)
+             py::arg("num_tokens_per_request")   = 4,
+             py::arg("hc_mult")                  = 4,
+             py::arg("group_tags")               = std::vector<std::string>{"full"},
+             py::arg("kernel_block_table_width") = 1)
         .def("init_decode",
              &CudaGraphTestRunner::init_decode,
              py::arg("py_instance"),

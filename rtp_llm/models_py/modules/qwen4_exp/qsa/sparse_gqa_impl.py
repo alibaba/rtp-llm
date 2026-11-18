@@ -357,13 +357,19 @@ class SparseGqaFmhaImpl(FMHAImplBase):
             and (not self.is_prefill or self.is_target_verify or self._is_draft_graph())
         )
 
-    def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
+    def prepare_cuda_graph(
+        self, attn_inputs: PyAttentionInputs, *, refresh_decode_lengths: bool = True
+    ) -> None:
         """Refresh the captured RoPE page offsets for this replay's block table."""
         if not self.support_cuda_graph():
             raise RuntimeError(
                 "qwen4_exp sparse GQA graph prepare requires a graph role"
             )
-        if self.is_target_verify or self._is_draft_graph():
+        if (
+            self.is_target_verify
+            or self._is_draft_graph()
+            or not refresh_decode_lengths
+        ):
             offset = self.rope_kvcache_impl.prepare_kv_cache_offset(attn_inputs)
         else:
             # Decode also refreshes its stable sequence-length buffer.

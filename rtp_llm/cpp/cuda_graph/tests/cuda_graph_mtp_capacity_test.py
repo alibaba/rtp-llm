@@ -51,7 +51,64 @@ class DraftCapacityModel(PackedDraftCapacityModel):
         )
 
 
+class DraftHostPageTableModel(PackedDraftCapacityModel):
+    def __init__(self):
+        super().__init__()
+        self.page_tables = {}
+
+    def prepare_fmha_impl(self, inputs, is_cuda_graph=False):
+        return self
+
+    def prepare_cuda_graph(self, inputs_by_tag):
+        self.page_tables = {
+            tag: inputs.kv_cache_kernel_block_id.clone()
+            for tag, inputs in inputs_by_tag.items()
+        }
+
+
 class MtpGraphCapacityTest(unittest.TestCase):
+    def test_draft_prepare_refreshes_strided_host_page_tables(self):
+        tags = ["full", "aux"]
+        model = DraftHostPageTableModel()
+        runner = CudaGraphRunner()
+        runner.init_mtp_draft_prefill(model, 4, 4, 3, 4, tags, 4)
+
+        # Reuse capture buffers with changing widths and physical row pitches.
+        # The last iteration exercises the generic copy for a strided column view.
+        for width, aux_col_stride in [(4, 1), (2, 1), (6, 2)]:
+            with self.subTest(width=width, aux_col_stride=aux_col_stride):
+                inputs = fixtures._build_prefill_inputs(
+                    tags, {"full": 1, "aux": 2}, [2, 1]
+                )
+                inputs.combo_position_ids = torch.tensor(
+                    [0, 1, 0], device="cuda", dtype=torch.int32
+                )
+                inputs.input_hiddens = torch.ones(
+                    (3, 16), device="cuda", dtype=torch.bfloat16
+                )
+                groups = inputs.attention_inputs
+                expected = {}
+                for offset, (tag, attention) in enumerate(groups.items()):
+                    col_stride = aux_col_stride if tag == "aux" else 1
+                    pitch = width * col_stride + 3
+                    values = torch.arange(2 * pitch, dtype=torch.int32).reshape(
+                        2, pitch
+                    )
+                    values += 1 + offset * 100
+                    host_table = values[:, : width * col_stride : col_stride]
+                    table = values.cuda()[:, : width * col_stride : col_stride]
+                    attention.kv_cache_kernel_block_id = table
+                    attention.kv_cache_kernel_block_id_device = table.contiguous()
+                    expected[tag] = torch.zeros((4, 4), dtype=torch.int32)
+                    live_width = min(width, 4)
+                    expected[tag][:2, :live_width] = host_table[:, :live_width]
+                inputs.attention_inputs = groups
+
+                self.assertTrue(runner.prepare(inputs))
+                for tag in tags:
+                    torch.testing.assert_close(model.page_tables[tag], expected[tag])
+                runner.forward(inputs)
+
     def test_request_capacity_shrink_and_grow_with_variable_acceptance(self):
         # HC width and speculative request lanes are independent dimensions.
         for lanes, hc_mult in ((1, 4), (2, 4), (3, 1), (4, 4)):
