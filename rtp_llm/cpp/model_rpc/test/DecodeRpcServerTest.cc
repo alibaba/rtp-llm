@@ -512,8 +512,12 @@ TEST(DecodeRpcServerTest, CancelBeforeDecodeAdmissionForwardsToSelectedPrefillAn
         EXPECT_EQ(prefill.request_id.load(), 203);
         EXPECT_EQ(prefill.cancel_error_code.load(), static_cast<int64_t>(code));
         const auto finished = decode.meta_->getEngineScheduleInfo(0);
-        ASSERT_EQ(finished.finished_task_info_list.size(), 1);
-        EXPECT_EQ(finished.finished_task_info_list.front().error_code, static_cast<int64_t>(code));
+        if (code == ErrorCode::PRIORITY_PREEMPTED) {
+            ASSERT_EQ(finished.finished_task_info_list.size(), 1u);
+            EXPECT_EQ(finished.finished_task_info_list.front().error_code, static_cast<int64_t>(code));
+        } else {
+            EXPECT_TRUE(finished.finished_task_info_list.empty());
+        }
         GenerateInputPB late;
         late.set_request_id(203);
         PDCancelRegistry::Handle late_handle;

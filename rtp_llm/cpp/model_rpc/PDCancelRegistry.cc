@@ -353,16 +353,13 @@ absl::StatusOr<CancelStatusPB> PDCancelRegistry::cancel(int64_t                 
     if (e->local_done && e->downstream_done && !active_reads_.count(e->unique_key)
         && (!e->stream || !e->stream->hasPendingLocalCleanup()))
         return CANCEL_STATUS_NOT_FOUND;
-    const bool priority_preemption = reason.code() == ErrorCode::PRIORITY_PREEMPTED;
-    // WorkerStatus may already have published completion while RPC cleanup is still running.
-    // Preserve that outcome for preemption while allowing ordinary resource cleanup.
-    if (!meta_->markCancellationPending(e->identity, priority_preemption, priority_preemption)) {
-        return CANCEL_STATUS_NOT_FOUND;
-    }
     e->cancel_reason = reason;
     // Preserve the first local failure if it preceded the cleanup request.
     if (prior_error.hasError())
         e->cancel_reason = prior_error;
+    if (e->cancel_reason.code() == ErrorCode::PRIORITY_PREEMPTED) {
+        meta_->markPriorityPreemptionCanceling(e->identity);
+    }
     e->canceled.store(true);
     // The first scheduled deadline observes cleanup age. Only complete()
     // can start retirement for a canceled record.
@@ -466,11 +463,12 @@ bool PDCancelRegistry::complete(const Handle& handle) {
         waiting_on_reads_[handle->unique_key].insert(handle->identity.request_id);
         return false;
     }
-    if (!meta_->markCancellationComplete(handle->identity.request_id,
-                                         static_cast<int64_t>(handle->cancel_reason.code()),
-                                         handle->cancel_reason.ToString(),
-                                         stream))
-        return false;
+    if (handle->cancel_reason.code() == ErrorCode::PRIORITY_PREEMPTED) {
+        meta_->markPriorityPreemptionCanceled(handle->identity.request_id,
+                                              static_cast<int64_t>(handle->cancel_reason.code()),
+                                              handle->cancel_reason.ToString(),
+                                              stream);
+    }
     handle->terminal = true;
     overdue_cancels_.erase({handle->retain_until_ms, handle->identity.request_id});
     // Local terminal is independent of remote control-plane availability. Keep
