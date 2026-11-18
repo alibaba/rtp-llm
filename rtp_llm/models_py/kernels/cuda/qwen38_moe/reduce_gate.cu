@@ -96,9 +96,15 @@ __global__ void reduce_gate(Bf16* output,
     const auto*                        peer  = static_cast<const Pack*>(ncclGetLsaPointer(window, 0, 1 - comm.lsaRank));
     const auto*                        shared_packs = reinterpret_cast<const Pack*>(shared);
     auto*                              output_packs = reinterpret_cast<Pack*>(output);
+    // NCCL Device API "Local AllReduce using LSA" uses an ordinary CUDA
+    // launch with one barrier slot per CTA. Both peers launch the same
+    // grid; blockIdx.x addresses a slot below requirements.lsaBarrierCount.
+    // ncclCoopCta synchronizes threads in this CTA, not the entire grid.
     ncclCoopCta                        coop;
     ncclLsaBarrierSession<ncclCoopCta> barrier{coop, comm, ncclTeamTagLsa(), blockIdx.x};
-    // The caller stages its local partial on this same CUDA stream.
+    // The acquire/release barriers publish the stream-ordered local copy
+    // before peer loads, then retire each CTA's peer reads before the
+    // next stream-ordered copy can reuse this window.
     sync_or_trap(barrier, coop, timeout_cycles);
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < count / 8; i += blockDim.x * gridDim.x) {
         const Pack  x          = local[i];

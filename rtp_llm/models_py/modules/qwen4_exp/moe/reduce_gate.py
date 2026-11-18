@@ -1,6 +1,7 @@
 """Model-owned TP2 LSA reduction with the shared expert epilogue."""
 
 import logging
+import os
 import socket
 
 import torch
@@ -12,6 +13,7 @@ from rtp_llm.models_py.distributed.collective_utils import exchange_group_state
 # close occurs on only one rank or a graph runner still references the model.
 _PROCESS_LIFETIME_CONTEXTS = []
 _MAX_ROWS = 32
+_NCCL_HEADROOM_BYTES = 8 * 1024 * 1024
 logger = logging.getLogger(__name__)
 
 
@@ -49,6 +51,9 @@ class LsaMoeReduce:
         )
 
     def __call__(self, partial, shared, gate):
+        # Once the routed collective is suppressed, a local failure cannot
+        # choose a different collective. The peer's timed barrier bounds
+        # the wait and both workers must be restarted on such a failure.
         if not (
             not self.closed
             and self.supports(partial)
@@ -112,6 +117,8 @@ def prepare_model_reduce(model, config, parallelism):
     ops = None
     device = None
     try:
+        if os.environ.get("NCCL_P2P_DISABLE") == "1" or os.environ.get("NCCL_CUMEM_ENABLE") == "0":
+            raise ValueError("NCCL P2P access or CUDA memory management is disabled")
         if not (
             not getattr(config, "is_mtp", False)
             and parallelism.ep_size == 2
@@ -127,6 +134,11 @@ def prepare_model_reduce(model, config, parallelism):
             raise ValueError(
                 "LSA shared merge requires local EP2, BF16 Dense and a positive hidden size divisible by 8"
             )
+        device = torch.device("cuda", torch.cuda.current_device())
+        window_bytes = _MAX_ROWS * config.hidden_size * torch.bfloat16.itemsize
+        free_bytes, _ = torch.cuda.mem_get_info(device)
+        if free_bytes < window_bytes + _NCCL_HEADROOM_BYTES:
+            raise ValueError("insufficient free CUDA memory for the LSA window and headroom")
         for layer in model.layers:
             mlp = layer.mlp
             if not (
@@ -138,7 +150,7 @@ def prepare_model_reduce(model, config, parallelism):
                 and getattr(mlp, "_shared_stream", None) is None
                 and tuple(mlp.shared_expert_gate.weight.shape)
                 == (1, config.hidden_size)
-                and mlp.shared_expert_gate.weight.is_cuda
+                and mlp.shared_expert_gate.weight.device == device
                 and mlp.shared_expert_gate.weight.dtype == torch.bfloat16
             ):
                 raise ValueError(
@@ -147,7 +159,6 @@ def prepare_model_reduce(model, config, parallelism):
         from rtp_llm.ops import rtp_llm_ops
 
         ops = rtp_llm_ops._qwen38_lsa
-        device = torch.device("cuda", torch.cuda.current_device())
         state["bus_id"] = ops.device(device.index)
     except Exception as error:
         state["error"] = str(error)
@@ -180,6 +191,7 @@ def prepare_model_reduce(model, config, parallelism):
     owner = LsaMoeReduce(
         ops, group, device, config.hidden_size, bytes.fromhex(peers[0]["uid"])
     )
+    logger.info("MoE LSA ready on %s; missing-peer barrier timeout is nominally 10 seconds", device)
     for layer in model.layers:
         layer.mlp._reduce_shared_gate = owner
     return owner

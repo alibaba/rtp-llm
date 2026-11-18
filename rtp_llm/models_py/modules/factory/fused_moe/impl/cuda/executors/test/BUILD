@@ -393,3 +393,21 @@ py_test(
     srcs = ["nvfp4_hybrid_executor_test.py"],
     deps = ["//rtp_llm/models_py/standalone:auto_model"],
 )
+
+# The stock FlashInfer lock has no b12x ABI. Run this target in the matching
+# CUDA 13 build whose dependency lock includes the verified upstream wheel.
+py_test(
+    name = "nvfp4_hybrid_sm120_gpu_test",
+    srcs = ["nvfp4_hybrid_executor_test.py"],
+    main = "nvfp4_hybrid_executor_test.py",
+    args = ["B12xNvfp4GpuTest"],
+    deps = ["//rtp_llm/models_py/standalone:auto_model"],
+    env = {"GPU_COUNT": "1", "RTP_TEST_B12X_NVFP4_GPU": "1"},
+    tags = ["manual", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+    target_compatible_with = select({
+        "//:using_cuda13_x86": [],
+        "//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
