@@ -66,7 +66,7 @@ void detectNodeViolations(const BlockTree& tree, const TreeNode& node, std::vect
 std::string formatViolationDetail(const FullViolationDetail& detail);
 
 // Each interval targets 5% of the tree (at least one batch), spreading batches of at
-// most 1024 nodes across the interval. Cache lock acquisition retries with sleeps
+// most 128 nodes across the interval. Cache lock acquisition retries with sleeps
 // for up to 10 ms; a timeout skips the window/batch without advancing the cursor.
 // Observation only: it never mutates the tree, resources, block pools or refcounts.
 class BlockTreeCacheMetricsReporter;

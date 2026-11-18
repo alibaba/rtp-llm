@@ -169,9 +169,18 @@ class PausableRecordingTransferEngine: public PerRankBlockTransferEngine {
 public:
     explicit PausableRecordingTransferEngine(const std::vector<GroupSetPtr>& groups,
                                              bool                            enable_disk_cache,
-                                             size_t                          device_disk_staging_block_count = 4):
-        PerRankBlockTransferEngine(
-            groups, enable_disk_cache, {}, device_disk_staging_block_count, 8, 4, 10000, nullptr, 0, 4, true) {}
+                                             size_t                          device_disk_staging_block_count = 8):
+        PerRankBlockTransferEngine(groups,
+                                   enable_disk_cache,
+                                   {},
+                                   device_disk_staging_block_count,
+                                   enable_disk_cache ? 2 : 8,
+                                   4,
+                                   10000,
+                                   nullptr,
+                                   0,
+                                   4,
+                                   true) {}
 
     std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask task) override {
         const auto& descriptors      = task.descriptors();
@@ -388,6 +397,9 @@ inline KVCacheConfig makeTierConfig(TierLayout layout, const std::string& disk_p
     config.btc_transfer_engine_async      = true;
     config.enable_crc                     = true;
     config.reuse_cache_tail_blocks        = std::numeric_limits<int>::max();
+    if (config.enable_disk_cache) {
+        config.memory_cache_max_descriptors_per_transfer_batch = 4;
+    }
     return config;
 }
 

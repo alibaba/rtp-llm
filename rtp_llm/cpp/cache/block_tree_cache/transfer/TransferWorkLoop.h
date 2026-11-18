@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <condition_variable>
 #include <cstdlib>
 #include <exception>
@@ -42,7 +43,8 @@ public:
                      std::shared_ptr<HostStagingBlockPool>          staging,
                      std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr,
                      int64_t                                        world_rank       = 0,
-                     size_t                                         worker_index     = 0);
+                     size_t                                         worker_index     = 0,
+                     std::shared_ptr<HostStagingBlockPool>          swa_staging      = nullptr);
     ~TransferWorkLoop();
     TransferWorkLoop(const TransferWorkLoop&)            = delete;
     TransferWorkLoop& operator=(const TransferWorkLoop&) = delete;
@@ -119,15 +121,16 @@ private:
         CrcCopyExecutor::Timing crc_timing;
     };
     struct StagingResource {
-        std::shared_ptr<HostStagingBlockPool> pool;
-        Queue                                 waiting;
+        std::array<std::shared_ptr<HostStagingBlockPool>, 2> pools;  // FULL/default, SWA.
+        Queue                                                waiting;
     };
     void run();
     // false means the Entry is waiting for staging or has finished.
     bool               plan(Entry& entry);
     bool               acquireStaging(Entry& entry, bool waiting = false);
     void               releaseStaging(Entry& entry);
-    void               retryStaging(StagingResource& resource);
+    void               retryStaging();
+    size_t             stagingIndex(const Entry& entry) const;
     void               tryStep(Entry& entry);
     void               submitCrc(Entry& entry);
     void               submitDisk(Entry& entry);
@@ -190,8 +193,8 @@ private:
     std::string                                    thread_name_;
 
     // ==================== Owner-thread-only state: no lock ====================
-    // One private pool per operation owner, shared by all cache group types.
-    // Declared before entries_ so the pool outlives all Entry leases.
+    // Only load owners have staging. Both class pools and their single wait
+    // queue are private to this owner and outlive every staging lease.
     StagingResource      staging_;
     std::map<int, Queue> crc_waiting_;
     Entries              entries_;

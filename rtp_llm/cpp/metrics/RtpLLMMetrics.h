@@ -1305,6 +1305,17 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class RtpLLMCacheInvariantMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags* tags);
+
+    kmonitor::MutableMetric* violation_qps_metric = nullptr;
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMCacheReuseMetricsCollector final {
 public:
     int64_t device_input_length              = 0;

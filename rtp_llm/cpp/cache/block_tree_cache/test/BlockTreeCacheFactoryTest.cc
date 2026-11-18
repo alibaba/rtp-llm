@@ -2134,7 +2134,7 @@ TEST_F(BlockTreeCacheFactoryTest, DiskIOQueueBudgetsDeriveFromTransferQueueAndBa
         size_t  write_queue;
     };
     const QueueBudgetCase cases[]{
-        {0, 5, 128, 20000, 20000}, {37, 5, 128, 185, 37}, {307, 32, 128, 4912, 307}, {37, 32, 2, 592, 37}};
+        {0, 5, 128, 20000, 20000}, {37, 5, 128, 185, 37}, {307, 32, 128, 4912, 307}, {37, 32, 64, 592, 37}};
     for (const auto& expected : cases) {
         auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
         block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_disk_io_queues");
@@ -2387,6 +2387,7 @@ TEST_F(BlockTreeCacheFactoryTest, DiskStagingBlockCountPropagatesAndValidates) {
         kv_cache_config.enable_disk_cache   = true;
         kv_cache_config.disk_cache_size_mb  = 1;
         kv_cache_config.disk_cache_paths    = disk_path;
+        kv_cache_config.memory_cache_max_descriptors_per_transfer_batch = 1;
         return kv_cache_config;
     };
 
@@ -2403,12 +2404,15 @@ TEST_F(BlockTreeCacheFactoryTest, DiskStagingBlockCountPropagatesAndValidates) {
         EXPECT_EQ(cache->config().device_disk_staging_block_count, 2u);
     }
 
-    for (const int64_t bad_block_count : {int64_t{0}, int64_t{-1}, int64_t{3}}) {
-        auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
-        block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_staging_bad_blocks");
-        auto                                     kv_cache_config = makeDiskKvCacheConfig(disk_dir.path);
-        kv_cache_config.disk_cache_staging_block_count           = bad_block_count;
-        expectFactoryRejects(config, allocator, kv_cache_config);
+    for (const bool async : {false, true}) {
+        for (const int64_t bad_block_count : {int64_t{0}, int64_t{-1}, int64_t{1}, int64_t{3}}) {
+            auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
+            block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_staging_bad_blocks");
+            auto                                     kv_cache_config = makeDiskKvCacheConfig(disk_dir.path);
+            kv_cache_config.btc_transfer_engine_async                = async;
+            kv_cache_config.disk_cache_staging_block_count           = bad_block_count;
+            expectFactoryRejects(config, allocator, kv_cache_config);
+        }
     }
 
     if (CrcCopyWorkspace::available()) {
@@ -2418,7 +2422,35 @@ TEST_F(BlockTreeCacheFactoryTest, DiskStagingBlockCountPropagatesAndValidates) {
         kv_cache_config.disk_cache_staging_block_count           = 2;
         auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{});
         ASSERT_NE(cache, nullptr);
-        EXPECT_EQ(cache->transfer_dispatcher_->per_rank_engine_->batchLimit(Tier::DISK, Tier::DEVICE), 1u);
+        EXPECT_EQ(cache->transfer_dispatcher_->per_rank_engine_->batchLimit(), 1u);
+    }
+
+    if (CrcCopyWorkspace::available()) {
+        auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
+        block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_staging_remainder_blocks");
+        auto                                     kv_cache_config = makeDiskKvCacheConfig(disk_dir.path);
+        kv_cache_config.disk_cache_staging_block_count           = 4;
+        kv_cache_config.block_tree_transfer_worker_count         = 3;
+        auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{});
+        ASSERT_NE(cache, nullptr);
+        const auto& loops = cache->transfer_dispatcher_->per_rank_engine_->load_loops_;
+        ASSERT_EQ(loops.size(), 3u);
+        EXPECT_EQ(loops[0]->staging_.pools[1]->capacity(), 2u);
+        EXPECT_EQ(loops[1]->staging_.pools[1]->capacity(), 1u);
+        EXPECT_EQ(loops[2]->staging_.pools[1]->capacity(), 1u);
+    }
+
+    if (CrcCopyWorkspace::available()) {
+        auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
+        block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_staging_small_batch");
+        auto                                     kv_cache_config        = makeDiskKvCacheConfig(disk_dir.path);
+        kv_cache_config.disk_cache_staging_block_count                  = 2;
+        kv_cache_config.memory_cache_max_descriptors_per_transfer_batch = 2;
+        expectFactoryRejects(config, allocator, kv_cache_config);
+        kv_cache_config.disk_cache_staging_block_count = 4;
+        auto cache                                     = createBlockTreeCache(config, kv_cache_config, allocator);
+        ASSERT_NE(cache, nullptr);
+        EXPECT_EQ(cache->transfer_dispatcher_->per_rank_engine_->batchLimit(), 2u);
     }
 
     // Disk disabled: staging block count is not validated and creation succeeds.
@@ -3303,11 +3335,11 @@ void verifyCrcLocalTierBudgets(bool enable_crc, int tokens_per_block = 64) {
             const size_t staging_stride = ((storage_bytes + 4095) / 4096) * 4096;
             if (engine->asyncEnabled()) {
                 size_t staging_bytes = 0;
-                for (const auto* owners : {&engine->load_loops_, &engine->evict_loops_}) {
-                    ASSERT_EQ(owners->size(), cache->config().transfer_worker_count);
-                    for (const auto& owner : *owners) {
-                        ASSERT_NE(owner, nullptr);
-                        const auto& pool = owner->staging_.pool;
+                ASSERT_EQ(engine->load_loops_.size(), cache->config().transfer_worker_count);
+                ASSERT_EQ(engine->evict_loops_.size(), cache->config().transfer_worker_count);
+                for (const auto& owner : engine->load_loops_) {
+                    ASSERT_NE(owner, nullptr);
+                    for (const auto& pool : owner->staging_.pools) {
                         ASSERT_NE(pool, nullptr);
                         EXPECT_EQ(pool->stride_bytes_, staging_stride);
                         staging_bytes += pool->block_count_ * pool->stride_bytes_;
@@ -3315,9 +3347,11 @@ void verifyCrcLocalTierBudgets(bool enable_crc, int tokens_per_block = 64) {
                             std::memset(pool->backing_.data(), 0xa5, pool->block_count_ * pool->stride_bytes_);
                     }
                 }
-                EXPECT_EQ(staging_bytes,
-                          cache->config().device_disk_staging_block_count * engine->transferWorkerCount()
-                              * staging_stride);
+                EXPECT_EQ(staging_bytes, 2 * cache->config().device_disk_staging_block_count * staging_stride);
+                for (const auto& owner : engine->evict_loops_) {
+                    for (const auto& pool : owner->staging_.pools)
+                        EXPECT_EQ(pool, nullptr);
+                }
             } else {
                 const auto& executor = engine->legacy_->device_disk_executor_;
                 ASSERT_NE(executor, nullptr);
@@ -3588,7 +3622,7 @@ TEST_F(BlockTreeCacheFactoryTest, TransferMemoryBudgetMatchesActualCrcServices) 
                 options.block_tree_transfer_worker_count                = 2;
                 options.btc_crc_slot_count                              = 3;
                 options.memory_cache_max_descriptors_per_transfer_batch = 8;
-                options.disk_cache_staging_block_count                  = 10;  // effective async batch is 5
+                options.disk_cache_staging_block_count                  = 128;
                 const auto estimate  = blockTreeTransferDeviceMemory(config, options);
                 auto       allocator = initAllocator<CoordinatorCacheManager>(config);
                 auto       cache     = createBlockTreeCache(config, options, allocator);

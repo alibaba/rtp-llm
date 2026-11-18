@@ -1998,6 +1998,7 @@ TEST_F(BlockTreeCacheIntegrationTest, WorkLoopEvictLoadRetainsBusinessReferences
         config.btc_transfer_engine_async                    = true;
         config.btc_crc_slot_count                           = 1;
         config.device_disk_staging_block_count              = 4;
+        config.max_descriptors_per_transfer_batch           = 2;
         auto       cache                                    = makeBlockTreeCacheForTest({group}, config);
         const auto request_sources                          = allocateDeviceBlocksForTest(*group, 1);
         ASSERT_EQ(request_sources.size(), 1u);

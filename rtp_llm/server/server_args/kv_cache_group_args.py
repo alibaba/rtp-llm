@@ -425,9 +425,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         type=int,
         default=128,
         help=(
-            "异步模式每对 Load/Offload loops 的 staging 块数，FULL/SWA 各一半，"
-            "再按方向拆分，各类别使用自己的 stride；缺失类别不分配。"
-            "legacy 保留每 rank 按最大块大小折算字节预算。"
+            "每 rank 的磁盘 staging 参考块数 B，必须为不小于 2 的偶数。"
+            "异步模式以 SWA 块为参考，load worker 数为 W。"
+            "仅 load WorkLoop 分配私有 FULL/SWA 池；SWA 容量按 B/W 分配，余数依次分给前几个 loop，"
+            "FULL 使用等量字节预算并按自身 stride 换算容量；每个 loop 的两类池容量均须不小于 "
+            "memory_cache_max_descriptors_per_transfer_batch，否则初始化失败，不会自动缩小 batch。"
+            "stride 覆盖对应 group 的存储大小和磁盘 stride，并按 4096 字节对齐；"
+            "无 SWA 时以 FULL stride 为参考，无 FULL 时使用 SWA stride。总预算不随 worker 数增加。"
+            "legacy 按 B×最大 stride 的总字节预算平分 FULL/SWA 池。"
         ),
     )
     kv_cache_group.add_argument(

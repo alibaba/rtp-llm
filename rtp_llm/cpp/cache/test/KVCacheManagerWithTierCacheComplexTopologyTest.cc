@@ -715,7 +715,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
     }
     ASSERT_NO_FATAL_FAILURE(initManager(/*device_blocks=*/32));
     auto             cache               = manager_->blockTreeCache();
-    constexpr size_t staging_block_count = 4;
+    constexpr size_t staging_block_count = 8;
     auto             engine              = std::make_shared<PausableRecordingTransferEngine>(
         cache->groupSets(), cache->isDiskCacheEnabled(), staging_block_count);
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, engine);
@@ -724,7 +724,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
 
     const auto    initial_device = snapshotDevicePools(manager_);
     const auto    initial_lower  = snapshotLowerPools(*cache, GetParam());
-    constexpr int logical_blocks = 9;
+    constexpr int logical_blocks = 15;
     auto seed_opt = seedDevicePrefix(manager_, cache_config_, /*token_offset=*/0, /*cached_blocks=*/logical_blocks);
     ASSERT_TRUE(seed_opt.has_value());
     auto seed = std::move(*seed_opt);
@@ -837,9 +837,15 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
         ASSERT_GT(reuse_count, 0u);
         ASSERT_LE(reuse_count, static_cast<size_t>(logical_blocks));
         expected_load_descriptors += reuse_count;
-        const auto& staging = engine->load_loops_.front()->staging_.pool;
-        ASSERT_NE(staging, nullptr);
-        exceeds_staging_capacity = exceeds_staging_capacity || reuse_count > staging->capacity();
+        const size_t staging_lane                 = group_set->groupType() == CacheGroupType::SWA ? 1 : 0;
+        bool         exceeds_all_owner_capacities = true;
+        ASSERT_FALSE(engine->load_loops_.empty());
+        for (const auto& owner : engine->load_loops_) {
+            const auto& staging = owner->staging_.pools[staging_lane];
+            ASSERT_NE(staging, nullptr);
+            exceeds_all_owner_capacities = exceeds_all_owner_capacities && reuse_count > staging->capacity();
+        }
+        exceeds_staging_capacity = exceeds_staging_capacity || exceeds_all_owner_capacities;
         const size_t reuse_begin = static_cast<size_t>(logical_blocks) - reuse_count;
         for (const auto& tag : group_set->groupTags()) {
             const BlockIndicesType& blocks = resource->blocks(0, tag);
