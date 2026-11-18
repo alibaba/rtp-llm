@@ -44,6 +44,7 @@ public:
         metrics_reporter_(metrics_reporter),
         sep_token_ids_(mm_model_config.mm_sep_tokens),
         include_sep_tokens_(mm_model_config.include_sep_tokens),
+        hash_embedding_features_(mm_model_config.hash_embedding_features),
         max_seq_len_(max_seq_len) {}
 
 protected:
@@ -62,6 +63,7 @@ protected:
 private:
     std::vector<std::vector<int64_t>> sep_token_ids_;
     bool                              include_sep_tokens_;
+    bool                              hash_embedding_features_;
     int64_t                           max_seq_len_;
 
     virtual ErrorResult<MultimodalOutput> V41MultimodalEmbedding(const V41RequestInputs& inputs,
@@ -104,7 +106,11 @@ public:
 
     ErrorResult<MultimodalFeature> getMultimodalFeatures(const torch::Tensor&                         input_ids,
                                                          const std::vector<rtp_llm::MultimodalInput>& mm_inputs,
-                                                         bool hash_features = true);
+                                                         bool                                         hash_features);
+    ErrorResult<MultimodalFeature> getMultimodalFeatures(const torch::Tensor&                         input_ids,
+                                                         const std::vector<rtp_llm::MultimodalInput>& mm_inputs) {
+        return getMultimodalFeatures(input_ids, mm_inputs, hash_embedding_features_);
+    }
 };
 
 }  // namespace rtp_llm

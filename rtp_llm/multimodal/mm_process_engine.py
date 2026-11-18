@@ -1522,10 +1522,14 @@ class MMProcessEngine:
             self.device
         ):
             result = self.mm_part.embedding(tensors)
-        embeddings = self._maybe_tensor_to_list(result[0], dim=2)
-        position_ids = self._maybe_tensor_to_list(result[1], dim=2)
+        _validate_embedding_result(result)
+        embeddings = maybe_tensor_to_list(result[0], ndim_threshold=2)
+        position_ids = [
+            position.cpu()
+            for position in maybe_tensor_to_list(result[1], ndim_threshold=2)
+        ]
         extra_input = (
-            self._maybe_tensor_to_list(result[2], dim=1) if len(result) > 2 else []
+            maybe_tensor_to_list(result[2], ndim_threshold=1) if len(result) > 2 else []
         )
         return MMEmbeddingRes(embeddings, position_ids, extra_input)
 

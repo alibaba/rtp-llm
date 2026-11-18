@@ -78,6 +78,8 @@ EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object 
     std::vector<std::string> handler_args;
     {
         py::gil_scoped_acquire acquire;
+        requires_host_input_metadata_ =
+            py::getattr(params.py_model, "requires_host_input_metadata", py::bool_(false)).cast<bool>();
         torch_type_  = py::module::import("torch").attr("Tensor");
         handler_args = py::cast<std::vector<std::string>>(handler_.attr("extend_forward_args")());
     }
@@ -239,10 +241,14 @@ absl::StatusOr<GptModelInputs> EmbeddingExecutor::gatherModelInput(const std::li
     // but the model-facing GptModelInputs metadata should be CUDA resident.
     // Non-CUDA platforms keep the host pipeline: buildPyAttentionInputs's
     // device-metadata branch requires the CUDA-only metadata kernel.
-    model_input.combo_tokens     = toCudaInt32ModelInput(model_input.combo_tokens);
-    model_input.input_lengths    = toCudaInt32ModelInput(model_input.input_lengths);
-    model_input.sequence_lengths = toCudaInt32ModelInput(model_input.sequence_lengths);
-    model_input.prefix_lengths   = toCudaInt32ModelInput(model_input.prefix_lengths);
+    // Models that prepare attention from host tokens reuse the pinned inputs;
+    // PyWrappedModel also supplies device IDs for embedding lookup.
+    if (!requires_host_input_metadata_) {
+        model_input.combo_tokens     = toCudaInt32ModelInput(model_input.combo_tokens);
+        model_input.input_lengths    = toCudaInt32ModelInput(model_input.input_lengths);
+        model_input.sequence_lengths = toCudaInt32ModelInput(model_input.sequence_lengths);
+        model_input.prefix_lengths   = toCudaInt32ModelInput(model_input.prefix_lengths);
+    }
 #endif
     return model_input;
 }

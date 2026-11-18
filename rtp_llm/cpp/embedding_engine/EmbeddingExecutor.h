@@ -44,6 +44,7 @@ private:
     py::object                   handler_;
     HandlerArgs::Flag            handler_args_;
     py::handle                   torch_type_;
+    bool                         requires_host_input_metadata_ = false;
     torch::Tensor                max_position_ids_tensor_;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
     ModelConfig                  model_config_;

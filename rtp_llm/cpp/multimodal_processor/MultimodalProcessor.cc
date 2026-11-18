@@ -396,7 +396,8 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
                                         input->token_ids,
                                         mm_inputs,
                                         input->token_type_ids,
-                                        mm_embedding_res.mm_feature_hashes));
+                                        mm_embedding_res.mm_feature_hashes,
+                                        hash_embedding_features_));
     mm_features.expanded_ids     = expanded_ids.expanded_ids;
     mm_features.text_tokens_mask = expanded_ids.text_tokens_mask;
     mm_features.locs             = expanded_ids.locs;
