@@ -217,6 +217,13 @@ class RemoteCacheTest(unittest.TestCase):
                     )
                     self.assertNotIn("do-not-log", json.dumps(fields))
                     call.assert_called_once()
+                    if grpc_failure:
+                        self.assertEqual(fields["rpc_attempt"], 1)
+                        self.assertGreater(fields["rpc_budget_ms"], 0)
+                        self.assertLessEqual(fields["rpc_budget_ms"], 100)
+                        self.assertGreaterEqual(fields["rpc_elapsed_ms"], 0)
+                    else:
+                        self.assertNotIn("rpc_budget_ms", fields)
                 finally:
                     lookup.close()
 
@@ -613,7 +620,10 @@ class RemoteCacheTest(unittest.TestCase):
     def test_read_timeout_before_io_keeps_slot_free_and_skips_sdk(self):
         remote, (slot,) = self.slot_cache(1)
         gate = threading.Event()
-        blockers = [remote._executor.submit(gate.wait, 3) for _ in range(2)]
+        blockers = [
+            remote._executor.submit(gate.wait, 3)
+            for _ in range(remote._executor._max_workers)
+        ]
         try:
             with patch.object(slot, "object_size", wraps=slot.object_size) as lookup:
                 self.assertIsNone(remote.load("queued", timeout_ms=30))
@@ -629,10 +639,47 @@ class RemoteCacheTest(unittest.TestCase):
             remote._executor.shutdown(wait=True)
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
 
+    def test_metadata_remains_available_while_two_payloads_are_stalled(self):
+        payload = pack_object(plan_object((torch.ones(3), None)))
+        store = Store({"hit-0": payload, "hit-1": payload, "busy": payload})
+        remote = self.remote(store, max_pending=4)
+        started = threading.Semaphore(0)
+        release = threading.Event()
+        original_load = store.load_one
+
+        def stall_payload(*args, **kwargs):
+            started.release()
+            if not release.wait(3):
+                raise RuntimeError("transfer test was not released")
+            return original_load(*args, **kwargs)
+
+        with patch.object(store, "load_one", side_effect=stall_payload), patch.object(
+            store, "object_size", wraps=store.object_size
+        ) as metadata, concurrent.futures.ThreadPoolExecutor(2) as callers:
+            reads = [callers.submit(remote.load, key) for key in ("hit-0", "hit-1")]
+            try:
+                self.assertTrue(all(started.acquire(timeout=1) for _ in reads))
+                self.assertIsNone(remote.load("missing"))
+                self.assertIsNone(remote.load("busy"))
+                self.assertEqual(metadata.call_count, 4)
+                self.assertEqual(remote.stats()["miss"], 1)
+                self.assertEqual(remote.stats()["admission_skip"], 1)
+                self.assertEqual(remote.stats().get("read_error", 0), 0)
+                self.assertEqual(remote.stats()["inflight_tasks"], 2)
+            finally:
+                release.set()
+            for read in reads:
+                torch.testing.assert_close(read.result(timeout=1)[0], torch.ones(3))
+        self.assertEqual(remote.stats()["inflight_tasks"], 0)
+        self.assertEqual(remote.stats()["inflight_bytes"], 0)
+
     def test_timed_out_queued_reads_keep_admission_until_consumed(self):
         remote, (slot,) = self.slot_cache(1, max_pending=2)
         gate = threading.Event()
-        blockers = [remote._executor.submit(gate.wait, 3) for _ in range(2)]
+        blockers = [
+            remote._executor.submit(gate.wait, 3)
+            for _ in range(remote._executor._max_workers)
+        ]
         try:
             with patch.object(
                 remote._executor, "submit", wraps=remote._executor.submit
@@ -759,7 +806,7 @@ class RemoteCacheTest(unittest.TestCase):
             remote._gdr_pool, "acquire", side_effect=acquire
         ) as leasing, patch.object(slot, "load_one") as transfer:
             self.assertIsNone(remote.load("late", timeout_ms=30))
-            remote._executor.shutdown(wait=True)
+            remote._transfer_executor.shutdown(wait=True)
             leasing.assert_called_once()
             transfer.assert_not_called()
         self.assertFalse(remote._gdr_pool._in_use)
@@ -1071,14 +1118,14 @@ class RemoteCacheTest(unittest.TestCase):
         from concurrent.futures import ThreadPoolExecutor
 
         remote = self.remote(Store())
-        entered = [threading.Event(), threading.Event()]
+        entered = [threading.Event() for _ in range(remote._executor._max_workers)]
         release = threading.Event()
 
         def block(index):
             entered[index].set()
             release.wait(3)
 
-        blockers = [remote._executor.submit(block, i) for i in range(2)]
+        blockers = [remote._executor.submit(block, i) for i in range(len(entered))]
         self.assertTrue(all(e.wait(2) for e in entered))
         with patch(
             "rtp_llm.multimodal.mm_remote_embedding_cache.kmonitor.report"

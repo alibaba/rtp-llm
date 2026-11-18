@@ -18,10 +18,11 @@ def _cached_vipserver_resolver(domain):
 
 
 class KvMetaLookupError(RuntimeError):
-    def __init__(self, message, *, reason="metadata", code=None):
+    def __init__(self, message, *, reason="metadata", code=None, rpc_timing=None):
         super().__init__(message)
         self.reason = reason
         self.code = code
+        self.rpc_timing = rpc_timing or {}
 
 
 class KvMetaLookup:
@@ -62,7 +63,8 @@ class KvMetaLookup:
             query_type=1,
             keys=[key],
         )
-        deadline = time.monotonic() + timeout_ms / 1000
+        started_at = time.monotonic()
+        deadline = started_at + timeout_ms / 1000
         with self._lock:
             if self._closed:
                 raise RuntimeError("KVMeta lookup is closed")
@@ -81,13 +83,22 @@ class KvMetaLookup:
             calls = list(self._calls)
         last_code, last_reason = None, "deadline"
         last_error = None
+        last_rpc_timing = None
         for index, call in enumerate(calls):
-            remaining = deadline - time.monotonic()
+            rpc_started_at = time.monotonic()
+            remaining = deadline - rpc_started_at
             if remaining <= 0:
                 break
+            rpc_budget = remaining / (len(calls) - index)
             try:
-                response = call(request, timeout=remaining / (len(calls) - index))
+                response = call(request, timeout=rpc_budget)
             except grpc.RpcError as error:
+                last_rpc_timing = {
+                    "rpc_attempt": index + 1,
+                    "rpc_started_after_ms": (rpc_started_at - started_at) * 1000,
+                    "rpc_budget_ms": rpc_budget * 1000,
+                    "rpc_elapsed_ms": (time.monotonic() - rpc_started_at) * 1000,
+                }
                 last_reason = "grpc"
                 last_error = error
                 try:
@@ -97,6 +108,7 @@ class KvMetaLookup:
                 continue
             status = response.header.status.code
             if status in (4, 9):  # Not ready / not leader: read-only failover.
+                last_rpc_timing = None
                 last_code, last_reason = status, "service_status"
                 last_error = KvMetaLookupError(
                     response.header.status.message, reason=last_reason, code=status
@@ -122,7 +134,10 @@ class KvMetaLookup:
                 )
             return size
         raise KvMetaLookupError(
-            "KVMeta Get unavailable within deadline", reason=last_reason, code=last_code
+            "KVMeta Get unavailable within deadline",
+            reason=last_reason,
+            code=last_code,
+            rpc_timing=last_rpc_timing,
         ) from last_error
 
     def close(self):
