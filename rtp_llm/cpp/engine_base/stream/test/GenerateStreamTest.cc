@@ -372,7 +372,8 @@ TEST_F(GenerateStreamTest, SpeculativeEndpointBookkeepingIsDecodeOnly) {
                 EXPECT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
                 if (enabled && role == RoleType::DECODE) {
                     EXPECT_EQ(resource.decode_endpoint, accepted);
-                    EXPECT_TRUE(resource.decode_round_endpoints.empty());
+                    ASSERT_EQ(resource.decode_round_endpoints.size(), 1u);
+                    EXPECT_EQ(resource.decode_round_endpoints.front(), accepted);
                 } else {
                     EXPECT_EQ(resource.decode_endpoint, stale);
                     ASSERT_EQ(resource.decode_round_endpoints.size(), 2u);
@@ -400,14 +401,59 @@ TEST_F(GenerateStreamTest, SpecUpdateCannotPromoteALaterRoundEndpointBeforeItsCo
         stream->specUpdate({torch::tensor({{17}}, torch::kInt32), 1, -1, {}, {}});
         ASSERT_FALSE(stream->hasError());
         EXPECT_EQ(resource.decode_endpoint, current);
-        ASSERT_EQ(resource.decode_round_endpoints.size(), 1u);
-        EXPECT_EQ(resource.decode_round_endpoints.front(), later);
+        ASSERT_EQ(resource.decode_round_endpoints.size(), 2u);
+        EXPECT_EQ(resource.decode_round_endpoints.front(), current);
+        EXPECT_EQ(resource.decode_round_endpoints.back(), later);
         stream->specUpdate({torch::tensor({{18}}, torch::kInt32), 1, -1, {}, {}});
         ASSERT_FALSE(stream->hasError());
         EXPECT_EQ(resource.decode_endpoint, later);
-        EXPECT_TRUE(resource.decode_round_endpoints.empty());
+        ASSERT_EQ(resource.decode_round_endpoints.size(), 2u); // Both accepted states survive to EOS.
+        EXPECT_FALSE(resource.decodeCompletionSubmitted());
+        auto clipped = std::make_shared<DecodeEndpoint>(); clipped->end = 6;
+        stream->setDecodePublicationPages({clipped});
+        stream->generateConfig()->max_new_tokens = 3;
+        stream->specUpdate({torch::tensor({{19}}, torch::kInt32), 1, -1, {}, {}});
+        ASSERT_FALSE(stream->hasError());
+        EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
+        EXPECT_EQ(resource.decode_endpoint, later);
+        ASSERT_EQ(resource.decode_round_endpoints.size(), 2u);
+        EXPECT_EQ(resource.decode_round_endpoints.front(), current);
+        EXPECT_EQ(resource.decode_round_endpoints.back(), later); // Only the unreachable H=6 was discarded.
         // This checks the promotion boundary; real draft-event ordering is
         // checked by the native executor path and the model trace separately.
+    });
+}
+
+TEST_F(GenerateStreamTest, OrdinaryDecodeRetainsOnlyNewCompleteEndpointsBeforeEos) {
+    autil::EnvGuard publish("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    test::withDecodePublicationStartup([&] {
+        auto builder = GenerateStreamBuilder();
+        ResourceContext context;
+        context.role_type = RoleType::DECODE;
+        context.reuse_cache = true;
+        context.cache_manager = std::make_shared<KVCacheManager>(builder.init_config());
+        ASSERT_TRUE(context.cache_manager->init());
+        auto stream = builder.createContextStream({1, 2, 3}, nullptr, context);
+        stream->generateConfig()->max_new_tokens = 16;
+        stream->setReserveStep(1);
+        ASSERT_TRUE(stream->initKVBlock().ok());
+        stream->setIsContextStream(false);
+        stream->generate_status_->status.store(StreamState::RUNNING);
+        for (int step = 0; step < 5; ++step) {
+            ASSERT_TRUE(stream->incrKVBlock().ok());
+            stream->update({torch::tensor({{17 + step}}, torch::kInt32), 1});
+            ASSERT_FALSE(stream->hasError()) << stream->statusInfo().ToString();
+            EXPECT_FALSE(stream->hasEvent(StreamEvents::GenerateDone));
+            EXPECT_FALSE(stream->kvCache().decodeCompletionSubmitted());
+        }
+        const auto& resource = stream->kvCache();
+        ASSERT_EQ(resource.decode_round_endpoints.size(), 2u);
+        const auto& first = resource.decode_round_endpoints.front();
+        const auto& last = resource.decode_round_endpoints.back();
+        EXPECT_EQ(first->end, 4u);
+        EXPECT_EQ(last->end, 6u); // The emitted token at seqLength()-1 has no KV yet.
+        EXPECT_EQ(resource.decode_endpoint, last);
+        EXPECT_EQ(first->pages.at("default").front(), last->pages.at("default").front());
     });
 }
 

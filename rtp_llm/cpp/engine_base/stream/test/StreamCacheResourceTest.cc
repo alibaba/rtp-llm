@@ -633,7 +633,7 @@ protected:
             EXPECT_EQ(observations_->calls[0].end, 257u);
         }
         if (!dspark) {
-            EXPECT_FALSE(resource.kvCache().decode_endpoint);
+            EXPECT_EQ(static_cast<bool>(resource.kvCache().decode_endpoint), expect_capture);
         }
         EXPECT_FALSE(resource.isResourceReleased());
     }
@@ -677,11 +677,12 @@ protected:
             EXPECT_EQ(cache_manager_->cacheConfig().mtp_sub_configs.size(), 1u);
             EXPECT_EQ(cache_manager_->cacheConfig().layerIdsForGroup("swa_kv").size(), 4u);
         } else {
-            EXPECT_EQ(before.endpoint_end, 0u); // Ordinary publication uses the live tables, not an endpoint.
-            EXPECT_TRUE(before.endpoint.expired());
+            EXPECT_EQ(before.endpoint_end, 256u); // Ordinary Decode also retains its complete native endpoint.
             for (const auto& [tag, group] : before.groups) {
-                EXPECT_TRUE(group.endpoint_blocks.empty());
-                EXPECT_TRUE(group.pinned.empty());
+                SCOPED_TRACE(tag);
+                EXPECT_FALSE(group.endpoint_blocks.empty());
+                EXPECT_FALSE(group.pinned.empty());
+                EXPECT_FALSE(group.holds.empty());
             }
         }
         for (const auto& pool : cache_manager_->coordinator_manager_->groupBlockPools())
@@ -1678,16 +1679,17 @@ TEST_F(StreamCacheResourceTest, PublicationFreshnessRequiresSingleRowAndExisting
         prepareResourceWithCacheConfig(init_config(), {1, 2, 3, 4, 5}, true, RoleType::DECODE, {}, 1);
         auto& resource = stream_->streamCacheResource();
         stream_->reportEventWithoutLock(StreamEvents::GenerateDone);
-        const auto& lifecycle = resource.batch_kv_cache_resource_->decodeCompletionLifecycle();
-        bool& submitted = resource.batch_kv_cache_resource_->decodeCompletionSubmitted();
-        EXPECT_EQ(lifecycle.tryAdmit(submitted, [] { return false; }), DecodePublicationLifecycle::Admission::DECLINED);
-        EXPECT_EQ(lifecycle.tryAdmit(submitted, [] { return false; }), DecodePublicationLifecycle::Admission::DECLINED);
+        const auto& publication = *resource.batch_kv_cache_resource_;
+        EXPECT_TRUE(publication.beginDecodePublication());
+        publication.endDecodePublication();
+        EXPECT_TRUE(publication.beginDecodePublication());
+        publication.endDecodePublication();
         resource.publishCompletedDecode(4); // No prior prepared keys: still refresh for local insertion.
         ASSERT_TRUE(resource.publicationKeysFresh());
-        EXPECT_FALSE(lifecycle.mayAttempt(submitted));
-        EXPECT_EQ(lifecycle.admissionAttempts(), 2u);
+        EXPECT_FALSE(publication.mayAttemptDecodePublication());
+        EXPECT_EQ(publication.decodePublicationAttempts(), 2u);
         resource.publishCompletedDecode(4);
-        EXPECT_EQ(lifecycle.admissionAttempts(), 2u);
+        EXPECT_EQ(publication.decodePublicationAttempts(), 2u);
         resource.batch_kv_cache_resource_->clearCacheKeys();
         EXPECT_FALSE(resource.publicationKeysFresh());
         resource.publishCompletedDecode(4);

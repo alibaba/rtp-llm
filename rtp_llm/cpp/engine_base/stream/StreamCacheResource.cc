@@ -118,14 +118,22 @@ void StreamCacheResource::publishCompletedDecode(size_t computed_end) {
         || !resource_context_.cache_manager || !reuseCache() || stream_->hasErrorWithoutLock() || !computed_end
         || !stream_->hasEventWithoutLock(StreamEvents::GenerateDone)) return;
     const auto& resource = *batch_kv_cache_resource_;
-    if (!resource.decodeCompletionLifecycle().mayAttempt(resource.decodeCompletionSubmitted())
+    if (!resource.mayAttemptDecodePublication()
         && publicationKeysFresh()) return;
     const auto& config = resource_context_.cache_manager->cacheConfig();
     try {
         // Release-time local insertion still needs refreshed final keys after
         // a token-length or partial-key shape change, even if admission is over.
-        initCacheKeys(batch_kv_cache_resource_, stream_->completeTokenIdsPtr(),
-                      config.seq_size_per_block, config.cache_key_hash_seed);
+        if (resource.cacheKeysInitialized() && resource.batchSize() == 1 && stream_->maxBatchSize() == 1
+            && !stream_->hasNumBeams()) {
+            // Non-beam Decode appends tokens. Reuse the original rolling keys,
+            // keeping the final partial key for local insertion, not publication.
+            updateCacheKeys(batch_kv_cache_resource_, stream_->completeTokenIdsPtr(),
+                            config.seq_size_per_block, config.cache_key_hash_seed, true);
+        } else {
+            initCacheKeys(batch_kv_cache_resource_, stream_->completeTokenIdsPtr(),
+                          config.seq_size_per_block, config.cache_key_hash_seed);
+        }
         publication_key_tokens_ = resource.batchSize() == 1 && stream_->maxBatchSize() == 1 ?
                                       stream_->completeTokenIdsPtr()->seqLength() : 0;
         (void)resource_context_.cache_manager->captureCompletedDecode(resource, computed_end, true);

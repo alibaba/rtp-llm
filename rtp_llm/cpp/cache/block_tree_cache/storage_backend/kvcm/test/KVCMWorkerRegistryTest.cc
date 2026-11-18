@@ -83,7 +83,7 @@ TEST(KVCMWorkerRegistryTest, RpcReadUsesExplicitCompletionProofAndRejectsDuplica
             auto backend = makeRegistryBackend(environment, client, singleRankConfig(),
                 protected_payload ? RoleType::DECODE : RoleType::PREFILL);
             ASSERT_TRUE(initSingleRank(*backend.backend, environment));
-            ASSERT_EQ(backend->protectUnknownCompletion(), protected_payload);
+            ASSERT_FALSE(backend->protectUnknownCompletion());
             client->load_status = code;
             EXPECT_CALL(*client, loadKvCachesForTag(_, _, _, _)).Times(0);
             auto request = readRequest(environment, "rpc-read");
@@ -135,7 +135,7 @@ TEST(KVCMWorkerRegistryTest, ThrowingSdkCannotPublishSafeFromReusedResponse) {
         auto backend = makeRegistryBackend(environment, client, singleRankConfig(),
             protected_payload ? RoleType::DECODE : RoleType::PREFILL);
         ASSERT_TRUE(initSingleRank(*backend.backend, environment));
-        ASSERT_EQ(backend->protectUnknownCompletion(), protected_payload);
+        ASSERT_FALSE(backend->protectUnknownCompletion());
         EXPECT_CALL(*client, loadKvCachesForTag(_, _, _, _))
             .WillOnce(Invoke([&](const auto&, const auto&, auto&, const auto&) -> bool {
                 EXPECT_EQ(registryState(*backend.backend, "throwing"), RegistryState::RUNNING);
@@ -445,11 +445,11 @@ TEST(KVCMWorkerRegistryTest, ShutdownRejectsUnsubmittedReadsWithoutReplacingReta
     auto client = std::make_shared<MockClientWrapper>();
     EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client, shutdown()).Times(1);
-    // The protected worker contract belongs to Decode; the switch does not
-    // turn an ordinary Prefill worker into a protected Decode worker.
+    // Decode uses the same worker completion registry and native custody;
+    // enabling publication does not create a second protected owner.
     auto backend = makeRegistryBackend(environment, client, singleRankConfig(), RoleType::DECODE);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
-    ASSERT_TRUE(backend->protectUnknownCompletion());
+    ASSERT_FALSE(backend->protectUnknownCompletion());
     // Use the actual WithStatus fallback so any extra SDK load, including after
     // shutdown, violates this expectation instead of bypassing a legacy mock.
     EXPECT_CALL(*client, loadKvCachesForTag(_, _, _, _)).WillOnce(Return(true));

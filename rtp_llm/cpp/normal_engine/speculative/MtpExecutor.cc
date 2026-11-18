@@ -120,7 +120,7 @@ void MtpExecutor::retainDecodePublicationPages(const StreamGroups& streams, cons
                 if (endpoint) {
                     previous = endpoint;
                     endpoints.push_back(std::move(endpoint));
-                }
+                } else RTP_LLM_LOG_WARNING("DSV4.1 optional endpoint capture failed: H=%zu", h);
             }
         } catch (const std::exception& error) {
             RTP_LLM_LOG_WARNING("DSV4.1 optional endpoint capture failed: %s", error.what());
@@ -1812,10 +1812,16 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& schedul
             try { cudaSyncAndCheck(); }
             catch (...) { drained = false; }
             if (!drained) {
-                frame->unknown = frame; // Keep actual sources before fallible request notification.
                 for (const auto& stream : frame->streams) {
                     try { stream->retainUnknownDecodePublication(stream); }
-                    catch (...) {} // The retained frame and submission still protect every source.
+                    catch (...) {
+                        frame->unknown = frame; // Protection installation failed; keep this admission alive.
+                        continue;
+                    }
+                    // The failed GPU drain does not prevent retiring host
+                    // admissions once native pages and unpooled tensors are held.
+                    try { stream->endDecodePublicationSubmission(); }
+                    catch (...) {} // A release failure is not a new writer obligation.
                 }
                 return;
             }
@@ -2346,6 +2352,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& schedul
         fenceModelBufferRelease();
 
         releaseAllModelBuffers();
+        if (frame && model_input.is_fake_stream
+            && std::all_of(frame->streams.begin(), frame->streams.end(), [](const auto& stream) {
+                   return stream->isFakeStream() && !stream->hasError();
+               })) {
+            // Normal fake work publishes no payload and retains the original
+            // buffer-lifetime fence above. Complete its frame only after both
+            // cleanup calls succeed; failures and real streams keep the drain.
+            frame->handed_off = true;
+        }
         return absl::OkStatus();
     }
 
@@ -2468,7 +2483,7 @@ std::shared_ptr<torch::Event> MtpExecutor::bookkeepingReadyEvent(bool v41_async_
     // the worker's existing single wait: publishing completion can then release
     // a finished/cancelled stream without racing its final draft KV accesses.
     const bool final_draft_required = v41_async_reservation || decode_publication;
-    // The publication caller is dispatchDecodeAsync (stream-async only).
+    // Both sync and async publication reuse the same final writer dependency.
     // decodeStep records draft_event for stream-async/publication rounds;
     // a missing event is a broken dependency and must fail closed here.
     RTP_LLM_CHECK_WITH_INFO(!final_draft_required || draft_event != nullptr,
@@ -3283,9 +3298,18 @@ absl::Status MtpExecutor::dispatchDecodeOutput(const StreamGroups&              
     } else {
         MergedOutput draft_prefill_output{std::move(draft_prefill_model_output),
                                           std::move(draft_prefill_sampler_output)};
-        if (remoteCacheDecodePublicationEnabled() && role_type_ == RoleType::DECODE && draft_event) draft_event->synchronize();
-        result = batch_stream_processor_->dispatchDecode(
-            stream_groups, speculative_sampler_output, draft_prefill_output, std::move(target_logprobs));
+        if (remoteCacheDecodePublicationEnabled() && role_type_ == RoleType::DECODE) {
+            auto publication_output = speculative_sampler_output;
+            publication_output.transfer_done_event = bookkeepingReadyEvent(
+                false, speculative_sampler_output.transfer_done_event, draft_event, true);
+            // The original processor's single wait covers both accept D2H and
+            // the final draft writer, as in the asynchronous dispatch path.
+            result = batch_stream_processor_->dispatchDecode(
+                stream_groups, publication_output, draft_prefill_output, std::move(target_logprobs));
+        } else {
+            result = batch_stream_processor_->dispatchDecode(
+                stream_groups, speculative_sampler_output, draft_prefill_output, std::move(target_logprobs));
+        }
         if (result.ok() && useAsyncDeviceState()) {
             publishSyncMtpDeviceState(
                 stream_groups, speculative_sampler_output, verify_position_ids, draft_prefill_output);

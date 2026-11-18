@@ -27,7 +27,7 @@ public:
     using ConfigMap = std::map<std::string, KVCMConfigPtr>;
     explicit ClientWrapper(std::unique_ptr<ClientFactory> client_factory = std::make_unique<ClientFactory>(),
                            std::chrono::milliseconds reinit_interval = std::chrono::seconds(10),
-                           bool retain_transfer_descriptors = true);
+                           bool decode_transfer = true);
     virtual ~ClientWrapper();
     virtual bool
     init(const ConfigMap& config_str_map, const kv_cache_manager::InitParams& init_params, const std::string& tag);
@@ -158,20 +158,9 @@ private:
     // Shutdown takes this lock exclusively before destroying the pool transfer clients.
     std::shared_mutex transfer_mutex_;
     TransferObserver  transfer_observer_;
-    const bool retain_transfer_descriptors_;
-    // Borrowed URI/IOV/trace descriptors must survive an SDK error or throw
-    // whose payload completion is unknown, together with the registered client.
-    struct PendingTransfer {
-        kv_cache_manager::UriStrVec uris;
-        kv_cache_manager::BlockBuffers buffers;
-        std::shared_ptr<kv_cache_manager::TransferTraceInfo> trace;
-        std::shared_ptr<PendingTransfer> next;
-    };
-    void retainTransfer(const std::shared_ptr<PendingTransfer>& transfer);
-    void releaseTransfer(const std::shared_ptr<PendingTransfer>& transfer);
-    std::mutex pending_transfer_mutex_;
-    std::shared_ptr<PendingTransfer> pending_transfers_;
-
+    // Scope Decode-only geometry accounting and telemetry; descriptors follow
+    // the original Prefill SDK ownership path for both roles.
+    const bool decode_transfer_;
 
     std::unique_ptr<ClientFactory>                                 client_factory_;
     std::vector<std::unique_ptr<kv_cache_manager::TransferClient>> transfer_clients_;

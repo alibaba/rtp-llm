@@ -73,7 +73,7 @@ initializeClient(bool                                                  enable_vi
                  std::chrono::milliseconds                            reinit_interval = std::chrono::seconds(10),
                  MockClientFactory**                                  observed_factory = nullptr,
                  const std::vector<std::string>&                       endpoints = {},
-                 bool bound_sdk_calls = true) {
+                 bool decode_transfer = true) {
     auto  factory        = std::make_unique<MockClientFactory>();
     auto* factory_ptr    = factory.get();
     if (observed_factory) *observed_factory = factory_ptr;
@@ -143,7 +143,7 @@ initializeClient(bool                                                  enable_vi
             return client;
         }));
 
-    auto wrapper = std::make_shared<ClientWrapper>(std::move(factory), reinit_interval, bound_sdk_calls);
+    auto wrapper = std::make_shared<ClientWrapper>(std::move(factory), reinit_interval, decode_transfer);
     ClientWrapper::ConfigMap     config_map{{"", makeConfig(enable_vipserver, endpoint)}};
     if (!endpoints.empty()) config_map.begin()->second->set_addresses(endpoints);
     kv_cache_manager::InitParams params{kv_cache_manager::RoleType::HYBRID, &registration_span, "tp0_Fgroup"};
@@ -1395,12 +1395,12 @@ TEST(ClientWrapperTest, PrefillWholeCallPreservesIdentityDeadlineAndCallerLifeti
     }
 }
 
-TEST(ClientWrapperTest, PrefillAndDecodeUseWholeCallsWhileDecodeOwnsBorrowedDescriptors) {
+TEST(ClientWrapperTest, PrefillAndDecodeForwardOriginalWholeCallDescriptors) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     ::rtp_llm::test::withDecodePublicationStartup([&] {
     using namespace kv_cache_manager;
-    for (bool retained : {false, true}) {
-    SCOPED_TRACE(retained);
+    for (bool decode_transfer : {false, true}) {
+    SCOPED_TRACE(decode_transfer);
     std::vector<unsigned char> data(300 * 19), destination(data.size(), 0);
     for (size_t i = 0; i < data.size(); ++i)
         data[i] = static_cast<unsigned char>(i * 31 + 7);
@@ -1409,7 +1409,7 @@ TEST(ClientWrapperTest, PrefillAndDecodeUseWholeCallsWhileDecodeOwnsBorrowedDesc
     MockTransferClient* mock = nullptr;
     auto                client =
         initializeClient(false, "retained", span, observation, std::make_shared<int>(0), nullptr, nullptr, &mock,
-                         nullptr, std::chrono::seconds(10), nullptr, {}, retained);
+                         nullptr, std::chrono::seconds(10), nullptr, {}, decode_transfer);
     ASSERT_NE(client, nullptr);
     ASSERT_NE(mock, nullptr);
     size_t read_bytes = 0, written_bytes = 0, unknown_calls = 0;
@@ -1436,21 +1436,13 @@ TEST(ClientWrapperTest, PrefillAndDecodeUseWholeCallsWhileDecodeOwnsBorrowedDesc
         .Times(1)
         .WillRepeatedly(Invoke([&](const auto& u, const auto& b, const auto& part_trace) {
             EXPECT_NE(part_trace, nullptr);
-            if (retained) {
-                EXPECT_NE(part_trace.get(), trace.get());
-            } else {
-                EXPECT_EQ(part_trace.get(), trace.get());
-            }
+            EXPECT_EQ(part_trace.get(), trace.get());
             EXPECT_TRUE(part_trace->need_print);
             EXPECT_EQ(part_trace->block_ids, u);
-            if (retained) {
-                EXPECT_EQ(u.size(), 300u);
-                EXPECT_GT(u.size() * 19, 1024u);
-            } else {
-                EXPECT_EQ(u.size(), uris.size());
-                EXPECT_EQ(&u, &uris);
-                EXPECT_EQ(&b, &source);
-            }
+            EXPECT_EQ(u.size(), 300u);
+            EXPECT_GT(u.size() * 19, 1024u);
+            EXPECT_EQ(&u, &uris);
+            EXPECT_EQ(&b, &source);
             UriStrVec actual;
             for (size_t i = 0; i < u.size(); ++i) {
                 EXPECT_EQ(u[i], uris[saved + i]);
@@ -1460,10 +1452,6 @@ TEST(ClientWrapperTest, PrefillAndDecodeUseWholeCallsWhileDecodeOwnsBorrowedDesc
                 actual.push_back("actual_" + u[i]);
             }
             saved += u.size();
-            if (retained) {
-                part_trace->need_print = false;
-                part_trace->block_ids.front() = "sdk-private-save-trace";
-            }
             return std::make_pair(ClientErrorCode::ER_OK, actual);
         }));
     auto written = client->saveKvCachesForTagWithStatus("default", uris, source, trace);
@@ -1476,33 +1464,21 @@ TEST(ClientWrapperTest, PrefillAndDecodeUseWholeCallsWhileDecodeOwnsBorrowedDesc
         .Times(1)
         .WillRepeatedly(Invoke([&](const auto& u, auto& b, const auto& part_trace) {
             EXPECT_NE(part_trace, nullptr);
-            if (retained) {
-                EXPECT_NE(part_trace.get(), trace.get());
-            } else {
-                EXPECT_EQ(part_trace.get(), trace.get());
-            }
+            EXPECT_EQ(part_trace.get(), trace.get());
             EXPECT_TRUE(part_trace->need_print);
             EXPECT_EQ(part_trace->block_ids.size(), u.size());
             for (size_t i = 0; i < u.size(); ++i)
                 EXPECT_EQ(part_trace->block_ids[i], uris[loaded + i]);
-            if (retained) {
-                EXPECT_EQ(u.size(), 300u);
-                EXPECT_GT(u.size() * 19, 1024u);
-            } else {
-                EXPECT_EQ(u.size(), uris.size());
-                EXPECT_EQ(&u, &written.second);
-                EXPECT_EQ(&b, &target);
-            }
+            EXPECT_EQ(u.size(), 300u);
+            EXPECT_GT(u.size() * 19, 1024u);
+            EXPECT_EQ(&u, &written.second);
+            EXPECT_EQ(&b, &target);
             for (size_t i = 0; i < u.size(); ++i) {
                 EXPECT_EQ(u[i], "actual_" + uris[loaded + i]);
                 for (size_t j = 0; j < 19; ++j)
                     *static_cast<unsigned char*>(b[i].iovs[j].base) = data[(loaded + i) * 19 + j];
             }
             loaded += u.size();
-            if (retained) {
-                part_trace->need_print = false;
-                part_trace->block_ids.front() = "sdk-private-load-trace";
-            }
             return ClientErrorCode::ER_OK;
         }));
     ASSERT_EQ(client->loadKvCachesForTagWithStatus("default", written.second, target, trace), ClientErrorCode::ER_OK);
@@ -1510,18 +1486,20 @@ TEST(ClientWrapperTest, PrefillAndDecodeUseWholeCallsWhileDecodeOwnsBorrowedDesc
     EXPECT_TRUE(trace->need_print);
     EXPECT_EQ(trace->block_ids, uris);
     EXPECT_EQ(data, destination);
-    EXPECT_EQ(read_bytes, retained ? data.size() : 0u);
-    EXPECT_EQ(written_bytes, retained ? data.size() : 0u);
+    EXPECT_EQ(read_bytes, decode_transfer ? data.size() : 0u);
+    EXPECT_EQ(written_bytes, decode_transfer ? data.size() : 0u);
     EXPECT_EQ(unknown_calls, 0u);
     client->shutdown();
     }
     });
 }
-TEST(ClientWrapperTest, WholeCallUnknownOwnsBorrowedDescriptorsAboveAllFormerLimits) {
+TEST(ClientWrapperTest, WholeCallUnknownUsesSdkOwnedCopiesWithoutWrapperRetention) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     ::rtp_llm::test::withDecodePublicationStartup([&] {
         using namespace kv_cache_manager;
+        for (const bool is_read : {false, true}) {
         for (const bool throws : {false, true}) {
+            SCOPED_TRACE(is_read);
             SCOPED_TRACE(throws);
             constexpr size_t objects = 300, segments = 4, segment_bytes = 64 * 1024;
             std::vector<unsigned char> data(objects * segments * segment_bytes, 7);
@@ -1541,37 +1519,60 @@ TEST(ClientWrapperTest, WholeCallUnknownOwnsBorrowedDescriptorsAboveAllFormerLim
             }
             auto trace = std::make_shared<TransferTraceInfo>();
             trace->block_ids = uris;
-            const UriStrVec* borrowed_uris = nullptr;
-            const BlockBuffers* borrowed_buffers = nullptr;
+            // Match SDK1025 GroupBySdk/value capture. These descriptors belong
+            // to the SDK mock, not the wrapper or a borrowed caller vector.
+            UriStrVec sdk_uris;
+            BlockBuffers sdk_buffers;
             std::weak_ptr<TransferTraceInfo> borrowed_trace;
-            EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).Times(1).WillOnce(Invoke(
-                [&](const auto& u, const auto& b, const auto& t) -> std::pair<ClientErrorCode, UriStrVec> {
-                    EXPECT_NE(&u, &uris); EXPECT_NE(&b, &buffers); EXPECT_NE(t, trace);
+            auto capture = [&](const auto& u, const auto& b, const auto& t) -> ClientErrorCode {
+                    EXPECT_EQ(&u, &uris); EXPECT_EQ(&b, &buffers); EXPECT_EQ(t, trace);
                     EXPECT_EQ(u.size(), objects); EXPECT_EQ(b.size(), objects);
                     size_t bytes = 0, iovs = 0;
                     for (const auto& block : b) for (const auto& iov : block.iovs) { bytes += iov.size; ++iovs; }
                     EXPECT_GT(bytes, 64u * 1024 * 1024); EXPECT_GT(iovs, 1024u);
-                    borrowed_uris = &u; borrowed_buffers = &b; borrowed_trace = t;
+                    sdk_uris = u; sdk_buffers = b; borrowed_trace = t;
                     if (throws) throw std::runtime_error("synthetic SDK exception after handoff");
-                    return {ClientErrorCode::ER_SDK_TIMEOUT, {}};
-                }));
+                    return ClientErrorCode::ER_SDK_TIMEOUT;
+            };
             auto completion = ClientWrapper::TransferCompletion::NOT_STARTED;
-            if (throws) EXPECT_THROW((void)client->saveKvCachesForTagWithStatus(
-                "default", uris, buffers, trace, &completion), std::runtime_error);
-            else EXPECT_EQ(client->saveKvCachesForTagWithStatus(
-                "default", uris, buffers, trace, &completion).first, ClientErrorCode::ER_SDK_TIMEOUT);
+            if (is_read) {
+                EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).Times(0);
+                EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).Times(1).WillOnce(Invoke(capture));
+                if (throws) {
+                    EXPECT_THROW((void)client->loadKvCachesForTagWithStatus(
+                        "default", uris, buffers, trace, &completion), std::runtime_error);
+                } else {
+                    EXPECT_EQ(client->loadKvCachesForTagWithStatus(
+                        "default", uris, buffers, trace, &completion), ClientErrorCode::ER_SDK_TIMEOUT);
+                }
+            } else {
+                EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).Times(0);
+                EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).Times(1).WillOnce(Invoke(
+                    [&](const auto& u, const auto& b, const auto& t) {
+                        return std::make_pair(capture(u, b, t), UriStrVec{});
+                    }));
+                if (throws) {
+                    EXPECT_THROW((void)client->saveKvCachesForTagWithStatus(
+                        "default", uris, buffers, trace, &completion), std::runtime_error);
+                } else {
+                    EXPECT_EQ(client->saveKvCachesForTagWithStatus(
+                        "default", uris, buffers, trace, &completion).first, ClientErrorCode::ER_SDK_TIMEOUT);
+                }
+            }
             EXPECT_EQ(completion, ClientWrapper::TransferCompletion::UNKNOWN);
             uris.clear(); buffers.clear(); trace.reset();
-            // The actual SDK arguments belong to the same retained record as
-            // this trace. This tests descriptor custody, not detached GPU DMA.
-            ASSERT_FALSE(borrowed_trace.expired());
-            ASSERT_NE(borrowed_uris, nullptr); ASSERT_NE(borrowed_buffers, nullptr);
-            EXPECT_EQ(borrowed_uris->size(), objects);
-            EXPECT_EQ(borrowed_uris->back(), "uri299");
-            EXPECT_EQ(borrowed_buffers->back().iovs.back().base,
+            EXPECT_TRUE(borrowed_trace.expired()); // No wrapper-only UNKNOWN trace hold.
+            ASSERT_EQ(sdk_uris.size(), objects);
+            ASSERT_EQ(sdk_buffers.size(), objects);
+            EXPECT_EQ(sdk_uris.back(), "uri299");
+            EXPECT_EQ(sdk_buffers.back().iovs.back().base,
                       data.data() + (objects * segments - 1) * segment_bytes);
+            // The backing payload remains alive separately; descriptor copying
+            // does not prove DMA completion or permit early source reuse.
+            *static_cast<unsigned char*>(sdk_buffers.back().iovs.back().base) = 11;
+            EXPECT_EQ(data[(objects * segments - 1) * segment_bytes], 11u);
             client->shutdown(); client.reset(); // Mock SDK has no detached work.
-            EXPECT_TRUE(borrowed_trace.expired());
+        }
         }
     });
 }

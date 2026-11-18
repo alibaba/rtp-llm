@@ -37,12 +37,6 @@ cc_test(
     ],
 )
 
-cc_test(
-    name = "decode_publication_lifecycle_test",
-    srcs = ["DecodePublicationLifecycleTest.cc"],
-    copts = copts(),
-    deps = google_test_deps + ["//rtp_llm/cpp/utils:core_utils"],
-)
 
 test_deps = [
     "//rtp_llm/cpp/utils:core_utils",

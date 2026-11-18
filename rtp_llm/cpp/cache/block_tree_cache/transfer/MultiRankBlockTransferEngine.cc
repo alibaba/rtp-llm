@@ -231,6 +231,9 @@ private:
                     rank_snapshot.dispatch_state = TransferRpcDispatchState::NOT_SUBMITTED;
                     break;
                 case BroadcastDispatchState::POSSIBLY_SUBMITTED:
+                case BroadcastDispatchState::LOCAL_COMPLETED:
+                    // This RPC-only consumer has no CQ/buffer proof for a
+                    // local result; preserve conservative UNKNOWN custody.
                     rank_snapshot.dispatch_state = TransferRpcDispatchState::POSSIBLY_SUBMITTED;
                     break;
                 case BroadcastDispatchState::SUBMITTED:

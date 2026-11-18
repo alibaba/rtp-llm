@@ -41,7 +41,6 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheWriteMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheSDKMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCachePayloadMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheQuarantineMetrics);
-AUTIL_LOG_SETUP(rtp_llm, RtpLLMDecodePublicationMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheOutcomeMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheControlMetrics);
 
@@ -964,74 +963,6 @@ bool RtpLLMCacheInvariantMetrics::init(kmonitor::MetricsGroupManager* manager) {
 
 void RtpLLMCacheInvariantMetrics::report(const kmonitor::MetricsTags* tags) {
     violation_qps_metric->Report(tags, 1);
-}
-
-bool RtpLLMDecodePublicationMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_GAUGE_MUTABLE_METRIC(pending_bytes_metric, "rtp_llm_decode_publish_pending_charge_bytes");
-    REGISTER_GAUGE_MUTABLE_METRIC(pending_jobs_metric, "rtp_llm_decode_publish_pending_jobs");
-    REGISTER_GAUGE_MUTABLE_METRIC(queued_jobs_metric, "rtp_llm_decode_publish_queued_jobs");
-    REGISTER_GAUGE_MUTABLE_METRIC(running_jobs_metric, "rtp_llm_decode_publish_running_jobs");
-    REGISTER_GAUGE_MUTABLE_METRIC(quarantined_jobs_metric, "rtp_llm_decode_publish_quarantined_jobs");
-    REGISTER_GAUGE_MUTABLE_METRIC(byte_limit_metric, "rtp_llm_decode_publish_pending_bytes_limit");
-    REGISTER_GAUGE_MUTABLE_METRIC(job_limit_metric, "rtp_llm_decode_publish_pending_jobs_limit");
-    REGISTER_GAUGE_MUTABLE_METRIC(oldest_age_us_metric, "rtp_llm_decode_publish_oldest_pending_age_us");
-    REGISTER_QPS_MUTABLE_METRIC(outcome_qps_metric, "rtp_llm_decode_publish_outcome_qps");
-    REGISTER_QPS_MUTABLE_METRIC(budget_skip_qps_metric, "rtp_llm_decode_publish_budget_skip_qps");
-    REGISTER_QPS_MUTABLE_METRIC(eos_latency_bucket_qps_metric, "rtp_llm_decode_publish_eos_latency_bucket_qps");
-    REGISTER_QPS_MUTABLE_METRIC(eos_latency_sum_us_qps_metric, "rtp_llm_decode_publish_eos_latency_sum_us_qps");
-    return true;
-}
-
-void RtpLLMDecodePublicationMetrics::report(const kmonitor::MetricsTags*                  tags,
-                                            RtpLLMDecodePublicationStateMetricsCollector* collector) {
-    REPORT_MUTABLE_METRIC(pending_bytes_metric, collector->pending_bytes);
-    REPORT_MUTABLE_METRIC(pending_jobs_metric, collector->pending_jobs);
-    REPORT_MUTABLE_METRIC(queued_jobs_metric, collector->queued_jobs);
-    REPORT_MUTABLE_METRIC(running_jobs_metric, collector->running_jobs);
-    REPORT_MUTABLE_METRIC(quarantined_jobs_metric, collector->quarantined_jobs);
-    REPORT_MUTABLE_METRIC(byte_limit_metric, collector->byte_limit);
-    REPORT_MUTABLE_METRIC(job_limit_metric, collector->job_limit);
-    REPORT_MUTABLE_METRIC(oldest_age_us_metric, collector->oldest_age_us);
-}
-
-void RtpLLMDecodePublicationMetrics::report(const kmonitor::MetricsTags*                  tags,
-                                            RtpLLMDecodePublicationEventMetricsCollector* collector) {
-    if (std::string_view(collector->outcome) == "budget_skipped") {
-        budget_skip_qps_metric->Report(tags, 1);
-        return;
-    }
-    kmonitor::MetricsTags outcome_tags = tags ? *tags : kmonitor::MetricsTags{};
-    outcome_tags.AddTag("outcome", collector->outcome);
-    outcome_qps_metric->Report(&outcome_tags, 1);
-    if (!collector->eos_to_commit_us)
-        return;
-    const int64_t latency = *collector->eos_to_commit_us;
-    // Fixed cumulative buckets support approximate quantiles; a GAUGE average
-    // alone cannot supply P50/P95. +Inf is the observation denominator.
-    static const int64_t bounds[] = {100,
-                                     500,
-                                     1000,
-                                     5000,
-                                     10000,
-                                     20000,
-                                     50000,
-                                     100000,
-                                     250000,
-                                     500000,
-                                     1000000,
-                                     2000000,
-                                     5000000,
-                                     10000000,
-                                     60000000};
-    for (const auto upper : bounds) {
-        kmonitor::MetricsTags bucket_tags = tags ? *tags : kmonitor::MetricsTags{};
-        bucket_tags.AddTag("le_us", std::to_string(upper));
-        eos_latency_bucket_qps_metric->Report(&bucket_tags, latency <= upper ? 1 : 0);
-    }
-    kmonitor::MetricsTags all_tags = tags ? *tags : kmonitor::MetricsTags{};
-    all_tags.AddTag("le_us", "+Inf");
-    eos_latency_bucket_qps_metric->Report(&all_tags, 1);
-    eos_latency_sum_us_qps_metric->Report(tags, latency);
 }
 
 bool RtpLLMRemoteCacheControlMetrics::init(kmonitor::MetricsGroupManager* manager) {

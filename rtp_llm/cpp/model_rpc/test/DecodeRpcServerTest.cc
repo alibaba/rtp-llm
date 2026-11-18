@@ -712,7 +712,7 @@ TEST_F(PrefillCompletionRpcTest, PublicationBoundaryComesFromSuccessfulLocalLoad
         service.handler.meta_   = std::make_shared<RpcServerRuntimeMeta>();
         service.loaded          = mode != "no_loaded_boundary";
         if (mode == "conflicting") {
-            ASSERT_TRUE(service.stream->kvCache().decodeCompletionLifecycle().recordPrefillComputedEnd(2));
+            ASSERT_TRUE(service.stream->kvCache().recordPrefillComputedEnd(2));
         }
         int                 port = 0;
         grpc::ServerBuilder builder;
@@ -744,7 +744,7 @@ TEST_F(PrefillCompletionRpcTest, PublicationBoundaryComesFromSuccessfulLocalLoad
         const bool accepted = mode != "conflicting";
         EXPECT_EQ(status.ok(), accepted) << status.error_message();
         EXPECT_EQ(service.stream->outputTokenLen(), accepted ? 1 : 0);
-        const auto& boundary = service.stream->kvCache().decodeCompletionLifecycle().prefillComputedEnd();
+        const auto& boundary = service.stream->kvCache().prefillComputedEnd();
         if (mode == "valid" || mode == "legacy") {
             EXPECT_EQ(boundary, 3);
         } else if (mode == "conflicting") {
@@ -921,7 +921,7 @@ TEST_F(PrefillCompletionRpcTest, LoadTopologyFailureClearsStaleBoundary) {
         server->Shutdown();
         server->Wait();
         EXPECT_FALSE(service.boundary_after_load);
-        EXPECT_FALSE(service.stream->kvCache().decodeCompletionLifecycle().prefillComputedEnd());
+        EXPECT_FALSE(service.stream->kvCache().prefillComputedEnd());
         EXPECT_FALSE(service.generation_entered);
         EXPECT_EQ(service.stream->outputTokenLen(), 0);
     });

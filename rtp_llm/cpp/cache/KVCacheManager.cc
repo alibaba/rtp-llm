@@ -18,6 +18,8 @@
 #include <optional>
 #include <pthread.h>
 #include <sstream>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
@@ -54,6 +56,23 @@ public:
 };
 
 namespace {
+
+using DecodeFrozenPages = std::unordered_map<DeviceBlockPool*, std::unordered_set<BlockIdxType>>;
+
+void freezeDecodePage(DecodeFrozenPages& frozen, const DeviceBlockPoolPtr& pool, BlockIdxType block) noexcept {
+    // Ordinary request/endpoint pins still own these allocations. Failure to
+    // acquire native custody must not unwind and release uncovered pages.
+    if (pool && pool->isAllocated(block) && frozen[pool.get()].insert(block).second)
+        pool->freezeBlock(block, "Decode writer completion unknown; native FROZEN custody");
+}
+
+void freezeDecodeEndpointPages(DecodeFrozenPages& frozen,
+                               const std::shared_ptr<const DecodeEndpoint>& endpoint) noexcept {
+    if (!endpoint) return;
+    for (const auto& [tag, pages] : endpoint->pages)
+        for (const auto& page : pages)
+            if (page && page->pin) freezeDecodePage(frozen, page->pool, page->block);
+}
 
 void notifyAllocationChangeState(const std::shared_ptr<KVCacheAllocationWaitState>& state) {
     if (!state) {
@@ -600,8 +619,9 @@ std::function<void()> KVCacheManager::allocationChangeCallback() const {
     };
 }
 
-void KVCacheManager::freezeUnknownDecodeWriter(const BatchKVCacheResource& resource) const noexcept {
-    if (!isAllocatorOwner() || !coordinator_manager_) return;
+bool KVCacheManager::freezeUnknownDecodeWriter(const BatchKVCacheResource& resource) const noexcept {
+    if (!isAllocatorOwner() || !coordinator_manager_) return false;
+    DecodeFrozenPages frozen;
     const auto& pools = coordinator_manager_->groupBlockPools();
     const auto& tags = config_.groupTags();
     for (size_t group = 0; group < tags.size() && group < pools.size(); ++group) {
@@ -611,11 +631,16 @@ void KVCacheManager::freezeUnknownDecodeWriter(const BatchKVCacheResource& resou
             for (auto block : resource.blocks(batch, tags[group])) {
                 // Own a frozen reference even if another operation already
                 // froze this page: its later recovery must not hide our hold.
-                if (pool->isAllocated(block))
-                    pool->freezeBlock(block, "Decode writer completion unknown; request owner retained");
+                freezeDecodePage(frozen, pool, block);
             }
         }
     }
+    // Endpoint STATE/SWA pages may have left the current table. Their ordinary
+    // connector pins must also be replaceable by native frozen references.
+    freezeDecodeEndpointPages(frozen, resource.decode_endpoint);
+    for (const auto& endpoint : resource.decode_round_endpoints)
+        freezeDecodeEndpointPages(frozen, endpoint);
+    return true;
 }
 
 size_t KVCacheManager::decodePublicationUnit() const {
@@ -635,13 +660,45 @@ size_t KVCacheManager::decodePublicationUnit() const {
 std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpoint(
     const torch::Tensor& physical_ids, const std::vector<std::string>& tags, size_t row, size_t end,
     const std::shared_ptr<const DecodeEndpoint>& previous, bool defer_writer_wait) const {
+    if (physical_ids.dim() != 3 || !physical_ids.is_cpu() || physical_ids.scalar_type() != torch::kInt32
+        || row >= static_cast<size_t>(physical_ids.size(1))
+        || tags.size() != static_cast<size_t>(physical_ids.size(0))) return {};
+    return retainDecodeEndpointPages(end, previous, [&](const std::string& tag) {
+        const auto it = std::find(tags.begin(), tags.end(), tag);
+        const auto input = it == tags.end() ? torch::Tensor{} :
+            physical_ids.select(0, it - tags.begin()).select(0, row);
+        return [input](size_t slot, bool full) -> BlockIdxType {
+            if (!input.defined() || !input.numel()
+                || (full && slot >= static_cast<size_t>(input.numel()))) return NULL_BLOCK_IDX;
+            return input.accessor<int32_t, 1>()[slot % input.numel()];
+        };
+    }, defer_writer_wait);
+}
+
+std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpoint(
+    const BatchKVCacheResource& resource, size_t end,
+    const std::shared_ptr<const DecodeEndpoint>& previous) const {
+    if (resource.batchSize() != 1) return {};
+    return retainDecodeEndpointPages(end, previous, [&](const std::string& tag) {
+        const auto* blocks = &resource.blocks(0, tag);
+        return [blocks](size_t slot, bool) -> BlockIdxType {
+            // Host BlockIds retain logical positions: removed old SWA slots
+            // become NULL, not a compact ring that may wrap to a newer page.
+            if (slot >= blocks->size()) return NULL_BLOCK_IDX;
+            return (*blocks)[slot];
+        };
+    }, /*defer_writer_wait=*/true);
+}
+
+template<typename ReadGroup>
+std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpointPages(
+    size_t end, const std::shared_ptr<const DecodeEndpoint>& previous,
+    ReadGroup&& read_group, bool defer_writer_wait) const {
     // Decode owns the native pages locally; the existing D->P projection
     // performs the actual target-CP slicing at publication time.
     if (decode_capture_stopped_.load() || !isAllocatorOwner() || !coordinator_manager_ || !end) return {};
     const auto unit = decodePublicationUnit();
-    if (!unit || end % unit || physical_ids.dim() != 3 || !physical_ids.is_cpu()
-        || physical_ids.scalar_type() != torch::kInt32 || row >= static_cast<size_t>(physical_ids.size(1))
-        || tags.size() != static_cast<size_t>(physical_ids.size(0))) return {};
+    if (!unit || end % unit) return {};
     auto endpoint = std::make_shared<DecodeEndpoint>(); endpoint->end = end;
     const auto& pools = coordinator_manager_->groupBlockPools();
     const size_t canonical = config_.seq_size_per_block *
@@ -652,8 +709,7 @@ std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpoint(
         if (!group.policy.enable_prefix_reuse) continue;
         if (group.policy.group_type != CacheGroupType::FULL && group.policy.group_type != CacheGroupType::SWA)
             throw std::runtime_error("DSV4.1 endpoint requires native FULL/SWA pages");
-        const auto it = std::find(tags.begin(), tags.end(), tag);
-        if (it == tags.end() || group_id >= pools.size()) return {};
+        if (group_id >= pools.size()) return {};
         const auto& pool = pools[group_id];
         if (!pool || pool->where() != MemoryType::MEMORY_GPU) return {};
         const size_t count = end / group.seqSizePerBlock();
@@ -668,11 +724,9 @@ std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpoint(
             const auto found = previous->pages.find(tag);
             if (found != previous->pages.end()) prior = &found->second;
         }
-        const auto input = physical_ids.select(0, it - tags.begin()).select(0, row);
-        const auto values = input.accessor<int32_t, 1>();
+        auto source_at = read_group(tag);
         for (size_t slot = first; slot < count; ++slot) {
-            if (!input.numel() || (group.policy.group_type == CacheGroupType::FULL && slot >= static_cast<size_t>(input.numel()))) return {};
-            const auto source = values[slot % input.numel()];
+            const auto source = source_at(slot, group.policy.group_type == CacheGroupType::FULL);
             if (isNullBlockIdx(source)) return {};
             const auto* held = prior && slot < prior->size() ? (*prior)[slot].get() : nullptr;
             if (held && held->pool.get() == pool.get() && held->block == source
@@ -701,10 +755,11 @@ std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpoint(
     } catch (...) {
 #if USING_CUDA
         if (cudaDeviceSynchronize() != cudaSuccess) {
-            // No release without last-use proof. Stop optional capture and
-            // retain this preallocated owner; pool capacity bounds the hold.
+            // Keep the original device-health stop. Native frozen references
+            // protect every actual page after this temporary endpoint unwinds.
             decode_capture_stopped_.store(true);
-            endpoint->unknown_owner = endpoint;
+            DecodeFrozenPages frozen;
+            freezeDecodeEndpointPages(frozen, endpoint);
         }
 #endif
         throw;

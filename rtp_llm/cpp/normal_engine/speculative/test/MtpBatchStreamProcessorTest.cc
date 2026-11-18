@@ -16,6 +16,7 @@
 #include "autil/EnvUtil.h"
 
 #if USING_CUDA
+#include <cuda_runtime_api.h>
 #include <ATen/cuda/CUDAGraph.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -1547,6 +1548,57 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
 }
 
 #if USING_CUDA
+namespace {
+// Same bounded host-callback gate as the executor tests. The callback owns its
+// state until completion; release is idempotent and does not call CUDA APIs.
+class ScopedSamplerStreamGate {
+public:
+    explicit ScopedSamplerStreamGate(cuda_graph::GraphStream stream): state_(std::make_shared<State>()) {
+        auto*      callback_state = new std::shared_ptr<State>(state_);
+        const auto status         = cudaLaunchHostFunc(
+            stream.stream(),
+            [](void* opaque) {
+                std::unique_ptr<std::shared_ptr<State>> owner(static_cast<std::shared_ptr<State>*>(opaque));
+                auto&                                   state = **owner;
+                std::unique_lock<std::mutex>            lock(state.mutex);
+                if (!state.cv.wait_for(lock, std::chrono::seconds(5), [&] { return state.released; })) {
+                    state.timed_out.store(true);
+                }
+            },
+            callback_state);
+        if (status != cudaSuccess) {
+            delete callback_state;
+            throw std::runtime_error(cudaGetErrorString(status));
+        }
+    }
+
+    ~ScopedSamplerStreamGate() {
+        release();
+    }
+
+    void release() {
+        {
+            std::lock_guard<std::mutex> lock(state_->mutex);
+            state_->released = true;
+        }
+        state_->cv.notify_all();
+    }
+
+    bool timedOut() const {
+        return state_->timed_out.load();
+    }
+
+private:
+    struct State {
+        std::mutex              mutex;
+        std::condition_variable cv;
+        bool                    released = false;
+        std::atomic<bool>       timed_out{false};
+    };
+    std::shared_ptr<State> state_;
+};
+}  // namespace
+
 TEST_F(MtpBatchStreamProcessorTest, DecodeDispatchWaitsForFinalDraftBeforeUpdatingStream) {
     class TrackingUpdateProcessor: public BaseLogitsProcessor {
     public:

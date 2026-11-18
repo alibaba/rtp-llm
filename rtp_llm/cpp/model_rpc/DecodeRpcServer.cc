@@ -687,7 +687,7 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
     }
     if (remoteCacheDecodePublicationEnabled() && decode_context.loaded_prefill_kv_end) {
         GRPC_RET_IF_ERROR(decode_context,
-                          generate_stream->kvCache().decodeCompletionLifecycle().recordPrefillComputedEnd(
+                          generate_stream->kvCache().recordPrefillComputedEnd(
                               *decode_context.loaded_prefill_kv_end),
                           grpc::StatusCode::INVALID_ARGUMENT,
                           "loaded prefill boundary changes an established boundary");

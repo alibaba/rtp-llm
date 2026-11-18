@@ -21,7 +21,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DecodePublicationAccounting.h"
 #include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 
 namespace rtp_llm {
@@ -996,10 +995,10 @@ TEST(StorageBackendTest, CompletedDecodePinsUniquePeersAndReleasesBudgetOnReject
     auto executor = std::make_shared<HoldingExecutor>();
     ProtectedBackend backend(true, executor);
     ASSERT_TRUE(initBackend(backend, pool));
-    auto budget = std::make_shared<kvcm::DecodePublicationAccounting>(32, 1);
     auto request = makeRequest(first, 2);
     request.decode_completion = true;
-    request.completion_admission = budget->tryAcquire(32, std::nullopt);
+    request.completion_admission = std::make_shared<StorageCompletionAdmission>();
+    const std::weak_ptr<StorageCompletionAdmission> admission = request.completion_admission;
     ASSERT_TRUE(request.completion_admission);
     request.decode_peer_blocks = std::make_shared<DecodePeerBlocks>(DecodePeerBlocks{
         {request.handles.front().front().tag, {{first, second, first}, {first, second, first}}}});
@@ -1010,7 +1009,7 @@ TEST(StorageBackendTest, CompletedDecodePinsUniquePeersAndReleasesBudgetOnReject
     EXPECT_FALSE(backend.write(std::move(task)));
     EXPECT_EQ(pool->refCount(first), 1u);
     EXPECT_EQ(pool->refCount(second), 1u);
-    EXPECT_EQ(budget->snapshot().jobs, 0u);
+    EXPECT_TRUE(admission.expired());
     pool->decRef(first);
     pool->decRef(second);
     backend.shutdown();
@@ -1109,10 +1108,10 @@ TEST(StorageBackendTest, CompletedDecodeWriteMaskRetainsSharedPeersAndBudgetUnti
     auto executor = std::make_shared<HoldingExecutor>();
     ProtectedBackend backend(true, executor);
     ASSERT_TRUE(initBackend(backend, pool));
-    auto budget = std::make_shared<kvcm::DecodePublicationAccounting>(48, 1);
     auto request = makeRequest(blocks[0], 2);
     request.decode_completion = true;
-    request.completion_admission = budget->tryAcquire(48, std::nullopt);
+    request.completion_admission = std::make_shared<StorageCompletionAdmission>();
+    const std::weak_ptr<StorageCompletionAdmission> admission = request.completion_admission;
     ASSERT_TRUE(request.completion_admission);
     request.handles[1].front().block = blocks[2];
     request.decode_peer_blocks = std::make_shared<DecodePeerBlocks>(DecodePeerBlocks{
@@ -1135,11 +1134,11 @@ TEST(StorageBackendTest, CompletedDecodeWriteMaskRetainsSharedPeersAndBudgetUnti
     };
     ASSERT_TRUE(backend.write(backend.prepareWrite(std::move(request))));
     executor->runAll();
-    EXPECT_EQ(budget->snapshot().jobs, 1u);
+    EXPECT_FALSE(admission.expired());
     ASSERT_TRUE(static_cast<bool>(complete));
     complete();
     executor->runAll();
-    EXPECT_EQ(budget->snapshot().jobs, 0u);
+    EXPECT_TRUE(admission.expired());
     for (const auto block : blocks)
         EXPECT_EQ(pool->refCount(block), 1u);
     backend.shutdown();
@@ -1193,18 +1192,18 @@ TEST(StorageBackendTest, MidPreparePinFailureRollsBackRecordedPinsAndBudgetExact
     *copies = 0;
     ProtectedBackend backend;
     ASSERT_TRUE(initBackend(backend, pool));
-    auto budget = std::make_shared<kvcm::DecodePublicationAccounting>(32, 1);
     auto request = makeRequest(first);
     request.decode_completion = true;
     request.decode_peer_blocks = std::make_shared<DecodePeerBlocks>(DecodePeerBlocks{
         {request.handles.front().front().tag, {{first, second}}}});
-    request.completion_admission = budget->tryAcquire(32, std::nullopt);
+    request.completion_admission = std::make_shared<StorageCompletionAdmission>();
+    const std::weak_ptr<StorageCompletionAdmission> admission = request.completion_admission;
     ASSERT_TRUE(request.completion_admission);
     EXPECT_THROW(backend.prepareWrite(std::move(request)), std::bad_alloc);
     EXPECT_EQ(*copies, 2u);
     EXPECT_EQ(pool->refCount(first), 1u);
     EXPECT_EQ(pool->refCount(second), 1u);
-    EXPECT_EQ(budget->snapshot().jobs, 0u);
+    EXPECT_TRUE(admission.expired());
     pool->decRef(first);
     pool->decRef(second);
     backend.shutdown();
@@ -1374,10 +1373,10 @@ TEST(StorageBackendTest, PostEntryAllocationFailureRetainsOwnersUntilExplicitQui
     auto executor = std::make_shared<HoldingExecutor>();
     auto backend = std::make_shared<ProtectedBackend>(true, executor);
     ASSERT_TRUE(initBackend(*backend, pool));
-    auto budget = std::make_shared<kvcm::DecodePublicationAccounting>(16, 1);
     auto request = makeRequest(block);
     request.decode_completion = true;
-    request.completion_admission = budget->tryAcquire(16, std::nullopt);
+    request.completion_admission = std::make_shared<StorageCompletionAdmission>();
+    const std::weak_ptr<StorageCompletionAdmission> admission = request.completion_admission;
     ASSERT_TRUE(request.completion_admission);
     std::weak_ptr<void> owner = backend->resources;
     std::weak_ptr<const CacheKeysType> keys = request.keys;
@@ -1390,7 +1389,7 @@ TEST(StorageBackendTest, PostEntryAllocationFailureRetainsOwnersUntilExplicitQui
     EXPECT_FALSE(keys.expired());
     EXPECT_EQ(pool->refCount(block), 2u);
     EXPECT_FALSE(pool->isFrozen(block));
-    EXPECT_EQ(budget->snapshot().jobs, 1u);
+    EXPECT_FALSE(admission.expired());
     BoundedThread<void> stopping([backend] { backend->shutdown(); });
     EXPECT_EQ(stopping.waitFor(std::chrono::milliseconds(20)), std::future_status::timeout);
     EXPECT_FALSE(backend->shutdownCalled());
@@ -1401,7 +1400,7 @@ TEST(StorageBackendTest, PostEntryAllocationFailureRetainsOwnersUntilExplicitQui
     EXPECT_TRUE(backend->shutdownCalled());
     EXPECT_TRUE(owner.expired());
     EXPECT_TRUE(keys.expired());
-    EXPECT_EQ(budget->snapshot().jobs, 0u);
+    EXPECT_TRUE(admission.expired());
     EXPECT_EQ(pool->refCount(block), 1u);
     pool->decRef(block);
 }
@@ -1468,16 +1467,16 @@ TEST(StorageBackendTest, ExplicitPayloadSafeFailureReleasesWithoutQuarantine) {
     ProtectedBackend backend(true, executor);
     ASSERT_TRUE(initBackend(backend, pool));
     backend.write_action = [] { throw StorageOperationBufferSafeFailure("payload completed; metadata failed"); };
-    auto budget = std::make_shared<kvcm::DecodePublicationAccounting>(16, 1);
     auto request = makeRequest(block);
     request.decode_completion = true;
-    request.completion_admission = budget->tryAcquire(16, std::nullopt);
+    request.completion_admission = std::make_shared<StorageCompletionAdmission>();
+    const std::weak_ptr<StorageCompletionAdmission> admission = request.completion_admission;
     ASSERT_TRUE(request.completion_admission);
     ASSERT_TRUE(backend.write(backend.prepareWrite(std::move(request))));
     ASSERT_EQ(executor->runAll(), 1u);
     EXPECT_EQ(backend.quarantine_events, 0u);
     EXPECT_EQ(pool->refCount(block), 1u);
-    EXPECT_EQ(budget->snapshot().jobs, 0u);
+    EXPECT_TRUE(admission.expired());
     for (const bool safe_failure : {false, true}) {
         auto read_request = makeRequest(block);
         read_request.transfer_task.emplace(std::vector<TransferDescriptor>{}, std::chrono::milliseconds(100));
@@ -2659,6 +2658,38 @@ TEST(StorageBackendTest, RepeatedUnknownWritesKeepFrozenReferencesAcrossShutdown
     EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
     pool->decRef(block);
     EXPECT_EQ(pool->refCount(block), 1u);
+}
+
+TEST(StorageBackendTest, DecodePostSubmitFailuresUseNativeFreezeWithoutExtraOwnership) {
+    for (int failure = 0; failure < 3; ++failure) {
+        SCOPED_TRACE(failure);
+        auto pool = std::make_shared<TestBlockPool>();
+        const auto block = pool->malloc().value();
+        pool->incRef(block);
+        auto executor = std::make_shared<HoldingExecutor>();
+        QuarantineObservingBackend backend(/*init_result=*/true, executor);
+        ASSERT_TRUE(initBackend(backend, pool));
+        backend.write_action = [failure] {
+            if (failure == 0) throw std::runtime_error("unclassified failure after backend entry");
+            if (failure == 1) throw 17;
+            throw StorageOperationBufferSafeFailure("explicit buffer-safe failure");
+        };
+        auto request = makeRequest(block, /*key_count=*/2);
+        request.decode_completion = true;
+        std::weak_ptr<const CacheKeysType> keys = request.keys;
+        ASSERT_TRUE(backend.write(backend.prepareWrite(std::move(request))));
+        ASSERT_EQ(executor->runAll(), 1u);
+        const bool unknown = failure != 2;
+        EXPECT_TRUE(keys.expired()); // Ordinary request ownership really retired.
+        EXPECT_EQ(pool->isFrozen(block), unknown);
+        EXPECT_EQ(pool->treeRefCount(block), unknown ? 1u : 0u);
+        EXPECT_EQ(pool->refCount(block), unknown ? 2u : 1u);
+        EXPECT_EQ(backend.quarantine_events, unknown ? 1u : 0u);
+        backend.shutdown(); // Native custody does not require a private quiescence signal.
+        EXPECT_EQ(pool->isFrozen(block), unknown);
+        pool->decRef(block);
+        EXPECT_EQ(pool->isAllocated(block), unknown);
+    }
 }
 
 TEST(StorageBackendTest, CompletedReadAndWriteFailuresReleasePinsWithoutFreezing) {

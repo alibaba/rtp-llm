@@ -256,7 +256,7 @@ void GenerateStream::releaseResource() {
             });
         }
         std::lock_guard<std::mutex> lock(*mutex_);
-        if (async_bookkeeping_->submissions || unknown_decode_publication_) {
+        if (async_bookkeeping_->submissions || (unknown_decode_publication_ && !unknown_decode_kv_frozen_)) {
             markDeferredRelease();
             return;
         }
@@ -271,7 +271,8 @@ void GenerateStream::releaseResource() {
 }
 
 bool GenerateStream::hasOutstandingResourceUseWithoutLock() const {
-    return hasPendingAsyncBookkeeping() || async_bookkeeping_->submissions || unknown_decode_publication_;
+    return hasPendingAsyncBookkeeping() || async_bookkeeping_->submissions
+        || (unknown_decode_publication_ && !unknown_decode_kv_frozen_);
 }
 
 void GenerateStream::tryReleaseResourceAfterBookkeeping() {
@@ -312,18 +313,24 @@ void GenerateStream::retainUnknownDecodePublication(const std::shared_ptr<Genera
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_CHECK(owner.get() == this);
     const bool first_unknown = !unknown_decode_publication_;
-    unknown_decode_publication_ = owner; // No GPU last-use proof: retain actual pages, not just logical IDs.
     if (first_unknown) {
-        RTP_LLM_LOG_ERROR("Decode writer completion UNKNOWN; retaining stream and freezing its blocks until process recovery");
         const auto& manager = stream_cache_resource_->resourceContext().cache_manager;
-        if (manager) manager->freezeUnknownDecodeWriter(stream_cache_resource_->kvCache());
+        unknown_decode_kv_frozen_ = manager && manager->freezeUnknownDecodeWriter(stream_cache_resource_->kvCache());
     }
+    // Native FROZEN holds now protect KV/endpoint allocations independently of
+    // ordinary request refs. Keep this owner only for unpooled device tensors
+    // and pinned host snapshots that an unproven writer may still access.
+    unknown_decode_publication_ = owner;
     // Set the code before emitting the bitmask event, so reporting does not
     // construct a diagnostic string on this destructor/error path. Keep the
     // first error (including cancellation) and the actual UNKNOWN owner.
     if (generate_status_->error_info.ok())
         generate_status_->error_info.setErrorCode(ErrorCode::EXECUTION_EXCEPTION);
-    reportEventWithoutLock(StreamEvents::Error, ErrorCode::EXECUTION_EXCEPTION, "");
+    try {
+        if (first_unknown)
+            RTP_LLM_LOG_ERROR("Decode writer completion UNKNOWN; KV pages frozen, unpooled tensors retained");
+        reportEventWithoutLock(StreamEvents::Error, ErrorCode::EXECUTION_EXCEPTION, "");
+    } catch (...) {} // Notification failure cannot undo installed physical/tensor protection.
 }
 
 void GenerateStream::endDecodePublicationSubmission() {
@@ -1703,7 +1710,10 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
         const bool finished = generate_status_->checkFinished();
         auto& pending = resource.decode_round_endpoints;
         pending.erase(std::remove_if(pending.begin(), pending.end(), [&](const auto& endpoint) {
-            return finished || !endpoint || endpoint->end <= final_computed;
+            // Accepted endpoints remain pinned until the one EOS publication.
+            // A future asynchronous candidate is unresolved, not rejected;
+            // only final EOS/stop clipping makes its over-end range invalid.
+            return !endpoint || (finished && endpoint->end > final_computed);
         }), pending.end());
         if (finished && hasEventWithoutLock(StreamEvents::GenerateDone)
             && !hasErrorWithoutLock() && resource.decode_endpoint)
@@ -1804,14 +1814,37 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     // 即使 moveToNext() 还未被调度器轮询，这里也能拿到与事件一致的"已完成"判断。
     bool is_done = generate_status_->checkFinished();
 
-    // Protect the final native checkpoint only AFTER successful EOS and before
-    // any final block remapping. The backend prepares pinned GPU handles and
-    // queues the existing Prefill writer; no decode-progress CPU snapshots.
-    if (is_done && hasEventWithoutLock(StreamEvents::GenerateDone) && !hasEventWithoutLock(StreamEvents::Error)
-        && !hasErrorWithoutLock() && resourceContext().cache_manager
+    // Ordinary output dispatch has already joined the model writer. Retain a
+    // newly completed native endpoint before remapping, without another GPU
+    // wait or an early upload. Speculative capture uses its actual writer table.
+    if (!hasEventWithoutLock(StreamEvents::Error) && !hasErrorWithoutLock() && resourceContext().cache_manager
         && num_new_tokens == 1 && currentBatchSize() == 1 && remoteCacheDecodePublicationEnabled()
         && resourceContext().role_type == RoleType::DECODE && stream_cache_resource_->reuseCache() && seqLength() > 0) {
-        stream_cache_resource_->publishCompletedDecode(seqLength() - 1);
+        auto& resource = kvCacheMutable();
+        const auto& manager = resourceContext().cache_manager;
+        if (!isFakeStream() && manager->cacheConfig().mtp_sub_configs.empty()) {
+            const size_t unit = manager->decodePublicationUnit();
+            const size_t computed = seqLength() - 1;
+            const size_t previous_computed = old_seq_length > 0 ? old_seq_length - 1 : 0;
+            if (unit && previous_computed / unit < computed / unit) {
+                try {
+                    auto previous = resource.decode_endpoint;
+                    for (size_t h = (previous_computed / unit + 1) * unit; h <= computed; h += unit) {
+                        auto endpoint = manager->retainDecodeEndpoint(resource, h, previous);
+                        if (!endpoint) {
+                            RTP_LLM_LOG_WARNING("optional Decode endpoint capture failed: H=%zu", h);
+                            continue;
+                        }
+                        resource.decode_round_endpoints.push_back(endpoint);
+                        resource.decode_endpoint = previous = std::move(endpoint);
+                    }
+                } catch (const std::exception& error) {
+                    RTP_LLM_LOG_WARNING("optional Decode endpoint capture failed: %s", error.what());
+                }
+            }
+        }
+        if (is_done && hasEventWithoutLock(StreamEvents::GenerateDone))
+            stream_cache_resource_->publishCompletedDecode(seqLength() - 1);
     }
 
     if (!is_done || stream_cache_resource_->reuseCache()) {

@@ -445,27 +445,24 @@ TEST(BatchKVCacheResourceTest, DecodeEosMetadataFollowsResourceSwapAndResetsForN
     BatchKVCacheResource first, second;
     first.resetBatchSize(1);
     second.resetBatchSize(1);
-    const auto eos = DecodePublicationLifecycle::Clock::now();
-    first.decodeCompletionLifecycle().recordEos(eos);
-    ASSERT_TRUE(first.decodeCompletionLifecycle().recordPrefillComputedEnd(3));
-    EXPECT_TRUE(first.decodeCompletionLifecycle().recordFirstBudgetSkip());
+    const auto eos = BatchKVCacheResource::DecodePublicationClock::now();
+    first.recordDecodePublicationEos(eos);
+    ASSERT_TRUE(first.recordPrefillComputedEnd(3));
     first.decodeCompletionSubmitted() = true;
     first.swap(second);
-    EXPECT_FALSE(first.decodeCompletionLifecycle().eosAt());
-    EXPECT_FALSE(first.decodeCompletionLifecycle().prefillComputedEnd());
+    EXPECT_FALSE(first.decodePublicationEos());
+    EXPECT_FALSE(first.prefillComputedEnd());
     EXPECT_FALSE(first.decodeCompletionSubmitted());
-    EXPECT_EQ(second.decodeCompletionLifecycle().eosAt(), eos);
-    EXPECT_EQ(second.decodeCompletionLifecycle().prefillComputedEnd(), 3);
-    EXPECT_FALSE(second.decodeCompletionLifecycle().recordFirstBudgetSkip());
+    EXPECT_EQ(second.decodePublicationEos(), eos);
+    EXPECT_EQ(second.prefillComputedEnd(), 3);
     EXPECT_TRUE(second.decodeCompletionSubmitted());
     second.resetBatchSize(1);  // Same request geometry is not a new lifecycle.
-    EXPECT_EQ(second.decodeCompletionLifecycle().eosAt(), eos);
-    EXPECT_EQ(second.decodeCompletionLifecycle().prefillComputedEnd(), 3);
+    EXPECT_EQ(second.decodePublicationEos(), eos);
+    EXPECT_EQ(second.prefillComputedEnd(), 3);
     second.clearBlocks();
-    EXPECT_FALSE(second.decodeCompletionLifecycle().eosAt());
-    EXPECT_FALSE(second.decodeCompletionLifecycle().prefillComputedEnd());
+    EXPECT_FALSE(second.decodePublicationEos());
+    EXPECT_FALSE(second.prefillComputedEnd());
     EXPECT_FALSE(second.decodeCompletionSubmitted());
-    EXPECT_TRUE(second.decodeCompletionLifecycle().recordFirstBudgetSkip());
 }
 
 TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
@@ -521,6 +518,30 @@ TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
     batch.moveBatchResource(0, std::move(moved));
     ASSERT_EQ(batch.cacheResource(0).groupNums(), 1);
     ASSERT_EQ(batch.cacheResource(0).kernelBlocks("group0"), (BlockIndicesType{6, 7}));
+}
+
+TEST(BatchKVCacheResourcePublicationTest, ResourceOwnsFixedDeadlineOnceAndFallbackState) {
+    BatchKVCacheResource resource;
+    using Clock = BatchKVCacheResource::DecodePublicationClock;
+    const auto eos = Clock::now();
+    resource.recordDecodePublicationEos(eos);
+    resource.recordDecodePublicationEos(eos + std::chrono::seconds(1));
+    EXPECT_EQ(resource.decodePublicationEos(), eos);
+    const auto deadline = resource.decodePublicationDeadline(std::chrono::seconds(2), eos);
+    EXPECT_EQ(deadline, eos + std::chrono::seconds(2));
+    EXPECT_TRUE(resource.beginDecodePublication(eos));
+    EXPECT_FALSE(resource.beginDecodePublication(eos)); // Reentry cannot submit twice.
+    resource.endDecodePublication(); // Real capture uses ScopeRollback on exceptions too.
+    EXPECT_TRUE(resource.beginDecodePublication(eos + std::chrono::seconds(1)));
+    resource.endDecodePublication();
+    EXPECT_FALSE(resource.beginDecodePublication(eos + std::chrono::seconds(1)));
+    EXPECT_EQ(resource.decodePublicationDeadline(std::chrono::seconds(99)), deadline);
+    resource.clearBlocks();
+    EXPECT_FALSE(resource.recordPrefillComputedEnd(-1));
+    EXPECT_TRUE(resource.recordPrefillComputedEnd(0));
+    EXPECT_FALSE(resource.recordPrefillComputedEnd(1));
+    resource.decodeCompletionSubmitted() = true;
+    EXPECT_FALSE(resource.beginDecodePublication()); // UNKNOWN cannot reopen an admitted request.
 }
 
 }  // namespace test

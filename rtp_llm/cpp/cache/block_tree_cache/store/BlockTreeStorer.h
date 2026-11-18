@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
@@ -33,6 +34,11 @@ public:
                                  std::optional<int64_t>                            request_id         = {},
                                  size_t                                            remote_reuse_begin = 0,
                                  size_t                                            remote_reuse_end   = 0);
+
+    // Append an already-resolved complete group, without inserting tree nodes
+    // or importing tier/eviction metadata into a remote-only publication.
+    static void appendDeviceGroup(std::vector<StorageBlockHandle>& handles,
+                                  const std::string* tags, const BlockIdxType* blocks, size_t count);
 
 private:
     void           publishDeviceLocked(const CacheKeysType&                              cache_keys,

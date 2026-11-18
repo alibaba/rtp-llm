@@ -76,12 +76,17 @@ StorageRequest BlockTreeStorer::makeStorageRequest(const CacheKeysType&         
                 continue;
             }
             const auto& group = *tree_->groupSets()[group_set];
-            for (size_t member = 0; member < group.groupTags().size(); ++member) {
-                key_handles.push_back({group.groupTags()[member], resource.device_blocks[member]});
-            }
+            appendDeviceGroup(key_handles, group.groupTags().data(), resource.device_blocks.data(),
+                              group.groupTags().size());
         }
     }
     return request;
+}
+
+void BlockTreeStorer::appendDeviceGroup(std::vector<StorageBlockHandle>& handles,
+                                        const std::string* tags, const BlockIdxType* blocks, size_t count) {
+    for (size_t member = 0; member < count; ++member)
+        handles.push_back({tags[member], blocks[member]});
 }
 
 }  // namespace rtp_llm

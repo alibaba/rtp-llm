@@ -4,6 +4,7 @@
 #include "gmock/gmock.h"
 #include <chrono>
 #include <future>
+#include <functional>
 #include <mutex>
 #if USING_CUDA
 #include <c10/cuda/CUDAStream.h>
@@ -20,6 +21,7 @@
 #include "rtp_llm/cpp/cache/test/mock/MockCoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/test/MockAsyncContext.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
+#include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -162,15 +164,18 @@ TEST_F(GenerateStreamStateTest, SubmissionAloneDefersSchedulerReleaseUntilItsHan
     }, [&] { TearDown(); cache_manager_.reset(); });
 }
 
-TEST_F(GenerateStreamStateTest, UnknownWriterReportsErrorAndSurvivesBothReleasePathsAfterBookkeepingDrains) {
+TEST_F(GenerateStreamStateTest, UnknownWriterReleasesOrdinaryResourcesButKeepsNativeFrozenPagesAndTensorOwner) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     test::withDecodePublicationStartup([&] {
+        auto config = init_config();
+        config.finalizeBlockNums(32, RuntimeConfig{}); // Preserve the native frozen-ratio guard.
         for (bool cancelled : {false, true}) for (bool pending_worker : {false, true})
-        for (bool externally_frozen : {false, true}) {
+        for (bool externally_frozen : {false, true}) for (bool pending_submission : {false, true}) {
             SCOPED_TRACE(cancelled);
             SCOPED_TRACE(pending_worker);
             SCOPED_TRACE(externally_frozen);
-            auto stream = createStream({1, 2, 3, 4}, false, RoleType::DECODE);
+            SCOPED_TRACE(pending_submission);
+            auto stream = createStream({1, 2, 3, 4}, false, RoleType::DECODE, &config);
             stream->generate_status_->status = StreamState::RUNNING;
             auto& resource = stream->streamCacheResource();
             ASSERT_TRUE(resource.initKVBlock().ok());
@@ -194,6 +199,13 @@ TEST_F(GenerateStreamStateTest, UnknownWriterReportsErrorAndSurvivesBothReleaseP
                 stream->releaseResource();
             });
             std::shared_ptr<void> worker;
+            std::shared_ptr<void> submission;
+            if (pending_submission) {
+                ASSERT_TRUE(stream->beginDecodePublicationSubmission());
+                submission = std::shared_ptr<void>(nullptr, [stream](void*) {
+                    stream->endDecodePublicationSubmission();
+                });
+            }
             if (pending_worker) {
                 stream->incPendingAsyncBookkeeping();
                 worker = std::shared_ptr<void>(nullptr, [stream](void*) {
@@ -215,19 +227,23 @@ TEST_F(GenerateStreamStateTest, UnknownWriterReportsErrorAndSurvivesBothReleaseP
             if (cancelled) {
                 EXPECT_EQ(output.status().ToString(), "original cancellation");
             }
-            worker.reset(); // UNKNOWN must still protect pages once the ordinary count reaches zero.
+            worker.reset(); // Native FROZEN must protect pages after ordinary host users retire.
             ASSERT_FALSE(stream->hasPendingAsyncBookkeeping());
             EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
-            EXPECT_FALSE(resource.isResourceReleased());
-            EXPECT_TRUE(stream->isDeferredReleasePending());
+            EXPECT_EQ(resource.isResourceReleased(), !pending_submission);
+            EXPECT_EQ(stream->isDeferredReleasePending(), pending_submission);
             stream->releaseResource();
-            EXPECT_FALSE(resource.isResourceReleased());
+            EXPECT_EQ(resource.isResourceReleased(), !pending_submission);
+            submission.reset();
+            EXPECT_TRUE(resource.isResourceReleased());
             EXPECT_FALSE(stream->beginDecodePublicationSubmission());
             EXPECT_EQ(stream->unknown_decode_publication_.get(), stream.get());
-            EXPECT_EQ(resource.kvCache().blocks(0, "default"), blocks);
+            EXPECT_TRUE(resource.kvCache().blocks(0, "default").empty());
+            EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::REQUEST), 0u);
+            EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
             for (auto block : blocks) {
                 EXPECT_TRUE(pool->isAllocated(block));
-                EXPECT_GT(pool->refCount(block), 0u);
+                EXPECT_EQ(pool->refCount(block), 1u); // Aggregate native tree hold, not an ordinary pin.
             }
             stream->retainUnknownDecodePublication(stream); // Duplicate notification preserves the first error/hold.
             EXPECT_EQ(stream->statusInfo().code(), expected);
@@ -257,6 +273,122 @@ TEST_F(GenerateStreamStateTest, UnknownWriterReportsErrorAndSurvivesBothReleaseP
     }, [&] { TearDown(); cache_manager_.reset(); });
 }
 
+TEST_F(GenerateStreamStateTest, UnknownWriterFreezesRetainedEndpointPagesOutsideTheCurrentTableOnce) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    test::withDecodePublicationStartup([&] {
+        auto config = init_config();
+        config.finalizeBlockNums(32, RuntimeConfig{});
+        auto stream = createStream({1, 2}, false, RoleType::DECODE, &config);
+        stream->generate_status_->status = StreamState::RUNNING;
+        auto& resource = stream->streamCacheResource();
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        auto pool = cache_manager_->coordinator_manager_->groupBlockPools().front();
+        const auto current = resource.kvCache().blocks(0, "default");
+        ASSERT_FALSE(current.empty());
+        const auto extra = pool->malloc();
+        ASSERT_TRUE(extra);
+        pool->incRef(*extra);
+        auto extra_request = std::shared_ptr<void>(nullptr, [pool, block = *extra](void*) { pool->decRef(block); });
+        auto endpoint = std::make_shared<DecodeEndpoint>();
+        // A retained endpoint can own a physical page no longer in the current
+        // table (STATE/SWA), and share other pages with both endpoint lists.
+        auto protected_blocks = current;
+        protected_blocks.push_back(*extra);
+        for (auto block : protected_blocks) {
+            auto page = std::make_shared<DecodeEndpoint::PageHold>();
+            page->pool = pool;
+            page->block = block;
+            page->pin = pool->pinForRemotePublication(block);
+            endpoint->pages["default"].push_back(std::move(page));
+        }
+        stream->kvCacheMutable().decode_endpoint = endpoint;
+        stream->kvCacheMutable().decode_round_endpoints.push_back(endpoint);
+        endpoint.reset();
+        extra_request.reset(); // The out-of-table allocation now has only its endpoint pin.
+        std::vector<std::function<void()>> releases;
+        for (auto block : protected_blocks)
+            releases.push_back(pool->prepareFrozenReferenceRelease({block}));
+        auto mock_quiescence = std::shared_ptr<void>(nullptr, [stream, pool, protected_blocks, releases](void*) {
+            // No real writer was submitted. Recover only this test's native holds.
+            for (size_t i = 0; i < protected_blocks.size(); ++i)
+                if (pool->isAllocated(protected_blocks[i]) && pool->isFrozen(protected_blocks[i])) releases[i]();
+            stream->unknown_decode_publication_.reset();
+            stream->releaseResource();
+        });
+        ASSERT_TRUE(stream->beginDecodePublicationSubmission());
+        auto submission = std::shared_ptr<void>(nullptr, [stream](void*) { stream->endDecodePublicationSubmission(); });
+        stream->retainUnknownDecodePublication(stream);
+        stream->releaseResource();
+        EXPECT_FALSE(resource.isResourceReleased());
+        submission.reset();
+        EXPECT_TRUE(resource.isResourceReleased());
+        EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::REQUEST), 0u);
+        EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
+        for (auto block : protected_blocks) {
+            EXPECT_TRUE(pool->isAllocated(block));
+            EXPECT_TRUE(pool->isFrozen(block));
+            EXPECT_EQ(pool->treeRefCount(block), 1u); // Current + repeated endpoint references deduplicate.
+            EXPECT_EQ(pool->refCount(block), 1u);
+        }
+        stream->retainUnknownDecodePublication(stream);
+        for (auto block : protected_blocks) EXPECT_EQ(pool->treeRefCount(block), 1u);
+        EXPECT_FALSE(stream->beginDecodePublicationSubmission());
+        EXPECT_EQ(stream->unknown_decode_publication_.get(), stream.get());
+        mock_quiescence.reset();
+        for (auto block : protected_blocks) EXPECT_FALSE(pool->isAllocated(block));
+    }, [&] { TearDown(); cache_manager_.reset(); });
+}
+
+TEST_F(GenerateStreamStateTest, UnknownWriterWithoutNativeCustodyKeepsOrdinaryResources) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    test::withDecodePublicationStartup([&] {
+        for (bool missing_manager : {false, true}) {
+            SCOPED_TRACE(missing_manager);
+            auto stream = createStream({1, 2}, false, RoleType::DECODE);
+            stream->generate_status_->status = StreamState::RUNNING;
+            auto& resource = stream->streamCacheResource();
+            ASSERT_TRUE(resource.initKVBlock().ok());
+            auto manager = cache_manager_;
+            auto pool = manager->coordinator_manager_->groupBlockPools().front();
+            const auto blocks = resource.kvCache().blocks(0, "default");
+            auto restore = std::shared_ptr<void>(nullptr, [&, stream, manager](void*) {
+                // No real writer was submitted; restore this test's altered
+                // context before releasing its simulated UNKNOWN ordinary refs.
+                resource.resource_context_.cache_manager = manager;
+                stream->unknown_decode_publication_.reset();
+                stream->releaseResource();
+            });
+            if (missing_manager) resource.resource_context_.cache_manager.reset();
+            else {
+                ParallelismConfig non_owner;
+                non_owner.tp_size = 2;
+                non_owner.tp_rank = 1;
+                non_owner.role_type = RoleType::DECODE;
+                // Use a separately constructed immutable configuration; no
+                // mutation of the real allocation owner's const topology.
+                resource.resource_context_.cache_manager = std::make_shared<KVCacheManager>(
+                    manager->cacheConfig(), false, nullptr, KVCacheConfig{}, non_owner);
+            }
+            stream->retainUnknownDecodePublication(stream);
+            EXPECT_FALSE(stream->unknown_decode_kv_frozen_);
+            stream->releaseResource();
+            stream->tryReleaseResourceAfterBookkeeping();
+            EXPECT_FALSE(resource.isResourceReleased());
+            EXPECT_TRUE(stream->isDeferredReleasePending());
+            EXPECT_EQ(resource.kvCache().blocks(0, "default"), blocks);
+            for (auto block : blocks) {
+                EXPECT_TRUE(pool->isAllocated(block));
+                EXPECT_FALSE(pool->isFrozen(block));
+                EXPECT_GT(pool->refCount(block), 0u);
+            }
+            EXPECT_FALSE(stream->beginDecodePublicationSubmission());
+            restore.reset();
+            EXPECT_TRUE(resource.isResourceReleased());
+            for (auto block : blocks) EXPECT_FALSE(pool->isAllocated(block));
+        }
+    }, [&] { TearDown(); cache_manager_.reset(); });
+}
+
 TEST_F(GenerateStreamStateTest, UnclaimedPrefillAndDecodeStillReleaseWithPublicationOnOrOff) {
     for (const char* value : {"0", "1"}) {
         autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", value);
@@ -283,16 +415,16 @@ TEST_F(GenerateStreamStateTest, DecodePublicationClockComesFromFirstGenerateDone
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     ::rtp_llm::test::withDecodePublicationStartup([&] {
     auto            stream = createStream({1, 2, 3, 4}, true, RoleType::DECODE);
-    const auto      before = DecodePublicationLifecycle::Clock::now();
-    EXPECT_FALSE(stream->kvCache().decodeCompletionLifecycle().eosAt());
+    const auto      before = BatchKVCacheResource::DecodePublicationClock::now();
+    EXPECT_FALSE(stream->kvCache().decodePublicationEos());
     stream->reportEvent(StreamEvents::GenerateDone);
-    const auto after = DecodePublicationLifecycle::Clock::now();
-    const auto eos   = stream->kvCache().decodeCompletionLifecycle().eosAt();
+    const auto after = BatchKVCacheResource::DecodePublicationClock::now();
+    const auto eos   = stream->kvCache().decodePublicationEos();
     ASSERT_TRUE(eos);
     EXPECT_GE(*eos, before);
     EXPECT_LE(*eos, after);
     stream->reportEvent(StreamEvents::GenerateDone);
-    EXPECT_EQ(stream->kvCache().decodeCompletionLifecycle().eosAt(), eos);
+    EXPECT_EQ(stream->kvCache().decodePublicationEos(), eos);
     }, [&] { TearDown(); cache_manager_.reset(); });
 }
 
@@ -301,7 +433,7 @@ TEST_F(GenerateStreamStateTest, DisabledPublicationDoesNotRecordDecodeEosClock) 
     ::rtp_llm::test::withDecodePublicationStartup([&] {
     auto            stream = createStream({1, 2, 3, 4}, true, RoleType::DECODE);
     stream->reportEvent(StreamEvents::GenerateDone);
-    EXPECT_FALSE(stream->kvCache().decodeCompletionLifecycle().eosAt());
+    EXPECT_FALSE(stream->kvCache().decodePublicationEos());
     }, [&] { TearDown(); cache_manager_.reset(); });
 }
 

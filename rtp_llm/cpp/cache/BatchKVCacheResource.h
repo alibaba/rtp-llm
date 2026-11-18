@@ -1,6 +1,9 @@
 #pragma once
 
 #include <memory>
+#include <chrono>
+#include <cstdint>
+#include <optional>
 #include <functional>
 #include <unordered_map>
 #include <sstream>
@@ -9,7 +12,6 @@
 
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/utils/DecodePublicationLifecycle.h"
 
 namespace rtp_llm {
 class DeviceBlockPool;
@@ -34,10 +36,10 @@ struct DecodeEndpoint {
     // FULL holds are slot-indexed. STATE/SWA hold only this endpoint's required
     // tail pages and are never inherited from another endpoint.
     std::unordered_map<std::string, PageHolds> pages;
-    mutable std::shared_ptr<const DecodeEndpoint> unknown_owner;
 };
 class BatchKVCacheResource {
 public:
+    using DecodePublicationClock = std::chrono::steady_clock;
     BatchKVCacheResource() {}
 
     int batchSize() const {
@@ -46,8 +48,7 @@ public:
 
     void resetBatchSize(size_t batch_size) {
         if (batch_size != batch_resource.size()) {
-            decode_completion_submitted_ = false;
-            decode_completion_lifecycle_.reset();
+            resetDecodePublication();
             decode_endpoint.reset(); decode_round_endpoints.clear();
         }
         batch_resource.resize(batch_size);
@@ -123,8 +124,7 @@ public:
     }
 
     void clearBlocks() {
-        decode_completion_submitted_ = false;
-        decode_completion_lifecycle_.reset();
+        resetDecodePublication();
         decode_endpoint.reset(); decode_round_endpoints.clear();
         resizeBlocks(0, 0);
     }
@@ -213,7 +213,11 @@ public:
         decode_endpoint.swap(other.decode_endpoint);
         decode_round_endpoints.swap(other.decode_round_endpoints);
         std::swap(decode_completion_submitted_, other.decode_completion_submitted_);
-        std::swap(decode_completion_lifecycle_, other.decode_completion_lifecycle_);
+        std::swap(decode_preparing_, other.decode_preparing_);
+        std::swap(decode_attempts_, other.decode_attempts_);
+        std::swap(decode_eos_at_, other.decode_eos_at_);
+        std::swap(decode_deadline_, other.decode_deadline_);
+        std::swap(prefill_computed_end_, other.prefill_computed_end_);
         swapBlockStorage(other);
     }
 
@@ -280,7 +284,8 @@ public:
     }
 
     std::shared_ptr<const DecodeEndpoint> decode_endpoint;
-    // Candidates belong only to the current verify packet, not token history.
+    // Native endpoints retained through EOS, plus not-yet-validated candidates
+    // from the current verify packet. They carry pages, never token snapshots.
     std::vector<std::shared_ptr<const DecodeEndpoint>> decode_round_endpoints;
 
     // Scheduler-owned idempotency only. Payloads stay in their native GPU pools;
@@ -288,13 +293,45 @@ public:
     bool& decodeCompletionSubmitted() const {
         return decode_completion_submitted_;
     }
-    const DecodePublicationLifecycle& decodeCompletionLifecycle() const {
-        return decode_completion_lifecycle_;
+    bool mayAttemptDecodePublication(DecodePublicationClock::time_point now = DecodePublicationClock::now()) const {
+        return !decode_completion_submitted_ && !decode_preparing_ && decode_attempts_ < 2
+               && (!decode_deadline_ || now < *decode_deadline_);
     }
+    bool beginDecodePublication(DecodePublicationClock::time_point now = DecodePublicationClock::now()) const {
+        if (!mayAttemptDecodePublication(now)) return false;
+        ++decode_attempts_;
+        decode_preparing_ = true;
+        return true;
+    }
+    void endDecodePublication() const noexcept { decode_preparing_ = false; }
+    size_t decodePublicationAttempts() const { return decode_attempts_; }
+    DecodePublicationClock::time_point decodePublicationDeadline(std::chrono::milliseconds timeout,
+        DecodePublicationClock::time_point now = DecodePublicationClock::now()) const {
+        if (!decode_deadline_) decode_deadline_ = decode_eos_at_.value_or(now) + timeout;
+        return *decode_deadline_;
+    }
+    void recordDecodePublicationEos(DecodePublicationClock::time_point at = DecodePublicationClock::now()) const {
+        if (!decode_eos_at_) decode_eos_at_ = at;
+    }
+    const auto& decodePublicationEos() const { return decode_eos_at_; }
+    bool recordPrefillComputedEnd(int64_t end) const {
+        if (end < 0 || (prefill_computed_end_ && *prefill_computed_end_ != end)) return false;
+        prefill_computed_end_ = end;
+        return true;
+    }
+    const auto& prefillComputedEnd() const { return prefill_computed_end_; }
 
 private:
     mutable bool                 decode_completion_submitted_{false};
-    DecodePublicationLifecycle   decode_completion_lifecycle_;
+    mutable bool                 decode_preparing_{false};
+    mutable size_t               decode_attempts_{0};
+    mutable std::optional<DecodePublicationClock::time_point> decode_eos_at_, decode_deadline_;
+    mutable std::optional<int64_t> prefill_computed_end_;
+    void resetDecodePublication() {
+        decode_completion_submitted_ = decode_preparing_ = false;
+        decode_attempts_ = 0;
+        decode_eos_at_.reset(); decode_deadline_.reset(); prefill_computed_end_.reset();
+    }
     std::vector<KVCacheResource> batch_resource;  // [batch_size]
     bool                         cache_keys_initialized_{false};
 };

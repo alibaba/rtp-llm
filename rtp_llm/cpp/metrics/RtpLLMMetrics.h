@@ -1316,40 +1316,6 @@ public:
     bool    report_load_join_wait         = false;
 };
 
-class RtpLLMDecodePublicationStateMetricsCollector final {
-public:
-    int64_t pending_bytes{0}, pending_jobs{0}, queued_jobs{0}, running_jobs{0}, quarantined_jobs{0};
-    int64_t byte_limit{0}, job_limit{0}, oldest_age_us{0};
-};
-
-class RtpLLMDecodePublicationEventMetricsCollector final {
-public:
-    const char*            outcome{"failed"};
-    std::optional<int64_t> eos_to_commit_us;
-};
-
-class RtpLLMDecodePublicationMetrics: public kmonitor::MetricsGroup {
-public:
-    bool                     init(kmonitor::MetricsGroupManager* manager) override;
-    void                     report(const kmonitor::MetricsTags*, RtpLLMDecodePublicationStateMetricsCollector*);
-    void                     report(const kmonitor::MetricsTags*, RtpLLMDecodePublicationEventMetricsCollector*);
-    kmonitor::MutableMetric* pending_bytes_metric{nullptr};
-    kmonitor::MutableMetric* pending_jobs_metric{nullptr};
-    kmonitor::MutableMetric* queued_jobs_metric{nullptr};
-    kmonitor::MutableMetric* running_jobs_metric{nullptr};
-    kmonitor::MutableMetric* quarantined_jobs_metric{nullptr};
-    kmonitor::MutableMetric* byte_limit_metric{nullptr};
-    kmonitor::MutableMetric* job_limit_metric{nullptr};
-    kmonitor::MutableMetric* oldest_age_us_metric{nullptr};
-    kmonitor::MutableMetric* outcome_qps_metric{nullptr};
-    kmonitor::MutableMetric* budget_skip_qps_metric{nullptr};
-    kmonitor::MutableMetric* eos_latency_bucket_qps_metric{nullptr};
-    kmonitor::MutableMetric* eos_latency_sum_us_qps_metric{nullptr};
-
-private:
-    AUTIL_LOG_DECLARE();
-};
-
 class RtpLLMRemoteCacheControlMetricsCollector final {
 public:
     bool enabled{true};

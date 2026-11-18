@@ -1440,6 +1440,8 @@ TEST_F(MtpExecutorTest, testPackedDsparkKeepsSharedIdentityAndCommitOnlyPrefill)
 
 TEST_F(MtpExecutorTest, testRealModelWrappersEnableEplbForDSparkProposals) {
     py::scoped_interpreter interpreter;
+    // Format Python errors before interpreter teardown, rather than in gtest.
+    try {
     // Match NormalEngineCustomOutputTest's embedded-torch setup: KVCM's
     // OpenSSL symbols conflict with Python's _hashlib in this linked binary.
     py::exec(R"(
@@ -1630,6 +1632,9 @@ import torch)");
         }
     }
     runtime_patch.attr("__exit__")(py::none(), py::none(), py::none());
+    } catch (const py::error_already_set& error) {
+        FAIL() << "Embedded Python failure while interpreter is alive: " << error.what();
+    }
 }
 
 void MtpExecutorTest::runSingleBatchPrefillScenario(bool simulate_cp_mutation, bool with_cp_hidden_buffers) {

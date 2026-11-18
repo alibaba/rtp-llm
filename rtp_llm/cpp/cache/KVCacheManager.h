@@ -71,13 +71,18 @@ public:
     size_t decodePublicationUnit() const;
     // No writer last-use proof: keep ownership and charge the existing frozen
     // pool guard rather than silently accumulating invisible request holds.
-    void freezeUnknownDecodeWriter(const BatchKVCacheResource& resource) const noexcept;
+    // False means native custody was unavailable; keep ordinary ownership.
+    bool freezeUnknownDecodeWriter(const BatchKVCacheResource& resource) const noexcept;
     // Speculative capture may defer this wait only while the original stream
     // owns the pages and its final draft-event host wait precedes promotion in
     // specUpdate. Standalone captures retain their synchronous default.
     std::shared_ptr<const DecodeEndpoint> retainDecodeEndpoint(const torch::Tensor& physical_ids,
         const std::vector<std::string>& tags, size_t row, size_t end,
         const std::shared_ptr<const DecodeEndpoint>& previous = {}, bool defer_writer_wait = false) const;
+    // Ordinary dispatch has already joined its writer before updating the
+    // stream. Read its host block map without another GPU metadata copy/wait.
+    std::shared_ptr<const DecodeEndpoint> retainDecodeEndpoint(const BatchKVCacheResource& resource,
+        size_t end, const std::shared_ptr<const DecodeEndpoint>& previous = {}) const;
 
     // Decode-side P/D admission allocates destination blocks before cache handoff.  When pools are
     // temporarily full, waiters use this generation instead of polling malloc in a tight loop.
@@ -176,6 +181,10 @@ public:
     }
 
 private:
+    template<typename ReadGroup>
+    std::shared_ptr<const DecodeEndpoint> retainDecodeEndpointPages(size_t end,
+        const std::shared_ptr<const DecodeEndpoint>& previous, ReadGroup&& read_group,
+        bool defer_writer_wait) const;
     std::function<void()>             allocationChangeCallback() const;
     void                              reportMetricsLoop();
     void                              missingCleanupLoop();

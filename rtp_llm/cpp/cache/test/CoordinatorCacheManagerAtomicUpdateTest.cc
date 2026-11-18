@@ -96,17 +96,15 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, AtomicRemapPreservesRequestEosAn
     ASSERT_EQ(blocks.size(), 2u);
     auto resource = createBatchKVCacheResource(1, config);
     resource->setBatchBlocks(0, "default", blocks);
-    const auto eos = DecodePublicationLifecycle::Clock::now();
-    resource->decodeCompletionLifecycle().recordEos(eos);
-    ASSERT_TRUE(resource->decodeCompletionLifecycle().recordPrefillComputedEnd(3));
-    EXPECT_TRUE(resource->decodeCompletionLifecycle().recordFirstBudgetSkip());
+    const auto eos = BatchKVCacheResource::DecodePublicationClock::now();
+    resource->recordDecodePublicationEos(eos);
+    ASSERT_TRUE(resource->recordPrefillComputedEnd(3));
     resource->decodeCompletionSubmitted() = true;
     std::vector<TaggedBlockIdPair> mapping;
     ASSERT_TRUE(allocator_->updateKVBlock(resource, {0}, /*copy_last_block=*/false, mapping));
     EXPECT_EQ(resource->blocks(0, "default"), blocks);
-    EXPECT_EQ(resource->decodeCompletionLifecycle().eosAt(), eos);
-    EXPECT_EQ(resource->decodeCompletionLifecycle().prefillComputedEnd(), 3);
-    EXPECT_FALSE(resource->decodeCompletionLifecycle().recordFirstBudgetSkip());
+    EXPECT_EQ(resource->decodePublicationEos(), eos);
+    EXPECT_EQ(resource->prefillComputedEnd(), 3);
     EXPECT_TRUE(resource->decodeCompletionSubmitted());
     allocator_->free(FreeInfo{resource, nullptr});
 }
@@ -585,10 +583,10 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, RetainedBeamsMoveBlockViewsAndMe
                                           &resource->mutableBlockIds(1, "default")};
 
     std::vector<TaggedBlockIdPair> mapping;
-    ASSERT_TRUE(resource->decodeCompletionLifecycle().recordPrefillComputedEnd(8));
+    ASSERT_TRUE(resource->recordPrefillComputedEnd(8));
     resource->decodeCompletionSubmitted() = true;
     ASSERT_TRUE(allocator_->updateKVBlock(resource, {1, 0}, true, mapping));
-    EXPECT_EQ(resource->decodeCompletionLifecycle().prefillComputedEnd(), 8);
+    EXPECT_EQ(resource->prefillComputedEnd(), 8);
     EXPECT_TRUE(resource->decodeCompletionSubmitted());
     EXPECT_TRUE(mapping.empty());
     for (int i = 0; i < 2; ++i) {

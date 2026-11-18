@@ -11,17 +11,6 @@ cc_test(
     ],
 )
 
-cc_test(
-    name = "decode_publication_accounting_test",
-    srcs = ["DecodePublicationAccountingTest.cc"],
-    copts = copts(),
-    deps = [
-        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:decode_publication_accounting",
-        "//rtp_llm/cpp/utils:core_utils",
-        "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main",
-    ],
-)
 
 cc_test_wrapper(
     name = "client_wrapper_test",

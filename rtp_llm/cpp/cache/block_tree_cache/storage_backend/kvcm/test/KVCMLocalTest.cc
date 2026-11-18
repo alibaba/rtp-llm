@@ -33,7 +33,6 @@
 #include "rtp_llm/cpp/utils/AsyncProfileTrace.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DecodePublicationAccounting.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 
@@ -356,30 +355,6 @@ kvcm::KVCMConfigPtr makeLocalConfig() {
                                               sdk,
                                               location_groups,
                                               kvcm::ModelDeployment());
-}
-
-TEST(KVCMLocalTest, PublicationStateMetricsKeepQuarantineInPendingTotals) {
-    auto reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
-    RtpLLMDecodePublicationStateMetricsCollector collector;
-    collector.pending_bytes    = 100;
-    collector.pending_jobs     = 3;
-    collector.queued_jobs      = 1;
-    collector.running_jobs     = 1;
-    collector.quarantined_jobs = 1;
-    collector.byte_limit       = 512;
-    collector.job_limit        = 4;
-    collector.oldest_age_us    = 7000000;
-    reporter->report<RtpLLMDecodePublicationMetrics, RtpLLMDecodePublicationStateMetricsCollector>(nullptr, &collector);
-    auto* metrics = reporter->getMetricsGroup<RtpLLMDecodePublicationMetrics>();
-    ASSERT_NE(metrics, nullptr);
-    EXPECT_DOUBLE_EQ(snapshotGauge(metrics->pending_bytes_metric), 100);
-    EXPECT_DOUBLE_EQ(snapshotGauge(metrics->pending_jobs_metric), 3);
-    EXPECT_DOUBLE_EQ(snapshotGauge(metrics->queued_jobs_metric), 1);
-    EXPECT_DOUBLE_EQ(snapshotGauge(metrics->running_jobs_metric), 1);
-    EXPECT_DOUBLE_EQ(snapshotGauge(metrics->quarantined_jobs_metric), 1);
-    EXPECT_DOUBLE_EQ(snapshotGauge(metrics->byte_limit_metric), 512);
-    EXPECT_DOUBLE_EQ(snapshotGauge(metrics->job_limit_metric), 4);
-    EXPECT_DOUBLE_EQ(snapshotGauge(metrics->oldest_age_us_metric), 7000000);
 }
 
 TEST(KVCMLocalTest, DirectClientRoutesMetadataAndPayload) {
@@ -1302,7 +1277,7 @@ TEST(KVCMLocalTest, DsparkDecodeAdmitsNativeCacheTagsAndRejectsIncompleteDraftCo
                 EXPECT_CALL(*client, saveKvCachesForTag(_, _, _, _)).Times(0);
                 for (size_t attempt = 1; attempt <= 3; ++attempt) {
                     EXPECT_TRUE(backend.backend->captureCompletedDecode(resource, 8));
-                    EXPECT_EQ(resource.decodeCompletionLifecycle().admissionAttempts(), std::min(attempt, size_t{2}));
+                    EXPECT_EQ(resource.decodePublicationAttempts(), std::min(attempt, size_t{2}));
                     EXPECT_FALSE(resource.decodeCompletionSubmitted());
                 }
             }

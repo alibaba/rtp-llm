@@ -246,6 +246,43 @@ TEST_F(KVCacheManagerTest, EndpointReadsStridedCpuBlockTablesWithoutChangingPage
     EXPECT_EQ(f.refs(), baseline);
 }
 
+TEST_F(KVCacheManagerTest, OrdinaryHostMapCaptureUsesTheSameNativePagesAndPreservesEarlierState) {
+    EndpointHoldFixture f;
+    const auto baseline = f.refs();
+    BatchKVCacheResource resource;
+    resource.resetBatchSize(1);
+    resource.initGroups(f.manager->cacheConfig().topologyPtr());
+    for (const auto& tag : f.tags) {
+        BlockIndicesType blocks;
+        for (size_t slot = 0; slot < 4; ++slot) blocks.push_back(f.block(tag, slot));
+        resource.setBatchBlocks(0, tag, std::move(blocks));
+    }
+    auto first = f.manager->retainDecodeEndpoint(resource, 4);
+    ASSERT_TRUE(first);
+    // The original allocator may discard old STATE/SWA table entries. The
+    // saved endpoint, not the current stream table, owns their remote source.
+    for (const auto& tag : {"state", "swa"}) {
+        auto blocks = resource.blocks(0, tag);
+        blocks.front() = NULL_BLOCK_IDX;
+        resource.setBatchBlocks(0, tag, blocks);
+    }
+    auto next = f.manager->retainDecodeEndpoint(resource, 8, first);
+    ASSERT_TRUE(next);
+    auto from_tensor = f.capture(8, first, /*defer_writer_wait=*/true);
+    ASSERT_TRUE(from_tensor);
+    EXPECT_EQ(next->blocks, from_tensor->blocks);
+    EXPECT_EQ(first->pages.at("full").front(), next->pages.at("full").front());
+    EXPECT_EQ(f.refs("state", 0), 2u);
+    EXPECT_EQ(first->blocks.at("state").front(), f.block("state", 0));
+    from_tensor.reset();
+    next.reset();
+    first.reset();
+    EXPECT_EQ(f.refs(), baseline);
+    resource.setBatchBlocks(0, "state", {f.block("state", 0)});
+    EXPECT_FALSE(f.manager->retainDecodeEndpoint(resource, 8)); // Never wrap a short host map to the wrong page.
+    EXPECT_EQ(f.refs(), baseline);
+}
+
 TEST_F(KVCacheManagerTest, EndpointRejectsPriorHoldsWithoutAnEngagedPinForTheExactPage) {
     for (int kind = 0; kind < 3; ++kind) {
         EndpointHoldFixture f;

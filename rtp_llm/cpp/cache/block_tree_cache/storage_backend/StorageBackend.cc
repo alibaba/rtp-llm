@@ -70,6 +70,7 @@ struct StorageTaskState {
                     pin.pool->decRef(pin.block, DeviceBlockRefType::REMOTE_CONNECTOR);
             }
             pins.clear();
+            request.source_owner.reset(); // Endpoint connector pins also retire after native freeze/completion.
             request.completion_admission.reset();
             completion_resources.reset();
         });
@@ -390,8 +391,6 @@ void StorageBackend::quarantineTask(
         return;
     }
     const size_t pinned_block_count = state->pins.size();
-    if (state->request.completion_admission)
-        state->request.completion_admission->onQuarantined();
     if (state->completion_protected) {
         // Anchor before any log, observer, allocation or cleanup. This link
         // only copies/moves already-existing shared ownership and is acyclic.
@@ -446,7 +445,9 @@ StorageBackend::prepare(StorageRequest request, bool for_write, uint64_t trace_i
     state->trace_id = trace_id;
     RTP_LLM_CHECK(initialized_);
 
-    state->completion_protected = state->request.decode_completion || protectUnknownCompletion();
+    // Decode source blocks use the same native FROZEN custody as ordinary
+    // storage tasks. A backend must explicitly opt into additional ownership.
+    state->completion_protected = protectUnknownCompletion();
     if (state->completion_protected) {
         state->completion_resources = completionResourceOwner();
         RTP_LLM_CHECK_WITH_INFO(state->completion_resources != nullptr,
@@ -679,13 +680,13 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                                                                                         ErrorCode::EXECUTION_EXCEPTION,
                                               exception.what());
                         } catch (const std::exception& exception) {
-                            if (!before_io && state->completion_protected) {
+                            if (!before_io && (state->completion_protected || state->request.decode_completion)) {
                                 quarantine_reason = StorageQuarantineReason::INVALID_RESPONSE;
                                 quarantineTask(state, /*is_write=*/false, *quarantine_reason);
                             }
                             error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
                         } catch (...) {
-                            if (!before_io && state->completion_protected) {
+                            if (!before_io && (state->completion_protected || state->request.decode_completion)) {
                                 quarantine_reason = StorageQuarantineReason::INVALID_RESPONSE;
                                 quarantineTask(state, /*is_write=*/false, *quarantine_reason);
                             }
@@ -763,9 +764,6 @@ bool StorageBackend::write(StorageWriteTask task) {
     auto total = stageTimer("write_total", state->request, "write", state->trace_id, AsyncProfileKind::Lifecycle);
     auto queue = stageTimer("write_queue_wait", state->request, "write", state->trace_id, AsyncProfileKind::Wait);
     const bool skip_remote = !remoteCacheEnabled();
-    if (state->request.completion_admission) {
-        state->request.completion_admission->onQueued();
-    }
     const bool admitted = dispatch([this, skip_remote, state, total, queue](Lifecycle outcome, Task finished) {
         const bool accepting = outcome == Lifecycle::ACCEPTING;
         queue.finish(accepting && !state->request.transfer_task->expired());
@@ -813,13 +811,13 @@ bool StorageBackend::write(StorageWriteTask task) {
                     } catch (const StorageOperationBufferSafeFailure& error) {
                         RTP_LLM_LOG_WARNING("StorageBackend payload-safe write failure: %s", error.what());
                     } catch (const std::exception& error) {
-                        if (!before_io && state->completion_protected) {
+                        if (!before_io && (state->completion_protected || state->request.decode_completion)) {
                             quarantine_reason = StorageQuarantineReason::INVALID_RESPONSE;
                             quarantineTask(state, /*is_write=*/true, *quarantine_reason);
                         }
                         RTP_LLM_LOG_ERROR("StorageBackend write failed: %s", error.what());
                     } catch (...) {
-                        if (!before_io && state->completion_protected) {
+                        if (!before_io && (state->completion_protected || state->request.decode_completion)) {
                             quarantine_reason = StorageQuarantineReason::INVALID_RESPONSE;
                             quarantineTask(state, /*is_write=*/true, *quarantine_reason);
                         }
@@ -854,8 +852,6 @@ bool StorageBackend::write(StorageWriteTask task) {
                 submit.emplace(nullptr, "write_submit", state->request.request_id.value_or(-1), 0,
                                state->request.handles.size(), world_rank_, "storage_backend",
                                state->trace_id, CacheStageContext::storage("write"));
-            if (state->request.completion_admission)
-                state->request.completion_admission->onRunning();
             auto retain_pins = [this, state](const std::vector<size_t>& key_indices) {
                 if (key_indices.size() == state->request.handles.size())
                     return;

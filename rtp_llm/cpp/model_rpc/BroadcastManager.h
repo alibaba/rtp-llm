@@ -22,7 +22,7 @@
 
 namespace rtp_llm {
 
-enum class BroadcastDispatchState { NOT_SUBMITTED, POSSIBLY_SUBMITTED, SUBMITTED };
+enum class BroadcastDispatchState { NOT_SUBMITTED, POSSIBLY_SUBMITTED, SUBMITTED, LOCAL_COMPLETED };
 
 // Only a local preflight which has not entered gRPC may give this proof.
 class BroadcastRpcNotStarted: public std::runtime_error {
@@ -157,7 +157,7 @@ public:
         for (size_t rank = 0; rank < worker_contexts_.size(); ++rank) {
             // A locally failed dispatch is not a CQ event. gRPC may still be
             // writing its response, including after aggregate completion.
-            if (cq_received_[rank]) {
+            if (cq_received_[rank] || dispatch_states_[rank] == BroadcastDispatchState::LOCAL_COMPLETED) {
                 responses.push_back(worker_contexts_[rank]->response);
             } else {
                 responses.emplace_back();
@@ -184,6 +184,8 @@ public:
                 snapshot.grpc_code    = worker_contexts_[rank]->status.error_code();
                 snapshot.grpc_message = worker_contexts_[rank]->status.error_message();
                 snapshot.response     = worker_contexts_[rank]->response;
+            } else if (snapshot.dispatch_state == BroadcastDispatchState::LOCAL_COMPLETED) {
+                snapshot.response = worker_contexts_[rank]->response;
             }
             snapshots.push_back(std::move(snapshot));
         }
@@ -215,6 +217,26 @@ public:
 
     void finishRank(size_t rank, bool cq_event_ok) {
         completeRank(rank, /*cq_received=*/true, cq_event_ok, nullptr);
+    }
+
+    // A local worker has finished writing its own response. Reuse aggregation
+    // and onDone without fabricating a gRPC CQ event, status or RPC success.
+    void finishLocalRank(size_t rank) {
+        std::vector<DoneCallback> callbacks;
+        {
+            std::lock_guard<std::mutex> lock(wait_done_mutex_);
+            RTP_LLM_CHECK(rank < finished_.size());
+            if (already_done_.load() || finished_[rank]) return;
+            finished_[rank] = true;
+            dispatch_states_[rank] = BroadcastDispatchState::LOCAL_COMPLETED;
+            completion_times_us_[rank] = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            completion_wall_times_us_[rank] = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            if (++finished_count_ == static_cast<int>(finished_.size())) finishLocked(callbacks);
+        }
+        wait_done_cv_.notify_all();
+        for (auto& callback : callbacks) { try { callback(); } catch (...) {} }
     }
 
     void finishDispatchFailure(size_t rank, const char* error) {
