@@ -104,11 +104,17 @@ public:
         return call_count_;
     }
 
+    std::optional<bool> input_inspection_enabled;
+
 private:
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput> mm_inputs,
                                                       std::string                        ip_port = "",
                                                       int64_t                                    = 0,
-                                                      grpc::ServerContext*                       = nullptr) override {
+                                                      grpc::ServerContext*                       = nullptr,
+                                                      const MultimodalInputsPB* wire_inputs      = nullptr) override {
+        if (wire_inputs && wire_inputs->has_input_inspection_enabled()) {
+            input_inspection_enabled = wire_inputs->input_inspection_enabled().value();
+        }
         const auto result_code = result_codes_[std::min<size_t>(call_count_, result_codes_.size() - 1)];
         ++call_count_;
         if (result_code != ErrorCode::NONE_ERROR) {
@@ -472,7 +478,7 @@ TEST_F(PrefillRpcServerTest, rawGrpcPromptScoringWithPositiveMaxNewTokensRoutesL
     GenerateInputPB request;
     request.set_request_id(3);
     request.add_token_ids(0);
-    request.add_multimodal_inputs()->set_multimodal_url("image");
+    request.mutable_multimodal_inputs()->add_multimodal_inputs()->set_multimodal_url("image");
     auto* config = request.mutable_generate_config();
     config->set_max_new_tokens(8);
     config->set_return_prompt_logits(true);
@@ -514,7 +520,7 @@ TEST_F(PrefillRpcServerTest, bareWireZeroRoutesToLocalLegacyPrefill) {
     ASSERT_FALSE(wire_request.generate_config().prefill_only());
     ASSERT_TRUE(wire_request.generate_config().can_use_pd_separation());
 
-    wire_request.add_multimodal_inputs()->set_multimodal_url("image");
+    wire_request.mutable_multimodal_inputs()->add_multimodal_inputs()->set_multimodal_url("image");
     TestPrefillRpcServer server;
     server.mm_processor_          = std::make_shared<TestMultimodalProcessor>(ErrorCode::MM_WRONG_FORMAT_ERROR);
     auto                processor = std::static_pointer_cast<TestMultimodalProcessor>(server.mm_processor_);
@@ -535,7 +541,9 @@ TEST_F(PrefillRpcServerTest, flaggedWireZeroRoutesToLocalPrefillOnly) {
     request.add_token_ids(0);
     request.add_token_ids(1);
     request.add_token_ids(2);
-    request.add_multimodal_inputs()->set_multimodal_url("image");
+    auto* multimodal = request.mutable_multimodal_inputs();
+    multimodal->add_multimodal_inputs()->set_multimodal_url("image");
+    multimodal->mutable_input_inspection_enabled()->set_value(false);
     auto* config = request.mutable_generate_config();
     config->set_max_new_tokens(0);
     config->set_prefill_only(true);
@@ -556,6 +564,8 @@ TEST_F(PrefillRpcServerTest, flaggedWireZeroRoutesToLocalPrefillOnly) {
     const auto          status = server.GenerateStreamCall(&context, &wire_request, nullptr);
 
     EXPECT_EQ(processor->callCount(), 1);
+    ASSERT_TRUE(processor->input_inspection_enabled.has_value());
+    EXPECT_FALSE(*processor->input_inspection_enabled);
     EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
     ErrorDetailsPB error_details;
     ASSERT_TRUE(error_details.ParseFromString(status.error_details()));
@@ -1262,7 +1272,7 @@ TEST_F(PrefillRpcServerTest, retryRebuildsPbInputBeforeMultimodalProcessing) {
     request.add_token_ids(1);
     request.add_token_ids(2);
     request.mutable_generate_config();
-    request.add_multimodal_inputs()->set_multimodal_url("image");
+    request.mutable_multimodal_inputs()->add_multimodal_inputs()->set_multimodal_url("image");
     auto context = makeContext(&request);
 
     TestPrefillRpcServer server;

@@ -366,11 +366,14 @@ void PrefillRpcServer::multimodalProcess(PrefillGenerateContext& prefill_context
         return;
     }
 
-    auto result = updateMultimodalFeaturesWithTrace(input,
+    const auto* request     = prefill_context.rpc_context.request;
+    const auto* wire_inputs = request && request->has_multimodal_inputs() ? &request->multimodal_inputs() : nullptr;
+    auto        result      = updateMultimodalFeaturesWithTrace(input,
                                                     prefill_context.trace_span_guard ?
-                                                        prefill_context.trace_span_guard->sharedSpan() :
-                                                        opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{},
-                                                    prefill_context.server_context);
+                                                                    prefill_context.trace_span_guard->sharedSpan() :
+                                                                    opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>{},
+                                                    prefill_context.server_context,
+                                                    wire_inputs);
     if (!result.ok()) {
         prefill_context.setRetryable(isRetryableMultimodalError(result.code()));
         setContextError(prefill_context, result);

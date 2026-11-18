@@ -34,9 +34,10 @@ public:
 
 private:
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput>,
-                                                      std::string          = "",
-                                                      int64_t              = 0,
-                                                      grpc::ServerContext* = nullptr) override {
+                                                      std::string               = "",
+                                                      int64_t                   = 0,
+                                                      grpc::ServerContext*      = nullptr,
+                                                      const MultimodalInputsPB* = nullptr) override {
         MultimodalOutput output;
         output.mm_features.push_back(torch::ones({3, 4}, torch::kFloat32));
         output.mm_feature_hashes =

@@ -284,7 +284,7 @@ message RequestInfoPB {
 message GenerateInputPB {
     int64 request_id = 1;
     repeated int32 token_ids = 2;
-    repeated MultimodalInputPB multimodal_inputs = 3;
+    MultimodalInputsPB multimodal_inputs = 3;
     GenerateConfigPB generate_config = 4;
     string client_id = 5;
     int64 start_time = 6;

@@ -108,7 +108,9 @@ class GenerateInputPayloadTest {
 
     @Test void parseFailureDoesNotRetainAnAlreadyDecodedLargeTensor() throws Exception {
         var tensor = EngineRpcService.TensorPB.newBuilder().setFp16Data(ByteString.copyFrom(new byte[1 << 20]));
-        var partial = EngineRpcService.MultimodalInputPB.newBuilder().setMultimodalTensor(tensor).build().toByteString();
+        var partial = EngineRpcService.MultimodalInputsPB.newBuilder()
+                .addMultimodalInputs(EngineRpcService.MultimodalInputPB.newBuilder().setMultimodalTensor(tensor))
+                .build().toByteString();
         var invalid = partial.concat(ByteString.copyFrom(new byte[] {0})); // Invalid tag after a valid large tensor.
         var bytes = ByteString.newOutput();
         var output = CodedOutputStream.newInstance(bytes);
@@ -128,7 +130,8 @@ class GenerateInputPayloadTest {
         var tensor = EngineRpcService.TensorPB.newBuilder()
                 .setFp16Data(ByteString.copyFrom(new byte[4 * 1024 * 1024]));
         ByteString bytes = GenerateInputPB.newBuilder().setRequestId(17).addTokenIds(71)
-                .addMultimodalInputs(EngineRpcService.MultimodalInputPB.newBuilder().setMultimodalTensor(tensor))
+                .setMultimodalInputs(EngineRpcService.MultimodalInputsPB.newBuilder()
+                        .addMultimodalInputs(EngineRpcService.MultimodalInputPB.newBuilder().setMultimodalTensor(tensor)))
                 .build().toByteString();
         var management = java.lang.management.ManagementFactory.getThreadMXBean();
         org.junit.jupiter.api.Assumptions.assumeTrue(management instanceof com.sun.management.ThreadMXBean);

@@ -21,6 +21,8 @@ namespace grpc {
 class ServerContext;
 }
 
+class MultimodalInputsPB;
+
 namespace rtp_llm {
 
 struct ExpandedOutput {
@@ -75,8 +77,9 @@ private:
 
     virtual ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
                                                               std::string                                 ip_port = "",
-                                                              int64_t              request_id                     = 0,
-                                                              grpc::ServerContext* server_context = nullptr) = 0;
+                                                              int64_t                   request_id                = 0,
+                                                              grpc::ServerContext*      server_context = nullptr,
+                                                              const MultimodalInputsPB* wire_inputs    = nullptr) = 0;
 
     ErrorResult<ExpandedOutput>
     expandTokenIds(const std::vector<torch::Tensor>&                mm_embedding,
@@ -90,7 +93,8 @@ private:
 
 public:
     ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input,
-                                       grpc::ServerContext*                     server_context = nullptr);
+                                       grpc::ServerContext*                     server_context = nullptr,
+                                       const MultimodalInputsPB*                wire_inputs    = nullptr);
 
     ErrorInfo updateMultimodalFeatures(std::shared_ptr<rtp_llm::EmbeddingInput>&    input,
                                        const std::vector<rtp_llm::MultimodalInput>& mm_inputs,

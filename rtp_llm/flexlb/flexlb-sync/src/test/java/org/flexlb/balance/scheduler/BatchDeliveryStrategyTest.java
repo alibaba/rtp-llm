@@ -66,7 +66,7 @@ class BatchDeliveryStrategyTest {
         prefill.setGrpcPort(8090);
         var template = EngineRpcService.GenerateInputPB.newBuilder().addTokenIds(129264);
         if (images) {
-            template.addMultimodalInputs(EngineRpcService.MultimodalInputPB.newBuilder()
+            template.getMultimodalInputsBuilder().addMultimodalInputs(EngineRpcService.MultimodalInputPB.newBuilder()
                     .setMultimodalTensor(EngineRpcService.TensorPB.newBuilder()
                             .setBf16Data(ByteString.copyFrom(new byte[20 * 1024 * 1024]))));
         }
@@ -99,10 +99,10 @@ class BatchDeliveryStrategyTest {
                 for (var external : slot.getRequestsList()) {
                     var input = external.getInput();
                     sentIds.add(input.getRequestId());
-                    assertEquals(images ? 1 : 0, input.getMultimodalInputsCount());
+                    assertEquals(images ? 1 : 0, input.getMultimodalInputs().getMultimodalInputsCount());
                     if (images) {
                         assertEquals(20 * 1024 * 1024,
-                                input.getMultimodalInputs(0).getMultimodalTensor().getBf16Data().size());
+                                input.getMultimodalInputs().getMultimodalInputs(0).getMultimodalTensor().getBf16Data().size());
                     }
                     response.addSuccesses(EngineRpcService.EnqueueBatchSuccessPB.newBuilder()
                             .setRequestId(input.getRequestId()));

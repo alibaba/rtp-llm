@@ -149,9 +149,12 @@ class V41ImageRendererTest(TestCase):
         )
         normal_wire = trans_input(normal_input)
         self.assertEqual(list(normal_wire.token_ids), rendered.input_ids)
-        self.assertEqual(len(normal_wire.multimodal_inputs), 2)
+        self.assertEqual(len(normal_wire.multimodal_inputs.multimodal_inputs), 2)
         self.assertEqual(
-            [item.multimodal_url for item in normal_wire.multimodal_inputs],
+            [
+                item.multimodal_url
+                for item in normal_wire.multimodal_inputs.multimodal_inputs
+            ],
             [item.url for item in rendered.multimodal_inputs],
         )
 
@@ -229,7 +232,7 @@ class V41ImageRendererTest(TestCase):
         self.assertEqual(
             [
                 (m.mm_preprocess_config.width, m.mm_preprocess_config.height)
-                for m in wire.multimodal_inputs
+                for m in wire.multimodal_inputs.multimodal_inputs
             ],
             [(-1, -1), (512, 512), (-1, -1), (-1, -1), (-1, -1)],
         )

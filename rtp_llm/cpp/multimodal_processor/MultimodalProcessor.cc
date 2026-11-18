@@ -242,7 +242,8 @@ ErrorInfo MultimodalProcessor::checkExpandLength(const ExpandedOutput& expand_ou
 }
 
 ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm::GenerateInput>& input,
-                                                        grpc::ServerContext*                     server_context) {
+                                                        grpc::ServerContext*                     server_context,
+                                                        const MultimodalInputsPB*                wire_inputs) {
     if (input->generate_config && input->generate_config->calculate_loss) {
         return ErrorInfo(ErrorCode::MM_NOT_SUPPORTED_ERROR, "cannot calculate loss in multimodal query");
     }
@@ -267,7 +268,7 @@ ErrorInfo MultimodalProcessor::updateMultimodalFeatures(std::shared_ptr<rtp_llm:
 #endif
     CHECK_AND_RETURN_REF(
         mm_embedding_res,
-        MultimodalEmbedding(input->multimodal_inputs.value(), ip_port, input->request_id, server_context));
+        MultimodalEmbedding(input->multimodal_inputs.value(), ip_port, input->request_id, server_context, wire_inputs));
     auto                       mm_features = std::move(mm_embedding_res.mm_features);
     std::vector<torch::Tensor> mm_extra_input;
     if (mm_embedding_res.mm_extra_input.has_value()) {

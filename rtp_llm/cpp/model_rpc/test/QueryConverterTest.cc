@@ -703,7 +703,7 @@ TEST_F(QueryConverterTest, NormalImageInputPreservesSourceAndCanonicalMarker) {
         wire.add_token_ids(token);
     }
     const std::string source = "data:image/png;base64,iVBORwD/";
-    auto*             media  = wire.add_multimodal_inputs();
+    auto*             media  = wire.mutable_multimodal_inputs()->add_multimodal_inputs();
     media->set_multimodal_url(source);
     media->set_multimodal_type(1);
     auto input = QueryConverter::transQuery(&wire);

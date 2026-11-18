@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalError.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
 
@@ -13,7 +14,8 @@ private:
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
                                                       std::string                                 ip_port    = "",
                                                       int64_t                                     request_id = 0,
-                                                      grpc::ServerContext* server_context = nullptr) {
+                                                      grpc::ServerContext*      server_context               = nullptr,
+                                                      const MultimodalInputsPB* wire_inputs = nullptr) override {
         if (mm_inputs.size() == 0) {
             return MultimodalOutput();
         } else if (!mm_process_engine_.is_none()) {
@@ -48,6 +50,10 @@ private:
                     mm_preprocess_configs.push_back(mm_preprocess_config);
                 }
 
+                py::object input_inspection_enabled = py::none();
+                if (wire_inputs && wire_inputs->has_input_inspection_enabled()) {
+                    input_inspection_enabled = py::bool_(wire_inputs->input_inspection_enabled().value());
+                }
                 auto res = mm_process_engine_.attr("mm_embedding_cpp")(
                     urls,
                     types,
@@ -56,7 +62,8 @@ private:
                     request_id,
                     dashScopeMetadata(server_context, "x-dashscope-uid"),
                     dashScopeMetadata(server_context, "x-dashscope-service"),
-                    dashScopeMetadata(server_context, "x-dashscope-request-id"));
+                    dashScopeMetadata(server_context, "x-dashscope-request-id"),
+                    input_inspection_enabled);
                 auto mm_embedding_vec = convertPyObjectToVec(res.attr("embeddings"));
 
                 MultimodalOutput           mm_embedding_res;

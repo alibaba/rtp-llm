@@ -139,7 +139,8 @@ protected:
     ErrorInfo
                  updateMultimodalFeaturesWithTrace(std::shared_ptr<GenerateInput>&                                     input,
                                                    const opentelemetry::nostd::shared_ptr<opentelemetry::trace::Span>& parent_span,
-                                                   grpc::ServerContext* server_context = nullptr);
+                                                   grpc::ServerContext*      server_context = nullptr,
+                                                   const MultimodalInputsPB* wire_inputs    = nullptr);
     ErrorInfo    collectStreamOutput(grpc::ServerContext*                  context,
                                      std::shared_ptr<GenerateStream>&      stream,
                                      const std::shared_ptr<GenerateInput>& input,

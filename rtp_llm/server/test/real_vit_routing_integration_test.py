@@ -158,9 +158,9 @@ class RealVitRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[1].kwargs["selected_vit"], self.status)
         wire = calls[1].kwargs["input_pb"]
         self.assertEqual(list(wire.token_ids), [1, 99, 2])
-        self.assertEqual(len(wire.multimodal_inputs), 1)
+        self.assertEqual(len(wire.multimodal_inputs.multimodal_inputs), 1)
         self.assertEqual(
-            wire.multimodal_inputs[0].multimodal_url,
+            wire.multimodal_inputs.multimodal_inputs[0].multimodal_url,
             request.mm_inputs[0].url,
         )
         self.assertEqual(list(trans_input(request).token_ids), [1, 99, 2])

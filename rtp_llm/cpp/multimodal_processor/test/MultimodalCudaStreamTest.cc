@@ -104,8 +104,11 @@ public:
     bool fail = false;
 
 private:
-    ErrorResult<MultimodalOutput>
-    MultimodalEmbedding(const std::vector<MultimodalInput>, std::string, int64_t, grpc::ServerContext*) override {
+    ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput>,
+                                                      std::string,
+                                                      int64_t,
+                                                      grpc::ServerContext*,
+                                                      const MultimodalInputsPB* = nullptr) override {
         if (fail) {
             return ErrorInfo(ErrorCode::MM_PROCESS_ERROR, "intentional stream restoration test");
         }

@@ -25,7 +25,6 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     GenerateInputPB,
     GenerateOutputsPB,
     MultimodalInputPB,
-    MultimodalInputsPB,
     RoleAddrPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
@@ -729,12 +728,6 @@ def trans_input(input_py: GenerateInput):
     return input_pb
 
 
-def _make_multimodal_inputs_pb(input_pb: GenerateInputPB) -> MultimodalInputsPB:
-    mm_inputs_pb = MultimodalInputsPB(request_id=input_pb.request_id)
-    mm_inputs_pb.multimodal_inputs.extend(input_pb.multimodal_inputs)
-    return mm_inputs_pb
-
-
 def get_multimodal_preprocess_value(
     value: Optional[Union[int, float]], default: Union[int, float]
 ) -> Union[int, float]:
@@ -747,7 +740,22 @@ def get_multimodal_preprocess_value(
 def trans_multimodal_input(
     input_py: GenerateInput, input_pb: GenerateInputPB, generate_config: GenerateConfig
 ):
-    input_pb.multimodal_inputs.extend(iter_multimodal_inputs(input_py, generate_config))
+    if not input_py.mm_inputs:
+        return
+
+    multimodal = input_pb.multimodal_inputs
+    multimodal.request_id = input_pb.request_id
+    multimodal.multimodal_inputs.extend(
+        iter_multimodal_inputs(input_py, generate_config)
+    )
+    region = input_py.headers.get("region")
+    if region:
+        multimodal.region = region
+    inspection_enabled = extract_input_inspection_enabled(input_py.headers)
+    if inspection_enabled is not None:
+        multimodal.input_inspection_enabled.CopyFrom(
+            BoolValue(value=inspection_enabled)
+        )
 
 
 def iter_multimodal_inputs(input_py: GenerateInput, generate_config: GenerateConfig):
@@ -1332,7 +1340,7 @@ class ModelRpcClient(object):
         last_output = None
 
         try:
-            if input_pb.multimodal_inputs:
+            if input_pb.multimodal_inputs.multimodal_inputs:
                 # GreenNet content-safety gate: block before prefill until the VIT
                 # encoder's inspection verdict lands. A violation raises
                 # FtRuntimeException(UNSAFE_INPUT_CONTENT) here, short-circuiting the
@@ -1686,18 +1694,7 @@ class ModelRpcClient(object):
                 # approved hash). No separate ViT RPC is needed on this route.
                 continue
             vit_addr = f"{role_addr.ip}:{role_addr.grpc_port}"
-            mm_inputs_pb = _make_multimodal_inputs_pb(input_pb)
-            region = input_py.headers.get("region")
-            if region:
-                # Request-level: one value for every multimodal input in this PB.
-                mm_inputs_pb.region = region
-            input_inspection_enabled = extract_input_inspection_enabled(
-                input_py.headers
-            )
-            if input_inspection_enabled is not None:
-                mm_inputs_pb.input_inspection_enabled.CopyFrom(
-                    BoolValue(value=input_inspection_enabled)
-                )
+            mm_inputs_pb = input_pb.multimodal_inputs
             channel = await self._channel_pool.get(vit_addr)
             stub = MultimodalRpcServiceStub(channel)
             try:

@@ -2414,27 +2414,16 @@ class VitRpcRemoteIdentityTest(unittest.TestCase):
                         )
                     )
                     frontend = type(frontend).FromString(frontend.SerializeToString())
-                    self.assertEqual(len(frontend.multimodal_inputs), 1)
-                    image = frontend.multimodal_inputs[0]
+                    self.assertEqual(
+                        len(frontend.multimodal_inputs.multimodal_inputs), 1
+                    )
+                    image = frontend.multimodal_inputs.multimodal_inputs[0]
                     self.assertEqual(image.multimodal_url, urls[0])
                     self.assertEqual(image.multimodal_type, MMUrlType.IMAGE)
                     self.assertFalse(image.HasField("multimodal_tensor"))
 
-                    # QueryConverterMultimodalInputTest independently exercises
-                    # the actual C++ converter for this absent-TensorPB contract.
-                    # Reproduce its present zero-length tensor on the ViT wire,
-                    # then invoke the actual Python ViT decoder and cache key.
-                    wire = MultimodalInputsPB(request_id=123)
-                    forwarded = wire.multimodal_inputs.add()
-                    forwarded.CopyFrom(image)
-                    forwarded.multimodal_tensor.CopyFrom(
-                        trans_from_tensor(torch.empty(0))
-                    )
-                    self.assertTrue(forwarded.HasField("multimodal_tensor"))
-                    self.assertEqual(list(forwarded.multimodal_tensor.shape), [0])
-                    inputs = trans_mm_input(
-                        MultimodalInputsPB.FromString(wire.SerializeToString())
-                    )
+                    # Prefill forwards the URL-only multimodal envelope to ViT.
+                    inputs = trans_mm_input(frontend.multimodal_inputs)
                     self.assertEqual(inputs[0].tensor.numel(), 0)
                     # The local cache key follows the URL after frontend serialization.
                     expected = [

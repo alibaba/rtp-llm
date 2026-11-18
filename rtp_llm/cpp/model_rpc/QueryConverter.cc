@@ -281,29 +281,30 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     generate_input->input_ids =
         torch::from_blob(const_cast<int*>(input->token_ids().data()), {(int64_t)input->token_ids_size()}, torch::kInt32)
             .clone();
-    if (input->multimodal_inputs_size() > 0) {
+    const auto& media = input->multimodal_inputs().multimodal_inputs();
+    if (!media.empty()) {
         std::vector<MultimodalInput> mm_inputs;
-        for (int i = 0; i < input->multimodal_inputs_size(); i++) {
-            auto               mm_input             = &input->multimodal_inputs(i);
-            auto               mm_preprocess_config = &mm_input->mm_preprocess_config();
+        mm_inputs.reserve(media.size());
+        for (const auto& item : media) {
+            const auto&        mm_preprocess_config = item.mm_preprocess_config();
             std::vector<float> crop_positions;
-            for (const auto& crop_position : mm_preprocess_config->crop_positions()) {
+            for (const auto& crop_position : mm_preprocess_config.crop_positions()) {
                 crop_positions.push_back(crop_position);
             }
             mm_inputs.emplace_back(
-                mm_input->multimodal_url(),
+                item.multimodal_url(),
                 torch::empty(1),
-                mm_input->multimodal_type(),
-                mm_preprocess_config->width(),
-                mm_preprocess_config->height(),
-                mm_preprocess_config->min_pixels(),
-                mm_preprocess_config->max_pixels(),
-                mm_preprocess_config->fps(),
-                mm_preprocess_config->min_frames(),
-                mm_preprocess_config->max_frames(),
+                item.multimodal_type(),
+                mm_preprocess_config.width(),
+                mm_preprocess_config.height(),
+                mm_preprocess_config.min_pixels(),
+                mm_preprocess_config.max_pixels(),
+                mm_preprocess_config.fps(),
+                mm_preprocess_config.min_frames(),
+                mm_preprocess_config.max_frames(),
                 crop_positions,
-                mm_preprocess_config->mm_timeout_ms(),
-                mm_preprocess_config->max_long_side_pixel() > 0 ? mm_preprocess_config->max_long_side_pixel() : -1);
+                mm_preprocess_config.mm_timeout_ms(),
+                mm_preprocess_config.max_long_side_pixel() > 0 ? mm_preprocess_config.max_long_side_pixel() : -1);
         }
         generate_input->multimodal_inputs = std::move(mm_inputs);
     }

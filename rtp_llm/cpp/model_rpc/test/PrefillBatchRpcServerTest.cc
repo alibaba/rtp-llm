@@ -307,9 +307,10 @@ public:
 
 private:
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<MultimodalInput> inputs,
-                                                      std::string          = "",
-                                                      int64_t              = 0,
-                                                      grpc::ServerContext* = nullptr) override {
+                                                      std::string               = "",
+                                                      int64_t                   = 0,
+                                                      grpc::ServerContext*      = nullptr,
+                                                      const MultimodalInputsPB* = nullptr) override {
         ++calls;
         if (throws) {
             throw std::runtime_error("embedding failed");
@@ -332,8 +333,8 @@ GenerateInputPB makeVitRequest(int64_t request_id) {
     for (const auto token : {0, 1, 2, 1, 3}) {
         request.add_token_ids(token);
     }
-    request.add_multimodal_inputs()->set_multimodal_url("image-one");
-    request.add_multimodal_inputs()->set_multimodal_url("image-two");
+    request.mutable_multimodal_inputs()->add_multimodal_inputs()->set_multimodal_url("image-one");
+    request.mutable_multimodal_inputs()->add_multimodal_inputs()->set_multimodal_url("image-two");
     return request;
 }
 

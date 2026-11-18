@@ -848,9 +848,11 @@ class DefaultBatchDispatcherTest {
         item.ctx().getRequest().setPriority(60);
         var original = EngineRpcService.GenerateInputPB.parseFrom(item.ctx().getGenerateInputPb()).toBuilder()
                 .addAllTokenIds(List.of(0, 127, 128, 129264, -1, Integer.MIN_VALUE))
-                .addMultimodalInputs(EngineRpcService.MultimodalInputPB.newBuilder()
-                        .setMultimodalTensor(EngineRpcService.TensorPB.newBuilder()
-                                .setFp16Data(com.google.protobuf.ByteString.copyFrom(new byte[1024 * 1024]))))
+                .setMultimodalInputs(EngineRpcService.MultimodalInputsPB.newBuilder()
+                        .setInputInspectionEnabled(com.google.protobuf.BoolValue.of(false))
+                        .addMultimodalInputs(EngineRpcService.MultimodalInputPB.newBuilder()
+                                .setMultimodalTensor(EngineRpcService.TensorPB.newBuilder()
+                                        .setFp16Data(com.google.protobuf.ByteString.copyFrom(new byte[1024 * 1024])))))
                 .build();
         item.ctx().setGenerateInputPb(original.toByteString());
 
@@ -869,7 +871,7 @@ class DefaultBatchDispatcherTest {
         assertEquals(0, encoded.getTokenIdsCount(), "dispatcher must keep tokens encoded");
         var received = sentInput(EngineRpcService.EnqueueBatchRequestPB.parseFrom(sent.getFirst().toByteString()));
         assertEquals(original.getTokenIdsList(), received.getTokenIdsList());
-        assertEquals(original.getMultimodalInputsList(), received.getMultimodalInputsList());
+        assertEquals(original.getMultimodalInputs(), received.getMultimodalInputs());
         assertEquals(60, received.getPriority());
         assertEquals("PREFILL", received.getGenerateConfig().getRoleAddrs(0).getRoleStr());
     }

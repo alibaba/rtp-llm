@@ -393,14 +393,14 @@ class MMHashRpcTest(unittest.IsolatedAsyncioTestCase):
             )
             wire = calls[1].kwargs["input_pb"]
             self.assertEqual(list(wire.token_ids), [1, 99, 2])
-            self.assertEqual(len(wire.multimodal_inputs), 1)
+            self.assertEqual(len(wire.multimodal_inputs.multimodal_inputs), 1)
             self.assertEqual(
-                wire.multimodal_inputs[0].multimodal_url,
+                wire.multimodal_inputs.multimodal_inputs[0].multimodal_url,
                 self.request.mm_inputs[0].url,
             )
             forwarded = trans_input(self.request)
             self.assertEqual(list(forwarded.token_ids), [1, 99, 2])
-            self.assertEqual(len(forwarded.multimodal_inputs), 1)
+            self.assertEqual(len(forwarded.multimodal_inputs.multimodal_inputs), 1)
             self.assertEqual(self.request.token_ids.tolist(), [1, 99, 2])
             snapshot = self.request.mm_routing_snapshot
             self.assertIsNotNone(snapshot)

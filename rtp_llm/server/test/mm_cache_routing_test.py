@@ -103,7 +103,7 @@ class MMCacheRoutingTest(unittest.TestCase):
         request = GenerateInput(1, torch.tensor([1]), [item], cfg)
         wire = GenerateInputPB()
         trans_multimodal_input(request, wire, cfg)
-        resolved = wire.multimodal_inputs[0]
+        resolved = wire.multimodal_inputs.multimodal_inputs[0]
         expected = MultimodalInput(
             item.url,
             item.mm_type,
@@ -133,7 +133,7 @@ class MMCacheRoutingTest(unittest.TestCase):
                     wire = GenerateInputPB()
                     trans_multimodal_input(request, wire, cfg)
                     worker_config = trans_config(
-                        wire.multimodal_inputs[0].mm_preprocess_config
+                        wire.multimodal_inputs.multimodal_inputs[0].mm_preprocess_config
                     )
                     resolved_limit = (
                         request_limit if request_limit != -1 else media_limit
@@ -459,9 +459,9 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         )
         wire = GenerateInputPB.FromString(route["input_pb"].SerializeToString())
         self.assertEqual(list(wire.token_ids), [1, 99, 2])
-        self.assertEqual(len(wire.multimodal_inputs), 1)
+        self.assertEqual(len(wire.multimodal_inputs.multimodal_inputs), 1)
         self.assertEqual(
-            wire.multimodal_inputs[0].multimodal_url,
+            wire.multimodal_inputs.multimodal_inputs[0].multimodal_url,
             request.mm_inputs[0].url,
         )
 
@@ -596,7 +596,10 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
                 list(route_calls[1].kwargs["input_pb"].token_ids), [1, 99, 2]
             )
             self.assertEqual(
-                route_calls[1].kwargs["input_pb"].multimodal_inputs[0].multimodal_url,
+                route_calls[1]
+                .kwargs["input_pb"]
+                .multimodal_inputs.multimodal_inputs[0]
+                .multimodal_url,
                 self.request.mm_inputs[0].url,
             )
 
@@ -708,9 +711,9 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         await self.visitor.get_master_route_addrs(self.request)
         wire = trans_input(self.request)
         self.assertEqual(list(wire.token_ids), [1, 99, 2])
-        self.assertEqual(len(wire.multimodal_inputs), 1)
+        self.assertEqual(len(wire.multimodal_inputs.multimodal_inputs), 1)
         self.assertEqual(
-            wire.multimodal_inputs[0].multimodal_url,
+            wire.multimodal_inputs.multimodal_inputs[0].multimodal_url,
             self.request.mm_inputs[0].url,
         )
 
@@ -757,7 +760,7 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hints, model_keys[:2])
         wire = route["input_pb"]
         self.assertEqual(list(wire.token_ids), original)
-        self.assertEqual(len(wire.multimodal_inputs), 1)
+        self.assertEqual(len(wire.multimodal_inputs.multimodal_inputs), 1)
         self.assertEqual(self.request.token_ids.tolist(), original)
         self.visitor.master_client.get_vit_cache_metadata.assert_not_awaited()
 
@@ -775,7 +778,9 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(calls), 2)
         self.visitor.master_client.get_vit_cache_metadata.assert_not_awaited()
         self.assertEqual(list(calls[1].kwargs["input_pb"].token_ids), [1, 99, 2])
-        self.assertEqual(len(calls[1].kwargs["input_pb"].multimodal_inputs), 1)
+        self.assertEqual(
+            len(calls[1].kwargs["input_pb"].multimodal_inputs.multimodal_inputs), 1
+        )
         # Ordinary Schedule may already own/admit this request on main.
         # Do not issue a second admission after retrieving optional hashes.
 
@@ -840,9 +845,9 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.request.token_ids.tolist(), [1, 99, 2])
         wire = last["input_pb"]
         self.assertEqual(list(wire.token_ids), [1, 99, 2])
-        self.assertEqual(len(wire.multimodal_inputs), 1)
+        self.assertEqual(len(wire.multimodal_inputs.multimodal_inputs), 1)
         self.assertEqual(
-            wire.multimodal_inputs[0].multimodal_url,
+            wire.multimodal_inputs.multimodal_inputs[0].multimodal_url,
             self.request.mm_inputs[0].url,
         )
 
@@ -856,9 +861,9 @@ class MMCacheRoutingIntegrationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.request.token_ids.tolist(), [1, 99, 2])
         wire = trans_input(self.request)
         self.assertEqual(list(wire.token_ids), [1, 99, 2])
-        self.assertEqual(len(wire.multimodal_inputs), 1)
+        self.assertEqual(len(wire.multimodal_inputs.multimodal_inputs), 1)
         self.assertEqual(
-            wire.multimodal_inputs[0].multimodal_url,
+            wire.multimodal_inputs.multimodal_inputs[0].multimodal_url,
             self.request.mm_inputs[0].url,
         )
 

@@ -36,11 +36,22 @@ public:
     ErrorResult<MultimodalOutput> MultimodalEmbedding(const std::vector<rtp_llm::MultimodalInput> mm_inputs,
                                                       std::string                                 ip_port    = "",
                                                       int64_t                                     request_id = 0,
-                                                      grpc::ServerContext* server_context = nullptr) override {
+                                                      grpc::ServerContext*      server_context               = nullptr,
+                                                      const MultimodalInputsPB* wire_inputs = nullptr) override {
         if (ip_port == "") {
             return ErrorInfo(ErrorCode::MM_EMPTY_ENGINE_ERROR, "ip:port is empty in remote multimodal processing");
         }
-        auto request_pb = MultimodalPbConverter::inputsToPb(mm_inputs, request_id);
+        auto request_pb = wire_inputs ? *wire_inputs : MultimodalPbConverter::inputsToPb(mm_inputs, request_id);
+        request_pb.set_request_id(request_id);
+        // RDMA capability belongs to this consumer and is advertised by its transport.
+        request_pb.clear_support_rdma();
+        if (wire_inputs) {
+            // Generate RPCs carry media references. As in QueryConverter, ignore
+            // tensor payloads supplied alongside them.
+            for (auto& item : *request_pb.mutable_multimodal_inputs()) {
+                item.clear_multimodal_tensor();
+            }
+        }
         return output_transport_->fetch(ip_port, request_pb, server_context);
     }
 

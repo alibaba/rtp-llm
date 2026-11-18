@@ -489,12 +489,19 @@ class ModelRpcClientTest(TestCase):
                 )
             ],
             generate_config=GenerateConfig(),
+            headers={"x-dashscope-datainspection": '{"input":"disable"}'},
         )
         wire = GenerateInputPB.FromString(trans_input(request).SerializeToString())
         self.assertEqual(list(wire.token_ids), [7, 129264, 8])
-        self.assertEqual(len(wire.multimodal_inputs), 1)
+        multimodal = wire.multimodal_inputs
+        self.assertEqual(multimodal.request_id, wire.request_id)
+        self.assertTrue(multimodal.HasField("input_inspection_enabled"))
+        self.assertFalse(multimodal.input_inspection_enabled.value)
+        self.assertEqual(len(multimodal.multimodal_inputs), 1)
         self.assertEqual(
-            base64.b64decode(wire.multimodal_inputs[0].multimodal_url.split(",", 1)[1]),
+            base64.b64decode(
+                multimodal.multimodal_inputs[0].multimodal_url.split(",", 1)[1]
+            ),
             source,
         )
 
@@ -2917,7 +2924,9 @@ class ClientSpanSettlementTest(TestCase):
                 span = _FakeClientSpan()
                 client = self._build_client(span, total=1)
                 input_pb = GenerateInputPB(request_id=7)
-                input_pb.multimodal_inputs.add(multimodal_url="image://test")
+                input_pb.multimodal_inputs.multimodal_inputs.add(
+                    multimodal_url="image://test"
+                )
                 with (
                     patch(
                         "rtp_llm.cpp.model_rpc.model_rpc_client.trans_input",
@@ -2955,6 +2964,26 @@ class ClientSpanSettlementTest(TestCase):
                         http_port=8000,
                     )
                 ]
+                # Construct the request as the frontend does, including the shared
+                # multimodal envelope used for both downstream calls.
+                inp.mm_inputs = [
+                    SimpleNamespace(
+                        url="image://test",
+                        mm_type=1,
+                        mm_preprocess_config=SimpleNamespace(
+                            width=-1,
+                            height=-1,
+                            min_pixels=-1,
+                            max_pixels=-1,
+                            fps=-1,
+                            min_frames=-1,
+                            max_frames=-1,
+                            crop_positions=[],
+                            mm_timeout_ms=-1,
+                            max_long_side_pixel=-1,
+                        ),
+                    )
+                ]
                 stub = MagicMock()
                 stub.WaitGreenNetVerdict = AsyncMock()
                 with (
@@ -2964,11 +2993,7 @@ class ClientSpanSettlementTest(TestCase):
                         return_value=stub,
                     ),
                 ):
-                    asyncio.run(
-                        client._wait_greennet_verdict(
-                            inp, GenerateInputPB(request_id=7)
-                        )
-                    )
+                    asyncio.run(client._wait_greennet_verdict(inp, trans_input(inp)))
                 stub.WaitGreenNetVerdict.assert_awaited_once()
                 sent = stub.WaitGreenNetVerdict.call_args.args[0]
                 self.assertEqual(sent.region, region or "")
