@@ -283,6 +283,8 @@ class FrontendShutdownManagerTest(unittest.TestCase):
                     on_prebind=Mock(side_effect=RuntimeError("SCR restore failed"))
                 )
             socket_factory.assert_not_called()
+            app_owner.frontend_server.start.assert_not_called()
+            app_owner.create_app.assert_not_called()
             init_tracing.assert_not_called()
             server.run.assert_not_called()
             events.clear()
@@ -290,7 +292,8 @@ class FrontendShutdownManagerTest(unittest.TestCase):
             app_owner.start(on_prebind=prebind)
 
         self.assertEqual(
-            events, ["frontend_start", "create_app", "prebind", "tracing", "socket", "bind"]
+            events,
+            ["prebind", "frontend_start", "create_app", "tracing", "socket", "bind"],
         )
         init_tracing.assert_called_once_with("frontend", 0)
         socket_factory.assert_called_once()

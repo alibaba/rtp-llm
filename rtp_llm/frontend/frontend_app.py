@@ -46,6 +46,7 @@ from rtp_llm.server.misc import format_exception
 from rtp_llm.telemetry import init_telemetry, shutdown_telemetry
 from rtp_llm.utils.concurrency_controller import ConcurrencyException
 from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
+from rtp_llm.utils.scr.template_utils import register_server_config_template_hook
 from rtp_llm.utils.shutdown_config import (
     AUTO_PRE_STOP_DRAIN_HEADROOM_SECONDS,
     DEFAULT_PRE_STOP_DRAIN_SECONDS,
@@ -416,6 +417,7 @@ class FrontendApp(object):
     ):
         self.py_env_configs = py_env_configs
         self.server_config = py_env_configs.server_config
+        register_server_config_template_hook(py_env_configs)
         self.frontend_server = FrontendServer(
             self.server_config.rank_id,
             self.server_config.frontend_server_id,
@@ -500,13 +502,10 @@ class FrontendApp(object):
         readiness callback after it returns.
         """
         self._on_ready = on_ready
-        self._on_prebind = on_prebind
+        if on_prebind is not None:
+            on_prebind()
         self.frontend_server.start()
         app = self.create_app()
-
-        prebind = getattr(self, "_on_prebind", None)
-        if prebind is not None:
-            prebind()
         init_telemetry("frontend", 0)
 
         loop = "auto"

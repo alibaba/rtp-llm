@@ -2,14 +2,11 @@
 Unit tests for MasterService: VIP discovery and heartbeat probes are mocked.
 """
 
-import os
 import unittest
 from typing import Dict
 from unittest.mock import MagicMock, patch
 
 from rtp_llm.server.host_service import FlexlbHeartbeatInfo, MasterService
-from rtp_llm.utils.scr.lifecycle import TemplateLifecycle
-from rtp_llm.utils.scr.restore_context import RestoreContext
 from rtp_llm.vipserver.host import Host
 
 
@@ -21,22 +18,18 @@ def _json_response(payload: dict, status_code: int = 200):
 
 
 class TestMasterService(unittest.TestCase):
-    def test_scr_release_starts_all_master_discovery_instances(self):
-        lifecycle = TemplateLifecycle()
+
+    def test_construction_starts_each_master_discovery_instance(self):
         vip = MagicMock(domain="master.vip")
-        with patch.dict(
-            os.environ, {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "checkpoint"}
-        ), patch(
-            "rtp_llm.utils.scr.lifecycle.get_template_lifecycle", return_value=lifecycle
-        ), patch.object(MasterService, "start_refresh", autospec=True) as start:
+        with patch("rtp_llm.server.host_service.threading.Thread") as thread:
             first, second = MasterService(vip), MasterService(vip)
             self.addCleanup(first._probe_executor.shutdown)
             self.addCleanup(second._probe_executor.shutdown)
-            start.assert_not_called()
-            lifecycle.prepare_for_template("seed", "checkpoint")
-            lifecycle.restore_fixup(RestoreContext("seed", "192.0.2.20"))
-            lifecycle.release_template("seed")
-        self.assertEqual([call.args[0] for call in start.call_args_list], [first, second])
+        self.assertEqual(
+            [call.kwargs["target"].__self__ for call in thread.call_args_list],
+            [first, second],
+        )
+        self.assertEqual(thread.return_value.start.call_count, 2)
 
     def _make_service(self, vip: MagicMock):
         with patch("rtp_llm.server.host_service.threading.Thread") as mock_thread_cls:

@@ -185,10 +185,6 @@ class BackendRPCServerVisitor:
         self.pd_route_retry_on_unavailable = self._pd_route_retry_on_unavailable()
         self.request_id_factory: Optional[Callable[[], int]] = None
 
-    def update_addresses(self, addresses: list[str]) -> None:
-        """Replace backend peers after a template restore fixup."""
-        self.model_rpc_client.update_addresses(addresses)
-
     @staticmethod
     def _pd_route_retry_on_unavailable() -> int:
         raw = os.environ.get(PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV, "")
@@ -1267,12 +1263,4 @@ def create_backend_rpc_server_visitor(
         model_config=model_config,
     )
 
-    from rtp_llm.utils.scr.template_utils import (
-        register_backend_visitor_template_hook,
-        register_server_config_template_hook,
-    )
-
-    # Bind restore validation to the same route view used to open the channels.
-    register_server_config_template_hook(py_env_configs)
-    register_backend_visitor_template_hook(visitor, py_env_configs, world_info)
     return visitor

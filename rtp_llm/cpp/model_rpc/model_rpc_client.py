@@ -1279,10 +1279,6 @@ class ModelRpcClient(object):
         )
         logging.info(f"addresses: {self._addresses}")
 
-    def update_addresses(self, addresses: list[str]) -> None:
-        self._addresses = list(addresses)
-        logging.info("model RPC addresses refreshed: %s", self._addresses)
-
     async def close(self) -> None:
         await self._channel_pool.close()
 

@@ -10,7 +10,7 @@ from rtp_llm.distribute.distributed_server import WorldInfo
 from rtp_llm.distribute.worker_info import WorkerInfo
 from rtp_llm.server.backend_manager import BackendManager
 from rtp_llm.utils.scr.restore_context import RestoreContext
-from rtp_llm.utils.scr.template_utils import _BackendVisitorTemplateHook
+from rtp_llm.utils.scr.template_utils import _ServerConfigTemplateHook
 
 
 class ScrEndpointConfigTest(unittest.TestCase):
@@ -27,17 +27,9 @@ class ScrEndpointConfigTest(unittest.TestCase):
         self.world = WorldInfo([member], member, member, 1, True)
         self.context = RestoreContext("g1", "192.0.2.20")
 
-    def test_visitor_refreshes_control_address_and_identity(self):
-        visitor = Mock()
-        with patch(
-            "rtp_llm.distribute.distributed_server.get_world_info",
-            return_value=self.world,
-        ):
-            _BackendVisitorTemplateHook(
-                visitor, self.configs, self.world
-            ).restore_fixup(self.context)
-        visitor.update_addresses.assert_called_once_with(["127.0.0.1:9001"])
-        self.assertEqual(visitor.source_ip, self.context.pod_ip)
+    def test_server_config_refreshes_before_frontend_construction(self):
+        _ServerConfigTemplateHook(self.configs).restore_fixup(self.context)
+        self.assertEqual(self.configs.server_config.ip, self.context.pod_ip)
 
     def test_backend_refreshes_engine_endpoints(self):
         backend = BackendManager.__new__(BackendManager)

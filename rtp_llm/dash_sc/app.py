@@ -46,7 +46,7 @@ from rtp_llm.openai.renderers.custom_renderer import RendererParams
 from rtp_llm.ops import TaskType
 from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_visitor
 from rtp_llm.telemetry import init_telemetry, shutdown_telemetry
-from rtp_llm.utils.scr.lifecycle import get_template_lifecycle
+from rtp_llm.utils.scr.template_utils import register_server_config_template_hook
 
 if TYPE_CHECKING:
     from rtp_llm.config.model_config import ModelConfig
@@ -444,29 +444,16 @@ def _derive_stop_word_ids_list(
 class DashScApp:
     """Self-contained lifecycle for a per-rank DashSc gRPC server.
 
-    Startup order (``start``):
-      1. Pick mode from ``DASH_SC_GRPC_PROXY_MODE`` (proxy if true,
-         inference otherwise). Inference mode additionally builds
-         ``ModelConfig`` + ``BackendRPCServerVisitor``; proxy mode skips both
-         since it only needs service discovery plus an outbound channel cache.
-      2. In inference mode, build ``ModelConfig`` / tokenizer / servicer before
-         loop startup. In proxy mode, initialize the servicer on the gRPC owner
-         loop for a consistent async lifecycle.
-      3. Spin up a dedicated asyncio loop in a background thread — same loop
-         hosts the aio gRPC server AND backend ``enqueue`` coroutines, so the
-         request path never leaves this loop.
-      4. Construct the proxy servicer on that loop when in proxy mode.
-      5. Wait for every DashSc worker to finish initialization at the shared
-         bind barrier.
-      6. Call ``self._grpc_server.start_on_loop`` (schedules start on the
-         loop and blocks the main thread until bind succeeds or raises).
-      7. Notify the parent via the pipe, then block the main thread waiting on
-         SIGTERM/SIGINT.
+    Startup prepares model/tokenizer state and registers metrics, then waits at
+    the local bind barrier and optional checkpoint barrier. Once released, it
+    creates discovery clients, the enqueue loop, grammar workers and servicer,
+    binds gRPC, notifies the parent, and waits for shutdown.
     """
 
     def __init__(self, py_env_configs: PyEnvConfigs):
         self.py_env_configs = py_env_configs
         self.server_config = py_env_configs.server_config
+        register_server_config_template_hook(py_env_configs)
         self.dash_sc_grpc_config = py_env_configs.dash_sc_grpc_config
 
         self._enqueue_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -695,12 +682,6 @@ class DashScApp:
                     render_config=self.py_env_configs.render_config,
                 )
 
-                backend_visitor = create_backend_rpc_server_visitor(
-                    py_env_configs=self.py_env_configs,
-                    model_config=model_config,
-                    source_role="dash",
-                )
-
                 base_tok = TokenizerFactory.create(
                     model_config.ckpt_path,
                     model_config.tokenizer_path,
@@ -740,6 +721,45 @@ class DashScApp:
                 derive_grammar_compile_threads(
                     grammar_config, self.py_env_configs.parallelism_config
                 )
+                v41_processor_config = _v41_image_processor_config(model_config)
+
+            # Register py_rtp_* metrics so ``grpc_metrics``' kmonitor.report
+            # calls find their metric objects. Idempotent — matches FrontendServer.__init__
+            # so dashboards/alerts see gRPC and HTTP paths under the same metric family
+            # (split via the ``protocol`` tag ``grpc_metrics`` injects).
+            kmonitor.init()
+
+            _wait_for_bind_barrier(
+                bind_barrier,
+                self.server_config.rank_id,
+                self.server_config.frontend_server_id,
+            )
+            if on_prebind is not None:
+                on_prebind()
+            # Restore resumes here with repaired identity. Create serving
+            # workers and their threads only after the checkpoint barrier.
+            loop = self._start_enqueue_loop()
+            if is_proxy:
+                fut = asyncio.run_coroutine_threadsafe(
+                    _create_proxy_servicer_on_loop(
+                        dash_sc_grpc_config=self.dash_sc_grpc_config,
+                        rank_id=self.server_config.rank_id,
+                        server_id=self.server_config.frontend_server_id,
+                    ),
+                    loop,
+                )
+                try:
+                    servicer = fut.result(timeout=_PROXY_SERVICER_STARTUP_TIMEOUT_S)
+                except BaseException:
+                    fut.cancel()
+                    raise
+            else:
+                backend_visitor = create_backend_rpc_server_visitor(
+                    py_env_configs=self.py_env_configs,
+                    model_config=model_config,
+                    source_role="dash",
+                )
+
                 grammar_validator = None
                 if model_config.task_type == TaskType.LANGUAGE_MODEL:
                     try:
@@ -758,7 +778,6 @@ class DashScApp:
                             "[DashScApp] grammar admission validator disabled: %s", e
                         )
                         grammar_validator = None
-                v41_processor_config = _v41_image_processor_config(model_config)
                 servicer = DashScInferenceServicer(
                     backend_visitor=backend_visitor,
                     ip=self.server_config.ip,
@@ -779,39 +798,6 @@ class DashScApp:
                         0.1,
                     ),
                 )
-                get_template_lifecycle().register_fixup(
-                    "dash-inference", servicer
-                )
-
-            loop = self._start_enqueue_loop()
-            if is_proxy:
-                fut = asyncio.run_coroutine_threadsafe(
-                    _create_proxy_servicer_on_loop(
-                        dash_sc_grpc_config=self.dash_sc_grpc_config,
-                        rank_id=self.server_config.rank_id,
-                        server_id=self.server_config.frontend_server_id,
-                    ),
-                    loop,
-                )
-                try:
-                    servicer = fut.result(timeout=_PROXY_SERVICER_STARTUP_TIMEOUT_S)
-                except BaseException:
-                    fut.cancel()
-                    raise
-
-            # Register py_rtp_* metrics so ``grpc_metrics``' kmonitor.report
-            # calls find their metric objects. Idempotent — matches FrontendServer.__init__
-            # so dashboards/alerts see gRPC and HTTP paths under the same metric family
-            # (split via the ``protocol`` tag ``grpc_metrics`` injects).
-            kmonitor.init()
-
-            _wait_for_bind_barrier(
-                bind_barrier,
-                self.server_config.rank_id,
-                self.server_config.frontend_server_id,
-            )
-            if on_prebind is not None:
-                on_prebind()
             _init_trace_telemetry()
             logging.info(
                 "[DashScApp] starting gRPC server rank_id=%s server_id=%s port=%s mode=%s",

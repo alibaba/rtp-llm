@@ -17,7 +17,6 @@ from rtp_llm.utils.scr import runtime_fixup as fixup
 from rtp_llm.utils.scr import template_utils as scr
 from rtp_llm.utils.scr.lifecycle import CallbackHook, TemplateLifecycle
 from rtp_llm.utils.scr.restore_context import RestoreContext
-from rtp_llm.utils.scr.template_utils import _BackendVisitorTemplateHook
 
 
 class ScrPdAdvertisementTest(unittest.TestCase):
@@ -98,23 +97,12 @@ class ScrPdAdvertisementTest(unittest.TestCase):
         self.assertEqual(runtime.worker_addrs, ["192.0.2.30:18642:18644"])
         self.assertEqual(runtime.worker_grpc_addrs, ["127.0.0.1:18641"])
 
-    def test_frontend_identity_refreshes_without_publishing_loopback(self):
-        configs = NS(
-            server_config=object(),
-            distribute_config=NS(gang_annotation_path="/unused/annotations"),
-            parallelism_config=self.pc,
-            role_config=NS(role_type="PREFILL"),
+    def test_frontend_config_receives_restored_identity(self):
+        configs = NS(server_config=NS(ip="192.0.2.1"))
+        scr._ServerConfigTemplateHook(configs).restore_fixup(
+            RestoreContext("generation-2", "192.0.2.20")
         )
-        visitor = Mock(source_ip="192.0.2.1")
-        with patch(
-            "rtp_llm.distribute.distributed_server.get_world_info",
-            return_value=self.world,
-        ), patch("socket.gethostbyname", return_value="192.0.2.20"):
-            _BackendVisitorTemplateHook(visitor, configs, self.world).restore_fixup(
-                RestoreContext("generation-2", "192.0.2.20")
-            )
-        self.assertEqual(visitor.source_ip, "192.0.2.20")
-        visitor.update_addresses.assert_called_once_with(["127.0.0.1:18631"])
+        self.assertEqual(configs.server_config.ip, "192.0.2.20")
 
     def test_repeated_restore_repairs_all_consumers_before_release(self):
         members = [
@@ -141,15 +129,11 @@ class ScrPdAdvertisementTest(unittest.TestCase):
             parallelism_config=self.pc,
             role_config=NS(role_type="PREFILL"),
         )
-        visitor = Mock(source_ip="192.0.2.1")
         runtime_config = NS()
         releases = []
         lifecycle = TemplateLifecycle()
         lifecycle.register_fixup(
             "server-config", scr._ServerConfigTemplateHook(configs)
-        )
-        lifecycle.register_fixup(
-            "visitor", scr._BackendVisitorTemplateHook(visitor, configs, world)
         )
         lifecycle.register(
             "kv",
@@ -158,7 +142,6 @@ class ScrPdAdvertisementTest(unittest.TestCase):
                 release=lambda _g: releases.append(
                     (
                         configs.server_config.ip,
-                        visitor.source_ip,
                         list(runtime_config.worker_addrs),
                     )
                 ),
@@ -202,7 +185,6 @@ class ScrPdAdvertisementTest(unittest.TestCase):
                 self.assertEqual(
                     releases[-1],
                     (
-                        ip,
                         ip,
                         [
                             f"{ip}:{member.cache_store_listen_port}:{member.cache_store_rdma_listen_port}"

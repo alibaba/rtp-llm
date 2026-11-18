@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from datetime import timedelta
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import set_parallelism_config
@@ -13,7 +13,7 @@ from rtp_llm.distribute import distributed_server as ds
 from rtp_llm.distribute.distributed_server import get_dp_rpc_addresses
 from rtp_llm.utils.scr import network
 from rtp_llm.utils.scr.restore_context import RestoreContext
-from rtp_llm.utils.scr.template_utils import _BackendVisitorTemplateHook
+from rtp_llm.utils.gang_info import GangInfoReader
 
 
 class FrontendRoutingTest(unittest.TestCase):
@@ -101,7 +101,6 @@ class FrontendRoutingTest(unittest.TestCase):
                     ["127.0.0.1:8001", "127.0.0.1:8021"],
                 )
                 store.assert_not_called()
-
 
     def test_warmup_without_local_serving_rank_keeps_resolution_error(self):
         from rtp_llm.start_server import (
@@ -266,7 +265,6 @@ class FrontendRoutingTest(unittest.TestCase):
         pc.world_rank, pc.local_rank = 2, 0
         pc.tp_size, pc.dp_size = 4, 1
         configs.server_config.ip = "10.0.0.3"
-        visitor = MagicMock()
         with patch.dict(
             os.environ,
             {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "checkpoint", "RANK_ID": "1"},
@@ -282,19 +280,25 @@ class FrontendRoutingTest(unittest.TestCase):
             world = ds.get_frontend_world_info(
                 configs.server_config, configs.distribute_config, pc
             )
-            hook = _BackendVisitorTemplateHook(visitor, configs, world)
+            gang = GangInfoReader.from_config(configs.distribute_config)
             store.reset_mock()
             with patch.dict(os.environ, {"SCR_PHASE": "restore"}):
-                hook.restore_fixup(RestoreContext("seed", "10.1.0.3"))
-                hook.restore_fixup(RestoreContext("seed", "10.2.0.3"))
+                for ip in ("10.1.0.3", "10.2.0.3"):
+                    restored = RestoreContext("seed", ip).resolve_world_info(
+                        world, pc, gang
+                    )
+                    self.assertEqual(
+                        ds.get_dp_addrs_from_world_info(restored, pc),
+                        ["22.0.1.2:23001"],
+                    )
             store.assert_not_called()
-            visitor.update_addresses.assert_called_with(["22.0.1.2:23001"])
-            self.assertEqual(visitor.source_ip, "10.2.0.3")
             with patch.object(
                 network, "topology", return_value={0: "22.0.1.9", 1: "22.0.1.3"}
             ):
                 with self.assertRaisesRegex(RuntimeError, "cannot change"):
-                    hook.restore_fixup(RestoreContext("seed", "10.3.0.3"))
+                    RestoreContext("seed", "10.3.0.3").resolve_world_info(
+                        world, pc, gang
+                    )
 
 
 if __name__ == "__main__":

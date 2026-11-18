@@ -168,9 +168,11 @@ class EngineRemoteCacheTest(unittest.TestCase):
         with patch(
             "rtp_llm.multimodal.kvcm.RtpKvMetaObjectClient.from_env", return_value=store
         ):
-            return self.make_engine()
+            engine = self.make_engine()
+            engine.start_remote_embedding_cache()
+            return engine
 
-    def make_engine(self, *, defer_remote_cache=False):
+    def make_engine(self):
         config = VitConfig()
         config.use_local_preprocess = True
         config.mm_cache_gpu_max_bytes = 0
@@ -186,17 +188,16 @@ class EngineRemoteCacheTest(unittest.TestCase):
             model,
             config,
             ProfilingDebugLoggingConfig(),
-            defer_remote_cache=defer_remote_cache,
         )
         self.addCleanup(engine.stop)
         return engine
 
-    def test_deferred_remote_cache_connects_when_service_starts(self):
+    def test_remote_cache_connects_only_when_service_starts(self):
         with patch(
             "rtp_llm.multimodal.kvcm.RtpKvMetaObjectClient.from_env",
             return_value=Store(),
         ) as create:
-            engine = self.make_engine(defer_remote_cache=True)
+            engine = self.make_engine()
             create.assert_not_called()
             self.assertIsNone(engine._remote_embedding_cache)
 

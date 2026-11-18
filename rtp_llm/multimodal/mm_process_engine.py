@@ -731,8 +731,6 @@ class MMProcessEngine:
         is_proxy_mode: bool = False,
         device: str = "cuda:0",
         kv_cache_config: Optional[Any] = None,
-        *,
-        defer_remote_cache: bool = False,
     ):
         """
         Initialize the multimodal process engine.
@@ -785,8 +783,6 @@ class MMProcessEngine:
             )
 
             self._remote_cache_init = (kv_cache_config, limits, cuda_device)
-            if not defer_remote_cache:
-                self.start_remote_embedding_cache()
 
         # threading.Lock: protects gRPC-handler-thread access within this
         # process. multiprocessing.Lock would round-trip through an OS

@@ -28,7 +28,6 @@ from dataclasses import dataclass
 from typing import Any, Callable
 from typing import Mapping as TypingMapping
 
-from rtp_llm.utils.gang_info import GangInfoReader
 from rtp_llm.utils.scr.lifecycle import (
     RTPLLM_ENABLE_SCR_ENV,
     SCR_PHASE_ENV,
@@ -66,52 +65,6 @@ def _start_native_kmonitor(generation: str) -> None:
 get_template_lifecycle().register(
     "native-kmonitor", CallbackHook(release=_start_native_kmonitor)
 )
-
-
-class _BackendVisitorTemplateHook:
-    def __init__(self, visitor: Any, py_env_configs: Any, world_info: Any) -> None:
-        self.visitor = visitor
-        self.configs = py_env_configs
-        self.world_info = world_info
-        self.gang_info = GangInfoReader.from_config(py_env_configs.distribute_config)
-
-    def restore_fixup(self, context: RestoreContext) -> None:
-        from rtp_llm.distribute.distributed_server import (
-            get_dp_addrs_from_world_info,
-            get_world_info,
-        )
-        from rtp_llm.utils.scr import network
-
-        # VIP restore must validate the endpoints actually used before checkpoint.
-        # No new registry connection is opened while other ranks are resuming.
-        current = (
-            self.world_info
-            if network.enabled(self.configs.parallelism_config)
-            else get_world_info(
-                self.configs.server_config,
-                self.configs.distribute_config,
-                self.configs.parallelism_config,
-            )
-        )
-        world_info = context.resolve_world_info(
-            current,
-            self.configs.parallelism_config,
-            self.gang_info,
-        )
-        self.visitor.update_addresses(
-            get_dp_addrs_from_world_info(world_info, self.configs.parallelism_config)
-        )
-        self.visitor.source_ip = context.pod_ip
-
-
-def register_backend_visitor_template_hook(
-    visitor: Any, py_env_configs: Any, world_info: Any
-) -> None:
-    lifecycle = get_template_lifecycle()
-    lifecycle.register_fixup(
-        f"backend-visitor:{id(visitor)}",
-        _BackendVisitorTemplateHook(visitor, py_env_configs, world_info),
-    )
 
 
 class _ServerConfigTemplateHook:
