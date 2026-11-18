@@ -1,24 +1,8 @@
 """PACE configuration for smoke tests; external services remain caller-owned."""
 
 import json
-import os
 from pathlib import Path
 from urllib.request import urlopen
-
-
-def runfile(repository, relative):
-    root = Path(os.environ["TEST_SRCDIR"])
-    candidates = {
-        candidate.resolve()
-        for candidate in (
-            root / repository / relative,
-            root / os.environ["TEST_WORKSPACE"] / "external" / repository / relative,
-        )
-        if candidate.exists()
-    }
-    if len(candidates) != 1:
-        raise RuntimeError(f"Expected one selected runfile: {repository}/{relative}, found {len(candidates)}")
-    return candidates.pop()
 
 
 def require_ok(response):
@@ -144,24 +128,3 @@ class PaceFixture:
         group = server.post_json("getInstanceGroup", {"name": name}, admin=True)["instance_group"]
         if group.get("storage_candidates") != [name]:
             raise RuntimeError("PACE smoke group must have exactly one payload backend")
-
-    def sdk_config(self, server, instance_id):
-        return {
-            "instance_group": self.instance_group, "instance_id": instance_id,
-            "address": [server.address()], "block_size": 16,
-            "default_query_type": 2,
-            "location_spec_infos": {"full": 262144, "state": 65536},
-            "location_spec_groups": {
-                "Ffull": ["full"], "Lstate": ["state"],
-                "FfullLstate": ["full", "state"],
-            },
-            "sdk_config": {
-                "thread_num": 2, "queue_size": 32,
-                "sdk_backend_configs": [{"type": self.backend}],
-                "timeout_config": {"put_timeout_ms": 10000, "get_timeout_ms": 10000},
-            },
-            "model_deployment": {
-                "model_name": "pace_contract_smoke", "dtype": "fp16",
-                "use_mla": False, "tp_size": 1, "dp_size": 1, "pp_size": 1,
-            },
-        }

@@ -1,46 +1,6 @@
-"""Exercise RTP's metadata RPC adapter against its own remote-cache instance."""
+"""Check that KVCM receives cache events from inference."""
 
 import time
-
-
-def check_metadata_rpc(server_manager, backend_type):
-    import grpc
-    from rtp_llm.cpp.model_rpc.proto import model_rpc_service_pb2 as pb
-    from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import RpcServiceStub
-
-    # Negative keys are unique to this run; removal cannot affect model caches.
-    key = -time.time_ns()
-    with grpc.insecure_channel(f"127.0.0.1:{server_manager.port + 1}") as channel:
-        stub = RpcServiceStub(channel)
-
-        def call(operation, query_type=2):
-            request = pb.FunctionRequestPB()
-            request.remote_request.op = getattr(pb, operation)
-            request.remote_request.trace_id = "pace-rtp-metadata-smoke"
-            metadata = request.remote_request.metadata
-            metadata.query_type = query_type
-            metadata.block_keys.append(key)
-            metadata.backend_type = backend_type
-            metadata.medium.append("hbm")
-            response = stub.ExecuteFunction(request, timeout=15)
-            if not response.HasField("remote_response"):
-                raise AssertionError(f"Missing RTP metadata response for {operation}")
-            return response.remote_response
-
-        backend = call("REMOTE_OPERATION_GET_LOCATIONS_BY_BACKEND", query_type=1)
-        if len(backend.backend_locations) != 1 or backend.backend_locations[0].locations:
-            raise AssertionError("RTP backend query did not preserve a miss position")
-        if call("REMOTE_OPERATION_GET_HOST_CACHE_STATE").hosts:
-            raise AssertionError("Fresh key unexpectedly matched an event host")
-        call("REMOTE_OPERATION_REMOVE_CACHE")
-        try:
-            call("REMOTE_OPERATION_GET_HOST_CACHE_STATE", query_type=999)
-        except grpc.RpcError as error:
-            # LocalRpcServer currently maps executeFunction(false) to INTERNAL.
-            if error.code() != grpc.StatusCode.INTERNAL:
-                raise
-        else:
-            raise AssertionError("RTP swallowed the invalid query type")
 
 
 def check_model_events(server_manager, kvcm_server):

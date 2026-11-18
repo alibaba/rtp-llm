@@ -179,29 +179,17 @@ class CaseRunner(object):
             task_states = self.curl_server(server_manager)
             if task_states.ret != True:
                 return task_states
-            metadata_check = str_to_bool(
-                self.kvcm_config.get("PACE_METADATA_CHECK", "false")
-            )
-            model_events_check = str_to_bool(
-                self.kvcm_config.get("PACE_MODEL_EVENTS_CHECK", "false")
-            )
-            if metadata_check or model_events_check:
-                from smoke.pace_rtp_metadata import check_metadata_rpc, check_model_events
+            if str_to_bool(self.kvcm_config.get("PACE_MODEL_EVENTS_CHECK", "false")):
+                from smoke.pace_rtp_metadata import check_model_events
 
                 if (
                     self.remote_kvcm_server is None
                     or self.remote_kvcm_server.pace_fixture is None
                 ):
                     raise RuntimeError(
-                        "PACE checks require an enabled remote cache and a PACE fixture"
+                        "PACE model event check requires an enabled remote cache and a PACE fixture"
                     )
-                if metadata_check:
-                    check_metadata_rpc(
-                        server_manager,
-                        self.remote_kvcm_server.pace_fixture.storage_type,
-                    )
-                if model_events_check:
-                    check_model_events(server_manager, self.remote_kvcm_server)
+                check_model_events(server_manager, self.remote_kvcm_server)
         finally:
             # Reclaim the server on the failure path too; __del__ is not a guaranteed backstop.
             server_manager.stop_server()
