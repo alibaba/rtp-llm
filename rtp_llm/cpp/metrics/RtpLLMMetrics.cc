@@ -2,6 +2,7 @@
 #include <atomic>
 
 #include "autil/EnvUtil.h"
+#include "autil/StringUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "kmonitor/client/KMonitorFactory.h"
 #include "kmonitor/client/KMonitorWorker.h"
@@ -1201,8 +1202,12 @@ std::atomic<bool> kmonitorTransportDeferred{false};
 
 bool deferKmonitorTransportForScr() {
     const auto phase = autil::EnvUtil::getEnv("SCR_PHASE", "");
-    const bool enabled = autil::EnvUtil::getEnv("RTPLLM_ENABLE_SCR", false);
-    return enabled && (phase == "checkpoint" || phase == "restore");
+    // Match Python lifecycle.template_phase_active(), including "on".
+    auto enabled = autil::EnvUtil::getEnv("RTPLLM_ENABLE_SCR", "");
+    autil::StringUtil::trim(enabled);
+    autil::StringUtil::toLowerCase(enabled);
+    return (enabled == "1" || enabled == "true" || enabled == "yes" || enabled == "on")
+           && (phase == "checkpoint" || phase == "restore");
 }
 
 void fillKmonitorConfig(kmonitor::MetricsConfig& metricsConfig, const KmonParam& param) {
@@ -1290,9 +1295,12 @@ bool resumeKmonitorAfterScr() {
     param.init();
     kmonitor::MetricsConfig resumedConfig;
     fillKmonitorConfig(resumedConfig, param);
+    // Copying common tags clears the seed's identity, including host when
+    // Start() cannot rediscover it. Updating global tags alone leaves it stale.
     *factoryConfig = resumedConfig;
     auto* system = worker->getMetricsSystem();
-    // Start refreshes common tags before MetricsSystem::Init creates transport.
+    // havenask@3c973500 defines CommonTags/GetTagsMap and directly includes
+    // <map>/<set> in MetricsSystem.h. Start refreshes common tags before Init.
     // Only SCR needs to replace identity captured by registered metric handles.
     system->SetOutputTagKeys({"hippo_slave_ip", "host_ip", "container_ip", "hippo_role", "hippo_app", "hippo_group",
                              "host", "hippo_cluster"});

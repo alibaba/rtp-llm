@@ -14,6 +14,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <utility>
 
 namespace rtp_llm {
 
@@ -78,6 +79,52 @@ TEST_F(ScrKmonitorLifecycleTest, DeferredDefaultModeStartsAutomaticReporter) {
     EXPECT_TRUE(kmonitor::KMonitorFactory::GetWorker()->getMetricsSystem()->Started());
     EXPECT_FALSE(kmonitor::KMonitorFactory::GetConfig()->manually_mode());
     EXPECT_TRUE(kmonitor::KMonitorFactory::GetWorker()->getMetricsSystem()->GetSink("FlumeSink"));
+}
+
+TEST_F(ScrKmonitorLifecycleTest, ScrEnabledValuesMatchPythonLifecycle) {
+    autil::EnvGuard phase("SCR_PHASE", "checkpoint");
+    autil::EnvGuard manual("kmonitorManuallyMode", "true");
+    for (const auto* value : {"1", "true", " YES ", " On "}) {
+        SCOPED_TRACE(value);
+        autil::EnvGuard enabled("RTPLLM_ENABLE_SCR", value);
+        ASSERT_TRUE(initKmonitorFactory());
+        EXPECT_TRUE(kmonitorReportsDeferredForScr());
+        EXPECT_FALSE(kmonitor::KMonitorFactory::IsStarted());
+        stopKmonitorFactory();
+    }
+    const std::pair<const char*, const char*> normalStartup[] = {
+        {"", "checkpoint"}, {"0", "restore"}, {"false", "checkpoint"},
+        {"t", "checkpoint"}, {"y", "checkpoint"}, {"on", ""}, {"1", "serving"}};
+    for (const auto& [value, currentPhase] : normalStartup) {
+        SCOPED_TRACE(value);
+        autil::EnvGuard enabled("RTPLLM_ENABLE_SCR", value);
+        autil::EnvGuard normalPhase("SCR_PHASE", currentPhase);
+        ASSERT_TRUE(initKmonitorFactory());
+        EXPECT_FALSE(kmonitorReportsDeferredForScr());
+        EXPECT_TRUE(kmonitor::KMonitorFactory::IsStarted());
+        stopKmonitorFactory();
+    }
+}
+
+TEST_F(ScrKmonitorLifecycleTest, ConfigAssignmentClearsSeedCommonTags) {
+    kmonitor::MetricsConfig seed;
+    seed.AddCommonTag("host", "192.0.2.1");
+    seed.AddCommonTag("hippo_cluster", "seed");
+    kmonitor::MetricsConfig restored;
+    seed = restored;
+    EXPECT_TRUE(seed.CommonTags().empty());
+    restored.AddCommonTag("hippo_cluster", "restored");
+    seed = restored;
+    EXPECT_EQ(seed.CommonTags(), restored.CommonTags());
+}
+
+TEST_F(ScrKmonitorLifecycleTest, TagOverridesHandleAbsentTags) {
+    kmonitor::MetricsRecord record(nullptr, nullptr, 0);
+    record.OverrideTags({}, {});
+    EXPECT_FALSE(record.Tags());
+    record.OverrideTags({{"identity", "restored"}}, {"identity"});
+    ASSERT_TRUE(record.Tags());
+    EXPECT_EQ(record.Tags()->FindTag("identity"), "restored");
 }
 
 TEST_F(ScrKmonitorLifecycleTest, FirstActivationPreservesMetricsAndUsesRestoredIdentity) {

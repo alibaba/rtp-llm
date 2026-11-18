@@ -50,12 +50,13 @@ index 03ff7ce5..bdaff505 100644
 diff --git aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsRecord.cpp aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsRecord.cpp
 --- aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsRecord.cpp
 +++ aios/kmonitor/cpp_client/src/kmonitor/client/core/MetricsRecord.cpp
-@@ -50,6 +50,35 @@
+@@ -50,6 +50,36 @@
 
  const string &MetricsRecord::Name() const { return info_->Name(); }
 
 +void MetricsRecord::OverrideTags(const map<string, string> &tags, const std::set<string> &keys) {
-+    const auto &current = tags_->GetTagsMap();
++    static const map<string, string> emptyTags;
++    const auto &current = tags_ ? tags_->GetTagsMap() : emptyTags;
 +    bool changed = false;
 +    for (const auto &key : keys) {
 +        auto oldTag = current.find(key);

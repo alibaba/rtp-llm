@@ -19,29 +19,34 @@ reporters = importlib.import_module(
 
 class ScrKmonitorLifecycleTest(unittest.TestCase):
     def test_non_scr_hippo_transport_still_starts_eagerly(self):
-        with mock.patch.object(
-            reporters.HippoHelper, "is_hippo_env", return_value=True
-        ), mock.patch.object(
-            reporters.HippoHelper,
-            "get_hippo_tags",
-            return_value={"host_ip": "10.0.0.1"},
-        ), mock.patch.object(
-            reporters.HippoHelper, "refresh_runtime_identity"
-        ) as refresh, mock.patch.object(
-            reporters.ReportWorker, "start"
-        ) as start, mock.patch.object(
-            reporters, "FlumeClient"
-        ) as flume_cls, mock.patch.dict(
-            os.environ,
-            {"HIPPO_SLAVE_IP": "10.0.0.1"},
-            clear=True,
+        for environment in (
+            {},
+            {"RTPLLM_ENABLE_SCR": "0", "SCR_PHASE": "checkpoint"},
+            {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "serving"},
         ):
-            worker = reporters.ReportWorker()
+            with mock.patch.object(
+                reporters.HippoHelper, "is_hippo_env", return_value=True
+            ), mock.patch.object(
+                reporters.HippoHelper,
+                "get_hippo_tags",
+                return_value={"host_ip": "10.0.0.1"},
+            ), mock.patch.object(
+                reporters.HippoHelper, "refresh_runtime_identity"
+            ) as refresh, mock.patch.object(
+                reporters.ReportWorker, "start"
+            ) as start, mock.patch.object(
+                reporters, "FlumeClient"
+            ) as flume_cls, mock.patch.dict(
+                os.environ,
+                {"HIPPO_SLAVE_IP": "10.0.0.1", **environment},
+                clear=True,
+            ):
+                worker = reporters.ReportWorker()
 
-        self.assertFalse(worker._transport_deferred)
-        flume_cls.assert_called_once_with("10.0.0.1", 4141, timeout=1000)
-        start.assert_called_once_with()
-        refresh.assert_not_called()
+            self.assertFalse(worker._transport_deferred)
+            flume_cls.assert_called_once_with("10.0.0.1", 4141, timeout=1000)
+            start.assert_called_once_with()
+            refresh.assert_not_called()
 
     def test_normal_startup_preserves_explicit_metric_tags(self):
         for environment in ({}, {"RTPLLM_ENABLE_SCR": "1", "SCR_PHASE": "serving"}):
