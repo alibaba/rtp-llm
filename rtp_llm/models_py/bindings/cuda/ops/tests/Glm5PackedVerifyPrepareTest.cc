@@ -2,6 +2,8 @@
 #include "rtp_llm/models_py/bindings/cuda/ops/tests/CudaTestUtils.h"
 
 #include <cstdlib>
+#include <chrono>
+#include <iostream>
 #include <ATen/cuda/CUDAContext.h>
 #include <ATen/cuda/CUDAGraph.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -221,6 +223,79 @@ TEST_F(Glm5PackedVerifyPrepareTest, PlannerTotalMismatchAssertsInIsolatedProcess
         std::_Exit(cudaStreamSynchronize(stream) == cudaErrorAssert ? 0 : 1);
     }, ::testing::ExitedWithCode(0), "");
     ::testing::FLAGS_gtest_death_test_style = previous_style;
+}
+
+TEST_F(Glm5PackedVerifyPrepareTest, DISABLED_benchmarkCapsProducerAB) {
+    const auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32);
+    const auto stream  = at::cuda::getCurrentCUDAStream().stream();
+    for (int batch : {1, 31, 127, 1031, 8193}) {
+        auto       caps      = torch::arange(batch, options).remainder(4);
+        auto       dense     = torch::arange(batch * 4, options);
+        auto       positions = dense.to(torch::kInt64) * 7;
+        auto       types     = dense.remainder(2);
+        const auto total     = (caps + 1).sum().item<int64_t>();
+        auto       reference = [&] {
+            auto                   ids   = torch::arange(dense.numel(), options.dtype(torch::kInt64));
+            auto                   valid = ids.remainder(4) <= caps.repeat_interleave(4);
+            auto                   order = torch::argsort(torch::where(valid, ids, ids + ids.numel()));
+            Glm5PackedVerifyInputs result;
+            result.rows              = ids.index_select(0, order.narrow(0, 0, total));
+            result.tokens            = dense.index_select(0, result.rows);
+            result.position_ids      = positions.index_select(0, result.rows);
+            result.token_type_ids    = types.index_select(0, result.rows);
+            result.lengths           = caps + 1;
+            result.lm_output_indexes = torch::arange(total, options);
+            return result;
+        };
+        auto candidate = [&] {
+            Glm5PackedVerifyInputs result;
+            TORCH_CHECK(tryGlm5PackedVerifyPrepareFromCaps(dense, caps, total, positions, types, result, stream));
+            return result;
+        };
+        auto expected = reference();
+        auto actual   = candidate();
+        ASSERT_TRUE(torch::equal(actual.rows, expected.rows));
+        ASSERT_TRUE(torch::equal(actual.tokens, expected.tokens));
+        ASSERT_TRUE(torch::equal(actual.position_ids, expected.position_ids));
+        ASSERT_TRUE(torch::equal(actual.token_type_ids, expected.token_type_ids));
+        ASSERT_TRUE(torch::equal(actual.lengths, expected.lengths));
+        ASSERT_TRUE(torch::equal(actual.lm_output_indexes, expected.lm_output_indexes));
+        auto measure = [&](auto&& operation) {
+            for (int i = 0; i < 20; ++i)
+                operation();
+            TORCH_CHECK(cudaStreamSynchronize(stream) == cudaSuccess);
+            cudaEvent_t start, stop;
+            TORCH_CHECK(cudaEventCreate(&start) == cudaSuccess);
+            TORCH_CHECK(cudaEventCreate(&stop) == cudaSuccess);
+            const auto begin = std::chrono::steady_clock::now();
+            TORCH_CHECK(cudaEventRecord(start, stream) == cudaSuccess);
+            for (int i = 0; i < 100; ++i)
+                operation();
+            TORCH_CHECK(cudaEventRecord(stop, stream) == cudaSuccess);
+            TORCH_CHECK(cudaEventSynchronize(stop) == cudaSuccess);
+            const auto wall_us =
+                std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - begin).count() / 100;
+            float ms;
+            TORCH_CHECK(cudaEventElapsedTime(&ms, start, stop) == cudaSuccess);
+            TORCH_CHECK(cudaEventDestroy(start) == cudaSuccess);
+            TORCH_CHECK(cudaEventDestroy(stop) == cudaSuccess);
+            return std::make_pair(wall_us, ms * 10.0);
+        };
+        for (int round = 0; round < 10; ++round) {
+            std::pair<double, double> before, after;
+            if (round % 2) {
+                after  = measure(candidate);
+                before = measure(reference);
+            } else {
+                before = measure(reference);
+                after  = measure(candidate);
+            }
+            std::cout << "PACKED_PRODUCER_AB {\"batch\":" << batch << ",\"round\":" << round
+                      << ",\"baseline_wall_us\":" << before.first << ",\"candidate_wall_us\":" << after.first
+                      << ",\"baseline_stream_us\":" << before.second << ",\"candidate_stream_us\":" << after.second
+                      << "}" << std::endl;
+        }
+    }
 }
 
 }  // namespace rtp_llm

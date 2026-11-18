@@ -3,6 +3,10 @@
 #include <ATen/record_function.h>
 #include <numeric>
 #include <string>
+#include <chrono>
+#include <iostream>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDACachingAllocator.h>
 
 namespace rtp_llm {
 namespace {
@@ -129,5 +133,146 @@ TEST_F(MicroBatchLengthsTest, DisabledPlannerDoesNotReadLengths) {
     EXPECT_EQ(split.first.front().combo_tokens.data_ptr(), inputs.combo_tokens.data_ptr());
 }
 
+TEST_F(MicroBatchLengthsTest, DISABLED_benchmarkLocalMetadataAB) {
+    auto measure = [](auto&& operation, int iterations) {
+        for (int i = 0; i < 20; ++i)
+            operation();
+        TORCH_CHECK(cudaDeviceSynchronize() == cudaSuccess);
+        const auto begin = std::chrono::steady_clock::now();
+        for (int i = 0; i < iterations; ++i)
+            operation();
+        TORCH_CHECK(cudaDeviceSynchronize() == cudaSuccess);
+        return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - begin).count() / iterations;
+    };
+    for (int batch : {1, 31, 127}) {
+        for (bool decode : {false, true}) {
+            auto inputs = makeMicroInputs(std::vector<int32_t>(batch, decode ? 1 : 17), decode ? batch : 0);
+            auto legacy = [&] {
+                auto plan = PyWrappedModel::planMicroBatches(inputs, true, 1);
+                return PyWrappedModel::splitInputsIntoMicroBatches(inputs, plan);
+            };
+            auto shared = [&] {
+                torch::Tensor snapshot;
+                auto          plan = PyWrappedModel::planMicroBatches(inputs, true, 1, &snapshot);
+                return PyWrappedModel::splitInputsIntoMicroBatches(inputs, plan, &snapshot);
+            };
+            auto expected = legacy();
+            auto actual   = shared();
+            ASSERT_EQ(actual.first.size(), expected.first.size());
+            for (size_t i = 0; i < actual.first.size(); ++i) {
+                ASSERT_TRUE(torch::equal(actual.first[i].combo_tokens, expected.first[i].combo_tokens));
+            }
+            int baseline_copies, candidate_copies;
+            {
+                CountLengthCopies count;
+                legacy();
+                baseline_copies = length_d2h_count;
+            }
+            {
+                CountLengthCopies count;
+                shared();
+                candidate_copies = length_d2h_count;
+            }
+            for (int round = 0; round < 10; ++round) {
+                double before, after;
+                if (round % 2) {
+                    after  = measure(shared, 100);
+                    before = measure(legacy, 100);
+                } else {
+                    before = measure(legacy, 100);
+                    after  = measure(shared, 100);
+                }
+                std::cout << "LOCAL_METADATA_AB {\"case\":\"microbatch\",\"batch\":" << batch
+                          << ",\"decode\":" << decode << ",\"round\":" << round
+                          << ",\"baseline_d2h\":" << baseline_copies << ",\"candidate_d2h\":" << candidate_copies
+                          << ",\"baseline_us\":" << before << ",\"candidate_us\":" << after << "}" << std::endl;
+            }
+        }
+        auto storage = torch::arange((batch + 2) * 41, torch::TensorOptions().device(torch::kCUDA).dtype(torch::kInt32))
+                           .view({batch + 2, 41})
+                           .narrow(0, 1, batch)
+                           .slice(1, 2, 39, 2);
+        auto accepted    = torch::arange(batch, torch::kInt32).remainder(6);
+        auto old_metrics = [&] {
+            auto rows  = accepted.to(torch::kInt64).flatten().contiguous();
+            auto total = accepted.to(torch::kInt64).sum().reshape({1}).pin_memory();
+            return std::make_pair(rows, total);
+        };
+        auto reused_metrics = [&] {
+            auto rows  = accepted.to(torch::kInt64).flatten().contiguous();
+            auto total = rows.sum().reshape({1}).pin_memory();
+            return std::make_pair(rows, total);
+        };
+        ASSERT_TRUE(torch::equal(old_metrics().second, reused_metrics().second));
+        for (int round = 0; round < 10; ++round) {
+            double before, after;
+            if (round % 2) {
+                after  = measure(reused_metrics, 1000);
+                before = measure(old_metrics, 1000);
+            } else {
+                before = measure(old_metrics, 1000);
+                after  = measure(reused_metrics, 1000);
+            }
+            std::cout << "LOCAL_METADATA_AB {\"case\":\"cpu_metrics_primitive\",\"batch\":" << batch
+                      << ",\"round\":" << round << ",\"baseline_us\":" << before << ",\"candidate_us\":" << after << "}"
+                      << std::endl;
+        }
+        auto stream        = at::cuda::getStreamFromPool();
+        auto legacy_record = [&] { storage.record_stream(stream); };
+        auto direct_record = [&] {
+            c10::cuda::CUDACachingAllocator::recordStream(storage.storage().data_ptr(), stream);
+        };
+        auto legacy_view = [&] { return storage.narrow(0, batch - 1, 1); };
+        auto direct_view = [&] {
+            auto sizes = storage.sizes().vec();
+            sizes[0]   = 1;
+            return storage.as_strided(
+                sizes, storage.strides(), storage.storage_offset() + (batch - 1) * storage.stride(0));
+        };
+        ASSERT_TRUE(torch::equal(legacy_view(), direct_view()));
+        ASSERT_EQ(legacy_view().data_ptr(), direct_view().data_ptr());
+        for (int round = 0; round < 10; ++round) {
+            double old_record, new_record, old_view, new_view;
+            if (round % 2) {
+                new_record = measure(direct_record, 10000);
+                old_record = measure(legacy_record, 10000);
+                new_view   = measure(direct_view, 10000);
+                old_view   = measure(legacy_view, 10000);
+            } else {
+                old_record = measure(legacy_record, 10000);
+                new_record = measure(direct_record, 10000);
+                old_view   = measure(legacy_view, 10000);
+                new_view   = measure(direct_view, 10000);
+            }
+            std::cout << "LOCAL_METADATA_AB {\"case\":\"record_stream_primitive\",\"batch\":" << batch
+                      << ",\"round\":" << round << ",\"baseline_us\":" << old_record
+                      << ",\"candidate_us\":" << new_record << "}" << std::endl;
+            std::cout << "LOCAL_METADATA_AB {\"case\":\"row_view_primitive\",\"batch\":" << batch
+                      << ",\"round\":" << round << ",\"baseline_us\":" << old_view << ",\"candidate_us\":" << new_view
+                      << "}" << std::endl;
+        }
+        for (int width : {257, 8193}) {
+            auto history          = torch::arange(batch * width, storage.options()).view({batch, width});
+            auto published        = history.select(1, width - 1).clone();
+            auto full_readback    = [&] { return history.cpu(); };
+            auto compact_readback = [&] { return published.cpu(); };
+            ASSERT_TRUE(torch::equal(full_readback().select(1, width - 1), compact_readback()));
+            for (int round = 0; round < 10; ++round) {
+                double before, after;
+                if (round % 2) {
+                    after  = measure(compact_readback, 100);
+                    before = measure(full_readback, 100);
+                } else {
+                    before = measure(full_readback, 100);
+                    after  = measure(compact_readback, 100);
+                }
+                std::cout << "LOCAL_METADATA_AB {\"case\":\"prefill_readback_primitive\",\"batch\":" << batch
+                          << ",\"width\":" << width << ",\"round\":" << round
+                          << ",\"baseline_bytes\":" << batch * width * 4 << ",\"candidate_bytes\":" << batch * 4
+                          << ",\"baseline_us\":" << before << ",\"candidate_us\":" << after << "}" << std::endl;
+            }
+        }
+    }
+}
 }
 }
