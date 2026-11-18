@@ -28,10 +28,10 @@ _SOURCES = ("_v41_wo_a_quant.cu", "_v41_wo_a_quant.cuh", "_v41_wo_a_driver.cc")
 # The shim and two schedules depend on this private DeepGEMM ABI. A different
 # implementation falls back until its epilogue/layout has been verified.
 _VENDOR_HASHES = {
-    "impls/sm100_fp8_fp4_gemm_1d1d.cuh": "88dd217719c153b805ee9a791a8c612c078c42a65205a14b7c9ee4f1d0fce110",
-    "epilogue/sm100_store_cd.cuh": "72ea5a5915552004c4b1d5cedd049442476c2cce367985527032f6dcca4a5b10",
-    "epilogue/sm100_store_cd_swap_ab.cuh": "0cc27e0ca66e3be47b1d90974ff7f66efca38c08b783ce16fc5e8f1d8db7010f",
-    "common/math.cuh": "576e9db1a1889087f77b3f74d74d011bf452f16c0e5c030bdd661e961c074ddc",
+    "impls/sm100_fp8_fp4_gemm_1d1d.cuh": "71d32a9fd72034d04f3900165f5bb88dde6e2d4565c624a4953c4c72b2c18ef1",
+    "epilogue/sm100_store_cd.cuh": "0b23dcc32c4d08b1efb641844806dd92ebffd4697c8157bdfc5ca64238fe489b",
+    "epilogue/sm100_store_cd_swap_ab.cuh": "7d71c6630ba4d9376266cbdfdbe8fb38544cb1ac7ef2437d32ce52bdb2c76f6a",
+    "common/math.cuh": "a28f4dfe0340b62dbdb3e9c1286d5e7332d81bd5936ef7cbec13e8e447a2e51a",
 }
 
 

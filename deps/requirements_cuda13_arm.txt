@@ -10,7 +10,7 @@ flashinfer-python==0.6.9+8c4f4dcf
 flashinfer-cubin==0.6.9+8c4f4dcf
 
 # Self-built wheels against torch 2.11+cu130; SHAs encoded in filename.
-deep-gemm==2.8.1+057ca59
+deep-gemm==2.8.2+522942a.cu132
 flash-mla==1.0.0+2e5429f
 # Preserve existing model KV formats through a separate namespace.
 flash-mla-legacy==1.0.0+92fd68b.rtp1
