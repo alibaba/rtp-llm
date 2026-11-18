@@ -534,6 +534,7 @@ def _prefix_reuse_snapshots(
     KV_WIDTH,
     PAGES,
     GROUPS,
+    PAGE: tl.constexpr,
 ):
     """Both prefix-reuse pool snapshots in one launch.
 
@@ -547,15 +548,15 @@ def _prefix_reuse_snapshots(
     prefix = tl.load(prefixes + request)
     if index < PAGES:
         r, d = tl.arange(0, STATE_RING_ROWS), tl.arange(0, INDEXER_HEAD_DIM)
-        end = tl.minimum((index + 1) * 128, length)
+        end = tl.minimum((index + 1) * PAGE, length)
         position = end - 1 - (end - 1 - r + 8) % 8
-        valid = position >= index * 128
+        valid = position >= index * PAGE
         # Prefixes are page aligned, so a local page index addresses the same
         # ring rows as the absolute one; only the table column shifts.
-        column = prefix // 128 + index
+        column = prefix // PAGE + index
         block = tl.load(
             state_table + request * STATE_WIDTH + column,
-            mask=(index * 128 < length) & (column < STATE_WIDTH),
+            mask=(index * PAGE < length) & (column < STATE_WIDTH),
             other=0,
         )
         slot = block * 8 + r
@@ -570,13 +571,13 @@ def _prefix_reuse_snapshots(
     if index < GROUPS:
         valid = index < length // 4
         start = prefix + index * 4
-        column = start // 128
+        column = start // PAGE
         block = tl.load(
             kv_table + request * KV_WIDTH + column,
             mask=valid & (column < KV_WIDTH),
             other=0,
         )
-        slot = block * 32 + (start // 4) % 32
+        slot = block * (PAGE // 4) + (start // 4) % (PAGE // 4)
         d = tl.arange(0, INDEXER_HEAD_DIM)
         row = request * GROUPS + index
         value = tl.load(kv_pool + slot.to(tl.int64) * 128 + d, mask=valid, other=0)
@@ -602,6 +603,7 @@ def _prefix_reuse_q_prep(
     HEADS,
     Q_STRIDE,
     RAW_STRIDE,
+    PAGE: tl.constexpr,
     EPS: tl.constexpr,
 ):
     request, row, head = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -618,8 +620,8 @@ def _prefix_reuse_q_prep(
         # the same (page, ring offset) arrive as later rows, so only the last
         # one writes: the staged writer's sequential last-write-wins order
         # without its argsort.
-        page = position // 128
-        last = position + 8 >= tl.minimum((page + 1) * 128, prefix + length)
+        page = position // PAGE
+        last = position + 8 >= tl.minimum((page + 1) * PAGE, prefix + length)
         state_block = tl.load(
             state_table + request * STATE_WIDTH + page,
             mask=last & (page < STATE_WIDTH),
@@ -686,6 +688,7 @@ def _prefix_reuse_k_compress(
     KV_WIDTH,
     KV_BLOCKS,
     RAW_STRIDE,
+    PAGE: tl.constexpr,
     EPS: tl.constexpr,
 ):
     request, group = tl.program_id(0), tl.program_id(1)
@@ -732,13 +735,13 @@ def _prefix_reuse_k_compress(
         # Absolute block-start addressing. One program owns each (request,
         # group) slot, so the store is already last-wins without an argsort.
         block_start = prefix + group * 4
-        column = block_start // 128
+        column = block_start // PAGE
         kv_block = tl.load(
             kv_table + request * KV_WIDTH + column,
             mask=column < KV_WIDTH,
             other=0,
         )
-        slot = kv_block * 32 + (block_start // 4) % 32
+        slot = kv_block * (PAGE // 4) + (block_start // 4) % (PAGE // 4)
         tl.store(
             kv_pool + slot.to(tl.int64) * 128 + d,
             value,
@@ -836,7 +839,7 @@ def write_prefix_reuse_prefill(
     ``S >= heads * 128``, and ``raw_keys`` with strides ``(S2, 1)`` where
     ``S2 >= 128``; any other layout declines. The caller owns a frozen
     ``Qwen4ExpPrefillStepPlan`` hit and guarantees the geometry this writer
-    specializes on: ratio 4, 128-token KV/state pages with equal
+    specializes on: ratio 4, 64- or 128-token KV/state pages with equal
     page-aligned prefixes and 128-wide heads, so every completed group's
     four source rows lie inside this invocation's packed rows. ``current_cos`` /
     ``current_sin`` carry one per-token rotation row and ``rope_cos`` /
@@ -879,12 +882,12 @@ def write_prefix_reuse_prefill(
             return None
     elif not (
         batch > 0
-        and kv_tokens_per_block == 128
-        and state_tokens_per_block == 128
+        and kv_tokens_per_block in (64, 128)
+        and state_tokens_per_block == kv_tokens_per_block
         and 0 < maximum <= 65535
         and 0 < head_num <= 65535
         and all(isinstance(n, int) and n > 0 for n in lengths)
-        and all(value % 128 == 0 for value in prefix_values)
+        and all(value % kv_tokens_per_block == 0 for value in prefix_values)
         and q.is_cuda
         and torch.version.hip is None
         and q.dtype == torch.bfloat16
@@ -916,7 +919,7 @@ def write_prefix_reuse_prefill(
         and q_norm_gamma.is_contiguous()
         and k_norm_gamma.is_contiguous()
         and kv_pool.dim() == 3
-        and tuple(kv_pool.shape[1:]) == (32, 128)
+        and tuple(kv_pool.shape[1:]) == (kv_tokens_per_block // 4, 128)
         and kv_pool.dtype == torch.bfloat16
         and kv_pool.is_contiguous()
         and state_pool.dim() == 3
@@ -952,7 +955,7 @@ def write_prefix_reuse_prefill(
     ):
         return None
     _PREFIX_REUSE_FUSED_STATS["hits"] += 1
-    pages = triton.cdiv(maximum, 128)
+    pages = triton.cdiv(maximum, kv_tokens_per_block)
     groups = maximum // 4
     padded_q = torch.empty(
         (batch, maximum, head_num, 128), dtype=torch.bfloat16, device=device
@@ -989,6 +992,7 @@ def write_prefix_reuse_prefill(
         KV_WIDTH=kv_table.shape[1],
         PAGES=pages,
         GROUPS=groups,
+        PAGE=kv_tokens_per_block,
         num_warps=4,
     )
     # All allocations and snapshot launches precede any mutation.
@@ -1010,6 +1014,7 @@ def write_prefix_reuse_prefill(
             HEADS=head_num,
             Q_STRIDE=q.stride(0),
             RAW_STRIDE=raw_keys.stride(0),
+            PAGE=kv_tokens_per_block,
             EPS=norm_eps,
             num_warps=1,
             enable_fp_fusion=False,
@@ -1027,6 +1032,7 @@ def write_prefix_reuse_prefill(
                 KV_WIDTH=kv_table.shape[1],
                 KV_BLOCKS=kv_pool.shape[0],
                 RAW_STRIDE=raw_keys.stride(0),
+                PAGE=kv_tokens_per_block,
                 EPS=norm_eps,
                 num_warps=4,
                 enable_fp_fusion=False,

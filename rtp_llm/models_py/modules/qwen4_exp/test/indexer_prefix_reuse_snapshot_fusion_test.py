@@ -169,6 +169,7 @@ def _fused_snapshots(args, pages, groups):
         KV_WIDTH=args["kv_table"].shape[1],
         PAGES=pages,
         GROUPS=groups,
+        PAGE=128,
         num_warps=4,
     )
     return state_slots, original_state, kv_slots, original_kv
