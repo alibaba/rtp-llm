@@ -42,14 +42,26 @@ void registerLsaBindings(py::module& ops) {
         checkLsa(qwen38_lsa_unique_id(uid.data()));
         return py::bytes(uid);
     });
-    m.def("create", [](int rank, int device, int hidden, const py::bytes& value) {
+    m.def("allocate", [](int device, int hidden) {
+        void* handle = nullptr;
+        py::gil_scoped_release release;
+        checkLsa(qwen38_lsa_allocate(device, hidden, &handle));
+        return reinterpret_cast<uintptr_t>(handle);
+    });
+    m.def("connect", [](uintptr_t handle, int rank, const py::bytes& value) {
         const std::string uid = value;
         if (uid.size() != static_cast<size_t>(qwen38_lsa_uid_size()))
             throw std::invalid_argument("Invalid LSA NCCL unique ID size");
-        void* handle = nullptr;
         py::gil_scoped_release release;
-        checkLsa(qwen38_lsa_create(rank, device, hidden, uid.data(), &handle));
-        return reinterpret_cast<uintptr_t>(handle);
+        checkLsa(qwen38_lsa_connect(reinterpret_cast<void*>(handle), rank, uid.data()));
+    });
+    m.def("check_capability", [](uintptr_t handle) {
+        py::gil_scoped_release release;
+        checkLsa(qwen38_lsa_check_capability(reinterpret_cast<void*>(handle)));
+    });
+    m.def("activate", [](uintptr_t handle) {
+        py::gil_scoped_release release;
+        checkLsa(qwen38_lsa_activate(reinterpret_cast<void*>(handle)));
     });
     m.def("apply", [](uintptr_t handle,
                       uintptr_t partial,
@@ -73,7 +85,10 @@ void registerLsaBindings(py::module& ops) {
                                      rows,
                                      reinterpret_cast<void*>(stream)));
     });
-    m.def("destroy", [](uintptr_t handle) { qwen38_lsa_destroy(reinterpret_cast<void*>(handle)); });
+    m.def("destroy", [](uintptr_t handle) {
+        py::gil_scoped_release release;
+        qwen38_lsa_destroy(reinterpret_cast<void*>(handle));
+    });
 }
 }  // namespace
 #endif

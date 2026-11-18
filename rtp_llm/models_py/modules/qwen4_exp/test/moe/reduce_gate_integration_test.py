@@ -64,7 +64,10 @@ def run_missing_peer(rank, group_options):
     ids = [ops.unique_id() if rank == 0 else None]
     dist.broadcast_object_list(ids, src=0)
     hidden = 2560
-    handle = ops.create(rank, rank, hidden, ids[0])
+    handle = ops.allocate(rank, hidden)
+    ops.connect(handle, rank, ids[0])
+    ops.check_capability(handle)
+    ops.activate(handle)
     value = torch.zeros(1, hidden, device="cuda", dtype=torch.bfloat16)
     output = torch.full_like(value, float("nan"))
     gate = torch.zeros(1, 1, device="cuda", dtype=torch.bfloat16)
@@ -91,6 +94,45 @@ def run_missing_peer(rank, group_options):
     # A timeout makes the CUDA context unusable. Let the subprocess exit
     # without attempting to reuse or destroy the test communicator.
     os._exit(0)
+
+
+def check_startup_fallback(model, config, parallelism, rank, device):
+    from rtp_llm.ops import rtp_llm_ops
+
+    ops = rtp_llm_ops._qwen38_lsa
+    for stage in ("allocate", "check_capability"):
+        with (
+            patch.object(ops, "allocate", wraps=ops.allocate) as allocate,
+            patch.object(ops, "connect", wraps=ops.connect) as connect,
+            patch.object(ops, "check_capability", wraps=ops.check_capability) as check,
+            patch.object(ops, "activate", wraps=ops.activate) as activate,
+            patch.object(ops, "destroy", wraps=ops.destroy) as destroy,
+        ):
+            if rank == 1:
+                failing = allocate if stage == "allocate" else check
+                failing.side_effect = RuntimeError(f"injected local LSA {stage} failure")
+            assert prepare_model_reduce(model, config, parallelism) is None
+            assert all(not hasattr(layer.mlp, "_reduce_shared_gate") for layer in model.layers)
+            allocate.assert_called_once_with(device.index, config.hidden_size)
+            if stage == "allocate":
+                connect.assert_not_called()
+                check.assert_not_called()
+            else:
+                connect.assert_called_once()
+                check.assert_called_once()
+            activate.assert_not_called()
+            if stage == "allocate" and rank == 1:
+                destroy.assert_not_called()
+            else:
+                destroy.assert_called_once()
+                assert destroy.call_args.args[0] > 0
+
+        # The original TP communicator is still usable on both ranks.
+        value = torch.full((1,), rank + 1, device=device, dtype=torch.bfloat16)
+        dist.all_reduce(value)
+        assert value.item() == 3
+        if rank == 0:
+            print(f"LSA_STARTUP_SYMMETRIC_FALLBACK {stage}", flush=True)
 
 
 def run_hidden_size(device, rank, hidden_size):
@@ -150,6 +192,8 @@ def run_hidden_size(device, rank, hidden_size):
         mlp.shared_expert_gate.weight = torch.empty(
             1, hidden_size, device=device, dtype=torch.bfloat16
         )
+        if hidden_size == 2560:
+            check_startup_fallback(model, config, parallelism, rank, device)
         owner = prepare_model_reduce(model, config, parallelism)
     assert owner is not None, "SM120 CUDA 13 native LSA unavailable"
     assert mlp._reduce_shared_gate is owner
@@ -159,10 +203,9 @@ def run_hidden_size(device, rank, hidden_size):
     assert not owner.supports(
         torch.empty(1, hidden_size + 8, device=device, dtype=torch.bfloat16)
     )
-    uid = owner.ops.unique_id()
     for invalid_hidden in (0, 7, (2**31 - 1) // 32 + 1):
         with unittest.TestCase().assertRaisesRegex(RuntimeError, "hidden size"):
-            owner.ops.create(rank, device.index, invalid_hidden, uid)
+            owner.ops.allocate(device.index, invalid_hidden)
     results = []
     for rows in (1, 2, 4, 8, 16, 32):
         torch.manual_seed(300 + rank + rows)
