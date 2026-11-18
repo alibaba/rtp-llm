@@ -1214,7 +1214,9 @@ class VitProxyServer:
         if self._recovery_thread and self._recovery_thread.ident is not None:
             self._recovery_thread.join(timeout=STATUS_CHECK_TIMEOUT_SEC + 1.0)
         if self.rpc_server:
-            self.rpc_server.stop(grace=None)
+            # Keep forwarding channels alive until admitted RPCs finish or
+            # exhaust the same budget used when forwarding to the workers.
+            self.rpc_server.stop(grace=self.default_rpc_timeout_seconds).wait()
             logging.info("VIT Proxy Server stopped")
         self.connection_pool.close_all()
 

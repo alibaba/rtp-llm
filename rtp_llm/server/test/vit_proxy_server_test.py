@@ -224,6 +224,48 @@ class LoadBalancerRoundRobinTest(TestCase):
 
 
 class RpcTimeoutTest(TestCase):
+    def test_shutdown_drains_before_closing_worker_channels(self):
+        entered = threading.Event()
+        finished = threading.Event()
+        pool = futures.ThreadPoolExecutor(max_workers=2)
+        server = grpc.server(pool)
+        draining = threading.Event()
+
+        def echo(request, context):
+            entered.set()
+            if not draining.wait(4):
+                context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, "drain did not start")
+            finished.set()
+            return request
+
+        handler = grpc.method_handlers_generic_handler(
+            "test", {"Echo": grpc.unary_unary_rpc_method_handler(echo)}
+        )
+        server.add_generic_rpc_handlers((handler,))
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        self.addCleanup(pool.shutdown)
+        self.addCleanup(lambda: server.stop(0).wait())
+        proxy = VitProxyServer([], 0, default_rpc_timeout_seconds=4)
+        proxy.rpc_server = MagicMock(wraps=server)
+        proxy.connection_pool.close_all = MagicMock(
+            side_effect=lambda: self.assertTrue(finished.is_set())
+        )
+
+        def begin_drain(grace):
+            stopped = server.stop(grace)
+            draining.set()
+            return stopped
+
+        proxy.rpc_server.stop.side_effect = begin_drain
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            call = channel.unary_unary("/test/Echo").future(b"active", timeout=5)
+            self.assertTrue(entered.wait(3))
+            proxy.stop()
+            self.assertTrue(finished.is_set())
+            self.assertEqual(call.result(timeout=1), b"active")
+            proxy.connection_pool.close_all.assert_called_once_with()
+
     def test_default_timeout_adds_worker_completion_margin(self):
         self.assertEqual(
             resolve_default_rpc_timeout_seconds(3500),
