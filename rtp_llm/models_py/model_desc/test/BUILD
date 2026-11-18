@@ -3,6 +3,13 @@ py_test_deps = [
 ]
 
 py_test(
+    name = "rocm_eager_prefill_plan_test",
+    srcs = ["rocm_eager_prefill_plan_test.py"],
+    deps = py_test_deps + ["//rtp_llm/models_py:models"],
+    tags = ["rocm"],
+)
+
+py_test(
     name = "qwen_gdn_graph_replay_test_rocm",
     srcs = ["qwen_gdn_graph_replay_test.py"],
     main = "qwen_gdn_graph_replay_test.py",

@@ -112,6 +112,8 @@ class Qwen3Model(GptModelBase):
         self._cached_kv_cache = None
         self._layer_kv_caches = None
         self._eager_prefill_plan = None
+        self._eager_prefill_failure = None
+        self._eager_prefill_fallback_reasons = set()
         self.embed_tokens = (
             Embedding(
                 config, parallelism_config, weights.get_global_weight(W.embedding)
@@ -150,6 +152,8 @@ class Qwen3Model(GptModelBase):
         self._cached_kv_cache = None
         self._layer_kv_caches = None
         self._eager_prefill_plan = None
+        self._eager_prefill_failure = None
+        self._eager_prefill_fallback_reasons = set()
         initialized = super().initialize(init_resource)
         self._get_cached_layer_kv_caches()
         return initialized
