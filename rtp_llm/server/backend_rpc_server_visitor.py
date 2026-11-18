@@ -4,7 +4,7 @@ import logging
 import os
 import time
 from dataclasses import replace
-from typing import TYPE_CHECKING, AsyncGenerator, Callable, List, Optional, Sequence, Set
+from typing import TYPE_CHECKING, AsyncGenerator, Callable, List, Optional, Set
 
 import torch
 
@@ -32,7 +32,7 @@ from rtp_llm.server.master_client import (
     MasterClient,
 )
 from rtp_llm.server.misc import format_exception
-from rtp_llm.server.mm_cache_metadata import MAX_METADATA_KEY_LENGTH, MAX_METADATA_KEYS
+from rtp_llm.server.mm_cache_metadata import MAX_METADATA_KEYS
 from rtp_llm.server.mm_cache_routing import multimodal_routing_tokens
 from rtp_llm.server.recent_cache_key_window import RecentCacheKeyWindow
 from rtp_llm.server.request_headers import (
@@ -58,14 +58,6 @@ route_logger = logging.getLogger("route_logger")
 def get_role_names(role_addrs: List[RoleAddr]) -> Set[str]:
     """Return the set of human-readable role names from a list of RoleAddr."""
     return {role_addr.role.name for role_addr in role_addrs}
-
-
-def _valid_vit_cache_keys(keys: Sequence[str]) -> bool:
-    return (
-        bool(keys)
-        and len(keys) <= MAX_METADATA_KEYS
-        and all(0 < len(key) <= MAX_METADATA_KEY_LENGTH for key in keys)
-    )
 
 
 PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
@@ -340,7 +332,7 @@ class BackendRPCServerVisitor:
         ):
             keys = multimodal_cache_keys(input)
             metadata = None
-            if _valid_vit_cache_keys(keys):
+            if keys and len(keys) <= 256 and all(len(key) <= 4096 for key in keys):
                 vit_result = await self.master_client.get_backend_role_addrs(
                     block_cache_keys=[],
                     cache_key_block_size=self._cache_key_block_size(),
@@ -686,7 +678,11 @@ class BackendRPCServerVisitor:
             )
         keys = multimodal_cache_keys(input)
         metadata = None
-        if _valid_vit_cache_keys(keys):
+        if (
+            keys
+            and len(keys) <= MAX_METADATA_KEYS
+            and all(0 < len(key) <= 4096 for key in keys)
+        ):
             metadata = await self.master_client.get_vit_cache_metadata(
                 vit_addrs[0], keys, input=input
             )

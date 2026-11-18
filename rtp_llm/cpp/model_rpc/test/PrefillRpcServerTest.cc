@@ -433,9 +433,8 @@ TEST(PDCancelRegistryTest, PriorityCancelLosingToOrdinaryCleanupReturnsNotFound)
     registry.finishLocal(handle);
     ASSERT_TRUE(registry.complete(handle));
     const auto info = meta->getEngineScheduleInfo(0);
-    ASSERT_EQ(info.finished_task_info_list.size(), 1u);
-    EXPECT_EQ(info.finished_task_info_list.front().error_code, static_cast<int64_t>(ErrorCode::CANCELLED));
-    EXPECT_EQ(info.finished_task_info_list.front().priority_preemption_progress, PriorityPreemptionProgress::NONE);
+    EXPECT_TRUE(info.running_task_info_list.empty());
+    EXPECT_TRUE(info.finished_task_info_list.empty());
 }
 
 TEST(PDCancelRegistryTest, PriorityCancelLosingToStreamFailureDoesNotInstallPreemptionIntent) {
@@ -461,7 +460,7 @@ TEST(PDCancelRegistryTest, PriorityCancelLosingToStreamFailureDoesNotInstallPree
     EXPECT_EQ(stream->firstError().error.code(), ErrorCode::EXECUTION_EXCEPTION);
 }
 
-TEST(PDCancelRegistryTest, LatePriorityCancelPreservesPublishedCompletion) {
+TEST(PDCancelRegistryTest, PriorityCancelCanReclassifyDequeuedTaskDuringRpcCleanup) {
     auto meta = std::make_shared<RpcServerRuntimeMeta>();
     PDCancelRegistry registry(meta);
     GenerateInputPB request;
@@ -472,13 +471,19 @@ TEST(PDCancelRegistryTest, LatePriorityCancelPreservesPublishedCompletion) {
     meta->finishTask(request.request_id());
 
     EXPECT_EQ(registry.cancel(request.request_id(), {ErrorCode::PRIORITY_PREEMPTED, "late"}).value(),
-              CANCEL_STATUS_NOT_FOUND);
-    EXPECT_FALSE(handle->canceled.load());
-    EXPECT_FALSE(registry.needsDownstreamCancel(handle));
+              CANCEL_STATUS_ACCEPTED);
+    const auto pending = meta->getEngineScheduleInfo(-1);
+    ASSERT_EQ(pending.running_task_info_list.size(), 1u);
+    EXPECT_EQ(pending.running_task_info_list.front().priority_preemption_progress,
+              PriorityPreemptionProgress::CANCELING);
+    EXPECT_TRUE(pending.finished_task_info_list.empty());
+    registry.finishLocal(handle);
+    ASSERT_TRUE(registry.complete(handle));
     const auto info = meta->getEngineScheduleInfo(-1);
     ASSERT_EQ(info.finished_task_info_list.size(), 1u);
     EXPECT_EQ(info.finished_task_info_list.front().request_id, request.request_id());
-    EXPECT_EQ(info.finished_task_info_list.front().error_code, 0);
+    EXPECT_EQ(info.finished_task_info_list.front().error_code, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
+    EXPECT_EQ(info.finished_task_info_list.front().priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
 }
 
 TEST(PDCancelRegistryTest, StreamEventDropsStreamAfterDeferredReleaseWithoutExpiringRecord) {
@@ -569,15 +574,15 @@ TEST(PDCancelRegistryTest, RacingOrdinaryAndPriorityCancelAckMatchesPublishedTer
         registry.finishLocal(handle);
         ASSERT_TRUE(registry.complete(handle));
         const auto info = meta->getEngineScheduleInfo(0);
-        ASSERT_EQ(info.finished_task_info_list.size(), 1u);
-        const auto& terminal = info.finished_task_info_list.front();
         if (priority_ack == CANCEL_STATUS_ACCEPTED) {
+            ASSERT_EQ(info.finished_task_info_list.size(), 1u);
+            const auto& terminal = info.finished_task_info_list.front();
             EXPECT_EQ(terminal.error_code, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
             EXPECT_EQ(terminal.priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
         } else {
             EXPECT_EQ(priority_ack, CANCEL_STATUS_NOT_FOUND);
-            EXPECT_EQ(terminal.error_code, static_cast<int64_t>(ErrorCode::CANCELLED));
-            EXPECT_EQ(terminal.priority_preemption_progress, PriorityPreemptionProgress::NONE);
+            EXPECT_EQ(handle->cancel_reason.code(), ErrorCode::CANCELLED);
+            EXPECT_TRUE(info.finished_task_info_list.empty());
         }
     }
 }
@@ -835,9 +840,8 @@ TEST(PDCancelRegistryTest, OrdinaryCleanupRetainsCauseAndDoesNotPublishPriorityP
         registry.finishDownstream(handle);
         EXPECT_FALSE(registry.needsDownstreamCancel(handle));
         const auto info = meta->getEngineScheduleInfo(0);
-        ASSERT_EQ(info.finished_task_info_list.size(), 1);
-        EXPECT_EQ(info.finished_task_info_list.front().error_code, static_cast<int64_t>(code));
-        EXPECT_EQ(info.finished_task_info_list.front().priority_preemption_progress, PriorityPreemptionProgress::NONE);
+        EXPECT_TRUE(info.running_task_info_list.empty());
+        EXPECT_TRUE(info.finished_task_info_list.empty());
     }
 }
 TEST(PDCancelRegistryTest, CompletedRequestsExpireFromCompletionRatherThanBusinessDeadline) {

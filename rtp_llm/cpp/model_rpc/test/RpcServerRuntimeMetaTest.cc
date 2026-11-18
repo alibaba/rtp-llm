@@ -192,7 +192,7 @@ TEST(RpcServerRuntimeMetaTest, PriorityCancelDecoratesExistingTaskWithoutDuplica
 
     // The running record and Cancel overlay are constructed from the same
     // request identity, so decoration cannot change its batch id.
-    meta.markCancellationPending(TaskIdentity{input->request_id, /*batch_id=*/77}, true);
+    meta.markPriorityPreemptionCanceling(TaskIdentity{input->request_id, /*batch_id=*/77});
 
     auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
     ASSERT_EQ(info.running_task_info_list.size(), 1);
@@ -200,7 +200,7 @@ TEST(RpcServerRuntimeMetaTest, PriorityCancelDecoratesExistingTaskWithoutDuplica
     EXPECT_EQ(info.running_task_info_list[0].batch_id, 77);
     EXPECT_EQ(info.running_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELING);
 
-    ASSERT_TRUE(meta.markCancellationComplete(
+    ASSERT_TRUE(meta.markPriorityPreemptionCanceled(
         input->request_id, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "priority preempted", stream));
     auto canceled = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
     ASSERT_EQ(canceled.finished_task_info_list.size(), 1);
@@ -210,15 +210,15 @@ TEST(RpcServerRuntimeMetaTest, PriorityCancelDecoratesExistingTaskWithoutDuplica
 
 TEST(RpcServerRuntimeMetaTest, PriorityCanceledIsPublishedOnceAndClearsControlOverlay) {
     RpcServerRuntimeMeta meta;
-    meta.markCancellationPending(TaskIdentity{/*request_id=*/405, /*batch_id=*/-1}, true);
+    meta.markPriorityPreemptionCanceling(TaskIdentity{/*request_id=*/405, /*batch_id=*/-1});
 
     auto canceling = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
     ASSERT_EQ(canceling.running_task_info_list.size(), 1);
     EXPECT_EQ(canceling.running_task_info_list[0].batch_id, -1);
 
-    EXPECT_TRUE(meta.markCancellationComplete(
+    EXPECT_TRUE(meta.markPriorityPreemptionCanceled(
         /*request_id=*/405, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "priority preempted", nullptr));
-    EXPECT_FALSE(meta.markCancellationComplete(
+    EXPECT_FALSE(meta.markPriorityPreemptionCanceled(
         /*request_id=*/405, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "duplicate", nullptr));
 
     auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
@@ -228,22 +228,6 @@ TEST(RpcServerRuntimeMetaTest, PriorityCanceledIsPublishedOnceAndClearsControlOv
     EXPECT_EQ(info.finished_task_info_list[0].batch_id, -1);
     EXPECT_EQ(info.finished_task_info_list[0].error_code, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED));
     EXPECT_EQ(info.finished_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELED);
-}
-
-TEST(RpcServerRuntimeMetaTest, OrdinaryCancelWithoutLocalStreamOnlyPublishesTerminalStatus) {
-    RpcServerRuntimeMeta meta;
-    ASSERT_TRUE(meta.markCancellationPending(TaskIdentity{/*request_id=*/407, /*batch_id=*/88}, false));
-    const auto pending = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
-    EXPECT_TRUE(pending.running_task_info_list.empty());
-    EXPECT_TRUE(pending.finished_task_info_list.empty());
-
-    const auto code = static_cast<int64_t>(ErrorCode::CANCELLED);
-    ASSERT_TRUE(meta.markCancellationComplete(407, code, "request cancelled", nullptr));
-    const auto completed = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
-    EXPECT_TRUE(completed.running_task_info_list.empty());
-    ASSERT_EQ(completed.finished_task_info_list.size(), 1);
-    EXPECT_EQ(completed.finished_task_info_list[0].request_id, 407);
-    EXPECT_EQ(completed.finished_task_info_list[0].error_code, code);
 }
 
 TEST(RpcServerRuntimeMetaTest, PriorityCanceledReplacesRunningTaskWithSingleTypedFinishedRecord) {
@@ -257,14 +241,14 @@ TEST(RpcServerRuntimeMetaTest, PriorityCanceledReplacesRunningTaskWithSingleType
     // Cancel can win before the local stream is enqueued. Both records are
     // created from the same immutable request identity.
     const TaskIdentity identity{input->request_id, input->group_id};
-    meta.markCancellationPending(identity, true);
+    meta.markPriorityPreemptionCanceling(identity);
     meta.enqueue(identity, stream);
 
     auto canceling = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
     ASSERT_EQ(canceling.running_task_info_list.size(), 1);
     EXPECT_EQ(canceling.running_task_info_list[0].batch_id, 88);
 
-    ASSERT_TRUE(meta.markCancellationComplete(
+    ASSERT_TRUE(meta.markPriorityPreemptionCanceled(
         input->request_id, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "priority preempted", stream));
 
     auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
@@ -300,7 +284,7 @@ TEST(RpcServerRuntimeMetaTest, ConcurrentEarlyCancelAndEnqueueKeepOneBatchIdenti
         };
         std::thread cancel_thread([&]() {
             await_start();
-            meta.markCancellationPending(identity, true);
+            meta.markPriorityPreemptionCanceling(identity);
         });
         std::thread enqueue_thread([&]() {
             await_start();
@@ -321,7 +305,7 @@ TEST(RpcServerRuntimeMetaTest, ConcurrentEarlyCancelAndEnqueueKeepOneBatchIdenti
                   PriorityPreemptionProgress::CANCELING)
             << "attempt=" << attempt;
 
-        ASSERT_TRUE(meta.markCancellationComplete(
+        ASSERT_TRUE(meta.markPriorityPreemptionCanceled(
             identity.request_id, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "priority preempted", stream));
         auto canceled = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
         ASSERT_EQ(canceled.finished_task_info_list.size(), 1) << "attempt=" << attempt;
@@ -343,7 +327,7 @@ TEST(RpcServerRuntimeMetaTest, OrdinaryDequeueCannotRegressPriorityCancelingToUn
     // Exercise the full early-Cancel -> late enqueue -> ordinary dequeue ->
     // typed CANCELED sequence with one immutable request identity.
     const TaskIdentity identity{input->request_id, input->group_id};
-    meta.markCancellationPending(identity, true);
+    meta.markPriorityPreemptionCanceling(identity);
     meta.enqueue(identity, stream);
 
     auto enqueued = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
@@ -358,7 +342,7 @@ TEST(RpcServerRuntimeMetaTest, OrdinaryDequeueCannotRegressPriorityCancelingToUn
     EXPECT_EQ(canceling.running_task_info_list[0].batch_id, 89);
     EXPECT_EQ(canceling.running_task_info_list[0].priority_preemption_progress, PriorityPreemptionProgress::CANCELING);
 
-    ASSERT_TRUE(meta.markCancellationComplete(
+    ASSERT_TRUE(meta.markPriorityPreemptionCanceled(
         input->request_id, static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED), "priority preempted", stream));
     auto canceled = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
     EXPECT_TRUE(canceled.running_task_info_list.empty());
@@ -380,8 +364,8 @@ TEST(RpcServerRuntimeMetaTest, PriorityCancelAfterOrdinaryDequeueReplacesFinishe
 
     meta.enqueue(identity, stream);
     meta.dequeue(identity.request_id, stream);
-    meta.markCancellationPending(identity, /*priority_preemption=*/true);
-    ASSERT_TRUE(meta.markCancellationComplete(
+    meta.markPriorityPreemptionCanceling(identity);
+    ASSERT_TRUE(meta.markPriorityPreemptionCanceled(
         identity.request_id,
         static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED),
         "priority preempted",
@@ -436,13 +420,13 @@ TEST(RpcServerRuntimeMetaTest, StalePriorityFinalizerDoesNotRemoveReplacementStr
     auto replacement_stream            = std::make_shared<RuntimeMetaTestStream>(replacement_input);
 
     meta.enqueue(stale_input->request_id, stale_stream);
-    meta.markCancellationPending(TaskIdentity{stale_input->request_id, stale_input->group_id}, true);
+    meta.markPriorityPreemptionCanceling(TaskIdentity{stale_input->request_id, stale_input->group_id});
     meta.enqueue(replacement_input->request_id, replacement_stream);
 
-    EXPECT_TRUE(meta.markCancellationComplete(stale_input->request_id,
-                                              static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED),
-                                              "stale priority preemption",
-                                              stale_stream));
+    EXPECT_TRUE(meta.markPriorityPreemptionCanceled(stale_input->request_id,
+                                                    static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED),
+                                                    "stale priority preemption",
+                                                    stale_stream));
 
     auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
     ASSERT_EQ(info.finished_task_info_list.size(), 1);

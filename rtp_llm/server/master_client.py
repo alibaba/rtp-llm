@@ -39,11 +39,7 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics
 from rtp_llm.server.host_service import HostService
-from rtp_llm.server.mm_cache_metadata import (
-    MAX_METADATA_BYTES,
-    MAX_METADATA_KEYS,
-    metadata_from_proto,
-)
+from rtp_llm.server.mm_cache_metadata import MAX_METADATA_BYTES, metadata_from_proto
 from rtp_llm.server.request_headers import dashscope_greennet_metadata
 from rtp_llm.server.worker_status import _coerce_role_type
 from rtp_llm.telemetry import attributes as trace_attrs
@@ -552,8 +548,6 @@ class MasterClient:
         probe_timeout = DEFAULT_REQUEST_TIMEOUT_SEC
         if input is not None:
             input.greennet_verified_vit = None
-            if len(unique_keys) > MAX_METADATA_KEYS:
-                return None
             configured_timeout = input.generate_config.mm_timeout_ms
             if not configured_timeout or configured_timeout <= 0:
                 configured_timeout = max(
