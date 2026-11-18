@@ -130,6 +130,16 @@ NCCL_P2P_DISABLE=0 python -m \
 The manual `reduce_gate_missing_peer_test` target makes rank 1 omit the
 collective and checks the resulting CUDA fault on rank 0.
 
+On the admitted BF16 Decode path, the shared projections and gate run on
+an auxiliary CUDA stream and join the routed result before the LSA epilogue.
+For a static Qwen4 checkpoint, set `"decode_shared_gemm_nk": true` in the
+ModelOpt FP4 quantization config to also pack contiguous BF16 shared
+projection weights. The measured shapes use packed weights for up at
+physical M1–16 and down at M2–32. A 48-layer Qwen3.8-Flash-Next worker
+uses an additional 450 MiB per rank. This option defaults to false.
+Updating packed weights requires restarting the model and rebuilding the
+CUDA Graphs.
+
 ## Method 3: Using docker
 More Docker versions can be obtained from [RTP-LLM Release](../release/index.rst)
 ```bash
