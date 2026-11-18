@@ -11,6 +11,7 @@ prompts using that checkpoint's tokenizer.
 | Decode | 32 | 4 | 32768 | 16 | 3 CUDA Graph replays |
 | Cold prefill | 8 | 1 | 16384 | 1 | 1 eager forward |
 | Prefix-hit prefill (optional) | 8 | 1 | 16384 (14336 cached + 2048 new) | 1 | 1 eager forward |
+| MTP with CUDA Graph (optional) | 1 | 1 on rank 0 | 4608 | 20 | 4 MTP decode steps |
 
 Both phases run on one TP1/DP8/EP8 `PDFUSION` server, with MXFP8 online quantization,
 FlashInfer GDN and Indexer, native QSA, and single-launch Indexer preparation.
@@ -46,6 +47,13 @@ each prefix-hit batch, then routes the continuation to the same rank. It checks
 that each continuation reports exactly 14336 reused tokens. Decode and cold
 prefill bypass the cache in both modes.
 
+Use `--mtp` (Bazel `--test_arg=--mtp`) to capture the MTP case. The driver
+uses the target checkpoint for the MXFP8 draft, proposes three tokens per
+cycle, and captures decode batch size 1. It checks for CUDA Graph launches,
+cross-layer GR fusion on every rank, and the tiled PLE prefill kernel on rank 0.
+MTP target verification uses its own PLE cache transaction path. The fused
+single-token PLE decode kernels can be inspected in the default decode case.
+
 For either invocation, set `QWEN4_PLE_SHARED_TABLE` (Bazel `--test_env`) to reuse
 a matching shared PLE manifest whose backing remains readable throughout the
 test. If unset, the driver stages the roughly 305 GiB PLE table from the checkpoint
@@ -57,6 +65,8 @@ The output contains 16 raw Chrome Trace JSON files in `timelines/`, unprofiled
 `--prefix_cache`, it adds eight `-prefix14336` timelines and
 `prefill_prefix_cache_metrics.json`. The driver checks each rank for the expected
 CUDA Graph replays, fused Indexer preparation, and FlashInfer score and TopK launches.
+With `--mtp`, the output contains eight MTP traces and `mtp_metrics.json`. Each
+run writes its server arguments and backend environment to `launch.json`.
 
 The manual smoke target `//rtp_llm/test/smoke:qwen4_m11_mxfp4_sm10x` also checks
 that a changed continuation hits the seeded page-aligned prefix and generates
