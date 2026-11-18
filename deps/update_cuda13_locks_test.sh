@@ -31,3 +31,18 @@ internal=$($script internal-x86 --print-command)
 # Invoking from another directory must not embed machine paths into the lock.
 from_elsewhere=$(cd /tmp && "$script" x86 --print-command)
 [[ "$from_elsewhere" == "$x86" ]]
+
+sm90=$($script sm90-x86 --print-command)
+internal_sm90=$($script internal-sm90-x86 --print-command)
+[[ "$sm90" == *"deps/requirements_torch_gpu_cuda13_sm90.txt"* ]]
+[[ "$sm90" == *"deps/requirements_lock_torch_gpu_cuda13_sm90.txt"* ]]
+[[ "$sm90" == *"deps/requirements_cuda13_sm90_overrides.txt"* ]]
+[[ "$sm90" == *"@rtp_public_deps//:requirements_torch_gpu_cuda13_sm90.update"* ]]
+[[ "$internal_sm90" == *"internal_source/deps/requirements_torch_gpu_cuda13_sm90.txt"* ]]
+[[ "$internal_sm90" == *"internal_source/deps/requirements_lock_torch_gpu_cuda13_sm90.txt"* ]]
+[[ "$internal_sm90" == *"@rtp_deps//:requirements_torch_gpu_cuda13_sm90.update"* ]]
+# The Hopper closure is x86 only; ARM continues its existing upstream lineage.
+if "$script" sm90-arm --print-command >/dev/null 2>&1; then
+    echo "Unexpected SM90 ARM lock target" >&2
+    exit 1
+fi

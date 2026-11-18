@@ -1,6 +1,7 @@
 load("@rules_python//python:pip.bzl", "package_annotation", "pip_parse")
 
 PIP_EXTRA_ARGS = [
+    "--cache-dir=~/.cache/pip",
     "--extra-index-url=https://mirrors.aliyun.com/pypi/simple/",
     "--verbose",
 ]
@@ -118,6 +119,18 @@ def pip_deps():
         requirements_lock = "@rtp_deps//:requirements_lock_torch_gpu_cuda13.txt",
         python_interpreter = "/opt/conda310/bin/python3",
         extra_pip_args = PIP_EXTRA_ARGS + ["--quiet"],
+        timeout = 3600,
+        quiet = False,
+    )
+
+    # Separate repository and wheel extraction directories; never replace the
+    # upstream pip_gpu_cuda13_torch closure with Hopper packages.
+    pip_parse(
+        name = "pip_gpu_cuda13_sm90_torch",
+        annotations = CUDA13_ANNOTATIONS,
+        requirements_lock = "@rtp_deps//:requirements_lock_torch_gpu_cuda13_sm90.txt",
+        python_interpreter = "/opt/conda310/bin/python3",
+        extra_pip_args = [arg for arg in PIP_EXTRA_ARGS if not arg.startswith("--cache-dir=")] + ["--quiet"],
         timeout = 3600,
         quiet = False,
     )

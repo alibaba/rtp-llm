@@ -1,5 +1,17 @@
 workspace(name = "rtp_llm")
 
+# Bootstrap without loading a main-repository label while Bazel is still
+# computing the main repository mapping. This rules-only repository has no
+# dependency on pip, arch_config, or the generated selection repository.
+local_repository(
+    name = "sm90_dependency_config_rules",
+    path = "deps/sm90_dependency_config",
+)
+
+load("@sm90_dependency_config_rules//:repositories.bzl", "sm90_dependency_config")
+
+sm90_dependency_config(name = "sm90_dependency_config")
+
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 http_archive(
@@ -111,6 +123,9 @@ pip_gpu_cuda12_9_torch_install_deps()
 
 load("@pip_gpu_cuda13_torch//:requirements.bzl", pip_gpu_cuda13_torch_install_deps = "install_deps")
 pip_gpu_cuda13_torch_install_deps()
+
+load("@pip_gpu_cuda13_sm90_torch//:requirements.bzl", pip_gpu_cuda13_sm90_torch_install_deps = "install_deps")
+pip_gpu_cuda13_sm90_torch_install_deps()
 
 load("@pip_cuda12_arm_torch//:requirements.bzl", pip_cuda12_arm_torch_install_deps = "install_deps")
 pip_cuda12_arm_torch_install_deps()

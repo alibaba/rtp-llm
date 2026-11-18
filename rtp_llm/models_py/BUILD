@@ -1,5 +1,6 @@
 load("@arch_config//:arch_select.bzl", "requirement")
-load("@pip_gpu_cuda13_torch//:requirements.bzl", cuda13_requirement = "requirement")
+load("@sm90_dependency_config//:config.bzl", "SM90_DEPS")
+load("@pip_gpu_cuda13_sm90_torch//:requirements.bzl", sm90_requirement = "requirement")
 
 # Import-only dependency checks reuse the production Python 3.10 adapter.
 exports_files(["modules/dsv41/vision_swiglu.py"])
@@ -138,9 +139,10 @@ py_library(
         "//rtp_llm/models_py/distributed:user_buffers",
     ] + select({
         # cuda13 locks ship flashinfer-python and deep-ep.
-        "@//:using_cuda13_x86": flashinfer + deep + [
+        "@//:using_cuda13_x86": flashinfer + deep + ([
             "@flash_mla_sm90_sidecar//:pkg",  # Hopper sparse attention.
-        ],
+            sm90_requirement("gc-moe"),
+        ] if SM90_DEPS else []),
         "@//:using_cuda13_arm": flashinfer + deep,
         "@//:using_cuda12": flashinfer + deep,
         "@//:using_ppu": deep,

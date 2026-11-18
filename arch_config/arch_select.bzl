@@ -1,3 +1,5 @@
+load("@sm90_dependency_config//:config.bzl", "SM90_DEPS")
+load("@pip_gpu_cuda13_sm90_torch//:requirements.bzl", requirement_gpu_cuda13_sm90 = "requirement")
 load("@pip_arm_torch//:requirements.bzl", requirement_arm = "requirement")
 
 # to wrapper target relate with different system config
@@ -5,9 +7,12 @@ load("@pip_cpu_torch//:requirements.bzl", requirement_cpu = "requirement")
 load("@pip_cuda13_arm_torch//:requirements.bzl", requirement_cuda13_arm = "requirement")
 load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9 = "requirement")
 load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12 = "requirement")
-load("@pip_gpu_cuda13_torch//:requirements.bzl", requirement_gpu_cuda13 = "requirement")
+load("@pip_gpu_cuda13_torch//:requirements.bzl", requirement_gpu_cuda13_upstream = "requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm = "requirement")
 load("@rtp_llm//bazel:defs.bzl", "copy_so")
+
+# x86 backend labels select a separate repository; ARM labels never change.
+requirement_gpu_cuda13 = requirement_gpu_cuda13_sm90 if SM90_DEPS else requirement_gpu_cuda13_upstream
 
 def copy_all_so():
     copy_so("@rtp_llm//:mm_rdma_exporter")
@@ -127,10 +132,31 @@ def whl_deps():
             "fastsafetensors@https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/cuda13-x86/20261107/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl",
             "tilelang==0.1.15",
             "apache-tvm-ffi==0.1.12",
+        ] if SM90_DEPS else [
+            "quack-kernels @ https://github.com/Dao-AILab/quack/archive/77a750c0d9548d4a6e23c0f64062d61b3ea420ff.tar.gz#sha256=ebc940da966e88a05be318c3dc3f650a7359a281642f8f2f77c28ba4e9affa05",
+            "flash-attn-4 @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260612/flash_attn_4-4.0.0b21-py3-none-any.whl#sha256=8ad0cdd22b279ef2ca8b4e43a4fb33b7dc78936d36c41788bad9d67372056949",
+            "nvidia-cutlass-dsl==4.7.1",
+            "nvidia-cutlass-dsl-libs-base==4.7.1",
+            "torch-c-dlpack-ext==0.1.5",
+            "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
+            "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
+            # Keep wheel metadata aligned with the CUDA13 dependency lock.
+            "flash-mla@https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/dsv41/20261013/x86-cuda132/flash_mla-1.0.0%2B2e5429f-cp310-cp310-linux_x86_64.whl",
+            "flash-mla-legacy@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/whl/eplb-20261023-01a16309/flash_mla_legacy-1.0.0%2B9241ae3.rtp1-cp310-cp310-linux_x86_64.whl",
+            "deep-ep@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/deep-ep/deep_ep-2.1.0%2Ba56d615-cp310-cp310-linux_x86_64.whl",
+            "fast-hadamard-transform@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/fast-hadamard-transform/fast_hadamard_transform-1.1.0%2Be7706fa.cu132.torch2.11.cxx11abitrue-cp310-cp310-linux_x86_64.whl",
+            "flash_attn@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/flash-attn/flash_attn-2.8.3.post1%2Bcu13torch2.11cxx11abitrue.r1-cp310-cp310-linux_x86_64.whl",
+            "flashinfer-python@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-python/flashinfer_python-0.6.9+8c4f4dcf-py3-none-any.whl",
+            "flashinfer-cubin@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-cubin/flashinfer_cubin-0.6.9+8c4f4dcf-py3-none-any.whl",
+            "rtp-kernel@http://artlab.alibaba-inc.com/1/pypi/rtp_llm/rtp-kernel/rtp_kernel-0.1.0%2B94fd20eb.cu132-cp310-cp310-linux_x86_64.whl",
+            "fast-safetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl",
+            "fastsafetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0502/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_x86_64.whl",
+            "tilelang==0.1.15",
+            "apache-tvm-ffi==0.1.12",
         ],
         "@rtp_llm//:using_cuda13_arm": [
             "quack-kernels @ https://github.com/Dao-AILab/quack/archive/77a750c0d9548d4a6e23c0f64062d61b3ea420ff.tar.gz#sha256=ebc940da966e88a05be318c3dc3f650a7359a281642f8f2f77c28ba4e9affa05",
-            "flash-attn-4 @ https://search-ad.oss-cn-hangzhou-zmf-internal.aliyuncs.com/rtp-llm-deps/cuda13-x86/20261107/flash_attn_4-4.0.0b21-py3-none-any.whl#sha256=8ad0cdd22b279ef2ca8b4e43a4fb33b7dc78936d36c41788bad9d67372056949",
+            "flash-attn-4 @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260612/flash_attn_4-4.0.0b21-py3-none-any.whl#sha256=8ad0cdd22b279ef2ca8b4e43a4fb33b7dc78936d36c41788bad9d67372056949",
             "nvidia-cutlass-dsl==4.7.1",
             "nvidia-cutlass-dsl-libs-base==4.7.1",
             "torch-c-dlpack-ext==0.1.5",

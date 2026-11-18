@@ -1,3 +1,4 @@
+load("@sm90_dependency_config//:config.bzl", "SM90_DEPS")
 load("//:def.bzl", "cc_test_wrapper", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 load("@rules_python//python:defs.bzl", "py_test")
@@ -53,7 +54,7 @@ py_test(
 
 cc_import(
     name = "cuda13_torch_nvshmem",
-    shared_library = "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so",
+    shared_library = ("@pip_gpu_cuda13_sm90_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so" if SM90_DEPS else "@pip_gpu_cuda13_torch_torch//:site-packages/torch/lib/libtorch_nvshmem.so"),
 )
 
 cuda13_torch_link_deps = select({

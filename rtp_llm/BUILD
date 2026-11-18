@@ -1,3 +1,4 @@
+load("@sm90_dependency_config//:config.bzl", "SM90_DEPS")
 package(default_visibility = ["//visibility:public"])
 
 exports_files([
@@ -877,7 +878,7 @@ sm90_backend_wheel_deps = select({
         "@flash_mla_sm90_sidecar//:wheel_package",
     ],
     "//conditions:default": [],
-})
+}) if SM90_DEPS else []
 
 # target for wheel
 py_wheel(
@@ -895,7 +896,7 @@ py_wheel(
         ":rtp_llm_package",
         "@rtp_deps//:extension_package"
     ] + sm90_backend_wheel_deps,
-    strip_path_prefixes = ["site-packages/"],
+    strip_path_prefixes = ["site-packages/"] if SM90_DEPS else [],
     requires = whl_reqs,
 )
 
@@ -909,7 +910,7 @@ py_wheel(
         ":rtp_llm_package",
         "@rtp_deps//:extension_package",
     ] + sm90_backend_wheel_deps,
-    strip_path_prefixes = ["site-packages/"],
+    strip_path_prefixes = ["site-packages/"] if SM90_DEPS else [],
     requires = whl_reqs + [
         "kserve",
     ] + xft_dep + arch_with_version_dep,

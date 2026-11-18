@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 <x86|arm|internal-x86> [--check|--print-command]" >&2
+    echo "Usage: $0 <x86|arm|internal-x86|sm90-x86|internal-sm90-x86> [--check|--print-command]" >&2
     exit 2
 }
 
@@ -15,15 +15,21 @@ cd "$workspace"
 overrides=deps/requirements_cuda13_overrides.txt
 
 case "$platform" in
-    x86|internal-x86)
+    x86|internal-x86|sm90-x86|internal-sm90-x86)
         input=deps/requirements_torch_gpu_cuda13.txt
         output=deps/requirements_lock_torch_gpu_cuda13.txt
         python_platform=x86_64-manylinux_2_28
         target=@rtp_public_deps//:requirements_torch_gpu_cuda13.update
-        if [[ "$platform" == internal-x86 ]]; then
+        if [[ "$platform" == internal-x86 || "$platform" == internal-sm90-x86 ]]; then
             input=internal_source/deps/requirements_torch_gpu_cuda13.txt
             output=internal_source/deps/requirements_lock_torch_gpu_cuda13.txt
             target=@rtp_deps//:requirements_torch_gpu_cuda13.update
+        fi
+        if [[ "$platform" == sm90-x86 || "$platform" == internal-sm90-x86 ]]; then
+            input=${input%.txt}_sm90.txt
+            output=${output%.txt}_sm90.txt
+            target=${target%.update}_sm90.update
+            overrides=deps/requirements_cuda13_sm90_overrides.txt
         fi
         # The x86 lock resolves by-name packages from public PyPI (with the
         # aliyun mirror fallback) while the arm lock uses the internal artlab
