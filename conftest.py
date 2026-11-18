@@ -411,9 +411,20 @@ def pytest_configure(config):
 # ============================================================================
 
 
+# Keep only these four upstream-disabled methods out of automatic Native CI.
+# unittest.skip on each source method still prevents explicit/manual execution.
+_UPSTREAM_DISABLED_TEST_NODEIDS = {
+    "rtp_llm/cpp/model_rpc/test/model_rpc_client_test.py::ModelRpcClientTest::test_generate_stream",
+    "rtp_llm/models_py/modules/dsv4/decode/test/indexer_decode_test.py::TestIndexerDecodeOp::test_fast_path_topk_iou",
+    "rtp_llm/test/concurrency_limit_test.py::ConcurrencyLimitTest::test_exception",
+    "rtp_llm/test/concurrency_limit_test.py::ConcurrencyLimitTest::test_simple",
+}
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
     """
+    - Route the exact upstream-disabled inventory through the manual filter.
     - Deselect tests marked @pytest.mark.manual (require manual execution).
     - Add synthetic gpu_count_N markers before pytest applies -m selection.
     """
@@ -439,6 +450,15 @@ def pytest_collection_modifyitems(config, items):
             item.get_closest_marker("multi_arch_cuda")
         ):
             item.add_marker(pytest.mark.gpu(type="H20"))
+
+    for item in items:
+        if item.nodeid in _UPSTREAM_DISABLED_TEST_NODEIDS:
+            if not getattr(item.obj, "__unittest_skip__", False):
+                raise pytest.UsageError(
+                    f"{item.nodeid} is registered as upstream-disabled "
+                    "but has no unconditional unittest.skip"
+                )
+            item.add_marker(pytest.mark.manual)
 
     marker_expr = getattr(config.option, "markexpr", "") or ""
     if "manual" not in marker_expr:

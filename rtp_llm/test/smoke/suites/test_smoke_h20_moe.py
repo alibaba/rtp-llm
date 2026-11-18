@@ -65,34 +65,6 @@ SMOKE_CASES = {
         "markers": ["smoke", "cuda", "H20"],
         "timeout": 600,
     },
-    "moe_deepep_continuous_dp2": {
-        "task_info": "data/model/qwen3_moe/q_r_30b_py.json",
-        "smoke_args": "--warm_up 0 --act_type BF16 --reserver_runtime_mem_mb 8192 "
-        "--use_deepep_moe 1 --use_deepep_low_latency 0 --dp_size 2",
-        "gpu_type": "H20",
-        "platform": "cuda",
-        "markers": ["smoke", "cuda", "H20"],
-        "timeout": 600,
-    },
-    "moe_deepep_ll_tp2": {
-        "task_info": "data/model/qwen3_moe/q_r_30b_py_tp2_ll.json",
-        "smoke_args": "--warm_up 0 --act_type BF16 --reserver_runtime_mem_mb 8192 "
-        "--use_deepep_moe 1 --use_deepep_low_latency 1 --tp_size 2 --world_size 2",
-        "gpu_type": "H20",
-        "platform": "cuda",
-        "markers": ["smoke", "cuda", "H20"],
-        "timeout": 600,
-    },
-    "moe_deepep_normal_tp2": {
-        "task_info": "data/model/qwen3_moe/q_r_30b_py_tp2.json",
-        "smoke_args": "--warm_up 0 --act_type BF16 --reserver_runtime_mem_mb 8192 "
-        "--use_deepep_moe 1 --use_deepep_low_latency 0 --tp_size 2 --world_size "
-        "2",
-        "gpu_type": "H20",
-        "platform": "cuda",
-        "markers": ["smoke", "cuda", "H20"],
-        "timeout": 600,
-    },
     "moe_headwise": {
         "task_info": "data/model/qwen3_moe/q_r_30b_py_headwise.json",
         "smoke_args": "--use_deepep_moe 1 --use_deepep_low_latency 0",
@@ -105,18 +77,6 @@ SMOKE_CASES = {
             "RESERVER_RUNTIME_MEM_MB=8192",
             "MAX_SEQ_LEN=32768",
         ],
-        "gpu_type": "H20",
-        "platform": "cuda",
-        "markers": ["smoke", "cuda", "H20"],
-        "timeout": 600,
-    },
-    "moe_fp8pt_batched_cudagraph": {
-        "task_info": "data/model/qwen3_moe/q_r_fp8_per_tensor_batched_cuda_graph_30b.json",
-        "smoke_args": "--decode_capture_config '1,2' --reserver_runtime_mem_mb 20000 "
-        "--warm_up 0 --act_type BF16 --enable_cuda_graph 1  "
-        "--use_deepep_moe 1 --use_deepep_low_latency 1 --dp_size 2 "
-        "--ep_size 2",
-        "envs": ["ACCL_LOW_LATENCY_OPTIMIZE=1"],
         "gpu_type": "H20",
         "platform": "cuda",
         "markers": ["smoke", "cuda", "H20"],

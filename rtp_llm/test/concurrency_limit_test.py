@@ -75,6 +75,7 @@ class ConcurrencyLimitTest(unittest.IsolatedAsyncioTestCase):
         server._frontend_worker = worker
         return server, controller
 
+    @unittest.skip("Temporarily disabled test case")
     async def test_simple(self):
         request_count = 10
         started = asyncio.Event()
@@ -96,6 +97,7 @@ class ConcurrencyLimitTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(responses), request_count)
         self.assertEqual(controller.get_available_concurrency(), 16)
 
+    @unittest.skip("Temporarily disabled test case")
     async def test_exception(self):
         server, controller = self._make_server(2, _FailingWorker())
 

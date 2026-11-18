@@ -629,7 +629,7 @@ def test_per_test_command_exports_marker_gpu_count(tmp_path, monkeypatch):
         "python rtp_llm/test/utils/device_resource.py"
     )
 
-    plugin.timeout_policy = select_remote_timeout_policy("perf_sm9x", per_test=True)
+    plugin.timeout_policy = select_remote_timeout_policy("perf_ppu_internal", per_test=True)
     perf_shell = plugin._build_command(
         _FakeRemoteItem(test_file, gpu_type="H20", gpu_count=1), runtime
     )[2]
@@ -929,7 +929,7 @@ def test_executor_pool_resolves_hostname_inside_remote_framework(monkeypatch):
 def test_timeout_policy_maps_ci_profiles():
     ut = select_remote_timeout_policy("ut-sm9x", per_test=False)
     smoke = select_remote_timeout_policy("smoke-sm100-internal", per_test=False)
-    perf = select_remote_timeout_policy("perf-test", per_test=False)
+    perf = select_remote_timeout_policy("perf_ppu_internal", per_test=False)
     per_test = select_remote_timeout_policy("ut-sm9x", per_test=True)
     per_test_smoke = select_remote_timeout_policy("smoke-ppu-internal", per_test=True)
     per_test_eval = select_remote_timeout_policy("smoke_sm100_eval_oss", per_test=True)

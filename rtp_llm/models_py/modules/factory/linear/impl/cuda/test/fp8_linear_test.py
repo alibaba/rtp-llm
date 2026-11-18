@@ -792,6 +792,7 @@ class CudaFp8LinearTestBase:
                 self.assertFalse(torch.isnan(fp8_output1).any())
                 self.assertFalse(torch.isinf(fp8_output1).any())
 
+    @unittest.skip("Skip profiling tests")
     @pytest.mark.manual
     @pytest.mark.perf
     def test_profile_cuda_fp8_deepgemm_linear(self):

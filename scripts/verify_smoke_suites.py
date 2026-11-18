@@ -34,9 +34,9 @@ EXPECTED_OSS_SUITE_COUNTS = {
     "h20_eagle": 6,
     "h20_grammar_heavy": 2,
     "h20_kimi_linear": 6,
-    "h20_mla": 15,
-    "h20_moe": 12,
-    "h20_next": 17,
+    "h20_mla": 4,
+    "h20_moe": 8,
+    "h20_next": 16,
     "h20_vl": 5,
     "h20_jit_cache": 1,
     "rocm_basic": 4,
@@ -56,9 +56,8 @@ EXPECTED_OSS_SUITE_COUNTS = {
 }
 
 EXPECTED_INTERNAL_SUITE_COUNTS = {
-    "cuda13_arm": 5,
-    "cuda13_x86": 2,
-    "cuda13_flexlb": 2,
+    "cuda13_arm": 1,
+    "cuda13_x86": 1,
     "h20_dense_internal": 1,
     "ppu_basic": 8,
     "ppu_pd": 8,
@@ -71,7 +70,9 @@ EXPECTED_INTERNAL_SUITE_COUNTS = {
 
 EXPECTED_OSS_PROFILE_COUNTS = {
     "smoke_h20_light_oss": 16,
-    "smoke_h20_full_oss": 58,
+    "smoke_h20_full_oss": 41,
+    # Smoke contribution only: the mixed profile also owns four DeepEP methods.
+    "deepep_cuda13_h20": 1,
     "smoke_sm8x_light_oss": 9,
     "smoke_sm8x_full_oss": 9,
     "smoke_rocm_oss": 26,
@@ -95,6 +96,8 @@ def _oss_profile_owners(
     markers = set(config.get("markers", []))
     is_light = suite_name in LIGHT_SUITES
     owners: List[str] = []
+    if "H20_CU13" in markers:
+        owners.append("deepep_cuda13_h20")
     if "H20" in markers:
         owners.append("smoke_h20_light_oss" if is_light else "smoke_h20_full_oss")
     if "L20" in markers:

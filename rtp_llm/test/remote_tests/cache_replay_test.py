@@ -107,8 +107,8 @@ def test_session_deselect_uses_only_complete_matching_cache_entries():
     no_junit = _entry("pkg/test_mod.py::test_no_junit")
     wrong_profile = _entry(
         "pkg/test_mod.py::test_perf",
-        profile="perf_sm9x",
-        scope="profile=perf_sm9x|markexpr=H20|keyword=|pytest_args=",
+        profile="perf_ppu_internal",
+        scope="profile=perf_ppu_internal|markexpr=PPU_ZW810E|keyword=|pytest_args=",
         junit=(
             '<testcase classname="pkg.test_mod" name="test_perf" time="1.25">'
             '<properties><property name="nodeid" value="pkg/test_mod.py::test_perf" /></properties>'

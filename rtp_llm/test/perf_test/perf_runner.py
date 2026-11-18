@@ -15,12 +15,14 @@ import time
 from pathlib import Path
 from typing import List
 
+from rtp_llm.test.perf_test.perf_behavior import uses_mainline_perf_semantics
+
 
 def build_perf_params(pytest_module, perf_tests: dict):
     """Build pytest.param list from a PERF_TESTS dict.
 
     Caller passes the suite's PERF_TESTS dict, for example from
-    ``internal_source/rtp_llm/test/perf_test/suites/test_perf_qwen35.py``.
+    ``internal_source/rtp_llm/test/perf_test/suites/test_perf_qwen35_ppu.py``.
     Keeps framework decoupled from data location.
     """
     params = []
@@ -93,8 +95,13 @@ def run_perf_test(test_name: str, test_config: dict, data_dir: Path):
 
         args, remaining = parse_args()
         grid_config = None
-        if args.target_tpot <= 0 and not any(
-            (args.dataset_name, args.dataset_path, args.dataset, args.test_json)
+        # The five manual PPU targets retain mainline's no-baseline verdict.
+        if (
+            not uses_mainline_perf_semantics(test_name)
+            and args.target_tpot <= 0
+            and not any(
+                (args.dataset_name, args.dataset_path, args.dataset, args.test_json)
+            )
         ):
             grid_config = prepare_config(args, remaining)
             # Match main's explicit prefill batch-size override.
