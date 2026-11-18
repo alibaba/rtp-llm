@@ -34,7 +34,6 @@ def _gdn_norm_quant(
     GH: gl.constexpr,
     WARPS: gl.constexpr,
     UE8M0: gl.constexpr,
-    LEGACY: gl.constexpr,
 ):
     layout: gl.constexpr = gl.BlockedLayout([1, 4], [1, 32], [WARPS, 1], [1, 0])
     flat = gl.program_id(0) * GH + gl.arange(0, GH, layout=gl.SliceLayout(1, layout))
@@ -54,8 +53,8 @@ def _gdn_norm_quant(
     rounded = normalized.to(gl.bfloat16).to(gl.float32)
     absolute = gl.abs(rounded)
     amax = gl.maximum(gl.max(gl.where(absolute == absolute, absolute, 0.0), 1), 1.0e-4)
-    scale_float = amax * (1.0 / 448.0)
     if UE8M0:
+        scale_float = amax * (1.0 / 448.0)
         bits = scale_float.to(gl.uint32, bitcast=True)
         exponent = (
             ((bits >> 23) & 255).to(gl.int32)
@@ -63,15 +62,11 @@ def _gdn_norm_quant(
             + ((bits & 0x7FFFFF) != 0).to(gl.int32)
         )
         reciprocal = ((127 - exponent).to(gl.uint32) << 23).to(gl.float32, bitcast=True)
+        scaled = rounded * reciprocal[:, None]
     else:
-        # Match the CUDA v2 quantizer division before FP8 rounding.
-        reciprocal = gl.div_rn(448.0, amax)
-    if LEGACY:
         # The legacy CUDA path rounds both divisions independently.
         scale_float = gl.div_rn(amax, 448.0)
         scaled = gl.div_rn(rounded, scale_float[:, None])
-    else:
-        scaled = rounded * reciprocal[:, None]
     scaled = gl.where(scaled == scaled, scaled, -448.0)
     quant = gl.minimum(gl.maximum(scaled, -448.0), 448.0)
     gl.store(Q + row[:, None] * N + offset, quant, valid)
@@ -86,14 +81,14 @@ def _gdn_norm_quant(
         gl.store(S + row + head * SS, scale_float, flat < M * GROUPS)
 
 
-def norm_quant(x, z, weight, eps, groups=8, warps=1, *, scale_ue8m0=True):
+def norm_quant(x, z, weight, eps, groups=8, warps=1):
     rows, width = x.shape
     if not (
         x.is_cuda
         and x.dtype == torch.bfloat16
         and x.is_contiguous()
         and width in (1536, 3072)
-        and 2048 <= rows <= (8192 if scale_ue8m0 else 32768)
+        and 2048 <= rows <= 8192
         and z.device == x.device
         and z.shape == x.shape
         and z.dtype == x.dtype
@@ -104,15 +99,13 @@ def norm_quant(x, z, weight, eps, groups=8, warps=1, *, scale_ue8m0=True):
         and weight.dtype in (torch.bfloat16, torch.float32)
         and weight.is_contiguous()
         and groups == 8
-        and warps == (1 if scale_ue8m0 else 2)
+        and warps == 1
     ):
-        raise ValueError("unsupported GDN norm/FP8 input layout")
-    return _launch_norm_quant(x, z, weight, eps, groups, warps, scale_ue8m0=scale_ue8m0)
+        raise ValueError("unsupported GDN norm/UE8M0 input layout")
+    return _launch_norm_quant(x, z, weight, eps, groups, warps, scale_ue8m0=True)
 
 
-def _launch_norm_quant(
-    x, z, weight, eps, groups=8, warps=1, *, scale_ue8m0=True, legacy=False
-):
+def _launch_norm_quant(x, z, weight, eps, groups=8, warps=1, *, scale_ue8m0):
     """Launch after the public helper or model dispatch validates the layout."""
     rows, width = x.shape
     q = torch.empty_like(x, dtype=torch.float8_e4m3fn)
@@ -134,7 +127,6 @@ def _launch_norm_quant(
         GH=groups,
         WARPS=warps,
         UE8M0=scale_ue8m0,
-        LEGACY=legacy,
         num_warps=warps,
     )
     return q, s

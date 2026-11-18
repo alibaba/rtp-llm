@@ -1361,33 +1361,6 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             hw_kernel_config=hw_kernel_config,
         )
 
-        if os.environ.get("RTP_QWEN4_SM90_GDN_FP8_PROJECTION", "0") == "1":
-            from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
-                CudaFp8GEMMLinear,
-            )
-            from rtp_llm.models_py.utils.device_capability import (
-                cached_device_capability,
-            )
-
-            for projection in (self.in_proj_qkvz, self.out_proj):
-                if (
-                    type(projection) is CudaFp8GEMMLinear
-                    and projection.weight.is_cuda
-                    and cached_device_capability(projection.weight.device) == (9, 0)
-                    and torch.cuda.get_device_properties(
-                        projection.weight.device
-                    ).multi_processor_count
-                    == 78
-                    and (projection.N, projection.K) in ((8192, 2560), (2560, 3072))
-                ):
-                    # Complete-projection measurements, including quantization.
-                    # Input and output GEMMs have different useful M ranges.
-                    projection.flashinfer_m_ranges = (
-                        ((32, 64), (2049, 2560), (5121, 5248))
-                        if projection.N == 8192
-                        else ((32, 128), (5121, 5376))
-                    )
-
         if (
             norm_activation == "sigmoid"
             and self._qkvz_ba_fused

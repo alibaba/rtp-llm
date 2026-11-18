@@ -77,9 +77,6 @@ class Qwen4PrefillGatedNorm(torch.nn.Module):
         super().__init__()
         self.native = native
         self.role = str(role).rsplit(".", 1)[-1]
-        self.sm90_norm_quant = (
-            os.environ.get("RTP_QWEN4_SM90_GDN_NORM_QUANT", "0") == "1"
-        )
 
     @property
     def weight(self):
@@ -162,10 +159,10 @@ class Qwen4PrefillGatedNorm(torch.nn.Module):
             ):
                 return projection(self(x, gate))
         elif not (
-            (capability == (12, 0) or (sm90 and self.sm90_norm_quant))
+            capability == (12, 0)
             and self._supports_prefill(x, gate)
             and x.shape[1] in (1536, 3072)
-            and x.shape[0] <= (32768 if sm90 else 8192)
+            and x.shape[0] <= 8192
             and (
                 quant_kernel == "v2"
                 or (quant_kernel == "auto" and x.numel() >= 4 * 1024 * 1024)
@@ -216,11 +213,11 @@ class Qwen4PrefillGatedNorm(torch.nn.Module):
             and not torch.nn.modules.module._global_forward_pre_hooks
             and not torch.nn.modules.module._global_forward_hooks
         ):
-            options = dict(warps=2 if sm90 else 1, scale_ue8m0=not sm90)
+            groups = 8
             if decode:
-                options.update(
-                    groups=2 if x.shape[0] >= 48 else 1, warps=1, legacy=True
-                )
-            quantized, scales = norm_quant(x, gate, self.weight, self.eps, **options)
+                groups = 2 if x.shape[0] >= 48 else 1
+            quantized, scales = norm_quant(
+                x, gate, self.weight, self.eps, groups=groups, scale_ue8m0=not decode
+            )
             return consumer.forward_quantized(quantized, scales)
         return projection(self(x, gate))
