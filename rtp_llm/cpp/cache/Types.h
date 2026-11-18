@@ -71,7 +71,7 @@ enum class LinearCachePolicy : uint8_t {
 };
 
 inline bool reuseCacheForGroup(bool reuse_cache, CacheGroupType group_type, LinearCachePolicy linear_cache_policy) {
-    return reuse_cache
+    return reuse_cache && group_type != CacheGroupType::REQUEST_STATE
            && !(group_type == CacheGroupType::LINEAR && linear_cache_policy == LinearCachePolicy::TAIL_ONLY);
 }
 
