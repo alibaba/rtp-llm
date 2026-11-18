@@ -26,6 +26,10 @@ class WEIGHT_TYPE(Enum):
         return self.value[0][0]
 
     def to_torch_dtype(self) -> torch.dtype:
+        if self is WEIGHT_TYPE.AUTO:
+            raise NotImplementedError(
+                "AUTO must be resolved to a concrete dtype before conversion to torch.dtype."
+            )
         if (dtype := self.value[1]) is None:
             raise NotImplementedError("Torch does not support INT4 dtype directly.")
         return dtype

@@ -8,10 +8,12 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig, ModelOptFp4Config
 from rtp_llm.model_factory_register import get_lazy_model_module_path
 from rtp_llm.models.deepseek_v2 import DeepSeekV2, DeepSeekV32Mtp
+from rtp_llm.ops import DataType, KvCacheDataType
 from rtp_llm.utils.model_weight import W
+from rtp_llm.utils.weight_type import WEIGHT_TYPE
 
 
 class DeepSeekV32MtpTest(unittest.TestCase):
@@ -126,10 +128,71 @@ class DeepSeekV32MtpTest(unittest.TestCase):
             self.assertEqual(config.attn_config.rope_config.max_pos, 32768)
             self.assertEqual(config.attn_config.indexer_topk, 2048)
 
+    def test_nvfp4_precision_resolves_auto_for_main_and_mtp(self):
+        self.config_json["torch_dtype"] = "bfloat16"
+        self.config_json["quantization_config"] = {
+            "quant_method": "modelopt",
+            "quant_algo": "NVFP4",
+            "config_groups": {
+                "group_0": {
+                    "weights": {"num_bits": 4, "group_size": 16, "type": "float"},
+                    "input_activations": {
+                        "num_bits": 4,
+                        "group_size": 16,
+                        "type": "float",
+                    },
+                }
+            },
+        }
+        self.config()
+        for model_cls in (DeepSeekV2, DeepSeekV32Mtp):
+            for act_type, expected in (
+                ("auto", DataType.TYPE_BF16),
+                ("AUTO", DataType.TYPE_BF16),
+                (None, DataType.TYPE_BF16),
+                ("", DataType.TYPE_BF16),
+                ("BF16", DataType.TYPE_BF16),
+                ("FP16", DataType.TYPE_FP16),
+            ):
+                for fp8_cache in (False, True):
+                    with self.subTest(
+                        model=model_cls.__name__, act_type=act_type, fp8_cache=fp8_cache
+                    ):
+                        config = model_cls._create_config(self.directory.name)
+                        config.ckpt_path = self.directory.name
+                        config.init_precision_config(
+                            SimpleNamespace(
+                                int8_kv_cache=False, fp8_kv_cache=fp8_cache
+                            ),
+                            act_type,
+                        )
+                        self.assertIsInstance(config.quant_config, ModelOptFp4Config)
+                        self.assertEqual(config.data_type, expected)
+                        self.assertEqual(
+                            config.attn_config.kv_cache_dtype,
+                            KvCacheDataType.FP8 if fp8_cache else KvCacheDataType.BASE,
+                        )
+
+    def test_auto_precision_falls_back_without_concrete_checkpoint_dtype(self):
+        for dtype in (None, "auto", "float32"):
+            with self.subTest(dtype=dtype):
+                self.config_json["torch_dtype"] = dtype
+                config = self.config()
+                config.ckpt_path = self.directory.name
+                config.init_precision_config(None, "auto")
+                self.assertEqual(config.data_type, DataType.TYPE_FP16)
+
+    def test_unresolved_weight_dtype_error_identifies_actual_type(self):
+        for dtype in (WEIGHT_TYPE.AUTO, WEIGHT_TYPE.INT4):
+            with self.subTest(dtype=dtype):
+                with self.assertRaisesRegex(NotImplementedError, dtype.name):
+                    dtype.to_torch_dtype()
+
     def test_custom_tokenizers_backend_preserves_special_tokens_and_template(self):
         from tokenizers import Tokenizer
         from tokenizers.models import WordLevel
         from transformers import PreTrainedTokenizerFast
+
         from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import (
             BaseTokenizer,
         )

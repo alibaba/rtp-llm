@@ -625,7 +625,7 @@ class ModelConfig(CppModelConfig):
         This method:
         1. Loads quant_config from checkpoint or quantization string
         2. Sets quant_algo if quant_config exists
-        3. Initializes data_type from act_type (or config_dtype if act_type is empty)
+        3. Initializes data_type from act_type (or config_dtype for empty/auto)
         4. Sets attn_config.kv_cache_dtype based on kv_cache_config (if provided)
         5. Applies quantization-specific overrides (e.g., fp8 quant_config sets kv_cache_dtype to FP8)
         6. Validates configuration with quant_config using kv_cache_dtype_to_torch_dtype
@@ -649,9 +649,10 @@ class ModelConfig(CppModelConfig):
                 quant_config.group_size(),
             )
 
-        # Initialize data_type: first try act_type, then config_dtype, finally default to FP16
+        # AUTO is a selection policy, not a concrete compute dtype.
+        # Resolve it like an unset act_type before quantization/cache validation.
         data_type: Optional[WEIGHT_TYPE] = None
-        if act_type:
+        if act_type and act_type.lower() != "auto":
             data_type = WEIGHT_TYPE.from_str(act_type)
             logging.info(f"Initializing data_type from act_type: {data_type}")
         else:
@@ -660,10 +661,10 @@ class ModelConfig(CppModelConfig):
             if self.config_dtype:
                 config_dtype_parsed = WEIGHT_TYPE.from_str(self.config_dtype)
                 logging.info(
-                    f"act_type is empty, using config_dtype: {config_dtype_parsed}"
+                    f"act_type is empty/auto, using config_dtype: {config_dtype_parsed}"
                 )
 
-            if config_dtype_parsed:
+            if config_dtype_parsed not in (None, WEIGHT_TYPE.AUTO):
                 data_type = config_dtype_parsed
                 if data_type == WEIGHT_TYPE.FP32:
                     data_type = WEIGHT_TYPE.FP16
@@ -671,7 +672,7 @@ class ModelConfig(CppModelConfig):
             else:
                 data_type = WEIGHT_TYPE.FP16
                 logging.info(
-                    f"act_type and config_dtype are both empty, using default: {data_type}"
+                    f"act_type and config_dtype are empty/auto, using default: {data_type}"
                 )
 
         # Apply quantization-specific overrides
