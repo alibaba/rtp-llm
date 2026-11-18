@@ -168,7 +168,7 @@ class EngineConfigTest(TestCase):
         config.rdma_transfer_wait_timeout_ms = 5678
         config.p2p_resource_store_timeout_check_interval_ms = 123
         state = config.__getstate__()
-        self.assertEqual(len(state), 30)
+        self.assertEqual(len(state), 28)
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.__getstate__(), state)
         self.assertEqual(restored.p2p_prefill_sender_thread_count, 8)

@@ -385,8 +385,6 @@ struct VitConfig {
 
 struct CacheStoreConfig {
     bool    cache_store_rdma_mode               = false;
-    int     wrr_available_ratio                 = 80;
-    int     rank_factor                         = 0;
     int     thread_count                        = 32;
     int     rdma_connect_timeout_ms             = 250;
     int     rdma_qp_count_per_connection        = 2;
