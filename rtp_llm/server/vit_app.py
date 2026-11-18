@@ -102,6 +102,30 @@ def register_mm_cache_routes(app: FastAPI, engine: MMProcessEngine) -> None:
 class GracefulShutdownServer(Server):
     def set_server(self, vit_endpoint_server):
         self.vit_endpoint_server = vit_endpoint_server
+        self._idle_full_gc_threshold = None
+        if vit_endpoint_server.mm_process_engine is not None and gc.isenabled():
+            young, middle, full = gc.get_threshold()
+            self._idle_full_gc_threshold = max(full, 60)
+            # Keep young-generation collection unchanged. Retain a bounded
+            # automatic full collection for workers that never become idle.
+            gc.set_threshold(young, middle, max(full, 500))
+
+    @override
+    async def on_tick(self, counter: int) -> bool:
+        if await super().on_tick(counter):
+            return True
+        threshold = self._idle_full_gc_threshold
+        if (
+            counter % 10 == 0
+            and threshold is not None
+            and gc.get_count()[2] > threshold
+        ):
+            engine = self.vit_endpoint_server.mm_process_engine
+            # Neither counter holds its lock across the collection.
+            if not engine.get_inflight_input_count() and not engine.get_query_num():
+                gc.collect()
+        return False
+
 
     @override
     async def shutdown(self, sockets: Optional[List[socket.socket]] = None) -> None:
