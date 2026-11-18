@@ -6,7 +6,6 @@
 #include "rtp_llm/cpp/cache/RequestStateCacheManager.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/BlockTreeCacheAllocatorTestHelper.h"
-#include "rtp_llm/cpp/config/StaticConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 namespace rtp_llm::test {
@@ -75,14 +74,8 @@ MallocInfo request(const CacheConfig& cfg, int length = 8192) {
 
 class RequestStateCacheTest: public ::testing::Test {
     void SetUp() override {
-        old_core_                                    = StaticConfig::user_ft_core_dump_on_exception;
-        StaticConfig::user_ft_core_dump_on_exception = false;
         createDevice();
     }
-    void TearDown() override {
-        StaticConfig::user_ft_core_dump_on_exception = old_core_;
-    }
-    bool old_core_ = false;
 };
 
 TEST_F(RequestStateCacheTest, ModelDeclarationSplitsBytesAndBudgetsEveryPool) {
@@ -202,8 +195,8 @@ TEST_F(RequestStateCacheTest, UnsupportedDeploymentFailsBeforeAllocation) {
     pc         = parallel();
     pc.dp_size = 2;
     EXPECT_ANY_THROW(CacheConfigCreator::createWarmupConfig(model(), pc, options(), 2));
-    pc                                                 = parallel();
-    pc.ffn_disaggregate_config.enable_ffn_disaggregate = true;
+    pc         = parallel();
+    pc.pp_size = 2;
     EXPECT_ANY_THROW(CacheConfigCreator::createWarmupConfig(model(), pc, options(), 2));
     auto cfg                                          = model();
     cfg.kv_cache_spec_descs[0][0].linear_state_layout = LinearStateLayout::LEGACY;

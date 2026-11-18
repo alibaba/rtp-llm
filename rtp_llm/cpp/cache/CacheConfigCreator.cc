@@ -317,11 +317,10 @@ LayerKVCacheSpecDescs resolveLinearStateLayout(const ModelConfig&       model,
     if (split) {
         const bool supported_role = fusion || (parallel.role_type == RoleType::DECODE && !options.reuse_cache);
         RTP_LLM_CHECK_WITH_INFO(supported_role && supported_topology && parallel.dp_size == 1
-                                    && !parallel.ffn_disaggregate_config.enable_ffn_disaggregate
                                     && !options.enable_remote_cache && ctx.gen_num_per_cycle > 0
                                     && ctx.gen_num_per_cycle <= 3,
                                 "split linear SSM requires PDFUSION or D without prefix reuse, TP2/CP1/DP1, "
-                                "no FFN disaggregation or remote cache, and chained MTP with 1 to 3 draft tokens");
+                                "no remote cache, and chained MTP with 1 to 3 draft tokens");
         RTP_LLM_CHECK_WITH_INFO(options.linear_pool_blocks > state_slots,
                                 "split linear SSM requires linear_pool_blocks > %u "
                                 "(SSM slots per request plus the reserved null slot)",
