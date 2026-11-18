@@ -231,7 +231,25 @@ class QuantizationConfig(ABC):
                 group_size = weight_block[0]
                 quant_method = Fp8BlockWiseQuantConfig.get_method()
         if quant_method == "compressed-tensors":
-            group_name, group_config = _pick_config_group(quant_config["config_groups"])
+            groups = quant_config.get("config_groups", {})
+            if quant_config.get("format") == "nvfp4-pack-quantized" or any(
+                isinstance(g, dict)
+                and (
+                    g.get("format") == "nvfp4-pack-quantized"
+                    or (g.get("weights") or {}).get("num_bits") == 4
+                    and (g.get("weights") or {}).get("type") == "float"
+                )
+                for g in groups.values()
+            ):
+                text = config_json.get("text_config") or config_json
+                if text.get("model_type") != "qwen3":
+                    raise ValueError(
+                        "compressed-tensors NVFP4 currently supports dense Qwen3 only"
+                    )
+                return CompressedTensorsNvfp4Config.from_checkpoint(quant_config)
+            group_name, group_config = _pick_config_group(
+                quant_config["config_groups"]
+            )
             weights_config = group_config["weights"]
             # Absent or explicitly null when the checkpoint quantizes weights
             # only. Legacy FP8 per-channel checkpoints accept that shape, while
@@ -879,6 +897,79 @@ class ModelOptFp4Config(QuantizationConfig):
     @classmethod
     def _from_config(cls, config: Dict[str, Any]) -> "QuantizationConfig":
         return ModelOptFp4Config(**config)
+
+
+class CompressedTensorsNvfp4Config(ModelOptFp4Config):
+    """Serialized compressed-tensors NVFP4; reuse the native ModelOpt FP4 ABI."""
+
+    def __init__(self, bits=4, group_size=16, is_quanted=True, **kwargs):
+        if bits != 4 or group_size != 16 or not is_quanted:
+            raise ValueError(
+                "compressed-tensors NVFP4 requires serialized float4/group16"
+            )
+        super().__init__(bits, group_size, is_quanted, **kwargs)
+        patterns = kwargs.get("ignore_patterns", ["lm_head"])
+        # The current memory estimator does not price arbitrary BF16 islands.
+        # Keep this serialized recipe scoped to the audited dense checkpoint.
+        if patterns != ["lm_head"]:
+            raise ValueError(
+                "NVFP4 currently requires ignore=[lm_head]; mixed BF16 layer exclusions are not supported"
+            )
+        self.ignore_patterns = ["lm_head"]
+
+    @classmethod
+    def get_method(cls):
+        return "COMPRESSED_TENSORS_NVFP4"
+
+    @classmethod
+    def _from_config(cls, config):
+        return cls(**config)
+
+    def is_module_excluded(self, name):
+        return name.removesuffix(".weight") == "lm_head"
+
+    @classmethod
+    def from_checkpoint(cls, config):
+        groups = config.get("config_groups")
+        if not isinstance(groups, dict) or len(groups) != 1:
+            raise ValueError("NVFP4 currently requires exactly one config group")
+        group = next(iter(groups.values()))
+        if not isinstance(group, dict):
+            raise ValueError("NVFP4 config group must be an object")
+        if group.get("format", "nvfp4-pack-quantized") != "nvfp4-pack-quantized":
+            raise ValueError("NVFP4 config group has an incompatible format")
+        if config.get("quantization_status") != "compressed":
+            raise ValueError("NVFP4 requires quantization_status=compressed")
+        if config.get("format") != "nvfp4-pack-quantized":
+            raise ValueError("NVFP4 requires nvfp4-pack-quantized format")
+        if group.get("targets") != ["Linear"]:
+            raise ValueError("NVFP4 currently requires targets=[Linear]")
+        for key in ("transform_config", "sparsity_config", "kv_cache_scheme"):
+            if config.get(key):
+                raise ValueError(f"NVFP4 does not support {key}")
+        if group.get("output_activations") is not None:
+            raise ValueError("NVFP4 output quantization is not supported")
+        for key, dynamic in (("weights", False), ("input_activations", "local")):
+            scheme = group.get(key)
+            required = dict(
+                type="float",
+                num_bits=4,
+                group_size=16,
+                strategy="tensor_group",
+                symmetric=True,
+                dynamic=dynamic,
+            )
+            if (
+                not isinstance(scheme, dict)
+                or any(scheme.get(k) != v for k, v in required.items())
+                or scheme.get("actorder")
+                or scheme.get("block_structure")
+            ):
+                raise ValueError(f"Unsupported NVFP4 {key}: {scheme}")
+        result = cls(ignore_patterns=config.get("ignore") or [])
+        if not result.is_module_excluded("lm_head"):
+            raise ValueError("NVFP4 currently requires an unquantized lm_head")
+        return result
 
 
 class W4a8Int4PerChannelQuantConfig(QuantizationConfig):

@@ -6,7 +6,11 @@ from typing import Any, Dict, List, Union
 
 import torch
 
-from rtp_llm.config.quant_config import ModelOptFp4Config, QuantizationConfig
+from rtp_llm.config.quant_config import (
+    CompressedTensorsNvfp4Config,
+    ModelOptFp4Config,
+    QuantizationConfig,
+)
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, MoeAtomicWeight
 from rtp_llm.model_loader.load_config import LoadConfig
@@ -189,6 +193,8 @@ class PerGroupFp4Weight(CompositeWeight, QuantWeight):
     def support(
         cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
     ) -> bool:
+        if isinstance(quant_config, CompressedTensorsNvfp4Config):
+            return False
         if not quant_config.is_quanted() or not isinstance(
             quant_config, ModelOptFp4Config
         ):
@@ -656,6 +662,8 @@ class V4PerGroupFp4Weight(PerGroupFp4Weight):
     def support(
         cls, quant_config: QuantizationConfig, src_weight_info: WeightModule
     ) -> bool:
+        if isinstance(quant_config, CompressedTensorsNvfp4Config):
+            return False
         if not quant_config.is_quanted() or not isinstance(
             quant_config, ModelOptFp4Config
         ):

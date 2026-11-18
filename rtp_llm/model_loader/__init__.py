@@ -1,4 +1,5 @@
 from .attn_weight import AttnAtomicWeight, AttnConfig, MlaAttnAtomicWeight, MlaConfig
+from .compressed_tensors_nvfp4_weight import CompressedTensorsNvfp4Weight
 from .compressed_w4a8_int4_per_channel_weight import (
     LoadCompressedW4A8Int4PerGroupQuantWeight,
 )

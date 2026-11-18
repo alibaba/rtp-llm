@@ -1,0 +1,16 @@
+{
+  "mode": "isolated_python_loader_unit_tests",
+  "torch": "2.8.0+cpu",
+  "tests": 25,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "success": true,
+  "substituted_boundaries": [
+    "rtp_llm.ops",
+    "rtp_llm.utils.database"
+  ],
+  "bypassed_eager_package_init": "rtp_llm.model_loader",
+  "native_layout_tested": false,
+  "full_linux_integration_tested": false
+}

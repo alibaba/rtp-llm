@@ -1,0 +1,26 @@
+{
+  "status": "PASS",
+  "package": "compressed-tensors",
+  "version": "0.11.1a20250917",
+  "wheel_url": "https://files.pythonhosted.org/packages/c9/86/b3d9204e42969832779c7e122b406ccc399e43e9e365ae8b925e0ab89e48/compressed_tensors-0.11.1a20250917-py3-none-any.whl",
+  "wheel_sha256": "b0edd61c7d2beb8ec956250ddd7525d3de2f5016105c355029543e64ed11c9a1",
+  "sources": {
+    "compressed_tensors/compressors/quantized_compressors/nvfp4_quantized.py": "96b17e155019d8e180775c85bc7e6da7b779ff2be2dfb69912e26e8befbb4664",
+    "compressed_tensors/quantization/lifecycle/forward.py": "300c34e3d2f86bd85ae0fe43e0c8ce32821c4b0bfdfd95e2cda858cc725a6902",
+    "compressed_tensors/compressors/quantized_compressors/base.py": "ad6bda583ab38bc71cb41a3df368369f7fb2e9a7d18859778df4ddf7495232b6"
+  },
+  "mode": "selected_upstream_source_functions_eager_without_compile_decorators",
+  "checks": {
+    "real_tile_matches_upstream_dequantization": true,
+    "all_256_packed_codes_roundtrip": true,
+    "asymmetric_pair_even_k_low_nibble": true,
+    "wrong_nibble_order_detected": true
+  },
+  "max_abs_error": 7.450580596923828e-09,
+  "source_contracts": {
+    "scale_layout": "GROUP branch unflattens last dimension; scale.unsqueeze(-1), no swizzle",
+    "scale_storage": "BaseQuantizationCompressor.compress preserves non-weight scale tensors",
+    "global_scale": "_dequantize divides local scale by global_scale"
+  },
+  "limitation": "Not full-package import, native GEMM, or original-BF16 quality validation"
+}
