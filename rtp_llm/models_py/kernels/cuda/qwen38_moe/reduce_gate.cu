@@ -185,11 +185,11 @@ extern "C" int qwen38_lsa_peer(int device, const char* bus_id) {
     });
 }
 
-extern "C" int qwen38_lsa_create(int rank, int device, int hidden, const void* unique_id, void** output) {
+// Local allocation precedes all NCCL collectives. A failure here can be
+// reported to the TP group without stranding anyone in a native collective.
+extern "C" int qwen38_lsa_allocate(int device, int hidden, void** output) {
     return protect([&] {
         *output = nullptr;
-        if (rank < 0 || rank > 1)
-            throw std::runtime_error("LSA requires two ranks");
         if (hidden <= 0 || hidden % 8 != 0 || hidden > std::numeric_limits<int>::max() / kMaxRows)
             throw std::runtime_error("LSA hidden size must be positive, divisible by 8 and fit its row capacity");
         check(cudaSetDevice(device));
@@ -198,17 +198,47 @@ extern "C" int qwen38_lsa_create(int rank, int device, int hidden, const void* u
         int clock_khz;
         check(cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, device));
         context->timeout_cycles = static_cast<uint64_t>(clock_khz) * kBarrierTimeoutMs;
+        const size_t window_bytes = static_cast<size_t>(kMaxRows) * hidden * sizeof(Bf16);
+        check(ncclMemAlloc(&context->input, window_bytes));
+        *output = context.release();
+    });
+}
+
+extern "C" int qwen38_lsa_connect(void* handle, int rank, const void* unique_id) {
+    return protect([&] {
+        auto* context = static_cast<Context*>(handle);
+        if (!context || context->comm || rank < 0 || rank > 1)
+            throw std::runtime_error("Invalid LSA context or rank for communicator initialization");
+        check(cudaSetDevice(context->device));
         check(ncclCommInitRank(&context->comm, 2, *static_cast<const ncclUniqueId*>(unique_id), rank));
+    });
+}
+
+extern "C" int qwen38_lsa_check_capability(void* handle) {
+    return protect([&] {
+        auto* context = static_cast<Context*>(handle);
+        if (!context || !context->comm)
+            throw std::runtime_error("LSA requires an initialized communicator");
 #if NCCL_VERSION_CODE >= NCCL_VERSION(2, 30, 0)
         ncclCommProperties properties = NCCL_COMM_PROPERTIES_INITIALIZER;
         check(ncclCommQueryProperties(context->comm, &properties));
         if (!properties.deviceApiSupport || properties.nLsaTeams != 1)
-            throw std::runtime_error("NCCL device LSA is unavailable");
+            throw std::runtime_error("NCCL communicator does not support two-rank device LSA");
 #endif
-        const size_t window_bytes = static_cast<size_t>(kMaxRows) * hidden * sizeof(Bf16);
-        check(ncclMemAlloc(&context->input, window_bytes));
+    });
+}
+
+extern "C" int qwen38_lsa_activate(void* handle) {
+    return protect([&] {
+        auto* context = static_cast<Context*>(handle);
+        if (!context || !context->comm || context->registered)
+            throw std::runtime_error("LSA requires an initialized, unregistered communicator");
+        check(cudaSetDevice(context->device));
+        const size_t window_bytes = static_cast<size_t>(kMaxRows) * context->hidden * sizeof(Bf16);
         check(ncclCommWindowRegister(
             context->comm, context->input, window_bytes, &context->window, NCCL_WIN_COLL_SYMMETRIC));
+        if (!context->window)
+            throw std::runtime_error("NCCL did not register a symmetric LSA window");
         context->registered = true;
 #ifdef NCCL_DEV_COMM_REQUIREMENTS_INITIALIZER
         ncclDevCommRequirements requirements = NCCL_DEV_COMM_REQUIREMENTS_INITIALIZER;
@@ -220,7 +250,6 @@ extern "C" int qwen38_lsa_create(int rank, int device, int hidden, const void* u
         context->dev_created = true;
         if (context->dev.lsaSize != 2)
             throw std::runtime_error("Expected two LSA peers");
-        *output = context.release();
     });
 }
 
@@ -233,7 +262,7 @@ extern "C" int qwen38_lsa_apply(void*       handle,
                                 void*       stream_pointer) {
     return protect([&] {
         auto* context = static_cast<Context*>(handle);
-        if (!context || rows < 1 || rows > kMaxRows)
+        if (!context || !context->dev_created || rows < 1 || rows > kMaxRows)
             throw std::runtime_error("Invalid LSA context or row count");
         int device;
         check(cudaGetDevice(&device));

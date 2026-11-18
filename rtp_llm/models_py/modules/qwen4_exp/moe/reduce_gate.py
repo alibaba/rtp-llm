@@ -31,15 +31,12 @@ def _aligned_buffer_like(value):
 class LsaMoeReduce:
     """One symmetric window shared by serialized forwards of a single model."""
 
-    def __init__(self, ops, group, device, hidden_size, uid):
+    def __init__(self, ops, device, hidden_size, handle):
         self.hidden_size = hidden_size
         self.ops = ops
         self.device = device
         self.closed = False
-        with torch.cuda.device(device):
-            self.handle = ops.create(
-                dist.get_rank(group), device.index, hidden_size, uid
-            )
+        self.handle = handle
 
     def supports(self, value):
         # TP consumes the same logical batch shape on both ranks. Local tensor
@@ -174,24 +171,48 @@ def prepare_model_reduce(model, config, parallelism):
         return None
 
     rank = dist.get_rank(group)
-    state = {"error": None, "uid": None}
+    handle = None
     try:
-        ops.check_peer(device.index, peers[1 - rank]["bus_id"])
-        if rank == 0:
-            state["uid"] = ops.unique_id().hex()
-    except Exception as error:
-        state["error"] = str(error)
-    peers = exchange_group_state(group, state, "qwen38-lsa-peer")
-    if any(peer["error"] is not None for peer in peers):
-        logger.info("MoE LSA peer setup unavailable: %s", peers)
-        return None
+        state = {"error": None, "uid": None}
+        try:
+            ops.check_peer(device.index, peers[1 - rank]["bus_id"])
+            if rank == 0:
+                state["uid"] = ops.unique_id().hex()
+            handle = ops.allocate(device.index, config.hidden_size)
+        except Exception as error:
+            state["error"] = str(error)
+        peers = exchange_group_state(group, state, "qwen38-lsa-allocation")
+        if any(peer["error"] is not None for peer in peers):
+            logger.info("MoE LSA local setup unavailable: %s", peers)
+            return None
 
-    # From here both ranks enter the same native collective. Propagate errors
-    # instead of allowing one rank to revert to a different protocol.
-    owner = LsaMoeReduce(
-        ops, group, device, config.hidden_size, bytes.fromhex(peers[0]["uid"])
+        # Communicator bootstrap itself is collective. An error in that call
+        # is fatal. Once it returns, each rank can query its capabilities
+        # and decline together before the next NCCL collective.
+        ops.connect(handle, rank, bytes.fromhex(peers[0]["uid"]))
+        state = {"error": None}
+        try:
+            ops.check_capability(handle)
+        except Exception as error:
+            state["error"] = str(error)
+        peers = exchange_group_state(group, state, "qwen38-lsa-capability")
+        if any(peer["error"] is not None for peer in peers):
+            logger.info("MoE LSA communicator capability unavailable: %s", peers)
+            return None
+
+        # Window registration and device communicator creation are
+        # collective. Let errors propagate instead of switching protocols.
+        ops.activate(handle)
+        exchange_group_state(group, {"ready": True}, "qwen38-lsa-ready")
+        owner = LsaMoeReduce(ops, device, config.hidden_size, handle)
+        handle = None
+    finally:
+        if handle is not None:
+            ops.destroy(handle)
+    logger.info(
+        "MoE LSA ready on %s; missing-peer barrier timeout is nominally 10 seconds",
+        device,
     )
-    logger.info("MoE LSA ready on %s; missing-peer barrier timeout is nominally 10 seconds", device)
     for layer in model.layers:
         layer.mlp._reduce_shared_gate = owner
     return owner
