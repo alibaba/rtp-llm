@@ -535,6 +535,38 @@ test_suite(
     ],
 )
 
+_SM120_LSA_CUDA13_ONLY = select({
+    "//:using_cuda13_x86": [],
+    "//:using_cuda13_arm": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
+py_test(
+    name = "reduce_gate_integration_test",
+    srcs = ["moe/reduce_gate_integration_test.py"],
+    main = "moe/reduce_gate_integration_test.py",
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "2", "NCCL_P2P_DISABLE": "0"},
+    tags = ["RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "2"},
+    target_compatible_with = _SM120_LSA_CUDA13_ONLY,
+)
+
+py_test(
+    name = "reduce_gate_missing_peer_test",
+    srcs = ["moe/reduce_gate_integration_test.py"],
+    main = "moe/reduce_gate_integration_test.py",
+    deps = ["//rtp_llm:testlib"],
+    env = {
+        "GPU_COUNT": "2",
+        "NCCL_P2P_DISABLE": "0",
+        "RTP_TEST_LSA_MISSING_PEER": "1",
+    },
+    tags = ["manual", "RTX_5000_PRO_CU13"],
+    exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "2"},
+    target_compatible_with = _SM120_LSA_CUDA13_ONLY,
+)
+
 test_suite(
     name = "qwen4_moe",
     tests = [
@@ -550,6 +582,7 @@ test_suite(
         ":moe_topk_triton_test",
         "//rtp_llm/models_py/triton_kernels/moe/test:qwen4_topk_test",
         ":shared_expert_overlap_test",
+        ":reduce_gate_integration_test",
         "//rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/executors/test:small_moe_gemv_test",
     ],
 )
