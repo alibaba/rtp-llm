@@ -1,3 +1,4 @@
+import gc
 import logging
 
 from setproctitle import setproctitle
@@ -83,6 +84,11 @@ def vit_start_server(
     logging.info(
         f"[VIT_SERVER_{server_id}] Creating multimodal process engine finished"
     )
+
+    # Keep the initialized model and runtime out of recurring GC scans.
+    # Requests arrive only after startup and remain eligible for collection.
+    gc.collect()
+    gc.freeze()
 
     app = VitEndpointApp(py_env_configs, vit_process_engine, local_rank)
     app.start(
