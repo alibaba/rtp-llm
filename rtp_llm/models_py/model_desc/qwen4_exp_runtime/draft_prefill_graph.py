@@ -51,8 +51,21 @@ def draft_graph_rows(inputs, token_capacity):
 class _ReplayWorkspace:
     """One callback/stream's scratch, retained only after successful prepares."""
 
-    def __init__(self, key, transported, cu, capacity, factor):
+    def __init__(self, key):
         self.key = key
+        self.positions_host = None
+        self.positions = None
+        self.cu_host = None
+        self.cu = None
+        self.canonical = None
+        self.reference_host = None
+        self.reference = None
+        self.invalid = None
+        self.state_inputs = {}
+
+    def legacy_buffers(self, transported, cu, capacity, factor):
+        if self.positions_host is not None:
+            return
         self.positions_host = torch.empty(
             capacity, dtype=transported.dtype, pin_memory=transported.is_cuda
         )
@@ -64,7 +77,14 @@ class _ReplayWorkspace:
         )
         self.cu = torch.empty_like(cu) if cu.is_cuda else self.cu_host
         self.canonical = torch.empty_like(transported).reshape(capacity, factor)
-        self.state_inputs = {}
+
+    def reference_buffers(self, batch, device):
+        if self.reference_host is None:
+            self.reference_host = torch.empty(
+                (2, batch), dtype=torch.int64, pin_memory=True
+            )
+            self.reference = torch.empty((2, batch), dtype=torch.int64, device=device)
+            self.invalid = torch.empty((), dtype=torch.bool, device=device)
 
 
 class DraftPrefillGraphReplay(Mapping):
@@ -141,9 +161,7 @@ class DraftPrefillGraphReplay(Mapping):
                 None if stream is None else stream.cuda_stream,
             )
             if self._workspace is None or self._workspace.key != key:
-                self._workspace = _ReplayWorkspace(
-                    key, transported, cu, self.token_capacity, self.position_factor
-                )
+                self._workspace = _ReplayWorkspace(key)
             # The validation .item() completes all scratch reads on this stream
             # before a successful return, so the next prepare can reuse it.
             return self._prepare_cuda_graph(groups, transported, cu, self._workspace)
@@ -173,7 +191,6 @@ class DraftPrefillGraphReplay(Mapping):
         expected = [0]
         lanes = draft_graph_lanes(anchor, self.token_capacity)
         padding_started = False
-        positions = []
         for length, prefix in zip(lengths, prefixes):
             if length == 0:
                 padding_started = True
@@ -182,7 +199,6 @@ class DraftPrefillGraphReplay(Mapping):
                     "QSA draft graph requires positive live prefixes and lengths within request capacity followed by padding"
                 )
             expected.append(expected[-1] + length)
-            positions.extend(range(prefix, prefix + length))
         # Derive the host partition from the same current length mirror; a
         # device-only CU tensor must not add a public GraphRunner D2H copy.
         if expected[-1] > self.token_capacity:
@@ -241,6 +257,51 @@ class DraftPrefillGraphReplay(Mapping):
         # The draft uses logical Base-RoPE coordinates. The target transports
         # MRoPE coordinates, which differ after an image or timestamped frame;
         # normalize this graph-owned buffer just as eager draft prefill does.
+        if workspace is not None and transported.is_cuda and state_geometry is not None:
+            from rtp_llm.models_py.kernels.cuda.qsa.draft_metadata_triton import (
+                prepare_replay_metadata,
+                supports_replay_metadata,
+            )
+
+            table, pool_size, page_size = state_geometry
+            if supports_replay_metadata(
+                anchor.input_lengths_device,
+                anchor.prefix_lengths_device,
+                cu,
+                table,
+                transported,
+                pool_size=pool_size,
+                page_size=page_size,
+                token_capacity=self.token_capacity,
+                position_factor=self.position_factor,
+            ):
+                workspace.reference_buffers(len(lengths), transported.device)
+                reference = workspace.reference_host.numpy()
+                reference[0] = lengths
+                reference[1] = prefixes
+                workspace.reference.copy_(workspace.reference_host, non_blocking=True)
+                invalid_replay = prepare_replay_metadata(
+                    anchor.input_lengths_device,
+                    anchor.prefix_lengths_device,
+                    cu,
+                    table,
+                    transported,
+                    workspace.reference,
+                    workspace.invalid,
+                    pool_size=pool_size,
+                    page_size=page_size,
+                    token_capacity=self.token_capacity,
+                    position_factor=self.position_factor,
+                )
+                if invalid_replay is not None:
+                    copied = {transported.data_ptr()}
+                    for value in groups.values():
+                        target = value.combo_position_ids
+                        if target.data_ptr() not in copied:
+                            target.copy_(transported.reshape_as(target))
+                            copied.add(target.data_ptr())
+                    return self._finish_prepare(groups, invalid_replay)
+        positions = [p + i for p, n in zip(prefixes, lengths) for i in range(n)]
         if workspace is None:
             expected_positions = torch.tensor(
                 positions,
@@ -252,6 +313,12 @@ class DraftPrefillGraphReplay(Mapping):
                 self.token_capacity, self.position_factor
             )
         else:
+            workspace.legacy_buffers(
+                transported,
+                cu,
+                self.token_capacity,
+                self.position_factor,
+            )
             host = workspace.positions_host[: len(positions)]
             host.numpy()[:] = positions
             expected_positions = workspace.positions[: len(positions)]
@@ -317,6 +384,9 @@ class DraftPrefillGraphReplay(Mapping):
             if cu.is_cuda:
                 expected_cu.copy_(workspace.cu_host, non_blocking=True)
         invalid_replay = invalid_replay | torch.any(cu != expected_cu)
+        return self._finish_prepare(groups, invalid_replay)
+
+    def _finish_prepare(self, groups, invalid_replay):
         if bool(invalid_replay.item()):
             raise RuntimeError(
                 "QSA draft graph has invalid raw-state pages, cu_seqlens or positions disagree with logical cache positions"

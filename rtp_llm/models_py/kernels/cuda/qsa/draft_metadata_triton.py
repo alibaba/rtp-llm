@@ -1,7 +1,7 @@
 """Integer-only draft lane mapping and pre-replay validation.
 
 The validation flag is consumed on the host before any cache writer runs.
-Host-derived expected positions remain independent of the device metadata.
+Host-derived references remain independent of the device metadata.
 """
 
 import torch
@@ -196,6 +196,201 @@ def replay_invalid(
         expected.numel(),
         position_factor,
         tr.next_power_of_2(max(batch, expected.numel() * position_factor)),
+        num_warps=4,
+    )
+    return invalid
+
+
+@tr.jit
+def _prepare_replay_metadata(
+    lengths,
+    prefixes,
+    cu,
+    table,
+    transported,
+    reference,
+    invalid,
+    BATCH: tl.constexpr,
+    LANES: tl.constexpr,
+    COLUMNS: tl.constexpr,
+    POOL_SIZE: tl.constexpr,
+    PAGE_SHIFT: tl.constexpr,
+    CAPACITY: tl.constexpr,
+    FACTOR: tl.constexpr,
+    OUTPUT_INT32: tl.constexpr,
+    BLOCK: tl.constexpr,
+    REQUEST_BLOCK: tl.constexpr,
+):
+    request = tl.arange(0, REQUEST_BLOCK)
+    in_batch = request < BATCH
+    length = tl.load(lengths + request, in_batch, other=0).to(tl.int64)
+    prefix = tl.load(prefixes + request, in_batch, other=0).to(tl.int64)
+    host_length = tl.load(reference + request, in_batch, other=0)
+    host_prefix = tl.load(reference + BATCH + request, in_batch, other=0)
+    active = in_batch & (length > 0)
+    bad_request = in_batch & (
+        (length != host_length)
+        | (length < 0)
+        | (length > LANES)
+        | (active & (prefix != host_prefix))
+    )
+
+    # The reference is copied from this prepare's CPU metadata, independently
+    # of the device CU table and the positions produced below.
+    host_end = tl.cumsum(host_length, 0)
+    actual_end = tl.load(cu + request + 1, in_batch, other=0).to(tl.int64)
+    bad_cu = in_batch & (actual_end != host_end)
+    bad_start = tl.load(cu).to(tl.int64) != 0
+
+    # Cast before arithmetic: an invalid int32 prefix/length must not wrap into
+    # a valid page. Clamp every gather even when the verdict will reject it.
+    first = ((prefix >> 2) << 2) >> PAGE_SHIFT
+    last = (prefix + length - 1) >> PAGE_SHIFT
+    first_col = tl.minimum(tl.maximum(first, 0), COLUMNS - 1)
+    last_col = tl.minimum(tl.maximum(last, 0), COLUMNS - 1)
+    table_row = request.to(tl.int64) * COLUMNS
+    first_page = tl.load(table + table_row + first_col, in_batch, other=0)
+    last_page = tl.load(table + table_row + last_col, in_batch, other=0)
+    bad_state = active & (
+        (first < 0)
+        | (last >= COLUMNS)
+        | (first_page <= 0)
+        | (first_page >= POOL_SIZE)
+        | (last_page <= 0)
+        | (last_page >= POOL_SIZE)
+    )
+
+    element = tl.arange(0, BLOCK)
+    in_capacity = element < CAPACITY * FACTOR
+    token = element // FACTOR
+    owner = tl.sum(
+        ((token[:, None] >= actual_end[None, :]) & in_batch[None, :]).to(tl.int32),
+        axis=1,
+    )
+    owner = tl.minimum(owner, BATCH - 1)
+    packed_begin = tl.load(cu + owner, in_capacity, other=0).to(tl.int64)
+    packed_prefix = tl.load(prefixes + owner, in_capacity, other=0).to(tl.int64)
+    total = tl.load(cu + BATCH).to(tl.int64)
+    live = in_capacity & (token < total)
+    position = packed_prefix + token.to(tl.int64) - packed_begin
+    bad_position = tl.full((BLOCK,), False, tl.int1)
+    if OUTPUT_INT32:
+        bad_position = live & ((position < -2147483648) | (position > 2147483647))
+    tl.store(
+        transported + element,
+        tl.where(live & ~bad_position, position, 0),
+        in_capacity,
+    )
+    tl.store(
+        invalid,
+        bad_start
+        | (tl.sum((bad_request | bad_cu | bad_state).to(tl.int32), 0) != 0)
+        | (tl.sum(bad_position.to(tl.int32), 0) != 0),
+    )
+
+
+def supports_replay_metadata(
+    lengths,
+    prefixes,
+    cu,
+    table,
+    transported,
+    *,
+    pool_size,
+    page_size,
+    token_capacity,
+    position_factor,
+):
+    """Check kernel eligibility before allocating or copying host references."""
+    if not is_supported(lengths, prefixes, cu, table, transported):
+        return False
+    batch = lengths.numel()
+    if (
+        lengths.ndim != 1
+        or prefixes.shape != lengths.shape
+        or cu.shape != (batch + 1,)
+        or any(t.dtype != torch.int32 for t in (lengths, prefixes, cu, table))
+        or table.ndim != 2
+        or table.shape[0] != batch
+        or table.shape[1] <= 0
+        or not 1 <= batch <= 32
+        or not 1 <= token_capacity <= 128
+        or token_capacity % batch
+        or not 1 <= token_capacity // batch <= 4
+        or position_factor not in (1, 3)
+        or transported.numel() != token_capacity * position_factor
+        or page_size <= 0
+        or page_size > 1 << 30
+        or page_size & (page_size - 1)
+        or pool_size <= 0
+    ):
+        return False
+    return True
+
+
+def prepare_replay_metadata(
+    lengths,
+    prefixes,
+    cu,
+    table,
+    transported,
+    reference,
+    invalid,
+    *,
+    pool_size,
+    page_size,
+    token_capacity,
+    position_factor,
+):
+    """Fill logical positions and reject inconsistent draft replay metadata.
+
+    ``reference`` contains this prepare's host lengths/prefixes as two int64
+    rows. The supplied output buffers keep their addresses across graph
+    replay. Unsupported inputs leave both buffers untouched.
+    """
+    if not supports_replay_metadata(
+        lengths,
+        prefixes,
+        cu,
+        table,
+        transported,
+        pool_size=pool_size,
+        page_size=page_size,
+        token_capacity=token_capacity,
+        position_factor=position_factor,
+    ):
+        return None
+    batch = lengths.numel()
+    if (
+        not is_supported(reference)
+        or reference.device != lengths.device
+        or reference.shape != (2, batch)
+        or reference.dtype != torch.int64
+        or not isinstance(invalid, torch.Tensor)
+        or invalid.device != lengths.device
+        or invalid.dtype != torch.bool
+        or invalid.ndim != 0
+        or not invalid.is_contiguous()
+    ):
+        return None
+    _prepare_replay_metadata[(1,)](
+        lengths,
+        prefixes,
+        cu,
+        table,
+        transported,
+        reference,
+        invalid,
+        batch,
+        token_capacity // batch,
+        table.shape[1],
+        pool_size,
+        page_size.bit_length() - 1,
+        token_capacity,
+        position_factor,
+        transported.dtype == torch.int32,
+        tr.next_power_of_2(max(batch, token_capacity * position_factor)),
+        tr.next_power_of_2(batch),
         num_warps=4,
     )
     return invalid
