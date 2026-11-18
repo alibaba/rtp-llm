@@ -868,15 +868,8 @@ class MMRemoteEmbeddingCache:
             outcome = "error"
             failure_stage = "client_acquire"
             try:
-                if self._gdr_pool is not None:
-                    slot = self._gdr_pool.acquire(for_write=True)
                 queue_ms = (time.perf_counter() - queued_at) * 1000
                 self._report_queue_wait("write", queued_at)
-                if self._gdr_pool is not None and slot is None:
-                    outcome = "skipped"
-                    if not self._skip_quarantined("write"):
-                        self._report_skip("write", "executor_closed")
-                    return
                 if ready_events and not self._gdr_pool_quarantined():
                     failure_stage = "producer_wait"
                     with self._observe_stage(
@@ -893,6 +886,17 @@ class MMRemoteEmbeddingCache:
                         reason="gdr_quarantined",
                     )
                     return
+                # Producer events belong to the owned snapshot, not an arena.
+                # Wait with the same CUDA ordering before leasing scarce GDR
+                # storage; pack is the first operation that needs that storage.
+                failure_stage = "client_acquire"
+                if self._gdr_pool is not None:
+                    slot = self._gdr_pool.acquire(for_write=True)
+                    if slot is None:
+                        outcome = "skipped"
+                        if not self._skip_quarantined("write"):
+                            self._report_skip("write", "executor_closed")
+                        return
                 failure_stage = "pack"
                 with self._observe_stage("write", "pack"):
                     buffer = (
@@ -1037,25 +1041,9 @@ class MMRemoteEmbeddingCache:
         timing = {"stage": "queue", "nbytes": 0}
         payload_nbytes = 0
         outcome = "error"
-        # Lease before queuing metadata so busy or timed-out transfers cause
-        # an immediate miss, even if all read executor threads are occupied.
-        slot = None
-        if self._gdr_pool is not None:
-            slot = self._gdr_pool.acquire()
-            if slot is None:
-                self._report_skip("read", "gdr_slot_unavailable", report_outcome=False)
-                self._report_operation("read", started, "skipped")
-                self._count("miss")
-                self.record(
-                    "load_miss",
-                    key=key,
-                    trace_id=trace_id,
-                    reason="gdr_slot_unavailable",
-                )
-                return None
+        # Bound metadata work first. A miss, lookup timeout or byte-budget
+        # rejection must not consume a registered transfer slot.
         if not self._reserve(0):
-            if slot is not None:
-                self._gdr_pool.release(slot)
             self._report_skip("read", "admission")
             return None
         cost = 0
@@ -1066,6 +1054,7 @@ class MMRemoteEmbeddingCache:
             nonlocal cost
             self._report_queue_wait("read", queued_at)
             client = None
+            slot = None
             try:
                 if time.monotonic() >= deadline:
                     raise TimeoutError("remote embedding queue deadline expired")
@@ -1077,8 +1066,9 @@ class MMRemoteEmbeddingCache:
                     raise TimeoutError("remote embedding lookup deadline expired")
                 api_started = time.perf_counter()
                 timing["stage"] = "metadata"
-                source = slot if slot is not None else client
-                size = self._lookup_object_size(source, key, trace_id, remaining_ms)
+                # Pool.object_size uses the independent KvMetaLookup client;
+                # it neither leases an arena nor enters the SDK data-plane lock.
+                size = self._lookup_object_size(client, key, trace_id, remaining_ms)
                 if size is None:
                     timing["outcome"] = "miss"
                     timing["sdk_api_ms"] = (time.perf_counter() - api_started) * 1000
@@ -1096,10 +1086,35 @@ class MMRemoteEmbeddingCache:
                     return None
                 if time.monotonic() >= deadline:
                     raise TimeoutError("remote embedding transfer deadline expired")
-                timing["stage"] = "transfer"
                 # unpack_object can return CPU views. Keep the result independent
                 # of the pinned slot, even when the caller times out during IO.
                 buffer = torch.empty(size, dtype=torch.uint8)
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        "remote embedding buffer preparation deadline expired"
+                    )
+                if self._gdr_pool is not None:
+                    timing["stage"] = "client_acquire"
+                    slot = self._gdr_pool.acquire()
+                    if slot is None:
+                        timing["outcome"] = "skipped"
+                        self._report_skip(
+                            "read", "gdr_slot_unavailable", report_outcome=False
+                        )
+                        self._count("miss")
+                        self.record(
+                            "load_miss",
+                            key=key,
+                            trace_id=trace_id,
+                            reason="gdr_slot_unavailable",
+                        )
+                        return None
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            "remote embedding slot acquisition deadline expired"
+                        )
+                source = slot if slot is not None else client
+                timing["stage"] = "transfer"
                 try:
                     with self._observe_stage("read", "transfer", size):
                         source.load_one(key, buffer, trace_id=trace_id)
@@ -1112,6 +1127,11 @@ class MMRemoteEmbeddingCache:
                 timing["sdk_api_ms"] = (time.perf_counter() - api_started) * 1000
                 return buffer
             finally:
+                if slot is not None:
+                    # Only the IO worker owns this lease. A caller timeout or
+                    # queued-task cancellation cannot release an active buffer;
+                    # an SDK-unsafe slot remains quarantined by the transport.
+                    self._gdr_pool.release(slot)
                 if client is not None:
                     # Close may join native workers even after our last call.
                     # It stays in this admitted IO task, never the request
@@ -1121,11 +1141,6 @@ class MMRemoteEmbeddingCache:
         queued_at = time.perf_counter()
         try:
             future = self._executor.submit(read)
-            if slot is not None:
-                # The caller can time out before IO returns. Completion (or
-                # cancellation before execution) ends this exclusive lease;
-                # an SDK-unsafe slot stays quarantined by the transport.
-                future.add_done_callback(lambda _: self._gdr_pool.release(slot))
             buffer = future.result(timeout=max(0, deadline - time.monotonic()))
             if buffer is None:
                 outcome = timing["outcome"]
@@ -1171,7 +1186,10 @@ class MMRemoteEmbeddingCache:
                 caller_timed_out = not future.done() or (
                     not future.cancelled() and future.exception() is not error
                 )
-                future.cancel()
+                # Future.cancel() does not remove a ThreadPoolExecutor work
+                # item. Keep its admission ticket until the worker consumes
+                # it, or repeated caller timeouts could grow a queue of
+                # cancelled items despite max_pending. Expired tasks skip IO.
             self.record(
                 "read_error",
                 key=key,
@@ -1247,8 +1265,6 @@ class MMRemoteEmbeddingCache:
                 finally:
                     self._release(cost)
 
-            if future is None and slot is not None:
-                self._gdr_pool.release(slot)
             if future is None or (future.done() and not caller_timed_out):
                 self._release(cost)
             else:
