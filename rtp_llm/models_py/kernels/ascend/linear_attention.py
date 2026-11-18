@@ -76,8 +76,11 @@ def _next_power_of_two(value: int) -> int:
 
 
 def _cumsum_block_size(chunk_size: int) -> int:
-    # Mirrors the FLA-NPU tiling-side BLOCK_T computation used by the
-    # standalone GPU/NPU golden tests in example/ascendc_npu.
+    # Mirrors the FLA-NPU tiling-side BLOCK_T computation
+    # (chunk_local_cumsum_tiling.cpp: NextPowerOfTwo((1 << 17) / chunkSize),
+    # tail fixed to 1) as used by its golden tests
+    # (fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_local_cumsum/test/test.py and
+    # examples/flash_gated_delta_rule.py in the fla-npu repo).
     return _next_power_of_two((1 << 17) // chunk_size)
 
 
@@ -324,7 +327,10 @@ def chunk_fwd_o(
 ) -> torch.Tensor:
     batch, seqlen = q.shape[:2]
     value_heads = v.shape[-2]
-    effective_chunk_size = min(chunk_size, max(16, _next_power_of_two(seqlen)))
+    # fla_npu chunk_fwd_o 仅注册了 chunk_size 64/128 的 AscendC kernel；
+    # 短序列取小 chunk（16/32）会触发 161002 崩溃，故不再向下取小，统一用调用方 chunk_size（默认 64）。
+    # 尾部不足 64 的块走 varlen block-map 标准 padding 路径，与长序列非整除时一致。
+    effective_chunk_size = chunk_size
     cu = _canonical_cu_seqlens(cu_seqlens, batch, seqlen)
     chunk_indices = _prepare_chunk_indices(cu, effective_chunk_size)
     g_input = (
