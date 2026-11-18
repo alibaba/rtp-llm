@@ -1306,6 +1306,9 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 pass
             else:
                 self._fp8_decode_project_pair = try_project_pair
+                self._fp8_decode_ba_stream = torch.cuda.Stream(
+                    device=self.in_proj_ba.weight.device
+                )
         extended_gdn = os.environ.get("RTP_QWEN4_SM90_GDN_EXTENDED", "1") == "1"
         if (
             (self._qkvz_ba_fused or extended_gdn)
@@ -1418,7 +1421,11 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                         ]._rtp_requires_restart_for_update = True
 
     def _input_project(
-        self, hidden_states: torch.Tensor, *, decode: bool = False
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        decode: bool = False,
+        overlap_ba: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the input projection and return (projected_qkvz, projected_ba).
 
@@ -1431,7 +1438,14 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             return fused[..., : self._qkvz_size], fused[..., self._qkvz_size :]
         if decode and self._fp8_decode_project_pair is not None:
             projected = self._fp8_decode_project_pair(
-                hidden_states, self.in_proj_qkvz, self.in_proj_ba
+                hidden_states,
+                self.in_proj_qkvz,
+                self.in_proj_ba,
+                ba_stream=(
+                    self._fp8_decode_ba_stream
+                    if overlap_ba and hidden_states.shape[0] in (16, 32, 64)
+                    else None
+                ),
             )
             if projected is not None:
                 return projected
@@ -1663,7 +1677,11 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         ), "prefill_conv1d_meta is required for prefill"
         is_prefill = attention_inputs.is_prefill and not attn_meta.is_target_verify
         projected_states_qkvz, projected_states_ba = self._input_project(
-            hidden_states, decode=not is_prefill
+            hidden_states,
+            decode=not is_prefill,
+            overlap_ba=not (
+                attention_inputs.is_target_verify or attn_meta.is_target_verify
+            ),
         )
         mixed_qkv, z, b, a = self.fix_query_key_value_ordering(
             projected_states_qkvz, projected_states_ba

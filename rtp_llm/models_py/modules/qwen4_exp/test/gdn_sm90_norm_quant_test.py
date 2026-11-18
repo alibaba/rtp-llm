@@ -185,6 +185,48 @@ class GdnSm90NormQuantTest(unittest.TestCase):
             self.assert_bytes_equal(output, projection(norm(value, gating)))
 
     @torch.inference_mode()
+    def test_fp8_input_projection_overlap_replays(self):
+        from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
+        from rtp_llm.models_py.modules.qwen4_exp.gdn_decode_fp8 import try_project_pair
+
+        qkvz = CudaFp8GEMMLinear(
+            torch.randn(8192, 2560, device="cuda")
+            .to(torch.float8_e4m3fn)
+            .reshape(2560, 8192),
+            weight_scales=torch.full((20, 64), 0.02, device="cuda"),
+            quant_config=Fp8BlockWiseQuantConfig(is_quanted=True),
+        )
+        ba = Fp8Linear(
+            torch.randn(48, 2560, device="cuda").to(torch.float8_e4m3fn),
+            torch.full((1,), 0.02, device="cuda"),
+        )
+        ba_stream = torch.cuda.Stream()
+        native_ba = ba._run_quantized
+        streams = []
+
+        def run_ba(*args):
+            streams.append(torch.cuda.current_stream())
+            return native_ba(*args)
+
+        with patch.dict(os.environ, DSV4_FP8_QUANT_KERNEL="legacy"):
+            for rows in (16, 32, 64):
+                with self.subTest(rows=rows):
+                    x = torch.randn(rows, 2560, device="cuda", dtype=torch.bfloat16)
+                    try_project_pair(x, qkvz, ba)
+                    graph = torch.cuda.CUDAGraph()
+                    with patch.object(ba, "_run_quantized", side_effect=run_ba):
+                        with torch.cuda.graph(graph):
+                            actual = try_project_pair(x, qkvz, ba, ba_stream=ba_stream)
+                    self.assertEqual(streams.pop(), ba_stream)
+                    for _ in range(3):
+                        x.normal_()
+                        expected = try_project_pair(x, qkvz, ba)
+                        graph.replay()
+                        for value, reference in zip(actual, expected):
+                            self.assert_bytes_equal(value, reference)
+                    graph.reset()
+
+    @torch.inference_mode()
     def test_ue8m0_branch_and_nonfinite_values_retain_quantizer_semantics(self):
         norm, _ = self.build()
         x = torch.randn(2053, 3072, device="cuda", dtype=torch.bfloat16)

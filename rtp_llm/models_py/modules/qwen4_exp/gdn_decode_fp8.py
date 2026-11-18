@@ -61,7 +61,7 @@ def _quant_from_partial(
     )
 
 
-def _quantized_pair(x):
+def _quantize_qkvz(x):
     m = x.shape[0]
     groups = warps = 2 if m <= 24 else 4
     q = torch.empty_like(x, dtype=torch.float8_e4m3fn)
@@ -73,8 +73,13 @@ def _quantized_pair(x):
     _group_and_partial[(tiles,)](
         x, q, s, partial, m, s.stride(1), groups, warps, num_warps=warps
     )
-    pad = triton.cdiv(m, 16) * 16
-    bq = torch.empty((pad, x.shape[1]), dtype=q.dtype, device=x.device)
+    return q, s, partial
+
+
+def _quantize_ba(x, partial):
+    pad = triton.cdiv(x.shape[0], 16) * 16
+    bq = torch.empty((pad, x.shape[1]), dtype=torch.float8_e4m3fn, device=x.device)
+    tiles = partial.numel()
     bs = torch.empty(1, device=x.device, dtype=torch.float32)
     _quant_from_partial[(triton.cdiv(bq.numel(), 1024),)](
         x,
@@ -88,7 +93,7 @@ def _quantized_pair(x):
         1024,
         enable_fp_fusion=False,
     )
-    return q, s, bq, bs
+    return bq, bs
 
 
 def _unmodified(module, methods):
@@ -99,7 +104,7 @@ def _unmodified(module, methods):
     )
 
 
-def try_project_pair(x, qkvz, ba):
+def try_project_pair(x, qkvz, ba, *, ba_stream=None):
     """Run the existing FP8 GEMMs using each projection's original scale."""
     if not (
         x.ndim == 2
@@ -135,7 +140,21 @@ def try_project_pair(x, qkvz, ba):
         backend, ("forward", "quantize_input", "forward_quantized")
     ):
         return None
-    q, scales, ba_q, ba_scale = _quantized_pair(x)
+    q, scales, partial = _quantize_qkvz(x)
+    if ba_stream is not None and torch.cuda.is_current_stream_capturing():
+        # The BA reduction can run while the QKVZ GEMM consumes its own scales.
+        main = torch.cuda.current_stream(x.device)
+        ba_stream.wait_stream(main)
+        projected_qkvz = backend.forward_quantized(q, scales)
+        with torch.cuda.stream(ba_stream):
+            ba_q, ba_scale = _quantize_ba(x, partial)
+            projected_ba = ba._run_quantized(
+                ba_q, ba_scale, x.shape[:-1], x.shape[0]
+            ).to(x.dtype)
+        main.wait_stream(ba_stream)
+        return projected_qkvz, projected_ba
+
+    ba_q, ba_scale = _quantize_ba(x, partial)
     return (
         backend.forward_quantized(q, scales),
         ba._run_quantized(ba_q, ba_scale, x.shape[:-1], x.shape[0]).to(x.dtype),

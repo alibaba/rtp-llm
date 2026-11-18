@@ -653,7 +653,10 @@ class GdnSm90CandidateTest(unittest.TestCase):
             scaled_fp8_per_tensor_quant,
             sgl_per_token_group_quant_fp8,
         )
-        from rtp_llm.models_py.modules.qwen4_exp.gdn_decode_fp8 import _quantized_pair
+        from rtp_llm.models_py.modules.qwen4_exp.gdn_decode_fp8 import (
+            _quantize_ba,
+            _quantize_qkvz,
+        )
 
         with mock.patch.dict(os.environ, DSV4_FP8_QUANT_KERNEL="legacy"):
             for batch in (16, 17, 32, 64):
@@ -673,8 +676,11 @@ class GdnSm90CandidateTest(unittest.TestCase):
                         dtype=q.dtype,
                     )
                     ba_q, ba_scale = scaled_fp8_per_tensor_quant(x, output=padded)
+                    actual_q, actual_scales, partial = _quantize_qkvz(x)
+                    actual_ba, actual_ba_scale = _quantize_ba(x, partial)
                     for actual, expected in zip(
-                        _quantized_pair(x), (q, scales, ba_q, ba_scale)
+                        (actual_q, actual_scales, actual_ba, actual_ba_scale),
+                        (q, scales, ba_q, ba_scale),
                     ):
                         self.assertBytesEqual(actual, expected)
 
