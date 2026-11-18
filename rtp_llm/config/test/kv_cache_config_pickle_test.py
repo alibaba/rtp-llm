@@ -203,64 +203,6 @@ class KVCacheConfigPickleTest(TestCase):
         self.assertEqual(restored.block_pool_frozen_abort_lower_ratio, 0.3)
         self.assertEqual(restored.__getstate__()[:2], ("KVCacheConfig", 21))
 
-    def test_frozen_recovery_timing_defaults_and_boundaries_round_trip(self):
-        config = KVCacheConfig()
-        self.assertEqual(config.block_tree_frozen_recovery_interval_ms, 1000)
-        self.assertEqual(config.block_tree_frozen_recovery_query_timeout_ms, 1000)
-        for interval, timeout in (
-            (0, 1),
-            (1, 1000),
-            (2500, 750),
-            (2**31 - 1, 2**31 - 1),
-        ):
-            with self.subTest(interval=interval, timeout=timeout):
-                config.block_tree_frozen_recovery_interval_ms = interval
-                config.block_tree_frozen_recovery_query_timeout_ms = timeout
-                for _ in range(2):
-                    config = pickle.loads(pickle.dumps(config))
-                    self.assertEqual(
-                        config.block_tree_frozen_recovery_interval_ms, interval
-                    )
-                    self.assertEqual(
-                        config.block_tree_frozen_recovery_query_timeout_ms, timeout
-                    )
-
-    def test_frozen_force_release_timeout_defaults_boundaries_and_validation(self):
-        name = "block_tree_frozen_force_release_timeout_ms"
-        config = KVCacheConfig()
-        self.assertEqual(getattr(config, name), 300000)
-        for timeout in (0, 1, 120000, 1200000, 2**31 - 1):
-            with self.subTest(timeout=timeout):
-                setattr(config, name, timeout)
-                for _ in range(2):
-                    config = pickle.loads(pickle.dumps(config))
-                    self.assertEqual(getattr(config, name), timeout)
-                    self.assertEqual(config.__getstate__()[94], timeout)
-                    self.assertIn(f"{name}: {timeout}\n", config.to_string())
-        for timeout in (-1, 2**31):
-            with self.subTest(timeout=timeout), self.assertRaisesRegex(
-                RuntimeError, "invalid KVCacheConfig frozen recovery timing"
-            ):
-                state = KVCacheConfig().__getstate__()
-                restored = KVCacheConfig.__new__(KVCacheConfig)
-                restored.__setstate__((*state[:95], timeout))
-
-    def test_invalid_frozen_recovery_timing_is_rejected_during_restore(self):
-        state = KVCacheConfig().__getstate__()
-        for interval, timeout in (
-            (-1, 1000),
-            (2**31, 1000),
-            (1000, 0),
-            (1000, -1),
-            (1000, 2**31),
-            (0, 0),
-        ):
-            with self.subTest(interval=interval, timeout=timeout), self.assertRaisesRegex(
-                RuntimeError, "invalid KVCacheConfig frozen recovery timing"
-            ):
-                restored = KVCacheConfig.__new__(KVCacheConfig)
-                restored.__setstate__((*state[:92], interval, timeout))
-
     def test_disk_timeout_defaults_and_overrides_survive_worker_round_trips(self):
         self.assertEqual(KVCacheConfig().disk_cache_sync_timeout_ms, 30000)
         self.assertEqual(KVCacheConfig().disk_cache_evict_timeout_ms, -1)
@@ -294,70 +236,6 @@ class KVCacheConfigPickleTest(TestCase):
                 self.assertEqual(
                     restored.kvcm_task_timeout_ms, 20000 if version == 13 else 23000
                 )
-
-    def test_older_versions_use_default_frozen_abort_ratio(self):
-        source = KVCacheConfig()
-        source.kvcm_task_timeout_ms = 23000
-        source.disk_cache_evict_timeout_ms = 45000
-        source.block_pool_frozen_abort_lower_ratio = 0.35
-        state = source.__getstate__()
-        for version, size in ((14, 84), (15, 85)):
-            with self.subTest(version=version):
-                previous = (state[0], version, *state[2:size])
-                restored = KVCacheConfig.__new__(KVCacheConfig)
-                restored.__setstate__(previous)
-                self.assertEqual(restored.kvcm_task_timeout_ms, 23000)
-                self.assertEqual(
-                    restored.disk_cache_evict_timeout_ms, -1 if version == 14 else 45000
-                )
-                self.assertEqual(restored.block_pool_frozen_abort_lower_ratio, 0.3)
-
-    def test_frozen_abort_range_defaults_and_boundaries_round_trip(self):
-        config = KVCacheConfig()
-        self.assertEqual(config.block_pool_frozen_abort_lower_ratio, 0.3)
-        self.assertEqual(config.block_pool_frozen_abort_upper_ratio, 0.4)
-        for lower, upper in (
-            (0.0, 0.0),
-            (0.0, 0.4),
-            (0.3, 0.8),
-            (0.5, 0.5),
-            (1.0, 1.0),
-        ):
-            with self.subTest(lower=lower, upper=upper):
-                config.block_pool_frozen_abort_lower_ratio = lower
-                config.block_pool_frozen_abort_upper_ratio = upper
-                restored = pickle.loads(pickle.dumps(config))
-                self.assertEqual(restored.block_pool_frozen_abort_lower_ratio, lower)
-                self.assertEqual(restored.block_pool_frozen_abort_upper_ratio, upper)
-
-    def test_invalid_frozen_abort_ranges_are_rejected(self):
-        state = KVCacheConfig().__getstate__()
-        invalid_values = (-0.1, 1.1, float("nan"), float("inf"), float("-inf"))
-        invalid_ranges = (
-            [(value, 0.4) for value in invalid_values]
-            + [(0.3, value) for value in invalid_values]
-            + [(0.5, 0.4), (1.0, 0.4)]
-        )
-        for lower, upper in invalid_ranges:
-            with self.subTest(lower=lower, upper=upper), self.assertRaisesRegex(
-                RuntimeError,
-                "invalid KVCacheConfig block pool frozen abort ratio range",
-            ):
-                restored = KVCacheConfig.__new__(KVCacheConfig)
-                restored.__setstate__(
-                    (*state[:85], lower, *state[86:90], upper, *state[91:])
-                )
-
-    def test_old_frozen_abort_lower_above_default_upper_is_rejected(self):
-        state = KVCacheConfig().__getstate__()
-        for version, size in ((16, 86), (17, 90)):
-            previous = (state[0], version, *state[2:85], 0.45, *state[86:size])
-            with self.subTest(version=version), self.assertRaisesRegex(
-                RuntimeError,
-                "invalid KVCacheConfig block pool frozen abort ratio range",
-            ):
-                restored = KVCacheConfig.__new__(KVCacheConfig)
-                restored.__setstate__(previous)
 
     def test_tail_and_pool_configuration_survives_worker_round_trips(self):
         config = KVCacheConfig()

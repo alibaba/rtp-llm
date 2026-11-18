@@ -451,7 +451,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "block_tree_frozen_recovery_interval_ms"),
         type=_frozen_recovery_interval_ms,
         default=1000,
-        help="冻结任务恢复与完成记录清理的轮询间隔，单位毫秒，默认 1000；0 暂停两者，范围 [0, 2147483647]。"
+        help="冻结任务恢复的轮询间隔，单位毫秒，默认 1000；0 暂停自动解冻，完成记录仍独立清理。范围 [0, 2147483647]。"
         "原参与者均确认 buffer safe 或达到强制解冻超时后释放冻结引用。",
     )
     kv_cache_group.add_argument(
@@ -460,7 +460,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "block_tree_frozen_recovery_query_timeout_ms"),
         type=_frozen_recovery_query_timeout_ms,
         default=1000,
-        help="单个冻结任务查询或一批完成记录清理的超时预算，单位毫秒，默认 1000；范围 [1, 2147483647]。"
+        help="单个冻结任务查询的超时预算，单位毫秒，默认 1000；范围 [1, 2147483647]。"
         "查询失败或缺少安全证明时，在强制解冻超时前保留冻结引用。",
     )
     kv_cache_group.add_argument(

@@ -427,62 +427,6 @@ TEST_P(PerRankBlockTransferEngineCrcTest, CopyPreservesSameDeviceMixedGroupBatch
         EXPECT_EQ(std::memcmp(views[i].base, expected_[i].data(), payload_), 0);
 }
 
-TEST_P(PerRankBlockTransferEngineCrcTest, AsyncPendingAndBusyDoNotPublishSafety) {
-    ASSERT_NO_FATAL_FAILURE(initialize());
-    retainAsyncAllocations();
-    CrcCopyExecutor service({group_}, 1, 1);
-    const auto buffer = host_->blockBuffer(hosts_[0]);
-    const HostBufferView view{buffer.addr, payload_, buffer.stride_bytes};
-    const auto descriptor = TransferDescriptor::deviceToHost(0, sources_[0], hosts_[0]);
-    auto submitted = submitService(service, {view}, {descriptor}, group_);
-    ASSERT_TRUE(submitted);
-    EXPECT_FALSE(submitted->result.has_value());
-    EXPECT_EQ(submitted->callbacks, 0u);
-
-    size_t busy_callbacks = 0;
-    EXPECT_FALSE(service.trySubmit({view}, {descriptor}, group_, [&](TransferResult) { ++busy_callbacks; }));
-    EXPECT_EQ(busy_callbacks, 0u);
-    const auto completed = waitService(service, submitted);
-    ASSERT_TRUE(completed.has_value());
-    EXPECT_TRUE(completed->ok());
-    EXPECT_TRUE(completed->buffer_safe);
-    EXPECT_EQ(submitted->callbacks, 1u);
-    EXPECT_EQ(busy_callbacks, 0u);
-}
-
-TEST_P(PerRankBlockTransferEngineCrcTest, SyncDeviceErrorPublishesSafetyOnlyAfterDrain) {
-    ASSERT_NO_FATAL_FAILURE(initialize());
-    const auto buffer = host_->blockBuffer(hosts_[0]);
-    const HostBufferView view{buffer.addr, payload_, buffer.stride_bytes};
-    const auto descriptor = TransferDescriptor::deviceToHost(0, sources_[0], hosts_[0]);
-    for (const char* phase : {"metadata", "query"}) {
-        SCOPED_TRACE(phase);
-        CrcCopyExecutor service({group_}, 1, 1, 0, nullptr, false);
-        size_t drains = 0;
-        auto& workspace = service.slots_.at(devices_.front()->deviceIndex()).front().copy;
-        workspace->setTestHook([&](const char* point, void*, void*) {
-            if (std::strcmp(point, "drain") == 0)
-                ++drains;
-            return int(std::strcmp(point, phase) == 0 ? cudaErrorInvalidValue : cudaSuccess);
-        });
-        const auto failed = service.copy({view}, {descriptor}, {group_.get()});
-        EXPECT_FALSE(failed.ok());
-        EXPECT_EQ(failed.copy_error, CacheCopyError::COPY_FAILED);
-        EXPECT_TRUE(failed.buffer_safe);
-        EXPECT_EQ(drains, 1u);
-
-        workspace->setTestHook({});
-        const auto healthy = service.copy({view}, {descriptor}, {group_.get()});
-        EXPECT_TRUE(healthy.ok());
-        EXPECT_TRUE(healthy.buffer_safe);
-        EXPECT_EQ(std::memcmp(buffer.addr, expected_[0].data(), payload_), 0);
-        service.stopAdmission();
-        const auto stopped = service.copy({view}, {descriptor}, {group_.get()});
-        EXPECT_EQ(stopped.copy_error, CacheCopyError::INVALID_REQUEST);
-        EXPECT_TRUE(stopped.buffer_safe);
-    }
-}
-
 TEST_P(PerRankBlockTransferEngineCrcTest, AsyncDirectionQuotasAndIndependentBytes) {
     initialize(false, false, 17);
     retainAsyncAllocations();

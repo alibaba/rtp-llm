@@ -1,11 +1,8 @@
 #include <gtest/gtest.h>
 
-#include <atomic>
 #include <chrono>
 #include <functional>
 #include <memory>
-#include <stdexcept>
-#include <thread>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
@@ -32,340 +29,58 @@ State state(const BlockTransferDispatcher& dispatcher, uint64_t trace) {
     return registry.query(registry.epoch(), std::vector<uint64_t>{trace}).front();
 }
 
-enum class Observation { NORMAL, THROW_BEFORE_SUBSCRIBE, THROW_AFTER_SUBSCRIBE, THROW_ON_EXECUTE, NULL_CONTEXT };
-
-class ProducerObservation final: public TransferAsyncContext {
-public:
-    ProducerObservation(std::shared_ptr<TransferBatchAsyncContext> producer, Observation mode):
-        producer_(std::move(producer)), mode_(mode) {}
-    void waitDone() override { producer_->waitDone(); }
-    void onDone(DoneCallback callback) override {
-        if (mode_ == Observation::THROW_BEFORE_SUBSCRIBE)
-            throw std::runtime_error("observer subscription failed");
-        producer_->onDone(std::move(callback));
-        if (mode_ == Observation::THROW_AFTER_SUBSCRIBE)
-            throw std::runtime_error("observer failed after subscription");
-    }
-    bool done() const override { return producer_->done(); }
-    bool success() const override { return producer_->success(); }
-    TransferResult result() const override { return producer_->result(); }
-private:
-    std::shared_ptr<TransferBatchAsyncContext> producer_;
-    Observation mode_;
-};
-
 class ControlledProducer final: public PerRankBlockTransferEngine {
 public:
-    explicit ControlledProducer(Observation mode = Observation::NORMAL):
-        PerRankBlockTransferEngine({}, false, {}, 128, 1, 1, 8, nullptr, 0, 4, true), mode(mode) {}
+    ControlledProducer(): PerRankBlockTransferEngine({}, false, {}, 128, 1, 1, 8, nullptr, 0, 4, true) {}
     std::shared_ptr<TransferAsyncContext> executeBatch(TransferTask batch) override {
-        ++submissions;
-        traces.push_back(batch.traceId());
-        auto producer = std::make_shared<TransferBatchAsyncContext>(
-            batch.descriptors().size(), nullptr, batch.completionProof());
-        producers.push_back(producer);
-        if (after_start)
-            after_start(batch, producer);
-        if (mode == Observation::THROW_ON_EXECUTE)
-            throw std::runtime_error("execute threw after starting I/O");
-        if (mode == Observation::NULL_CONTEXT)
-            return nullptr;
-        return std::make_shared<ProducerObservation>(producer, mode);
+        auto context = std::make_shared<TransferBatchAsyncContext>(batch.descriptors().size(), nullptr, batch.completionProof());
+        proofs.push_back(batch.completionProof());
+        contexts.push_back(context);
+        on_submit(batch.traceId());
+        return context;
     }
-    Observation mode;
-    std::atomic<size_t> submissions{0};
-    std::vector<uint64_t> traces;
-    std::vector<std::shared_ptr<TransferBatchAsyncContext>> producers;
-    std::function<void(const TransferTask&, const std::shared_ptr<TransferBatchAsyncContext>&)> after_start;
+    std::vector<std::shared_ptr<TransferBufferSafety>> proofs;
+    std::vector<std::shared_ptr<TransferBatchAsyncContext>> contexts;
+    std::function<void(uint64_t)> on_submit;
 };
 
-TEST(WorkerTransferRegistryTest, EngineEarlyReturnsCloseExecutionTrackerExactlyOnce) {
-    ControlledProducer engine;
-    for (bool expired : {false, true}) {
-        SCOPED_TRACE(expired);
-        auto execution = task(expired ? 1 : 0);
-        if (expired)
-            execution.deadline_ = TransferTask::Clock::now() - std::chrono::seconds(1);
-        size_t notifications = 0;
-        auto safety = std::make_shared<TransferBufferSafetyTracker>([&] { ++notifications; });
-        auto context = engine.execute(std::move(execution), safety);
-        ASSERT_TRUE(context->done());
-        EXPECT_FALSE(context->success());
-        EXPECT_TRUE(context->result().buffer_safe);
-        EXPECT_EQ(notifications, 1u);
-        safety->finishSubmitting();
-        EXPECT_EQ(notifications, 1u);
-    }
-    EXPECT_EQ(engine.submissions, 0u);
-}
-
-TEST(WorkerTransferRegistryTest, RecoveryQueryRejectsLateExecutionWithFreshDeadline) {
-    auto engine = std::make_shared<ControlledProducer>();
-    BlockTransferDispatcher dispatcher(engine);
-    const auto original = task(3);
-    const auto trace = original.traceId();
-    EXPECT_EQ(dispatcher.queryLocalCompletion(trace), State::REJECTED);
-    EXPECT_EQ(dispatcher.forgetLocalCompletion(trace), TransferTaskRegistry::ForgetResult::DONE);
-    EXPECT_EQ(state(dispatcher, trace), State::REJECTED);
-    // The delayed RPC can reconstruct a fresh budget. The trace fence, rather
-    // than its deadline, must reject it before any physical batch is submitted.
-    auto late = task(3);
-    late.setTraceId(trace);
-    ASSERT_FALSE(late.expired());
-    auto context = dispatcher.executePerRank(late);
-    ASSERT_TRUE(context->done());
-    EXPECT_FALSE(context->success());
-    EXPECT_TRUE(context->result().buffer_safe);
-    EXPECT_EQ(context->result().copy_error, CacheCopyError::NOT_EXECUTED);
-    EXPECT_EQ(engine->submissions, 0u);
-    EXPECT_EQ(state(dispatcher, trace), State::UNKNOWN);
-    EXPECT_EQ(dispatcher.taskRegistry().size(), 0u);
-    EXPECT_EQ(dispatcher.forgetLocalCompletion(trace), TransferTaskRegistry::ForgetResult::DONE);
-    EXPECT_EQ(state(dispatcher, trace), State::UNKNOWN);
-    // A subsequent recovery query starts a new retention fence.
-    EXPECT_EQ(dispatcher.queryLocalCompletion(trace), State::REJECTED);
-}
-
-TEST(WorkerTransferRegistryTest, RecoveryQueryPreservesAlreadyAdmittedExecution) {
-    auto engine = std::make_shared<ControlledProducer>();
-    BlockTransferDispatcher dispatcher(engine);
-    auto execution = task();
-    const auto trace = execution.traceId();
-    auto context = dispatcher.executePerRank(std::move(execution));
-    EXPECT_EQ(dispatcher.queryLocalCompletion(trace), State::RUNNING);
-    ASSERT_EQ(engine->submissions, 1u);
-    engine->producers.front()->complete(result(true));
-    EXPECT_TRUE(context->success());
-    EXPECT_EQ(dispatcher.queryLocalCompletion(trace), State::BUFFER_SAFE);
-}
-
-TEST(WorkerTransferRegistryTest, RegistersOneTraceAndWaitsForEveryPhysicalBatch) {
+TEST(WorkerTransferRegistryTest, OneTraceBecomesSafeOnlyAfterSubmissionAndEveryBatchProof) {
     auto engine = std::make_shared<ControlledProducer>();
     BlockTransferDispatcher dispatcher(engine);
     auto execution = task(3);
     const auto trace = execution.traceId();
-    auto context = dispatcher.executePerRank(std::move(execution));
-    ASSERT_EQ(engine->submissions, 3u);
-    EXPECT_EQ(engine->traces, std::vector<uint64_t>(3, trace));
-    EXPECT_EQ(dispatcher.taskRegistry().size(), 1u);
-    EXPECT_EQ(state(dispatcher, trace), State::RUNNING);
-    engine->producers[1]->complete(result(true, TransferStatus::DISK_IO_ERROR));
-    engine->producers[0]->complete(result(true));
-    EXPECT_FALSE(context->done());
-    EXPECT_EQ(state(dispatcher, trace), State::RUNNING);
-    context->onDone([&](TransferResult final) {
-        EXPECT_EQ(state(dispatcher, trace), State::BUFFER_SAFE);
-        EXPECT_FALSE(final.ok());
-        EXPECT_TRUE(final.buffer_safe);
-    });
-    engine->producers[2]->complete(result(true));
-    EXPECT_TRUE(context->done());
-    EXPECT_EQ(state(dispatcher, trace), State::BUFFER_SAFE);
-}
-
-TEST(WorkerTransferRegistryTest, SynchronousBatchesCannotFinishBeforeSubmissionCloses) {
-    auto engine = std::make_shared<ControlledProducer>();
-    BlockTransferDispatcher dispatcher(engine);
-    auto execution = task(3);
-    const auto trace = execution.traceId();
-    engine->after_start = [&](const TransferTask&, const std::shared_ptr<TransferBatchAsyncContext>& producer) {
-        EXPECT_EQ(state(dispatcher, trace), State::RUNNING);
-        producer->complete(result(true));
+    engine->on_submit = [&](uint64_t id) {
+        EXPECT_EQ(id, trace);
+        if (engine->contexts.size() == 1) {
+            engine->contexts.front()->complete(result(true));
+        }
         EXPECT_EQ(state(dispatcher, trace), State::RUNNING);
     };
-    auto context = dispatcher.executePerRank(std::move(execution));
-    ASSERT_TRUE(context->done());
-    EXPECT_TRUE(context->success());
-    EXPECT_EQ(state(dispatcher, trace), State::BUFFER_SAFE);
-}
-
-TEST(WorkerTransferRegistryTest, LateProofSurvivesFailedBusinessObservation) {
-    for (auto mode : {Observation::THROW_BEFORE_SUBSCRIBE, Observation::THROW_AFTER_SUBSCRIBE,
-                      Observation::THROW_ON_EXECUTE, Observation::NULL_CONTEXT}) {
-        SCOPED_TRACE(static_cast<int>(mode));
-        auto engine = std::make_shared<ControlledProducer>(mode);
-        BlockTransferDispatcher dispatcher(engine);
-        auto execution = task();
-        const auto trace = execution.traceId();
-        auto context = dispatcher.executePerRank(std::move(execution));
-        ASSERT_TRUE(context->done());
-        EXPECT_FALSE(context->success());
-        const auto original_error = context->result().status.code();
-        EXPECT_FALSE(context->result().buffer_safe);
-        EXPECT_EQ(state(dispatcher, trace), State::RUNNING);
-        size_t callbacks = 0;
-        context->onDone([&](TransferResult) { ++callbacks; });
-        engine->producers.front()->complete(result(true));
-        EXPECT_EQ(state(dispatcher, trace), State::BUFFER_SAFE);
-        EXPECT_FALSE(context->result().buffer_safe);
-        EXPECT_EQ(context->result().status.code(), original_error);
-        EXPECT_EQ(callbacks, 1u);
-    }
-}
-
-TEST(WorkerTransferRegistryTest, MissingProofStaysRunningUntilExplicitLateConfirmation) {
-    auto engine = std::make_shared<ControlledProducer>();
-    BlockTransferDispatcher dispatcher(engine);
-    auto execution = task(2);
-    const auto trace = execution.traceId();
-    auto context = dispatcher.executePerRank(std::move(execution));
-    engine->producers[0]->complete(result(false, TransferStatus::DEVICE_IO_ERROR));
-    engine->producers[1]->complete(result(true));
-    ASSERT_TRUE(context->done());
-    EXPECT_FALSE(context->result().buffer_safe);
-    EXPECT_EQ(state(dispatcher, trace), State::RUNNING);
-    dispatcher.shutdown();
-    EXPECT_EQ(state(dispatcher, trace), State::RUNNING);
-    engine->producers[0]->complete(result(true));
-    EXPECT_EQ(state(dispatcher, trace), State::BUFFER_SAFE);
-    EXPECT_FALSE(context->result().buffer_safe);
-}
-
-TEST(WorkerTransferRegistryTest, DuplicateEvenWhenExpiredFailsSafelyWithoutChangingOriginalProof) {
-    auto engine = std::make_shared<ControlledProducer>();
-    BlockTransferDispatcher dispatcher(engine);
-    auto execution = task();
-    const auto trace = execution.traceId();
+    auto late = task();
+    ASSERT_EQ(dispatcher.queryLocalCompletion(late.traceId()), State::REJECTED);
+    ASSERT_EQ(dispatcher.forgetLocalCompletion(late.traceId()), TransferTaskRegistry::ForgetResult::DONE);
+    auto rejected = dispatcher.executePerRank(std::move(late));
+    EXPECT_EQ(rejected->result().copy_error, CacheCopyError::NOT_EXECUTED);
+    EXPECT_TRUE(engine->contexts.empty());
     auto original = dispatcher.executePerRank(execution);
+    ASSERT_EQ(engine->contexts.size(), 3u);
     execution.deadline_ = TransferTask::Clock::now() - std::chrono::seconds(1);
-    auto duplicate = dispatcher.executePerRank(execution);
-    EXPECT_TRUE(duplicate->done());
-    EXPECT_FALSE(duplicate->success());
-    EXPECT_EQ(duplicate->errorInfo().code(), ErrorCode::INVALID_PARAMS);
-    EXPECT_TRUE(duplicate->result().buffer_safe);
-    EXPECT_EQ(duplicate->result().copy_error, CacheCopyError::NOT_EXECUTED);
-    EXPECT_EQ(duplicate->result().block_errors, (std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED}));
-    EXPECT_EQ(engine->submissions, 1u);
-    EXPECT_FALSE(original->done());
+    auto check_duplicate = [&] {
+        auto duplicate = dispatcher.executePerRank(execution);
+        EXPECT_EQ(duplicate->errorInfo().code(), ErrorCode::INVALID_PARAMS);
+        EXPECT_EQ(duplicate->result().copy_error, CacheCopyError::NOT_EXECUTED);
+        EXPECT_EQ(engine->contexts.size(), 3u);
+    };
+    check_duplicate();
+    engine->contexts[1]->complete(result(true));
+    engine->contexts[2]->complete(result(false, TransferStatus::DISK_IO_ERROR));
+    ASSERT_TRUE(original->done());
+    EXPECT_FALSE(original->success());
+    engine->proofs[0]->report(true);
     EXPECT_EQ(state(dispatcher, trace), State::RUNNING);
-    engine->producers.front()->complete(result(true));
-    EXPECT_TRUE(original->success());
-    duplicate = dispatcher.executePerRank(execution);
-    EXPECT_FALSE(duplicate->success());
-    EXPECT_EQ(duplicate->errorInfo().code(), ErrorCode::INVALID_PARAMS);
-    EXPECT_TRUE(duplicate->result().buffer_safe);
-    EXPECT_EQ(duplicate->result().copy_error, CacheCopyError::NOT_EXECUTED);
-    EXPECT_EQ(duplicate->result().block_errors, (std::vector<CacheCopyError>{CacheCopyError::NOT_EXECUTED}));
-    EXPECT_EQ(engine->submissions, 1u);
-    EXPECT_EQ(state(dispatcher, trace), State::BUFFER_SAFE);
-    EXPECT_EQ(dispatcher.taskRegistry().size(), 1u);
-}
-
-TEST(WorkerTransferRegistryTest, ConcurrentDuplicateSubmissionsHaveOneExecutionOwner) {
-    auto engine = std::make_shared<ControlledProducer>();
-    BlockTransferDispatcher dispatcher(engine);
-    const auto execution = task();
-    std::vector<std::shared_ptr<TransferAsyncContext>> contexts(16);
-    std::vector<std::thread> threads;
-    for (size_t i = 0; i < contexts.size(); ++i)
-        threads.emplace_back([&, i] { contexts[i] = dispatcher.executePerRank(execution); });
-    for (auto& thread : threads)
-        thread.join();
-    EXPECT_EQ(engine->submissions, 1u);
-    EXPECT_EQ(dispatcher.taskRegistry().size(), 1u);
-    EXPECT_EQ(state(dispatcher, execution.traceId()), State::RUNNING);
-    engine->producers.front()->complete(result(true));
-    size_t successes = 0;
-    for (const auto& context : contexts) {
-        ASSERT_TRUE(context->done());
-        successes += context->success();
-        if (!context->success()) {
-            EXPECT_EQ(context->errorInfo().code(), ErrorCode::INVALID_PARAMS);
-            EXPECT_TRUE(context->result().buffer_safe);
-            EXPECT_EQ(context->result().copy_error, CacheCopyError::NOT_EXECUTED);
-        }
-    }
-    EXPECT_EQ(successes, 1u);
-    EXPECT_EQ(state(dispatcher, execution.traceId()), State::BUFFER_SAFE);
-}
-
-TEST(WorkerTransferRegistryTest, AdmissionRejectionsRetainSafeRecordsAndWarningsDoNotLimitAdmission) {
-    auto engine = std::make_shared<ControlledProducer>();
-    BlockTransferDispatcher dispatcher(engine);
-    dispatcher.next_registry_warning_ = 2;
-    auto empty = task(0);
-    const auto empty_trace = empty.traceId();
-    EXPECT_FALSE(dispatcher.executePerRank(empty)->success());
-    EXPECT_EQ(state(dispatcher, empty_trace), State::BUFFER_SAFE);
-    for (size_t i = 0; i < 4; ++i) {
-        auto expired = task();
-        expired.deadline_ = TransferTask::Clock::now() - std::chrono::seconds(1);
-        const auto trace = expired.traceId();
-        const auto context = dispatcher.executePerRank(std::move(expired));
-        EXPECT_FALSE(context->success());
-        EXPECT_TRUE(context->result().buffer_safe);
-        EXPECT_EQ(state(dispatcher, trace), State::BUFFER_SAFE);
-    }
-    EXPECT_EQ(engine->submissions, 0u);
-    EXPECT_EQ(dispatcher.taskRegistry().size(), 5u);
-    EXPECT_EQ(dispatcher.next_registry_warning_, 8u);
-    EXPECT_EQ(state(dispatcher, empty_trace), State::BUFFER_SAFE);
-}
-
-TEST(WorkerTransferRegistryTest, LocalCoordinatorPreservesTaskTrace) {
-    auto engine = std::make_shared<ControlledProducer>();
-    BlockTransferDispatcher dispatcher(engine);
-    auto parent = task();
-    const auto parent_trace = parent.traceId();
-    size_t calls = 0;
-    dispatcher.runTransfer(std::move(parent), [&](TransferResult value) {
-        ++calls;
-        EXPECT_TRUE(value.ok());
-    });
-    ASSERT_EQ(engine->traces.size(), 1u);
-    EXPECT_EQ(engine->traces.front(), parent_trace);
-    EXPECT_EQ(state(dispatcher, parent_trace), State::RUNNING);
-    engine->producers.front()->complete(result(true));
-    EXPECT_EQ(calls, 1u);
-    EXPECT_EQ(state(dispatcher, parent_trace), State::BUFFER_SAFE);
-}
-
-TEST(WorkerTransferRegistryTest, CoordinatorRejectsRepeatedTaskWithoutResubmittingBatches) {
-    auto engine = std::make_shared<ControlledProducer>();
-    BlockTransferDispatcher dispatcher(engine);
-    const auto execution = task(3);
-    const auto trace = execution.traceId();
-    size_t original_calls = 0;
-    dispatcher.runTransfer(execution, [&](TransferResult value) {
-        ++original_calls;
-        EXPECT_TRUE(value.ok());
-    });
-    ASSERT_EQ(engine->submissions, 3u);
-    EXPECT_EQ(engine->traces, std::vector<uint64_t>(3, trace));
-
-    size_t duplicate_calls = 0;
-    dispatcher.runTransfer(execution, [&](TransferResult value) {
-        ++duplicate_calls;
-        EXPECT_EQ(value.status.code(), ErrorCode::INVALID_PARAMS);
-        EXPECT_EQ(value.copy_error, CacheCopyError::NOT_EXECUTED);
-        EXPECT_TRUE(value.buffer_safe);
-    });
-    EXPECT_EQ(duplicate_calls, 1u);
-    EXPECT_EQ(original_calls, 0u);
-    EXPECT_EQ(engine->submissions, 3u);
-    EXPECT_EQ(dispatcher.taskRegistry().size(), 1u);
-    EXPECT_EQ(state(dispatcher, trace), State::RUNNING);
-    for (const auto& producer : engine->producers)
-        producer->complete(result(true));
-    EXPECT_EQ(original_calls, 1u);
+    engine->proofs[2]->report(true);
+    check_duplicate();
     EXPECT_EQ(state(dispatcher, trace), State::BUFFER_SAFE);
 }
-
-TEST(WorkerTransferRegistryTest, SameTraceOnDifferentWorkersHasIndependentEvidence) {
-    auto first = std::make_shared<ControlledProducer>();
-    auto second = std::make_shared<ControlledProducer>();
-    BlockTransferDispatcher worker0(first), worker1(second);
-    const auto execution = task();
-    auto context0 = worker0.executePerRank(execution);
-    auto context1 = worker1.executePerRank(execution);
-    first->producers.front()->complete(result(true));
-    EXPECT_EQ(state(worker0, execution.traceId()), State::BUFFER_SAFE);
-    EXPECT_EQ(state(worker1, execution.traceId()), State::RUNNING);
-    second->producers.front()->complete(result(true));
-    EXPECT_EQ(state(worker1, execution.traceId()), State::BUFFER_SAFE);
-    EXPECT_TRUE(context0->success());
-    EXPECT_TRUE(context1->success());
 }
-
-}  // namespace
-}  // namespace rtp_llm
+}

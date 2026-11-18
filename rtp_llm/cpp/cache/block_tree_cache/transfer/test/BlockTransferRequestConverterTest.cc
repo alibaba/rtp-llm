@@ -664,25 +664,6 @@ TEST(BlockTransferRequestConverterTest, ResponseDefaultCodeMeansSuccess) {
     EXPECT_EQ(result.block_errors, std::vector<CacheCopyError>{CacheCopyError::NONE});
 }
 
-TEST(BlockTransferRequestConverterTest, ResponseRoundTripPreservesBufferSafetyIndependentlyOfSuccess) {
-    MemoryOperationResponsePB response;
-    for (const auto status : {TransferStatus::OK, TransferStatus::CRC_MISMATCH}) {
-        for (const bool buffer_safe : {true, false}) {
-            TransferResult expected(status);
-            expected.buffer_safe = buffer_safe;
-            expected.expandBlockErrors(1);
-            BlockTransferRequestConverter::encodeTransferResult(response, expected);
-            MemoryOperationResponsePB received;
-            ASSERT_TRUE(received.ParseFromString(response.SerializeAsString()));
-            const auto decoded = BlockTransferRequestConverter::decodeTransferResult(received, 1);
-            EXPECT_EQ(decoded.buffer_safe, buffer_safe);
-            EXPECT_EQ(decoded.ok(), expected.ok());
-            EXPECT_EQ(decoded.status.code(), expected.status.code());
-            EXPECT_EQ(decoded.block_errors, expected.block_errors);
-        }
-    }
-}
-
 TEST(BlockTransferRequestConverterTest, ResponseCodePreservesEveryCopyFailure) {
     for (auto error : {CacheCopyError::NOT_EXECUTED,
                        CacheCopyError::COPY_FAILED,

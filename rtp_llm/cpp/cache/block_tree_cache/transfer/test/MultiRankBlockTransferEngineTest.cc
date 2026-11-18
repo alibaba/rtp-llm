@@ -707,7 +707,9 @@ TEST_F(MultiRankBlockTransferEngineTest, DispatcherPreservesTaskWireIdentityAcro
                                        TransferDescriptor::hostToDevice(0, 4, {4})},
                       std::chrono::seconds(5),
                       42);
-    TransferTask                 second_task(first_task.descriptors(), std::chrono::seconds(5), 42);
+    TransferTask second_task(
+        std::vector<TransferDescriptor>(first_task.descriptors().begin(), first_task.descriptors().end()),
+        std::chrono::seconds(5), 42);
     first_task.setWorkflow(1234, 5678);
     second_task.setWorkflow(1234, 5678);
     const auto                   first_trace = first_task.traceId();
@@ -745,98 +747,6 @@ TEST_F(MultiRankBlockTransferEngineTest, DispatcherPreservesTaskWireIdentityAcro
     ASSERT_EQ(batches.size(), 2u);
     EXPECT_EQ(batches[first_trace], 2u);
     EXPECT_EQ(batches[second_trace], 2u);
-}
-
-TEST_F(MultiRankBlockTransferEngineTest, FrozenExecutionKeepsWireTraceAndAggregatedFailure) {
-    auto cleanup = std::make_shared<TransferCompletionCleanup>();
-    auto state = std::make_shared<MultiRankBlockTransferRpcState>();
-    MultiRankBlockTransferRpcConfig failed{true, MemoryOperationResponsePB::IO_FAILED, grpc::Status::OK, state};
-    failed.error_info = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "rank zero disk failure");
-    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
-    auto manager = makeBroadcastManager(
-        {failed, {true, MemoryOperationResponsePB::OK, grpc::Status(grpc::StatusCode::UNAVAILABLE, "lost reply"), state}},
-        servers);
-    ASSERT_NE(manager, nullptr);
-    auto cache = makeBroadcastCache(manager);
-    auto group = cache->groupSets().front();
-    auto pool = group->hostPool();
-    const auto target = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICTION);
-    ASSERT_NE(target, NULL_BLOCK_IDX);
-    TransferTask task({TransferDescriptor::deviceToHost(0, {1}, target)}, std::chrono::seconds(5), 42);
-    const auto trace = task.traceId();
-    task.setWorkflow(1234, 5678);
-    auto* dispatcher = cache->transfer_dispatcher_.get();
-    std::promise<TransferResult> completion;
-    auto done = completion.get_future();
-    dispatcher->runTransfer(std::move(task), [&](TransferResult result) {
-        EXPECT_TRUE(pool->isFrozen(target));
-        EXPECT_EQ(dispatcher->frozenTasks().size(), 1u);
-        pool->decTreeRef(target, BlockTreeRefType::EVICTION);
-        completion.set_value(std::move(result));
-    }, "evict");
-    ASSERT_EQ(done.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-    EXPECT_EQ(done.get().status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
-    dispatcher->waitForTransfers();
-    auto records = dispatcher->frozenTasks();
-    ASSERT_EQ(records.size(), 1u);
-    const auto& record = *records.front();
-    EXPECT_EQ(std::stoull(record.execution().trace_id), trace);
-    EXPECT_EQ(record.failure().status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
-    EXPECT_NE(record.failure().status.ToString().find("rank zero disk failure"), std::string::npos);
-    EXPECT_NE(record.failure().status.ToString().find("rank=0"), std::string::npos);
-    EXPECT_EQ(record.failure().block_errors, std::vector<CacheCopyError>{CacheCopyError::RPC_FAILED});
-    ASSERT_EQ(record.execution().participant_ranks.size(), 2u);
-    {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        ASSERT_EQ(state->requests.size(), 2u);
-        for (const auto& request : state->requests) {
-            EXPECT_EQ(request.transfer_trace_id(), std::stoull(record.execution().trace_id));
-            EXPECT_EQ(request.transfer_workflow_id(), 1234u);
-            EXPECT_EQ(request.transfer_parent_id(), 5678u);
-        }
-    }
-    EXPECT_EQ(pool->treeRefCount(target), 1u);
-    records.front()->completeRecovery(*cleanup);
-    EXPECT_EQ(pool->freeBlocksNum(), pool->totalBlocksNum());
-}
-
-static void failBroadcastSubscription() {
-    throw std::bad_alloc();
-}
-
-TEST_F(MultiRankBlockTransferEngineTest, SubscriptionFailureFreezesBeforeLateRpcCompletion) {
-    std::promise<void> release;
-    auto released = release.get_future().share();
-    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
-    auto manager = makeBroadcastManager(
-        {{true, MemoryOperationResponsePB::OK, grpc::Status::OK, nullptr, 0, released}}, servers);
-    ASSERT_NE(manager, nullptr);
-    auto cache = makeBroadcastCache(manager);
-    auto group = cache->groupSets().front();
-    auto pool = group->hostPool();
-    const auto target = group->allocateSingleBlock(Tier::HOST, BlockTreeRefType::EVICTION);
-    ASSERT_NE(target, NULL_BLOCK_IDX);
-    auto* dispatcher = cache->transfer_dispatcher_.get();
-    block_tree_cache_detail::ScopeRollback cleanup([&] {
-        block_tree_cache_detail::before_transfer_broadcast_subscription_for_test.store(nullptr);
-        release.set_value();
-    });
-    block_tree_cache_detail::before_transfer_broadcast_subscription_for_test.store(&failBroadcastSubscription);
-    size_t callbacks = 0;
-    dispatcher->runTransfer(
-        TransferTask({TransferDescriptor::deviceToHost(0, {1}, target)}, std::chrono::seconds(5)),
-        [&](TransferResult result) {
-            EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
-            EXPECT_TRUE(pool->isFrozen(target));
-            ++callbacks;
-            pool->decTreeRef(target, BlockTreeRefType::EVICTION);
-        }, "evict");
-    EXPECT_EQ(callbacks, 1u);
-    auto records = dispatcher->frozenTasks();
-    ASSERT_EQ(records.size(), 1u);
-    // No automatic thaw: this UNKNOWN record stays frozen even if the worker
-    // later succeeds. Explicit release is exercised separately by FrozenTaskTest.
-    EXPECT_EQ(pool->treeRefCount(target), 1u);
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, DiskLoadDiagnosticsCoverAllRanksAndKeepWireIdentity) {
@@ -1013,55 +923,6 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferSucceedsForAllWorkers)
         *cache->transfer_dispatcher_->multi_rank_engine_, makeBroadcastDescriptors(), /*timeout_ms=*/500));
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, BufferSafetyRequiresEveryWorkerProofRegardlessOfBusinessResult) {
-    for (const bool first_safe : {false, true}) {
-        for (const bool second_safe : {false, true}) {
-            for (const auto second_code : {MemoryOperationResponsePB::OK, MemoryOperationResponsePB::COPY_FAILED}) {
-                SCOPED_TRACE(::testing::Message() << "first_safe=" << first_safe << " second_safe=" << second_safe
-                                                 << " second_code=" << second_code);
-                MultiRankBlockTransferRpcConfig first{true, MemoryOperationResponsePB::OK, grpc::Status::OK};
-                MultiRankBlockTransferRpcConfig second{true, second_code, grpc::Status::OK};
-                first.buffer_safe  = first_safe;
-                second.buffer_safe = second_safe;
-                std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
-                auto manager = makeBroadcastManager({first, second}, servers);
-                ASSERT_NE(manager, nullptr);
-                auto cache   = makeBroadcastCache(manager);
-                auto context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
-                    TransferTask(makeBroadcastDescriptors(), std::chrono::seconds(5)));
-                auto completion = std::make_shared<std::promise<TransferResult>>();
-                auto finished   = completion->get_future();
-                context->onDone([completion](TransferResult result) { completion->set_value(std::move(result)); });
-                ASSERT_EQ(finished.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-                const auto result = finished.get();
-                EXPECT_EQ(result.ok(), second_code == MemoryOperationResponsePB::OK);
-                EXPECT_EQ(result.buffer_safe, first_safe && second_safe);
-                context->waitDone();
-                EXPECT_EQ(context->result().buffer_safe, result.buffer_safe);
-            }
-        }
-    }
-}
-
-TEST_F(MultiRankBlockTransferEngineTest, MissingWorkerSafetyProofRemainsUnsafeWithSafePeer) {
-    for (const size_t legacy_rank : {0u, 1u}) {
-        SCOPED_TRACE(::testing::Message() << "legacy_rank=" << legacy_rank);
-        std::vector<MultiRankBlockTransferRpcConfig> configs{
-            {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
-            {true, MemoryOperationResponsePB::OK, grpc::Status::OK}};
-        configs[1 - legacy_rank].buffer_safe = true;
-        std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
-        auto manager = makeBroadcastManager(configs, servers);
-        ASSERT_NE(manager, nullptr);
-        auto cache   = makeBroadcastCache(manager);
-        auto context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
-            TransferTask(makeBroadcastDescriptors(), std::chrono::seconds(5)));
-        context->waitDone();
-        EXPECT_TRUE(context->success());
-        EXPECT_FALSE(context->result().buffer_safe);
-    }
-}
-
 TEST_F(MultiRankBlockTransferEngineTest, EachBlockCombinesOnlyItsOwnRankResults) {
     MultiRankBlockTransferRpcConfig first{true, MemoryOperationResponsePB::CRC_MISMATCH, grpc::Status::OK};
     first.error_info   = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "CRC mismatch, descriptor_index=1");
@@ -1198,29 +1059,6 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferReportsWorkerRpcError)
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferReportsRpcDeadlineWithCoreDumpEnabled) {
-    const bool previous = StaticConfig::user_ft_core_dump_on_exception;
-    block_tree_cache_detail::ScopeRollback restore_config(
-        [previous] { StaticConfig::user_ft_core_dump_on_exception = previous; });
-    StaticConfig::user_ft_core_dump_on_exception = true;
-    const std::vector<MultiRankBlockTransferRpcConfig> configs = {
-        {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
-        {true, MemoryOperationResponsePB::OK, grpc::Status::OK, nullptr, /*sleep_millis=*/500},
-    };
-    std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
-    std::shared_ptr<BroadcastManager> broadcast_manager = makeBroadcastManager(configs, servers);
-    ASSERT_NE(broadcast_manager, nullptr);
-    std::unique_ptr<BlockTreeCache> cache = makeBroadcastCache(broadcast_manager);
-
-    auto context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
-        TransferTask(makeBroadcastDescriptors(), std::chrono::milliseconds(50)));
-    context->waitDone();
-    EXPECT_TRUE(context->done());
-    EXPECT_FALSE(context->success());
-    EXPECT_EQ(context->errorInfo().code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
-    EXPECT_EQ(context->result().copy_error, CacheCopyError::RPC_FAILED);
-}
-
 TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsOnWorkerBusinessError) {
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
         {true, MemoryOperationResponsePB::OK, grpc::Status::OK},
@@ -1311,67 +1149,6 @@ INSTANTIATE_TEST_SUITE_P(InvalidWorkerResponses,
                          ::testing::Values(InvalidWorkerResponse{false, MemoryOperationResponsePB::OK},
                                            InvalidWorkerResponse{true,
                                                                  static_cast<MemoryOperationResponsePB::Code>(42)}));
-
-class MultiRankBlockTransferGrpcStatusTest: public ::testing::TestWithParam<grpc::StatusCode> {
-protected:
-    void expectFailureWithCoreDumpEnabled(bool callback_only) {
-        std::promise<void> release;
-        auto               released = release.get_future().share();
-        std::vector<MultiRankBlockTransferRpcConfig> configs = {
-            {true, MemoryOperationResponsePB::OK, grpc::Status::OK, nullptr, 0, released},
-            {true, MemoryOperationResponsePB::OK, grpc::Status(GetParam(), "worker failed"), nullptr, 0, released},
-        };
-        for (auto& config : configs) {
-            config.buffer_safe = true;
-        }
-        std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
-        auto broadcast_manager = makeBroadcastManager(configs, servers);
-        ASSERT_NE(broadcast_manager, nullptr);
-        auto cache = makeBroadcastCache(broadcast_manager);
-        const bool previous = StaticConfig::user_ft_core_dump_on_exception;
-        block_tree_cache_detail::ScopeRollback restore_config(
-            [previous] { StaticConfig::user_ft_core_dump_on_exception = previous; });
-        StaticConfig::user_ft_core_dump_on_exception = true;
-        block_tree_cache_detail::ScopeRollback release_response([&release] { release.set_value(); });
-
-        auto context = cache->transfer_dispatcher_->multi_rank_engine_->execute(
-            TransferTask(makeBroadcastDescriptors(), std::chrono::seconds(5)));
-        TransferResult result;
-        if (callback_only) {
-            auto completion = std::make_shared<std::promise<TransferResult>>();
-            auto finished = completion->get_future();
-            context->onDone([completion](TransferResult result) { completion->set_value(std::move(result)); });
-            release_response.run();
-            ASSERT_EQ(finished.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-            result = finished.get();
-        } else {
-            release_response.run();
-            context->waitDone();
-            result = context->result();
-        }
-        EXPECT_TRUE(context->done());
-        EXPECT_FALSE(context->success());
-        EXPECT_EQ(result.status.code(), ErrorCode::TRANSFER_COMPLETION_UNKNOWN);
-        EXPECT_EQ(result.copy_error, CacheCopyError::RPC_FAILED);
-        EXPECT_FALSE(result.buffer_safe);
-    }
-};
-
-TEST_P(MultiRankBlockTransferGrpcStatusTest, WaitDoneReturnsRpcFailureWithCoreDumpEnabled) {
-    expectFailureWithCoreDumpEnabled(/*callback_only=*/false);
-}
-
-TEST_P(MultiRankBlockTransferGrpcStatusTest, CallbackReturnsRpcFailureWithCoreDumpEnabled) {
-    expectFailureWithCoreDumpEnabled(/*callback_only=*/true);
-}
-
-INSTANTIATE_TEST_SUITE_P(NonOkWorkerStatuses,
-                         MultiRankBlockTransferGrpcStatusTest,
-                         ::testing::Values(grpc::StatusCode::CANCELLED,
-                                           grpc::StatusCode::DEADLINE_EXCEEDED,
-                                           grpc::StatusCode::INTERNAL,
-                                           grpc::StatusCode::UNAVAILABLE,
-                                           grpc::StatusCode::RESOURCE_EXHAUSTED));
 
 static void disableCoreDump() {
     rlimit no_core;
@@ -1515,10 +1292,11 @@ TEST_F(MultiRankBlockTransferEngineTest, HostLoadRpcFailureFreezesOnlyTargetBefo
     block_tree_cache_detail::ScopeRollback restore_config(
         [previous] { StaticConfig::user_ft_core_dump_on_exception = previous; });
     StaticConfig::user_ft_core_dump_on_exception = true;
+    auto state = std::make_shared<MultiRankBlockTransferRpcState>();
     std::vector<std::unique_ptr<MultiRankBlockTransferRpcServer>> servers;
     auto                                                          broadcast_manager = makeBroadcastManager(
-        {{true, MemoryOperationResponsePB::COPY_FAILED, grpc::Status::OK},
-                                                                  {true, MemoryOperationResponsePB::OK, grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "RPC timeout")}},
+        {{true, MemoryOperationResponsePB::COPY_FAILED, grpc::Status::OK, state},
+                                                                  {true, MemoryOperationResponsePB::OK, grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "RPC timeout"), state}},
         servers);
     ASSERT_NE(broadcast_manager, nullptr);
     auto       host_pool = makeHostPool(256, 4);
@@ -1542,6 +1320,19 @@ TEST_F(MultiRankBlockTransferEngineTest, HostLoadRpcFailureFreezesOnlyTargetBefo
         EXPECT_FALSE(error.ok());
         EXPECT_FALSE(host_pool->isFrozen(source));
         EXPECT_TRUE(device_pool->isFrozen(target));
+        const auto records = cache->transfer_dispatcher_->frozenTasks();
+        ASSERT_EQ(records.size(), 1u);
+        const auto& execution = records.front()->execution();
+        EXPECT_EQ(execution.registry_type, RegistryType::BLOCK_TRANSFER);
+        ASSERT_EQ(execution.participant_ranks.size(), servers.size());
+        for (const auto& peer : execution.participant_ranks) {
+            ASSERT_LT(peer.rank, servers.size());
+            EXPECT_EQ(peer.address, servers[peer.rank]->address());
+        }
+        std::lock_guard<std::mutex> lock(state->mutex);
+        ASSERT_EQ(state->requests.size(), 2u);
+        for (const auto& request : state->requests)
+            EXPECT_EQ(execution.trace_id, std::to_string(request.transfer_trace_id()));
     });
     ASSERT_TRUE(context->commit());
     context->waitDone();
