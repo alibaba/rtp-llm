@@ -3,6 +3,7 @@ import sys
 import textwrap
 from pathlib import Path
 
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INIT_PATH = REPO_ROOT / "rtp_llm" / "__init__.py"
 PKG_DIR = REPO_ROOT / "rtp_llm"
@@ -67,7 +68,7 @@ def test_bootstrap_is_deferred_during_pytest_plugin_discovery():
 
         spec.loader.exec_module(module)
 
-        assert "rtp_llm.ops" not in sys.modules
+        assert module._bootstrap_error is None
         assert triton_import_attempts == []
         assert "triton" not in sys.modules
         """
@@ -78,7 +79,7 @@ def test_bootstrap_is_deferred_during_pytest_plugin_discovery():
     assert result.returncode == 0, result.stderr + result.stdout
 
 
-def test_native_access_preserves_error_after_lazy_bootstrap():
+def test_bootstrap_error_raises_after_pytest_conftest_has_run():
     code = textwrap.dedent(
         f"""
         import importlib.abc
@@ -124,10 +125,8 @@ def test_native_access_preserves_error_after_lazy_bootstrap():
 
         sys.meta_path.insert(0, BoomFinder())
 
-        spec.loader.exec_module(module)
-        assert "rtp_llm.ops" not in sys.modules
         try:
-            module.AttentionConfigs
+            spec.loader.exec_module(module)
         except RuntimeError as exc:
             assert "ops boom" in str(exc)
         else:

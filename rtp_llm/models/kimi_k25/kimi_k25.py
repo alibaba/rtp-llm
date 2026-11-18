@@ -53,9 +53,10 @@ class KimiK25(DeepSeekV2):
         return True
 
     def _create_python_model(self):
-        # GenericMoeModel injects vision features and supports hidden-state
-        # capture; keep Kimi's multimodal weights and configuration below.
-        from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel
+        # Override DeepSeekV2._create_python_model to use MultimodalGenericModel
+        # so that vision features are injected into text embeddings.
+        # DeepSeekV2 uses GenericMoeModel (text-only) which silently drops image features.
+        from rtp_llm.models_py.model_desc.multimodal_generic import MultimodalGenericModel
 
         model_config = self.model_config
         parallelism_config = self.parallelism_config
@@ -64,7 +65,7 @@ class KimiK25(DeepSeekV2):
         moe_config = self.moe_config
         max_generate_batch_size = self.max_generate_batch_size
 
-        self.py_model = GenericMoeModel(
+        self.py_model = MultimodalGenericModel(
             model_config,
             parallelism_config,
             self.weight,

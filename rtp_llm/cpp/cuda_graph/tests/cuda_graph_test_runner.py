@@ -1,14 +1,23 @@
 """Lazily import the compiled CUDA Graph test binding staged by setup.py."""
 
-from rtp_llm.test.utils.extension_loader import load_test_extension
+import sys
+import importlib
+from pathlib import Path
 
+
+_TEST_LIB_DIR = Path(__file__).resolve().parents[3] / "libs" / "test"
+if str(_TEST_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(_TEST_LIB_DIR))
 
 def load_cuda_graph_test_binding():
-    return load_test_extension(
-        "libtest_cuda_graph_runner",
-        "rtp_llm/libs/test/libtest_cuda_graph_runner.so",
-        "rtp_llm/cpp/cuda_graph/tests/libtest_cuda_graph_runner.so",
-    )
+    try:
+        binding = importlib.import_module("libtest_cuda_graph_runner")
+    except ImportError as exc:
+        raise ImportError(
+            f"libtest_cuda_graph_runner.so not found under {_TEST_LIB_DIR}; "
+            "run `python setup.py build_ext --inplace` before pytest"
+        ) from exc
+    return binding
 
 
 class CudaGraphRunner:

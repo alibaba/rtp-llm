@@ -72,7 +72,6 @@ docs = [
     "sphinx-copybutton",
     "sphinxcontrib-mermaid",
     "nbsphinx",
-    "nbstripout",
 ]
 
 [tool.setuptools]

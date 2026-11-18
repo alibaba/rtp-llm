@@ -27,7 +27,6 @@ import torch.nn.functional as F
 
 from rtp_llm.models_py.distributed import collective_torch
 from rtp_llm.models_py.distributed.collective_torch import Group
-from rtp_llm.models_py.modules.dsv41 import _profiler
 from rtp_llm.models_py.modules.dsv41.attn_type import DECODER_SWA_KV, SWA_KV
 from rtp_llm.models_py.modules.dsv41.cp import CPContext, cp_swa_replay_starts
 from rtp_llm.models_py.modules.dsv41.kv_cache_utils import host_block_tables
@@ -573,10 +572,9 @@ class CEDPlan:
         ):
             return None
         group = collective_torch._get_group(Group.TP)
-        with _profiler.record_function_range("dsv41.ced.query_layout"):
-            context, exchange, indexer_groups = _query_layout(
-                cp_ctx, selected, group, keep_candidate_rows=bounded_replay
-            )
+        context, exchange, indexer_groups = _query_layout(
+            cp_ctx, selected, group, keep_candidate_rows=bounded_replay
+        )
         if bounded_replay:
             if len(lengths) == 1:
                 context.swa_replay_start = starts[0]

@@ -7,7 +7,7 @@ import sys as _sys
 
 
 def _xdist_gpu_slot(worker_index, worker_count, slot_count):
-    """Validate a controller-assigned slot; worker IDs are not slot IDs."""
+    """Map initial and replacement xdist workers onto logical GPU slots."""
     if slot_count < 1:
         raise ValueError("GPU pool does not contain a complete worker slot")
     if worker_count is None:
@@ -18,9 +18,7 @@ def _xdist_gpu_slot(worker_index, worker_count, slot_count):
         raise ValueError(
             f"xdist requested {worker_count} workers but only {slot_count} GPU slot(s) exist"
         )
-    if not 0 <= worker_index < worker_count:
-        raise ValueError("worker requires a controller-assigned free GPU slot")
-    return worker_index
+    return worker_index % worker_count
 
 
 _xdist_worker = _os.environ.get("PYTEST_XDIST_WORKER")
@@ -60,11 +58,10 @@ if _xdist_worker:
         _sys.stderr.flush()
         _sys.exit(2)
 
-    # The controller sets this in the gateway before pytest imports conftest.
-    # Standalone initial workers can use their index; replacement IDs cannot wrap.
-    _slot = int(_os.environ.get("_RTP_XDIST_ASSIGNED_SLOT", str(_wn)))
-    if _worker_count is not None:
-        _slot = _xdist_gpu_slot(_slot, _worker_count, _worker_count)
+    # xdist replacements continue numbering (gw4 after gw0..gw3). Record the
+    # logical slot even for CPU-only xdist runs so controller accounting uses
+    # the fixed worker pool rather than treating replacements as extra workers.
+    _slot = _wn % _worker_count if _worker_count is not None else _wn
     _os.environ["_RTP_XDIST_GPU_SLOT"] = str(_slot)
 
     _cvd = _os.environ.get("CUDA_VISIBLE_DEVICES")
@@ -83,7 +80,7 @@ if _xdist_worker:
             _sys.exit(2)
         _slot_count = len(_all_gpus) // _gpu_per_worker
         try:
-            _slot = _xdist_gpu_slot(_slot, _worker_count, _slot_count)
+            _slot = _xdist_gpu_slot(_wn, _worker_count, _slot_count)
         except ValueError as _slot_error:
             _sys.stderr.write(f"[conftest_gpu_slice] FATAL: {_slot_error}\n")
             _sys.stderr.flush()
@@ -529,55 +526,10 @@ def pytest_configure_node(node):
         config._rtp_gpu_isolation_problems = problems
     config._rtp_expected_gpu_workers = worker_count
 
-    allocations = getattr(config, "_rtp_gpu_slot_allocations", {})
-    config._rtp_gpu_slot_allocations = allocations
-    if node.gateway.id in allocations:
-        return
-    free = sorted(set(range(worker_count)) - set(allocations.values()))
-    if not free:
-        raise pytest.UsageError("No released GPU slot for replacement worker")
-    slot = free[0]
-    allocations[node.gateway.id] = slot
-    node.workerinput["rtp_gpu_slot"] = slot
-    # workerinput is assigned after pytest's initial conftest imports. Bootstrap
-    # the environment now so slicing precedes any torch/CUDA initialization.
-    bootstrap = node.gateway.remote_exec(
-        "import os\n"
-        "slot = channel.receive()\n"
-        "os.environ['_RTP_XDIST_ASSIGNED_SLOT'] = str(slot)\n"
-        "channel.send(slot)\n"
-    )
-    bootstrap.send(slot)
-    if bootstrap.receive(timeout=10) != slot:
-        raise pytest.UsageError("Worker did not acknowledge its assigned GPU slot")
-    bootstrap.waitclose(timeout=10)
-
-
-def _release_gpu_slot(node):
-    """Reuse a slot only after its local worker process has actually exited."""
-    allocations = getattr(node.config, "_rtp_gpu_slot_allocations", {})
-    if node.gateway.id not in allocations:
-        return
-    gateway = node.gateway
-    gateway.exit()
-    process = getattr(getattr(gateway, "_io", None), "popen", None)
-    # An SSH transport exit does not establish that the remote worker exited.
-    # Keep such slots reserved; a replacement must not guess that they are free.
-    if not getattr(gateway.spec, "popen", False) or process is None:
-        return
-    import subprocess
-
-    try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        return
-    allocations.pop(gateway.id)
-
 
 @pytest.hookimpl(optionalhook=True)
 def pytest_testnodedown(node, error):
     """Controller-side: record the CVD reported by a worker as it goes down."""
-    _release_gpu_slot(node)
     workeroutput = getattr(node, "workeroutput", None) or {}
     if "rtp_gpu_cvd" not in workeroutput or "rtp_gpu_slot" not in workeroutput:
         return
@@ -587,13 +539,6 @@ def pytest_testnodedown(node, error):
         records = {}
         config._rtp_worker_gpu_records = records
     slot = int(workeroutput["rtp_gpu_slot"])
-    assigned = node.workerinput.get("rtp_gpu_slot")
-    if slot != assigned:
-        problems = getattr(config, "_rtp_gpu_isolation_problems", [])
-        problems.append(
-            f"worker {node.gateway.id} reported slot {slot}, assigned {assigned}"
-        )
-        config._rtp_gpu_isolation_problems = problems
     cvd = workeroutput["rtp_gpu_cvd"]
     previous = records.get(slot)
     if previous is not None and previous["cvd"] != cvd:

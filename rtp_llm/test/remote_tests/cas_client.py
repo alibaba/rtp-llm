@@ -35,29 +35,6 @@ CAS_RPC_MAX_ATTEMPTS = 3
 
 
 @dataclass
-class UploadBudget:
-    deadline: float
-    rpc_timeout_seconds: float
-    cancelled: threading.Event = field(default_factory=threading.Event)
-
-    def remaining(self) -> float:
-        if self.cancelled.is_set():
-            raise TimeoutError("CAS upload cancelled")
-        remaining = self.deadline - time.monotonic()
-        if remaining <= 0:
-            self.cancelled.set()
-            raise TimeoutError("CAS upload deadline exceeded")
-        return remaining
-
-    def rpc_timeout(self) -> float:
-        return min(self.rpc_timeout_seconds, self.remaining())
-
-
-def _upload_rpc_timeout(budget: Optional[UploadBudget]) -> float:
-    return budget.rpc_timeout() if budget is not None else 300.0
-
-
-@dataclass
 class UploadProgress:
     """Thread-safe CAS upload progress for live terminal display."""
 
@@ -119,56 +96,51 @@ class CASClient:
         self._batch_upload_workers = max(1, batch_upload_workers)
         self._parallel_bytestream = max(1, parallel_bytestream)
         self._extra_channels: list = []
-        self._channel_lock = threading.Lock()
-        self._closed = False
 
     def _new_bs_stub(self):
-        return self.new_bytestream_stub()
+        """Create a new ByteStream stub on a separate channel (for parallel uploads)."""
+        ch = grpc.insecure_channel(
+            self._addr, options=[("grpc.max_send_message_length", GRPC_MAX_MSG_SIZE)]
+        )
+        self._extra_channels.append(ch)
+        return bs_grpc.ByteStreamStub(ch)
 
     def new_bytestream_stub(self) -> bs_grpc.ByteStreamStub:
-        """Register owned channels atomically with cancellation/close."""
-        with self._channel_lock:
-            if self._closed:
-                raise RuntimeError("CAS client is closed")
-            ch = grpc.insecure_channel(
-                self._addr,
-                options=[
-                    ("grpc.max_send_message_length", GRPC_MAX_MSG_SIZE),
-                    ("grpc.max_receive_message_length", GRPC_MAX_MSG_SIZE),
-                ],
-            )
-            self._extra_channels.append(ch)
+        """Separate channel for ByteStream.Read (streaming logs) or parallel Write."""
+        ch = grpc.insecure_channel(
+            self._addr,
+            options=[
+                ("grpc.max_send_message_length", GRPC_MAX_MSG_SIZE),
+                ("grpc.max_receive_message_length", GRPC_MAX_MSG_SIZE),
+            ],
+        )
+        self._extra_channels.append(ch)
         return bs_grpc.ByteStreamStub(ch)
 
     def close(self):
-        """Close owned channels; late uploads cannot register a new one."""
-        with self._channel_lock:
-            self._closed = True
-            channels = [self.channel, *self._extra_channels]
-            self._extra_channels.clear()
-        for channel in channels:
+        """Close all gRPC channels (main + extras created for parallel ops)."""
+        for ch in self._extra_channels:
             try:
-                channel.close()
+                ch.close()
             except Exception:
                 pass
+        self._extra_channels.clear()
+        try:
+            self.channel.close()
+        except Exception:
+            pass
 
     def upload_directory(
         self,
         root: Path,
         files: List[str],
         progress: Optional[UploadProgress] = None,
-        *,
-        budget: Optional[UploadBudget] = None,
     ) -> re_pb2.Digest:
         """Build Merkle tree and upload missing blobs to CAS. Memory-efficient."""
         if progress:
             progress.set_phase("merkle")
 
-        if budget is not None:
-            budget.remaining()
         result = build_merkle_tree(root, files)
-        if budget is not None:
-            budget.remaining()
         total_size = sum(result.sizes.values())
         total_count = len(result.file_map) + len(result.dir_blobs)
         total_mb = total_size / 1024 / 1024
@@ -180,7 +152,7 @@ class CASClient:
         if progress:
             progress.set_phase("find_missing")
 
-        missing = self._find_missing(all_digests, budget=budget)
+        missing = self._find_missing(all_digests)
         if not missing:
             log.info("All blobs already in CAS")
             log.info(
@@ -273,7 +245,7 @@ class CASClient:
         def _send_batch_tracked(
             batch: List[re_pb2.BatchUpdateBlobsRequest.Request],
         ) -> None:
-            self._send_batch(batch, budget=budget)
+            self._send_batch(batch)
             if progress:
                 n_bytes = sum(len(req.data) for req in batch)
                 progress.add_uploaded(len(batch), n_bytes)
@@ -297,7 +269,7 @@ class CASClient:
             def _upload_large(args: tuple) -> None:
                 h, path, size = args
                 digest = re_pb2.Digest(hash=h, size_bytes=size)
-                self._bytestream_write_file_parallel(digest, path, budget=budget)
+                self._bytestream_write_file_parallel(digest, path)
                 if progress:
                     progress.add_uploaded(1, size)
 
@@ -371,7 +343,7 @@ class CASClient:
             return b""
         return b"".join(chunks)
 
-    def _find_missing(self, digests: List[re_pb2.Digest], *, budget=None) -> Set[str]:
+    def _find_missing(self, digests: List[re_pb2.Digest]) -> Set[str]:
         missing = set()
         for i in range(0, len(digests), 1000):
             batch = digests[i : i + 1000]
@@ -382,17 +354,13 @@ class CASClient:
                         instance_name=self.instance_name, blob_digests=batch
                     ),
                     metadata=self.metadata,
-                    timeout=_upload_rpc_timeout(budget),
                 ),
-                budget=budget,
             )
             missing.update(d.hash for d in resp.missing_blob_digests)
         return missing
 
-    def _grpc_call_with_retry(self, op_name: str, call, *, budget=None):
+    def _grpc_call_with_retry(self, op_name: str, call):
         for attempt in range(1, CAS_RPC_MAX_ATTEMPTS + 1):
-            if budget is not None:
-                budget.remaining()
             try:
                 return call()
             except grpc.RpcError as e:
@@ -410,15 +378,9 @@ class CASClient:
                     CAS_RPC_MAX_ATTEMPTS,
                     e,
                 )
-                if budget is None:
-                    time.sleep(wait_s)
-                else:
-                    budget.cancelled.wait(min(wait_s, budget.remaining()))
-                    budget.remaining()
+                time.sleep(wait_s)
 
-    def _bytestream_write_file_parallel(
-        self, digest: re_pb2.Digest, path: Path, *, budget=None
-    ):
+    def _bytestream_write_file_parallel(self, digest: re_pb2.Digest, path: Path):
         """Upload a file via ByteStream on a dedicated channel (thread-safe)."""
         stub = self._new_bs_stub()
         uid = uuid.uuid4().hex
@@ -429,8 +391,6 @@ class CASClient:
                 offset = 0
                 is_last = False
                 while True:
-                    if budget is not None:
-                        budget.remaining()
                     data = f.read(BYTESTREAM_CHUNK)
                     if not data:
                         break
@@ -449,9 +409,7 @@ class CASClient:
                         finish_write=True,
                     )
 
-        resp = stub.Write(
-            _chunks(), metadata=self.metadata, timeout=_upload_rpc_timeout(budget)
-        )
+        resp = stub.Write(_chunks(), metadata=self.metadata)
         if resp.committed_size != digest.size_bytes:
             raise RuntimeError(
                 f"ByteStream Write committed size mismatch for {digest.hash[:12]}: "
@@ -475,20 +433,19 @@ class CASClient:
                 )
                 offset = end
 
-        resp = self.bs_stub.Write(_chunks(), metadata=self.metadata, timeout=300)
+        resp = self.bs_stub.Write(_chunks(), metadata=self.metadata)
         if resp.committed_size != digest.size_bytes:
             raise RuntimeError(
                 f"ByteStream Write committed size mismatch for {digest.hash[:12]}: "
                 f"expected {digest.size_bytes}, got {resp.committed_size}"
             )
 
-    def _send_batch(self, requests, *, budget=None):
+    def _send_batch(self, requests):
         resp = self.stub.BatchUpdateBlobs(
             re_pb2.BatchUpdateBlobsRequest(
                 instance_name=self.instance_name, requests=requests
             ),
             metadata=self.metadata,
-            timeout=_upload_rpc_timeout(budget),
         )
         failed = []
         for r in resp.responses:

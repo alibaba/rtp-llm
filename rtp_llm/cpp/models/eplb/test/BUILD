@@ -33,7 +33,6 @@ py_test(
         ":th_eplb_py_wrapper_test",
     ],
     deps = [
-        "//rtp_llm/test/utils:extension_loader",
         "//rtp_llm:torch",
     ],
     exec_properties = {"gpu": "L20_CU13"},

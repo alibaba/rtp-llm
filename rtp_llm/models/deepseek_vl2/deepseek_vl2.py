@@ -2,6 +2,7 @@ import json
 import os
 from typing import Any, Dict, Optional
 
+
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.model_factory_register import register_model
@@ -36,8 +37,7 @@ class DeepSeekVLV2(BaseModel):
 
     def _create_python_model(self):
 
-        from rtp_llm.models_py.model_desc.generic_moe import GenericMoeModel
-
+        from rtp_llm.models_py.model_desc.multimodal_generic import MultimodalGenericModel
         model_config = self.model_config
         parallelism_config = self.parallelism_config
         fmha_config = self.fmha_config
@@ -45,8 +45,9 @@ class DeepSeekVLV2(BaseModel):
         moe_config = self.moe_config
         max_generate_batch_size = self.max_generate_batch_size
 
-        # GenericMoeModel preserves multimodal injection and hidden-state capture.
-        self.py_model = GenericMoeModel(
+        # Use MultimodalGenericModel to inject visual features into text embeddings.
+        # GenericMoeModel (text-only) would silently drop image features.
+        self.py_model = MultimodalGenericModel(
             model_config,
             parallelism_config,
             self.weight,

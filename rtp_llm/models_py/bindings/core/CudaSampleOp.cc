@@ -405,15 +405,9 @@ static GreedyOutput flashinferSampleGreedy(const GreedyParams& params, const tor
                                             0,
                                             (int64_t)cur_stream);
             if (need_sampling_dist) {
-                // Joint sampling accepts a token iff the count AND original mass
-                // of strictly greater probabilities are below k and p. Applying
-                // top-p to a top-k-renormalized distribution changes that set.
-                auto top_k_dist = torch::empty_like(probs_t);
-                top_k_renorm_probs(probs_t, top_k_dist, top_k_t, 0, (int64_t)cur_stream);
-                top_p_renorm_probs(probs_t, sampling_dist_t, top_p_t, 1.0, (int64_t)cur_stream);
-                auto support = top_k_dist.gt(0).logical_and(sampling_dist_t.gt(0));
-                sampling_dist_t.copy_(probs_t * support.to(probs_t.scalar_type()));
-                sampling_dist_t.div_(sampling_dist_t.sum(1, /*keepdim=*/true));
+                torch::Tensor temp_t = torch::zeros_like(sampling_dist_t);
+                top_k_renorm_probs(probs_t, temp_t, top_k_t, 1.0, (int64_t)cur_stream);
+                top_p_renorm_probs(temp_t, sampling_dist_t, top_p_t, 1.0, (int64_t)cur_stream);
             }
         }
     }

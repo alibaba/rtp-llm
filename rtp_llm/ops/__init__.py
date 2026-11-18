@@ -12,7 +12,6 @@ from typing import List, Optional
 
 import torch
 
-
 def _preload_nvidia_deps():
     """Preload nvidia wheel libraries that torch doesn't cover.
 
@@ -33,30 +32,27 @@ def _preload_nvidia_deps():
     }
     search_paths = []
     try:
+        usp = site.getusersitepackages()
+        if isinstance(usp, str):
+            search_paths.append(usp)
+    except Exception:
+        pass
+    try:
         search_paths.extend(site.getsitepackages())
     except Exception:
         pass
-    if site.ENABLE_USER_SITE:
-        try:
-            user_site = site.getusersitepackages()
-            search_paths.extend(
-                [user_site] if isinstance(user_site, str) else user_site
-            )
-        except Exception:
-            pass
 
     for folder, pattern in _NVIDIA_DEPS.items():
-        loaded = False
-        for sp in dict.fromkeys(search_paths):
+        for sp in search_paths:
             lib_dir = os.path.join(sp, "nvidia", folder, "lib")
-            for path in sorted(glob.glob(os.path.join(lib_dir, pattern))):
+            if not os.path.isdir(lib_dir):
+                continue
+            matches = glob.glob(os.path.join(lib_dir, pattern))
+            if matches:
                 try:
-                    ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
+                    ctypes.CDLL(matches[0], mode=ctypes.RTLD_GLOBAL)
                 except OSError:
-                    continue
-                loaded = True
-                break
-            if loaded:
+                    pass
                 break
 
 
@@ -199,8 +195,8 @@ try:
         FMHAType,
         GrammarConfig,
         GrpcConfig,
-        HiddenStateCaptureDtype,
         HWKernelConfig,
+        HiddenStateCaptureDtype,
         HybridAttentionConfig,
         HybridAttentionType,
         KVCacheConfig,

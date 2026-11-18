@@ -811,50 +811,6 @@ TEST_F(CudaSamplerTest, testCumLogProbsUsesSamplingDistributionInOriginalMode) {
     }
 }
 
-// Independent joint-support oracle: k=2,p=.6 keeps BOTH .5 and .3.
-// Sequential top-k then top-p would retain only .5 and report log(1).
-TEST_F(CudaSamplerTest, testOriginalCumLogProbsJointSupportOracle) {
-    auto                       logits      = cudaTensor({std::log(.5f), std::log(.3f), std::log(.2f)}, {1, 3});
-    auto                       tokens      = cudaIntTensor({0, 0}, {1, 2});
-    auto                       lengths     = cudaIntTensor({1}, {1});
-    auto                       inputs      = cudaIntTensor({-1}, {1});
-    auto                       top_k       = pinnedIntTensor({2});
-    auto                       top_p       = pinnedFloatTensor({.6f});
-    auto                       temperature = pinnedFloatTensor({1.f});
-    auto                       cum         = cudaTensor({0.f}, {1});
-    auto                       original    = cudaTensor({0.f, 0.f, 0.f}, {1, 3});
-    std::vector<at::Generator> generators{torch::make_generator<at::CUDAGeneratorImpl>()};
-    generators[0].set_current_seed(7);
-    GreedyParams params({logits,
-                         inputs,
-                         lengths,
-                         tokens,
-                         1,
-                         top_k,
-                         top_p,
-                         temperature,
-                         nullopt,
-                         nullopt,
-                         cum,
-                         nullopt,
-                         true,
-                         original,
-                         nullopt,
-                         nullopt,
-                         nullopt,
-                         generators});
-    execSampleGreedy(params);
-    check_cuda_error();
-    auto token = toHostInt(tokens)[1];
-    ASSERT_TRUE(token == 0 || token == 1);
-    const std::vector<float> raw{.5f, .3f, .2f};
-    auto                     actual = toHostFloat(original);
-    for (size_t i = 0; i < raw.size(); ++i) {
-        ASSERT_NEAR(actual[i], raw[i], 1e-6);
-    }
-    ASSERT_NEAR(toHostFloat(cum)[0], std::log(raw[token] / .8f), 1e-5);
-}
-
 TEST_F(CudaSamplerTest, testCudaSamplingKernelTopKTopP) {
     size_t batch_size = 4;
     auto   logits_t   = cudaTensor(

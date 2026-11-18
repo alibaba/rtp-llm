@@ -815,6 +815,10 @@ def _prepare_runtime_libs_archive(rootdir: Path) -> str:
         raise RuntimeError(f"remote-session found no runtime libs under {libs_dir}")
 
     archive = rootdir / _RUNTIME_LIBS_ARCHIVE
+    latest_input_mtime = max(p.stat().st_mtime for p in lib_files)
+    if archive.is_file() and archive.stat().st_mtime >= latest_input_mtime:
+        return str(archive.relative_to(rootdir))
+
     archive.parent.mkdir(parents=True, exist_ok=True)
     tmp_archive = archive.with_suffix(".tar.tmp")
     if tmp_archive.exists():

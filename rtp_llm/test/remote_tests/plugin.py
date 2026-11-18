@@ -609,24 +609,13 @@ def _upload_directory_with_progress(
 ):
     """Run CAS upload in a background thread and refresh a one-line progress display."""
     _, UploadProgress, _, _ = _load_remote_execution_types()
-    from .cas_client import UploadBudget
-
-    policy = select_remote_timeout_policy(
-        config.getoption("--rtp-ci-profile", default=None),
-        remote_timeout_override=config.getoption("--remote-timeout", default=None),
-        per_test=not config.getoption("--remote-session", default=False),
-    )
-    budget = UploadBudget(
-        time.monotonic() + policy.session_budget_seconds,
-        policy.rpc_timeout_seconds,
-    )
     progress = UploadProgress()
     err_holder: List[BaseException] = []
     result_holder: List = []
 
     def _run():
         try:
-            d = cas.upload_directory(rootdir, files, progress=progress, budget=budget)
+            d = cas.upload_directory(rootdir, files, progress=progress)
             result_holder.append(d)
         except BaseException as e:
             err_holder.append(e)
@@ -638,29 +627,22 @@ def _upload_directory_with_progress(
         config.getoption("--remote-session", default=False)
         or config.getoption("-q", default=0)
     )
-    try:
-        while t.is_alive():
-            budget.remaining()
-            with progress._lock:
-                ub, tb = progress.uploaded_blobs, progress.total_blobs
-                ubytes, tbytes = progress.uploaded_bytes, progress.total_bytes
-                phase = progress.phase
-            mb_up = ubytes / (1024 * 1024)
-            mb_tot = tbytes / (1024 * 1024) if tbytes else 0.0
-            if not compact:
-                if tb > 0:
-                    tw.write(
-                        f"\rCAS upload: {ub}/{tb} blobs ({mb_up:.1f}/{mb_tot:.1f} MiB) [{phase}]",
-                        flush=True,
-                    )
-                else:
-                    tw.write(f"\rCAS upload: [{phase}]", flush=True)
-            time.sleep(0.2)
-    except BaseException:
-        budget.cancelled.set()
-        cas.close()
-        t.join(timeout=1)
-        raise
+    while t.is_alive():
+        with progress._lock:
+            ub, tb = progress.uploaded_blobs, progress.total_blobs
+            ubytes, tbytes = progress.uploaded_bytes, progress.total_bytes
+            phase = progress.phase
+        mb_up = ubytes / (1024 * 1024)
+        mb_tot = tbytes / (1024 * 1024) if tbytes else 0.0
+        if not compact:
+            if tb > 0:
+                tw.write(
+                    f"\rCAS upload: {ub}/{tb} blobs ({mb_up:.1f}/{mb_tot:.1f} MiB) [{phase}]",
+                    flush=True,
+                )
+            else:
+                tw.write(f"\rCAS upload: [{phase}]", flush=True)
+        time.sleep(0.2)
     t.join()
     if not compact:
         tw.line("")
@@ -990,7 +972,7 @@ class RemoteREAPIPlugin:
                     )
                     break
             result = self.executor.execute(**kwargs)
-            if not result.safe_to_retry:
+            if result.operation_name and not result.operation_done:
                 log.warning(
                     "[RETRY] refusing retry: prior operation is not confirmed "
                     "terminal operation=%s last_stage=%s",
@@ -1041,10 +1023,7 @@ class RemoteREAPIPlugin:
     @pytest.hookimpl(tryfirst=True)
     def pytest_collection(self, session):
         """Delegate session collection to the GPU worker, including explicit paths."""
-        if (
-            self.mode == RemoteDispatchMode.SESSION
-            and not session.config.option.collectonly
-        ):
+        if self.mode == RemoteDispatchMode.SESSION:
             # Explicit profile paths bypass pytest_ignore_collect and may load
             # GPU-only conftests before collection_modifyitems can dispatch them.
             session.items = []
@@ -1057,8 +1036,6 @@ class RemoteREAPIPlugin:
 
     @pytest.hookimpl(trylast=True)
     def pytest_collection_modifyitems(self, items, config, session):
-        if config.option.collectonly:
-            return
         if self.mode == RemoteDispatchMode.SESSION:
             self._session_collection_modifyitems(self.config, items)
         else:
@@ -1636,8 +1613,6 @@ class RemoteREAPIPlugin:
     def pytest_runtestloop(self, session):
         if self.mode != RemoteDispatchMode.SESSION:
             return None
-        if self.config.option.collectonly:
-            return None
         if self._gpu_request is None:
             log.warning(
                 "Session mode: no tests to run remotely (0 collected for this profile)"
@@ -1803,8 +1778,6 @@ class RemoteREAPIPlugin:
 
     def _cached_testcases_for_session(self) -> List[ET.Element]:
         cached_cases: List[ET.Element] = []
-        if getattr(self, "no_cache", False):
-            return cached_cases
         for entry in self._session_cached_entries.values():
             if not entry.junit_testcase_xml:
                 continue
@@ -1812,17 +1785,6 @@ class RemoteREAPIPlugin:
                 testcase = ET.fromstring(entry.junit_testcase_xml)
             except ET.ParseError as exc:
                 log.debug("Skipping malformed cached junit testcase: %s", exc)
-                continue
-            nodeid = _testcase_nodeid(testcase)
-            if (
-                testcase.tag != "testcase"
-                or not nodeid
-                or any(
-                    testcase.find(tag) is not None
-                    for tag in ("failure", "error", "skipped")
-                )
-                or nodeid != getattr(entry, "test_nodeid", nodeid)
-            ):
                 continue
             cached_cases.append(testcase)
         return cached_cases
@@ -1842,7 +1804,6 @@ class RemoteREAPIPlugin:
             except ET.ParseError as exc:
                 log.warning("Failed to parse remote junit XML: %s", exc)
 
-        self._complete_cache_replay = False
         cached_cases = []
         for testcase in self._cached_testcases_for_session():
             nodeid = _testcase_nodeid(testcase)
@@ -1856,16 +1817,8 @@ class RemoteREAPIPlugin:
         root = ET.Element("testsuites")
         for suite in fresh_suites:
             root.append(suite)
-        if fresh_xml and "fresh_root" in locals():
-            for properties in fresh_root.findall("properties"):
-                root.append(properties)
 
         if cached_cases:
-            from .junit_merge import remove_replayed_zero_execution_error
-
-            self._complete_cache_replay = remove_replayed_zero_execution_error(
-                root, cached_cases
-            )
             cache_suite = ET.Element(
                 "testsuite",
                 {
@@ -2073,7 +2026,7 @@ class RemoteREAPIPlugin:
         # at the REAPI layer, regardless of what the worker claims.
         if result.response_status_code is not None and result.response_status_code != 0:
             exit_code = result.exit_code or 1
-        elif exit_code == 0 and "EXIT_CODE=" in stdout:
+        elif "EXIT_CODE=" in stdout:
             try:
                 exit_code = int(stdout.rsplit("EXIT_CODE=", 1)[1].strip().split()[0])
             except (ValueError, IndexError):
@@ -2084,8 +2037,6 @@ class RemoteREAPIPlugin:
             and result.response_status_code in (None, 0)
             and reported_execution_tests > 0
             and replayed_cached > 0
-            and merged_errors == 0
-            and getattr(self, "_complete_cache_replay", False)
         ):
             log.info(
                 "Remote pytest selected no fresh tests; validating replayed cache evidence"
@@ -2456,8 +2407,7 @@ class RemoteREAPIPlugin:
         lines.append(
             "rm -f bazel-testlogs/pytest/test.xml "
             "bazel-testlogs/pytest/test_*gpu.xml "
-            "bazel-testlogs/pytest/test_isolated_*.xml "
-            "bazel-testlogs/pytest/*.collection.*.json"
+            "bazel-testlogs/pytest/test_isolated_*.xml"
         )
         lines.append("cat > /tmp/rtp_remote_nodeid_plugin.py << '_NODEID_PLUGIN_PY_'")
         lines.append("import pytest")
@@ -2476,9 +2426,9 @@ class RemoteREAPIPlugin:
         if deselect_nodeids:
             lines.append("cat > /tmp/_pytest_deselect.txt << '_DESELECT_EOF_'")
             for nodeid in deselect_nodeids:
-                lines.append(nodeid)
+                lines.append(f"--deselect={nodeid}")
             lines.append("_DESELECT_EOF_")
-            deselect_file_arg = " --rtp-cache-deselect-file=/tmp/_pytest_deselect.txt"
+            deselect_file_arg = " @/tmp/_pytest_deselect.txt"
             log.info(
                 "Session deselect: %d nodeids written to heredoc file (%d bytes cmd saved)",
                 len(deselect_nodeids),
@@ -2541,7 +2491,7 @@ class RemoteREAPIPlugin:
                 "python rtp_llm/test/utils/device_resource.py "
                 f"{isolated_env_prefix}"
                 "python -m pytest -p no:remote-gpu -p no:rtp-ci-profile "
-                f"-p rtp_remote_nodeid_plugin -p rtp_llm.test.remote_tests.cache_collection -p rtp_remote_heartbeat_plugin {common} "
+                f"-p rtp_remote_nodeid_plugin -p rtp_remote_heartbeat_plugin {common} "
                 f"{shlex.quote(isolated_path)} "
                 f"{isolated_mark_arg}"
                 f"{keyword_arg}"
@@ -2565,7 +2515,7 @@ class RemoteREAPIPlugin:
                 f"export GPU_COUNT_PER_WORKER={tier}; "
                 f"python rtp_llm/test/utils/device_resource.py "
                 f"python -m pytest -p no:remote-gpu -p no:rtp-ci-profile "
-                f"-p rtp_remote_nodeid_plugin -p rtp_llm.test.remote_tests.cache_collection -p rtp_remote_heartbeat_plugin {parallel_common} "
+                f"-p rtp_remote_nodeid_plugin -p rtp_remote_heartbeat_plugin {parallel_common} "
                 f"{profile_paths_args}"
                 f"{mark_arg}"
                 f"{keyword_arg}"

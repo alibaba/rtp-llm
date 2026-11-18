@@ -20,8 +20,14 @@ if _os.path.isdir(_internal) and _internal not in __path__:
 del _os, _internal
 
 import sys
+import time
+import warnings
 
+st = time.time()
+# load th_transformer.so
+# Import internal models to register them
 from rtp_llm.utils.import_util import has_internal_source
+from rtp_llm.utils.triton_compile_patch import enable_compile_monitor
 
 
 # torch_patch monkey-patches torch.concat for FP8 fallback. Apply eagerly
@@ -76,6 +82,71 @@ else:
     # Keep _machinery / _MetaPathFinder / _DeferredTorchPatchFinder bound at
     # module level — find_spec is a closure that resolves _machinery when torch
     # is imported, which may be much later than rtp_llm.__init__ ran.
+
+
+_bootstrap_error = None
+
+
+# `from .ops import *` is needed at runtime for two reasons:
+#   (a) downstream code does `from rtp_llm.ops import X` and the eager
+#       import resolves the heavy `librtp_compute_ops.so` upfront.
+#   (b) it AVOIDS a circular import — `rtp_llm.device.device_base`
+#       imports `rtp_llm.ops.compute_ops`, which imports
+#       `rtp_llm.models_py.utils.arch.is_cuda`. If `.ops` isn't
+#       fully loaded BEFORE arch.py first runs, the chain
+#         arch → device → device_base → compute_ops → arch (partial)
+#       fails with `ImportError: cannot import name 'is_cuda' from
+#       partially initialized module rtp_llm.models_py.utils.arch`
+#       (run 39338093 smoke-light-sm8x tp2/beam_search_tp2 reproduction).
+#
+# But .ops imports torch at module level (rtp_llm/ops/__init__.py:10),
+# so eager loading at PYTEST PLUGIN DISCOVERY (when pytest imports
+# `rtp_llm.test.remote_tests.plugin` → triggers `rtp_llm/__init__.py`)
+# pulls torch into sys.modules BEFORE conftest.py runs its xdist GPU
+# slicing. Result: torch.cuInit() seen the wrong CUDA_VISIBLE_DEVICES;
+# test_gpu_isolation (test_torch_not_imported_before_gpu_slice +
+# test_device_count_matches_cvd) failed deterministically on ut-sm8x.
+#
+# Resolution: defer .ops only during pytest plugin discovery — once
+# conftest.py's slicing has run (signalled by `sys._RTP_CONFTEST_DONE` at
+# the END of its module-level code), eager ops loading is safe and DESIRED
+# for downstream import correctness.
+def _in_pytest_plugin_discovery() -> bool:
+    """True iff this import is happening during pytest's plugin discovery.
+
+    conftest.py sets `sys._RTP_CONFTEST_DONE = True` (Python attribute, NOT
+    env var) at the end of its module-level slicing block. We use a Python-
+    level flag because env vars LEAK from the controller pytest into spawned
+    xdist workers — if the controller's conftest already ran (env var set),
+    the worker's plugin discovery would see the inherited env var and skip
+    the deferral, importing torch BEFORE the worker's own conftest runs.
+    sys._RTP_CONFTEST_DONE is process-local so each xdist worker correctly
+    sees False until its own conftest sets it.
+    """
+    if "pytest" not in sys.modules:
+        return False
+    if getattr(sys, "_RTP_CONFTEST_DONE", False):
+        return False
+    return True
+
+
+try:
+    if not _in_pytest_plugin_discovery():
+        import triton  # noqa: F401
+        from .ops import *  # noqa: F401,F403
+except Exception as exc:
+    _bootstrap_error = exc
+    if not _in_pytest_plugin_discovery():
+        raise
+    warnings.warn(
+        f"Skipping heavy rtp_llm bootstrap during pytest startup: {exc}",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+
+# check triton version
+# if triton.__version__ < "3.4":
+#     enable_compile_monitor()
 
 
 def __getattr__(name: str) -> Any:

@@ -213,10 +213,14 @@ public:
         return false;
     }
 
-    // Aggregate the maximum return mode (NONE < DEFAULT < ORIGINAL).
-    // BatchDecodeScheduler separates DEFAULT and ORIGINAL streams. FIFO and
-    // direct StreamGroups callers can still form mixed batches; retain the
-    // maximum-mode fallback and warning for those callers.
+    // NOTE: Aggregates by "max mode" across all streams in the batch
+    // (NONE < DEFAULT < ORIGINAL). The scheduler (FIFOScheduler /
+    // BatchDecodeScheduler) now partitions streams so that DEFAULT and
+    // ORIGINAL are not scheduled into the same batch; therefore mixed
+    // DEFAULT+ORIGINAL batches should not reach this path in normal
+    // operation. The one-shot warning below remains as a defensive guard for
+    // code paths that construct StreamGroups directly without scheduler
+    // partitioning.
     ReturnAllProbsMode needReturnAllProbs() const {
         // get the max return all probs mode from all streams
         ReturnAllProbsMode return_all_probs = ReturnAllProbsMode::NONE;

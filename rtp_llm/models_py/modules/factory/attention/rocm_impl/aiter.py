@@ -106,52 +106,6 @@ def validate_v_layout(
     return True
 
 
-def implementation_v_layouts(impl, attn_configs, *, is_prefill):
-    """Layouts actually written/read by an implementation, after named selection."""
-    name = impl.NAME
-    if name == "aiter_triton" and not is_prefill:
-        return {False, True}
-    if (
-        name == "aiter_asm"
-        and not is_prefill
-        and attn_configs.size_per_head not in ASM_DECODE_HEAD_SIZES
-    ):
-        return set()
-    if name == "aiter":
-        return {is_prefill and attn_configs.kv_cache_dtype == KvCacheDataType.FP8}
-    if name in {"aiter_asm", "aiter_paged", "aiter_triton"}:
-        return {True}
-    return set()
-
-
-def select_compatible_v_layout(attn_configs, prefill_impls, decode_impls, fmha_config):
-    width = _kv_vector_width(attn_configs)
-    page = attn_configs.kernel_tokens_per_block
-    _validate_v_geometry(attn_configs.size_per_head, page, width)
-    prefill = set().union(
-        *(
-            implementation_v_layouts(i, attn_configs, is_prefill=True)
-            for i in prefill_impls
-        )
-    )
-    decode = set().union(
-        *(
-            implementation_v_layouts(i, attn_configs, is_prefill=False)
-            for i in decode_impls
-        )
-    )
-    compatible = prefill & decode
-    # At one vector per page the two physical layouts are identical.
-    if page == width and prefill and decode:
-        compatible = prefill
-    if not compatible:
-        raise ValueError(
-            "ROCm KV-cache V layout mismatch between selected prefill/decode backends"
-        )
-    preferred = prefill_writes_vectorized_v(attn_configs, fmha_config)
-    return preferred if preferred in compatible else next(iter(compatible))
-
-
 class _PrefillGraphMetadata:
     """Capture-owned staging; the runner fences the previous replay before reuse."""
 
@@ -1898,7 +1852,6 @@ class AiterPrefillImplPaged(FMHAImplBase):
         attn_inputs: PyAttentionInputs,
         parallelism_config: Optional[ParallelismConfig] = None,
         fmha_config: Optional[FMHAConfig] = None,
-        cache_vectorized_v: Optional[bool] = None,
     ) -> None:
         self.attn_configs = attn_configs
         self.fmha_config = fmha_config
@@ -1910,11 +1863,7 @@ class AiterPrefillImplPaged(FMHAImplBase):
         self.max_triton_q_len = min(4, 64 // query_group_size)
 
         self.batch_prefill_impl = AiterPrefillAttnOpPaged(attn_configs)
-        # CK batch-prefill reads vectorized V; Triton and the writer must use
-        # the same negotiated layout. Legacy enable flags cannot override it.
-        self.linear_v = cache_vectorized_v is False
-        if self.linear_v and self.tokens_per_block != _kv_vector_width(attn_configs):
-            raise ValueError("Paged prefill requires vectorized V cache")
+        self.linear_v = not prefill_writes_vectorized_v(attn_configs, fmha_config)
 
         rope_kvcache_cls = (
             FusedRopeKVCachePrefillOpNonAsm
@@ -2369,14 +2318,9 @@ class AiterDecodeImplTriton(AiterDecodeImplBase):
         attn_inputs: PyAttentionInputs,
         parallelism_config: Optional[ParallelismConfig] = None,
         fmha_config: Optional[FMHAConfig] = None,
-        cache_vectorized_v: Optional[bool] = None,
     ) -> None:
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
-        linear_v = not (
-            prefill_writes_vectorized_v(attn_configs, fmha_config)
-            if cache_vectorized_v is None
-            else cache_vectorized_v
-        )
+        linear_v = not prefill_writes_vectorized_v(attn_configs, fmha_config)
         self.fmha_impl = AiterDecodeAttnOpTriton(attn_configs, linear_v=linear_v)
         self.rope_kvcache_impl = (
             FusedRopeKVCacheDecodeOpNonAsm if linear_v else FusedRopeKVCacheDecodeOpAsm
