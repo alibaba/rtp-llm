@@ -2223,6 +2223,63 @@ TEST_F(FIFOSchedulerTest, testPDFusionCompletedLoadIsNotCountedTwice) {
     }
 }
 
+TEST_F(FIFOSchedulerTest, testPDFusionSinglePrefillGateDoesNotStarveBlockHoldingWaiter) {
+    auto [cache_manager, resource_context, model_config, runtime_config] =
+        makeReadinessResources(4, 1, RoleType::PDFUSION, 4);
+    runtime_config.fifo_scheduler_config.force_single_prefill = true;
+    ASSERT_TRUE(cache_manager->init());
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 3);
+    auto                   load_context  = setupPendingCacheLoad(cache_manager);
+    PDSepConfig            pd_sep_config = makePDFusionPDSepConfig();
+    ParallelismConfig      parallelism_config;
+    PDFusionRatioScheduler scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, cache_manager);
+
+    // B holds two real blocks while its async cache load is pending.
+    auto generation = makeStream({1, 2}, model_config, runtime_config, resource_context, /*max_new_tokens=*/1);
+    generation->generateConfig()->reuse_cache         = true;
+    generation->generateConfig()->enable_memory_cache = true;
+    ASSERT_TRUE(scheduler.enqueue(generation).ok());
+    auto loading = scheduler.schedule();
+    ASSERT_TRUE(loading.ok());
+    ASSERT_TRUE(loading->streams.empty());
+    ASSERT_EQ(generation->getStatus(), StreamState::LOADING_CACHE);
+    ASSERT_EQ(generation->curBlocksNum(), 2);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 1);
+
+    // A needs three blocks, which only B's completion can free. Its retryable
+    // malloc failure keeps it at the queue head; the single force_single_prefill
+    // slot must go to the block-holding B instead of being re-occupied by A
+    // every round.
+    auto prefill_only = makeStream({3, 4, 5}, model_config, runtime_config, resource_context, /*max_new_tokens=*/0);
+    ASSERT_TRUE(scheduler.enqueue(prefill_only).ok());
+    // The completed load returns B behind A in the waiting queue.
+    ASSERT_TRUE(load_context->settle(true));
+    auto ready = scheduler.schedule();
+    ASSERT_TRUE(ready.ok());
+    ASSERT_EQ(ready->streams.size(), 1)
+        << "the block-holding waiter must take the single-prefill slot";
+    EXPECT_EQ(ready->streams.front(), generation);
+    EXPECT_EQ(generation->getStatus(), StreamState::RUNNING);
+    EXPECT_FALSE(generation->hasError());
+    ASSERT_EQ(scheduler.waiting_streams_.size(), 1);
+    EXPECT_EQ(scheduler.waiting_streams_.front(), prefill_only);
+    EXPECT_EQ(prefill_only->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(prefill_only->curBlocksNum(), 0);
+    EXPECT_FALSE(prefill_only->hasError());
+
+    // B's completion releases its blocks and unblocks A's allocation.
+    generation->reportEvent(StreamEvents::GenerateDone);
+    auto recovered = scheduler.schedule();
+    ASSERT_TRUE(recovered.ok());
+    ASSERT_EQ(recovered->streams.size(), 1);
+    EXPECT_EQ(recovered->streams.front(), prefill_only);
+    EXPECT_EQ(prefill_only->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(prefill_only->curBlocksNum(), 3);
+    EXPECT_FALSE(prefill_only->hasError());
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
+}
+
 TEST_F(FIFOSchedulerTest, testPDFusionCompletedLoadRespectsTokenAdmission) {
     for (int token_budget : {4, 5}) {
         SCOPED_TRACE(token_budget);

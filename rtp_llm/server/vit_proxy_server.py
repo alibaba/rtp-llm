@@ -71,7 +71,14 @@ def resolve_min_healthy_workers(worker_count: int, configured_min: int = 0) -> i
             "VIT_PROXY_MIN_HEALTHY_WORKERS must be 0 (auto) or in "
             f"1..{worker_count}, got {configured_min!r}"
         )
-    return (worker_count + 1) // 2 if configured_min == 0 else configured_min
+    # Default 1, not ceil(N/2): FlexLB retires the aggregate VIT endpoint once the
+    # gRPC status plane reports it unhealthy, and VitCacheSelector has no fallback
+    # — a default majority quorum would un-route a proxy that can still serve
+    # with the surviving workers, failing 100% of multimodal requests with
+    # NO_VIT_WORKER/ROUTE_ERROR while base kept degraded 1/N service. Majority
+    # arbitration stays available as an explicit opt-in via
+    # VIT_PROXY_MIN_HEALTHY_WORKERS.
+    return 1 if configured_min == 0 else configured_min
 
 
 def resolve_default_rpc_timeout_seconds(

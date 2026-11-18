@@ -254,7 +254,9 @@ def init_vit_group_args(parser, vit_config):
         bind_to=(vit_config, "vit_proxy_min_healthy_workers"),
         type=_non_negative_int,
         default=0,
-        help="VIT proxy 最少健康 worker 数：0 自动取 ceil(N/2)，显式值必须在 1..N",
+        help="VIT proxy 最少健康 worker 数：默认 0 视为 1（任一健康 worker 存活即端点健康、保持降级服务）；"
+        "设为 >1 即显式启用多数派仲裁：健康数低于该值时 gRPC 状态面报 UNAVAILABLE、FlexLB 会摘除端点；"
+        "显式值必须在 1..N",
     )
     transport_config = vit_config.output_transport
     control_config = transport_config.control

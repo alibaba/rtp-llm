@@ -247,6 +247,11 @@ absl::StatusOr<ScheduleOutput> PDFusionRatioScheduler::schedule() {
         }
         if (new_streams_.empty()) {
             const size_t prev_waiting_size = waiting_streams_.size();
+            // Deterministic single-prefill rounds starve without this: see
+            // prioritizeBlockHoldingWaitingStreams.
+            if (explicit_force_single_prefill_) {
+                prioritizeBlockHoldingWaitingStreams();
+            }
             // Build once for this in-flight snapshot, then update for accepted candidates.
             admission_peak_state_.reset();
             const auto admitted_streams = evaluateWaitingStreams(waiting_streams_, /*include_running_mode=*/false);
@@ -291,6 +296,28 @@ absl::StatusOr<ScheduleOutput> PDFusionRatioScheduler::schedule() {
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
     return ScheduleOutput{running_streams_};
+}
+
+void PDFusionRatioScheduler::prioritizeBlockHoldingWaitingStreams() {
+    // Under force_single_prefill the waiting queue is scanned in FIFO order and the
+    // gate admits at most one candidate per prefill round. A fresh candidate whose
+    // per-group KV malloc fails retryably stays at the queue head: it re-passes the
+    // gate every round and re-occupies the single slot, while a block-holding
+    // candidate behind it (load initiated, KV owned) is rejected by the same gate
+    // forever — it never runs and never releases exactly the blocks the fresh
+    // candidate is waiting for, so prefill admission stalls. Evaluating block-holding
+    // candidates first gives the slot to the stream that can actually release KV;
+    // the unchanged gate then ends the round's admission after that single stream,
+    // preserving the one-prefill-per-round batching the flag asks for.
+    std::list<GenerateStreamPtr> block_holding;
+    for (auto it = waiting_streams_.begin(); it != waiting_streams_.end();) {
+        if (isAdmittedWaitingStream(*it)) {
+            block_holding.splice(block_holding.end(), waiting_streams_, it++);
+        } else {
+            ++it;
+        }
+    }
+    waiting_streams_.splice(waiting_streams_.begin(), block_holding);
 }
 
 PDFusionRatioScheduler::RoundType PDFusionRatioScheduler::chooseRound() {
