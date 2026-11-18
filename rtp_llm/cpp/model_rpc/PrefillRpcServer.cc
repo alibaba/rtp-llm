@@ -414,7 +414,10 @@ grpc::Status PrefillRpcServer::GenerateStreamCall(grpc::ServerContext*          
     const bool pd_separation = checkPDSupport(*request).supported;
     if (!pd_separation) {
         RTP_LLM_LOG_INFO("pd separation is disabled, call local rpc server");
-        return LocalRpcServer::GenerateStreamCall(server_context, request, response_writer);
+        if (!cancel_registry_) {
+            return grpc::Status(grpc::StatusCode::UNAVAILABLE, "Prefill is not initialized");
+        }
+        return generateLocalStream(server_context, request, response_writer, cancel_registry_.get());
     }
     PDCancelRegistry::Handle cancel_handle;
     // Activated only after successful admission; destruction still follows
@@ -991,7 +994,7 @@ PrefillRpcServer::Cancel(grpc::ServerContext*, const CancelRequestPB* request, C
         [this](const auto& handle) {
             // A completed Prefill can still have unconsumed KV. Fence it
             // before the registry can publish local cleanup.
-            if (engine_ && engine_->getCacheManager()) {
+            if (!handle->unique_key.empty() && engine_ && engine_->getCacheManager()) {
                 engine_->getCacheManager()->cancelPrefillRequest(handle->unique_key, handle->deadline_ms);
             }
         });

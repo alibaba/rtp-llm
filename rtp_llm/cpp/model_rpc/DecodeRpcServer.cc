@@ -750,11 +750,30 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
     }
     if (!pd_separation) {
         RTP_LLM_LOG_DEBUG("pd separation is disabled, call prefill server");
+        if (!cancel_registry_ || !prefill_server_caller_) {
+            return grpc::Status(grpc::StatusCode::UNAVAILABLE, "Decode is not initialized");
+        }
+        PDCancelRegistry::Handle handle;
+        const auto admission = cancel_registry_->admit(*request,
+                                                       "",
+                                                       prefillAddress(*request),
+                                                       request_entry_ms + handoff_timeout_ms,
+                                                       handle);
+        if (!admission.ok()) {
+            return serializeErrorMsg(std::to_string(request->request_id()),
+                                     QueryConverter::transRequestInfo(request->request_info()),
+                                     admission);
+        }
+        PDCancelRegistry::CallGuard call_guard(*cancel_registry_, handle);
         GenerateInputPB prefill_forward_request;
         prefill_forward_request.CopyFrom(*effective_request);
         prefill_forward_request.mutable_generate_config()->set_timeout_ms(configured_timeout_ms);
         prefill_forward_request.mutable_generate_config()->set_can_use_pd_separation(false);
-        return prefill_server_caller_->callPrefill(server_context, &prefill_forward_request, response_writer);
+        const auto status = prefill_server_caller_->callPrefill(server_context, &prefill_forward_request, response_writer);
+        if (!handle->canceled.load()) {
+            cancel_registry_->finishDownstream(handle);
+        }
+        return status;
     }
 
     const auto log_pd_error = [&](const char* stage, const grpc::Status& status) {
