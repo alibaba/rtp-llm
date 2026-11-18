@@ -363,14 +363,36 @@ def get_fmha_impl(
     attn_inputs.is_cuda_graph = is_cuda_graph
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
     strict_impl_selection = False
-    if get_device_type() == DeviceType.ROCm:
+    rocm_v_layout = None
+    if get_device_type() == DeviceType.ROCm and attn_configs.need_rope_kv_cache:
         from rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter import (
-            validate_v_layout,
+            _kv_vector_width,
+            implementation_v_layouts,
+            select_compatible_v_layout,
         )
 
-        strict_impl_selection = validate_v_layout(
-            attn_configs, attn_inputs, fmha_config
+        def layout_candidates(impls, is_prefill):
+            selected = _select_attn_impls(impls, fmha_config, is_prefill)
+            automatic = fmha_config is None or _get_effective_backends(
+                fmha_config, is_prefill
+            ) == ["auto"]
+            return [
+                impl
+                for impl in selected
+                if not (
+                    automatic
+                    and fmha_config
+                    and _is_fmha_impl_disabled_legacy(impl, fmha_config)
+                )
+            ]
+
+        rocm_v_layout = select_compatible_v_layout(
+            attn_configs,
+            layout_candidates(PREFILL_MHA_IMPS, True),
+            layout_candidates(DECODE_MHA_IMPS, False),
+            fmha_config,
         )
+        strict_impl_selection = True
 
     # Shared backend resolution (attn_backend / overrides / none / blocklist +
     # name validation). Returns candidate impls in priority order.
@@ -393,7 +415,23 @@ def get_fmha_impl(
         # Check if implementation supports parallelism config
         if not impl.support_parallelism_config(parallelism_config):
             continue
+        if rocm_v_layout is not None:
+            layouts = implementation_v_layouts(
+                impl, attn_configs, is_prefill=attn_inputs.is_prefill
+            )
+            if not layouts or (
+                rocm_v_layout not in layouts
+                and attn_configs.kernel_tokens_per_block
+                != _kv_vector_width(attn_configs)
+            ):
+                continue
         kwargs = {"fmha_config": fmha_config} if impl.accepts_fmha_config else {}
+        if rocm_v_layout is not None and impl_class_name in {
+            "AiterDecodeImplTriton",
+            "AiterPrefillImplPaged",
+            "AiterPrefillImplTriton",
+        }:
+            kwargs["cache_vectorized_v"] = rocm_v_layout
         try:
             instance = impl(attn_configs, attn_inputs, parallelism_config, **kwargs)
         except DecodeRopeContractError:

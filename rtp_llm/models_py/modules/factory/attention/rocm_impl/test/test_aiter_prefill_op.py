@@ -1128,8 +1128,10 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
             use_asm_pa=False,
             impl_class=AiterPrefillImplTriton,
         )
-        self.assertTrue(impl.linear_v)
-        self.assertFalse(impl.supports_generation_prefill_cuda_graph())
+        # Legacy flags still gate auto selection, but an explicitly selected
+        # backend owns its physical cache layout and can capture with it.
+        self.assertFalse(impl.linear_v)
+        self.assertTrue(impl.supports_generation_prefill_cuda_graph())
 
     def test_triton_backend_feature_gate(self):
         flags = FMHAConfig()
@@ -3454,6 +3456,8 @@ class TestVLayoutContract(unittest.TestCase):
         config, inputs = self._make_case(256, 16)
         inputs.is_prefill = False
         flags = self._decode_flags(aiter=True, asm=True, triton=False)
+        flags.prefill_attn_backend = "aiter_asm"
+        flags.decode_attn_backend = "aiter"
         with self.assertRaisesRegex(ValueError, "layout mismatch"):
             attn_factory.get_fmha_impl(config, None, inputs, fmha_config=flags)
 
@@ -3475,6 +3479,7 @@ class TestVLayoutContract(unittest.TestCase):
 
     def test_constructor_fallback_is_strict_only_with_layout_validator(self):
         class BrokenImpl:
+            NAME = "aiter"
             accepts_fmha_config = False
             support = support_parallelism_config = staticmethod(lambda *_: True)
 
