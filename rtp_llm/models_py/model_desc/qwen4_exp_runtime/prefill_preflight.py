@@ -6,6 +6,7 @@ only scoped receipts for that forward. Side-cache and selected-token checks
 keep their existing mutation boundaries. No receipt survives a call.
 """
 
+from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 
 import torch
@@ -95,37 +96,51 @@ def main_geometry_preflight(entries):
             if receipts is None:
                 impl._model_prefill_geometry = receipts = []
             receipts.append(receipt)
-        yield
+        yield True
     finally:
         for impl, _ in pending:
             impl._model_prefill_geometry = None
 
 
 def prefill_geometry_scope(model, inputs, fmha_impl):
+    attn_inputs = getattr(inputs, "attention_inputs", None)
+    if isinstance(attn_inputs, Mapping):
+        attn_inputs = next(iter(attn_inputs.values()), None)
     if (
         model.kv_cache is None
-        or fmha_impl is None
-        or getattr(model.config, "is_mtp", False)
-        or torch.version.hip is not None
-        or not inputs.input_ids.is_cuda
-        or torch.cuda.get_device_capability(inputs.input_ids.device) != (12, 0)
-        or any(
-            module._forward_hooks or module._forward_pre_hooks
+        or not getattr(attn_inputs, "is_prefill", False)
+        or getattr(attn_inputs, "is_target_verify", False)
+        or getattr(attn_inputs, "is_cuda_graph", False)
+    ):
+        return nullcontext(True)
+    if (
+        any(
+            module._forward_hooks
+            or module._forward_pre_hooks
+            or "forward" in module.__dict__
             for module in model.modules()
         )
         or torch.nn.modules.module._global_forward_hooks
         or torch.nn.modules.module._global_forward_pre_hooks
     ):
-        return nullcontext()
+        # Hooks can update inference tensors without a version counter. Read
+        # QSA input metadata afresh in each layer when Python can change it.
+        return nullcontext(False)
+    if (
+        fmha_impl is None
+        or getattr(model.config, "is_mtp", False)
+        or torch.version.hip is not None
+        or not inputs.input_ids.is_cuda
+        or torch.cuda.get_device_capability(inputs.input_ids.device) != (12, 0)
+    ):
+        return nullcontext(True)
     from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpModel
     from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import (
         SparseGqaFmhaImpl,
     )
 
-    if type(model) is not Qwen4ExpModel or any(
-        "forward" in module.__dict__ for module in model.modules()
-    ):
-        return nullcontext()
+    if type(model) is not Qwen4ExpModel:
+        return nullcontext(True)
 
     entries = []
     for index, layer in enumerate(model.layers):
@@ -137,7 +152,7 @@ def prefill_geometry_scope(model, inputs, fmha_impl):
             or impl.is_target_verify
             or impl.attn_inputs.is_cuda_graph
         ):
-            return nullcontext()
+            return nullcontext(True)
         bases = impl.attn_inputs.prefix_lengths
         lengths = impl.attn_inputs.input_lengths
         if (
@@ -148,7 +163,7 @@ def prefill_geometry_scope(model, inputs, fmha_impl):
             or bases.dtype not in (torch.int32, torch.int64)
             or lengths.dtype not in (torch.int32, torch.int64)
         ):
-            return nullcontext()
+            return nullcontext(True)
         if not any(bases.tolist()):
             continue
         cache = model.kv_cache.get_layer_cache(index, model._attention_tag(index))
