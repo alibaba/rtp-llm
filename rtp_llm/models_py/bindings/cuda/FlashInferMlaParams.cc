@@ -562,32 +562,34 @@ void FlashInferMlaAttnParams::fillDecodeCudaGraphParams(torch::Tensor sequence_l
     const int page_capacity = batch_size * max_blocks_per_batch;
     ensureTensorSize(batch_size, batch_size, page_capacity, 0, batch_size * 4, true);
 
-    auto set_i32_shape = [](torch::Tensor& tensor, std::vector<int64_t> shape) {
+    auto set_shape = [](torch::Tensor& tensor, std::vector<int64_t> shape) {
         if (tensor.defined()) {
             tensor.unsafeGetTensorImpl()->set_sizes_contiguous(shape);
         }
     };
 
-    set_i32_shape(decode_page_indptr_d, {batch_size + 1});
-    set_i32_shape(decode_page_indptr_h, {batch_size + 1});
-    set_i32_shape(prefill_ragged_kv_len_indptr_d, {batch_size + 1});
-    set_i32_shape(prefill_ragged_kv_len_indptr_h, {batch_size + 1});
-    set_i32_shape(qo_indptr_d, {batch_size + 1});
-    set_i32_shape(qo_indptr_h, {batch_size + 1});
-    set_i32_shape(batch_indice_d, {batch_size});
-    set_i32_shape(batch_indice_h, {batch_size});
-    set_i32_shape(positions_d, {batch_size});
-    set_i32_shape(positions_h, {batch_size});
-    set_i32_shape(kvlen_d, {batch_size});
-    set_i32_shape(kvlen_h, {batch_size});
-    set_i32_shape(paged_kv_last_page_len_d, {batch_size});
-    set_i32_shape(paged_kv_last_page_len_h, {batch_size});
-    set_i32_shape(page_indice_d, {page_capacity});
-    set_i32_shape(page_indice_h, {page_capacity});
-    set_i32_shape(reuse_cache_page_indice_d, {0});
-    set_i32_shape(reuse_cache_page_indice_h, {0});
-    set_i32_shape(batch_reuse_info_vec_d, {batch_size, 4});
-    set_i32_shape(batch_reuse_info_vec_h, {batch_size, 4});
+    set_shape(decode_page_indptr_d, {batch_size + 1});
+    set_shape(decode_page_indptr_h, {batch_size + 1});
+    set_shape(prefill_ragged_kv_len_indptr_d, {batch_size + 1});
+    set_shape(prefill_ragged_kv_len_indptr_h, {batch_size + 1});
+    set_shape(qo_indptr_d, {batch_size + 1});
+    set_shape(qo_indptr_h, {batch_size + 1});
+    set_shape(batch_indice_d, {batch_size});
+    set_shape(batch_indice_h, {batch_size});
+    set_shape(positions_d, {batch_size});
+    set_shape(positions_h, {batch_size});
+    set_shape(kvlen_d, {batch_size});
+    set_shape(kvlen_h, {batch_size});
+    set_shape(paged_kv_last_page_len_d, {batch_size});
+    set_shape(paged_kv_last_page_len_h, {batch_size});
+    set_shape(page_indice_d, {page_capacity});
+    set_shape(page_indice_h, {page_capacity});
+    set_shape(slot_mapping_d_, {batch_size});
+    set_shape(slot_mapping_h_, {batch_size});
+    set_shape(reuse_cache_page_indice_d, {0});
+    set_shape(reuse_cache_page_indice_h, {0});
+    set_shape(batch_reuse_info_vec_d, {batch_size, 4});
+    set_shape(batch_reuse_info_vec_h, {batch_size, 4});
 
     cudaStream_t stream = GET_CURRENT_STREAM();
     invokePrepareFlashInferDecodeParams(sequence_lengths_plus_1_d.data_ptr<int32_t>(),
@@ -602,7 +604,8 @@ void FlashInferMlaAttnParams::fillDecodeCudaGraphParams(torch::Tensor sequence_l
                                         batch_size,
                                         max_blocks_per_batch,
                                         seq_size_per_block,
-                                        stream);
+                                        stream,
+                                        slot_mapping_d_.data_ptr<int64_t>());
 
     batch_indice                 = batch_indice_d;
     page_indice                  = page_indice_d;
@@ -614,7 +617,7 @@ void FlashInferMlaAttnParams::fillDecodeCudaGraphParams(torch::Tensor sequence_l
     kvlen                        = kvlen_d;
     positions                    = positions_d;
     batch_reuse_info_vec         = batch_reuse_info_vec_d;
-    slot_mapping                 = torch::Tensor();
+    slot_mapping                 = slot_mapping_d_;
 }
 
 void FlashInferMlaAttnParams::fillParamsMhaDevice(torch::Tensor t_prefix_lengths,

@@ -1,5 +1,6 @@
 #include "rtp_llm/models_py/bindings/cuda/SparseMlaParams.h"
 #include "rtp_llm/models_py/bindings/cuda/FlashInferMlaParams.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/cuda_graph_prepare.h"
 
 #include <cuda_runtime.h>
 
@@ -496,6 +497,143 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
     }
 }
 
+void SparseMlaParams::fillMultiTokenDecodeParams(torch::Tensor input_lengths_d,
+                                                 torch::Tensor prefix_lengths_d,
+                                                 torch::Tensor block_table_d,
+                                                 int           seq_size_per_block,
+                                                 int           total_tokens) {
+    RTP_LLM_CHECK_WITH_INFO(input_lengths_d.dim() == 1 && prefix_lengths_d.dim() == 1 && block_table_d.dim() == 2
+                                && total_tokens > 0 && input_lengths_d.numel() > 0
+                                && prefix_lengths_d.numel() == input_lengths_d.numel()
+                                && block_table_d.size(0) == input_lengths_d.numel(),
+                            "multi-token decode metadata shapes are inconsistent");
+    const int batch_size    = static_cast<int>(input_lengths_d.numel());
+    const int page_capacity = static_cast<int>(block_table_d.numel());
+    FlashInferMlaAttnParams::ensureTensorSize(batch_size, total_tokens, page_capacity, 0, batch_size * 4);
+    ensureTensorSize(batch_size, total_tokens);
+    multi_token_decode_total_tokens_ = total_tokens;
+    // The replay kernel uses these shapes as its active capacities. Repeated
+    // eager calls may reuse allocations from a larger preceding batch.
+    kvlen_d.unsafeGetTensorImpl()->set_sizes_contiguous({batch_size});
+    batch_indice_d.unsafeGetTensorImpl()->set_sizes_contiguous({total_tokens});
+    page_indice_d.unsafeGetTensorImpl()->set_sizes_contiguous({page_capacity});
+    fillMultiTokenDecodeCudaGraphParams(input_lengths_d, prefix_lengths_d, block_table_d, seq_size_per_block);
+}
+
+void SparseMlaParams::fillMultiTokenDecodeCudaGraphParams(torch::Tensor input_lengths_d,
+                                                          torch::Tensor prefix_lengths_d,
+                                                          torch::Tensor kv_cache_block_id_device,
+                                                          int           seq_size_per_block) {
+    RTP_LLM_CHECK_WITH_INFO(input_lengths_d.defined() && input_lengths_d.is_cuda(), "expects CUDA input_lengths");
+    RTP_LLM_CHECK_WITH_INFO(prefix_lengths_d.defined() && prefix_lengths_d.is_cuda(), "expects CUDA prefix_lengths");
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_block_id_device.defined() && kv_cache_block_id_device.is_cuda(),
+                            "expects CUDA kv_cache block table");
+
+    RTP_LLM_CHECK_WITH_INFO(input_lengths_d.scalar_type() == torch::kInt32 && input_lengths_d.is_contiguous()
+                                && prefix_lengths_d.scalar_type() == torch::kInt32 && prefix_lengths_d.is_contiguous()
+                                && kv_cache_block_id_device.scalar_type() == torch::kInt32
+                                && kv_cache_block_id_device.is_contiguous(),
+                            "multi-token decode metadata expects contiguous int32 tensors");
+    RTP_LLM_CHECK_WITH_INFO(input_lengths_d.dim() == 1 && prefix_lengths_d.dim() == 1
+                                && kv_cache_block_id_device.dim() == 2 && input_lengths_d.numel() > 0
+                                && prefix_lengths_d.numel() == input_lengths_d.numel()
+                                && kv_cache_block_id_device.size(0) == input_lengths_d.numel() && seq_size_per_block > 0
+                                && input_lengths_d.device() == prefix_lengths_d.device()
+                                && input_lengths_d.device() == kv_cache_block_id_device.device(),
+                            "multi-token decode metadata shapes/devices are inconsistent");
+    RTP_LLM_CHECK_WITH_INFO(multi_token_decode_total_tokens_ > 0 && kvlen_d.defined() && batch_indice_d.defined(),
+                            "multi-token decode metadata must be initialized before replay");
+
+    const int batch_size           = static_cast<int>(input_lengths_d.size(0));
+    const int max_blocks_per_batch = static_cast<int>(kv_cache_block_id_device.size(1));
+    const int cap_batch            = kvlen_d.defined() ? static_cast<int>(kvlen_d.size(0)) : batch_size;
+    const int cap_tokens           = batch_indice_d.defined() ? static_cast<int>(batch_indice_d.size(0)) : batch_size;
+
+    RTP_LLM_CHECK_WITH_INFO(batch_size <= cap_batch
+                                && static_cast<int64_t>(batch_size) * max_blocks_per_batch <= page_indice_d.numel()
+                                && multi_token_decode_total_tokens_ <= cap_tokens,
+                            "multi-token decode metadata exceeds captured capacity");
+
+    cudaStream_t stream = GET_CURRENT_STREAM();
+
+    invokePrepareSparseMlaTargetVerifyParams(input_lengths_d.data_ptr<int32_t>(),
+                                             prefix_lengths_d.data_ptr<int32_t>(),
+                                             kv_cache_block_id_device.data_ptr<int32_t>(),
+                                             batch_indice_d.data_ptr<int32_t>(),
+                                             page_indice_d.data_ptr<int32_t>(),
+                                             decode_page_indptr_d.data_ptr<int32_t>(),
+                                             paged_kv_last_page_len_d.data_ptr<int32_t>(),
+                                             qo_indptr_d.data_ptr<int32_t>(),
+                                             prefill_ragged_kv_len_indptr_d.data_ptr<int32_t>(),
+                                             kvlen_d.data_ptr<int32_t>(),
+                                             positions_d.data_ptr<int32_t>(),
+                                             slot_mapping_d_.data_ptr<int64_t>(),
+                                             expanded_seq_lens_d_.data_ptr<int32_t>(),
+                                             topk_indices_offset_d_.data_ptr<int32_t>(),
+                                             ks_d_.data_ptr<int32_t>(),
+                                             ke_d_.data_ptr<int32_t>(),
+                                             batch_size,
+                                             max_blocks_per_batch,
+                                             seq_size_per_block,
+                                             cap_batch,
+                                             cap_tokens,
+                                             stream);
+
+    int total_tokens = multi_token_decode_total_tokens_;
+    RTP_LLM_CHECK_WITH_INFO(total_tokens > 0, "multi-token decode metadata must be initialized before replay");
+    const int page_capacity = batch_size * max_blocks_per_batch;
+
+    auto set_shape = [](torch::Tensor& t, std::vector<int64_t> s) {
+        if (t.defined())
+            t.unsafeGetTensorImpl()->set_sizes_contiguous(s);
+    };
+
+    set_shape(batch_indice_d, {total_tokens});
+    set_shape(batch_indice_h, {total_tokens});
+    set_shape(positions_d, {total_tokens});
+    set_shape(positions_h, {total_tokens});
+    set_shape(kvlen_d, {batch_size});
+    set_shape(kvlen_h, {batch_size});
+    set_shape(qo_indptr_d, {batch_size + 1});
+    set_shape(qo_indptr_h, {batch_size + 1});
+    set_shape(decode_page_indptr_d, {batch_size + 1});
+    set_shape(decode_page_indptr_h, {batch_size + 1});
+    set_shape(paged_kv_last_page_len_d, {batch_size});
+    set_shape(paged_kv_last_page_len_h, {batch_size});
+    set_shape(prefill_ragged_kv_len_indptr_d, {batch_size + 1});
+    set_shape(prefill_ragged_kv_len_indptr_h, {batch_size + 1});
+    set_shape(page_indice_d, {page_capacity});
+    set_shape(page_indice_h, {page_capacity});
+    set_shape(slot_mapping_d_, {total_tokens});
+    set_shape(slot_mapping_h_, {total_tokens});
+
+    set_shape(expanded_seq_lens_d_, {total_tokens});
+    set_shape(expanded_seq_lens_h_, {total_tokens});
+    set_shape(topk_indices_offset_d_, {total_tokens});
+    set_shape(topk_indices_offset_h_, {total_tokens});
+    set_shape(ks_d_, {total_tokens});
+    set_shape(ks_h_, {total_tokens});
+    set_shape(ke_d_, {total_tokens});
+    set_shape(ke_h_, {total_tokens});
+
+    batch_indice                 = batch_indice_d;
+    page_indice                  = page_indice_d;
+    reuse_cache_page_indice      = torch::Tensor();
+    decode_page_indptr           = decode_page_indptr_d;
+    prefill_ragged_kv_len_indptr = prefill_ragged_kv_len_indptr_d;
+    paged_kv_last_page_len       = paged_kv_last_page_len_d;
+    qo_indptr                    = qo_indptr_d;
+    kvlen                        = kvlen_d;
+    positions                    = positions_d;
+    batch_reuse_info_vec         = torch::Tensor();
+    slot_mapping                 = slot_mapping_d_;
+
+    expanded_seq_lens   = expanded_seq_lens_d_;
+    topk_indices_offset = topk_indices_offset_d_;
+    ks                  = ks_d_;
+    ke                  = ke_d_;
+}
+
 void SparseMlaParams::fillSparseMlaDecodeCudaGraphParams(torch::Tensor sequence_lengths_plus_1_d,
                                                          torch::Tensor kv_cache_block_id_device,
                                                          int           seq_size_per_block) {
@@ -522,6 +660,20 @@ void registerPySparseMlaParams(pybind11::module& m) {
             pybind11::arg("attention_inputs"),
             pybind11::arg("seq_size_per_block"),
             pybind11::arg("forbid_realloc") = false)
+        .def("fill_multi_token_decode_params",
+             &SparseMlaParams::fillMultiTokenDecodeParams,
+             pybind11::arg("input_lengths"),
+             pybind11::arg("prefix_lengths"),
+             pybind11::arg("kv_cache_block_id_device"),
+             pybind11::arg("seq_size_per_block"),
+             pybind11::arg("total_tokens"))
+        .def("fill_multi_token_decode_cuda_graph_params",
+             &SparseMlaParams::fillMultiTokenDecodeCudaGraphParams,
+             pybind11::arg("input_lengths"),
+             pybind11::arg("prefix_lengths"),
+             pybind11::arg("kv_cache_block_id_device"),
+             pybind11::arg("seq_size_per_block"))
+        .def_property_readonly("multi_token_decode_total_tokens", &SparseMlaParams::multiTokenDecodeTotalTokens)
         .def("fill_sparse_mla_decode_cuda_graph_params",
              &SparseMlaParams::fillSparseMlaDecodeCudaGraphParams,
              pybind11::arg("sequence_lengths_plus_1_device"),

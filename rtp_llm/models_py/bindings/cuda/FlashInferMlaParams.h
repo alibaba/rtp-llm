@@ -27,10 +27,12 @@ private:
     int    max_batch_reuse_info_ = 0;
     size_t max_i64_elements_     = 0;
 
-    // Private slot_mapping tensors
+protected:
+    // Native MLA metadata fills share these preallocated slot-map views.
     torch::Tensor slot_mapping_h_;
     torch::Tensor slot_mapping_d_;
 
+private:
     // Helper method to refresh buffer shapes and copy to device (single memcpy)
     void
     refreshBuffer(int batch_size, int input_token_num, int page_num, int reuse_page_num, int batch_reuse_info_size);
@@ -47,6 +49,7 @@ private:
                             int&          reuse_page_num,
                             int&          batch_reuse_info_size);
 
+protected:
     // Ensure tensors are allocated with sufficient size.
     // forbid_realloc: when true (replay path only), throw if realloc would be needed.
     void ensureTensorSize(int  batch_size,
@@ -56,7 +59,6 @@ private:
                           int  batch_reuse_info_size,
                           bool forbid_realloc = false);
 
-protected:
     static std::tuple<torch::Tensor, std::vector<torch::Tensor>> allocateManyBuffer(
         const std::vector<std::vector<int64_t>>& shapes, bool is_device, torch::ScalarType dtype = torch::kInt32);
 

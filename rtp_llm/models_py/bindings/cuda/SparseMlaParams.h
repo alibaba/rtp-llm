@@ -27,6 +27,7 @@ private:
     torch::Tensor topk_indices_offset_d_;
     torch::Tensor ks_d_;
     torch::Tensor ke_d_;
+    int           multi_token_decode_total_tokens_ = 0;
 
     void ensureTensorSize(int batch_size, int token_num, bool forbid_realloc = false);
     void fillParamsInternal(bool                 is_prefill,
@@ -40,10 +41,10 @@ private:
     void refreshBuffer(int batch_size, int token_num, bool is_prefill);
 
     // CP Plan buffers
-    torch::Tensor cp_buf_h_i64_;   // pinned HOST buffer for int64 CP tensors
-    torch::Tensor cp_buf_d_i64_;   // DEVICE buffer for int64 CP tensors
-    torch::Tensor cp_buf_h_i32_2_; // pinned HOST buffer for int32 CP tensors (cu_kv_seqlens)
-    torch::Tensor cp_buf_d_i32_2_; // DEVICE buffer for int32 CP tensors
+    torch::Tensor cp_buf_h_i64_;    // pinned HOST buffer for int64 CP tensors
+    torch::Tensor cp_buf_d_i64_;    // DEVICE buffer for int64 CP tensors
+    torch::Tensor cp_buf_h_i32_2_;  // pinned HOST buffer for int32 CP tensors (cu_kv_seqlens)
+    torch::Tensor cp_buf_d_i32_2_;  // DEVICE buffer for int32 CP tensors
 
     size_t cp_max_i64_elements_  = 0;
     size_t cp_max_i32_elements_  = 0;
@@ -65,6 +66,18 @@ private:
 
 public:
     void fillParams(torch_ext::PyAttentionInputs attn_inputs, int seq_size_per_block, bool forbid_realloc = false);
+    void fillMultiTokenDecodeParams(torch::Tensor input_lengths,
+                                    torch::Tensor prefix_lengths,
+                                    torch::Tensor block_table,
+                                    int           seq_size_per_block,
+                                    int           total_tokens);
+    void fillMultiTokenDecodeCudaGraphParams(torch::Tensor input_lengths,
+                                             torch::Tensor prefix_lengths,
+                                             torch::Tensor block_table,
+                                             int           seq_size_per_block);
+    int  multiTokenDecodeTotalTokens() const {
+        return multi_token_decode_total_tokens_;
+    }
     void fillSparseMlaDecodeCudaGraphParams(torch::Tensor sequence_lengths_plus_1_d,
                                             torch::Tensor kv_cache_block_id_device,
                                             int           seq_size_per_block);
@@ -79,14 +92,14 @@ public:
     torch::Tensor schedule_metadata;
 
     // CP Plan: compute CP indices on CPU, single cudaMemcpyAsync to device
-    void fillCpPlanParams(const torch::Tensor&         padding_mask,
-                          const torch::Tensor&         kv_restore_indices,
-                          const std::vector<int64_t>&  q0_idx,
-                          const std::vector<int64_t>&  q1_idx,
-                          int                          cp_rank,
-                          int                          local_tokens,
-                          const torch::Tensor&         actual_input_lengths,
-                          const torch::Tensor&         prefix_lengths);
+    void fillCpPlanParams(const torch::Tensor&        padding_mask,
+                          const torch::Tensor&        kv_restore_indices,
+                          const std::vector<int64_t>& q0_idx,
+                          const std::vector<int64_t>& q1_idx,
+                          int                         cp_rank,
+                          int                         local_tokens,
+                          const torch::Tensor&        actual_input_lengths,
+                          const torch::Tensor&        prefix_lengths);
 
     // CP Plan outputs (device tensors)
     torch::Tensor cp_kv_restore_unpad_indices;  // [n_valid], int64
