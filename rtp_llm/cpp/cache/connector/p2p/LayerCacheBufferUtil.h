@@ -57,7 +57,8 @@ public:
                             const std::vector<size_t>& logical_positions,
                             int                        cp_rank,
                             int                        cp_size,
-                            size_t                     cache_key_tokens_per_block = 1);
+                            size_t                     cache_key_tokens_per_block = 1,
+                            bool                       shared_pp_block_table      = false);
 
     /// @brief 对某个 tag 覆盖的每一层各产出一个 buffer（route 与 layer 无关，故在此展开）。
     [[nodiscard]] static ErrorResult<std::vector<std::shared_ptr<LayerCacheBuffer>>>

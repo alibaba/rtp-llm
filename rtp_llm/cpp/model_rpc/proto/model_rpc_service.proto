@@ -814,6 +814,50 @@ message TransferRoutePB {
     // never re-derive a key set. Empty in the Prefill direction: the caller must
     // select the route's keys using its cache group's projection rules.
     repeated LayerCacheBlockPB layer_blocks = 9;
+    // Prefill's stage-local layers for this PP route. Empty for the TP-only path.
+    repeated uint32 prefill_layer_ids = 10;
+    uint64 slice_payload_bytes = 11;
+}
+
+message P2PShardLayoutPB {
+    message Group {
+        string tag = 1;
+        int32 group_type = 2;
+        int32 spec_type = 3;
+        int32 cp_mapping = 4;
+        int32 cp_slice = 5;
+        uint32 active_tail_blocks = 6;
+        uint64 kv_block_stride_bytes = 7;
+        uint64 kv_scale_stride_bytes = 8;
+        uint64 k_block_payload_bytes = 9;
+        uint64 seq_size_per_block = 10;
+        bool pre_sliced = 11;
+        uint32 global_kv_heads = 12;
+    }
+    int32 tp_size = 1;
+    int32 cp_method = 2;
+    bool kv_cache_sharded = 3;
+    int32 prefill_cp_size = 4;
+    uint64 cache_key_tokens_per_block = 5;
+    bool use_group_cache_transfer_policy = 6;
+    bool use_mla = 7;
+    repeated Group groups = 8;
+}
+
+message P2PPipelineLayoutPB {
+    message Stage {
+        message Layer {
+            repeated string tags = 1;
+        }
+        int32 main_layer_begin = 1;
+        int32 main_layer_count = 2;
+        repeated Layer layers = 3;
+        repeated int32 worker_indices = 4;
+        P2PShardLayoutPB main_shards = 5;
+        P2PShardLayoutPB draft_shards = 6;
+    }
+    repeated Stage stages = 1;
+    uint32 worker_count = 2;
 }
 
 message P2PConnectorBroadcastTpRequestPB {
@@ -856,6 +900,7 @@ message P2PConnectorBroadcastTpRequestPB {
 message GetPeerInfoRequestPB {
     string requester_ip = 1;
     int32  requester_tp_size = 2;
+    int32  requester_pp_size = 3;
 }
 
 message GetPeerInfoResponsePB {
@@ -865,6 +910,7 @@ message GetPeerInfoResponsePB {
     // Effective KV-cache context-parallel size. This is 1 when TP is enabled
     // but Prefill CP KV-cache sharding is disabled.
     int32  cp_size                = 4;
+    bytes pipeline_layout = 5;  // Serialized P2PPipelineLayoutPB.
 }
 
 message P2PConnectorBroadcastTpResponsePB {
@@ -905,6 +951,7 @@ message P2PConnectorStartLoadRequestPB {
     int64 handoff_timeout_ms = 8;
     // Decode TP width. The worker list can also include other pipeline stages.
     int32 decode_tp_size = 9;
+    bytes decode_pipeline_layout = 10;  // Serialized P2PPipelineLayoutPB.
 }
 
 // Side-channel tensor blob: carries named tensor data between prefill and decode

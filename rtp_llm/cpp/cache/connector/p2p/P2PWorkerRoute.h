@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -29,6 +30,12 @@ struct P2PWorkerRoute {
     /// Prefill 方向：目的端点（由 peer_index 在 peer_workers 里解析而来）。
     std::string dst_ip;
     uint32_t    dst_port = 0;
+    std::set<int> prefill_layer_ids;
+    size_t        slice_payload_bytes = 0;
+
+    bool sendsLayer(int layer_id, const std::string& tag) const {
+        return cache_tag == tag && (prefill_layer_ids.empty() || prefill_layer_ids.count(layer_id) != 0);
+    }
 };
 
 /// @brief 一个 worker 收到的完整指令集。
@@ -43,10 +50,10 @@ struct P2PWorkerRoutePlan {
 
     /// 某个 tag 上有多少条 route —— prefill 侧用它把 outstanding 阈值按「层」而非
     /// 「传输次数」计量，否则一层的 route 会填满窗口、per-layer overlap 塌成 1 层。
-    int routeCountForTag(const std::string& tag) const {
+    int routeCountForLayer(int layer_id, const std::string& tag) const {
         int n = 0;
         for (const auto& r : routes) {
-            if (r.cache_tag == tag) {
+            if (r.sendsLayer(layer_id, tag)) {
                 ++n;
             }
         }

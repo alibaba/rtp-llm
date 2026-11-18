@@ -221,6 +221,11 @@ TEST(PlannerPipeline, PreservesCpKeyRulesAndUsesPublishedDraftGeometry) {
     dst.stages.back().layer_tags.push_back({kFullTag});
     auto& mixed_src                       = src.stages.back();
     auto& mixed_dst                       = dst.stages[1];
+    for (auto* side : {&src, &dst}) {
+        auto& root                       = side->stages.front();
+        root.main_shards.groups["mixed"] = root.main_shards.groups.at(kFullTag);
+        root.layer_tags.front().push_back("mixed");
+    }
     mixed_src.main_shards.groups["mixed"] = mixed_src.main_shards.groups.at(kFullTag);
     mixed_dst.main_shards.groups["mixed"] = mixed_dst.main_shards.groups.at(kFullTag);
     mixed_src.layer_tags[2].push_back("mixed");
@@ -233,9 +238,15 @@ TEST(PlannerPipeline, PreservesCpKeyRulesAndUsesPublishedDraftGeometry) {
         ASSERT_FALSE(route.layers.empty());
         if (route.cache_tag == "mixed") {
             ASSERT_EQ(route.layers.size(), 1u);
-            EXPECT_EQ(route.layers.front().global_id, 5);
-            EXPECT_EQ(route.layers.front().src_local_id, 2);
-            EXPECT_EQ(route.layers.front().dst_local_id, 3);
+            const auto& layer = route.layers.front();
+            if (layer.global_id == 5) {
+                EXPECT_EQ(layer.src_local_id, 2);
+                EXPECT_EQ(layer.dst_local_id, 3);
+            } else {
+                EXPECT_EQ(layer.global_id, 0);
+                EXPECT_EQ(layer.src_local_id, 0);
+                EXPECT_EQ(layer.dst_local_id, 0);
+            }
             ++mixed_routes;
         }
         for (const auto& layer : route.layers) {
@@ -253,7 +264,7 @@ TEST(PlannerPipeline, PreservesCpKeyRulesAndUsesPublishedDraftGeometry) {
             }
         }
     }
-    EXPECT_EQ(mixed_routes, 2);
+    EXPECT_EQ(mixed_routes, 4);
     EXPECT_EQ(draft_positions, (std::set<size_t>{2, 3, 4}));
 }
 
@@ -274,6 +285,13 @@ TEST(PlannerPipeline, RejectsInvalidCoverageAndWorkerMapping) {
     EXPECT_FALSE(missing.ok());
     EXPECT_TRUE(missing.plan.routes.empty());
     EXPECT_NE(missing.error.ToString().find("global layer 5"), std::string::npos);
+
+    auto missing_dst_tag = dst;
+    missing_dst_tag.stages[1].layer_tags[3].clear();
+    const auto missing_destination = KVCacheTransferPlanner::planStages(src, missing_dst_tag, "request");
+    EXPECT_FALSE(missing_destination.ok());
+    EXPECT_TRUE(missing_destination.plan.routes.empty());
+    EXPECT_NE(missing_destination.error.ToString().find("empty or duplicate layer tags"), std::string::npos);
 }
 
 TEST(PlannerPipeline, UsesExplicitWorkerIndicesInRoutesAndDigest) {

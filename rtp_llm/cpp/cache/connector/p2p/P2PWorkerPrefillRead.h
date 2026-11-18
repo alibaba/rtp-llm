@@ -146,7 +146,7 @@ private:
     // CacheTopology 在 worker 生命周期内不变；缓存其派生值，避免每个请求遍历
     // topology 或解析 "layer:tag" 字符串。
     std::set<std::string>                                               expected_buffer_keys_;
-    std::vector<std::string>                                            expected_buffer_tags_;
+    std::vector<std::pair<int, std::string>>                            expected_buffer_layers_;
     std::shared_ptr<StoreWaitContextChecker>                            store_wait_context_checker_;
     std::thread                                                         store_wait_check_thread_;
     std::atomic<bool>                                                   store_wait_stopping_{false};

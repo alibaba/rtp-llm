@@ -559,6 +559,7 @@ grpc::Status DecodeRpcServer::BatchGenerateCall(grpc::ServerContext*        cont
             auto stream = engine_->makeStream(input);
             stream->setPrefillTpSize(peer->tp_size);
             stream->setPrefillCpSize(peer->cp_size);
+            stream->setPrefillPipelineLayout(peer->pipeline_layout);
             guard.streams.push_back(stream);
             output_streams[response_indices.at(item.request_id())] = stream;
             cancel_registry_->attach(handle, stream);
@@ -701,7 +702,8 @@ grpc::Status DecodeRpcServer::preparePDRequest(const GenerateInputPB&          r
     auto        parse_status = parsePrefillDpAddr(address, &ip, &port);
     if (!parse_status.ok())
         return parse_status;
-    auto peer_result = prefill_server_caller_->getPrefillPeerInfo(ip, port, clampRpcTimeoutMsToInt32(remaining));
+    auto peer_result = prefill_server_caller_->getPrefillPeerInfo(
+        ip, port, clampRpcTimeoutMsToInt32(remaining), maga_init_params_.parallelism_config.pp_size);
     if (!peer_result.ok())
         return grpcStatusFromErrorInfo(peer_result.status());
     if (peer_result.value().tp_size <= 0 || peer_result.value().cp_size <= 0) {
@@ -934,6 +936,7 @@ grpc::Status DecodeRpcServer::GenerateStreamCall(grpc::ServerContext*           
         } unenqueued_guard{stream};
         stream->setPrefillTpSize(peer_info->tp_size);
         stream->setPrefillCpSize(peer_info->cp_size);
+        stream->setPrefillPipelineLayout(std::move(peer_info->pipeline_layout));
         generate_context.setStream(stream);
         cancel_registry_->attach(cancel_handle, stream);
 
