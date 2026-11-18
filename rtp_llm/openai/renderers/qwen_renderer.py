@@ -454,7 +454,8 @@ class QwenRenderer(CustomChatRenderer):
             )
         if status.finish_reason != None:
             return await self._create_empty_delta(status.output.aux_info)
-        status.update_output(
+        self._update_status_output(
+            status,
             output,
             functools.partial(self._check_finish_reason, max_new_tokens=max_new_tokens),
             self._remove_stop_word_ids,

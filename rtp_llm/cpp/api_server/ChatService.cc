@@ -10,6 +10,16 @@ using namespace autil::legacy::json;
 
 namespace rtp_llm {
 
+namespace {
+RenderedInputs renderValidatedChatRequest(ChatRender& chat_render, const std::string& body) {
+    try {
+        return chat_render.render_chat_request(body);
+    } catch (const ChatRequestParseError& error) {
+        throw HttpApiServerException(HttpApiServerException::ERROR_INPUT_FORMAT_ERROR, error.what());
+    }
+}
+}
+
 // ChatService::ChatService() {}
 
 std::shared_ptr<GenerateInput> ChatService::fillGenerateInput(int64_t                      request_id,
@@ -192,12 +202,21 @@ void ChatService::chatCompletions(const std::unique_ptr<http_server::HttpRespons
 
     const auto            body = request.GetBody();
     ChatCompletionRequest chat_request;
-    FromJsonString(chat_request, body);
+    try {
+        FromJsonString(chat_request, body);
+    } catch (const LogprobsConfigParseError& error) {
+        throw HttpApiServerException(HttpApiServerException::ERROR_GENERATE_CONFIG_FORMAT, error.what());
+    }
+
+    if (chat_request.extra_configs
+        && (chat_request.extra_configs->return_logprobs || chat_request.extra_configs->top_logprobs > 0)) {
+        throw HttpApiServerException(HttpApiServerException::UNSUPPORTED_OPERATION,
+                                     "compact logprobs are not supported by the C++ frontend");
+    }
 
     AccessLogWrapper::logQueryAccess(body, request_id, chat_request.private_request);
 
-    auto       chat_render    = openai_endpoint_->getChatRender();
-    const auto rendered_input = chat_render->render_chat_request(body);
+    const auto rendered_input = renderValidatedChatRequest(*openai_endpoint_->getChatRender(), body);
 
     auto input  = fillGenerateInput(request_id, chat_request, rendered_input);
     auto stream = engine_->enqueue(input);
@@ -231,8 +250,7 @@ void ChatService::chatRender(const std::unique_ptr<http_server::HttpResponseWrit
     ChatCompletionRequest chat_request;
     FromJsonString(chat_request, body);
 
-    auto        chat_render    = openai_endpoint_->getChatRender();
-    const auto  rendered_input = chat_render->render_chat_request(body);
+    const auto  rendered_input = renderValidatedChatRequest(*openai_endpoint_->getChatRender(), body);
     std::string debug_info     = openai_endpoint_->getDebugInfo(chat_request, rendered_input);
 
     writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Normal);

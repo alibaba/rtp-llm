@@ -2,6 +2,7 @@
 
 #include <string>
 #include <map>
+#include <stdexcept>
 
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/api_server/openai/ApiDataType.h"
@@ -14,6 +15,11 @@ namespace rtp_llm {
 class EngineInputs;
 class EngineOutputs;
 class RenderContext;
+
+class ChatRequestParseError: public std::invalid_argument {
+public:
+    using std::invalid_argument::invalid_argument;
+};
 
 class RenderedInputs {
 public:

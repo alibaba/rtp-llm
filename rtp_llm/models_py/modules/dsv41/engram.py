@@ -25,6 +25,7 @@ import math
 import mmap
 import os
 import shutil
+import time
 import uuid
 import weakref
 from pathlib import Path
@@ -361,7 +362,7 @@ def _load_engram_tables(
         raise ValueError("Pinned Engram tables require native FP8/E8M0 bytes")
     nbytes = weight.numel() + scales.numel()
     logger.info(
-        "Engram %s read %.2f GiB from checkpoint in %.1fs (%s)",
+        "Engram %s mapped %.2f GiB checkpoint views in %.1fs (%s); staging copy pending",
         prefix,
         nbytes / 1024**3,
         perf_counter() - started,
@@ -392,9 +393,10 @@ def _prune_expired_engram_tables() -> None:
     """Drop stale /dev/shm Engram tables so persistence stays bounded.
 
     The staged tables survive the process group that created them (the cold
-    staging of ~94 GiB per layer is far too expensive to repeat per run);
-    this TTL prune, taken under the creating digest's lock, bounds the
-    resident set. Tables with live leases are never pruned.
+    staging of ~94 GiB per layer is far too expensive to repeat per run).
+    Lock each target digest while checking expiry and leases so attachment
+    cannot race deletion. Skip busy targets: the caller holds a creator lock,
+    and waiting for another digest could deadlock concurrent creators.
     """
     import time
 
@@ -403,18 +405,16 @@ def _prune_expired_engram_tables() -> None:
         if "." in table.name:  # .partial/.lease artifacts have their own paths
             continue
         try:
-            stat = table.stat()
-            if stat.st_mtime >= cutoff:
-                continue
-            if _live_leases(table):
-                continue
-            if table.stat().st_ino != stat.st_ino:
-                # The name now maps to a freshly created table (a creator
-                # replaced it after our expiry verdict on the old inode);
-                # never let the prune unlink a live generation.
-                continue
-            table.unlink(missing_ok=True)
-            logger.info("Pruned expired Engram shared table %s", table)
+            lock_path = Path("/tmp") / (table.name + ".lock")
+            with open(lock_path, "a+b") as lock:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue
+                if table.stat().st_mtime >= cutoff or _live_leases(table):
+                    continue
+                table.unlink(missing_ok=True)
+                logger.info("Pruned expired Engram shared table %s", table)
         except FileNotFoundError:
             continue
 
@@ -495,8 +495,18 @@ class _PinnedSharedTable:
             if weight_dtype.itemsize != 1:
                 raise ValueError("Pinned Engram tables require native FP8/E8M0 bytes")
         total_bytes = weight_bytes + scale_bytes
+        lock_started = time.monotonic()
+        logger.info(
+            "Engram waiting for staging lock path=%s pid=%s", data_path, os.getpid()
+        )
         with open(lock_path, "a+b") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
+            logger.info(
+                "Engram acquired staging lock path=%s pid=%s wait_s=%.3f",
+                data_path,
+                os.getpid(),
+                time.monotonic() - lock_started,
+            )
             _live_leases(data_path)
             for partial in data_path.parent.glob(data_path.name + ".partial.*"):
                 try:
@@ -506,6 +516,12 @@ class _PinnedSharedTable:
             _prune_expired_engram_tables()
             if not data_path.exists():
                 free = shutil.disk_usage(data_path.parent).free
+                logger.info(
+                    "Engram staging cache miss path=%s needed_bytes=%s free_bytes=%s",
+                    data_path,
+                    total_bytes,
+                    free,
+                )
                 if free < total_bytes:
                     raise RuntimeError(
                         f"Engram needs {total_bytes / 1024**3:.2f} GiB shared RAM, "
@@ -514,6 +530,7 @@ class _PinnedSharedTable:
                 # At most one invocation, by the flock winner, only on a miss;
                 # attaching processes (lock waiters that find the file present)
                 # never materialize the ~94 GiB pair from the checkpoint.
+                staging_started = time.monotonic()
                 sources = (weight, scales) if loader is None else loader()
                 partial = Path(str(data_path) + f".partial.{os.getpid()}")
                 try:
@@ -524,6 +541,12 @@ class _PinnedSharedTable:
                         try:
                             destination = np.frombuffer(mapping, dtype=np.uint8)
                             offset = 0
+                            next_progress_bytes = 8 * 1024**3
+                            logger.info(
+                                "Engram staging copy started path=%s total_bytes=%s",
+                                partial,
+                                total_bytes,
+                            )
                             for tensor in sources:
                                 source = tensor.view(torch.uint8).reshape(-1).numpy()
                                 for begin in range(0, source.size, 64 * 1024**2):
@@ -531,15 +554,31 @@ class _PinnedSharedTable:
                                     destination[offset + begin : offset + end] = source[
                                         begin:end
                                     ]
+                                    copied_bytes = offset + end
+                                    if (
+                                        copied_bytes >= next_progress_bytes
+                                        or copied_bytes == total_bytes
+                                    ):
+                                        logger.info(
+                                            "Engram staging copy path=%s copied_bytes=%s "
+                                            "total_bytes=%s allocated_bytes=%s elapsed_s=%.3f",
+                                            partial,
+                                            copied_bytes,
+                                            total_bytes,
+                                            os.fstat(file.fileno()).st_blocks * 512,
+                                            time.monotonic() - staging_started,
+                                        )
+                                        next_progress_bytes += 8 * 1024**3
                                 offset += source.size
                             del destination, source, sources
                         finally:
                             mapping.close()
                     os.replace(partial, data_path)
                     logger.info(
-                        "Created shared host Engram table %s (%.2f GiB)",
+                        "Created shared host Engram table %s (%.2f GiB) elapsed_s=%.3f",
                         data_path,
                         total_bytes / 1024**3,
+                        time.monotonic() - staging_started,
                     )
                 except BaseException:
                     partial.unlink(missing_ok=True)

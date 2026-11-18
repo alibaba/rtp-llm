@@ -3,11 +3,13 @@
 import logging
 import re
 import unittest
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack
 from pathlib import Path
 
 from rtp_llm.server.host_service import EndPoint, GroupEndPoint, ServiceRoute
 from rtp_llm.test.smoke import deepseek_v41_contract_test as contract
+from rtp_llm.test.smoke.startup_resource_monitor import monitor_startup_resources
 from rtp_llm.test.utils.device_resource import get_gpu_ids
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
@@ -22,6 +24,11 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
     reuse_field = "prefill_total_reuse_len"
 
     def start_servers(self):
+        resource_cleanup = ExitStack()
+        self.addCleanup(resource_cleanup.close)
+        resource_cleanup.enter_context(
+            monitor_startup_resources(self.output_dir / "startup_resources.jsonl")
+        )
         gpu_ids = list(get_gpu_ids())
         role_size = self.prefill_cp_size
         self.assertGreaterEqual(len(gpu_ids), 2 * role_size)
@@ -98,7 +105,10 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
         # Use the same independent server lifecycle and endpoint routing as
         # PdSeperationCaseRunner. Register cleanup before parallel startup so
         # failures and assertion errors always stop both processes.
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with ThreadPoolExecutor(max_workers=2) as executor, ExitStack() as failed_start:
+            # Stop both roles before executor shutdown joins a blocked startup.
+            for manager in (self.server, self.graph_server):
+                failed_start.callback(manager.stop_server)
             starts = [
                 executor.submit(
                     manager.start_server,
@@ -108,8 +118,9 @@ class DeepSeekV41PDContractTest(contract.DeepSeekV41ContractTest):
                 )
                 for manager in (self.server, self.graph_server)
             ]
-            for result in starts:
+            for result in as_completed(starts):
                 self.assertTrue(result.result())
+            failed_start.pop_all()
 
     def _long_prefix_reuse_checks(self, prompt):
         # Fresh SWA uses BF16 while a reused prefix uses MXFP8-dequantized KV.

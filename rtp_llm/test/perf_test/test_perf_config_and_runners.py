@@ -1039,7 +1039,6 @@ class TestOfflineAnalyze(unittest.TestCase):
     def test_duration_workload_dump_contains_only_submitted_requests(self):
         import io
         import json
-        import threading
 
         import rtp_llm.test.perf_test.offline_runner as offline_runner
         from rtp_llm.test.perf_test.offline_runner import (
@@ -1047,8 +1046,6 @@ class TestOfflineAnalyze(unittest.TestCase):
             OfflineRunner,
             WorkloadGenerator,
         )
-
-        second_prompt_generated = threading.Event()
 
         class RecordingWorkloadGenerator(WorkloadGenerator):
             def __init__(self, *args, **kwargs):
@@ -1058,8 +1055,6 @@ class TestOfflineAnalyze(unittest.TestCase):
             def _generate(self, spec, *args, **kwargs):
                 prepared = super()._generate(spec, *args, **kwargs)
                 self.generated_ids.append(spec.request_id)
-                if spec.request_id == 1:
-                    second_prompt_generated.set()
                 return prepared
 
         class FastTokenizer:
@@ -1080,6 +1075,17 @@ class TestOfflineAnalyze(unittest.TestCase):
                 return False
 
         async def run_dispatch():
+            second_prompt_received = asyncio.Event()
+            clock = MagicMock(return_value=0.0)
+            original_get = offline_runner._PromptPrefetcher.get
+
+            async def get_and_expire(prefetcher, timeout=None):
+                prepared = await original_get(prefetcher, timeout)
+                if prepared.request_id == 1:
+                    clock.return_value = 10.0
+                    second_prompt_received.set()
+                return prepared
+
             config = OfflineBenchConfig(
                 input_len_min=1,
                 input_len_max=1,
@@ -1102,18 +1108,18 @@ class TestOfflineAnalyze(unittest.TestCase):
                 await asyncio.Event().wait()
 
             async def hold_first_request(session, prompt, output_len):
-                while not second_prompt_generated.is_set():
-                    await asyncio.sleep(0)
-                await asyncio.sleep(0.05)
+                await second_prompt_received.wait()
                 return {"aux_info": [{"input_len": 1, "output_len": output_len}]}
 
             runner._status_sampler = fake_status_sampler
             runner._send_one = hold_first_request
             with patch.object(
                 offline_runner.aiohttp, "ClientSession", FakeClientSession
+            ), patch.object(offline_runner.time, "perf_counter", clock), patch.object(
+                offline_runner._PromptPrefetcher, "get", get_and_expire
             ):
                 result = await runner._dispatch(
-                    gen, concurrency_limit=1, duration_s=0.02, drain_timeout_s=1
+                    gen, concurrency_limit=1, duration_s=5, drain_timeout_s=1
                 )
             dumped_ids = [
                 json.loads(line)["id"] for line in dump_file.getvalue().splitlines()

@@ -21,6 +21,21 @@ namespace rtp_llm {
 
 class QueryConverterTest: public DeviceTestBase {};
 
+TEST_F(QueryConverterTest, MainPrefillWireFieldsKeepTheirMeaningWithCompactLogprobs) {
+    const char      wire[] = {'\xda', '\x04', '\x02', '\x08', '\x00', '\xe0', '\x04', '\x01'};
+    GenerateInputPB input;
+    input.add_token_ids(0);
+    auto* config_pb = input.mutable_generate_config();
+    ASSERT_TRUE(config_pb->ParseFromArray(wire, sizeof(wire)));
+    ASSERT_TRUE(config_pb->has_aux_info());
+    EXPECT_FALSE(config_pb->aux_info().value());
+    EXPECT_TRUE(config_pb->prefill_only());
+    EXPECT_FALSE(config_pb->return_logprobs());
+    const auto config = QueryConverter::transQuery(&input)->generate_config;
+    EXPECT_TRUE(config->isPrefillOnly());
+    EXPECT_FALSE(config->aux_info);
+}
+
 TEST_F(QueryConverterTest, PrefillOnlyFlagWithZeroMaxNewTokensMeansPrefillOnly) {
     for (const bool enable_disk_cache : {false, true}) {
         SCOPED_TRACE(enable_disk_cache);

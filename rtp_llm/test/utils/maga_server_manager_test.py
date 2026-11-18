@@ -1,8 +1,14 @@
+import select
 import signal
+import subprocess
+import sys
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from unittest.mock import Mock, patch
+
+import psutil
 
 from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
@@ -115,6 +121,56 @@ class MagaServerManagerTest(unittest.TestCase):
         self.assertIn("pid=4242 killed by SIGTERM", "\n".join(logs.output))
         self.assertNotIn("still alive", "\n".join(logs.output))
         self.manager.print_process_log.assert_called_once_with()
+
+    def test_stop_reclaims_remaining_processes_when_one_child_disappears(self):
+        child_script = "import threading; threading.Event().wait()"
+        server_script = (
+            "import subprocess, sys, threading\n"
+            f"children = [subprocess.Popen([sys.executable, '-c', {child_script!r}], "
+            "stdin=subprocess.DEVNULL) for _ in range(2)]\n"
+            "print(*(child.pid for child in children), flush=True)\n"
+            "sys.stdin.readline()\n"
+            "children[0].terminate()\n"
+            "children[0].wait()\n"
+            "print('reaped', flush=True)\n"
+            "threading.Event().wait()\n"
+        )
+        with subprocess.Popen(
+            [sys.executable, "-c", server_script],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        ) as server:
+            self.assertIsNotNone(server.stdin)
+            self.assertIsNotNone(server.stdout)
+            children = []
+            parent = psutil.Process(server.pid)
+            try:
+                self.assertTrue(select.select([server.stdout], [], [], 5)[0])
+                child_pids = [int(pid) for pid in server.stdout.readline().split()]
+                self.assertEqual(len(child_pids), 2)
+                children = parent.children(recursive=True)
+                self.assertEqual({child.pid for child in children}, set(child_pids))
+
+                server.stdin.write("reap\n")
+                server.stdin.flush()
+                self.assertTrue(select.select([server.stdout], [], [], 5)[0])
+                self.assertEqual(server.stdout.readline().strip(), "reaped")
+                self.assertFalse(psutil.pid_exists(child_pids[0]))
+                self.manager._server_process = server
+                # Preserve the enumeration snapshot while the first child exits.
+                with patch.object(psutil.Process, "children", return_value=children):
+                    self.manager.stop_server()
+
+                self.assertIsNotNone(server.poll())
+                for child in children:
+                    with suppress(psutil.NoSuchProcess):
+                        self.assertEqual(child.status(), psutil.STATUS_ZOMBIE)
+            finally:
+                for process in [*children, parent]:
+                    with suppress(psutil.NoSuchProcess):
+                        process.kill()
+                server.wait(timeout=5)
 
 
 if __name__ == "__main__":
