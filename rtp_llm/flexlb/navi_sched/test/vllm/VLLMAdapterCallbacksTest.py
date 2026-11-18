@@ -13,8 +13,14 @@ ADAPTER = Path(__file__).resolve().parents[2] / "adapters/vllm"
 
 
 def module(name, file):
+    package_name = "_review_vllm_adapter"
+    if package_name not in sys.modules:
+        package = types.ModuleType(package_name)
+        package.__path__ = [str(ADAPTER)]
+        sys.modules[package_name] = package
     loaded = types.ModuleType(name)
-    loaded.__package__ = name.rpartition(".")[0]
+    loaded.__file__ = str(file)
+    loaded.__package__ = name.rpartition(".")[0] or package_name
     sys.modules[name] = loaded
     exec(compile(file.read_text(), str(file), "exec"), loaded.__dict__)
     return loaded
@@ -28,6 +34,11 @@ worker_callbacks = module("review_worker", ADAPTER / "VLLMWorkerDiagnostics.py")
 scheduler_callbacks = module("review_scheduler", ADAPTER / "VLLMSchedulerObserver.py")
 cache_callbacks = module("review_cache", ADAPTER / "VLLMCacheCallbacks.py")
 iteration_callbacks = module("review_metrics", ADAPTER / "VLLMIterationMetrics.py")
+
+
+FileLoggingTests = module(
+    "review_logging_contracts", Path(__file__).with_name("VLLMLoggingTest.py")
+).VLLMLoggingTest
 
 
 class ReviewTests(unittest.TestCase):

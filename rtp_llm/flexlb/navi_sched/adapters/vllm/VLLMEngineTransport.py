@@ -311,8 +311,8 @@ class VLLMEngineTransport:
         for request_id in request_ids:
             request_id = str(request_id)
             logger.info(
-                "[navi-vllm-client-abort] source=api request_id=%s "
-                "navi_request_id=%s",
+                "[navi-vllm-client-abort-requested] source=api request_id=%s "
+                "navi_request_id=%s (API call; not engine cancellation confirmation)",
                 request_id,
                 self._request_ids.get(request_id),
             )

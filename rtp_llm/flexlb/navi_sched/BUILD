@@ -1841,3 +1841,10 @@ py_test(
     main = "test/vllm/VLLMAbortLoggingTest.py",
     python_version = "PY3",
 )
+
+py_test(
+    name = "vllm_file_logging_test",
+    srcs = ["test/vllm/VLLMLoggingTest.py", "adapters/vllm/VLLMLogging.py"],
+    main = "test/vllm/VLLMLoggingTest.py",
+    python_version = "PY3",
+)

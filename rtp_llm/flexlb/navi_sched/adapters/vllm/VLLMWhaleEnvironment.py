@@ -39,6 +39,15 @@ def main():
         sys.argv[2],
         lambda: socket.gethostbyname(socket.gethostname()),
     )
+    # vLLM already supports dictConfig; generate its file-only default before
+    # importing vLLM in the API server or any spawned worker process.
+    if not os.environ.get("VLLM_LOGGING_CONFIG_PATH"):
+        from pathlib import Path
+        from .VLLMLogging import write_vllm_logging_config
+
+        path = Path(os.environ.get("NAVI_SCHED_LOG_DIR", "logs")).absolute() / "vllm_logging.json"
+        write_vllm_logging_config(path)
+        values["VLLM_LOGGING_CONFIG_PATH"] = str(path)
     for name, value in values.items():
         print(f"export {name}={shlex.quote(value)}")
 
