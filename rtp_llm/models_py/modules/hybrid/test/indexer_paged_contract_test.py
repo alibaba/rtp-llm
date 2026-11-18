@@ -6,6 +6,7 @@ import torch
 from torch import nn
 
 from rtp_llm.models_py.modules.base.cuda import indexer_op
+from rtp_llm.models_py.modules.hybrid import indexer as indexer_module
 from rtp_llm.models_py.modules.hybrid.indexer import Indexer
 
 
@@ -162,6 +163,44 @@ class IndexerPagedContractTest(unittest.TestCase):
                 self.assertEqual(result.shape, (2, 2))
                 legacy.assert_called_once()
                 torch.testing.assert_close(legacy.call_args.args[3].flatten(), lengths)
+
+    def test_indexer_projection_accepts_compatible_fp8_and_falls_back(self):
+        class Fp8Projection:
+            def __init__(self, packed_scales):
+                self.scale_ue8m0 = packed_scales
+                self.forward = Mock()
+
+            def __call__(self, *args, **kwargs):
+                return self.forward(*args, **kwargs)
+
+        bf16 = torch.ones(1, dtype=torch.bfloat16)
+        fp8 = torch.ones(1).to(torch.float8_e4m3fn)
+        with patch.object(indexer_module, "CudaFp8GEMMLinear", Fp8Projection):
+            for packed, scale_dtype in ((False, torch.float32), (True, torch.int32)):
+                for variant in ("matched", "mismatch", "no_scale", "other_linear"):
+                    with self.subTest(packed=packed, variant=variant):
+                        candidate = Fp8Projection(packed)
+                        projection = Mock() if variant == "other_linear" else candidate
+                        actual_dtype = scale_dtype
+                        if variant == "mismatch":
+                            actual_dtype = torch.float32 if packed else torch.int32
+                        scales = (
+                            None
+                            if variant == "no_scale"
+                            else torch.ones(1, dtype=actual_dtype)
+                        )
+                        Indexer._project_with_fp8(projection, bf16, fp8, scales)
+                        if variant == "matched":
+                            candidate.forward.assert_called_once_with(
+                                fp8, input_scales=scales
+                            )
+                        else:
+                            call = (
+                                projection
+                                if variant == "other_linear"
+                                else candidate.forward
+                            )
+                            call.assert_called_once_with(bf16)
 
     def test_score_workspace_is_bounded_for_long_contexts(self):
         for keys in (128, 32768, 262144, 1048576):

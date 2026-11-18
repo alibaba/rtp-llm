@@ -24,6 +24,7 @@ class Glm5EnvironmentArgumentsTest(TestCase):
 
         env = {
             "RTP_LLM_FRONTEND_METRICS_ENABLE": "1",
+            "ENABLE_FUSE_KERNELS": "0",
             "GLM5_CP_OPT": "1",
             "RTP_LLM_GLM5_CMP": "1",
             "DETERMINISTIC_GEMM": "1",
@@ -35,6 +36,7 @@ class Glm5EnvironmentArgumentsTest(TestCase):
             )
             self.assertTrue(config.server_config.frontend_metrics_enable)
             restored = pickle.loads(pickle.dumps(config.py_hw_kernel_config))
+            self.assertFalse(restored.enable_fuse_kernels)
             self.assertTrue(restored.glm5_cp_opt)
             self.assertTrue(restored.enable_glm5_cmp)
             config = setup_args(
@@ -47,10 +49,13 @@ class Glm5EnvironmentArgumentsTest(TestCase):
                     "0",
                     "--enable_glm5_cmp",
                     "0",
+                    "--enable_fuse_kernels",
+                    "1",
                 ]
             )
             self.assertFalse(config.fmha_config.deterministic_gemm)
             self.assertFalse(config.server_config.frontend_metrics_enable)
+            self.assertTrue(config.py_hw_kernel_config.enable_fuse_kernels)
             self.assertFalse(config.py_hw_kernel_config.glm5_cp_opt)
             self.assertFalse(config.py_hw_kernel_config.enable_glm5_cmp)
 

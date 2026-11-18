@@ -1,7 +1,6 @@
 # GLM5x optimized profile: 1M limit (not a 1M workload assertion).
 # CMP is decode-only: TP=1 is required; CP4 prefill uses GLM5_CP_OPT.
-# Per rank: 1 GiB tiered MLA host pool + 4 GiB memory prefix cache;
-# these are separate budgets, not enough to guarantee 1M residency.
+# The 4 GiB memory prefix cache does not guarantee 1M residency.
 # Set REMOTE_JIT_DIR to a trusted shared root in the test environment;
 # an empty value disables remote restore/publish (local JIT still works).
 load("//rtp_llm/test/perf_test:defs.bzl", "perf_test")
@@ -20,14 +19,9 @@ def cu13_glm5x_perf_suites():
                    "NVCC_PREPEND_FLAGS": "-ccbin=/opt/rh/gcc-toolset-13/root/usr/bin/g++",
                    "DG_JIT_CPP_STANDARD": "20",
                    "MOE_STRATEGY": "mega_moe_se",
-                   "USE_GATHER_PATH": "1",
-                   "RTP_LLM_MAX_TOKENS_EXCLUDE_THINKING": "0",
                    "THINK_END_TAG": "</think>",
-                   "RTP_LLM_GRPC_KEEPALIVE_TIME_MS": "30000",
-                   "RTP_LLM_GRPC_KEEPALIVE_TIMEOUT_MS": "600000",
                    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
                    "PREFILL_CP_KV_CACHE_SHARDED": "true",
-                   "RTP_LLM_REQUIRE_CP_SHARDED_KV_CACHE": "1",
                    "THINK_MODE": "1",
                    "GEN_TIMELINE_SYNC": "1",
                    "PERF_PREARM_PROFILE": "1",
@@ -38,8 +32,6 @@ def cu13_glm5x_perf_suites():
                    "GLM5_CP_OPT": "1",
                    "ENABLE_FUSE_KERNELS": "1",
                    "ENABLE_FP32_LM_HEAD": "0",
-                   "RTP_LLM_DSA_MLA_HOST_CACHE_MB": "1024",
-                   "RTP_LLM_HOST_BLOCK_POOL_PREFAULT_THREADS": "8",
                    "MANAGE_JIT_CACHE": "1",
                    "RTP_LLM_GLM5_CMP": "0"
                },
@@ -143,8 +135,6 @@ def cu13_glm5x_perf_suites():
                    "NVCC_PREPEND_FLAGS": "-ccbin=/opt/rh/gcc-toolset-13/root/usr/bin/g++",
                    "DG_JIT_CPP_STANDARD": "20",
                    "MOE_STRATEGY": "mega_moe_se",
-                   "RTP_LLM_GRPC_KEEPALIVE_TIME_MS": "30000",
-                   "RTP_LLM_GRPC_KEEPALIVE_TIMEOUT_MS": "600000",
                    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
                    "RTP_LLM_STREAM_ASYNC": "1",
                    "RTP_LLM_DROP_BROAD_SYNC": "1",
@@ -152,7 +142,6 @@ def cu13_glm5x_perf_suites():
                    "ENABLE_FP32_LM_HEAD": "0",
                    "PREFILL_CP_KV_CACHE_SHARDED": "true",
                    "PREFILL_CP_SIZE": "4",
-                   "RTP_LLM_MAX_TOKENS_EXCLUDE_THINKING": "0",
                    "THINK_END_TAG": "</think>",
                    "GEN_TIMELINE_SYNC": "1",
                    "PERF_PREARM_PROFILE": "1",
@@ -160,11 +149,8 @@ def cu13_glm5x_perf_suites():
                    "PERF_FORMAL_WARMUP_RUNS": "3",
                    "PERF_MEASURE_RUNS": "5",
                    "PERF_PROFILE_RUNS": "1",
-                   "USE_GATHER_PATH": "1",
                    "GLM5_CP_OPT": "1",
                    "ENABLE_FUSE_KERNELS": "1",
-                   "RTP_LLM_DSA_MLA_HOST_CACHE_MB": "1024",
-                   "RTP_LLM_HOST_BLOCK_POOL_PREFAULT_THREADS": "8",
                    "MANAGE_JIT_CACHE": "1",
                    "RTP_LLM_GLM5_CMP": "1"
                },

@@ -3,10 +3,9 @@ Sparse MLA implementation for prefill and decode.
 
 Two operators:
 - SparseMlaOp:    BF16 KV cache → flash_mla_sparse_fwd
-- SparseMlaFp8Op: FP8 paged KV cache. Two paths controlled by USE_GATHER_PATH env:
-    * USE_GATHER_PATH=1 (prefill): gather + upconvert FP8 → BF16 workspace,
-      then flash_mla_sparse_fwd. ~1.7x faster than with_kvcache for large s_q.
-    * Otherwise: flash_mla_with_kvcache directly on FP8 paged cache.
+- SparseMlaFp8Op: flash_mla_with_kvcache on an FP8 paged KV cache.
+  Sharded context-parallel prefill can instead gather into BF16 for
+  flash_mla_sparse_fwd when required by its cache layout.
 """
 
 import logging

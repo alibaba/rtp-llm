@@ -427,13 +427,19 @@ class Glm5MoeDecoderLayer(nn.Module):
         cmp = self.cmp
         if cmp is None:
             raise RuntimeError("GLM5 CMP execution was not initialized")
+        default_fmha = (
+            fmha_impl["default"] if isinstance(fmha_impl, Mapping) else fmha_impl
+        )
+        default_cache = (
+            kv_cache["default"] if isinstance(kv_cache, Mapping) else kv_cache
+        )
         # Prepare MLA inputs with internal streams and PDL. MTP reuse layers
         # consume the TopK indices produced by the seed model.
         output_residual, mla_query, topk_indices = cmp.mla_prologue(
             hidden_states,
             residual,
-            fmha_impl["default"] if isinstance(fmha_impl, Mapping) else fmha_impl,
-            kv_cache["default"] if isinstance(kv_cache, Mapping) else kv_cache,
+            default_fmha,
+            default_cache,
             prev_topk_indices,
             reuse_topk_indices=force_reuse_topk_indices,
             indexer_fmha_impl=fmha_impl["indexer_kv"],
@@ -444,10 +450,7 @@ class Glm5MoeDecoderLayer(nn.Module):
 
         # Run RTP's existing FlashMLA interface explicitly.
         mla_output = cmp.sparse_mla(
-            mla_query,
-            topk_indices,
-            fmha_impl["default"] if isinstance(fmha_impl, Mapping) else fmha_impl,
-            kv_cache["default"] if isinstance(kv_cache, Mapping) else kv_cache,
+            mla_query, topk_indices, default_fmha, default_cache
         )
 
         # Dense or unsupported MoE prepacking returns four None values and
@@ -460,7 +463,7 @@ class Glm5MoeDecoderLayer(nn.Module):
         mla_post = cmp.mla_post_moe_pre(
             mla_output,
             output_residual,
-            fmha_impl["default"] if isinstance(fmha_impl, Mapping) else fmha_impl,
+            default_fmha,
             moe_activation=moe_activation,
             moe_scale=moe_scale,
             routed_indices=routed_indices,
@@ -504,9 +507,9 @@ class Glm5MoeDecoderLayer(nn.Module):
                 force_reuse_topk_indices=force_reuse_topk_indices,
             )
 
-        topk_indices = None
+        quantized_input = {}
         if self._fuse_input_norm_quant and hidden_states.dim() == 2:
-            bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
+            hidden_states, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
                 hidden_states,
                 residual,
                 self.input_layernorm.weight.data,
@@ -514,40 +517,28 @@ class Glm5MoeDecoderLayer(nn.Module):
                 group_size=128,
                 scale_ue8m0=self._fuse_input_scale_ue8m0,
             )
-            if isinstance(self.self_attn, MlaAttention):
-                hidden_states, topk_indices = self.self_attn(
-                    hidden_states=bf16_hs,
-                    fmha_impl=fmha_impl,
-                    kv_cache=kv_cache,
-                    x_fp8=fp8_hs,
-                    x_scale=scale,
-                    prev_topk_indices=prev_topk_indices,
-                    force_reuse_topk_indices=force_reuse_topk_indices,
-                    return_topk=True,
-                )
-            else:
-                hidden_states = self.self_attn(
-                    hidden_states=bf16_hs,
-                    fmha_impl=fmha_impl,
-                    kv_cache=kv_cache,
-                    x_fp8=fp8_hs,
-                    x_scale=scale,
-                )
+            quantized_input = {"x_fp8": fp8_hs, "x_scale": scale}
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-            if isinstance(self.self_attn, MlaAttention):
-                hidden_states, topk_indices = self.self_attn(
-                    hidden_states=hidden_states,
-                    fmha_impl=fmha_impl,
-                    kv_cache=kv_cache,
-                    prev_topk_indices=prev_topk_indices,
-                    force_reuse_topk_indices=force_reuse_topk_indices,
-                    return_topk=True,
-                )
-            else:
-                hidden_states = self.self_attn(
-                    hidden_states=hidden_states, fmha_impl=fmha_impl, kv_cache=kv_cache
-                )
+
+        topk_indices = None
+        if isinstance(self.self_attn, MlaAttention):
+            hidden_states, topk_indices = self.self_attn(
+                hidden_states=hidden_states,
+                fmha_impl=fmha_impl,
+                kv_cache=kv_cache,
+                prev_topk_indices=prev_topk_indices,
+                force_reuse_topk_indices=force_reuse_topk_indices,
+                return_topk=True,
+                **quantized_input,
+            )
+        else:
+            hidden_states = self.self_attn(
+                hidden_states=hidden_states,
+                fmha_impl=fmha_impl,
+                kv_cache=kv_cache,
+                **quantized_input,
+            )
 
         hidden_states, residual = self._fwd_mlp_or_moe(hidden_states, residual)
 

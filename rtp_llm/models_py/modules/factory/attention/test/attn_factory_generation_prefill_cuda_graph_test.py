@@ -1,6 +1,6 @@
 import types
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -200,6 +200,33 @@ class AttentionFactoryGenerationPrefillMlaCudaGraphTest(
         )
         with self.assertRaises(ValueError):
             self._select([_SafeAttentionImpl], mode="invalid_graph_mode")
+
+    def test_prefill_checks_short_sequence_once_and_skips_the_check_under_cp(self):
+        class Sparse(_StubAttentionImpl):
+            @classmethod
+            def is_sparse(cls):
+                return True
+
+        self.attn_configs.indexer_topk = 4
+        self.attn_configs.is_sparse = True
+        for cp, expected in ((False, _SafeAttentionImpl), (True, Sparse)):
+            with self.subTest(cp=cp):
+                lengths = types.SimpleNamespace(max=Mock(return_value=torch.tensor(4)))
+                self.attn_inputs.cu_kv_seqlens_device = lengths
+                parallelism = types.SimpleNamespace(
+                    prefill_cp_config=types.SimpleNamespace(is_enabled=lambda: cp)
+                )
+                with patch.object(
+                    attn_factory, "PREFILL_MLA_IMPS", [Sparse, _SafeAttentionImpl]
+                ):
+                    selected = attn_factory.get_mla_impl(
+                        self.attn_configs,
+                        self.weight,
+                        self.attn_inputs,
+                        parallelism_config=parallelism,
+                    )
+                self.assertIsInstance(selected, expected)
+                self.assertEqual(lengths.max.call_count, 0 if cp else 1)
 
 
 class AttnFactoryRegistryDispatchTest(unittest.TestCase):

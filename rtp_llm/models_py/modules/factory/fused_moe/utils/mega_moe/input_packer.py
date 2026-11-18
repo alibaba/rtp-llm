@@ -2,8 +2,8 @@
 
 MegaMoE consumes a symmetric-memory dispatch buffer.  The original path builds
 temporary FP8 activation and UE8M0 scale tensors, then copies four tensors into
-that buffer.  This module centralizes the implementation choice so Triton/CUDA
-packer below is the reference oracle for tests; the runtime always uses the fused packer.
+that buffer.  The runtime uses the fused packer; the Torch implementation provides
+a reference for tests.
 """
 
 from __future__ import annotations
@@ -68,8 +68,7 @@ class FusedMegaMoEInputPacker(MegaMoEInputPacker):
     name = "fused"
 
     def __init__(self, *, pack_inputs=None):
-        # Recipes may select a launch policy while sharing buffer validation
-        # and slicing. None preserves the environment-selected default path.
+        # Recipes share validation and slicing while selecting the kernel policy.
         self.pack_inputs = pack_inputs
 
     def pack(
@@ -113,12 +112,11 @@ def get_mega_moe_input_packer(*, prepared: bool = False) -> MegaMoEInputPacker:
             fused_pack_mega_moe_inputs_optimized,
         )
 
-        # GLM checkpoints retain their fixed launch and non-finite policy.
+        # GLM checkpoints allow int32 routing IDs and skip input sanitization.
         return FusedMegaMoEInputPacker(
             pack_inputs=partial(
                 fused_pack_mega_moe_inputs_optimized,
                 sanitize_non_finite=False,
-                use_block_m_env=False,
                 allow_int32_indices=True,
             )
         )
