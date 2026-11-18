@@ -53,6 +53,10 @@ private:
     bool      promotePendingDecodeStreams();
     RoundType chooseRound();
     bool      tryAdmitKVForPrefill(const GenerateStreamPtr& new_stream);
+    // force_single_prefill admits at most one waiting candidate per prefill
+    // round; this keeps the single slot reachable by the block-holding
+    // candidates instead of a retry-failing fresh one.
+    void      prioritizeBlockHoldingWaitingStreams();
 
     struct AdmissionPeakState;
     void buildAdmissionPeakState();

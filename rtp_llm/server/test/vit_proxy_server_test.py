@@ -532,7 +532,7 @@ class VitProxyRpcServerStatusTest(TestCase):
         stubs["b"].GetWorkerStatus.future.return_value = FakeGrpcFuture(
             error=RpcUnavailable()
         )
-        # N=2, default ceil(N/2)=1: one healthy worker is sufficient.
+        # N=2, default threshold 1: one healthy worker is sufficient.
         self.assertEqual(asyncio.run(endpoint()), {"status": "ok"})
         self.assertEqual(server.load_balancer.get_alive_worker_addresses(), ["a"])
         stubs["a"].GetWorkerStatus.future.return_value = FakeGrpcFuture(
@@ -640,7 +640,9 @@ class VitProxyRpcServerStatusTest(TestCase):
         from rtp_llm.multimodal.vit_proxy_start_server import create_proxy_app
 
         for configured, healthy, expected in (
-            (0, 2, False),
+            (0, 0, False),
+            (0, 1, True),
+            (0, 2, True),
             (0, 3, True),
             (1, 1, True),
             (6, 5, False),
@@ -674,12 +676,20 @@ class VitProxyRpcServerStatusTest(TestCase):
                 server.GetCacheStatus(CacheVersionPB(), cache_context)
                 self.assertEqual(cache_context.code, context.code)
 
-    def test_odd_worker_count_requires_rounded_up_half(self):
-        for count, healthy, expected in (
-            (5, 2, False),
-            (5, 3, True),
-            (9, 4, False),
-            (9, 5, True),
+    def test_default_threshold_keeps_degraded_service_majority_is_opt_in(self):
+        # Default (configured 0) resolves to 1: any surviving worker keeps the
+        # aggregate endpoint alive so FlexLB keeps routing to it — a default
+        # ceil(N/2) quorum would retire a still-serving endpoint and fail all
+        # multimodal requests with NO_VIT_WORKER/ROUTE_ERROR. Majority
+        # arbitration only applies when explicitly configured.
+        for count, healthy, default_expected, majority, majority_expected in (
+            (5, 2, True, 3, False),
+            (5, 3, True, 3, True),
+            (5, 1, True, 3, False),
+            (5, 0, False, 3, False),
+            (9, 4, True, 5, False),
+            (9, 5, True, 5, True),
+            (9, 3, True, 5, False),
         ):
             with self.subTest(count=count, healthy=healthy):
                 stubs = {
@@ -689,10 +699,19 @@ class VitProxyRpcServerStatusTest(TestCase):
                     for i in range(count)
                 }
                 server = self._make_server(stubs)
-                self.assertEqual(server.min_healthy_workers, (count + 1) // 2)
+                self.assertEqual(server.min_healthy_workers, 1)
                 self.assertEqual(
                     server.GetWorkerStatus(StatusVersionPB(), FakeContext()).alive,
-                    expected,
+                    default_expected,
+                )
+                majority_server = self._make_server(stubs, min_healthy_workers=majority)
+                self.assertEqual(majority_server.min_healthy_workers, majority)
+                context = FakeContext()
+                status = majority_server.GetWorkerStatus(StatusVersionPB(), context)
+                self.assertEqual(status.alive, majority_expected)
+                self.assertEqual(
+                    context.code,
+                    None if majority_expected else grpc.StatusCode.UNAVAILABLE,
                 )
 
     def test_http_empty_worker_list_is_unhealthy(self):
@@ -1695,22 +1714,24 @@ class MMOutputProxyRouterTest(TestCase):
 
 
 class VitHealthThresholdTest(TestCase):
-    def test_auto_rounding_and_explicit_boundaries(self):
+    def test_auto_threshold_and_explicit_boundaries(self):
         for n, expected in (
             (1, 1),
             (2, 1),
-            (3, 2),
-            (4, 2),
-            (5, 3),
-            (6, 3),
-            (7, 4),
-            (8, 4),
-            (9, 5),
+            (3, 1),
+            (4, 1),
+            (5, 1),
+            (6, 1),
+            (7, 1),
+            (8, 1),
+            (9, 1),
         ):
             with self.subTest(n=n):
                 self.assertEqual(resolve_min_healthy_workers(n), expected)
                 self.assertEqual(resolve_min_healthy_workers(n, 1), 1)
                 self.assertEqual(resolve_min_healthy_workers(n, n), n)
+        # Majority arbitration is an explicit opt-in, e.g. ceil(5/2)=3.
+        self.assertEqual(resolve_min_healthy_workers(5, 3), 3)
 
     def test_invalid_counts_fail_instead_of_silently_clamping(self):
         for n, configured in ((0, 0), (-1, 0), (6, -1), (6, 7), (6, 1.5), (6, True)):
