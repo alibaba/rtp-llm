@@ -2232,8 +2232,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     return c;
                 }
-                if (t.size() != 12 && t.size() != 18)
-                    throw std::runtime_error("Invalid PDSepConfig state: expected 12 or 18 fields, got "
+                if (t.size() != 12)
+                    throw std::runtime_error("Invalid PDSepConfig state: expected 12 or 19 fields, got "
                                              + std::to_string(t.size()));
                 PDSepConfig c;
                 try {

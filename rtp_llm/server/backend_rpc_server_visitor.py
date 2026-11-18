@@ -164,6 +164,7 @@ class BackendRPCServerVisitor:
         )
 
         host_args = HostServiceArgs.create_from_env()
+        self._prefill_has_decode_routing = bool(host_args.decode_domain or host_args.master_domain)
         self.backend_role_list = self.get_backend_role_list(
             self.pd_sep_config, host_args, vit_separation
         )
@@ -828,6 +829,10 @@ class BackendRPCServerVisitor:
                 RoleType.PREFILL not in final_roles
                 and self._local_prefill_addresses
                 and not getattr(input, "enqueued_by_master", False)
+                and (
+                    RoleType.DECODE in final_roles
+                    or not self._prefill_has_decode_routing
+                )
             ):
                 # This HTTP entry belongs to a real Prefill backend. Preserve an
                 # externally selected Prefill, otherwise advertise the local DP

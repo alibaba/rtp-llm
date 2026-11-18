@@ -1630,16 +1630,19 @@ public final class JavaLoadClient {
         }
         // Both evaluation mocks report an empty topology. Real Prefill returns
         // a positive TP size or a gRPC error.
-        return mockPrefillByAddress.computeIfAbsent(
+        return Boolean.TRUE.equals(mockPrefillByAddress.computeIfAbsent(
                 address,
-                endpoint ->
-                        RpcServiceGrpc.newBlockingStub(getEngineChannel(endpoint))
+                endpoint -> {
+                    try {
+                        return RpcServiceGrpc.newBlockingStub(getEngineChannel(endpoint))
                                         .withDeadlineAfter(1, TimeUnit.SECONDS)
-                                        .getPeerInfo(
-                                                EngineRpcService.GetPeerInfoRequestPB
-                                                        .getDefaultInstance())
-                                        .getTpSize()
-                                == 0);
+                                        .getPeerInfo(EngineRpcService.GetPeerInfoRequestPB.getDefaultInstance())
+                                        .getTpSize() == 0;
+                    } catch (io.grpc.StatusRuntimeException e) {
+                        // Keep the Decode route and allow a later probe to retry.
+                        return null;
+                    }
+                }));
     }
 
     private ManagedChannel getEngineChannel(String target) {

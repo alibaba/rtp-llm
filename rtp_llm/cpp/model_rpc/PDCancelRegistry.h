@@ -104,6 +104,7 @@ private:
     void                                    trimLocked(int64_t now_ms);
     void                                    scheduleExpirationLocked(const Handle& handle, int64_t expires_at_ms);
     void                                    reportPressureLocked();
+    void                                    retryOverdueCancelsLocked(int64_t now_ms);
     static constexpr int64_t                kRetentionMs = 10 * 60 * 1000;
     static constexpr int64_t                kActiveReadExpiryRetryMs = 1000;
     // Cancel-before-admission records have their own budget. Existing request
@@ -125,6 +126,8 @@ private:
     std::multimap<int64_t, int64_t>         fence_expirations_;
     std::set<std::pair<int64_t, int64_t>>   entry_expirations_;
     std::set<std::pair<int64_t, int64_t>>              overdue_cancels_;
+    std::pair<int64_t, int64_t>                        last_overdue_retry_key_{};
+    int64_t                                            next_overdue_retry_ms_{0};
     std::unordered_map<std::string, size_t> canceled_keys_;
     std::unordered_map<std::string, size_t> active_reads_;
     std::unordered_map<std::string, std::set<int64_t>> waiting_on_reads_;

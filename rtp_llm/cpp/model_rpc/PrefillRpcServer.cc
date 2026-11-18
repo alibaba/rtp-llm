@@ -1010,7 +1010,7 @@ PrefillRpcServer::Cancel(grpc::ServerContext*, const CancelRequestPB* request, C
     }
     response->set_tp_size(static_cast<int32_t>(pc.tp_size));
     const auto& cp = pc.prefill_cp_config;
-    response->set_cp_size(static_cast<int32_t>(cp.is_enabled() && cp.kv_cache_sharded ? pc.tp_size : 1));
+    response->set_cp_size(static_cast<int32_t>(cp.is_prefill_enabled() && cp.kv_cache_sharded ? pc.tp_size : 1));
     RTP_LLM_LOG_INFO("GetPeerInfo: tp_size=%ld, cp_size=%d", pc.tp_size, response->cp_size());
     return grpc::Status::OK;
 }
