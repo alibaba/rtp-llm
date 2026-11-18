@@ -344,7 +344,7 @@ class PLEDecodeFusionTest(unittest.TestCase):
                 device="cuda", dtype=torch.int64,
             ),
             ngram_size=3, eos_token_id=eos, shard_indices=[0, 2, 5, 7],
-            total_shards=8, distributed_reduce=True, inline_cpu_uva_graph=True,
+            total_shards=8, distributed_reduce=True,
         )
         with patch.object(embedding, "_reduce_rows", side_effect=lambda x: x.flatten(-2)):
             for batch in (16, 64, 128):

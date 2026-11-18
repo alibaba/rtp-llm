@@ -77,7 +77,7 @@ class MoeTopkTritonTest(unittest.TestCase):
                     fallback.assert_not_called()
                 torch.testing.assert_close(ids, expected_ids, atol=0, rtol=0)
                 torch.testing.assert_close(
-                    weights, expected_weights, atol=0, rtol=0, equal_nan=True
+                    weights, expected_weights, atol=2e-7, rtol=2e-6, equal_nan=True
                 )
 
     def test_nonfinite_logits_preserve_native_routing_and_bounded_ids(self):

@@ -952,3 +952,12 @@ py_test(
     tags = ["H20_CU13"],
     exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
 )
+
+py_test(
+    name = "qsa_sm90_capacity_test",
+    srcs = ["qsa_sm90_capacity_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)

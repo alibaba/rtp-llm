@@ -19,7 +19,7 @@ def save(name, value):
 def metadata():
     import triton
 
-    from rtp_llm.models_py.modules.qwen4_exp.qsa import sparse_fmha, sparse_prefill_sm90
+    from rtp_llm.models_py.kernels.cuda.qsa import sparse_fmha, sparse_prefill_sm90
 
     prop = torch.cuda.get_device_properties(torch.cuda.current_device())
     return {
