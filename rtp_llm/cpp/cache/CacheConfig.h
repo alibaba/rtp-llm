@@ -23,6 +23,16 @@ namespace rtp_llm {
 
 using PPBlockNumOverrides = std::unordered_map<std::string, uint32_t>;
 
+inline uint32_t projectCacheBlockCount(uint32_t base_blocks, uint32_t divisor) {
+    if (base_blocks == 0) {
+        return 0;
+    }
+    // Both pools reserve physical block zero. Retain the partial state page
+    // that covers the final usable base blocks.
+    const auto usable = base_blocks - 1;
+    return 1 + usable / divisor + (usable % divisor != 0);
+}
+
 // Residency (memory_placement) and budget (charge_to_paged_budget) are independent.
 inline void checkGroupResidencyBudget(const CacheGroupPolicy& policy, const std::string& tag) {
     RTP_LLM_CHECK_WITH_INFO(

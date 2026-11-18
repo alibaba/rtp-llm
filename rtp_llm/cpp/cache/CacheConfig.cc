@@ -477,10 +477,10 @@ void CacheConfig::finalizeBlockNums(uint32_t                   global_block_num,
     auto groups = topology().groups();
     for (auto& group : groups) {
         const auto explicit_independent_blocks = group.policy.explicit_block_num;
-        uint32_t   rule_blocks                 = global_block_num;
-        if (explicit_independent_blocks > 0) {
-            rule_blocks = explicit_independent_blocks;
-        }
+        uint32_t   rule_blocks =
+            explicit_independent_blocks > 0 ?
+                  explicit_independent_blocks :
+                  projectCacheBlockCount(global_block_num, group.blockCountDivisor(seq_size_per_block));
         if (pp_overrides != nullptr) {
             const auto it = pp_overrides->find(group.tag);
             RTP_LLM_CHECK_WITH_INFO(

@@ -39,20 +39,31 @@ bool modelHasMultipleCacheGroups(const ModelConfig& model_config) {
 // kernel block passes it and then produces a partial compression unit.
 constexpr uint32_t kCompressedKernelSeqSizeAlignment = 128;
 
+bool consumeBlockBudget(uint32_t count, size_t bytes_per_block, size_t& remaining) {
+    if (bytes_per_block > 0 && static_cast<size_t>(count) > remaining / bytes_per_block) {
+        return false;
+    }
+    remaining -= static_cast<size_t>(count) * bytes_per_block;
+    return true;
+}
+
 bool blockNumFitsBudget(uint32_t block_num, size_t total_budget_bytes, const KVCacheBlockBudget& budget) {
     if (budget.explicit_pool_reserve_bytes > total_budget_bytes) {
         return false;
     }
 
     size_t remaining = total_budget_bytes - budget.explicit_pool_reserve_bytes;
-    if (budget.paged_block_bytes > 0) {
-        if (static_cast<size_t>(block_num) > remaining / budget.paged_block_bytes) {
+    if (!consumeBlockBudget(block_num, budget.paged_block_bytes, remaining)
+        || !consumeBlockBudget(block_num, budget.swa_block_bytes, remaining)) {
+        return false;
+    }
+    for (const auto& pool : budget.projected_pools) {
+        const auto count = projectCacheBlockCount(block_num, pool.block_count_divisor);
+        if (!consumeBlockBudget(count, pool.bytes_per_block, remaining)) {
             return false;
         }
-        remaining -= static_cast<size_t>(block_num) * budget.paged_block_bytes;
     }
-
-    return budget.swa_block_bytes == 0 || static_cast<size_t>(block_num) <= remaining / budget.swa_block_bytes;
+    return true;
 }
 
 void addBudgetBytes(size_t& total, size_t bytes, size_t count = 1) {
@@ -99,6 +110,11 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
             if (policy.charge_to_paged_budget) {
                 addBudgetBytes(budget.explicit_pool_reserve_bytes, group_bytes, policy.explicit_block_num);
             }
+            continue;
+        }
+        const auto divisor = group.blockCountDivisor(config.seq_size_per_block);
+        if (divisor > 1) {
+            budget.projected_pools.push_back({group_bytes, divisor});
             continue;
         }
         switch (policy.group_type) {
@@ -230,7 +246,8 @@ void validateDescs(const ModelConfig& model_config, uint32_t kernel_tokens_per_b
 void populateGroups(CacheConfig&                 config,
                     const LayerKVCacheSpecDescs& descs_by_layer,
                     const LayerKVCacheSpecs&     specs_by_layer,
-                    const ModelConfig&           model_config) {
+                    const ModelConfig&           model_config,
+                    RoleType                     role) {
     struct BuildState {
         KVCacheSpecPtr   spec;
         std::string      fingerprint;
@@ -258,6 +275,8 @@ void populateGroups(CacheConfig&                 config,
                                     layer_id,
                                     spec->tag.c_str());
             auto policy = SpecBuilder::groupPolicy(desc);
+            policy.match_base_token_capacity =
+                role == RoleType::DECODE && desc.capacity.has_value() && desc.capacity->match_decode_token_capacity;
             checkGroupResidencyBudget(policy, spec->tag);
             if (policy.group_type == CacheGroupType::SWA) {
                 RTP_LLM_CHECK_WITH_INFO(model_config.attn_config.sliding_window >= 0,
@@ -320,7 +339,7 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
     config.seq_size_per_block = seq_size;
     config.use_mla            = model_config.attn_config.use_mla;
     config.is_sparse          = model_config.attn_config.is_sparse;
-    populateGroups(config, model_config.kv_cache_spec_descs, specs, model_config);
+    populateGroups(config, model_config.kv_cache_spec_descs, specs, model_config, parallelism_config.role_type);
     for (const auto& group : config.topology().groups()) {
         const bool opaque =
             group.spec->type == KVCacheSpecType::OpaqueKV || group.spec->type == KVCacheSpecType::OpaqueState;
@@ -335,7 +354,7 @@ CacheConfig createConfigFromDescs(const ModelConfig&       model_config,
 }  // namespace
 
 uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlockBudget& budget) {
-    if (budget.paged_block_bytes == 0 && budget.swa_block_bytes == 0) {
+    if (budget.paged_block_bytes == 0 && budget.swa_block_bytes == 0 && budget.projected_pools.empty()) {
         return budget.explicit_pool_reserve_bytes <= total_budget_bytes ? 1u : 0u;
     }
 
@@ -632,6 +651,11 @@ uint64_t CacheConfigCreator::computeLocalCacheBytes(const CacheConfig&          
         size_t     bytes  = budget.explicit_pool_reserve_bytes;
         addBudgetBytes(bytes, budget.paged_block_bytes, static_cast<size_t>(kv_cache_config.test_block_num));
         addBudgetBytes(bytes, budget.swa_block_bytes, static_cast<size_t>(kv_cache_config.test_block_num));
+        for (const auto& pool : budget.projected_pools) {
+            addBudgetBytes(bytes,
+                           pool.bytes_per_block,
+                           projectCacheBlockCount(kv_cache_config.test_block_num, pool.block_count_divisor));
+        }
         return bytes;
     }
     return MemoryEvaluationHelper::getKVCacheMemorySize(
