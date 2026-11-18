@@ -1102,8 +1102,16 @@ async def _run_rocm_startup_real_warmup_grpc(
     max_seq_len = resolve_rocm_warmup_max_seq_len(
         py_env_configs.model_args.max_seq_len, model_max_seq_len
     )
-    cases = rocm_warmup_cases(max_seq_len)
-    logging.info("ROCm startup warmup model max_seq_len=%s", max_seq_len)
+    cases = rocm_warmup_cases(
+        max_seq_len,
+        tokens_per_block=int(py_env_configs.kv_cache_config.seq_size_per_block),
+    )
+    logging.info(
+        "ROCm startup warmup model max_seq_len=%s, cases=%s, prefixes=%s",
+        max_seq_len,
+        len(cases),
+        sorted({case.expected_reuse for case in cases if case.expected_reuse}),
+    )
     addresses = _get_startup_real_warmup_grpc_addresses(py_env_configs)
     timeout_s = float(os.environ.get("RTP_LLM_ROCM_STARTUP_WARMUP_TIMEOUT_S", "600"))
     if not 0 < timeout_s < float("inf"):

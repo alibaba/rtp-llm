@@ -1,4 +1,5 @@
 import math
+import os
 from typing import Any, Optional
 
 import aiter
@@ -11,6 +12,11 @@ from rtp_llm.models_py.modules.factory.attention.rocm_impl._attn_utils import (
     split_qkv_fp8,
     split_raw_qkv,
     unpad_kv_vectorized,
+)
+from rtp_llm.models_py.modules.factory.attention.rocm_impl.eager_prefill import (
+    CKPrefillLauncher,
+    allocate_pa_workspace,
+    short_query_backend,
 )
 from rtp_llm.models_py.modules.factory.attention.rocm_impl.paged_prefill_metadata import (
     borrow_prefill_cumulative_lengths,
@@ -765,6 +771,7 @@ class AiterPrefillAttnOpPaged:
         self.descale_buf: Optional[torch.Tensor] = None
         self.sanitized_bt_buf: Optional[torch.Tensor] = None
         self._block_positions: Optional[torch.Tensor] = None
+        self._eager_launcher = CKPrefillLauncher(self.head_dim)
 
     def support(self, attn_inputs: PyAttentionInputs) -> bool:
         has_prefix = (
@@ -905,7 +912,9 @@ class AiterPrefillAttnOpPaged:
     def forward(self, qkv, kv_cache, fmha_params) -> torch.Tensor:
         # Eager metadata is immutable per batch. Graph metadata must continue
         # to refresh on replay; do not reuse an eager sanitized table there.
-        q_tensor = qkv[0][: fmha_params.token_q_num]
+        q_tensor = qkv[0]
+        if q_tensor.shape[0] != fmha_params.token_q_num:
+            q_tensor = q_tensor[: fmha_params.token_q_num]
         device = q_tensor.device
 
         key_cache = kv_cache.kv_cache_base.select(1, 0)
@@ -982,7 +991,24 @@ class AiterPrefillAttnOpPaged:
                 k_descale = metadata.descale
                 v_descale = metadata.descale
 
-        res = aiter.mha_batch_prefill_func(
+        # No graph or algorithm change: for the supported eager layout call
+        # the same CK entry point without repeated public-wrapper validation.
+        launch = aiter.mha_batch_prefill_func if graph_ready else self._eager_launcher
+        output = None
+        if (
+            not graph_ready
+            and not self.fp8_kv_cache
+            and q_tensor.dtype in (torch.float16, torch.bfloat16)
+            and not q_tensor.requires_grad
+        ):
+            output = getattr(fmha_params, "eager_ck_output", None)
+            if output is None:
+                # Same ownership rule as PA scratch: one immutable batch/cache
+                # group, serial layers on its compute stream, no cross-request
+                # sharing. FP8 and graph paths retain their existing allocation.
+                output = torch.empty_like(q_tensor)
+                fmha_params.eager_ck_output = output
+        res = launch(
             q_tensor,
             key_cache,
             value_cache,
@@ -997,6 +1023,7 @@ class AiterPrefillAttnOpPaged:
             q_descale=q_descale,
             k_descale=k_descale,
             v_descale=v_descale,
+            out=output,
         )
 
         token_num = fmha_params.token_q_num
@@ -1080,41 +1107,13 @@ def _run_triton_paged_attention(
     ) // context_partition_size
 
     if workspace is None:
-        num_query_heads = query.shape[1]
-        query_group_size = num_query_heads // num_kv_heads
-        output_dtype = (
-            torch.bfloat16
-            if query_dtype
-            in (
-                torch.float8_e4m3fnuz,
-                torch.float8_e4m3fn,
-            )
-            else query_dtype
+        workspace = allocate_pa_workspace(
+            query, num_seqs, query_length, num_kv_heads, max_context_partition_num
         )
-        equivalent_query_group_size = query_length * query_group_size
-        output_shape = (num_seqs * query_length, num_query_heads, head_size)
-        workspace_shape = (
-            num_seqs,
-            num_kv_heads,
-            max_context_partition_num,
-            equivalent_query_group_size,
-        )
-        temporary_shape = (*workspace_shape, head_size)
-        output = torch.empty(output_shape, dtype=output_dtype, device=query.device)
-        exp_sums = torch.empty(
-            workspace_shape, dtype=torch.float32, device=query.device
-        )
-        max_logits = torch.empty(
-            workspace_shape, dtype=torch.float32, device=query.device
-        )
-        temporary_output = torch.empty(
-            temporary_shape, dtype=output_dtype, device=query.device
-        )
-    else:
-        output = workspace["output"]
-        exp_sums = workspace["exp_sums"]
-        max_logits = workspace["max_logits"]
-        temporary_output = workspace["temporary_output"]
+    output = workspace["output"]
+    exp_sums = workspace["exp_sums"]
+    max_logits = workspace["max_logits"]
+    temporary_output = workspace["temporary_output"]
 
     block_tables = block_tables_id_device
     query_scale = kv_scale_buf if query_is_fp8 else None
@@ -1372,6 +1371,20 @@ class AiterPrefillAttnOpTriton:
                 "max_logits": fmha_params.max_logits,
                 "temporary_output": fmha_params.temporary_output,
             }
+        elif not query.requires_grad:
+            workspace = getattr(fmha_params, "eager_pa_workspace", None)
+            if workspace is None:
+                # All layers consume attention on the same ordered stream.
+                # Scratch is batch-owned, never global or shared with another
+                # request/cache group. The next layer overwrites it only after
+                # the preceding projection has consumed the output.
+                partitions = (
+                    fmha_params.max_seqlen_k + self.context_partition_size - 1
+                ) // self.context_partition_size
+                workspace = allocate_pa_workspace(
+                    query, num_seqs, max_q_len, self.head_num_kv, partitions
+                )
+                fmha_params.eager_pa_workspace = workspace
 
         output = _run_triton_paged_attention(
             query,
@@ -1857,6 +1870,11 @@ class AiterPrefillImplPaged(FMHAImplBase):
         self.tokens_per_block = attn_configs.kernel_tokens_per_block
         query_group_size = max(1, attn_configs.head_num // max(1, self.head_num_kv))
         self.max_triton_q_len = min(4, 64 // query_group_size)
+        # Optional clone-side A/B knob. Auto preserves the established dispatch;
+        # do not infer a new threshold from unlike q=1 and q=14 request shapes.
+        self.short_query_backend = short_query_backend(
+            os.environ.get("RTP_LLM_ROCM_SHORT_QUERY_BACKEND", "auto")
+        )
 
         self.batch_prefill_impl = AiterPrefillAttnOpPaged(attn_configs)
         self.linear_v = not prefill_writes_vectorized_v(attn_configs, fmha_config)
@@ -1903,6 +1921,12 @@ class AiterPrefillImplPaged(FMHAImplBase):
     def _select_backend(self, attn_inputs: PyAttentionInputs) -> str:
         if self.use_unified_attention:
             return "triton"
+        if (
+            not attn_inputs.is_cuda_graph
+            and self.short_query_backend == "ck"
+            and not self.linear_v
+        ):
+            return "batch"
         return "triton" if self._use_triton_paged_prefill(attn_inputs) else "batch"
 
     def support_cuda_graph(self) -> bool:

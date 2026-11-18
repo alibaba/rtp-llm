@@ -1059,6 +1059,15 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
         self.assertIs(impl.triton_fmha_params, triton_params)
         self.assertIsNone(impl.fmha_params)
 
+    def test_ck_override_is_eager_only_and_preserves_linear_v_layout(self):
+        with patch.dict("os.environ", {"RTP_LLM_ROCM_SHORT_QUERY_BACKEND": "ck"}):
+            impl, *_ = self._make_impl_with_mocked_prepare([1], False)
+            self.assertEqual(impl.backend, "batch")
+            impl, *_ = self._make_impl_with_mocked_prepare([1], True)
+            self.assertEqual(impl.backend, "triton")
+            impl, *_ = self._make_impl_with_mocked_prepare([1], False, use_asm_pa=False)
+            self.assertEqual(impl.backend, "triton")
+
     def test_generation_prefill_cuda_graph_backend_uses_unified_triton_for_eager_and_graph(
         self,
     ):
@@ -1280,6 +1289,37 @@ class TestAiterPrefillImplPagedCudaGraphDispatch(unittest.TestCase):
 @unittest.skipUnless(_OPS_IMPORTABLE, "Requires AiterPrefillAttnOpTriton module")
 class TestAiterPrefillAttnOpTritonCudaGraphWorkspace(unittest.TestCase):
     """Unit tests for CUDA graph workspace ownership."""
+
+    def test_eager_layers_reuse_only_their_batch_workspace(self):
+        from types import SimpleNamespace
+
+        op = AiterPrefillAttnOpTriton(_make_attn_configs(8, 2, 128))
+        query = torch.empty(3, 8, 128, dtype=torch.bfloat16)
+        cache = SimpleNamespace(
+            kv_cache_base=torch.empty(64, 2, 2, 16, 128), kv_scale_base=None
+        )
+
+        def params():
+            return SimpleNamespace(
+                kv_cache_block_id_device=torch.zeros(1, 64, dtype=torch.int32),
+                max_seqlen_q=3,
+                max_seqlen_k=835,
+                token_q_num=3,
+                prefill_seqlen_k_int32=torch.tensor([835]),
+                kv_scale=None,
+            )
+
+        first, second = params(), params()
+        path = "rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter._run_triton_paged_attention"
+        with patch(
+            path, side_effect=lambda *args, **kw: kw["workspace"]["output"]
+        ) as run:
+            op.forward((query,), cache, first)
+            op.forward((query,), cache, first)
+            op.forward((query,), cache, second)
+        workspaces = [call.kwargs["workspace"] for call in run.call_args_list]
+        self.assertIs(workspaces[0], workspaces[1])
+        self.assertIsNot(workspaces[0], workspaces[2])
 
     def test_uniform_eager_batch_skips_unused_compaction_kernels(self):
         from types import SimpleNamespace

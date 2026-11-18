@@ -78,23 +78,54 @@ class RocmWarmupLimitTest(unittest.TestCase):
 class RocmWarmupPlanTest(unittest.TestCase):
     def test_bounded_plan_covers_cache_paths_and_decode(self):
         cases = rocm_warmup_cases(8192)
-        self.assertEqual(len(cases), 10)
+        self.assertLess(len(cases), 300)
         self.assertFalse(cases[0].reuse_cache)
         self.assertTrue(cases[1].reuse_cache)
-        self.assertEqual(
-            [len(c.token_ids) - c.expected_reuse for c in cases[2:]],
-            [1, 2, 3, 4, 8, 14, 15, 16],
-        )
+        cached = [c for c in cases if c.expected_reuse]
+        by_prefix = {}
+        for case in cached:
+            by_prefix.setdefault(case.expected_reuse, []).append(case)
+        for prefix in (256, 816, 832):
+            group = by_prefix[prefix]
+            self.assertEqual(
+                [len(c.token_ids) - prefix for c in group], list(range(1, 33))
+            )
+            self.assertEqual(len({c.token_ids[prefix] for c in group}), 32)
+        partitions = {
+            (c.expected_reuse + 1 + 255) // 256
+            for c in cached
+            if len(c.token_ids) - c.expected_reuse == 1
+        }
+        self.assertEqual(partitions, set(range(1, 33)))
         for case in cases:
             self.assertLessEqual(len(case.token_ids) + case.max_new_tokens, 8192)
             self.assertEqual(case.max_new_tokens, 2)
-        self.assertEqual(len({c.token_ids[256] for c in cases[2:]}), 8)
-        self.assertTrue(all(c.token_ids[:256] == cases[1].token_ids for c in cases[2:]))
+
+    def test_seed_groups_cannot_reuse_each_other(self):
+        cases = rocm_warmup_cases(8192)
+        seeds = [c for c in cases if c.reuse_cache and not c.expected_reuse]
+        self.assertEqual(len({c.token_ids[0] for c in seeds}), len(seeds))
+        for seed in seeds:
+            group = [c for c in cases if c.expected_reuse == len(seed.token_ids)]
+            self.assertTrue(
+                all(c.token_ids[: c.expected_reuse] == seed.token_ids for c in group)
+            )
+
+    def test_physical_cache_block_alignment(self):
+        for block in (16, 64, 256, 512):
+            cases = rocm_warmup_cases(8192, tokens_per_block=block)
+            self.assertTrue(all(c.expected_reuse % block == 0 for c in cases))
+
+    def test_large_context_does_not_expand_startup_work(self):
+        self.assertEqual(rocm_warmup_cases(8192), rocm_warmup_cases(131072))
 
     def test_short_context_is_rejected_instead_of_skipping_coverage(self):
         with self.assertRaises(ValueError):
             rocm_warmup_cases(273)
-        self.assertEqual(len(rocm_warmup_cases(274)), 10)
+        self.assertTrue(rocm_warmup_cases(274))
+        self.assertTrue(
+            all(len(c.token_ids) + 2 <= 274 for c in rocm_warmup_cases(274))
+        )
 
 
 class RocmWarmupExecutionTest(unittest.IsolatedAsyncioTestCase):
