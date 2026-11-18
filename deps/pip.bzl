@@ -23,11 +23,14 @@ PIP_EXTRA_ARGS = [
 PIP_INDEX_ARGS = [
     "--index-url=${PIP_INDEX_URL:-https://pypi.org/simple/}",
     "--extra-index-url=${PIP_EXTRA_INDEX_URL:-https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/}",
+    # Optional vendor index; the public default repeats the public wheel index.
+    "--extra-index-url=${PIP_ADDITIONAL_INDEX_URL:-https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/}",
 ]
 
 PIP_INDEX_ENVSUBST = [
     "PIP_INDEX_URL",
     "PIP_EXTRA_INDEX_URL",
+    "PIP_ADDITIONAL_INDEX_URL",
 ]
 
 # FlashInfer 0.6.9 plans decode on the CPU; avoid Python scalar-Tensor iteration.
