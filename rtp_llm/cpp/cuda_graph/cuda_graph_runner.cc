@@ -11,6 +11,7 @@
 #include <limits>
 #include <string>
 #include <c10/core/InferenceMode.h>
+#include <c10/util/ScopeExit.h>
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -492,7 +493,6 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     const size_t graph_idx =
         is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
     auto&      py_model_inputs_ = graph_instances_[graph_idx].mem_hold_.py_model_inputs_;
-    auto       attn_pyobj       = graph_instances_[graph_idx].mem_hold_.attn_pyobj_;
     const bool has_tagged_cache = !inputs.attention_inputs_by_tag.empty();
     const int  selected_graph_batch_size =
         is_prefill_cuda_graph_mode_ ? static_cast<int>(py_model_inputs_.attention_inputs.input_lengths.numel()) :
@@ -566,13 +566,26 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // async strided D2H copy that the pre-callPrepareCudaGraph synchronize below
     // waits for; host sources keep main's synchronous row-by-row memcpy.
     bool pending_host_mirror_d2h = false;
-    // Records the stream position right after each async mirror D2H enqueue.
+    // Records the stream position after the most recent async mirror copy.
     // The consumer wait below synchronizes this event instead of the whole
     // stream, so it never blocks on kernels enqueued after the copies (fills,
     // dummy-row installs) that do not feed the host mirrors.
     torch::Event host_mirror_copy_event = cuda_graph::makeGraphEvent();
-    auto         stridedCopyHost        = [&pending_host_mirror_d2h, &host_mirror_copy_event](const torch::Tensor& src,
-                                                                               torch::Tensor&       dst) {
+    bool         pending_page_tables    = false;
+#if USING_CUDA && !USE_PPU
+    const bool is_mtp_draft = mtp_draft_steps_ > 0 || isMtpDraftPrefillCudaGraph();
+    // Native copies borrow the live input tensor storage until the event wait.
+    // Drain on an error before the inputs can be released or staging reused.
+    auto finish_page_tables = c10::make_scope_exit([&]() {
+        if (pending_page_tables) {
+            const auto error = cudaStreamSynchronize(cuda_graph::graphGetCurrentStream().stream());
+            if (error != cudaSuccess) {
+                RTP_LLM_LOG_ERROR("MTP page table copy failed: %s", cudaGetErrorString(error));
+            }
+        }
+    });
+#endif
+    auto stridedCopyHost = [&](const torch::Tensor& src, torch::Tensor& dst) {
         if (!dst.defined() || dst.is_cuda()) {
             return;
         }
@@ -601,6 +614,27 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             return;
         }
         if (src.is_cuda()) {
+#if USING_CUDA && !USE_PPU
+            if (is_mtp_draft && has_tagged_cache && src.dim() == 2 && src.stride(1) == 1 && dst.stride(1) == 1
+                && src.stride(0) >= geometry.cols && dst.stride(0) >= geometry.cols && !src.is_neg()
+                && dst.is_pinned()) {
+                const auto stream = cuda_graph::graphGetCurrentStream();
+                if (src.get_device() == stream.device_index()) {
+                    RTP_LLM_PROFILE_SCOPE("stridedCopyHost(cudaMemcpy2DAsync)");
+                    const auto element_bytes = src.element_size();
+                    pending_page_tables      = true;
+                    check_cuda_value(cudaMemcpy2DAsync(dst.data_ptr(),
+                                                       dst.stride(0) * element_bytes,
+                                                       src.data_ptr(),
+                                                       src.stride(0) * element_bytes,
+                                                       geometry.cols * element_bytes,
+                                                       geometry.rows,
+                                                       cudaMemcpyDeviceToHost,
+                                                       stream.stream()));
+                    return;
+                }
+            }
+#endif
             RTP_LLM_PROFILE_SCOPE("stridedCopyHost(D2H)");
             if (src.dim() < 2) {
                 dst.view({-1})
@@ -767,7 +801,7 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     }
 #endif
 
-    if (!has_tagged_cache) {
+    if (!has_tagged_cache && !mtp_draft_metadata_in_graph_) {
         // The host mirror must be cleared with the device block table. fillParams
         // walks every graph-batch row and may dereference padding rows when a
         // backend keeps input_lengths uniform for graph-stable cu_seqlens. Without
@@ -852,7 +886,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                     "CUDA graph capture has no attention input for tag=%s",
                                     tag.c_str());
             auto& dst_inputs = dst_it->second;
-            if (dst_inputs.kv_cache_kernel_block_id.defined() && !dst_inputs.kv_cache_kernel_block_id.is_cuda()) {
+            if (!mtp_draft_metadata_in_graph_ && dst_inputs.kv_cache_kernel_block_id.defined()
+                && !dst_inputs.kv_cache_kernel_block_id.is_cuda()) {
                 dst_inputs.kv_cache_kernel_block_id.zero_();
             }
             tryAddStridedD2DCopy(src_inputs.kv_cache_kernel_block_id_device,
@@ -865,6 +900,13 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(fused_d2d_copy)");
         fusedCopy(d2d_copies);
         fusedStridedCopy(strided_d2d_copies);
+    }
+
+    if (mtp_draft_metadata_in_graph_) {
+        // The captured metadata hook and draft steps consume the device buffers
+        // staged above. They refresh RoPE offsets and lengths on the replay stream.
+        prepared_guard.commit();
+        return;
     }
 
     // NOTE: we do H2H after D2D copies to let GPU finish the D2D copies as soon as possible,
@@ -997,11 +1039,16 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             }
         }
 
-        // Multi-group cache: H2H strided copies for group-local block tables.
+        // Multi-group MTP uses pinned graph-owned mirrors. Record one event
+        // after the native copies so Python can read every group's live rows.
         if (has_tagged_cache) {
             for (const auto& [tag, src_inputs] : inputs.attention_inputs_by_tag) {
                 auto& dst_inputs = py_model_inputs_.attention_inputs_by_tag.at(tag);
                 stridedCopyHost(src_inputs.kv_cache_kernel_block_id, dst_inputs.kv_cache_kernel_block_id);
+            }
+            if (pending_page_tables) {
+                host_mirror_copy_event.record(cuda_graph::graphGetCurrentStream());
+                pending_host_mirror_d2h = true;
             }
         }
     }
@@ -1117,9 +1164,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
             // fill kernels enqueued after those copies.
             RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_host_mirror_d2h)");
             host_mirror_copy_event.synchronize();
+            pending_page_tables = false;
         }
         py::gil_scoped_acquire gil;
-        callPrepareCudaGraph(attn_pyobj, py_model_inputs_);
+        callPrepareCudaGraph(graph_instances_[graph_idx].mem_hold_.attn_pyobj_, py_model_inputs_);
     }
     prepared_guard.commit();
     completion_guard.committed = true;
@@ -2061,6 +2109,9 @@ void CudaGraphRunner::configureMtpDraftLoop(
     mtp_draft_steps_          = steps;
     mtp_draft_sample_         = std::move(sample);
     py_mtp_draft_step_method_ = py_instance_.attr("prepare_mtp_draft_graph_step");
+#if USING_CUDA && !USE_PPU
+    mtp_draft_metadata_in_graph_ = py::hasattr(py_instance_, "prepare_mtp_draft_graph_replay");
+#endif
     RTP_LLM_LOG_INFO("Whole MTP draft CUDA graph enabled: %d forward/head/sample steps", steps);
 }
 
@@ -2069,6 +2120,9 @@ PyModelOutputs CudaGraphRunner::runCaptureForward(int key) {
     auto  inputs = hold.py_model_inputs_;
     if (mtp_draft_steps_ == 0) {
         return py_forward_method_(inputs, hold.attn_pyobj_).cast<PyModelOutputs>();
+    }
+    if (mtp_draft_metadata_in_graph_) {
+        py_instance_.attr("prepare_mtp_draft_graph_replay")(inputs, hold.attn_pyobj_);
     }
     hold.draft_token_ids_.clear();
     hold.draft_probs_.clear();

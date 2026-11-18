@@ -215,6 +215,12 @@ class Qwen4ExpMTPInputProjection(nn.Module):
 class Qwen4ExpMTPModel(Qwen4ExpModel):
     """One-layer draft model with target-hidden input fusion and QSA."""
 
+    def prepare_mtp_draft_graph_replay(self, inputs, fmha_impl) -> None:
+        """Record one device RoPE page-offset refresh for the entire loop."""
+        groups = get_attention_inputs_value(inputs)
+        for tag, impl in fmha_impl.items():
+            impl.prepare_cuda_graph(groups[tag], refresh_decode_lengths=False)
+
     def prepare_mtp_draft_graph_step(self, inputs, fmha_impl) -> None:
         """Record the live logical position consumed by each step's RoPE writer.
 
@@ -222,7 +228,7 @@ class Qwen4ExpMTPModel(Qwen4ExpModel):
         inside the graph. QSA already reads that storage in its captured
         forward. Decode RoPE owns a separate stable buffer: refresh it here
         without calling its host planner. The complete page-offset table is
-        refreshed once before replay and covers every step, including page
+        refreshed once for the replay and covers every step, including page
         crossings. All capture/warmup inputs use the reserved scratch page.
         """
         groups = get_attention_inputs_value(inputs)

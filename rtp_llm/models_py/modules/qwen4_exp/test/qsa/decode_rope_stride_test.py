@@ -140,21 +140,34 @@ class DecodeRopeStrideTest(unittest.TestCase):
 
     def test_multi_step_graph_refreshes_live_lengths_and_crosses_cache_pages(self):
         from rtp_llm.models_py.model_desc.qwen4_exp_mtp import Qwen4ExpMTPModel
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.sparse_gqa_impl import (
+            SparseGqaFmhaImpl,
+        )
 
         _, op, params, cache, qkv = self.case()
         plus_one = params.sequence_lengths.clone() + 1
+        convert = _get_fused_rope_kvcache().convert_offset_to_block_array
+        physical_pages = torch.arange(1, 9, device="cuda", dtype=torch.int32)[:, None]
+        block_table = physical_pages.expand(8, 67).contiguous()
         attention = SimpleNamespace(
             is_cuda_graph=True,
             is_prefill=False,
             is_target_verify=False,
             sequence_lengths_plus_1_device=plus_one,
+            kv_cache_kernel_block_id_device=block_table,
         )
         inputs = SimpleNamespace(
             attention_inputs={"full": attention, "side": attention}
         )
-        impls = {"full": SimpleNamespace(rope_params=params)}
+        impl = SparseGqaFmhaImpl.__new__(SparseGqaFmhaImpl)
+        impl.attn_inputs = attention
+        impl.is_prefill = impl.is_target_verify = False
+        impl.rope_kvcache_impl = op
+        impl.rope_params = params
+        impls = {"full": impl}
 
         def run():
+            Qwen4ExpMTPModel.prepare_mtp_draft_graph_replay(None, inputs, impls)
             Qwen4ExpMTPModel.prepare_mtp_draft_graph_step(None, inputs, impls)
             first = op.forward(qkv, cache, params)
             plus_one.add_(1)
@@ -179,16 +192,31 @@ class DecodeRopeStrideTest(unittest.TestCase):
                 )
                 + generation
             )
+            block_table.copy_(
+                physical_pages.roll(generation + 1, dims=0).expand_as(block_table)
+            )
+            # A single dummy row keeps the reserved page writes deterministic
+            # for the byte-for-byte comparison with the scalar reference.
+            live_rows = 8 - generation % 2
+            plus_one[live_rows:].fill_(1)
+            block_table[live_rows:].zero_()
             before = plus_one.clone()
-            params.kv_cache_offset.copy_(params.kv_cache_offset.flip(0))
             qkv.mul_(0.875)
             expected_cache = self.clone_cache(cache)
-            params.sequence_lengths.copy_(plus_one - 1)
-            expected_first = self.scalar_reference(params, expected_cache, qkv)
-            params.sequence_lengths.copy_(plus_one)
-            expected_second = self.scalar_reference(params, expected_cache, qkv * 0.75)
+            reference = SimpleNamespace(
+                sequence_lengths=plus_one - 1,
+                kv_cache_offset=convert(block_table),
+            )
+            expected_first = self.scalar_reference(reference, expected_cache, qkv)
+            reference.sequence_lengths = plus_one
+            expected_second = self.scalar_reference(
+                reference, expected_cache, qkv * 0.75
+            )
             graph.replay()
             torch.cuda.synchronize()
+            torch.testing.assert_close(
+                params.kv_cache_offset, reference.kv_cache_offset, rtol=0, atol=0
+            )
             torch.testing.assert_close(actual[0], expected_first, rtol=0, atol=0)
             torch.testing.assert_close(actual[1], expected_second, rtol=0, atol=0)
             torch.testing.assert_close(plus_one, before, rtol=0, atol=0)

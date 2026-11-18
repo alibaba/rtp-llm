@@ -216,7 +216,8 @@ public:
 
 private:
     PyModelOutputs                                                               runCaptureForward(int key);
-    int                                                                          mtp_draft_steps_ = 0;
+    int                                                                          mtp_draft_steps_             = 0;
+    bool                                                                         mtp_draft_metadata_in_graph_ = false;
     std::function<std::pair<torch::Tensor, torch::Tensor>(const torch::Tensor&)> mtp_draft_sample_;
     py::object                                                                   py_mtp_draft_step_method_;
     // Common capture logic for both prefill and decode

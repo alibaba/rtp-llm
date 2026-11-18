@@ -454,19 +454,18 @@ class FusedRopeKVCacheDecodeOp:
             rope_mrope_dim3=rope_config.mrope_dim3,
         )
 
+    def prepare_kv_cache_offset(self, attn_inputs: PyAttentionInputs) -> torch.Tensor:
+        block_ids = attn_inputs.kv_cache_kernel_block_id_device
+        assert block_ids is not None and block_ids.numel() > 0
+        return _get_fused_rope_kvcache().convert_offset_to_block_array(block_ids)
+
     def prepare(
         self,
         attn_inputs: PyAttentionInputs,
         *,
         forbid_reallocation: bool = False,
     ) -> FusedRopeAttnParams:
-        assert (
-            attn_inputs.kv_cache_kernel_block_id_device is not None
-            and attn_inputs.kv_cache_kernel_block_id_device.numel() > 0
-        )
-        kv_cache_offset = _get_fused_rope_kvcache().convert_offset_to_block_array(
-            attn_inputs.kv_cache_kernel_block_id_device
-        )
+        kv_cache_offset = self.prepare_kv_cache_offset(attn_inputs)
         kv_cache_offset_h = None  # not used
         if self.attn_configs.need_rope_kv_cache:
             sequence_lengths_device = self.refresh_sequence_lengths(
