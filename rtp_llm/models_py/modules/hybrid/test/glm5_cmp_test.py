@@ -211,6 +211,54 @@ def test_dynamic_fallback_rejects_rows_above_q_b_limit() -> None:
     )
 
 
+def test_adaptive_verify_selects_cmp_with_token_bucket_padding(monkeypatch) -> None:
+    cmp = _selection_cmp(has_indexer=True, reuses_indexer=False, is_moe_layer=False)
+    cmp.config = SimpleNamespace(model_type="glm_5")
+    cmp._draft_prefill_clone = False
+    rows, batch_capacity = 112, 64
+    request_table = torch.zeros((batch_capacity, 2), dtype=torch.int32)
+    inputs = SimpleNamespace(
+        is_prefill=True,
+        is_target_verify=True,
+        kv_cache_block_id_device=request_table,
+        kv_cache_kernel_block_id_device=torch.zeros(
+            (batch_capacity, 16), dtype=torch.int32
+        ),
+    )
+    # Representative graph capture lengths: 48 requests of width two,
+    # followed by 16 of width one.
+    batch_indices = torch.arange(batch_capacity, dtype=torch.int32).repeat_interleave(
+        torch.tensor([2] * 48 + [1] * 16)
+    )
+    params = SimpleNamespace(
+        expanded_seq_lens=torch.full((rows,), 64, dtype=torch.int32),
+        batch_indice_d=batch_indices,
+    )
+    attention = SimpleNamespace(attn_inputs=inputs, fmha_params=params, weights={})
+    layers = [SimpleNamespace(cmp=cmp)]
+    hidden = torch.empty((rows, 6144), dtype=torch.bfloat16)
+    cache = SimpleNamespace(get_layer_cache=lambda _: object())
+
+    monkeypatch.setenv("RTP_LLM_ADAPTIVE_VERIFICATION", "0")
+    assert not bridge.should_enable_glm5_cmp(layers, 1, hidden, attention, cache)
+
+    monkeypatch.setenv("RTP_LLM_ADAPTIVE_VERIFICATION", "1")
+    assert bridge.should_enable_glm5_cmp(layers, 1, hidden, attention, cache)
+
+    for invalid_map in (
+        None,
+        batch_indices[:-1],
+        batch_indices.view(-1, 1),
+        batch_indices.float(),
+    ):
+        params.batch_indice_d = invalid_map
+        assert not bridge.should_enable_glm5_cmp(layers, 1, hidden, attention, cache)
+
+    params.batch_indice_d = batch_indices
+    inputs.kv_cache_kernel_block_id_device = request_table[:-1]
+    assert not bridge.should_enable_glm5_cmp(layers, 1, hidden, attention, cache)
+
+
 def test_selected_call_initializes_all_layers_once() -> None:
     full = _selection_cmp(
         has_indexer=True,
@@ -289,6 +337,7 @@ def test_fused_shared_expert_is_not_added_twice() -> None:
     layer = SimpleNamespace(
         fake_balance_expert=None,
         fused_moe=SimpleNamespace(forward_prepacked=Mock(return_value=expected)),
+        _cmp_moe_streams=None,
         _use_mega_moe_fused_shared=True,
         shared_expert=shared_expert,
     )
