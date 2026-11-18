@@ -160,7 +160,8 @@ public:
         if (capture_session_may_be_dirty_.load(std::memory_order_acquire)) {
             RTP_LLM_LOG_ERROR("Skip CUDA graph runner drain because capture/session cleanup did not complete; "
                               "the caller must fail model initialization instead of continuing eager execution");
-        } else if (isGenerationPrefillCudaGraph()) {
+        } else if (isGenerationPrefillCudaGraph() || replay_verdict_source_owner_.has_value()
+                   || replay_verdict_failed_prepare_pending_) {
             try {
                 cuda_graph::GraphStreamGuard stream_guard(capture_stream_);
                 cuda_graph::graphDeviceSynchronize();
@@ -204,6 +205,7 @@ public:
     static CudaGraphRunner* initializeCapture(std::unique_ptr<CudaGraphRunner> runner);
 
 private:
+    void waitForFailedReplayVerdictPrepare();
     // Common capture logic for both prefill and decode
     void captureOneGraphInstance(int key, const char* key_type);
     // Common replay and sync check logic
@@ -246,18 +248,33 @@ private:
                                   size_t&               copy_numel) const;
     bool
     canReplaySelectedGraph(const PyModelInputs& inputs, const CudaGraphState& state, CudaGraphCheckMode mode) const;
-    void                    initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
-    void                    initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
-    void                    initCaptureAttentionInputsPost();
-    py::object              py_forward_method_;
-    py::object              py_attn_pyobj_method_;
-    py::object              py_after_warmup_method_;
-    py::object              py_after_capture_method_;
-    py::object              py_after_replay_method_;
-    bool                    enable_cuda_graph_{false};
-    bool                    is_prefill_cuda_graph_mode_{false};
-    bool                    is_target_verify_{false};
-    bool                    draft_prefill_uses_request_lanes_{false};
+    void       initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
+    void       initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
+    void       initCaptureAttentionInputsPost();
+    py::object py_forward_method_;
+    py::object py_attn_pyobj_method_;
+    py::object py_after_warmup_method_;
+    py::object py_after_capture_method_;
+    py::object py_after_replay_method_;
+    bool       enable_cuda_graph_{false};
+    bool       is_prefill_cuda_graph_mode_{false};
+    bool       is_target_verify_{false};
+    bool       draft_prefill_uses_request_lanes_{false};
+    std::shared_ptr<std::atomic<uint64_t>> metadata_lease_generation_{std::make_shared<std::atomic<uint64_t>>(0)};
+    struct ReplayVerdictSlot {
+        torch::Tensor source_lengths;
+        torch::Tensor source_prefixes;
+        torch::Tensor invalid_host;
+    };
+    std::unordered_map<int, ReplayVerdictSlot> replay_verdict_slots_;
+    // The early callback can throw before any host wait. Retain every original
+    // source tensor, not just private destinations, until its copy readers end.
+    std::optional<PyModelInputs> replay_verdict_source_owner_;
+    // Success is drained by the required mirror/verdict wait. Only interrupted
+    // prepares need this additional fence before reusing any slot or capture.
+    torch::Event            replay_verdict_failed_prepare_event_ = cuda_graph::makeGraphEvent();
+    bool                    replay_verdict_failed_prepare_pending_{false};
+    bool                    replay_verdict_failed_prepare_poisoned_{false};
     CudaGraphRole           role_{CudaGraphRole::AUTO};
     cuda_graph::GraphStream capture_stream_;
     bool                    enable_cuda_graph_debug_mode_{false};

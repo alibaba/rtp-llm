@@ -135,7 +135,52 @@ bool streamAsyncReplayPrepEnabled() {
     return enabled;
 }
 
-void callPrepareCudaGraph(py::object attn_pyobj, PyModelInputs& inputs) {
+bool metadataLeaseEnabled() {
+    static const bool enabled = []() {
+        const char* value = std::getenv("RTP_LLM_CUDA_GRAPH_METADATA_LEASE");
+        return value != nullptr && std::string(value) == "1";
+    }();
+    return enabled;
+}
+
+bool replayDeviceVerdictEnabled() {
+    static const bool enabled = []() {
+        const char* value         = std::getenv("RTP_LLM_CUDA_GRAPH_DEVICE_VERDICT");
+        const char* hook          = std::getenv("RTP_HOT_HOOK");
+        const bool  hook_disabled = hook == nullptr || std::string(hook).empty() || std::string(hook) == "0";
+        return value != nullptr && std::string(value) == "1" && hook_disabled;
+    }();
+    return enabled;
+}
+
+bool sameDeviceLengthSources(const PyModelInputs& inputs) {
+    const auto& source      = inputs.attention_inputs;
+    auto        same_source = [](const torch::Tensor& logical, const torch::Tensor& device) {
+        return logical.defined() && device.defined() && logical.is_cuda() && logical.scalar_type() == torch::kInt32
+               && logical.dim() == 1 && logical.numel() > 0 && logical.is_contiguous()
+               && logical.unsafeGetTensorImpl() == device.unsafeGetTensorImpl();
+    };
+    if (!same_source(source.input_lengths, source.input_lengths_device)
+        || !same_source(source.prefix_lengths, source.prefix_lengths_device)
+        || source.input_lengths.device() != source.prefix_lengths.device()
+        || source.input_lengths.numel() != source.prefix_lengths.numel()) {
+        return false;
+    }
+    for (const auto& [tag, group] : inputs.attention_inputs_by_tag) {
+        (void)tag;
+        if (!same_source(group.input_lengths, group.input_lengths_device)
+            || !same_source(group.prefix_lengths, group.prefix_lengths_device)
+            || group.input_lengths.unsafeGetTensorImpl() != source.input_lengths.unsafeGetTensorImpl()
+            || group.prefix_lengths.unsafeGetTensorImpl() != source.prefix_lengths.unsafeGetTensorImpl()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void callPrepareCudaGraph(py::object                                       attn_pyobj,
+                          PyModelInputs&                                   inputs,
+                          const std::shared_ptr<GraphReplayMetadataLease>& metadata_lease = nullptr) {
     if (!attn_pyobj || attn_pyobj.is_none()) {
         return;
     }
@@ -165,7 +210,14 @@ void callPrepareCudaGraph(py::object attn_pyobj, PyModelInputs& inputs) {
     }
 
     if (py::hasattr(attn_pyobj, "prepare_cuda_graph")) {
-        attn_pyobj.attr("prepare_cuda_graph")(inputs.attention_inputs_by_tag);
+        if (metadata_lease) {
+            attn_pyobj.attr("prepare_cuda_graph")(inputs.attention_inputs_by_tag,
+                                                  py::arg("metadata_lease") = metadata_lease);
+            TORCH_CHECK(metadata_lease->consumed(),
+                        "CUDA graph metadata lease was not consumed before prepare returned");
+        } else {
+            attn_pyobj.attr("prepare_cuda_graph")(inputs.attention_inputs_by_tag);
+        }
     }
 }
 
@@ -334,6 +386,7 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
 }
 
 void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphState& state) {
+    waitForFailedReplayVerdictPrepare();
     RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareInputData");
     const size_t graph_idx =
         is_prefill_cuda_graph_mode_ ? state.current_real_graph_seq_len : state.current_real_graph_bs;
@@ -419,6 +472,16 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
     }
 }
 
+void CudaGraphRunner::waitForFailedReplayVerdictPrepare() {
+    TORCH_CHECK(!replay_verdict_failed_prepare_poisoned_, "CUDA graph verdict staging could not be fenced");
+    if (replay_verdict_failed_prepare_pending_) {
+        RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_failed_verdict_prepare)");
+        replay_verdict_failed_prepare_event_.synchronize();
+        replay_verdict_source_owner_.reset();
+        replay_verdict_failed_prepare_pending_ = false;
+    }
+}
+
 void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                              CudaGraphState&      state,
                                              bool                 skip_forward_event_sync) {
@@ -428,6 +491,29 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     c10::InferenceMode inference_guard(true);
     RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs");
     PreparedAttentionInputsGuard prepared_guard(prepared_attention_inputs_);
+    waitForFailedReplayVerdictPrepare();
+    struct ReplayVerdictFailureGuard {
+        torch::Event& event;
+        bool&         pending;
+        bool&         poisoned;
+        bool          active    = false;
+        bool          completed = false;
+
+        ~ReplayVerdictFailureGuard() noexcept {
+            if (!active || completed) {
+                return;
+            }
+            try {
+                event.record(cuda_graph::graphGetCurrentStream());
+                pending = true;
+            } catch (...) {
+                // Never reuse an unfenced pinned destination or snapshot.
+                poisoned = true;
+            }
+        }
+    } verdict_failure_guard{replay_verdict_failed_prepare_event_,
+                            replay_verdict_failed_prepare_pending_,
+                            replay_verdict_failed_prepare_poisoned_};
     // 1. non spec cuda graph:
     // is_prefill_cuda_graph_mode_ is set true only when use embedding model
     // 2. spec cuda graph:
@@ -489,11 +575,50 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                                        state.current_real_graph_bs;
     const bool has_padded_rows = state.current_batch_size < selected_graph_batch_size;
 
-    // These values are ordinary host scalars, not captured tensor storage. A
-    // replay can keep the same graph shape while prefix reuse changes the total
-    // KV length, so refresh them for every cache group before replanning. Dummy
-    // graph rows are an implementation detail and must not contribute to the
-    // request-level totals.
+    ReplayVerdictSlot* verdict_slot = nullptr;
+    if (replayDeviceVerdictEnabled() && metadataLeaseEnabled() && isMtpDraftPrefillCudaGraph() && has_tagged_cache
+        && state.current_batch_size > 0 && sameDeviceLengthSources(inputs)) {
+        py::gil_scoped_acquire gil;
+        if (attn_pyobj && !attn_pyobj.is_none() && !py::isinstance<py::dict>(attn_pyobj)
+            && py::hasattr(attn_pyobj, "cuda_graph_metadata_lease")
+            && attn_pyobj.attr("cuda_graph_metadata_lease").cast<bool>()
+            && py::hasattr(attn_pyobj, "cuda_graph_device_verdict")
+            && attn_pyobj.attr("cuda_graph_device_verdict").cast<bool>()
+            && py::hasattr(attn_pyobj, "enqueue_cuda_graph_validation")) {
+            auto protocol = py::module_::import("rtp_llm.models_py.model_desc.qwen4_exp_runtime.draft_prefill_graph");
+            // An arbitrary callback could change values after the early GPU
+            // verdict without advancing an inference tensor's version. Admit
+            // only the original exact implementation; subclasses, replaced
+            // callbacks and hot hooks retain the late reference validation.
+            auto       prepare_method = attn_pyobj.attr("prepare_cuda_graph");
+            auto       enqueue_method = attn_pyobj.attr("enqueue_cuda_graph_validation");
+            const bool original_protocol =
+                py::type::of(attn_pyobj).is(protocol.attr("DraftPrefillGraphReplay"))
+                && py::hasattr(prepare_method, "__func__") && py::hasattr(enqueue_method, "__func__")
+                && prepare_method.attr("__func__").is(protocol.attr("_DEVICE_VERDICT_PREPARE"))
+                && enqueue_method.attr("__func__").is(protocol.attr("_DEVICE_VERDICT_ENQUEUE"));
+            if (original_protocol) {
+                auto& slot = replay_verdict_slots_[graph_idx];
+                if (!slot.source_lengths.defined()) {
+                    slot.source_lengths =
+                        torch::empty({selected_graph_batch_size}, inputs.attention_inputs.input_lengths.options());
+                    slot.source_prefixes = torch::empty_like(slot.source_lengths);
+                    slot.invalid_host    = torch::empty(
+                        {}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCPU).pinned_memory(true));
+                }
+                TORCH_CHECK(slot.source_lengths.numel() == selected_graph_batch_size
+                                && slot.source_lengths.device() == inputs.attention_inputs.input_lengths.device()
+                                && inputs.attention_inputs.input_lengths.numel() == state.current_batch_size,
+                            "CUDA graph verdict source slot geometry changed");
+                verdict_slot                 = &slot;
+                replay_verdict_source_owner_ = inputs;
+                verdict_failure_guard.active = true;
+            }
+        }
+    }
+
+    // Refresh request totals for every cache group on every replay.
+    // Dummy graph rows must not change the request-level totals.
     py_model_inputs_.attention_inputs.context_total_kv_length = inputs.attention_inputs.context_total_kv_length;
     py_model_inputs_.attention_inputs.total_tokens            = inputs.attention_inputs.total_tokens;
     for (auto& [tag, tagged_inputs] : py_model_inputs_.attention_inputs_by_tag) {
@@ -503,7 +628,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     }
 
     // Per-launch capacity contract: see fuse_copy_util.h sizing rationale.
-    // Worst case here is ~8 contiguous + (1 + 2 * group_count) strided copies,
+    // Worst case here is ~10 contiguous (including two opt-in source snapshots)
+    // + (1 + 2 * group_count) strided copies,
     // batched into one launch each. If new copies are added below — or if the
     // hybrid KV-cache group_count grows materially — re-check MAX_FUSED_*_COPIES.
     FusedD2DCopyParams     d2d_copies;
@@ -615,6 +741,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     {
         RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(fused_fill)");
         CudaGraphPrepareFillParams fill_params;
+        if (verdict_slot != nullptr) {
+            addCudaGraphPrepareFillRegion(fill_params, verdict_slot->source_lengths, 0, selected_graph_batch_size, 0);
+            addCudaGraphPrepareFillRegion(fill_params, verdict_slot->source_prefixes, 0, selected_graph_batch_size, 0);
+        }
         if (!has_tagged_cache) {
             addCudaGraphPrepareFillRegion(fill_params,
                                           py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_device,
@@ -765,6 +895,17 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
     // undefined empty tensors for those slots, which would crash on element_size().
 
     if (!isGenerationPrefillCudaGraph()) {
+        if (verdict_slot != nullptr) {
+            // Independent producer snapshots, collected in the same existing
+            // fused copy launch as the captured metadata. Never copy these
+            // references back from the captured L/P or CU/positions.
+            tryAddD2DCopy(inputs.attention_inputs.input_lengths,
+                          verdict_slot->source_lengths,
+                          state.current_batch_size * sizeof(int));
+            tryAddD2DCopy(inputs.attention_inputs.prefix_lengths,
+                          verdict_slot->source_prefixes,
+                          state.current_batch_size * sizeof(int));
+        }
         tryAddD2DCopy(inputs.attention_inputs.cu_seqlens_device,
                       py_model_inputs_.attention_inputs.cu_seqlens_device,
                       (state.current_batch_size + 1) * sizeof(int));
@@ -876,12 +1017,13 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                              (state.current_batch_size + 1) * sizeof(int));
         }
 
-        copyToHostMirror(inputs.attention_inputs.input_lengths,
+        copyToHostMirror(verdict_slot != nullptr ? verdict_slot->source_lengths : inputs.attention_inputs.input_lengths,
                          py_model_inputs_.attention_inputs.input_lengths,
                          state.current_batch_size * sizeof(int));
 
         if (!isGenerationPrefillCudaGraph()) {
-            copyToHostMirror(inputs.attention_inputs.prefix_lengths,
+            copyToHostMirror(verdict_slot != nullptr ? verdict_slot->source_prefixes :
+                                                       inputs.attention_inputs.prefix_lengths,
                              py_model_inputs_.attention_inputs.prefix_lengths,
                              state.current_batch_size * sizeof(int));
         }
@@ -1081,6 +1223,29 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
 #endif
     }
 
+    torch::Tensor device_verdict;
+    bool          device_verdict_submitted = false;
+    if (verdict_slot != nullptr) {
+        RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(enqueue_device_verdict)");
+        py::gil_scoped_acquire gil;
+        // All device copies, padding and fill operations have been enqueued.
+        // This callback may inspect device tensors and geometry, never the
+        // still-pending host mirrors. None preserves the original fallback.
+        auto verdict = attn_pyobj.attr("enqueue_cuda_graph_validation")(
+            py_model_inputs_.attention_inputs_by_tag, verdict_slot->source_lengths, verdict_slot->source_prefixes);
+        if (!verdict.is_none()) {
+            device_verdict = verdict.cast<torch::Tensor>();
+            TORCH_CHECK(device_verdict.is_cuda() && device_verdict.scalar_type() == torch::kBool
+                            && device_verdict.dim() == 0 && device_verdict.is_contiguous()
+                            && device_verdict.device() == verdict_slot->source_lengths.device(),
+                        "CUDA graph device verdict must be a same-device bool scalar");
+            optimizedCopyAsync(device_verdict, verdict_slot->invalid_host, sizeof(bool));
+            host_mirror_copy_event.record(cuda_graph::graphGetCurrentStream());
+            pending_host_mirror_d2h  = true;
+            device_verdict_submitted = true;
+        }
+    }
+
     // launch prepare_cuda_graph when attention inputs are ready.
     // GIL is required: this function may be invoked from an AsyncRunner worker thread
     // (MtpExecutor::decodeStep) and from the engine main thread (PyWrappedModel::forward),
@@ -1091,20 +1256,47 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         if (pending_host_mirror_d2h) {
             // Wait for the async D2H metadata copies above so the CPU-side
             // fill/plan paths inside prepare_cuda_graph read this step's
-            // values instead of the previous step's. The event was recorded
-            // at the last mirror copy enqueue, so this never blocks on the
-            // fill kernels enqueued after those copies.
+            // values instead of the previous step's. Normally the event ends
+            // at the last mirror copy. The opt-in device verdict deliberately
+            // advances it to include validation and its fixed pinned result.
             RTP_LLM_PROFILE_SCOPE("cuda_graph.prepareAttentionInputs(wait_host_mirror_d2h)");
             host_mirror_copy_event.synchronize();
+            if (verdict_slot != nullptr) {
+                replay_verdict_source_owner_.reset();
+            }
         }
         py::gil_scoped_acquire gil;
-        callPrepareCudaGraph(attn_pyobj, py_model_inputs_);
+        struct MetadataLeaseScope {
+            std::shared_ptr<GraphReplayMetadataLease> lease;
+            ~MetadataLeaseScope() {
+                if (lease) {
+                    lease->revoke();
+                }
+            }
+        } lease_scope;
+        // The existing D2H wait above has completed this call's CPU mirrors.
+        // Issue only for native device-first L/P with one shared source in all
+        // groups. Host/mixed/foreign sources retain the original callback.
+        if (metadataLeaseEnabled() && isMtpDraftPrefillCudaGraph() && !inputs.attention_inputs_by_tag.empty()
+            && sameDeviceLengthSources(inputs) && attn_pyobj && !attn_pyobj.is_none()
+            && !py::isinstance<py::dict>(attn_pyobj) && py::hasattr(attn_pyobj, "cuda_graph_metadata_lease")
+            && attn_pyobj.attr("cuda_graph_metadata_lease").cast<bool>()) {
+            lease_scope.lease = std::shared_ptr<GraphReplayMetadataLease>(new GraphReplayMetadataLease(
+                metadata_lease_generation_,
+                inputs.attention_inputs,
+                py_model_inputs_.attention_inputs_by_tag,
+                device_verdict_submitted ? std::optional<bool>(*verdict_slot->invalid_host.data_ptr<bool>()) :
+                                           std::nullopt));
+        }
+        callPrepareCudaGraph(attn_pyobj, py_model_inputs_, lease_scope.lease);
     }
     prepared_guard.commit();
-    completion_guard.committed = true;
+    completion_guard.committed      = true;
+    verdict_failure_guard.completed = true;
 }
 
 void CudaGraphRunner::updateKVCacheKernelBlockId(const PyModelInputs& inputs, CudaGraphState& state) {
+    waitForFailedReplayVerdictPrepare();
     c10::InferenceMode inference_guard(true);
     RTP_LLM_PROFILE_SCOPE("cuda_graph.updateKVCacheKernelBlockId");
     const size_t graph_idx =

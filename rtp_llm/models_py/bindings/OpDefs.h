@@ -5,6 +5,8 @@
 #include <pybind11/embed.h>
 #include <torch/extension.h>
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
@@ -18,6 +20,10 @@
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+
+namespace rtp_llm {
+class CudaGraphRunner;
+}
 
 namespace torch_ext {
 
@@ -346,6 +352,146 @@ using AttentionInputsByTag = std::map<std::string, PyAttentionInputs>;
 
 // PP stage-boundary tensors; keys are model-defined ("hidden_states" + "residual" for fused-residual models).
 using PPIntermediates = std::map<std::string, torch::Tensor>;
+
+// A native-issued reservation for one GraphRunner metadata callback. It proves
+// storage/shape identity and the current prepare generation. An optional
+// device verdict is issued only after native-owned source snapshots, GPU
+// validation and its pinned result copy have completed. Without that value,
+// the reservation never exempts GPU value validation.
+class GraphReplayMetadataLease {
+public:
+    std::optional<bool> deviceValidationInvalid() const {
+        return device_validation_invalid_;
+    }
+
+    bool matches(const AttentionInputsByTag& inputs) const {
+        const auto current = generation_.lock();
+        if (!active_.load(std::memory_order_acquire) || consumed_.load(std::memory_order_acquire) || !current
+            || current->load(std::memory_order_acquire) != epoch_ || inputs.size() != groups_.size()
+            || !source_lengths_.matches(source_lengths_.tensor) || !source_prefixes_.matches(source_prefixes_.tensor)) {
+            return false;
+        }
+        for (const auto& [tag, signatures] : groups_) {
+            const auto found = inputs.find(tag);
+            if (found == inputs.end()) {
+                return false;
+            }
+            const auto tensors = metadataTensors(found->second);
+            for (size_t i = 0; i < signatures.size(); ++i) {
+                if (!signatures[i].matches(tensors[i])) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    bool consume(const AttentionInputsByTag& inputs) {
+        if (!matches(inputs)) {
+            return false;
+        }
+        bool expected = false;
+        return consumed_.compare_exchange_strong(expected, true, std::memory_order_acq_rel);
+    }
+
+    bool consumed() const {
+        return consumed_.load(std::memory_order_acquire);
+    }
+
+    // Native scope teardown revokes retained Python handles, including when
+    // validation or a delegate throws. This does not drain or release storage.
+    void revoke() noexcept {
+        active_.store(false, std::memory_order_release);
+    }
+
+private:
+    friend class rtp_llm::CudaGraphRunner;
+
+    struct TensorSignature {
+        torch::Tensor               tensor;
+        std::vector<int64_t>        sizes;
+        std::vector<int64_t>        strides;
+        int64_t                     offset = 0;
+        std::optional<uint32_t>     version;
+        std::optional<c10::Storage> storage;
+        const void*                 data  = nullptr;
+        c10::ScalarType             dtype = c10::ScalarType::Undefined;
+        c10::Device                 device{c10::DeviceType::CPU};
+
+        explicit TensorSignature(const torch::Tensor& value): tensor(value) {
+            if (tensor.defined()) {
+                sizes               = tensor.sizes().vec();
+                strides             = tensor.strides().vec();
+                offset              = tensor.storage_offset();
+                storage             = tensor.storage();
+                data                = tensor.data_ptr();
+                dtype               = tensor.scalar_type();
+                device              = tensor.device();
+                const auto& counter = tensor.unsafeGetTensorImpl()->version_counter();
+                if (counter.enabled()) {
+                    version = counter.current_version();
+                }
+            }
+        }
+
+        bool matches(const torch::Tensor& value) const {
+            if (tensor.defined() != value.defined()) {
+                return false;
+            }
+            if (!tensor.defined()) {
+                return true;
+            }
+            if (tensor.unsafeGetTensorImpl() != value.unsafeGetTensorImpl() || !value.sizes().equals(sizes)
+                || !value.strides().equals(strides) || value.storage_offset() != offset
+                || value.storage().unsafeGetStorageImpl() != storage->unsafeGetStorageImpl() || value.data_ptr() != data
+                || value.scalar_type() != dtype || value.device() != device) {
+                return false;
+            }
+            const auto& counter = value.unsafeGetTensorImpl()->version_counter();
+            return version.has_value() == counter.enabled()
+                   && (!version.has_value() || *version == counter.current_version());
+        }
+    };
+
+    static std::vector<torch::Tensor> metadataTensors(const PyAttentionInputs& inputs) {
+        return {inputs.input_lengths,
+                inputs.input_lengths_device,
+                inputs.prefix_lengths,
+                inputs.prefix_lengths_device,
+                inputs.cu_seqlens_device,
+                inputs.combo_position_ids,
+                inputs.kv_cache_kernel_block_id,
+                inputs.kv_cache_kernel_block_id_device,
+                inputs.kv_cache_block_id,
+                inputs.kv_cache_block_id_device};
+    }
+
+    GraphReplayMetadataLease(const std::shared_ptr<std::atomic<uint64_t>>& generation,
+                             const PyAttentionInputs&                      source,
+                             const AttentionInputsByTag&                   captured,
+                             std::optional<bool>                           device_validation_invalid = std::nullopt):
+        generation_(generation),
+        epoch_(generation->fetch_add(1, std::memory_order_acq_rel) + 1),
+        source_lengths_(source.input_lengths),
+        source_prefixes_(source.prefix_lengths),
+        device_validation_invalid_(device_validation_invalid) {
+        for (const auto& [tag, inputs] : captured) {
+            auto& signatures = groups_[tag];
+            for (const auto& tensor : metadataTensors(inputs)) {
+                signatures.emplace_back(tensor);
+            }
+        }
+    }
+
+    std::weak_ptr<std::atomic<uint64_t>>                generation_;
+    uint64_t                                            epoch_;
+    TensorSignature                                     source_lengths_;
+    TensorSignature                                     source_prefixes_;
+    const std::optional<bool>                           device_validation_invalid_;
+    std::map<std::string, std::vector<TensorSignature>> groups_;
+    std::atomic<bool>                                   active_{true};
+    std::atomic<bool>                                   consumed_{false};
+};
 
 struct PyModelInputs {
     torch::Tensor      input_ids;
