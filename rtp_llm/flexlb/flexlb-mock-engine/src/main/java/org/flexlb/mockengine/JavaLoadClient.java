@@ -1173,6 +1173,7 @@ public final class JavaLoadClient {
         }
 
         Exception scheduleExc = null;
+        boolean needsDirectSubmission = false;
         inflightCount.incrementAndGet();
         try {
             double sendStartEpochMs =
@@ -1250,8 +1251,11 @@ public final class JavaLoadClient {
             } else {
                 result.prefill = roleAddr(scheduleResponse, "PREFILL");
                 result.decode = roleAddr(scheduleResponse, "DECODE");
+                needsDirectSubmission =
+                        !scheduleResponse.getEnqueuedByMaster()
+                                && !inputPb.getGenerateConfig().getCanUsePdSeparation();
 
-                if (!config.fetchOutputStream) {
+                if (!config.fetchOutputStream && !needsDirectSubmission) {
                     // Under a NON_BATCH dispatcher the engine only receives the
                     // request through the client's own GenerateStreamCall
                     // (submission and stream reading are the same streaming
@@ -1350,7 +1354,7 @@ public final class JavaLoadClient {
         }
 
         // Phase 2: engine stream reading (outside semaphore)
-        if (scheduleResponse != null && config.fetchOutputStream) {
+        if (scheduleResponse != null && (config.fetchOutputStream || needsDirectSubmission)) {
             try {
                 Double firstFrameNanos = null;
                 Double terminalNanos = null;
@@ -1360,6 +1364,9 @@ public final class JavaLoadClient {
                 String target = mock ? prefillAddr : roleAddr(scheduleResponse, "DECODE");
                 if (target.isEmpty()) {
                     target = roleAddr(scheduleResponse, "PDFUSION");
+                }
+                if (target.isEmpty() && needsDirectSubmission) {
+                    target = prefillAddr;
                 }
                 if (target.isEmpty()) {
                     throw new RuntimeException("schedule response has no DECODE/PDFUSION address");
