@@ -32,55 +32,50 @@ TEST(TransferTaskTest, SubtasksPreserveQueryIdAndDeadline) {
     EXPECT_EQ(grandchild.requestId(), 73);
 }
 
-TEST(TransferTaskTest, RpcBatchesHaveDistinctExecutionTracesWithinWorkflow) {
+TEST(TransferTaskTest, NewTasksHaveDistinctExecutionTracesWithinWorkflow) {
     TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::seconds(10), 73);
-    auto first  = task.rpcSubtask({TransferDescriptor::hostToDevice(1, 3, {4})});
-    auto second = task.rpcSubtask({TransferDescriptor::hostToDevice(2, 5, {6})});
+    TransferTask first({TransferDescriptor::hostToDevice(1, 3, {4})}, std::chrono::seconds(10), 73);
+    TransferTask second({TransferDescriptor::hostToDevice(2, 5, {6})}, std::chrono::seconds(10), 73);
+    first.setWorkflow(task.workflowId(), task.traceId());
+    second.setWorkflow(task.workflowId(), task.traceId());
 
+    EXPECT_NE(task.traceId(), 0u);
     EXPECT_NE(first.traceId(), 0u);
     EXPECT_NE(second.traceId(), 0u);
     EXPECT_NE(first.traceId(), task.traceId());
     EXPECT_NE(second.traceId(), task.traceId());
     EXPECT_NE(first.traceId(), second.traceId());
-    EXPECT_EQ(first.deadline(), task.deadline());
-    EXPECT_EQ(second.deadline(), task.deadline());
     EXPECT_EQ(first.requestId(), task.requestId());
     EXPECT_EQ(second.requestId(), task.requestId());
     EXPECT_EQ(first.workflowId(), task.workflowId());
     EXPECT_EQ(second.workflowId(), task.workflowId());
     EXPECT_EQ(first.parentTraceId(), task.traceId());
     EXPECT_EQ(second.parentTraceId(), task.traceId());
-
-    auto nested_rpc = first.rpcSubtask();
-    EXPECT_NE(nested_rpc.traceId(), first.traceId());
-    EXPECT_EQ(nested_rpc.workflowId(), task.workflowId());
-    EXPECT_EQ(nested_rpc.parentTraceId(), first.traceId());
 }
 
 TEST(TransferTaskTest, WorkerSubtasksPreserveReceivedExecutionTrace) {
     TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::seconds(10), 73);
-    const auto   rpc = task.rpcSubtask();
-    TransferTask worker(std::vector<TransferDescriptor>(rpc.descriptors().begin(), rpc.descriptors().end()),
-                        std::chrono::seconds(10),
-                        rpc.requestId());
-    worker.setTraceId(rpc.traceId());
-    worker.setWorkflow(rpc.workflowId(), rpc.parentTraceId());
+    task.setWorkflow(1234, 5678);
+    TransferTask worker(std::vector<TransferDescriptor>(task.descriptors().begin(), task.descriptors().end()),
+                        std::chrono::seconds(10), task.requestId());
+    worker.setTraceId(task.traceId());
+    worker.setWorkflow(task.workflowId(), task.parentTraceId());
 
     auto child  = worker.subtask({TransferDescriptor::hostToDevice(1, 3, {4})});
     auto nested = child.subtask({TransferDescriptor::hostToDevice(2, 5, {6})});
 
-    EXPECT_EQ(worker.traceId(), rpc.traceId());
-    EXPECT_EQ(child.traceId(), rpc.traceId());
-    EXPECT_EQ(nested.traceId(), rpc.traceId());
+    EXPECT_EQ(worker.traceId(), task.traceId());
+    EXPECT_EQ(child.traceId(), task.traceId());
+    EXPECT_EQ(nested.traceId(), task.traceId());
     EXPECT_EQ(nested.workflowId(), task.workflowId());
-    EXPECT_EQ(nested.parentTraceId(), task.traceId());
+    EXPECT_EQ(nested.parentTraceId(), task.parentTraceId());
     EXPECT_EQ(nested.deadline(), worker.deadline());
     EXPECT_EQ(nested.requestId(), worker.requestId());
 }
 
 TEST(TransferTaskTest, CopyAndMovePreserveExecutionTrace) {
-    TransferTask parent({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::seconds(10), 73);
-    const auto   task   = parent.rpcSubtask();
+    TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2})}, std::chrono::seconds(10), 73);
+    task.setWorkflow(1234, 5678);
     auto copied = task;
     auto moved  = std::move(copied);
     EXPECT_EQ(moved.traceId(), task.traceId());
@@ -107,7 +102,6 @@ TEST(TransferTaskTest, CompletionProofFollowsOwnershipButNotNewSubtasks) {
     auto moved = std::move(copied);
     EXPECT_EQ(moved.completionProof(), proof);
     EXPECT_EQ(task.subtask(0, task.descriptors().size()).completionProof(), nullptr);
-    EXPECT_EQ(task.rpcSubtask().completionProof(), nullptr);
 
     auto owned = task.subtask(0, task.descriptors().size());
     owned.setCompletionProof(task.completionProof());
@@ -117,19 +111,19 @@ TEST(TransferTaskTest, CompletionProofFollowsOwnershipButNotNewSubtasks) {
     EXPECT_EQ(owned.completionProof(), proof);
 }
 
-TEST(TransferTaskTest, RpcSubmissionSharesDescriptorsWithoutChangingParent) {
+TEST(TransferTaskTest, SubtaskSharesDescriptorsWithoutChangingParent) {
     TransferTask task({TransferDescriptor::hostToDevice(0, 1, {2, 3})}, std::chrono::seconds(10), 73);
     const auto   proof = std::make_shared<TransferBufferSafety>([] {});
     task.setCompletionProof(proof);
-    const auto rpc = task.rpcSubtask();
+    const auto rpc = task.subtask(0, task.descriptors().size());
 
     EXPECT_EQ(task.completionProof(), proof);
     EXPECT_EQ(rpc.descriptors().data(), task.descriptors().data());
     EXPECT_EQ(rpc.deadline(), task.deadline());
     EXPECT_EQ(rpc.requestId(), task.requestId());
     EXPECT_EQ(rpc.workflowId(), task.workflowId());
-    EXPECT_EQ(rpc.parentTraceId(), task.traceId());
-    EXPECT_NE(rpc.traceId(), task.traceId());
+    EXPECT_EQ(rpc.parentTraceId(), task.parentTraceId());
+    EXPECT_EQ(rpc.traceId(), task.traceId());
     EXPECT_EQ(rpc.completionProof(), nullptr);
 }
 

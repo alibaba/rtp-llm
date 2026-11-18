@@ -477,11 +477,11 @@ TEST_F(KVCMSubmissionBoundaryTest, ProjectedOneSdkHandoffAndOnePreflightExpiryRe
 TEST_F(KVCMSubmissionBoundaryTest, TargetProtectionPreservesExceptionalSdkUnknownType) {
     const auto failure = std::make_exception_ptr(StorageOperationPayloadExceptionUnknown(
         "exceptional SDK completion", StorageQuarantineReason::RPC_ERROR));
-    for (const auto protection : {StorageLocalTargetProtection::LEGACY,
-                                  StorageLocalTargetProtection::TARGETS_HELD,
-                                  StorageLocalTargetProtection::NO_LOCAL_TARGETS}) {
+    for (const auto protection : {StorageTargetProtection::FREEZE_REQUEST_BLOCKS,
+                                  StorageTargetProtection::PROTECTED_BY_BACKEND,
+                                  StorageTargetProtection::NO_LOCAL_TARGETS}) {
         try {
-            std::rethrow_exception(KVCMStorageBackend::Impl::withTargetProtection(failure, protection));
+            std::rethrow_exception(KVCMStorageBackend::Impl::copyFailureWithTargetProtection(failure, protection));
         } catch (const StorageOperationPayloadExceptionUnknown& error) {
             EXPECT_STREQ(error.what(), "exceptional SDK completion");
             EXPECT_EQ(error.reason(), StorageQuarantineReason::RPC_ERROR);

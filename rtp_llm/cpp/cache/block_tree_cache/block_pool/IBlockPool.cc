@@ -199,8 +199,6 @@ std::function<void()> IBlockPool::prepareFrozenReferenceRelease(BlockIdList bloc
     for (const auto block : blocks) {
         checkAllocatedNoLock(block);
     }
-    // All live allocations can eventually be returned without growing this
-    // vector, including when ordinary ownership disappears before unfreeze.
     reserveAllReleasedBlocksNoLock();
     auto notify = capacity_change_callback_;
     return [this, blocks = std::move(blocks), notify = std::move(notify)]() noexcept {
@@ -213,8 +211,6 @@ void IBlockPool::releaseFrozenReferences(const BlockIdList& blocks, const std::f
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto type = treeRefTypeIndex(BlockTreeRefType::FROZEN);
-        // Preparation already checked uniqueness. Validate the whole balance
-        // before changing any block; a violated ownership contract is fatal.
         for (const auto block : blocks) {
             checkAllocatedNoLock(block);
             RTP_LLM_CHECK(tree_refcounts_by_type_[type][block] > 0);
@@ -222,16 +218,7 @@ void IBlockPool::releaseFrozenReferences(const BlockIdList& blocks, const std::f
         const auto free_before      = availableFreeBlocksNoLock();
         const auto available_before = available_blocks_num_;
         for (const auto block : blocks) {
-            const bool was_active    = isActiveNoLock(block);
-            const bool was_available = isAvailableNoLock(block);
-            if (--tree_refcounts_by_type_[type][block] == 0) {
-                --tree_referenced_block_counts_[type];
-            }
-            if (--tree_refcounts_[block] == 0 && onLastTreeRefNoLock(block)) {
-                freeAllocatedBlockNoLock(block);
-            }
-            updateActiveBlocksNumNoLock(block, was_active);
-            updateAvailableBlocksNumNoLock(block, was_available);
+            decTreeRefNoLock(block, type);
         }
         capacity_grew = availableFreeBlocksNoLock() > free_before || available_blocks_num_ > available_before;
     }
@@ -258,23 +245,27 @@ void IBlockPool::decTreeRef(const BlockIdList& blocks, BlockTreeRefType ref_type
                                     ref_type_index);
         },
         [this, ref_type_index](BlockIdxType block) {
-            const bool was_active     = isActiveNoLock(block);
-            const bool was_available  = isAvailableNoLock(block);
-            uint32_t&  typed_refcount = tree_refcounts_by_type_[ref_type_index][block];
-            --typed_refcount;
-            if (typed_refcount == 0) {
-                assert(tree_referenced_block_counts_[ref_type_index] > 0);
-                --tree_referenced_block_counts_[ref_type_index];
-            }
-
-            assert(tree_refcounts_[block] > 0);
-            --tree_refcounts_[block];
-            if (tree_refcounts_[block] == 0 && onLastTreeRefNoLock(block)) {
-                freeAllocatedBlockNoLock(block);
-            }
-            updateActiveBlocksNumNoLock(block, was_active);
-            updateAvailableBlocksNumNoLock(block, was_available);
+            decTreeRefNoLock(block, ref_type_index);
         });
+}
+
+void IBlockPool::decTreeRefNoLock(BlockIdxType block, size_t ref_type_index) {
+    const bool was_active     = isActiveNoLock(block);
+    const bool was_available  = isAvailableNoLock(block);
+    uint32_t&  typed_refcount = tree_refcounts_by_type_[ref_type_index][block];
+    --typed_refcount;
+    if (typed_refcount == 0) {
+        assert(tree_referenced_block_counts_[ref_type_index] > 0);
+        --tree_referenced_block_counts_[ref_type_index];
+    }
+
+    assert(tree_refcounts_[block] > 0);
+    --tree_refcounts_[block];
+    if (tree_refcounts_[block] == 0 && onLastTreeRefNoLock(block)) {
+        freeAllocatedBlockNoLock(block);
+    }
+    updateActiveBlocksNumNoLock(block, was_active);
+    updateAvailableBlocksNumNoLock(block, was_available);
 }
 
 uint32_t IBlockPool::treeRefCount(BlockIdxType block) const {

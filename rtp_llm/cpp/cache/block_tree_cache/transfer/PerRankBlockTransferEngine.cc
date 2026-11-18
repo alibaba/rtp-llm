@@ -300,14 +300,14 @@ BlockTreeQueueSizes PerRankBlockTransferEngine::queueSizes() const {
     return legacy_->queueSizes();
 }
 
-std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(TransferTask task) {
-    const auto                             proof = task.completionProof();
-    block_tree_cache_detail::ScopeRollback unsubmitted([proof] {
-        if (proof)
-            proof->report(true);
-    });
-    const auto                             descriptors = task.descriptors();
-    const size_t                           count       = descriptors.size();
+std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(
+    TransferTask task, std::shared_ptr<TransferBufferSafetyTracker> safety) {
+    if (!safety) {
+        safety = std::make_shared<TransferBufferSafetyTracker>(std::function<void()>{});
+    }
+    block_tree_cache_detail::ScopeRollback close_submission([safety] { safety->finishSubmitting(); });
+    const auto   descriptors = task.descriptors();
+    const size_t count       = descriptors.size();
     if (count == 0 || !task.sanityCheck()) {
         return invalidTransferContext(task);
     }
@@ -315,18 +315,12 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(Transf
         TransferResult result(ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "transfer deadline exceeded before dispatch"),
                               CacheCopyError::NOT_EXECUTED);
         result.buffer_safe = true;
-        return std::make_shared<CompletedTransferAsyncContext>(std::move(result), count, proof);
+        return std::make_shared<CompletedTransferAsyncContext>(std::move(result), count);
     }
 
     auto context = std::make_shared<TransferBatchAsyncContext>(count);
     auto state   = std::make_shared<TransferStageState>(
         [context](TransferResult result) { context->complete(std::move(result)); }, count);
-    auto                                   safety = std::make_shared<TransferBufferSafetyTracker>([proof] {
-        if (proof)
-            proof->report(true);
-    });
-    block_tree_cache_detail::ScopeRollback close_submission([safety] { safety->finishSubmitting(); });
-    unsubmitted.dismiss();
     bool any_registered = false;
     for (size_t begin = 0; begin < count;) {
         std::vector<size_t>                   indices;
@@ -350,7 +344,9 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(Transf
             begin = end;
             indices.resize(end - batch_begin);
             std::iota(indices.begin(), indices.end(), batch_begin);
-            batch_proof    = safety->addBatch();
+            auto prepared_proof = std::make_shared<TransferBufferSafety>([safety] { safety->completeBatch(); });
+            safety->addBatch();
+            batch_proof = std::move(prepared_proof);
             auto completed = std::make_shared<std::atomic<bool>>(false);
             complete       = [state, indices, completed](TransferResult result) {
                 if (!completed->exchange(true, std::memory_order_acq_rel))

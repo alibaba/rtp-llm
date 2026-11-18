@@ -37,9 +37,8 @@ public:
     PerRankBlockTransferEngine() = delete;
     virtual ~PerRankBlockTransferEngine();
 
-    // Group a logical request by direction and GroupSet, then submit bounded batches.
-    std::shared_ptr<TransferAsyncContext> execute(TransferTask task);
-    // Staging pools are validated at initialization to hold a full configured batch.
+    std::shared_ptr<TransferAsyncContext> execute(
+        TransferTask task, std::shared_ptr<TransferBufferSafetyTracker> safety = nullptr);
     size_t batchLimit() const noexcept {
         return max_descriptors_per_batch_;
     }

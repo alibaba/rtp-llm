@@ -14,20 +14,20 @@ namespace {
 using State = TransferTaskRegistry::State;
 using Clock = std::chrono::steady_clock;
 
-void encodeKey(const TransferExecutionTrace& trace, TransferCompletionKeyPB& key) {
-    if (const auto* numeric = std::get_if<uint64_t>(&trace)) {
-        key.set_transfer_trace_id(*numeric);
+void encodeKey(const TransferCompletionKey& trace, TransferCompletionKeyPB& key) {
+    if (trace.registry_type == RegistryType::BLOCK_TRANSFER) {
+        key.set_transfer_trace_id(trace.numericId());
     } else {
-        key.set_kvcm_trace_id(std::get<std::string>(trace));
+        key.set_kvcm_trace_id(trace.trace_id);
     }
 }
 
-bool sameKey(const TransferCompletionKeyPB& key, const TransferExecutionTrace& trace) {
-    if (const auto* numeric = std::get_if<uint64_t>(&trace)) {
-        return key.trace_case() == TransferCompletionKeyPB::kTransferTraceId && key.transfer_trace_id() == *numeric;
+bool sameKey(const TransferCompletionKeyPB& key, const TransferCompletionKey& trace) {
+    if (trace.registry_type == RegistryType::BLOCK_TRANSFER) {
+        return key.trace_case() == TransferCompletionKeyPB::kTransferTraceId && key.transfer_trace_id() == trace.numericId();
     }
     return key.trace_case() == TransferCompletionKeyPB::kKvcmTraceId
-           && key.kvcm_trace_id() == std::get<std::string>(trace);
+           && key.kvcm_trace_id() == trace.trace_id;
 }
 
 bool validState(State state) {
@@ -36,7 +36,7 @@ bool validState(State state) {
 }
 
 void decodeResponse(const FunctionResponsePB& response,
-                    const TransferExecutionTrace& trace,
+                    const TransferCompletionKey& trace,
                     TransferCompletionRankResult& row) {
     if (!response.has_completion_query()) {
         row.error = "missing completion query response";
@@ -92,9 +92,11 @@ TransferCompletionQuery::TransferCompletionQuery(std::shared_ptr<BroadcastManage
     broadcast_manager_(std::move(broadcast_manager)), local_reader_(std::move(local_reader)) {}
 
 TransferCompletionQueryResult
-TransferCompletionQuery::query(const FrozenTask::ExecutionInfo& execution, int timeout_ms) const {
+TransferCompletionQuery::query(const TransferCompletionIdentity& execution, int timeout_ms) const {
     TransferCompletionQueryResult result;
+    result.registry_type = execution.registry_type;
     result.trace_id = execution.trace_id;
+    const TransferCompletionKey key{execution.registry_type, execution.trace_id};
     result.ranks.resize(execution.expected_rank_count);
     for (size_t rank = 0; rank < result.ranks.size(); ++rank)
         result.ranks[rank].rank = rank;
@@ -102,7 +104,7 @@ TransferCompletionQuery::query(const FrozenTask::ExecutionInfo& execution, int t
         if (peer.rank < result.ranks.size())
             result.ranks[peer.rank].server_address = peer.address;
     }
-    if (timeout_ms <= 0 || !validTransferExecutionTrace(execution.trace_id)) {
+    if (timeout_ms <= 0 || !validTransferCompletionKey(key)) {
         fail(result, "completion query requires a valid trace and positive timeout");
         return result;
     }
@@ -127,7 +129,7 @@ TransferCompletionQuery::query(const FrozenTask::ExecutionInfo& execution, int t
             return result;
         }
         try {
-            const auto state = local_reader_(execution.trace_id);
+            const auto state = local_reader_(key);
             if (!validState(state)) {
                 fail(result, "local completion reader returned an invalid state");
             } else if (remainingTimeout(deadline) == 0) {
@@ -159,7 +161,7 @@ TransferCompletionQuery::query(const FrozenTask::ExecutionInfo& execution, int t
     try {
         std::vector<FunctionRequestPB> requests(result.ranks.size());
         for (auto& request : requests)
-            encodeKey(execution.trace_id, *request.mutable_completion_query()->add_keys());
+            encodeKey(key, *request.mutable_completion_query()->add_keys());
         const int submit_timeout = remainingTimeout(deadline);
         if (submit_timeout == 0) {
             fail(result, "completion query deadline exceeded before submission");
@@ -194,7 +196,7 @@ TransferCompletionQuery::query(const FrozenTask::ExecutionInfo& execution, int t
             } else if (!snapshot.response) {
                 row.error = "completion query response is unavailable";
             } else {
-                decodeResponse(*snapshot.response, execution.trace_id, row);
+                decodeResponse(*snapshot.response, key, row);
             }
         }
         if (remainingTimeout(deadline) == 0) {
