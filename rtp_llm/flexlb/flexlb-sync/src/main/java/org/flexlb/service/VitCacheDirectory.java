@@ -26,26 +26,28 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * Polls ViT workers and exposes fresh cache residency for routing.
+ */
 @Component
 public class VitCacheDirectory {
     // Cache residency changes after each image; ten-minute snapshots lose affinity.
     static final long SYNC_INTERVAL_MS = 30_000;
+
     private final WorkerDirectory workers;
     private final EngineGrpcClient grpc;
     private final LBStatusConsistencyService consistency;
+
     private volatile Map<String, Snapshot> snapshots = Map.of();
+
     private final Map<String, Long> attempts = new HashMap<>();
     private final ScheduledExecutorService sync = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread thread = new Thread(r, "vit-cache-sync");
         thread.setDaemon(true);
         return thread;
     });
-    private boolean wasMaster;
 
-    private record Snapshot(WorkerStatus worker, String instance, Set<String> keys,
-                            Set<String> gpuEmbeddingKeys, Set<String> cpuEmbeddingKeys, long time) {}
-    public record Candidate(WorkerStatus worker, String instance, Set<String> hashKeys,
-                            int hashHits, int embeddingHits, int gpuHits) {}
+    private boolean wasMaster;
 
     public VitCacheDirectory(WorkerDirectory workers, EngineGrpcClient grpc,
                              LBStatusConsistencyService consistency) {
@@ -62,6 +64,41 @@ public class VitCacheDirectory {
     @PreDestroy
     public void stop() {
         sync.shutdownNow();
+    }
+
+    /** Cache matches share immutable key sets from one directory view. */
+    public Map<String, Candidate> candidates(String group, List<String> keys) {
+        var fleet = workers.vitRoutingSnapshot();
+        Map<String, Snapshot> cacheView = snapshots;
+        long now = System.currentTimeMillis();
+        Map<String, Candidate> matches = new HashMap<>();
+        for (var entry : fleet) {
+            WorkerStatus worker = entry.endpoint().getStatus();
+            if (group != null && !Objects.equals(group, worker.getGroup())) {
+                continue;
+            }
+            Snapshot snapshot = freshSnapshot(cacheView.get(entry.address()), worker, now);
+            int hashHits = 0;
+            int gpuHits = 0;
+            int cpuHits = 0;
+            List<String> matchingKeys = group == null || Objects.equals(group, worker.getGroup()) ? keys : List.of();
+            for (String key : matchingKeys) {
+                if (snapshot != null && snapshot.keys().contains(key)) {
+                    hashHits++;
+                }
+                if (snapshot != null) {
+                    if (snapshot.gpuEmbeddingKeys().contains(key)) {
+                        gpuHits++;
+                    } else if (snapshot.cpuEmbeddingKeys().contains(key)) {
+                        cpuHits++;
+                    }
+                }
+            }
+            matches.put(worker.getIpPort(), new Candidate(worker,
+                    snapshot == null ? null : snapshot.instance(),
+                    snapshot == null ? Set.of() : snapshot.keys(), hashHits, gpuHits + cpuHits, gpuHits));
+        }
+        return Map.copyOf(matches);
     }
 
     void refresh() {
@@ -125,6 +162,10 @@ public class VitCacheDirectory {
         return true;
     }
 
+    Snapshot snapshotFor(WorkerStatus worker) {
+        return freshSnapshot(snapshots.get(worker.getIpPort()), worker, System.currentTimeMillis());
+    }
+
     private boolean validKeys(List<String> keys) {
         return keys == null || (keys.size() <= 100_000
                 && keys.stream().noneMatch(k -> k == null || k.isEmpty() || k.length() > 4096));
@@ -145,6 +186,13 @@ public class VitCacheDirectory {
         attempts.keySet().removeIf(address -> !live.containsKey(address) || !isRoutable(live.get(address)));
     }
 
+    private boolean isRoutable(WorkerStatus worker) {
+        if (worker == null) { return false; }
+        try (var pin = workers.captureEndpoint(RoleType.VIT, worker.getIpPort())) {
+            return pin != null && pin.endpoint().getStatus() == worker;
+        }
+    }
+
     private Map<String, WorkerStatus> liveWorkers() {
         Map<String, WorkerStatus> live = new HashMap<>();
         for (var entry : workers.vitRoutingSnapshot()) {
@@ -153,49 +201,14 @@ public class VitCacheDirectory {
         return live;
     }
 
-    private boolean isRoutable(WorkerStatus worker) {
-        if (worker == null) { return false; }
-        try (var pin = workers.captureEndpoint(RoleType.VIT, worker.getIpPort())) {
-            return pin != null && pin.endpoint().getStatus() == worker;
-        }
+    private static Snapshot freshSnapshot(Snapshot snapshot, WorkerStatus worker, long now) {
+        return snapshot != null && snapshot.worker() == worker && now - snapshot.time() <= 2 * SYNC_INTERVAL_MS
+                ? snapshot : null;
     }
 
-    /** Cache matches share immutable key sets from one directory view. */
-    public Map<String, Candidate> candidates(String group, List<String> keys) {
-        var fleet = workers.vitRoutingSnapshot();
-        Map<String, Snapshot> cacheView = snapshots;
-        long now = System.currentTimeMillis();
-        Map<String, Candidate> matches = new HashMap<>();
-        for (var entry : fleet) {
-            WorkerStatus worker = entry.endpoint().getStatus();
-            if (group != null && !Objects.equals(group, worker.getGroup())) {
-                continue;
-            }
-            Snapshot snapshot = cacheView.get(entry.address());
-            if (snapshot != null && (snapshot.worker() != worker
-                    || now - snapshot.time() > 2 * SYNC_INTERVAL_MS)) {
-                snapshot = null;
-            }
-            int hashHits = 0;
-            int gpuHits = 0;
-            int cpuHits = 0;
-            List<String> matchingKeys = group == null || Objects.equals(group, worker.getGroup()) ? keys : List.of();
-            for (String key : matchingKeys) {
-                if (snapshot != null && snapshot.keys().contains(key)) {
-                    hashHits++;
-                }
-                if (snapshot != null) {
-                    if (snapshot.gpuEmbeddingKeys().contains(key)) {
-                        gpuHits++;
-                    } else if (snapshot.cpuEmbeddingKeys().contains(key)) {
-                        cpuHits++;
-                    }
-                }
-            }
-            matches.put(worker.getIpPort(), new Candidate(worker,
-                    snapshot == null ? null : snapshot.instance(),
-                    snapshot == null ? Set.of() : snapshot.keys(), hashHits, gpuHits + cpuHits, gpuHits));
-        }
-        return Map.copyOf(matches);
-    }
+    record Snapshot(WorkerStatus worker, String instance, Set<String> keys,
+                    Set<String> gpuEmbeddingKeys, Set<String> cpuEmbeddingKeys, long time) {}
+
+    public record Candidate(WorkerStatus worker, String instance, Set<String> hashKeys,
+                            int hashHits, int embeddingHits, int gpuHits) {}
 }

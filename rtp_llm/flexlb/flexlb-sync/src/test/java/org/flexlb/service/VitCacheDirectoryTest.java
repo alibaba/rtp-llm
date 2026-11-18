@@ -5,8 +5,8 @@ import io.grpc.Status;
 import io.grpc.netty.NettyServerBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
-import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry.VitRoutingEntry;
+import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.consistency.LBStatusConsistencyService;
@@ -26,39 +26,48 @@ import org.flexlb.sync.status.WorkerDirectory;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
-import static org.mockito.Mockito.clearInvocations;
-import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
+/**
+ * Verifies ViT cache snapshots, placement affinity, and load-aware routing.
+ */
 class VitCacheDirectoryTest {
     private VitCacheDirectory directory;
     private VitCacheSelector selector;
+
     private final Map<String, WorkerStatus> live = new HashMap<>();
+
     private WorkerStatus a;
     private WorkerStatus b;
     private EngineGrpcClient grpc;
@@ -93,27 +102,6 @@ class VitCacheDirectoryTest {
         directory.stop();
     }
 
-    private WorkerStatus worker(String ip, String group) {
-        return WorkerStatus.createDiscovered(RoleType.VIT, group, ip, 8000, 8001, "");
-    }
-
-    private BalanceContext context(String... keys) {
-        Request request = new Request();
-        request.setRequestId(123);
-        request.setCacheAffinityKeys(List.of(keys));
-        request.setGenerateTimeout(30000);
-        BalanceContext context = new BalanceContext(new FlexlbConfig());
-        context.getConfig().getRouter().getRoles().getVit().setCacheAffinityEnabled(true);
-        context.setRequest(request);
-        return context;
-    }
-
-    private void load(WorkerStatus worker, Long count) {
-        try (var poll = worker.tryBeginStatusPoll(1)) {
-            worker.recordVitLoad(poll, count);
-        }
-    }
-
     @Test
     void defaultsToLeastMediaWorkEvenWhenBusyWorkerHasCache() {
         var ctx = context("image");
@@ -126,17 +114,17 @@ class VitCacheDirectoryTest {
     }
 
     @Test
-    void disabledAffinityBypassesCacheAndPinsOnlyTheWinner() {
-        var unusedDirectory = mock(VitCacheDirectory.class);
-        var fastSelector = new VitCacheSelector(unusedDirectory, workers);
+    void leastLoadInspectsCacheAndPinsOnlyTheWinner() {
+        var cacheDirectory = mock(VitCacheDirectory.class);
+        var fastSelector = new VitCacheSelector(cacheDirectory, workers);
         try {
-            var ctx = context("image");
-            ctx.getConfig().getRouter().getRoles().getVit().setCacheAffinityEnabled(false);
+            var ctx = firstVitRoute(false, "image");
             load(a, 100L);
             load(b, 2L);
             clearInvocations(workers);
             assertEquals(b.getIp(), fastSelector.select(ctx, null).getServerIp());
-            verifyNoInteractions(unusedDirectory);
+            verify(cacheDirectory).snapshotFor(b);
+            verifyNoMoreInteractions(cacheDirectory);
             verify(workers, times(1)).captureEndpoint(RoleType.VIT, b.getIpPort());
             verify(workers, never()).captureEndpoint(RoleType.VIT, a.getIpPort());
             verify(workers, never()).statusSnapshot(any());
@@ -224,10 +212,11 @@ class VitCacheDirectoryTest {
                 () -> before.get(a.getIpPort()).hashKeys().add("other"));
     }
 
-    @Test
-    void backgroundCleanupDropsRestartedPendingPlacement() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void backgroundCleanupDropsRestartedPendingPlacement(boolean affinity) {
         snapshot(a, "a1");
-        selector.select(context("cold"), "one");
+        selector.select(firstVitRoute(affinity, "cold"), "one");
         snapshot(a, "a2");
         selector.prunePending();
         load(a, 100L);
@@ -244,6 +233,88 @@ class VitCacheDirectoryTest {
         assertEquals(a.getIp(), selector.select(ctx, null).getServerIp());
         snapshot(b, "b", "image");
         assertEquals(b.getIp(), selector.select(ctx, null).getServerIp());
+    }
+
+    @Test
+    void leastLoadRoutesRememberColdKeysForSubsequentAffinityRoutes() {
+        load(a, 0L);
+        load(b, 2L);
+        assertEquals(a.getIp(), selector.select(firstVitRoute(false, "x", "x", "y"), null).getServerIp());
+        assertEquals(b.getIp(), selector.select(firstVitRoute(false, "x"), null).getServerIp());
+
+        var observed = directory.candidates(null, List.of("x", "y")).get(a.getIpPort());
+        assertEquals(0, observed.hashHits());
+        assertEquals(0, observed.embeddingHits());
+        load(a, 100L);
+        load(b, 0L);
+        assertEquals(a.getIp(), selector.select(firstVitRoute(true, "y"), null).getServerIp());
+        load(a, 0L);
+        load(b, 100L);
+        assertEquals(b.getIp(), selector.select(firstVitRoute(true, "x"), null).getServerIp());
+        snapshot(b, "b1", "y");
+        assertEquals(b.getIp(), selector.select(firstVitRoute(true, "y"), null).getServerIp());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void mediaDispatchedDuringPollRemainCountedUntilAFollowingPoll(boolean affinity) {
+        load(a, 0L);
+        load(b, 3L);
+        try (var earlyPoll = a.tryBeginStatusPoll(2)) {
+            var images = firstVitRoute(affinity, "a", "b", "c", "d");
+            assertEquals(a.getIp(), selector.select(images, null).getServerIp());
+            a.recordVitLoad(earlyPoll, 0L);
+        }
+        assertEquals(0L, a.vitLoad().inflightInputs());
+        assertEquals(b.getIp(), selector.select(firstVitRoute(affinity, "e"), null).getServerIp());
+        load(a, 0L);
+        assertEquals(a.getIp(), selector.select(firstVitRoute(affinity, "f"), null).getServerIp());
+    }
+
+    @Test
+    void validatingPinnedWorkerDoesNotChargeTheImagesAgain() {
+        load(a, 0L);
+        load(b, 3L);
+        var first = firstVitRoute(false, "1", "2");
+        var selected = selector.select(first, null);
+        assertEquals(a.getIp(), selected.getServerIp());
+        first.getRequest().setVitRouteOnly(false);
+        first.getRequest().setSelectedVit(selected);
+        try (var pinned = selector.selectPinned(first, null)) {
+            assertNotNull(pinned);
+        }
+        assertEquals(a.getIp(), selector.select(firstVitRoute(false, "3", "4"), null).getServerIp());
+        assertEquals(b.getIp(), selector.select(firstVitRoute(false, "5"), null).getServerIp());
+    }
+
+    @Test
+    void simultaneousSelectionsSpreadAcrossWorkersOnOneLoadSnapshot() throws Exception {
+        load(a, 0L);
+        load(b, 1L);
+        int requests = 12;
+        var atWinner = new CountDownLatch(requests);
+        when(workers.captureEndpoint(eq(RoleType.VIT), eq(a.getIpPort()))).thenAnswer(call -> {
+            atWinner.countDown();
+            assertTrue(atWinner.await(5, TimeUnit.SECONDS));
+            return new WorkerEndpoint(a).tryPinGeneration();
+        });
+        try (var pool = Executors.newFixedThreadPool(requests)) {
+            var results = IntStream.range(0, requests).mapToObj(i -> pool.submit(() -> {
+                var ctx = firstVitRoute(false, "image-" + i, "other-" + i);
+                ctx.getRequest().setRequestId(i);
+                return selector.select(ctx, null).getServerIp();
+            })).toList();
+            int sentToA = 0;
+            for (var result : results) {
+                String ip = result.get(10, TimeUnit.SECONDS);
+                if (a.getIp().equals(ip)) {
+                    sentToA++;
+                } else {
+                    assertEquals(b.getIp(), ip);
+                }
+            }
+            assertEquals(requests / 2, sentToA);
+        }
     }
 
     @Test
@@ -272,17 +343,6 @@ class VitCacheDirectoryTest {
         ctx.getConfig().getRouter().getRoles().getVit().setLoadMaxAgeMs(10);
         assertEquals(b.getIp(), selector.select(ctx, null).getServerIp());
         assertTrue(live.containsKey(a.getIpPort()));
-    }
-
-    private void snapshot(WorkerStatus worker, String epoch, String... keys) {
-        directory.replace(worker, MultimodalCacheStatusPB.newBuilder()
-                .setWorkerInstance(epoch).addAllKeys(List.of(keys)).build());
-    }
-
-    private void tierSnapshot(WorkerStatus worker, List<String> hashes, List<String> gpu, List<String> cpu) {
-        directory.replace(worker, MultimodalCacheStatusPB.newBuilder()
-                .setWorkerInstance("instance").addAllKeys(hashes)
-                .addAllGpuEmbeddingKeys(gpu).addAllCpuEmbeddingKeys(cpu).build());
     }
 
     @Test
@@ -551,6 +611,7 @@ class VitCacheDirectoryTest {
         directory.refresh();
         verify(grpc, times(4)).getMultimodalCacheStatusAsync(any(), eq(8001), any(), eq(2000L));
     }
+
     @Test
     void selectionKeepsGenerationThroughCopyAndPin() throws Exception {
         snapshot(a, "epoch-a", "image");
@@ -574,6 +635,45 @@ class VitCacheDirectoryTest {
         live.put(a.getIpPort(), worker(a.getIp(), "one"));
         assertFalse(selector.validate(ctx, "one").isSuccess());
         org.junit.jupiter.api.Assertions.assertNull(selector.selectPinned(ctx, "one"));
+    }
+
+    private WorkerStatus worker(String ip, String group) {
+        return WorkerStatus.createDiscovered(RoleType.VIT, group, ip, 8000, 8001, "");
+    }
+
+    private void load(WorkerStatus worker, Long count) {
+        try (var poll = worker.tryBeginStatusPoll(1)) {
+            worker.recordVitLoad(poll, count);
+        }
+    }
+
+    private BalanceContext firstVitRoute(boolean affinity, String... keys) {
+        var ctx = context(keys);
+        ctx.getConfig().getRouter().getRoles().getVit().setCacheAffinityEnabled(affinity);
+        ctx.getRequest().setVitRouteOnly(true);
+        return ctx;
+    }
+
+    private BalanceContext context(String... keys) {
+        Request request = new Request();
+        request.setRequestId(123);
+        request.setCacheAffinityKeys(List.of(keys));
+        request.setGenerateTimeout(30000);
+        BalanceContext context = new BalanceContext(new FlexlbConfig());
+        context.getConfig().getRouter().getRoles().getVit().setCacheAffinityEnabled(true);
+        context.setRequest(request);
+        return context;
+    }
+
+    private void snapshot(WorkerStatus worker, String epoch, String... keys) {
+        directory.replace(worker, MultimodalCacheStatusPB.newBuilder()
+                .setWorkerInstance(epoch).addAllKeys(List.of(keys)).build());
+    }
+
+    private void tierSnapshot(WorkerStatus worker, List<String> hashes, List<String> gpu, List<String> cpu) {
+        directory.replace(worker, MultimodalCacheStatusPB.newBuilder()
+                .setWorkerInstance("instance").addAllKeys(hashes)
+                .addAllGpuEmbeddingKeys(gpu).addAllCpuEmbeddingKeys(cpu).build());
     }
 
 }
