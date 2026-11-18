@@ -25,6 +25,7 @@ public:
 private:
     void workerLoop();
     void rethrowPendingExceptionIfAny(std::unique_lock<std::mutex>& lk);
+    void drainFailedTask();
 
     torch::Stream stream_;
     torch::Event  event_;
@@ -39,9 +40,13 @@ private:
         at::ThreadLocalState  tls_state;
     };
     std::optional<Task> pending_task_;
+    // A failed callback may already have enqueued work using its captures.
+    // Keep those inputs alive until its stream tail is drained on the error path.
+    std::optional<Task> failed_task_;
     std::exception_ptr  pending_exception_;
-    bool                task_done_ = true;
-    bool                shutdown_  = false;
+    bool                completion_event_recorded_ = false;
+    bool                task_done_                 = true;
+    bool                shutdown_                  = false;
 };
 
 }  // namespace rtp_llm
