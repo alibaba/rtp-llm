@@ -1569,7 +1569,7 @@ TEST(P2PRetainedKvTest, ThresholdUsesCapacityBytesAndStrictGreaterThan) {
         checker.retained_kv_over_threshold_since_ms_ -= 31000;
         checker.checkRetainedResources({context});
     }, ::testing::KilledBySignal(SIGABRT), "");
-    checker.kv_leak_exit_threshold_bps_ = 0;
+    checker.kv_leak_exit_enabled_ = false;
     checker.retained_kv_over_threshold_since_ms_ -= 31000;
     checker.checkRetainedResources({context});
     EXPECT_TRUE(context->resourceHoldPending());
@@ -1616,11 +1616,13 @@ TEST(P2PRetainedKvTest, InitDerivesCapacityAndRejectsInvalidThreshold) {
     P2PConnectorSchedulerConfig config;
     config.topology = test::makeTestCacheTopology(2, 2, {{0}, {1}});
     P2PConnectorAsyncReadContextChecker checker;
-    for (const int invalid : {-1, 101}) {
-        config.p2p_kv_leak_exit_threshold_percent = invalid;
+    for (const auto& [min_percent, max_percent] : {std::pair{-1, 70}, std::pair{30, 101}, std::pair{70, 30}}) {
+        config.p2p_kv_leak_exit_threshold_min_percent = min_percent;
+        config.p2p_kv_leak_exit_threshold_max_percent = max_percent;
         EXPECT_FALSE(checker.init(nullptr, nullptr, pool, config));
     }
-    config.p2p_kv_leak_exit_threshold_percent = 45;
+    config.p2p_kv_leak_exit_threshold_min_percent = 45;
+    config.p2p_kv_leak_exit_threshold_max_percent = 45;
     config.physical_block_bytes_by_group.emplace(config.topology->groups().front().tag, 135);
     ASSERT_TRUE(checker.init(nullptr, nullptr, pool, config));
     checker.stop();
@@ -1635,17 +1637,20 @@ TEST(P2PRetainedKvTest, InitDerivesCapacityAndRejectsInvalidThreshold) {
     EXPECT_EQ(checker.total_kv_bytes_, expected_bytes);
     EXPECT_EQ(checker.kv_leak_exit_threshold_bps_, 4500);
 
-    config.p2p_kv_leak_exit_threshold_percent = 30;
-    P2PConnectorAsyncReadContextChecker default_checker;
-    ASSERT_TRUE(default_checker.init(nullptr, nullptr, pool, config));
-    EXPECT_GE(default_checker.kv_leak_exit_threshold_bps_, 3000);
-    EXPECT_LE(default_checker.kv_leak_exit_threshold_bps_, 7000);
-    default_checker.stop();
+    config.p2p_kv_leak_exit_threshold_min_percent = 35;
+    config.p2p_kv_leak_exit_threshold_max_percent = 42;
+    P2PConnectorAsyncReadContextChecker range_checker;
+    ASSERT_TRUE(range_checker.init(nullptr, nullptr, pool, config));
+    EXPECT_GE(range_checker.kv_leak_exit_threshold_bps_, 3500);
+    EXPECT_LE(range_checker.kv_leak_exit_threshold_bps_, 4200);
+    range_checker.stop();
 
-    config.p2p_kv_leak_exit_threshold_percent = 0;
+    config.p2p_kv_leak_exit_threshold_min_percent = 0;
+    config.p2p_kv_leak_exit_threshold_max_percent = 0;
     P2PConnectorAsyncReadContextChecker disabled;
     ASSERT_TRUE(disabled.init(nullptr, nullptr, pool, config));
     EXPECT_EQ(disabled.kv_leak_exit_threshold_bps_, 0);
+    EXPECT_FALSE(disabled.kv_leak_exit_enabled_);
     disabled.stop();
     pool->stop();
 }

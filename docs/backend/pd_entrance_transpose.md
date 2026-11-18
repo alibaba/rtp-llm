@@ -32,7 +32,7 @@ Prefill 多模态瞬时错误可用 PREFILL_RETRY_TIMES 配置额外尝试次数
 
 旧启动参数及对应环境变量仍可解析。旧入口专用的线程池、等待、重试和轮询参数，以及旧传输的提前停止参数保留配置兼容。实际通信、取消与资源释放使用新路径的 deadline 和租约。
 
-KV 单次通信默认预算为 5 秒，从 worker 开始发送计时，上限为请求剩余时间。等待 Prefill 注册、产出 KV 和返回首 token 使用请求 deadline。冷启动或建链需要更长预算时，可调整 `--load_cache_timeout_ms`。RDMA 在传输 deadline 后等待 `--p2p_transfer_not_done_resource_hold_ms` 再尝试关闭连接。Decode 通过租约查询确认停写才释放 KV，`--p2p_lease_query_timeout_ms` 控制单次查询的上限，`--p2p_kv_leak_exit_threshold_percent` 控制滞留量达到何种程度时退出进程。
+KV 单次通信默认预算为 5 秒，从 worker 开始发送计时，上限为请求剩余时间。等待 Prefill 注册、产出 KV 和返回首 token 使用请求 deadline。冷启动或建链需要更长预算时，可调整 `--load_cache_timeout_ms`。RDMA 在传输 deadline 后等待 `--p2p_transfer_not_done_resource_hold_ms` 再尝试关闭连接。Decode 通过租约查询确认停写才释放 KV，`--p2p_lease_query_timeout_ms` 控制单次查询的上限，`--p2p_kv_leak_exit_threshold_min_percent` 和 `--p2p_kv_leak_exit_threshold_max_percent` 设置启动时抽取滞留退出阈值的区间。
 
 旧同步 Decode RPC 的 `rtp_llm_rpc_` 阶段指标 `allocate_resource_rt_us`、`load_cache_from_prefill_rt_us`、`local_generate_rt_us`、`load_cache_min_rt_us`、`load_cache_max_rt_us` 和 `load_cache_polling_cost_us` 随旧路径下线。新链路可用 `rtp_llm_stream_loading_cache_latency_us` 观察流的加载耗时，用 `rtp_llm_p2p_connector_decode_schedule_cost_time_us` 和 `rtp_llm_p2p_connector_decode_worker_total_cost_time_us` 分别观察协调与 worker 耗时。这些指标的计时边界不同，已启用 tracing 的部署还可查看 Decode 生成和 KV 加载 span。
 

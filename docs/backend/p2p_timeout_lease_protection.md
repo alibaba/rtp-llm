@@ -16,7 +16,7 @@ Prefill 向 Decode 的各个 worker 发起 P2P KV 数据传输。TCP 和 RDMA �
 
 ## 泄漏阈值
 
-环境变量 `P2P_KV_LEAK_EXIT_THRESHOLD_PERCENT` 默认配置值为 **30**，允许 0～100，也可通过 `--p2p_kv_leak_exit_threshold_percent` 设置。配置值为 30 时，进程启动时从 30～70 中抽取实际阈值。其他非零配置值直接作为阈值。设为 0 只关闭按阈值退出，滞留指标和租约查询继续运行。
+环境变量 `P2P_KV_LEAK_EXIT_THRESHOLD_MIN_PERCENT` 和 `P2P_KV_LEAK_EXIT_THRESHOLD_MAX_PERCENT` 分别设置阈值下界和上界，默认 **30%** 和 **70%**。Decode 进程启动时在闭区间内均匀抽取一次。上下界必须满足 `0 <= 下界 <= 上界 <= 100`。两者设为同一个正值时使用固定阈值，均设为 0 时关闭按阈值退出，滞留指标和租约查询继续运行。
 
 统计对象为失败后仍在等待物理完成的目标 KV，按 `(cache group, block ID)` 去重，再按各 group 的实际块字节数和层数加权。分母为 Decode 本地 KV 总容量，包含 KV scale。正常传输中的请求不计入滞留量。
 
