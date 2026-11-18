@@ -13,9 +13,9 @@ MODULE = "rtp_llm.models_py.modules.qwen4_exp.qsa.target_writer"
 
 
 class TargetWriterFixture:
-    def case(self, prefixes, query, strided=False):
+    def case(self, prefixes, query, strided=False, page_size=128):
         batch = len(prefixes)
-        columns = max(prefixes) // 128 + 2
+        columns = max(prefixes) // page_size + 2
         device = "cuda"
         raw = torch.randn(
             batch * query, 640 if strided else 128, device=device, dtype=torch.bfloat16
@@ -26,10 +26,10 @@ class TargetWriterFixture:
         gamma = torch.randn(128, device=device, dtype=torch.bfloat16) * 0.1
         table = torch.zeros(batch, columns, device=device, dtype=torch.int32)
         for b, prefix in enumerate(prefixes):
-            table[b, prefix // 128 : prefix // 128 + 2] = torch.tensor(
+            table[b, prefix // page_size : prefix // page_size + 2] = torch.tensor(
                 [1 + 2 * b, 2 + 2 * b], device=device, dtype=torch.int32
             )
-        kv = torch.randn(1 + 2 * batch, 32, 128, device=device, dtype=torch.bfloat16)
+        kv = torch.randn(1 + 2 * batch, page_size // 4, 128, device=device, dtype=torch.bfloat16)
         state = torch.randn(1 + 2 * batch, 8, 128, device=device).bfloat16().float()
         return [raw, p, cos, sin, gamma, kv, table, state, table.clone()]
 

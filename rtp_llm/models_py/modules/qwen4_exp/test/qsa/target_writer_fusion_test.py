@@ -1,4 +1,5 @@
 import unittest
+from itertools import product
 from unittest.mock import patch
 
 import torch
@@ -19,8 +20,8 @@ MODULE = "rtp_llm.models_py.modules.qwen4_exp.qsa.target_writer"
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class TargetWriterFusionTest(TargetWriterFixture, unittest.TestCase):
     def setUp(self):
-        if torch.cuda.get_device_capability() != (12, 0):
-            self.skipTest("SM120 fast path")
+        if torch.cuda.get_device_capability() not in ((9, 0), (12, 0)):
+            self.skipTest("SM90/SM120 fast path")
         torch.manual_seed(613)
 
     def write(self, args, fused):
@@ -30,26 +31,31 @@ class TargetWriterFusionTest(TargetWriterFixture, unittest.TestCase):
             return write_target_window_with_undo_(*args, norm_eps=1.0e-6)
 
     def test_snapshots_writes_and_undo_are_exact(self):
-        for query in (1, 2, 3, 4):
+        for page_size, query in product((64, 128), (1, 2, 3, 4)):
             for prefixes in (
                 [4],
                 [5],
                 [6],
                 [7],
-                [127],
-                [128],
+                [page_size - 1],
+                [page_size],
                 [4093],
                 [32749],
-                [5, 127, 4093],
-                [124, 125, 126, 127, 128, 129, 130],
+                [5, page_size - 1, 4093],
+                list(range(page_size - 4, page_size + 3)),
             ):
                 for strided in (False, True):
-                    with self.subTest(query=query, prefixes=prefixes, strided=strided):
-                        self.compare(self.case(prefixes, query, strided))
+                    with self.subTest(
+                        page_size=page_size,
+                        query=query,
+                        prefixes=prefixes,
+                        strided=strided,
+                    ):
+                        self.compare(self.case(prefixes, query, strided, page_size))
 
     def test_dummy_and_invalid_physical_slots_match_reference(self):
-        for query in (1, 2, 3, 4):
-            args = self.case([5, 127, 128], query)
+        for page_size, query in product((64, 128), (1, 2, 3, 4)):
+            args = self.case([5, page_size - 1, page_size], query, page_size=page_size)
             args[6][0].zero_()
             args[8][1].zero_()
             args[8][2].fill_(args[7].shape[0] + 1)
@@ -66,8 +72,8 @@ class TargetWriterFusionTest(TargetWriterFixture, unittest.TestCase):
             self.assertIsNone(try_write_target_window(*args, norm_eps=1e-6))
 
     def test_graph_refreshes_prefix_pages_keys_and_gamma(self):
-        for query in (1, 2, 3, 4):
-            args = self.case([5, 125, 126], query, True)
+        for page_size, query in product((64, 128), (1, 2, 3, 4)):
+            args = self.case([5, page_size - 3, page_size - 2], query, True, page_size)
             self.write(args, True)
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
@@ -75,7 +81,7 @@ class TargetWriterFusionTest(TargetWriterFixture, unittest.TestCase):
             for residue in (0, 1, 2, 3):
                 args[1].copy_(
                     torch.tensor(
-                        [4 + residue, 124 + residue, 128 + residue],
+                        [4 + residue, page_size - 4 + residue, page_size + residue],
                         device="cuda",
                         dtype=torch.int32,
                     )

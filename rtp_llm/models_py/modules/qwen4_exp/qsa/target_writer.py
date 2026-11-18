@@ -16,8 +16,8 @@ def try_write_target_window(
 ):
     """Called only after the existing writer's full layout validation."""
     if (
-        torch.cuda.get_device_capability(raw.device) != (12, 0)
-        or kv.shape[1:] != (32, 128)
+        torch.cuda.get_device_capability(raw.device) not in ((9, 0), (12, 0))
+        or kv.shape[1:] not in ((16, 128), (32, 128))
         or min(kt.shape[1], st.shape[1], kv.shape[0], state.shape[0]) <= 0
         or raw.stride(1) != 1
         or raw.stride(0) <= 0
@@ -38,6 +38,7 @@ def try_write_target_window(
         STW=st.shape[1],
         KB=kv.shape[0],
         SB=state.shape[0],
+        KV_PAGE=kv.shape[1],
         BQ=triton.next_power_of_2(query),
         num_warps=4,
     )

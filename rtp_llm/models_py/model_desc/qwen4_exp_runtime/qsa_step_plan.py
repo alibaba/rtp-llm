@@ -1260,7 +1260,11 @@ def build_incremental_step_plan(
             token_count=token_count,
             dtype=torch.bfloat16,
             device=device,
-            logical_positions=None if target_mrope else logical_positions,
+            # Like cold draft prefill, the prefix-hit draft consumes the
+            # shifted positions from the engine, independently of KV slots.
+            logical_positions=(
+                None if target_mrope or draft_prefix_reuse else logical_positions
+            ),
             # Text-shaped transports (Base style, or MRoPE whose rows the
             # logical-positions check inside build_qsa_rope proves
             # equal-axis) engage the fused text kernel through the shared
@@ -1309,7 +1313,12 @@ def build_incremental_step_plan(
 
     block_starts = prep.block_starts
     try:
-        if target_mrope:
+        if draft_prefix_reuse:
+            # A page-aligned prefix leaves each new group's first row in the
+            # suffix. Reuse its Base RoPE rather than rotating by the KV slot.
+            rope_cos = current_cos.index_select(0, prep.mrope_sources)
+            rope_sin = current_sin.index_select(0, prep.mrope_sources)
+        elif target_mrope:
             # Each page-aligned suffix contains the first row of every new
             # group, including image groups with unequal/nonlinear axes.
             # Multimodal positions keep the eager MRoPE builder (which now

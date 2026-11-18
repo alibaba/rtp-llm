@@ -51,6 +51,7 @@ def _prepare_target_window(
     STW,
     KB: tl.constexpr,
     SB: tl.constexpr,
+    KV_PAGE: tl.constexpr,
     BQ: tl.constexpr,
     MROPE: tl.constexpr,
     H_PAIRS: tl.constexpr,
@@ -77,6 +78,7 @@ def _prepare_target_window(
             STW=STW,
             KB=KB,
             SB=SB,
+            KV_PAGE=KV_PAGE,
             BQ=BQ,
         )
     lane = tl.arange(0, 32)
