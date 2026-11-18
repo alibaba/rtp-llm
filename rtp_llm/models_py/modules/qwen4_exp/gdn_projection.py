@@ -21,11 +21,12 @@
 # TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 # SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-"""BF16 GDN projections for the measured H20 TP2 matrix shapes."""
+"""Shape-specific BF16 projection plans for H20 TP2 GDN."""
 
 import ctypes as ct
 import threading
 import weakref
+from collections import OrderedDict
 from functools import lru_cache
 
 import torch
@@ -83,6 +84,14 @@ def _check(status):
         raise RuntimeError(f"GDN cuBLASLt returned status {status}")
 
 
+@lru_cache(maxsize=None)
+def _is_h20(device):
+    return (
+        cached_device_capability(device) == (9, 0)
+        and torch.cuda.get_device_properties(device).multi_processor_count == 78
+    )
+
+
 @lru_cache(maxsize=1)
 def _library():
     try:
@@ -90,9 +99,6 @@ def _library():
     except OSError:
         return None
     lib.cublasLtGetVersion.restype = ct.c_size_t
-    # Tactics and heuristic positions were measured against cuBLASLt 13.1.0.
-    if lib.cublasLtGetVersion() != 130100:
-        return None
     pointer = ct.c_void_p
     signatures = {
         "cublasLtCreate": [ct.POINTER(pointer)],
@@ -116,6 +122,13 @@ def _library():
         "cublasLtMatmulAlgoGetHeuristic": [pointer] * 7
         + [ct.c_int, ct.POINTER(_Heuristic), ct.POINTER(ct.c_int)],
         "cublasLtMatmulAlgoCheck": [pointer] * 8,
+        "cublasLtMatmulAlgoConfigGetAttribute": [
+            pointer,
+            ct.c_int,
+            pointer,
+            ct.c_size_t,
+            ct.POINTER(ct.c_size_t),
+        ],
         "cublasLtMatmulAlgoCapGetAttribute": [
             pointer,
             ct.c_int,
@@ -137,15 +150,47 @@ def _release(library, resources):
         getattr(library, name)(pointer)
 
 
+# Profitable FP32-reduction tactics measured on H20 with cuBLASLt 13.1.0
+# and the checkpoint's column-major weight view. Other shapes use heuristics.
+_H20_TACTICS = {
+    # (output width, rows): (transpose product, heuristic index)
+    (8240, 1): (True, 2),
+    (8240, 4): (True, 2),
+    (8240, 8): (True, 2),
+    (8240, 16): (False, 3),
+    (8240, 17): (False, 1),
+    (8240, 24): (False, 1),
+    (8240, 31): (True, 1),
+    (8240, 512): (False, 1),
+    (2560, 8): (False, 1),
+    (2560, 33): (True, 2),
+    (2560, 48): (True, 1),
+    (2560, 100): (False, 3),
+    (2560, 3072): (True, 2),
+    (2560, 16384): (False, 2),
+}
+
+
 class _MatmulPlan:
     """Immutable descriptors; every invocation owns its CUDA workspace."""
 
-    def __init__(self, weight, rows, is_input):
+    def __init__(
+        self, weight, rows, is_input, *, heuristic_index=None, swap_inputs=False
+    ):
         self.library = lib = _library()
         self.resources = resources = []
         self.cleanup = weakref.finalize(self, _release, lib, resources)
         self.rows, self.columns, self.inner = rows, weight.shape[0], weight.shape[1]
-        self.swapped = is_input and rows == 64
+        # Opaque tactics are valid only for the library they were measured with.
+        tuned = heuristic_index is None and lib.cublasLtGetVersion() == 130100
+        tactic = (
+            _H20_TACTICS.get((self.columns, rows))
+            if tuned and weight.stride() == (1, self.columns)
+            else None
+        )
+        if tactic is not None:
+            swap_inputs, heuristic_index = tactic
+        self.swapped = swap_inputs or (tuned and is_input and rows == 64)
         self.alpha, self.beta = ct.c_float(1), ct.c_float(0)
         self.valid = False
 
@@ -195,7 +240,7 @@ class _MatmulPlan:
         else:
             self.output_layout = layout(rows, self.columns, self.columns, True)
         result = _Heuristic()
-        if rows == 64:
+        if tuned and rows == 64:
             # Opaque records from the measured 13.1.0 library. The version guard
             # and AlgoCheck keep these local to the matching library and layout.
             words = (
@@ -246,25 +291,31 @@ class _MatmulPlan:
                 )
             )
             choices, count = (_Heuristic * 24)(), ct.c_int()
-            _check(
-                lib.cublasLtMatmulAlgoGetHeuristic(
-                    self.handle,
-                    self.operation,
-                    self.input_layout,
-                    self.weight_layout,
-                    self.output_layout,
-                    self.output_layout,
-                    preference,
-                    24,
-                    choices,
-                    ct.byref(count),
-                )
-            )
-            usable = [choice for choice in choices[: count.value] if choice.state == 0]
-            index = 7 if rows == 32768 else 1
-            if len(usable) <= index:
+            if lib.cublasLtMatmulAlgoGetHeuristic(
+                self.handle,
+                self.operation,
+                self.input_layout,
+                self.weight_layout,
+                self.output_layout,
+                self.output_layout,
+                preference,
+                len(choices),
+                choices,
+                ct.byref(count),
+            ):
                 return
-            result = usable[index]
+            usable = [choice for choice in choices[: count.value] if choice.state == 0]
+            if tuned and tactic is None and rows == 32768:
+                index = 7
+            elif tuned and tactic is None and (rows == 16 or (is_input and rows == 32)):
+                index = 1
+            else:
+                # Keep FP32 partial sums when selecting a new split-K tactic.
+                usable = [choice for choice in usable if self._fp32_reduction(choice)]
+                index = heuristic_index or 0
+            if not usable or (heuristic_index is not None and index >= len(usable)):
+                return
+            result = usable[min(index, len(usable) - 1)]
         self.result = result
         alignments = []
         for attribute in range(16, 20):  # MIN_ALIGNMENT_{A,B,C,D}_BYTES
@@ -282,6 +333,14 @@ class _MatmulPlan:
         self.alignments = tuple(alignments)
         self.valid = all(self.alignments) and result.workspace_size <= 64 * 1024 * 1024
 
+    def _fp32_reduction(self, choice):
+        scheme = ct.c_uint32()
+        status = self.library.cublasLtMatmulAlgoConfigGetAttribute(
+            ct.byref(choice.algorithm), 3, ct.byref(scheme), ct.sizeof(scheme), None
+        )
+        # CUBLASLT_REDUCTION_SCHEME_NONE / CUBLASLT_REDUCTION_SCHEME_COMPUTE_TYPE.
+        return status == 0 and scheme.value in (0, 2)
+
     def __call__(self, value, weight):
         left, right = (weight, value) if self.swapped else (value, weight)
         inputs = (left.data_ptr(), right.data_ptr())
@@ -296,29 +355,35 @@ class _MatmulPlan:
             del output
             return F.linear(value, weight)
         pointers = (*inputs, output_ptr)
-        workspace = torch.empty(
-            self.result.workspace_size, dtype=torch.uint8, device=value.device
-        )
-        _check(
-            self.library.cublasLtMatmul(
-                self.handle,
-                self.operation,
-                ct.byref(self.alpha),
-                pointers[0],
-                self.input_layout,
-                pointers[1],
-                self.weight_layout,
-                ct.byref(self.beta),
-                pointers[2],
-                self.output_layout,
-                pointers[2],
-                self.output_layout,
-                ct.byref(self.result.algorithm),
-                workspace.data_ptr(),
-                workspace.numel(),
-                torch.cuda.current_stream(value.device).cuda_stream,
+        workspace = (
+            torch.empty(
+                self.result.workspace_size, dtype=torch.uint8, device=value.device
             )
+            if self.result.workspace_size
+            else None
         )
+        status = self.library.cublasLtMatmul(
+            self.handle,
+            self.operation,
+            ct.byref(self.alpha),
+            pointers[0],
+            self.input_layout,
+            pointers[1],
+            self.weight_layout,
+            ct.byref(self.beta),
+            pointers[2],
+            self.output_layout,
+            pointers[2],
+            self.output_layout,
+            ct.byref(self.result.algorithm),
+            workspace.data_ptr() if workspace is not None else None,
+            self.result.workspace_size,
+            torch.cuda.current_stream(value.device).cuda_stream,
+        )
+        # NOT_SUPPORTED can be reported for an otherwise valid heuristic.
+        if status == 15:
+            return F.linear(value, weight)
+        _check(status)
         return output
 
 
@@ -331,7 +396,7 @@ class Sm90GdnLinear(CudaF16Linear):
         self._packed = None
         self._ready = None
         self._pack_event = None
-        self._plans = {}
+        self._plans = OrderedDict()
         self._plan_lock = threading.Lock()
         self._refresh_weight()
 
@@ -381,81 +446,94 @@ class Sm90GdnLinear(CudaF16Linear):
             and value.is_contiguous()
             and not value.requires_grad
             and not weight.requires_grad
-            and cached_device_capability(value.device) == (9, 0)
-            and torch.cuda.get_device_properties(value.device).multi_processor_count
-            == 78
+            and _is_h20(value.device)
             and tuple(weight.shape) in ((8240, 2560), (2560, 3072))
             and (weight.stride() == (1, weight.shape[0]) or weight.is_contiguous())
             and value.shape[1] == weight.shape[1]
-            and value.shape[0] in (16, 32, 64, 8192, 32768)
+            and value.shape[0] > 0
         ):
             return F.linear(value, weight, self.bias)
         rows = value.shape[0]
         is_input = weight.shape[0] == 8240
-        if rows == 32 and not is_input:
-            return F.linear(value, weight, self.bias)
         if rows != 8192 and _library() is None:
             return F.linear(value, weight, self.bias)
-        packed = is_input and rows <= 64 or not is_input and rows >= 8192
-        with self._plan_lock, torch.cuda.device(value.device):
-            tracked = self._refresh_weight(packed)
-            direct_prefill = (
-                not tracked and weight.is_inference() and rows == 8192 and not is_input
+        packed = (
+            not weight.is_inference()
+            and (
+                (is_input and rows in (16, 32, 64))
+                or (not is_input and rows in (8192, 32768))
             )
-            if not tracked and not direct_prefill:
-                return F.linear(value, weight, self.bias)
-            if tracked and packed and self._ready is not None:
-                if torch.cuda.is_current_stream_capturing():
-                    torch.cuda.current_stream(value.device).wait_event(self._ready)
-                elif self._ready.query():
-                    self._ready = None
-                else:
-                    torch.cuda.current_stream(value.device).wait_event(self._ready)
-            # Unversioned weights are consumed directly. Only tracked weights
-            # can retain a value-derived packed copy across calls.
-            selected = self._packed if tracked and packed else weight
-            if packed:
-                selected.record_stream(torch.cuda.current_stream(value.device))
-            if rows == 8192:
-                output = value.new_empty((rows, weight.shape[0]))
-                grid = (
-                    triton.cdiv(rows, 64) * triton.cdiv(weight.shape[0], 128),
-                    1,
-                    1,
-                )
-                key = (rows, packed, value.data_ptr() % 16 == 0)
-                launch = self._plans.get(key) if tracked else None
-                if launch is None:
-                    kernel = _prefill_projection[grid](
-                        value,
-                        selected,
-                        output,
-                        weight.shape[0],
-                        weight.shape[1],
-                        *selected.stride(),
-                        num_warps=4,
-                        num_stages=3,
-                    )
-                    if tracked:
-                        self._plans[key] = kernel[grid]
-                else:
-                    launch(
-                        value,
-                        selected,
-                        output,
-                        weight.shape[0],
-                        weight.shape[1],
-                        *selected.stride(),
-                        stream=torch.cuda.current_stream(value.device).cuda_stream,
-                    )
-                return output
-            key = (rows, packed)
-            if key not in self._plans:
-                if torch.cuda.is_current_stream_capturing():
-                    return F.linear(value, weight, self.bias)
-                self._plans[key] = _MatmulPlan(selected, rows, is_input)
-            plan = self._plans[key]
-        if not plan.valid:
-            return F.linear(value, weight, self.bias)
+        )
         with torch.cuda.device(value.device):
+            with self._plan_lock:
+                tracked = self._refresh_weight(packed)
+                direct_prefill = (
+                    not tracked and weight.is_inference() and rows == 8192 and not is_input
+                )
+                if not tracked and not weight.is_inference():
+                    return F.linear(value, weight, self.bias)
+                if tracked and packed and self._ready is not None:
+                    if torch.cuda.is_current_stream_capturing():
+                        torch.cuda.current_stream(value.device).wait_event(self._ready)
+                    elif self._ready.query():
+                        self._ready = None
+                    else:
+                        torch.cuda.current_stream(value.device).wait_event(self._ready)
+                # Unversioned weights are consumed directly. Only tracked weights
+                # can retain a value-derived packed copy across calls.
+                selected = self._packed if tracked and packed else weight
+                if packed:
+                    selected.record_stream(torch.cuda.current_stream(value.device))
+                if rows == 8192 and (tracked or direct_prefill):
+                    output = value.new_empty((rows, weight.shape[0]))
+                    grid = (
+                        triton.cdiv(rows, 64) * triton.cdiv(weight.shape[0], 128),
+                        1,
+                        1,
+                    )
+                    key = (rows, packed, value.data_ptr() % 16 == 0)
+                    launch = self._plans.get(key) if tracked else None
+                    if launch is None:
+                        kernel = _prefill_projection[grid](
+                            value,
+                            selected,
+                            output,
+                            weight.shape[0],
+                            weight.shape[1],
+                            *selected.stride(),
+                            num_warps=4,
+                            num_stages=3,
+                        )
+                        if tracked:
+                            self._plans[key] = kernel[grid]
+                    else:
+                        launch(
+                            value,
+                            selected,
+                            output,
+                            weight.shape[0],
+                            weight.shape[1],
+                            *selected.stride(),
+                            stream=torch.cuda.current_stream(value.device).cuda_stream,
+                        )
+                    return output
+                if rows == 8192 and _library() is None:
+                    return F.linear(value, weight, self.bias)
+                # A plan describes the layout only, so inference tensors can use
+                # it with the current weight address without retaining a packed copy.
+                key = (
+                    (rows, packed)
+                    if tracked
+                    else (rows, weight.device, weight.stride())
+                )
+                if key not in self._plans:
+                    if torch.cuda.is_current_stream_capturing():
+                        return F.linear(value, weight, self.bias)
+                    if len(self._plans) >= 128:
+                        self._plans.popitem(last=False)
+                    self._plans[key] = _MatmulPlan(selected, rows, is_input)
+                self._plans.move_to_end(key)
+                plan = self._plans[key]
+            if not plan.valid:
+                return F.linear(value, weight, self.bias)
             return plan(value, selected)

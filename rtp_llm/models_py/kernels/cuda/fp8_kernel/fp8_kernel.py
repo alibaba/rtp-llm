@@ -112,6 +112,9 @@ def create_per_token_group_quant_fp8_output_scale(
         )
 
 
+FP8_GROUP_QUANT_V2_MIN_ELEMENTS = 4 * 1024 * 1024
+
+
 def sgl_per_token_group_quant_fp8(
     x: torch.Tensor,
     group_size: int,
@@ -154,7 +157,7 @@ def sgl_per_token_group_quant_fp8(
                 return True
             # Microbench on the target 16..64K token sweep shows v2 wins
             # consistently once the quantized matrix has at least ~4M elements.
-            return x.numel() >= 4 * 1024 * 1024
+            return x.numel() >= FP8_GROUP_QUANT_V2_MIN_ELEMENTS
 
         if quant_kernel == "legacy":
             per_token_group_quant_fp8(

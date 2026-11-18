@@ -9,6 +9,10 @@ import triton.language as tl
 from rtp_llm.models_py.utils.device_capability import cached_device_capability
 
 try:
+    from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
+        FP8_GROUP_QUANT_V2_MIN_ELEMENTS,
+    )
+
     from .gdn_prefill_norm_gluon import flat_head_norm
     from .gdn_prefill_norm_quant_gluon import _launch_norm_quant as norm_quant
 except ImportError:
@@ -139,22 +143,24 @@ class Qwen4PrefillGatedNorm(torch.nn.Module):
             )
         return self.native(x, gate)
 
-    def forward_project(self, x, gate, projection, *, decode=False):
-        """Preserve the BF16 norm boundary when fusing the projection's quantizer."""
+    def forward_project(self, x, gate, projection):
+        """Preserve the BF16 norm rounding and the selected FP8 quantizer."""
         capability = cached_device_capability(x.device)
         sm90 = capability == (9, 0)
         quant_kernel = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
-        if norm_quant is None:
+        if norm_quant is None or quant_kernel not in ("auto", "legacy", "v2"):
             return projection(self(x, gate))
-        if decode:
+        v2 = quant_kernel == "v2" or (
+            quant_kernel == "auto" and x.numel() >= FP8_GROUP_QUANT_V2_MIN_ELEMENTS
+        )
+        if sm90:
             if not (
-                sm90
-                and torch.version.hip is None
+                torch.version.hip is None
                 and x.is_cuda
                 and x.ndim == 2
                 and x.shape[1] == 3072
-                and 16 <= x.shape[0] <= 64
-                and quant_kernel in ("auto", "legacy")
+                and 1 <= x.shape[0] <= 32768
+                and torch.cuda.get_device_properties(x.device).multi_processor_count == 78
                 and self._supports_norm_layout(x, gate)
             ):
                 return projection(self(x, gate))
@@ -163,10 +169,7 @@ class Qwen4PrefillGatedNorm(torch.nn.Module):
             and self._supports_prefill(x, gate)
             and x.shape[1] in (1536, 3072)
             and x.shape[0] <= 8192
-            and (
-                quant_kernel == "v2"
-                or (quant_kernel == "auto" and x.numel() >= 4 * 1024 * 1024)
-            )
+            and v2
         ):
             return projection(self(x, gate))
 
@@ -214,10 +217,16 @@ class Qwen4PrefillGatedNorm(torch.nn.Module):
             and not torch.nn.modules.module._global_forward_hooks
         ):
             groups = 8
-            if decode:
+            if sm90 and x.shape[0] <= 64:
                 groups = 2 if x.shape[0] >= 48 else 1
             quantized, scales = norm_quant(
-                x, gate, self.weight, self.eps, groups=groups, scale_ue8m0=not decode
+                x,
+                gate,
+                self.weight,
+                self.eps,
+                groups=groups,
+                scale_ue8m0=not sm90,
+                v2=v2,
             )
             return consumer.forward_quantized(quantized, scales)
         return projection(self(x, gate))
