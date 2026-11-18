@@ -150,80 +150,33 @@ class RegisteredTransportUnavailableError(RuntimeError):
 
 class RegisteredObjectTransport:
     transport_mode = "gdr"
-    _GUARD_BYTES = 65536
-    _quarantine_lock = threading.Lock()
+    _quarantine_lock = threading.RLock()
     _quarantined_transports = []
 
-    def __init__(
-        self,
-        factory,
-        *,
-        max_object_bytes,
-        device,
-        observe_stage=None,
-        on_quarantine=None,
-    ):
-        if max_object_bytes <= 0 or max_object_bytes > 1024**3:
-            raise ValueError("invalid registered object capacity")
+    def __init__(self, owner, buffer, device, observe_stage):
+        self._owner = owner
+        self._buffer = buffer
+        self._capacity = buffer.numel()
+        self._device = device
         self._observe_stage = observe_stage
-        self._on_quarantine = on_quarantine
         self._lock = threading.Lock()
-        self._closed = False
         self._poisoned = False
         self.device_failed = False
-        self._capacity = max_object_bytes
-        self._device = torch.device(device)
-        if self._device.type != "cuda":
-            raise ValueError("GDR transport requires a CUDA device")
-        # A dedicated allocation pool isolates registered storage from the
-        # model allocator. Reserve a nonzero MR-relative offset: PACE's normal
-        # single-IOV interface treats a zero IOVA as an invalid address.
-        # A failed transfer/registration may leave DMA outstanding. Refuse new
-        # arenas after failure so retries cannot accumulate quarantined memory.
-        with self._quarantine_lock:
-            if self._quarantined_transports:
-                raise RegisteredTransportUnavailableError(
-                    "GDR transport is quarantined; restart the worker",
-                    quarantined=True,
-                    initial_failure=getattr(
-                        self._quarantined_transports[0], "_quarantine_cause", {}
-                    ),
-                    quarantine_id=getattr(
-                        self._quarantined_transports[0], "_quarantine_id", None
-                    ),
-                )
-            with cuda_graph_gate.operation(), torch.cuda.device(self._device):
-                # Shared by reads and writes under _lock. Keep pageable codec
-                # buffers out of CUDA copies to the registered GPU allocation.
-                self._host_staging = torch.empty(
-                    max_object_bytes, dtype=torch.uint8, device="cpu", pin_memory=True
-                )
-                try:
-                    self._pool = torch.cuda.MemPool()
-                    with torch.cuda.use_mem_pool(self._pool):
-                        self._arena = torch.empty(
-                            self._GUARD_BYTES + max_object_bytes,
-                            dtype=torch.uint8,
-                            device=self._device,
-                        )
-                    _enable_sync_memops(self._arena)
-                    self._stream = torch.cuda.Stream(device=self._device)
-                    self._client = factory(gpu_tensors=(self._arena,))
-                except Exception as error:
-                    self._poisoned = True
-                    self._quarantined_transports.append(self)
-                    self._record_quarantine(error, stage="registration")
-                    raise
-        self.instance_id = self._client.instance_id
-        self.instance_group = self._client.instance_group
+        self._host_staging = torch.empty(
+            self._capacity, dtype=torch.uint8, device="cpu", pin_memory=True
+        )
+        self._stream = torch.cuda.Stream(device=device)
+
+    @property
+    def _client(self):
+        return self._owner._client
 
     @property
     def quarantined(self):
-        # Monotonic. A caller can bypass a failed transport without waiting on IO.
         return self._poisoned
 
     def _check_available(self):
-        if self._closed or self._poisoned:
+        if self._owner._closed or self._poisoned:
             raise RegisteredTransportUnavailableError(
                 "registered transport unavailable; restart worker after GDR failure",
                 quarantined=self._poisoned,
@@ -238,6 +191,7 @@ class RegisteredObjectTransport:
         self._quarantine_cause = _safe_error_context(error)
         self._quarantine_cause.setdefault("data_transfer_may_be_inflight", True)
         self._quarantine_id = uuid.uuid4().hex
+        self._poisoned = True
         try:
             logging.error(
                 "MM_EMB_GDR_QUARANTINE %s",
@@ -257,16 +211,13 @@ class RegisteredObjectTransport:
         except Exception:
             pass  # Diagnostics must never mask the original failure.
 
-        observer = getattr(self, "_on_quarantine", None)
-        if observer is not None:
-            observer(self)
+        self._owner._report_hold(self._quarantine_operation, "entered")
 
     def _quarantine(self, error, **context):
         if not self._poisoned:
-            self._poisoned = True
             with self._quarantine_lock:
                 self._quarantined_transports.append(self)
-            self._record_quarantine(error, **context)
+                self._record_quarantine(error, **context)
 
     def reclaim_quarantine(self, ttl_seconds):
         # The pool excludes leased slots. Never wait behind a live IO worker.
@@ -280,14 +231,6 @@ class RegisteredObjectTransport:
                 or time.monotonic() - self._quarantine_started < ttl_seconds
             ):
                 return False
-            if self._closed:
-                # Closed pools retire the MR before releasing Tensor/pool owners.
-                self._client.close()
-                self._client = None
-                self._stream = None
-                self._host_staging = None
-                self._arena = None
-                self._pool = None
             # For a serving pool, the operator-selected TTL returns this Tensor
             # to its fixed registration. It is not a BufferSafe completion.
             # No allocator reuse or MR replacement occurs. The codec verifies
@@ -300,7 +243,7 @@ class RegisteredObjectTransport:
             self._lock.release()
 
     def is_transfer_quiescent(self, error):
-        if self._closed or self._poisoned:
+        if self._owner._closed or self._poisoned:
             return False
         check = getattr(self._client, "buffer_safe_after_failure", None)
         try:
@@ -326,7 +269,7 @@ class RegisteredObjectTransport:
             or not 0 < tensor.numel() <= self._capacity
         ):
             raise ValueError("invalid registered object buffer")
-        return self._arena[self._GUARD_BYTES : self._GUARD_BYTES + tensor.numel()]
+        return self._buffer[: tensor.numel()]
 
     def _stage(self, operation, name):
         observe = getattr(self, "_observe_stage", None)
@@ -424,30 +367,11 @@ class RegisteredObjectTransport:
                 )
                 raise
 
-    def close(self):
-        with self._lock:
-            if self._closed:
-                return
-            if self._poisoned:
-                # A timeout is not proof that peer DMA stopped. Keep the native
-                # client, registration, arena AND allocator pool alive together.
-                # This transport cannot be reused or recreated in this worker.
-                self._closed = True
-                return
-            try:
-                self._client.close()
-            except Exception as error:
-                self._quarantine(error, stage="close")
-                raise
-            self._closed = True
-            self._stream = None
-            self._host_staging = None
-            self._arena = None
-            self._pool = None
-
 
 class RegisteredTransportPool:
-    """Fixed, client-owned registrations. A lease may move to the IO worker."""
+    """One registered GPU arena and KVCM client shared by disjoint slot leases."""
+
+    _GUARD_BYTES = 65536  # PACE requires a nonzero MR-relative transfer offset.
 
     def __init__(
         self,
@@ -470,42 +394,71 @@ class RegisteredTransportPool:
         self._condition = threading.Condition()
         self._accepting = True
         self._closed = False
-        self._slots = []
         self._in_use = {}  # slot -> whether the lease is for a write
-        try:
-            for _ in range(slots):
-                self._slots.append(
-                    RegisteredObjectTransport(
-                        factory,
-                        max_object_bytes=max_object_bytes,
-                        device=device,
-                        observe_stage=observe_stage,
-                        on_quarantine=self._on_quarantine,
-                    )
-                )
-        except Exception:
-            self.close()
-            raise
-        self.instance_id = self._slots[0].instance_id
-        self.instance_group = self._slots[0].instance_group
+        self._create_slots(factory, slots, max_object_bytes, device, observe_stage)
+        self.instance_id = self._client.instance_id
+        self.instance_group = self._client.instance_group
         self._gc_thread = threading.Thread(
             target=self._gc_loop, name="mm-emb-quarantine-gc", daemon=True
         )
         self._gc_thread.start()
 
-    def _on_quarantine(self, slot):
-        self._report_hold(slot._quarantine_operation, "entered")
+    def _create_slots(self, factory, slots, capacity, device, observe_stage):
+        if not 0 < capacity <= 1024**3:
+            raise ValueError("invalid registered object capacity")
+        device = torch.device(device)
+        if device.type != "cuda":
+            raise ValueError("GDR transport requires a CUDA device")
+
+        with cuda_graph_gate.operation(), RegisteredObjectTransport._quarantine_lock:
+            held = RegisteredObjectTransport._quarantined_transports
+            if held:
+                raise RegisteredTransportUnavailableError(
+                    "GDR transport is quarantined; restart the worker",
+                    quarantined=True,
+                    initial_failure=held[0]._quarantine_cause,
+                    quarantine_id=held[0]._quarantine_id,
+                )
+            with torch.cuda.device(device):
+                self._allocator = torch.cuda.MemPool()
+                with torch.cuda.use_mem_pool(self._allocator):
+                    self._arena = torch.empty(
+                        self._GUARD_BYTES + slots * capacity,
+                        dtype=torch.uint8,
+                        device=device,
+                    )
+                _enable_sync_memops(self._arena)
+                self._slots = [
+                    RegisteredObjectTransport(
+                        self,
+                        self._arena.narrow(
+                            0, self._GUARD_BYTES + i * capacity, capacity
+                        ),
+                        device,
+                        observe_stage,
+                    )
+                    for i in range(slots)
+                ]
+                try:
+                    # Register the allocation root exactly once. IO passes only
+                    # the leased slot's view, trimmed to the object size.
+                    self._client = factory(gpu_tensors=(self._arena,))
+                except Exception as error:
+                    # Native initialization may have partially registered the MR.
+                    self._quarantine_registration(error, "registration")
+                    raise
+
+    def _quarantine_registration(self, error, stage):
+        for slot in self._slots:
+            slot._quarantine(error, stage=stage)
 
     def _report_hold(self, operation, event):
         if self._observe_hold is None:
             return
         held = [slot for slot in self._slots if slot.quarantined]
-        registered_bytes = sum(
-            slot._GUARD_BYTES + slot._capacity
-            for slot in self._slots
-            if slot._arena is not None
-        )
-        held_bytes = sum(slot._GUARD_BYTES + slot._capacity for slot in held)
+        arena = self._arena
+        registered_bytes = arena.numel() if arena is not None else 0
+        held_bytes = sum(slot._capacity for slot in held)
         age = max(
             (time.monotonic() - slot._quarantine_started for slot in held), default=0
         )
@@ -519,31 +472,22 @@ class RegisteredTransportPool:
     def _gc_loop(self):
         while not self._gc_stop.wait(min(10, self._quarantine_ttl_seconds)):
             self._gc_tick()
-            if self._closed and not any(slot.quarantined for slot in self._slots):
-                self._gc_stop.set()
 
     def _gc_tick(self):
         with self._condition:
-            candidates = [
-                slot
+            recovered = [
+                slot._quarantine_operation
                 for slot in self._slots
-                if slot not in self._in_use and slot.quarantined
+                if slot not in self._in_use
+                and slot.quarantined
+                and slot.reclaim_quarantine(self._quarantine_ttl_seconds)
             ]
-        for slot in candidates:
-            try:
-                if not slot.reclaim_quarantine(self._quarantine_ttl_seconds):
-                    continue
-            except Exception as error:
-                logging.error(
-                    "MM_EMB_GDR_GC_ERROR quarantine_id=%s details=%s",
-                    slot._quarantine_id,
-                    _safe_error_context(error),
-                )
-                self._report_hold(slot._quarantine_operation, "gc_error")
-                continue
-            self._report_hold(slot._quarantine_operation, "gc_success")
-            with self._condition:
+            if recovered:
                 self._condition.notify_all()
+            if self._closed and not self._close_registration_if_safe():
+                recovered.clear()  # The closed pool still owns the registration.
+        for operation in recovered:
+            self._report_hold(operation, "gc_success")
         self._report_hold("unknown", "held")
 
     @property
@@ -593,14 +537,35 @@ class RegisteredTransportPool:
     def close(self):
         self.stop_acquiring()
         with self._condition:
-            if self._closed:
-                return
-            self._closed = True
             self._condition.wait_for(lambda: not self._in_use)
-        for slot in self._slots:
-            try:
-                slot.close()
-            except Exception:
-                logging.exception("Failed to close registered GDR slot")
-        if not any(slot.quarantined for slot in self._slots):
-            self._gc_stop.set()
+            if not self._closed:
+                self._closed = True
+                self._close_registration_if_safe()
+
+    def _close_registration_if_safe(self):
+        # Called under _condition after all leases drain, including late IO.
+        if self._client is None:
+            return True
+        if any(slot.quarantined for slot in self._slots):
+            return False
+        try:
+            self._client.close()
+        except Exception as error:
+            # A subsequent SDK close can be a no-op even if deregistration
+            # failed. Retain the entire allocation and its allocator until exit.
+            logging.error(
+                "MM_EMB_GDR_GC_ERROR closing registration: %s",
+                _safe_error_context(error),
+            )
+            self._quarantine_registration(error, "close")
+            self._report_hold("unknown", "gc_error")
+        else:
+            self._client = None
+            for slot in self._slots:
+                slot._buffer = None
+                slot._host_staging = None
+                slot._stream = None
+            self._arena = None
+            self._allocator = None
+        self._gc_stop.set()
+        return self._client is None

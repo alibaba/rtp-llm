@@ -437,10 +437,13 @@ class RemoteCacheTest(unittest.TestCase):
         for slot in slots:
             slot.device_failed = slot.quarantined = False
             slot.pack = pack_object
-        with patch(
-            "rtp_llm.multimodal.kvcm.registered_transport.RegisteredObjectTransport",
-            side_effect=slots,
-        ):
+
+        def fake_slots(pool, *args):
+            pool._slots = slots
+            pool._client = Store(shared)
+            pool._arena = None
+
+        with patch.object(RegisteredTransportPool, "_create_slots", fake_slots):
             pool = RegisteredTransportPool(
                 None, max_object_bytes=65536, device="cpu", slots=count
             )
@@ -2884,17 +2887,14 @@ class GdrStartupLifetimeTest(unittest.TestCase):
         import tempfile
         from unittest.mock import Mock
 
-        slots = [
-            Mock(instance_id="test", instance_group="test", quarantined=False)
-            for _ in range(4)
-        ]
+        pool = Mock(instance_id="test", instance_group="test", quarantined=False)
         vit = VitConfig()
         vit.mm_remote_cache_namespace = "immutable-model-revision"
         vit.mm_remote_cache_gdr_enable = True
-        vit.mm_remote_cache_gdr_num = len(slots)
+        vit.mm_remote_cache_gdr_num = 4
         with tempfile.TemporaryDirectory() as directory, patch(
-            "rtp_llm.multimodal.kvcm.registered_transport.RegisteredObjectTransport",
-            side_effect=slots,
+            "rtp_llm.multimodal.kvcm.registered_transport.RegisteredTransportPool",
+            return_value=pool,
         ) as constructor, patch(
             "rtp_llm.multimodal.kvcm._config.RtpKvMetaObjectClientConfig.from_env",
             return_value=object(),
@@ -2904,9 +2904,9 @@ class GdrStartupLifetimeTest(unittest.TestCase):
             )
             cache = MMRemoteEmbeddingCache.from_configs(model, vit, device="cuda:0")
             cache.close()
-        self.assertEqual(constructor.call_count, len(slots))
-        for slot in slots:
-            slot.close.assert_called_once()
+        constructor.assert_called_once()
+        self.assertEqual(constructor.call_args.kwargs["slots"], 4)
+        pool.close.assert_called_once()
 
     def test_startup_client_creation_registers_before_first_report(self):
         from unittest import mock
@@ -2964,6 +2964,7 @@ class GdrStartupLifetimeTest(unittest.TestCase):
         client = Mock(
             instance_id="registered-serving", instance_group="test", quarantined=False
         )
+        client.acquire.return_value = client
         client.object_size.side_effect = [TimeoutError("metadata timeout"), None]
         vit = SimpleNamespace(
             mm_remote_cache_gdr_enable=None,
@@ -2980,7 +2981,7 @@ class GdrStartupLifetimeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             os.environ, {"MM_REMOTE_CACHE_GDR_ENABLE": "1"}
         ), patch(
-            "rtp_llm.multimodal.kvcm.registered_transport.RegisteredObjectTransport",
+            "rtp_llm.multimodal.kvcm.registered_transport.RegisteredTransportPool",
             return_value=client,
         ) as constructor, patch(
             "rtp_llm.multimodal.kvcm._config.RtpKvMetaObjectClientConfig.from_env",

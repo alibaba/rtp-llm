@@ -3,6 +3,7 @@ import json
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -65,11 +66,11 @@ class RegisteredObjectTransportTest(unittest.TestCase):
 
         for capacity in (0, -1, 1024**3 + 1):
             with self.assertRaises(ValueError):
-                RegisteredObjectTransport(
+                RegisteredTransportPool(
                     forbidden, max_object_bytes=capacity, device="cuda:0"
                 )
         with self.assertRaises(ValueError):
-            RegisteredObjectTransport(forbidden, max_object_bytes=1024, device="cpu")
+            RegisteredTransportPool(forbidden, max_object_bytes=1024, device="cpu")
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
     def test_registered_range_roundtrip_bounds_and_close(self):
@@ -80,7 +81,8 @@ class RegisteredObjectTransportTest(unittest.TestCase):
             instance_group = "test"
 
             def __init__(self, gpu_tensors):
-                self.arena = gpu_tensors[0]
+                (self.arena,) = gpu_tensors
+                assert "client" not in seen
                 value = ctypes.c_uint()
                 driver = ctypes.CDLL("libcuda.so.1")
                 driver.cuPointerGetAttribute.argtypes = [
@@ -113,9 +115,10 @@ class RegisteredObjectTransportTest(unittest.TestCase):
             def close(self):
                 self.closed += 1
 
-        transport = RegisteredObjectTransport(
-            Client, max_object_bytes=1024, device="cuda:0"
+        pool = RegisteredTransportPool(
+            Client, max_object_bytes=1024, device="cuda:0", slots=2
         )
+        transport = pool.acquire()
         copies = []
 
         class ObserveCopies(TorchDispatchMode):
@@ -127,15 +130,19 @@ class RegisteredObjectTransportTest(unittest.TestCase):
                         copies.append((dst.is_cuda, host.is_pinned(), host.data_ptr()))
                 return func(*args, **(kwargs or {}))
 
+        reader = pool.acquire()
+        self.assertEqual(reader._buffer.data_ptr() - transport._buffer.data_ptr(), 1024)
         host_ptr = transport._host_staging.data_ptr()
+        read_ptr = reader._host_staging.data_ptr()
+        self.assertNotEqual(host_ptr, read_ptr)
         with ObserveCopies():
             for size in (1024, 17):
                 source = torch.arange(size).to(torch.uint8)
                 target = torch.empty_like(source)
                 transport.save_one("x", source)
-                self.assertIs(transport.load_one("x", target), target)
+                self.assertIs(reader.load_one("x", target), target)
                 self.assertTrue(torch.equal(source, target))
-        self.assertEqual(copies, [(True, True, host_ptr), (False, True, host_ptr)] * 2)
+        self.assertEqual(copies, [(True, True, host_ptr), (False, True, read_ptr)] * 2)
         for bad in (
             torch.empty(1025, dtype=torch.uint8),
             torch.empty(0, dtype=torch.uint8),
@@ -144,10 +151,12 @@ class RegisteredObjectTransportTest(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 transport.save_one("x", bad)
-        transport.close()
-        transport.close()
+        pool.release(reader)
+        pool.release(transport)
+        pool.close()
+        pool.close()
         self.assertEqual(seen["client"].closed, 1)
-        self.assertIsNone(transport._arena)
+        self.assertIsNone(transport._buffer)
         self.assertIsNone(transport._host_staging)
         with self.assertRaises(RuntimeError):
             transport.load_one("x", target)
@@ -180,19 +189,74 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         self.stream.start()
         self.addCleanup(self.stream.stop)
 
+    def pool(self, slots=1, factory=None, ttl=300):
+        allocate = torch.empty
+        with patch("torch.cuda.MemPool"), patch(
+            "torch.cuda.use_mem_pool", return_value=nullcontext()
+        ), patch("torch.cuda.Stream", return_value=torch.cuda.current_stream()), patch(
+            "torch.empty",
+            side_effect=lambda size, *, dtype, **kw: allocate(size, dtype=dtype),
+        ):
+            pool = RegisteredTransportPool(
+                factory or Mock(),
+                max_object_bytes=16,
+                device="cuda:0",
+                slots=slots,
+                observe_hold=Mock(),
+                quarantine_ttl_seconds=ttl,
+            )
+        self.addCleanup(pool._gc_stop.set)
+        self.addCleanup(pool.close)
+        return pool
+
     def transport(self):
-        transport = object.__new__(RegisteredObjectTransport)
-        transport._lock = threading.Lock()
-        transport._closed = transport._poisoned = False
-        transport._device = torch.device("cuda:0")
-        transport._capacity = 16
-        transport._host_staging = torch.empty(16, dtype=torch.uint8)
-        transport._arena = torch.empty(transport._GUARD_BYTES + 16, dtype=torch.uint8)
-        transport._pool = object()
-        transport._stream = torch.cuda.current_stream()
-        transport.device_failed = False
-        transport._client = Mock()
-        return transport
+        return self.pool()._slots[0]
+
+    def test_one_client_registers_root_and_transfers_disjoint_slices_concurrently(self):
+        factory = Mock()
+        pool = self.pool(slots=3, factory=factory)
+        client = factory.return_value
+        factory.assert_called_once_with(gpu_tensors=(pool._arena,))
+        self.enable_memops.assert_called_once_with(pool._arena)
+        self.assertEqual(pool._arena.storage_offset(), 0)
+        self.assertEqual(pool._arena.numel(), pool._GUARD_BYTES + 3 * 16)
+        slots = [
+            pool.acquire(for_write=True),
+            pool.acquire(for_write=True),
+            pool.acquire(),
+        ]
+        gate = threading.Barrier(3)
+        payload = torch.arange(16, dtype=torch.uint8)
+
+        def transfer(key, view):
+            self.assertEqual(
+                view.data_ptr() - pool._arena.data_ptr(), pool._GUARD_BYTES + key * 16
+            )
+            self.assertEqual(view.numel(), 16 - key)
+            gate.wait(timeout=3)
+            if key == 2:
+                view.fill_(23)
+            else:
+                torch.testing.assert_close(view, payload[: 16 - key] + key)
+
+        client.save_one.side_effect = client.load_one.side_effect = transfer
+        out = torch.empty(14, dtype=torch.uint8)
+        try:
+            with ThreadPoolExecutor(3) as io:
+                jobs = [
+                    io.submit(slots[i].save_one, i, payload[: 16 - i] + i)
+                    for i in range(2)
+                ]
+                jobs.append(io.submit(slots[2].load_one, 2, out))
+                for job in jobs:
+                    job.result(timeout=5)
+            torch.testing.assert_close(out, torch.full_like(out, 23))
+        finally:
+            for slot in slots:
+                pool.release(slot)
+        pool.close()
+        pool.close()
+        client.close.assert_called_once()
 
     def test_observes_contention_and_copies_without_extra_cuda_sync(self):
         transport = self.transport()
@@ -223,26 +287,12 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         )
         self.assertEqual(sync.call_count - before, 2)
         transport._client.load_one.assert_called_once()
-        transport.close()
-
-    def gc_pool(self, slot, ttl=300):
-        pool = object.__new__(RegisteredTransportPool)
-        pool._condition = threading.Condition()
-        pool._slots = [slot]
-        pool._in_use = {}
-        pool._accepting = True
-        pool._closed = False
-        pool._gc_stop = threading.Event()
-        pool._observe_hold = Mock()
-        pool._quarantine_ttl_seconds = ttl
-        self.addCleanup(pool._gc_stop.set)
-        self.addCleanup(pool.close)
-        return pool
+        transport._owner.close()
 
     def test_gc_returns_expired_tensor_to_registered_pool_after_lease_release(self):
-        slot = self.transport()
-        pool = self.gc_pool(slot)
-        arena, client = slot._arena, slot._client
+        pool = self.pool()
+        slot = pool._slots[0]
+        arena, client = slot._buffer, slot._client
         slot._client.load_one.side_effect = TimeoutError("unconfirmed completion")
         with self.assertLogs(level="ERROR"), self.assertRaises(TimeoutError):
             slot.load_one("old-key", torch.zeros(16, dtype=torch.uint8))
@@ -258,7 +308,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         self.assertFalse(slot.quarantined)
         self.assertIs(pool.acquire(), slot)
         pool.release(slot)
-        self.assertIs(slot._arena, arena)
+        self.assertIs(slot._buffer, arena)
         self.assertIs(slot._client, client)
         client.close.assert_not_called()
         client.load_one.side_effect = None
@@ -270,8 +320,8 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         )
 
     def test_gc_does_not_recycle_cuda_failures_or_contended_slots(self):
-        slot = self.transport()
-        pool = self.gc_pool(slot)
+        pool = self.pool()
+        slot = pool._slots[0]
         with self.assertLogs(level="ERROR"):
             slot._quarantine(
                 TimeoutError("GPU error"), stage="gpu_copy", operation="read"
@@ -289,40 +339,44 @@ class RegisteredTransportFailureTest(unittest.TestCase):
         self.assertFalse(slot.quarantined)
 
     def test_closed_pool_gc_unregisters_before_releasing_tensor_and_pool(self):
-        slot = self.transport()
-        pool = self.gc_pool(slot)
-        arena, allocator, client = slot._arena, slot._pool, slot._client
+        pool = self.pool(slots=2)
+        slot = pool.acquire()
+        client, arena, allocator = slot._client, pool._arena, pool._allocator
         with self.assertLogs(level="ERROR"):
             slot._quarantine(
                 TimeoutError("unknown IO"), stage="sdk_transfer", operation="read"
             )
-        pool.close()
+        pool.release(slot)
+        other = pool.acquire()
+        self.assertIs(other, pool._slots[1])
+        with ThreadPoolExecutor(1) as worker:
+            closing = worker.submit(pool.close)
+            try:
+                self.assertFalse(closing.done())
+                client.close.assert_not_called()
+            finally:
+                pool.release(other)
+            closing.result(timeout=3)
+        client.close.assert_not_called()
         self.assertFalse(pool._gc_stop.is_set())
-        slot._quarantine_started -= 301
-        client.close.side_effect = RuntimeError("MR deregistration failed")
-        with self.assertLogs(level="ERROR"):
-            pool._gc_tick()
-        self.assertTrue(slot.quarantined)
-        self.assertIs(slot._arena, arena)
-        self.assertIs(slot._pool, allocator)
-        self.assertIn(
-            "gc_error", [call.args[1] for call in pool._observe_hold.call_args_list]
-        )
 
         def close_native():
-            self.assertIs(slot._arena, arena)
-            self.assertIs(slot._pool, allocator)
+            self.assertIs(pool._arena, arena)
+            self.assertIs(pool._allocator, allocator)
+            self.assertTrue(all(s._buffer is not None for s in pool._slots))
 
         client.close.side_effect = close_native
+        slot._quarantine_started -= 301
         pool._gc_tick()
-        self.assertFalse(slot.quarantined)
-        self.assertIsNone(slot._arena)
-        self.assertIsNone(slot._pool)
+        client.close.assert_called_once()
+        self.assertIsNone(pool._arena)
+        self.assertIsNone(pool._allocator)
         self.assertIsNone(slot._client)
+        self.assertTrue(all(s._buffer is None for s in pool._slots))
 
     def test_background_gc_honors_configured_ttl(self):
-        slot = self.transport()
-        pool = self.gc_pool(slot, ttl=1)
+        pool = self.pool(ttl=1)
+        slot = pool._slots[0]
         with self.assertLogs(level="ERROR"):
             slot._quarantine(
                 TimeoutError("unknown IO"), stage="sdk_transfer", operation="read"
@@ -335,8 +389,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
 
         pool._observe_hold.side_effect = observed
         slot._quarantine_started -= 2
-        worker = threading.Thread(target=pool._gc_loop, daemon=True)
-        worker.start()
+        worker = pool._gc_thread
         self.assertTrue(done.wait(3))
         self.assertFalse(slot.quarantined)
         pool.close()
@@ -346,6 +399,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
     def test_transfer_failure_quarantines_arena_and_blocks_reuse(self):
         for operation in ("save_one", "load_one"):
             with self.subTest(operation=operation):
+                RegisteredObjectTransport._quarantined_transports.clear()
                 transport = self.transport()
                 native = getattr(transport._client, operation)
                 error = TimeoutError("private credential=do-not-log")
@@ -376,8 +430,8 @@ class RegisteredTransportFailureTest(unittest.TestCase):
                     transport, RegisteredObjectTransport._quarantined_transports
                 )
                 arena, pool, client = (
-                    transport._arena,
-                    transport._pool,
+                    transport._buffer,
+                    transport._owner._allocator,
                     transport._client,
                 )
                 with self.assertNoLogs(level="ERROR"):
@@ -396,11 +450,11 @@ class RegisteredTransportFailureTest(unittest.TestCase):
                 )
                 self.assertTrue(rejected.exception.restart_required)
                 native.assert_called_once()
-                transport.close()
-                transport.close()
+                transport._owner.close()
+                transport._owner.close()
                 client.close.assert_not_called()
-                self.assertIs(transport._arena, arena)
-                self.assertIs(transport._pool, pool)
+                self.assertIs(transport._buffer, arena)
+                self.assertIs(transport._owner._allocator, pool)
 
     def test_quarantine_distinguishes_gpu_copy_from_post_sdk_wait(self):
         for operation, expected_stage in (
@@ -408,6 +462,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
             ("load_one", "gpu_ready_wait"),
         ):
             with self.subTest(operation=operation):
+                RegisteredObjectTransport._quarantined_transports.clear()
                 transport = self.transport()
                 torch.cuda.current_stream().synchronize.side_effect = RuntimeError(
                     "CUDA event synchronization failed"
@@ -447,15 +502,17 @@ class RegisteredTransportFailureTest(unittest.TestCase):
                 native.side_effect = None
                 getattr(transport, operation)("key", buffer)
                 self.assertEqual(native.call_count, 2)
-                transport.close()
-                transport._client.close.assert_called_once()
+                client = transport._client
+                transport._owner.close()
+                client.close.assert_called_once()
 
     def test_unavailable_reason_distinguishes_closed_from_quarantined(self):
         for poisoned in (False, True):
             with self.subTest(poisoned=poisoned):
                 transport = self.transport()
+                client = transport._client
                 transport._poisoned = poisoned
-                transport.close()
+                transport._owner.close()
                 with self.assertRaises(RegisteredTransportUnavailableError) as raised:
                     transport.object_size("key")
                 self.assertEqual(
@@ -466,7 +523,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
                     str(raised.exception),
                     "registered transport unavailable; restart worker after GDR failure",
                 )
-                transport._client.object_size.assert_not_called()
+                client.object_size.assert_not_called()
 
     def test_failed_safety_check_does_not_hide_the_original_error(self):
         transport = self.transport()
@@ -490,9 +547,10 @@ class RegisteredTransportFailureTest(unittest.TestCase):
             transport.object_size("key")
         self.assertFalse(transport._poisoned)
         self.assertEqual(RegisteredObjectTransport._quarantined_transports, [])
-        transport.close()
-        transport._client.close.assert_called_once()
-        self.assertIsNone(transport._arena)
+        client = transport._client
+        transport._owner.close()
+        client.close.assert_called_once()
+        self.assertIsNone(transport._buffer)
 
     def test_safe_failure_reuses_same_arena_for_next_request(self):
         for method in ("load_one", "save_one"):
@@ -511,19 +569,31 @@ class RegisteredTransportFailureTest(unittest.TestCase):
                 first, second = (call.args[1] for call in native.call_args_list)
                 self.assertEqual(first.data_ptr(), second.data_ptr())
                 self.assertFalse(slot.quarantined)
-                slot.close()
+                slot._owner.close()
 
     def test_failed_close_keeps_allocator_and_registration_owner(self):
-        transport = self.transport()
-        arena, pool = transport._arena, transport._pool
-        transport._client.close.side_effect = RuntimeError("unregister failed")
-        with self.assertRaises(RuntimeError):
-            transport.close()
-        transport.close()
-        transport._client.close.assert_called_once()
-        self.assertIs(transport._arena, arena)
-        self.assertIs(transport._pool, pool)
-        self.assertIn(transport, RegisteredObjectTransport._quarantined_transports)
+        pool = self.pool(slots=2)
+        slot = pool._slots[0]
+        arena, allocator, client = pool._arena, pool._allocator, pool._client
+        with self.assertLogs(level="ERROR"):
+            slot._quarantine(TimeoutError("unknown IO"), stage="sdk_transfer")
+        pool.close()
+        slot._quarantine_started -= 301
+        client.close.side_effect = RuntimeError("unregister failed")
+        with self.assertLogs(level="ERROR"):
+            pool._gc_tick()
+        pool._gc_tick()
+        pool.close()
+        client.close.assert_called_once()
+        self.assertIs(pool._arena, arena)
+        self.assertIs(pool._allocator, allocator)
+        self.assertEqual(RegisteredObjectTransport._quarantined_transports, pool._slots)
+        self.assertNotIn(
+            "gc_success", [call.args[1] for call in pool._observe_hold.call_args_list]
+        )
+        self.assertIn(
+            "gc_error", [call.args[1] for call in pool._observe_hold.call_args_list]
+        )
 
     def test_constructor_failure_is_retained_and_blocks_new_allocations(self):
         arena = torch.empty(65552, dtype=torch.uint8)
@@ -532,12 +602,12 @@ class RegisteredTransportFailureTest(unittest.TestCase):
             "torch.cuda.use_mem_pool", return_value=nullcontext()
         ), patch("torch.empty", return_value=arena) as allocate:
             with self.assertRaises(RuntimeError):
-                RegisteredObjectTransport(factory, max_object_bytes=16, device="cuda:0")
+                RegisteredTransportPool(factory, max_object_bytes=16, device="cuda:0")
             retained = RegisteredObjectTransport._quarantined_transports[0]
-            self.assertIs(retained._arena, arena)
-            self.assertIs(retained._pool, pool.return_value)
+            self.assertIs(retained._owner._arena, arena)
+            self.assertIs(retained._owner._allocator, pool.return_value)
             with self.assertRaisesRegex(RuntimeError, "quarantined") as rejected:
-                RegisteredObjectTransport(factory, max_object_bytes=16, device="cuda:0")
+                RegisteredTransportPool(factory, max_object_bytes=16, device="cuda:0")
             self.assertEqual(rejected.exception.reason, "gdr_transport_quarantined")
             self.assertEqual(
                 rejected.exception.initial_failure["error_type"], "RuntimeError"
@@ -554,7 +624,7 @@ class RegisteredTransportFailureTest(unittest.TestCase):
             "torch.cuda.use_mem_pool", return_value=nullcontext()
         ), patch("torch.empty", return_value=arena):
             with self.assertRaisesRegex(RuntimeError, "SYNC_MEMOPS"):
-                RegisteredObjectTransport(factory, max_object_bytes=16, device="cuda:0")
+                RegisteredTransportPool(factory, max_object_bytes=16, device="cuda:0")
         factory.assert_not_called()
 
 
