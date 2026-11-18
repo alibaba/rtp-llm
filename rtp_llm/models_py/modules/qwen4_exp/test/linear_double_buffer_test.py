@@ -428,6 +428,11 @@ class LinearDoubleBufferKernelTest(unittest.TestCase):
                     stage.reads.copy_(table[order, 0])
                     stage.record_ids.copy_(order.to(torch.int32) + 1)
                     accepted = torch.tensor(counts, dtype=torch.int32, device="cuda")
+                    if iteration == 0:
+                        # Padding must never be interpreted as a request's accept length.
+                        backing = accepted.new_full((2 * accepted.numel(),), -1)
+                        backing[::2].copy_(accepted)
+                        accepted = backing[::2]
                     before = [state.transpose(-1, -2).clone() for state in stage.states]
                     replay_partial_acceptance(stage, accepted)
                     for layer, physical in enumerate(expected):
