@@ -133,6 +133,18 @@ class Qwen4ExpMTPComponentTest(unittest.TestCase):
                 model.load()
         parent_load.assert_not_called()
 
+    def test_draft_inherits_target_rope_base_without_an_override(self):
+        root_config = self._config()
+        del root_config["text_config"]["mtp"]["rope_theta"]
+        path = self._temp_dir.name
+        Path(path, "config.json").write_text(json.dumps(root_config))
+        target = Qwen4Exp.create_config(path)
+        draft = Qwen4ExpMTP.create_config(path)
+        self.assertEqual(draft.attn_config.rope_config.base, 10_000_000)
+        self.assertEqual(
+            draft.attn_config.rope_config.base, target.attn_config.rope_config.base
+        )
+
     def test_draft_config_is_one_full_attention_layer_without_ple_or_graph(self):
         self.assertEqual(self.config.model_type, "qwen4_exp_mtp")
         self.assertEqual(self.config.num_layers, 1)

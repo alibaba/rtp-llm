@@ -500,6 +500,40 @@ class Qwen4ExpQSAMtpTest(QSARuntimeFixture, TestCase):
                 torch.testing.assert_close(state, state_initial, rtol=0, atol=0)
                 reference.finalize_side_cache()
 
+    @skipUnless(torch.cuda.is_available(), "CUDA is required for paged scoring")
+    def test_draft_incremental_prefill_ignores_padded_cache_rows(self):
+        device = torch.device("cuda")
+        indexer = self._decode_indexer()
+        indexer.k_norm_gamma = indexer.k_norm_gamma.to(device)
+        kv_pool = torch.zeros(4, 2 * self.D * 2, dtype=torch.uint8, device=device)
+        state_pool = torch.zeros(
+            4, 2 * self.RATIO * self.D, dtype=torch.float32, device=device
+        )
+        table = torch.tensor([[0], [1]], dtype=torch.int32, device=device)
+        context = self._draft_incremental_context(
+            kv_pool,
+            state_pool,
+            prefixes=[1, 1],
+            lengths=[self.RATIO, self.RATIO],
+            kv_table=table,
+            state_table=table,
+        )
+        context.main_inputs.is_s_padded = True
+        q = torch.randn(2 * self.RATIO, 2, self.D, dtype=torch.bfloat16, device=device)
+        selected = context.select_draft_incremental_prefill_tokens(
+            q,
+            q[:, 0].contiguous(),
+            indexer=indexer,
+            rope_config=self._base_rope_config(3),
+        )
+
+        self.assertTrue((selected[: self.RATIO] == -1).all().item())
+        self.assertEqual(
+            sorted(selected[-1][selected[-1] >= 0].tolist()), list(range(5))
+        )
+        self.assertEqual(kv_pool[0].count_nonzero().item(), 0)
+        self.assertEqual(state_pool[0].count_nonzero().item(), 0)
+
     def test_draft_incremental_prefill_rejects_before_side_writer(self):
         q = torch.randn(1, 2, self.D, dtype=torch.bfloat16)
         raw = torch.randn(1, self.D, dtype=torch.bfloat16)

@@ -102,6 +102,27 @@ class DraftPrefillGraphReplay(Mapping):
             raise RuntimeError(
                 "QSA draft graph cu_seqlens do not partition the live token capacity"
             )
+        if getattr(anchor, "is_s_padded", False) and all(
+            not groups[tag].kv_cache_kernel_block_id.numpy().any()
+            for tag, _, _, _ in self.bounds
+        ):
+            # The DP alignment batch carries synthetic lengths and only
+            # reserved pages. Replay the same graph with empty attention rows
+            # so the MoE collectives still run and QSA never writes block zero.
+            for name in (
+                "input_lengths",
+                "prefix_lengths",
+                "cu_seqlens",
+                "input_lengths_device",
+                "prefix_lengths_device",
+                "cu_seqlens_device",
+                "cu_kv_seqlens_device",
+            ):
+                getattr(anchor, name).zero_()
+            for tag, impl in self.impls.items():
+                groups[tag].combo_position_ids.zero_()
+                impl.prepare_cuda_graph(groups[tag])
+            return
         state_geometry = None
         for tag, pool_size, page_size, compressed in self.bounds:
             inputs = groups[tag]

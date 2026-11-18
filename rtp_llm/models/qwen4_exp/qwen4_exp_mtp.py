@@ -264,7 +264,9 @@ class Qwen4ExpMTP(Qwen4Exp):
             HybridAttentionType.NONE
         ]
         config.attn_config.rope_config.style = RopeStyle.Base
-        config.attn_config.rope_config.base = int(mtp_config["rope_theta"])
+        config.attn_config.rope_config.base = int(
+            mtp_config.get("rope_theta", config.attn_config.rope_config.base)
+        )
         config._qwen4_ple_layer_ids = []
         # QSA is the released draft attention contract. Config construction may
         # keep it disabled for checkpoint-inspection tools, but shared load

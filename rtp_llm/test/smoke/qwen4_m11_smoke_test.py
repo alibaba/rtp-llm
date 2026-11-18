@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import unittest
 from pathlib import Path
 
@@ -24,10 +25,14 @@ class Qwen4M11SmokeTest(unittest.TestCase):
         from rtp_llm.config.py_config_modules import ServerConfig
         from rtp_llm.test.utils.maga_server_manager import MagaServerManager
 
+        smoke_args = os.environ["SMOKE_ARGS"]
+        cls.mtp_enabled = "--sp_type mtp" in smoke_args
+        if cls.mtp_enabled:
+            smoke_args += " --sp_checkpoint_path " + shlex.quote(checkpoint)
         server = MagaServerManager(
             env_args={"FT_SERVER_TEST": "1"},
             role_name="qwen4_m11_sm10x",
-            smoke_args_str=os.environ["SMOKE_ARGS"],
+            smoke_args_str=smoke_args,
         )
         cls.addClassCleanup(server.stop_server)
         if not server.start_server(
@@ -77,7 +82,8 @@ class Qwen4M11SmokeTest(unittest.TestCase):
         self.assertTrue(
             all(0 <= token < self.text_config["vocab_size"] for token in ids)
         )
-        self.assertEqual(actual["aux_info"]["speculative_draft_rounds"], 0)
+        if not self.mtp_enabled:
+            self.assertEqual(actual["aux_info"]["speculative_draft_rounds"], 0)
         return actual
 
     def chat(self, prompt):
@@ -105,6 +111,31 @@ class Qwen4M11SmokeTest(unittest.TestCase):
         prompt = "Complete the sequence: 1, 2, 3, 4,"
         self.assertEqual(
             self.generate(prompt)["output_ids"], self.generate(prompt)["output_ids"]
+        )
+
+    def test_mtp_decodes_archive_seal(self):
+        if not self.mtp_enabled:
+            self.skipTest("Requires MTP")
+        prompt = (
+            "Archive seal register. Copy the seal for the requested route.\n\n"
+            "NORTH: silver lantern by the river and a brass key beside the door\n"
+            "SOUTH: amber compass under the bridge and a red map inside the box\n\n"
+            "Requested route: EAST\n"
+            "Seal: bronze feather over the hill and a gold coin beside the well\n\n"
+            "Requested route: NORTH\nSeal:"
+        )
+        actual = self.generate(prompt, role_addrs=self.cache_role_addrs)
+        self.assertEqual(
+            actual["response"].strip(),
+            "silver lantern by the river and a brass key beside the door",
+        )
+        aux = actual["aux_info"]
+        self.assertGreaterEqual(aux["speculative_draft_rounds"], 2, aux)
+        self.assertGreater(sum(aux["speculative_accepted_tokens_per_pos"]), 0, aux)
+        print(
+            f"MTP rounds={aux['speculative_draft_rounds']}, "
+            f"accepted={aux['speculative_accepted_tokens_per_pos']}",
+            flush=True,
         )
 
     def test_prefix_cache_restore(self):
@@ -156,6 +187,12 @@ class Qwen4M11SmokeTest(unittest.TestCase):
                 self.assertEqual(hit["response"].strip(), expected)
                 self.assertEqual(hit["input_ids"], reference["input_ids"])
                 self.assertEqual(hit["output_ids"], reference["output_ids"])
+                if self.mtp_enabled:
+                    aux = hit["aux_info"]
+                    self.assertGreater(aux["speculative_draft_rounds"], 0, aux)
+                    self.assertGreater(
+                        sum(aux["speculative_accepted_tokens_per_pos"]), 0, aux
+                    )
                 print(
                     f"{direction}: reused {reuse} tokens, response={expected!r}",
                     flush=True,

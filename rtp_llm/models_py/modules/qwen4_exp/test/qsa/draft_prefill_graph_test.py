@@ -115,6 +115,24 @@ class DraftPrefillGraphTest(unittest.TestCase):
             hook.prepare_cuda_graph(groups)
         delegate.prepare_cuda_graph.assert_not_called()
 
+    def test_replay_empties_reserved_dp_alignment_batch(self):
+        hook, groups, delegate = self._replay()
+        anchor = groups["full"]
+        anchor.is_s_padded = True
+        anchor.cu_kv_seqlens_device = anchor.cu_seqlens_device.clone()
+        for inputs in groups.values():
+            inputs.kv_cache_kernel_block_id.zero_()
+            inputs.kv_cache_block_id_device.zero_()
+
+        hook.prepare_cuda_graph(groups)
+
+        self.assertFalse(anchor.input_lengths_device.any())
+        self.assertFalse(anchor.prefix_lengths_device.any())
+        self.assertFalse(anchor.cu_seqlens_device.any())
+        self.assertFalse(anchor.cu_kv_seqlens_device.any())
+        self.assertFalse(anchor.combo_position_ids.any())
+        delegate.prepare_cuda_graph.assert_called_once_with(anchor)
+
     def test_replay_resolves_state_pages_from_refreshed_kernel_table(self):
         hook, groups, delegate = self._replay()
         state = groups[INDEXER_STATE_TAG]

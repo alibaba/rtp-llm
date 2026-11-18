@@ -267,6 +267,14 @@ def _draft_incremental_prefill_geometry(
     visible_lengths = torch.where(valid_rows, visible_lengths, 0)
     compressed_lengths = (visible_lengths // ratio).to(torch.int32)
     final_compressed_lengths = (visible_ends // ratio).to(torch.int32)
+    active_rows = None
+    if self.main_inputs.is_s_padded:
+        # Idle DP ranks run a draft commit using reserved block zero.
+        active = state_table.ne(0).any(dim=1) | kv_table.ne(0).any(dim=1)
+        visible_lengths = torch.where(active[:, None], visible_lengths, 0)
+        compressed_lengths = torch.where(active[:, None], compressed_lengths, 0)
+        final_compressed_lengths = torch.where(active, final_compressed_lengths, 0)
+        active_rows = self.host_values(active)
     required_kv_columns = (
         final_compressed_lengths + kv_entries_per_block - 1
     ) // kv_entries_per_block
@@ -283,6 +291,8 @@ def _draft_incremental_prefill_geometry(
     state_table_width = int(state_table.shape[1])
     state_pairs = []
     for request_idx, (prefix, length) in enumerate(zip(prefix_values, lengths)):
+        if active_rows is not None and not active_rows[request_idx]:
+            continue
         first_needed = prefix - (prefix % ratio)
         logical_blocks = {
             position // state_tokens_per_block
