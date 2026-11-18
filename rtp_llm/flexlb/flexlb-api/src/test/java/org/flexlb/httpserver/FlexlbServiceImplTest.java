@@ -1302,6 +1302,9 @@ class FlexlbServiceImplTest {
                                             "flexlb.schedule.code")));
             assertTrue(data.getEvents().isEmpty());
             verify(routeService, never()).route(any());
+            verify(grpcForwarder, never())
+                    .forwardCompensatingCancelToMaster(
+                            any(), any(), any(io.opentelemetry.context.Context.class));
         }
     }
 
