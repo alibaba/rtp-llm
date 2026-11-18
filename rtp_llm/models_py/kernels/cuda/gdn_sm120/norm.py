@@ -6,11 +6,15 @@ import triton.language as tl
 
 try:
     from rtp_llm.models_py.kernels.cuda.gdn_sm120.norm_gluon import flat_head_norm
-    from rtp_llm.models_py.kernels.cuda.gdn_sm120.norm_quant_gluon import norm_quant
+    from rtp_llm.models_py.kernels.cuda.gdn_sm120.norm_quant_gluon import (
+        _launch_norm_quant as launch_norm_quant,
+        norm_quant,
+    )
 except ImportError:
     # Older platform Triton versions retain the existing implementation.
     flat_head_norm = None
     norm_quant = None
+    launch_norm_quant = None
 
 
 @triton.jit

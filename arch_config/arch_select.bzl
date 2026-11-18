@@ -161,7 +161,7 @@ def whl_deps():
             "deep-ep==2.1.0+a56d615",
             "fast-hadamard-transform@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/fast_hadamard/fast_hadamard_transform-1.1.0-cp310-cp310-linux_x86_64.whl",
             "flash_attn==2.8.3.post1+cu13torch2.11cxx11abitrue.r1",
-            "flashinfer-python==0.6.9+8c4f4dcf",
+            "flashinfer-python@https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-python/flashinfer_python-0.6.9+8c4f4dcf.gdnsm90.4143c592-py3-none-any.whl",
             "flashinfer-cubin==0.6.9+8c4f4dcf",
             # Unified rtp_kernel from cuda_extension feat/port-nvfp4-xqa@94fd20eb;
             # NVFP4 mm only (no XQA wrappers).

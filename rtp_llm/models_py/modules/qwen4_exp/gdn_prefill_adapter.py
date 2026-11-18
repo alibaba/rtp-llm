@@ -5,6 +5,7 @@ not replace installed FlashInfer or the speculative Decode state owner.
 """
 
 import logging
+import os
 from functools import lru_cache
 
 import torch
@@ -25,22 +26,19 @@ from rtp_llm.models_py.triton_kernels.fla.block import (
 def _sm90_cp_available():
     try:
         import cutlass
-        import flashinfer
+
+        if cutlass.__version__ == "4.4.2":
+            from . import gdn_prefill_cp_sm90  # noqa: F401
+
+            return True
     except ImportError:
-        logging.warning("H20 CP dependencies unavailable, using native Prefill")
+        logging.warning("SM90 CP wheel unavailable, using native Prefill")
         return False
-    available = (
-        flashinfer.__version__.split("+")[0] == "0.7.3"
-        and cutlass.__version__ == "4.8.0"
+    logging.warning(
+        "SM90 CP wheel requires CUTLASS DSL 4.4.2; found %s, using native Prefill",
+        cutlass.__version__,
     )
-    if not available:
-        logging.warning(
-            "H20 CP Prefill requires FlashInfer 0.7.3 and Cutlass DSL 4.8.0; "
-            "found %s and %s, using native Prefill",
-            flashinfer.__version__,
-            cutlass.__version__,
-        )
-    return available
+    return False
 
 
 class Qwen4Sm120GdnPrefill(Qwen3NextGatedDeltaNetPrefill):
@@ -48,6 +46,9 @@ class Qwen4Sm120GdnPrefill(Qwen3NextGatedDeltaNetPrefill):
         super().__init__(*args, **kwargs)
         self.sm90_cp_prefill = True
         self.sm90_grouped_prepare = True
+        self.sm90_cp_extended = (
+            os.environ.get("RTP_QWEN4_SM90_GDN_EXTENDED", "1") == "1"
+        )
 
     def _fla(
         self,
@@ -64,8 +65,13 @@ class Qwen4Sm120GdnPrefill(Qwen3NextGatedDeltaNetPrefill):
             and mixed_qkv.is_cuda
             and torch.version.hip is None
             and torch.cuda.get_device_capability(mixed_qkv.device) == (9, 0)
-            and torch.cuda.get_device_properties(mixed_qkv.device).multi_processor_count
-            == 78
+            and (
+                self.sm90_cp_extended
+                or torch.cuda.get_device_properties(
+                    mixed_qkv.device
+                ).multi_processor_count
+                == 78
+            )
             and _sm90_cp_available()
         ):
             from .gdn_prefill_cp_sm90 import try_sm90_prefill

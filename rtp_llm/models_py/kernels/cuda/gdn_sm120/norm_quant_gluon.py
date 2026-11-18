@@ -1,4 +1,4 @@
-"""Fuse GDN gated norm with the existing UE8M0 quantization boundary.
+"""Fuse GDN gated norm with the existing FP32 or UE8M0 scale boundary.
 
 The BF16 norm rounding is kept before amax and FP8 conversion. Head traversal
 follows the vLLM norm, while the reduction layout and scale encoding retain
@@ -15,7 +15,10 @@ from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
 )
 
 
-@gluon.jit(do_not_specialize=["M", "ZX", "SS"])
+@gluon.jit(
+    do_not_specialize=["M", "ZX", "SS"],
+    do_not_specialize_on_alignment=["M", "ZX", "SS"],
+)
 def _gdn_norm_quant(
     X,
     Z,
@@ -30,6 +33,7 @@ def _gdn_norm_quant(
     SS,
     GH: gl.constexpr,
     WARPS: gl.constexpr,
+    UE8M0: gl.constexpr,
 ):
     layout: gl.constexpr = gl.BlockedLayout([1, 4], [1, 32], [WARPS, 1], [1, 0])
     flat = gl.program_id(0) * GH + gl.arange(0, GH, layout=gl.SliceLayout(1, layout))
@@ -49,22 +53,32 @@ def _gdn_norm_quant(
     rounded = normalized.to(gl.bfloat16).to(gl.float32)
     absolute = gl.abs(rounded)
     amax = gl.maximum(gl.max(gl.where(absolute == absolute, absolute, 0.0), 1), 1.0e-4)
-    scale_float = amax * (1.0 / 448.0)
-    bits = scale_float.to(gl.uint32, bitcast=True)
-    exponent = (
-        ((bits >> 23) & 255).to(gl.int32) - 127 + ((bits & 0x7FFFFF) != 0).to(gl.int32)
-    )
-    reciprocal = ((127 - exponent).to(gl.uint32) << 23).to(gl.float32, bitcast=True)
-    scaled = rounded * reciprocal[:, None]
+    if UE8M0:
+        scale_float = amax * (1.0 / 448.0)
+        bits = scale_float.to(gl.uint32, bitcast=True)
+        exponent = (
+            ((bits >> 23) & 255).to(gl.int32)
+            - 127
+            + ((bits & 0x7FFFFF) != 0).to(gl.int32)
+        )
+        reciprocal = ((127 - exponent).to(gl.uint32) << 23).to(gl.float32, bitcast=True)
+        scaled = rounded * reciprocal[:, None]
+    else:
+        # The legacy CUDA path rounds both divisions independently.
+        scale_float = gl.div_rn(amax, 448.0)
+        scaled = gl.div_rn(rounded, scale_float[:, None])
     scaled = gl.where(scaled == scaled, scaled, -448.0)
     quant = gl.minimum(gl.maximum(scaled, -448.0), 448.0)
     gl.store(Q + row[:, None] * N + offset, quant, valid)
-    scale_offset = ((head // 4) * SS + row) * 4 + head % 4
-    gl.store(
-        S.to(gl.pointer_type(gl.uint8)) + scale_offset,
-        exponent + 127,
-        flat < M * GROUPS,
-    )
+    if UE8M0:
+        scale_offset = ((head // 4) * SS + row) * 4 + head % 4
+        gl.store(
+            S.to(gl.pointer_type(gl.uint8)) + scale_offset,
+            exponent + 127,
+            flat < M * GROUPS,
+        )
+    else:
+        gl.store(S + row + head * SS, scale_float, flat < M * GROUPS)
 
 
 def norm_quant(x, z, weight, eps, groups=8, warps=1):
@@ -88,9 +102,15 @@ def norm_quant(x, z, weight, eps, groups=8, warps=1):
         and warps == 1
     ):
         raise ValueError("unsupported GDN norm/UE8M0 input layout")
+    return _launch_norm_quant(x, z, weight, eps, groups, warps, scale_ue8m0=True)
+
+
+def _launch_norm_quant(x, z, weight, eps, groups=8, warps=1, *, scale_ue8m0):
+    """Launch after the public helper or model dispatch validates the layout."""
+    rows, width = x.shape
     q = torch.empty_like(x, dtype=torch.float8_e4m3fn)
     s = create_per_token_group_quant_fp8_output_scale(
-        x.shape, x.device, 128, True, True, True
+        x.shape, x.device, 128, True, True, scale_ue8m0
     )
     _gdn_norm_quant[(triton.cdiv(rows * (width // 128), groups),)](
         x,
@@ -106,6 +126,7 @@ def norm_quant(x, z, weight, eps, groups=8, warps=1):
         SS=s.stride(1),
         GH=groups,
         WARPS=warps,
+        UE8M0=scale_ue8m0,
         num_warps=warps,
     )
     return q, s

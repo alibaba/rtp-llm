@@ -29,7 +29,7 @@ nvidia-cutlass-dsl-libs-cu13==4.4.2
 # carries the fix. Regression-covered by the FMHA v2 prefill CUDA-graph
 # unit test (test_trtllm_fmha_v2_prefill_sm12x) and the generation-prefill
 # CUDA-graph smoke case generation_prefill_cuda_graph_sm120 (cuda13/sm12x).
-flashinfer-python==0.6.9+8c4f4dcf
+https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-python/flashinfer_python-0.6.9+8c4f4dcf.gdnsm90.4143c592-py3-none-any.whl
 flashinfer-cubin==0.6.9+8c4f4dcf
 
 # Hadamard transform used by the GLM5 indexer.

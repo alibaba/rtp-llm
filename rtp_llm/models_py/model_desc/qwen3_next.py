@@ -1,6 +1,7 @@
 import logging
+import os
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Any, Dict, Optional
 
 import torch
@@ -27,6 +28,7 @@ from rtp_llm.models_py.modules import (
     MultimodalEmbeddingInjector,
     RMSResNorm,
 )
+from rtp_llm.models_py.modules.base.common.fp8_linear import Fp8Linear
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     CausalConv1dMetadata,
     causal_conv1d_fn,
@@ -901,10 +903,12 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             mixed_qkv, attn_inputs, is_target_verify
         )
         packed_decode = getattr(self, "_packed_decode", None)
+        packed_steps = (
+            seq if not is_target_verify or getattr(self, "_packed_verify", False) else 0
+        )
         if (
             packed_decode is not None
-            and seq == 1
-            and not is_target_verify
+            and packed_steps in (1, 2, 3, 4)
             and precomputed_gates is None
         ):
             fused = packed_decode(
@@ -917,9 +921,12 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
                 attn_inputs.kv_cache_kernel_block_id_device,
                 attn_inputs.sequence_lengths_plus_1_device,
                 seq_size_per_block,
+                sequence_length=packed_steps,
             )
             if fused is not None:
-                return fused.reshape(batch, self.local_num_v_heads, self.head_v_dim)
+                return fused.reshape(
+                    batch * seq, self.local_num_v_heads, self.head_v_dim
+                )
         # asserr head_k_dim == head_v_dim
         mixed_qkv = mixed_qkv.reshape(
             batch,
@@ -1281,8 +1288,37 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         self.decode_gdn = Qwen3NextGatedDeltaNetDecode(
             linear_attn_config, parallelism_config, weights
         )
+        self.use_sm90_gdn_fp8_decode = (
+            norm_activation == "sigmoid"
+            and attn_tp_size == 2
+            and type(self.in_proj_ba) is Fp8Linear
+            and self.in_proj_ba.weight.is_cuda
+            and self.in_proj_ba.weight.shape == (48, 2560)
+            and torch.version.hip is None
+            and torch.cuda.get_device_capability(self.in_proj_ba.weight.device)
+            == (9, 0)
+            and torch.cuda.get_device_properties(
+                self.in_proj_ba.weight.device
+            ).multi_processor_count
+            == 78
+        )
+        self._fp8_decode_project_pair = None
+        if self.use_sm90_gdn_fp8_decode:
+            try:
+                from rtp_llm.models_py.modules.qwen4_exp.gdn_decode_fp8 import (
+                    try_project_pair,
+                )
+            except ImportError:
+                # Keep the separate projections on older Triton builds.
+                pass
+            else:
+                self._fp8_decode_project_pair = try_project_pair
+                self._fp8_decode_ba_stream = torch.cuda.Stream(
+                    device=self.in_proj_ba.weight.device
+                )
+        extended_gdn = os.environ.get("RTP_QWEN4_SM90_GDN_EXTENDED", "1") == "1"
         if (
-            self._qkvz_ba_fused
+            (self._qkvz_ba_fused or extended_gdn)
             and norm_activation == "sigmoid"
             and (attn_tp_size, self.local_num_k_heads, self.local_num_v_heads)
             in ((1, 16, 48), (2, 8, 24), (4, 4, 12), (8, 2, 6))
@@ -1299,7 +1335,24 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             )
 
             if attn_tp_size == 2 and self.decode_gdn.ssm_state_dtype == torch.float32:
-                self.decode_gdn._packed_decode = try_packed_decode
+                packed_decode = try_packed_decode
+                if self.use_sm90_gdn_fp8_decode:
+                    packed_decode = partial(try_packed_decode, tune_h20=True)
+                elif (
+                    os.environ.get("RTP_QWEN4_SM90_GDN_BF16_PACKED", "1") == "1"
+                    and self._qkvz_ba_fused
+                    and not _is_rocm
+                    and fused_w.is_cuda
+                    and fused_w.dtype == torch.bfloat16
+                    and torch.cuda.get_device_capability(fused_w.device) == (9, 0)
+                    and torch.cuda.get_device_properties(
+                        fused_w.device
+                    ).multi_processor_count
+                    == 78
+                ):
+                    packed_decode = partial(try_packed_decode, tune_h20_bf16=True)
+                self.decode_gdn._packed_decode = packed_decode
+                self.decode_gdn._packed_verify = extended_gdn
         self.norm = RmsNormGated(
             weights[W.linear_attn_norm_w],
             eps=layernorm_eps,
@@ -1360,7 +1413,11 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                         ]._rtp_requires_restart_for_update = True
 
     def _input_project(
-        self, hidden_states: torch.Tensor
+        self,
+        hidden_states: torch.Tensor,
+        *,
+        decode: bool = False,
+        overlap_ba: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the input projection and return (projected_qkvz, projected_ba).
 
@@ -1371,6 +1428,19 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         if self._qkvz_ba_fused:
             fused = self.in_proj_fused(hidden_states)
             return fused[..., : self._qkvz_size], fused[..., self._qkvz_size :]
+        if decode and self._fp8_decode_project_pair is not None:
+            projected = self._fp8_decode_project_pair(
+                hidden_states,
+                self.in_proj_qkvz,
+                self.in_proj_ba,
+                ba_stream=(
+                    self._fp8_decode_ba_stream
+                    if overlap_ba and hidden_states.shape[0] in (16, 32, 64)
+                    else None
+                ),
+            )
+            if projected is not None:
+                return projected
         return self.in_proj_qkvz(hidden_states), self.in_proj_ba(hidden_states)
 
     # mixed_qkvz, mixed_ba -> q, k, v, z, b, a
@@ -1575,11 +1645,11 @@ class Qwen3NextGatedDeltaNet(nn.Module):
 
         return self._output_project(local_attn_out, z)
 
-    def _output_project(self, attn_output, gate):
+    def _output_project(self, attn_output, gate, *, decode=False):
         value = attn_output.reshape(-1, self.local_num_v_heads * self.head_v_dim)
         project = getattr(self.norm, "forward_project", None)
         if callable(project):
-            return project(value, gate, self.out_proj)
+            return project(value, gate, self.out_proj, decode=decode)
         return self.out_proj(self.norm(value, gate))
 
     def forward(
@@ -1597,11 +1667,18 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             or attn_meta.get_prefill_conv1d_meta() is not None
             or attn_meta.is_cp_linear_attn
         ), "prefill_conv1d_meta is required for prefill"
-        projected_states_qkvz, projected_states_ba = self._input_project(hidden_states)
+        is_prefill = attention_inputs.is_prefill and not attn_meta.is_target_verify
+        projected_states_qkvz, projected_states_ba = self._input_project(
+            hidden_states,
+            decode=not is_prefill,
+            overlap_ba=not (
+                attention_inputs.is_target_verify or attn_meta.is_target_verify
+            ),
+        )
         mixed_qkv, z, b, a = self.fix_query_key_value_ordering(
             projected_states_qkvz, projected_states_ba
         )
-        if attention_inputs.is_prefill and not attn_meta.is_target_verify:
+        if is_prefill:
             if attn_meta.is_cp_linear_attn:
                 return self._forward_cp_prefill(
                     mixed_qkv, z, b, a, attention_inputs, kv_cache, attn_meta
@@ -1618,9 +1695,13 @@ class Qwen3NextGatedDeltaNet(nn.Module):
                 kv_cache,
                 attn_meta,
             )
-        attn_output = self._output_project(attn_output, z)
+        attn_output = self._output_project(
+            attn_output, z, decode=not is_prefill and self.use_sm90_gdn_fp8_decode
+        )
         if self.parallelism_config.get_attn_tp_size() > 1:
             reduce_output = getattr(self, "tp_all_reduce", all_reduce)
+            if not is_prefill:
+                reduce_output = getattr(self, "tp_all_reduce_decode", reduce_output)
             attn_output = reduce_output(attn_output, group=Group.TP)
         return attn_output
 

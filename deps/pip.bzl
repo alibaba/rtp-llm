@@ -44,6 +44,7 @@ FLASHINFER_069_ANNOTATIONS = {
                     "flashinfer_python-0.6.9-py3-none-any.whl",
                     "flashinfer_python-0.6.9+e87d610f-py3-none-any.whl",
                     "flashinfer_python-0.6.9+8c4f4dcf-py3-none-any.whl",
+                    "flashinfer_python-0.6.9+8c4f4dcf.gdnsm90.4143c592-py3-none-any.whl",
                 ],
                 "patch_strip": 1,
             }),

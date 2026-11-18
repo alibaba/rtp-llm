@@ -979,33 +979,34 @@ def broadcast(tensor: torch.Tensor, src: int, group: Group) -> None:
 
 
 def all_reduce(
-    tensor: torch.Tensor, group: Group, *, inplace: bool = True
+    tensor: torch.Tensor, group: Group, *, inplace: Optional[bool] = True
 ) -> torch.Tensor:
     """All-reduce a tensor across all ranks in the group.
 
     Args:
         tensor: Tensor to all-reduce.
         group: Process group to use
-        inplace: If true, write fast-path results back to ``tensor``. Defaults to
-            true to preserve the in-place contract of torch.distributed.all_reduce.
+        inplace: True updates tensor, False preserves it, and None permits the
+            selected backend to return its own output or update tensor.
 
     Returns:
         All-reduced tensor.
     """
+    write_input = inplace is not False
     rocm_rccl = _get_rocm_rccl()
     if rocm_rccl is not None:
         rocm_rccl.ensure_capture_comm_ready(group == Group.TP)
         if rocm_rccl.should_use_capture_collectives(group == Group.TP):
-            target = tensor if inplace else tensor.clone()
+            target = tensor if write_input else tensor.clone()
             return rocm_rccl.capture_all_reduce(target, _get_group(group))
 
     if group == Group.TP:
         if _canonical_p2p is not None and _canonical_p2p.should_use(tensor):
-            return _canonical_p2p.all_reduce(tensor, inplace=inplace)
+            return _canonical_p2p.all_reduce(tensor, inplace=write_input)
 
         all_reduce_comm = _get_all_reduce_module().get_all_reduce()
         if all_reduce_comm is not None and all_reduce_comm.should_use(tensor):
-            if inplace:
+            if inplace is True:
                 # IPC first stages the input, so the registered reduction may
                 # write directly back into its original destination. Avoid a
                 # second device copy at every model-layer collective.
@@ -1016,9 +1017,9 @@ def all_reduce(
         if symm_mem_comm is not None and symm_mem_comm.should_torch_symm_mem_allreduce(
             tensor
         ):
-            return symm_mem_comm.all_reduce(tensor, out=tensor if inplace else None)
+            return symm_mem_comm.all_reduce(tensor, out=tensor if write_input else None)
 
-    target = tensor if inplace else tensor.clone()
+    target = tensor if write_input else tensor.clone()
     process_group = _get_group(group)
     torch.distributed.all_reduce(
         target, op=torch.distributed.ReduceOp.SUM, group=process_group

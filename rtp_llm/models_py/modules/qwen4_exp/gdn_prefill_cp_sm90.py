@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Reuses FlashInfer 0.7.3 SM90 CP kernels. Only checkpoint addressing changes.
-"""FlashInfer 0.7.3 H20 Prefill with direct RTP checkpoint writes.
-
-Reuses the upstream SM90 precompute, fixup and prefill kernels. Only checkpoint
-addressing changes; Q/K and beta rounding follow the native RTP contract.
-"""
+"""SM90 CP Prefill with direct RTP checkpoint writes."""
 
 from functools import lru_cache
 
@@ -14,13 +9,14 @@ import torch
 import triton
 import triton.language as tl
 from cuda.bindings import driver as cuda_driver
-from flashinfer.gdn_kernels.delta_rule_dsl import delta_rule_cp_sm90 as upstream
-from flashinfer.gdn_kernels.delta_rule_dsl.varlen_helper import choose_cp_chunk_len_host
+from flashinfer.gdn_kernels.rtp_sm90_cp import delta_rule_cp_sm90 as upstream
+from flashinfer.gdn_kernels.rtp_sm90_cp.varlen_helper import choose_cp_chunk_len_host
 from triton.language.extra.cuda import libdevice
 
 from rtp_llm.models_py.triton_kernels.common.scatter_qkv import (
     try_scatter_qkv_l2norm_sm90,
 )
+from rtp_llm.models_py.triton_kernels.fla.block import load_initial_state_from_block_map
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import _gdn_gate_values
 
 
@@ -61,11 +57,11 @@ class _PagedCP(upstream.CPDeltaRulePrefillSm90):
                 )
 
 
-@lru_cache(maxsize=2)
-def _kernel(cumulative_dtype):
+@lru_cache(maxsize=4)
+def _kernel(cumulative_dtype, needs_initial_state=False):
     return _PagedCP(
         dtype=cutlass.BFloat16,
-        needs_initial_state=False,
+        needs_initial_state=needs_initial_state,
         store_final_state=False,
         initial_state_dtype=cutlass.Float32,
         checkpoint_state_dtype=cutlass.Float32,
@@ -75,7 +71,19 @@ def _kernel(cumulative_dtype):
     )
 
 
-def _run(q, k, v, alpha, beta, pool, table, cumulative, page, cp_chunk_len=None):
+def _run(
+    q,
+    k,
+    v,
+    alpha,
+    beta,
+    pool,
+    table,
+    cumulative,
+    page,
+    cp_chunk_len=None,
+    initial_state=None,
+):
     rows, query_heads, dimension = q.shape
     heads = v.shape[1]
     assert q.shape == k.shape == (rows, 8, 128) and v.shape == (rows, 24, 128)
@@ -88,10 +96,15 @@ def _run(q, k, v, alpha, beta, pool, table, cumulative, page, cp_chunk_len=None)
     page_ids = table[0]
     assert page_ids.is_contiguous() and page_ids.numel() >= triton.cdiv(rows, page)
     device = q.device
-    sms = torch.cuda.get_device_properties(device).multi_processor_count
-    cp_chunk_len = cp_chunk_len or choose_cp_chunk_len_host(
-        rows, heads, sms, device_capability=(9, 0), device_name="NVIDIA H20"
-    )
+    properties = torch.cuda.get_device_properties(device)
+    sms = properties.multi_processor_count
+    if cp_chunk_len is None:
+        if rows == 32768 and sms == 78:
+            cp_chunk_len = 2048
+        else:
+            cp_chunk_len = choose_cp_chunk_len_host(
+                rows, heads, sms, device_capability=(9, 0), device_name=properties.name
+            )
     stream = cuda_driver.CUstream(torch.cuda.current_stream(device).cuda_stream)
     common = dict(
         cp_chunk_len=cp_chunk_len, _skip_check=True, _device=device, _stream=stream
@@ -121,7 +134,7 @@ def _run(q, k, v, alpha, beta, pool, table, cumulative, page, cp_chunk_len=None)
         local_state,
         cumulative,
         rows,
-        initial_state=None,
+        initial_state=initial_state,
         **common,
     )
     output = torch.empty_like(v)
@@ -163,7 +176,7 @@ def _run(q, k, v, alpha, beta, pool, table, cumulative, page, cp_chunk_len=None)
         alpha.reshape(-1),
         state_argument,
         fixed.reshape(-1),
-        None,
+        initial_state,
         None,
         pool,
         page_ids,
@@ -173,7 +186,7 @@ def _run(q, k, v, alpha, beta, pool, table, cumulative, page, cp_chunk_len=None)
         *dimensions,
         stream,
     )
-    kernel = _kernel(cumulative.dtype)
+    kernel = _kernel(cumulative.dtype, initial_state is not None)
     compiled = upstream.get_cached_compile(kernel, upstream._SM90_COMPILE_OPTIONS)
     if compiled is None:
 
@@ -194,7 +207,7 @@ def _run(q, k, v, alpha, beta, pool, table, cumulative, page, cp_chunk_len=None)
             tensor(alpha.reshape(-1)),
             tensor(state_argument),
             tensor(fixed.reshape(-1)),
-            None,
+            tensor(initial_state) if initial_state is not None else None,
             None,
             tensor(pool),
             tensor(page_ids, align=4),
@@ -295,12 +308,18 @@ def _prepare_cp(packed, a, b, alog, bias, heads, value_heads, *, group_heads=Fal
 
 
 def try_sm90_prefill(self, packed, b, a, cache, page, inputs, metadata):
-    """Cold, single-request H20 Prefill; None keeps native dispatch."""
+    """Single-request SM90 Prefill with native paged checkpoint ownership."""
+    extended = getattr(self, "sm90_cp_extended", False)
     if not (
         cache is not None
-        and page == 64
+        and (page in (64, 128) if extended else page == 64)
         and packed.ndim == 2
-        and packed.shape in ((8192, 5120), (32768, 5120))
+        and packed.shape[1] == 5120
+        and (
+            2048 <= packed.shape[0] <= 32768
+            if extended
+            else packed.shape[0] in (8192, 32768)
+        )
         and packed.dtype == a.dtype == b.dtype == torch.bfloat16
         and packed.is_contiguous()
         and self.local_num_k_heads == 8
@@ -314,18 +333,39 @@ def try_sm90_prefill(self, packed, b, a, cache, page, inputs, metadata):
         and inputs.prefix_lengths.device.type == "cpu"
         and inputs.input_lengths.numel() == inputs.prefix_lengths.numel() == 1
         and int(inputs.input_lengths[0]) == packed.shape[0]
-        and int(inputs.prefix_lengths[0]) == 0
         and not any(value.requires_grad for value in (packed, a, b))
+    ):
+        return None
+    prefix = int(inputs.prefix_lengths[0])
+    if prefix < 0 or prefix % page or (prefix and not extended):
+        return None
+    table = inputs.kv_cache_kernel_block_id_device
+    if (
+        table is None
+        or table.ndim != 2
+        or table.shape[0] != 1
+        or table.stride(1) != 1
+        or table.device != packed.device
+        or table.dtype != torch.int32
+        or table.shape[1] < triton.cdiv(prefix + packed.shape[0], page)
     ):
         return None
     pool = self._get_ssm_states(cache)
     if not (
         pool.dtype == torch.float32
+        and pool.device == packed.device
         and pool.shape[1:] == (24, 128, 128)
         and pool.stride()[1:] == (16384, 128, 1)
         and pool.stride(0) % 4 == 0
     ):
         return None
+    initial_state = None
+    if prefix:
+        # Snapshot the incoming state before parallel chunks write their pages.
+        initial_state = self._initial_states_buffer(1, packed.device)
+        load_initial_state_from_block_map(
+            inputs.prefix_lengths_device, table, pool, initial_state, page
+        )
     q, k, v, alpha, beta = _prepare_cp(
         packed,
         a,
@@ -343,8 +383,8 @@ def try_sm90_prefill(self, packed, b, a, cache, page, inputs, metadata):
         alpha,
         beta,
         pool,
-        inputs.kv_cache_kernel_block_id_device,
+        table[:, prefix // page :],
         inputs.cu_seqlens_device,
         page,
-        cp_chunk_len=2048 if packed.shape[0] == 32768 else None,
+        initial_state=initial_state,
     )

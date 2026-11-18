@@ -1,6 +1,7 @@
 """Qwen4-owned reduction dispatch; draft and eager paths keep their contract."""
 
 import logging
+from functools import partial
 
 import torch
 
@@ -14,7 +15,7 @@ from rtp_llm.models_py.modules.qwen4_exp._profiler import record_function_range
 _PROCESS_LIFETIME_TARGET_REDUCE = []
 
 
-def install_target_graph_all_reduce(attention, mlp, dispatch=None):
+def install_target_graph_all_reduce(attention, mlp, dispatch=None, *, fp8_gdn_decode=False):
     """Include the actual routed finalizer, even when shared FFN is unsharded."""
     from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.pure_tp_router import (
         PureTpRouterNvfp4Cutlass,
@@ -22,6 +23,8 @@ def install_target_graph_all_reduce(attention, mlp, dispatch=None):
 
     dispatch = all_reduce_target_graph if dispatch is None else dispatch
     attention.tp_all_reduce = dispatch
+    if fp8_gdn_decode:
+        attention.tp_all_reduce_decode = partial(all_reduce_target_graph, inplace=None)
     mlp.tp_all_reduce = dispatch
     router = getattr(getattr(mlp, "fused_moe", None), "router", None)
     if type(router) is PureTpRouterNvfp4Cutlass:
@@ -124,7 +127,7 @@ def prepare_target_reduce(config, parallelism):
         return None
 
 
-def all_reduce_target_graph(tensor, group):
+def all_reduce_target_graph(tensor, group, *, inplace=True):
     with record_function_range("qwen4.tp_all_reduce"):
         if tensor.is_cuda and group == collective_torch.Group.TP:
             communicator = get_all_reduce()
@@ -132,4 +135,6 @@ def all_reduce_target_graph(tensor, group):
                 tensor
             ):
                 return collective_torch.all_reduce(tensor, group, inplace=False)
+        if inplace is None:
+            return collective_torch.all_reduce(tensor, group, inplace=None)
         return collective_torch.all_reduce(tensor, group)
