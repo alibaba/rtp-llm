@@ -21,7 +21,10 @@ public:
                    const BlockTreeCacheMetricsReporter& reporter,
                    const char*                          operation,
                    std::defer_lock_t):
-        CacheLockGuard(mutex, operation, CacheStageContext::forLock(&reporter, operation), std::defer_lock) {}
+        CacheLockGuard(mutex,
+                       operation,
+                       CacheStageContext::forLock(&reporter, operation, Tier::NONE, Tier::NONE),
+                       std::defer_lock) {}
 
     CacheLockGuard(std::mutex& mutex, const char* operation, const CacheStageContext& stage_context):
         CacheLockGuard(mutex, operation, stage_context, std::defer_lock) {
@@ -37,7 +40,10 @@ public:
                    std::mutex&                           wait_mutex,
                    std::condition_variable&              condition,
                    StopPredicate                         stop):
-        CacheLockGuard(mutex, operation, CacheStageContext::forLock(reporter, operation), std::defer_lock) {
+        CacheLockGuard(mutex,
+                       operation,
+                       CacheStageContext::forLock(reporter, operation, Tier::NONE, Tier::NONE),
+                       std::defer_lock) {
         wait_ = TransferStageTimer(stage_context_, "lock_wait", "cache_lock", AsyncProfileKind::Wait);
         while (!stop() && Clock::now() < deadline) {
             if (lock_.try_lock()) {

@@ -99,8 +99,9 @@ struct CacheStageContext {
         context.enabled     = enabled;
         return context;
     }
-    static CacheStageContext forLock(const BlockTreeCacheMetricsReporter* reporter, const char* operation) noexcept {
-        auto context     = CacheStageContext{operation, "NONE", "NONE", "cache_lock"};
+    static CacheStageContext
+    forLock(const BlockTreeCacheMetricsReporter* reporter, const char* operation, Tier source, Tier target) noexcept {
+        auto context     = CacheStageContext{operation, tierName(source), tierName(target), "cache_lock"};
         context.reporter = reporter;
         context.enabled  = (reporter && reporter->stageMetricsEnabled()) || AsyncProfileSession::enabled();
         return context;

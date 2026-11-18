@@ -223,7 +223,9 @@ size_t BlockTreeCache::insert(const CacheKeysType&                              
 }
 
 int BlockTreeCache::evictForGroup(std::string_view group_tag, size_t num_blocks) {
-    CacheLockGuard lock(mutex_, *metrics_reporter_, "force_drop");
+    CacheLockGuard lock(mutex_,
+                        "force_drop",
+                        CacheStageContext::forLock(metrics_reporter_.get(), "force_drop", Tier::DEVICE, Tier::NONE));
     if (!config_.isTierEnabled(Tier::DEVICE)) {
         return 0;
     }

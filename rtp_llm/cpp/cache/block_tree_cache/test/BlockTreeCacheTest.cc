@@ -1215,6 +1215,24 @@ TEST(BlockTreeCacheMetricsTest, CacheLockStagesShareBoundaryAndPreserveTraceIden
     }
 }
 
+TEST(BlockTreeCacheMetricsTest, WatermarkDropLocksKeepSourceAndTargetLabels) {
+    auto                          raw = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    BlockTreeCacheMetricsReporter reporter(raw, true, std::chrono::hours(1));
+    std::mutex                    mutex;
+    for (Tier source : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
+        CacheLockGuard lock(mutex, "watermark", CacheStageContext::forLock(&reporter, "watermark", source, Tier::NONE));
+    }
+    reporter.flushStageMetrics();
+    auto* metrics = raw->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    EXPECT_EQ(metricSeriesCount(metrics->transfer_stage_qps_metric), 6u);
+    for (Tier source : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
+        for (const char* stage : {"lock_wait", "lock_hold"}) {
+            const auto tags = lockStageTags("watermark", stage, true, tierName(source), "NONE");
+            EXPECT_DOUBLE_EQ(snapshotQps(metrics->transfer_stage_qps_metric, tags), 1);
+        }
+    }
+}
+
 TEST(BlockTreeCacheMetricsTest, DeferredCacheLockStartsTraceAtLockAttempt) {
     BlockTreeCacheMetricsReporter        reporter(nullptr);
     auto                                 before = AsyncProfileSession::start();
@@ -1234,6 +1252,22 @@ TEST(BlockTreeCacheMetricsTest, DeferredCacheLockStartsTraceAtLockAttempt) {
         EXPECT_EQ(event.record.operation, "match");
         EXPECT_FALSE(event.start_clipped);
         EXPECT_FALSE(event.end_clipped);
+    }
+}
+
+TEST_F(BlockTreeCacheTest, ForceDropLockMetricsKeepKnownTiers) {
+    auto raw = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    resetCache(raw);
+    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {42};
+    cache_->insert({100}, resources, Tier::DEVICE);
+    EXPECT_EQ(cache_->evictForGroup("group0", 1), 1);
+    cache_->metrics_reporter_->flushStageMetrics();
+    auto* metrics = raw->getMetricsGroup<RtpLLMCacheTransferMetrics>();
+    for (const char* stage : {"lock_wait", "lock_hold"}) {
+        EXPECT_DOUBLE_EQ(
+            snapshotQps(metrics->transfer_stage_qps_metric, lockStageTags("force_drop", stage, true, "DEVICE", "NONE")),
+            1);
     }
 }
 
@@ -2662,6 +2696,7 @@ TEST_F(BlockTreeCacheTest, WatermarkDirectDropSkipsHeldLruCandidateUntilLastRequ
     BlockTreeCacheTestPeer::setTierWatermarkForTest(*cache_, Tier::DEVICE, 0.99);
     const size_t initial_free = pool->freeBlocksNum();
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache_);
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(pool->freeBlocksNum(), initial_free + 1);
     EXPECT_FALSE(pool->isAllocated(43));
     EXPECT_FALSE(cache_->tree()->findNode({100}).empty());
@@ -2671,9 +2706,11 @@ TEST_F(BlockTreeCacheTest, WatermarkDirectDropSkipsHeldLruCandidateUntilLastRequ
 
     const auto version = cache_->getKeySnapshot().version;
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache_);
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(cache_->getKeySnapshot().version, version);
     pool->decRef(42);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache_);
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_EQ(pool->freeBlocksNum(), initial_free + 1);
     EXPECT_EQ(pool->refCount(42), 2u);
     EXPECT_FALSE(cache_->tree()->findNode({100}).empty());
@@ -2681,6 +2718,7 @@ TEST_F(BlockTreeCacheTest, WatermarkDirectDropSkipsHeldLruCandidateUntilLastRequ
 
     pool->decRef(42);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache_);
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_FALSE(pool->isAllocated(42));
     EXPECT_EQ(pool->freeBlocksNum(), initial_free + 2);
     EXPECT_TRUE(cache_->tree()->findNode({100}).empty());
@@ -2736,6 +2774,7 @@ TEST_F(BlockTreeCacheTest, WatermarkDirectDropPreservesDeviceBlockWithTreeOperat
     for (const BlockTreeRefType type : {BlockTreeRefType::LOAD, BlockTreeRefType::EVICT}) {
         pool->incTreeRef(42, type);
         BlockTreeCacheTestPeer::runMaintenanceForTest(*cache_);
+        BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
         EXPECT_EQ(pool->freeBlocksNum(), initial_free);
         EXPECT_EQ(cache_->getKeySnapshot().version, version);
         EXPECT_FALSE(cache_->tree()->findNode({100}).empty());
@@ -2744,6 +2783,7 @@ TEST_F(BlockTreeCacheTest, WatermarkDirectDropPreservesDeviceBlockWithTreeOperat
     }
 
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache_);
+    BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache_);
     EXPECT_FALSE(pool->isAllocated(42));
     EXPECT_EQ(pool->freeBlocksNum(), initial_free + 1);
     EXPECT_TRUE(cache_->tree()->findNode({100}).empty());
