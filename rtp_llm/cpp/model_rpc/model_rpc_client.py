@@ -1200,9 +1200,12 @@ class ModelRpcClient(object):
         self._addresses = addresses
         self._max_rpc_timeout_ms = max_rpc_timeout_ms
         self._decode_entrance = decode_entrance
-        self._options = []
-        for key, value in client_config.items():
-            self._options.append((key, value))
+        # A backend can return on the same address after several minutes of
+        # downtime. Bound the retained channel's reconnect backoff so it can
+        # discover the listener promptly, even for calls without a deadline.
+        self._options = list(
+            {"grpc.max_reconnect_backoff_ms": 2000, **client_config}.items()
+        )
         logging.info(f"client options: {self._options}")
 
         # Initialize the channel pool

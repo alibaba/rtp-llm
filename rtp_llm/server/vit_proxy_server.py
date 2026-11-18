@@ -999,7 +999,9 @@ class VitProxyServer:
     def stop(self):
         """停止代理服务器"""
         if self.rpc_server:
-            self.rpc_server.stop(grace=None)
+            # Keep forwarding channels alive until admitted RPCs finish or
+            # exhaust the same budget used when forwarding to the workers.
+            self.rpc_server.stop(grace=self.default_rpc_timeout_seconds).wait()
             logging.info("VIT Proxy Server stopped")
         if self.proxy_servicer:
             self.proxy_servicer.cancel_status_probes()

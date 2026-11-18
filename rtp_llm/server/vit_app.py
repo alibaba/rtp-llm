@@ -18,7 +18,7 @@ from uvicorn.loops.auto import auto_loop_setup
 
 from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.exceptions import FtRuntimeException
-from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.py_config_modules import PyEnvConfigs, VitConfig
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
@@ -100,8 +100,9 @@ class GracefulShutdownServer(Server):
 
     @override
     async def shutdown(self, sockets: Optional[List[socket.socket]] = None) -> None:
-        self.vit_endpoint_server.stop()
-        await super().shutdown(sockets)
+        await asyncio.gather(
+            super().shutdown(sockets), asyncio.to_thread(self.vit_endpoint_server.stop)
+        )
 
 
 class VitEndpointApp:
@@ -311,7 +312,10 @@ class VitEndpointServer:
 
     def stop(self):
         if self.rpc_server is not None:
-            self.rpc_server.stop(grace=None)
+            timeout_ms = self.py_env_configs.vit_config.mm_timeout_ms
+            if timeout_ms <= 0:
+                timeout_ms = VitConfig.DEFAULT_MM_TIMEOUT_MS
+            self.rpc_server.stop(grace=timeout_ms / 1000.0).wait()
         if self.mm_rpc_server is not None:
             self.mm_rpc_server.stop()
 

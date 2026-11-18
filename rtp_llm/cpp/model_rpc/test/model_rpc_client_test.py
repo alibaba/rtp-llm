@@ -403,6 +403,21 @@ class BatchedTerminalOutputTest(TestCase):
 
 
 class ModelRpcClientTest(TestCase):
+    def test_reconnect_backoff_preserves_caller_overrides(self):
+        option = "grpc.max_reconnect_backoff_ms"
+        for config, expected in (({}, 2000), ({option: 9000}, 9000)):
+            with (
+                self.subTest(config=config),
+                patch(
+                    "rtp_llm.cpp.model_rpc.model_rpc_client.GrpcHostChannelPool"
+                ) as pool,
+            ):
+                ModelRpcClient(["localhost:1234"], config)
+                options = pool.call_args.kwargs["options"]
+                self.assertEqual(
+                    [value for name, value in options if name == option], [expected]
+                )
+
     def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
         # self.client = FakeModelRpcClient()
