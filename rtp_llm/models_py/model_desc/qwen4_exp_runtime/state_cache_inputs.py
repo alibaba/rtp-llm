@@ -31,7 +31,7 @@ class _GraphStateInputs:
 
 
 def state_page_table(
-    kernel_table: torch.Tensor, blocks_per_physical: int
+    kernel_table: torch.Tensor, blocks_per_physical: int, *, out=None
 ) -> torch.Tensor:
     """Invert FULL block expansion without changing the state pool's geometry."""
     if (
@@ -55,15 +55,18 @@ def state_page_table(
         kernel_table[:, :width:blocks_per_physical],
         blocks_per_physical,
         rounding_mode="floor",
+        out=out,
     ).contiguous()
 
 
-def prepare_state_cache_inputs(groups, kv_cache) -> Any:
+def prepare_state_cache_inputs(groups, kv_cache, *, workspace=None) -> Any:
     """Normalize the three model-owned FULL state chains once per forward.
 
     Their kernel maps are ordinary physical-block expansions: unlike SWA or
     LINEAR execution maps, they never use cyclic or shared chunk remapping.
     Eager/PD inputs retain their native physical tables and host-mirror contract.
+    A caller supplying scratch must lease it through all readers; every call
+    still projects the current table and binds the current native input owner.
     """
     if kv_cache is None or not isinstance(groups, Mapping):
         return groups
@@ -75,10 +78,33 @@ def prepare_state_cache_inputs(groups, kv_cache) -> Any:
         kernel = int(kv_cache.get_kernel_seq_size_per_block(tag))
         if kernel <= 0 or physical <= 0 or physical % kernel:
             raise RuntimeError(f"Qwen state cache {tag!r} has invalid block geometry")
-        table = state_page_table(
-            inputs.kv_cache_kernel_block_id_device, physical // kernel
-        )
+        source = inputs.kv_cache_kernel_block_id_device
+        factor = physical // kernel
+        binding = None if workspace is None else workspace.get(tag)
+        layout = None
+        if workspace is not None and isinstance(source, torch.Tensor):
+            layout = (
+                source.shape,
+                source.stride(),
+                source.dtype,
+                source.device,
+                factor,
+            )
+        if binding is not None and binding[0] == layout:
+            view = binding[1]
+            table = state_page_table(
+                source,
+                factor,
+                out=view.kv_cache_block_id_device if factor > 1 else None,
+            )
+            view._inputs = inputs
+            view.kv_cache_block_id_device = table
+        else:
+            table = state_page_table(source, factor)
+            view = _GraphStateInputs(inputs, table)
+            if workspace is not None:
+                workspace[tag] = (layout, view)
         if result is None:
             result = dict(groups)
-        result[tag] = _GraphStateInputs(inputs, table)
+        result[tag] = view
     return groups if result is None else result
