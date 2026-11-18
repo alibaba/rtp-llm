@@ -1,7 +1,7 @@
 """Fused prefix-reuse preparation: bit-exactness, declines and transactions.
 
 The fused writer must be a drop-in for the staged vectorized writer on the
-geometry it specializes on (page-aligned prefix reuse, ratio 4, 128-token
+geometry it specializes on (page-aligned prefix reuse, ratio 4, 64/128-token
 KV/state pages, 128-wide heads): pools match bit for bit, the padded scorer
 query matches the eager norm + RoPE + padding chain bit for bit, declines
 leave every pool untouched, and launch failures restore both snapshots.
@@ -80,7 +80,9 @@ class IndexerPrefixReuseTritonTest(unittest.TestCase):
         state_table = self._table(batch, width, blocks)
         q_gamma = torch.randn(128, device="cuda", dtype=torch.bfloat16) * 0.1
         k_gamma = torch.randn(128, device="cuda", dtype=torch.bfloat16) * 0.1
-        kv = torch.randn(blocks, 32, 128, device="cuda", dtype=torch.bfloat16)
+        kv = torch.randn(
+            blocks, self.PAGE // self.RATIO, 128, device="cuda", dtype=torch.bfloat16
+        )
         state = torch.randn(blocks, 8, 128, device="cuda")
         positions = torch.cat(
             [
@@ -223,9 +225,17 @@ class IndexerPrefixReuseTritonTest(unittest.TestCase):
             ([384, 128, 0], [260, 1, 131]),  # batch > 1, mixed prefixes/lengths
             ([0], [512]),  # four pages in one request
         )
-        for prefixes, lengths in cases:
-            with self.subTest(prefixes=prefixes, lengths=lengths):
-                self.assert_fused_matches_reference(self.inputs(prefixes, lengths))
+        for page in (64, 128):
+            with patch.object(self, "PAGE", page):
+                for prefixes, lengths in cases:
+                    with self.subTest(page=page, prefixes=prefixes, lengths=lengths):
+                        self.assert_fused_matches_reference(
+                            self.inputs(prefixes, lengths)
+                        )
+        with patch.object(self, "PAGE", 64):
+            for prefixes, lengths in (([64], [65]), ([3200], [4800]), ([4800], [5200])):
+                with self.subTest(page=64, prefixes=prefixes, lengths=lengths):
+                    self.assert_fused_matches_reference(self.inputs(prefixes, lengths))
 
     def strided_inputs(self, prefixes, lengths, seed=20261103, extra_columns=0):
         """Rebuild q/raw as zero-copy ``split_projected`` cross-column views.
@@ -449,6 +459,72 @@ class IndexerPrefixReuseTritonTest(unittest.TestCase):
             )
         fused_writer.assert_not_called()
         self.assertEqual(tuple(selected.shape), (132, 64 + self.RATIO - 1))
+
+    def test_uniform_selection_reuses_output_and_ragged_rows_remain_packed(self):
+        from rtp_llm.models_py.model_desc.qwen4_exp_runtime import qsa_prefill
+
+        original = qsa_prefill.select_qsa_paged_tokens
+        for lengths in ([132], [132, 132], [132, 7]):
+            context, indexer, rope, args = self.runtime_inputs(
+                [128] * len(lengths), lengths
+            )
+            produced = []
+
+            def select(*values, **options):
+                output = original(*values, **options)
+                produced.append(output)
+                return output
+
+            with patch.object(
+                qsa_prefill, "select_qsa_paged_tokens", side_effect=select
+            ):
+                actual = context.select_prefix_reuse_prefill_tokens(
+                    args["q"],
+                    args["raw"],
+                    indexer=indexer,
+                    rope_config=rope,
+                    raw_query=True,
+                )
+            padded = produced[0]
+            rows = torch.cat(
+                [
+                    torch.arange(i * max(lengths), i * max(lengths) + n, device="cuda")
+                    for i, n in enumerate(lengths)
+                ]
+            )
+            torch.testing.assert_close(
+                actual, padded.index_select(0, rows), rtol=0, atol=0
+            )
+            if len(set(lengths)) == 1:
+                self.assertEqual(actual.data_ptr(), padded.data_ptr())
+
+    def test_page64_model_router_reaches_fused_writer(self):
+        from rtp_llm.models_py.model_desc.qwen4_exp import Qwen4ExpAttention
+
+        with patch.object(self, "PAGE", 64):
+            context, indexer, rope, args = self.runtime_inputs([64], [132])
+            reference, ref_indexer, _, ref_args = self.runtime_inputs([64], [132])
+        q, raw = args["q"], args["raw"]
+        indexer.project_raw = lambda _: (q, raw)
+        indexer.project = lambda _: (
+            exact_head_rms_norm(q, indexer.q_norm_gamma, self.EPS),
+            raw,
+        )
+        owner = SimpleNamespace(
+            qsa_indexer=indexer, qsa_rope_config=rope, is_mtp_draft=False
+        )
+        hidden = torch.empty(132, 2560, device="cuda", dtype=torch.bfloat16)
+        hits = prefix_reuse_fused_stats()["hits"]
+        with patch.dict(os.environ, {"RTP_LLM_QSA_STRICT_VALIDATION": "0"}):
+            actual = Qwen4ExpAttention._qsa_selected_indices(owner, hidden, context)
+            self.assertGreater(prefix_reuse_fused_stats()["hits"], hits)
+            expected = reference.select_prefix_reuse_prefill_tokens(
+                exact_head_rms_norm(ref_args["q"], ref_indexer.q_norm_gamma, self.EPS),
+                ref_args["raw"],
+                indexer=ref_indexer,
+                rope_config=rope,
+            )
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 if __name__ == "__main__":

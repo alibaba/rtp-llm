@@ -774,6 +774,10 @@ def _incremental_prefill_selection(
         token_budget=int(plan.token_budget),
         validate_lengths=False,
     )
+    # Uniform requests have no padding: their packed row map is the identity.
+    # Reuse TopK output instead of copying the full selection matrix per layer.
+    if selected.shape[0] == token_count:
+        return selected
     return selected.index_select(0, valid_rows_map)
 
 

@@ -254,7 +254,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 )
                 or 0
             )
-            == 128
+            in (64, 128)
             and int(
                 getattr(
                     getattr(qsa_runtime, "indexer_state_cache", None),
@@ -263,7 +263,7 @@ class Qwen4ExpAttention(Qwen3NextAttention):
                 )
                 or 0
             )
-            == 128
+            in (64, 128)
         )
         packed_prefill_raw = (
             bool(qsa_runtime.main_inputs.is_prefill)

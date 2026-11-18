@@ -888,10 +888,10 @@ def prefix_reuse_fused_geometry_supported(
         and 0 < head_num <= 65535
         and all(isinstance(n, int) and n > 0 for n in lengths)
         and max(lengths, default=0) <= 65535
-        and kv_tokens_per_block == 128
-        and state_tokens_per_block == 128
+        and kv_tokens_per_block in (64, 128)
+        and state_tokens_per_block == kv_tokens_per_block
         and ratio == 4
-        and all(value % 128 == 0 for value in prefixes)
+        and all(value % kv_tokens_per_block == 0 for value in prefixes)
     )
 
 
