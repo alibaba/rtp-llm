@@ -6,7 +6,7 @@
   "components": {
     "atom": {
       "patch": "atom.patch",
-      "patch_sha256": "2c61a66ff5e05e2cd5db8eaf284b22c806f1da49c95d27da001412c2a134e32a",
+      "patch_sha256": "27427d23a85835b10840245aeb15662e2932bb0dd3e8c8067e1e2f9b5bc1576b",
       "source_files_sha256": {
         "atom/model_ops/attention_gdn.py": "f9c8f411016cfd945184ad45cd8d8ade28b25e07b42fecb936ed2adec5a69a07",
         "atom/plugin/rtpllm/models/qwen4_exp.py": "4ecaaa091e397e59f96ffa4cf65f901847ee7965112094e2fa54d6939750e57a",
@@ -15,9 +15,9 @@
         "atom/plugin/rtpllm/utils/split_ssm_storage.py": "72c2d8a3b32feff982cd74ca62116eb723dd076b48957800153fdc2c722ea346"
       },
       "patched_files_sha256": {
-        "atom/model_ops/attention_gdn.py": "37cd8f727b06fb7bda2b7415e1d1e0bd40b2feef7dd8345fb50b5812700568ec",
-        "atom/plugin/rtpllm/models/qwen4_exp.py": "1efaf17bbd1d7db7a448c636e6ea4d90f53d2b4e926fedecd1d77b5fbf98ed03",
-        "atom/plugin/rtpllm/utils/linear_double_buffer.py": "cb89068bc34db088afb904f3cc2eba02ac98c4a1d0df118b79bbd3c5d086214a",
+        "atom/model_ops/attention_gdn.py": "7c4433a05f3b6414b814cbf1f1d11d20bf63c95f448e79b4730bcd0b9fa01ec6",
+        "atom/plugin/rtpllm/models/qwen4_exp.py": "0877d0f101f60053d8ed700e9e65bc5928a950ba7f45a86dea356e8b65520aea",
+        "atom/plugin/rtpllm/utils/linear_double_buffer.py": "dc2e1615acdd8c1775621872e3699c296fc11f4025c7cdeb8840d2169c17a832",
         "atom/plugin/rtpllm/utils/qwen4_exp_context.py": "7ce25e3e28fac4ed4481fd59110ef1cefebce7a32a676d111b609b9768c363a5",
         "atom/plugin/rtpllm/utils/split_ssm_storage.py": "06b4f73a4eedf0055cec0f1bf6c726b28686fcadbbfba85047f83102ecb8f5b0"
       }

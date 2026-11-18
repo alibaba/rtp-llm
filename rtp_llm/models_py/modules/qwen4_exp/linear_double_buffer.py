@@ -41,6 +41,7 @@ def split_pool_views(
     conv_dim: int,
     conv_length: int,
     query: int,
+    combined_linear: bool = False,
 ):
     """Return logical conv/KV views and physical FP32 replay rows, without copies."""
     if key_dim != 128 or value_dim != 128 or query not in (2, 3, 4):
@@ -49,7 +50,17 @@ def split_pool_views(
         raise ValueError("Split-state pool dimensions must be positive")
     if not (conv_base.device == state_base.device == replay_base.device):
         raise ValueError("Split-state pools must share one device")
-    conv = _pool_rows(conv_base, torch.bfloat16, conv_length * conv_dim, "linear")
+    if combined_linear:
+        if (
+            conv_base.ndim != 2
+            or conv_base.dtype != torch.bfloat16
+            or conv_base.shape[1] != conv_length * conv_dim
+            or conv_base.stride(1) != 1
+        ):
+            raise ValueError("Combined linear pool has an invalid convolution view")
+        conv = conv_base
+    else:
+        conv = _pool_rows(conv_base, torch.bfloat16, conv_length * conv_dim, "linear")
     state = _pool_rows(
         state_base, torch.float32, heads * value_dim * key_dim, "linear_ssm"
     )
@@ -188,6 +199,7 @@ class LinearDoubleBufferStage:
     writes: torch.Tensor
     record_ids: torch.Tensor
     in_place: bool = False
+    checkpoint: Optional[tuple] = None
 
     @property
     def query(self):
@@ -202,6 +214,9 @@ def _partial_replay(
     WRITE,
     RECORD_IDS,
     ACCEPT,
+    CHECKPOINT_PTRS,
+    PAGED_WRITES,
+    SEQUENCE_LENGTHS,
     HEADS: tl.constexpr,
     DIM: tl.constexpr,
     QUERY: tl.constexpr,
@@ -211,6 +226,9 @@ def _partial_replay(
     RECORD_STRIDE: tl.constexpr,
     TILE_V: tl.constexpr,
     IN_PLACE: tl.constexpr = False,
+    CHECKPOINT_PERIOD: tl.constexpr = 0,
+    CHECKPOINT_STRIDE: tl.constexpr = 0,
+    PAGED_WRITE_STRIDE: tl.constexpr = 0,
 ):
     row = tl.program_id(0)
     layer_head = tl.program_id(1)
@@ -227,7 +245,18 @@ def _partial_replay(
     # Single SSM has no full-accept checkpoint: every accepted prefix must
     # replay. Each program owns disjoint V rows and loads them before storing;
     # k/u/decay are immutable records, so src == dst has no cross-tile hazard.
-    if valid & (count > 0) & (count <= QUERY) & (IN_PLACE | (count < QUERY)):
+    replay = IN_PLACE | (count < QUERY)
+    checkpoint_step = 0
+    checkpoint_slot = -1
+    if CHECKPOINT_PERIOD:
+        # RTP target-verify sequence lengths include the first uncached token.
+        cached = tl.load(SEQUENCE_LENGTHS + row) - 1
+        checkpoint_step = CHECKPOINT_PERIOD - cached % CHECKPOINT_PERIOD
+        if (cached > 0) & (checkpoint_step <= count) & (checkpoint_step <= QUERY):
+            checkpoint_slot = tl.load(
+                PAGED_WRITES + row * PAGED_WRITE_STRIDE + checkpoint_step - 1
+            )
+    if valid & (count > 0) & (count <= QUERY) & (replay | (checkpoint_slot > 0)):
         state = tl.load(STATE_PTRS + layer).to(tl.pointer_type(tl.float32))
         records = tl.load(RECORD_PTRS + layer).to(tl.pointer_type(tl.float32))
         vv = tl.program_id(2) * TILE_V + tl.arange(0, TILE_V)
@@ -246,13 +275,27 @@ def _partial_replay(
             value = tl.where(
                 token < count, value * decay + update[:, None] * key[None, :], value
             )
-        tl.store(
-            state + dst.to(tl.int64) * STATE_STRIDE + offset, value, vv[:, None] < DIM
-        )
+            if CHECKPOINT_PERIOD:
+                if (checkpoint_slot > 0) & (checkpoint_step == token + 1):
+                    checkpoint = tl.load(CHECKPOINT_PTRS + layer).to(
+                        tl.pointer_type(tl.float32)
+                    )
+                    tl.store(
+                        checkpoint + checkpoint_slot.to(tl.int64) * CHECKPOINT_STRIDE + offset,
+                        value, vv[:, None] < DIM,
+                    )
+        if replay:
+            tl.store(
+                state + dst.to(tl.int64) * STATE_STRIDE + offset, value, vv[:, None] < DIM
+            )
 
 
 def replay_partial_acceptance(stage: LinearDoubleBufferStage, accept: torch.Tensor):
     state, records = stage.states[0], stage.records[0]
+    ptrs, paged_writes, lengths, period, stride = (
+        stage.checkpoint if stage.checkpoint is not None
+        else (stage.state_ptrs, stage.writes, stage.reads, 0, 0)
+    )
     _partial_replay[(accept.numel(), len(stage.states) * state.shape[1], 4)](
         stage.state_ptrs,
         stage.record_ptrs,
@@ -260,6 +303,9 @@ def replay_partial_acceptance(stage: LinearDoubleBufferStage, accept: torch.Tens
         stage.writes,
         stage.record_ids,
         accept,
+        ptrs,
+        paged_writes,
+        lengths,
         state.shape[1],
         128,
         stage.query,
@@ -269,6 +315,9 @@ def replay_partial_acceptance(stage: LinearDoubleBufferStage, accept: torch.Tens
         records.stride(0),
         32,
         IN_PLACE=stage.in_place,
+        CHECKPOINT_PERIOD=period,
+        CHECKPOINT_STRIDE=stride,
+        PAGED_WRITE_STRIDE=paged_writes.stride(0),
         num_warps=4,
     )
 
