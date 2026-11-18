@@ -4,7 +4,14 @@ from dataclasses import dataclass
 
 import torch
 
-from rtp_llm.libs.test.libth_eplb_py_wrapper_test import EplbPyWrapperOP
+from rtp_llm.test.utils.extension_loader import load_test_extension
+
+_binding = load_test_extension(
+    "libth_eplb_py_wrapper_test",
+    "rtp_llm/libs/test/libth_eplb_py_wrapper_test.so",
+    "rtp_llm/cpp/models/eplb/test/libth_eplb_py_wrapper_test.so",
+)
+EplbPyWrapperOP = _binding.EplbPyWrapperOP
 
 
 @dataclass

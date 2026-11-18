@@ -102,3 +102,9 @@ py_test(
     env = {"GPU_COUNT": "1"},
     exec_properties = {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
 )
+
+py_library(
+    name = "extension_loader",
+    srcs = ["extension_loader.py"],
+    visibility = ["//visibility:public"],
+)

@@ -115,6 +115,7 @@ py_test(
         "//rtp_llm/libs:libth_transformer_config_so",
     ],
     deps = [
+        "//rtp_llm/test/utils:extension_loader",
         "//rtp_llm:config_ops",
     ],
     exec_properties = {"gpu": "L20_CU13"},

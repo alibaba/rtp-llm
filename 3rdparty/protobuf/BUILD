@@ -774,3 +774,10 @@ objc_library(
     ],
     visibility = ["//visibility:public"],
 )
+
+# Python uses the architecture-selected installed protobuf runtime.
+alias(
+    name = "protobuf_python",
+    actual = "@rtp_llm//rtp_llm:protobuf",
+    visibility = ["//visibility:public"],
+)

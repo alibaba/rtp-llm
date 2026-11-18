@@ -1,7 +1,14 @@
 import unittest
 
 from rtp_llm.config.model_config import ModelConfig
-from rtp_llm.libs.test.libcache_config_creator_py_test import validate_basic_config
+from rtp_llm.test.utils.extension_loader import load_test_extension
+
+_binding = load_test_extension(
+    "libcache_config_creator_py_test",
+    "rtp_llm/libs/test/libcache_config_creator_py_test.so",
+    "rtp_llm/cpp/cache/test/libcache_config_creator_py_test.so",
+)
+validate_basic_config = _binding.validate_basic_config
 from rtp_llm.models.kimi_linear.kimi_linear import KimiLinear
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next
 from rtp_llm.ops import DataType, HybridAttentionType, KVCacheSpecDesc, KVCacheSpecType

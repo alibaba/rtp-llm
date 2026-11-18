@@ -1,21 +1,15 @@
-import importlib.util
 import unittest
-from pathlib import Path
 
 from rtp_llm.config.py_config_modules import MMRdmaConfig
+from rtp_llm.test.utils.extension_loader import load_test_extension
 
 
 def _load_exporter_module():
-    extension_path = Path(__file__).resolve().parents[2] / "libs/libmm_rdma_exporter.so"
-    if not extension_path.is_file():
-        raise FileNotFoundError(f"RDMA exporter shared library not found: {extension_path}")
-
-    spec = importlib.util.spec_from_file_location("libmm_rdma_exporter", extension_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot create module spec for {extension_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return load_test_extension(
+        "libmm_rdma_exporter",
+        "rtp_llm/libs/libmm_rdma_exporter.so",
+        "rtp_llm/libs/libmm_rdma_exporter.so",
+    )
 
 
 class MMRdmaExporterLibraryTest(unittest.TestCase):

@@ -26,6 +26,7 @@ py_test(
         "//rtp_llm/cpp/cache/test:cache_config_creator_py_test",
     ],
     deps = [
+        "//rtp_llm/test/utils:extension_loader",
         "//rtp_llm:testlib",
     ],
     exec_properties = {"gpu": "L20_CU13"},

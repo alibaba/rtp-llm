@@ -22,7 +22,7 @@ py_test(
     srcs = ["qwen_gdn_graph_replay_test.py"],
     main = "qwen_gdn_graph_replay_test.py",
     data = ["//rtp_llm/cpp/cuda_graph/tests:test_cuda_graph_runner"],
-    deps = py_test_deps,
+    deps = py_test_deps + ["//rtp_llm/cpp/cuda_graph/tests:cuda_graph_test_runner"],
     env = {"GPU_COUNT": "1"},
     exec_properties = {
         "gpu": "L20_CU13",

@@ -2,7 +2,14 @@ import unittest
 
 import torch
 
-from rtp_llm.libs.test import libth_context_parallel_py_wrapper_test as cp_test
+from rtp_llm.test.utils.extension_loader import load_test_extension
+
+_binding = load_test_extension(
+    "libth_context_parallel_py_wrapper_test",
+    "rtp_llm/libs/test/libth_context_parallel_py_wrapper_test.so",
+    "rtp_llm/cpp/models/context_parallel/test/libth_context_parallel_py_wrapper_test.so",
+)
+cp_test = _binding
 
 
 class TestContextParallelProcessor(unittest.TestCase):

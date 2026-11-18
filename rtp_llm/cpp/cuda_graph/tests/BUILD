@@ -125,7 +125,7 @@ cc_binary(
 
 py_library(
     name = "cuda_graph_test_utils",
-    srcs = ["cuda_graph_test_utils.py"],
+    srcs = ["cuda_graph_test_utils.py", "single_group_kv_cache.py"],
     deps = [
         "//rtp_llm/models_py:utils",
         "//rtp_llm/test/model_test/test_util",
@@ -144,6 +144,7 @@ py_test(
     ],
     deps = [
         ":cuda_graph_test_utils",
+        ":cuda_graph_test_runner",
         "//rtp_llm/test/model_test/test_util",
     ],
     env = {
@@ -168,6 +169,7 @@ py_test(
     ],
     deps = [
         ":cuda_graph_test_utils",
+        ":cuda_graph_test_runner",
         "//rtp_llm/test/model_test/test_util",
     ],
     env = {
@@ -198,6 +200,7 @@ py_test(
     ],
     deps = [
         ":cuda_graph_test_utils",
+        ":cuda_graph_test_runner",
         "//rtp_llm/models_py:modules",
         "//rtp_llm/test/model_test/test_util",
     ],
@@ -220,9 +223,10 @@ py_test(
     ],
     deps = [
         ":cuda_graph_test_utils",
+        ":cuda_graph_test_runner",
         "//rtp_llm/models_py:modules",
         "//rtp_llm/test/model_test/test_util",
-    ] + [":cuda_graph_test_runner"],
+    ],
     env = {
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
         "NOT_USE_DEFAULT_STREAM": "1",
@@ -243,6 +247,7 @@ py_test(
     ],
     deps = [
         ":cuda_graph_test_utils",
+        ":cuda_graph_test_runner",
         "//rtp_llm/models_py:modules",
         "//rtp_llm/test/model_test/test_util",
     ],
@@ -267,9 +272,10 @@ py_test(
     ],
     deps = [
         ":cuda_graph_test_utils",
+        ":cuda_graph_test_runner",
         "//rtp_llm/models_py:modules",
         "//rtp_llm/test/model_test/test_util",
-    ] + [":cuda_graph_test_runner"],
+    ],
     env = {
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
         "NOT_USE_DEFAULT_STREAM": "1",
@@ -373,6 +379,7 @@ py_test(
 py_library(
     name = "cuda_graph_test_runner",
     srcs = ["cuda_graph_test_runner.py"],
+    deps = ["//rtp_llm/test/utils:extension_loader"],
     data = [":test_cuda_graph_runner"],
     imports = ["."],
     visibility = ["//visibility:public"],
