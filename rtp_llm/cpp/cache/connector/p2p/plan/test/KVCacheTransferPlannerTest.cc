@@ -283,7 +283,7 @@ TEST(PlannerPipeline, RejectsInvalidCoverageAndWorkerMapping) {
     const auto missing = KVCacheTransferPlanner::planStages(missing_src_tag, dst, "request");
     EXPECT_FALSE(missing.ok());
     EXPECT_TRUE(missing.plan.routes.empty());
-    EXPECT_NE(missing.error.ToString().find("global layer 5"), std::string::npos);
+    EXPECT_NE(missing.error.ToString().find("PP stage 1 local_layer=2"), std::string::npos);
 
     auto missing_dst_tag = dst;
     missing_dst_tag.stages[1].layer_tags[3].clear();
