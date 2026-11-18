@@ -3,10 +3,29 @@
 #include "rtp_llm/cpp/cache/connector/p2p/plan/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
+#include <limits>
+#include <map>
 #include <optional>
 #include <utility>
 
 namespace rtp_llm {
+
+inline bool accumulateDecodeStageBlockBytes(const P2PStageStartupPB&       stage,
+                                            size_t                         tp_size,
+                                            std::map<std::string, size_t>& instance_block_bytes) {
+    if (tp_size == 0) {
+        return false;
+    }
+    for (const auto& [tag, rank_bytes] : stage.decode_block_bytes()) {
+        auto& total = instance_block_bytes[tag];
+        // Within each stage the physical geometry and block table are shared across TP lanes.
+        if (rank_bytes == 0 || rank_bytes > (std::numeric_limits<size_t>::max() - total) / tp_size) {
+            return false;
+        }
+        total += static_cast<size_t>(rank_bytes) * tp_size;
+    }
+    return true;
+}
 
 inline void encodeP2PShardLayout(const ShardLayout& layout, P2PShardLayoutPB* pb) {
     const auto& cp = layout.pc.prefill_cp_config;

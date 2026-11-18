@@ -218,7 +218,6 @@ TEST(PlannerPipeline, PreservesCpKeyRulesAndUsesPublishedDraftGeometry) {
         stage.draft_shards.groups.at(kFullTag).kv_block_stride_bytes *= 2;
         stage.layer_tags.push_back({kFullTag});
     }
-    dst.stages.back().layer_tags.push_back({kFullTag});
     auto& mixed_src                       = src.stages.back();
     auto& mixed_dst                       = dst.stages[1];
     for (auto* side : {&src, &dst}) {
@@ -292,6 +291,40 @@ TEST(PlannerPipeline, RejectsInvalidCoverageAndWorkerMapping) {
     EXPECT_FALSE(missing_destination.ok());
     EXPECT_TRUE(missing_destination.plan.routes.empty());
     EXPECT_NE(missing_destination.error.ToString().find("empty or duplicate layer tags"), std::string::npos);
+}
+
+TEST(PlannerPipeline, RejectsMissingDecodeDraftLayers) {
+    auto src = pipeline({8}, mlaLayout(1));
+    auto dst = pipeline({3, 5}, mlaLayout(1));
+    for (auto* side : {&src, &dst}) {
+        auto& tail        = side->stages.back();
+        tail.draft_shards = tail.main_shards;
+    }
+    auto& src_layers = src.stages.back().layer_tags;
+    dst.stages.back().layer_tags.resize(7, {kFullTag});
+    for (int published = 0; published < 2; ++published) {
+        src_layers.resize(8 + published, {kFullTag});
+        const auto result = KVCacheTransferPlanner::planStages(src, dst, "request");
+        EXPECT_FALSE(result.ok());
+        EXPECT_TRUE(result.plan.routes.empty());
+        EXPECT_NE(result.error.ToString().find("Prefill is missing draft layers required by Decode"),
+                  std::string::npos);
+    }
+    for (int published = 2; published <= 3; ++published) {
+        src_layers.resize(8 + published, {kFullTag});
+        const auto result = KVCacheTransferPlanner::planStages(src, dst, "request");
+        ASSERT_TRUE(result.ok()) << result.error.ToString();
+        std::set<int> transferred_draft_layers;
+        for (const auto& route : result.plan.routes) {
+            for (const auto& layer : route.layers) {
+                if (layer.global_id >= 8) {
+                    transferred_draft_layers.insert(layer.global_id);
+                    EXPECT_EQ(route.dst_rank, 1);
+                }
+            }
+        }
+        EXPECT_EQ(transferred_draft_layers, (std::set<int>{8, 9}));
+    }
 }
 
 TEST(PlannerPipeline, UsesExplicitWorkerIndicesInRoutesAndDigest) {

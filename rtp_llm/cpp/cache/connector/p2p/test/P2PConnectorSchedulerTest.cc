@@ -1788,6 +1788,46 @@ TEST(P2PRetainedKvTest, InitDerivesCapacityAndRejectsInvalidThreshold) {
     pool->stop();
 }
 
+TEST(P2PRetainedKvTest, ThresholdUsesAllDecodePipelineStages) {
+    P2PConnectorSchedulerConfig config;
+    config.topology                               = test::makeTestCacheTopology(2, 2, {{0}, {1}});
+    config.p2p_kv_leak_exit_threshold_min_percent = 30;
+    config.p2p_kv_leak_exit_threshold_max_percent = 30;
+    P2PStageStartupPB stage0;
+    (*stage0.mutable_decode_block_bytes())["group0"] = 100;
+    (*stage0.mutable_decode_block_bytes())["group1"] = 200;
+    P2PStageStartupPB stage1;
+    (*stage1.mutable_decode_block_bytes())["group1"] = 600;
+    ASSERT_TRUE(accumulateDecodeStageBlockBytes(stage0, 2, config.physical_block_bytes_by_group));
+    ASSERT_TRUE(accumulateDecodeStageBlockBytes(stage1, 2, config.physical_block_bytes_by_group));
+
+    auto pool = std::make_shared<autil::LockFreeThreadPool>(1, 16, nullptr, "P2PPipelineCapacity");
+    ASSERT_TRUE(pool->start());
+    P2PConnectorAsyncReadContextChecker checker;
+    ASSERT_TRUE(checker.init(nullptr, nullptr, pool, config));
+    EXPECT_EQ(checker.group_block_bytes_.at("group0"), 200u);
+    EXPECT_EQ(checker.group_block_bytes_.at("group1"), 1600u);
+    EXPECT_EQ(checker.total_kv_bytes_, 28800u);
+
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->initGroups(config.topology);
+    resource->mutableBlockIds("group1").assign({1, 2, 3, 4, 5});
+    const auto deadline = currentTimeMs() - 1;
+    auto       context =
+        std::make_shared<P2PConnectorAsyncReadContext>(resource, "pp-held", nullptr, 1, false, deadline, deadline);
+    ASSERT_TRUE(context->beginKickoff());
+    ASSERT_TRUE(context->expireTransferDeadlineIfNeeded());
+    // 8000 / 28800 stays below 30%, including when the same blocks appear twice.
+    checker.checkRetainedResources({context, context});
+    EXPECT_EQ(checker.retained_kv_over_threshold_since_ms_, 0);
+    // 9600 / 28800 exceeds 30%; Stage 0 alone would still report 25%.
+    resource->mutableBlockIds("group1").assign({1, 2, 3, 4, 5, 6});
+    checker.checkRetainedResources({context});
+    EXPECT_NE(checker.retained_kv_over_threshold_since_ms_, 0);
+    checker.stop();
+    pool->stop();
+}
+
 TEST_F(P2PConnectorSchedulerTest, ControlWorkProgressesWhileEveryKickoffThreadIsBlocked) {
     auto gate_release = std::make_shared<std::promise<void>>();
     auto gate = gate_release->get_future().share();

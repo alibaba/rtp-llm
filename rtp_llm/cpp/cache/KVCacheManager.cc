@@ -1186,7 +1186,8 @@ bool KVCacheManager::initP2PConnector() {
     }
 
     const auto&                pc = parallelism_config_;
-    P2PPipelineLayoutPB::Stage local_stage;
+    P2PStageStartupPB          startup;
+    auto&                      local_stage = *startup.mutable_layout();
     local_stage.set_main_layer_begin(config_.global_layer_begin);
     local_stage.set_main_layer_count(config_.layer_num);
     for (int lane = 0; lane < pc.tp_size; ++lane) {
@@ -1211,17 +1212,33 @@ bool KVCacheManager::initP2PConnector() {
         const auto& draft = *config_.mtp_sub_configs.front();
         append_layout(draft, draft.layer_num, local_stage.mutable_draft_shards());
     }
+    const bool decode = pd_sep_config_.role_type == RoleType::DECODE;
+    if (decode) {
+        for (const auto& group : config_.topology().groups()) {
+            // Capacity includes all allocated KV and scales, including extra draft modules.
+            (*startup.mutable_decode_block_bytes())[group.tag] = config_.blockSizeBytesForGroup(group.tag);
+        }
+    }
     P2PPipelineLayoutPB pipeline;
+    std::map<std::string, size_t> instance_block_bytes;
     pipeline.set_worker_count(pc.pp_size * pc.tp_size);
     if (pc.pp_size > 1) {
-        for (const auto& payload : collectPPStagePayloads(local_stage.SerializeAsString(), pc.pp_size)) {
-            if (!pipeline.add_stages()->ParseFromString(payload)) {
-                RTP_LLM_LOG_ERROR("P2P connector init failed to decode PP stage layout");
+        for (const auto& payload : collectPPStagePayloads(startup.SerializeAsString(), pc.pp_size)) {
+            P2PStageStartupPB stage;
+            if (!stage.ParseFromString(payload) || !stage.has_layout()
+                || (decode && !accumulateDecodeStageBlockBytes(stage, pc.tp_size, instance_block_bytes))) {
+                RTP_LLM_LOG_ERROR("P2P connector init failed to read PP stage layout or KV capacity");
                 return false;
             }
+            *pipeline.add_stages() = std::move(*stage.mutable_layout());
         }
     } else {
         *pipeline.add_stages() = std::move(local_stage);
+        // Preserve the existing per-rank capacity for non-PP deployments.
+        if (decode && !accumulateDecodeStageBlockBytes(startup, 1, instance_block_bytes)) {
+            RTP_LLM_LOG_ERROR("P2P connector init failed to read Decode KV capacity");
+            return false;
+        }
     }
     p2p_pipeline_layout_ = pipeline.SerializeAsString();
 
@@ -1244,17 +1261,14 @@ bool KVCacheManager::initP2PConnector() {
     p2p_config.scheduler_config.use_mla                         = config_.use_mla;
     p2p_config.worker_config.topology    = config_.topologyPtr();
     p2p_config.worker_config.global_layer_begin = config_.global_layer_begin;
-    if (pd_sep_config_.role_type == RoleType::DECODE) {
+    if (decode) {
         if (config_.mtp_sub_configs.size() > 1) {
             // Both MTP executors reuse module 0 for all proposal steps. The
             // extra allocated modules have no Prefill KV to transfer.
             p2p_config.scheduler_config.decode_transfer_layer_end =
                 config_.layer_num + config_.mtp_sub_configs.front()->layer_num;
         }
-        for (const auto& group : config_.topology().groups()) {
-            p2p_config.scheduler_config.physical_block_bytes_by_group.emplace(
-                group.tag, config_.blockSizeBytesForGroup(group.tag));
-        }
+        p2p_config.scheduler_config.physical_block_bytes_by_group = std::move(instance_block_bytes);
     }
     p2p_config.scheduler_config.cache_key_tokens_per_block = config_.seq_size_per_block;
     p2p_config.worker_config.cache_key_tokens_per_block    = config_.seq_size_per_block;
