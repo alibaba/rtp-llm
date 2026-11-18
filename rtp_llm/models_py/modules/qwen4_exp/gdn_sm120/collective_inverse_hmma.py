@@ -19,9 +19,7 @@ class CollectiveInverse:
         self,
         garbage_filled_diagonal: bool = True,
         garbage_filled_upper_triangular: bool = False,
-        barrier=cute.arch.barrier,
     ):
-        self.barrier = barrier
         self.garbage_filled_diagonal = garbage_filled_diagonal
         self.garbage_filled_upper_triangular = garbage_filled_upper_triangular
 
@@ -355,14 +353,14 @@ class CollectiveInverse:
         tOrO_f16.store(tOrO.load().to(cutlass.Float16))
 
         # ── Cross-warp reduction: warps with x=0 write first, x=1 reads+adds+writes
-        self.barrier(barrier_id=barrier_id, number_of_threads=128)
+        cute.arch.barrier(barrier_id=barrier_id, number_of_threads=128)
 
         tOsO = O_thr_r2s.partition_D(sO)
         tOrO_cv = O_thr_r2s.retile(tOrO_f16)
         if x == 0:
             cute.copy(O_tiled_r2s, tOrO_cv, tOsO)
 
-        self.barrier(barrier_id=barrier_id, number_of_threads=128)
+        cute.arch.barrier(barrier_id=barrier_id, number_of_threads=128)
 
         if x == 1:
             tOrO_red = cute.make_fragment_like(tOrO_f16)
@@ -388,14 +386,14 @@ class CollectiveInverse:
                 t8x8[None, None, blk, blk], thread_idx % 8, 8
             )
 
-        self.barrier(barrier_id=barrier_id, number_of_threads=128)
+        cute.arch.barrier(barrier_id=barrier_id, number_of_threads=128)
 
         # ── Level 2: 16×16 blockwise inverse (all 4 warps → 4 diagonal blocks) ──
         t16x16 = cute.flat_divide(sT, (16, 16))
         blk2 = thread_idx // 32
         self.blockwise_8x8_to_16x16(t16x16[None, None, blk2, blk2])
 
-        self.barrier(barrier_id=barrier_id, number_of_threads=128)
+        cute.arch.barrier(barrier_id=barrier_id, number_of_threads=128)
 
         # ── Level 3: 32×32 blockwise inverse (threads 0-63 → 2 diagonal blocks) ─
         t32x32 = cute.flat_divide(sT, (32, 32))
@@ -403,7 +401,7 @@ class CollectiveInverse:
             blk3 = thread_idx // 32
             self.blockwise_16x16_to_32x32(t32x32[None, None, blk3, blk3])
 
-        self.barrier(barrier_id=barrier_id, number_of_threads=128)
+        cute.arch.barrier(barrier_id=barrier_id, number_of_threads=128)
 
         # ── Level 4: 64×64 blockwise inverse (all 4 warps) ───────────────────────
         self.blockwise_32x32_to_64x64(sT, barrier_id)
