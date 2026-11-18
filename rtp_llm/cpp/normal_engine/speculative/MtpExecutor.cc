@@ -1928,7 +1928,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
-        cudaSyncAndCheck();
+        // Fake EP participants must not drain the device after every round.
+        // The ordered CUDA streams and retained staging buffers also cover
+        // ranks without a local request, as on the real-stream dispatch path.
         releaseAllModelBuffers();
         return absl::OkStatus();
     }
