@@ -24,7 +24,7 @@ triton==3.6.0
 # carries the fix. Regression-covered by the FMHA v2 prefill CUDA-graph
 # unit test (test_trtllm_fmha_v2_prefill_sm12x) and the generation-prefill
 # CUDA-graph smoke case generation_prefill_cuda_graph_sm120 (cuda13/sm12x).
-https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-python/flashinfer_python-0.6.9+8c4f4dcf-py3-none-any.whl
+https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-python/flashinfer_python-0.6.9+8c4f4dcf.gdnsm90.4143c592-py3-none-any.whl
 https://artlab.alibaba-inc.com/1/pypi/rtp_llm/flashinfer-cubin/flashinfer_cubin-0.6.9+8c4f4dcf-py3-none-any.whl
 
 # Upstream v1.1.0.post2@e7706faf, rebuilt for torch 2.11+cu130.

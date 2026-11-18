@@ -10,7 +10,7 @@ from rtp_llm.models_py.utils.device_capability import cached_device_capability
 
 try:
     from .gdn_prefill_norm_gluon import flat_head_norm
-    from .gdn_prefill_norm_quant_gluon import norm_quant
+    from .gdn_prefill_norm_quant_gluon import _launch_norm_quant as norm_quant
 except ImportError:
     # Older platform Triton versions retain the existing implementation.
     flat_head_norm = None
@@ -112,7 +112,12 @@ class Qwen4PrefillGatedNorm(torch.nn.Module):
             and width in (768, 1536, 3072)
             and (not sm90 or (flat_head_norm is not None and width == 3072))
             and 2048 <= x.shape[0] <= max_rows
-            and self.group_size == 128
+            and self._supports_norm_layout(x, gate)
+        )
+
+    def _supports_norm_layout(self, x, gate):
+        return (
+            self.group_size == 128
             and self.activation == "sigmoid"
             and self.bias is None
             and self.weight.shape == (128,)
@@ -134,19 +139,42 @@ class Qwen4PrefillGatedNorm(torch.nn.Module):
             )
         return self.native(x, gate)
 
-    def forward_project(self, x, gate, projection):
-        """Explicit GDN consumer; preserve the BF16 norm quantization boundary."""
-        if not (
-            cached_device_capability(x.device) == (12, 0)
-            and norm_quant is not None
+    def forward_project(self, x, gate, projection, *, decode=False):
+        """Preserve the BF16 norm boundary when fusing the projection's quantizer."""
+        capability = cached_device_capability(x.device)
+        sm90 = capability == (9, 0)
+        quant_kernel = os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
+        if norm_quant is None:
+            return projection(self(x, gate))
+        if decode:
+            if not (
+                sm90
+                and torch.version.hip is None
+                and x.is_cuda
+                and x.ndim == 2
+                and x.shape[1] == 3072
+                and 16 <= x.shape[0] <= 64
+                and quant_kernel in ("auto", "legacy")
+                and self._supports_norm_layout(x, gate)
+            ):
+                return projection(self(x, gate))
+        elif not (
+            capability == (12, 0)
             and self._supports_prefill(x, gate)
             and x.shape[1] in (1536, 3072)
             and x.shape[0] <= 8192
+            and (
+                quant_kernel == "v2"
+                or (quant_kernel == "auto" and x.numel() >= 4 * 1024 * 1024)
+            )
         ):
             return projection(self(x, gate))
 
         from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
             CudaFp8DeepGEMMLinear,
+        )
+        from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_flashinfer_linear import (
+            CudaFp8FlashinferLinear,
         )
         from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_gemm_linear import (
             CudaFp8GEMMLinear,
@@ -167,27 +195,29 @@ class Qwen4PrefillGatedNorm(torch.nn.Module):
             if not unmodified(projection, ("forward", "_should_use_flashinfer")):
                 return projection(self(x, gate))
             if projection._should_use_flashinfer(x):
-                return projection(self(x, gate))
-            consumer = projection._deepgemm_linear
+                if not sm90:
+                    return projection(self(x, gate))
+                consumer = projection._flashinfer_linear
+            else:
+                consumer = projection._deepgemm_linear
 
         if (
-            type(consumer) is CudaFp8DeepGEMMLinear
-            and consumer.scale_ue8m0
+            type(consumer) in (CudaFp8DeepGEMMLinear, CudaFp8FlashinferLinear)
+            and getattr(consumer, "scale_ue8m0", False) == (not sm90)
             and consumer.K == x.shape[1]
-            and os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
-            in ("auto", "v2")
-            and (
-                x.numel() >= 4 * 1024 * 1024
-                or os.environ.get("DSV4_FP8_QUANT_KERNEL", "auto").strip().lower()
-                == "v2"
-            )
             and consumer.N == 2560
             and consumer.weight.device == x.device
             and unmodified(self, ("forward",))
+            and unmodified(self.native, ("forward",))
             and unmodified(consumer, ("forward", "quantize_input", "forward_quantized"))
             and not torch.nn.modules.module._global_forward_pre_hooks
             and not torch.nn.modules.module._global_forward_hooks
         ):
-            quantized, scales = norm_quant(x, gate, self.weight, self.eps)
+            groups = 8
+            if decode:
+                groups = 2 if x.shape[0] >= 48 else 1
+            quantized, scales = norm_quant(
+                x, gate, self.weight, self.eps, groups=groups, scale_ue8m0=not decode
+            )
             return consumer.forward_quantized(quantized, scales)
         return projection(self(x, gate))
