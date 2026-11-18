@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, AsyncGenerator, Callable, List, Optional, Set
 
@@ -8,6 +9,7 @@ import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
+from rtp_llm.config.mm_download_domains import check_download_urls
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import (
     ModelRpcClient,
@@ -27,6 +29,7 @@ from rtp_llm.server.master_client import (
     VIT_ROUTE_STALE_CODE,
     FlexlbResponse,
     MasterClient,
+    vit_request_timeout_ms,
 )
 from rtp_llm.server.misc import format_exception
 from rtp_llm.server.mm_cache_metadata import snapshot_from_metadata
@@ -41,7 +44,9 @@ from rtp_llm.telemetry import internal_span
 from rtp_llm.telemetry import request_event as trace_event
 from rtp_llm.telemetry import start_internal_span
 from rtp_llm.utils.base_model_datatypes import (
+    AuxInfo,
     GenerateInput,
+    GenerateOutput,
     GenerateOutputs,
     RequestInfo,
 )
@@ -122,6 +127,7 @@ class BackendRPCServerVisitor:
         self.remote_vit = vit_separation == VitSeparation.VIT_SEPARATION_REMOTE
         self.max_seq_len = max_seq_len
         self.seq_size_per_block = seq_size_per_block
+        self.frontend_vit_only = pd_sep_config.role_type == RoleType.FRONTEND
         self.pd_sep_config = pd_sep_config
         self.sp_config = sp_config
         self.source_role = source_role
@@ -237,6 +243,8 @@ class BackendRPCServerVisitor:
         vit_separation: Optional[VitSeparation] = None,
     ) -> List[RoleType]:
         logging.info(f"pd_sep_config: {pd_sep_config.to_string()}")
+        if pd_sep_config.role_type == RoleType.FRONTEND:
+            return [RoleType.VIT]
         role_list: List[RoleType] = []
 
         if (
@@ -254,20 +262,6 @@ class BackendRPCServerVisitor:
         elif config_role_type == RoleType.DECODE and pd_sep_config.decode_entrance:
             role_list.append(RoleType.PREFILL)
             logging.info("Added PREFILL role for DECODE type")
-        elif config_role_type == RoleType.FRONTEND:
-            logging.info(
-                f"Checking FRONTEND roles: decode_domain={host_args.decode_domain}, prefill_domain={host_args.prefill_domain}, pdfusion_domain={host_args.pdfusion_domain}"
-            )
-            if host_args.decode_domain:
-                role_list.append(RoleType.DECODE)
-                logging.info("Added DECODE role for FRONTEND type")
-            if host_args.prefill_domain:
-                role_list.append(RoleType.PREFILL)
-                logging.info("Added PREFILL role for FRONTEND type")
-            if host_args.pdfusion_domain:
-                role_list.append(RoleType.PDFUSION)
-                logging.info("Added PDFUSION role for FRONTEND type")
-
         logging.info(f"configured backend role list: {role_list}")
         return role_list
 
@@ -909,6 +903,54 @@ class BackendRPCServerVisitor:
                 f"request length is {input.prompt_length}, max_new_tokens is {max_new_tokens}",
             )
 
+    async def _run_frontend_vit(self, input: GenerateInput) -> GenerateOutputs:
+        addrs = []
+        if input.mm_inputs:
+            deadline = time.monotonic() + vit_request_timeout_ms(input) / 1000
+            check_download_urls(item.url for item in input.mm_inputs)
+            keys = multimodal_cache_keys(input)
+            if not keys:
+                raise FtRuntimeException(
+                    ExceptionType.MM_WRONG_FORMAT_ERROR, "ViT hashes require URL inputs"
+                )
+            result = await self.master_client.get_backend_role_addrs(
+                block_cache_keys=[],
+                cache_key_block_size=self._cache_key_block_size(),
+                input=input,
+                request_id=input.request_id,
+                cache_affinity_keys=keys,
+                vit_only=True,
+                timeout_s=max(0.001, deadline - time.monotonic()),
+            )
+            if result.connection_failed:
+                raise FtRuntimeException(
+                    ExceptionType.GET_HOST_FAILED, "ViT master unavailable"
+                )
+            addrs = result.role_addrs or []
+            if len(addrs) != 1 or addrs[0].role != RoleType.VIT:
+                raise FtRuntimeException(
+                    ExceptionType.ROUTE_ERROR, "Expected one ViT worker from master"
+                )
+            await self.model_rpc_client.run_vit_only(input, addrs[0], keys, deadline)
+
+        return GenerateOutputs(
+            [
+                GenerateOutput(
+                    output_ids=torch.empty((1, 0), dtype=torch.int32),
+                    input_ids=input.token_ids,
+                    finished=True,
+                    aux_info=AuxInfo(input_len=input.prompt_length, role_addrs=addrs),
+                )
+                for _ in range(
+                    max(
+                        1,
+                        input.generate_config.num_return_sequences,
+                        input.generate_config.max_num_beams(),
+                    )
+                )
+            ]
+        )
+
     @torch.inference_mode()
     async def enqueue(self, input: GenerateInput) -> AsyncGenerator[object, None]:
         """Route, then stream backend outputs.
@@ -944,8 +986,9 @@ class BackendRPCServerVisitor:
             self.fill_request_info(input)
             input.generate_config.validate()
             self._validate_input(input)
-            self.check_sp_supported(input)
-            self.check_prefill_cp_supported(input)
+            if not self.frontend_vit_only:
+                self.check_sp_supported(input)
+                self.check_prefill_cp_supported(input)
             trace_event("rtp_llm.input_validation_completed")
         except BaseException as e:
             set_aux_info(e)
@@ -967,6 +1010,13 @@ class BackendRPCServerVisitor:
             first_exc: Optional[BaseException] = None
             fake_sent = False
             try:
+                if self.frontend_vit_only:
+                    try:
+                        yield await self._run_frontend_vit(input)
+                    except Exception as error:
+                        set_aux_info(error)
+                        raise
+                    return
                 while True:
                     yielded_output = False
                     stream = None
@@ -1075,8 +1125,21 @@ class BackendRPCServerVisitor:
             self.fill_request_info(input)
             input.generate_config.validate()
             self._validate_input(input)
-            self.check_sp_supported(input)
-            self.check_prefill_cp_supported(input)
+            if not self.frontend_vit_only:
+                self.check_sp_supported(input)
+                self.check_prefill_cp_supported(input)
+
+        if self.frontend_vit_only:
+            tasks = [
+                asyncio.create_task(self._run_frontend_vit(item)) for item in inputs
+            ]
+            try:
+                return await asyncio.gather(*tasks)
+            except BaseException:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
 
         if self.host_service.service_available:
             for input in inputs:
@@ -1085,6 +1148,9 @@ class BackendRPCServerVisitor:
         return await self.model_rpc_client.batch_enqueue(inputs)
 
     def is_backend_service_ready(self, refresh: bool = False) -> bool:
+        if self.frontend_vit_only:
+            # The master owns ViT discovery and selects the worker per request.
+            return bool(self.host_service.get_master_addr())
         roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(
             self.backend_role_list, refresh
         )

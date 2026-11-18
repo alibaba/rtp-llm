@@ -165,6 +165,25 @@ def _admission_reject_reason_from_response(response) -> AdmissionRejectReason:
         return AdmissionRejectReason.INVALID
 
 
+def vit_request_timeout_ms(input: GenerateInput) -> int:
+    configured_timeout = input.generate_config.mm_timeout_ms
+    if not configured_timeout or configured_timeout <= 0:
+        configured_timeout = max(
+            (
+                i.mm_preprocess_config.mm_timeout_ms
+                for i in input.mm_inputs
+                if i.mm_preprocess_config.mm_timeout_ms > 0
+            ),
+            default=120000,
+        )
+    limits = [configured_timeout]
+    for name in ("ttft_timeout_ms", "timeout_ms"):
+        limit = getattr(input.generate_config, name, None)
+        if limit and limit > 0:
+            limits.append(limit)
+    return min(limits)
+
+
 class MasterClient:
     """Client for FlexLB schedule gRPC API (master and optional slave)."""
 
@@ -385,7 +404,7 @@ class MasterClient:
             return FlexlbResponse.connection_failed_response()
 
         slave_addr = None
-        if self.host_service:
+        if self.host_service and not vit_only:
             slave_addr = getattr(self.host_service, "get_slave_addr", lambda: None)()
 
         ttft_timeout_ms = getattr(
@@ -600,21 +619,7 @@ class MasterClient:
             # The first hash probe carries only keys, even on a warm hit.
             check_download_urls(item.url for item in input.mm_inputs)
             input.greennet_verified_vit = None
-            configured_timeout = input.generate_config.mm_timeout_ms
-            if not configured_timeout or configured_timeout <= 0:
-                configured_timeout = max(
-                    (
-                        i.mm_preprocess_config.mm_timeout_ms
-                        for i in input.mm_inputs
-                        if i.mm_preprocess_config.mm_timeout_ms > 0
-                    ),
-                    default=120000,
-                )
-            limits = [configured_timeout]
-            for name in ("ttft_timeout_ms", "timeout_ms"):
-                limit = getattr(input.generate_config, name, None)
-                if limit and limit > 0:
-                    limits.append(limit)
+            timeout_ms = vit_request_timeout_ms(input)
             try:
                 configured_probe_ms = int(
                     os.environ.get(
@@ -623,7 +628,7 @@ class MasterClient:
                 )
             except ValueError:
                 configured_probe_ms = DEFAULT_VIT_HASH_PROBE_TIMEOUT_MS
-            probe_timeout = min(max(1, configured_probe_ms), min(limits)) / 1000.0
+            probe_timeout = min(max(1, configured_probe_ms), timeout_ms) / 1000.0
         with internal_span(
             "rtp_llm.vit.hash_probe",
             **{
@@ -699,7 +704,7 @@ class MasterClient:
                 raise FtRuntimeException(
                     ExceptionType.MM_PROCESS_ERROR, "Missing ViT submission inputs"
                 )
-        remaining = min(limits) / 1000.0 - (time.monotonic() - started)
+        remaining = timeout_ms / 1000.0 - (time.monotonic() - started)
         if remaining <= 0:
             raise FtRuntimeException(
                 ExceptionType.GENERATE_TIMEOUT, "ViT hash acquisition timed out"

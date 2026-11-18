@@ -24,7 +24,9 @@ from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     GenerateConfigPB,
     GenerateInputPB,
     GenerateOutputsPB,
+    MultimodalHashRequestPB,
     MultimodalInputPB,
+    MultimodalInputsPB,
     RoleAddrPB,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
@@ -743,8 +745,15 @@ def trans_multimodal_input(
     if not input_py.mm_inputs:
         return
 
-    multimodal = input_pb.multimodal_inputs
-    multimodal.request_id = input_pb.request_id
+    _fill_multimodal_inputs(input_py, input_pb.multimodal_inputs, generate_config)
+    input_pb.multimodal_inputs.request_id = input_pb.request_id
+
+
+def _fill_multimodal_inputs(
+    input_py: GenerateInput,
+    multimodal: MultimodalInputsPB,
+    generate_config: GenerateConfig,
+):
     multimodal.multimodal_inputs.extend(
         iter_multimodal_inputs(input_py, generate_config)
     )
@@ -1653,6 +1662,63 @@ class ModelRpcClient(object):
         except Exception as e:
             logging.error(f"batch rpc unknown error: {str(e)}")
             raise e
+
+    async def run_vit_only(
+        self,
+        input_py: GenerateInput,
+        address: RoleAddr,
+        keys: list[str],
+        deadline: float,
+    ) -> None:
+        from rtp_llm.telemetry.vit_rpc import vit_client_span
+
+        target = f"{address.ip}:{address.grpc_port}"
+        channel = await self._channel_pool.get(target)
+        stub = MultimodalRpcServiceStub(channel)
+        metadata = dashscope_greennet_metadata(input_py.headers)
+
+        async def call(name, rpc, request):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise FtRuntimeException(
+                    ExceptionType.GENERATE_TIMEOUT, "ViT request timed out"
+                )
+            request.timeout_ms = max(1, int(remaining * 1000))
+            try:
+                with vit_client_span(name, target, request, metadata) as headers:
+                    return await rpc(request, timeout=remaining, metadata=headers)
+            except grpc.RpcError as error:
+                self._handle_grpc_error(error, name, target)
+                raise
+
+        hash_request = MultimodalHashRequestPB(keys=dict.fromkeys(keys))
+        inputs = hash_request.inputs
+        inputs.request_id = input_py.request_id
+        _fill_multimodal_inputs(input_py, inputs, input_py.generate_config)
+        if len(hash_request.keys) != len(keys):
+            # Submit each distinct key once for hashing, then embed in request order.
+            inputs = MultimodalInputsPB()
+            inputs.CopyFrom(hash_request.inputs)
+            del hash_request.inputs.multimodal_inputs[:]
+            hash_request.inputs.multimodal_inputs.extend(
+                dict(zip(keys, inputs.multimodal_inputs)).values()
+            )
+        hashes = await call(
+            "GetMultimodalHashes", stub.GetMultimodalHashes, hash_request
+        )
+        if {entry.key for entry in hashes.entries if entry.hash_hit} != set(
+            hash_request.keys
+        ):
+            raise FtRuntimeException(
+                ExceptionType.MM_PROCESS_ERROR, "ViT returned incomplete hashes"
+            )
+        del hashes
+        # Receive the full inline embedding without parsing a tensor proto we discard.
+        embedding_rpc = channel.unary_unary(
+            "/MultimodalRpcService/RemoteMultimodalEmbedding",
+            request_serializer=MultimodalInputsPB.SerializeToString,
+        )
+        await call("RemoteMultimodalEmbedding", embedding_rpc, inputs)
 
     async def _wait_greennet_verdict(
         self, input_py: GenerateInput, input_pb: GenerateInputPB
