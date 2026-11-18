@@ -367,7 +367,6 @@ def _sparse_paged_grouped_split_kernel(
     BLOCK_N: tl.constexpr,
     WITH_GATE: tl.constexpr = False,
     OUT_BTHD: tl.constexpr = False,
-    RESOLVED_SLOTS: tl.constexpr = False,
 ):
     """Tensor-core grouped sparse paged GQA.
 
@@ -397,8 +396,7 @@ def _sparse_paged_grouped_split_kernel(
     )
 
     row = selected_ptr + batch * stride_sel_b + query * stride_sel_s
-    if not RESOLVED_SLOTS:
-        kv_len = tl.load(kv_lens_ptr + batch * stride_len_b + query * stride_len_s)
+    kv_len = tl.load(kv_lens_ptr + batch * stride_len_b + query * stride_len_s)
     count = (
         tl.minimum(tl.maximum(tl.load(row + selected_width), 0), selected_width)
         if HAS_COUNT
@@ -417,26 +415,21 @@ def _sparse_paged_grouped_split_kernel(
     for tile in range(tile_start, tile_end):
         offset = tile * BLOCK_N + columns
         index = tl.load(row + offset, mask=offset < count, other=-1)
-        if RESOLVED_SLOTS:
-            valid = (offset < count) & (index >= 0)
-            safe_page = (index // PAGE_SIZE).to(tl.int64)
-            page_slot = index % PAGE_SIZE
-        else:
-            logical = index // PAGE_SIZE
-            candidate = (offset < count) & (index >= 0) & (index < kv_len)
-            physical = tl.load(
-                block_table_ptr + batch * stride_bt_b + logical * stride_bt_block,
-                mask=candidate & (logical < max_blocks),
-                other=0,
-            )
-            valid = (
-                candidate
-                & (logical < max_blocks)
-                & (physical > 0)
-                & (physical < cache_blocks)
-            )
-            safe_page = tl.maximum(physical, 0).to(tl.int64)
-            page_slot = tl.maximum(index, 0) % PAGE_SIZE
+        logical = index // PAGE_SIZE
+        candidate = (offset < count) & (index >= 0) & (index < kv_len)
+        physical = tl.load(
+            block_table_ptr + batch * stride_bt_b + logical * stride_bt_block,
+            mask=candidate & (logical < max_blocks),
+            other=0,
+        )
+        valid = (
+            candidate
+            & (logical < max_blocks)
+            & (physical > 0)
+            & (physical < cache_blocks)
+        )
+        safe_page = tl.maximum(physical, 0).to(tl.int64)
+        page_slot = tl.maximum(index, 0) % PAGE_SIZE
         keys = tl.load(
             cache_ptr
             + safe_page[None, :] * stride_cache_page
@@ -602,6 +595,7 @@ def _resolve_paged_slots(
     ROW_BLOCK: tl.constexpr,
     REQUEST_BLOCK: tl.constexpr,
     DECODE: tl.constexpr = False,
+    PACKED_CONTEXT: tl.constexpr = False,
 ):
     # Resolve pages before the attention loop, as in SGLang's QSA paged reader.
     # The scan keeps the tail after the compressed selection, including on rows
@@ -632,7 +626,12 @@ def _resolve_paged_slots(
     valid = candidate & (physical > 0) & (physical < cache_blocks)
     packed_offset = tl.cumsum(valid.to(tl.int32)) - 1
     slot_row = slots + row * (width + 1)
-    tl.store(slot_row + packed_offset, physical * PAGE + token % PAGE, valid)
+    slot = (
+        request * logical_blocks * PAGE + token
+        if PACKED_CONTEXT
+        else physical * PAGE + token % PAGE
+    )
+    tl.store(slot_row + packed_offset, slot, valid)
     tl.store(slot_row + width, tl.sum(valid.to(tl.int32), axis=0))
 
 
@@ -692,6 +691,7 @@ def _pack_paged_slots(
     page_size: int,
     cache_blocks: int,
     cu_seqlens: torch.Tensor | None = None,
+    packed_context: bool = False,
 ) -> torch.Tensor:
     rows, width = selected.shape
     batch, logical_blocks = block_table.shape
@@ -715,6 +715,7 @@ def _pack_paged_slots(
         ROW_BLOCK=triton.next_power_of_2(width),
         REQUEST_BLOCK=1 if decode else triton.next_power_of_2(batch),
         DECODE=decode,
+        PACKED_CONTEXT=packed_context,
         num_warps=4,
     )
     return slots
@@ -726,9 +727,52 @@ def _supports_sm90_paged_packing(q, kv_cache, page_size, kv_head_num):
         and q.is_cuda
         and q.dtype == kv_cache.dtype == torch.bfloat16
         and q.shape[-2:] == (12, 256)
-        and (kv_head_num, page_size) == (1, 128)
+        and kv_head_num == 1
+        and page_size in (64, 128)
         and kv_cache.shape[0] * page_size <= 2**31
         and torch.cuda.get_device_capability(q.device) == (9, 0)
+    )
+
+
+@triton.jit
+def _pack_prefill_context(
+    cache,
+    table,
+    cu,
+    prefixes,
+    k,
+    v,
+    table_row_stride,
+    table_col_stride,
+    cu_stride,
+    prefix_stride,
+    cache_stride,
+    cache_blocks,
+    context_length,
+    PAGE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    request = tl.program_id(0)
+    token = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    dim = tl.arange(0, 256)
+    end = tl.load(prefixes + request * prefix_stride)
+    end += tl.load(cu + (request + 1) * cu_stride) - tl.load(cu + request * cu_stride)
+    live = (token < end) & (token < context_length)
+    physical = tl.load(
+        table + request * table_row_stride + token // PAGE * table_col_stride,
+        live,
+        other=0,
+    )
+    live &= (physical > 0) & (physical < cache_blocks)
+    source = physical.to(tl.int64) * cache_stride + token % PAGE * 256
+    target = (request * context_length + token).to(tl.int64) * 256
+    key = tl.load(cache + source[:, None] + dim[None, :], live[:, None], other=0.0)
+    value = tl.load(
+        cache + source[:, None] + PAGE * 256 + dim[None, :], live[:, None], other=0.0
+    )
+    tl.store(k + target[:, None] + dim[None, :], key, (token < context_length)[:, None])
+    tl.store(
+        v + target[:, None] + dim[None, :], value, (token < context_length)[:, None]
     )
 
 
@@ -744,25 +788,28 @@ def try_sm90_packed_paged_prefill(
     kv_head_num: int,
     output_gate: torch.Tensor | None,
 ) -> torch.Tensor | None:
-    """Resolve trusted ragged prefill slots once, then reuse grouped attention.
+    """Pack cached contexts and reuse the cold-prefill attention kernel.
 
-    The caller has validated the paged cache geometry and request partition.
-    Small chunks keep the existing split-K path. The row limit bounds the
-    temporary slot matrix to the validated long-prefill range.
+    Like SGLang, each request's KV is copied once per layer rather than doing
+    paged address calculations in every query's attention loop. Both metadata
+    preparation and KV packing stay on-device, including ragged request splits.
     """
-    rows, heads, dim = q.shape
+    rows, _, dim = q.shape
+    context_length = block_table.shape[1] * page_size
+    batch = block_table.shape[0]
     if (
         not 4096 <= rows <= 32768
         or selected.shape != (rows, 2051)
         or selected.stride(-1) != 1
         or q.stride(-1) != 1
+        or batch * context_length > 2**31 - 1
         or not _supports_sm90_paged_packing(q, kv_cache, page_size, kv_head_num)
     ):
         return None
+    from .sparse_prefill_sm90 import _sparse_gqa_prefill_sm90
+
     kv_cache = _main_cache_hnd_view(kv_cache, kv_head_num, page_size, dim)
     cache_blocks = int(kv_cache.shape[0])
-    logical_blocks = block_table.shape[1]
-    width = selected.shape[1]
     slots = _pack_paged_slots(
         selected,
         block_table,
@@ -770,51 +817,56 @@ def try_sm90_packed_paged_prefill(
         page_size=page_size,
         cache_blocks=cache_blocks,
         cu_seqlens=cu_seqlens,
+        packed_context=True,
     )
-    block_n = 32
-    out = torch.empty(q.shape, device=q.device, dtype=q.dtype)
-    _sparse_paged_grouped_split_kernel[(rows, kv_head_num)](
-        q,
-        kv_cache,
+    k, v = torch.empty((2, batch * context_length, dim), device=q.device, dtype=q.dtype)
+    _pack_prefill_context[(batch, triton.cdiv(context_length, 32))](
         kv_cache,
         block_table,
+        cu_seqlens,
         prefixes,
-        slots,
+        k,
+        v,
+        *block_table.stride(),
+        cu_seqlens.stride(0),
+        prefixes.stride(0),
+        kv_cache.stride(0),
+        cache_blocks,
+        context_length,
+        PAGE=page_size,
+        BLOCK=32,
+        num_warps=4,
+    )
+    out = torch.empty(q.shape, device=q.device, dtype=q.dtype)
+    _sparse_gqa_prefill_sm90[(rows, 1)](
+        q,
+        k,
+        v,
         out,
-        output_gate if output_gate is not None else out,
+        slots,
+        dim**-0.5,
         0,
         q.stride(1),
         q.stride(0),
-        *kv_cache.stride()[:4],
         0,
+        k.stride(0),
         0,
+        v.stride(0),
         0,
-        0,
-        *block_table.stride(),
-        0,
-        0,
-        0,
-        slots.stride(0),
-        width,
-        logical_blocks,
-        cache_blocks,
-        HAS_COUNT=True,
-        FP8_CACHE=False,
-        H_Q=heads,
-        GROUP_SIZE=heads,
-        QUERY_LEN=rows,
-        PAGE_SIZE=page_size,
-        D=dim,
-        SCALE=dim**-0.5,
-        NUM_SPLITS=1,
-        NUM_TILES=triton.cdiv(width, block_n),
+        out.stride(1),
+        out.stride(0),
+        S=rows,
+        T=batch * context_length,
+        gate=output_gate if output_gate is not None else out,
+        WIDTH=2051,
         BLOCK_M=16,
-        BLOCK_N=block_n,
+        BLOCK_N=32,
+        HEAD_DIM=dim,
         WITH_GATE=output_gate is not None,
-        OUT_BTHD=True,
-        RESOLVED_SLOTS=True,
         num_warps=4,
         num_stages=2,
+        # Keep five CTAs resident per H20 SM for the 32-key tile.
+        maxnreg=96,
     )
     return out
 

@@ -67,11 +67,14 @@ def _sparse_gqa_prefill_sm90(
     so_h,
     so_s,
     S,
+    T,
+    gate,
     WIDTH: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     BLOCK_IDS: tl.constexpr = False,
+    WITH_GATE: tl.constexpr = False,
 ):
     query = tl.program_id(0).to(tl.int64)
     batch = tl.program_id(1).to(tl.int64)
@@ -100,7 +103,7 @@ def _sparse_gqa_prefill_sm90(
             )
         else:
             token = tl.load(idx_row + current, mask=current < count, other=-1)
-        valid = (current < count) & (token >= 0) & (token < S)
+        valid = (current < count) & (token >= 0) & (token < T)
         keys = tl.load(
             k_base + token[None, :] * sk_s + offs_d[:, None],
             mask=valid[None, :],
@@ -127,6 +130,17 @@ def _sparse_gqa_prefill_sm90(
         normalizer = normalizer * alpha + tl.sum(probabilities, 1)
         max_value = next_max
     output = tl.where(normalizer[:, None] > 0, accumulator / normalizer[:, None], 0.0)
+    if WITH_GATE:
+        gate_value = tl.load(
+            gate
+            + ((batch * S + query) * 12 + offs_h[:, None]) * HEAD_DIM
+            + offs_d[None, :],
+            mask=(offs_h < 12)[:, None],
+            other=0.0,
+        ).to(tl.float32)
+        # Match the standalone BF16 sigmoid and multiply rounding.
+        sigmoid = tl.sigmoid(gate_value).to(tl.bfloat16).to(tl.float32)
+        output = output.to(tl.bfloat16).to(tl.float32) * sigmoid
     tl.store(
         out + batch * so_b + query * so_s + offs_h[:, None] * so_h + offs_d[None, :],
         output,
@@ -226,6 +240,8 @@ def try_sm90_sparse_prefill(q, k, v, selected, *, blk_k=64, selected_has_count=F
         v.stride(2),
         *out.stride()[:3],
         S=length,
+        T=length,
+        gate=out,
         WIDTH=packed.shape[-1] - 1,
         BLOCK_M=16,
         BLOCK_N=block_n,
