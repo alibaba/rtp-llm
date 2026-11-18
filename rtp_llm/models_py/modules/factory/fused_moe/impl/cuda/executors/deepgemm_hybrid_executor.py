@@ -228,6 +228,7 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
 
         self.masked_max_token_num = config.masked_max_token_num
         self.enable_cuda_graph = config.enable_cuda_graph
+        self._batch_invariant = config.batch_invariant
         self.is_sm120 = get_sm()[0] == 12
         if self.is_sm120 and self.enable_cuda_graph and self.ep_size == 1:
             self.sm120_triton_max_tokens = _get_sm120_triton_max_tokens()
@@ -310,7 +311,13 @@ class DeepGemmHybridExecutor(FusedMoeExpertExecutor):
         # all routing metadata work on GPU, so it is safe to capture/replay.
         # It avoids the E * padded_M masked layout that dominates small decode
         # batches on SM120.
-        if token_num <= self.masked_max_token_num and not self.enable_cuda_graph:
+        # The masked and contiguous paths round the SwiGLU output differently
+        # before quantizing the input to the down projection.
+        if (
+            not self._batch_invariant
+            and token_num <= self.masked_max_token_num
+            and not self.enable_cuda_graph
+        ):
             return self.execute_masked(
                 payload,
                 activation,

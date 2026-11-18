@@ -332,12 +332,19 @@ def configure_batch_invariant_model(
                 f"{name} requires WORLD_SIZE=LOCAL_WORLD_SIZE=TP_SIZE={tp}, "
                 "DP_SIZE=EP_SIZE=PP_SIZE=1 and CP disabled"
             )
-    if (
-        model_config.data_type != DataType.TYPE_BF16
-        or model_config.quant_config is not None
-    ):
+    quant = model_config.quant_config
+    quant_method = quant.get_method() if quant is not None else None
+    fp8_block = (
+        quant_method == "FP8_PER_BLOCK"
+        and quant.bits == 8
+        and quant.group_size() == 128
+    )
+    if model_config.data_type != DataType.TYPE_BF16:
+        conflicts.append("requires BF16 activations (ACT_TYPE=bf16)")
+    if quant is not None and (not fp8_block or not hybrid or model is None):
         conflicts.append(
-            "requires unquantized BF16 weights and BF16 activations (ACT_TYPE=bf16)"
+            f"unsupported quantization {quant_method}: FP8_PER_BLOCK with 128x128 "
+            "weight blocks requires Qwen3.6-35B-A3B TP1 or Qwen3.5-397B-A17B TP4"
         )
     if model is not None:
         checkpoint_config = get_config_from_path(model_config.ckpt_path) or {}
@@ -364,17 +371,28 @@ def configure_batch_invariant_model(
         conflicts.append("speculative decoding and MTP must be disabled")
     if engine_config.runtime_config.use_batch_decode_scheduler:
         conflicts.append("USE_BATCH_DECODE_SCHEDULER must be disabled")
+    moe_strategies = (
+        ("auto", "fp8_per_block_no_dp") if fp8_block else ("auto", "no_quant_cpp")
+    )
     if uses_moe and (
-        moe.moe_strategy not in ("auto", "no_quant_cpp")
+        moe.moe_strategy not in moe_strategies
+        or (fp8_block and not moe.use_all_gather)
         or moe.use_deepep_moe
         or moe.use_mori_ep
         or moe.fake_balance_expert
         or model_config.eplb_config.phy_exp_num(model_config.expert_num)
         != model_config.expert_num
     ):
-        conflicts.append(
-            "requires the local Triton MoE strategy and no expert remapping"
-        )
+        if fp8_block:
+            conflicts.append(
+                "FP8_PER_BLOCK requires the local DeepGEMM MoE strategy "
+                "(MOE_STRATEGY=auto or fp8_per_block_no_dp, USE_ALL_GATHER enabled) "
+                "and no expert remapping"
+            )
+        else:
+            conflicts.append(
+                "requires the local Triton MoE strategy and no expert remapping"
+            )
     if attn.kv_cache_dtype != KvCacheDataType.BASE:
         conflicts.append("requires BF16 KV cache with FP8_KV_CACHE disabled")
     if (
