@@ -300,7 +300,8 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
             kv_cache_group_num_,
             kv_cache_layer_to_group_,
             /*warm_up=*/false,
-            [this](const std::list<GenerateStreamPtr>& streams) { maybeRefreshCacheStatusSnapshot(streams); }));
+            [this](const std::list<GenerateStreamPtr>& streams) { maybeRefreshCacheStatusSnapshot(streams); },
+            pd_sep_config.role_type == RoleType::PREFILL ? &step_profiler_ : nullptr));
     } else {
         executor_.reset(new NormalExecutor(
             params,
@@ -994,7 +995,7 @@ absl::Status NormalEngine::step() {
     const bool   report_metrics     = isKmonMetricReportingEnabled();
     int64_t      step_begin_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     absl::Status status             = absl::OkStatus();
-    if (propose_params_) {
+    if (propose_params_ && pd_sep_config.role_type != RoleType::PREFILL) {
         step_profiler_.tick();
     }
     {

@@ -520,7 +520,7 @@ def _wait_for_ranks_startup(
     # Track which ranks have reported
     ranks_received = [False] * local_world_size
     poll_timeout = 0.5  # seconds per poll
-    max_wait_time = 3600  # Maximum 1 hour wait
+    max_wait_time = int(os.getenv("RTP_LLM_SERVER_START_TIMEOUT_S", "3600"))
     start_time = time.time()
 
     try:

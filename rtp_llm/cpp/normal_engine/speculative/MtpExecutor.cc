@@ -1,3 +1,5 @@
+#include <c10/util/ScopeExit.h>
+#include "rtp_llm/cpp/engine_base/TorchProfiler.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
@@ -1421,7 +1423,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                          int32_t                                        kv_cache_group_num,
                          const std::vector<int32_t>&                    kv_cache_layer_to_group,
                          bool                                           warm_up,
-                         CacheStatusSnapshotRefreshCallback             cache_status_snapshot_refresh_callback):
+                         CacheStatusSnapshotRefreshCallback             cache_status_snapshot_refresh_callback,
+                         StepWindowProfiler* prefill_profiler):
     Executor(),
     cache_manager_(cache_manager),
     metrics_reporter_(warm_up ? nullptr : params.metrics_reporter),
@@ -1432,6 +1435,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     warm_up_(warm_up),
     role_type_(params.pd_sep_config.role_type),
     cache_status_snapshot_refresh_callback_(std::move(cache_status_snapshot_refresh_callback)),
+    prefill_profiler_(prefill_profiler),
     collect_metrics_stream_(cuda_graph::graphGetStreamFromPool(true)),
     // These runners intentionally do not inherit PyTorch profiler TLS from the
     // engine loop. Kineto callbacks are thread-affine; propagating an active
@@ -1869,6 +1873,16 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
+    // Non-leader ranks can already be waiting in tpSyncModelInputs when the
+    // profiling RPC arrives. Count only synchronized, non-empty prefill steps.
+    if (prefill_profiler_) {
+        prefill_profiler_->startStep();
+    }
+    auto finish_profile = c10::make_scope_exit([this] {
+        if (prefill_profiler_) {
+            prefill_profiler_->finishStep();
+        }
+    });
     metrics_collector.not_skip = true;
 
     // release model input before forward
