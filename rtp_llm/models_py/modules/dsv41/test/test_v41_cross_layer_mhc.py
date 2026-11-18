@@ -2,14 +2,12 @@
 
 import os
 import unittest
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
 from rtp_llm.models_py.modules.dsv41.block import Block
 from rtp_llm.models_py.modules.dsv41.hc import decode_transition as transition
-from rtp_llm.models_py.modules.dsv41.hc import engram_transition
 from rtp_llm.models_py.modules.dsv41.hc.delayed import DelayedHCHead, DelayedHCUnit
 
 _ENV = {"DSV41_FUSED_CROSS_LAYER_MHC": "1", "DSV41_MEGA_MHC": "1"}
@@ -318,64 +316,9 @@ class CrossLayerMHCCPUTest(unittest.TestCase):
     def test_unsupported_backend_materializes_original_post(self):
         self.assertEqual(self.compare(backend=lambda *args, **kwargs: None), 2)
 
-    def test_engram_opt_in_preserves_native_fallback(self):
-        from rtp_llm.models_py.modules.dsv41.hc import engram_transition
-
-        with patch.object(
-            engram_transition, "enabled", return_value=True
-        ), patch.object(
-            engram_transition, "try_fused_engram_post_pre", return_value=None
-        ) as fused, patch.object(
-            transition, "_can_quantize_attention_input", return_value=True
-        ):
-            self.compare(engram_layers=(1,), backend=lambda *args, **kwargs: None)
-        fused.assert_called_once()
-
-    def test_engram_aux_capture_observes_materialized_entry(self):
-        from rtp_llm.models_py.modules.dsv41.hc import engram_transition
-
-        blocks = make_blocks(count=2, engram_layers=(1,))
-        with patch.object(engram_transition, "enabled", return_value=True):
-            pending = transition.forward_decode_layer(
-                blocks[0],
-                self.hidden.clone(),
-                None,
-                self.ids,
-                next_layer=blocks[1],
-                expert_load=None,
-            )
-        self.assertIsInstance(pending, transition.PendingDecodePost)
-        expected = pending.previous.post(
-            pending.output, pending.residual.clone(), pending.post, pending.comb
-        ).clone()
-        captured = []
-        with patch.object(
-            engram_transition, "try_fused_engram_post_pre"
-        ) as fused, patch.object(
-            transition, "_can_quantize_attention_input", return_value=True
-        ):
-            transition.forward_decode_layer(
-                blocks[1],
-                pending,
-                None,
-                self.ids,
-                expert_load=None,
-                capture_input=lambda value: captured.append(value.clone()),
-            )
-        fused.assert_not_called()
-        torch.testing.assert_close(captured[0], expected, rtol=0, atol=0)
-
-    def test_engram_deferral_requires_backend_and_matching_predecessor(self):
-        from rtp_llm.models_py.modules.dsv41.hc import engram_transition
-
+    def test_post_is_materialized_before_an_engram_layer(self):
         left, right = make_blocks(count=2, engram_layers=(1,))
-        with patch.object(engram_transition, "enabled", return_value=False):
-            self.assertFalse(transition.can_defer_decode_post(left, right, False))
-        with patch.object(engram_transition, "enabled", return_value=True):
-            self.assertTrue(transition.can_defer_decode_post(left, right, False))
-            self.assertFalse(transition.can_defer_decode_post(left, right, True))
-            right.attn_hc.set_previous(left.attn_hc)
-            self.assertFalse(transition.can_defer_decode_post(left, right, False))
+        self.assertFalse(transition.can_defer_decode_post(left, right, False))
 
     def test_pending_values_do_not_escape_a_forward(self):
         blocks = make_blocks()
@@ -543,48 +486,6 @@ class CrossLayerMHCCudaTest(unittest.TestCase):
                 initial = actual[1].clone()
             else:
                 self.assertFalse(torch.equal(initial, actual[1]))
-
-
-class EngramBackendContractTest(unittest.TestCase):
-    def setUp(self):
-        engram_transition._backend.cache_clear()
-        self.addCleanup(engram_transition._backend.cache_clear)
-
-    def test_default_does_not_load_cuda_backend(self):
-        with patch.dict(
-            os.environ, {"DSV41_ENGRAM_RETAINED_FUSION": "0"}
-        ), patch.object(engram_transition.importlib, "import_module") as load:
-            self.assertFalse(engram_transition.enabled())
-        load.assert_not_called()
-
-    def test_build_without_engram_bindings_keeps_native_path(self):
-        backend = SimpleNamespace(available=lambda: False)
-        with patch.dict(
-            os.environ, {"DSV41_ENGRAM_RETAINED_FUSION": "1"}
-        ), patch.object(
-            engram_transition.importlib, "import_module", return_value=backend
-        ):
-            self.assertFalse(engram_transition.enabled())
-
-    def test_native_three_kernel_backend_is_enabled(self):
-        backend = SimpleNamespace(available=lambda: True)
-        with patch.dict(
-            os.environ, {"DSV41_ENGRAM_RETAINED_FUSION": "1"}
-        ), patch.object(
-            engram_transition.importlib, "import_module", return_value=backend
-        ) as load:
-            self.assertTrue(engram_transition.enabled())
-            self.assertIs(engram_transition._backend(), backend)
-        load.assert_called_once_with("rtp_llm.models_py.modules.dsv41.hc.engram_cuda")
-
-    def test_broken_backend_dependency_is_reported(self):
-        with patch.object(
-            engram_transition.importlib,
-            "import_module",
-            side_effect=ModuleNotFoundError(name="backend_dependency"),
-        ):
-            with self.assertRaises(ModuleNotFoundError):
-                engram_transition._backend()
 
 
 if __name__ == "__main__":
