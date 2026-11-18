@@ -24,7 +24,11 @@ from rtp_llm.config.py_config_modules import (
 from rtp_llm.device.device_type import is_hip
 from rtp_llm.model_factory_register import _model_factory, ensure_model_registered
 from rtp_llm.ops import (
+    DataType,
+    KVCacheSpecType,
+    LinearStateLayout,
     ProfilingDebugLoggingConfig,
+    RoleType,
     SpeculativeType,
     TaskType,
     VitSeparation,
@@ -32,6 +36,59 @@ from rtp_llm.ops import (
 from rtp_llm.utils.import_util import load_external_model_packages
 from rtp_llm.utils.util import check_with_info
 from rtp_llm.utils.warmup import configure_warmup
+
+
+def _configure_atom_ssm_replay(model_config: ModelConfig, engine_config: EngineConfig):
+    """Select the request-owned state pool for supported ATOM MTP targets."""
+    import torch
+
+    cache = engine_config.kv_cache_config
+    parallel = engine_config.parallelism_config
+    cp = parallel.prefill_cp_config
+    sp = engine_config.sp_config
+    linear = model_config.linear_attention_config
+    role = parallel.role_type
+    if not (
+        torch.version.hip
+        and (
+            role == RoleType.PDFUSION
+            or (role == RoleType.DECODE and not cache.reuse_cache)
+        )
+        and parallel.tp_size == parallel.local_world_size == 2
+        and parallel.pp_size == parallel.dp_size == 1
+        and not cp.is_enabled()
+        and not cp.is_prefill_enabled()
+        and not cp.kv_cache_sharded
+        and cp.prefill_cp_size <= 1
+        and not parallel.ffn_disaggregate_config.enable_ffn_disaggregate
+        and not cache.enable_remote_cache
+        and not sp.tree_decode_config
+        and 1 <= sp.gen_num_per_cycle <= 3
+        and model_config.attn_config.tokens_per_block > sp.gen_num_per_cycle
+        and linear.ssm_state_dtype == DataType.TYPE_FP32
+        and linear.conv_state_dtype == DataType.TYPE_BF16
+        and linear.linear_key_head_dim == linear.linear_value_head_dim == 128
+        and torch.cuda.device_count() == 2
+    ):
+        return
+
+    linear_layouts = {
+        desc.linear_state_layout
+        for layer in model_config.kv_cache_spec_descs
+        for desc in layer
+        if desc.cache_type == KVCacheSpecType.LINEAR
+    }
+    if linear_layouts != {LinearStateLayout.SPLIT_EXPORT}:
+        return
+    from atom.plugin.rtpllm.utils.replay_policy import replay_mode
+
+    if replay_mode() == "1":
+        cache.linear_ssm_replay = True
+        if not cache.linear_pool_blocks:
+            cache.linear_pool_blocks = (
+                engine_config.runtime_config.max_generate_batch_size + 1
+            )
+        logging.info("ATOM MTP single SSM replay pool: %d slots", cache.linear_pool_blocks)
 
 
 class ModelFactory:
@@ -285,6 +342,8 @@ class ModelFactory:
                 and propose_model_config is not None
                 and propose_model_config.model_type == "atom_qwen4_exp_mtp"
             )
+            if model_config.atom_qwen4_exp_mtp_target:
+                _configure_atom_ssm_replay(model_config, engine_config)
 
         model = ModelFactory._create_model(
             model_config=model_config,
