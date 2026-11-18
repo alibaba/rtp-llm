@@ -1,7 +1,18 @@
 diff --git a/atom/model_ops/attention_gdn.py b/atom/model_ops/attention_gdn.py
+index 7b0a59f..cd097d1 100644
 --- a/atom/model_ops/attention_gdn.py
 +++ b/atom/model_ops/attention_gdn.py
-@@ -346,6 +346,12 @@
+@@ -221,6 +221,9 @@ class GatedDeltaNet(nn.Module):
+         # than one state per speculative token; the per-draft states it used
+         # to hold are reconstructed from `replay_buf_*` on demand.
+         ssm_state = layer_cache.v_cache
++        rtp_checkpoints = getattr(gdn_metadata, "rtp_linear_prefill_checkpoints", None)
++        if rtp_checkpoints is not None:
++            ssm_state = rtp_checkpoints[self.layer_num]
+         use_replayssm = getattr(gdn_metadata, "replayssm", False)
+         flydsl_policy = self.gdn_flydsl_policy
+
+@@ -346,6 +349,12 @@ class GatedDeltaNet(nn.Module):
                  1, num_tokens_nonspec, -1, self.head_v_dim
              )
  
@@ -14,7 +25,7 @@ diff --git a/atom/model_ops/attention_gdn.py b/atom/model_ops/attention_gdn.py
          use_flydsl_mtp = bool(getattr(gdn_metadata, "rtp_flydsl_mtp", False))
          if use_flydsl_mtp and use_replayssm:
              raise ValueError("FlyDSL GDN MTP cannot run ReplaySSM")
-@@ -417,8 +423,11 @@
+@@ -417,8 +426,11 @@ class GatedDeltaNet(nn.Module):
                          a.reshape(batch,width,-1), b.reshape(batch,width,-1),
                          self.dt_bias,self.A_log,ssm_state.transpose(-1,-2),
                          output.reshape(batch,width,*value_spec.shape[-2:]),
@@ -28,10 +39,22 @@ diff --git a/atom/model_ops/attention_gdn.py b/atom/model_ops/attention_gdn.py
                      core_attn_out_spec, last_recurrent_state = output.unsqueeze(0), None
                  else:
                      core_attn_out_spec, last_recurrent_state = mtp_rtp(
+@@ -576,6 +588,10 @@ class GatedDeltaNet(nn.Module):
+                 gdn_metadata.non_spec_state_indices_i64,
+                 last_recurrent_state.to(ssm_state.dtype),
+             )
++            if rtp_checkpoints is not None:
++                layer_cache.v_cache.index_copy_(
++                    0, gdn_metadata.rtp_linear_prefill_slots, last_recurrent_state
++                )
+             # SSM state cache: copy out every checkpoint this step reached.
+             #
+             # A checkpoint slot is never where the recurrence runs — the live
 diff --git a/atom/plugin/rtpllm/models/qwen4_exp.py b/atom/plugin/rtpllm/models/qwen4_exp.py
+index 5777bdc..ef11801 100644
 --- a/atom/plugin/rtpllm/models/qwen4_exp.py
 +++ b/atom/plugin/rtpllm/models/qwen4_exp.py
-@@ -22,6 +22,7 @@
+@@ -22,6 +22,7 @@ from rtp_llm.ops import (
      CacheTailPolicyDesc,
      DataType,
      HybridAttentionType,
@@ -39,7 +62,7 @@ diff --git a/atom/plugin/rtpllm/models/qwen4_exp.py b/atom/plugin/rtpllm/models/
      KVCacheSpecType,
      TpCacheTransferMode,
  )
-@@ -65,8 +66,6 @@
+@@ -65,8 +66,6 @@ class _ATOMQwen4ExpRuntime(_ATOMQwen35MoeRuntime):
              self, model_config, *args, **kwargs
          )
          max_batch = bound.arguments.get("max_generate_batch_size")
@@ -48,28 +71,28 @@ diff --git a/atom/plugin/rtpllm/models/qwen4_exp.py b/atom/plugin/rtpllm/models/
          self._rtp_forward_context_cls = RTPQwen4ExpContext
          super().__init__(model_config, *args, **kwargs)
          self._rtp_model_config = model_config
-@@ -90,6 +89,13 @@
-         install_runtime(self)
+@@ -91,6 +90,13 @@ class _ATOMQwen4ExpRuntime(_ATOMQwen35MoeRuntime):
          from atom.plugin.rtpllm.utils.replay_hybrid import install_runtime as install_hybrid
          install_hybrid(self)
-+
+
 +    def initialize(self, init_resource) -> bool:
 +        initialized = super().initialize(init_resource)
 +        if initialized and self.kv_cache is not None:
 +            from atom.plugin.rtpllm.utils.linear_double_buffer import initialize_runtime
 +            initialize_runtime(self)
 +        return initialized
- 
++
      def copy_plugin_cache_blocks(self, mapping: torch.Tensor, tags: list[str]) -> None:
          """Move ReplaySSM records with RTP linear blocks when enabled."""
-@@ -761,11 +767,16 @@
+         from atom.plugin.rtpllm.utils.replayssm_rtp import copy_moved_blocks
+@@ -761,11 +767,16 @@ class ATOMQwen4Exp(ATOMQwen35Moe):
              for desc in layer:
                  if desc.cache_type == KVCacheSpecType.LINEAR:
                      desc.dtype = DataType.TYPE_BF16
 +                    if (
 +                        torch.version.hip
 +                        and not model_config.is_mtp
-+                        and os.getenv("ROLE_TYPE") in ("PREFILL", "DECODE")
++                        and os.getenv("ROLE_TYPE", "PDFUSION") in ("PREFILL", "DECODE", "PDFUSION")
 +                    ):
 +                        desc.linear_state_layout = LinearStateLayout.SPLIT_EXPORT
                      tail = desc.tail or CacheTailPolicyDesc()
@@ -83,9 +106,10 @@ diff --git a/atom/plugin/rtpllm/models/qwen4_exp.py b/atom/plugin/rtpllm/models/
  
 diff --git a/atom/plugin/rtpllm/utils/linear_double_buffer.py b/atom/plugin/rtpllm/utils/linear_double_buffer.py
 new file mode 100644
+index 0000000..bfcb5f9
 --- /dev/null
 +++ b/atom/plugin/rtpllm/utils/linear_double_buffer.py
-@@ -0,0 +1,304 @@
+@@ -0,0 +1,336 @@
 +"""RTP-only adapter for cache-manager-owned GDN state and replay records.
 +
 +Installed as atom.plugin.rtpllm.utils.linear_double_buffer by atom.patch.
@@ -198,18 +222,20 @@ new file mode 100644
 +        return
 +    config = runtime._rtp_model_config
 +    role = str(getattr(runtime.parallelism_config, "role_type", "")).rsplit(".", 1)[-1]
++    fusion = role == "PDFUSION"
 +    if (
-+        role != "DECODE"
++        role not in ("DECODE", "PDFUSION")
 +        or not getattr(config, "atom_qwen4_exp_mtp_target", False)
 +        or getattr(config, "is_mtp", False)
-+        or getattr(config, "atom_qwen4_exp_prefix_cache_enabled", False)
++        or (not fusion and getattr(config, "atom_qwen4_exp_prefix_cache_enabled", False))
 +        or not torch.version.hip
 +        or not getattr(runtime, "_hybrid_enabled", False)
 +        or getattr(runtime, "_hybrid_reducer", None) is None
 +    ):
 +        raise ValueError(
-+            "Split GDN state requires D-only chain MTP, no reuse, and FP32 hybrid/TP consensus"
++            "Split GDN state requires fusion or D without reuse, chain MTP, and FP32 hybrid/TP consensus"
 +        )
++    runtime._linear_db_fusion = fusion
 +    runtime._hybrid_enabled = False
 +    runtime._linear_db_transaction = LinearDoubleBufferTransaction(in_place=in_place)
 +    runtime._linear_db_indices = {}
@@ -241,11 +267,19 @@ new file mode 100644
 +    gdn, full, mla = layer_maps
 +    caches = base_builder(runtime, ({}, full, mla))
 +    query = int(runtime._rtp_model_config.gen_num_per_cycle) + 1
-+    states, records, keys = [], [], tuple(sorted(gdn))
++    states, records, checkpoints, keys = [], [], [], tuple(sorted(gdn))
 +    for number in keys:
 +        layer = gdn[number]
++        linear = runtime.kv_cache.get_layer_cache(number, "linear").kv_cache_base
++        if runtime._linear_db_fusion:
++            heads, kd, vd = int(layer.dt_bias.numel()), layer.head_k_dim, layer.head_v_dim
++            width = heads * kd * vd
++            linear = linear.reshape(linear.shape[0], -1)
++            checkpoint = linear.view(torch.float32)[:, :width]
++            checkpoints.append(checkpoint.view(-1, heads, vd, kd).transpose(-1, -2))
++            linear = linear[:, 2 * width:]
 +        conv, state, record = split_pool_views(
-+            runtime.kv_cache.get_layer_cache(number, "linear").kv_cache_base,
++            linear,
 +            runtime.kv_cache.get_layer_cache(number, "linear_ssm").kv_cache_base,
 +            runtime.kv_cache.get_layer_cache(number, "linear_replay").kv_cache_base,
 +            heads=int(layer.dt_bias.numel()),
@@ -254,6 +288,7 @@ new file mode 100644
 +            conv_dim=int(layer.conv1d.weight.size(0)),
 +            conv_length=int(layer.conv1d.weight.size(2)) - 1,
 +            query=query,
++            combined_linear=runtime._linear_db_fusion,
 +        )
 +        if states and (
 +            state.shape != states[0].shape or record.shape != records[0].shape
@@ -290,6 +325,11 @@ new file mode 100644
 +        ),
 +    )
 +    runtime._linear_db_records = dict(zip(keys, records))
++    if checkpoints:
++        runtime._linear_db_checkpoints = dict(zip(keys, checkpoints))
++        runtime._linear_db_checkpoint_ptrs = torch.tensor(
++            [state.data_ptr() for state in checkpoints], dtype=torch.int64, device=states[0].device
++        )
 +    return caches
 +
 +
@@ -297,9 +337,14 @@ new file mode 100644
 +    if metadata is None:
 +        raise ValueError("Split SSM layout requires GDN metadata")
 +    if metadata.num_prefills:
-+        raise ValueError(
-+            "Split SSM D layout rejects prefill/chunk-prefill; warm up with decode or target verify"
-+        )
++        if not runtime._linear_db_fusion or metadata.num_decodes or metadata.num_spec_decodes:
++            raise ValueError("Split SSM prefill requires a pure fusion prefill batch")
++        state_inputs = inputs.attention_inputs_by_tag["linear_ssm"]
++        slots = state_inputs.kv_cache_block_id_device[:, 0].to(torch.int64)
++        metadata.rtp_linear_prefill_slots = slots
++        metadata.rtp_linear_prefill_checkpoints = runtime._linear_db_checkpoints
++        runtime._linear_db_transaction.clear()
++        return
 +    spec = metadata.num_spec_decodes > 0
 +    if spec and (
 +        metadata.num_decodes or not getattr(metadata, "rtp_flydsl_mtp", False)
@@ -372,6 +417,16 @@ new file mode 100644
 +        metadata.rtp_hybrid_records = runtime._linear_db_records
 +        metadata.rtp_hybrid_record_indices = record_ids
 +        metadata.rtp_hybrid_record_only = runtime._linear_db_transaction.in_place
++        checkpoint = None
++        if runtime._linear_db_fusion and runtime._rtp_model_config.atom_qwen4_exp_prefix_cache_enabled:
++            from atom.plugin.rtpllm.models.qwen4_exp import GDN_PREFIX_CHECKPOINT_STRIDE_BLOCKS
++            paged = next(iter(runtime._linear_db_checkpoints.values()))
++            checkpoint = (
++                runtime._linear_db_checkpoint_ptrs, metadata.spec_state_indices_tensor,
++                metadata.rtp_target_verify_sequence_lengths,
++                GDN_PREFIX_CHECKPOINT_STRIDE_BLOCKS * metadata.rtp_seq_size_per_block,
++                paged.stride(0),
++            )
 +        runtime._linear_db_transaction.bind(
 +            LinearDoubleBufferStage(
 +                states,
@@ -382,6 +437,7 @@ new file mode 100644
 +                writes,
 +                record_ids,
 +                in_place=runtime._linear_db_transaction.in_place,
++                checkpoint=checkpoint,
 +            )
 +        )
 +    else:
@@ -391,17 +447,19 @@ new file mode 100644
 +        metadata.rtp_ssm_non_spec_indices = reads
 +        runtime._linear_db_transaction.clear()
 diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
+index cc5c664..c38c5d8 100644
 --- a/atom/plugin/rtpllm/utils/qwen4_exp_context.py
 +++ b/atom/plugin/rtpllm/utils/qwen4_exp_context.py
-@@ -362,7 +362,15 @@
+@@ -361,8 +361,16 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
+                 full[int(module.layer_num)] = module
          return gdn, full, mla
  
-     @staticmethod
++    @staticmethod
 +    def _kv_cache_signature(runtime, layer_maps):
 +        from atom.plugin.rtpllm.utils.linear_double_buffer import pool_signature
 +        return RTPForwardQwen35HybridContext._kv_cache_signature(runtime, layer_maps) + pool_signature(runtime, layer_maps[0])
 +
-+    @staticmethod
+     @staticmethod
      def _build_kv_cache_tensors(runtime: Any, layer_maps: Any) -> dict[str, Any]:
 +        from atom.plugin.rtpllm.utils.linear_double_buffer import enabled as request_pool_enabled, build_cache_views
 +        if request_pool_enabled(runtime):
@@ -409,7 +467,7 @@ diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/
          from atom.plugin.rtpllm.utils.split_ssm_storage import enabled, build_caches
          caches = (build_caches(runtime, layer_maps, RTPForwardQwen35HybridContext._build_kv_cache_tensors)
                    if enabled() else RTPForwardQwen35HybridContext._build_kv_cache_tensors(runtime, layer_maps))
-@@ -775,10 +783,14 @@
+@@ -775,10 +783,14 @@ class RTPQwen4ExpContext(RTPForwardQwen35HybridContext):
                  gdn_metadata.rtp_flydsl_read_indices = gdn_metadata.spec_state_indices_in_tensor[:, 0].contiguous()
              from atom.plugin.rtpllm.utils.split_ssm_storage import bind_conv
              bind_conv(cls, runtime, inputs, positions, gdn_metadata, cg_bufs)
@@ -429,9 +487,10 @@ diff --git a/atom/plugin/rtpllm/utils/qwen4_exp_context.py b/atom/plugin/rtpllm/
                  metadata.gdn_metadata,
                  resolved_layer_maps[0],
 diff --git a/atom/plugin/rtpllm/utils/split_ssm_storage.py b/atom/plugin/rtpllm/utils/split_ssm_storage.py
+index af2a1c7..0b26732 100644
 --- a/atom/plugin/rtpllm/utils/split_ssm_storage.py
 +++ b/atom/plugin/rtpllm/utils/split_ssm_storage.py
-@@ -5,10 +5,8 @@
+@@ -5,10 +5,8 @@ from atom.config import KVCacheTensor
  
  
  def enabled():

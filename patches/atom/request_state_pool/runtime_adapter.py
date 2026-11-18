@@ -110,18 +110,20 @@ def _install(runtime):
         return
     config = runtime._rtp_model_config
     role = str(getattr(runtime.parallelism_config, "role_type", "")).rsplit(".", 1)[-1]
+    fusion = role == "PDFUSION"
     if (
-        role != "DECODE"
+        role not in ("DECODE", "PDFUSION")
         or not getattr(config, "atom_qwen4_exp_mtp_target", False)
         or getattr(config, "is_mtp", False)
-        or getattr(config, "atom_qwen4_exp_prefix_cache_enabled", False)
+        or (not fusion and getattr(config, "atom_qwen4_exp_prefix_cache_enabled", False))
         or not torch.version.hip
         or not getattr(runtime, "_hybrid_enabled", False)
         or getattr(runtime, "_hybrid_reducer", None) is None
     ):
         raise ValueError(
-            "Split GDN state requires D-only chain MTP, no reuse, and FP32 hybrid/TP consensus"
+            "Split GDN state requires fusion or D without reuse, chain MTP, and FP32 hybrid/TP consensus"
         )
+    runtime._linear_db_fusion = fusion
     runtime._hybrid_enabled = False
     runtime._linear_db_transaction = LinearDoubleBufferTransaction(in_place=in_place)
     runtime._linear_db_indices = {}
@@ -153,11 +155,19 @@ def build_cache_views(runtime, layer_maps, base_builder):
     gdn, full, mla = layer_maps
     caches = base_builder(runtime, ({}, full, mla))
     query = int(runtime._rtp_model_config.gen_num_per_cycle) + 1
-    states, records, keys = [], [], tuple(sorted(gdn))
+    states, records, checkpoints, keys = [], [], [], tuple(sorted(gdn))
     for number in keys:
         layer = gdn[number]
+        linear = runtime.kv_cache.get_layer_cache(number, "linear").kv_cache_base
+        if runtime._linear_db_fusion:
+            heads, kd, vd = int(layer.dt_bias.numel()), layer.head_k_dim, layer.head_v_dim
+            width = heads * kd * vd
+            linear = linear.reshape(linear.shape[0], -1)
+            checkpoint = linear.view(torch.float32)[:, :width]
+            checkpoints.append(checkpoint.view(-1, heads, vd, kd).transpose(-1, -2))
+            linear = linear[:, 2 * width:]
         conv, state, record = split_pool_views(
-            runtime.kv_cache.get_layer_cache(number, "linear").kv_cache_base,
+            linear,
             runtime.kv_cache.get_layer_cache(number, "linear_ssm").kv_cache_base,
             runtime.kv_cache.get_layer_cache(number, "linear_replay").kv_cache_base,
             heads=int(layer.dt_bias.numel()),
@@ -166,6 +176,7 @@ def build_cache_views(runtime, layer_maps, base_builder):
             conv_dim=int(layer.conv1d.weight.size(0)),
             conv_length=int(layer.conv1d.weight.size(2)) - 1,
             query=query,
+            combined_linear=runtime._linear_db_fusion,
         )
         if states and (
             state.shape != states[0].shape or record.shape != records[0].shape
@@ -202,6 +213,11 @@ def build_cache_views(runtime, layer_maps, base_builder):
         ),
     )
     runtime._linear_db_records = dict(zip(keys, records))
+    if checkpoints:
+        runtime._linear_db_checkpoints = dict(zip(keys, checkpoints))
+        runtime._linear_db_checkpoint_ptrs = torch.tensor(
+            [state.data_ptr() for state in checkpoints], dtype=torch.int64, device=states[0].device
+        )
     return caches
 
 
@@ -209,9 +225,14 @@ def prepare_metadata(runtime, metadata, inputs):
     if metadata is None:
         raise ValueError("Split SSM layout requires GDN metadata")
     if metadata.num_prefills:
-        raise ValueError(
-            "Split SSM D layout rejects prefill/chunk-prefill; warm up with decode or target verify"
-        )
+        if not runtime._linear_db_fusion or metadata.num_decodes or metadata.num_spec_decodes:
+            raise ValueError("Split SSM prefill requires a pure fusion prefill batch")
+        state_inputs = inputs.attention_inputs_by_tag["linear_ssm"]
+        slots = state_inputs.kv_cache_block_id_device[:, 0].to(torch.int64)
+        metadata.rtp_linear_prefill_slots = slots
+        metadata.rtp_linear_prefill_checkpoints = runtime._linear_db_checkpoints
+        runtime._linear_db_transaction.clear()
+        return
     spec = metadata.num_spec_decodes > 0
     if spec and (
         metadata.num_decodes or not getattr(metadata, "rtp_flydsl_mtp", False)
@@ -284,6 +305,16 @@ def prepare_metadata(runtime, metadata, inputs):
         metadata.rtp_hybrid_records = runtime._linear_db_records
         metadata.rtp_hybrid_record_indices = record_ids
         metadata.rtp_hybrid_record_only = runtime._linear_db_transaction.in_place
+        checkpoint = None
+        if runtime._linear_db_fusion and runtime._rtp_model_config.atom_qwen4_exp_prefix_cache_enabled:
+            from atom.plugin.rtpllm.models.qwen4_exp import GDN_PREFIX_CHECKPOINT_STRIDE_BLOCKS
+            paged = next(iter(runtime._linear_db_checkpoints.values()))
+            checkpoint = (
+                runtime._linear_db_checkpoint_ptrs, metadata.spec_state_indices_tensor,
+                metadata.rtp_target_verify_sequence_lengths,
+                GDN_PREFIX_CHECKPOINT_STRIDE_BLOCKS * metadata.rtp_seq_size_per_block,
+                paged.stride(0),
+            )
         runtime._linear_db_transaction.bind(
             LinearDoubleBufferStage(
                 states,
@@ -294,6 +325,7 @@ def prepare_metadata(runtime, metadata, inputs):
                 writes,
                 record_ids,
                 in_place=runtime._linear_db_transaction.in_place,
+                checkpoint=checkpoint,
             )
         )
     else:

@@ -298,14 +298,15 @@ LayerKVCacheSpecDescs resolveLinearStateLayout(const ModelConfig&       model,
                             "linear_ssm_double_buffer and linear_ssm_replay are mutually exclusive");
     const bool     split       = options.linear_ssm_double_buffer || options.linear_ssm_replay;
     const uint32_t state_slots = options.linear_ssm_replay ? 1 : 2;
+    const bool     fusion      = parallel.role_type == RoleType::PDFUSION;
     if (split) {
-        RTP_LLM_CHECK_WITH_INFO(parallel.role_type == RoleType::DECODE && supported_topology && parallel.dp_size == 1
-                                    && !parallel.ffn_disaggregate_config.enable_ffn_disaggregate && !options.reuse_cache
+        const bool supported_role = fusion || (parallel.role_type == RoleType::DECODE && !options.reuse_cache);
+        RTP_LLM_CHECK_WITH_INFO(supported_role && supported_topology && parallel.dp_size == 1
+                                    && !parallel.ffn_disaggregate_config.enable_ffn_disaggregate
                                     && !options.enable_remote_cache && ctx.gen_num_per_cycle > 0
                                     && ctx.gen_num_per_cycle <= 3,
-                                "split linear SSM requires D, TP2/CP1/DP1, no FFN disaggregation, "
-                                "reuse off and chained MTP "
-                                "with 1 to 3 draft tokens");
+                                "split linear SSM requires PDFUSION or D without prefix reuse, TP2/CP1/DP1, "
+                                "no FFN disaggregation or remote cache, and chained MTP with 1 to 3 draft tokens");
         RTP_LLM_CHECK_WITH_INFO(options.linear_pool_blocks > state_slots,
                                 "split linear SSM requires linear_pool_blocks > %u "
                                 "(SSM slots per request plus the reserved null slot)",
@@ -327,7 +328,7 @@ LayerKVCacheSpecDescs resolveLinearStateLayout(const ModelConfig&       model,
                                     "split linear state requires the model's linear attention descriptor");
             declared = true;
             if (!split) {
-                if (!supported_topology) {
+                if (fusion || !supported_topology) {
                     desc.linear_state_layout = LinearStateLayout::LEGACY;
                 }
                 resolved.push_back(std::move(desc));
@@ -372,14 +373,21 @@ LayerKVCacheSpecDescs resolveLinearStateLayout(const ModelConfig&       model,
                 result.capacity             = CacheCapacityPolicyDesc{true, blocks, true};
                 return result;
             };
-            resolved.push_back(region("linear",
-                                      LinearStateLayout::SPLIT_CONV,
-                                      linear.conv_state_dtype,
-                                      legacy->v_block_size_bytes() / getTypeSize(linear.conv_state_dtype),
-                                      1,
-                                      CacheGroupType::LINEAR,
-                                      0,
-                                      static_cast<uint32_t>(conv_blocks)));
+            if (fusion) {
+                // Prefix checkpoint rows must survive the owning request. Keep the
+                // paged checkpoint and convolution pool separate from the live SSM.
+                desc.linear_state_layout = LinearStateLayout::LEGACY;
+                resolved.push_back(std::move(desc));
+            } else {
+                resolved.push_back(region("linear",
+                                          LinearStateLayout::SPLIT_CONV,
+                                          linear.conv_state_dtype,
+                                          legacy->v_block_size_bytes() / getTypeSize(linear.conv_state_dtype),
+                                          1,
+                                          CacheGroupType::LINEAR,
+                                          0,
+                                          static_cast<uint32_t>(conv_blocks)));
+            }
             resolved.push_back(
                 region("linear_ssm",
                        options.linear_ssm_replay ? LinearStateLayout::SINGLE_SSM : LinearStateLayout::DOUBLE_BUFFER_SSM,
@@ -487,9 +495,11 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
     RTP_LLM_CHECK_WITH_INFO(kv_cache_config.reuse_cache_tail_blocks > 0, "reuse_cache_tail_blocks must be positive");
     config.reuse_cache_tail_blocks = kv_cache_config.reuse_cache_tail_blocks;
     auto groups                    = config.topology().groups();
+    const bool fusion_request_state = parallelism_config.role_type == RoleType::PDFUSION
+                                      && (kv_cache_config.linear_ssm_double_buffer || kv_cache_config.linear_ssm_replay);
     for (auto& group : groups) {
         const uint32_t override_blocks =
-            group.policy.group_type == CacheGroupType::LINEAR ? kv_cache_config.linear_pool_blocks :
+            group.policy.group_type == CacheGroupType::LINEAR && !fusion_request_state ? kv_cache_config.linear_pool_blocks :
             group.policy.group_type == CacheGroupType::SWA    ? kv_cache_config.swa_pool_blocks :
                                                                 0;
         RTP_LLM_CHECK_WITH_INFO(override_blocks != 1
