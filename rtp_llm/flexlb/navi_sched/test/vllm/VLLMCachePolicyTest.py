@@ -1,4 +1,5 @@
 import math
+import importlib
 import os
 import random
 import sys
@@ -426,6 +427,15 @@ class VLLMCachePolicyTest(unittest.TestCase):
                 (6144, 6144, (6144, 6144)),
                 resolve_vllm_hybrid_geometry(config, kv),
             )
+
+    def test_uniform_groups_expand_without_native_iterator_helper(self):
+        module = importlib.import_module("navi_sched.adapters.vllm.VLLMCachePolicy")
+        full = FullAttentionSpec(768)
+        mamba = MambaSpec(768)
+        wrapped = UniformTypeKVCacheSpecs(768, full, mamba)
+        with mock.patch.dict(sys.modules, {"vllm.v1.kv_cache_interface": None}):
+            self.assertEqual((full,), module._vllm_layer_specs(full))
+            self.assertEqual((full, mamba), module._vllm_layer_specs(wrapped))
 
     def test_native_prefill_uses_runtime_geometry_without_kv_transfer_config(self):
         config = make_vllm_config(block_size=768, dcp_size=1, pcp_size=8)

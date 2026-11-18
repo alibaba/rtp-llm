@@ -1,4 +1,5 @@
 import hashlib
+import importlib
 import os
 import unittest
 from array import array
@@ -34,8 +35,11 @@ class VLLMBlockHashTest(unittest.TestCase):
 
     def test_cpp_kv_hash_matches_native_and_continues_existing_blocks(self):
         from navi_sched.util import naviSchedModule
-        from vllm.utils.hashing import sha256_cbor
-        from vllm.v1.core import kv_cache_utils
+        try:
+            from vllm.utils.hashing import sha256_cbor
+            from vllm.v1.core import kv_cache_utils
+        except ImportError:
+            self.skipTest("vLLM is not installed")
 
         cpp_hash = naviSchedModule().hash_vllm_plain_text_kv_blocks
         block_size = 16
@@ -106,9 +110,9 @@ class VLLMBlockHashTest(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=True):
             router = NaviSchedEndpointRouter(client, "prefill", block_size=64)
         self.addCleanup(router.close)
-        with mock.patch(
-            "navi_sched.adapters.vllm.NaviSchedEndpointRouter._hash_normalized_token_ids",
-            return_value=[17],
+        with mock.patch.object(
+            importlib.import_module("navi_sched.adapters.vllm.NaviSchedEndpointRouter"),
+            "_hash_normalized_token_ids", return_value=[17],
         ) as vendor_hash:
             self.assertIs(
                 router.route(token_ids, request_id=42, block_hash_request=plain_request),
@@ -229,7 +233,10 @@ class VLLMBlockHashTest(unittest.TestCase):
         )
 
     def test_multimodal_hash_distinguishes_relative_image_offsets(self):
-        from vllm.v1.core import kv_cache_utils
+        try:
+            from vllm.v1.core import kv_cache_utils
+        except ImportError:
+            self.skipTest("vLLM is not installed")
 
         def request(offset):
             return SimpleNamespace(

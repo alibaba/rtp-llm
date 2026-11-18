@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import inspect
 import itertools
 import json
 import logging
@@ -39,6 +40,9 @@ from .VLLMExecutionSample import PrefillExecutionSample, PrefillStepRequest
 from .VLLMExecutionWindow import PrefillExecutionWindowAssembler
 from .VLLMForwardProtocol import forward_outputs_fields, forward_request_type
 from .VLLMImageCacheMap import VLLMImageCacheMap
+from .VLLMCoreCallbacks import VLLMCoreCallbacks
+from .VLLMSchedulerObserver import VLLMSchedulerObserver
+from .VLLMCacheCallbacks import VLLMCacheObserver
 
 logger = logging.getLogger("vllm.navi_sched.agent")
 
@@ -1403,7 +1407,22 @@ class _NaviSchedScheduler:
             self._observer._abort_forward_requests(state, cancelled_ids)
 
         native_results = self._scheduler.finish_requests(request_ids, finished_status)
-        native_ids = {request.request_id for request in native_results}
+        native_ids = {
+            result[0] if isinstance(result, tuple) else result.request_id
+            for result in native_results
+        }
+        if native_results:
+            native_returns_pairs = isinstance(native_results[0], tuple)
+        else:
+            # Preserve the scheduler's contract even when all aborted requests
+            # were held outside its queues and its native result is empty.
+            try:
+                result_type = inspect.signature(
+                    self._scheduler.finish_requests
+                ).return_annotation
+            except (TypeError, ValueError):
+                result_type = None
+            native_returns_pairs = "tuple[" in str(result_type).lower()
         changed_request_ids = set(native_ids)
         if requested is None:
             with self._observer._workload_lock:
@@ -1414,7 +1433,9 @@ class _NaviSchedScheduler:
             self._scheduler, changed_request_ids, "finish_requests"
         )
         return native_results + [
-            request for request in held_results if request.request_id not in native_ids
+            (request.request_id, request.client_index)
+            if native_returns_pairs else request
+            for request in held_results if request.request_id not in native_ids
         ]
 
     def schedule(self, throttle_prefills: bool | None = None):
@@ -1598,7 +1619,7 @@ class _SerialPrefillTestBridge:
         return self._bridge.disable_forwarding()
 
 
-class VLLMEngineObserver:
+class VLLMEngineObserver(VLLMCoreCallbacks):
     def __init__(
         self,
         vllm_config,
@@ -2816,7 +2837,7 @@ class VLLMEngineObserver:
         for request_id, request, accepted_time_ns in touches:
             try:
                 cache_manager = scheduler.kv_cache_manager
-                cached_blocks, _, _ = cache_manager.get_computed_blocks(request)
+                cached_blocks = cache_manager.get_computed_blocks(request)[0]
                 blocks = [block for group in cached_blocks.blocks for block in group]
                 if blocks:
                     # vLLM 0.29 exposes cache lookup and block-pool touch/free,
@@ -3157,12 +3178,23 @@ class VLLMEngineObserver:
                 if request_id in self._response_request_ids:
                     self._inactive_response_request_ids.add(request_id)
 
+    def _report_abort_event(self, stage: str, count: int) -> None:
+        # Telemetry failure must never interrupt cancellation or older bridges.
+        report = getattr(self._bridge, "record_abort_event", None)
+        if count <= 0 or not callable(report):
+            return
+        try:
+            report(stage, count)
+        except Exception:
+            logger.exception("failed to report abort metric: stage=%s", stage)
+
     def _abort_engine_requests(self, external_request_ids, request_type) -> None:
         request_ids = list(dict.fromkeys(external_request_ids))
         engine_core = self._engine_core
         if not request_ids:
             return
         if engine_core is None:
+            self._report_abort_event("engine_unbound", len(request_ids))
             logger.warning(
                 "[navi-vllm-abort-not-delivered] reason=engine_core_unbound "
                 "vllm_request_ids=%s",
@@ -3171,6 +3203,7 @@ class VLLMEngineObserver:
             return
         engine_core.aborts_queue.put_nowait(request_ids)
         engine_core.input_queue.put_nowait((request_type.ABORT, request_ids))
+        self._report_abort_event("enqueued", len(request_ids))
         logger.info(
             "[navi-vllm-abort-enqueued] vllm_request_ids=%s "
             "queues=aborts_queue,input_queue",
@@ -3184,6 +3217,7 @@ class VLLMEngineObserver:
         try:
             self._abort_engine_requests(request_ids, request_type)
         except Exception:
+            self._report_abort_event("enqueue_failed", len(request_ids))
             with self._response_lock:
                 self._pending_engine_abort_request_ids = list(
                     dict.fromkeys(self._pending_engine_abort_request_ids + request_ids)
@@ -3229,6 +3263,8 @@ class VLLMEngineObserver:
                         )
                         entry[1].add(request_id)
         if request_ids:
+            self._report_abort_event("mapped", len(mapped_request_ids))
+            self._report_abort_event("deferred", len(deferred_request_ids))
             logger.info(
                 "[navi-vllm-abort-mapped] request_id_map=%s "
                 "deferred_navi_request_ids=%s",
@@ -3372,20 +3408,20 @@ class VLLMEngineObserver:
                     ],
                 )
             self._initialize_agent(scheduler)
-            scheduler.kv_cache_manager.block_pool.set_block_lifecycle_listener(
+            scheduler.kv_cache_manager.block_pool.cache_observer = VLLMCacheObserver(
                 self.on_block_lifecycle_event
             )
-            lifecycle_setter = getattr(
-                scheduler, "set_request_lifecycle_listener", None
-            )
-            if lifecycle_setter is not None:
-                lifecycle_setter(self.on_request_lifecycle_event)
+            lifecycle_supported = hasattr(scheduler, "request_observer")
+            if lifecycle_supported:
+                scheduler.request_observer = VLLMSchedulerObserver(
+                    self.on_request_lifecycle_event
+                )
             config = getattr(scheduler, "scheduler_config", None)
             self.on_request_lifecycle_event(
                 {
                     "event": "scheduler_config",
                     "event_time_us": time.time_ns() // 1000,
-                    "lifecycle_supported": lifecycle_setter is not None,
+                    "lifecycle_supported": lifecycle_supported,
                     "scheduler_class": type(scheduler).__qualname__,
                     **{
                         name: getattr(config, name, None)
@@ -6354,6 +6390,7 @@ class VLLMEngineObserver:
                 event.get("event") == "terminal"
                 and event.get("status") == "FINISHED_ABORTED"
             ):
+                self._report_abort_event("vllm_applied", 1)
                 logger.info(
                     "[navi-vllm-abort-applied] vllm_request_id=%s "
                     "batch_id=%s schedule_batch_id=%s status=FINISHED_ABORTED",

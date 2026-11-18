@@ -1,5 +1,7 @@
 #pragma once
 
+#include "aios/navi_sched/service/AbortMetrics.h"
+
 #include "aios/navi_sched/resource/AgentBatchR.h"
 #include "aios/navi_sched/resource/RequestLatencyTracker.h"
 #include "aios/navi_sched/service/NaviSchedAgent.h"
@@ -37,6 +39,7 @@ public:
                                 bool terminal) const;
     bool failForwardResponse(uint64_t requestId, const std::string &errorMessage) const;
     void setForwardCancelHandler(const std::function<void(uint64_t)> &handler) const;
+    bool recordAbortEvent(const std::string &stage, uint64_t count) const;
     bool enableObservedExecutionWindowTraining() const;
     bool recordObservedExecutionSample(const std::vector<NaviSchedRequestStats> &requests,
                                        double latencyMs, int64_t executionStepCount,
@@ -144,6 +147,7 @@ private:
     mutable int64_t _lastExecutionBusyReportTimeUs = 0;
     mutable int64_t _lastBackendExecutionBusyTimeUs = 0;
     mutable int64_t _lastBackendExecutionBusyReportTimeUs = 0;
+    std::shared_ptr<AbortMetrics> _abortMetrics = std::make_shared<AbortMetrics>();
     bool _stoppingReported = false;
 };
 

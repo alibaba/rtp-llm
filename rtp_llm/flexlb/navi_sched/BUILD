@@ -511,26 +511,6 @@ py_library(
         "navi_sched/adapters/sglang/SGLangObserver.py",
         "navi_sched/adapters/sglang/SGLangRuntime.py",
         "navi_sched/adapters/sglang/SGLangTransport.py",
-        "navi_sched/adapters/vllm/__init__.py",
-        "navi_sched/adapters/vllm/NaviSchedAdapterConfig.py",
-        "navi_sched/adapters/vllm/NaviSchedClient.py",
-        "navi_sched/adapters/vllm/NaviSchedEndpointRouter.py",
-        "navi_sched/adapters/vllm/NaviSchedProductionStackRouter.py",
-        "navi_sched/adapters/vllm/NaviSchedVLLMPlugin.py",
-        "navi_sched/adapters/vllm/VLLMBlockHash.py",
-        "navi_sched/adapters/vllm/VLLMCachePolicy.py",
-        "navi_sched/adapters/vllm/VLLMDeferredRenderer.py",
-        "navi_sched/adapters/vllm/ExecutionTimingProbe.py",
-        "navi_sched/adapters/vllm/VLLMEngineObserver.py",
-        "navi_sched/adapters/vllm/VLLMExecutionGeometry.py",
-        "navi_sched/adapters/vllm/VLLMExecutionSample.py",
-        "navi_sched/adapters/vllm/VLLMExecutionWindow.py",
-        "navi_sched/adapters/vllm/VLLMEngineTransport.py",
-        "navi_sched/adapters/vllm/VLLMForwardProtocol.py",
-        "navi_sched/adapters/vllm/VLLMImageCacheMap.py",
-        "navi_sched/adapters/vllm/VLLMNativePreparation.py",
-        "navi_sched/adapters/vllm/VLLMWorkerObserver.py",
-        "navi_sched/adapters/vllm/VLLMAdapterUtils.py",
         "navi_sched/client.py",
         "navi_sched/asyncio.py",
         "navi_sched/master.py",
@@ -542,7 +522,7 @@ py_library(
         "navi_sched/route_control.py",
         "navi_sched/util.py",
         "navi_sched/sched.py",
-    ],
+    ] + glob(["navi_sched/adapters/vllm/*.py"]),
     data = [
         ":navi_sched/_navi_sched_core.so",
         ":wheel_lockless_allocator",
@@ -1839,4 +1819,32 @@ cc_test(
     name = "navi_sched_pp_initial_history_fit_test",
     srcs = ["test/LatencyPpInitialFitTest.cpp"],
     deps = [":navi_sched_role_lib", "//aios/unittest_framework", "//aios/navi:navi_ops_testlib"],
+)
+
+py_test(
+    name = "navi_sched_vllm_adapter_callbacks_test",
+    srcs = ["test/vllm/VLLMAdapterCallbacksTest.py"],
+    data = glob(["adapters/vllm/*.py"]),
+    main = "test/vllm/VLLMAdapterCallbacksTest.py",
+    python_version = "PY3",
+)
+
+cc_test(
+    name = "abort_metrics_test",
+    srcs = ["test/AbortMetricsTest.cpp", "service/AbortMetrics.h"],
+    linkopts = ["-pthread"],
+)
+
+py_test(
+    name = "vllm_abort_logging_test",
+    srcs = ["test/vllm/VLLMAbortLoggingTest.py", "adapters/vllm/VLLMEngineObserver.py"],
+    main = "test/vllm/VLLMAbortLoggingTest.py",
+    python_version = "PY3",
+)
+
+py_test(
+    name = "vllm_file_logging_test",
+    srcs = ["test/vllm/VLLMLoggingTest.py", "adapters/vllm/VLLMLogging.py"],
+    main = "test/vllm/VLLMLoggingTest.py",
+    python_version = "PY3",
 )

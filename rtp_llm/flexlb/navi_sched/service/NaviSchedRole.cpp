@@ -244,8 +244,9 @@ bool NaviSchedRole::init()
     }
     const auto effectiveConfig =
         makeEffectiveServiceConfig(_config, getGrpcPort(), getHttpPort());
-    std::fprintf(stderr, "navi_sched_effective_service_config=%s\n",
-                 effectiveConfig.c_str());
+    autil::FileRecorder::newRecord(
+        effectiveConfig, _config.snapshotDir + "/" + _config.name,
+        "effective_service_config", autil::TimeUtility::currentTime(), 3);
     _started = true;
     return true;
 }
@@ -510,8 +511,9 @@ bool NaviSchedRole::update(const std::string &configStr,
     auto naviSuccess = _navi->update(config, *rootResourceMap);
     auto success = naviSuccess && onUpdated();
     if (success) {
-        std::fprintf(stderr, "navi_sched_effective_runtime_config=%s\n",
-                     configStr.c_str());
+        autil::FileRecorder::newRecord(
+            configStr, _config.snapshotDir + "/" + _config.name,
+            "effective_runtime_config", autil::TimeUtility::currentTime(), 3);
     }
     return startSnapshot() && success;
 }

@@ -116,12 +116,18 @@ bool ClientResponseR::publishResponse(uint64_t requestId,
             return false;
         }
         if (!state->expectResponseStream) {
+            if (response->kind == AgentResponseKind::ERROR) {
+                _remoteErrorCount.fetch_add(1, std::memory_order_relaxed);
+            }
             state->responseFinished = response->terminal;
             return true;
         }
         std::lock_guard<std::mutex> lock(_mutex);
         if (_stopped) {
             return false;
+        }
+        if (response->kind == AgentResponseKind::ERROR) {
+            _remoteErrorCount.fetch_add(1, std::memory_order_relaxed);
         }
         state->responseFinished = response->terminal;
         auto output = std::make_shared<AgentResponseToClientData>();
@@ -304,6 +310,7 @@ ClientResponseR::DecisionResult ClientResponseR::finishGraph(
             std::lock_guard<std::mutex> lock(_mutex);
             if (!_stopped) {
                 _responses.emplace_back(std::move(response));
+                _streamErrorCount.fetch_add(1, std::memory_order_relaxed);
             }
         }
         _responseCondition.notify_one();

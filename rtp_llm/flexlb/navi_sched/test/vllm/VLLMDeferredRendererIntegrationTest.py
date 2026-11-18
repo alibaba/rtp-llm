@@ -950,6 +950,7 @@ class DeferredRendererTest(DeferredRendererTestBase):
 
     async def test_native_api_builder_registers_preparation_only_when_enabled(self):
         import vllm.plugins as plugins
+        from navi_sched.adapters.vllm import VLLMPluginRegistry as adapter
         from vllm.entrypoints.openai.api_server import build_app
         from vllm.entrypoints.openai.cli_args import make_arg_parser
         from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -960,7 +961,8 @@ class DeferredRendererTest(DeferredRendererTestBase):
             with (
                 self.subTest(enabled=enabled),
                 mock.patch.dict(os.environ, {"VLLM_NAVI_SCHED_DEFER_RENDER": enabled}),
-                mock.patch.object(plugins, "_frontend_app_configurator", preparation.configure_native_preparation),
+                mock.patch.object(plugins, "_engine_adapter", adapter),
+                mock.patch.object(adapter, "_frontend_app_configurator", preparation.configure_native_preparation),
             ):
                 app = build_app(args, supported_tasks=("generate",))
                 paths = [getattr(route, "path", None) for route in app.routes]
