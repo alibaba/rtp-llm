@@ -1,6 +1,7 @@
 """Fixed-capacity MTP draft metadata and validation before graph replay."""
 
 from collections.abc import Mapping
+from threading import Lock
 
 import torch
 
@@ -47,6 +48,21 @@ def draft_graph_rows(inputs, token_capacity):
     return sources, inverse, packed_valid, positions, visible
 
 
+class _ReplayWorkspace:
+    """One callback/stream's scratch, retained only after successful prepares."""
+
+    def __init__(self, key, transported, cu, capacity, factor):
+        self.key = key
+        self.positions_host = torch.empty(
+            capacity, dtype=transported.dtype, pin_memory=transported.is_cuda
+        )
+        self.cu_host = torch.empty(cu.shape, dtype=cu.dtype, pin_memory=cu.is_cuda)
+        self.positions = self.positions_host.to(transported.device)
+        self.cu = self.cu_host.to(cu.device)
+        self.canonical = torch.empty_like(transported).reshape(capacity, factor)
+        self.state_inputs = {}
+
+
 class DraftPrefillGraphReplay(Mapping):
     """Validate all tagged pools before the graph runner launches any writes.
 
@@ -62,6 +78,8 @@ class DraftPrefillGraphReplay(Mapping):
         self.position_factor = position_factor
         self.token_capacity = token_capacity
         self.state_cache = state_cache
+        self._workspace = None
+        self._workspace_lock = Lock()
 
     def __getitem__(self, key):
         return self.impls[key]
@@ -72,8 +90,73 @@ class DraftPrefillGraphReplay(Mapping):
     def __len__(self):
         return len(self.impls)
 
+    def _validate_replay_layout(self, anchor):
+        """Check bucket metadata before allocating scratch or writing graph inputs."""
+        transported = anchor.combo_position_ids
+        if not isinstance(transported, torch.Tensor) or transported.dtype not in (
+            torch.int32,
+            torch.int64,
+        ):
+            raise RuntimeError(
+                "QSA draft graph requires int32 or int64 transported positions"
+            )
+        if transported.numel() != self.token_capacity * self.position_factor:
+            raise RuntimeError("QSA draft graph transported position capacity changed")
+        cu = getattr(anchor, "cu_seqlens_device", None)
+        if (
+            not isinstance(cu, torch.Tensor)
+            or cu.dtype != torch.int32
+            or tuple(cu.shape) != (anchor.input_lengths.numel() + 1,)
+        ):
+            raise RuntimeError(
+                "QSA draft graph requires int32 device cu_seqlens matching the request capacity"
+            )
+        if transported.device != cu.device:
+            raise RuntimeError(
+                "QSA draft graph positions and cu_seqlens must use the same device"
+            )
+        return transported, cu
+
     def prepare_cuda_graph(self, groups):
-        groups = prepare_state_cache_inputs(groups, self.state_cache)
+        anchor = groups[next(iter(self.impls))]
+        transported, cu = self._validate_replay_layout(anchor)
+        if not self._workspace_lock.acquire(blocking=False):
+            return self._prepare_cuda_graph(groups, transported, cu)
+        try:
+            stream = (
+                torch.cuda.current_stream(transported.device)
+                if transported.is_cuda
+                else None
+            )
+            key = (
+                self.token_capacity,
+                self.position_factor,
+                transported.dtype,
+                transported.device,
+                tuple(cu.shape),
+                None if stream is None else stream.cuda_stream,
+            )
+            if self._workspace is None or self._workspace.key != key:
+                self._workspace = _ReplayWorkspace(
+                    key, transported, cu, self.token_capacity, self.position_factor
+                )
+            # The validation .item() completes all scratch reads on this stream
+            # before a successful return, so the next prepare can reuse it.
+            return self._prepare_cuda_graph(groups, transported, cu, self._workspace)
+        except BaseException:
+            # A failed prepare may leave H2D copies pending. Drop the cache
+            # reference; PyTorch's allocators retain in-flight storage safely.
+            self._workspace = None
+            raise
+        finally:
+            self._workspace_lock.release()
+
+    def _prepare_cuda_graph(self, groups, transported, cu, workspace=None):
+        groups = prepare_state_cache_inputs(
+            groups,
+            self.state_cache,
+            workspace=None if workspace is None else workspace.state_inputs,
+        )
         anchor = groups[next(iter(self.impls))]
         lengths = anchor.input_lengths
         prefixes = anchor.prefix_lengths
@@ -129,39 +212,48 @@ class DraftPrefillGraphReplay(Mapping):
                 if not length:
                     continue
                 if compressed:
-                    first = 0
                     end = ((prefix + length) // 4 + page_size - 1) // page_size
                 else:
-                    first = 0
                     end = (prefix + length + page_size - 1) // page_size
                 if end > table.shape[1]:
                     raise RuntimeError(
                         "QSA draft graph block table does not cover the visible tail"
                     )
-                if any(
-                    not 0 < int(block) < pool_size for block in values[row, first:end]
-                ):
+                # Check this replay's visible pages in native array code. The
+                # graph-owned table may change in place between prepares.
+                visible = values[row, :end]
+                if end <= 64:
+                    # Small rows avoid allocating NumPy comparison masks.
+                    pages = visible.tolist()
+                    invalid = bool(pages) and (
+                        min(pages) <= 0 or max(pages) >= pool_size
+                    )
+                else:
+                    invalid = ((visible <= 0) | (visible >= pool_size)).any()
+                if invalid:
                     raise RuntimeError(
                         "QSA draft graph live row resolves to an unallocated or out-of-range physical block"
                     )
         # The draft uses logical Base-RoPE coordinates. The target transports
         # MRoPE coordinates, which differ after an image or timestamped frame;
         # normalize this graph-owned buffer just as eager draft prefill does.
-        transported = anchor.combo_position_ids
-        if (
-            transported is None
-            or transported.numel() != self.token_capacity * self.position_factor
-        ):
-            raise RuntimeError("QSA draft graph transported position capacity changed")
-        expected_positions = torch.tensor(
-            positions,
-            dtype=transported.dtype,
-            device="cpu",
-            pin_memory=transported.is_cuda,
-        ).to(device=transported.device, non_blocking=True)
-        canonical = torch.zeros_like(transported).reshape(
-            self.token_capacity, self.position_factor
-        )
+        if workspace is None:
+            expected_positions = torch.tensor(
+                positions,
+                dtype=transported.dtype,
+                device="cpu",
+                pin_memory=transported.is_cuda,
+            ).to(device=transported.device, non_blocking=True)
+            canonical = torch.zeros_like(transported).reshape(
+                self.token_capacity, self.position_factor
+            )
+        else:
+            host = workspace.positions_host[: len(positions)]
+            host.numpy()[:] = positions
+            expected_positions = workspace.positions[: len(positions)]
+            if transported.is_cuda:
+                expected_positions.copy_(host, non_blocking=True)
+            canonical = workspace.canonical.zero_()
         canonical[: len(positions)] = expected_positions[:, None]
         copied = set()
         for value in groups.values():
@@ -211,19 +303,15 @@ class DraftPrefillGraphReplay(Mapping):
             ]
             invalid_positions = (actual != expected_positions.unsqueeze(1)).any()
             invalid_replay = invalid_state | invalid_positions
-        cu = getattr(anchor, "cu_seqlens_device", None)
-        if (
-            not isinstance(cu, torch.Tensor)
-            or cu.dtype != torch.int32
-            or tuple(cu.shape) != (len(expected),)
-        ):
-            raise RuntimeError(
-                "QSA draft graph requires int32 device cu_seqlens matching the request capacity"
-            )
-        expected_cu = torch.tensor(
-            expected, device="cpu", dtype=cu.dtype, pin_memory=cu.is_cuda
-        )
-        expected_cu = expected_cu.to(device=cu.device, non_blocking=True)
+        if workspace is None:
+            expected_cu = torch.tensor(
+                expected, device="cpu", dtype=cu.dtype, pin_memory=cu.is_cuda
+            ).to(device=cu.device, non_blocking=True)
+        else:
+            workspace.cu_host.numpy()[:] = expected
+            expected_cu = workspace.cu
+            if cu.is_cuda:
+                expected_cu.copy_(workspace.cu_host, non_blocking=True)
         invalid_replay = invalid_replay | torch.any(cu != expected_cu)
         if bool(invalid_replay.item()):
             raise RuntimeError(
