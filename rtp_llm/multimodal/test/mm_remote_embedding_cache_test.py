@@ -7,7 +7,7 @@ import unittest
 import weakref
 from enum import Enum
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import torch
 
@@ -672,6 +672,44 @@ class RemoteCacheTest(unittest.TestCase):
                 torch.testing.assert_close(read.result(timeout=1)[0], torch.ones(3))
         self.assertEqual(remote.stats()["inflight_tasks"], 0)
         self.assertEqual(remote.stats()["inflight_bytes"], 0)
+
+    def test_metadata_admission_remains_held_after_caller_timeouts(self):
+        store = Store({})
+        remote = self.remote(store, max_pending=16)
+        started = threading.Semaphore(0)
+        release = threading.Event()
+
+        def block_lookup(*args, **kwargs):
+            started.release()
+            if not release.wait(3):
+                raise RuntimeError("metadata test was not released")
+            return None
+
+        with (
+            patch.object(store, "object_size", side_effect=block_lookup) as lookup,
+            patch.object(remote, "_report_skip", wraps=remote._report_skip) as report_skip,
+            concurrent.futures.ThreadPoolExecutor(8) as callers,
+        ):
+            reads = [
+                callers.submit(remote.load, f"key-{index}", timeout_ms=500)
+                for index in range(8)
+            ]
+            try:
+                self.assertTrue(all(started.acquire(timeout=1) for _ in reads))
+                self.assertIsNone(remote.load("busy"))
+                for read in reads:
+                    self.assertIsNone(read.result(timeout=1))
+                self.assertIsNone(remote.load("still-busy"))
+                self.assertEqual(lookup.call_count, 8)
+                self.assertEqual(remote.stats()["inflight_tasks"], 8)
+                self.assertEqual(
+                    report_skip.call_args_list,
+                    [call("read", "metadata_admission")] * 2,
+                )
+            finally:
+                release.set()
+        remote._executor.shutdown(wait=True)
+        self.assertEqual(remote.stats()["inflight_tasks"], 0)
 
     def test_timed_out_queued_reads_keep_admission_until_consumed(self):
         remote, (slot,) = self.slot_cache(1, max_pending=2)
