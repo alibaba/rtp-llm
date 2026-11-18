@@ -143,10 +143,11 @@ bool CoordinatorCacheManager::init() {
 }
 
 MallocResult CoordinatorCacheManager::initMalloc(const MallocInfo& malloc_info) {
+    const bool unsupported_reuse = malloc_info.reuse_cache && role_type_ != RoleType::PDFUSION;
     for (const auto& group : config_.topology().groups()) {
         if (group.policy.group_type == CacheGroupType::REQUEST_STATE
-            && (malloc_info.reuse_cache || malloc_info.batch_kv_cache_resource->batchSize() != 1)) {
-            RTP_LLM_LOG_ERROR("request-state layout requires reuse disabled and one sequence per request");
+            && (unsupported_reuse || malloc_info.batch_kv_cache_resource->batchSize() != 1)) {
+            RTP_LLM_LOG_ERROR("request-state layout requires one sequence per request and prefix reuse only in PDFUSION");
             return {false, 0, 0, MallocStatus::PERMANENT_RESOURCE_EXHAUSTED};
         }
     }
@@ -727,10 +728,13 @@ bool CoordinatorCacheManager::materializeInitialBlocks(const MallocInfo& malloc_
         const auto&         tag       = config_.groupTags()[static_cast<size_t>(group_id)];
         auto&               block_ids = kv_resource.mutableBlockIds(0, tag);
         std::vector<size_t> backfilled_positions;
-        if (!kv_cache_groups_[static_cast<size_t>(group_id)]->malloc(
+        const auto& group = kv_cache_groups_[static_cast<size_t>(group_id)];
+        // A shared prefix hit does not supply a request's private mutable state.
+        const bool group_reuse = malloc_info.reuse_cache && group->policy().group_type != CacheGroupType::REQUEST_STATE;
+        if (!group->malloc(
                 block_ids,
                 cpEffectiveSeqLenForGroup(cp_mapper, config_, tag, common_seq_len),
-                malloc_info.reuse_cache,
+                group_reuse,
                 0,
                 &backfilled_positions,
                 prepared.required_positions[static_cast<size_t>(group_id)])) {
@@ -833,13 +837,15 @@ MallocResult CoordinatorCacheManager::incrMalloc(const MallocInfo& malloc_info) 
             auto&       filled_positions = backfilled_positions[static_cast<size_t>(b)][static_cast<size_t>(group_id)];
             const auto  required_positions = chunkCachePositions(malloc_info, config_.group(tag));
             auto&       group              = kv_cache_groups_[static_cast<size_t>(group_id)];
+            const bool  group_reuse =
+                malloc_info.reuse_cache && group->policy().group_type != CacheGroupType::REQUEST_STATE;
             const bool  allocated =
                 malloc_info.enable_remove_skipped_blocks ?
                      group->mallocForDecode(
-                        block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step, &filled_positions) :
+                        block_ids, group_seq_len, group_reuse, reserve_step, &filled_positions) :
                      group->malloc(block_ids,
                                   group_seq_len,
-                                  malloc_info.reuse_cache,
+                                  group_reuse,
                                   reserve_step,
                                   &filled_positions,
                                   required_positions);

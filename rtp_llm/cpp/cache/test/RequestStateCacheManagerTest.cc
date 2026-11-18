@@ -282,6 +282,34 @@ TEST_F(RequestStateCacheTest, CoordinatorAdmits192AndKeepsBanksAcrossPagesAndAsy
     lease.reset();
     EXPECT_EQ(allocator->freeBlocksNum(), initial_free);
 }
+TEST_F(RequestStateCacheTest, PrefixReuseFlagDoesNotShareWritableRequestState) {
+    auto cfg = config(3, true);
+    auto allocator = std::make_shared<BlockTreeCacheTestAllocator<CoordinatorCacheManager>>(cfg);
+    ASSERT_TRUE(allocator->init());
+
+    auto first = request(cfg, 128);
+    auto second = request(cfg, 128);
+    first.reuse_cache = second.reuse_cache = true;
+    ASSERT_TRUE(allocator->malloc(first).success);
+    ASSERT_TRUE(allocator->malloc(second).success);
+    for (const auto* tag : {"linear_ssm", "linear_replay"}) {
+        const auto& first_ids = first.batch_kv_cache_resource->blocks(0, tag);
+        const auto& second_ids = second.batch_kv_cache_resource->blocks(0, tag);
+        ASSERT_EQ(first_ids.size(), 1);
+        ASSERT_EQ(second_ids.size(), 1);
+        EXPECT_NE(first_ids.front(), second_ids.front());
+    }
+
+    const auto first_ssm = first.batch_kv_cache_resource->blocks(0, "linear_ssm");
+    first.enable_remove_skipped_blocks = true;
+    first.incr_seq_len_override = 192;
+    ASSERT_TRUE(allocator->malloc(first).success);
+    EXPECT_EQ(first.batch_kv_cache_resource->blocks(0, "linear_ssm"), first_ssm);
+
+    allocator->free({first.batch_kv_cache_resource, first.complete_token_ids});
+    allocator->free({second.batch_kv_cache_resource, second.complete_token_ids});
+}
+
 TEST_F(RequestStateCacheTest, SingleSsmAdmits192AndKeepsOneRowAcrossPagesAndAsyncRelease) {
     auto cfg = config(193, true);
     cfg.finalizeBlockNums(32768, RuntimeConfig{});
