@@ -45,6 +45,30 @@ AgentRequestR::SubmitResult AgentRequestR::submitWithResult(
     return SubmitResult::ACCEPTED;
 }
 
+void AgentRequestR::setV6dCacheTouchHandler(const std::function<bool(uint64_t, const NaviSchedBlockHashes &)> &handler)
+{
+    autil::ScopedWriteLock lock(_handlerLock);
+    _v6dCacheTouchHandler = handler;
+}
+
+bool AgentRequestR::touchV6dCache(uint64_t requestId,
+                                 const NaviSchedBlockHashes &hashes) const
+{
+    std::function<bool(uint64_t, const NaviSchedBlockHashes &)> handler;
+    {
+        autil::ScopedReadLock lock(_handlerLock);
+        handler = _v6dCacheTouchHandler;
+    }
+    if (!handler || requestId == 0 || hashes.empty()) {
+        return false;
+    }
+    try {
+        return handler(requestId, hashes);
+    } catch (...) {
+        return false;
+    }
+}
+
 bool AgentRequestR::finish() const
 {
     std::function<bool()> handler;

@@ -29,6 +29,8 @@ public:
     SubmitResult submitWithResult(
         const NaviSchedForwardRequest &request,
         const navi::AsyncPipePtr &completionPipe = {}) const;
+    void setV6dCacheTouchHandler(const std::function<bool(uint64_t, const NaviSchedBlockHashes &)> &handler);
+    bool touchV6dCache(uint64_t requestId, const NaviSchedBlockHashes &hashes) const;
     bool finish() const;
     navi::SummaryErrorCode getSummary(const std::string &query,
                                       navi::SummaryBuilder &builder) const override;
@@ -39,6 +41,7 @@ public:
 private:
     mutable autil::ReadWriteLock _handlerLock;
     CompletionHandler _completionHandler;
+    std::function<bool(uint64_t, const NaviSchedBlockHashes &)> _v6dCacheTouchHandler;
     std::function<bool()> _finishHandler;
     mutable std::atomic<uint64_t> _requestCount{0};
     mutable std::atomic<uint64_t> _rejectedRequestCount{0};

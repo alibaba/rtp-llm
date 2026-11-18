@@ -396,6 +396,7 @@ private:
 class VLLMAgentBridge {
 public:
     using BatchRequest = std::tuple<uint64_t, int64_t, int64_t, std::vector<uint64_t>>;
+    using V6dCacheTouch = std::pair<uint64_t, NaviSchedBlockHashes>;
     using RequestStats = std::tuple<uint64_t, int64_t, int64_t>;
     using ObservedRequestStats = std::tuple<uint64_t, int64_t, int64_t, int64_t>;
 
@@ -548,6 +549,18 @@ public:
             std::lock_guard<std::mutex> lock(state->mutex);
             state->enabled = false;
             state->condition.notify_all();
+        } else {
+            _agent->setV6dCacheTouchHandler(
+                [state](uint64_t requestId, const NaviSchedBlockHashes &hashes) {
+                    std::lock_guard<std::mutex> lock(state->mutex);
+                    if (!state->enabled) {
+                        return false;
+                    }
+                    state->v6dCacheTouches.emplace_back(requestId, hashes);
+                    state->condition.notify_one();
+                    state->notification.notify();
+                    return true;
+                });
         }
         return enabled;
     }
@@ -565,6 +578,7 @@ public:
         }
         if (_agent) {
             _agent->setForwardCancelHandler({});
+            _agent->setV6dCacheTouchHandler({});
         }
         const auto disabled = _agent && _agent->setForwardBatchHandler({});
         std::vector<std::shared_ptr<ForwardBatch>> pending;
@@ -573,6 +587,7 @@ public:
             pending.assign(state->forwardQueue.begin(), state->forwardQueue.end());
             state->forwardQueue.clear();
             state->touchQueue.clear();
+            state->v6dCacheTouches.clear();
             state->queuedForwardRequestIds.clear();
             state->queuedTouchRequestIds.clear();
             state->cancelledRequests.clear();
@@ -630,6 +645,19 @@ public:
     }
 
     int notificationFd() { return _forwardState->notification.fd(); }
+
+    std::vector<V6dCacheTouch> takeV6dCacheTouches()
+    {
+        const auto state = _forwardState;
+        std::lock_guard<std::mutex> lock(state->mutex);
+        std::vector<V6dCacheTouch> requests;
+        requests.reserve(state->v6dCacheTouches.size());
+        while (!state->v6dCacheTouches.empty()) {
+            requests.emplace_back(std::move(state->v6dCacheTouches.front()));
+            state->v6dCacheTouches.pop_front();
+        }
+        return requests;
+    }
 
     std::vector<std::shared_ptr<ForwardRequestTouch>> takeForwardRequestTouches(
         size_t maxCount)
@@ -1347,6 +1375,7 @@ private:
         AsyncNotification notification;
         std::deque<std::shared_ptr<ForwardBatch>> forwardQueue;
         std::deque<std::shared_ptr<ForwardRequestTouch>> touchQueue;
+        std::deque<V6dCacheTouch> v6dCacheTouches;
         std::deque<uint64_t> cancelledRequests;
         std::unordered_set<uint64_t> queuedForwardRequestIds;
         std::unordered_set<uint64_t> queuedTouchRequestIds;
@@ -1466,6 +1495,8 @@ void bindNaviSchedData(py::module_ &m)
         .def("notification_fd", &VLLMAgentBridge::notificationFd)
         .def("take_forward_request_touches", &VLLMAgentBridge::takeForwardRequestTouches,
              py::arg("max_count") = 0, py::call_guard<py::gil_scoped_release>())
+        .def("take_v6d_cache_touches", &VLLMAgentBridge::takeV6dCacheTouches,
+             py::call_guard<py::gil_scoped_release>())
         .def("take_cancelled_requests", &VLLMAgentBridge::takeCancelledRequests,
              py::call_guard<py::gil_scoped_release>())
         .def("publish_forward_response", &VLLMAgentBridge::publishForwardResponse,
