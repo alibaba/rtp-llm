@@ -59,6 +59,17 @@ class RpcErrorCodeProtoTest(unittest.TestCase):
                 self.assertEqual(parsed.error_code, expected)
                 self.assertEqual(parsed.SerializeToString(), encoded)
 
+    def test_admission_errors_round_trip_as_per_item_errors(self):
+        for name, wire_id in (
+            ("CONCURRENCY_LIMIT_ERROR", 409),
+            ("PRIORITY_PREEMPTED", 8429),
+        ):
+            with self.subTest(name=name):
+                error = RpcErrorPB(error_code=ErrorCodePB.Value(name))
+                self.assertEqual(error.error_code, wire_id)
+                parsed = RpcErrorPB.FromString(error.SerializeToString())
+                self.assertEqual(ErrorCodePB.Name(parsed.error_code), name)
+
     def test_disk_cache_and_prefill_only_keep_independent_wire_fields(self):
         fields = GenerateConfigPB.DESCRIPTOR.fields_by_name
         self.assertEqual(fields["enable_disk_cache"].number, 74)

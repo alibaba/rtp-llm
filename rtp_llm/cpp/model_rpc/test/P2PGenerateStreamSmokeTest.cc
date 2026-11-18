@@ -1461,7 +1461,7 @@ TEST_F(P2PGenerateStreamSmokeTest, BatchAttachesMasterAdmissionsWithoutEnqueuein
     ASSERT_NO_FATAL_FAILURE(expectReleased());
 }
 
-TEST_F(P2PGenerateStreamSmokeTest, BatchPartialPrefillAdmissionCancelsEverySubmittedItem) {
+TEST_F(P2PGenerateStreamSmokeTest, BatchPartialPrefillAdmissionKeepsAcceptedItem) {
     initialize(DataType::TYPE_FP16, Fault::RejectSecondBatchItem);
     BatchGenerateInputPB batch;
     batch.add_inputs()->CopyFrom(request(1901, 8));
@@ -1471,11 +1471,14 @@ TEST_F(P2PGenerateStreamSmokeTest, BatchPartialPrefillAdmissionCancelsEverySubmi
     context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(15));
     BatchGenerateOutputsPB response;
     const auto             status = stub->BatchGenerateCall(&context, batch, &response);
-    EXPECT_FALSE(status.ok());
-    EXPECT_NE(status.error_message().find("Prefill batch request 1902"), std::string::npos);
-    EXPECT_NE(status.error_message().find("EnqueueBatch does not support beam search"), std::string::npos);
+    ASSERT_TRUE(status.ok()) << status.error_message();
+    ASSERT_EQ(response.results_size(), 2);
+    EXPECT_TRUE(response.results(0).has_final_output());
+    EXPECT_FALSE(response.results(0).has_error_info());
+    ASSERT_TRUE(response.results(1).has_error_info());
+    EXPECT_EQ(response.results(1).error_info().error_code(), ErrorCodePB::INVALID_PARAMS);
     expectCancelDrained();
-    EXPECT_EQ(decode_engine_->checked_requests.load(), 0);
+    EXPECT_EQ(decode_engine_->checked_requests.load(), 1);
     healthyAfterCancel(1903);
 }
 
@@ -1507,7 +1510,13 @@ TEST_F(P2PGenerateStreamSmokeTest, BatchLostAdmissionAckStillCancelsPrefillResou
     grpc::ClientContext context;
     context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(15));
     BatchGenerateOutputsPB response;
-    EXPECT_EQ(stub->BatchGenerateCall(&context, batch, &response).error_code(), grpc::StatusCode::UNAVAILABLE);
+    const auto             status = stub->BatchGenerateCall(&context, batch, &response);
+    ASSERT_TRUE(status.ok()) << status.error_message();
+    ASSERT_EQ(response.results_size(), 2);
+    for (const auto& result : response.results()) {
+        ASSERT_TRUE(result.has_error_info());
+        EXPECT_EQ(result.error_info().error_code(), ErrorCodePB::CONNECT_FAILED);
+    }
     expectCancelDrained();
     EXPECT_EQ(decode_engine_->checked_requests.load(), 0);
     healthyAfterCancel(2203);

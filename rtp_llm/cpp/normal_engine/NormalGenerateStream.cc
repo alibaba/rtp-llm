@@ -498,13 +498,17 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
                       update_info.update_remote_generate);
 
     // Prefill publishes its handoff output immediately. Decode replays that
-    // first token once; later non-streaming updates must stay buffered until
-    // completion, just as on the original PD output path.
+    // first token once. A requested logits step also needs to reach the RPC
+    // collector before it combines the non-streaming response.
     const auto role = resourceContext().role_type;
     const bool pd_sep_first_token = queryPdSep()
         && (role == RoleType::PREFILL
             || (role == RoleType::DECODE && !update_info.update_remote_generate && iter_count_ == 1));
-    const bool need_update = pd_sep_first_token || isStreaming() || finished_;
+    const auto& config               = *generateConfig();
+    const bool  selected_logits_step = role == RoleType::DECODE && queryPdSep() && config.aux_info
+                                      && config.return_logits && config.logits_index
+                                      && seqLength() - inputLength() == *config.logits_index;
+    const bool need_update = pd_sep_first_token || selected_logits_step || isStreaming() || finished_;
     if (!need_update) {
         return;
     }

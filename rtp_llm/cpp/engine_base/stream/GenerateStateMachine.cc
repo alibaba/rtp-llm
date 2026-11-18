@@ -68,9 +68,16 @@ void GenerateStateMachine::handleWaiting() {
         initial_kv_allocation_rt_us = currentTimeUs() - allocation_start_us;
         if (!result.ok()) {
             const auto role_type              = stream_cache_resource_->resourceContext().role_type;
-            const bool retryable_prefill_init = (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL)
+            const bool retryable_context_init = (role_type == RoleType::PDFUSION || role_type == RoleType::PREFILL)
                                                 && stream_cache_resource_->isContextStream();
-            if (absl::IsUnavailable(result) && retryable_prefill_init) {
+            const bool retryable_handoff_init = role_type == RoleType::DECODE && stream && stream->queryPdSep();
+            if (retryable_handoff_init && currentTimeMs() >= stream->deadlineMs()) {
+                reportEvent(StreamEvents::Error, ErrorCode::GENERATE_TIMEOUT, "decode KV allocation deadline expired");
+                status.store(StreamState::FINISHED, std::memory_order_release);
+                releaseResource();
+                return;
+            }
+            if (absl::IsUnavailable(result) && (retryable_context_init || retryable_handoff_init)) {
                 stream_cache_resource_->reportMallocRetry();
                 return;
             }

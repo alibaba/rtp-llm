@@ -5,6 +5,9 @@
 #include <limits>
 
 namespace rtp_llm {
+namespace {
+constexpr int64_t kOverdueRetryIntervalMs = 30 * 1000;
+}
 
 PDCancelRegistry::~PDCancelRegistry() {
     if (cancel_expiration_) {
@@ -24,7 +27,7 @@ void PDCancelRegistry::armExpirationLocked() {
     if (!fence_expirations_.empty())
         next = std::min(next, fence_expirations_.begin()->first);
     if (!overdue_cancels_.empty())
-        next = std::min(next, now + 30 * 1000);
+        next = std::min(next, next_overdue_retry_ms_);
     if (cancel_expiration_ && expiration_ms_ == next) {
         return;
     }
@@ -46,7 +49,9 @@ void PDCancelRegistry::armExpirationLocked() {
             if (generation != registry->expiration_generation_)
                 return;
             registry->cancel_expiration_ = {};
-            registry->trimLocked(currentTimeMs());
+            const auto now_ms            = currentTimeMs();
+            registry->trimLocked(now_ms);
+            registry->retryOverdueCancelsLocked(now_ms);
             registry->reportPressureLocked();
             registry->armExpirationLocked();
         });
@@ -93,6 +98,9 @@ void PDCancelRegistry::trimLocked(int64_t now_ms) {
             continue;
         }
         if (e->canceled.load() && !e->terminal) {
+            if (overdue_cancels_.empty()) {
+                next_overdue_retry_ms_ = now_ms;
+            }
             overdue_cancels_.insert(std::move(expired));
             continue;
         }
@@ -124,6 +132,28 @@ void PDCancelRegistry::trimLocked(int64_t now_ms) {
     if (expired_remote_retries != 0) {
         RTP_LLM_LOG_WARNING("PD cancel retry retention expired after local physical cleanup, unconfirmed_peers=%zu",
                             expired_remote_retries);
+    }
+}
+
+void PDCancelRegistry::retryOverdueCancelsLocked(int64_t now_ms) {
+    if (overdue_cancels_.empty() || now_ms < next_overdue_retry_ms_) {
+        return;
+    }
+    // Retry a bounded slice through the existing completion queue. complete()
+    // still verifies local cleanup and active reads before publishing terminal.
+    auto it = overdue_cancels_.upper_bound(last_overdue_retry_key_);
+    for (size_t count = 0; it != overdue_cancels_.end() && count < kMaxExpirationsPerPass; ++count, ++it) {
+        last_overdue_retry_key_ = *it;
+        const auto entry        = entries_.find(it->second);
+        if (entry != entries_.end() && entry->second->local_done.load()) {
+            scheduleLocalProgress(entry->second);
+        }
+    }
+    if (it == overdue_cancels_.end()) {
+        last_overdue_retry_key_ = {};
+        next_overdue_retry_ms_  = now_ms + kOverdueRetryIntervalMs;
+    } else {
+        next_overdue_retry_ms_ = now_ms + kActiveReadExpiryRetryMs;
     }
 }
 
