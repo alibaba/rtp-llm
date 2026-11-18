@@ -2485,10 +2485,25 @@ TEST_F(BlockTreeEvictorTest, DirectDeviceDropsConvergePastTransferBatchLimit) {
     ASSERT_EQ(device_pool_->usedBlocksNum(), 18u);
 
     std::vector<bool> settled_events;
-    evictor_->settled_ = [&settled_events](bool check_watermark) {
+    evictor_->settled_ = [this, &settled_events](bool check_watermark) {
         settled_events.push_back(check_watermark);
+        if (check_watermark) {
+            evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE, TierWatermark{0.40, 0.80});
+        }
     };
-    evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE, TierWatermark{/*low_ratio=*/0.40, /*high_ratio=*/0.80});
+    {
+        std::lock_guard<std::mutex> lock(evictor_runtime_.mutex_);
+        evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE,
+                                                   TierWatermark{/*low_ratio=*/0.40, /*high_ratio=*/0.80});
+        EXPECT_EQ(device_pool_->usedBlocksNum(), 10u);
+        EXPECT_EQ(settled_events, (std::vector<bool>{false}));
+        EXPECT_EQ(evictor_->heaps_[0].watermark_rounds[static_cast<size_t>(Tier::DEVICE)].pending_count, 1u);
+        // Repeated callers cannot drain a second batch while the first continuation waits for this lock.
+        evictor_->scheduleWatermarkEvictionsLocked(Tier::DEVICE,
+                                                   TierWatermark{/*low_ratio=*/0.40, /*high_ratio=*/0.80});
+        EXPECT_EQ(device_pool_->usedBlocksNum(), 10u);
+    }
+    task_pool.waitForIdle();
 
     EXPECT_EQ(evictor_runtime_.transferEngine()->submittedBatchCount(), 0u);
     EXPECT_EQ(evictor_runtime_.transferEngine()->submittedDescriptorCount(), 0u);
@@ -2497,9 +2512,8 @@ TEST_F(BlockTreeEvictorTest, DirectDeviceDropsConvergePastTransferBatchLimit) {
     EXPECT_EQ(evictor_->candidateStats().device_candidates, 8u);
     EXPECT_EQ(evictor_->candidateStats().host_candidates, 0u);
     EXPECT_EQ(tree_->size(), 8u);
-    // Direct drops perform no transfer: all ten releases settle in one round,
-    // even though the transfer descriptor limit is eight.
-    EXPECT_EQ(settled_events, (std::vector<bool>{false}));
+    // Two lock acquisitions release eight then two blocks, but report one watermark round.
+    EXPECT_EQ(settled_events, (std::vector<bool>{false, true, false, true}));
 
     RtpLLMCacheEvictionMetrics* eviction_metrics = metrics_reporter->getMetricsGroup<RtpLLMCacheEvictionMetrics>();
     ASSERT_NE(eviction_metrics, nullptr);
@@ -2521,6 +2535,202 @@ TEST_F(BlockTreeEvictorTest, DirectDeviceDropsConvergePastTransferBatchLimit) {
     evictor_->settled_ = [](bool) {};
     while (evictor_->dropLocked(/*group_set_id=*/0, Tier::DEVICE, /*notify_settled=*/false)) {}
     while (evictor_->dropLocked(/*group_set_id=*/0, Tier::HOST, /*notify_settled=*/false)) {}
+    task_pool.shutdown();
+}
+
+TEST_F(BlockTreeEvictorTest, HostDirectDropYieldsAndContinuesBelowHighWatermark) {
+    auto host_pool = makePinnedHostPool(20);
+    ASSERT_NE(host_pool, nullptr);
+    resetGroup(host_pool);
+    BlockTreeTaskPool task_pool(1, 4, "host_drop_continuation");
+    ASSERT_TRUE(task_pool.start());
+    evictor_ = evictor_runtime_.make(
+        tree_.get(),
+        EvictionPolicy::LRU,
+        EvictionPolicy::LRU,
+        EvictionPolicy::FIFO,
+        [](Tier tier) { return tier != Tier::DISK; },
+        &task_pool,
+        3);
+    for (int64_t key = 1; key <= 18; ++key) {
+        auto block = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+        ASSERT_FALSE(isNullBlockIdx(block));
+        insert({key}, {{makeResource(Tier::HOST, block)}});
+    }
+    const TierWatermark watermark{0.4, 0.8};
+    std::vector<size_t> used_after_batch;
+    evictor_->settled_ = [&](bool check_watermark) {
+        if (check_watermark) {
+            evictor_->scheduleWatermarkEvictionsLocked(Tier::HOST, watermark);
+        } else {
+            used_after_batch.push_back(host_pool->usedBlocksNum());
+        }
+    };
+    {
+        std::lock_guard<std::mutex> lock(evictor_runtime_.mutex_);
+        evictor_->scheduleWatermarkEvictionsLocked(Tier::HOST, watermark);
+        EXPECT_EQ(host_pool->usedBlocksNum(), 15u);  // Already below high, still above low.
+        EXPECT_EQ(evictor_->heaps_[0].watermark_rounds[static_cast<size_t>(Tier::HOST)].pending_count, 1u);
+        EXPECT_EQ(evictor_->heaps_[0].watermark_rounds[static_cast<size_t>(Tier::HOST)].required_count, 10u);
+        evictor_->scheduleWatermarkEvictionsLocked(Tier::HOST, watermark);
+        EXPECT_EQ(host_pool->usedBlocksNum(), 15u);
+    }
+    // No new request or transfer callback is needed to finish the remaining batches.
+    task_pool.waitForIdle();
+    EXPECT_EQ(used_after_batch, (std::vector<size_t>{15, 12, 9, 8}));
+    EXPECT_EQ(evictor_->heaps_[0].watermark_rounds[static_cast<size_t>(Tier::HOST)].pending_count, 0u);
+    EXPECT_EQ(evictor_->heaps_[0].watermark_rounds[static_cast<size_t>(Tier::HOST)].required_count, 0u);
+    EXPECT_EQ(evictor_runtime_.transferCount(), 0u);
+    evictor_->settled_ = [](bool) {};
+    while (evictor_->dropLocked(0, Tier::HOST, false)) {}
+    task_pool.shutdown();
+}
+
+TEST_F(BlockTreeEvictorTest, RejectedDropContinuationDoesNotDrainInlineAndCanRetry) {
+    auto host_pool = makePinnedHostPool(10);
+    ASSERT_NE(host_pool, nullptr);
+    resetGroup(host_pool);
+    // A pool that has not started rejects background admission.
+    BlockTreeTaskPool task_pool(1, 4, "rejected_drop_continuation");
+    evictor_ = evictor_runtime_.make(
+        tree_.get(),
+        EvictionPolicy::LRU,
+        EvictionPolicy::LRU,
+        EvictionPolicy::FIFO,
+        [](Tier tier) { return tier != Tier::DISK; },
+        &task_pool,
+        2);
+    for (int64_t key = 1; key <= 9; ++key) {
+        auto block = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+        ASSERT_FALSE(isNullBlockIdx(block));
+        insert({key}, {{makeResource(Tier::HOST, block)}});
+    }
+    const TierWatermark watermark{0.4, 0.8};
+    {
+        std::lock_guard<std::mutex> lock(evictor_runtime_.mutex_);
+        evictor_->scheduleWatermarkEvictionsLocked(Tier::HOST, watermark);
+        EXPECT_EQ(host_pool->usedBlocksNum(), 7u);
+        EXPECT_EQ(evictor_->heaps_[0].watermark_rounds[static_cast<size_t>(Tier::HOST)].pending_count, 0u);
+    }
+    ASSERT_TRUE(task_pool.start());
+    {
+        std::lock_guard<std::mutex> lock(evictor_runtime_.mutex_);
+        evictor_->settled_ = [&](bool check_watermark) {
+            if (check_watermark) {
+                evictor_->scheduleWatermarkEvictionsLocked(Tier::HOST, watermark);
+            }
+        };
+        evictor_->scheduleWatermarkEvictionsLocked(Tier::HOST, watermark);
+        EXPECT_EQ(host_pool->usedBlocksNum(), 5u);
+    }
+    task_pool.waitForIdle();
+    EXPECT_EQ(host_pool->usedBlocksNum(), 4u);
+    while (evictor_->dropLocked(0, Tier::HOST, false)) {}
+    task_pool.shutdown();
+}
+
+TEST_F(BlockTreeEvictorTest, DirectDropStopsWhenSourceReferencesPreventPhysicalReclamation) {
+    auto host_pool = makePinnedHostPool(10);
+    ASSERT_NE(host_pool, nullptr);
+    resetGroup(host_pool);
+    BlockTreeTaskPool task_pool(1, 4, "drop_without_reclamation");
+    ASSERT_TRUE(task_pool.start());
+    evictor_ = evictor_runtime_.make(
+        tree_.get(),
+        EvictionPolicy::LRU,
+        EvictionPolicy::LRU,
+        EvictionPolicy::FIFO,
+        [](Tier tier) { return tier != Tier::DISK; },
+        &task_pool,
+        2);
+    std::vector<BlockIdxType> held_blocks;
+    for (int64_t key = 1; key <= 9; ++key) {
+        auto block = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+        ASSERT_FALSE(isNullBlockIdx(block));
+        host_pool->incTreeRef(block, BlockTreeRefType::EVICT);
+        held_blocks.push_back(block);
+        insert({key}, {{makeResource(Tier::HOST, block)}});
+    }
+    const TierWatermark watermark{0.4, 0.8};
+    size_t              continuations = 0;
+    evictor_->settled_                = [&](bool check_watermark) {
+        if (check_watermark) {
+            ++continuations;
+            evictor_->scheduleWatermarkEvictionsLocked(Tier::HOST, watermark);
+        }
+    };
+    {
+        std::lock_guard<std::mutex> lock(*evictor_->mutex_);
+        evictor_->scheduleWatermarkEvictionsLocked(Tier::HOST, watermark);
+        EXPECT_EQ(host_pool->usedBlocksNum(), 9u);
+        EXPECT_EQ(tree_->size(), 7u);
+    }
+    task_pool.waitForIdle();
+    EXPECT_EQ(continuations, 0u);
+    EXPECT_EQ(tree_->size(), 7u);
+    {
+        std::lock_guard<std::mutex> lock(*evictor_->mutex_);
+        for (auto block : held_blocks) {
+            host_pool->decTreeRef(block, BlockTreeRefType::EVICT);
+        }
+        evictor_->scheduleWatermarkEvictionsLocked(Tier::HOST, watermark);
+    }
+    task_pool.waitForIdle();
+    EXPECT_EQ(host_pool->usedBlocksNum(), 4u);
+    evictor_->settled_ = [](bool) {};
+    while (evictor_->dropLocked(0, Tier::HOST, false)) {}
+    task_pool.shutdown();
+}
+
+TEST_F(BlockTreeEvictorTest, QueuedLoadRunsBetweenDirectDropBatchesWithOneWorker) {
+    auto host_pool = makePinnedHostPool(20);
+    ASSERT_NE(host_pool, nullptr);
+    resetGroup(host_pool);
+    std::mutex         worker_gate;
+    std::promise<void> worker_entered;
+    auto               entered = worker_entered.get_future();
+    BlockTreeTaskPool  task_pool(1, 4, "drop_load_fairness");
+    ASSERT_TRUE(task_pool.start());
+    evictor_ = evictor_runtime_.make(
+        tree_.get(),
+        EvictionPolicy::LRU,
+        EvictionPolicy::LRU,
+        EvictionPolicy::FIFO,
+        [](Tier tier) { return tier != Tier::DISK; },
+        &task_pool,
+        3);
+    for (int64_t key = 1; key <= 18; ++key) {
+        auto block = group_->allocateSingleBlock(Tier::HOST, BlockTreeRefType::CACHE);
+        ASSERT_FALSE(isNullBlockIdx(block));
+        insert({key}, {{makeResource(Tier::HOST, block)}});
+    }
+    const TierWatermark watermark{0.4, 0.8};
+    evictor_->settled_ = [&](bool check_watermark) {
+        if (check_watermark) {
+            evictor_->scheduleWatermarkEvictionsLocked(Tier::HOST, watermark);
+        }
+    };
+    size_t used_when_load_runs = 0;
+    {
+        std::unique_lock<std::mutex> gate_lock(worker_gate);
+        ASSERT_TRUE(task_pool.submit(BlockTreeTaskClass::BACKGROUND, [&] {
+            worker_entered.set_value();
+            std::lock_guard<std::mutex> lock(worker_gate);
+        }));
+        ASSERT_EQ(entered.wait_for(std::chrono::seconds(2)), std::future_status::ready);
+        std::lock_guard<std::mutex> lock(*evictor_->mutex_);
+        evictor_->scheduleWatermarkEvictionsLocked(Tier::HOST, watermark);
+        EXPECT_EQ(host_pool->usedBlocksNum(), 15u);
+        ASSERT_TRUE(task_pool.submit(BlockTreeTaskClass::LOAD, [&] {
+            std::lock_guard<std::mutex> lock(*evictor_->mutex_);
+            used_when_load_runs = host_pool->usedBlocksNum();
+        }));
+    }
+    task_pool.waitForIdle();
+    EXPECT_EQ(used_when_load_runs, 15u);
+    EXPECT_EQ(host_pool->usedBlocksNum(), 8u);
+    evictor_->settled_ = [](bool) {};
+    while (evictor_->dropLocked(0, Tier::HOST, false)) {}
     task_pool.shutdown();
 }
 

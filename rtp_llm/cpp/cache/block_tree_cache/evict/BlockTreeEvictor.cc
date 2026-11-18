@@ -463,11 +463,32 @@ BlockTreeEvictor::batchEvictLocked(size_t group_set_id, Tier source_tier, size_t
     }
     const Tier target_tier = watermarkTargetTier(source_tier);
     if (target_tier == Tier::NONE) {
-        size_t     scheduled_count = 0;
-        const bool direct_progress = batchDropLocked(group_set_id, source_tier, max_victim_count, scheduled_count);
-        return {/*direct_progress=*/direct_progress,
-                /*async_submitted=*/false,
-                /*scheduled_count=*/scheduled_count};
+        BatchEvictResult result;
+        result.direct_progress = batchDropLocked(group_set_id, source_tier, max_victim_count, result.scheduled_count);
+        if (result.scheduled_count != 0 && task_pool_ != nullptr) {
+            try {
+                // Continue only after physical reclamation, and let LOAD run between batches.
+                result.async_submitted =
+                    task_pool_->submit(BlockTreeTaskClass::BACKGROUND, [this, group_set_id, source_tier] {
+                        CacheLockGuard lock(
+                            *mutex_,
+                            "watermark",
+                            CacheStageContext::forLock(metrics_reporter_, "watermark", source_tier, Tier::NONE));
+                        --heaps_[group_set_id].watermark_rounds[static_cast<size_t>(source_tier)].pending_count;
+                        settled_(true);
+                        finishWatermarkRoundLocked(group_set_id, source_tier);
+                    });
+            } catch (const std::exception& error) {
+                RTP_LLM_LOG_ERROR("failed to enqueue drop settlement: %s", error.what());
+            } catch (...) {
+                RTP_LLM_LOG_ERROR("failed to enqueue drop settlement with unknown exception");
+            }
+            if (result.async_submitted) {
+                // The callback must acquire our cache mutex before consuming this count.
+                ++heaps_[group_set_id].watermark_rounds[static_cast<size_t>(source_tier)].pending_count;
+            }
+        }
+        return result;
     }
 
     std::vector<TransferDescriptor>     descriptors;
@@ -803,9 +824,6 @@ Tier BlockTreeEvictor::watermarkTargetTier(Tier source_tier) const {
 
 size_t
 BlockTreeEvictor::watermarkLogicalBatchLimit(const GroupSet& group_set, Tier source_tier, Tier target_tier) const {
-    if (target_tier == Tier::NONE) {
-        return std::numeric_limits<size_t>::max();
-    }
     if (source_tier != Tier::HOST || target_tier != Tier::DISK || !group_set.diskPool()) {
         return max_descriptors_per_batch_;
     }
@@ -834,7 +852,9 @@ BlockTreeEvictor::watermarkLogicalBatchLimit(const GroupSet& group_set, Tier sou
 void BlockTreeEvictor::scheduleWatermarkEvictionsLocked(Tier                         tier,
                                                         std::optional<TierWatermark> tier_watermark,
                                                         std::optional<TierWatermark> full_watermark) {
-    const bool   is_host_disk       = tier == Tier::HOST && watermarkTargetTier(tier) == Tier::DISK;
+    const Tier   target_tier        = watermarkTargetTier(tier);
+    const bool   direct_drop        = target_tier == Tier::NONE;
+    const bool   is_host_disk       = tier == Tier::HOST && target_tier == Tier::DISK;
     const auto&  group_sets         = tree_->groupSets();
     const size_t first_group        = is_host_disk ? next_disk_evict_group_ : 0;
     bool         waiting_for_budget = false;
@@ -842,6 +862,9 @@ void BlockTreeEvictor::scheduleWatermarkEvictionsLocked(Tier                    
         const size_t group_index = (first_group + i) % group_sets.size();
         const auto&  group_set   = group_sets[group_index];
         auto&        round       = heaps_[group_set->groupSetId()].watermark_rounds[static_cast<size_t>(tier)];
+        if (direct_drop && round.pending_count != 0) {
+            continue;
+        }
         if (tier_watermark.has_value()
             && (!is_host_disk
                 || (!round.watermark.has_value() && round.required_count == 0 && round.pending_count == 0))) {
@@ -857,9 +880,8 @@ void BlockTreeEvictor::scheduleWatermarkEvictionsLocked(Tier                    
         if (round.required_count == 0) {
             round.required_count = required_count;
         }
-        bool eviction_reported = is_host_disk && round.scheduled_count != 0;
+        bool eviction_reported = (is_host_disk || direct_drop) && round.scheduled_count != 0;
         while (required_count > 0 && !waiting_for_budget) {
-            const Tier   target_tier = watermarkTargetTier(tier);
             const size_t batch_count =
                 std::min(required_count, watermarkLogicalBatchLimit(*group_set, tier, target_tier));
             if (batch_count == 0) {
@@ -883,7 +905,8 @@ void BlockTreeEvictor::scheduleWatermarkEvictionsLocked(Tier                    
             if (is_host_disk && result.async_submitted) {
                 next_disk_evict_group_ = (group_index + 1) % group_sets.size();
             }
-            if (result.async_submitted) {
+            // Even rejected drop settlement must not turn into an inline drain.
+            if (result.async_submitted || direct_drop) {
                 break;
             }
 
