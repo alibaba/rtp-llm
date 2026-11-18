@@ -3,7 +3,12 @@ import logging
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.generate_config import GenerateConfig, RequestFormat, RoleAddr
+from rtp_llm.config.generate_config import (
+    INTERNAL_GENERATE_CONFIG_FIELDS,
+    GenerateConfig,
+    RequestFormat,
+    RoleAddr,
+)
 from rtp_llm.structure.request_constants import request_id_field_name
 
 
@@ -48,10 +53,14 @@ class RequestExtractor:
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         field_names = GenerateConfig.model_fields
         config_values = {
-            key: value for key, value in values.items() if key in field_names
+            key: value
+            for key, value in values.items()
+            if key in field_names and key not in INTERNAL_GENERATE_CONFIG_FIELDS
         }
         remain_values = {
-            key: value for key, value in values.items() if key not in field_names
+            key: value
+            for key, value in values.items()
+            if key not in field_names and key not in INTERNAL_GENERATE_CONFIG_FIELDS
         }
         return config_values, remain_values
 

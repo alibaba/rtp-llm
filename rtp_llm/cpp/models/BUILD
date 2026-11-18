@@ -149,6 +149,7 @@ cc_library(
     srcs = ["ModelInputsLogger.cc"],
     hdrs = ["ModelInputsLogger.h"],
     deps = [
+        "//rtp_llm/cpp/metrics:metrics",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings/core:op_data",
         "@havenask//aios/autil:env_util",

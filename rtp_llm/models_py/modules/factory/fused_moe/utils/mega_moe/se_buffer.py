@@ -186,10 +186,10 @@ def _signature_has(callable_obj, required: tuple[str, ...]) -> str | None:
     return None
 
 
-def _mega_moe_se_unavailable_reason() -> str | None:
+def _mega_moe_se_unavailable_reason(*, allow_single_rank=False) -> str | None:
     """Return ``None`` only when the installed Mega API supports fused SE."""
 
-    base = _mega_moe_unavailable_reason()
+    base = _mega_moe_unavailable_reason(allow_single_rank=allow_single_rank)
     if base is not None:
         return base
     try:
@@ -218,5 +218,5 @@ def _mega_moe_se_unavailable_reason() -> str | None:
     return None
 
 
-def _mega_moe_se_available() -> bool:
-    return _mega_moe_se_unavailable_reason() is None
+def _mega_moe_se_available(*, allow_single_rank=False) -> bool:
+    return _mega_moe_se_unavailable_reason(allow_single_rank=allow_single_rank) is None

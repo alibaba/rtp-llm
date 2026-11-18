@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import logging
 import os
 import re
@@ -113,31 +114,27 @@ def _make_cpu_tp_broadcaster_base_path(
         base_dir = os.path.join(
             os.environ.get("TMPDIR", "/tmp"), f"rtp_llm_{os.getuid()}"
         )
-    os.makedirs(base_dir, mode=0o700, exist_ok=True)
     # pp_rank disambiguates the TP groups of different PP stages.
     base_path = os.path.join(
         base_dir,
         f"rtp_llm_tp_{session_id}_pp{parallelism_config.pp_rank}_dp{parallelism_config.dp_rank}",
     )
     rank0_path = f"{base_path}_0.sock"
-    if len(os.fsencode(rank0_path)) >= _UDS_SUN_PATH_LIMIT:
-        # Remote-execution sandboxes (nativelink) can have TMPDIR paths well
-        # over 150 bytes, pushing the sun_path past the kernel's 107-byte
-        # limit. Fall back to a short /tmp path derived from a hash of the
-        # full base path -- all ranks compute the same hash from the same
-        # session inputs (ppid, port, dp_rank), so they rendezvous at the
-        # same socket. /tmp is writable on every CI worker.
-        import hashlib
-
-        digest = hashlib.sha256(os.fsencode(base_path)).hexdigest()[:16]
-        base_path = os.path.join("/tmp", f"rtp_llm_tp_{digest}")
+    if len(os.fsencode(rank0_path)) >= _UDS_SUN_PATH_LIMIT and not os.environ.get(
+        "RTP_LLM_CPU_TP_BROADCASTER_DIR"
+    ):
+        # Remote workers may provide a TMPDIR longer than sockaddr_un allows.
+        # Hash the full identity so ranks agree while separate jobs stay isolated.
+        identity = hashlib.sha256(os.fsencode(base_path)).hexdigest()[:24]
+        base_dir = os.path.join("/tmp", f"rtp_llm_{os.getuid()}")
+        base_path = os.path.join(base_dir, f"rtp_llm_tp_{identity}")
         rank0_path = f"{base_path}_0.sock"
-        if len(os.fsencode(rank0_path)) >= _UDS_SUN_PATH_LIMIT:
-            raise ValueError(
-                f"CpuTpBroadcaster UDS path too long even after "
-                f"shortening ({len(os.fsencode(rank0_path))} "
-                f"bytes, limit {_UDS_SUN_PATH_LIMIT - 1}): {rank0_path}"
-            )
+    if len(os.fsencode(rank0_path)) >= _UDS_SUN_PATH_LIMIT:
+        raise ValueError(
+            f"CpuTpBroadcaster UDS path too long ({len(os.fsencode(rank0_path))} "
+            f"bytes, limit {_UDS_SUN_PATH_LIMIT - 1}): {rank0_path}"
+        )
+    os.makedirs(base_dir, mode=0o700, exist_ok=True)
     return base_path
 
 
@@ -222,6 +219,7 @@ def init_distributed_environment(
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         _init_all_reduce(parallelism_config, collective_config)
+        _init_glm5_cp_comm(parallelism_config)
         return
 
     _normalize_parallelism_ranks(parallelism_config)
@@ -256,6 +254,7 @@ def init_distributed_environment(
         if rocm_rccl is not None and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         _init_all_reduce(parallelism_config, collective_config)
+        _init_glm5_cp_comm(parallelism_config)
         return
 
     logging.info(
@@ -294,6 +293,7 @@ def init_distributed_environment(
     _register_process_groups_to_cpp()
     if rocm_rccl is not None and parallelism_config.tp_size > 1:
         rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
+    _init_glm5_cp_comm(parallelism_config)
     init_user_buffers_environment(parallelism_config)
     _init_all_reduce(parallelism_config, collective_config)
 
@@ -436,6 +436,24 @@ def _create_process_groups(
                 _group_map[f"PP_RESULT{dp_rank}"] = result_group
     else:
         _group_map[Group.STAGE] = torch.distributed.group.WORLD
+
+
+def _init_glm5_cp_comm(parallelism_config: ParallelismConfig) -> None:
+    """Create optional GLM5 pynccl/symmetric resources during startup."""
+    if parallelism_config.tp_size <= 1 or not torch.cuda.is_available():
+        return
+
+    from rtp_llm.models_py.distributed import pynccl_cp
+
+    if not pynccl_cp.enabled():
+        return
+    process_group = _get_group(Group.TP)
+    device = torch.device("cuda", parallelism_config.local_rank)
+    pynccl_cp.init(process_group, device)
+    logging.info(
+        "[rank: %s] initialized GLM5 pynccl CP resources",
+        parallelism_config.world_rank,
+    )
 
 
 def _register_process_groups_to_cpp():
@@ -831,6 +849,12 @@ def destroy_distributed_environment():
         rocm_rccl.destroy_capture_comm()
 
     _canonical_p2p = None
+    # Direct GLM5 NCCL communicators must be released while the underlying
+    # torch process groups and CUDA runtime are still alive.
+    from rtp_llm.models_py.distributed import pynccl_cp
+
+    pynccl_cp.destroy()
+
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
     _group_map.clear()

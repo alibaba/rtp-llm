@@ -41,3 +41,9 @@ py_test(
         "//conditions:default": {"gpu": "SM100_ARM_CU13", "gpu_count": "1"},
     }),
 )
+
+py_test(
+    name = "glm5_kv_cache_test",
+    srcs = ["glm5_kv_cache_test.py"],
+    deps = ["//rtp_llm:testlib"],
+)

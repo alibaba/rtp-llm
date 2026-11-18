@@ -45,8 +45,8 @@ struct GptModelInputs {
     };
     std::optional<RecordedLengths> record_lengths;
     int64_t                        record_execution_id = 0;
-    torch::Tensor engram_token_windows;
-    torch::Tensor mm_features_spans;
+    torch::Tensor                  engram_token_windows;
+    torch::Tensor                  mm_features_spans;
     // input_lengths holds original input length for requests,
     // shape [decoder_batch_size + context_batch_size], int32
     // sequence_lengths holds current sequence length for incremental decoding requests,
@@ -59,11 +59,11 @@ struct GptModelInputs {
     torch::Tensor custom_output_indexes;
     // Kept for ModelInputsLogger/legacy micro-batch consumers; the async
     // scheduling redesign no longer populates it (stays undefined).
-    torch::Tensor lm_output_lengths;        // [total_batch_size]
-    torch::Tensor prefix_lengths;           // [context_batch_size]
+    torch::Tensor lm_output_lengths;  // [total_batch_size]
+    torch::Tensor prefix_lengths;     // [context_batch_size]
     // First token of this request's FULL cache-store write; zero on its first chunk.
     torch::Tensor cache_store_publish_start_tokens;  // [context_batch_size], optional
-    torch::Tensor sequence_lengths_plus_1;  // optional CUDA mirror for target-verify linear attention
+    torch::Tensor sequence_lengths_plus_1;           // optional CUDA mirror for target-verify linear attention
 
     torch::Tensor combo_tokens_type_ids;  // [cumulated_seq_len]
     torch::Tensor combo_position_ids;     // [cumulated_seq_len]
@@ -128,6 +128,10 @@ struct GptModelInputs {
 
     /** Upstream stage activations; excluded from TP input synchronization. */
     std::map<std::string, torch::Tensor> pp_intermediates;
+    // MTP draft model state extension after target verification. The outer
+    // input remains prefill-shaped (input_lengths + prefix_lengths), while
+    // MLA/Indexer must execute as flattened multi-token paged decode.
+    bool is_draft_extend = false;
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
@@ -146,6 +150,9 @@ struct GptModelOutputs {
     torch::Tensor all_hidden_states;
     torch::Tensor all_logits;
     torch::Tensor softmax_result;
+    // Request-ordered GLM-5.2 MTP indexer seed. It stays on the draft
+    // device and is carried by GenerateStream between decode cycles.
+    torch::Tensor mtp_indexer_topk;
 
     std::vector<torch::Tensor> moe_gating;
 

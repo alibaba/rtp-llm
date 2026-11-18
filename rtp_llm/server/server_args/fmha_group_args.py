@@ -7,6 +7,14 @@ def init_fmha_group_args(parser, fmha_config):
     ##############################################################################################################
     fmha_group = parser.add_argument_group("FMHA")
     fmha_group.add_argument(
+        "--deterministic_gemm",
+        env_name="DETERMINISTIC_GEMM",
+        bind_to=(fmha_config, "deterministic_gemm"),
+        type=str2bool,
+        default=False,
+        help="Use single-query sparse MLA decode for batch-invariant rounding; reduces throughput",
+    )
+    fmha_group.add_argument(
         "--enable_flashinfer_trtllm_gen",
         env_name="ENABLE_FLASHINFER_TRTLLM_GEN",
         bind_to=(fmha_config, "enable_flashinfer_trtllm_gen"),

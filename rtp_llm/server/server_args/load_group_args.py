@@ -7,6 +7,22 @@ def init_load_group_args(parser, load_config, model_args):
     ##############################################################################################################
     load_group = parser.add_argument_group("Load Configuration")
     load_group.add_argument(
+        "--fastsafetensors_config_json",
+        env_name="FASTSAFETENSORS_CONFIG_JSON",
+        bind_to=(load_config, "fastsafetensors_config_json"),
+        type=str,
+        default=None,
+        help="FastSafeTensors JSON configuration; takes precedence over config path",
+    )
+    load_group.add_argument(
+        "--fastsafetensors_config",
+        env_name="FASTSAFETENSORS_CONFIG",
+        bind_to=(load_config, "fastsafetensors_config"),
+        type=str,
+        default=None,
+        help="FastSafeTensors configuration file path",
+    )
+    load_group.add_argument(
         "--load_method",
         env_name="LOAD_METHOD",
         bind_to=(load_config, "load_method"),
