@@ -2156,25 +2156,31 @@ class CacheStoreArgumentsTest(TestCase):
         return config
 
     def test_default_environment_override_and_cli_override(self):
-        self.assertEqual(self.parse_config([], {}).p2p_kv_leak_exit_threshold_percent, 30)
-        env = {"P2P_KV_LEAK_EXIT_THRESHOLD_PERCENT": "45"}
-        self.assertEqual(self.parse_config([], env).p2p_kv_leak_exit_threshold_percent, 45)
-        config = self.parse_config(["--p2p_kv_leak_exit_threshold_percent", "60"], env)
-        self.assertEqual(config.p2p_kv_leak_exit_threshold_percent, 60)
-        self.assertEqual(
-            self.parse_config([], {"P2P_KV_LEAK_EXIT_THRESHOLD_PERCENT": "0"}).p2p_kv_leak_exit_threshold_percent,
-            0,
-        )
+        defaults = self.parse_config([], {})
+        self.assertEqual(defaults.p2p_kv_leak_exit_threshold_min_percent, 30)
+        self.assertEqual(defaults.p2p_kv_leak_exit_threshold_max_percent, 70)
+        env = {
+            "P2P_KV_LEAK_EXIT_THRESHOLD_MIN_PERCENT": "35",
+            "P2P_KV_LEAK_EXIT_THRESHOLD_MAX_PERCENT": "45",
+        }
+        overridden = self.parse_config([], env)
+        self.assertEqual(overridden.p2p_kv_leak_exit_threshold_min_percent, 35)
+        self.assertEqual(overridden.p2p_kv_leak_exit_threshold_max_percent, 45)
+        config = self.parse_config(["--p2p_kv_leak_exit_threshold_max_percent", "60"], env)
+        self.assertEqual(config.p2p_kv_leak_exit_threshold_min_percent, 35)
+        self.assertEqual(config.p2p_kv_leak_exit_threshold_max_percent, 60)
 
     def test_out_of_range_threshold_is_rejected(self):
-        for value in ("-1", "101", "invalid"):
-            for args, env in (
-                (["--p2p_kv_leak_exit_threshold_percent", value], {}),
-                ([], {"P2P_KV_LEAK_EXIT_THRESHOLD_PERCENT": value}),
-            ):
-                with self.subTest(value=value, env=env), patch("sys.stderr", io.StringIO()):
-                    with self.assertRaises(SystemExit):
-                        self.parse_config(args, env)
+        for bound in ("min", "max"):
+            flag = f"--p2p_kv_leak_exit_threshold_{bound}_percent"
+            env_name = f"P2P_KV_LEAK_EXIT_THRESHOLD_{bound.upper()}_PERCENT"
+            for value in ("-1", "101", "invalid"):
+                for args, env in (([flag, value], {}), ([], {env_name: value})):
+                    with self.subTest(bound=bound, value=value, env=env), patch(
+                        "sys.stderr", io.StringIO()
+                    ):
+                        with self.assertRaises(SystemExit):
+                            self.parse_config(args, env)
 
     def test_legacy_rdma_transfer_wait_timeout_is_accepted(self):
         flag = "--cache_store_rdma_transfer_wait_timeout_ms"
