@@ -151,7 +151,7 @@ def try_select_qsa_tokens(
         and scores.dtype == torch.float32
         and scores.ndim == 2
         and 0 < scores.shape[0] <= 32768
-        and 0 < scores.shape[1] <= 8192
+        and 0 < scores.shape[1] <= (2**31 - 1) // 4
         and scores.stride(0) > 0
         and scores.stride(1) > 0
         and lengths.shape == (scores.shape[0],)
@@ -170,6 +170,17 @@ def try_select_qsa_tokens(
         output = try_cub_qsa_tokens(scores, lengths, finite_only=finite_only)
         if output is not None:
             return output
+    if torch.cuda.get_device_capability(scores.device) == (9, 0):
+        from rtp_llm.models_py.modules.qwen4_exp.qsa.cub_topk import (
+            try_radix_qsa_tokens,
+        )
+
+        output = try_radix_qsa_tokens(scores, lengths, finite_only=finite_only)
+        if output is not None:
+            return compact_qsa_selection(output) if packed_count else output
+    # Legacy kernels remain bounded when the streaming contract is unsupported.
+    if columns > 8192:
+        return None
     if (
         scores_are_masked
         and columns in (1024, 2048)
@@ -202,52 +213,6 @@ def try_select_qsa_tokens(
             num_warps=warps,
         )
         return output
-    if (
-        not packed_count
-        and 1024 <= columns <= 8192
-        and rows <= 32
-        and scores.is_contiguous()
-        and lengths.is_contiguous()
-        and torch.cuda.get_device_capability(scores.device) == (9, 0)
-    ):
-        # SM90 L20X: O(N) C++ radix select + stable 512-wide sort + token
-        # expansion in one launch. The Triton tl.topk and Triton radix-select
-        # variants both measured slower than the native sbtopk chain on L20X
-        # (tl.sort/tl.histogram primitives dominate); the inline-C++ kernel
-        # with shared-memory histograms and a CUB block sort is the SM90
-        # replacement. The kernel masks past-complete blocks internally, so
-        # pre-masked and raw (indexer-style) inputs both work. Bit-exact
-        # against the frozen native TopK order (see the SM90 parity gate in
-        # the qsa-kernel-opt campaign).
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.cub_topk import (
-            try_radix_qsa_tokens,
-        )
-
-        output = try_radix_qsa_tokens(scores, lengths, finite_only=finite_only)
-        if output is not None:
-            return output
-    if (
-        not packed_count
-        and 1024 <= columns <= 8192
-        and 32 < rows <= 65536
-        and scores.is_contiguous()
-        and lengths.is_contiguous()
-        and torch.cuda.get_device_capability(scores.device) == (9, 0)
-    ):
-        # SM90 prefill rows: the sglang v0.5.22 fast-topk select ported into
-        # cub_topk - one coarse fp16-truncated byte pass, boundary-bin
-        # candidate collection with the fused next-byte histogram, then
-        # refinement rounds over the candidates only, plus the length<=512
-        # short-circuit. Same output contract as the decode kernel above
-        # (frozen native order, internal past-complete masking), rows
-        # unrestricted.
-        from rtp_llm.models_py.modules.qwen4_exp.qsa.cub_topk import (
-            try_prefill_radix_qsa_tokens,
-        )
-
-        output = try_prefill_radix_qsa_tokens(scores, lengths, finite_only=finite_only)
-        if output is not None:
-            return output
     # Paged scoring has already stored -inf past each completed-block limit.
     # Only callers owning that producer contract may skip the duplicate mask.
     if scores_are_masked and scores.is_contiguous():

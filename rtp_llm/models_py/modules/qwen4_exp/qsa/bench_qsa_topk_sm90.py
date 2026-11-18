@@ -203,7 +203,7 @@ def main():
         out = torch.empty(
             (scores.shape[0], 2051), device=scores.device, dtype=torch.int32
         )
-        module.qsa_radix_topk_p(scores, lengths, out, finite_only)
+        module.qsa_radix_topk(scores, lengths, out, finite_only)
         return out, "direct"
 
     def masked_like(scores, lengths):
@@ -253,8 +253,7 @@ def main():
             )
 
     # Prefill edge cases: short rows (complete <= 512 short-circuit), tie
-    # fields wider than the candidate buffers (four-pass fallback), NaN inputs
-    # (fallback), and the raw production signature (finite_only=False).
+    # fields wider than the candidate buffer (exact streaming), NaN inputs, and the raw production signature (finite_only=False).
     for columns in (1024, 2048, 8192):
         for rows in (33, 128, 512):
             for kind in ("short", "ties", "wide-ties", "nan", "raw"):
@@ -276,7 +275,7 @@ def main():
                     )
                 elif kind == "wide-ties":
                     # One fp16 coarse byte bin wider than the candidate
-                    # buffers: must take the frozen four-pass fallback.
+                    # buffers: must retain every boundary candidate.
                     scores[0, : columns - 512] = 1.0
                     lengths = torch.full(
                         (rows,), columns * 4, device="cuda", dtype=torch.int32
@@ -308,30 +307,6 @@ def main():
                 if not ok:
                     FAILURES.append(f"prefill edge rows={rows} cols={columns} kind={kind}")
 
-    # Cross-check the decode kernel and the prefill port at shared shapes:
-    # both must produce the identical 2051-slot rows.
-    print(
-        f"cross pre-state: module={'loaded' if _cub._MODULE is not None else 'None'} "
-        f"build_failed={_cub._BUILD_FAILED}"
-    )
-    module = _cub._load_module(torch.cuda.current_device())
-    if module is not None:
-        for columns in (1024, 2048, 4096, 8192):
-            for rows in (1, 4, 32):
-                scores = make_scores(rows, columns, 53000 + rows * 100 + columns)
-                lengths = torch.randint(
-                    1, columns * 4 + 4, (rows,), device="cuda", dtype=torch.int32
-                )
-                out_a = torch.empty((rows, 2051), device="cuda", dtype=torch.int32)
-                out_b = torch.empty((rows, 2051), device="cuda", dtype=torch.int32)
-                module.qsa_radix_topk(scores, lengths, out_a, True)
-                module.qsa_radix_topk_p(scores, lengths, out_b, True)
-                ok = torch.equal(out_a, out_b)
-                print(f"cross rows={rows} cols={columns}: {'OK' if ok else 'MISMATCH'}")
-                if not ok:
-                    FAILURES.append(f"cross rows={rows} cols={columns}")
-    else:
-        FAILURES.append("cross build")
     print("ALL-PASS" if not FAILURES else "FAILURES: " + ", ".join(FAILURES))
     sys.exit(1 if FAILURES else 0)
 

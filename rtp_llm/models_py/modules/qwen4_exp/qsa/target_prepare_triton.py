@@ -45,6 +45,7 @@ def _prepare_target_window(
     STW,
     KB: tl.constexpr,
     SB: tl.constexpr,
+    KV_PAGE: tl.constexpr,
     BQ: tl.constexpr,
 ):
     request = tl.program_id(0)
@@ -68,6 +69,7 @@ def _prepare_target_window(
             STW=STW,
             KB=KB,
             SB=SB,
+            KV_PAGE=KV_PAGE,
             BQ=BQ,
         )
     lane = tl.arange(0, 32)
@@ -140,7 +142,7 @@ def try_prepare_target_window(
     if not (
         q.is_cuda
         and torch.version.hip is None
-        and torch.cuda.get_device_capability(q.device) == (12, 0)
+        and torch.cuda.get_device_capability(q.device) in ((9, 0), (12, 0))
         and q.ndim == 3
         and q.shape[1:] == (4, 128)
         and 1 <= q.shape[0] <= 32
@@ -167,7 +169,7 @@ def try_prepare_target_window(
         and q_gamma.dtype in (torch.bfloat16, torch.float32)
         and k_gamma.dtype == torch.bfloat16
         and kv.ndim == state.ndim == 3
-        and kv.shape[1:] == (32, 128)
+        and kv.shape[1:] in ((16, 128), (32, 128))
         and kv.dtype == torch.bfloat16
         and state.shape[1:] == (8, 128)
         and state.dtype == torch.float32
@@ -238,6 +240,7 @@ def try_prepare_target_window(
         STW=st.shape[1],
         KB=kv.shape[0],
         SB=state.shape[0],
+        KV_PAGE=kv.shape[1],
         BQ=triton.next_power_of_2(query),
     )
     _prepare_target_window[(batch, query * 4)](

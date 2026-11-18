@@ -215,6 +215,33 @@ class Qwen4ExpStepPlanTest(unittest.TestCase):
             {"hits": 1, "invalidations": 0, "misses": 1},
         )
 
+    def test_draft_prefix_hit_matches_shifted_cold_rope(self):
+        cold = self._context([0], [13], is_mtp_draft=True)
+        hit = self._context([8], [5], is_mtp_draft=True)
+        cold.main_inputs.combo_position_ids.add_(1)
+        hit.main_inputs.combo_position_ids.add_(1)
+        cold_plan = qsa_step_plan.get_cold_step_plan(
+            cold,
+            indexer=self.indexer,
+            token_count=13,
+            device=torch.device("cpu"),
+            rope_config=self.base_rope,
+            rope_dtype=torch.bfloat16,
+        )
+        hit_plan = self._geometry(
+            hit, 5, draft_prefix_reuse=True, rope_config=self.base_rope
+        ).step
+        for suffix, full in (
+            (hit_plan.current_cos, cold_plan.rope_table_cos[0]),
+            (hit_plan.current_sin, cold_plan.rope_table_sin[0]),
+        ):
+            torch.testing.assert_close(suffix, full[8:], rtol=0, atol=0)
+        for blocks, full in (
+            (hit_plan.rope_cos, cold_plan.rope_table_cos[0]),
+            (hit_plan.rope_sin, cold_plan.rope_table_sin[0]),
+        ):
+            torch.testing.assert_close(blocks, full[[8, 8, 8, 8, 12]], rtol=0, atol=0)
+
     def test_inplace_position_edit_invalidates_the_entry_and_rebuilds(self):
         context = self._context([8], [5])
         plan_one = self._geometry(context, 5)

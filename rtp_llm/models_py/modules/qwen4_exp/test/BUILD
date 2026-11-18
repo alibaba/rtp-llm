@@ -1,6 +1,15 @@
 load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
+py_test(
+    name = "fp8_sm90_shared_b64_test",
+    srcs = ["fp8_sm90_shared_b64_test.py"],
+    deps = ["//rtp_llm:testlib", "//rtp_llm/models_py:modules"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
 py_library(
     name = "math_references",
     srcs = glob(["reference/*.py"]),
@@ -279,6 +288,15 @@ py_test(
     env = {"GPU_COUNT": "1"},
     tags = ["RTX_5000_PRO_CU13"],
     exec_properties = {"gpu": "RTX_5000_PRO_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "fp8_sm90_quant_test",
+    srcs = ["fp8_sm90_quant_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
 )
 
 py_test(
@@ -1005,6 +1023,24 @@ py_test(
     name = "gdn_sm90_norm_quant_test",
     srcs = ["gdn_sm90_norm_quant_test.py", "gdn_composition_test.py"],
     main = "gdn_sm90_norm_quant_test.py",
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "qsa_paged_packing_test",
+    srcs = ["qsa_paged_packing_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    env = {"GPU_COUNT": "1"},
+    tags = ["H20_CU13"],
+    exec_properties = {"gpu": "H20_CU13", "gpu_count": "1"},
+)
+
+py_test(
+    name = "qsa_sm90_capacity_test",
+    srcs = ["qsa_sm90_capacity_test.py"],
     deps = ["//rtp_llm:testlib"],
     env = {"GPU_COUNT": "1"},
     tags = ["H20_CU13"],

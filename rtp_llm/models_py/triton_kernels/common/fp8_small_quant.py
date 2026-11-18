@@ -1,4 +1,4 @@
-"""Exact native dynamic FP8 quantization for small SM90/SM120 projections."""
+"""Exact native dynamic FP8 quantization for qualified SM90/SM120 projections."""
 
 import os
 
@@ -6,16 +6,18 @@ import torch
 import triton as tr
 import triton.language as tl
 
+_SMALL_QUANT_MAX_ELEMENTS = 65536
+
 
 @tr.jit
-def _small_fp8_quant(
-    x, q, scale, N: tl.constexpr, OUT: tl.constexpr, BLOCK: tl.constexpr
-):
-    offsets = tl.arange(0, BLOCK)
-    values = tl.load(x + offsets, offsets < N, other=0).to(tl.float32)
+def _fp8_absmax(values):
     absolute = tl.abs(values)
     # CUDA fmaxf ignores NaNs during the native amax reduction.
-    maximum = tl.max(tl.where(absolute == absolute, absolute, 0), 0)
+    return tl.max(tl.where(absolute == absolute, absolute, 0), 0)
+
+
+@tr.jit
+def _quantize_projection_tile(x, q, scale, maximum, N: tl.constexpr, OUT: tl.constexpr):
     # The native per-tensor absmax divides by FP8_E4M3_MAX directly; a
     # multiply by the rounded reciprocal diverges by 1 ULP on some inputs.
     output_scale = tl.div_rn(maximum, 448.0)
@@ -26,14 +28,48 @@ def _small_fp8_quant(
         tl.store(scale, output_scale)
     inverse = tl.div_rn(1.0, tl.maximum(output_scale, 1.0e-9))
 
-    # Replicate the small reduction across output tiles. This parallelizes the
-    # padded GEMM rows without a second launch or an inter-CTA dependency.
-    rows = tl.program_id(0) * 4096 + tl.arange(0, 4096)
-    values = tl.load(x + rows, rows < N, other=0).to(tl.float32) * inverse
+    offsets = tl.program_id(0) * 4096 + tl.arange(0, 4096)
+    values = tl.load(x + offsets, offsets < N, other=0).to(tl.float32) * inverse
     # Native fmin(value, 448) maps NaNs, including Inf * 0, to positive 448.
     values = tl.where(values == values, values, 448.0)
     values = tl.maximum(-448.0, tl.minimum(448.0, values))
-    tl.store(q + rows, tl.where(rows < N, values, 0).to(tl.float8e4nv), rows < OUT)
+    tl.store(
+        q + offsets, tl.where(offsets < N, values, 0).to(tl.float8e4nv), offsets < OUT
+    )
+
+
+@tr.jit
+def _small_fp8_quant(
+    x, q, scale, N: tl.constexpr, OUT: tl.constexpr, BLOCK: tl.constexpr
+):
+    # Replicate the small reduction across output tiles to avoid a second launch.
+    offsets = tl.arange(0, BLOCK)
+    values = tl.load(x + offsets, offsets < N, other=0).to(tl.float32)
+    _quantize_projection_tile(x, q, scale, _fp8_absmax(values), N, OUT)
+
+
+@tr.jit
+def _fp8_partial_amax(x, partial, N: tl.constexpr, BLOCK: tl.constexpr):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    values = tl.load(x + offsets, offsets < N, other=0).to(tl.float32)
+    # Every invocation overwrites the workspace; no atomic/reset is needed.
+    tl.store(partial + tl.program_id(0), _fp8_absmax(values))
+
+
+@tr.jit
+def _fp8_finish_quant(
+    x,
+    partial,
+    q,
+    scale,
+    N: tl.constexpr,
+    OUT: tl.constexpr,
+    PARTS: tl.constexpr,
+    REDUCE: tl.constexpr,
+):
+    ids = tl.arange(0, REDUCE)
+    maxima = tl.load(partial + ids, ids < PARTS, other=0)
+    _quantize_projection_tile(x, q, scale, tl.max(maxima, 0), N, OUT)
 
 
 @tr.jit
@@ -116,6 +152,24 @@ def _silu_mul_fp8_quant_shared(
         )
 
 
+# B64 is too large for the existing single-CTA SiLU/amax fusion.
+# Reduce while producing BF16 activation, then reuse the small finalizer.
+@tr.jit
+def _silu_mul_fp8_partial_amax(
+    x, activated, partial, N: tl.constexpr, D: tl.constexpr, BLOCK: tl.constexpr
+):
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    row = i // D
+    col = i % D
+    gate = tl.load(x + row * 2 * D + col, i < N, other=0).to(tl.float32)
+    value = tl.load(x + row * 2 * D + D + col, i < N, other=0).to(tl.float32)
+    a = ((gate * tl.sigmoid(gate)) * value).to(tl.bfloat16).to(tl.float32)
+    absolute = tl.abs(a)
+    maximum = tl.max(tl.where(absolute == absolute, absolute, 0), 0)
+    tl.store(activated + i, a, i < N)
+    tl.store(partial + tl.program_id(0), maximum)
+
+
 def try_silu_mul_fp8_quant(gate_up, *, output=None):
     """Fuse BF16 SiLU×Mul and dynamic FP8 quant for the small shared FFN."""
     if not (
@@ -127,6 +181,14 @@ def try_silu_mul_fp8_quant(gate_up, *, output=None):
         and gate_up.is_contiguous()
         and (
             (gate_up.shape[0] in (4, 8, 12, 16) and gate_up.shape[1] == 1280)
+            or (
+                tuple(gate_up.shape) == (64, 640)
+                and (
+                    os.environ.get("RTP_LLM_CUDA_GRAPH_WARMUP_FORWARD") == "1"
+                    or torch.cuda.is_current_stream_capturing()
+                )
+                and torch.cuda.get_device_capability(gate_up.device) == (9, 0)
+            )
             or (
                 os.environ.get("QWEN_MOE_FP8_SMALL_ROWS_FUSION", "0") == "1"
                 and 1 <= gate_up.shape[0] <= 32
@@ -153,6 +215,35 @@ def try_silu_mul_fp8_quant(gate_up, *, output=None):
         )
     scale = torch.empty((1,), device=gate_up.device, dtype=torch.float32)
     block = tr.next_power_of_2(rows * width)
+    if rows == 64 and width == 320:
+        activated = torch.empty(
+            (rows, width), device=gate_up.device, dtype=torch.bfloat16
+        )
+        parts = tr.cdiv(rows * width, 128)
+        partial = torch.empty((parts,), device=gate_up.device, dtype=torch.float32)
+        _silu_mul_fp8_partial_amax[(parts,)](
+            gate_up,
+            activated,
+            partial,
+            rows * width,
+            width,
+            128,
+            num_warps=1,
+            enable_fp_fusion=False,
+        )
+        _fp8_finish_quant[(tr.cdiv(output.numel(), 4096),)](
+            activated,
+            partial,
+            output,
+            scale,
+            rows * width,
+            output.numel(),
+            parts,
+            tr.next_power_of_2(parts),
+            num_warps=4,
+            enable_fp_fusion=False,
+        )
+        return output, scale
     if width == 320:
         warps = 4 if rows <= 2 else 8 if rows <= 8 or rows > 16 else 32
         _silu_mul_fp8_quant_shared[(1,)](
@@ -190,14 +281,27 @@ def is_supported(x, output=None):
         and x.dtype == torch.bfloat16
         and x.ndim == 2
         and x.is_contiguous()
-        and 1 <= x.shape[0] <= 32
-        and (
-            x.shape[1] in (320, 2560, 10240)
-            or (x.shape[1] == 640 and x.shape[0] in (4, 8, 12, 16))
-        )
-        and x.numel() <= 65536
-        and torch.cuda.get_device_capability(x.device) in ((9, 0), (12, 0))
     ):
+        return False
+    rows, width = x.shape
+    small = (
+        1 <= rows <= 32
+        and (width in (320, 2560, 10240) or (width == 640 and rows in (4, 8, 12, 16)))
+        and x.numel() <= _SMALL_QUANT_MAX_ELEMENTS
+    )
+    # These shapes save GPU time on H20, but the extra dispatch costs more in eager.
+    if not small and not (
+        (
+            (width == 320 and rows == 64)
+            or (width == 640 and rows in (32, 64))
+            or (width == 2560 and rows in (32, 64, 256, 1024))
+            or (width == 10240 and rows in (16, 32, 64))
+        )
+        and torch.cuda.is_current_stream_capturing()
+    ):
+        return False
+    capability = torch.cuda.get_device_capability(x.device)
+    if not (capability == (9, 0) or (small and capability == (12, 0))):
         return False
     return output is None or (
         isinstance(output, torch.Tensor)
@@ -216,13 +320,39 @@ def try_small_fp8_quant(x, *, output=None):
     if output is None:
         output = torch.empty_like(x, dtype=torch.float8_e4m3fn)
     scale = torch.empty((1,), device=x.device, dtype=torch.float32)
-    block = tr.next_power_of_2(x.numel())
-    _small_fp8_quant[(tr.cdiv(output.numel(), 4096),)](
+    numel = x.numel()
+    output_numel = output.numel()
+    grid = (tr.cdiv(output_numel, 4096),)
+    if numel > _SMALL_QUANT_MAX_ELEMENTS:
+        parts = tr.cdiv(numel, 4096)
+        partial = torch.empty((parts,), device=x.device, dtype=torch.float32)
+        _fp8_partial_amax[(parts,)](
+            x,
+            partial,
+            numel,
+            4096,
+            num_warps=4,
+        )
+        _fp8_finish_quant[grid](
+            x,
+            partial,
+            output,
+            scale,
+            numel,
+            output_numel,
+            parts,
+            tr.next_power_of_2(parts),
+            num_warps=4,
+            enable_fp_fusion=False,
+        )
+        return output, scale
+    block = tr.next_power_of_2(numel)
+    _small_fp8_quant[grid](
         x,
         output,
         scale,
-        x.numel(),
-        output.numel(),
+        numel,
+        output_numel,
         block,
         num_warps=4 if block <= 8192 else 16,
         enable_fp_fusion=False,
