@@ -2352,7 +2352,8 @@ TEST_F(CudaSamplerTest, testGlm5NeutralMixedSamplingSkipsOnlyIdentityTransforms)
                     expected_tokens = params.token_ids.clone();
                     expected_logits = params.logits.clone();
                     if (!deferred) {
-                        expected_probs = params.output_all_probs->clone();
+                        expected_probs = expected_logits.clone();
+                        expected_probs.select(0, 1).zero_().scatter_(0, original.select(0, 1).argmax().view({1}), 1.0);
                         expected_success = result.success.clone();
                     }
                     for (const auto& generator : params.generator) {
@@ -3605,6 +3606,120 @@ TEST_F(CudaSamplerTest, HistoryFreeOutputMatchesOriginalSamplingAndPreservesPref
             }
             actual.no_repeat_ngram_size = pinnedIntTensor(std::vector<int32_t>(batch, 2));
             EXPECT_THROW(execSampleGreedy(actual), c10::Error);
+        }
+    }
+}
+
+TEST_F(CudaSamplerTest, testUnfilteredProbabilityOutputsPreserveSoftmaxRows) {
+    const auto    options  = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    const int64_t batch    = 31;
+    const auto    original = torch::randn({batch, 129280}, options);
+    for (bool mixed_cutoff : {false, true}) {
+        GreedyParams params{};
+        params.logits           = original.clone();
+        params.input_lengths    = pinnedIntTensor(std::vector<int32_t>(batch, 0));
+        params.sequence_lengths = params.input_lengths;
+        params.token_ids        = torch::zeros({batch, 1}, options.dtype(torch::kInt32));
+        params.step             = 0;
+        params.top_k            = pinnedIntTensor(std::vector<int32_t>(batch, 0));
+        std::vector<float> cutoffs(batch, 1.0f);
+        if (mixed_cutoff)
+            cutoffs[0] = 0.9f;
+        params.top_p            = pinnedFloatTensor(cutoffs);
+        params.temperature      = pinnedFloatTensor(std::vector<float>(batch, 1.0f));
+        params.output_all_probs = torch::full_like(original, std::numeric_limits<float>::quiet_NaN());
+        params.allow_glm5_multistep_sampling_optimizations = true;
+        for (int64_t row = 0; row < batch; ++row) {
+            params.generator.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+            params.generator.back().set_current_seed(731 + row);
+        }
+        execSampleGreedy(params);
+        const int64_t start = mixed_cutoff ? 1 : 0;
+        ASSERT_TRUE(torch::isfinite(*params.output_all_probs).all().item<bool>());
+        ASSERT_TRUE(torch::equal(params.output_all_probs->narrow(0, start, batch - start),
+                                 params.logits.narrow(0, start, batch - start)));
+    }
+}
+
+TEST_F(CudaSamplerTest, DISABLED_benchmarkNeutralMixedSamplingAB) {
+    initializeSamplerPython();
+    const auto options = torch::TensorOptions().device(torch::kCUDA).dtype(torch::kFloat32);
+    auto       flush   = torch::zeros({1024 * 1024}, options);
+    for (int64_t batch : {3, 31, 127}) {
+        auto original = torch::randn({batch, 129280}, options);
+        for (bool deferred : {false, true}) {
+            GreedyParams params{};
+            params.logits                            = original.clone();
+            params.input_lengths                     = torch::full({batch}, 3, options.dtype(torch::kInt32));
+            params.sequence_lengths                  = params.input_lengths;
+            params.sequence_lengths_are_token_counts = true;
+            params.token_ids                         = torch::zeros({batch, 4}, options.dtype(torch::kInt32));
+            params.step                              = 3;
+            std::vector<int32_t> top_k(batch);
+            auto do_sample = torch::empty({batch}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
+            for (int64_t row = 0; row < batch; ++row) {
+                top_k[row]                      = row % 2;
+                do_sample.data_ptr<bool>()[row] = row % 2 == 0;
+                params.generator.push_back(torch::make_generator<at::CUDAGeneratorImpl>());
+            }
+            params.top_k                = pinnedIntTensor(top_k);
+            params.top_p                = pinnedFloatTensor(std::vector<float>(batch, 1.0f));
+            params.temperature          = pinnedFloatTensor(std::vector<float>(batch, 1.0f));
+            params.do_sample            = do_sample;
+            params.output_all_probs     = torch::empty_like(original);
+            params.defer_token_sampling = deferred;
+            torch::Tensor         expected_tokens, expected_logits, expected_probs;
+            std::vector<uint64_t> expected_offsets;
+            for (bool enabled : {false, true}) {
+                params.allow_glm5_multistep_sampling_optimizations = enabled;
+                for (int64_t row = 0; row < batch; ++row)
+                    params.generator[row].set_current_seed(731 + row);
+                params.logits.copy_(original);
+                params.token_ids.zero_();
+                execSampleGreedy(params);
+                if (!enabled) {
+                    expected_tokens = params.token_ids.clone();
+                    expected_logits = params.logits.clone();
+                    if (!deferred)
+                        expected_probs = params.output_all_probs->clone();
+                    for (const auto& generator : params.generator)
+                        expected_offsets.push_back(generator.get_offset());
+                } else {
+                    ASSERT_TRUE(torch::equal(expected_tokens, params.token_ids));
+                    ASSERT_TRUE(torch::equal(expected_logits, params.logits));
+                    if (!deferred) {
+                        auto reference_probs = torch::softmax(original, -1);
+                        for (int64_t row = 1; row < batch; row += 2) {
+                            reference_probs[row].zero_();
+                            reference_probs[row].index_put_({original[row].argmax().item<int64_t>()}, 1.0f);
+                        }
+                        ASSERT_TRUE(torch::equal(reference_probs, *params.output_all_probs));
+                        std::cout << "NEUTRAL_BASELINE_PROBS batch=" << batch
+                                  << " max_abs_error=" << (expected_probs - reference_probs).abs().max().item<float>()
+                                  << std::endl;
+                    }
+                    for (int64_t row = 0; row < batch; ++row) {
+                        ASSERT_EQ(expected_offsets[row], params.generator[row].get_offset());
+                    }
+                }
+            }
+            for (int round = 0; round < 10; ++round) {
+                for (int arm = 0; arm < 2; ++arm) {
+                    const bool enabled                                 = (round + arm) % 2;
+                    params.allow_glm5_multistep_sampling_optimizations = enabled;
+                    const double us                                    = benchmarkCudaEventUs(
+                        [&] {
+                            params.logits.copy_(original);
+                            execSampleGreedy(params);
+                        },
+                        flush,
+                        10,
+                        50);
+                    std::cout << "NEUTRAL_MIXED_AB {\"batch\":" << batch << ",\"deferred\":" << deferred
+                              << ",\"enabled\":" << enabled << ",\"round\":" << round << ",\"stream_us\":" << us << "}"
+                              << std::endl;
+                }
+            }
         }
     }
 }

@@ -1064,8 +1064,11 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
                                   0,
                                   (int64_t)cur_stream);
         if (output_all_probs_t.defined()) {
-            top_p_renorm_probs(probs_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream,
-                               params.allow_glm5_multistep_sampling_optimizations);
+            if (params.allow_glm5_multistep_sampling_optimizations) {
+                renorm_top_p(probs_t);
+            } else {
+                top_p_renorm_probs(probs_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream, false);
+            }
         }
     } else {
         // top_k<=0 means "no limit" in RTP config. The combined FlashInfer
@@ -1108,8 +1111,11 @@ flashinferSampleGreedy(const GreedyParams& params, const torch::Tensor& transpos
             if (output_all_probs_t.defined()) {
                 torch::Tensor temp_t = torch::zeros_like(output_all_probs_t);
                 top_k_renorm_probs(probs_t, temp_t, top_k_t, 1.0, (int64_t)cur_stream);
-                top_p_renorm_probs(temp_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream,
-                               params.allow_glm5_multistep_sampling_optimizations);
+                if (params.allow_glm5_multistep_sampling_optimizations) {
+                    renorm_top_p(temp_t);
+                } else {
+                    top_p_renorm_probs(temp_t, output_all_probs_t, top_p_t, 1.0, (int64_t)cur_stream, false);
+                }
             }
         }
     }
