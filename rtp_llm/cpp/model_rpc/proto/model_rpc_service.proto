@@ -860,6 +860,12 @@ message P2PPipelineLayoutPB {
     uint32 worker_count = 2;
 }
 
+// Exchanged within an engine at startup. Only the layout is used by peer RPCs.
+message P2PStageStartupPB {
+    P2PPipelineLayoutPB.Stage layout = 1;
+    map<string, uint64> decode_block_bytes = 2;  // Physical bytes per block ID on one TP rank.
+}
+
 message P2PConnectorBroadcastTpRequestPB {
     repeated LayerCacheBlockPB layer_blocks = 1;
     repeated TPWorkerInfoPB peer_workers = 2;
